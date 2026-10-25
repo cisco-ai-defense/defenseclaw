@@ -9,7 +9,7 @@
 param(
     [string]$ModulePath = '',
     [string]$ScratchRoot = [IO.Path]::GetTempPath(),
-    [ValidateSet('All', 'Baseline', 'Linked', 'Junction', 'Interrupted', 'Order')]
+    [ValidateSet('All', 'Baseline', 'ExistingCas', 'Linked', 'Junction', 'Interrupted', 'Order')]
     [string]$Case = 'All'
 )
 
@@ -94,6 +94,7 @@ try {
         New-Item -ItemType Directory -Force `
             -Path ([IO.Path]::GetDirectoryName($otherPaths[2])) | Out-Null
         [IO.File]::WriteAllText($otherPaths[2], 'orphaned predecessor token')
+        [IO.File]::WriteAllText($otherPaths[3], 'operator credential before upgrade')
         $orphanedTokenHash = (Get-FileHash -LiteralPath $otherPaths[2] `
             -Algorithm SHA256).Hash.ToLowerInvariant()
         $orphanedTokenAcl = (Get-Acl -LiteralPath $otherPaths[2]).Sddl
@@ -121,6 +122,9 @@ try {
             [IO.File]::WriteAllText($path, 'user-owned setting edited during upgrade')
         }
         Remove-Item -LiteralPath $otherPaths[2]
+        [IO.File]::WriteAllText($otherPaths[3], 'operator credential edited during upgrade')
+        Set-DefenseClawUserNativeOTLPTransactionPostimages `
+            -SnapshotPath $snapshotPath -Layout $layout
         $snapshot = Get-Content -LiteralPath $snapshotPath -Raw |
             ConvertFrom-Json
         Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
@@ -150,6 +154,10 @@ try {
             (Get-FileHash -LiteralPath $otherPaths[2] -Algorithm SHA256).Hash.ToLowerInvariant() -cne $orphanedTokenHash -or
             (Get-Acl -LiteralPath $otherPaths[2]).Sddl -cne $orphanedTokenAcl) {
             throw 'rollback did not restore a revoked token without a CAS witness'
+        }
+        if ([IO.File]::ReadAllText($otherPaths[3]) -cne
+            'operator credential edited during upgrade') {
+            throw 'rollback overwrote an operator credential that Guardian did not revoke'
         }
         foreach ($agent in @('.codex', '.claude')) {
             if (Test-Path -LiteralPath (Join-Path `
@@ -183,6 +191,115 @@ try {
                         sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
                     })
                 }
+            }
+        }
+        if ($SelectedCase -in @('All', 'ExistingCas')) {
+            $fixture = New-NativeOTLPFixture -Name 'existing-cas'
+            $codex = Join-Path $fixture.profile '.codex'
+            $cas = Join-Path $codex '.defenseclaw-cas-state'
+            New-Item -ItemType Directory -Force -Path $cas | Out-Null
+            $config = Join-Path $codex 'config.toml'
+            [IO.File]::WriteAllText($config, 'operator original')
+            Add-DefenseClawUserNativeOTLPTransactionSnapshot `
+                -SnapshotPath $fixture.snapshot -Layout $fixture.layout `
+                -Plan $fixture.plan
+            [IO.File]::WriteAllText($config, 'operator edited while upgrade is open')
+            Set-DefenseClawUserNativeOTLPTransactionPostimages `
+                -SnapshotPath $fixture.snapshot -Layout $fixture.layout
+            $saved = Get-Content -LiteralPath $fixture.snapshot -Raw |
+                ConvertFrom-Json
+            Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
+                -Snapshot $saved -SnapshotPath $fixture.snapshot `
+                -Layout $fixture.layout
+            if ([IO.File]::ReadAllText($config) -cne
+                'operator edited while upgrade is open') {
+                throw 'pre-existing CAS state caused rollback to overwrite operator edit'
+            }
+            $changed = New-NativeOTLPFixture -Name 'existing-cas-changed'
+            $changedCodex = Join-Path $changed.profile '.codex'
+            $changedCas = Join-Path $changedCodex '.defenseclaw-cas-state'
+            New-Item -ItemType Directory -Force -Path $changedCas | Out-Null
+            $changedConfig = Join-Path $changedCodex 'config.toml'
+            [IO.File]::WriteAllText($changedConfig, 'prior product exporter')
+            Add-DefenseClawUserNativeOTLPTransactionSnapshot `
+                -SnapshotPath $changed.snapshot -Layout $changed.layout `
+                -Plan $changed.plan
+            [IO.File]::WriteAllText($changedConfig, 'guardian cleanup postimage')
+            [IO.File]::WriteAllText((Join-Path $changedCas 'transaction-witness'),
+                'existing CAS directory changed by Guardian')
+            Set-DefenseClawUserNativeOTLPTransactionPostimages `
+                -SnapshotPath $changed.snapshot -Layout $changed.layout
+            $changedSaved = Get-Content -LiteralPath $changed.snapshot -Raw |
+                ConvertFrom-Json
+            if ([string]$changedSaved.user_native_otlp_preimages.files[0].postimage_sha256 -cnotmatch
+                '^[0-9a-f]{64}$') {
+                throw 'Guardian postimage was not recorded for an existing CAS directory'
+            }
+            [IO.File]::WriteAllText($changedConfig, 'operator edit after Guardian')
+            Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
+                -Snapshot $changedSaved -SnapshotPath $changed.snapshot `
+                -Layout $changed.layout
+            if ([IO.File]::ReadAllText($changedConfig) -cne
+                'operator edit after Guardian') {
+                throw 'rollback overwrote a user edit after the transaction postimage'
+            }
+            $nativeSecurity = Initialize-DefenseClawNativeSecurity
+            $backup = Join-Path (Join-Path $changed.layout.StateRoot `
+                'transactions\test') 'native-otlp-000.bak'
+            $staleRestoreRefused = $false
+            try {
+                [void]$nativeSecurity::RestoreUserFileNoFollow(
+                    $changedConfig,
+                    [IO.File]::ReadAllBytes($backup),
+                    [string]$changedSaved.user_native_otlp_preimages.files[0].security_descriptor,
+                    [IO.File]::GetCreationTimeUtc($backup),
+                    [IO.File]::GetLastWriteTimeUtc($backup),
+                    [string]$changedSaved.user_native_otlp_preimages.files[0].postimage_sha256)
+            }
+            catch { $staleRestoreRefused = $true }
+            if (-not $staleRestoreRefused -or
+                [IO.File]::ReadAllText($changedConfig) -cne
+                    'operator edit after Guardian') {
+                throw 'handle-bound rollback overwrote a changed postimage'
+            }
+            $missing = Join-Path $changedCodex 'missing-config.toml'
+            $missingRestoreRefused = $false
+            try {
+                [void]$nativeSecurity::RestoreUserFileNoFollow(
+                    $missing,
+                    [IO.File]::ReadAllBytes($backup),
+                    [string]$changedSaved.user_native_otlp_preimages.files[0].security_descriptor,
+                    [IO.File]::GetCreationTimeUtc($backup),
+                    [IO.File]::GetLastWriteTimeUtc($backup),
+                    [string]$changedSaved.user_native_otlp_preimages.files[0].postimage_sha256)
+            }
+            catch { $missingRestoreRefused = $true }
+            if (-not $missingRestoreRefused -or
+                (Test-Path -LiteralPath $missing)) {
+                throw 'rollback created a file after a captured postimage disappeared'
+            }
+            $positive = New-NativeOTLPFixture -Name 'existing-cas-product'
+            $positiveCodex = Join-Path $positive.profile '.codex'
+            $positiveCas = Join-Path $positiveCodex '.defenseclaw-cas-state'
+            New-Item -ItemType Directory -Force -Path $positiveCas | Out-Null
+            $positiveConfig = Join-Path $positiveCodex 'config.toml'
+            [IO.File]::WriteAllText($positiveConfig, 'prior native exporter')
+            Add-DefenseClawUserNativeOTLPTransactionSnapshot `
+                -SnapshotPath $positive.snapshot -Layout $positive.layout `
+                -Plan $positive.plan
+            [IO.File]::WriteAllText($positiveConfig, 'guardian removed exporter')
+            [IO.File]::WriteAllText((Join-Path $positiveCas 'transaction-witness'),
+                'Guardian changed the existing CAS directory')
+            Set-DefenseClawUserNativeOTLPTransactionPostimages `
+                -SnapshotPath $positive.snapshot -Layout $positive.layout
+            $positiveSaved = Get-Content -LiteralPath $positive.snapshot -Raw |
+                ConvertFrom-Json
+            Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
+                -Snapshot $positiveSaved -SnapshotPath $positive.snapshot `
+                -Layout $positive.layout
+            if ([IO.File]::ReadAllText($positiveConfig) -cne
+                'prior native exporter') {
+                throw 'rollback did not restore a proven transaction postimage'
             }
         }
         if ($SelectedCase -in @('All', 'Linked')) {
@@ -258,6 +375,8 @@ try {
             [IO.File]::WriteAllBytes(
                 (Join-Path $newCas '.defenseclaw-v2-protocol.lock'),
                 [byte[]]::new(0))
+            Set-DefenseClawUserNativeOTLPTransactionPostimages `
+                -SnapshotPath $fixture.snapshot -Layout $fixture.layout
             $saved = Get-Content -LiteralPath $fixture.snapshot -Raw |
                 ConvertFrom-Json
             Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
@@ -273,7 +392,8 @@ try {
                     [Text.Encoding]::UTF8.GetBytes('must not reach outside'),
                     [string]$saved.user_native_otlp_preimages.files[0].security_descriptor,
                     [IO.File]::GetCreationTimeUtc($backup),
-                    [IO.File]::GetLastWriteTimeUtc($backup))
+                    [IO.File]::GetLastWriteTimeUtc($backup),
+                    $null)
             }
             catch {
                 $refused = $true
@@ -309,6 +429,8 @@ try {
                 [byte[]]::new(0))
             [IO.File]::WriteAllText((Join-Path $cas '.intent'),
                 'interrupted compare-and-swap receipt')
+            Set-DefenseClawUserNativeOTLPTransactionPostimages `
+                -SnapshotPath $fixture.snapshot -Layout $fixture.layout
             $saved = Get-Content -LiteralPath $fixture.snapshot -Raw |
                 ConvertFrom-Json
             Restore-DefenseClawUserNativeOTLPTransactionSnapshot `

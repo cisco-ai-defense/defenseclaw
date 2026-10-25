@@ -60,6 +60,8 @@ var windowsUserEnvironment = func(sid, name string) string {
 	return value
 }
 
+var windowsSurfaceTrustedProgramFiles = winpath.TrustedProgramFiles
+
 // windowsRelocatedExtensionsRoot is the VS Code extensions folder the
 // user's persistent VSCODE_EXTENSIONS names, or "". %USERPROFILE%,
 // %APPDATA% and %LOCALAPPDATA% are expanded to the profile's folders; any
@@ -106,28 +108,20 @@ var windowsExtensionRoots = []struct{ host, dir string }{
 var windowsSurfaceExtensions = map[string]struct {
 	id             string
 	engineIsHost   bool
-	desktopProbers []func(profileHome string) (connector.AgentSurface, bool)
+	desktopProbers []func(profileHome string) (connector.AgentSurface, bool, error)
 }{
-	"claudecode": {id: "anthropic.claude-code", engineIsHost: true, desktopProbers: []func(string) (connector.AgentSurface, bool){discoverWindowsClaudeDesktop}},
-	"codex":      {id: "openai.chatgpt", desktopProbers: []func(string) (connector.AgentSurface, bool){discoverWindowsCodexApp}},
+	"claudecode": {id: "anthropic.claude-code", engineIsHost: true, desktopProbers: []func(string) (connector.AgentSurface, bool, error){discoverWindowsClaudeDesktop}},
+	"codex":      {id: "openai.chatgpt", desktopProbers: []func(string) (connector.AgentSurface, bool, error){discoverWindowsCodexApp}},
 	// Devin Desktop has no extension (surface_probes_devin.go).
-	"devin": {desktopProbers: []func(string) (connector.AgentSurface, bool){discoverWindowsDevinDesktop}},
+	"devin": {desktopProbers: []func(string) (connector.AgentSurface, bool, error){discoverWindowsDevinDesktop}},
 }
 
 const windowsSurfaceMaxEntries = 4096
 
-// DiscoverWindowsAgentSurfaces lists connectorName's app and extension
-// installs of the profile owner sid under profileHome, reading the
-// profile under the owner's token. It fails when the owner has no active
-// session.
-func DiscoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]connector.AgentSurface, error) {
-	observed, _, err := discoverWindowsAgentSurfaces(sid, profileHome, connectorName)
-	return observed, err
-}
-
-// discoverWindowsAgentSurfaces also distinguishes roots whose bounded listing
-// completed. An overflowing root can supply observations for diagnostics, but
-// cannot select a row version while older extensions may remain unseen there.
+// discoverWindowsAgentSurfaces distinguishes complete extension roots from
+// overflowing app and extension roots. An overflowing root supplies observed
+// warnings but cannot select a row version because a newer build may be beyond
+// its bound.
 func discoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]connector.AgentSurface, []connector.AgentSurface, error) {
 	profileHome = strings.TrimSpace(profileHome)
 	probe, ok := windowsSurfaceExtensions[strings.ToLower(strings.TrimSpace(connectorName))]
@@ -147,6 +141,7 @@ func discoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]con
 	}
 	var out []connector.AgentSurface
 	var completeIndexes []int
+	incompleteIndexes := map[int]bool{}
 	var scanErr error
 	readErr := windowsSurfaceReadAs(sid, profileHome, func() error {
 		seen := map[string]bool{}
@@ -172,9 +167,13 @@ func discoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]con
 			}
 		}
 		for _, prober := range probe.desktopProbers {
-			if surface, ok := prober(profileHome); ok {
+			surface, ok, err := prober(profileHome)
+			scanErr = errors.Join(scanErr, err)
+			if ok {
 				out = append(out, surface)
-				completeIndexes = append(completeIndexes, len(out)-1)
+				if err == nil {
+					completeIndexes = append(completeIndexes, len(out)-1)
+				}
 			}
 		}
 		return nil
@@ -182,15 +181,22 @@ func discoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]con
 	// Administrator-protected package folders are read as LocalSystem.
 	for i := range out {
 		if out[i].Host == "codex-app" {
-			if programFiles, err := winpath.TrustedProgramFiles(); err == nil {
-				out[i].HostVersion = newestWindowsPackageVersion(filepath.Join(programFiles, "WindowsApps"), "OpenAI.Codex_")
+			if programFiles, err := windowsSurfaceTrustedProgramFiles(); err == nil {
+				version, versionErr := newestWindowsPackageVersion(filepath.Join(programFiles, "WindowsApps"), "OpenAI.Codex_")
+				out[i].HostVersion = version
+				if versionErr != nil {
+					scanErr = errors.Join(scanErr, versionErr)
+					incompleteIndexes[i] = true
+				}
 			}
 		}
 	}
 	var complete []connector.AgentSurface
 	if readErr == nil {
 		for _, i := range completeIndexes {
-			complete = append(complete, out[i])
+			if !incompleteIndexes[i] {
+				complete = append(complete, out[i])
+			}
 		}
 	}
 	return out, complete, errors.Join(scanErr, readErr)
@@ -199,7 +205,7 @@ func discoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]con
 // discoverWindowsClaudeDesktop finds the Claude Code build Claude Desktop
 // runs, kept as claude-code\<version> under its roaming data folder; the
 // MSIX package keeps it in the package's LocalCache (live check).
-func discoverWindowsClaudeDesktop(profileHome string) (connector.AgentSurface, bool) {
+func discoverWindowsClaudeDesktop(profileHome string) (connector.AgentSurface, bool, error) {
 	dirs := []string{filepath.Join(profileHome, "AppData", "Roaming", "Claude", "claude-code")}
 	if packages, _ := filepath.Glob(filepath.Join(profileHome, "AppData", "Local", "Packages", "Claude_*")); len(packages) != 0 {
 		sort.Strings(packages)
@@ -207,19 +213,23 @@ func discoverWindowsClaudeDesktop(profileHome string) (connector.AgentSurface, b
 			dirs = append(dirs, filepath.Join(pkg, "LocalCache", "Roaming", "Claude", "claude-code"))
 		}
 	}
+	var scanErr error
+	var best connector.AgentSurface
 	for _, dir := range dirs {
-		if version := newestWindowsVersionDir(dir); version != "" {
-			return connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: "claude-desktop", EngineVersion: version, Path: dir}, true
+		version, err := newestWindowsVersionDir(dir)
+		scanErr = errors.Join(scanErr, err)
+		if version != "" && (best.EngineVersion == "" || compareWindowsEnterpriseVersion(version, best.EngineVersion) > 0) {
+			best = connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: "claude-desktop", EngineVersion: version, Path: dir}
 		}
 	}
-	return connector.AgentSurface{}, false
+	return best, best.EngineVersion != "", scanErr
 }
 
 // discoverWindowsCodexApp reports the Codex app's MSIX package data folder.
 // Its engine version has no static source (live check), so it is reported
-// and never enrolled on its own; DiscoverWindowsAgentSurfaces takes the
+// and never enrolled on its own; discovery takes the
 // host version from the package folder name under WindowsApps.
-func discoverWindowsCodexApp(profileHome string) (connector.AgentSurface, bool) {
+func discoverWindowsCodexApp(profileHome string) (connector.AgentSurface, bool, error) {
 	packages, _ := filepath.Glob(filepath.Join(profileHome, "AppData", "Local", "Packages", "OpenAI.Codex_*"))
 	for _, pkg := range packages {
 		if winpath.RejectReparseChain(pkg) != nil {
@@ -228,16 +238,16 @@ func discoverWindowsCodexApp(profileHome string) (connector.AgentSurface, bool) 
 		if info, err := os.Lstat(pkg); err != nil || !info.IsDir() {
 			continue
 		}
-		return connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: "codex-app", Path: pkg}, true
+		return connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: "codex-app", Path: pkg}, true, nil
 	}
-	return connector.AgentSurface{}, false
+	return connector.AgentSurface{}, false, nil
 }
 
 // discoverWindowsDevinDesktop finds Devin Desktop's per-user install
 // (%LOCALAPPDATA%\Programs\Devin) or machine install (%ProgramFiles%\Devin)
 // and reads the engine version from the man page of the Devin CLI it
 // bundles.
-func discoverWindowsDevinDesktop(profileHome string) (connector.AgentSurface, bool) {
+func discoverWindowsDevinDesktop(profileHome string) (connector.AgentSurface, bool, error) {
 	dirs := []string{filepath.Join(profileHome, "AppData", "Local", "Programs", "Devin")}
 	if programFiles, err := winpath.TrustedProgramFiles(); err == nil {
 		dirs = append(dirs, filepath.Join(programFiles, "Devin"))
@@ -255,9 +265,9 @@ func discoverWindowsDevinDesktop(profileHome string) (connector.AgentSurface, bo
 				surface.EngineVersion = version
 			}
 		}
-		return surface, true
+		return surface, true, nil
 	}
-	return connector.AgentSurface{}, false
+	return connector.AgentSurface{}, false, nil
 }
 
 // newestWindowsExtensionDir returns the newest "<id>-<version>[-<platform>]"
@@ -295,23 +305,26 @@ func newestWindowsExtensionDir(root, id string) (string, string, error) {
 
 // newestWindowsVersionDir returns the highest dotted-numeric folder name
 // under dir.
-func newestWindowsVersionDir(dir string) string {
+func newestWindowsVersionDir(dir string) (string, error) {
 	best := ""
-	entries, _ := readWindowsDirBounded(dir)
+	entries, overflow := readWindowsDirBounded(dir)
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() && windowsNativeClaudeVersionName(name) && (best == "" || compareWindowsEnterpriseVersion(name, best) > 0) {
 			best = name
 		}
 	}
-	return best
+	if overflow {
+		return best, fmt.Errorf("version folder %s has more than %d entries", dir, windowsSurfaceMaxEntries)
+	}
+	return best, nil
 }
 
 // newestWindowsPackageVersion reads "<prefix><version>_<arch>__<publisher>"
 // package folder names.
-func newestWindowsPackageVersion(dir, prefix string) string {
+func newestWindowsPackageVersion(dir, prefix string) (string, error) {
 	best := ""
-	entries, _ := readWindowsDirBounded(dir)
+	entries, overflow := readWindowsDirBounded(dir)
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() || !strings.HasPrefix(name, prefix) {
@@ -322,7 +335,10 @@ func newestWindowsPackageVersion(dir, prefix string) string {
 			best = version
 		}
 	}
-	return best
+	if overflow {
+		return best, fmt.Errorf("package folder %s has more than %d entries", dir, windowsSurfaceMaxEntries)
+	}
+	return best, nil
 }
 
 func readWindowsDirBounded(dir string) ([]os.DirEntry, bool) {
@@ -367,8 +383,8 @@ func windowsStandaloneSurfaces(row *ManifestTarget, logf EnumerationLogger, rowC
 	policy := UnverifiedVersionsFor(name)
 	admission := admitSurfaces(name, policy, complete)
 	if err != nil {
-		// Keep rejections observed in incomplete roots alongside the
-		// incomplete warning, without enrolling from those roots.
+		// Retain refused observations from incomplete roots alongside the
+		// coverage warning, without enrolling from those roots.
 		admission.rejected = admitSurfaces(name, policy, surfaces).rejected
 	}
 	return admission, true

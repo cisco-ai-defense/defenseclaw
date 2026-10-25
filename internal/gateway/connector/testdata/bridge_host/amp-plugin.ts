@@ -47,6 +47,9 @@ const DC_FOREIGN_GUARD: string = "{{.ForeignHookGuardJS}}"
 // the deployment was uninstalled and this plugin stops failing closed. A
 // standard user cannot remove the marker. Empty keeps the fail mode.
 const DC_INSTALL_MARKER: string = "{{.InstallMarkerJS}}"
+// The standalone Unix lifecycle holds this public, root-owned marker while
+// install, upgrade or recovery may stop the gateway.
+const DC_LIFECYCLE_MARKER: string = "{{.LifecycleMarkerJS}}"
 // Windows standalone installs reach the gateway over loopback TCP, where a
 // local user can hold the port while the gateway restarts, and this plugin
 // cannot compare the listener with the gateway service the way the hook
@@ -60,6 +63,11 @@ const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"
 // Per-user plugins ask the native gateway binary to verify the connected
 // listener's account before each request. The proof above serves managed TCP.
 const DC_PER_USER_NATIVE_POST: string = "1"
+// A per-user plugin's gateway-outage mode (config.HookOutageFailMode): "open"
+// in the default and permissive policy tiers lets a tool call or result run
+// with a warning and a hook-failures.jsonl row while this account's gateway
+// is not running; "closed" (strict) blocks it. Every other failure blocks.
+const DC_OUTAGE_FAIL_MODE: string = "{{.OutageFailMode}}"
 const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
@@ -377,33 +385,21 @@ async function provenTCPRequest(path: string, init: RequestInit, token: string):
 }
 
 function perUserNativePostBinary(): string {
-	const account = userInfo()
-	const dataDir = dirname(dirname(DC_TOKEN_FILE))
-	const dataHome = dirname(dataDir)
-	// The token path is baked into this plugin at setup. A custom data
-	// directory uses the OS account home. Neither path follows the agent's HOME.
-	const homes = dataDir === join(dataHome, ".defenseclaw") ? [dataHome, account.homedir] : [account.homedir]
-	let lastError: unknown = new Error("per-user gateway helper path is missing")
-	for (const home of new Set(homes)) {
-		const directory = join(home, ".local", "bin")
-		const binary = join(directory, process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")
-		const paths = [home, join(home, ".local"), directory, binary]
-		try {
-			for (let index = 0; index < paths.length; index++) {
-				const info = lstatSync(paths[index])
-				if (info.isSymbolicLink() || (index === paths.length - 1 ? !info.isFile() : !info.isDirectory())) {
-					throw new Error("per-user gateway helper path is untrusted")
-				}
-				if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) {
-					throw new Error("per-user gateway helper path is writable by another account")
-				}
-			}
-			return binary
-		} catch (error) {
-			lastError = error
+	const home = homedir()
+	const directory = join(home, ".local", "bin")
+	const binary = join(directory, process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")
+	const paths = [home, join(home, ".local"), directory, binary]
+	const uid = userInfo().uid
+	for (let index = 0; index < paths.length; index++) {
+		const info = lstatSync(paths[index])
+		if (info.isSymbolicLink() || (index === paths.length - 1 ? !info.isFile() : !info.isDirectory())) {
+			throw new Error("per-user gateway helper path is untrusted")
+		}
+		if (process.platform !== "win32" && (info.uid !== uid || (info.mode & 0o022) !== 0)) {
+			throw new Error("per-user gateway helper path is writable by another account")
 		}
 	}
-	throw lastError
+	return binary
 }
 
 // gatewayFetch posts over the verified managed hook socket when one is
@@ -577,6 +573,19 @@ async function deploymentRemoved(): Promise<boolean> {
 	}
 }
 
+async function managedLifecycleHeld(): Promise<boolean> {
+	if (!DC_LIFECYCLE_MARKER) return false
+	try {
+		await lstat(DC_LIFECYCLE_MARKER)
+		return true
+	} catch (error) {
+		// Only a definite absence ends the install window.
+		return (error as { code?: unknown } | null)?.code !== "ENOENT"
+	}
+}
+
+const DC_MANAGED_LIFECYCLE_TEXT = "DefenseClaw is being installed or upgraded on this computer; try again in a moment."
+
 // DC_GATEWAY_STOPPED_TEXT is what a managed install says when its gateway
 // service is stopped, in the words of the native hook, instead of the
 // runtime's network error (GAP-0639).
@@ -616,32 +625,17 @@ async function installWindow(): Promise<boolean> {
 // `defenseclaw-gateway stop`, a stopped, busy or failing gateway) and what
 // brings it back, in the words of the native and shell hooks, instead of the
 // runtime's network error alone (GAP-0850).
-// defenseclaw-call-time-outage-v1: perUserOutageOpen reports a per-user call that may run unchecked: the
+// perUserOutageOpen reports a per-user call that may run unchecked: the
 // native helper exited 7 (hookexec.PerUserPostOutageExit: this account's
 // gateway refused or dropped the connection before any status), the outage
-// mode in the config on disk is open and no install holds the data directory.
-// An answer the gateway gave, an
-// unverified listener and every other error keep the call blocked. Like the
-// rest of this plugin it reads no environment, so strict availability does
-// not apply (the strict policy tier closes it).
+// mode is open and no install holds the data
+// directory. An answer the gateway gave, an unverified listener and every
+// other error keep the call blocked. Like the rest of this plugin it reads
+// no environment, so strict availability does not apply (the strict policy
+// tier closes it).
 async function perUserOutageOpen(error: unknown): Promise<boolean> {
-	if ((error as { status?: unknown } | null)?.status !== 7) return false
-	return !(await installWindow()) && configOutageOpen()
-}
-
-// configOutageOpen asks the per-user helper (`hook-outage-mode`, which only
-// reads the config.yaml of this plugin's data directory, never one the
-// agent's DEFENSECLAW_CONFIG or DEFENSECLAW_HOME names) for Amp's outage mode
-// now. A helper that cannot run or answers anything but "open" keeps it closed.
-function configOutageOpen(): boolean {
-	try {
-		const output = execFileSync(perUserNativePostBinary(), ["hook-outage-mode", "--connector", "amp", "--hook-dir", dirname(DC_TOKEN_FILE)], {
-			timeout: 3000, maxBuffer: 4096, windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
-		})
-		return String(output).trim() === "open"
-	} catch {
-		return false
-	}
+	if (DC_OUTAGE_FAIL_MODE !== "open" || (error as { status?: unknown } | null)?.status !== 7) return false
+	return !(await installWindow())
 }
 
 // perUserOutageNotice is the one warning of a call that ran because this
@@ -789,7 +783,8 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	// found at load holds for the whole process.
 	const startupGuard = runForeignHookCheck("session.load", workspaceRoot)
 	const foreignHookCheck = async (event: string): Promise<string> =>
-		(await startupGuard) || (await runForeignHookCheck(event, workspaceRoot))
+		(await managedLifecycleHeld()) ? DC_MANAGED_LIFECYCLE_TEXT :
+			(await startupGuard) || (await runForeignHookCheck(event, workspaceRoot))
 
 	async function agentFacts(threadID: string, ctx: { thread: { agent(): Promise<Agent> } }): Promise<AgentFacts> {
 		const cached = agents.get(threadID)
@@ -866,6 +861,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	}
 
 	async function post(payload: Record<string, unknown>, actionable: boolean): Promise<GatewayResponse> {
+		if (actionable && await managedLifecycleHeld()) return { action: "block", reason: DC_MANAGED_LIFECYCLE_TEXT }
 		if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 		let body: string
 		try {
@@ -949,6 +945,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			}
 
 			const data = gatewayJSON(await response.text()) as GatewayResponse
+			if (actionable && await managedLifecycleHeld()) return { action: "block", reason: DC_MANAGED_LIFECYCLE_TEXT }
 			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
@@ -1136,10 +1133,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			)
 			return
 		default:
-			// A result kept because this account's gateway is down carries the
-			// same one warning as the call. Returning void preserves Amp's
-			// original status and output.
-			if (verdict.outage_notice) await notifyIfForeground(threadID, verdict.outage_notice)
+			// Returning void preserves Amp's original status and output.
 			return
 		}
 	})

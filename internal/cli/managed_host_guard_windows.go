@@ -112,24 +112,6 @@ var managedHostWindowsStandalone = func() (string, bool) {
 	return managedHostStandaloneRecord()
 }
 
-// A failed managed classification may mean the machine marker is unreadable
-// or invalid. Only a definitely absent HKLM key lets a stale per-user hook
-// open an OSS outage; a standard user cannot plant this machine key.
-var managedHostWindowsMarkerUncertain = func() bool {
-	key, err := registry.OpenKey(
-		registry.LOCAL_MACHINE,
-		WindowsEnterpriseMarkerKey,
-		registry.QUERY_VALUE|registry.WOW64_64KEY|windows.READ_CONTROL,
-	)
-	if err == nil {
-		key.Close()
-		return true
-	}
-	return !errors.Is(err, os.ErrNotExist) &&
-		!errors.Is(err, windows.ERROR_FILE_NOT_FOUND) &&
-		!errors.Is(err, windows.ERROR_PATH_NOT_FOUND)
-}
-
 // managedHostStandaloneMarker reports the administrator-written HKLM
 // standalone marker.
 func managedHostStandaloneMarker() (string, bool) {

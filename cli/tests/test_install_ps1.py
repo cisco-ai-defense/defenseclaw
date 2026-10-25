@@ -19,7 +19,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import json
 import re
 import shutil
 import subprocess
@@ -805,6 +804,8 @@ def test_the_locked_package_install_is_retried_with_backoff() -> None:
 # transaction, run with the transaction's record and proof stubbed out (the
 # transaction has its own tests below, fix/r104-windows).
 _NO_TXN = (
+    "function Write-DurableText { param($Path, $Text) [IO.File]::WriteAllText($Path, $Text) }\n"
+    "function Save-LifecycleHookTransition { param($Slot) Undo-HookFirst $Slot; return '' }\n"
     "function Write-LifecycleManifest { return $null }\n"
     "function Read-LifecycleManifest { return $null }\n"
     "function New-RecoveryManifest { return $null }\n"
@@ -3748,13 +3749,189 @@ def test_the_new_hook_goes_in_before_the_data_copy() -> None:
     assert positions == sorted(positions), save
     first = _ps1_function("Install-HookFirst")
     assert first.index("Save-HookCloser $Slot $gateway") < first.index('(Join-Path $Slot "HOOK_FIRST")') < first.index("Install-File $staged $live")
-    # An unfinished snapshot puts the old hook back before anything else.
+    # A rollback keeps the checked hook at the registered path until the
+    # restored gateway has passed its readiness and connector proof.
     undo = _ps1_function("Undo-Snapshot")
-    assert undo.index("Undo-HookFirst $Slot") < undo.index("Move-Path")
+    assert undo.index("Save-LifecycleHookTransition $Slot") < undo.index("Move-Path")
     install = _ps1_function("Invoke-Install")
     assert install.index("Save-BinarySnapshot") < install.index("if (-not (Stop-Gateway))")
-    # A finished one is restored with the rest of the bin folder.
-    assert 'Restore-BinDir (Join-Path $Slot "bin")' in _ps1_function("Restore-Slot")
+    restore = _ps1_function("Restore-Slot")
+    assert restore.index("Save-LifecycleHookTransition $Slot") < restore.index('Restore-BinDir (Join-Path $Slot "bin")')
+    proof = _ps1_function("Assert-LifecycleRestored")
+    assert proof.index("Wait-LifecycleProof") < proof.index("Restore-PriorHookAfterProof")
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("prior_version", ["0.8.10", "1.0.0", "1.0.2", "1.0.3"])
+def test_windows_rollback_holds_checked_hook_until_prior_gateway_is_proven(tmp_path: Path, prior_version: str) -> None:
+    # The registered 1.0.2 hook answered open while Restore-BinDir copied it
+    # back ahead of the gateway. This exercises the real binary restore and
+    # lifecycle proof with all supported prior-release families. A failed
+    # proof must leave the checked new hook and durable record for a retry.
+    transition_names = (
+        "Get-LifecycleHookTransition", "Save-LifecycleHookTransition", "Restore-PriorHookAfterProof",
+        "Ensure-LifecycleHookGuard",
+    )
+    optional_transition = "\n".join(
+        _ps1_function(name) for name in transition_names if f"function {name}(" in _text()
+    )
+    body = (
+        _ps1_function("Read-Text")
+        + _ps1_function("Restore-BinDir")
+        + _ps1_function("Assert-BinDirRestored")
+        + _ps1_function("Undo-HookFirst")
+        + _ps1_function("Undo-Snapshot")
+        + optional_transition
+        + r"""
+$ManagedFiles = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe')
+$Slot = Join-Path $DataDir 'previous.new'
+New-Item -ItemType Directory -Path (Join-Path $Slot 'bin'), (Join-Path $Slot 'closer') -Force | Out-Null
+function Install-File { param($Source, $Destination) Copy-Item -LiteralPath $Source -Destination $Destination -Force }
+function Remove-Aside { param($Path) Remove-Item -LiteralPath $Path -Force }
+[IO.File]::WriteAllText((Join-Path $Slot 'bin\defenseclaw-gateway.exe'), 'old gateway')
+[IO.File]::WriteAllText((Join-Path $Slot 'bin\defenseclaw-hook.exe'), 'old hook')
+[IO.File]::WriteAllText((Join-Path $Slot 'closer\defenseclaw-hook.exe'), 'checked new hook')
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-gateway.exe'), 'failed new gateway')
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-hook.exe'), 'checked new hook')
+$priorSHA = Get-Sha256 (Join-Path $Slot 'bin\defenseclaw-hook.exe')
+$guardSHA = Get-Sha256 (Join-Path $Slot 'closer\defenseclaw-hook.exe')
+$gatewaySHA = Get-Sha256 (Join-Path $Slot 'bin\defenseclaw-gateway.exe')
+[IO.File]::WriteAllText((Join-Path $Slot 'HOOK_FIRST'), $priorSHA)
+[IO.File]::WriteAllText((Join-Path $Slot 'HOOK_GUARD'), $guardSHA)
+$state = [ordered]@{ Schema = 1; Operation = 'upgrade'; From = '__PRIOR__'; To = '1.0.4'; Slot = $Slot
+    Bins = [ordered]@{ 'defenseclaw-gateway.exe' = $gatewaySHA
+        'defenseclaw-hook.exe' = $priorSHA }; GatewayWasRunning = $true; Connectors = @(); Config = ''
+    ExternalConfig = ''; ExternalConfigSha256 = ''; HookFailModes = ''; BinDirProtected = $false; SetupRoot = ''; Committed = $false }
+Write-DurableText $LifecycleManifest ($state | ConvertTo-Json -Depth 4)
+$recordBeforeRestore = Read-LifecycleManifest
+$transitionCommand = Get-Command Save-LifecycleHookTransition -ErrorAction SilentlyContinue
+$guardForRestore = if ($transitionCommand) { Save-LifecycleHookTransition $Slot } else { '' }
+Restore-BinDir (Join-Path $Slot 'bin') $guardForRestore
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA) {
+    throw 'the registered prior hook ran before gateway readiness'
+}
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-gateway.exe')) -ne $gatewaySHA) { throw 'prior gateway not restored' }
+$failed = $false
+try { Assert-LifecycleRestored $recordBeforeRestore } catch { $failed = $true }
+if (-not $failed -or -not (Test-Path -LiteralPath $LifecycleManifest) -or
+    (Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA) {
+    throw 'unproven restore released the registered prior hook or lifecycle record'
+}
+# Model a process stop immediately after prior-hook publication, before the
+# record is retired. The retry must put the checked guard back before proof.
+Copy-Item -LiteralPath (Join-Path $Slot 'bin\defenseclaw-hook.exe') -Destination (Join-Path $BinDir 'defenseclaw-hook.exe') -Force
+try { Assert-LifecycleRestored $recordBeforeRestore } catch { }
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA -or
+    -not (Test-Path -LiteralPath $LifecycleManifest)) { throw 'interrupted publication did not restore the guard' }
+$script:gateway = [pscustomobject]@{ Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }
+$script:digestHelp = $false
+function Invoke-Native { param($FilePath, $Arguments, [switch]$Quiet) if ($script:gateway) { return 0 }; return 1 }
+Assert-LifecycleRestored $recordBeforeRestore
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $priorSHA -or
+    (Test-Path -LiteralPath $LifecycleManifest)) { throw 'proved rollback did not finish the hook transition' }
+# The unfinished-snapshot undo follows the same transition. Its snapshot is
+# consumed before the caller proves the prior gateway, so the record and both
+# hook copies must survive in .lifecycle-closer.
+$early = Join-Path $DataDir 'early.new'
+New-Item -ItemType Directory -Path (Join-Path $early 'bin'), (Join-Path $early 'closer') -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $Slot 'bin\defenseclaw-hook.exe') -Destination (Join-Path $early 'bin\defenseclaw-hook.exe')
+Copy-Item -LiteralPath (Join-Path $Slot 'closer\defenseclaw-hook.exe') -Destination (Join-Path $early 'closer\defenseclaw-hook.exe')
+Copy-Item -LiteralPath (Join-Path $early 'closer\defenseclaw-hook.exe') -Destination (Join-Path $BinDir 'defenseclaw-hook.exe') -Force
+[IO.File]::WriteAllText((Join-Path $early 'HOOK_FIRST'), $priorSHA)
+[IO.File]::WriteAllText((Join-Path $early 'HOOK_GUARD'), $guardSHA)
+$state['Slot'] = $early
+Write-DurableText $LifecycleManifest ($state | ConvertTo-Json -Depth 4)
+$earlyRecord = Read-LifecycleManifest
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+function Remove-Tree { param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }
+$script:gateway = $null
+Undo-Snapshot $early
+if ((Test-Path -LiteralPath $early) -or (Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA -or
+    -not (Test-Path -LiteralPath $LifecycleManifest)) { throw 'early undo released the prior hook before gateway proof' }
+$script:gateway = [pscustomobject]@{ Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }
+Assert-LifecycleRestored $earlyRecord
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $priorSHA -or
+    (Test-Path -LiteralPath $LifecycleManifest)) { throw 'proved early undo did not finish the hook transition' }
+'OK'
+"""
+    ).replace("__PRIOR__", prior_version)
+    result = _txn_harness(tmp_path, body)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("prior_version", ["0.8.10", "1.0.0", "1.0.2", "1.0.3"])
+def test_windows_rollback_finishes_for_a_previously_stopped_gateway(tmp_path: Path, prior_version: str) -> None:
+    # A stopped prior gateway has no readiness to prove. Its restored bytes
+    # and closed hooks must be proven before the old hook and lock return.
+    body = (
+        _ps1_function("Read-Text")
+        + _ps1_function("Restore-BinDir")
+        + _ps1_function("Assert-BinDirRestored")
+        + "\n".join(_ps1_function(name) for name in (
+            "Get-LifecycleHookTransition", "Save-LifecycleHookTransition",
+            "Restore-PriorHookAfterProof", "Ensure-LifecycleHookGuard",
+        ))
+        + r"""
+$ManagedFiles = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe')
+$slot = Join-Path $DataDir 'previous.new'
+New-Item -ItemType Directory -Path (Join-Path $slot 'bin'), (Join-Path $slot 'closer') -Force | Out-Null
+function Write-Warn { param($Message) }
+function Install-File { param($Source, $Destination) Copy-Item -LiteralPath $Source -Destination $Destination -Force }
+function Remove-Aside { param($Path) Remove-Item -LiteralPath $Path -Force }
+[IO.File]::WriteAllText((Join-Path $slot 'bin\defenseclaw-gateway.exe'), 'old gateway')
+[IO.File]::WriteAllText((Join-Path $slot 'bin\defenseclaw-hook.exe'), 'old hook')
+[IO.File]::WriteAllText((Join-Path $slot 'closer\defenseclaw-hook.exe'), 'checked new hook')
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-gateway.exe'), 'failed new gateway')
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-hook.exe'), 'checked new hook')
+$sidecar = Join-Path $DataDir 'hooks\.hookcfg'
+[IO.File]::WriteAllText($sidecar, '{"fail_modes":{"codex":"open"}}')
+$priorSHA = Get-Sha256 (Join-Path $slot 'bin\defenseclaw-hook.exe')
+$guardSHA = Get-Sha256 (Join-Path $slot 'closer\defenseclaw-hook.exe')
+$gatewaySHA = Get-Sha256 (Join-Path $slot 'bin\defenseclaw-gateway.exe')
+[IO.File]::WriteAllText((Join-Path $slot 'HOOK_FIRST'), $priorSHA)
+[IO.File]::WriteAllText((Join-Path $slot 'HOOK_GUARD'), $guardSHA)
+$record = [ordered]@{ Schema = 1; Operation = 'upgrade'; From = '__PRIOR__'; To = '1.0.4'; Slot = $slot
+    Bins = [ordered]@{ 'defenseclaw-gateway.exe' = $gatewaySHA; 'defenseclaw-hook.exe' = $priorSHA }
+    GatewayWasRunning = $false; Connectors = @('codex'); Config = ''; ExternalConfig = ''
+    ExternalConfigSha256 = ''; HookFailModes = ''; BinDirProtected = $false; SetupRoot = ''; Committed = $false }
+Write-DurableText $LifecycleManifest ($record | ConvertTo-Json -Depth 4)
+$guardForRestore = Save-LifecycleHookTransition $slot
+[IO.File]::WriteAllText((Join-Path $LifecycleCloser 'defenseclaw-gateway.exe'), 'checked closer')
+Restore-BinDir (Join-Path $slot 'bin') $guardForRestore
+$script:closeFails = $true
+function Invoke-Native {
+    param($FilePath, $Arguments, [switch]$Quiet)
+    if ($script:closeFails) { return 1 }
+    if (($Arguments -join ' ') -like 'connector refresh-fail-modes --closed*') {
+        if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA) {
+            throw 'old hook was published before closure'
+        }
+        [IO.File]::WriteAllText($sidecar, '{"fail_modes":{"codex":"closed"}}')
+        $script:closes++
+        return 0
+    }
+    throw 'a stopped gateway was probed for readiness'
+}
+try { Assert-LifecycleRestored (Read-LifecycleManifest); throw 'hook closure failure was accepted' }
+catch { if ($_.Exception.Message -eq 'hook closure failure was accepted') { throw } }
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA -or
+    -not (Test-Path -LiteralPath $LifecycleManifest) -or
+    [IO.File]::ReadAllText($sidecar) -notmatch '"open"') { throw 'failed closure released the guard' }
+$script:closeFails = $false
+Assert-LifecycleRestored (Read-LifecycleManifest)
+if ($script:closes -ne 1 -or (Test-Path -LiteralPath $LifecycleManifest) -or
+    [IO.File]::ReadAllText($sidecar) -notmatch '"closed"' -or
+    (Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $priorSHA -or
+    (Get-Sha256 (Join-Path $BinDir 'defenseclaw-gateway.exe')) -ne $gatewaySHA -or $script:gateway) {
+    throw 'stopped prior install was not proven and retired'
+}
+'OK'
+"""
+    ).replace("__PRIOR__", prior_version)
+    result = _txn_harness(tmp_path, body)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
 
 
 def test_hook_fail_modes_are_held_from_before_the_gateway_stops_until_it_exits() -> None:
@@ -3914,6 +4091,10 @@ def test_setup_hook_launcher_answers_until_the_fail_mode_hold_is_ready(
         + _ps1_function("Enable-SetupHooks")
         + _ps1_function("Restore-SetupInstall")
         + _ps1_function("Start-SwapHookFailModes")
+        # This test exercises handoff timing; the publisher's byte and digest
+        # contract has its own test below. Model a valid atomic publisher.
+        + "function Publish-SetupLauncherTrampoline { [IO.File]::WriteAllText($SetupHookState, 'delegated'); return $true }\n"
+        + "function Test-SetupLauncherTrampoline { return (Test-Path -LiteralPath $SetupHookState) -and ([IO.File]::ReadAllText($SetupHookState) -eq 'delegated') }\n"
         + "try { $was = [bool](Start-SwapHookFailModes 'staged-gateway.exe' (Get-GatewayProcess)); Write-Host \"was=$was\" } "
         + "catch { Write-Host \"thrown=$($_.Exception.Message)\" }\n"
         + "foreach ($e in $events) { Write-Host \"event $e\" }\n"
@@ -3933,11 +4114,10 @@ def test_setup_hook_launcher_answers_until_the_fail_mode_hold_is_ready(
     lines = completed.stdout.splitlines()
     assert [line[len("event ") :] for line in lines if line.startswith("event ")] == want_events, (case, completed.stdout)
     assert any(line.startswith(want_out) for line in lines), (case, completed.stdout)
-    # The launcher is disabled here only when the swap goes on with Setup's
-    # gateway down; with one running Invoke-Install disables it right before the stop.
-    want_end = "disabled" if setup and want_out == "was=False" else "enabled"
-    assert f"end={want_end}" in lines, (case, completed.stdout)
-    assert not (staging / "hook-runtime-state.json").exists() or want_end == "disabled", (case, completed.stdout)
+    # With no gateway running, the launcher delegates to the staged hook;
+    # its state remains present throughout the swap.
+    assert "end=enabled" in lines, (case, completed.stdout)
+    assert not (staging / "hook-runtime-state.json").exists() or setup, (case, completed.stdout)
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -4021,6 +4201,7 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         + _bin_dir_functions()
         + _ps1_function("Read-Text")
         + _ps1_function("Get-Sha256")
+        + _ps1_function("Write-DurableText")
         + _ps1_function("Install-HookFirst")
         + _ps1_function("Save-HookCloser")
         + _ps1_function("Undo-HookFirst")
@@ -5227,6 +5408,7 @@ def _txn_harness(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
     script = tmp_path / "txn.ps1"
     script.write_text(
         "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        "if ($PSVersionTable.PSVersion.Major -lt 6) { Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1') -Force -ErrorAction Stop }\n"
         f"$DataDir = '{data}'\n$BinDir = '{bin_dir}'\n$Local = ''\n$Setup = $null\n"
         "$ManagedBinaries = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe', 'defenseclaw-acp.exe')\n"
         "$LifecycleManifest = Join-Path $DataDir '.lifecycle-txn.json'\n"
@@ -5680,6 +5862,44 @@ function Write-Warn([string]$m) {{ Write-Host "warn $m" }}
 """
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("publication", ["success", "refused", "throws"])
+def test_setup_launcher_state_stays_active_until_atomic_handoff(tmp_path: Path, publication: str) -> None:
+    # GAP-1071: a cached Setup launcher must never observe a missing state
+    # while the installer prepares the replacement, including on errors.
+    state = tmp_path / "hook-runtime-state.json"
+    state.write_text("original", encoding="utf-8")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    publish = {
+        "success": "[IO.File]::WriteAllText($SetupHookState, 'delegated'); return $true",
+        "refused": "return $false",
+        "throws": "throw 'publication failed'",
+    }[publication]
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$SetupHookState = '{state}'\n$Staging = '{staging}'\n"
+        "function Move-Path([string]$From, [string]$To) { [IO.File]::Move($From, $To) }\n"
+        "function Protect-SetupLauncherFile([string]$Path) { }\n"
+        "function Invoke-Quietly([scriptblock]$Action) { try { & $Action } catch { } }\n"
+        "function Publish-SetupLauncherTrampoline([string]$Template, [string]$Hook, [string]$Gateway) {\n"
+        "  if (-not (Test-Path -LiteralPath $SetupHookState)) { throw 'cached launcher saw missing state' }\n"
+        f"  {publish}\n"
+        "}\n"
+        + _ps1_function("Disable-SetupHooks")
+        + "try { Disable-SetupHooks; Write-Host 'result=ok' } catch { Write-Host \"result=error:$($_.Exception.Message)\" }\n"
+        + "Write-Host \"state=$(if (Test-Path -LiteralPath $SetupHookState) { [IO.File]::ReadAllText($SetupHookState) } else { 'missing' })\"\n"
+    )
+    result = _run_powershell(script)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    if publication == "success":
+        assert "result=ok" in output and "state=delegated" in output, output
+        assert (staging / "hook-runtime-state.json").read_text(encoding="utf-8") == "original"
+    else:
+        assert "result=error:" in output and "state=original" in output, output
+
+
 def _sha256(path: Path) -> str:
     import hashlib
 
@@ -5761,14 +5981,17 @@ def test_setup_launcher_delegates_to_this_releases_hook(tmp_path: Path, shell: s
         [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
     )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "warn" not in completed.stdout, completed.stdout
     kept = staging / "hook-runtime-state.json"
     if case in ("full-launcher", "launcher-changed"):
-        # Nothing to delegate to: Setup's state is set aside, as before.
-        assert not state.exists() and kept.read_text(encoding="utf-8") == original_text, completed.stdout
+        # An old or changed launcher cannot be delegated. Abort with its
+        # original state still active, before the gateway is stopped.
+        assert completed.returncode != 0, completed.stdout + completed.stderr
+        assert state.read_text(encoding="utf-8") == original_text, completed.stdout
+        assert kept.read_text(encoding="utf-8") == original_text, completed.stdout
         assert not delegated.exists() or not any(delegated.iterdir()), completed.stdout
         return
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "warn" not in completed.stdout, completed.stdout
     if case == "enable":
         assert state.read_text(encoding="utf-8") == original_text, completed.stdout
         assert not kept.exists(), completed.stdout

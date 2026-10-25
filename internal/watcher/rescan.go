@@ -1070,6 +1070,12 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		}
 		return rescanSkipped
 	}
+	if evt.Type == InstallMCP && w.hasRecoverableMCPBlock(evt) && !w.secureClientActive() {
+		// A clean recovery scan must run admission so its completed verdict
+		// can release this watcher's earlier rejection or scanner-failure block.
+		// Drift-only scanning recorded the clean finding but left it disabled.
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
+	}
 
 	if reason == "content-changed" && !w.secureClientActive() {
 		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
@@ -1213,7 +1219,8 @@ func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt Ins
 }
 
 // readmitChanged runs install admission for a target whose content changed
-// since its baseline: an installed skill, plugin or MCP server edited to
+// since its baseline, or for an MCP server recovering from this watcher's
+// earlier rejection: an installed skill, plugin or MCP server edited to
 // carry HIGH or CRITICAL content is blocked, quarantined and disabled as a
 // new install would be. The rescan used to scan it and emit drift only, so
 // the rejected verdict was never acted on and the agents kept loading it
@@ -1226,7 +1233,7 @@ func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt Ins
 // the change in gateway.log: the rescan cycle, or the watch of the MCP
 // server list. Secure Client keeps main's rescan (issue #1092).
 func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot, deltas []DriftDelta, fingerprint, source string) rescanOutcome {
-	fmt.Fprintf(os.Stderr, "[%s] %s %s changed; running install admission\n", source, evt.Type, evt.Name)
+	fmt.Fprintf(os.Stderr, "[%s] %s %s needs admission; scanning\n", source, evt.Type, evt.Name)
 	res := w.runAdmission(ctx, evt)
 	w.notifyAdmission(res)
 	if res.ScanID != "" {

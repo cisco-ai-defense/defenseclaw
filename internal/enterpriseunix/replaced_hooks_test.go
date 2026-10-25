@@ -10,12 +10,53 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// A standalone manifest may name an account without publishing its UID.
+// The guardian resolves that row, so the lifecycle must fence it as well.
+func TestReplacedHookTargetsResolveNameOnlyManifestRows(t *testing.T) {
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid, err := strconv.Atoi(current.Uid)
+	if err != nil || uid <= 0 {
+		t.Skip("the fixture needs a non-root account")
+	}
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.2")}))
+	dataDir := filepath.Join(current.HomeDir, "managed-data")
+	writeHostFile(t, h, h.env.Layout.ManifestPath, fmt.Sprintf("version: 1\ntargets:\n  - user: %q\n    data_dir: %q\n    connector: claudecode\n", current.Username, dataDir))
+	l := &lifecycle{env: h.env}
+	targets := l.replacedHookTargets(t.Context())
+	if len(targets) != 1 || targets[0].uid != uid || targets[0].home != current.HomeDir || targets[0].folder() != filepath.Join(dataDir, "hooks") {
+		t.Fatalf("name-only targets = %+v, want uid %d and hooks in %s", targets, uid, dataDir)
+	}
+	if err := os.MkdirAll(h.env.P(current.HomeDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeReplacedHooks(t, h.env.P(targets[0].folder()), replacedHardening103)
+	var stops int
+	var stoppedUnfenced bool
+	h.services.observe = func(call string) {
+		if strings.HasPrefix(call, "stop ") && strings.HasSuffix(call, " "+unitGateway) {
+			stops++
+			data, _ := os.ReadFile(h.env.P(filepath.Join(targets[0].folder(), hardeningFile)))
+			stoppedUnfenced = stoppedUnfenced || !strings.Contains(string(data), lifecycleFenceTag)
+		}
+	}
+	requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.3"), ProductVersion: "1.0.3"}))
+	if stops == 0 || stoppedUnfenced {
+		t.Fatalf("the gateway stopped %d times, with an unfenced old hook: %t", stops, stoppedUnfenced)
+	}
+}
 
 // replacedHardening103 is the decision of a 1.0.3 _hardening.sh that a
 // managed shell hook's fail_unreachable reads, verbatim, with the two
@@ -76,12 +117,45 @@ fail_response "gateway returned HTTP 418"
 HOOK_DIR="$(cd -P -- "${0%/*}" && pwd)"
 . "${HOOK_DIR}/_hardening.sh"
 FAIL_MODE="open"
+COPILOT_HOOK_EVENT="${2:-preToolUse}"
 fail_unreachable() {
   defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE"
   exit 0
 }
+
 fail_unreachable "gateway unreachable"
 `,
+}
+
+// The 1.0.2 Copilot hook puts its registered event in COPILOT_HOOK_EVENT.
+// permissionRequest needs a different native deny body from preToolUse.
+func TestFencedReplacedCopilotAnswersBothNativeEvents(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("no /bin/bash")
+	}
+	home := t.TempDir()
+	folder := filepath.Join(home, ".defenseclaw", "hooks")
+	writeReplacedHooks(t, folder, replacedHardening103)
+	marker := filepath.Join(t.TempDir(), "lifecycle.active")
+	if err := os.WriteFile(marker, []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if replaced, err := fenceHardening(home, filepath.Join(".defenseclaw", "hooks"), os.Getuid(), lifecycleFence(marker)); err != nil || !replaced {
+		t.Fatalf("fence = %v, %v", replaced, err)
+	}
+	for _, tc := range []struct{ event, want, other string }{
+		{"preToolUse", `"permissionDecision":"deny"`, `"behavior":"deny"`},
+		{"permissionRequest", `"behavior":"deny"`, `"permissionDecision":"deny"`},
+	} {
+		t.Run(tc.event, func(t *testing.T) {
+			cmd := exec.Command("/bin/bash", filepath.Join(folder, "copilot-hook.sh"), "--event", tc.event)
+			cmd.Env = []string{"PATH=/usr/bin:/bin"}
+			out, err := cmd.Output()
+			if err != nil || !strings.Contains(string(out), tc.want) || strings.Contains(string(out), tc.other) {
+				t.Fatalf("event %s: output %q, error %v; want %s only", tc.event, out, err, tc.want)
+			}
+		})
+	}
 }
 
 func writeReplacedHooks(t *testing.T, folder, hardening string) {

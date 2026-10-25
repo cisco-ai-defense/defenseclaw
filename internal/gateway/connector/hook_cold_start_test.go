@@ -394,9 +394,8 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			// A still-bound listener whose native post cannot verify an
-			// unanswered connection returns 1. It is not a retryable outage.
-			env := append([]string{"DEFENSECLAW_FAIL_MODE=open", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=1"}, tc.env...)
+			// An old per-user open setting stays closed, including during install.
+			env := append([]string{"DEFENSECLAW_FAIL_MODE=open", "DC_COLD_FAILS=1000"}, tc.env...)
 			run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, tc.prepare, env...)
 			time.Sleep(200 * time.Millisecond) // a background start would have logged by now
 			if log := readColdStartCapture(t, run.capDir, "gateway.log"); log != "" {
@@ -625,7 +624,7 @@ func TestShellHookRetriesUntilTheGatewayAnswersOrBudgetExpires(t *testing.T) {
 // A restart or outage longer than the budget blocks the call within about
 // 3 seconds and names this account's unavailable gateway.
 func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
-	for _, rc := range []string{"7"} {
+	for _, rc := range []string{"7", "56"} {
 		t.Run("claude-code/"+rc, func(t *testing.T) {
 			run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, nil,
 				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC="+rc, "DC_COLD_DROP_LISTENER=1")

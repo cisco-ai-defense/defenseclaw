@@ -71,7 +71,11 @@ type RuleFinding struct {
 	// Empty for content-only matches; the emission pipeline then
 	// falls back to a rule-id-based capability (CapabilityForRuleID).
 	ToolCapabilityClass string `json:"tool_capability_class,omitempty"`
-	enforcement         findingEnforcement
+	// profile is internal audit provenance for a profile-meet member. It is
+	// deliberately absent from hook and inspect responses, which can be read
+	// by an account whose group membership was not proven.
+	profile     string
+	enforcement findingEnforcement
 	// disposition is a private, value-free presentation class for trusted
 	// action findings. It lets benchmark and audit code distinguish an
 	// explicitly advisory result from audit-only evidence without changing the
@@ -233,14 +237,15 @@ type compiledRulePackCategories struct {
 	// reached their shared cost budget (noteMeetBudget); nil for one pack.
 	budgetNote *sync.Once
 	// members are the generations of the profiles of a strictest
-	// combination (a meet) whose rules it scans with. A scan of the meet is
-	// each member's own scan, the strongest finding of a rule kept
-	// (strongestRuleFindings), so a rule ID two packs define differently
-	// keeps both definitions. categories and ruleIdentityTitles then hold
+	// combination (a meet) whose rules it scans with. memberNames is parallel
+	// to members; duplicate generations still produce separately attributed
+	// findings because their profiles can have different modes and thresholds.
+	// categories and ruleIdentityTitles hold
 	// their union, for lookups only, and semanticRules is empty: every lane
 	// that judges with rules runs each member's. nil for the generation of
 	// one pack.
-	members []*compiledRulePackCategories
+	members     []*compiledRulePackCategories
+	memberNames []string
 }
 
 const (
@@ -1003,11 +1008,17 @@ func scanRuleCategoriesWithOptions(
 		return nil
 	}
 	if len(generation.members) > 0 {
-		lists := make([][]RuleFinding, 0, len(generation.members))
-		for _, member := range generation.members {
-			lists = append(lists, scanRuleCategoriesWithOptions(member, text, toolName, options))
+		var out []RuleFinding
+		for i, member := range generation.members {
+			findings := scanRuleCategoriesWithOptions(member, text, toolName, options)
+			if i < len(generation.memberNames) {
+				for j := range findings {
+					findings[j].profile = generation.memberNames[i]
+				}
+			}
+			out = append(out, findings...)
 		}
-		return strongestRuleFindings(lists, func(ruleID string) string { return ruleID })
+		return out
 	}
 	var findings []RuleFinding
 	// The hard-coded Windows recognizers cover only command and sensitive-path

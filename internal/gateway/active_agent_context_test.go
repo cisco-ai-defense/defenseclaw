@@ -671,9 +671,6 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 			SessionID:     sessionID,
 			FilePath:      filePath,
 		})
-		// The symlinked name is kept as well, so the file it reaches is
-		// protected by identity (GAP-0971); the session stays uncertain.
-		wantFiles = append(wantFiles, filePath)
 		if got := api.activeAgentContext.snapshot("claudecode", sessionID); !slices.Equal(got.files, wantFiles) || !got.uncertain ||
 			got.caseInsensitiveUncertain {
 			t.Fatalf("unprovable load context = %#v", got)

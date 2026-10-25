@@ -688,7 +688,7 @@ observability destination.
 
 ### Action mapping
 
-The scanner produces a *severity*. What that severity *does* is set in `config.yaml` under `admission:`: `admission.mcp.actions` first, then `admission.defaults.actions`, which every asset type inherits. Unlike the skill scanner, the MCP scanner has no gate keys (`fail_on_severity` and `review_queue_min` belong to the skill scanner), so the action map is the only control. The built-in defaults quarantine CRITICAL, HIGH and MEDIUM servers, disable LOW ones at runtime, and admit INFO findings with a warning:
+The scanner produces a *severity*. What that severity *does* is set in `config.yaml` under `admission:`: `admission.mcp.actions` first, then `admission.defaults.actions`, which every asset type inherits. Unlike the skill scanner, the MCP scanner has no gate keys (`fail_on_severity` and `review_queue_min` belong to the skill scanner), so the action map is the control. Balanced admission quarantines CRITICAL servers and warns on HIGH, MEDIUM, LOW and INFO findings. The scan finding and warning are audited:
 
 ```yaml title="~/.defenseclaw/config.yaml (the built-in defaults, written out)"
 admission:
@@ -696,8 +696,9 @@ admission:
     actions: {critical: quarantine, high: quarantine, medium: warn, low: warn, info: warn}
   mcp:
     actions:
-      medium: quarantine
-      low: {install: none, file: none, runtime: disable}
+      high: warn
+      medium: warn
+      low: warn
 ```
 
 An action is `block`, `quarantine`, `warn` or `allow`, or the exact `{install, file, runtime}` triple (see [Skill scanner](#skill-scanner)). Change one severity with `config set`, and read the map in force with `config get`:
@@ -708,6 +709,8 @@ defenseclaw config get admission.mcp --effective
 ```
 
 `defenseclaw policy edit scanner --type mcp -s <severity> ...` edits the same `admission.mcp.actions`. `defenseclaw policy activate <name>` writes a named policy's actions for every asset type as explicit maps, replacing your edits. [Admission](/docs/reference/scanning/admission) documents the whole block.
+
+For strict MCP admission, set `admission.mcp.actions.high: quarantine` (and any other severities your organization chooses to refuse). Secure Client keeps its separate closed admission.
 
 
 ### Private addresses and local servers

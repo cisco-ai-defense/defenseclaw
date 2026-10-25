@@ -65,7 +65,12 @@ def test_managed_windows_refuses_the_per_user_config_load():
 
 def test_windows_lifecycle_runs_the_hooks_status_and_verify():
     module = MODULE.read_text(encoding="utf-8")
-    assert "$verb = if ($LiveVerify) { 'verify' } else { 'status' }" in module
+    # A live check runs verify; the standalone profile runs readiness
+    # (hermes-win GAP-1380); otherwise the lifecycle reads status.
+    probe = module.split("function Get-DefenseClawGuardianReadinessProbe", 1)[1].split("\nfunction ", 1)[0]
+    assert "$verb = if ($LiveVerify) {" in probe
+    assert "if (Test-DefenseClawStandaloneProfile) { 'readiness' } else { 'verify' }" in probe
+    assert "else { 'status' }" in probe
     assert "-Arguments @('enterprise', 'hooks', $verb, '--manifest', $Layout.ManifestPath, '--json')" in module
     status = module.split("function Get-DefenseClawLifecycleStatus", 1)[1].split("\nfunction ", 1)[0]
     assert "Get-DefenseClawGuardianStatusReport" in status

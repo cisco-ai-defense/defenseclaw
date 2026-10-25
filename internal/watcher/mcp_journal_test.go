@@ -29,6 +29,7 @@ func TestTwoAccountsSameNameMCPServerVerdictsStayApart(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
 	cfg.Scanners.MCPScanner.UnverifiedServer = "block" // the strict tier blocks a server whose scan failed (GAP-1195)
 	cfg.Gateway.Watcher.MCP.TakeAction = true
+	cfg.Admission.MCP.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionQuarantine}
 	base := t.TempDir()
 	u1 := enrolledMCPServer(base, "1001", "decoy")
 	u2 := enrolledMCPServer(base, "1002", "benign")

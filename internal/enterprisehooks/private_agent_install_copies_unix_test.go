@@ -278,7 +278,7 @@ func TestDiscoverUnixPrivateInstallsCoverEveryCopyLayout(t *testing.T) {
 			withPrivateInstallMachinePrefixes(t, l.machineA, l.machineB)
 			tc.build(t, l)
 			var got []string
-			for _, line := range describeInstalls(t, DiscoverUnixPrivateAgentInstalls(l.home, []string{"claudecode", "codex"}), l.home) {
+			for _, line := range describeInstalls(t, DiscoverUnixPrivateAgentInstalls(context.Background(), l.home, []string{"claudecode", "codex"}), l.home) {
 				line = strings.ReplaceAll(line, "/alias/", "/private/") // one copy, whichever name the listing meets first
 				line = strings.ReplaceAll(line, l.machineA, "MACHINE-A")
 				got = append(got, strings.ReplaceAll(line, l.machineB, "MACHINE-B"))
@@ -346,7 +346,7 @@ func TestDiscoverUnixPrivateNPMCopiesNeedAnEntryPoint(t *testing.T) {
 				home := makeHome(t, trustedTestDir(t), "alice")
 				dir := filepath.Join(home, "private", "node_modules", filepath.FromSlash(pkg))
 				tc.build(t, dir, connector, pkg)
-				found := DiscoverUnixPrivateAgentInstalls(home, []string{connector})
+				found := DiscoverUnixPrivateAgentInstalls(context.Background(), home, []string{connector})
 				switch {
 				case tc.skipped != "":
 					if len(found) != 1 || !found[0].Incomplete || found[0].Skipped != tc.skipped {
@@ -380,7 +380,7 @@ func TestDiscoverUnixPrivateInstallsReportsTheFindingLimit(t *testing.T) {
 	for i := 0; i <= privateAgentInstallMaxFindings; i++ {
 		npmCopy(t, claudePackage(filepath.Join(home, fmt.Sprintf("old-%02d", i)), false), "@anthropic-ai/claude-code", "2.0.77", "cli.js")
 	}
-	found := DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode"})
+	found := DiscoverUnixPrivateAgentInstalls(context.Background(), home, []string{"claudecode"})
 	last := found[len(found)-1]
 	if len(found) != privateAgentInstallMaxFindings+1 || !last.Incomplete || installFacts(t, last)["skipped"] != PrivateInstallSkippedFindings {
 		t.Fatalf("%d findings, last %+v", len(found), last)
@@ -423,7 +423,7 @@ func TestPrivateInstallWalkReportsSearchableUnlistableOtherOwner(t *testing.T) {
 			if _, err := os.ReadDir(opaque); !os.IsPermission(err) {
 				t.Fatalf("opaque directory must be unlistable, got %v", err)
 			}
-			found := DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode"})
+			found := DiscoverUnixPrivateAgentInstalls(context.Background(), home, []string{"claudecode"})
 			if tc.wantIncomplete {
 				for _, install := range found {
 					if install.Connector == "claudecode" && install.Incomplete && install.Skipped == PrivateInstallSkippedHome {
@@ -591,7 +591,7 @@ func TestEnumerateUnixHealthyHostIsCleanAndAnOldMachineCopyIsReported(t *testing
 			DiscoverSurfaces: func(ctx context.Context, account unixidentity.Account, names []string) (UnixDiscovery, error) {
 				version, _ := DiscoverUnixAgentVersion(ctx, account.Home, "claudecode", false)
 				return UnixDiscovery{Versions: map[string]string{"claudecode": version},
-					PrivateInstalls: DiscoverUnixPrivateAgentInstalls(account.Home, names)}, nil
+					PrivateInstalls: DiscoverUnixPrivateAgentInstalls(context.Background(), account.Home, names)}, nil
 			},
 		})
 		if err != nil {

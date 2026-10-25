@@ -437,6 +437,9 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 				decision.Assignment = yes[0].index
 				decision.Candidates = matched
 			}
+			if len(matched) > 1 {
+				decision.provenMembers = matched
+			}
 		}
 		if verified && res.proven() {
 			set.provenProfiles.note(res.Incarnation, decision.Name)
@@ -738,8 +741,9 @@ func (set *guardrailProfileSet) provenProfileCovers(a, b string, connectors []st
 	return set.profileCoverage(a, b, connectors, path, true)
 }
 
-// profileCoverage checks sandbox enforcement and, on path (on both the hook
-// and the inspect and proxy path for profilePathAny) where b blocks, that a
+// profileCoverage checks the sandbox floor for a pathless decision and the
+// host-run requirement on a standalone enterprise concrete path.
+// On path (on both the hook and inspect path for profilePathAny) where b blocks, a
 // blocks there too with what it decides that path with (profilePathConfig),
 // scanning every rule pack b scans there (scansRulePacksOf, and for
 // profilePathAny every pack b scans on either), from a block level at or
@@ -757,11 +761,15 @@ func (set *guardrailProfileSet) profileCoverage(a, b string, connectors []string
 	if ca == nil || cb == nil {
 		return false
 	}
-	if effectiveSandbox {
+	if effectiveSandbox && (path == profilePathAny ||
+		set.base.StandaloneEnterprise() && (set.profileRequiresSandbox(a) || set.profileRequiresSandbox(b))) {
+		// A standalone host hook reads required_for from the selected
+		// profile's floor after this choice. Even on a concrete path, an
+		// uncertain floor that requires a sandbox cannot be dropped.
 		if !set.sandboxFloorCovers(a, b) {
 			return false
 		}
-	} else if !reflect.DeepEqual(set.profileSandbox(a), set.profileSandbox(b)) {
+	} else if !effectiveSandbox && !reflect.DeepEqual(set.profileSandbox(a), set.profileSandbox(b)) {
 		return false
 	}
 	paths := []profilePath{path}
@@ -776,6 +784,14 @@ func (set *guardrailProfileSet) profileCoverage(a, b string, connectors []string
 		}
 	}
 	return true
+}
+
+func (set *guardrailProfileSet) profileRequiresSandbox(name string) bool {
+	if name == "" {
+		return len(set.base.OpenShell.Admin.RequiredFor) > 0
+	}
+	derived, ok := set.derivedProfile(name)
+	return ok && len(derived.Sandbox.RequiredFor) > 0
 }
 
 // pathCovers is profileCoverage on one connector and path, for a request on
@@ -819,14 +835,10 @@ type rulePackID struct {
 	ref config.RulePackRef
 }
 
-// scannedRulePacks are the rule packs name scans connectorName with on
-// path, in the order its scan composes them: a profile's own (the base
-// configuration's for a name that is no profile), or, for a meet, the packs
-// of its members that block there on path (enforcingMembers), as
-// profileMeet.ruleGeneration and profileMeet.rulePack take them. A meet's
-// own configuration names the base pack, which the meet never scans by that
-// reference, so it is never read here. ok is false for a meet this set
-// cannot derive.
+// scannedRulePacks are the pack IDs relevant to enforcement coverage on a
+// connector and path. An explicit meet also scans observing members for
+// audit; this coverage proof only needs the members that can enforce there.
+// ok is false for a meet this set cannot derive.
 func (set *guardrailProfileSet) scannedRulePacks(name, connectorName string, path profilePath) (packs []rulePackID, ok bool) {
 	members := []string{strings.TrimSpace(name)}
 	if config.IsProfileMeet(members[0]) {
@@ -852,9 +864,8 @@ func (set *guardrailProfileSet) scannedRulePacks(name, connectorName string, pat
 // scansRulePacksOf reports whether a scans connectorName on path with
 // everything b scans there: every rule pack of b's is one of a's (so every rule b
 // enforces is in a's rules, every sensitive tool b inspects is inspected,
-// and a allows only what b allows), and both compose their pack from the
-// same first one, whose judge prompts and local patterns a composed pack
-// keeps (mergeRulePacks). Anything else is not proved: an uncertain
+// and a allows only what b allows). The same first pack is required as a
+// conservative check on judge prompts and local patterns. Anything else is not proved: an uncertain
 // assignment it decides keeps its missing fact.
 func (set *guardrailProfileSet) scansRulePacksOf(a, b, connectorName string, path profilePath) bool {
 	packsA, okA := set.scannedRulePacks(a, connectorName, path)

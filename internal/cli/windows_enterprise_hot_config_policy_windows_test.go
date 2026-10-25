@@ -14,79 +14,90 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-func TestWindowsHotConfigHealthProofUsesOnlyTheServiceListener(t *testing.T) {
-	requests := 0
-	redirectURL := ""
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		if r.URL.Path != "/health" || r.Header.Get("X-DefenseClaw-Token") != "fixture-token" {
-			t.Errorf("health request path %q or token was wrong", r.URL.Path)
-		}
-		if redirectURL != "" {
-			http.Redirect(w, r, redirectURL, http.StatusFound)
-			return
-		}
-		_, _ = w.Write([]byte(`{"policy":{"effective_digest":"sha256:prior"}}`))
-	}))
-	defer server.Close()
-	_, portText, err := net.SplitHostPort(server.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, err := strconv.Atoi(portText)
+// windowsHotConfigHealthFixture serves /health on a loopback port and points
+// a managed standalone layout (config api_port and gateway token) at it.
+func windowsHotConfigHealthFixture(t *testing.T, handler http.HandlerFunc) (managed.StandaloneLayout, string) {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
 	layout := managed.StandaloneLayout{ConfigPath: filepath.Join(root, "config.yaml"), DataDir: root, APIAddr: managed.StandaloneAPIAddr}
-	if err := os.WriteFile(layout.ConfigPath, []byte(fmt.Sprintf("gateway:\n  api_port: %d\n", port)), 0o600); err != nil {
+	if err := os.WriteFile(layout.ConfigPath, []byte(fmt.Sprintf("gateway:\n  api_port: %s\n", port)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("DEFENSECLAW_GATEWAY_TOKEN=fixture-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	priorHost, priorLayout := managedHostWindowsStandalone, managedScanWindowsLayout
-	priorListeners, priorServicePID := windowsEnterpriseAPIListeners, windowsEnterpriseServicePID
-	t.Cleanup(func() {
-		managedHostWindowsStandalone, managedScanWindowsLayout = priorHost, priorLayout
-		windowsEnterpriseAPIListeners, windowsEnterpriseServicePID = priorListeners, priorServicePID
-	})
+	t.Cleanup(func() { managedHostWindowsStandalone, managedScanWindowsLayout = priorHost, priorLayout })
 	managedHostWindowsStandalone = func() (string, bool) { return "managed", true }
 	managedScanWindowsLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
-	windowsEnterpriseServicePID = func(string) int { return 42 }
-	windowsEnterpriseAPIListeners = func(host string, gotPort int) ([]daemon.Listener, error) {
-		if host != "127.0.0.1" || gotPort != port {
-			t.Fatalf("listener query %s:%d", host, gotPort)
+	return layout, "127.0.0.1:" + port
+}
+
+func TestWindowsHotConfigHealthProofUsesOnlyTheServiceSocket(t *testing.T) {
+	requests := 0
+	layout, apiAddr := windowsHotConfigHealthFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/health" || r.Header.Get("X-DefenseClaw-Token") != "fixture-token" {
+			t.Errorf("health request path %q or token was wrong", r.URL.Path)
 		}
-		return []daemon.Listener{{Address: fmt.Sprintf("127.0.0.1:%d", port), PID: 42}}, nil
+		_, _ = w.Write([]byte(`{"policy":{"effective_digest":"sha256:prior"}}`))
+	})
+	// The connected-socket check has its own tests (hookexec); here the
+	// probe must ask it for the gateway service at the configured port.
+	priorFactory := managedGatewayClientFactory
+	t.Cleanup(func() { managedGatewayClientFactory = priorFactory })
+	var dialed string
+	managedGatewayClientFactory = func(timeout time.Duration, addr string, service string) (*http.Client, error) {
+		dialed = addr
+		if service != managed.StandaloneWindowsGatewaySvc {
+			t.Fatalf("health checked the socket against %q", service)
+		}
+		return &http.Client{Timeout: timeout}, nil
 	}
 	policy, err := windowsEnterpriseHotConfigGatewayPolicy(context.Background(), layout)
-	if err != nil || policy.EffectiveDigest != "sha256:prior" || requests != 1 {
-		t.Fatalf("owned listener policy = %+v, %v; requests=%d", policy, err, requests)
+	if err != nil || policy.EffectiveDigest != "sha256:prior" || requests != 1 || dialed != apiAddr {
+		t.Fatalf("service socket policy = %+v, %v; requests=%d dialed=%q", policy, err, requests, dialed)
 	}
-	windowsEnterpriseAPIListeners = func(string, int) ([]daemon.Listener, error) {
-		return []daemon.Listener{{PID: 42}, {PID: 77}}, nil
-	}
-	if _, err := windowsEnterpriseHotConfigGatewayPolicy(context.Background(), layout); err == nil || requests != 1 {
-		t.Fatalf("foreign listener got a request; err=%v requests=%d", err, requests)
-	}
-	tokenForwarded := false
-	redirectTarget := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		tokenForwarded = r.Header.Get("X-DefenseClaw-Token") != ""
-	}))
-	defer redirectTarget.Close()
-	redirectURL = redirectTarget.URL
+}
+
+// The service can release its port after a listener-table check and another
+// account can bind it before the probe connects. The listener table below
+// still names the service; the socket the probe reaches is not the
+// service's. It must receive no token, and its policy answer must not count.
+func TestWindowsHotConfigHealthSendsNoTokenToAPortTakenAfterTheListenerCheck(t *testing.T) {
+	var received []string
+	layout, _ := windowsHotConfigHealthFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		received = append(received, r.URL.Path+" "+r.Header.Get("X-DefenseClaw-Token"))
+		_, _ = w.Write([]byte(`{"policy":{"effective_digest":"sha256:prior","bundle_id":"forged"}}`))
+	})
+	priorListeners, priorServicePID := windowsEnterpriseAPIListeners, windowsEnterpriseServicePID
+	t.Cleanup(func() { windowsEnterpriseAPIListeners, windowsEnterpriseServicePID = priorListeners, priorServicePID })
+	windowsEnterpriseServicePID = func(string) int { return 42 }
 	windowsEnterpriseAPIListeners = func(string, int) ([]daemon.Listener, error) {
 		return []daemon.Listener{{PID: 42}}, nil
 	}
-	if _, err := windowsEnterpriseHotConfigGatewayPolicy(context.Background(), layout); err == nil || tokenForwarded || requests != 2 {
-		t.Fatalf("redirect was accepted or forwarded the token: err=%v forwarded=%t requests=%d", err, tokenForwarded, requests)
+	if policy, err := windowsEnterpriseHotConfigGatewayPolicy(context.Background(), layout); err == nil {
+		t.Fatalf("a listener that is not the gateway service supplied policy health %+v", policy)
+	}
+	prior := policyDigestReport{GatewayReportedBundleID: "forged"}
+	prior.Digest = "sha256:prior"
+	if windowsEnterpriseHotConfigPriorPolicyLive(context.Background(), layout, prior) {
+		t.Fatal("a forged policy answer from another listener proved the prior policy live")
+	}
+	if len(received) != 0 {
+		t.Fatalf("an unverified listener received %v", received)
 	}
 }

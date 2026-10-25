@@ -508,8 +508,8 @@ Each severity resolves in this order, first match wins: `admission.<type>`,
 for skills the scanner gate (`scanners.skill_scanner.fail_on_severity` and
 `review_queue_min`), `admission.defaults`, and the built-in policy. The
 built-in policy quarantines `critical` and `high`, warns on `medium`, `low` and
-`info`, except that MCP servers also quarantine `medium` and disable at runtime
-on `low`. The built-in first-party lists name the `codeguard` skill and the
+`info`, except that balanced MCP servers warn on `high`, `medium` and `low` as
+well. Secure Client keeps its separate admission actions. The built-in first-party lists name the `codeguard` skill and the
 `defenseclaw` plugin. A severity nothing covers fails closed.
 
 ### Block and allow lists
@@ -555,7 +555,7 @@ The skill scanner and MCP scanner settings live under `scanners` ([Scanners](/do
 | `scanners.mcp_scanner.analyzers` | `[]` | A list of `api`, `yara`, `llm`, `behavioral` and `readiness`. `[]` is automatic: YARA, plus the LLM analyzer when its model and key are ready. |
 | `scanners.mcp_scanner.scan_prompts`, `scan_resources`, `scan_instructions` | `false` | Also scan prompts, resources or server instructions. |
 | `scanners.mcp_scanner.judge_source`, `llm` | `inherit` | As for the skill scanner. |
-| `scanners.mcp_scanner.unverified_server` | `warn` | What `defenseclaw mcp set` and the gateway's install admission do with a server they could not verify: its scan did not finish (a timeout, an unresolved hostname, a launcher that exited, an unreachable URL), or an OpenCode command is outside the trusted install prefixes. `warn` adds or keeps it with a warning and an audit record, and the gateway scans it again later. `block` refuses it, and the gateway blocks and disables it (the strict setting). Unset is `warn` on managed standalone and per-user hosts. Secure Client uses its separate closed admission. A scan with HIGH or CRITICAL findings is refused either way. |
+| `scanners.mcp_scanner.unverified_server` | `warn` | What `defenseclaw mcp set` and the gateway's install admission do with a server they could not verify: its scan did not finish (a timeout, an unresolved hostname, a launcher that exited, an unreachable URL), or an OpenCode command is outside the trusted install prefixes. `warn` adds or keeps it with a warning and an audit record, and the gateway scans it again later. `block` refuses it, and the gateway blocks and disables it (the strict setting). Unset is `warn` on managed standalone and per-user hosts. Secure Client uses its separate closed admission. Completed HIGH scanner findings follow `admission.mcp.actions.high`: balanced warns and audits; `quarantine` refuses under an explicit strict setting. CRITICAL still refuses by default. |
 | `scanners.mcp_scanner.yara` | bundled rules | `include_bundled` (default `true`) and `extra_rules`, a list of `{path, digest}` files pinned by digest. A scan loads a file only when it matches its digest; a config whose pin does not match is refused when it is applied, and the gateway rejects a reload while a file does not match. |
 
 

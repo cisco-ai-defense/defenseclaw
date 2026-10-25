@@ -97,6 +97,8 @@ for target in "${TARGETS[@]}"; do
     GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build -trimpath -ldflags "${ldflags}" \
         -o "${stage}/defenseclaw-acp${exe}" ./cmd/defenseclaw-acp
     if [[ "${goos}" != windows ]]; then
+        GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build -trimpath -ldflags "${ldflags}" \
+            -o "${stage}/defenseclaw-hook-post" ./cmd/defenseclaw-hook-post
         # The sandbox kernel feed (Linux); the release archive carries it on
         # every POSIX target, as .goreleaser.yaml's default archive does.
         GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build -trimpath -ldflags "${ldflags}" \

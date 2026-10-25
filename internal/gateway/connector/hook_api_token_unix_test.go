@@ -8,11 +8,46 @@ package connector
 
 import (
 	"errors"
+	"os"
 	"os/user"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"testing"
 )
+
+func TestHookAPITokenLocationWalksAncestorChainOnce(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	hooksDir := filepath.Join(dataDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(hooksDir, "codex.token")
+	var inspected []string
+	element := func(path string) error {
+		inspected = append(inspected, "element:"+path)
+		return nil
+	}
+	chain := func(path string) error {
+		inspected = append(inspected, "chain:"+path)
+		return nil
+	}
+	if err := validateHookAPITokenLocationWith(dataDir, tokenPath, element, chain); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(inspected, []string{"element:" + dataDir, "chain:" + hooksDir}) {
+		t.Fatalf("validated directories = %v, want the data dir as protected element and the hooks chain once", inspected)
+	}
+
+	// The single walk still checks dataDir as an ancestor. A token under a
+	// writable parent must remain unusable even when the token file is sound.
+	if err := os.Chmod(dataDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateHookAPITokenLocation(dataDir, tokenPath); err == nil {
+		t.Fatal("accepted a token below a writable data directory")
+	}
+}
 
 func TestHookAPITrustedOwnerRejectsUnrelatedUID(t *testing.T) {
 	t.Setenv("SUDO_UID", "")

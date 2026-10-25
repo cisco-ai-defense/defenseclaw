@@ -6,6 +6,7 @@
 package enterprisehooks
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -55,7 +56,7 @@ func TestDiscoverWindowsPrivateInstallsFindCopiesAtAnyDepth(t *testing.T) {
 			home, outside := t.TempDir(), t.TempDir()
 			tc.build(t, home, outside)
 			var got []string
-			for _, install := range DiscoverWindowsPrivateAgentInstalls(home, []string{"claudecode"}) {
+			for _, install := range DiscoverWindowsPrivateAgentInstalls(context.Background(), home, []string{"claudecode"}) {
 				if install.Incomplete {
 					skipped, _ := windowsInstallFacts(t, install)["skipped"].(string)
 					got = append(got, install.Connector+" incomplete "+skipped)
@@ -116,5 +117,26 @@ func TestOpenWindowsPrivateWalkDirRejectsReparseAncestors(t *testing.T) {
 		if err == nil {
 			t.Errorf("opened a directory through reparse path %s", dir)
 		}
+	}
+	// A substituted drive has no reparse attribute on its directory handle.
+	// The handle's final path must still match the local drive path we opened.
+	var mappedDrive string
+	for letter := 'Z'; letter >= 'P'; letter-- {
+		candidate := string(letter) + ":"
+		if err := exec.Command("subst", candidate, outside).Run(); err == nil {
+			mappedDrive = candidate
+			break
+		}
+	}
+	if mappedDrive == "" {
+		t.Skip("no free drive letter for substituted-drive check")
+	}
+	t.Cleanup(func() { _ = exec.Command("subst", mappedDrive, "/D").Run() })
+	file, err := openWindowsPrivateWalkDir(filepath.Join(mappedDrive+`\`, "nested"))
+	if file != nil {
+		_ = file.Close()
+	}
+	if err == nil {
+		t.Fatal("opened a directory through a substituted drive")
 	}
 }

@@ -10,10 +10,6 @@ import (
 	"syscall"
 )
 
-// fileIdentity is empty: the Windows hook sends no client evidence, and the
-// Windows gateway compares file identity itself.
-func fileIdentity(os.FileInfo) string { return "" }
-
 // linkCount returns the number of hard links to a file. An unknown count is
 // reported as more than one so the caller fails closed.
 func linkCount(path string, _ os.FileInfo) uint64 {

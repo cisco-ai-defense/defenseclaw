@@ -993,8 +993,9 @@ class TestCompileAdmission(unittest.TestCase):
     def test_builtin_defaults(self):
         mcp = compile_admission(None, "mcp")
         self.assertTrue(mcp.scan_on_install and mcp.allow_list_bypass_scan)
-        self.assertEqual(mcp.actions["HIGH"][0].install, "block")
-        self.assertEqual(mcp.actions["MEDIUM"][0].install, "block")
+        self.assertEqual(mcp.actions["CRITICAL"][0].install, "block")
+        for severity in ("HIGH", "MEDIUM", "LOW"):
+            self.assertEqual(mcp.actions[severity][0].install, "none")
         self.assertIn("codeguard", compile_admission(None, "skill").first_party_allow)
         self.assertIn("defenseclaw", compile_admission(None, "plugin").first_party_allow)
 

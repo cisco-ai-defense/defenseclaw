@@ -39,6 +39,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"gopkg.in/yaml.v3"
 )
@@ -1330,6 +1331,21 @@ func managedPluginHookSocket(opts SetupOpts) (string, int) {
 	return filepath.Clean(socket), uid
 }
 
+// managedPluginLifecycleMarker uses the same marker as native and shell
+// managed hooks, only when this plugin is bound to the standalone Unix
+// socket. A configured or per-user socket cannot name the lifecycle.
+func managedPluginLifecycleMarker(opts SetupOpts) string {
+	socket, _ := managedPluginHookSocket(opts)
+	if socket == "" {
+		return ""
+	}
+	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
+	if err != nil || socket != layout.HookSocketPath {
+		return ""
+	}
+	return layout.LifecycleMarkerPath
+}
+
 // managedPluginForeignHookGuard returns the administrator-owned hook binary
 // a standalone managed plugin runs for the foreign-hook guard, or "" for
 // any other install.
@@ -1412,6 +1428,16 @@ func managedPluginInstallMarker(opts SetupOpts) string {
 	return filepath.Clean(marker)
 }
 
+// pluginOutageFailMode is the outage mode a per-user in-agent plugin bakes
+// (OutageHookFailMode): open in the default and permissive tiers, closed in
+// strict. Managed and Secure Client plugins bake "" and keep FailMode.
+func pluginOutageFailMode(opts SetupOpts) string {
+	if !perUserOutageRender(opts) {
+		return ""
+	}
+	return normalizeHookFailMode(opts.HookFailMode)
+}
+
 // renderPluginArtifact is shared by Setup and standalone verification so
 // verification compares the agent's executable plugin with the bytes Setup
 // would install for the current options.
@@ -1439,8 +1465,10 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 		ServiceUID:         serviceUID,
 		ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts)),
 		InstallMarkerJS:    javaScriptStringContent(managedPluginInstallMarker(opts)),
+		LifecycleMarkerJS:  javaScriptStringContent(managedPluginLifecycleMarker(opts)),
 		ListenerProofJS:    managedPluginListenerProofJS(opts),
 		FailMode:           failMode,
+		OutageFailMode:     pluginOutageFailMode(opts),
 		Managed:            opts.ManagedEnterprise,
 		SecureClient:       shellHookSecureClientProfile(opts),
 		ConnectorName:      c.name,

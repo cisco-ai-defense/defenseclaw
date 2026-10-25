@@ -528,6 +528,18 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		// writes its own result after this one.
 		defer func() { l.recordPackageResult(failure) }()
 	}
+	if l.opts.Action == ActionInstall || l.opts.Action == ActionUpgrade ||
+		l.opts.Action == ActionEnsure || l.opts.Action == ActionRepair {
+		defer func() {
+			if len(r.Errors) != 0 || !r.Installed || r.InstalledVersion != env.ProductVersion {
+				return
+			}
+			current, err := env.loadDeployment()
+			if err == nil && current != nil && current.ProductVersion == env.ProductVersion {
+				l.invalidateLegacyHookSessions(ctx)
+			}
+		}()
+	}
 
 	if !l.recoverInterrupted(ctx) && l.opts.Action != ActionUninstall {
 		// The previous deployment's files are only in the kept snapshot;

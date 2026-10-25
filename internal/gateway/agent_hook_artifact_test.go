@@ -1107,6 +1107,40 @@ func TestPromotedArtifactFactsParticipateInToolChains(t *testing.T) {
 	}
 }
 
+func TestPromotedArtifactObserverFindingDoesNotEnterEnforcingChain(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	home := trustedSameHostHome()
+	if home == "" {
+		t.Skip("same-host home unavailable")
+	}
+	keyPath := filepath.Join(home, ".ssh", "id_rsa")
+	readCommand := "cat " + keyPath
+	a := config.GuardrailProfile{Mode: "action"}
+	b := config.GuardrailProfile{Mode: "observe", Sandbox: &config.OpenShellAdminConfig{EgressBlock: []string{"observer.example"}}}
+	_, ctx := meetVerdictFixture(t, a, b,
+		meetVerdictRule("A-OTHER", "absent-marker", "HIGH"),
+		meetVerdictRule("PATH-SSH-KEY", keyPath, "HIGH"))
+	dir := t.TempDir()
+	path := filepath.Join(dir, "read.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+readCommand+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outer := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: dir})
+	capture := &toolChainHookCapture{}
+	capture.recordTrustedAction(outer, nil)
+	req := agentHookRequest{ConnectorName: "codex", toolChain: capture}
+	findings := promotedArtifactFindings(ctx, req, outer, true, nil)
+	if found := findingWithID(findings, "PATH-SSH-KEY"); found == nil || found.profile != "b" {
+		t.Fatalf("observer finding missing from artifact audit: %+v", findings)
+	}
+	step, _ := guardrail.ToolChainStepMask(guardrail.ToolChainSecretReadThenEgress, 1)
+	for _, projection := range capture.artifactProjections {
+		if projection.DetectionStepMask&step != 0 || projection.EnforcementStepMask&step != 0 {
+			t.Fatalf("observer's PATH-SSH-KEY entered an enforcing chain: %+v", projection)
+		}
+	}
+}
+
 func TestPromotedWindowsArtifactFactsParticipateInToolChains(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-native artifact integration")

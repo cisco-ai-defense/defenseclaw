@@ -6,6 +6,7 @@ package audit
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -513,6 +514,54 @@ func TestConnectorCustodyHotPathIsMonotonicAndExplicitUpdatesRemainPossible(t *t
 	instances, err := repo.ListConnectorInstances(t.Context())
 	if err != nil || len(instances) != 1 || !instances[0].Default {
 		t.Fatalf("instances=%+v err=%v", instances, err)
+	}
+}
+
+func TestUnchangedConnectorResolutionDoesNotNeedSQLiteWriter(t *testing.T) {
+	store, repo := newCorrelationTestStore(t)
+	connectors := []string{"claudecode", "codex", "opencode", "hermes", "kiro"}
+	for _, connector := range connectors {
+		mustCorrelationInstance(t, repo, connector, ConnectorCustodyDefenseClaw)
+	}
+	scopedID, err := NewConnectorInstanceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ResolveScopedConnectorInstance(t.Context(), scopedID, "codex", "codex-profile-v1", ConnectorCustodyDefenseClaw); err != nil {
+		t.Fatal(err)
+	}
+
+	// A different audit writer may be committing an event while the next hook
+	// resolves its existing connector. WAL permits the read, but an UPDATE of
+	// an unchanged row would fail with SQLITE_BUSY at this point.
+	writer, err := sql.Open("sqlite", store.DatabasePath()+"?_pragma=busy_timeout(0)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	conn, err := writer.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.ExecContext(context.Background(), "ROLLBACK") //nolint:errcheck
+
+	for _, connector := range connectors {
+		for i := 0; i < 10; i++ {
+			instance, err := repo.ResolveConnectorInstance(t.Context(), connector, connector+"-profile-v1", ConnectorCustodyDefenseClaw)
+			if err != nil {
+				t.Fatalf("unchanged %s resolution %d under another writer: %v", connector, i, err)
+			}
+			if instance.Connector != connector || instance.ProfileVersion != connector+"-profile-v1" {
+				t.Fatalf("unexpected resolved instance: %+v", instance)
+			}
+		}
+	}
+	if _, err := repo.ResolveScopedConnectorInstance(t.Context(), scopedID, "codex", "codex-profile-v1", ConnectorCustodyDefenseClaw); err != nil {
+		t.Fatalf("unchanged scoped resolution under another writer: %v", err)
 	}
 }
 

@@ -156,9 +156,6 @@ _DC_GATEWAY_RESTART_WAITED=""
 # Set only by defenseclaw_await_gateway for this call; an inherited value can
 # never open a per-user outage (defenseclaw_per_user_outage_open).
 _DC_TRANSPORT_STATUS=""
-# The config's outage mode for this call (defenseclaw_config_outage_open);
-# never inherited.
-_DC_CONFIG_OUTAGE_MODE=""
 
 # Resource limits — bound the hook so a stuck regex / hostile input
 # can't wedge the agent. Plan F16 ask: CPU 5s, virt mem 512MiB, fds 32.
@@ -1215,85 +1212,36 @@ defenseclaw_log_hook_delivery_failure() {
 # defenseclaw_per_user_outage_open returns 0 (true) when a per-user hook lets
 # the call through because this account's gateway is down (owner decision
 # 2026-10-23, config.HookOutageFailMode): the call's last transport status
-# (_DC_TRANSPORT_STATUS, defenseclaw_await_gateway) is 7, 52, 55 or 56, with
-# no HTTP status or body after the cold-start retries, and the connector's
-# current config selects an open tier. Strict availability, this account's install
+# (_DC_TRANSPORT_STATUS, defenseclaw_await_gateway) is 7, no gateway took the
+# connection after the cold-start retries, and the connector's runtime record
+# (hooks/.hookcfg.<connector>, written by Setup from the policy tier) says
+# open with its config source. Strict availability, this account's install
 # window, an answer the gateway gave (any HTTP status, a cut-off or
-# malformed body), another program on the port, a missing token and a
-# config that is missing, malformed or strict keep the call closed. Managed,
-# socket, Secure Client and shared inspect-* hooks never take this path. The
-# defenseclaw-call-time-outage-v1: the config in this hook's own data
-# directory alone decides the tier.
+# malformed body), another program on the port, a missing token and every
+# record that is missing, malformed or closed keep the call closed. Managed,
+# socket, Secure Client and shared inspect-* hooks never take this path.
 defenseclaw_per_user_outage_open() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
   [ "${_DC_SECURE_CLIENT_HOOK:-0}" != 1 ] || return 1
-  case "${_DC_TRANSPORT_STATUS:-}:${RESPONSE:-}" in
-    7:|7:$'\n000'|52:$'\n000'|55:$'\n000'|56:$'\n000') ;;
-    *) return 1 ;;
-  esac
+  [ "${_DC_TRANSPORT_STATUS:-}" = 7 ] || return 1
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
   # Either data folder an installer may hold (GAP-0914, defenseclaw_install_held).
   ! defenseclaw_install_held || return 1
-  local connector="${DEFENSECLAW_HOOK_CONNECTOR:-}"
+  local connector="${DEFENSECLAW_HOOK_CONNECTOR:-}" record="" recorded="" mode="" source=""
   case "$connector" in
     ""|inspect|*[!a-z0-9_-]*) return 1 ;;
   esac
   [ -n "${HOOK_DIR:-}" ] || return 1
-  defenseclaw_config_outage_open "$connector"
-}
-
-# Resolve the account home from the hook's data directory or the OS account
-# record. The agent's inherited HOME cannot choose the outage-mode binary.
-defenseclaw_outage_account_home() {
-  local data="$1" home=""
-  # These two layouts are derived from the hook's own data directory. The
-  # first also covers an explicitly selected data directory with its own
-  # per-user binary; the second is the normal ~/.defenseclaw layout.
-  if [ -x "${data}/.local/bin/defenseclaw-gateway" ]; then
-    printf '%s' "$data"
-    return 0
-  fi
-  if [ -x "${data}/../.local/bin/defenseclaw-gateway" ]; then
-    printf '%s' "${data}/.."
-    return 0
-  fi
-  # A custom data directory may be elsewhere. Resolve the account's home
-  # from the OS, with a clean environment; the agent's HOME cannot select
-  # the binary that answers this security decision.
-  home="$(env -i PATH=/usr/bin:/bin LC_ALL=C getent passwd "$UID" 2>/dev/null | cut -d: -f6 | head -n 1)" || true
-  if [ -z "$home" ]; then
-    home="$(env -i PATH=/usr/bin:/bin LC_ALL=C dscacheutil -q user -a uid "$UID" 2>/dev/null | sed -n 's/^dir: //p' | head -n 1)" || true
-  fi
-  case "$home" in
-    /*) [ -d "$home" ] && printf '%s' "$home" ;;
-  esac
-}
-
-# defenseclaw_config_outage_open CONNECTOR returns 0 only when this hook's
-# runtime config gives CONNECTOR the open outage mode now. The selected
-# gateway binary runs `hook-outage-mode`, which reads config.yaml next to the
-# hook's own data directory. Agent environment cannot select the config or
-# binary. A missing binary, unreadable config, or other answer stays closed.
-defenseclaw_config_outage_open() {
-  local home="" hook_dir="${HOOK_DIR:-}" bin=""
-  if [ -z "$_DC_CONFIG_OUTAGE_MODE" ]; then
-    _DC_CONFIG_OUTAGE_MODE=closed
-    if [ "${hook_dir#/}" != "$hook_dir" ] &&
-      home="$(defenseclaw_outage_account_home "${hook_dir}/..")" && [ -n "$home" ] &&
-      bin="$(defenseclaw_gateway_binary "${hook_dir}/.." "$home")"; then
-      # The Go runtime cannot start under the hook's address-space limit.
-      _DC_CONFIG_OUTAGE_MODE="$(
-        ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || true
-        HOME="$home" exec "$bin" hook-outage-mode --connector "$1" --hook-dir "$hook_dir" </dev/null 2>/dev/null
-      )" || _DC_CONFIG_OUTAGE_MODE=closed
-    fi
-  fi
-  [ "$_DC_CONFIG_OUTAGE_MODE" = open ]
+  record="${HOOK_DIR}/.hookcfg.${connector}"
+  recorded="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_CONNECTOR 2>/dev/null)" || return 1
+  mode="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_FAIL_MODE 2>/dev/null)" || return 1
+  source="$(defenseclaw_flat_hookcfg_value "$record" FAIL_MODE_SOURCE 2>/dev/null)" || return 1
+  [ "$recorded" = "$connector" ] && [ "$mode" = open ] && [ "$source" = config ]
 }
 
 defenseclaw_hook_delivery_outcome() {
@@ -1831,7 +1779,7 @@ defenseclaw_should_fail_closed_on_unreachable() {
   # An install that started since the hook selected its mode closes it.
   defenseclaw_close_during_install
   # A per-user hook bakes closed for every failure (an older script's baked
-  # open included); only an outage its current config opens lets the call
+  # open included); only an outage its runtime record opens lets the call
   # through (defenseclaw_per_user_outage_open).
   if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" != 1 ]; then
     if defenseclaw_per_user_outage_open; then
@@ -2698,10 +2646,10 @@ defenseclaw_keep_nul_visible() {
 # into a transport failure. Bash 3.2 compatible.
 defenseclaw_gateway_post() {
   local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
-  local _dc_post_auth="" _dc_post_arg _dc_listener_status=0 _dc_post_status=0
-  local _dc_native_post=0 _dc_post_bin _dc_post_prefix _dc_post_path
-  local _dc_post_headers="" _dc_post_sep="" _dc_header_name _dc_header_value _dc_post_output
-  local -a _dc_post_args _dc_post_auth_args
+  local _dc_post_auth="" _dc_post_arg _dc_listener_status=0
+  local _dc_native_post=0 _dc_post_bin _dc_post_prefix _dc_post_path _dc_legacy_post=1
+  local _dc_header_name _dc_header_value _dc_post_output _dc_post_headers _dc_post_sep _dc_field_index
+  local -a _dc_post_args _dc_post_auth_args _dc_post_fields
   # This probe still distinguishes a free port for cold start. The native
   # helper proves the actual connection again before it sends any data.
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
@@ -2760,11 +2708,56 @@ defenseclaw_gateway_post() {
     # harden_env moved HOME to a private scratch directory. Use the account
     # home it retained before that move, then verify every path component.
     local _dc_agent_home="${DEFENSECLAW_AGENT_HOME:-}"
+    local _dc_recovery_home="" _dc_recovery_path="" _dc_secure_meta="" _dc_secure_uid=""
+    local _dc_secure_path _dc_secure_mode
     case "$_dc_agent_home" in /*) ;; *) return 1 ;; esac
     _dc_post_bin="${_dc_agent_home}/.local/bin/defenseclaw-gateway"
+    # The small helper has the same connected-socket peer check as the full
+    # CLI. An older installation without it keeps the verified CLI path.
+    # A present but untrusted helper is refused below, never bypassed.
+    if [ -e "${_dc_agent_home}/.local/bin/defenseclaw-hook-post" ] ||
+       [ -L "${_dc_agent_home}/.local/bin/defenseclaw-hook-post" ]; then
+      _dc_post_bin="${_dc_agent_home}/.local/bin/defenseclaw-hook-post"
+      _dc_legacy_post=0
+    else
+      # An older installer's roll-forward restores its saved installer folder
+      # but does not know this new binary name. That folder carries a checked
+      # recovery copy, so the 10 Hz path remains fast after the roll-forward.
+      _dc_recovery_home="${DEFENSECLAW_HOME:-${_dc_agent_home}/.defenseclaw}"
+      case "$_dc_recovery_home" in
+        /*)
+          _dc_recovery_path="${_dc_recovery_home%/}/installer/defenseclaw-hook-post"
+          if [ -e "$_dc_recovery_path" ] || [ -L "$_dc_recovery_path" ]; then
+            _dc_post_bin="$_dc_recovery_path"
+            _dc_legacy_post=0
+            # Prove every parent, including custom data-dir ancestors. A
+            # root-owned sticky temporary parent is safe; a writable
+            # non-sticky or foreign-owned parent can replace this executable.
+            _dc_secure_path="${_dc_recovery_home%/}/installer"
+            while [ "$_dc_secure_path" != / ]; do
+              [ -d "$_dc_secure_path" ] && [ ! -L "$_dc_secure_path" ] || return 1
+              _dc_secure_meta="$(stat -c '%a:%u' "$_dc_secure_path" 2>/dev/null || stat -f '%Lp:%u' "$_dc_secure_path" 2>/dev/null)" || return 1
+              _dc_secure_mode="${_dc_secure_meta%%:*}"
+              _dc_secure_uid="${_dc_secure_meta#*:}"
+              case "$_dc_secure_mode" in ""|*[!0-7]*) return 1 ;; esac
+              case "$_dc_secure_uid" in ""|*[!0-9]*) return 1 ;; esac
+              if [ -O "$_dc_secure_path" ]; then
+                [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
+              else
+                [ "$_dc_secure_uid" = 0 ] || return 1
+                if [ $((8#${_dc_secure_mode} & 8#022)) -ne 0 ]; then
+                  [ $((8#${_dc_secure_mode} & 8#1000)) -ne 0 ] || return 1
+                fi
+              fi
+              _dc_secure_path="${_dc_secure_path%/*}"
+              [ -n "$_dc_secure_path" ] || _dc_secure_path=/
+            done
+          fi
+          ;;
+      esac
+    fi
     # This binary receives the bearer on stdin. A stale PID record, PATH
     # entry, writable path, or symlink cannot select a different executable.
-    local _dc_secure_path _dc_secure_mode
     for _dc_secure_path in "$_dc_agent_home" "$_dc_agent_home/.local" "$_dc_agent_home/.local/bin"; do
       [ -d "$_dc_secure_path" ] && [ -O "$_dc_secure_path" ] && [ ! -L "$_dc_secure_path" ] || return 1
       _dc_secure_mode="$(stat -c %a "$_dc_secure_path" 2>/dev/null || stat -f %Lp "$_dc_secure_path" 2>/dev/null)" || return 1
@@ -2775,6 +2768,7 @@ defenseclaw_gateway_post() {
     [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
     _dc_post_prefix="http://${API_ADDR}"
     _dc_post_path="${_dc_post_url:${#_dc_post_prefix}}"
+    _dc_post_fields=()
     set -- "${_dc_post_args[@]+"${_dc_post_args[@]}"}"
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -2789,17 +2783,27 @@ defenseclaw_gateway_post() {
       _dc_header_value="${_dc_header_value# }"
       case "$_dc_header_name" in ""|*[!A-Za-z0-9-]*) return 1 ;; esac
       case "$_dc_header_value" in *$'\n'*|*$'\r'*) return 1 ;; esac
-      _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"$(defenseclaw_json_escape "$_dc_header_name")\":\"$(defenseclaw_json_escape "$_dc_header_value")\""
-      _dc_post_sep=,
+      _dc_post_fields+=("$_dc_header_name" "$_dc_header_value")
     done
     if [ -n "$_dc_post_auth" ]; then
       _dc_header_value="${_dc_post_auth#*:}"
       _dc_header_value="${_dc_header_value# }"
-      _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"Authorization\":\"$(defenseclaw_json_escape "$_dc_header_value")\""
+      _dc_post_fields+=("Authorization" "$_dc_header_value")
     fi
     _dc_post_output="$(
-      printf '{"path":"%s","headers":{%s},"body":"%s"}' \
-        "$(defenseclaw_json_escape "$_dc_post_path")" "$_dc_post_headers" "$(defenseclaw_json_escape "$_dc_post_body")" |
+      if [ "$_dc_legacy_post" -eq 1 ]; then
+        # A hook can run during an upgrade before the small helper exists.
+        # The existing gateway CLI accepts the original JSON envelope.
+        _dc_post_headers="" _dc_post_sep=""
+        for ((_dc_field_index=0; _dc_field_index<${#_dc_post_fields[@]}; _dc_field_index+=2)); do
+          _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"$(defenseclaw_json_escape "${_dc_post_fields[_dc_field_index]}")\":\"$(defenseclaw_json_escape "${_dc_post_fields[_dc_field_index+1]}")\""
+          _dc_post_sep=,
+        done
+        printf '{"path":"%s","headers":{%s},"body":"%s"}' \
+          "$(defenseclaw_json_escape "$_dc_post_path")" "$_dc_post_headers" "$(defenseclaw_json_escape "$_dc_post_body")"
+      else
+        printf '%s\0' 'DCPOST1' "$_dc_post_path" "$_dc_post_body" "${_dc_post_fields[@]+"${_dc_post_fields[@]}"}"
+      fi |
         (
           if [ -n "${_DC_HOOK_NATIVE_VMEM_LIMIT:-}" ]; then
             ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 1
@@ -2809,16 +2813,9 @@ defenseclaw_gateway_post() {
         defenseclaw_keep_nul_visible
       exit "${PIPESTATUS[1]}"
     )" || {
-      _dc_post_status=$?
       _dc_listener_status=0
       defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?
-      # hook-post returns 7 only after its own connected-socket check and
-      # only when no HTTP status arrived. Preserve that result if the listener
-      # is still ours or has gone away; a foreign or unverified listener
-      # keeps every hook closed.
-      case "$_dc_post_status:$_dc_listener_status" in
-        7:1|7:2) return 7 ;;
-      esac
+      [ "$_dc_listener_status" -eq 2 ] && return 7
       return 1
     }
     printf '%s' "$_dc_post_output"

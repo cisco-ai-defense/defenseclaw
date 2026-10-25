@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -37,6 +38,63 @@ func newHookCorrelationServer(t *testing.T, path string) (*APIServer, *audit.Sto
 
 func installCorrelationHMACForTest() {
 	gatewaylog.SetTelemetryHMACSeed(bytes.Repeat([]byte{0x4a}, 32))
+}
+
+func TestHookCorrelationRetriesConcurrentSQLiteWriter(t *testing.T) {
+	installCorrelationHMACForTest()
+	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
+	defer store.Close() //nolint:errcheck
+	server.scannerCfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileStandalone}}
+	profile := server.hookProfileForConnector("claudecode")
+	repo, err := store.CorrelationRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ResolveConnectorInstance(t.Context(), "claudecode", string(profile.Correlation.ProfileVersion), audit.ConnectorCustodyExternal); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := sql.Open("sqlite", store.DatabasePath()+"?_pragma=busy_timeout(0)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	conn, err := writer.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(t.Context(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.ExecContext(context.Background(), "ROLLBACK") //nolint:errcheck
+	if _, err := conn.ExecContext(t.Context(), `UPDATE correlation_connector_instances
+		SET updated_time_unix_nano=updated_time_unix_nano+1 WHERE connector='claudecode'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// The hook reads the last committed connector state while another
+	// process owns the writer. Its occurrence transaction must start over
+	// after that writer commits, rather than dropping the correlation claim.
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		_, commitErr := conn.ExecContext(context.Background(), "COMMIT")
+		done <- commitErr
+	}()
+	const raw = `{"hook_event_name":"PreToolUse","session_id":"writer-test","tool_name":"Bash","tool_use_id":"writer-tool"}`
+	payload := map[string]interface{}{
+		"hook_event_name": "PreToolUse", "session_id": "writer-test",
+		"tool_name": "Bash", "tool_use_id": "writer-tool",
+	}
+	req := normalizeAgentHookRequestWithProfile("claudecode", payload, profile)
+	_, correlated, correlationErr := server.correlateHookOccurrence(t.Context(), profile, req, []byte(raw))
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if correlationErr != nil || correlated.SemanticEventID == "" {
+		t.Fatalf("correlation under a competing SQLite writer: id=%q err=%v", correlated.SemanticEventID, correlationErr)
+	}
 }
 
 func persistCanonicalCorrelationObservation(

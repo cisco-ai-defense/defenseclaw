@@ -172,10 +172,6 @@ type trustedActionRequest struct {
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
 	ResolvedWriteTargets map[string]string
-	// ActiveAgentFileIdentities maps the hook client's file identity of each
-	// instruction file the session loaded to that file, for a gateway that
-	// cannot read it (hookpaths.LoadedIdentityPrefix).
-	ActiveAgentFileIdentities map[string]string
 	// Hermes' native patch parser can reinterpret a symlink target containing
 	// a line break as another file directive. Its write views require the
 	// narrower patch-target proof, including in guest-directory views.
@@ -290,19 +286,24 @@ func dispatchTrustedAction(
 		return dispatchTrustedActionWith(parent, request, facts, generation, budget, &telemetry)
 	}
 	// A strictest combination of profiles judges the call with each
-	// member's own rules, within one budget, and keeps the strongest finding
-	// of each rule.
+	// member's own rules within one budget. Each finding keeps its member for
+	// the later verdict and audit, even when two members share a rule ID.
 	if budget == nil {
 		budget = newTrustedActionBudget(true)
 	}
-	lists := make([][]RuleFinding, 0, len(generation.members))
-	for _, member := range generation.members {
+	for i, member := range generation.members {
 		var memberTelemetry trustedActionTelemetry
-		lists = append(lists, dispatchTrustedActionWith(parent, request, facts, member, budget, &memberTelemetry))
+		found := dispatchTrustedActionWith(parent, request, facts, member, budget, &memberTelemetry)
+		if i < len(generation.memberNames) {
+			for j := range found {
+				found[j].profile = generation.memberNames[i]
+			}
+		}
+		findings = append(findings, found...)
 		telemetry.widen(memberTelemetry)
 	}
 	noteMeetBudget(generation, budget)
-	return strongestRuleFindings(lists, trustedActionFindingKey)
+	return findings
 }
 
 // dispatchTrustedActionWith is dispatchTrustedAction's judgment of the
@@ -2699,22 +2700,23 @@ func finalizeTrustedActionFindings(
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
 }
 
-// deduplicateTrustedActionFindings collapses both exact duplicate rule IDs and
-// equivalent aliases claimed by one semantic owner. Recovery lanes may prove
-// the same action independently; that strengthens provenance but must not
-// inflate finding counts or operator noise.
+// deduplicateTrustedActionFindings collapses exact duplicate rule IDs and
+// equivalent aliases claimed by one semantic owner within each profile.
+// Recovery lanes may prove the same action independently, but findings from
+// different meet members must remain for their own verdicts and audit.
 func deduplicateTrustedActionFindings(findings []RuleFinding) []RuleFinding {
 	deduplicated := make([]RuleFinding, 0, len(findings))
 	positions := make(map[string]int, len(findings))
 	for _, finding := range findings {
-		key := trustedActionFindingKey(finding.RuleID)
+		key := finding.profile + "\x00" + trustedActionFindingKey(finding.RuleID)
 		_, claimed := trustedSemanticOwnerClaimingRule(finding.RuleID)
 		if position, duplicate := positions[key]; duplicate {
 			current := deduplicated[position]
 			candidateRank := severityRank[strings.ToUpper(strings.TrimSpace(finding.Severity))]
 			currentRank := severityRank[strings.ToUpper(strings.TrimSpace(current.Severity))]
-			candidateCanonical := claimed && canonicalTrustedRuleID(finding.RuleID) == key
-			currentCanonical := canonicalTrustedRuleID(current.RuleID) == key
+			ownerKey := trustedActionFindingKey(finding.RuleID)
+			candidateCanonical := claimed && canonicalTrustedRuleID(finding.RuleID) == ownerKey
+			currentCanonical := canonicalTrustedRuleID(current.RuleID) == ownerKey
 			if candidateRank > currentRank ||
 				(candidateRank == currentRank && finding.Confidence > current.Confidence) ||
 				(candidateRank == currentRank && finding.Confidence == current.Confidence &&

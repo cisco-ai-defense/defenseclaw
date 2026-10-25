@@ -940,6 +940,56 @@ def test_windows_wrapper_settles_the_credential_journal_around_the_lifecycle() -
     assert body.index("Enter-WrapperRotationLock") < body.index("Complete-WrapperSecretJournal -Cli $cli -Restore")
 
 
+@pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
+@pytest.mark.parametrize("case", ["replay_refused", "replay_throw", "deployment_unknown", "foreign_entry", "settled"])
+def test_windows_wrapper_refuses_config_only_ensure_while_a_journal_is_unsettled(
+    tmp_path: Path, case: str,
+) -> None:
+    wrapper = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    resume_call = "if ($normalizedAction -eq 'ensure') { Resume-WrapperSecretJournal }"
+    assert resume_call in wrapper
+    prefix = _ROTATION_PROBE[: _ROTATION_PROBE.index("$out = [ordered]@{}")]
+    setup = {
+        "replay_refused": "$script:failNext = 'state_invalid'",
+        "replay_throw": "$script:failNext = 'throw'",
+        "deployment_unknown": "function Get-DefenseClawInstalledDeployment { throw 'deployment marker unreadable' }",
+        "foreign_entry": "[System.IO.File]::WriteAllText((Join-Path (Get-WrapperRotationJournal) 'foreign.entry'), 'unknown')",
+        "settled": "",
+    }[case]
+    probe = tmp_path / "ensure.ps1"
+    probe.write_text(
+        (prefix + "\n"
+         + "function ConvertTo-DefenseClawResultJson { param($Action, $ExitCode, $Code, $Message) return \"{`\"code`\":`\"$Code`\"}\" }\n"
+         + "function Remove-WrapperStaging { }\n"
+         + "$script:ResultAction = 'ensure'; $script:RotationCli = ''; $script:RotationLock = $null\n"
+         + "$script:RotationLockWaitSeconds = 1; $script:ExitFailure = 1603; $script:ExitBusy = 1618\n"
+         + "$script:inUse = $true; Reset-Device 'old-key'; Use-OldBundle 'old-key'\n"
+         + "[void](Rotate)\n" + setup + "\n"
+         + "$normalizedAction = 'ensure'\n" + resume_call + "\n"
+         + "Set-InstalledConfig 'config-after'\n")
+        .replace("__ROOT__", str(tmp_path).replace("'", "''"))
+        .replace("__FUNCTIONS__", _rotation_functions(*_ROTATION_FUNCTIONS, "Enter-WrapperRotationLock",
+                                                   "Resume-WrapperSecretJournal", "Exit-Wrapper")),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [_any_pwsh7(), "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    if case == "settled":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (tmp_path / "ProgramData/Cisco/DefenseClaw/etc/config.yaml").read_text() == "config-after"
+        assert not list((tmp_path / "ProgramData/Cisco/DefenseClaw-MDM/rotation").glob("*"))
+    else:
+        assert result.returncode in (1603, 1603 % 256), result.stdout + result.stderr
+        assert 'mdm_secret_failed' in result.stdout, result.stdout + result.stderr
+        assert (tmp_path / "ProgramData/Cisco/DefenseClaw/etc/config.yaml").read_text() == "config-before"
+        assert list((tmp_path / "ProgramData/Cisco/DefenseClaw-MDM/rotation").glob("*"))
+    assert (tmp_path / "ProgramData/Cisco/DefenseClaw/secrets/ai-defense-api-key").read_text() == (
+        "old-key" if case in ("foreign_entry", "settled") else "new-key"
+    )
+
+
 # Continuation 2, loop round 1 (Windows consolidation, GAP-1095): the
 # credential rotation is part of the bundle apply's transaction. Windows: an
 # exit between the rotation and the settle (mdm_not_installed after the

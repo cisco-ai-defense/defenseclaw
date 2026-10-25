@@ -1549,6 +1549,7 @@ class TestMCPScan(MCPCommandTestBase):
         import shlex
 
         self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        self.app.cfg.admission.mcp.actions["high"] = "quarantine"
         mock_run_scan.return_value = ScanResult(
             scanner="mcp-scanner", target="ctx7", timestamp=datetime.now(timezone.utc),
             findings=[Finding(id="f1", severity="HIGH", title="coercive", scanner="mcp-scanner")],
@@ -1572,6 +1573,32 @@ class TestMCPScan(MCPCommandTestBase):
         other = self.invoke(["set", "ctx7", "--command", "uvx", "--args", "other-mcp", "--connector", "codex"])
         self.assertEqual(other.exit_code, 1, other.output)
         self.assertEqual(mock_run_scan.call_count, 2)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.commands.cmd_mcp._run_scan")
+    def test_context7_high_warns_and_audits_in_balanced_strict_refuses(self, mock_scan, mock_set):
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        mock_scan.return_value = ScanResult(
+            scanner="mcp-scanner", target="context7", timestamp=datetime.now(timezone.utc),
+            findings=[Finding(
+                id="mcp-YARA-0", severity="HIGH", title="coercive injection",
+                location="tool:resolve-library-id", scanner="mcp-scanner/YARA",
+            )],
+        )
+        args = ["set", "context7", "--command", "npx", "--args", '["-y", "@upstash/context7-mcp"]', "--connector", "codex"]
+        balanced = self.invoke(args)
+        self.assertEqual(balanced.exit_code, 0, balanced.output)
+        self.assertIn("HIGH", balanced.output)
+        self.assertIn("warning", balanced.output.lower())
+        mock_set.assert_called_once()
+        rows = self.app.store.list_events(100)
+        self.assertTrue(any(e.action == "install-warning" and "severity=HIGH" in e.details for e in rows), rows)
+        self.assertTrue(any(e.action == "mcp-set" and e.target == "context7" for e in rows), rows)
+
+        self.app.cfg.admission.mcp.actions["high"] = "quarantine"
+        strict = self.invoke(args)
+        self.assertEqual(strict.exit_code, 1, strict.output)
+        self.assertEqual(mock_set.call_count, 1)
 
     @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
     def test_unset_skips_unsupported_write_surface(self, mock_unset):

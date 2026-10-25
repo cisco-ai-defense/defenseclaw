@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
@@ -134,6 +135,19 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 			return "", enterprisehooks.UnixAgentUnversionedReasonPrefix + filepath.Join(home, ".local", "bin", "codex")
 		}
 		return "", "not installed"
+	}
+	if mode == "slow-discover" {
+		enterpriseHookWorkerDiscoverSurfaces = func(context.Context, string, string, bool) ([]connector.AgentSurface, bool) {
+			return nil, true
+		}
+		enterpriseHookWorkerDiscoverPrivateInstalls = func(ctx context.Context, _ string, names []string) []enterprisehooks.PrivateAgentInstall {
+			<-ctx.Done() // Model a home walk that outlasts the worker's limit.
+			out := make([]enterprisehooks.PrivateAgentInstall, 0, len(names))
+			for _, name := range names {
+				out = append(out, enterprisehooks.PrivateAgentInstall{Connector: name, Incomplete: true, Skipped: enterprisehooks.PrivateInstallSkippedHome})
+			}
+			return out
+		}
 	}
 	os.Exit(enterpriseHookWorkerMain(context.Background(), os.Stdin, os.Stdout, os.Stderr))
 }
@@ -294,6 +308,21 @@ func TestEnterpriseHookWorkerDiscoverRunsAsTheUser(t *testing.T) {
 			t.Fatalf("static discover response = %+v, want the static finding only", response)
 		}
 	})
+}
+
+func TestEnterpriseHookWorkerSlowPrivateScanReturnsPartialResponse(t *testing.T) {
+	useEnterpriseHookWorkerHelper(t, "slow-discover")
+	account := selfWorkerAccount(t)
+	response, err := runEnterpriseHookWorker(context.Background(), account, enterpriseHookWorkerRequest{
+		Operation: enterpriseHookWorkerOpDiscover, Connectors: []string{"codex"}, TimeoutSeconds: 12,
+	})
+	if err != nil {
+		t.Fatalf("slow private scan timed out without a response: %v", err)
+	}
+	if len(response.PrivateInstalls) != 1 || !response.PrivateInstalls[0].Incomplete ||
+		response.PrivateInstalls[0].Skipped != enterprisehooks.PrivateInstallSkippedHome {
+		t.Fatalf("slow private scan = %+v, want home_unreadable", response.PrivateInstalls)
+	}
 }
 
 func TestEnterpriseHookWorkerRejectsMalformedOrRunawayWorkers(t *testing.T) {

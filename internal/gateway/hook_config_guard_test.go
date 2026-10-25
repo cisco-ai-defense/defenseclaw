@@ -83,9 +83,8 @@ func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 					t.Fatal(err)
 				}
 				if !bytes.Contains(original, []byte(`const DC_FAIL_MODE: string = "closed"`)) ||
-					!bytes.Contains(original, []byte("defenseclaw-call-time-outage-v1")) ||
-					bytes.Contains(original, []byte("DC_OUTAGE_FAIL_MODE")) {
-					t.Fatal("initial plugin does not use the call-time outage decision")
+					!bytes.Contains(original, []byte(fmt.Sprintf(`const DC_OUTAGE_FAIL_MODE: string = "%s"`, want))) {
+					t.Fatal("initial plugin does not contain the selected delivery mode")
 				}
 				guard := NewHookConfigGuard(nil, nil, time.Hour)
 				s.bindHookRuntimePolicyResolver(guard)

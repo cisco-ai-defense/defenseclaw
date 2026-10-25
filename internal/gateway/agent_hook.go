@@ -274,7 +274,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// when the decision waits on a remote scanner (hook_progress.go).
 		w, r, closeProgress := withHookProgress(w, r)
 		defer closeProgress()
-		delivery := a.beginHookDeliveryReceipt(w, r)
+		delivery := hookDeliveryReceiptForRequest(r)
+		if delivery == nil {
+			delivery = a.beginHookDeliveryReceipt(w, r)
+		}
 		// Resolve the identity-based guardrail profile once, after
 		// authentication, from the route's connector, the verified subject
 		// and the agent identity derived from both (never the payload).
@@ -448,8 +451,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// The agent identity (agt-) the hook runs under comes from the
 		// verified caller, not the payload. It scopes the agent ids the
 		// request mints.
-		agentIdentityID := resolveHookAgentIdentity(r.Context(), agentHookRequest{ConnectorName: connectorName, Payload: payload}).ID
-		req := normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, rawBody, profile, registeredEvent, agentIdentityID)
+		identityFacts := resolveHookAgentIdentity(r.Context(), agentHookRequest{ConnectorName: connectorName, Payload: payload})
+		req := normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, rawBody, profile, registeredEvent, identityFacts.ID)
+		r = r.WithContext(withHookIdentitySnapshot(r.Context(), identityFacts))
 		if len(profile.SupportedEvents) > 0 && !eventIn(req.HookEventName, profile.SupportedEvents) {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "event_outside_contract", int64(len(rawBody)))
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{
@@ -507,16 +511,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if connectorName == "copilot" && copilotVSCodeLocalFromContext(r.Context()) {
 			req.HookSurface = connector.CopilotHookSurfaceVSCodeLocal
 		}
-		// A session's prompts and tool calls wait for its start verdict and
-		// are refused while it blocks (GAP-0806, session_start_gate.go). A
-		// start that ends without a verdict blocks.
-		startGateKey := sessionStartGateKey(r.Context(), connectorName, req.SessionID)
-		var startTicket *sessionStartTicket
-		startVerdictBlocked, startVerdictReason := true, sessionStartUnfinishedReason
-		if canonicalHookLifecycleEvent(req.HookEventName) == "session_start" {
-			startTicket = a.sessionStartGate.begin(startGateKey)
-			defer func() { startTicket.finish(startVerdictBlocked, startVerdictReason) }()
-		}
 		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
 		// proves the connector hook route authenticated the request. A fresh
 		// SessionStart is the last authoritative recovery signal before a
@@ -528,7 +522,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			if err := a.ensureHookRegistration(r.Context(), connectorName); err != nil {
 				fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration recovery failed: %v\n", err)
 				a.recordConnectorHookRejection(r.Context(), connectorName, req.HookEventName, "registration_recovery", int64(len(b)))
-				startVerdictReason = "Codex runtime registration is unavailable"
 				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 					"error": "Codex runtime registration is unavailable",
 				})
@@ -542,9 +535,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		earlier, deduped, dedupeTicket := a.copilotDedupe.begin(r.Context(), connectorName, req)
 		defer dedupeTicket.release()
 		if deduped {
-			dedupedResp := copilotDedupedResponse(profile, req, earlier)
-			startVerdictBlocked, startVerdictReason = sessionStartVerdictBlocks(dedupedResp), dedupedResp.Reason
-			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, dedupedResp))
+			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, copilotDedupedResponse(profile, req, earlier)))
 			return
 		}
 		// From here on the hook is accepted. A managed native hook confirms
@@ -728,11 +719,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			resp = unparsedStructuredHookResponse(profile, req)
 			gated = true
 		}
-		if !gated && !hookSideRefusal(ctx) && sessionStartGateEvent(req.HookEventName) {
-			if reason, refuse := a.sessionStartGate.await(ctx, startGateKey, sessionStartGateWait(connectorName, req.HookEventName)); refuse {
-				resp, gated = a.sessionStartGateRefusal(ctx, profile, connectorName, req, payload, reason), true
-			}
-		}
 		sandboxGate := requireSandboxOutcome{}
 		if !gated {
 			// The require-sandbox gate answers a host run of a connector
@@ -841,9 +827,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		hungUpBeforeAnswer := r.Context().Err() != nil
 		if delivery != nil {
 			attemptedWrite = true
-			receipt := delivery.offer(w, func() {
-				a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, wireResp))
-			})
+			receipt := func() string {
+				resume := pauseHookRunSlot(ctx)
+				defer resume()
+				return delivery.offer(w, func() {
+					a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, wireResp))
+				})
+			}()
 			if receipt == hookexec.HookDeliveryReleased {
 				resp = a.unreceiptedHookDecision(hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
 			} else {
@@ -873,9 +863,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if delivery == nil && finalization.AuditFailedClosed {
 			wireResp = resp
 		}
-		// The start verdict is final: release the session's waiting calls.
-		startVerdictBlocked, startVerdictReason = sessionStartVerdictBlocks(wireResp), wireResp.Reason
-		startTicket.finish(startVerdictBlocked, startVerdictReason)
 		if !panicked && resp.Action != hookActionUnconfirmed {
 			dedupeTicket.complete(resp)
 		}
@@ -2860,7 +2847,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			patchTarget:          hermesV4APatch,
 			SandboxGuestCWD:      sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
 			windowsShellDialect:  dialectHint,
-			record:               toolChainRecorder(req.toolChain),
+			record:               toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
 		}, command, commandTool, hermesWriteViews)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}

@@ -98,7 +98,7 @@ readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 # Real files in BIN_DIR. Connector hooks record these paths, so they never move.
 # defenseclaw-sensor-helper is kept on Linux only: it is what `sudo
 # defenseclaw-gateway sandbox kernel-feed install` copies into a root service.
-readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp defenseclaw-sensor-helper"
+readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-hook-post defenseclaw-acp defenseclaw-sensor-helper"
 # The sandbox kernel feed's unit and its root copy of the helper.
 readonly SANDBOX_FEED_UNIT="/etc/systemd/system/defenseclaw-sandbox-feed.service"
 readonly SANDBOX_FEED_HELPER="/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper"
@@ -1158,6 +1158,7 @@ ok "Assets match checksums.txt"
 
 tar -xzf "${STAGING}/${ARCHIVE}" -C "${STAGING}/bin" || die "Could not unpack ${ARCHIVE}"
 [[ -f "${STAGING}/bin/defenseclaw-gateway" ]] || die "${ARCHIVE} has no defenseclaw-gateway"
+[[ -f "${STAGING}/bin/defenseclaw-hook-post" ]] || die "${ARCHIVE} has no defenseclaw-hook-post"
 # The sensor helper serves only the Linux sandbox kernel feed.
 [[ "${OS}" == linux ]] || rm -f "${STAGING}/bin/defenseclaw-sensor-helper"
 for binary in ${MANAGED_BINARIES}; do
@@ -1167,6 +1168,8 @@ for binary in ${MANAGED_BINARIES}; do
 done
 "${STAGING}/bin/defenseclaw-gateway" --version 2>/dev/null | grep -qF "${VERSION}" \
     || die "The gateway in ${ARCHIVE} does not report version ${VERSION}"
+"${STAGING}/bin/defenseclaw-hook-post" --version 2>/dev/null | grep -qF "${VERSION}" \
+    || die "The hook transport in ${ARCHIVE} does not report version ${VERSION}"
 
 # When another account's process holds this account's API port, the upgrade
 # only fails at the gateway restart, after the build, the migration and the
@@ -1849,7 +1852,14 @@ swap_in() {
         cp -p "${STAGING}/bin/${binary}" "${BIN_DIR}/.${binary}.new" \
             && mv -f "${BIN_DIR}/.${binary}.new" "${BIN_DIR}/${binary}" || return 1
     done
-    mkdir -p "${INSTALLER_DIR}" && record_binaries || return 1
+    # Older installers do not know the hook transport's binary name when a
+    # rollback later rolls forward. Their swap preserves installer/ as one
+    # directory, so keep a version-matched recovery copy there.
+    mkdir -p "${INSTALLER_DIR}" \
+        && cp -p "${STAGING}/bin/defenseclaw-hook-post" "${INSTALLER_DIR}/.defenseclaw-hook-post.new" \
+        && chmod 700 "${INSTALLER_DIR}/.defenseclaw-hook-post.new" \
+        && mv -f "${INSTALLER_DIR}/.defenseclaw-hook-post.new" "${INSTALLER_DIR}/defenseclaw-hook-post" \
+        && record_binaries || return 1
     for link in ${MANAGED_LINKS}; do
         target="${VENV}/bin/${link}"
         [[ -x "${target}" ]] || continue

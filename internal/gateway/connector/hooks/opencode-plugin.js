@@ -55,6 +55,7 @@ const DC_TOKEN_PATTERN = /^[A-Za-z0-9:._-]{1,512}$/;
 const DC_HOOK_SOCKET = "";
 const DC_FOREIGN_GUARD = "";
 const DC_INSTALL_MARKER = "";
+const DC_LIFECYCLE_MARKER = "";
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}";
 const DC_FAIL_MODE = "{{if and .Managed .SecureClient}}{{.FailMode}}{{else}}closed{{end}}"; // per-user and standalone hooks stay closed
 // The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the process
@@ -81,6 +82,9 @@ const DC_FOREIGN_GUARD = "{{.ForeignHookGuardJS}}";
 // the deployment was uninstalled and this plugin stops failing closed. A
 // standard user cannot remove the marker. Empty keeps the fail mode.
 const DC_INSTALL_MARKER = "{{.InstallMarkerJS}}";
+// The standalone Unix lifecycle publishes this public, root-owned marker
+// before it can stop the gateway and removes it after readiness or recovery.
+const DC_LIFECYCLE_MARKER = "{{.LifecycleMarkerJS}}";
 // Windows standalone installs reach the gateway over loopback TCP, where a
 // local user can hold the port while the gateway restarts, and this plugin
 // cannot compare the listener with the gateway service the way the hook
@@ -94,7 +98,12 @@ const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";
 // Per-user plugins ask the native gateway binary to verify the connected
 // listener's account before each request. The proof above serves managed TCP.
 const DC_PER_USER_NATIVE_POST = "{{if and (not .Managed) (not .SecureClient)}}1{{end}}";
-const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1";
+{{if and (not .Managed) (not .SecureClient)}}// A per-user plugin's gateway-outage mode (config.HookOutageFailMode): "open"
+// in the default and permissive policy tiers lets a tool call run with a
+// warning and a hook-failures.jsonl row while this account's gateway is not
+// running; "closed" (strict) blocks it. Every other failure blocks.
+const DC_OUTAGE_FAIL_MODE = "{{.OutageFailMode}}";
+{{end}}const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1";
 const DC_TIMEOUT_MS = 10000;
 const DC_PLUGIN_URL = import.meta.url;
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -327,6 +336,19 @@ async function defenseclawDeploymentRemoved() {
   }
 }
 
+async function defenseclawManagedLifecycleHeld() {
+  if (!DC_LIFECYCLE_MARKER) return false;
+  try {
+    await lstat(DC_LIFECYCLE_MARKER);
+    return true;
+  } catch (err) {
+    // Only a definite absence ends the install window.
+    return !err || err.code !== "ENOENT";
+  }
+}
+
+const DC_MANAGED_LIFECYCLE_TEXT = "DefenseClaw is being installed or upgraded on this computer; try again in a moment.";
+
 // defenseclawGatewayJSON parses a gateway answer and refuses one that
 // repeats a key in any object. JSON.parse keeps the last copy, so
 // {"action":"block","action":"allow"} would read as allow; the native and
@@ -546,33 +568,21 @@ async function defenseclawProvenTCPRequest(path, init, token) {
 }
 
 {{if not .Sandbox}}function defenseclawPerUserNativePostBinary() {
-  const account = userInfo();
-  const dataDir = dirname(dirname(DC_TOKEN_FILE));
-  const dataHome = dirname(dataDir);
-  // The token path is baked into this plugin at setup. A custom data
-  // directory uses the OS account home. Neither path follows the agent's HOME.
-  const homes = dataDir === join(dataHome, ".defenseclaw") ? [dataHome, account.homedir] : [account.homedir];
-  let lastError = new Error("per-user gateway helper path is missing");
-  for (const home of new Set(homes)) {
-    const directory = join(home, ".local", "bin");
-    const binary = join(directory, process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
-    const paths = [home, join(home, ".local"), directory, binary];
-    try {
-      for (let index = 0; index < paths.length; index++) {
-        const info = lstatSync(paths[index]);
-        if (info.isSymbolicLink() || (index === paths.length - 1 ? !info.isFile() : !info.isDirectory())) {
-          throw new Error("per-user gateway helper path is untrusted");
-        }
-        if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) {
-          throw new Error("per-user gateway helper path is writable by another account");
-        }
-      }
-      return binary;
-    } catch (error) {
-      lastError = error;
+  const home = homedir();
+  const directory = join(home, ".local", "bin");
+  const binary = join(directory, process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
+  const paths = [home, join(home, ".local"), directory, binary];
+  const uid = userInfo().uid;
+  for (let index = 0; index < paths.length; index++) {
+    const info = lstatSync(paths[index]);
+    if (info.isSymbolicLink() || (index === paths.length - 1 ? !info.isFile() : !info.isDirectory())) {
+      throw new Error("per-user gateway helper path is untrusted");
+    }
+    if (process.platform !== "win32" && (info.uid !== uid || (info.mode & 0o022) !== 0)) {
+      throw new Error("per-user gateway helper path is writable by another account");
     }
   }
-  throw lastError;
+  return binary;
 }
 
 {{end}}// defenseclawFetch posts to the gateway over the managed hook socket when one
@@ -821,6 +831,7 @@ async function defenseclawFailModeNow(mode, actionable) {
 }
 
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
+  if (actionable && await defenseclawManagedLifecycleHeld()) return { reason: DC_MANAGED_LIFECYCLE_TEXT };
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}  if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
 {{end}}  let token;
   try {
@@ -876,6 +887,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
 {{end}}      return null;
     }
     const data = defenseclawGatewayJSON(await res.text());
+    if (actionable && await defenseclawManagedLifecycleHeld()) return { reason: DC_MANAGED_LIFECYCLE_TEXT };
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
 {{end}}
 {{if .Sandbox}}    // A reply without a known verdict is as untrustworthy as no reply.
@@ -928,32 +940,16 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
   }
 }
 
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}// defenseclaw-call-time-outage-v1: defenseclawPerUserOutageOpen reports a per-user tool check that may run
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}// defenseclawPerUserOutageOpen reports a per-user tool check that may run
 // unchecked: the native helper exited 7 (hookexec.PerUserPostOutageExit:
 // this account's gateway refused or dropped the connection before any
-// status), strict availability is off, no install holds the data directory,
-// and the config on disk gives the open outage mode. An answer the gateway gave, an unverified listener and
-// every other error keep the call blocked.
+// status), the outage mode is open, strict availability is off and no
+// install holds the data directory. An answer the gateway gave, an
+// unverified listener and every other error keep the call blocked.
 async function defenseclawPerUserOutageOpen(err) {
-  if (!err || err.status !== 7) return false;
+  if (DC_OUTAGE_FAIL_MODE !== "open" || !err || err.status !== 7) return false;
   if (["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || ""))) return false;
-  return !(await defenseclawInstallWindow()) && defenseclawConfigOutageOpen();
-}
-
-// defenseclawConfigOutageOpen asks the per-user helper (`hook-outage-mode`,
-// which only reads the config.yaml of this plugin's data directory, never one
-// the agent's DEFENSECLAW_CONFIG or DEFENSECLAW_HOME names) for OpenCode's
-// outage mode now. A helper that cannot run or answers anything but "open"
-// keeps it closed.
-function defenseclawConfigOutageOpen() {
-  try {
-    const output = execFileSync(defenseclawPerUserNativePostBinary(), ["hook-outage-mode", "--connector", "opencode", "--hook-dir", dirname(DC_TOKEN_FILE)], {
-      timeout: 3000, maxBuffer: 4096, windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
-    });
-    return String(output).trim() === "open";
-  } catch (_) {
-    return false;
-  }
+  return !(await defenseclawInstallWindow());
 }
 
 // defenseclawPerUserOutageNotice is the one warning of a tool call that ran
@@ -1154,6 +1150,7 @@ function defenseclawToast(client, reason) {
   return {
     config: async (config) => {
       defenseclawConfigure(config);
+      if (await defenseclawManagedLifecycleHeld()) return;
       await defenseclawPostLoadHeartbeat(cwd);
     },
     // OpenCode publishes its session lifecycle through the generic event
@@ -1173,6 +1170,7 @@ function defenseclawToast(client, reason) {
     // The decision is resolved BEFORE the throw so a fail-open transport
     // error never turns into an accidental block.
     "tool.execute.before": async (input, output) => {
+      if (await defenseclawManagedLifecycleHeld()) throw defenseclawBlock(client, DC_MANAGED_LIFECYCLE_TEXT);
       // Every call runs the check, also after a block at load (which holds
       // for the process), so the gateway records each denied call.
       const startupBlock = await defenseclawStartupGuard;

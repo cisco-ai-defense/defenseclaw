@@ -120,9 +120,14 @@ type Registration struct {
 	// loosens it (GAP-0242). Nil for a registration made before 1.0.3 or
 	// under a provisional match: the next verified re-match sets it.
 	CreateProfile *string `json:"create_profile,omitempty"`
-	ProfileMatch  string  `json:"profile_match"`
-	MatchedGroup  string  `json:"matched_group,omitempty"`
-	ProfileDigest string  `json:"profile_digest"`
+	// The member names make hashed meet profiles resolvable after a restart.
+	// CreateProfileMembers is pinned with CreateProfile; ProfileMembers moves
+	// with Profile on a verified re-match. Empty for a single profile.
+	CreateProfileMembers []string `json:"create_profile_members,omitempty"`
+	ProfileMembers       []string `json:"profile_members,omitempty"`
+	ProfileMatch         string   `json:"profile_match"`
+	MatchedGroup         string   `json:"matched_group,omitempty"`
+	ProfileDigest        string   `json:"profile_digest"`
 	// Generation is the host config generation at resolve (admin-only).
 	Generation uint64 `json:"generation"`
 	// EffectiveDigest is packs.Effective.Digest(), the digest users see.

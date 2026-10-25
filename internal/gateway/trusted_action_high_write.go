@@ -13,44 +13,14 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
-	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
-
-// instructionRuleFiles maps each cognitive-file rule to the instruction file
-// it protects. AGENTS.md intentionally has no general regex in the rule pack;
-// this exact name supplies its proof.
-var instructionRuleFiles = map[string]string{
-	"COG-AGENTS-MD":     "AGENTS.md",
-	"COG-CLAUDE-MD":     "CLAUDE.md",
-	"COG-SOUL":          "SOUL.md",
-	"COG-IDENTITY":      "IDENTITY.md",
-	"COG-MEMORY":        "MEMORY.md",
-	"COG-TOOLS-MD":      "TOOLS.md",
-	"COG-OPENCLAW-JSON": "openclaw.json",
-	"COG-GATEWAY-JSON":  "gateway.json",
-}
-
-const instructionAliasTitle = " (written through another name of the file)"
 
 // provedHighWriteFindings joins a native action's resolved write target to a
 // HIGH or CRITICAL catalog rule whose expression names a write access. The
 // target is an ActionFacts path, not a regex hit on arbitrary tool text. A
 // missing active-file inventory cannot turn that resolved write into an
 // advisory finding (GAP-0768). The same proof covers POSIX and PowerShell.
-//
-// An instruction file is protected by file identity, not by the spelling of
-// its name (GAP-0869): a write through a symlink, a hard link or a case,
-// short-name or stream variant, and a write to the physical file a
-// symlinked instruction file reaches (GAP-0971), is a write to the file.
-// Another name is matched by file identity against the instruction files
-// agents load and the files the session loaded (hookpaths.InstructionFiles).
-// Either way the file is an instruction file of the call only when the
-// session loaded it or the session's own agent loads it at every start
-// (instructionLoadLocation, connectorInstructionLoads): a SOUL.md in a Claude
-// Code project, an AGENTS.md beside a Claude Code session or a CLAUDE.md
-// beside a Codex one is ordinary, under any of its names. Every other file is
-// ordinary, however many links it has, and creating a link writes nothing.
 func provedHighWriteFindings(
 	ctx context.Context,
 	request trustedActionRequest,
@@ -65,90 +35,15 @@ func provedHighWriteFindings(
 	}
 	facts := actionfacts.Analyze(request.Input)
 	proved := append([]RuleFinding(nil), findings...)
-	hostFlavor := actionfacts.PathFlavorPOSIX
-	if runtime.GOOS == "windows" {
-		hostFlavor = actionfacts.PathFlavorWindows
-	}
-	exactProof := func(ruleID string) findingProof {
-		return newExactFallbackFindingProof(ruleID, true, true, true, true)
-	}
-	instructions := hookpaths.NewInstructionFiles(request.Input.CWD, request.Input.ActiveHome, request.Input.ActiveAgentFiles)
-	// The places a call's instruction files are in: the working directory,
-	// also as the sandbox guest and the managed hook's physical directory
-	// name it, and the files the session loaded, also those the hook client
-	// identified for a gateway that cannot read them.
-	locations := instructionLocations{
-		loads: connectorInstructionLoads(request.Connector),
-		cwds: []string{
-			request.Input.CWD, request.SandboxGuestCWD,
-			request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+request.Input.CWD],
-		},
-		home:   request.Input.ActiveHome,
-		loaded: append([]string(nil), request.Input.ActiveAgentFiles...),
-	}
-	for _, loaded := range request.ActiveAgentFileIdentities {
-		locations.loaded = append(locations.loaded, loaded)
-	}
-	clientInstructions := hookpaths.InstructionIdentities(request.ResolvedWriteTargets)
-	loadedOrIdentified := func(location string, flavor actionfacts.PathFlavor) bool {
-		normalized, ok := activeAgentInstructionPath(location, flavor)
-		if !ok {
-			return false
-		}
-		for _, loaded := range locations.loaded {
-			if known, ok := activeAgentInstructionPath(loaded, flavor); ok && known == normalized {
-				return true
-			}
-		}
-		for _, identified := range clientInstructions {
-			if known, ok := activeAgentInstructionPath(identified, flavor); ok && known == normalized {
-				return true
-			}
-		}
-		return false
-	}
-	provedLocation := func(location string, flavor actionfacts.PathFlavor) bool {
-		if !instructionLoadLocation(location, flavor, locations) {
-			return false
-		}
-		if loadedOrIdentified(location, flavor) {
-			return true
-		}
-		// A startup location alone does not prove that its instruction file
-		// existed for this call. The hook client's identity above is the
-		// proof when a managed gateway cannot read the user's files.
-		if flavor != hostFlavor || isSandboxHookRequest(ctx) {
-			return false
-		}
-		info, err := os.Stat(filepath.FromSlash(location))
-		return err == nil && info.Mode().IsRegular()
-	}
-	instructionTarget := func(resolved string, flavor actionfacts.PathFlavor) bool {
-		if provedLocation(resolved, flavor) {
-			return true
-		}
-		// A symlinked or case-variant spelling of a load location's
-		// directory, on this host's file system, is judged as the spelling
-		// of the location it reaches.
-		if flavor != hostFlavor || isSandboxHookRequest(ctx) {
-			return false
-		}
-		located := instructions.Located(filepath.FromSlash(resolved))
-		return located != "" && provedLocation(located, flavor)
-	}
-	// File-identity evidence names the instruction file a target writes
-	// under its own path, so every target, however it was found, is judged
-	// by the same instructionTarget once.
-	seenTargets := make(map[string]bool)
-	addTarget := func(resolved string, flavor actionfacts.PathFlavor, proofForRule func(string) findingProof, note string) {
-		if seenTargets[resolved] {
+	seenTargets := make(map[string]struct{})
+	addTarget := func(resolved string, flavor actionfacts.PathFlavor, proofForRule func(string) findingProof) {
+		if _, seen := seenTargets[resolved]; seen {
 			return
 		}
-		seenTargets[resolved] = true
-		instruction := instructionTarget(resolved, flavor)
+		seenTargets[resolved] = struct{}{}
 		for _, category := range generation.categories {
 			for _, rule := range category.Rules {
-				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, resolved, flavor, instruction) {
+				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, resolved, flavor) {
 					continue
 				}
 				proof := proofForRule(rule.ID)
@@ -161,42 +56,38 @@ func provedHighWriteFindings(
 				if index >= 0 {
 					proved[index].enforcement = findingEnforcementAllowed
 					proved[index].proof = proof
-					continue
+				} else {
+					name := path.Base(strings.ReplaceAll(resolved, `\`, "/"))
+					proved = append(proved, adjustConfidence(request.Input.Tool, RuleFinding{
+						RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
+						Confidence: rule.Confidence, Evidence: name,
+						Tags:       append([]string(nil), rule.Tags...),
+						LineNumber: 1, enforcement: findingEnforcementAllowed,
+						proof: proof,
+					}))
 				}
-				proved = append(proved, adjustConfidence(request.Input.Tool, RuleFinding{
-					RuleID: rule.ID, Title: rule.Title + note, Severity: rule.Severity,
-					Confidence: rule.Confidence, Evidence: path.Base(strings.ReplaceAll(resolved, `\`, "/")),
-					Tags:       append([]string(nil), rule.Tags...),
-					LineNumber: 1, enforcement: findingEnforcementAllowed,
-					proof: proof,
-				}))
 			}
 		}
 	}
-	// gatewayIdentity checks a write target on this host's file system. A
-	// managed gateway that cannot read the user's home sees no file and
-	// relies on the hook client's InstructionIdentityKey below.
-	gatewayIdentity := func(resolved string, flavor actionfacts.PathFlavor) {
-		// A sandboxed agent's paths name its own file system, not this
-		// host's; its hook client's evidence speaks for it.
-		if flavor != hostFlavor || isSandboxHookRequest(ctx) {
-			return
+	addClientTarget := func(resolved string) {
+		flavor := actionfacts.PathFlavorPOSIX
+		if runtime.GOOS == "windows" {
+			flavor = actionfacts.PathFlavorWindows
 		}
-		if instruction := instructions.Alias(filepath.FromSlash(resolved)); instruction != "" {
-			addTarget(instruction, flavor, exactProof, instructionAliasTitle)
-		}
-	}
-	addClientTarget := func(resolved, note string) {
-		if _, ok := activeAgentInstructionPath(resolved, hostFlavor); !ok {
+		if _, ok := activeAgentInstructionPath(resolved, flavor); !ok {
 			return
 		}
 		// The hook resolver walked this operand in the invoking user's view.
 		// A managed gateway may be unable to traverse that user's home.
-		addTarget(resolved, hostFlavor, exactProof, note)
+		addTarget(resolved, flavor, func(ruleID string) findingProof {
+			return newExactFallbackFindingProof(ruleID, true, true, true, true)
+		})
 	}
 	for _, target := range facts.Paths {
-		write := target.Access == actionfacts.PathAccessWrite || target.Access == actionfacts.PathAccessAppend
-		if !write && target.Access != actionfacts.PathAccessDelete || target.Resolved == "" {
+		if target.Access != actionfacts.PathAccessWrite &&
+			target.Access != actionfacts.PathAccessAppend &&
+			target.Access != actionfacts.PathAccessDelete ||
+			target.Resolved == "" {
 			continue
 		}
 		// Absolute describes the operand spelling. A relative operand is
@@ -210,12 +101,7 @@ func provedHighWriteFindings(
 		}
 		addTarget(target.Resolved, target.Flavor, func(ruleID string) findingProof {
 			return newActionFactsSubgraphFindingProof(ruleID, true, true)
-		}, "")
-		// Removing one name of a file leaves the others intact; writing any
-		// name writes the file.
-		if write {
-			gatewayIdentity(target.Resolved, target.Flavor)
-		}
+		})
 	}
 	// The invoking user's hook also lists writes that ActionFacts cannot
 	// project, including patch directives inside an exec_command and Windows
@@ -227,22 +113,7 @@ func provedHighWriteFindings(
 			!filepath.IsAbs(operand) || !filepath.IsAbs(resolved) {
 			continue
 		}
-		addClientTarget(resolved, "")
-	}
-	// The hook client's file-identity check of the same targets: every
-	// instruction file they write under another name
-	// (hookpaths.InstructionIdentityKey, GAP-1065), and the targets' own
-	// identities matched with those of the files the session loaded
-	// (hookpaths.FileIdentitiesKey, GAP-1064).
-	for _, identity := range hookpaths.InstructionIdentities(request.ResolvedWriteTargets) {
-		if filepath.IsAbs(identity) {
-			addClientTarget(identity, instructionAliasTitle)
-		}
-	}
-	for _, identity := range hookpaths.FileIdentities(request.ResolvedWriteTargets) {
-		if loaded := request.ActiveAgentFileIdentities[identity]; filepath.IsAbs(loaded) {
-			addClientTarget(loaded, instructionAliasTitle)
-		}
+		addClientTarget(resolved)
 	}
 	// A native apply_patch call or a shell invocation of apply_patch carries
 	// targets in its patch envelope. ActionFacts does not project those
@@ -259,11 +130,16 @@ func provedHighWriteFindings(
 				if !filepath.IsAbs(target) {
 					continue
 				}
-				if _, ok := activeAgentInstructionPath(target, hostFlavor); !ok {
+				flavor := actionfacts.PathFlavorPOSIX
+				if runtime.GOOS == "windows" {
+					flavor = actionfacts.PathFlavorWindows
+				}
+				if _, ok := activeAgentInstructionPath(target, flavor); !ok {
 					continue
 				}
-				addTarget(target, hostFlavor, exactProof, "")
-				gatewayIdentity(target, hostFlavor)
+				addTarget(target, flavor, func(ruleID string) findingProof {
+					return newExactFallbackFindingProof(ruleID, true, true, true, true)
+				})
 			}
 		}
 	}
@@ -272,156 +148,48 @@ func provedHighWriteFindings(
 
 // An active instruction file may be loaded by a session that predates this
 // gateway process. Its in-memory load event is unavailable after a restart,
-// so a proved write to an instruction file the session's agent loads at
-// every start must still enforce that catalog rule. instruction reports such
-// a file or one the session loaded (instructionLoadLocation); without it the
-// name is an ordinary file's. Another name of the same file reaches this
-// check as the file's own path (hookpaths.InstructionFiles).
-func highWriteRuleMatchesTarget(rule PatternRule, resolved string, flavor actionfacts.PathFlavor, instruction bool) bool {
-	if name, ok := instructionRuleFiles[rule.ID]; ok {
-		return instruction && activeAgentInstructionBaseMatches(
-			path.Base(strings.ReplaceAll(resolved, `\`, "/")), flavor, name)
+// so a proved write to one of the catalog's instruction filenames must still
+// enforce that catalog rule. AGENTS.md intentionally has no general regex in
+// the rule pack; this exact basename check supplies its lost-session proof.
+func highWriteRuleMatchesTarget(rule PatternRule, resolved string, flavor actionfacts.PathFlavor) bool {
+	name := path.Base(strings.ReplaceAll(resolved, `\`, "/"))
+	var instruction string
+	switch rule.ID {
+	case "COG-AGENTS-MD":
+		instruction = "AGENTS.md"
+	case "COG-CLAUDE-MD":
+		instruction = "CLAUDE.md"
+	case "COG-SOUL":
+		instruction = "SOUL.md"
+	case "COG-IDENTITY":
+		instruction = "IDENTITY.md"
+	case "COG-MEMORY":
+		instruction = "MEMORY.md"
+	case "COG-TOOLS-MD":
+		instruction = "TOOLS.md"
+	case "COG-OPENCLAW-JSON":
+		instruction = "openclaw.json"
+	case "COG-GATEWAY-JSON":
+		instruction = "gateway.json"
+	}
+	if instruction != "" {
+		if activeAgentInstructionBaseMatches(name, flavor, instruction) {
+			return true
+		}
+		// A case-folded spelling can name the same inode on macOS or a
+		// case-folded Linux volume. A distinct lowercase file remains separate
+		// on case-sensitive POSIX filesystems. An exact file-identity check also
+		// covers a hard link to the active instruction file.
+		if flavor == actionfacts.PathFlavorPOSIX && activeAgentASCIIEqualFold(name, instruction) {
+			aliasInfo, aliasErr := os.Stat(resolved)
+			canonicalInfo, canonicalErr := os.Stat(filepath.Join(filepath.Dir(resolved), instruction))
+			return aliasErr == nil && canonicalErr == nil &&
+				aliasInfo.Mode().IsRegular() && canonicalInfo.Mode().IsRegular() &&
+				os.SameFile(aliasInfo, canonicalInfo)
+		}
+		return false
 	}
 	return rule.Pattern.MatchString(resolved)
-}
-
-// instructionLocations are the places of one call that its agent loads
-// instruction files from, as the call names them.
-type instructionLocations struct {
-	loads  instructionLoads
-	cwds   []string
-	home   string
-	loaded []string
-}
-
-// instructionLoads are the instruction files an agent reads at the start of
-// every session without reporting the load: the names it reads in the
-// working directory and each parent (project), in their .claude folders
-// (claudeFolder), in folders of the home (home, slash separated, from
-// hookpaths.InstructionHomeFolders) and in the folders its home variables
-// name (variables, from hookpaths.InstructionHomeVariables).
-type instructionLoads struct {
-	project, claudeFolder []string
-	home, variables       map[string][]string
-}
-
-var (
-	allInstructionNames     = hookpaths.InstructionFileNames[:]
-	projectInstructionNames = []string{"AGENTS.md", "CLAUDE.md"}
-	clawInstructionLoads    = instructionLoads{project: allInstructionNames, home: map[string][]string{".openclaw": allInstructionNames, ".openclaw/workspace": allInstructionNames}}
-	builtinInstructionLoads = map[string]instructionLoads{
-		"claudecode": {
-			project: []string{"CLAUDE.md"}, claudeFolder: []string{"CLAUDE.md"},
-			home: map[string][]string{".claude": {"CLAUDE.md"}}, variables: map[string][]string{"CLAUDE_CONFIG_DIR": {"CLAUDE.md"}},
-		},
-		"codex": {
-			project: []string{"AGENTS.md"},
-			home:    map[string][]string{".codex": {"AGENTS.md"}}, variables: map[string][]string{"CODEX_HOME": {"AGENTS.md"}},
-		},
-		"opencode": {project: projectInstructionNames, home: map[string][]string{".config/opencode": {"AGENTS.md"}, ".claude": {"CLAUDE.md"}}},
-		"amp":      {project: projectInstructionNames, home: map[string][]string{".config/amp": {"AGENTS.md"}, ".config": {"AGENTS.md"}}},
-		"openclaw": clawInstructionLoads, "zeptoclaw": clawInstructionLoads,
-	}
-)
-
-// connectorInstructionLoads are the instruction files connector's agent
-// loads at every start. Another built-in agent reads AGENTS.md and CLAUDE.md
-// in its project. An agent DefenseClaw does not know (a plugin connector, or
-// none) may read any instruction name in any of the places, so all of them
-// count for it.
-func connectorInstructionLoads(connector string) instructionLoads {
-	name := canonicalConnectorRulePackKey(connector)
-	if loads, ok := builtinInstructionLoads[name]; ok {
-		return loads
-	}
-	if gatewayconnector.IsKnownBuiltinConnector(name) {
-		return instructionLoads{project: projectInstructionNames}
-	}
-	every := instructionLoads{
-		project: allInstructionNames, claudeFolder: allInstructionNames,
-		home: map[string][]string{}, variables: map[string][]string{},
-	}
-	for _, folder := range hookpaths.InstructionHomeFolders {
-		every.home[folder] = allInstructionNames
-	}
-	for _, variable := range hookpaths.InstructionHomeVariables {
-		every.variables[variable] = allInstructionNames
-	}
-	return every
-}
-
-// instructionLoadLocation reports whether target, spelled with an
-// instruction file name, is an instruction file of the call by its spelling
-// in flavor: a file the session loaded, or one the call's agent loads at
-// every start (instructionLoads) from the working directory or one of its
-// parents or their .claude folders, a folder of the home or a folder its
-// home variables name. Windows spellings compare without case. Any other
-// file of that name is ordinary.
-func instructionLoadLocation(target string, flavor actionfacts.PathFlavor, locations instructionLocations) bool {
-	normal := func(value string) string {
-		normalized, ok := activeAgentInstructionPath(value, flavor)
-		if !ok {
-			return ""
-		}
-		return normalized
-	}
-	file := normal(target)
-	if file == "" {
-		return false
-	}
-	name, named := hookpaths.InstructionFileName(path.Base(file), flavor == actionfacts.PathFlavorWindows)
-	if !named {
-		return false
-	}
-	for _, loaded := range locations.loaded {
-		if normal(loaded) == file {
-			return true
-		}
-	}
-	loads := locations.loads
-	directory := instructionParent(file)
-	// within reports whether the working directory is base or under it.
-	within := func(base string) bool {
-		for _, cwd := range locations.cwds {
-			if cwd = normal(cwd); cwd != "" &&
-				(cwd == base || strings.HasPrefix(cwd, strings.TrimSuffix(base, "/")+"/")) {
-				return true
-			}
-		}
-		return false
-	}
-	if slices.Contains(loads.project, name) && within(directory) ||
-		slices.Contains(loads.claudeFolder, name) && path.Base(directory) == ".claude" && within(instructionParent(directory)) {
-		return true
-	}
-	if home := normal(locations.home); home != "" {
-		for folder, names := range loads.home {
-			candidate := home
-			if folder != "" {
-				candidate = normal(home + "/" + folder)
-			}
-			if candidate == directory && slices.Contains(names, name) {
-				return true
-			}
-		}
-	}
-	for variable, names := range loads.variables {
-		if value := normal(os.Getenv(variable)); value != "" && value == directory && slices.Contains(names, name) {
-			return true
-		}
-	}
-	return false
-}
-
-// instructionParent is the directory of a path activeAgentInstructionPath
-// normalized: "/" for a file at the POSIX root and the drive ("c:") for one
-// at a Windows drive root.
-func instructionParent(normalized string) string {
-	index := strings.LastIndex(normalized, "/")
-	if index <= 0 {
-		return "/"
-	}
-	return normalized[:index]
 }
 
 func highWriteCatalogRule(rule PatternRule) bool {

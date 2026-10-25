@@ -115,9 +115,6 @@ type APIServer struct {
 	// copilotDedupe answers the second delivery of one Copilot tool call
 	// with the first delivery's verdict.
 	copilotDedupe copilotHookDedupe
-	// sessionStartGate holds a session's calls until its start verdict
-	// (GAP-0806).
-	sessionStartGate sessionStartGate
 	// hermesTasks gives a Hermes hook that names only its task the session
 	// of that task.
 	hermesTasks hermesTaskSessions
@@ -285,11 +282,9 @@ type APIServer struct {
 
 	claudeCodeMu                sync.Mutex
 	claudeCodeLastComponentScan time.Time
-	// activeAgentContext is authenticated connector context, kept in memory
-	// and recorded per session under the data directory so a restart keeps it
-	// (saveInstructionLoads). It is deliberately separate from hook payloads
-	// so tool arguments and generic request fields cannot assert which agent
-	// instruction files are active.
+	// activeAgentContext is process-local, authenticated connector context. It
+	// is deliberately separate from hook payloads so tool arguments and generic
+	// request fields cannot assert which agent instruction files are active.
 	activeAgentContext     activeAgentContextCache
 	codexMu                sync.Mutex
 	codexLastComponentScan time.Time

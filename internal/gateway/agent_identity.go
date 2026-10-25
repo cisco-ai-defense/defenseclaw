@@ -73,10 +73,23 @@ type agentIdentityFacts struct {
 	InstallHint string
 	// LegacyID is the identity 1.0.0 to 1.0.3 gave this agent
 	// (agentidentity.LegacyAgentID), "" when it is ID. A guardrail profile
-	// assignment may still name it (profileAgentBridge); LegacyClaim says
-	// whether the upgrade bound it to this agent's account.
-	LegacyID    string
-	LegacyClaim profileAgentClaim
+	// assignment may still name it (profileAgentBridge).
+	LegacyID string
+	// The legacy owner is checked only when a profile names LegacyID.
+	account string
+	self    bool
+}
+
+type hookIdentitySnapshotKey struct{}
+
+// One accepted hook uses the same verified identity facts for correlation,
+// evaluation and audit. Later hooks resolve afresh, including current UPN and
+// account ownership, so a changed guardian record is seen on the next call.
+func withHookIdentitySnapshot(ctx context.Context, facts agentIdentityFacts) context.Context {
+	if facts.ID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, hookIdentitySnapshotKey{}, facts)
 }
 
 // agentIdentityConfig is the config the gateway resolves connector config
@@ -114,6 +127,10 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 	if connectorName == "" || user.ID == "" {
 		return agentIdentityFacts{}
 	}
+	if snapshot, ok := ctx.Value(hookIdentitySnapshotKey{}).(agentIdentityFacts); ok &&
+		snapshot.Connector == connectorName && snapshot.UserID == agentidentity.NormalizeUserID(user.ID) {
+		return snapshot.withInstallHint(req.Payload)
+	}
 	machine, machineVerified := agentidentity.HostMachineHash()
 	account := agentIdentityAccount(user)
 	upn, upnKnown, upnRead := agentIdentityUPNSnapshot(user.ID)
@@ -133,6 +150,8 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		UPNRead:         upnRead,
 		Connector:       connectorName,
 		InstallFP:       agentIdentityInstallFP(connectorName, user),
+		account:         account,
+		self:            user.Self,
 	}
 	inputs := agentidentity.Inputs{
 		MachineHash: facts.MachineHash, UserID: facts.UserID, Account: account,
@@ -143,11 +162,13 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		return agentIdentityFacts{}
 	}
 	facts.LegacyID = agentidentity.LegacyAgentID(inputs)
-	if facts.LegacyID != "" {
-		facts.LegacyClaim = legacyAgentClaim(facts.LegacyID, facts.UserID, facts.MachineHash, account, user.Self)
-	}
 	facts.Verified = machineVerified && user.Verified
-	if hint := claimedInstallHint(req.Payload); hint != "" &&
+	return facts.withInstallHint(req.Payload)
+}
+
+func (facts agentIdentityFacts) withInstallHint(payload map[string]interface{}) agentIdentityFacts {
+	facts.InstallHint = ""
+	if hint := claimedInstallHint(payload); hint != "" &&
 		agentidentity.NormalizeInstallFP(hint) != agentidentity.NormalizeInstallFP(facts.InstallFP) {
 		facts.InstallHint = hint
 	}

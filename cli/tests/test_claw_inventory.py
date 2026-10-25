@@ -1587,9 +1587,14 @@ class TestAdmissionVerdictWarning(_StoreWithPolicyMixin, unittest.TestCase):
         self.assertIn("2 findings", detail)
         self.assertIn("MEDIUM", detail)
 
-    def test_low_mcp_rejected_by_policy_override(self):
+    def test_low_mcp_warns_by_default_and_rejects_with_policy_override(self):
         pe = self._pe()
         scan = {"finding_count": 1, "max_severity": "LOW", "target": "/x"}
+        verdict, detail = _admission_verdict(
+            pe, "mcp", "minor-issues", scan, None,
+        )
+        self.assertEqual(verdict, "warning")
+        self.cfg.admission.mcp.actions["low"] = "quarantine"
         verdict, detail = _admission_verdict(
             pe, "mcp", "minor-issues", scan, None,
         )
@@ -2108,7 +2113,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
         enrich_with_policy(inv, self.store, cfg=cfg)
 
         self.assertEqual(inv["plugins"][0]["policy_verdict"], "rejected")
-        self.assertEqual(inv["mcp"][0]["policy_verdict"], "rejected")
+        self.assertEqual(inv["mcp"][0]["policy_verdict"], "warning")
         shutil.rmtree(tmp, ignore_errors=True)
 
     def test_plugin_policy_enrichment_uses_install_name_aliases(self):
@@ -2204,7 +2209,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
 
             enrich_with_policy(inv, self.store, cfg=cfg)
 
-            self.assertEqual(inv["mcp"][0]["policy_verdict"], "rejected")
+            self.assertEqual(inv["mcp"][0]["policy_verdict"], "warning")
             self.assertEqual(inv["mcp"][0]["scan_findings"], 2)
             self.assertEqual(inv["mcp"][0]["scan_severity"], "HIGH")
         finally:

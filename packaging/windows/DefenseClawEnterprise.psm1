@@ -1688,7 +1688,8 @@ namespace $nativeNamespace
         }
 
         public static string RestoreUserFileNoFollow(string path, byte[] content,
-            string sddl, DateTime creationTimeUtc, DateTime lastWriteTimeUtc)
+            string sddl, DateTime creationTimeUtc, DateTime lastWriteTimeUtc,
+            string expectedCurrentSha256)
         {
             if (content == null || content.Length > 4194304)
                 throw new InvalidOperationException("user file restore size is invalid");
@@ -1698,6 +1699,8 @@ namespace $nativeNamespace
             const uint WRITE_DAC = 0x00040000;
             const uint WRITE_OWNER = 0x00080000;
             const uint FILE_SHARE_READ = 0x00000001;
+            const uint CREATE_NEW = 1;
+            const uint OPEN_EXISTING = 3;
             const uint OPEN_ALWAYS = 4;
             const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
             const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
@@ -1731,7 +1734,9 @@ namespace $nativeNamespace
                         IntPtr handle = CreateFileW(path,
                             GENERIC_READ | GENERIC_WRITE | READ_CONTROL |
                                 WRITE_DAC | WRITE_OWNER,
-                            FILE_SHARE_READ, IntPtr.Zero, OPEN_ALWAYS,
+                            FILE_SHARE_READ, IntPtr.Zero,
+                            expectedCurrentSha256 == null ? OPEN_ALWAYS :
+                                expectedCurrentSha256 == "absent" ? CREATE_NEW : OPEN_EXISTING,
                             FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
                             IntPtr.Zero);
                         if (handle == new IntPtr(-1))
@@ -1744,6 +1749,21 @@ namespace $nativeNamespace
                                 new Microsoft.Win32.SafeHandles.SafeFileHandle(handle, false),
                                 FileAccess.ReadWrite))
                             {
+                                if (expectedCurrentSha256 != null &&
+                                    expectedCurrentSha256 != "absent")
+                                {
+                                    stream.Position = 0;
+                                    using (var sha = System.Security.Cryptography.SHA256.Create())
+                                    {
+                                        string actual = BitConverter.ToString(
+                                            sha.ComputeHash(stream)).Replace("-", "")
+                                            .ToLowerInvariant();
+                                        if (!String.Equals(actual, expectedCurrentSha256,
+                                                StringComparison.Ordinal))
+                                            throw new InvalidOperationException(
+                                                "user file changed after transaction postimage capture");
+                                    }
+                                }
                                 stream.Position = 0;
                                 stream.Write(content, 0, content.Length);
                                 stream.SetLength(content.Length);
@@ -9634,6 +9654,11 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.ManifestPath -Kind AdminFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.RuntimeDirectory -Kind RuntimeDirectory -GatewayServiceSID $gatewaySID
+    $runtimeEnv = [IO.Path]::Combine([string]$Layout.RuntimeDirectory, '.env')
+    if ((Test-DefenseClawStandaloneProfile) -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $runtimeEnv -PathType Leaf)) {
+        Set-DefenseClawPathAcl -Path $runtimeEnv -Kind RuntimeFile -GatewayServiceSID $gatewaySID
+    }
     if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout) -and
         (-not $AllowTransactionRecordedBrokerAbsence -or
             (Microsoft.PowerShell.Management\Test-Path `
@@ -12475,8 +12500,8 @@ function New-DefenseClawTransaction {
         # hook, which answers closed while the lifecycle has the services
         # disabled. The prior hook's bytes are kept as its preimage, recorded
         # in the intent before the swap, so a failed snapshot, a crash
-        # (Recover-DefenseClawQuiescingIntent) and a rollback each put it
-        # back with the services it answers for.
+        # (Recover-DefenseClawQuiescingIntent) and a rollback keep the
+        # replacement hook until the prior gateway passes readiness.
         $earlyHookPreimage = Publish-DefenseClawEarlyHook `
             -Layout $Layout `
             -Source $EarlyHookSource `
@@ -12866,6 +12891,9 @@ function New-DefenseClawTransaction {
         )
         managed_hooks_lifecycle_legacy_preimage =
             $legacyManagedHooksLifecyclePreimage
+        early_hook_guard_copy = [string]$quiescingIntent['early_hook_guard_copy']
+        early_hook_guard_sha256 = [string]$quiescingIntent['early_hook_guard_sha256']
+        early_hook_preimage_sha256 = [string]$quiescingIntent['early_hook_preimage_sha256']
         redaction_key_security = $redactionKeySecurity
         files = $files
         services = $services
@@ -12921,9 +12949,17 @@ function New-DefenseClawTransaction {
         $restartErrors = [Collections.Generic.List[string]]::new()
         $aclRestoreFailure = ''
         try {
-            # The prior release's hook answers for the services restarted
-            # below (GAP-0993).
-            Restore-DefenseClawEarlyHook -Layout $Layout -Intent $quiescingIntent -TransactionDirectory $directory
+            if (-not (Test-DefenseClawStandaloneProfile)) {
+                Restore-DefenseClawEarlyHook `
+                    -Layout $Layout `
+                    -Intent $quiescingIntent `
+                    -TransactionDirectory $directory
+            }
+            [void](Hold-DefenseClawEarlyHookGuard `
+                -Layout $Layout `
+                -TransactionDirectory $directory `
+                -GuardCopy ([string]$quiescingIntent['early_hook_guard_copy']) `
+                -GuardSHA256 ([string]$quiescingIntent['early_hook_guard_sha256']))
             if ([string]::IsNullOrWhiteSpace($servicesQuiescedAt)) {
                 foreach ($name in @(
                     $GatewayServiceName,
@@ -12993,6 +13029,13 @@ function New-DefenseClawTransaction {
                 -TrustInProcessQuiescence `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName
+            if ((Test-DefenseClawStandaloneProfile) -and
+                -not [bool]$script:DefenseClawRecoveryActivationDeferred) {
+                Restore-DefenseClawEarlyHook `
+                    -Layout $Layout `
+                    -Intent $quiescingIntent `
+                    -TransactionDirectory $directory
+            }
         }
         catch {
             $restartErrors.Add($_.Exception.Message)
@@ -14642,10 +14685,15 @@ function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
                 $userHome, $agent, '.defenseclaw-cas-state')
             $stateCaptured = $true
             $stateExisted = $false
+            $stateLastWriteTicks = ''
             try {
                 Assert-DefenseClawNoReparsePath -Path $statePath -AllowMissingLeaf
                 $stateExisted = [bool](Microsoft.PowerShell.Management\Test-Path `
                     -LiteralPath $statePath -PathType Container)
+                if ($stateExisted) {
+                    $stateLastWriteTicks = [IO.Directory]::GetLastWriteTimeUtc(
+                        $statePath).Ticks.ToString()
+                }
             }
             catch {
                 $stateCaptured = $false
@@ -14653,6 +14701,7 @@ function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
             $states.Add([ordered]@{
                 captured = $stateCaptured
                 existed = $stateExisted
+                last_write_ticks = $stateLastWriteTicks
             })
         }
         foreach ($path in @(Get-DefenseClawUserNativeOTLPTransactionPaths `
@@ -14703,6 +14752,7 @@ function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
                 existed = $exists
                 sha256 = $hash
                 security_descriptor = $sddl
+                postimage_sha256 = ''
             })
             $index++
         }
@@ -14716,6 +14766,88 @@ function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
             files = @($files)
             state_directories = @($states)
         }) -Force
+    Write-DefenseClawJsonAtomic -Value $snapshot -Path $SnapshotPath
+}
+
+# Record the exact agent-file bytes published by Guardian before another
+# activation step can trigger rollback. A pre-existing CAS directory is not a
+# transaction witness unless Guardian changed its directory timestamp.
+function Set-DefenseClawUserNativeOTLPTransactionPostimages {
+    param(
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    Assert-DefenseClawDescendant -Path $SnapshotPath -Root $Layout.StateRoot `
+        -Label 'native OTLP transaction snapshot' | Microsoft.PowerShell.Core\Out-Null
+    Assert-DefenseClawNoReparsePath -Path $SnapshotPath
+    $snapshot = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $SnapshotPath -Raw |
+        Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $property = $snapshot.PSObject.Properties['user_native_otlp_preimages']
+    if ($null -eq $property) { return }
+    $saved = $property.Value
+    if ($saved.schema_version -ne 1 -or
+        @($saved.files).Count -ne 4 * @($saved.roots).Count -or
+        @($saved.state_directories).Count -ne 2 * @($saved.roots).Count) {
+        throw 'invalid user native OTLP postimage target list'
+    }
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    for ($rootIndex = 0; $rootIndex -lt @($saved.roots).Count; $rootIndex++) {
+        $userHome = [string]$saved.roots[$rootIndex].user_home
+        $paths = @(Get-DefenseClawUserNativeOTLPTransactionPaths `
+                -UserHome $userHome)
+        for ($offset = 0; $offset -lt 4; $offset++) {
+            $fileIndex = 4 * $rootIndex + $offset
+            $entry = $saved.files[$fileIndex]
+            if (-not [bool]$entry.captured -or -not [bool]$entry.existed) {
+                continue
+            }
+            if ($offset -lt 2) {
+                $state = $saved.state_directories[2 * $rootIndex + $offset]
+                if (-not [bool]$state.captured) { continue }
+                $statePath = [IO.Path]::Combine(
+                    $userHome, @('.codex', '.claude')[$offset],
+                    '.defenseclaw-cas-state')
+                try {
+                    Assert-DefenseClawNoReparsePath -Path $statePath
+                    if (-not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $statePath -PathType Container)) {
+                        continue
+                    }
+                    $currentTicks = [IO.Directory]::GetLastWriteTimeUtc(
+                        $statePath).Ticks.ToString()
+                    if ([bool]$state.existed -and
+                        $currentTicks -ceq [string]$state.last_write_ticks) {
+                        continue
+                    }
+                }
+                catch { continue }
+            }
+            try {
+                $current = $nativeSecurity::CaptureUserFileNoFollowIfExists(
+                    $paths[$offset])
+                # Guardian only revokes these scoped credentials during
+                # cleanup. A still-present changed credential is an operator
+                # edit, so it has no transaction postimage.
+                if ($offset -ge 2 -and $null -ne $current) {
+                    continue
+                }
+                $postimage = if ($null -eq $current) {
+                    'absent'
+                } else {
+                    Get-DefenseClawNuclearSHA256 -Bytes $current.Content
+                }
+                if ($postimage -cne [string]$entry.sha256) {
+                    $entry.postimage_sha256 = $postimage
+                }
+            }
+            catch {
+                # An unreadable or linked file has no provable postimage.
+                # Rollback leaves it with the operator and reports the skip.
+                continue
+            }
+        }
+    }
     Write-DefenseClawJsonAtomic -Value $snapshot -Path $SnapshotPath
 }
 
@@ -14764,36 +14896,6 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
             [string]$root.sid -cnotmatch '^S-1-[0-9-]+$') {
             throw 'native OTLP rollback target root is not canonical'
         }
-        # An absent CAS directory that stayed absent means Guardian never
-        # edited this agent config. Preserve any user change made while
-        # Setup was open. A newly created CAS directory is the cleanup's
-        # witness; an existing one is conservatively restorable.
-        $restoreAgent = @()
-        foreach ($agentOffset in 0, 1) {
-            $agent = @('.codex', '.claude')[$agentOffset]
-            $statePath = [IO.Path]::Combine(
-                $userHome, $agent, '.defenseclaw-cas-state')
-            $state = $saved.state_directories[$stateIndex + $agentOffset]
-            $stateCaptured = $state.PSObject.Properties['captured']
-            if ($null -ne $stateCaptured -and -not [bool]$stateCaptured.Value) {
-                Add-DefenseClawUserNativeOTLPRollbackLeftover `
-                    -Path $statePath -Reason 'preimage could not be captured'
-                $restoreAgent += $false
-                continue
-            }
-            try {
-                Assert-DefenseClawNoReparsePath -Path $statePath -AllowMissingLeaf
-                $restoreAgent += [bool](
-                    [bool]$state.existed -or
-                    (Microsoft.PowerShell.Management\Test-Path `
-                        -LiteralPath $statePath -PathType Container))
-            }
-            catch {
-                Add-DefenseClawUserNativeOTLPRollbackLeftover `
-                    -Path $statePath -Reason $_.Exception.Message
-                $restoreAgent += $false
-            }
-        }
         foreach ($path in @(Get-DefenseClawUserNativeOTLPTransactionPaths `
                     -UserHome $userHome)) {
             $entry = $saved.files[$index]
@@ -14805,12 +14907,22 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
                             [string]$entry.sha256 -cnotmatch '^[0-9a-f]{64}$')) {
                         throw 'invalid user native OTLP rollback file record'
                     }
-                    # Guardian can revoke a token without changing its agent
-                    # config. A still-present token is a concurrent user edit.
-                    $restoreThisFile = $restoreAgent[$index % 2]
-                    if ($index % 4 -ge 2) {
+                    $postimage = [string]$entry.postimage_sha256
+                    $restoreThisFile = $false
+                    if ($postimage -cmatch '^[0-9a-f]{64}$') {
+                        $current = $nativeSecurity::CaptureUserFileNoFollowIfExists($path)
+                        $restoreThisFile = $null -ne $current -and
+                            (Get-DefenseClawNuclearSHA256 -Bytes $current.Content) -ceq
+                                $postimage
+                    }
+                    elseif ($postimage -ceq 'absent') {
                         $restoreThisFile = -not (Microsoft.PowerShell.Management\Test-Path `
                             -LiteralPath $path -PathType Leaf)
+                    }
+                    elseif ($index % 4 -lt 2) {
+                        # Even when no transaction postimage exists, report a
+                        # linked or unreadable agent path without touching it.
+                        [void]$nativeSecurity::CaptureUserFileNoFollowIfExists($path)
                     }
                     if ([bool]$entry.existed -and $restoreThisFile) {
                         $backup = [IO.Path]::Combine(
@@ -14827,7 +14939,8 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
                         $actualSDDL = $nativeSecurity::RestoreUserFileNoFollow(
                             $path, $bytes, [string]$entry.security_descriptor,
                             [IO.File]::GetCreationTimeUtc($backup),
-                            [IO.File]::GetLastWriteTimeUtc($backup))
+                            [IO.File]::GetLastWriteTimeUtc($backup),
+                            $postimage)
                         if ($actualSDDL -cne [string]$entry.security_descriptor) {
                             throw 'user native OTLP rollback did not restore exact ACL'
                         }
@@ -14848,9 +14961,14 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
             $state = $saved.state_directories[$stateIndex]
             $stateIndex++
             $captured = $state.PSObject.Properties['captured']
-            if ($null -ne $captured -and -not [bool]$captured.Value) { continue }
             $statePath = [IO.Path]::Combine(
                 $userHome, $agent, '.defenseclaw-cas-state')
+            if ($null -ne $captured -and -not [bool]$captured.Value) {
+                # win-otel b9f6cef3ed: an uncaptured CAS directory is a reported leftover.
+                Add-DefenseClawUserNativeOTLPRollbackLeftover `
+                    -Path $statePath -Reason 'preimage could not be captured'
+                continue
+            }
             try {
                 if ($state.existed -isnot [bool]) {
                     throw 'invalid user native OTLP rollback state record'
@@ -15034,6 +15152,19 @@ function Restore-DefenseClawTransaction {
                 ) -and [bool]$_.existed
             }
     ).Count -eq 1
+    # Reassert the protected replacement hook before the first rollback
+    # service mutation. The snapshot's old hook is restored only after the
+    # prior gateway and managed target set have passed activation readiness.
+    $guardCopy = Get-DefenseClawEarlyHookField -Record $snapshot -Name 'early_hook_guard_copy'
+    $guardSHA256 = Get-DefenseClawEarlyHookField -Record $snapshot -Name 'early_hook_guard_sha256'
+    $transitionHookSHA256 = ''
+    if (-not [string]::IsNullOrWhiteSpace($guardCopy) -or -not [string]::IsNullOrWhiteSpace($guardSHA256)) {
+        $transitionHookSHA256 = Hold-DefenseClawEarlyHookGuard `
+            -Layout $Layout `
+            -TransactionDirectory ([string]$snapshot.directory) `
+            -GuardCopy $guardCopy `
+            -GuardSHA256 $guardSHA256
+    }
     if (Test-DefenseClawServiceExists -Name $standaloneSensorHelper) {
         Assert-DefenseClawStandaloneSensorHelperOwned `
             -Name $standaloneSensorHelper `
@@ -15222,6 +15353,14 @@ function Restore-DefenseClawTransaction {
         $isSharedCodexFile = $isCodexMachinePolicy -or $isCodexManagedState
         if (-not $inInstall -and -not $inState -and -not $isSharedCodexFile) {
             throw "transaction contains path outside managed roots: $destination"
+        }
+        if ($transitionHookSHA256 -ne '' -and [string]::Equals(
+                $destination,
+                [IO.Path]::GetFullPath([string]$Layout.HookPath),
+                [StringComparison]::OrdinalIgnoreCase)) {
+            # The prior binary can answer open when its gateway is stopped.
+            # Its authenticated backup is installed after activation below.
+            continue
         }
         if ($isSharedCodexFile) {
             $policyDirectoryExists = Microsoft.PowerShell.Management\Test-Path `
@@ -15529,6 +15668,11 @@ function Restore-DefenseClawTransaction {
                     -Name $standaloneSensorHelper `
                     -StartMode ([int]$gatewayStartMode)
             }
+            if (-not [bool]$script:DefenseClawRecoveryActivationDeferred) {
+                Restore-DefenseClawSnapshotHookAfterActivation `
+                    -Snapshot $snapshot `
+                    -Layout $Layout
+            }
         }
         # A user-owned file or CAS receipt cannot hold back restoration of
         # the machine files and prior services.
@@ -15588,6 +15732,7 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
         -GatewayServiceName ([string]$Snapshot.gateway_service) `
         -GuardianServiceName ([string]$Snapshot.guardian_service) `
         -ServicingTransaction `
+        -TransitionHookSHA256 (Get-DefenseClawEarlyHookField -Record $Snapshot -Name 'early_hook_guard_sha256') `
         -AllowTransactionRecordedBrokerAbsence:$brokerAbsentPreimage `
         -AllowTransactionRecordedEnumeratorAbsence:$enumeratorAbsentPreimage `
         -ExpectedGatewayAccount @(
@@ -16156,6 +16301,11 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
                 Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy `
                     -Snapshot $snapshot `
                     -Name $restoredSensorHelper
+            }
+            if (-not [bool]$script:DefenseClawRecoveryActivationDeferred) {
+                Restore-DefenseClawSnapshotHookAfterActivation `
+                    -Snapshot $snapshot `
+                    -Layout $Layout
             }
         }
         if (Test-DefenseClawStandaloneProfile) {
@@ -17248,10 +17398,22 @@ function Complete-DefenseClawInstallRollbackIntent {
             )) `
             -Expected $quarantineAcl
         Assert-DefenseClawManagedTreeNoReparse -Root $path
+        $removalOptions = @{}
+        if ([string]$claim[0] -ceq 'InstallRoot' -and
+            (Test-DefenseClawStandaloneProfile)) {
+            # A hook process already started from this fresh install may
+            # briefly hold its executable after registrations were restored.
+            # The protected rollback receipt and this exact quarantined root
+            # authorize a bounded retry; no other root gets that window.
+            $removalOptions.RetryHeldFileMilliseconds = 60000
+            $removalOptions.ExpectedRootIdentity = [string]$rechecked.Identity
+            $removalOptions.ExpectedRootSecurityDescriptor = [byte[]]$rechecked.SecurityDescriptor
+        }
         Remove-DefenseClawManagedTree `
             -Path $path `
             -RequiredBase ([string]$claim[3]) `
-            -Label ([string]$claim[0])
+            -Label ([string]$claim[0]) `
+            @removalOptions
         if ($null -ne
             $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists(
                 $path
@@ -18477,7 +18639,19 @@ function Publish-DefenseClawEarlyHook {
     if (-not [string]::Equals($liveHash, $copiedHash, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'the installed hook changed while its preimage was copied'
     }
+    # Keep a protected copy of this release's standalone hook for in-process
+    # and crash recovery. Restoring the 1.0.2/1.0.3 image while SCM is down
+    # would turn this transition into an open outage answer.
     $Intent['early_hook_preimage'] = $preimage
+    if (Test-DefenseClawStandaloneProfile) {
+        $guardCopy = Microsoft.PowerShell.Management\Join-Path $TransactionDirectory 'early-hook-closed.exe'
+        Install-DefenseClawSourceDescriptor -Source $Source -Destination $guardCopy
+        $Intent['early_hook_preimage_sha256'] = $copiedHash.ToLowerInvariant()
+        $Intent['early_hook_guard_copy'] = $guardCopy
+        $Intent['early_hook_guard_sha256'] = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $guardCopy -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    }
     Write-DefenseClawJsonAtomic -Value $Intent -Path $Layout.PendingPath
     Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath
     # GAP-1070: a call the replaced release's hook took before the swap (one
@@ -18551,10 +18725,10 @@ function Wait-DefenseClawPriorHookCalls {
 
 function Restore-DefenseClawEarlyHook {
     <#
-        GAP-0993: puts the prior release's hook back (Publish-DefenseClawEarlyHook)
-        before a quiescing transaction that did not reach its snapshot restarts
-        the prior services. The intent may only name early-hook.bak in its own
-        transaction directory. Nothing is done when the intent names none.
+        GAP-0993: puts the prior release's hook back after the restored
+        standalone gateway passes readiness, or before Secure Client's
+        original service restart. The intent may only name early-hook.bak in
+        its own transaction directory. Nothing is done when it names none.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -18582,7 +18756,118 @@ function Restore-DefenseClawEarlyHook {
         throw 'pending lifecycle quiescing intent names a hook preimage that is missing'
     }
     Assert-DefenseClawNoReparsePath -Path $expected
-    Install-DefenseClawFileAtomic -Source $expected -Destination $Layout.HookPath
+    $digest = if ($Intent -is [Collections.IDictionary]) {
+        [string]$Intent['early_hook_preimage_sha256']
+    }
+    else {
+        [string]$Intent.early_hook_preimage_sha256
+    }
+    Install-DefenseClawFileAtomic `
+        -Source $expected `
+        -Destination $Layout.HookPath `
+        -ExpectedSHA256 $digest `
+        -SkipIfContentMatches
+}
+
+# The early-hook guard fields of a lifecycle record (GAP-1305). A quiescing
+# intent or rollback snapshot written before them (a 1.0.x predecessor's, or a
+# test fixture) has no guard: read the field as empty instead of failing a
+# strict-mode property lookup, so Hold-DefenseClawEarlyHookGuard returns ''.
+function Get-DefenseClawEarlyHookField {
+    param($Record, [Parameter(Mandatory)][string]$Name)
+    if ($null -eq $Record) { return '' }
+    if ($Record -is [Collections.IDictionary]) {
+        if ($Record.Contains($Name)) { return [string]$Record[$Name] }
+        return ''
+    }
+    $property = $Record.PSObject.Properties[$Name]
+    if ($null -eq $property) { return '' }
+    return [string]$property.Value
+}
+
+function Hold-DefenseClawEarlyHookGuard {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$TransactionDirectory,
+        [AllowEmptyString()][string]$GuardCopy,
+        [AllowEmptyString()][string]$GuardSHA256
+    )
+    if ([string]::IsNullOrWhiteSpace($GuardCopy) -and
+        [string]::IsNullOrWhiteSpace($GuardSHA256)) {
+        return ''
+    }
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        $GuardSHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]::IsNullOrWhiteSpace($GuardCopy)) {
+        throw 'pending lifecycle has an invalid closed hook guard'
+    }
+    $expected = Microsoft.PowerShell.Management\Join-Path $TransactionDirectory 'early-hook-closed.exe'
+    if (-not [string]::Equals(
+            [IO.Path]::GetFullPath($GuardCopy),
+            [IO.Path]::GetFullPath($expected),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'pending lifecycle names an unexpected closed hook guard'
+    }
+    Assert-DefenseClawNoReparsePath -Path $expected
+    $digest = (
+        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $expected -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($digest -cne $GuardSHA256) {
+        throw 'pending lifecycle closed hook guard changed'
+    }
+    Install-DefenseClawFileAtomic `
+        -Source $expected `
+        -Destination $Layout.HookPath `
+        -ExpectedSHA256 $GuardSHA256 `
+        -SkipIfContentMatches
+    $live = (
+        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($live -cne $GuardSHA256) {
+        throw 'pending lifecycle closed hook guard was not published'
+    }
+    return $GuardSHA256
+}
+
+function Restore-DefenseClawSnapshotHookAfterActivation {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    if ([string]::IsNullOrWhiteSpace((Get-DefenseClawEarlyHookField -Record $Snapshot -Name 'early_hook_guard_copy'))) {
+        return
+    }
+    # The restored service set has passed Start-DefenseClawTransactionServices
+    # by this point. The old hook may again answer its administrator's outage
+    # setting only now, after the rollback's readiness and boot policy proof.
+    $oldDigest = [string]$Snapshot.early_hook_preimage_sha256
+    if ($oldDigest -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'pending lifecycle has an invalid previous hook digest'
+    }
+    $rows = @($Snapshot.files | Microsoft.PowerShell.Core\Where-Object {
+        [string]::Equals(
+            [IO.Path]::GetFullPath([string]$_.path),
+            [IO.Path]::GetFullPath([string]$Layout.HookPath),
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    })
+    if ($rows.Count -ne 1 -or -not [bool]$rows[0].existed) {
+        throw 'pending lifecycle has no unique prior hook preimage'
+    }
+    $backup = [string]$rows[0].backup
+    Assert-DefenseClawDescendant -Path $backup -Root $Layout.StateRoot -Label 'transaction hook backup' |
+        Microsoft.PowerShell.Core\Out-Null
+    Install-DefenseClawFileAtomic `
+        -Source $backup `
+        -Destination $Layout.HookPath `
+        -ExpectedSHA256 $oldDigest `
+        -SkipIfContentMatches
+    $live = (
+        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($live -cne $oldDigest) {
+        throw 'restored prior hook digest does not match its transaction preimage'
+    }
 }
 
 function Recover-DefenseClawQuiescingIntent {
@@ -18776,6 +19061,11 @@ function Recover-DefenseClawQuiescingIntent {
                     -GatewayServiceName $GatewayServiceName)
         }
     }
+    [void](Hold-DefenseClawEarlyHookGuard `
+        -Layout $Layout `
+        -TransactionDirectory $recordedDirectory `
+        -GuardCopy (Get-DefenseClawEarlyHookField -Record $Intent -Name 'early_hook_guard_copy') `
+        -GuardSHA256 (Get-DefenseClawEarlyHookField -Record $Intent -Name 'early_hook_guard_sha256'))
     # A process/reboot recovery never trusts elapsed wall time from the prior
     # process. Reestablish both disabled+stopped, publish a fresh durable
     # quiescence point, and drain the complete failure-action window.
@@ -18844,10 +19134,12 @@ function Recover-DefenseClawQuiescingIntent {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
     }
-    # An interrupted upgrade may have put its hook in place before it
-    # stopped the services: the prior release's hook answers for the
-    # services restarted below (GAP-0993).
-    Restore-DefenseClawEarlyHook -Layout $Layout -Intent $Intent -TransactionDirectory $recordedDirectory
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        Restore-DefenseClawEarlyHook `
+            -Layout $Layout `
+            -Intent $Intent `
+            -TransactionDirectory $recordedDirectory
+    }
     Set-DefenseClawServiceActivationPhase `
         -State $Intent `
         -Path $Layout.PendingPath `
@@ -18858,6 +19150,13 @@ function Recover-DefenseClawQuiescingIntent {
         -ServicesQuiescedAt $recoveryQuiescedAt `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
+    if ((Test-DefenseClawStandaloneProfile) -and
+        -not [bool]$script:DefenseClawRecoveryActivationDeferred) {
+        Restore-DefenseClawEarlyHook `
+            -Layout $Layout `
+            -Intent $Intent `
+            -TransactionDirectory $recordedDirectory
+    }
     $rollbackIntent = Publish-DefenseClawInstallRollbackIntent `
         -Snapshot $Intent `
         -Layout $Layout
@@ -24045,8 +24344,13 @@ function Assert-DefenseClawInstalledArtifacts {
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)]$Metadata
+        [Parameter(Mandatory)]$Metadata,
+        [string]$TransitionHookSHA256 = ''
     )
+    if ($TransitionHookSHA256 -ne '' -and
+        $TransitionHookSHA256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'servicing transition hook digest is invalid'
+    }
     foreach ($property in $Metadata.hashes.PSObject.Properties) {
         # Must cover every key the hash writer emits.
         $path = switch ($property.Name) {
@@ -24065,7 +24369,14 @@ function Assert-DefenseClawInstalledArtifacts {
             throw "installed artifact recorded in metadata is missing: $($property.Name)"
         }
         $actualHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualHash -cne ([string]$property.Value).ToLowerInvariant()) {
+        $expectedHash = if ($property.Name -ceq 'hook' -and
+            $TransitionHookSHA256 -ne '') {
+            $TransitionHookSHA256
+        }
+        else {
+            ([string]$property.Value).ToLowerInvariant()
+        }
+        if ($actualHash -cne $expectedHash) {
             throw "installed artifact hash drift: $($property.Name)"
         }
     }
@@ -24079,6 +24390,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         [switch]$RequireReadiness,
         [switch]$PendingTransaction,
         [switch]$ServicingTransaction,
+        [string]$TransitionHookSHA256 = '',
         # Restore-only: an authenticated servicing preimage that predates the
         # Broker or Enumerator. Ordinary callers keep the full service set.
         [switch]$AllowTransactionRecordedBrokerAbsence,
@@ -24094,6 +24406,10 @@ function Assert-DefenseClawEnterpriseDeployment {
     }
     if ($RequireReadiness -and $ServicingTransaction) {
         throw 'disabled servicing state cannot satisfy live readiness'
+    }
+    if ($TransitionHookSHA256 -ne '' -and
+        (-not $ServicingTransaction -or -not (Test-DefenseClawStandaloneProfile))) {
+        throw 'a transition hook is valid only for standalone transaction restoration'
     }
     if (($AllowTransactionRecordedBrokerAbsence -or
             $AllowTransactionRecordedEnumeratorAbsence) -and
@@ -24734,7 +25050,10 @@ function Assert-DefenseClawEnterpriseDeployment {
         $null -eq $metadata.hashes.PSObject.Properties['cli']) {
         throw 'deployment metadata is missing the installed CLI artifact hash'
     }
-    Assert-DefenseClawInstalledArtifacts -Layout $Layout -Metadata $metadata
+    Assert-DefenseClawInstalledArtifacts `
+        -Layout $Layout `
+        -Metadata $metadata `
+        -TransitionHookSHA256 $TransitionHookSHA256
 
     $gatewayEnvironment = [Collections.Generic.List[string]]::new()
     foreach ($value in @(
@@ -26992,6 +27311,28 @@ function Restore-DefenseClawRetainedStateAclsFromTransaction {
         -Expected $expected
 }
 
+function Test-DefenseClawManagedTreeRetryRoot {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ExpectedIdentity,
+        [Parameter(Mandatory)][byte[]]$ExpectedSecurityDescriptor
+    )
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $current = $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists($Path)
+    if ($null -eq $current) {
+        return $false
+    }
+    if ([string]$current.Identity -cne $ExpectedIdentity) {
+        throw 'transaction-created InstallRoot identity changed during rollback deletion'
+    }
+    if ([Convert]::ToBase64String([byte[]]$current.SecurityDescriptor) -cne
+        [Convert]::ToBase64String($ExpectedSecurityDescriptor)) {
+        throw 'transaction-created InstallRoot security descriptor changed during rollback deletion'
+    }
+    Assert-DefenseClawManagedTreeNoReparse -Root $Path
+    return $true
+}
+
 function Remove-DefenseClawManagedTree {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -27002,10 +27343,32 @@ function Remove-DefenseClawManagedTree {
         # specify the AF_UNIX socket's exact full path so a stale
         # socket-reparse-point does not trip the pre-remove reparse
         # veto. Callers on other trees leave it empty for strict mode.
-        [string]$AllowAFUnixSocketAt = ''
+        [string]$AllowAFUnixSocketAt = '',
+        [int]$RetryHeldFileMilliseconds = 0,
+        [string]$ExpectedRootIdentity = '',
+        [byte[]]$ExpectedRootSecurityDescriptor
     )
+    if ($RetryHeldFileMilliseconds -lt 0 -or
+        $RetryHeldFileMilliseconds -gt 60000) {
+        throw 'rollback InstallRoot holder retry must be between 0 and 60000 milliseconds'
+    }
+    if ($RetryHeldFileMilliseconds -gt 0 -and
+        ($Label -cne 'InstallRoot' -or
+            -not (Test-DefenseClawStandaloneProfile) -or
+            $ExpectedRootIdentity -cnotmatch '^[0-9a-f]{8}:[0-9a-f]{16}$' -or
+            $null -eq $ExpectedRootSecurityDescriptor -or
+            $ExpectedRootSecurityDescriptor.Length -eq 0)) {
+        throw 'rollback InstallRoot holder retry requires the standalone profile and a recorded root identity and descriptor'
+    }
     $safe = Assert-DefenseClawSafeRoot -Path $Path -Label $Label -RequiredBase $RequiredBase
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
+        return
+    }
+    if ($RetryHeldFileMilliseconds -gt 0 -and
+        -not (Test-DefenseClawManagedTreeRetryRoot `
+            -Path $safe `
+            -ExpectedIdentity $ExpectedRootIdentity `
+            -ExpectedSecurityDescriptor $ExpectedRootSecurityDescriptor)) {
         return
     }
     Assert-DefenseClawManagedTreeNoReparse `
@@ -27043,6 +27406,39 @@ function Remove-DefenseClawManagedTree {
             $lastError = $_
             if ($attempt -lt 5) {
                 Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds (500 * $attempt)
+            }
+        }
+    }
+    if ($RetryHeldFileMilliseconds -gt 0 -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
+        # An executing hook answers AccessDenied even to SYSTEM. Extend the
+        # window only after Restart Manager proves a real holder; a deny ACE
+        # or an unqueryable root keeps the ordinary refusal. The protected
+        # rollback intent remains until the root is actually absent.
+        $holders = @(Get-DefenseClawInstallRootHolders `
+            -InstallRoot $safe `
+            -FailOnQueryError)
+        if ($holders.Count -gt 0) {
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            while ($clock.ElapsedMilliseconds -lt $RetryHeldFileMilliseconds) {
+                Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
+                if (-not (Test-DefenseClawManagedTreeRetryRoot `
+                    -Path $safe `
+                    -ExpectedIdentity $ExpectedRootIdentity `
+                    -ExpectedSecurityDescriptor $ExpectedRootSecurityDescriptor)) {
+                    return
+                }
+                try {
+                    Microsoft.PowerShell.Management\Remove-Item `
+                        -LiteralPath $target `
+                        -Recurse `
+                        -Force `
+                        -ErrorAction Stop
+                    return
+                }
+                catch {
+                    $lastError = $_
+                }
             }
         }
     }
@@ -33817,11 +34213,19 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawServiceStartMode `
                 -Name $GuardianServiceName `
                 -StartMode 3
-            [void](Wait-DefenseClawFreshGuardianReconcile `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName `
-                -ExpectedManifestSHA256 $expectedGuardianManifestSHA256)
+            try {
+                [void](Wait-DefenseClawFreshGuardianReconcile `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName `
+                    -ExpectedManifestSHA256 $expectedGuardianManifestSHA256)
+            }
+            finally {
+                if (Test-DefenseClawStandaloneProfile) {
+                    Set-DefenseClawUserNativeOTLPTransactionPostimages `
+                        -SnapshotPath $snapshot -Layout $Layout
+                }
+            }
             # The protected Guardian receipt is now exact for this manifest.
             # Promote the monotonic deployment activation state inside the
             # still-open transaction before the gateway can become startable.

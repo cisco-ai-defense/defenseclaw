@@ -1152,7 +1152,8 @@ function Resume-WrapperSecretJournal {
     # first. The journal is held first (Enter-WrapperRotationLock), so an
     # entry a concurrent run is still settling is waited for, never taken. A
     # journal that fails its check, or a deployment this run cannot trust,
-    # keeps every entry for a later run.
+    # keeps every entry for a later run and stops this ensure before it can
+    # install a config that adopts the unsettled credential.
     $problems = @()
     try {
         $held = Enter-WrapperRotationLock
@@ -1165,12 +1166,18 @@ function Resume-WrapperSecretJournal {
         try {
             $deployment = Get-DefenseClawInstalledDeployment
             $cli = if ($null -ne $deployment) { $deployment.Cli } else { '' }
-        } catch { $cli = $null }
+        } catch {
+            $cli = $null
+            $problems += "the installed deployment could not be inspected before credential journal replay: $($_.Exception.Message)"
+        }
         if ($null -ne $cli) { $problems += @(Complete-WrapperSecretJournal -Cli $cli -Restore) }
     }
     foreach ($problem in $problems) {
         Write-WrapperLog -Message $problem
         [Console]::Error.WriteLine($problem)
+    }
+    if ($problems.Count -gt 0) {
+        Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' 'the credential journal is not settled; no lifecycle change was started; inspect the logged problem and retry after it is resolved'
     }
 }
 

@@ -206,6 +206,7 @@ func TestIsSQLiteBusy_CodedDetection(t *testing.T) {
 		want bool
 	}{
 		{"sqlite_busy_typed", &codedErr{code: sqliteCodeBusy, msg: "busy"}, true},
+		{"sqlite_busy_snapshot_typed", &codedErr{code: sqliteCodeBusy | 2<<8, msg: "snapshot"}, true},
 		{"sqlite_locked_typed", &codedErr{code: sqliteCodeLocked, msg: "locked"}, true},
 		{"sqlite_constraint_typed", &codedErr{code: 19, msg: "constraint"}, false},
 		{"wrapped_typed_busy", fmt.Errorf("audit: %w", &codedErr{code: sqliteCodeBusy, msg: "busy"}), true},

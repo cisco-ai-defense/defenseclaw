@@ -103,13 +103,6 @@ func NewPerUserGatewayHTTPClient(timeout time.Duration, apiAddr string) (*http.C
 // sent a status line.
 var errPerUserAnswerIncomplete = errors.New("per-user gateway answer incomplete")
 
-// errPerUserPeerUnverified wraps every failure to prove that this account
-// owns the listener that accepted a per-user connection. A listener took the
-// connection, so it is never a gateway outage, whatever the cause: a socket
-// table or lsof that cannot be read fails with ENOENT, which alone reads as
-// a missing endpoint (gatewayRestartShaped).
-var errPerUserPeerUnverified = errors.New("per-user gateway connected listener is unverified")
-
 // PerUserPostOutageExit is the exit status of `hook-post` for a gateway
 // outage (PerUserPostOutage), curl's "could not connect" status, which the
 // shell hooks and in-agent plugins already read as this account's gateway
@@ -211,12 +204,9 @@ func verifiedPerUserHTTPClient(
 				if err != nil {
 					return nil, err
 				}
-				// A listener took the connection: the try is connected
-				// (connectBy) while its owner is checked.
-				markGatewayAccepted(ctx)
 				if err := verify(conn); err != nil {
 					_ = conn.Close()
-					return nil, fmt.Errorf("%w: %w", errPerUserPeerUnverified, err)
+					return nil, fmt.Errorf("per-user gateway connected listener is unverified: %w", err)
 				}
 				return conn, nil
 			},

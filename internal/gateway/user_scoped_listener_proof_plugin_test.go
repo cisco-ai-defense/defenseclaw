@@ -43,6 +43,7 @@ func renderListenerProofPlugin(t *testing.T, asset, addr, tokenPath string) []by
 		"{{.ServiceUID}}", "0",
 		"{{.ForeignHookGuardJS}}", "",
 		"{{.InstallMarkerJS}}", "",
+		"{{.LifecycleMarkerJS}}", "",
 		"{{.ListenerProofJS}}", "1",
 		"{{.OutageFailMode}}", "closed",
 	).Replace(string(body))
