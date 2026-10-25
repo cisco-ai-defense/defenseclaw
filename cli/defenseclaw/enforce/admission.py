@@ -79,6 +79,14 @@ _SHORTHANDS = {
 }
 
 
+def action_blocks(action: SeverityAction) -> bool:
+    """Whether an admission action refuses the asset (Go
+    ``CompiledAction.blocks``, admission.rego ``_should_reject``): install
+    block, runtime disable or file quarantine. A quarantine alone is a
+    refusal, never a warning (GAP-1442)."""
+    return action.install == "block" or action.runtime == "disable" or action.file == "quarantine"
+
+
 def triple_shorthand(triple: Any) -> str:
     """The shorthand a config ``{install, file, runtime}`` triple spells, or
     "" when it matches none. ``allow`` shares ``warn``'s triple, so it reads
@@ -549,7 +557,7 @@ def evaluate_admission(
         return _done(AdmissionDecision("clean", "scan clean", action=_WARN, source="scan-clean"))
 
     detail = f"{finding_count} {'finding' if finding_count == 1 else 'findings'}, max {severity}"
-    if action.install == "block" or action.runtime == "disable":
+    if action_blocks(action):
         return _done(AdmissionDecision("rejected", detail, action=action, source="scan-rejected"))
     if allow:
         return _done(AdmissionDecision("allowed", detail, action=action, source="scan-allowed"))

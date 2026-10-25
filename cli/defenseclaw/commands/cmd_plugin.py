@@ -577,7 +577,7 @@ def _plugin_scan_findings_verdict(
     sev = str(result.max_severity()).upper()
     try:
         from defenseclaw.enforce import PolicyEngine
-        from defenseclaw.enforce.admission import evaluate_admission
+        from defenseclaw.enforce.admission import action_blocks, evaluate_admission
 
         pe = PolicyEngine(app.store, app.cfg)
         try:
@@ -594,7 +594,7 @@ def _plugin_scan_findings_verdict(
             scan_result=result,
             connector=connector,
         )
-        blocks = decision.verdict != "allowed" and decision.action.install == "block"
+        blocks = decision.verdict != "allowed" and action_blocks(decision.action)
     except Exception:  # noqa: BLE001 - an admission failure must not read as clean.
         blocks = True
     return (_scan_ui.VERDICT_INFO if sev == "INFO" else _scan_ui.VERDICT_WARN), blocks
@@ -2027,7 +2027,12 @@ def _scan_installed_plugin_for_connector(
 
     if not take_action:
         sev_norm = (sev or "").strip().upper()
-        if sev_norm in {"HIGH", "CRITICAL"}:
+        # A HIGH or CRITICAL finding, and any verdict the admission policy
+        # rejects (a quarantine or block at any severity), refuses the
+        # install without --action; it is never installed with a warning
+        # (GAP-1442). Secure Client keeps its HIGH/CRITICAL refusal.
+        rejected = post_decision.verdict == "rejected" and not asset_lists.is_secure_client(app.cfg)
+        if sev_norm in {"HIGH", "CRITICAL"} or rejected:
             if rollback:
                 rollback()
             else:
@@ -2044,7 +2049,8 @@ def _scan_installed_plugin_for_connector(
                 saved_change_audit(app.logger).log_action(
                     "install-rejected",
                     plugin_name,
-                    f"{detail} result=refused reason=critical-without-action",
+                    f"{detail} result=refused reason="
+                    + ("rejected-without-action" if rejected else "critical-without-action"),
                 )
             raise SystemExit(1)
         ux.echo(
@@ -2063,6 +2069,7 @@ def _scan_installed_plugin_for_connector(
         saved_change_audit(app.logger).log_scan(result, connector=connector)
     enforcement_reason = f"post-install scan: {len(result.findings)} findings, max={sev}"
     applied_actions: list[str] = []
+    failed_actions: list[str] = []
 
     if action_cfg.file == "quarantine":
         pe.set_source_path("plugin", plugin_name, plugin_path, connector)
@@ -2073,6 +2080,7 @@ def _scan_installed_plugin_for_connector(
             pe.quarantine_for_connector("plugin", plugin_name, connector, enforcement_reason)
         else:
             click.echo("[install] quarantine failed", err=True)
+            failed_actions.append("quarantine")
 
     if action_cfg.runtime == "disable":
         target_connector = _normalize_runtime_connector(connector)
@@ -2084,6 +2092,7 @@ def _scan_installed_plugin_for_connector(
                 pe.disable_for_connector("plugin", plugin_name, connector, enforcement_reason)
             except Exception as exc:
                 click.echo(f"[install] gateway disable failed: {exc}", err=True)
+                failed_actions.append("runtime disable")
         else:
             applied_actions.append(f"runtime disable recorded for connector={connector}")
             pe.disable_for_connector("plugin", plugin_name, connector, enforcement_reason)
@@ -2091,6 +2100,29 @@ def _scan_installed_plugin_for_connector(
     if action_cfg.install == "block":
         pe.record_scan_block("plugin", plugin_name, connector, enforcement_reason)
         applied_actions.append("install blocked by this scan")
+
+    if failed_actions or (post_decision.verdict == "rejected" and not applied_actions):
+        # A refusal whose quarantine or disable could not be applied is
+        # still a refusal: the install is rolled back and the command fails,
+        # never a warning with the plugin left in place (GAP-1457).
+        if rollback:
+            rollback()
+        else:
+            _rollback_plugin_install_paths([plugin_path])
+        failed = ", ".join(failed_actions) or "enforcement"
+        ux.echo(
+            f"error: refusing to install {plugin_name!r} for connector={connector} — "
+            f"the admission policy rejects its {sev} findings and the {failed} failed; "
+            "the install was rolled back",
+            err=True,
+        )
+        if app.logger:
+            saved_change_audit(app.logger).log_action(
+                "install-rejected",
+                plugin_name,
+                f"{detail} result=refused reason=enforcement-failed failed={failed.replace(' ', '-')}",
+            )
+        raise SystemExit(1)
 
     pe.set_source_path("plugin", plugin_name, plugin_path, connector)
 

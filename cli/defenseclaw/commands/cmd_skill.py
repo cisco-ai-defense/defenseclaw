@@ -1806,7 +1806,7 @@ def _skill_scan_would_install_block(
 ) -> bool:
     if result.is_clean():
         return False
-    from defenseclaw.enforce.admission import evaluate_admission
+    from defenseclaw.enforce.admission import action_blocks, evaluate_admission
 
     eval_connector = connector or (
         app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else ""
@@ -1822,7 +1822,7 @@ def _skill_scan_would_install_block(
     )
     if decision.verdict == "allowed":
         return False
-    return decision.action.install == "block"
+    return action_blocks(decision.action)
 
 
 @skill.command()
@@ -5672,6 +5672,25 @@ def _scan_installed_skill_for_connector(
     detail = f"severity={sev} findings={len(result.findings)} connector={connector}" + _decision_generation(app)
 
     if not take_action:
+        if post_decision.verdict == "rejected" and not asset_lists.is_secure_client(app.cfg):
+            # A verdict the admission policy rejects (a quarantine or block)
+            # refuses the install without --action, as for plugins; it is
+            # never installed with a warning (GAP-1466).
+            _rollback_skill_install_paths(rollback_paths or [skill_path])
+            ux.echo(
+                f"error: refusing to install {skill_name!r} for connector={connector} — "
+                f"the admission policy rejects its {len(result.findings)} {sev} findings "
+                f"({post_decision.reason}). Run with --action to enforce, or "
+                f"`defenseclaw skill allow {skill_name}` to explicitly accept the risk.",
+                err=True,
+            )
+            if app.logger:
+                saved_change_audit(app.logger).log_action(
+                    "install-rejected",
+                    skill_name,
+                    f"{detail} result=refused reason=rejected-without-action",
+                )
+            raise SystemExit(1)
         ux.echo(
             f"[install] {len(result.findings)} {sev} findings in {skill_name!r} "
             f"(connector={connector}; no action taken — pass --action to enforce)"
@@ -5685,6 +5704,7 @@ def _scan_installed_skill_for_connector(
         f"post-install scan: {len(result.findings)} findings, max={sev}"
     )
     applied_actions: list[str] = []
+    failed_actions: list[str] = []
 
     if action_cfg.file == "quarantine":
         dest = _quarantine_skill_with_provenance(
@@ -5699,6 +5719,7 @@ def _scan_installed_skill_for_connector(
             applied_actions.append("quarantined")
         else:
             click.echo("[install] quarantine failed", err=True)
+            failed_actions.append("quarantine")
 
     if action_cfg.runtime == "disable":
         target_connector = _normalize_runtime_connector(connector)
@@ -5710,6 +5731,7 @@ def _scan_installed_skill_for_connector(
                 pe.disable_for_connector("skill", skill_name, connector, enforcement_reason)
             except Exception as exc:
                 click.echo(f"[install] gateway disable failed: {exc}", err=True)
+                failed_actions.append("runtime disable")
         else:
             applied_actions.append(f"runtime disable recorded for connector={connector}")
             pe.disable_for_connector("skill", skill_name, connector, enforcement_reason)
@@ -5717,6 +5739,26 @@ def _scan_installed_skill_for_connector(
     if action_cfg.install == "block":
         pe.record_scan_block("skill", skill_name, connector, enforcement_reason)
         applied_actions.append("install blocked by this scan")
+
+    if failed_actions or (post_decision.verdict == "rejected" and not applied_actions):
+        # A refusal whose quarantine or disable could not be applied is
+        # still a refusal: the install is rolled back and the command fails,
+        # never a warning with the skill left in place (GAP-1457, GAP-1466).
+        _rollback_skill_install_paths(rollback_paths or [skill_path])
+        failed = ", ".join(failed_actions) or "enforcement"
+        ux.echo(
+            f"error: refusing to install {skill_name!r} for connector={connector} — "
+            f"the admission policy rejects its {sev} findings and the {failed} failed; "
+            "the install was rolled back",
+            err=True,
+        )
+        if app.logger:
+            saved_change_audit(app.logger).log_action(
+                "install-rejected",
+                skill_name,
+                f"{detail} result=refused reason=enforcement-failed failed={failed.replace(' ', '-')}",
+            )
+        raise SystemExit(1)
 
     pe.set_source_path("skill", skill_name, skill_path, connector)
 

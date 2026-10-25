@@ -3604,6 +3604,97 @@ class TestPluginBareUnblockConfigScopes(PluginCommandTestBase):
         )
 
 
+class TestPluginInstallQuarantineNeverWarns(PluginCommandTestBase):
+    """GAP-1442/GAP-1457: once admission decides a quarantine or block, the
+    plugin install refuses it (rolled back, exit 1, install-rejected row),
+    with or without --action, at any severity, and also when the quarantine
+    move or the gateway disable fails. It is never an install-warning."""
+
+    FILE_ONLY = {"install": "none", "file": "quarantine", "runtime": "enable"}
+    RUNTIME_ONLY = {"install": "none", "file": "none", "runtime": "disable"}
+
+    def _install(self, name, args, action):
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.models import Finding, ScanResult
+
+        self.app.cfg.admission.plugin.actions["medium"] = action
+        src = self._create_plugin_dir(name)
+        scanned: list[str] = []
+
+        def scan(_self, path, *a, **kw):
+            scanned.append(path)
+            return ScanResult(
+                scanner="plugin-scanner", target=path, timestamp=datetime.now(timezone.utc),
+                findings=[Finding(id="m1", severity="MEDIUM", title="broad permissions",
+                                  description="d", scanner="plugin-scanner")],
+                duration=timedelta(seconds=0.1),
+            )
+
+        with patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan", new=scan), \
+                patch("defenseclaw.registry.fetch_npm_package", return_value=src):
+            result = self.runner.invoke(plugin, ["install", *args, name], obj=self.app, catch_exceptions=True)
+        return result, scanned
+
+    def _assert_refused(self, result, scanned, reason):
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("refusing to install", result.output)
+        self.assertTrue(scanned)
+        for path in scanned:
+            self.assertFalse(os.path.exists(path), f"refused plugin left installed at {path}")
+        events = self.app.store.list_events(50)
+        self.assertFalse([e for e in events if e.action == "install-warning"], "a refusal logged install-warning")
+        rejected = [e for e in events if e.action == "install-rejected"]
+        self.assertTrue(rejected and reason in rejected[0].details, [e.details for e in rejected])
+
+    def test_no_action_refuses_a_medium_file_only_quarantine(self):
+        result, scanned = self._install("fq-pkg", [], self.FILE_ONLY)
+        self._assert_refused(result, scanned, "reason=rejected-without-action")
+
+    def test_no_action_refuses_a_medium_runtime_only_disable(self):
+        result, scanned = self._install("rd-pkg", [], self.RUNTIME_ONLY)
+        self._assert_refused(result, scanned, "reason=rejected-without-action")
+
+    def test_action_refuses_when_the_quarantine_move_fails(self):
+        with patch.object(PluginEnforcer, "quarantine", return_value=None):
+            result, scanned = self._install("qfail-pkg", ["--action"], self.FILE_ONLY)
+        self._assert_refused(result, scanned, "reason=enforcement-failed failed=quarantine")
+
+    def test_action_refuses_when_the_gateway_disable_fails(self):
+        with patch("defenseclaw.gateway.OrchestratorClient.disable_plugin", side_effect=RuntimeError("down")):
+            result, scanned = self._install("dfail-pkg", ["--action"], self.RUNTIME_ONLY)
+        self._assert_refused(result, scanned, "reason=enforcement-failed failed=runtime-disable")
+
+    def test_action_file_only_quarantine_moves_it(self):
+        result, scanned = self._install("fq-moved-pkg", ["--action"], self.FILE_ONLY)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("quarantined to", result.output)
+        self.assertFalse(os.path.exists(scanned[0]))
+
+    def test_a_medium_warn_still_installs_with_a_warning(self):
+        result, scanned = self._install("warn-pkg", [], {"install": "none", "file": "none", "runtime": "enable"})
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(os.path.isdir(scanned[0]))
+
+    def test_plugin_scan_reports_a_file_only_quarantine_as_rejected(self):
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.commands.cmd_plugin import _plugin_scan_findings_verdict
+        from defenseclaw.models import Finding, ScanResult
+
+        self.app.cfg.admission.plugin.actions["medium"] = self.FILE_ONLY
+        result = ScanResult(
+            scanner="plugin-scanner", target="x", timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="m1", severity="MEDIUM", title="t", description="d", scanner="plugin-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+        path = self._install_plugin("scan-fq")
+        _verdict, rejects = _plugin_scan_findings_verdict(
+            self.app, result, name="scan-fq", path=path, connector="openclaw",
+        )
+        self.assertTrue(rejects)
+
+
 
 if __name__ == "__main__":
     unittest.main()

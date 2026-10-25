@@ -4109,3 +4109,84 @@ def test_info_card_policy_steps_one_per_line_with_connector(capsys):
     lines = capsys.readouterr().out.splitlines()
     assert "  Turn it off: defenseclaw skill disable fsav --connector claudecode" in lines
     assert "  Unblock it: defenseclaw skill unblock fsav --connector claudecode" in lines
+
+
+class TestSkillInstallQuarantineNeverWarns(SkillCommandTestBase):
+    """GAP-1466/GAP-1457: a skill the admission policy rejects (a quarantine
+    or block at any severity) is refused, rolled back, with an
+    install-rejected row, with or without --action, also when the
+    quarantine move or the gateway disable fails. Never an install-warning."""
+
+    FILE_ONLY = {"install": "none", "file": "quarantine", "runtime": "enable"}
+    RUNTIME_ONLY = {"install": "none", "file": "none", "runtime": "disable"}
+
+    def _fake_clawhub_install(self, skill_name, _force, cwd=None):
+        skill_dir = os.path.join(cwd or self.tmp_dir, "skills", skill_name)
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(f"# {skill_name}\n")
+
+    def _install(self, name, args, action):
+        self.app.cfg.admission.skill.actions["medium"] = action
+        scanned: list[str] = []
+
+        def scan(_self, path, *a, **kw):
+            scanned.append(path)
+            return ScanResult(
+                scanner="skill-scanner", target=path, timestamp=datetime.now(timezone.utc),
+                findings=[Finding(id="m1", severity="MEDIUM", title="broad permissions", scanner="skill-scanner")],
+                duration=timedelta(seconds=0.1),
+            )
+
+        with patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan", new=scan), \
+                patch("defenseclaw.commands.cmd_skill._run_clawhub_install", side_effect=self._fake_clawhub_install):
+            result = self.runner.invoke(skill, ["install", *args, name], obj=self.app, catch_exceptions=True)
+        return result, scanned
+
+    def _assert_refused(self, result, scanned, reason):
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("refusing to install", result.output)
+        self.assertTrue(scanned)
+        for path in scanned:
+            self.assertFalse(os.path.exists(path), f"refused skill left installed at {path}")
+        events = self.app.store.list_events(50)
+        self.assertFalse([e for e in events if e.action == "install-warning"], "a refusal logged install-warning")
+        rejected = [e for e in events if e.action == "install-rejected"]
+        self.assertTrue(rejected and reason in rejected[0].details, [e.details for e in rejected])
+
+    def test_no_action_refuses_a_medium_file_only_quarantine(self):
+        result, scanned = self._install("fq-skill", [], self.FILE_ONLY)
+        self._assert_refused(result, scanned, "reason=rejected-without-action")
+
+    def test_no_action_refuses_the_quarantine_shorthand(self):
+        result, scanned = self._install("q-skill", [], "quarantine")
+        self._assert_refused(result, scanned, "reason=rejected-without-action")
+
+    def test_action_refuses_when_the_quarantine_move_fails(self):
+        with patch("defenseclaw.commands.cmd_skill._quarantine_skill_with_provenance", return_value=None):
+            result, scanned = self._install("qfail-skill", ["--action"], self.FILE_ONLY)
+        self._assert_refused(result, scanned, "reason=enforcement-failed failed=quarantine")
+
+    def test_action_refuses_when_the_gateway_disable_fails(self):
+        with patch("defenseclaw.commands.cmd_skill._normalize_runtime_connector", return_value="openclaw"), \
+                patch("defenseclaw.gateway.OrchestratorClient.disable_skill", side_effect=RuntimeError("down")):
+            result, scanned = self._install("dfail-skill", ["--action"], self.RUNTIME_ONLY)
+        self._assert_refused(result, scanned, "reason=enforcement-failed failed=runtime-disable")
+
+    def test_a_medium_warn_still_installs_with_a_warning(self):
+        result, scanned = self._install("warn-skill", [], {"install": "none", "file": "none", "runtime": "enable"})
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(os.path.isdir(scanned[0]))
+        self.assertTrue([e for e in self.app.store.list_events(50) if e.action == "install-warning"])
+
+    def test_skill_scan_reports_a_file_only_quarantine_as_blocking(self):
+        from defenseclaw.commands.cmd_skill import _skill_scan_would_install_block
+
+        self.app.cfg.admission.skill.actions["medium"] = self.FILE_ONLY
+        result = ScanResult(
+            scanner="skill-scanner", target="x", timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="m1", severity="MEDIUM", title="t", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+        pe = PolicyEngine(self.app.store, self.app.cfg)
+        self.assertTrue(_skill_scan_would_install_block(self.app, pe, "x", self.tmp_dir, result, connector="openclaw"))
