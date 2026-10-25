@@ -78,12 +78,27 @@ func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, path: "/home/user/.ssh/authorized_keys"`, false},
 		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `description: ` + pad + `, ` + notes + `cmd: "cat /home/user/.ssh/authorized_keys"`, false},
 		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, overBudget + notes + `cmd: "cat /home/user/.ssh/authorized_keys"`, true},
+		// Loop round 1 review of 06bb83dd: any argument key, past a head or
+		// after notes that spent the head budget, is kept whole.
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `content: ` + pad + `, location: "a".repeat(20000) + "/home/user/.ssh/authorized_keys"`, false},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `content: ` + pad + `, ` + notes + `location: "/home/user/.ssh/authorized_keys"`, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, location: "a".repeat(20000) + "/home/user/.ssh/authorized_keys"`, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, ` + notes + `location: "/home/user/.ssh/authorized_keys"`, false},
+		// A review over the native helper's 900 KiB body cap failed closed.
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `content: ` + pad + `, command: "a".repeat(905000) + " cat /home/user/.ssh/authorized_keys"`, true},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, command: "a".repeat(905000) + " cat /home/user/.ssh/authorized_keys"`, true},
 	} {
 		name := strings.SplitN(plugin.input, ":", 2)[0]
 		if strings.HasPrefix(plugin.input, overBudget) {
 			name = "over budget"
 		} else if strings.Contains(plugin.input, "note") {
 			name += " then notes"
+		}
+		if strings.Contains(plugin.input, "location:") {
+			name += " then a long location"
+		}
+		if strings.Contains(plugin.input, "905000") {
+			name += " over the transport cap"
 		}
 		t.Run(plugin.connector+" "+name, func(t *testing.T) {
 			var request []byte

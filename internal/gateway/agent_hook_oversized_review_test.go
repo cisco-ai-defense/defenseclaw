@@ -186,6 +186,13 @@ func TestOversizeUninspectedReviewWarnsInObserveAndBlocksInAction(t *testing.T) 
 			if answer.Severity != "HIGH" || !strings.Contains(answer.Reason, "oversize, command not inspected") {
 				t.Fatalf("answer lacks the uninspected reason: %+v", answer)
 			}
+			// Loop round 1 review of 06bb83dd: the review's own would-block
+			// finding (no verifiable command) stays next to the uninspected
+			// one in the answer and the audit row.
+			if !strings.Contains(strings.Join(answer.Findings, ","), "TOOL-ARGS-UNVERIFIED") ||
+				!strings.Contains(strings.Join(answer.Findings, ","), hookOversizeUninspectedRuleID) {
+				t.Fatalf("answer lost the review's own finding: %+v", answer.Findings)
+			}
 			events, err := store.ListEvents(20)
 			if err != nil {
 				t.Fatal(err)

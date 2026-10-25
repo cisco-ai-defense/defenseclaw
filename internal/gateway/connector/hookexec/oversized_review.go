@@ -13,16 +13,18 @@ const (
 	// oversizedReviewHead bounds a string the review keeps as context only
 	// (content, prompts, tool results).
 	oversizedReviewHead = 8 << 10
-	// oversizedReviewKeep bounds the command and target text kept verbatim,
-	// summed over every such field. A call whose command and target values do
-	// not all fit is reviewed as uninspected (OversizeUninspectedField).
+	// oversizedReviewKeep bounds the command, target and argument text kept
+	// verbatim, summed over every such field. A call whose values do not all
+	// fit is reviewed as uninspected (OversizeUninspectedField).
 	// oversizedReviewHeads bounds the context heads; only they shrink when
 	// the encoded review is too large.
-	oversizedReviewKeep  = 896 << 10
+	oversizedReviewKeep  = 832 << 10
 	oversizedReviewHeads = 192 << 10
 	// oversizedReviewMaxBytes is the encoded review size the reducer aims
-	// for, under the gateway's 1 MiB request cap.
-	oversizedReviewMaxBytes = 960 << 10
+	// for: the per-user transports' body cap, under the gateway's 1 MiB
+	// request cap. A larger review was refused by the shell hooks' transport
+	// and failed closed, even in the balanced default.
+	oversizedReviewMaxBytes = perUserHookMaxBody
 	oversizedReviewMaxDepth = 128
 )
 
@@ -40,7 +42,9 @@ const OversizeUninspectedField = "oversize_command_not_inspected"
 // Codex shell "command" arrays, Copilot "toolArgs"), patches (Codex
 // apply_patch "input"/"patch"), scripts and every path or target form. The
 // review keeps their values, and everything nested in them, verbatim, or
-// sends no review at all. Keys are compared lower-case without '_' and '-'.
+// marks itself uninspected. The call's arguments (tool_input, toolArgs) are
+// kept the same way, except their file text (oversizedReviewBulkKeys). Keys
+// are compared lower-case without '_' and '-'.
 var oversizedReviewKeys = map[string]bool{
 	"cmd": true, "command": true, "commands": true, "commandline": true,
 	"args": true, "arguments": true, "argv": true, "toolargs": true,
@@ -53,22 +57,45 @@ var oversizedReviewKeys = map[string]bool{
 	"directory": true, "dir": true,
 }
 
-func oversizedReviewKey(key string) bool {
-	key = strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(key))
-	return oversizedReviewKeys[key]
+// oversizedReviewBulkKeys are the file text and description fields of the
+// call's arguments (Write content, Edit and Copilot old/new strings,
+// MultiEdit edits, NotebookEdit new_source, Copilot file_text, a shell
+// description). They keep an 8 KiB head like context. Every other value of
+// the arguments is kept whole, whatever its key, or the review is marked
+// uninspected: an agent (an MCP server above all) may act on any argument,
+// and the gateway reads all of them.
+var oversizedReviewBulkKeys = map[string]bool{
+	"content": true, "oldstring": true, "newstring": true, "oldstr": true, "newstr": true,
+	"edits": true, "newsource": true, "filetext": true, "description": true,
+}
+
+// oversizedReviewFileTools maps the file tools whose arguments name exactly
+// one target to that key. Once the target is read whole, the cap cutting
+// their file text hides no target: the agent acts on no other key. A cut in
+// the arguments of any other call marks the review uninspected (a shell
+// call's hidden keys can carry cwd, workdir or a sandbox bypass flag).
+var oversizedReviewFileTools = map[string]string{
+	"Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path", "NotebookEdit": "notebook_path", // Claude Code
+	"create": "path", "edit": "path", // Copilot CLI
+}
+
+func oversizedReviewKeyName(key string) string {
+	return strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(key))
 }
 
 // oversizedReviewPayload turns the bounded prefix of an oversized payload
 // into an ordinary, valid hook request for the gateway's usual verdict. It
 // keeps the prefix's whole structure: every key at every depth, before or
-// after a long value, arrays included. Command and target values are kept
-// verbatim (oversizedReviewKeys); other strings keep an 8 KiB head; a context
-// value the cap cut keeps the part the prefix holds. Fields past the cap were
-// never read and are not in the review. A review that could not keep every
-// command and target value of the call whole carries OversizeUninspectedField
-// (and a head of each such value). It returns nil, so the caller keeps its
-// closed oversize answer, only for a duplicated key (the gateway refuses that
-// payload at full size) or a structure too large for the gateway cap.
+// after a long value, arrays included. Command and target values and the
+// call's arguments are kept verbatim (oversizedReviewKeys); a file text of
+// the arguments and other strings keep an 8 KiB head; a context value the cap
+// cut keeps the part the prefix holds. Fields past the cap were never read
+// and are not in the review. A review that could not keep every command,
+// target and argument value of the call whole, or whose arguments the cap
+// cut where it may hide one, carries OversizeUninspectedField (and a head of
+// each such value). It returns nil, so the caller keeps its closed oversize
+// answer, only for a duplicated key (the gateway refuses that payload at full
+// size) or a structure too large for the transport cap.
 func oversizedReviewPayload(prefix []byte, boundEvent string) []byte {
 	review, _ := oversizedReview(prefix, boundEvent)
 	return review
@@ -141,6 +168,13 @@ type oversizedReducer struct {
 	// argsDepth is the depth of the call's arguments object (tool_input, an
 	// embedded toolArgs document) while the reducer is inside it, else 0.
 	argsDepth int
+	// argsDoc is set while the reducer reads the value of the payload's
+	// tool_input or toolArgs key: only that string is reduced as an
+	// embedded document (embedded).
+	argsDoc bool
+	// toolName is the payload's tool_name or toolName, read before the
+	// arguments (oversizedReviewFileTools).
+	toolName string
 	// cutSettled is set once settleCut has judged where the prefix ends.
 	cutSettled bool
 }
@@ -180,63 +214,75 @@ func (r *oversizedReducer) value(decoder *json.Decoder, keep bool, depth int) (v
 
 func (r *oversizedReducer) object(decoder *json.Decoder, keep bool, depth int) (any, bool, bool) {
 	out := map[string]any{}
-	sawKey := false // a command or target key of this object was read whole
+	atArgs := r.argsDepth != 0 && depth == r.argsDepth
+	target, fileTool := oversizedReviewFileTools[r.toolName]
+	targetSeen := false // the file tool's one target was read (atArgs)
 	for decoder.More() {
 		token, err := decoder.Token()
 		if err != nil {
-			r.settleCut(keep, sawKey, depth)
+			r.settleCut(keep, depth, targetSeen)
 			return out, true, false
 		}
 		key, ok := token.(string)
 		if !ok {
-			r.settleCut(keep, sawKey, depth)
+			r.settleCut(keep, depth, targetSeen)
 			return out, true, false
 		}
 		if _, seen := out[key]; seen {
 			r.duplicate = true
 		}
-		childKeep := keep || oversizedReviewKey(key)
-		args := depth == 1 && r.argsDepth == 0 && strings.EqualFold(strings.ReplaceAll(key, "_", ""), "toolinput")
-		if args {
-			r.argsDepth = depth + 1
+		name := oversizedReviewKeyName(key)
+		childKeep := keep || oversizedReviewKeys[name]
+		if atArgs && oversizedReviewBulkKeys[name] {
+			childKeep = false // a file text of the arguments keeps a head
 		}
+		args := depth == 1 && r.argsDepth == 0 && (name == "toolinput" || name == "toolargs")
+		if args {
+			r.argsDepth, childKeep = depth+1, true
+		}
+		r.argsDoc = args
 		value, present, complete := r.value(decoder, childKeep, depth)
+		r.argsDoc = false
 		if present && (r.charge(childKeep, len(key)) || childKeep || value != nil) {
 			out[key] = value
 		}
 		if !complete {
-			r.settleCut(childKeep, sawKey, depth)
+			r.settleCut(childKeep, depth, targetSeen)
 			return out, true, false
 		}
 		if args {
 			r.argsDepth = 0
 		}
-		sawKey = sawKey || childKeep
+		if depth == 1 && name == "toolname" {
+			r.toolName, _ = value.(string)
+		}
+		targetSeen = targetSeen || (atArgs && fileTool && key == target)
 	}
 	_, err := decoder.Token()
 	if err != nil {
-		r.settleCut(keep, sawKey, depth)
+		r.settleCut(keep, depth, targetSeen)
 	}
 	return out, len(out) > 0 || r.charge(keep, 2), err == nil
 }
 
 // settleCut judges, from the innermost object the prefix ends in outward,
-// whether the cap may have hidden a command or target value: the prefix ends
-// inside one, or inside the call's arguments before any of their command or
-// target keys was read (an agent writes the arguments in any order, so a long
-// description can come before the command). A cut in context outside the
-// arguments, or after the arguments named their command or target, hides none.
-func (r *oversizedReducer) settleCut(keep, sawKey bool, depth int) {
+// whether the cap may have hidden a command, target or argument value. A
+// cut inside one, or anywhere else in the call's arguments, may: an agent
+// writes its arguments in any order and may act on any key after the cut.
+// The one exception is the file text of a file tool whose single target was
+// already read (oversizedReviewFileTools). A cut in context outside the
+// arguments hides none.
+func (r *oversizedReducer) settleCut(keep bool, depth int, targetSeen bool) {
 	if r.cutSettled {
 		return
 	}
 	switch {
 	case keep:
 		r.incomplete = true
-	case r.argsDepth == 0 || depth < r.argsDepth || sawKey:
+	case r.argsDepth == 0 || depth < r.argsDepth:
 	case depth > r.argsDepth:
-		return // an enclosing object of the arguments decides
-	default:
+		return // inside a file text of the arguments: their object decides
+	case !targetSeen:
 		r.incomplete = true
 	}
 	r.cutSettled = true
@@ -275,11 +321,12 @@ func (r *oversizedReducer) charge(keep bool, n int) bool {
 	return false
 }
 
-// text keeps a command or target value verbatim while the keep budget
-// lasts, and a bounded head of anything else. An embedded JSON document
-// (Copilot toolArgs) too long to keep is reduced like the payload, so its
-// command and target keys survive whole. A command or target value that
-// fits neither way marks the review incomplete and keeps a bounded head.
+// text keeps a command, target or argument value verbatim while the keep
+// budget lasts, and a bounded head of anything else. The call's arguments as
+// an embedded JSON document (Copilot toolArgs) too long to keep are reduced
+// like tool_input, so their keys survive and only their file text is cut. A
+// kept value that fits neither way marks the review incomplete and keeps a
+// bounded head.
 func (r *oversizedReducer) text(value string, keep bool, depth int) (string, bool) {
 	if keep && len(value) <= r.keep {
 		r.keep -= len(value)
@@ -302,25 +349,26 @@ func (r *oversizedReducer) text(value string, keep bool, depth int) (string, boo
 
 func (r *oversizedReducer) embedded(value string, depth int) (string, bool) {
 	trimmed := strings.TrimLeft(value, " \t\r\n")
-	if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') || depth >= oversizedReviewMaxDepth {
+	if !r.argsDoc || trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') || depth >= oversizedReviewMaxDepth {
 		return "", false
 	}
-	// The document is the call's arguments: settleCut judges a cut in it.
-	sub := &oversizedReducer{src: []byte(trimmed), keep: r.keep, heads: r.heads, argsDepth: depth + 1}
+	// The document is the call's arguments, reduced like tool_input:
+	// settleCut judges a cut in it.
+	sub := &oversizedReducer{src: []byte(trimmed), keep: r.keep, heads: r.heads, argsDepth: depth + 1, toolName: r.toolName}
 	decoder := json.NewDecoder(bytes.NewReader(sub.src))
 	decoder.UseNumber()
 	token, err := decoder.Token()
 	if err != nil {
 		return "", false
 	}
-	// Its keys are classified like the payload's: a long file text in it
-	// keeps a head, its command and target keys stay whole.
+	// Like tool_input: a long file text in it keeps a head, every other
+	// value stays whole or marks the review.
 	var reduced any
 	complete := false
 	if token == json.Delim('{') {
-		reduced, _, complete = sub.object(decoder, false, depth+1)
+		reduced, _, complete = sub.object(decoder, true, depth+1)
 	} else {
-		reduced, _, complete = sub.array(decoder, false, depth+1)
+		reduced, _, complete = sub.array(decoder, true, depth+1)
 	}
 	r.keep, r.heads = sub.keep, sub.heads
 	r.duplicate = r.duplicate || sub.duplicate

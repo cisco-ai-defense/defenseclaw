@@ -761,7 +761,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// observe-mode alert already warns and audits its own finding).
 			// The field only tightens a verdict, so any sender may set it.
 			if mode := a.agentHookMode(ctx, connectorName); resp.Action == "allow" || mode == "action" {
-				resp = oversizeUninspectedHookResponse(profile, req, mode)
+				resp = oversizeUninspectedHookResponse(profile, req, mode, resp)
 			}
 		}
 		if payload["bounded_prefix_review"] == true && (resp.Action == "allow" || resp.Action == "alert") {
@@ -2993,12 +2993,19 @@ const oversizeUninspectedReason = "oversize, command not inspected: this hook pa
 	"and its command or target did not fit the bounded review."
 
 // oversizeUninspectedHookResponse answers such a call like an unparsed one,
-// in the connector's mode: observe warns and audits, action blocks.
-func oversizeUninspectedHookResponse(profile connector.HookProfile, req agentHookRequest, mode string) agentHookResponse {
+// in the connector's mode: observe warns and audits, action blocks. A
+// would-block finding the gateway made on the bounded review (observe mode)
+// stays in the answer and the audit row next to it.
+func oversizeUninspectedHookResponse(profile connector.HookProfile, req agentHookRequest, mode string, prior agentHookResponse) agentHookResponse {
 	action, wouldBlock := mapHookActionForProfile("block", mode, req.HookEventName, profile.Capabilities, profile, req.Payload)
+	findings, ruleIDs := []string{hookOversizeUninspectedRuleID}, []string{hookOversizeUninspectedRuleID}
+	if prior.WouldBlock || prior.RawAction == "block" {
+		findings = append(findings, prior.Findings...)
+		ruleIDs = append(ruleIDs, prior.RuleIDs...)
+	}
 	resp := agentHookResponseForProfile(profile, req, action, "block", "HIGH", oversizeUninspectedReason,
-		[]string{hookOversizeUninspectedRuleID}, mode, wouldBlock, profile.Capabilities)
-	resp.RuleIDs = []string{hookOversizeUninspectedRuleID}
+		findings, mode, wouldBlock, profile.Capabilities)
+	resp.RuleIDs = ruleIDs
 	return resp
 }
 

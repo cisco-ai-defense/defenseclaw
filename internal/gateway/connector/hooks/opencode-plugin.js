@@ -869,8 +869,13 @@ async function defenseclawFailModeNow(mode, actionable) {
 // Command and target fields the bounded review of an oversized call keeps
 // verbatim at any depth (Bash "command" or "cmd", argv arrays, patches,
 // scripts and every path or target form); other strings keep an 8 KiB head.
-// Keys are compared lower-case without "_" and "-".
+// Every value of the call's arguments (tool_input) is kept the same way,
+// whatever its key (an MCP server may act on any argument, and the gateway
+// reads all of them), except its file text and description
+// (DC_REVIEW_BULK_KEYS), which keep a head. Keys are compared lower-case
+// without "_" and "-".
 const DC_REVIEW_KEYS = new Set(["cmd", "command", "commands", "commandline", "args", "arguments", "argv", "toolargs", "script", "code", "input", "patch", "patchtext", "diff", "filepath", "path", "paths", "file", "files", "filename", "target", "targetfile", "targetpath", "targets", "destination", "dest", "source", "sourcepath", "oldpath", "newpath", "absolutepath", "relativepath", "url", "uri", "cwd", "workdir", "workingdirectory", "directory", "dir"]);
+const DC_REVIEW_BULK_KEYS = new Set(["content", "oldstring", "newstring", "oldstr", "newstr", "edits", "newsource", "filetext", "description"]);
 
 // defenseclawBoundedReview reduces an oversized payload to a request under
 // the gateway's 1 MiB cap that keeps every key of the call, so the gateway
@@ -884,14 +889,14 @@ function defenseclawBoundedReview(payload, originalBytes) {
     // Command and target values are kept whole while they fit; only the
     // context heads shrink when the review is too large. The last pass keeps
     // none whole.
-    let keep = pass === 4 ? 0 : 896 * 1024;
+    let keep = pass === 4 ? 0 : 832 * 1024;
     let heads = (192 * 1024) >> Math.min(pass, 3);
     let incomplete = false;
-    const walk = (value, inKeep, depth) => {
+    const walk = (value, inKeep, depth, atArgs = false) => {
       if (typeof value === "string") {
         if (inKeep && value.length <= keep) { keep -= value.length; return value; }
         if (inKeep && depth < 128 && /^\s*[[{]/.test(value)) {
-          try { return JSON.stringify(walk(JSON.parse(value), false, depth + 1)); } catch (_) { /* not JSON */ }
+          try { return JSON.stringify(walk(JSON.parse(value), true, depth + 1)); } catch (_) { /* not JSON */ }
         }
         // A command or target value that does not fit whole: only a head.
         if (inKeep) incomplete = true;
@@ -904,7 +909,10 @@ function defenseclawBoundedReview(payload, originalBytes) {
       if (Array.isArray(value)) return value.map((item) => walk(item, inKeep, depth + 1));
       const out = {};
       for (const [key, item] of Object.entries(value)) {
-        out[key] = walk(item, inKeep || DC_REVIEW_KEYS.has(String(key).toLowerCase().replace(/[_-]/g, "")), depth + 1);
+        const name = String(key).toLowerCase().replace(/[_-]/g, "");
+        const args = depth === 0 && name === "toolinput";
+        const keepChild = args || (atArgs && DC_REVIEW_BULK_KEYS.has(name) ? false : inKeep || DC_REVIEW_KEYS.has(name));
+        out[key] = walk(item, keepChild, depth + 1, args);
       }
       return out;
     };
@@ -914,7 +922,8 @@ function defenseclawBoundedReview(payload, originalBytes) {
     review.bounded_prefix_review = true;
     review.original_body_bytes = originalBytes;
     const body = JSON.stringify(review);
-    if (Buffer.byteLength(body, "utf8") <= 960 * 1024) return { body, uninspected: incomplete };
+    // The native helper's transport refuses a body over 900 KiB.
+    if (Buffer.byteLength(body, "utf8") <= 900 * 1024) return { body, uninspected: incomplete };
   }
   return null;
 }
