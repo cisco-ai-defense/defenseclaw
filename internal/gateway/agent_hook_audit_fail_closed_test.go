@@ -283,46 +283,59 @@ func (transport handlerTransport) RoundTrip(req *http.Request) (*http.Response, 
 	return recorder.Result(), nil
 }
 
-// Review of G-flood-wal round 2 (P1): the fail-closed verdict of a failed
-// audit write was rendered without the request body, so Claude Code got a
-// generic {"decision":"block"} for a PreToolUse. The Unix hook script prints
-// whatever the gateway rendered and exits 0, and Claude Code may run the call.
-// End to end through the native hook runner, the agent now reads the
-// gateway's own PreToolUse denial.
-func TestHookAuditWriteFailureReachesClaudeCodeAsANativeDenial(t *testing.T) {
-	fixture := newAuditFailureHookFixture(t, "")
-	fixture.emitter.fail = true
-	home := t.TempDir()
-	hookDir := filepath.Join(home, "hooks")
-	if err := os.MkdirAll(hookDir, 0o700); err != nil {
-		t.Fatal(err)
+// The native Claude Code hook must relay the gateway's tier-specific audit
+// failure answer: balanced allows with a visible warning, while strict sends
+// Claude Code's own PreToolUse denial rather than a generic block object.
+func TestHookAuditWriteFailureReachesClaudeCodeAsANativeTierDecision(t *testing.T) {
+	for _, tc := range []struct {
+		name, tier string
+		deny       bool
+	}{
+		{name: "balanced", tier: "balanced"},
+		{name: "strict", tier: "strict", deny: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newAuditFailureHookFixture(t, "")
+			fixture.api.scannerCfg.Guardrail.RulePack = tc.tier
+			fixture.emitter.fail = true
+			home := t.TempDir()
+			hookDir := filepath.Join(home, "hooks")
+			if err := os.MkdirAll(hookDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(hookDir, ".token"), []byte("DEFENSECLAW_GATEWAY_TOKEN=\"tkn\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			code := hookexec.Run(t.Context(), hookexec.Options{
+				Connector:  "claudecode",
+				Event:      "PreToolUse",
+				APIAddr:    "127.0.0.1:8787",
+				FailMode:   "closed",
+				Home:       home,
+				HookDir:    hookDir,
+				Stdin:      bytes.NewReader(preToolUseBody(t, "toolu-native")),
+				Stdout:     &stdout,
+				Stderr:     &stderr,
+				HTTPClient: &http.Client{Transport: handlerTransport{handler: fixture.api.handleAgentHook("claudecode")}},
+			})
+			var output map[string]any
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &output); err != nil {
+				t.Fatalf("hook exit %d stdout %q stderr %q: %v", code, stdout.String(), stderr.String(), err)
+			}
+			if code != 0 {
+				t.Fatalf("hook exit %d, want 0 with a structured answer (stderr %q)", code, stderr.String())
+			}
+			if tc.deny {
+				assertClaudeCodePreToolUseDenial(t, output)
+				return
+			}
+			message, _ := output["systemMessage"].(string)
+			if !strings.Contains(message, "audit is degraded") || output["hookSpecificOutput"] != nil || output["decision"] != nil {
+				t.Fatalf("balanced Claude Code output %v; want a visible degraded-audit allow", output)
+			}
+		})
 	}
-	if err := os.WriteFile(filepath.Join(hookDir, ".token"), []byte("DEFENSECLAW_GATEWAY_TOKEN=\"tkn\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var stdout, stderr bytes.Buffer
-	code := hookexec.Run(t.Context(), hookexec.Options{
-		Connector:  "claudecode",
-		Event:      "PreToolUse",
-		APIAddr:    "127.0.0.1:8787",
-		FailMode:   "closed",
-		Home:       home,
-		HookDir:    hookDir,
-		Stdin:      bytes.NewReader(preToolUseBody(t, "toolu-native")),
-		Stdout:     &stdout,
-		Stderr:     &stderr,
-		HTTPClient: &http.Client{Transport: handlerTransport{handler: fixture.api.handleAgentHook("claudecode")}},
-	})
-	var output map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &output); err != nil {
-		t.Fatalf("hook exit %d stdout %q stderr %q: %v", code, stdout.String(), stderr.String(), err)
-	}
-	if code != 0 {
-		t.Fatalf("hook exit %d, want 0 with a structured denial (stderr %q)", code, stderr.String())
-	}
-	// The reason is the gateway's, so the runner relayed the gateway's own
-	// native output rather than replacing an output it could not use.
-	assertClaudeCodePreToolUseDenial(t, output)
 }
 
 // Review of G-flood-wal round 2 (P2): the sandbox recorded a hook's verdict
