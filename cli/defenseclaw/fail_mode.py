@@ -1427,11 +1427,14 @@ def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
         if _registration_hook_config_paths(cfg, connector) != (current,):
             return "registration-config-binding-stale"
         # The fail-mode status must not call a stale open command "closed".
-        # Doctor's Hermes validator reads the full event matrix, approvals,
-        # sealed target and bounded execution proof from the active config.
-        from defenseclaw.commands.cmd_doctor import _hermes_registered_execution_problem
+        # Doctor's Hermes validator reads the full event matrix, approvals and
+        # sealed target from the active config. The execution probe is
+        # Doctor's alone: a host that cannot run it (no unprivileged user
+        # namespaces) has a current registration all the same, and the hook's
+        # rendered mode is read as its own source (hook-script).
+        from defenseclaw.commands.cmd_doctor import _hermes_registration_problem
 
-        return "registration-command-stale" if _hermes_registered_execution_problem(cfg, current) else None
+        return "registration-command-stale" if _hermes_registration_problem(cfg, current) else None
 
     paths = connector_config_files(connector, workspace_dir=_connector_workspace(cfg))
     script_name = _UNIX_REGISTRATION_HOOK_SCRIPTS.get(connector)

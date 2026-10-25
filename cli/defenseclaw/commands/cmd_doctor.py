@@ -9989,6 +9989,29 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
 
 def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
     """Read Hermes' active matrix and execute its sealed command as a bounded probe."""
+    problem = _hermes_registration_problem(cfg, config_path)
+    if problem:
+        return problem
+    expected = os.path.normpath(os.path.join(str(getattr(cfg, "data_dir", "") or ""), "hooks", "hermes-hook.sh"))
+    probe_argv = [expected, "--defenseclaw-execution-probe"]
+    if sys.platform == "darwin":
+        probe_argv.append("--forkless")
+    returncode, stdout = _run_hermes_execution_probe(probe_argv)
+    if returncode is None:
+        return "Hermes registered hook execution probe could not run"
+    if returncode != 0 or stdout != _HERMES_EXECUTION_PROBE_RESPONSE:
+        return f"Hermes registered hook execution probe failed (exit {returncode})"
+    return ""
+
+
+def _hermes_registration_problem(cfg, config_path: str) -> str:
+    """Read Hermes' active matrix, approvals and sealed hook without running it.
+
+    The fail-mode status uses this alone: whether the registration is this
+    install's sealed hook does not depend on whether this host can run the
+    contained execution probe (a Linux host without unprivileged user
+    namespaces cannot). Doctor adds the probe.
+    """
     from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS, _InspectionError, _read_config
     from defenseclaw.hook_integrity import _locked_hook_scripts
 
@@ -10086,14 +10109,6 @@ def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
     for event in _HERMES_REQUIRED_HOOKS:
         if event not in approved:
             return f"Hermes hook approval for {event} is missing at {allowlist_path}"
-    probe_argv = [expected, "--defenseclaw-execution-probe"]
-    if sys.platform == "darwin":
-        probe_argv.append("--forkless")
-    returncode, stdout = _run_hermes_execution_probe(probe_argv)
-    if returncode is None:
-        return "Hermes registered hook execution probe could not run"
-    if returncode != 0 or stdout != _HERMES_EXECUTION_PROBE_RESPONSE:
-        return f"Hermes registered hook execution probe failed (exit {returncode})"
     return ""
 
 
