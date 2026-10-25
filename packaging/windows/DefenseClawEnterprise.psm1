@@ -3809,7 +3809,12 @@ function Assert-DefenseClawRegularSource {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Label,
         [switch]$Authenticode,
-        [switch]$AllowUnsigned
+        [switch]$AllowUnsigned,
+        # The payload manifest name the file is admitted under in HashPinned
+        # mode; its own name when not given. A copy of an admitted payload
+        # file under another name (a transaction's early-hook-closed.exe) is
+        # admitted only by the pin of the file it was copied from (GAP-1381).
+        [string]$PinnedName = ''
     )
     $full = Resolve-DefenseClawFullPath -Path $Path -MustExist -Leaf
     Assert-DefenseClawNoReparsePath -Path $full
@@ -3824,7 +3829,7 @@ function Assert-DefenseClawRegularSource {
             # allowed signers) or, in HashPinned mode, an exact SHA-256 from
             # the administrator's payload manifest.
             if (-not $AllowUnsigned -and
-                -not (Test-DefenseClawStandalonePayloadTrusted -Path $full -Signature $signature)) {
+                -not (Test-DefenseClawStandalonePayloadTrusted -Path $full -Signature $signature -PinnedName $PinnedName)) {
                 throw (
                     "$Label is not admitted by the standalone payload trust policy " +
                     "(Authenticode $($signature.Status); trust mode $($script:DefenseClawTrustMode)): $full"
@@ -4003,11 +4008,16 @@ function Install-DefenseClawSourceDescriptor {
         }
     }
     if ([bool]$Source.authenticode) {
+        # The copy is admitted as the source was: in HashPinned mode by the
+        # pin of the source's own name, which a destination with another name
+        # (the transaction's early-hook-closed.exe guard) does not have in the
+        # payload manifest (GAP-1381). Its bytes must still be the pinned ones.
         [void](Assert-DefenseClawRegularSource `
             -Path $destinationPath `
             -Label ([string]$Source.label) `
             -Authenticode `
-            -AllowUnsigned:([bool]$Source.allow_unsigned))
+            -AllowUnsigned:([bool]$Source.allow_unsigned) `
+            -PinnedName ([IO.Path]::GetFileName($sourcePath)))
         $installedSignature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature `
             -LiteralPath $destinationPath
         $installedThumbprint = if ($null -eq $installedSignature.SignerCertificate) {
@@ -7320,6 +7330,113 @@ $script:ServiceStartReadyTimeoutSeconds = 60
 # answer a stop, as "<service> (pid <n>)", for the result.
 $script:DefenseClawTerminatedServiceProcesses = @()
 $script:DefenseClawSkippedRuntimeFiles = @()
+
+function Get-DefenseClawServiceProcessIdentity {
+    <#
+        GAP-1451: the id and start time of the running process of service
+        Name, or $null when it has none (or it is this lifecycle's own
+        process). The start time tells a later process that reuses the id
+        apart; it is $null when it cannot be read.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    $processId = Get-DefenseClawServiceProcessId -Name $Name
+    if ($processId -eq 0 -or $processId -eq [uint32]$PID) {
+        return $null
+    }
+    $started = $null
+    try {
+        $process = [Diagnostics.Process]::GetProcessById([int]$processId)
+        try {
+            $started = $process.StartTime
+        }
+        catch {
+            $started = $null
+        }
+        $process.Dispose()
+    }
+    catch {
+        # It has already exited.
+        return $null
+    }
+    return [pscustomobject]@{ Id = [int]$processId; StartTime = $started }
+}
+
+function Test-DefenseClawProcessIdentityRunning {
+    param([Parameter(Mandatory)]$Identity)
+    try {
+        $process = [Diagnostics.Process]::GetProcessById([int]$Identity.Id)
+    }
+    catch {
+        return $false
+    }
+    try {
+        try {
+            if ($process.HasExited) {
+                return $false
+            }
+        }
+        catch {
+            # Unreadable exit state: the start time decides.
+        }
+        if ($null -eq $Identity.StartTime) {
+            return $true
+        }
+        try {
+            $started = $process.StartTime
+        }
+        catch {
+            # Unreadable: count it as the same process.
+            return $true
+        }
+        # A later process that reuses the id started later.
+        return [Math]::Abs(($started - $Identity.StartTime).TotalSeconds) -lt 1
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
+function Wait-DefenseClawServiceProcessExit {
+    <#
+        GAP-1451: a Go service reports SERVICE_STOPPED before its process
+        exits, and a 1.0.2 or 1.0.3 service whose work did not end within its
+        own stop wait is still running then. Waits, up to TimeoutSeconds,
+        until the process Identity names (taken before the stop) has exited,
+        then ends it, and throws when it still runs. The caller has disabled
+        and stopped the service, so ending its process does not change what
+        the SCM does next.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [AllowNull()]$Identity,
+        [int]$TimeoutSeconds = 10
+    )
+    if ($null -eq $Identity) {
+        return
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while (Test-DefenseClawProcessIdentityRunning -Identity $Identity) {
+        if ([DateTime]::UtcNow -ge $deadline) {
+            Write-DefenseClawLifecyclePhase -Stage ("stop {0}: its process {1} still runs after the service stopped; ending it" -f $Name, $Identity.Id)
+            try {
+                Microsoft.PowerShell.Management\Stop-Process -Id ([int]$Identity.Id) -Force -ErrorAction Stop
+            }
+            catch {
+                # It may have exited meanwhile; the check below decides.
+            }
+            $script:DefenseClawTerminatedServiceProcesses += "$Name (pid $($Identity.Id))"
+            $ended = [DateTime]::UtcNow.AddSeconds(10)
+            while (Test-DefenseClawProcessIdentityRunning -Identity $Identity) {
+                if ([DateTime]::UtcNow -ge $ended) {
+                    throw "service $Name failed during stop: its process $($Identity.Id) still runs after the service stopped and could not be ended; end process $($Identity.Id), then run Setup /ensure again"
+                }
+                Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
+            }
+            return
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
+    }
+}
 
 function Wait-DefenseClawServiceStopped {
     param(
@@ -12502,12 +12619,19 @@ function New-DefenseClawTransaction {
         # in the intent before the swap, so a failed snapshot, a crash
         # (Recover-DefenseClawQuiescingIntent) and a rollback keep the
         # replacement hook until the prior gateway passes readiness.
-        $earlyHookPreimage = Publish-DefenseClawEarlyHook `
-            -Layout $Layout `
-            -Source $EarlyHookSource `
-            -TransactionDirectory $directory `
-            -Intent $quiescingIntent `
-            -PriorDeploymentActive:$PriorDeploymentActive
+        # Standalone publishes it after its prior guardian has stopped, below
+        # (GAP-1446): a running 1.0.2 or 1.0.3 guardian takes the swapped
+        # hook for damage and restores its own release's hook over it,
+        # through a temporary it leaves in bin when the stop interrupts it.
+        $earlyHookPreimage = ''
+        if (-not (Test-DefenseClawStandaloneProfile)) {
+            $earlyHookPreimage = Publish-DefenseClawEarlyHook `
+                -Layout $Layout `
+                -Source $EarlyHookSource `
+                -TransactionDirectory $directory `
+                -Intent $quiescingIntent `
+                -PriorDeploymentActive:$PriorDeploymentActive
+        }
         Write-DefenseClawLifecyclePhase -Stage 'transaction quiesce disable services'
 
         # Disabled start neutralizes boot activation and any failure restart
@@ -12540,7 +12664,33 @@ function New-DefenseClawTransaction {
         # Enumerator first — it's the targets.yaml writer, stopping it
         # first freezes the file the guardian's final reconcile pass reads.
         Stop-DefenseClawService -Name $enumeratorServiceName
+        # GAP-1451: the guardian's process, taken before its stop, so the
+        # standalone swap below waits for that process itself to exit.
+        $priorGuardianProcess = $null
+        if ((Test-DefenseClawStandaloneProfile) -and
+            (Test-DefenseClawServiceExists -Name $GuardianServiceName)) {
+            $priorGuardianProcess = Get-DefenseClawServiceProcessIdentity -Name $GuardianServiceName
+        }
         Stop-DefenseClawService -Name $GuardianServiceName
+        if (Test-DefenseClawStandaloneProfile) {
+            # A 1.0.2 or 1.0.3 guardian reports its service stopped before its
+            # process exits, and its hook watch can still restore its own
+            # release's hook meanwhile (GAP-1451). The swap waits until that
+            # process has exited (it is ended when it does not), so no restore
+            # of the prior hook can follow the swap; Publish checks the
+            # replacement is still in place once the prior calls drained. Its
+            # restore temporaries from this or an earlier run are removed, and
+            # the replacement hook goes in while the prior gateway still
+            # answers (GAP-0993, GAP-1070, GAP-1446).
+            Wait-DefenseClawServiceProcessExit -Name $GuardianServiceName -Identity $priorGuardianProcess
+            [void]@(Remove-DefenseClawStaleReplacementBackups -Destination $Layout.HookPath)
+            $earlyHookPreimage = Publish-DefenseClawEarlyHook `
+                -Layout $Layout `
+                -Source $EarlyHookSource `
+                -TransactionDirectory $directory `
+                -Intent $quiescingIntent `
+                -PriorDeploymentActive:$PriorDeploymentActive
+        }
         Stop-DefenseClawService -Name $GatewayServiceName
         Stop-DefenseClawService -Name $brokerServiceName
         Write-DefenseClawLifecyclePhase -Stage 'transaction services stopped'
@@ -18646,11 +18796,18 @@ function Publish-DefenseClawEarlyHook {
     if (Test-DefenseClawStandaloneProfile) {
         $guardCopy = Microsoft.PowerShell.Management\Join-Path $TransactionDirectory 'early-hook-closed.exe'
         Install-DefenseClawSourceDescriptor -Source $Source -Destination $guardCopy
-        $Intent['early_hook_preimage_sha256'] = $copiedHash.ToLowerInvariant()
-        $Intent['early_hook_guard_copy'] = $guardCopy
-        $Intent['early_hook_guard_sha256'] = (
+        # The guard is recorded with the digest its source was admitted by,
+        # and only when the copy still has those bytes.
+        $guardSHA256 = ([string]$Source.sha256).ToLowerInvariant()
+        $guardCopied = (
             Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $guardCopy -Algorithm SHA256
         ).Hash.ToLowerInvariant()
+        if ($guardCopied -cne $guardSHA256) {
+            throw 'the closed hook guard copy does not match its admitted source'
+        }
+        $Intent['early_hook_preimage_sha256'] = $copiedHash.ToLowerInvariant()
+        $Intent['early_hook_guard_copy'] = $guardCopy
+        $Intent['early_hook_guard_sha256'] = $guardSHA256
     }
     Write-DefenseClawJsonAtomic -Value $Intent -Path $Layout.PendingPath
     Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath
@@ -18661,7 +18818,45 @@ function Publish-DefenseClawEarlyHook {
     if ($running.Count -gt 0) {
         Write-DefenseClawLifecyclePhase -Stage ("transaction quiesce: hook calls of the replaced release still running after the wait (process ids {0})" -f ($running -join ', '))
     }
+    if (Test-DefenseClawStandaloneProfile) {
+        # GAP-1451: the gateway stops right after this, so the hook at its
+        # path must be this release's closed hook then. A writer of the
+        # replaced release (its guardian's restore) that put its own hook
+        # back during the wait is undone once; a hook that changes again
+        # fails the transaction, which keeps the prior release.
+        Assert-DefenseClawEarlyHookPublished -Layout $Layout -Source $Source
+    }
     return $preimage
+}
+
+function Assert-DefenseClawEarlyHookPublished {
+    <#
+        GAP-1451: checks that the hook path still holds the replacement hook
+        Publish-DefenseClawEarlyHook put there (its admitted SHA-256). It
+        publishes it once more when another writer replaced it, and throws
+        when the second publication does not hold either.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Source
+    )
+    $want = ([string]$Source.sha256).ToLowerInvariant()
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        Assert-DefenseClawNoReparsePath -Path $Layout.HookPath
+        $have = ''
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.HookPath -PathType Leaf) {
+            $have = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        if ($have -ceq $want) {
+            return
+        }
+        if ($attempt -eq 2) {
+            break
+        }
+        Write-DefenseClawLifecyclePhase -Stage ("transaction quiesce: the replacement hook was replaced while the prior hook calls drained (sha256 {0}); publishing it again" -f $(if ($have) { $have } else { 'missing' }))
+        Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath
+    }
+    throw 'the replacement hook was replaced again before the prior gateway stopped; a process of the prior release still writes the hook. End it, then run Setup /ensure again'
 }
 
 function Get-DefenseClawPriorHookProcessIds {
@@ -37349,7 +37544,8 @@ function Test-DefenseClawStandalonePayloadTrusted {
     #>
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)]$Signature
+        [Parameter(Mandatory)]$Signature,
+        [string]$PinnedName = ''
     )
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return $false
@@ -37375,7 +37571,12 @@ function Test-DefenseClawStandalonePayloadTrusted {
     if ([string]$script:DefenseClawTrustMode -cne 'HashPinned') {
         return $false
     }
-    $leaf = [IO.Path]::GetFileName($Path).ToLowerInvariant()
+    $leaf = if ([string]::IsNullOrEmpty($PinnedName)) {
+        [IO.Path]::GetFileName($Path).ToLowerInvariant()
+    }
+    else {
+        $PinnedName.ToLowerInvariant()
+    }
     if (-not $script:DefenseClawPinnedPayloadSHA256.ContainsKey($leaf)) {
         return $false
     }

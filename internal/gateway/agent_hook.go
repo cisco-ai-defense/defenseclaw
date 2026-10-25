@@ -725,6 +725,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// the caller's proven floor requires in a sandbox.
 			sandboxGate, resp, gated = a.requireSandboxHostRun(ctx, profile, connectorName, req, b, payload, requireSandboxSurface(ctx, r.Header))
 		}
+		if !gated {
+			// The strict tier refuses a call while an install or upgrade of
+			// this account holds its data directory (GAP-1438).
+			resp, gated = a.strictInstallWindowGate(ctx, profile, connectorName, req)
+		}
 		panicked := false
 		if !gated {
 			resp, panicked = a.safeEvaluateHook(evaluationCtx, connectorName, req, b, payload, runtime)

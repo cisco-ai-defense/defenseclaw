@@ -28,7 +28,9 @@ var managedLaunchReasons = map[string]map[string]bool{
 		"launch_arguments_unverified": true, "launch_environment_unverified": true},
 	"hermes": {"hermes_safe_mode": true, "hermes_config_relocated": true,
 		"user_config_relocated": true, "launch_arguments_unverified": true,
-		"launch_environment_unverified": true},
+		"launch_environment_unverified": true, "session_only_hermes_home_unobservable": true,
+		// An installed Hermes the enumerator could not enroll (GAP-1420).
+		"unsupported_installed_version": true, "installed_version_unverified": true},
 	"antigravity": {"user_config_relocated": true, "launch_arguments_unverified": true,
 		"launch_environment_unverified": true},
 	"claudecode": {"unsupported_installed_version": true, "installed_version_unverified": true,
@@ -66,7 +68,13 @@ func (a *APIServer) handleManagedLaunchCoverageAudit(w http.ResponseWriter, r *h
 		return
 	}
 	install := report.Reason == "unsupported_installed_version" || report.Reason == "installed_version_unverified"
-	if install {
+	sessionHome := report.Connector == "hermes" && report.Reason == "session_only_hermes_home_unobservable"
+	if sessionHome {
+		if report.UID != 0 || report.PID != 0 || report.StartedAt != "" || report.InstallPath != "" || report.Version != "" {
+			http.Error(w, "invalid Hermes coverage report", http.StatusBadRequest)
+			return
+		}
+	} else if install {
 		if report.PID != 0 || report.StartedAt != "" || !filepath.IsAbs(report.InstallPath) ||
 			len(report.InstallPath) > 512 || strings.ContainsAny(report.InstallPath, "\x00\r\n") || len(report.Version) > 128 {
 			http.Error(w, "invalid install coverage report", http.StatusBadRequest)
@@ -83,7 +91,9 @@ func (a *APIServer) handleManagedLaunchCoverageAudit(w http.ResponseWriter, r *h
 		"coverage_state": "incomplete", "actor_id_kind": string(useridentity.KindPOSIXUID),
 		"actor_id": report.UID}
 	source, summary := "managed-launch-coverage", "managed_launch_uninspected"
-	if install {
+	if sessionHome {
+		source, summary = "managed-install-coverage", "managed_hermes_session_home_not_covered"
+	} else if install {
 		details["agent_install_path"] = report.InstallPath
 		details["agent_version"] = report.Version
 		source, summary = "managed-install-coverage", "managed_agent_install_unprotected"

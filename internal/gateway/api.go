@@ -83,6 +83,10 @@ type APIServer struct {
 	hookDeliveryProcessID string
 	// sandboxAuthority is owned by this server and initialized on first use.
 	sandboxAuthority sandboxAuthorityHolder
+	// installWindowWarned is set once this per-user gateway has logged the
+	// install-window warning of strictInstallWindowGate; it clears when a
+	// call finds no install lock.
+	installWindowWarned atomic.Bool
 
 	// projectSkills are the project skill folders the install watcher
 	// watches; nil when no watcher shares them (GAP-1063).

@@ -175,6 +175,9 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		verdict = a.buildVerdict(r.Context(), ruleFindings, "prompt", false)
 	}
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
+	// The strict tier refuses a prompt while an install or upgrade holds this
+	// account's data directory, as on the hook and tool routes (GAP-1438).
+	a.strictInstallWindowInspectPrompt(r.Context(), inspectRequestConnector(r.Context(), a.connectorName()), verdict)
 
 	elapsed := time.Since(t0)
 

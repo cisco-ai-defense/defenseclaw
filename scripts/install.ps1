@@ -3278,20 +3278,31 @@ function Finish-InstallLock([int]$ExitCode) {
         if (Test-Path -LiteralPath $LifecycleManifest -PathType Leaf) { Set-RecoveryPending }
     }
     if (Test-RecoveryPending) {
-        # While the lock is held, hooks do not cold-start a gateway and follow
-        # their outage mode, which the config may set open. So the lock stays
-        # only on proof: this run closed every hook (Close-UnfinishedInstallHooks)
-        # and afterwards no gateway or watchdog of this install runs, by
-        # gateway.pid and by image (Get-InstallGatewayState). A gateway still
-        # running was left alone by a refusal, survived a stop that failed, or
-        # was started by a recovery whose proof failed; it renders its own
-        # hooks, and once it exits a kept lock would leave them on their outage
-        # mode. Without that proof the lock goes, so hooks cold-start the
-        # gateway as before 1.0.4, and the record stays for the next run.
+        # While the lock is held, hooks do not cold-start a gateway, and a
+        # call no gateway answers is closed (the install window, GAP-0649).
+        # The lock stays only while no gateway or watchdog of this install
+        # runs, by gateway.pid and by image (Get-InstallGatewayState), and
+        # either this run closed every hook (Close-UnfinishedInstallHooks) or
+        # the lifecycle record is still pending: a pending record is an
+        # install whose programs and data may not match, so no hook may
+        # cold-start a gateway for it until the next run settles the record
+        # (GAP-1403: a held gateway executable kept the closer from running,
+        # and the lock went while the record stayed). A gateway still running
+        # was left alone by a refusal, survived a stop that failed, or was
+        # started by a recovery whose proof failed; it renders its own hooks,
+        # and once it exits a kept lock would leave them unanswered. Then the
+        # lock goes, so hooks cold-start the gateway as before 1.0.4, and the
+        # record stays for the next run.
         $state = Get-InstallGatewayState
-        if ($state -ne "down" -or -not $closed) {
-            $accept = $Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement
-            $retry = if ($accept) { Get-LifecycleNextStep -Accept } else { Get-LifecycleNextStep }
+        $accept = $Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement
+        $retry = if ($accept) { Get-LifecycleNextStep -Accept } else { Get-LifecycleNextStep }
+        $record = Get-Variable -Name LifecycleManifest -ValueOnly -ErrorAction SilentlyContinue
+        $journal = [bool]$record -and (Test-Path -LiteralPath $record -PathType Leaf)
+        if ($state -eq "down" -and -not $closed -and $journal) {
+            Write-Warn ("The earlier install is not finished and this run could not prove every agent hook closed, " +
+                "so the install stays locked until its lifecycle record is settled: hooks do not start a gateway " +
+                "for the unfinished install. Finish it with: $retry")
+        } elseif ($state -ne "down" -or -not $closed) {
             $why = if ($state -eq "running") { "its gateway is still running and can rewrite its hooks" }
                 elseif ($state -eq "unknown") { "this run cannot tell whether its gateway is still running" }
                 else { "this run could not prove every agent hook closed" }

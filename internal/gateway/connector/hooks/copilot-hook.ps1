@@ -6,8 +6,8 @@
 # launcher is missing, fails or times out, a closed fail mode denies a tool
 # call with Copilot's native answer (Copilot ignores a failed hook process);
 # only an open one lets it run.
-{{if not .Managed}}# During an install or upgrade a per-user hook returns a native denial in
-# every fail mode.
+{{if not .Managed}}# During an install or upgrade a per-user adapter whose launcher fails returns
+# a native denial in every fail mode; the native hook answers every other call.
 {{end}}{{if .SecureClientDelivery}}[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
@@ -101,13 +101,8 @@ $deadline = [System.Diagnostics.Stopwatch]::StartNew()
     }
     return $false
 }
-$installGuard = $false
 {{end}}try {
-{{if not .Managed}}    if (Test-DefenseClawInstallLockHeld) {
-        $installGuard = $true
-        throw 'DefenseClaw install or upgrade in progress'
-    }
-{{end}}    if (-not (Test-Path -LiteralPath $hook -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $hook -PathType Leaf)) {
         throw "DefenseClaw hook launcher is missing: $hook"
     }
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -179,11 +174,7 @@ $installGuard = $false
         }
         throw "DefenseClaw hook launcher exited $($process.ExitCode) without an answer"
     }
-{{if not .Managed}}    if (Test-DefenseClawInstallLockHeld) {
-        $installGuard = $true
-        throw 'DefenseClaw install or upgrade in progress'
-    }
-{{end}}    if ($stdout.Length -gt 0) {
+    if ($stdout.Length -gt 0) {
         [Console]::Out.Write($stdout)
         $responseWritten = $true
     }
@@ -196,7 +187,7 @@ catch {
     # This adapter is the first Windows hook process Copilot starts. If
     # its launcher is missing or times out during an upgrade, the native hook
     # cannot answer, so the adapter must supply Copilot's own denial.
-    if (-not $responseWritten -and ($installGuard -or (Test-DefenseClawInstallLockHeld))) {
+    if (-not $responseWritten -and (Test-DefenseClawInstallLockHeld)) {
         [Console]::Error.WriteLine('defenseclaw: Copilot hook adapter failed closed while DefenseClaw is being installed or upgraded: ' + $failure)
         $message = 'DefenseClaw is being installed or upgraded for this account; try again in a moment, or run the installer again if it has stopped.'
         switch ($Event) {

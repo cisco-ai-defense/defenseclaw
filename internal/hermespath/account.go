@@ -16,6 +16,12 @@ import (
 // it is signed out, or no profile names its home.
 var ErrAccountEnvironmentUnavailable = errors.New("the account's persistent environment cannot be read")
 
+// ErrAccountSignedOut reports, inside ErrAccountEnvironmentUnavailable, the
+// one cause that only a sign-in clears: Windows has not loaded the
+// account's registry hive because the account is signed out. The Hermes
+// home it selects is then unobservable, not changed.
+var ErrAccountSignedOut = errors.New("the account is signed out")
+
 // ConfigPathForAccount resolves the config.yaml of the Hermes home the
 // account at userHome configured, for a privileged service acting for that
 // account (managed setup and verification). On Windows that is the

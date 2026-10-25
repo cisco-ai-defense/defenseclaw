@@ -64,9 +64,11 @@ func TestWindowsAdaptersShareTheOneInstallCheck(t *testing.T) {
 	for _, tc := range []struct {
 		adapter, mode string
 		managed       bool
-		reads         int // the definition plus each read
+		// the definition plus each read: since GAP-1372 only a launcher
+		// failure reads it; the native hook answers every other call.
+		reads int
 	}{
-		{"copilot-hook.ps1", "open", false, 4}, {"copilot-hook.ps1", "closed", false, 4},
+		{"copilot-hook.ps1", "open", false, 2}, {"copilot-hook.ps1", "closed", false, 2},
 		{"copilot-hook.ps1", "open", true, 0}, {"copilot-hook.ps1", "closed", true, 0},
 		{"cursor-hook.ps1", "open", false, 0}, {"cursor-hook.ps1", "closed", false, 0},
 		{"cursor-hook.ps1", "open", true, 0}, {"cursor-hook.ps1", "closed", true, 0},
