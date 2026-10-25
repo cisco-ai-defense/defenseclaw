@@ -672,7 +672,7 @@ keeps its log, so "sandbox logs" still shows it.`,
 			return app.Stop(ctx, o)
 		}),
 	}
-	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, "stop without asking when a detached run or a session in another terminal is still going; after a stop held for a failed MicroVM disk sync, stop it anyway with what reached its disk")
+	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, "stop without asking when a detached run or a session in another terminal is still going")
 	return cmd
 }
 
