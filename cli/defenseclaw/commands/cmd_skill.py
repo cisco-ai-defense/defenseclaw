@@ -5781,6 +5781,10 @@ def _scan_installed_skill_for_connector(
             enforcement_reason,
         )
         if dest:
+            # The copy is out: no later error may roll this connector back
+            # and put the replaced skill back as active next to it.
+            if rollback_paths is not None:
+                _keep_skill_enforcement(skill_path, rollback_paths, backups if backups is not None else [])
             applied_actions.append("quarantined")
         else:
             click.echo("[install] quarantine failed", err=True)

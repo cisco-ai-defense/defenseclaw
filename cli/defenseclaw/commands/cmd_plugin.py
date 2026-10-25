@@ -1549,6 +1549,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
                     connector=connector,
                     take_action=take_action,
                     rollback=transaction.rollback,
+                    keep=lambda connector=connector: transaction.keep(connector),
                     scan_result=scan_results[connector],
                     defer_action_failure=len(targets) > 1,
                     defer_scan_log=True,
@@ -1963,6 +1964,7 @@ def _scan_installed_plugin_for_connector(
     connector: str,
     take_action: bool,
     rollback: Any = None,
+    keep: Any = None,
     scan_result: Any = None,
     defer_action_failure: bool = False,
     defer_scan_log: bool = False,
@@ -2114,6 +2116,10 @@ def _scan_installed_plugin_for_connector(
         se = PluginEnforcer(app.cfg.quarantine_dir)
         q_dest = _quarantine_new_plugin_copy(se, plugin_name, plugin_path, connector)
         if q_dest:
+            # The copy is out: no later error may roll this connector back
+            # and put the replaced plugin back as active next to it.
+            if keep:
+                keep()
             applied_actions.append(f"quarantined to {q_dest}")
             try:
                 pe.quarantine_for_connector("plugin", plugin_name, connector, enforcement_reason)
@@ -2211,22 +2217,14 @@ def _scan_installed_plugin_for_connector(
 
 def _quarantine_new_plugin_copy(se: Any, plugin_name: str, plugin_path: str, connector: str) -> str | None:
     """Move the copy this install wrote into quarantine. A thrown error is a
-    failed quarantine (GAP-1483): a partial quarantine copy it left is
-    removed, and the caller refuses the install and rolls it back."""
-    dest = se.quarantine_path(plugin_name, connector)
-    pre_existing = bool(dest) and os.path.lexists(dest)
+    failed quarantine (GAP-1483): the partial copy it left is
+    removed, and the caller refuses the install and rolls it back. The
+    enforcer stages the move in a path it owns, so a failure never touches a
+    quarantine another process made."""
     try:
         return se.quarantine(plugin_name, plugin_path, connector=connector)
     except Exception as exc:
         click.echo(f"[install] quarantine move failed: {exc}", err=True)
-        if dest and not pre_existing and os.path.lexists(dest):
-            try:
-                if os.path.isdir(dest) and not os.path.islink(dest):
-                    shutil.rmtree(dest)
-                else:
-                    os.unlink(dest)
-            except OSError as rm_exc:
-                click.echo(f"[install] warning: could not remove partial quarantine copy {dest}: {rm_exc}", err=True)
         return None
 
 

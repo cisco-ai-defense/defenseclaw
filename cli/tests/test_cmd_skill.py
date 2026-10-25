@@ -4312,6 +4312,27 @@ class TestSkillInstallQuarantineNeverWarns(SkillCommandTestBase):
                     self.assertTrue([d for d in details if reason in d], details)
                 self.assertEqual(self.app.store.list_quarantine_records("skill", name), [])
 
+    def test_an_error_after_the_quarantine_keeps_it_and_not_the_old_skill(self):
+        """Once the quarantine moved the new copy out, a later error (here
+        the source-path record) fails the install but never puts the
+        replaced skill back as active next to the quarantine record."""
+        actions = {
+            "file-only": self.FILE_ONLY,
+            "file-and-disable": {"install": "none", "file": "quarantine", "runtime": "disable"},
+        }
+        for label, action in actions.items():
+            with self.subTest(label):
+                name = f"after-q-{label}"
+                paths = self._seed_old_copy(name)
+                with patch("defenseclaw.commands.cmd_skill._normalize_runtime_connector", return_value="hermes"), \
+                        patch.object(PolicyEngine, "set_source_path", side_effect=RuntimeError("database is locked")):
+                    result, _ = self._install(name, ["--force", "--action"], action)
+                self.assertEqual(result.exit_code, 1, result.output)
+                for path in paths:
+                    self.assertFalse(os.path.lexists(path), f"{path}: the replaced skill came back next to its quarantine")
+                self._assert_no_backup_left(paths)
+                self.assertTrue(self.app.store.list_quarantine_records("skill", name), "the quarantine record is gone")
+
     def test_an_earlier_quarantine_still_decides_every_later_connector(self):
         """A quarantine applied on the first connector does not end the
         install before the second connector is decided: the second one's

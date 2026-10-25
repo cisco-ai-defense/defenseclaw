@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import uuid
 
 from defenseclaw.inventory.plugin_identity import (
     PluginIdentityError,
@@ -34,6 +35,26 @@ from defenseclaw.inventory.plugin_identity import (
 
 # Quarantine tree of plugins in a Hermes category folder, next to plugins/.
 PLUGIN_CATEGORY_QUARANTINE_DIR = "plugin-categories"
+
+
+def _remove_owned(path: str) -> None:
+    """Remove a staging path this enforcer created (best effort)."""
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        elif os.path.lexists(path):
+            os.unlink(path)
+    except OSError:
+        pass
+
+
+def _move_back(stage: str, original: str) -> None:
+    """Put a staged copy back where it was so the caller's rollback finds it."""
+    try:
+        if os.path.lexists(stage) and not os.path.lexists(original):
+            shutil.move(stage, original)
+    except OSError:
+        pass
 
 
 class PluginEnforcer:
@@ -113,7 +134,29 @@ class PluginEnforcer:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         if os.path.lexists(dest):
             return None
-        shutil.move(real_path, dest)
+        # Move into a staging path only this call owns, then put it in place
+        # without replacing anything: a failed move cleans up only its own
+        # staging path, never a quarantine another process made at ``dest``.
+        stage = f"{dest}.pending-{uuid.uuid4().hex}"
+        try:
+            shutil.move(real_path, stage)
+        except BaseException:
+            if os.path.lexists(real_path):
+                _remove_owned(stage)
+            else:
+                _move_back(stage, real_path)
+            raise
+        try:
+            if os.path.lexists(dest):
+                raise FileExistsError(f"quarantine destination appeared: {dest}")
+            if os.path.isdir(stage) and not os.path.islink(stage):
+                os.rename(stage, dest)  # never replaces a non-empty directory
+            else:
+                os.link(stage, dest)  # never replaces an existing file
+                os.unlink(stage)
+        except BaseException:
+            _move_back(stage, real_path)
+            raise
         return dest
 
     def restore(

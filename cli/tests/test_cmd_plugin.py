@@ -3789,6 +3789,87 @@ class TestPluginInstallQuarantineNeverWarns(PluginCommandTestBase):
             with open(os.path.join(dest, "plugin.py"), "w") as f:
                 f.write("# old copy\n")
 
+    def test_an_error_after_the_quarantine_keeps_it_and_not_the_old_plugin(self):
+        """Once the quarantine moved the new copy out, a later error (here
+        the source-path record) fails the install but never puts the
+        replaced plugin back as active next to the quarantine."""
+        real = PolicyEngine.set_source_path
+        actions = {
+            "file-only": self.FILE_ONLY,
+            "file-and-disable": {"install": "none", "file": "quarantine", "runtime": "disable"},
+        }
+        for label, action in actions.items():
+            with self.subTest(label):
+                name = f"after-q-{label}"
+                dests = {"openclaw": os.path.join(self.app.cfg.plugin_dirs("openclaw")[0], name)}
+                self._seed_old_copies_named(name, dests)
+                calls: list[tuple] = []
+
+                def source_path(pe_self, *a, **kw):
+                    calls.append(a)
+                    if len(calls) > 1:
+                        raise RuntimeError("database is locked")
+                    return real(pe_self, *a, **kw)
+
+                with patch("defenseclaw.commands.cmd_plugin._normalize_runtime_connector", return_value="hermes"), \
+                        patch.object(PolicyEngine, "set_source_path", new=source_path):
+                    result, _ = self._install(name, ["--force", "--action"], action)
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertGreater(len(calls), 1, "the error after the quarantine never happened")
+                self.assertFalse(os.path.lexists(dests["openclaw"]), "the replaced plugin came back next to its quarantine")
+                self._assert_no_backup_left(dests)
+                quarantine = PluginEnforcer(self.app.cfg.quarantine_dir).quarantine_path(name, "openclaw")
+                self.assertTrue(os.path.isdir(quarantine), "the quarantined copy is gone")
+
+    def test_a_failed_quarantine_move_never_removes_a_quarantine_it_did_not_make(self):
+        """Another process makes the quarantine destination while this move
+        runs (before the move, or between staging and the final rename):
+        the failed move leaves that quarantine as it was, refuses, and puts
+        the replaced plugin back."""
+        real_rename = os.rename
+
+        def theirs(name):
+            dest = PluginEnforcer(self.app.cfg.quarantine_dir).quarantine_path(name, "openclaw")
+            os.makedirs(dest, exist_ok=True)
+            with open(os.path.join(dest, "theirs.txt"), "w") as f:
+                f.write("other process\n")
+            return dest
+
+        def move_fails(name):
+            def move(_src, _dst, *a, **kw):
+                theirs(name)
+                raise OSError("no space left on device")
+            return patch("defenseclaw.enforce.plugin_enforcer.shutil.move", side_effect=move)
+
+        def rename_races(name):
+            dest = PluginEnforcer(self.app.cfg.quarantine_dir).quarantine_path(name, "openclaw")
+
+            def rename(src, dst, *a, **kw):
+                if os.path.abspath(dst) == os.path.abspath(dest):
+                    theirs(name)
+                return real_rename(src, dst, *a, **kw)
+            return patch("defenseclaw.enforce.plugin_enforcer.os.rename", side_effect=rename)
+
+        for label, ctx_for in {"move-fails": move_fails, "destination-appears-before-rename": rename_races}.items():
+            with self.subTest(label):
+                name = f"race-{label}"
+                dests = {"openclaw": os.path.join(self.app.cfg.plugin_dirs("openclaw")[0], name)}
+                self._seed_old_copies_named(name, dests)
+                with ctx_for(name):
+                    result, _ = self._install(name, ["--force", "--action"], self.FILE_ONLY)
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn("refusing to install", result.output)
+                quarantine = PluginEnforcer(self.app.cfg.quarantine_dir).quarantine_path(name, "openclaw")
+                with open(os.path.join(quarantine, "theirs.txt")) as f:
+                    self.assertEqual(f.read(), "other process\n", "another process's quarantine was removed")
+                self.assertEqual(sorted(os.listdir(quarantine)), ["theirs.txt"])
+                self.assertEqual(
+                    [e for e in os.listdir(os.path.dirname(quarantine)) if ".pending-" in e], [],
+                    "a staging path was left",
+                )
+                self.assertEqual(self._content(dests["openclaw"]), "# old copy\n")
+                self._assert_no_backup_left(dests)
+
     def test_plugin_scan_reports_a_file_only_quarantine_as_rejected(self):
         from datetime import datetime, timedelta, timezone
 
