@@ -55,6 +55,58 @@ func ApplyPatchLexicalTargets(tool string, args json.RawMessage, cwd, home strin
 	return applyPatchTargets(tool, args, "", cwd, home, false)
 }
 
+// ApplyPatchNamesProtectedTarget is the protected-target check of an
+// apply_patch call whose payload could not be proven (GAP-1461). It reads
+// every directive line without the envelope parse, places each path lexically
+// in cwd and home, and reports one that is a protected authorized-keys file of
+// home, by name or through the target the user-side hook resolved for it
+// (resolved, keyed like the hook evidence). It only adds a finding to an
+// unparsed call and never proves a call ordinary.
+func ApplyPatchNamesProtectedTarget(tool string, args json.RawMessage, cwd, home string, resolved map[string]string) bool {
+	if !isApplyPatchToolName(tool) || len(args) == 0 {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(args, &fields) != nil {
+		fields = map[string]json.RawMessage{"patch": args}
+	}
+	protectedPaths := ProtectedAuthorizedKeysPaths(home)
+	protected := func(path string) bool {
+		for _, candidate := range protectedPaths {
+			if path != "" && samePathName(filepath.Clean(path), candidate) {
+				return true
+			}
+		}
+		return false
+	}
+	names := func(path string) bool {
+		paths, _ := patchTargetPaths(path, cwd, home, false)
+		for _, target := range paths {
+			if protected(target) || protected(resolved[OperandPath(target, cwd)]) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, key := range []string{"command", "cmd", "patch", "patchText", "patch_text", "input"} {
+		for _, line := range strings.Split(patchTextField(fields[key]), "\n") {
+			line = strings.TrimSpace(line)
+			for _, directive := range patchTargetDirectives {
+				if strings.HasPrefix(line, directive) && names(strings.TrimSpace(line[len(directive):])) {
+					return true
+				}
+			}
+		}
+	}
+	for _, key := range []string{"path", "file_path", "filePath"} {
+		var path string
+		if json.Unmarshal(fields[key], &path) == nil && names(path) {
+			return true
+		}
+	}
+	return false
+}
+
 func applyPatchTargets(tool string, args json.RawMessage, command, cwd, home string, resolve bool) (targets []string, ok bool) {
 	var fields map[string]json.RawMessage
 	if len(args) != 0 {

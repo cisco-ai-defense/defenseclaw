@@ -5,10 +5,13 @@ package gateway
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // malformedHookPayloadReason validates the event envelope before any decoder
@@ -139,7 +142,33 @@ func preToolFieldsValid(payload map[string]interface{}) bool {
 	return inputs == 1
 }
 
+const unparsedProtectedPatchRuleID = "persistence.ssh_authorized_keys_command"
+
+// copilotUnparsedPatchNamesProtectedTarget runs the protected-target check on
+// a Copilot patch the gateway could not prove (GAP-1461), from the directives
+// it can still read. The reported cwd only places a relative directive when
+// the gateway could not validate the event cwd; it can add a finding, never
+// remove one.
+func copilotUnparsedPatchNamesProtectedTarget(ctx context.Context, req agentHookRequest) bool {
+	if req.ConnectorName != "copilot" {
+		return false
+	}
+	cwd := req.CWD
+	if !filepath.IsAbs(cwd) {
+		cwd = req.ReportedCWD
+	}
+	return hookpaths.ApplyPatchNamesProtectedTarget(copilotargs.LocalActionTool(strings.TrimSpace(req.ToolName)),
+		req.ToolArgs, cwd, hookActiveHome(ctx), resolvedWritesFromContext(ctx))
+}
+
 func (a *APIServer) unparsedStructuredHookResponse(ctx context.Context, profile connector.HookProfile, req agentHookRequest) agentHookResponse {
+	findings := []string{hookToolCallUnparsedRuleID}
+	ruleIDs := []string{hookToolCallUnparsedRuleID}
+	protected := copilotUnparsedPatchNamesProtectedTarget(ctx, req)
+	if protected {
+		findings = []string{unparsedProtectedPatchRuleID + ":SSH authorized keys mutation", hookToolCallUnparsedRuleID}
+		ruleIDs = []string{unparsedProtectedPatchRuleID, hookToolCallUnparsedRuleID}
+	}
 	if req.ConnectorName == "copilot" && req.HookSurface != connector.CopilotHookSurfaceVSCodeLocal &&
 		!isSandboxHookRequest(ctx) && a.agentHookMode(ctx, "copilot") == "observe" {
 		cfg := a.decisionConfig(ctx)
@@ -147,14 +176,21 @@ func (a *APIServer) unparsedStructuredHookResponse(ctx context.Context, profile 
 			cfg.HookPolicyTierForConnector("copilot") != config.HookPolicyTierStrict {
 			reason := "DefenseClaw could not read this Copilot tool call; it was allowed in observe mode and recorded for review."
 			resp := agentHookResponseForProfile(profile, req, "allow", "alert", "WARN", reason,
-				[]string{hookToolCallUnparsedRuleID}, "observe", false, profile.Capabilities)
-			resp.RuleIDs = []string{hookToolCallUnparsedRuleID}
+				findings, "observe", false, profile.Capabilities)
+			if protected {
+				// Observe does not block, but the protected target is the
+				// finding: the critical alert and audit row name its rule.
+				reason = "rule " + unparsedProtectedPatchRuleID + ": SSH authorized keys mutation; " + reason
+				resp = agentHookResponseForProfile(profile, req, "allow", "block", "CRITICAL", reason,
+					findings, "observe", true, profile.Capabilities)
+			}
+			resp.RuleIDs = ruleIDs
 			return resp
 		}
 	}
 	reason := unparsedToolCallReason(req.ConnectorName)
 	resp := agentHookResponseForProfile(profile, req, "block", "block", "HIGH", reason,
-		[]string{hookToolCallUnparsedRuleID}, "action", false, profile.Capabilities)
-	resp.RuleIDs = []string{hookToolCallUnparsedRuleID}
+		findings, "action", false, profile.Capabilities)
+	resp.RuleIDs = ruleIDs
 	return resp
 }
