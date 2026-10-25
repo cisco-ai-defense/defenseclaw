@@ -67,7 +67,10 @@ func TestManagedLocalAccountRecoversWhenGuardianRecordsUnsharedUID(t *testing.T)
 	previousIncarnation, previousRecordedIncarnation := managedHookPeerAccountIncarnation, managedHookPeerRecordedAccountIncarnation
 	previousValidate, previousDir := validateManagedGuardianAuthorization, currentIdentitySpoolDir()
 	previousService := managedServiceHosted.Load()
+	// NewAPIServer below publishes its guardrail profiles process-wide.
+	previousProfiles := liveGuardrailProfiles.Load()
 	t.Cleanup(func() {
+		liveGuardrailProfiles.Store(previousProfiles)
 		newPeerNSSResolver, peerUnsharedUIDNeedsRoot = previousResolver, previousRootProof
 		managedHookPeerAccountIncarnation, managedHookPeerRecordedAccountIncarnation = previousIncarnation, previousRecordedIncarnation
 		validateManagedGuardianAuthorization = previousValidate
