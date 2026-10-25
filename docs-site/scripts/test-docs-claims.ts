@@ -45,6 +45,18 @@ describe('Public outage guidance', () => {
   });
 });
 
+describe('Managed administrator outage choice', () => {
+  it('says an explicit open applies to a classified outage under a strict pack', () => {
+    const resolver = source('internal/config/hook_outage_fail_mode.go');
+    assert.match(resolver, /if managedInstall \{\s*return explicitHookFailMode\(managedMode\)/);
+    assert.match(resolver, /return HookOutageFailMode\(true, c\.EffectiveHookFailModeForConnector\(connector\), ""\)/);
+    const config = source('internal/config/application_protection.go');
+    assert.match(config, /if managed\.IsManagedEnterprise\(c\.DeploymentMode\) \{\s*if mode := c\.configuredHookFailModeForConnector\(connector\); mode != "" \{\s*return mode/);
+    assert.match(page('reference/configuration/fail-modes.mdx'), /administrator-selected `open` permits eligible gateway outages even with a strict rule pack/i);
+    assert.match(page('reference/apis/capability-matrix.mdx'), /administrator's explicit `hook_fail_mode: open` applies to a classified outage even when the managed rule pack is strict/i);
+  });
+});
+
 describe('Owner-decided 1.0.4 vendor and platform limits', () => {
   it('states the Claude Code typed-shell hook limit on both pages', () => {
     const connector = page('connectors/claudecode.mdx');

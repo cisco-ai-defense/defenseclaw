@@ -67,8 +67,10 @@ against the hook code on every change.
   ([Fail modes](/docs/reference/configuration/fail-modes#per-user-installs)).
 - **Managed standalone** is an enterprise host outside Secure Client. Its fail
   mode is the administrator's `hook_fail_mode`: `closed`, the default, blocks
-  the outage on every connector, and the two managed columns give `open`. A
-  managed connector runs either through vendor
+  the outage on every connector, and the two managed columns give `open`.
+  An administrator's explicit `hook_fail_mode: open` applies to a classified
+  outage even when the managed rule pack is strict. A managed connector runs
+  either through vendor
   [machine policy](/docs/enterprise/configure/machine-policy) (the
   administrator-owned `defenseclaw-hook --enterprise-managed`) or through a
   hook or plugin the guardian writes into the user's home (the per-user route,
