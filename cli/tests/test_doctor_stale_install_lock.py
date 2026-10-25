@@ -15,7 +15,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from defenseclaw.commands import cmd_doctor
 
 REPO = Path(__file__).resolve().parents[2]
