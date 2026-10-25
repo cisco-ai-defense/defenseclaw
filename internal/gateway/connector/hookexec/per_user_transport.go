@@ -103,10 +103,6 @@ func NewPerUserGatewayHTTPClient(timeout time.Duration, apiAddr string) (*http.C
 // sent a status line.
 var errPerUserAnswerIncomplete = errors.New("per-user gateway answer incomplete")
 
-// A just-connected client can precede the accepted server row in the OS
-// socket table. Only this absence is retried by per-user peer verification.
-var errConnectedSocketNotFound = errors.New("connected gateway server socket was not found")
-
 // PerUserPostOutageExit is the exit status of `hook-post` for a gateway
 // outage (PerUserPostOutage), curl's "could not connect" status, which the
 // shell hooks and in-agent plugins already read as this account's gateway
