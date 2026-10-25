@@ -981,6 +981,9 @@ def test_a_write_over_the_legacy_default_keeps_what_it_decides(tmp_path, monkeyp
 
     monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
     monkeypatch.setattr(config_writer, "_use_go_validator", lambda: False)
+    # Not about managed devices: a test host with a machine-managed config
+    # must not refuse these writes.
+    monkeypatch.setattr(config_writer, "managed_refuses", lambda current, actor: False)
     fixture = json.loads(
         (Path(__file__).resolve().parents[2] / "testdata" / "admission_legacy_default_writes.json").read_text()
     )
