@@ -147,7 +147,7 @@ func TestR104GlobAliasBehindHiddenHome(t *testing.T) {
 		`cat docs/*.md > notes.txt`,
 		`rm -f src/*.log`,
 		`cp payload d*/notes.txt`,
-		`git add *`,
+		`git add docs/*`,
 		`cp payload docs/*`,
 		`chmod 644 src/[a-z]*`,
 	}
