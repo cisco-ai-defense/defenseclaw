@@ -8,6 +8,7 @@ package enterprisehooks
 import (
 	"context"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -224,5 +225,86 @@ func TestEnumerateWindowsAuthoredHomeStatStallAnswersByTheDeadline(t *testing.T)
 	}
 	if strings.Join(got, ",") != "codex,hermes" {
 		t.Fatalf("authored account reported %v, want codex and hermes timed out", got)
+	}
+}
+
+// Manifest mode inspects only the administrator's enrolled accounts, so the
+// ProfileList home of any other account is never opened: an offline
+// redirected or network home of an unrelated profile cannot hold the cycle
+// before the bounded profile workers start. An enrolled account's own home
+// is still checked.
+func TestEnumerateWindowsManifestModeNeverOpensAnUnenrolledHome(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	stubUserWinGet(t, nil)
+	enrolledHome := codexProfile(t, "0.150.0")
+	unrelatedHome := filepath.Join(t.TempDir(), "offline-redirected")
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: enrolledHome, testLocalUserTwo: unrelatedHome})
+	oldStat := windowsProfileHomeStat
+	t.Cleanup(func() { windowsProfileHomeStat = oldStat })
+	release := make(chan struct{})
+	defer close(release)
+	var opened []string
+	windowsProfileHomeStat = func(home string) (fs.FileInfo, error) {
+		opened = append(opened, home)
+		if strings.EqualFold(filepath.Clean(home), filepath.Clean(unrelatedHome)) {
+			<-release
+			return nil, fs.ErrNotExist
+		}
+		return os.Stat(home)
+	}
+	enabled := true
+	subjects := WindowsManifestSubjects(Manifest{Version: 1, Targets: []ManifestTarget{
+		{SID: testLocalUserSID, Connector: "codex", UserHome: enrolledHome, AgentVersion: "0.150.0", Enabled: &enabled},
+	}})
+	finished := make(chan error, 1)
+	go func() {
+		_, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("codex"), EnumerateOptions{
+			GroupCache:        NewWindowsEnrollmentGroupCache(),
+			ManifestSubjects:  subjects,
+			ReportUnprotected: func(UnprotectedAgent) {},
+		})
+		finished <- err
+	}()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("EnumerateWindows: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an unrelated profile's home held the manifest-mode scan")
+	}
+	if len(opened) != 1 || !strings.EqualFold(filepath.Clean(opened[0]), filepath.Clean(enrolledHome)) {
+		t.Fatalf("homes opened = %v, want only the enrolled account's %s", opened, enrolledHome)
+	}
+}
+
+// An exempt account keeps its enabled rows, so manifest mode inspects its
+// authored home like any enrolled account's: an unreadable one is NOT
+// COVERED, never left out of the record.
+func TestEnumerateWindowsManifestModeInspectsAnExemptAuthoredHome(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	stubUserWinGet(t, nil)
+	injectWindowsProfileList(t, map[string]string{})
+	home := filepath.Join(t.TempDir(), "carol")
+	if err := os.WriteFile(home, []byte("not a folder"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	subjects := WindowsManifestSubjects(Manifest{Version: 1, Targets: []ManifestTarget{
+		{SID: testLocalUserTwo, Connector: "codex", UserHome: home, Enabled: &enabled},
+	}})
+	for _, exempt := range []string{testLocalUserTwo, "carol"} {
+		var reported []UnprotectedAgent
+		if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("codex"), EnumerateOptions{
+			GroupCache:        NewWindowsEnrollmentGroupCache(),
+			ManifestSubjects:  subjects,
+			ExemptUsers:       []string{exempt},
+			ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+		}); err != nil {
+			t.Fatalf("EnumerateWindows: %v", err)
+		}
+		if len(reported) != 1 || reported[0].SID != testLocalUserTwo || reported[0].Connector != "codex" || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
+			t.Fatalf("exempt %q: reported %+v, want the exempt account's codex NOT COVERED", exempt, reported)
+		}
 	}
 }

@@ -240,7 +240,17 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	// newly discovered rows as deferred; the Secure Client profile keeps its
 	// historical filter and row state exactly.
 	standalone := cfg.StandaloneEnterprise()
-	profiles, err := listWindowsUserProfiles(ctx, opts.Logger, standalone)
+	// Manifest mode inspects only the administrator's enrolled accounts, so
+	// another account's home is never opened: an offline redirected or
+	// network home of an unrelated profile cannot hold the cycle.
+	var checkHome func(sid string) bool
+	if opts.ManifestSubjects != nil {
+		checkHome = func(sid string) bool {
+			_, enrolled := opts.ManifestSubjects[sid]
+			return enrolled
+		}
+	}
+	profiles, err := listWindowsUserProfiles(ctx, opts.Logger, standalone, checkHome)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -448,15 +458,13 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 
 	// A manifest subject ProfileList does not list as an interactive
 	// profile is still enrolled: its authored home is inspected directly,
-	// and an unreadable one is reported incomplete (GAP-0906).
+	// and an unreadable one is reported incomplete (GAP-0906). An exempt
+	// account keeps its enabled rows, so it is inspected as a listed one is.
 	if opts.ReportUnprotected != nil {
 		for _, sid := range sortedManifestSubjects(opts.ManifestSubjects) {
-			if visited[sid] || windowsEnrollmentListMatches(opts.ExcludeUsers, []string{sid}) || windowsEnrollmentListMatches(opts.ExemptUsers, []string{sid}) {
-				continue
-			}
 			subject := opts.ManifestSubjects[sid]
 			user := filepath.Base(subject.Home)
-			if windowsEnrollmentListMatches(opts.ExcludeUsers, []string{user}) || windowsEnrollmentListMatches(opts.ExemptUsers, []string{user}) {
+			if visited[sid] || windowsEnrollmentListMatches(opts.ExcludeUsers, []string{sid, user}) {
 				continue
 			}
 			judged[sid] = true
@@ -1317,7 +1325,7 @@ func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOpt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	profiles, err := listWindowsUserProfiles(ctx, nil, true)
+	profiles, err := listWindowsUserProfiles(ctx, nil, true, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1369,7 +1377,11 @@ func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOpt
 // ctx bounds the walk: a per-subkey ctx.Err() check ensures a
 // wedged os.Stat on one profile cannot starve the interval-loop's
 // 60 s cycle timeout.
-func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standalone bool) ([]windowsUserProfile, error) {
+//
+// checkHome, when not nil, names the canonical SIDs whose home is checked
+// (it exists, is a directory, has no reparse point). Any other profile is
+// listed from the registry alone and its home is never opened.
+func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standalone bool, checkHome func(sid string) bool) ([]windowsUserProfile, error) {
 	subkeyNames, err := windowsProfileListSubkeyReader()
 	if err != nil {
 		return nil, err
@@ -1411,25 +1423,27 @@ func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standa
 			logfSafely(logf, name, "ProfileImagePath is empty or not absolute")
 			continue
 		}
-		info, err := os.Stat(home)
-		if err != nil {
-			logfSafely(logf, name, fmt.Sprintf("ProfileImagePath does not resolve to an existing directory: %v", err))
-			continue
-		}
-		if !info.IsDir() {
-			logfSafely(logf, name, "ProfileImagePath is not a directory")
-			continue
-		}
-		if err := winpath.RejectReparseChain(home); err != nil {
-			logfSafely(logf, name, fmt.Sprintf("ProfileImagePath contains a reparse point in its ancestor chain: %v", err))
-			continue
-		}
-		mtime := info.ModTime().UnixNano()
-
 		canon := canonicalManifestTargetSID(name)
 		if canon == "" {
 			logfSafely(logf, name, "SID canonicalisation returned empty")
 			continue
+		}
+		var mtime int64
+		if checkHome == nil || checkHome(canon) {
+			info, err := windowsProfileHomeStat(home)
+			if err != nil {
+				logfSafely(logf, name, fmt.Sprintf("ProfileImagePath does not resolve to an existing directory: %v", err))
+				continue
+			}
+			if !info.IsDir() {
+				logfSafely(logf, name, "ProfileImagePath is not a directory")
+				continue
+			}
+			if err := winpath.RejectReparseChain(home); err != nil {
+				logfSafely(logf, name, fmt.Sprintf("ProfileImagePath contains a reparse point in its ancestor chain: %v", err))
+				continue
+			}
+			mtime = info.ModTime().UnixNano()
 		}
 		if prev, dup := byCanonSID[canon]; dup {
 			if mtime <= prev.HomeMtime {
@@ -1469,6 +1483,8 @@ func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standa
 var (
 	windowsProfileListSubkeyReader = readProfileListSubkeyNames
 	windowsProfileImagePathReader  = readAndExpandProfileImagePath
+	// windowsProfileHomeStat checks a listed profile's home.
+	windowsProfileHomeStat = os.Stat
 )
 
 func readProfileListSubkeyNames() ([]string, error) {
@@ -1815,9 +1831,10 @@ func windowsProfileScanBounded(ctx context.Context, home string, scan, timedOut 
 // administrator-enrolled subject that reported does not already name
 // incomplete. Manifest mode publishes it when its profile scan did not
 // finish, so an uninspected account is NOT COVERED with a reason and the
-// install or cycle goes on. Excluded and exempt accounts are left out, as
-// the scan leaves them out.
-func WindowsManifestScanIncomplete(subjects map[string]WindowsManifestSubject, excludeUsers, exemptUsers []string, reported []UnprotectedAgent, scanErr error) []UnprotectedAgent {
+// install or cycle goes on. Excluded accounts are left out, as the scan
+// leaves them out. An exempt account keeps its enabled rows, so a failed
+// scan never clears its NOT COVERED rows.
+func WindowsManifestScanIncomplete(subjects map[string]WindowsManifestSubject, excludeUsers []string, reported []UnprotectedAgent, scanErr error) []UnprotectedAgent {
 	skipped := PrivateInstallSkippedUnresolved
 	if errors.Is(scanErr, context.DeadlineExceeded) || errors.Is(scanErr, context.Canceled) {
 		skipped = PrivateInstallSkippedTimedOut
@@ -1832,7 +1849,7 @@ func WindowsManifestScanIncomplete(subjects map[string]WindowsManifestSubject, e
 	for _, sid := range sortedManifestSubjects(subjects) {
 		subject := subjects[sid]
 		user := filepath.Base(subject.Home)
-		if windowsEnrollmentListMatches(excludeUsers, []string{sid, user}) || windowsEnrollmentListMatches(exemptUsers, []string{sid, user}) {
+		if windowsEnrollmentListMatches(excludeUsers, []string{sid, user}) {
 			continue
 		}
 		for _, conn := range subject.Connectors {
