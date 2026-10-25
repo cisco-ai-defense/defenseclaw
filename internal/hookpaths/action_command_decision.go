@@ -52,6 +52,10 @@ func actionConcreteProtectedWrite(command, cwd, home string) bool {
 	writes = append(writes, AdjacentAssignedWriteOperands(command, cwd, home)...)
 	bounded, _ := BoundedShellWriteOperands(command, cwd, home)
 	writes = append(writes, bounded...)
+	directoryWrites, _ := ShellDirectoryWriteOperands(command, cwd, home, nil, false, false)
+	for _, occurrence := range directoryWrites {
+		writes = append(writes, occurrence.Path)
+	}
 	patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
 	writes = append(writes, patches...)
 	for _, target := range writes {

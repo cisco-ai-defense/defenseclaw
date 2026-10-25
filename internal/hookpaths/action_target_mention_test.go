@@ -34,7 +34,6 @@ func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
 		"git show HEAD --output=" + target,
 		"rg --pre='sh -c \"echo marker > " + target + "\"' marker .",
 		"cd " + filepath.Join(home, ".ssh") + " && echo " + target,
-		"cd -- " + filepath.Join(home, ".ssh") + " && cat authorized_keys",
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
@@ -53,6 +52,7 @@ func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
 		"pushd " + filepath.Join(home, ".ssh"),
 		"popd",
 		"cd -- " + filepath.Join(home, ".ssh"),
+		"cd -- " + filepath.Join(home, ".ssh") + " && cat authorized_keys",
 		"ls " + filepath.Join(home, ".ssh"),
 		"cp report.pub result.pub",
 	} {
@@ -176,6 +176,7 @@ func TestR104PosixHomeTargetMentionOnWindows(t *testing.T) {
 		"echo " + target,
 		"echo $HOME/.ssh/authorized_keys",
 		"echo ~/.ssh/authorized_keys",
+		"cp payload ~/.ssh/authorized_k*",
 	} {
 		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
 			t.Errorf("POSIX target %q decision = %q", command, got)
@@ -185,6 +186,7 @@ func TestR104PosixHomeTargetMentionOnWindows(t *testing.T) {
 		"cat " + target,
 		"cd /home/alice/.ssh",
 		"cd -- /home/alice/.ssh",
+		"cd ~/.ssh && ls -la",
 		"echo /repo/report.txt",
 	} {
 		if got := ActionCommandDecision(command, cwd, home); got != "" {
@@ -251,5 +253,167 @@ func TestR104WindowsActiveDefenseClawStateTargetMention(t *testing.T) {
 		if ActionStateTargetMention(command, cwd, home) {
 			t.Errorf("Windows ordinary/read-only %q has protected-state mention", command)
 		}
+	}
+}
+
+func TestR104ActionArgvGlobProtectedMention(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(home, ".ssh", "authorized_key")); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		`"$tool" ~/.ssh/authorized_k*`,
+		`cp payload ~/.ssh/authorized_ke?`,
+		`install -m 600 payload ~/.ssh/authorized_k[e]ys`,
+		`rsync payload ~/.ssh/authorized_key?`,
+		`tee ~/.ssh/authorized_k* < payload`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+				t.Fatalf("decision = %q, want protected-target", got)
+			}
+		})
+	}
+	if got := ActionCommandDecision(`cp payload ~/.ssh/*.pub`, cwd, home); got != "" {
+		t.Fatalf("ordinary glob decision = %q", got)
+	}
+	if got := ActionCommandDecision(`cp payload '~/.ssh/authorized_k*'`, cwd, home); got != "" {
+		t.Fatalf("literal glob decision = %q", got)
+	}
+}
+
+func TestR104WindowsActionArgvGlobProtectedMention(t *testing.T) {
+	const home = `C:\Users\b00`
+	const cwd = `C:\work`
+	for _, command := range []string{
+		`cp payload C:\Users\b00\.ssh\authorized_k*`,
+		`Copy-Item payload $HOME\.ssh\authorized_key?`,
+		`install -m 600 payload C:\Users\b00\.ssh\authorized_k[e]ys`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("protected glob %q decision = %q", command, got)
+		}
+	}
+	if got := ActionCommandDecision(`cp payload C:\Users\b00\.ssh\*.pub`, cwd, home); got != "" {
+		t.Errorf("ordinary glob decision = %q", got)
+	}
+}
+
+func TestR104WindowsNestedProtectedMention(t *testing.T) {
+	const home = `C:\Users\b00`
+	const cwd = `C:\work`
+	const target = `C:\Users\b00\.ssh\authorized_keys`
+	for _, command := range []string{
+		`Get-ChildItem C:\Users\b00\.ssh | Select-Object @{e={Set-Content ` + target + ` marker}}`,
+		`Get-ChildItem C:\Users\b00\.ssh | Select-Object -Property {Add-Content -Path ` + target + ` -Value marker}`,
+		`Get-Content C:\work\a.txt | Select-Object {Set-Content $env:USERPROFILE\.ssh\authorized_keys marker}`,
+		`[System.IO.File]::ReadAllText('C:/work/a.txt') + [System.IO.File]::AppendAllText('C:/Users/b00/.ssh/authorized_keys','marker')`,
+		`[IO.File]::ReadAllText([IO.File]::AppendAllText('C:/Users/b00/.ssh/authorized_keys','marker'))`,
+		`Test-Path (Add-Content -Path ` + target + ` -Value marker -PassThru)`,
+		`Get-Item (Set-Content -Path $HOME\.ssh\authorized_keys -Value marker -PassThru)`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+				t.Fatalf("decision = %q, want protected-target", got)
+			}
+		})
+	}
+}
+
+func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		`cd ~/.ssh && ls -la`,
+		`ls -la ~/.ssh; pwd`,
+		`find ~/.ssh -name '*.pub'`,
+		`cd ~/.ssh && pwd`,
+		`ls ~/.ssh && echo done`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if got := ActionCommandDecision(command, cwd, home); got != "" {
+				t.Fatalf("directory-only decision = %q, want allow", got)
+			}
+		})
+	}
+	const winHome = `C:\Users\b00`
+	const winCWD = `C:\work`
+	for _, command := range []string{
+		`Set-Location C:\Users\b00\.ssh; Get-ChildItem`,
+		`Get-ChildItem C:\Users\b00\.ssh | Format-Table Name`,
+		`foreach ($n in Get-ChildItem C:\Users\b00\.ssh) { Write-Output $n.Name }`,
+		`Push-Location C:\Users\b00\.ssh; Get-ChildItem; Pop-Location`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if got := ActionCommandDecision(command, winCWD, winHome); got != "" {
+				t.Fatalf("directory-only decision = %q, want allow", got)
+			}
+		})
+	}
+}
+
+func TestR104LessOutputProtectedMention(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(home, ".ssh", "authorized_keys")
+	for _, option := range []string{"-o", "-O", "--log-file"} {
+		if got := ActionCommandDecision("cat payload | less "+option+" "+target, cwd, home); got != "protected-target" {
+			t.Errorf("less %s decision = %q", option, got)
+		}
+	}
+	if got := ActionCommandDecision("less "+target, cwd, home); got != "" {
+		t.Errorf("read-only less decision = %q", got)
+	}
+}
+
+func TestR104DirectoryScopedWriteSurvivesDirectoryMentionExemption(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	ssh := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(ssh, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(cwd, "build"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(ssh, filepath.Join(cwd, "dirlink")); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		"cd dirlink && echo marker >> authorized_keys",
+		"env -C dirlink python3 <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"marker\")\nPY",
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			writes, unknown := ShellDirectoryWriteOperands(command, cwd, home, nil, false, false)
+			t.Errorf("directory-scoped write %q decision = %q, directory writes=%v unknown=%v", command, got, writes, unknown)
+		}
+	}
+	if got := ActionCommandDecision("cd dirlink && cat authorized_keys", cwd, home); got != "" {
+		t.Errorf("read-only directory command decision = %q", got)
+	}
+	if got := ActionCommandDecision("env -C build python3 <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"marker\")\nPY", cwd, home); got != "" {
+		t.Errorf("ordinary directory write decision = %q", got)
 	}
 }

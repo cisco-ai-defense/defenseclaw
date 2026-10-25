@@ -5,6 +5,8 @@ package hookpaths
 
 import (
 	"encoding/base64"
+	"io"
+	"os"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -45,7 +47,6 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 		return true
 	}
 	protected := newProtectedFiles(home)
-	ssh := filepath.Join(home, ".ssh")
 	check := func(value string) bool {
 		if len(value) == 0 || len(value) > MaxWriteTargetPathBytes {
 			return false
@@ -58,7 +59,13 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			}
 		}
 		if strings.ContainsAny(value, "*?[]") {
-			return false // A pattern in source text is not a resolved pathname.
+			if stateOnly {
+				return false
+			}
+			if actionPosixWindowsHome(home) {
+				return actionPosixWindowsProtectedGlob(value, cwd, home)
+			}
+			return actionProtectedFileGlobReach(value, cwd, protected)
 		}
 		if actionPosixWindowsHome(home) {
 			if stateOnly {
@@ -70,11 +77,19 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 		if stateOnly {
 			return actionProtectedStatePath(operand, home)
 		}
-		return protectedReachPath(operand, protected, ssh)
+		return actionProtectedFileReach(operand, protected)
 	}
 	if parsed {
 		values := actionValues{"HOME": home, "PWD": cwd}
 		found := false
+		checkWord := func(word *syntax.Word) bool {
+			value, known := actionWordValue(word, values, cwd, home)
+			activeGlob := actionWordHasUnquotedGlob(word, command)
+			if !known && activeGlob {
+				value, known = actionWordValueWithGlob(word, values, cwd, home, true)
+			}
+			return known && (!strings.ContainsAny(value, "*?[]") || activeGlob) && check(value)
+		}
 		syntax.Walk(file, func(node syntax.Node) bool {
 			if found {
 				return false
@@ -85,16 +100,14 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			}
 			actionUpdateValues(stmt, values, cwd, home)
 			for _, redir := range stmt.Redirs {
-				if redir.Word != nil {
-					if value, known := actionWordValue(redir.Word, values, cwd, home); known && check(value) {
-						found = true
-						return false
-					}
+				if redir.Word != nil && checkWord(redir.Word) {
+					found = true
+					return false
 				}
 			}
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
 				for _, word := range call.Args {
-					if value, known := actionWordValue(word, values, cwd, home); known && check(value) {
+					if checkWord(word) {
 						found = true
 						return false
 					}
@@ -106,9 +119,12 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			return true
 		}
 	}
-	text := actionMaskLiteralDollars(command)
+	text := actionMaskLiteralMetacharacters(command)
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "${HOME}/", home+"/"), "$HOME/", home+"/")
 	for _, token := range unprovenPathToken.FindAllString(text, -1) {
+		if strings.ContainsAny(token, "*?[]") && (parsed || !strings.ContainsAny(token, "/\\")) {
+			continue // Shell case labels and patch text are not argv glob operands.
+		}
 		if check(token) {
 			return true
 		}
@@ -138,11 +154,63 @@ func actionPosixWindowsPath(value, cwd, home string) string {
 func actionPosixWindowsProtected(value, cwd, home string) bool {
 	resolved := actionPosixWindowsPath(value, cwd, home)
 	ssh := path.Join(home, ".ssh")
-	if resolved == ssh {
-		return true
-	}
 	for _, name := range AuthorizedKeysFiles {
 		if resolved == path.Join(ssh, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func actionPosixWindowsProtectedGlob(value, cwd, home string) bool {
+	resolved := actionPosixWindowsPath(value, cwd, home)
+	parent, base := path.Split(resolved)
+	if strings.ContainsAny(parent, "*?[") {
+		return false
+	}
+	if path.Clean(parent) != path.Join(home, ".ssh") {
+		return false
+	}
+	for _, name := range AuthorizedKeysFiles {
+		if matched, _ := path.Match(base, name); matched {
+			return true
+		}
+	}
+	return false
+}
+
+// A directory mention alone is not a protected-file mention. The write proof
+// separately retains its directory-as-destination rule.
+func actionProtectedFileReach(operand string, protected protectedFiles) bool {
+	resolved, ok := ResolveWriteTarget(operand)
+	if !ok {
+		return false
+	}
+	if protected.has(resolved) {
+		return true
+	}
+	mapped, ok := protected.target(resolved)
+	return ok && protected.has(mapped)
+}
+
+// Expand only a bounded literal parent and match files, not the .ssh directory.
+func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles) bool {
+	parent, base := filepath.Dir(pattern), filepath.Base(pattern)
+	if _, err := filepath.Match(base, ""); err != nil || strings.ContainsAny(parent, "*?[") {
+		return false
+	}
+	directory, err := os.Open(OperandPath(parent, cwd))
+	if err != nil {
+		return false
+	}
+	names, err := directory.Readdirnames(4097)
+	_ = directory.Close()
+	if err != nil && err != io.EOF || len(names) > 4096 {
+		return false
+	}
+	for _, name := range names {
+		if matched, _ := filepath.Match(base, name); matched &&
+			actionProtectedFileReach(OperandPath(name, OperandPath(parent, cwd)), protected) {
 			return true
 		}
 	}
@@ -246,8 +314,9 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 	return found
 }
 
-// Literal and escaped dollar signs are not home variables in the outer shell.
-func actionMaskLiteralDollars(command string) string {
+// Quoted or escaped dollar signs and glob characters do not expand in the
+// outer shell. Nested shell bodies are checked separately above.
+func actionMaskLiteralMetacharacters(command string) string {
 	var masked strings.Builder
 	masked.Grow(len(command))
 	var quote byte
@@ -269,13 +338,20 @@ func actionMaskLiteralDollars(command string) string {
 		case c == '"' && quote == '"':
 			quote = 0
 		}
-		if c == '$' && (escapedNow || quote == '\'') {
+		if c == '$' && (escapedNow || quote == '\'') ||
+			strings.ContainsRune("*?[]", rune(c)) && (escapedNow || quote != 0) {
 			masked.WriteByte('@')
 		} else {
 			masked.WriteByte(c)
 		}
 	}
 	return masked.String()
+}
+
+func actionWordHasUnquotedGlob(word *syntax.Word, command string) bool {
+	start, end := int(word.Pos().Offset()), int(word.End().Offset())
+	return start >= 0 && end <= len(command) && start < end &&
+		strings.ContainsAny(actionMaskLiteralMetacharacters(command[start:end]), "*?[]")
 }
 
 func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
@@ -304,7 +380,15 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 		}
 		seen = true
 		switch programBase(program) {
-		case "cat", "type", "head", "tail", "less", "grep", "sha256sum", "ls", "dir", "stat", "wc", "readlink", "diff", "cmp", "file", "test", "[":
+		case "cat", "type", "head", "tail", "grep", "sha256sum", "ls", "dir", "stat", "wc", "readlink", "diff", "cmp", "file", "test", "[":
+		case "less":
+			for _, arg := range call.Args[1:] {
+				option, known := StaticWord(arg, home)
+				if !known || actionLessWritesFile(option) {
+					safe = false
+					break
+				}
+			}
 		case "git":
 			if len(call.Args) < 2 {
 				safe = false
@@ -318,6 +402,13 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 		return safe
 	})
 	return seen && safe
+}
+
+func actionLessWritesFile(option string) bool {
+	return option == "-o" || option == "-O" ||
+		strings.HasPrefix(option, "-o") && !strings.HasPrefix(option, "--") ||
+		strings.HasPrefix(option, "-O") ||
+		strings.HasPrefix(option, "--log-file")
 }
 
 func actionOnlySSHDirectoryNavigation(file *syntax.File, cwd, home string) bool {
@@ -475,18 +566,31 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 	if len(words) == 0 {
 		return false
 	}
-	for _, word := range words {
-		if strings.Contains(word, "$(") || strings.Contains(word, "`") {
-			return false // A nested command or escaped syntax is not a plain read.
-		}
-	}
 	call := strings.ToLower(words[0])
 	if strings.HasPrefix(call, "[system.io.file]::readall") || strings.HasPrefix(call, "[io.file]::readall") {
-		return true
+		return len(words) == 1 && strings.Count(call, "(") == 1 &&
+			strings.Count(call, ")") == 1 && strings.HasSuffix(call, ")")
+	}
+	for _, word := range words {
+		if strings.ContainsAny(word, "(`") || strings.Contains(word, "@{") {
+			return false // A nested command or escaped syntax is not a plain read.
+		}
+		for i := 0; i < len(word); i++ {
+			if word[i] == '{' && (i == 0 || word[i-1] != '$') {
+				return false // Scriptblocks and calculated properties execute commands.
+			}
+		}
 	}
 	program := strings.TrimSuffix(strings.ToLower(programBase(words[0])), ".exe")
 	switch program {
-	case "cat", "type", "get-content", "get-childitem", "get-item", "get-acl", "get-filehash", "resolve-path", "test-path", "select-string", "select-object", "grep", "head", "tail", "less", "sha256sum", "wc", "dir", "ls", "stat", "readlink", "diff", "cmp", "file", "findstr":
+	case "cat", "type", "get-content", "get-childitem", "get-item", "get-acl", "get-filehash", "resolve-path", "test-path", "select-string", "select-object", "grep", "head", "tail", "sha256sum", "wc", "dir", "ls", "stat", "readlink", "diff", "cmp", "file", "findstr":
+		return true
+	case "less":
+		for _, option := range words[1:] {
+			if actionLessWritesFile(option) {
+				return false
+			}
+		}
 		return true
 	case "git":
 		return len(words) > 1 && strings.EqualFold(words[1], "status")
@@ -522,6 +626,9 @@ func actionWindowsSSHDirectoryNavigation(words []string, cwd, home string) bool 
 func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) bool {
 	check := func(candidate string) bool {
 		candidate = strings.ReplaceAll(candidate, "`", "")
+		if strings.ContainsAny(candidate, "*?[]") {
+			return !stateOnly && actionWindowsProtectedGlobReach(candidate, cwd, home)
+		}
 		resolved, ok := actionWindowsPath(candidate, cwd, home)
 		if !ok {
 			if stateOnly {
@@ -537,9 +644,6 @@ func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) boo
 			return strings.HasPrefix(resolved, root+"/") &&
 				actionProtectedStateRelative(strings.TrimPrefix(resolved, root+"/"))
 		}
-		if resolved == root+"/.ssh" {
-			return true
-		}
 		protected, _ := actionWindowsProtected(candidate, cwd, home, false)
 		return protected
 	}
@@ -553,6 +657,31 @@ func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) boo
 			return true
 		}
 		if colon := strings.IndexByte(field, ':'); colon > 1 && field[0] == '-' && check(field[colon+1:]) {
+			return true
+		}
+	}
+	return false
+}
+
+func actionWindowsProtectedGlobReach(pattern, cwd, home string) bool {
+	pattern = strings.ReplaceAll(pattern, `\`, "/")
+	parent, base := path.Split(pattern)
+	if parent == "" {
+		parent = "."
+	}
+	if _, err := path.Match(base, ""); err != nil || strings.ContainsAny(parent, "*?[") {
+		return false
+	}
+	resolved, ok := actionWindowsPath(strings.TrimSuffix(parent, "/"), cwd, home)
+	if !ok {
+		return false
+	}
+	root, ok := actionWindowsPath(home, cwd, home)
+	if !ok || resolved != root+"/.ssh" {
+		return false
+	}
+	for _, name := range AuthorizedKeysFiles {
+		if matched, _ := path.Match(strings.ToLower(base), name); matched {
 			return true
 		}
 	}

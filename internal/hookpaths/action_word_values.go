@@ -131,6 +131,10 @@ func actionForgetValues(stmt *syntax.Stmt, values actionValues, home string) {
 }
 
 func actionWordValue(word *syntax.Word, values actionValues, cwd, home string) (string, bool) {
+	return actionWordValueWithGlob(word, values, cwd, home, false)
+}
+
+func actionWordValueWithGlob(word *syntax.Word, values actionValues, cwd, home string, allowGlob bool) (string, bool) {
 	if word == nil {
 		return "", false
 	}
@@ -140,7 +144,7 @@ func actionWordValue(word *syntax.Word, values actionValues, cwd, home string) (
 		for _, item := range items {
 			switch part := item.(type) {
 			case *syntax.Lit:
-				if strings.ContainsAny(part.Value, "*?[\x00\x1f") {
+				if strings.ContainsAny(part.Value, "\x00\x1f") || !allowGlob && strings.ContainsAny(part.Value, "*?[") {
 					return false
 				}
 				out.WriteString(part.Value)
@@ -172,7 +176,7 @@ func actionWordValue(word *syntax.Word, values actionValues, cwd, home string) (
 						return false
 					}
 					if !ok || part.Exp.Op == syntax.DefaultUnsetOrNull && value == "" {
-						value, ok = actionWordValue(part.Exp.Word, values, cwd, home)
+						value, ok = actionWordValueWithGlob(part.Exp.Word, values, cwd, home, allowGlob)
 					}
 				}
 				if !ok {

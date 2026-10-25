@@ -267,7 +267,7 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 			return add(literalInterpreterWrites(words[2], language, cwd, home))
 		}
 		if program == "python" || strings.HasPrefix(program, "python3") {
-			if len(words) >= 2 && words[1] == "-" && stmt != nil {
+			if stmt != nil && (len(words) == 1 || len(words) >= 2 && words[1] == "-") {
 				for _, redirect := range stmt.Redirs {
 					if code, ok := literalQuotedHereDocument(redirect); ok {
 						return add(literalInterpreterWrites(code, "python", cwd, home))

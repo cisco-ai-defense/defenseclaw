@@ -46,7 +46,7 @@ func TestWindowsAuthorizedKeysLocationChains(t *testing.T) {
 		{"powershell location data control", "Bash", `Set-Location $HOME; Add-Content -Va .ssh\authorized_keys report.txt`, `C:\Users\dcw-rv24p\project`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, true},
 		{"powershell push location", "Bash", `Push-Location ~\.ssh; Out-File -Append -FilePath authorized_keys -InputObject dccert-block-marker`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, true},
 		{"powershell pop location", "Bash", `Push-Location build; Pop-Location; Set-Location .ssh; Add-Content authorized_keys dccert-block-marker`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, true},
-		{"powershell pop control", "Bash", `Push-Location .ssh; Pop-Location; Add-Content notes.txt ok`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, true},
+		{"powershell pop control", "Bash", `Push-Location .ssh; Pop-Location; Add-Content notes.txt ok`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, false},
 		{"cmd drive switch", "Bash", `cd /d %USERPROFILE%\.ssh && echo dccert-block-marker >> authorized_keys`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, actionfacts.DialectCMD, true},
 		{"cmd wrapped drive switch", "Bash", `cmd /d /c "cd /d %USERPROFILE%\.ssh && echo dccert-block-marker >> authorized_keys"`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, "", true},
 		{"cmd wrapped control", "Bash", `cmd /d /c "cd build && echo ok >> notes.txt"`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, "", false},
