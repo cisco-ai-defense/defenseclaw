@@ -60,21 +60,42 @@ console.log(JSON.stringify({ verdict, notices }));
 func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 	nodeForTest(t)
 	const pad = `"x".repeat(1100000)`
+	// Loop round 2: context fields that use up the context-head budget, and
+	// command values that together exceed the whole-value budget.
+	const notes = `...Object.fromEntries(Array.from({ length: 40 }, (_, i) => ["note" + i, "z".repeat(9000)])), `
+	const overBudget = `patch: "q".repeat(600000), diff: "r".repeat(400000), `
 	for _, plugin := range []struct {
 		asset, name, connector, harness, input string
+		local                                  bool // no review: the plugin blocks locally
 	}{
-		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `command: "cat /home/user/.ssh/authorized_keys " + ` + pad},
-		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `description: ` + pad + `, command: "cat /home/user/.ssh/authorized_keys"`},
-		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `content: ` + pad + `, filePath: "/home/user/.ssh/authorized_keys"`},
-		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `command: "cat /home/user/.ssh/authorized_keys " + ` + pad},
-		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `cmd: "cat /home/user/.ssh/authorized_keys", description: ` + pad},
-		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, path: "/home/user/.ssh/authorized_keys"`},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `command: "cat /home/user/.ssh/authorized_keys " + ` + pad, true},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `description: ` + pad + `, command: "cat /home/user/.ssh/authorized_keys"`, false},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `content: ` + pad + `, filePath: "/home/user/.ssh/authorized_keys"`, false},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `description: ` + pad + `, ` + notes + `command: "cat /home/user/.ssh/authorized_keys"`, false},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, overBudget + notes + `command: "cat /home/user/.ssh/authorized_keys"`, true},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `command: "cat /home/user/.ssh/authorized_keys " + ` + pad, true},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `cmd: "cat /home/user/.ssh/authorized_keys", description: ` + pad, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, path: "/home/user/.ssh/authorized_keys"`, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `description: ` + pad + `, ` + notes + `cmd: "cat /home/user/.ssh/authorized_keys"`, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, overBudget + notes + `cmd: "cat /home/user/.ssh/authorized_keys"`, true},
 	} {
-		t.Run(plugin.connector+" "+strings.SplitN(plugin.input, ":", 2)[0], func(t *testing.T) {
+		name := strings.SplitN(plugin.input, ":", 2)[0]
+		if strings.HasPrefix(plugin.input, overBudget) {
+			name = "over budget"
+		} else if strings.Contains(plugin.input, "note") {
+			name += " then notes"
+		}
+		t.Run(plugin.connector+" "+name, func(t *testing.T) {
 			var request []byte
+			// The gateway blocks only a request that names the protected
+			// target: a review without it would be allowed.
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				request, _ = io.ReadAll(r.Body)
 				w.Header().Set("Content-Type", "application/json")
+				if !strings.Contains(string(request), "/home/user/.ssh/authorized_keys") {
+					_, _ = io.WriteString(w, `{"action":"allow","raw_action":"allow","mode":"action","hook_output":{"decision":"allow"}}`)
+					return
+				}
 				_, _ = io.WriteString(w, `{"action":"block","mode":"action","hook_output":{"decision":"deny","reason":"protected target"}}`)
 			}))
 			t.Cleanup(server.Close)
@@ -109,8 +130,14 @@ func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 			if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &result); err != nil {
 				t.Fatal(err)
 			}
+			if plugin.local {
+				if !strings.HasPrefix(result.Verdict, "block:") || strings.Contains(string(request), `"bounded_prefix_review":true`) {
+					t.Fatalf("local block=%q request=%.300q", result.Verdict, request)
+				}
+				return
+			}
 			if !strings.HasPrefix(result.Verdict, "block:") || !strings.Contains(string(request), `"bounded_prefix_review":true`) || !strings.Contains(string(request), "/home/user/.ssh/authorized_keys") {
-				t.Fatalf("gateway block=%q request=%q", result.Verdict, request)
+				t.Fatalf("gateway block=%q request=%.300q", result.Verdict, request)
 			}
 		})
 	}
@@ -249,7 +276,7 @@ func TestPerUserPluginOversizedPayloadUsesInstalledTier(t *testing.T) {
 				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				harness := strings.ReplaceAll(plugin.harness, `command: "echo marker"`, `command: "x".repeat(1100000)`)
+				harness := strings.ReplaceAll(plugin.harness, `command: "echo marker"`, `description: "x".repeat(1100000), command: "echo marker"`)
 				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", harness, path)
 				cmd.Env = append(sanitizedTestEnv(), "HOME="+home)
 				out, err := cmd.Output()

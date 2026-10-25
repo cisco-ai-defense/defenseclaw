@@ -874,25 +874,31 @@ const DC_REVIEW_KEYS = new Set(["cmd", "command", "commands", "commandline", "ar
 
 // defenseclawBoundedReview reduces an oversized payload to a request under
 // the gateway's 1 MiB cap that keeps every key of the call, so the gateway
-// judges its command and target as at normal size.
+// judges its command and target as at normal size. It returns "" (the call
+// keeps its closed oversize answer) when a command or target value does not
+// fit whole or the review stays over the cap.
 function defenseclawBoundedReview(payload, originalBytes) {
   let body = "";
   for (let scale = 1; scale <= 8; scale *= 2) {
-    let keep = (512 * 1024) / scale;
+    // Command and target values must all fit whole; only the context heads
+    // shrink when the review is too large.
+    let keep = 896 * 1024;
     let heads = (192 * 1024) / scale;
+    let incomplete = false;
     const walk = (value, inKeep, depth) => {
       if (typeof value === "string") {
         if (inKeep && value.length <= keep) { keep -= value.length; return value; }
         if (inKeep && depth < 128 && /^\s*[[{]/.test(value)) {
-          try { return JSON.stringify(walk(JSON.parse(value), true, depth + 1)); } catch (_) { /* not JSON: keep a head */ }
+          try { return JSON.stringify(walk(JSON.parse(value), false, depth + 1)); } catch (_) { /* not JSON */ }
         }
-        if (inKeep && keep > 0) { const head = value.slice(0, keep); keep = 0; return head; }
+        // A command or target value that does not fit whole: no review.
+        if (inKeep) { incomplete = true; return undefined; }
         const n = Math.max(0, Math.min(value.length, 8192, heads));
         heads -= n;
         return n > 0 || value === "" ? value.slice(0, n) : undefined;
       }
       if (value === null || typeof value !== "object") return value;
-      if (depth >= 128) return undefined;
+      if (depth >= 128) { incomplete = incomplete || inKeep; return undefined; }
       if (Array.isArray(value)) return value.map((item) => walk(item, inKeep, depth + 1));
       const out = {};
       for (const [key, item] of Object.entries(value)) {
@@ -901,13 +907,14 @@ function defenseclawBoundedReview(payload, originalBytes) {
       return out;
     };
     const review = walk(payload, false, 0) || {};
+    if (incomplete) return "";
     review.content_truncated = true;
     review.bounded_prefix_review = true;
     review.original_body_bytes = originalBytes;
     body = JSON.stringify(review);
-    if (Buffer.byteLength(body, "utf8") <= 960 * 1024) break;
+    if (Buffer.byteLength(body, "utf8") <= 960 * 1024) return body;
   }
-  return body;
+  return "";
 }
 {{end}}
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
@@ -955,9 +962,13 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     if (originalBytes > (1 << 20)) {
       if (await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
       if (DC_OUTAGE_FAIL_MODE === "open") {
-        body = defenseclawBoundedReview(payload, originalBytes);
-        oversizedReview = true;
-      } else if (actionable) {
+        const review = defenseclawBoundedReview(payload, originalBytes);
+        if (review) {
+          body = review;
+          oversizedReview = true;
+        }
+      }
+      if (!oversizedReview && actionable) {
         return { reason: "DefenseClaw hook payload too large" };
       }
     }

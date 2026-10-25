@@ -138,7 +138,7 @@ func TestPerUserShellHookOversizedPayloadClosesWhenAnInstallStartsDuringTheRead(
 							t.Error(err)
 						}
 					}
-					_, _ = io.WriteString(stdin, `{"hook_event_name":"PreToolUse","tool_input":{"command":"`+strings.Repeat("a", 16<<10)+`"}}`)
+					_, _ = io.WriteString(stdin, `{"hook_event_name":"PreToolUse","tool_input":{"command":"echo ok","description":"`+strings.Repeat("a", 16<<10)+`"}}`)
 					_ = stdin.Close()
 				}
 				stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, freeAPIAddr(t), write)
