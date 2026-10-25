@@ -4061,7 +4061,7 @@ func readEnterpriseHookBoundedFile(
 	if info.Size() > maxBytes {
 		return nil, fmt.Errorf("%s exceeds %d-byte limit", label, maxBytes)
 	}
-	file, err := os.Open(path)
+	file, err := openEnterpriseHookBoundedFileWithRetry(path, openEnterpriseHookBoundedFile)
 	if err != nil {
 		return nil, err
 	}
@@ -4091,6 +4091,20 @@ func readEnterpriseHookBoundedFile(
 		return nil, fmt.Errorf("%s exceeds %d-byte limit", label, maxBytes)
 	}
 	return data, nil
+}
+
+// A guardian publication can briefly hold a Windows file while replacing it.
+// Retry only a sharing/lock violation; every other read and identity failure
+// remains immediate and the wait is bounded below one second.
+func openEnterpriseHookBoundedFileWithRetry(path string, open func(string) (*os.File, error)) (*os.File, error) {
+	const attempts = 10
+	for attempt := 1; ; attempt++ {
+		file, err := open(path)
+		if err == nil || !enterpriseHookGuardianRecordBusy(err) || attempt >= attempts {
+			return file, err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func mergeProtectedEnterpriseHookTargets(previous, current []enterpriseHookReconcileRow) []enterpriseHookReconcileRow {
