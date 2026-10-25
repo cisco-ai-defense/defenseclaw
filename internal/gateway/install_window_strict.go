@@ -75,16 +75,15 @@ func (a *APIServer) perUserInstallWindowHeld() bool {
 }
 
 // strictPolicyTierForHook reports whether connector's guardrail rule pack is
-// the strict tier, in the live configuration or in the profile this request
-// resolves to (config.HookPolicyTierForConnector, the tier that also closes
-// a per-user outage, config.HookOutageFailMode).
+// the strict tier in the configuration that decides this request
+// (decisionConfig: the profile the request resolves to, else the live base
+// configuration), read as config.HookPolicyTierForConnector, the tier that
+// also closes a per-user outage (config.HookOutageFailMode). A request whose
+// profile gives the connector the default or permissive pack is not strict,
+// whatever pack the base configuration names (loop round 2 review).
 func (a *APIServer) strictPolicyTierForHook(ctx context.Context, connectorName string) bool {
-	for _, cfg := range []*config.Config{a.liveBaseConfig(ctx), a.decisionConfig(ctx)} {
-		if cfg != nil && cfg.HookPolicyTierForConnector(connectorName) == config.HookPolicyTierStrict {
-			return true
-		}
-	}
-	return false
+	cfg := a.decisionConfig(ctx)
+	return cfg != nil && cfg.HookPolicyTierForConnector(connectorName) == config.HookPolicyTierStrict
 }
 
 // installWindowStrict reports whether a per-user call of connectorName meets

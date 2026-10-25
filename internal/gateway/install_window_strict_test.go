@@ -231,3 +231,78 @@ func TestStrictInstallWindowBlocksInspectedCalls(t *testing.T) {
 		})
 	}
 }
+
+// The strict install-window block follows the tier of the configuration
+// that decides the request: the profile it resolves to, else the base
+// configuration (loop round 2 review). A default or permissive profile is
+// not blocked under a strict base pack, a strict profile is blocked under a
+// default or permissive base pack, and a profile that names no pack keeps
+// the base tier. Profiles set the pack for the whole profile or for one
+// connector; both are covered, on the hook and the inspect routes.
+func TestStrictInstallWindowFollowsTheRequestsProfileTier(t *testing.T) {
+	stubProfileSources(t)
+	type profileCase struct {
+		name, base, profileTier string
+		perConnector, matches   bool
+		blocked                 bool
+	}
+	cases := []profileCase{
+		{"strict base, permissive profile", "strict", "permissive", false, true, false},
+		{"strict base, default profile for the connector", "strict", "default", true, true, false},
+		{"strict base, permissive profile for the connector", "strict", "permissive", true, true, false},
+		{"default base, strict profile", "default", "strict", false, true, true},
+		{"permissive base, strict profile for the connector", "permissive", "strict", true, true, true},
+		{"strict base, profile without a pack", "strict", "", false, true, true},
+		{"default base, profile without a pack", "default", "", false, true, false},
+		{"strict base, profile of another connector", "strict", "permissive", false, false, true},
+	}
+	for _, tc := range cases {
+		for _, route := range []string{"hook", "inspect"} {
+			t.Run(tc.name+"/"+route, func(t *testing.T) {
+				t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+				dataDir := t.TempDir()
+				connectorName := "claudecode"
+				if route == "inspect" {
+					connectorName = "openclaw"
+				}
+				matchConnector := connectorName
+				if !tc.matches {
+					matchConnector = "cursor"
+				}
+				api := installWindowServer(t, connectorName, tc.base, "action", dataDir, func(cfg *config.Config) {
+					profile := config.GuardrailProfile{Mode: "action"}
+					if tc.profileTier != "" {
+						dir := filepath.Join(guardrailPoliciesRoot(t), tc.profileTier)
+						if tc.perConnector {
+							profile.Connectors = map[string]config.PerConnectorGuardrailConfig{
+								connectorName: {RulePackDir: dir},
+							}
+						} else {
+							profile.RulePackDir = dir
+						}
+					}
+					cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"team": profile}
+					cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+						{Profile: "team", Match: config.ProfileMatch{Connectors: []string{matchConnector}}},
+					}
+				})
+				api.setGuardrailProfiles(newGuardrailProfileSetFor(t, api.scannerCfg))
+				holdInstallLock(t, dataDir)
+				var blocked bool
+				var answer string
+				if route == "hook" {
+					_, body := sendInstallWindowCall(t, api, installWindowCalls[0])
+					blocked = strings.Contains(body, hookInstallWindowStrictRuleID)
+					answer = body
+				} else {
+					_, verdict := postInspectForConnector(t, api, "openclaw", `{"tool":"read_file","args":{"path":"/tmp/hello.txt"}}`)
+					blocked = verdict.Action == "block" && slices.Contains(verdict.Findings, hookInstallWindowStrictRuleID)
+					answer = verdict.Reason
+				}
+				if blocked != tc.blocked {
+					t.Fatalf("install window: blocked=%v, want %v: %s", blocked, tc.blocked, answer)
+				}
+			})
+		}
+	}
+}
