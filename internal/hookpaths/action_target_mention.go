@@ -1107,8 +1107,6 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 	if depth >= 8 || len(command) > MaxPayloadBytes {
 		return false
 	}
-	// The content lines of a here-string apply_patch reads are file content.
-	command = actionBlankPatchBodies(command, command)
 	// The argument to PowerShell -Command is parsed again by the child shell.
 	// Quotes that are literal in the outer command do not stop expansion there.
 	rawWords, rawOK := actionWindowsWords(command)
