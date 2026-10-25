@@ -1619,6 +1619,9 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
 	a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
+	// The strict tier refuses a call while an install or upgrade holds this
+	// account's data directory, as on the hook route (GAP-1438).
+	a.strictInstallWindowInspect(r.Context(), serverConnector, &req, verdict)
 
 	// Count the check against the authenticated connector so /health (and the
 	// TUI's "0 requests ... verify your agent is dialing the gateway port"

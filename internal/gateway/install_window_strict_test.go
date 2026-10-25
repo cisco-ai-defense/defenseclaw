@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -193,5 +194,40 @@ func TestDefaultTierInstallWindowWarnsOncePerWindow(t *testing.T) {
 	sendInstallWindowCall(t, api, call)
 	if api.installWindowWarned.Load() {
 		t.Fatal("the warning is not armed again after the install window")
+	}
+}
+
+// The generic inspect route (the OpenClaw plugin) follows the same rule: in
+// the strict tier a tool call and a prompt are blocked during the install
+// window, a tool result is not, and the default tier keeps the policy's
+// answer.
+func TestStrictInstallWindowBlocksInspectedCalls(t *testing.T) {
+	for _, tc := range []struct {
+		name, tier, body string
+		blocked          bool
+	}{
+		{"strict tool call", "strict", `{"tool":"read_file","args":{"path":"/tmp/hello.txt"}}`, true},
+		{"strict prompt", "strict", `{"tool":"message","content":"list the files","direction":"prompt"}`, true},
+		{"strict tool result", "strict", `{"tool":"message","content":"ok","direction":"tool_result"}`, false},
+		{"default tool call", "default", `{"tool":"read_file","args":{"path":"/tmp/hello.txt"}}`, false},
+		{"permissive tool call", "permissive", `{"tool":"read_file","args":{"path":"/tmp/hello.txt"}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+			dataDir := t.TempDir()
+			api := installWindowServer(t, "openclaw", tc.tier, "action", dataDir, nil)
+			if _, verdict := postInspectForConnector(t, api, "openclaw", tc.body); verdict.Action == "block" {
+				t.Fatalf("no install lock (control): %+v", verdict)
+			}
+			holdInstallLock(t, dataDir)
+			_, verdict := postInspectForConnector(t, api, "openclaw", tc.body)
+			got := verdict.Action == "block" && slices.Contains(verdict.Findings, hookInstallWindowStrictRuleID)
+			if got != tc.blocked {
+				t.Fatalf("install window: %+v, blocked=%v want %v", verdict, got, tc.blocked)
+			}
+			if !tc.blocked && verdict.Action == "block" {
+				t.Fatalf("install window, %s tier: the policy's answer was not kept: %+v", tc.tier, verdict)
+			}
+		})
 	}
 }

@@ -87,6 +87,55 @@ func (a *APIServer) strictPolicyTierForHook(ctx context.Context, connectorName s
 	return false
 }
 
+// installWindowStrict reports whether a per-user call of connectorName meets
+// an install window (perUserInstallWindowHeld) in the strict tier. In the
+// default and permissive tiers it logs one warning per install window and
+// reports false: the gateway decides the call as at any other time. Sandbox
+// calls are never gated here.
+func (a *APIServer) installWindowStrict(ctx context.Context, connectorName string) bool {
+	if !a.perUserInstallWindowHeld() {
+		a.installWindowWarned.Store(false)
+		return false
+	}
+	if sandboxHookForConnector(ctx, connectorName) {
+		return false
+	}
+	if a.strictPolicyTierForHook(ctx, connectorName) {
+		return true
+	}
+	if a.installWindowWarned.CompareAndSwap(false, true) {
+		fmt.Fprintf(os.Stderr, "[gateway] warning: an install or upgrade of this account's DefenseClaw is "+
+			"running; hook calls keep this gateway's answers until it is done (connector=%s, the strict "+
+			"policy tier blocks them instead)\n", connectorName)
+	}
+	return false
+}
+
+// strictInstallWindowInspect is strictInstallWindowGate for the generic
+// inspect route (the OpenClaw plugin's tool and prompt checks): in the
+// strict tier a tool call or a prompt is blocked with the install reason;
+// tool results and completions are not gated.
+func (a *APIServer) strictInstallWindowInspect(ctx context.Context, connectorName string, req *ToolInspectRequest, verdict *ToolInspectVerdict) {
+	if verdict == nil || req == nil {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(req.Direction)) {
+	case "tool_result", "tool-response", "completion", "outbound", "response":
+		return
+	}
+	if !a.installWindowStrict(ctx, connectorName) {
+		return
+	}
+	subject := "tool call"
+	if strings.EqualFold(req.Tool, "message") {
+		subject = "prompt"
+	}
+	verdict.Action, verdict.RawAction, verdict.Severity, verdict.Confidence = "block", "block", "HIGH", 1.0
+	verdict.WouldBlock = false
+	verdict.Reason = "DefenseClaw blocked this " + subject + strictInstallWindowReasonTail
+	verdict.Findings = append(verdict.Findings, hookInstallWindowStrictRuleID)
+}
+
 // strictInstallWindowGate answers a per-user call that reaches this gateway
 // while an install or upgrade of the account holds its data directory (owner
 // decision 2026-10-24, GAP-1372, GAP-1438). In the default and permissive
@@ -105,19 +154,7 @@ func (a *APIServer) strictInstallWindowGate(
 	connectorName string,
 	req agentHookRequest,
 ) (agentHookResponse, bool) {
-	if !a.perUserInstallWindowHeld() {
-		a.installWindowWarned.Store(false)
-		return agentHookResponse{}, false
-	}
-	if sandboxHookForConnector(ctx, connectorName) {
-		return agentHookResponse{}, false
-	}
-	if !a.strictPolicyTierForHook(ctx, connectorName) {
-		if a.installWindowWarned.CompareAndSwap(false, true) {
-			fmt.Fprintf(os.Stderr, "[gateway] warning: an install or upgrade of this account's DefenseClaw is "+
-				"running; hook calls keep this gateway's answers until it is done (connector=%s, the strict "+
-				"policy tier blocks them instead)\n", connectorName)
-		}
+	if !a.installWindowStrict(ctx, connectorName) {
 		return agentHookResponse{}, false
 	}
 	event := req.HookEventName
