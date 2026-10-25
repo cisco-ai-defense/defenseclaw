@@ -62,7 +62,7 @@ DefenseClaw backs up `settings.json` first. Teardown restores the backup, or rem
 
 - `disableAllHooks: true` in any Claude Code settings file turns every hook off. The gateway raises a guardrail-degraded alert, `defenseclaw status` shows DEGRADED, and `defenseclaw doctor` fails the **Claude Code hooks** row. Remove the key and restart Claude Code.
 - A project's `.claude/settings.json`, or a file passed with `claude --settings`, can do the same for its sessions. DefenseClaw cannot see a `--settings` file.
-- Claude Code does not emit `PreToolUse` for a command you type with `!` in its shell mode. DefenseClaw cannot inspect or block that command. See [Known limits in 1.0.4](/docs/troubleshooting/known-limits#claude-code-shell).
+- Claude Code does not run its hook for a command you type with `!` in shell mode. DefenseClaw cannot inspect or block that command. See [Known limits in 1.0.4](/docs/troubleshooting/known-limits#claude-code-shell).
 - Keep the gateway running while Claude Code runs. Give each account on a shared computer its own gateway port. Per-user hooks verify the connected gateway account before sending an event. During an outage the default and permissive policies let the call run with a warning, strict blocks it.
 - Per-user hooks live in a file you own. The [enterprise standalone profile](/docs/enterprise/configure/machine-policy) puts them in machine policy instead.
 

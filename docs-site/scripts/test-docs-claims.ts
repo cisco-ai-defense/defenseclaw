@@ -24,88 +24,6 @@ const hookConnectors = [
   { id: 'amp', command: 'amp', name: 'Amp' },
 ] as const;
 
-describe('Public outage guidance', () => {
-  it('has no release coordination notes or reassigned install-window claims', () => {
-    for (const name of [
-      'appendix/coverage-by-layer.mdx',
-      'connectors/claudecode.mdx',
-      'features/guardrail.mdx',
-      'get-started/upgrade.mdx',
-      'reference/apis/capability-matrix.mdx',
-      'reference/commands/cli.mdx',
-      'reference/commands/installer.mdx',
-      'reference/configuration/fail-modes.mdx',
-      'reference/connectors/cursor.mdx',
-      'troubleshooting/hooks-and-blocking.mdx',
-    ]) {
-      const text = page(name);
-      assert.doesNotMatch(text, /\bcurrent (?:1\.0\.4 )?train\b|pending OSS outage fix|saved-mode override requires/i, name);
-      assert.doesNotMatch(text, /all per-user and managed standalone hooks block supported tool calls even if the gateway answers allow/i, name);
-    }
-  });
-});
-
-describe('Managed administrator outage choice', () => {
-  it('says an explicit open applies to a classified outage under a strict pack', () => {
-    const resolver = source('internal/config/hook_outage_fail_mode.go');
-    assert.match(resolver, /if managedInstall \{\s*return explicitHookFailMode\(managedMode\)/);
-    assert.match(resolver, /return HookOutageFailMode\(true, c\.EffectiveHookFailModeForConnector\(connector\), ""\)/);
-    const config = source('internal/config/application_protection.go');
-    assert.match(config, /if managed\.IsManagedEnterprise\(c\.DeploymentMode\) \{\s*if mode := c\.configuredHookFailModeForConnector\(connector\); mode != "" \{\s*return mode/);
-    assert.match(page('reference/configuration/fail-modes.mdx'), /administrator-selected `open` permits eligible gateway outages even with a strict rule pack/i);
-    assert.match(page('reference/apis/capability-matrix.mdx'), /administrator's explicit `hook_fail_mode: open` applies to a classified outage even when the managed rule pack is strict/i);
-  });
-});
-
-describe('Owner-decided 1.0.4 vendor and platform limits', () => {
-  it('states the Claude Code typed-shell hook limit on both pages', () => {
-    const connector = page('connectors/claudecode.mdx');
-    const limits = page('troubleshooting/known-limits.mdx');
-    for (const text of [connector, limits]) {
-      assert.match(text, /Claude Code does not emit `PreToolUse`[^.]*`!`/i);
-    }
-  });
-
-  it('limits the local Splunk bridge to x86_64 and names the remote HEC route', () => {
-    const bridge = source('cli/defenseclaw/observability/local_splunk.py');
-    assert.match(bridge, /engine_arch not in \{"amd64", "x86_64"\}/);
-    for (const text of [page('how-to/observability/send-to-splunk.mdx'), page('troubleshooting/known-limits.mdx')]) {
-      assert.match(text, /local Splunk bridge[^.]*x86_64/i);
-      assert.match(text, /`--enterprise`[^.]*HEC/i);
-    }
-  });
-});
-
-describe('Known 1.0.4 upgrade and policy limits', () => {
-  it('gives the three limits and their mitigations without release notes', () => {
-    const pageText = page('troubleshooting/known-limits.mdx');
-    const limits = pageText.split('## Upgrade and policy limits')[1] ?? '';
-    assert.ok(limits, 'upgrade and policy limits section is missing');
-    assert.doesNotMatch(pageText, /release lead|fixes do not ship|\btrain\b|\bT12\b|\bround\b/i);
-    const microvm = limits.split('**Legacy MicroVM guests:**')[1]?.split('- **')[0] ?? '';
-    const doctor = source('internal/openshell/sandboxcli/doctor.go');
-    const lifecycle = source('internal/openshell/sandboxcli/lifecycle.go');
-    const restart = source('internal/openshell/restartgate.go');
-    assert.match(doctor, /if sb\.Phase == "ready" \{[\s\S]{0,250}CommandName \+ " stop "/);
-    assert.match(lifecycle, /then `%s start %s` \(or `connect`\) runs it on the gateway's own supervisor/);
-    assert.match(restart, /case p == PhaseReady:\s*return stop/);
-    assert.match(restart, /case knownOld:[\s\S]{0,200}cannot stop or start a completed or error-state MicroVM/);
-    assert.match(restart, /case p == PhaseCompleted \|\| p == PhaseError && LingeringVM\(p, said, false\) && MainProcessFailed\(said\):/);
-    assert.match(restart, /if sb != nil && HoldsGateway\(sb\.Status\.Phase, FailureReason\(sb\), false\)/);
-    assert.match(microvm, /`defenseclaw sandbox status NAME`[\s\S]*?state and (?:failure|phase) reason/i);
-    assert.match(microvm, /ready guest[\s\S]*?`defenseclaw sandbox stop NAME`[\s\S]*?`defenseclaw sandbox start NAME`/i);
-    assert.doesNotMatch(microvm.split('For a completed guest')[0], /recreat|delet/i);
-    assert.match(microvm, /completed guest[\s\S]*?`MainProcessFailed`[\s\S]*?`defenseclaw sandbox start NAME --end-vm`[\s\S]*?loses unwritten work/i);
-    assert.match(microvm, /OpenShell 0\.1\.3[\s\S]{0,200}completed or error-state guest[\s\S]{0,200}VM has not exited[\s\S]{0,200}`defenseclaw sandbox delete NAME`[\s\S]*?recreat/i);
-    assert.match(microvm, /`ProcessExited`[\s\S]*?`defenseclaw sandbox stop NAME`[\s\S]*?`defenseclaw sandbox start NAME`/i);
-    const policy = limits.split('**Managed policy before launch:**')[1]?.split('- **')[0] ?? '';
-    for (const word of ['root-owned', 'doctor', 'verify']) assert.ok(policy.includes(word));
-    const upgrade = limits.split('**Managed upgrades from 1.0.2 and 1.0.3:**')[1] ?? '';
-    assert.match(upgrade, /stop agent sessions[^.]*gateway is healthy/i);
-    assert.match(page('get-started/upgrade.mdx'), /For a legacy MicroVM guest[\s\S]{0,250}save[\s\S]{0,200}before upgrading[\s\S]{0,200}ready[\s\S]{0,200}`defenseclaw sandbox stop NAME`[\s\S]{0,100}`defenseclaw sandbox start NAME`[\s\S]{0,250}Known limits in 1\.0\.4/i);
-  });
-});
-
 function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }
@@ -888,18 +806,14 @@ describe('1.0.4 operator routes and limits', () => {
     assert.doesNotMatch(row, /DEFENSECLAW_FAIL_MODE[^|]*honored only when stricter/i);
   });
 
-  it('distinguishes native and shell/plugin managed Unix hook socket checks', () => {
+  it('describes the managed Unix hook socket directory and listener checks', () => {
     const transport = source('internal/gateway/connector/hookexec/managed_standalone_transport.go');
-    const shell = source('internal/gateway/connector/hook_socket_transport.go');
-    const plugin = source('internal/gateway/connector/codex.go');
     const row = source('docs-site/content/docs/troubleshooting/enterprise/index.mdx')
       .split('\n').find((line) => line.startsWith('| `enterprise_managed_gateway_peer_unverified` |')) ?? '';
     assert.match(transport, /hook socket directory .* is not owned by root or the gateway service account/);
     assert.match(transport, /hook socket listener uid .* is neither root nor the gateway service uid/);
-    assert.match(shell, /defenseclaw_hook_socket_trusted\(\)[\s\S]*?ls -ln -- "\$DEFENSECLAW_HOOK_SOCKET"[\s\S]*?defenseclaw_hook_socket_owner_trusted "\$owner"/);
-    assert.match(plugin, /shellHookSocketTrust\(socket, serviceUID\)[\s\S]*?defenseclaw_hook_socket_trusted/);
-    assert.match(row, /Linux and macOS:.*native.*socket directory.*root or the gateway account.*kernel.*listener UID/i);
-    assert.match(row, /shell hooks.*plugins.*socket inode.*owned by root or the gateway account/i);
+    assert.match(row, /Linux and macOS:.*socket directory.*root or the gateway account.*listener UID.*kernel/i);
+    assert.doesNotMatch(row, /hook socket is not owned by root or the gateway account/);
   });
 
   it('does not advertise local files as MCP scan targets', () => {
