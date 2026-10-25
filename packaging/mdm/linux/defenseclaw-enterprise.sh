@@ -1844,11 +1844,15 @@ dc_settle_rotation() {
     return 1
 }
 
-# dc_resume_rotation: before an ensure changes anything, settle the
-# rotations an earlier run left in the journal. Nothing installed (no
-# root-owned gateway) has nothing to put back. An entry that cannot be
-# settled stops this ensure before it can install a config that adopts the
-# unsettled credential.
+# dc_resume_rotation: before an ensure stores a credential or applies a
+# config, settle the rotations an earlier run left in the journal, with the
+# newest gateway this run has: the payload's when it delivers one, else the
+# installed one (a delivered package is already installed). A gateway
+# before 1.0.5 cannot remove a credential its installed config references
+# (--undo-config), so a package delivered with the ensure settles what it
+# could not. Nothing installed (no root-owned gateway) has nothing to put
+# back. An entry that cannot be settled stops this ensure before it can
+# install a config that adopts the unsettled credential.
 dc_resume_rotation() {
     [ -e "$DC_JOURNAL_DIR" ] || [ -L "$DC_JOURNAL_DIR" ] || return 0
     dc_journal_ready ||
@@ -1864,8 +1868,8 @@ dc_resume_rotation() {
             dc_retire_rotation "$dc_name"
             continue
         fi
-        dc_settle_rotation "$DC_GATEWAY" "$dc_name" ||
-            dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "an earlier credential rotation of $dc_name is not settled (the wrapper log says why); no lifecycle change was started: resolve it and run ensure again"
+        dc_settle_rotation "${DC_PAYLOAD_GATEWAY:-$DC_GATEWAY}" "$dc_name" ||
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "an earlier credential rotation of $dc_name is not settled (the wrapper log says why); no credential was stored and no config applied: resolve it and run ensure again. A gateway before 1.0.5 cannot put back a credential its installed config references: deliver the package with --source and the gateway it installs settles it"
     done
 }
 
@@ -1944,8 +1948,6 @@ dc_main() {
         return "$status"
     fi
 
-    dc_resume_rotation
-
     config=""
     if [ "$DC_CONFIG_STDIN" = 1 ]; then
         config="$DC_STAGE/config.yaml"
@@ -2006,6 +2008,9 @@ dc_main() {
         dc_stage_source
         dc_install_package
     fi
+    # Settled after the delivered package or payload, so the gateway it
+    # brings settles a rotation the installed one could not put back.
+    dc_resume_rotation
 
     # The payload channel runs the verified staged binary; every other run
     # uses the installed, root-owned gateway.

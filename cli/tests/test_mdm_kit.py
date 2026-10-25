@@ -1390,8 +1390,10 @@ def test_unix_wrapper_settles_the_rotated_credential_with_the_bundle_apply() -> 
         assert cleanup.index("dc_restore_secret || true") < cleanup.index('rm -rf "$DC_STAGE"')
         store = _shell_function(text, "dc_store_secret")
         assert store.index('dc_save_secret_previous "$gateway"') < store.index('set -- --bundle "$bundle" --if-confirmed "$DC_SECRET_CONFIRMED"') < store.index("enterprise secret set")
-        # A killed run's rotation is settled before the ensure changes anything.
-        assert main.index("dc_resume_rotation") < main.index('dc_store_secret "$gateway"')
+        # A killed run's rotation is settled before the ensure stores a
+        # credential or applies a config, after the package it delivers.
+        assert main.index("dc_install_package") < main.index("dc_resume_rotation") < main.index('dc_store_secret "$gateway"')
+        assert main.count("dc_resume_rotation") == 1
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
@@ -3745,3 +3747,97 @@ def test_unix_uninstall_removes_the_staging_folder_after_the_package_and_without
     assert text.count("\ndc_remove_stage_parent\n") + text.count("    dc_remove_stage_parent\n") == 2
     assert 'DC_LINUX_STAGE_PARENT=/var/lib/defenseclaw-mdm' in text
     assert "DC_STAGE_PARENT=/var/lib/defenseclaw-mdm" in _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+
+
+_OLD_GATEWAY = r"""#!/bin/sh
+printf '%s %s\n' "$(basename "$(dirname "$0")")" "$*" >>"$FAKE/calls"
+case "$*" in
+"enterprise secret remove"*)
+    if [ "$(basename "$(dirname "$0")")" = old ]; then
+        echo '{"schema_version":2,"ok":false,"errors":[{"code":"secret_change_failed","message":"the installed config still references credential ai-key"}]}'
+        exit 1
+    fi
+    rm -f "$SECRETS/ai-key"
+    echo '{"schema_version":2,"ok":true,"errors":[]}'
+    exit 0 ;;
+esac
+exit 0
+"""
+
+
+# R105 mgmt refix 1 (review R1-1): a 1.0.4 gateway ignores --undo-config on
+# Unix and refuses to remove a credential its installed config references,
+# so it cannot settle a rotation that added one. The ensure that delivers the
+# newer package or payload settles it with the gateway it brings, then goes
+# on; without a source the ensure stops and names that route.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("channel", ["package", "payload", "none"])
+def test_unix_wrapper_settles_a_rotation_with_the_gateway_it_delivers(tmp_path: Path, os_dir: str, channel: str) -> None:
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh").rstrip()
+    entry = '\ndc_main "$@"'
+    assert text.endswith(entry)
+    fake, secrets, journal, stage_parent = (tmp_path / name for name in ("fake", "secrets", "journal", "stage"))
+    for folder in (fake, secrets, journal, stage_parent):
+        folder.mkdir()
+    for name in ("old", "new"):
+        (tmp_path / name).mkdir()
+        gateway = tmp_path / name / "defenseclaw-gateway"
+        gateway.write_text(_OLD_GATEWAY, encoding="utf-8")
+        gateway.chmod(0o755)
+    installed = tmp_path / "bin"
+    installed.mkdir()
+    shutil.copy(tmp_path / "old" / "defenseclaw-gateway", installed / "defenseclaw-gateway")
+    # The installed gateway reports itself by folder name: "bin" is the 1.0.4 one until a package replaces it.
+    (installed / "defenseclaw-gateway").write_text(_OLD_GATEWAY.replace('"$(basename "$(dirname "$0")")"', '"$(cat "$FAKE/installed")"'), encoding="utf-8")
+    (fake / "installed").write_text("old", encoding="utf-8")
+    (secrets / "ai-key").write_text("new-key", encoding="utf-8")
+    rotated = hashlib.sha256(b"new-key").hexdigest()
+    (journal / "ai-key.entry").write_text(f"confirmed=none\nrotated={rotated}\nprevious=absent\nconfig={'c' * 64}\n", encoding="utf-8")
+    install = {
+        "package": 'printf new >"$FAKE/installed"; DC_CHANNEL_FLAG=--from-package',
+        "payload": f"DC_PAYLOAD_GATEWAY='{tmp_path / 'new' / 'defenseclaw-gateway'}'; DC_CHANNEL_FLAG=--payload='{tmp_path / 'new'}'",
+        "none": "echo unexpected; exit 9",
+    }[channel]
+    source = "" if channel == "none" else str(tmp_path / "source")
+    overrides = f"""
+dc_layout() {{
+    DC_GATEWAY='{installed / 'defenseclaw-gateway'}'
+    DC_SECRETS_DIR='{secrets}' DC_JOURNAL_DIR='{journal}' DC_INSTALLED_CONFIG='{tmp_path / 'config.yaml'}'
+    DC_ANCHORS='{tmp_path / 'anchors.json'}' DC_PACKAGE_RESULT='{tmp_path / 'package-result.json'}'
+    DC_OS_GROUP=linux DC_LOG='{tmp_path / 'kit.log'}'
+}}
+dc_parse_args() {{ DC_SOURCE='{source}'; }}
+dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
+dc_validate_args() {{ :; }}
+id() {{ echo 0; }}
+dc_stage_parent() {{ DC_STAGE_PARENT='{stage_parent}'; }}
+dc_sweep_stages() {{ :; }}
+dc_stat_uid() {{ echo 0; }}
+dc_stage_source() {{ :; }}
+dc_install_package() {{ {install}; }}
+dc_trusted_path() {{ [ -x "$1" ]; }}
+dc_journal_ready() {{ [ -d "$DC_JOURNAL_DIR" ]; }}
+dc_binaries_damaged() {{ return 1; }}
+dc_run_lifecycle_retry() {{ printf 'lifecycle %s\\n' "$*" >>"$FAKE/calls"; return 0; }}
+dc_annotate_package_step() {{ :; }}
+dc_emit_result() {{ echo emitted; }}
+dc_main
+"""
+    env = {"PATH": "/usr/bin:/bin", "FAKE": str(fake), "SECRETS": str(secrets)}
+    result = subprocess.run(["sh", "-c", text[: -len(entry)] + "\n" + overrides], env=env, capture_output=True, text=True, timeout=30)
+    out = result.stdout + result.stderr
+    calls = (fake / "calls").read_text(encoding="utf-8").splitlines() if (fake / "calls").exists() else []
+    removes = [call.split()[0] for call in calls if " enterprise secret remove " in f" {call} "]
+    if channel == "none":
+        assert result.returncode == 1 and "mdm_secret_failed" in out, out
+        assert "deliver the package with --source" in out, out
+        assert removes == ["old"], calls
+        assert (journal / "ai-key.entry").exists() and (secrets / "ai-key").exists()
+        assert not any(call.startswith("lifecycle ") for call in calls), calls
+        return
+    assert result.returncode == 0 and "emitted" in out, (out, calls)
+    assert removes == ["new"], calls
+    assert not (journal / "ai-key.entry").exists() and not (secrets / "ai-key").exists(), out
+    lifecycle = [call for call in calls if call.startswith("lifecycle ")]
+    assert len(lifecycle) == 1 and " ensure " in lifecycle[0], calls
