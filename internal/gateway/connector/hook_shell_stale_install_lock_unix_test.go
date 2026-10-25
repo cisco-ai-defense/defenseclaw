@@ -84,6 +84,7 @@ func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 		{name: "installer running, an earlier build's deadline passed", pid: live, deadline: past, held: true},
 		{name: "installer running, made seven hours ago", pid: live, age: 7 * time.Hour, held: true},
 		{name: "pid reused: its process started after the pid was written", pid: live, age: 7 * time.Hour, pidAge: 7 * time.Hour, held: false},
+		{name: "1.0.2/1.0.3 PID-only lock, pid reused an hour after it was written (GAP-1465)", pid: live, age: time.Hour, pidAge: time.Hour, held: false},
 		{name: "1.0.2/1.0.3 PID-only lock, pid reused", pid: live, age: 30 * 24 * time.Hour, pidAge: 30 * 24 * time.Hour, held: false},
 		{name: "no pid yet", held: true},
 		{name: "no pid for eleven minutes", age: 11 * time.Minute, held: false},

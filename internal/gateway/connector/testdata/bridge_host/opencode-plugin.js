@@ -821,8 +821,10 @@ async function defenseclawInstallLockNumber(path) {
 function defenseclawProcessStartMs(pid) {
   try {
     if (process.platform === "win32") {
-      const text = String(execFileSync(DC_WINDOWS_POWERSHELL, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-        "[DateTimeOffset]::new((Get-Process -Id " + pid + " -ErrorAction Stop).StartTime).ToUnixTimeMilliseconds()"],
+      // Arguments apart: the helper ACL check is the plugin's one inline PowerShell call (its repair marker).
+      const startArgs = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+        "[DateTimeOffset]::new((Get-Process -Id " + pid + " -ErrorAction Stop).StartTime).ToUnixTimeMilliseconds()"];
+      const text = String(execFileSync(DC_WINDOWS_POWERSHELL, startArgs,
         { encoding: "utf8", timeout: 10000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] })).trim();
       return /^[1-9][0-9]{0,15}$/.test(text) ? Number(text) : null;
     }

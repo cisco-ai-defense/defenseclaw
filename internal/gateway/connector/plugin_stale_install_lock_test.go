@@ -92,6 +92,7 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 		// (also the PID-only lock of 1.0.2 and 1.0.3, GAP-1465).
 		{name: "running installer, lock made seven hours ago", lock: makeLock(live, 7*time.Hour)},
 		{name: "pid reused: its process started after the pid was written", lock: makeAgedLock(live, 7*time.Hour, 7*time.Hour), runs: true},
+		{name: "1.0.2/1.0.3 PID-only lock, pid reused an hour after it was written (GAP-1465)", lock: makeAgedLock(live, time.Hour, time.Hour), runs: true},
 		{name: "installer exited, interrupted install kept previous.new", lock: withRecord("previous.new", true)},
 		{name: "installer exited, interrupted install kept .repair", lock: withRecord(".repair", true)},
 		{name: "installer exited, interrupted install kept .rollback-hold", lock: withRecord(".rollback-hold", true)},
@@ -129,6 +130,8 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 				}
 				rendered := writeRenderedPlugin(t, plugin.asset, plugin.file, templateData{
 					APIAddr: "127.0.0.1:1", TokenFileJS: javaScriptStringContent(token), FailMode: "open",
+					// The PowerShell a Windows render names (the process start of a reused pid).
+					WindowsPowerShellJS: javaScriptStringContent(windowsSystemPowerShellExe()),
 				})
 				root := dataDir
 				if tc.inHome {

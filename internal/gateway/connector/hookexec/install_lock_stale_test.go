@@ -49,6 +49,7 @@ func TestInstallLockHeldIgnoresOnlyALockWhoseOwnerIsGone(t *testing.T) {
 		{"installer running, lock made seven hours ago", owner{pid: live, age: 7 * time.Hour}, true},
 		{"installer running, a deadline an earlier build recorded has passed", owner{pid: live, deadline: past, age: 7 * time.Hour}, true},
 		{"pid reused: its process started after the pid was written", owner{pid: live, age: 7 * time.Hour, pidAge: 7 * time.Hour}, false},
+		{"1.0.2/1.0.3 PID-only lock, pid reused an hour after it was written (GAP-1465)", owner{pid: live, age: time.Hour, pidAge: time.Hour}, false},
 		{"1.0.2/1.0.3 PID-only lock, installer exited", owner{pid: dead, age: time.Hour, pidAge: time.Hour}, false},
 		{"1.0.2/1.0.3 PID-only lock, pid reused", owner{pid: live, age: 30 * 24 * time.Hour, pidAge: 30 * 24 * time.Hour}, false},
 		{"1.0.2/1.0.3 PID-only lock, installer running", owner{pid: live}, true},

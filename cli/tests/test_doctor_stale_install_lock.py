@@ -93,6 +93,7 @@ PAST = str(int(time.time()) - 60)
     [
         (str(os.getppid()), 7 * 3600, PAST, 0, None, "held"),
         (str(os.getppid()), 7 * 3600, None, 7 * 3600, None, "stale"),
+        (str(os.getppid()), 3600, None, 3600, None, "stale"),
         (str(os.getppid()), 30 * 86400, None, 30 * 86400, None, "stale"),
         (f"{DEAD}\n", 3600, None, 3600, None, "stale"),
         (f"{DEAD}\n", 0, PAST, 0, "previous.new", "recovery"),
