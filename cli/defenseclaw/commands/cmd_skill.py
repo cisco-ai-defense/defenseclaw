@@ -5803,9 +5803,10 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
     configured connector skill directory, and scans/evaluates each connector
     copy. Pass --connector <name> to install and scan only that connector.
 
-    By default, install only runs the scan and reports findings — no enforcement
-    actions are taken. Pass --action to apply the configured admission policy
-    (quarantine, disable, block) based on scan severity.
+    By default, install runs the scan and reports findings; a skill the
+    admission policy rejects is removed again and the install fails. Pass
+    --action to apply the configured admission policy (quarantine, disable,
+    block) based on scan severity.
 
     Use --force to overwrite an existing skill.
     """
