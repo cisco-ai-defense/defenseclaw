@@ -873,7 +873,7 @@ func windowsHotConfigResolveFailMode(modes map[string]string, connector string, 
 	lookup := func(kind string) string {
 		for path, mode := range modes {
 			if name, ok := windowsHotConfigFailModePathConnector(path); ok && windowsHotConfigFailModePathKind(path) == kind &&
-				windowsHotConfigConnectorKey(name) == want {
+				(name == "" || windowsHotConfigConnectorKey(name) == want) {
 				if canonical := windowsHotConfigCanonicalFailMode(mode); canonical != "" {
 					return canonical
 				}
