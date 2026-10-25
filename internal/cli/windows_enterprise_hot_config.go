@@ -900,6 +900,7 @@ func windowsHotConfigResolveFailMode(modes map[string]string, connector string, 
 // windowsHotConfigFailModePathConnector names the connector of a recognized
 // hook_fail_mode path ("" for a global one); ok is false for any other path.
 func windowsHotConfigFailModePathConnector(path string) (string, bool) {
+	path = strings.TrimPrefix(path, "[0]") // the document node
 	switch {
 	case path == ".guardrail.hook_fail_mode", path == ".application_protection.guardrail.hook_fail_mode":
 		return "", true
@@ -914,6 +915,7 @@ func windowsHotConfigFailModePathConnector(path string) (string, bool) {
 }
 
 func windowsHotConfigFailModePathKind(path string) string {
+	path = strings.TrimPrefix(path, "[0]") // the document node
 	switch {
 	case path == ".guardrail.hook_fail_mode":
 		return "global"
