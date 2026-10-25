@@ -87,19 +87,37 @@ $deadline = [System.Diagnostics.Stopwatch]::StartNew()
         catch { return $true }
     }
     foreach ($root in $roots) {
-        try {
-            [void][System.IO.File]::GetAttributes((Join-Path $root '.install.lock'))
-            return $true
-        }
-        catch {
-            $missing = $false
-            for ($cause = $_.Exception; $null -ne $cause; $cause = $cause.InnerException) {
-                if ($cause -is [System.IO.FileNotFoundException] -or $cause -is [System.IO.DirectoryNotFoundException]) { $missing = $true; break }
-            }
-            if (-not $missing) { return $true }
-        }
+        if (Test-DefenseClawInstallLockCurrent (Join-Path $root '.install.lock')) { return $true }
     }
     return $false
+}
+
+function Test-DefenseClawInstallLockCurrent([string]$lock) {
+    try { [void][System.IO.File]::GetAttributes($lock) }
+    catch {
+        $missing = $false
+        for ($cause = $_.Exception; $null -ne $cause; $cause = $cause.InnerException) {
+            if ($cause -is [System.IO.FileNotFoundException] -or $cause -is [System.IO.DirectoryNotFoundException]) { $missing = $true; break }
+        }
+        return (-not $missing)
+    }
+    try { $item = Get-Item -LiteralPath $lock -Force -ErrorAction Stop }
+    catch { return $true }
+    $age = ([DateTime]::UtcNow - $item.LastWriteTimeUtc).TotalSeconds
+    if ($age -gt 600 -or $age -lt -60) { return $false }
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $true }
+    $pidPath = Join-Path $lock 'pid'
+    try {
+        $pidFile = Get-Item -LiteralPath $pidPath -Force -ErrorAction Stop
+        if ($pidFile.PSIsContainer -or ($pidFile.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or $pidFile.Length -gt 64) { return $true }
+        $holder = [System.IO.File]::ReadAllText($pidPath).Trim()
+        [int]$holderId = 0
+        if ($holder -notmatch '^[1-9][0-9]*$' -or -not [int]::TryParse($holder, [ref]$holderId)) { return $true }
+        try { return (-not [System.Diagnostics.Process]::GetProcessById($holderId).HasExited) }
+        catch [System.ArgumentException] { return $false }
+        catch { return $true }
+    }
+    catch { return $true }
 }
 $installGuard = $false
 {{end}}try {
