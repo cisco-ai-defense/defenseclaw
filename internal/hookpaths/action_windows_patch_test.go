@@ -3,7 +3,13 @@
 
 package hookpaths
 
-import "testing"
+import (
+	"bufio"
+	"encoding/json"
+	"os"
+	"strings"
+	"testing"
+)
 
 // Copilot CLI on Windows sends a patch through its PowerShell tool as
 // apply_patch @'...'@. The envelope word is not a path: its directives are
@@ -55,5 +61,84 @@ func TestActionWindowsPatchHereString(t *testing.T) {
 				t.Fatalf("ActionCommandDecision = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// PowerShell 7 accepts these closing quotes at the start of a line. The
+// scanner must expose each following statement instead of treating it as
+// literal patch content. Unsupported quote lookalikes stay inside the body.
+func TestActionWindowsHereStringTerminatorMatrix(t *testing.T) {
+	lineEnds := []struct {
+		name, value string
+	}{{"LF", "\n"}, {"CRLF", "\r\n"}, {"CR", "\r"}}
+	quotes := []struct {
+		name, opener       string
+		accepted, rejected string
+	}{
+		{"single", "'", "'‘’‚‛", "“”„‟′＇"},
+		{"double", "\"", "\"“”„", "‘’‚‛‟″＂"},
+	}
+	for _, kind := range quotes {
+		for _, opening := range lineEnds {
+			for _, closing := range lineEnds {
+				for _, group := range []struct {
+					quotes string
+					want   int
+				}{{kind.accepted, 3}, {kind.rejected, 1}} {
+					for _, quote := range group.quotes {
+						command := "apply_patch @" + kind.opener + opening.value +
+							"one" + closing.value + string(quote) +
+							"@; Write-Output two; @" + kind.opener +
+							opening.value + "three" + closing.value + kind.opener + "@"
+						words, _, ok := actionWindowsWords(command)
+						statements := 1
+						for _, word := range words {
+							if word == ";" {
+								statements++
+							}
+						}
+						if !ok || statements != group.want {
+							t.Errorf("%s opening=%s closing=%s quote=%U: scanner statements=%d ok=%v, PowerShell statements=%d",
+								kind.name, opening.name, closing.name, quote, statements, ok, group.want)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestActionWindowsProtectedHereStringCorpus(t *testing.T) {
+	const home, cwd = `C:\Users\Alice`, `C:\Users\Alice\project`
+	f, err := os.Open("testdata/action-windows-protected.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	count := 0
+	for scanner.Scan() {
+		var item struct {
+			ID      string `json:"id"`
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &item); err != nil {
+			t.Fatal(err)
+		}
+		count++
+		t.Run(item.ID, func(t *testing.T) {
+			if !strings.Contains(item.Command, "authorized_keys") {
+				t.Fatal("corpus row lost its protected target")
+			}
+			if got := ActionCommandDecision(item.Command, cwd, home); got != "dynamic-argument" {
+				t.Fatalf("ActionCommandDecision = %q, want dynamic-argument for the protected write", got)
+			}
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if count != 4 {
+		t.Fatalf("protected here-string corpus has %d rows, want 4", count)
 	}
 }

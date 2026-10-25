@@ -70,9 +70,14 @@ func TestNativeCopilotShellPatchHereString(t *testing.T) {
 		{"protected target with an apostrophe", "apply_patch @'\n*** Begin Patch\n*** Add File: notes.txt\n+It's\n*** Add File: " + keys + "\n+k\n*** End Patch\n'@"},
 		{"protected target beside a literal dollar", "apply_patch @'\n*** Begin Patch\n*** Add File: a.ps1\n+$x = 1\n*** Add File: " + keys + "\n+k\n*** End Patch\n'@"},
 		{"piped protected target beside a literal dollar", piped("*** Add File: a.ps1\n+$x\n*** Delete File: " + keys + "\n")},
+		{"early Unicode closer then a protected write", "apply_patch @'\n*** Begin Patch\n*** Add File: notes.txt\n+x\n’@; Set-Content " + keys + " evil; @'\n*** End Patch\n'@"},
+		{"lone CR closer then a protected write", "apply_patch @'\n*** Begin Patch\n*** Add File: notes.txt\n+x\r'@; Set-Content " + keys + " evil; @'\n*** End Patch\n'@"},
 		{"expanding here-string", "apply_patch @\"\n*** Begin Patch\n*** Add File: notes.txt\n+$keys\n*** End Patch\n\"@"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if (strings.HasPrefix(tc.name, "early Unicode") || strings.HasPrefix(tc.name, "lone CR")) && runtime.GOOS != "windows" {
+				t.Skip("PowerShell here-string terminators apply to Windows Copilot CLI")
+			}
 			body, err := json.Marshal(map[string]any{"sessionId": "native-shell-patch", "cwd": project,
 				"toolCalls": []any{map[string]any{"id": "call_shell_patch", "name": "powershell",
 					"args": map[string]any{"command": tc.command, "description": "Create requested notes file"}}}})

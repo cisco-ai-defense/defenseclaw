@@ -121,16 +121,16 @@ func actionWindowsWords(command string) (words []string, literal []bool, ok bool
 		switch c {
 		case '\'', '"':
 			if word.String() == "@" {
-				if end, here, ok := actionWindowsHereStringEnd(command, i); here {
+				if bodyEnd, after, here, ok := actionWindowsHereStringEnd(command, i); here {
 					if !ok {
 						return words, literal, false
 					}
-					word.WriteString(command[i+1 : end])
+					word.WriteString(command[i+1 : bodyEnd])
 					word.WriteByte('@')
 					if c == '\'' {
 						hereLen = word.Len()
 					}
-					i = end + 1
+					i = after - 1
 					continue
 				}
 			}
@@ -160,32 +160,59 @@ func actionWindowsWords(command string) (words []string, literal []bool, ok bool
 }
 
 // actionWindowsHereStringEnd reads the here-string whose opening quote is at
-// command[open] (after an @). here is false when only blanks do not follow
-// the quote to the end of its line: that is an ordinary quote. Otherwise end
-// is the index of the closing quote, the first line that starts with the
-// quote and @. A closing marker after blanks, which PowerShell refuses, or
-// no closing line at all leaves the text unproved (ok false).
-func actionWindowsHereStringEnd(command string, open int) (end int, here, ok bool) {
+// command[open] (after an @). A quote followed by nonblanks on its line is an
+// ordinary quote. bodyEnd is the first byte of the closing marker, and after
+// is the byte after it. PowerShell also accepts lone CR line ends and smart
+// quote closing markers. An indented closer or no closer is unproved.
+func actionWindowsHereStringEnd(command string, open int) (bodyEnd, after int, here, ok bool) {
 	quote := command[open]
-	newline := strings.IndexByte(command[open+1:], '\n')
-	if newline < 0 || strings.Trim(command[open+1:open+1+newline], " \t\r") != "" {
-		return 0, false, false
+	newline := strings.IndexAny(command[open+1:], "\r\n")
+	if newline < 0 || strings.Trim(command[open+1:open+1+newline], " \t") != "" {
+		return 0, 0, false, false
 	}
-	closer := string(quote) + "@"
-	for start := open + 1 + newline + 1; start <= len(command); {
-		line := command[start:]
-		if next := strings.IndexByte(line, '\n'); next >= 0 {
-			line = line[:next]
-		}
-		if strings.HasPrefix(line, closer) {
-			return start, true, true
-		}
-		if strings.HasPrefix(strings.TrimLeft(line, " \t"), closer) {
-			return 0, true, false
-		}
-		start += len(line) + 1
+	firstEnd := open + 1 + newline
+	start := firstEnd + 1
+	if command[firstEnd] == '\r' && start < len(command) && command[start] == '\n' {
+		start++
 	}
-	return 0, true, false
+	for start <= len(command) {
+		lineEnd := len(command)
+		if next := strings.IndexAny(command[start:], "\r\n"); next >= 0 {
+			lineEnd = start + next
+		}
+		line := command[start:lineEnd]
+		if size := actionWindowsHereStringCloserLen(line, quote); size > 0 {
+			return start, start + size, true, true
+		}
+		if actionWindowsHereStringCloserLen(strings.TrimLeft(line, " \t"), quote) > 0 {
+			return 0, 0, true, false
+		}
+		if lineEnd == len(command) {
+			break
+		}
+		start = lineEnd + 1
+		if command[lineEnd] == '\r' && start < len(command) && command[start] == '\n' {
+			start++
+		}
+	}
+	return 0, 0, true, false
+}
+
+func actionWindowsHereStringCloserLen(line string, quote byte) int {
+	if quote == '\'' {
+		for _, closer := range [...]string{"'@", "‘@", "’@", "‚@", "‛@"} {
+			if strings.HasPrefix(line, closer) {
+				return len(closer)
+			}
+		}
+	} else {
+		for _, closer := range [...]string{"\"@", "“@", "”@", "„@"} {
+			if strings.HasPrefix(line, closer) {
+				return len(closer)
+			}
+		}
+	}
+	return 0
 }
 
 func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
