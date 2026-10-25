@@ -2735,18 +2735,59 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
 _INSTALL_RECOVERY_RECORDS = ("previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json")
 # install.sh and install.ps1 write the lock's pid right after they make it.
 _INSTALL_LOCK_NO_PID_SECONDS = 10 * 60
-# No install runs this long; past it a reused pid no longer holds the lock.
-_INSTALL_LOCK_MAX_SECONDS = 6 * 60 * 60
+# A process that started more than this after the lock's pid was written has
+# a reused pid (hookexec InstallLockStartSlack).
+_INSTALL_LOCK_START_SLACK_SECONDS = 60
+
+
+def _process_start_time(pid: int) -> float | None:
+    """When process pid started (Unix seconds), or None when the system does not say."""
+    if os.name == "nt":  # pragma: no cover - Windows only
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.GetProcessTimes.argtypes = (wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not kernel32.GetProcessTimes(handle, *(ctypes.byref(item) for item in times)):
+                return None
+            ticks = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+            return ticks / 10_000_000 - 11_644_473_600
+        finally:
+            kernel32.CloseHandle(handle)
+    for ps in ("/bin/ps", "/usr/bin/ps"):
+        try:
+            out = subprocess.run(
+                [ps, "-o", "etime=", "-p", str(pid)], capture_output=True, text=True, timeout=5, check=False
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out.returncode != 0:
+            continue
+        age = re.fullmatch(r"(?:(?:(\d{1,6})-)?(\d{1,2}):)?(\d{1,2}):(\d{1,2})", out.stdout.strip())
+        if not age:
+            return None
+        days, hours, minutes, seconds = (int(part or 0) for part in age.groups())
+        return time.time() - (((days * 24 + hours) * 60 + minutes) * 60 + seconds)
+    return None
 
 
 def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, str]:
     """("none" | "stale" | "recovery" | "held", detail) of the lock in folder.
 
     The one rule of every per-user hook (hookexec installLockStale): "stale"
-    when the lock is a folder whose deadline has passed (the one its owner
-    record names, never later than six hours after it was made), or, before
-    that, when no interrupted-install record sits beside it and its pid names
-    no process, or it has had no pid for ten minutes.
+    when the lock is a folder, no interrupted-install record sits beside it
+    and its installer is gone: its pid names no process, or a process that
+    started more than a minute after the pid was written (a reused pid), or
+    it has had no pid for ten minutes. A live installer keeps its lock for as
+    long as it runs.
     """
     from defenseclaw.process_liveness import pid_alive
 
@@ -2759,26 +2800,6 @@ def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, 
         return ("held", f"{lock} cannot be inspected ({exc.strerror or exc})")
     if not stat.S_ISDIR(info.st_mode):
         return ("held", f"{lock} is not a folder")
-    deadline = info.st_mtime + _INSTALL_LOCK_MAX_SECONDS
-    deadline_file = os.path.join(lock, "deadline")
-    recorded_unreadable = False
-    try:
-        deadline_info = os.lstat(deadline_file)
-        if not stat.S_ISREG(deadline_info.st_mode) or deadline_info.st_size > 64:
-            recorded_unreadable = True
-        else:
-            with open(deadline_file, encoding="ascii", errors="replace") as handle:
-                recorded = handle.read(64).strip()
-            if re.fullmatch(r"[1-9][0-9]{0,11}", recorded) and int(recorded) < deadline:
-                deadline = int(recorded)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        recorded_unreadable = True
-    if time.time() > deadline:
-        return ("stale", f"{lock} is past its deadline")
-    if recorded_unreadable:
-        return ("held", f"{deadline_file} cannot be read")
     for record in _INSTALL_RECOVERY_RECORDS:
         path = os.path.join(folder, record)
         try:
@@ -2791,10 +2812,12 @@ def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, 
     age = time.time() - info.st_mtime
     pid_file = os.path.join(lock, "pid")
     text = ""
+    written = 0.0
     try:
         pid_info = os.lstat(pid_file)
         if not stat.S_ISREG(pid_info.st_mode) or pid_info.st_size > 64:
             return ("held", f"{pid_file} is not a pid file")
+        written = pid_info.st_mtime
         with open(pid_file, encoding="ascii", errors="replace") as handle:
             text = handle.read(64).strip()
     except FileNotFoundError:
@@ -2806,8 +2829,16 @@ def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, 
         if age > _INSTALL_LOCK_NO_PID_SECONDS:
             return ("stale", f"{lock} has had no installer pid for more than ten minutes")
         return ("held", f"{lock} was made moments ago")
-    if pid != os.getpid() and not pid_alive(pid):
+    if pid == os.getpid():
+        return ("held", f"an installer (pid {pid}) holds {lock}")
+    if not pid_alive(pid):
         return ("stale", f"{lock} names installer pid {pid}, which is no longer running")
+    started = _process_start_time(pid)
+    if started is not None and started > written + _INSTALL_LOCK_START_SLACK_SECONDS:
+        return (
+            "stale",
+            f"{lock} names pid {pid}, a process that started after the lock was written; its installer is gone",
+        )
     return ("held", f"an installer (pid {pid}) holds {lock}")
 
 
@@ -2836,10 +2867,10 @@ def _check_install_lock(cfg, r: _DoctorResult) -> None:
     """WARN on an install lock that is still there (oss-outage-open round h).
 
     Hooks close outages, and OpenCode and Amp in the strict tier hold answered
-    calls, while an install may be running; a stale lock (past its deadline,
-    or its installer proven gone) is no lock to them and is removed by
+    calls, while an install may be running; a stale lock (its installer
+    proven gone) is no lock to them and is removed by
     doctor.install.stale-lock.clear. One an interrupted install keeps waits
-    for the installer until its deadline.
+    for the installer to run again.
     """
     if _doctor_managed(cfg):
         return
@@ -2861,7 +2892,7 @@ def _check_install_lock(cfg, r: _DoctorResult) -> None:
             _emit(
                 "warn",
                 "Install lock",
-                f"{detail}; hooks wait for the installer to finish it, until the lock's deadline",
+                f"{detail}; hooks wait for the installer to finish it",
                 r=r,
                 check_id="doctor.install.lock",
                 reason_code="install-lock-interrupted-install",

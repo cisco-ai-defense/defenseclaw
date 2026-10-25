@@ -12,14 +12,15 @@ import (
 	"time"
 )
 
-// oss-outage-open round i (stale lock class): an installer killed after it
-// made .install.lock left the lock, and every native hook, hook-outage-mode
-// and the shell hooks then closed every outage of a default-tier account for
-// good. The lock records its owner (pid, start time) and a deadline; a lock
-// whose deadline has passed, or whose owner is proven gone, is no lock. A
-// live or uncertain owner, or an interrupted install's kept lock before its
-// deadline, still holds it.
-func TestInstallLockHeldIgnoresALockWhoseOwnerIsGoneOrWhoseDeadlinePassed(t *testing.T) {
+// oss-outage-open round i (stale lock class) and round j (one liveness
+// rule): a lock is no lock only when its owner is gone: its pid names no
+// process, or a process that started after the pid was written (a reused
+// pid; also the PID-only lock of 1.0.2 and 1.0.3, GAP-1465), or it has had
+// no pid for ten minutes. A live owner keeps it for as long as it runs: a
+// lock made seven hours ago, or a deadline an earlier build recorded, no
+// longer expires it (round i loop 2 P1). An uncertain owner or an
+// interrupted install's kept lock holds.
+func TestInstallLockHeldIgnoresOnlyALockWhoseOwnerIsGone(t *testing.T) {
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -32,11 +33,9 @@ func TestInstallLockHeldIgnoresALockWhoseOwnerIsGoneOrWhoseDeadlinePassed(t *tes
 	live := strconv.Itoa(os.Getppid())
 	now := time.Now()
 	past := strconv.FormatInt(now.Add(-time.Minute).Unix(), 10)
-	future := strconv.FormatInt(now.Add(time.Hour).Unix(), 10)
-	farFuture := strconv.FormatInt(now.Add(100*24*time.Hour).Unix(), 10)
 	type owner struct {
 		pid, deadline string
-		age           time.Duration
+		age, pidAge   time.Duration
 		record        string
 	}
 	for _, tc := range []struct {
@@ -46,24 +45,24 @@ func TestInstallLockHeldIgnoresALockWhoseOwnerIsGoneOrWhoseDeadlinePassed(t *tes
 	}{
 		{"installer exited", owner{pid: dead + "\n"}, false},
 		{"installer exited, Windows line end", owner{pid: dead + "\r\n"}, false},
-		{"installer exited, deadline ahead", owner{pid: dead + "\n", deadline: future}, false},
-		{"installer running", owner{pid: live + "\n", deadline: future}, true},
-		{"installer running, no deadline recorded", owner{pid: live + "\n"}, true},
-		{"installer running, deadline passed", owner{pid: live + "\n", deadline: past}, false},
-		{"installer running, recorded deadline past the six-hour bound", owner{pid: live, deadline: farFuture, age: 7 * time.Hour}, false},
-		{"installer running, made seven hours ago", owner{pid: live, age: 7 * time.Hour}, false},
+		{"installer running", owner{pid: live + "\n"}, true},
+		{"installer running, lock made seven hours ago", owner{pid: live, age: 7 * time.Hour}, true},
+		{"installer running, a deadline an earlier build recorded has passed", owner{pid: live, deadline: past, age: 7 * time.Hour}, true},
+		{"pid reused: its process started after the pid was written", owner{pid: live, age: 7 * time.Hour, pidAge: 7 * time.Hour}, false},
+		{"1.0.2/1.0.3 PID-only lock, installer exited", owner{pid: dead, age: time.Hour, pidAge: time.Hour}, false},
+		{"1.0.2/1.0.3 PID-only lock, pid reused", owner{pid: live, age: 30 * 24 * time.Hour, pidAge: 30 * 24 * time.Hour}, false},
+		{"1.0.2/1.0.3 PID-only lock, installer running", owner{pid: live}, true},
 		{"no pid yet", owner{}, true},
 		{"empty pid", owner{pid: " "}, true},
 		{"no pid for eleven minutes", owner{age: 11 * time.Minute}, false},
 		{"pid not a number", owner{pid: "abc"}, true},
 		{"pid out of range, fresh", owner{pid: "99999999999"}, true},
 		{"pid out of range for eleven minutes", owner{pid: "99999999999", age: 11 * time.Minute}, false},
-		{"deadline not a number, installer exited", owner{pid: dead, deadline: "soon"}, false},
 		{"interrupted install kept previous.new", owner{pid: dead, record: "previous.new"}, true},
 		{"interrupted install kept .repair", owner{pid: dead, record: ".repair"}, true},
 		{"interrupted install kept .rollback-hold", owner{pid: dead, record: ".rollback-hold"}, true},
 		{"interrupted Windows install kept its record", owner{pid: dead, record: ".lifecycle-txn.json"}, true},
-		{"interrupted install past its deadline", owner{pid: dead, record: "previous.new", deadline: past}, false},
+		{"interrupted install, an earlier build's deadline passed", owner{pid: dead, record: "previous.new", deadline: past}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -76,6 +75,12 @@ func TestInstallLockHeldIgnoresALockWhoseOwnerIsGoneOrWhoseDeadlinePassed(t *tes
 					continue
 				}
 				if err := os.WriteFile(filepath.Join(lock, name), []byte(value), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.lock.pidAge > 0 {
+				then := now.Add(-tc.lock.pidAge)
+				if err := os.Chtimes(filepath.Join(lock, "pid"), then, then); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -108,15 +113,31 @@ func TestInstallLockHeldIgnoresALockWhoseOwnerIsGoneOrWhoseDeadlinePassed(t *tes
 			t.Fatal("a lock that is not a folder must hold")
 		}
 	})
-	t.Run("pid or deadline that is a folder", func(t *testing.T) {
-		for _, name := range []string{"pid", "deadline"} {
-			home := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(home, ".install.lock", name), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if !InstallLockHeld(home) {
-				t.Fatalf("a %s record that cannot be read must hold", name)
-			}
+	t.Run("pid that is a folder", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(home, ".install.lock", "pid"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if !InstallLockHeld(home) {
+			t.Fatal("a pid record that cannot be read must hold")
 		}
 	})
+}
+
+// The start-time reader names the start of another live process, and it is
+// no later than now.
+func TestProcessStartTimeOfAnotherProcess(t *testing.T) {
+	started, known := processStartTimeOf(os.Getppid(), time.Now())
+	if !processStartTimeKnown {
+		if known {
+			t.Fatal("a system without a start-time reader named one")
+		}
+		return
+	}
+	if !known {
+		t.Fatal("no start time for the parent process")
+	}
+	if started.After(time.Now().Add(time.Second)) || started.Before(time.Now().Add(-30*24*time.Hour)) {
+		t.Fatalf("parent start %s is not plausible", started)
+	}
 }

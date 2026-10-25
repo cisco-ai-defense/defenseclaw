@@ -10,8 +10,8 @@ import (
 	"syscall"
 )
 
-// installLockOwnerGone reports a pid that names no process (ESRCH). A
+// installLockOwnerExited reports a pid that names no process (ESRCH). A
 // process of another account (EPERM) or any other answer keeps the lock.
-func installLockOwnerGone(pid int) bool {
+func installLockOwnerExited(pid int) bool {
 	return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
 }

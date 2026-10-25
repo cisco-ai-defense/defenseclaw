@@ -260,16 +260,17 @@ def test_both_holds_come_before_anything_stops_the_gateway() -> None:
         assert staged < text.index(later), later
 
 
-# oss-outage-open round i: every lock install.sh takes records its owner
-# (pid, start time) and a deadline, the record the hooks and doctor read
-# (hookexec installLockStale); a lock past its deadline is taken over even
-# when its pid names a running process (a reused pid).
-def test_the_data_dir_lock_records_its_owner_and_a_deadline(tmp_path: Path) -> None:
+# oss-outage-open round i and j: every lock install.sh takes records its
+# owner (pid, start time), the record the hooks and doctor read (hookexec
+# installLockStale); a live installer keeps it however long it runs, and a
+# lock whose pid names a process that started after the pid was written (a
+# reused pid, also a 1.0.2/1.0.3 PID-only lock) is taken over.
+def test_the_data_dir_lock_records_its_owner(tmp_path: Path) -> None:
     home, data = _layout(tmp_path)
     body = (
         f'hold_hook_data_dir "{_gateway(tmp_path)}"\n'
         'lock="${DATA_LOCK_DIRS[0]}"\n'
-        'echo "pid=$(cat "$lock/pid") self=$$ started=$(cat "$lock/started") deadline=$(cat "$lock/deadline")"\n'
+        'echo "pid=$(cat "$lock/pid") self=$$ started=$(cat "$lock/started") deadline=$(test -e "$lock/deadline" && echo yes || echo no)"\n'
     )
     before = int(time.time())
     proc = _run(tmp_path, home, body, {"STUB_DATA_DIR": str(data)})
@@ -278,22 +279,52 @@ def test_the_data_dir_lock_records_its_owner_and_a_deadline(tmp_path: Path) -> N
     fields = dict(part.split("=", 1) for part in line.split())
     assert fields["pid"] == fields["self"]
     assert before - 1 <= int(fields["started"]) <= int(time.time()) + 1
-    assert int(fields["deadline"]) == int(fields["started"]) + 6 * 3600
+    assert fields["deadline"] == "no"
 
 
-def test_a_live_pid_past_the_deadline_is_taken_over(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy", [False, True])
+def test_a_live_installer_keeps_its_lock_however_old_and_a_reused_pid_is_taken_over(
+    tmp_path: Path, legacy: bool
+) -> None:
     home, data = _layout(tmp_path)
     other = subprocess.Popen(["sleep", "30"])
+    lock = data / ".install.lock"
     try:
-        (data / ".install.lock").mkdir()
-        (data / ".install.lock" / "pid").write_text(f"{other.pid}\n", encoding="utf-8")
-        (data / ".install.lock" / "deadline").write_text(f"{int(time.time()) - 60}\n", encoding="utf-8")
+        lock.mkdir()
+        (lock / "pid").write_text(f"{other.pid}\n", encoding="utf-8")
+        if not legacy:
+            (lock / "started").write_text(f"{int(time.time())}\n", encoding="utf-8")
+            (lock / "deadline").write_text(f"{int(time.time()) - 60}\n", encoding="utf-8")
+        week = time.time() - 7 * 86400
+        os.utime(lock, (week, week))
+        # Its installer runs (it started before it wrote the pid): the lock
+        # holds, however old the folder or a recorded deadline.
+        proc = _run(tmp_path, home, f'hold_hook_data_dir "{_gateway(tmp_path)}"\n', {"STUB_DATA_DIR": str(data)})
+        assert proc.returncode == 1
+        assert f"Another DefenseClaw install is running (pid {other.pid})" in proc.stderr
+        # The pid was written before its process started: a reused pid.
+        os.utime(lock / "pid", (week, week))
         proc = _run(tmp_path, home, f'hold_hook_data_dir "{_gateway(tmp_path)}"\n', {"STUB_DATA_DIR": str(data)})
         assert proc.returncode == 0, proc.stderr
         assert _held(proc) == [f"{data.resolve()}/.install.lock"]
     finally:
         other.kill()
         other.wait()
+
+
+@pytest.mark.parametrize(
+    ("etime", "seconds"), [("05:23", 323), ("1:02:03", 3723), ("2-01:02:03", 176523), ("08:09", 489)]
+)
+def test_process_age_reads_every_ps_etime_form(tmp_path: Path, etime: str, seconds: int) -> None:
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "ps").write_text(f"#!/bin/sh\necho '  {etime}'\n", encoding="utf-8")
+    (fake / "ps").chmod(0o755)
+    proc = _run(
+        tmp_path, tmp_path / "home", "process_age 1\n", {"PATH": f"{fake}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines()[0] == str(seconds)
 
 
 def test_relative_home_and_config_are_recorded_as_absolute_paths() -> None:
@@ -324,67 +355,8 @@ def test_relative_home_and_config_are_recorded_as_absolute_paths() -> None:
         assert proc.stdout.strip() == want.format(cwd=cwd)
 
 
-# oss-outage-open round i loop 2 (P1, a live installer lost its lock after
-# six hours): the deadline was fixed at the start, so an install waiting at
-# its prompt past it lost its locks to the next run and to the hooks. A live
-# install now renews every lock it holds; a killed one stops renewing at
-# once (its renewer is no longer its child), so its pid-gone lock is stale
-# to the next calls; and it gives back, or acts under, only a lock that is
-# still its own.
-def test_a_live_install_renews_every_lock_it_holds(tmp_path: Path) -> None:
-    home, data = _layout(tmp_path)
-    body = (
-        "LOCK_RENEW_SECONDS=1\n"
-        f'hold_hook_data_dir "{_gateway(tmp_path)}"\n'
-        'lock="${DATA_LOCK_DIRS[0]}"\n'
-        # Both deadlines as good as passed, as after six hours at a prompt.
-        'echo 1 > "$lock/deadline"; echo 1 > "$LOCK_DIR/deadline"\n'
-        "sleep 3\n"
-        'echo "data=$(cat "$lock/deadline") home=$(cat "$LOCK_DIR/deadline") now=$(date +%s)"\n'
-    )
-    proc = _run(tmp_path, home, body, {"STUB_DATA_DIR": str(data)})
-    assert proc.returncode == 0, proc.stderr
-    line = next(item for item in proc.stdout.splitlines() if item.startswith("data="))
-    fields = {key: int(value) for key, value in (part.split("=", 1) for part in line.split())}
-    assert fields["data"] >= fields["now"] + 6 * 3600 - 5, line
-    assert fields["home"] >= fields["now"] + 6 * 3600 - 5, line
-    # The installer gave both back when it exited, and no renewer is left.
-    assert not (data / ".install.lock").exists()
-    assert not (home / ".install.lock").exists()
-
-
-def test_a_killed_install_stops_renewing_and_its_lock_goes_stale(tmp_path: Path) -> None:
-    home, data = _layout(tmp_path)
-    script = tmp_path / "hold.sh"
-    body = f'LOCK_RENEW_SECONDS=1\nhold_hook_data_dir "{_gateway(tmp_path)}"\necho held >&2\nsleep 30\n'
-    _run(tmp_path, home, "true # KILLED-MARKER\n", {"STUB_DATA_DIR": str(data)})  # writes hold.sh once
-    text = script.read_text(encoding="utf-8").replace("true # KILLED-MARKER\n", body, 1)
-    script.write_text(text, encoding="utf-8")
-    run_env = {
-        "HOME": str(tmp_path / "user"),
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "STUB_DATA_DIR": str(data),
-    }
-    installer = subprocess.Popen([BASH, str(script)], env=run_env, stderr=subprocess.PIPE, text=True)
-    try:
-        assert installer.stderr is not None
-        assert installer.stderr.readline().strip() == "held"
-        lock = data.resolve() / ".install.lock"
-        assert (lock / "pid").read_text(encoding="utf-8").strip() == str(installer.pid)
-        installer.kill()
-        installer.wait()
-        (lock / "deadline").write_text("1\n", encoding="utf-8")
-        time.sleep(3)
-        # No renewer brought the deadline back, and the lock names a dead pid.
-        assert (lock / "deadline").read_text(encoding="utf-8").strip() == "1"
-        renewers = subprocess.run(["pgrep", "-f", str(lock)], capture_output=True, text=True, check=False)
-        assert renewers.stdout.strip() == "", renewers.stdout
-    finally:
-        if installer.poll() is None:
-            installer.kill()
-            installer.wait()
-
-
+# oss-outage-open round i loop 2: an install acts under, and gives back,
+# only a lock that is still its own.
 def test_a_lock_another_run_took_over_stops_the_install_and_stays(tmp_path: Path) -> None:
     home, data = _layout(tmp_path)
     other = subprocess.Popen(["sleep", "30"])

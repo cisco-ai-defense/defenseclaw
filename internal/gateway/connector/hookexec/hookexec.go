@@ -2824,8 +2824,8 @@ var installLockLstat = os.Lstat
 // directory home: its .install.lock exists, as any file type (a symlink
 // marker too, so changing its type cannot open a hook during install or
 // upgrade), or it cannot be read for any reason but its absence, and it is
-// not stale (installLockStale: its deadline passed or its installer is
-// proven gone). A lock whose state cannot be verified is held (GAP-0862).
+// not stale (installLockStale: its installer is proven gone). A lock whose
+// state cannot be verified is held (GAP-0862).
 func installLockHeld(home string) bool {
 	return installLockHeldBy(installLockLstat, home)
 }

@@ -140,6 +140,7 @@ func TestHookDataDirCommandPrintsTheFolder(t *testing.T) {
 	writeOutageNowConfig(t, data, `"data_dir": "`+filepath.ToSlash(data)+"\"\n"+outageNowDefaultConfig)
 	t.Setenv("DEFENSECLAW_CONFIG", filepath.Join(data, "config.yaml"))
 	t.Setenv("DEFENSECLAW_HOME", filepath.Join(base, "installer-home"))
+	stubOutageInstallFolders(t, func() string { return "" }, func() (string, bool) { return "", false })
 	var out bytes.Buffer
 	rootCmd.SetOut(&out)
 	rootCmd.SetErr(&out)

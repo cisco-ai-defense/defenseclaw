@@ -795,41 +795,67 @@ function installLockDirs(): string[] {
 }
 
 // An interrupted install keeps its lock on purpose, next to one of these,
-// until the installer runs again and finishes or undoes it, at most until
-// the lock's deadline (hookexec.InstallLockRecoveryRecords).
+// until the installer runs again and finishes or undoes it
+// (hookexec.InstallLockRecoveryRecords).
 const DC_INSTALL_RECOVERY_RECORDS = ["previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"]
 // install.sh and install.ps1 write the lock's pid right after they make it,
 // so a lock without a pid is an installer's for this long.
 const DC_INSTALL_LOCK_NO_PID_MS = 10 * 60 * 1000
-// No install runs this long: the latest deadline of any lock, whatever
-// deadline it records. Past it, a pid that names a process again (a reused
-// pid) no longer holds the lock.
-const DC_INSTALL_LOCK_MAX_MS = 6 * 60 * 60 * 1000
+// A process that started more than this after the lock's pid was written
+// has a reused pid (hookexec InstallLockStartSlack).
+const DC_INSTALL_LOCK_START_SLACK_MS = 60 * 1000
 
-// installLockNumber reads one number of the lock's owner record (pid,
-// deadline): "absent" (missing, empty or not a positive number), "valid",
-// or "unreadable" (not a small regular file, or a read error but its
-// absence).
-async function installLockNumber(path: string): Promise<{ state: "absent" | "valid" | "unreadable"; value: number }> {
+// installLockNumber reads the lock's pid file: "absent" (missing, empty or
+// not a positive number), "valid" (with when it was written), or
+// "unreadable" (not a small regular file, or a read error but its absence).
+async function installLockNumber(path: string): Promise<{ state: "absent" | "valid" | "unreadable"; value: number; writtenMs: number }> {
 	try {
 		const info = await lstat(path)
-		if (!info.isFile() || info.size > 64) return { state: "unreadable", value: 0 }
+		if (!info.isFile() || info.size > 64) return { state: "unreadable", value: 0, writtenMs: 0 }
 		const text = String(readFileSync(path, "utf8")).trim()
-		return /^[1-9][0-9]{0,11}$/.test(text) ? { state: "valid", value: Number(text) } : { state: "absent", value: 0 }
+		return /^[1-9][0-9]{0,11}$/.test(text) ? { state: "valid", value: Number(text), writtenMs: info.mtimeMs } : { state: "absent", value: 0, writtenMs: 0 }
 	} catch (error) {
-		return { state: (error as { code?: unknown } | null)?.code === "ENOENT" ? "absent" : "unreadable", value: 0 }
+		return { state: (error as { code?: unknown } | null)?.code === "ENOENT" ? "absent" : "unreadable", value: 0, writtenMs: 0 }
 	}
+}
+
+// processStartMs is when process pid started (Unix ms), as the system names
+// it: ps etime ([[dd-]hh:]mm:ss) on Linux and macOS, the process's start time
+// on Windows; null when it does not say.
+function processStartMs(pid: number): number | null {
+	try {
+		if (process.platform === "win32") {
+			const text = String(execFileSync(DC_WINDOWS_POWERSHELL, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+				"[DateTimeOffset]::new((Get-Process -Id " + pid + " -ErrorAction Stop).StartTime).ToUnixTimeMilliseconds()"],
+				{ encoding: "utf8", timeout: 10000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] })).trim()
+			return /^[1-9][0-9]{0,15}$/.test(text) ? Number(text) : null
+		}
+		for (const ps of ["/bin/ps", "/usr/bin/ps"]) {
+			let text: string
+			try {
+				text = String(execFileSync(ps, ["-o", "etime=", "-p", String(pid)], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })).trim()
+			} catch {
+				continue
+			}
+			const age = /^(?:(?:(\d{1,6})-)?(\d{1,2}):)?(\d{1,2}):(\d{1,2})$/.exec(text)
+			if (!age) return null
+			return Date.now() - (((Number(age[1] || 0) * 24 + Number(age[2] || 0)) * 60 + Number(age[3])) * 60 + Number(age[4])) * 1000
+		}
+	} catch {
+		// Fall through: the system does not say.
+	}
+	return null
 }
 
 // installLockState is the one install-lock rule of every per-user hook
 // (hookexec installLockStale, the shell hooks, the OpenCode plugin) and of
 // `defenseclaw doctor` (_install_lock_state): "none" when dir has no
-// .install.lock and is a folder or absent; "stale" when the lock is a folder
-// whose deadline has passed (the one it records, never later than six hours
-// after it was made), or, before that, when no interrupted-install record
-// sits beside it and its installer is proven gone: its pid names no process
-// or it has had no pid for ten minutes; "held" for a live or uncertain
-// install, everything else. A stale lock is no lock; `defenseclaw doctor
+// .install.lock and is a folder or absent; "stale" when the lock is a folder,
+// no interrupted-install record sits beside it and its installer is proven
+// gone: its pid names no process, or a process that started more than a
+// minute after the pid was written (a reused pid), or it has had no pid for
+// ten minutes; "held" for a live install (however long it runs) or an
+// uncertain one, everything else. A stale lock is no lock; `defenseclaw doctor
 // --fix` or the next installer run removes it.
 async function installLockState(dir: string): Promise<"none" | "stale" | "held"> {
 	const missing = (error: unknown) => (error as { code?: unknown } | null)?.code === "ENOENT"
@@ -850,11 +876,6 @@ async function installLockState(dir: string): Promise<"none" | "stale" | "held">
 	}
 	if (!info.isDirectory()) return "held"
 	const now = Date.now()
-	let deadline = info.mtimeMs + DC_INSTALL_LOCK_MAX_MS
-	const recorded = await installLockNumber(join(lock, "deadline"))
-	if (recorded.state === "valid" && recorded.value * 1000 < deadline) deadline = recorded.value * 1000
-	if (now > deadline) return "stale"
-	if (recorded.state === "unreadable") return "held"
 	for (const name of DC_INSTALL_RECOVERY_RECORDS) {
 		try {
 			await lstat(join(dir, name))
@@ -869,10 +890,11 @@ async function installLockState(dir: string): Promise<"none" | "stale" | "held">
 	if (owner.value === process.pid) return "held"
 	try {
 		process.kill(owner.value, 0)
-		return "held"
 	} catch (error) {
-		return (error as { code?: unknown } | null)?.code === "ESRCH" ? "stale" : "held"
+		if ((error as { code?: unknown } | null)?.code === "ESRCH") return "stale"
 	}
+	const started = processStartMs(owner.value)
+	return started !== null && started > owner.writtenMs + DC_INSTALL_LOCK_START_SLACK_MS ? "stale" : "held"
 }
 
 // installLocks reads the lock of every folder an installer of this account

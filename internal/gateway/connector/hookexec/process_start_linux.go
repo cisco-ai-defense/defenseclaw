@@ -25,7 +25,17 @@ const linuxClockTicks = 100
 const processStartTimeKnown = true
 
 func processStartTime(now time.Time) (time.Time, bool) {
-	data, err := os.ReadFile("/proc/self/stat")
+	return procStatStartTime("/proc/self/stat", now)
+}
+
+// processStartTimeOf is when process pid started, read as processStartTime
+// reads this one; false when /proc does not say.
+func processStartTimeOf(pid int, now time.Time) (time.Time, bool) {
+	return procStatStartTime("/proc/"+strconv.Itoa(pid)+"/stat", now)
+}
+
+func procStatStartTime(path string, now time.Time) (time.Time, bool) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return time.Time{}, false
 	}

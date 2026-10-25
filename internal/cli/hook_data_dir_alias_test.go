@@ -114,3 +114,99 @@ func aliasLink(t *testing.T, target, link string) {
 		t.Skipf("symlink: %v", err)
 	}
 }
+
+// oss-outage-open round j (lock path aliases): hook-data-dir tells folders
+// apart by file identity and follows every name on the way to the
+// configured file, so a config.yaml in a folder a link chain passes through
+// is held too; and it names the account's own .defenseclaw, which every
+// per-user hook checks (hookOutageInstallHeld), so a hook whose config.yaml
+// is the configured file under a name no path from it leads to (a hard link
+// in another folder) is closed while install.sh holds it.
+func TestHookDataDirsNowLocksEveryAliasOfTheConfiguredFile(t *testing.T) {
+	t.Run("a folder in the middle of a link chain", func(t *testing.T) {
+		base := t.TempDir()
+		real := filepath.Join(base, "real")
+		writeAliasConfig(t, filepath.Join(real, "policy.yaml"))
+		mid := filepath.Join(base, "mid")
+		if err := os.MkdirAll(filepath.Join(mid, "hooks"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		aliasLink(t, filepath.Join(real, "policy.yaml"), filepath.Join(mid, "mid.yaml"))
+		aliasLink(t, "mid.yaml", filepath.Join(mid, "config.yaml"))
+		cfg := filepath.Join(base, "cfg")
+		if err := os.MkdirAll(cfg, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		aliasLink(t, filepath.Join(mid, "mid.yaml"), filepath.Join(cfg, "policy.yaml"))
+		dirs := aliasHookDataDirs(t, base, filepath.Join(cfg, "policy.yaml"), "")
+		if !aliasHolds(dirs, mid) {
+			t.Fatalf("hooks in %s load the configured file, but hook-data-dir names only %q", mid, dirs)
+		}
+	})
+	t.Run("a hard link in another folder", func(t *testing.T) {
+		base := t.TempDir()
+		cfg := filepath.Join(base, "cfg")
+		writeAliasConfig(t, filepath.Join(cfg, "policy.yaml"))
+		other := filepath.Join(base, "other")
+		if err := os.MkdirAll(filepath.Join(other, "hooks"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(filepath.Join(cfg, "policy.yaml"), filepath.Join(other, "config.yaml")); err != nil {
+			t.Skipf("hard link: %v", err)
+		}
+		account := filepath.Join(base, "account")
+		accountData := filepath.Join(account, ".defenseclaw")
+		if err := os.MkdirAll(accountData, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		dirs := aliasHookDataDirs(t, base, filepath.Join(cfg, "policy.yaml"), account)
+		if !aliasHolds(dirs, accountData) {
+			t.Fatalf("hook-data-dir names %q, not the account's own %s", dirs, accountData)
+		}
+		hooks := filepath.Join(other, "hooks")
+		if mode := hookOutageFailModeNow("opencode", hooks); mode != "open" {
+			t.Fatalf("precondition: the hook in %s does not open an outage (%q)", other, mode)
+		}
+		if err := os.MkdirAll(filepath.Join(accountData, ".install.lock"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if mode := hookOutageFailModeNow("opencode", hooks); mode != "closed" {
+			t.Fatalf("hook-outage-mode while install.sh holds %s = %q, want closed", accountData, mode)
+		}
+	})
+}
+
+// aliasHookDataDirs runs hook-data-dir with the installer's environment
+// (DEFENSECLAW_CONFIG = configured, its own home elsewhere), then leaves an
+// agent's environment behind for the hooks.
+func aliasHookDataDirs(t *testing.T, base, configured, account string) []string {
+	t.Helper()
+	installer := filepath.Join(base, "installer-home")
+	if err := os.MkdirAll(installer, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	isolateOutageHostMarkers(t)
+	stubOutageInstallFolders(t, func() string { return account }, func() (string, bool) { return "", false })
+	t.Setenv("HOME", base)
+	t.Setenv("USERPROFILE", base)
+	t.Setenv("DEFENSECLAW_HOME", installer)
+	t.Setenv("DEFENSECLAW_CONFIG", configured)
+	dirs, err := hookDataDirsNow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_CONFIG", "")
+	t.Setenv("DEFENSECLAW_HOME", "")
+	t.Setenv("HOME", filepath.Join(base, "agent-home"))
+	t.Setenv("USERPROFILE", filepath.Join(base, "agent-home"))
+	return dirs
+}
+
+func aliasHolds(dirs []string, folder string) bool {
+	for _, dir := range dirs {
+		if pathidentity.Same(dir, folder) {
+			return true
+		}
+	}
+	return false
+}

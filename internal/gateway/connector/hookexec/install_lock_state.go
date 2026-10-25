@@ -13,17 +13,18 @@ import (
 	"time"
 )
 
-// The install-lock owner record. install.sh and install.ps1 write the
-// installer's pid, its start time and a deadline (Unix seconds) into the
-// lock folder right after they make it.
+// The install-lock owner record: install.sh and install.ps1 write the
+// installer's pid into the lock folder right after they make it, as 1.0.2
+// and 1.0.3 did, so every release's lock follows the same rule.
 const (
 	// InstallLockNoPIDWait is how long a lock without a readable pid is
 	// still an installer's that has not written it yet.
 	InstallLockNoPIDWait = 10 * time.Minute
-	// InstallLockMaxAge is the latest deadline of any lock: no install runs
-	// this long, so a pid that names a process again (a reused pid) or an
-	// interrupted install's kept lock no longer holds past it.
-	InstallLockMaxAge = 6 * time.Hour
+	// InstallLockStartSlack is how much later than the lock's pid file a
+	// process with that pid may have started and still be the installer
+	// that wrote it (clock resolution, a small clock step). A process that
+	// started later has a reused pid: the installer is gone.
+	InstallLockStartSlack = time.Minute
 )
 
 // InstallLockRecoveryRecords are the interrupted-install records install.sh
@@ -33,29 +34,16 @@ var InstallLockRecoveryRecords = []string{"previous.new", ".repair", ".rollback-
 
 // installLockStale is the one stale-lock rule of every per-user hook (this
 // package, hook-outage-mode, the shell hooks, the OpenCode and Amp plugins)
-// and of `defenseclaw doctor`: a lock folder in home is no lock once its
-// deadline has passed (the deadline it records, never later than
-// InstallLockMaxAge after it was made), or, before that, when no
+// and of `defenseclaw doctor`: a lock folder in home is no lock only when no
 // interrupted-install record sits beside it and its owner is proven gone:
-// its pid names no process, or it has had no valid pid for
-// InstallLockNoPIDWait. A live or uncertain owner holds it: a running pid,
-// a pid that cannot be checked, a record or pid that cannot be read, a lock
-// that is not a folder.
+// its pid names no process, or names a process that started after the pid
+// was written (a reused pid, InstallLockStartSlack), or it has had no valid
+// pid for InstallLockNoPIDWait. A live owner holds it for as long as it
+// runs, with no deadline; so does an uncertain one: a pid whose process
+// start cannot be read, a pid that cannot be read, a lock that is not a
+// folder. A deadline file an earlier 1.0.4 build wrote is not read.
 func installLockStale(lstat func(string) (fs.FileInfo, error), home string, info fs.FileInfo, now time.Time) bool {
 	if info == nil || !info.IsDir() {
-		return false
-	}
-	lock := filepath.Join(home, ".install.lock")
-	made := info.ModTime()
-	deadline := made.Add(InstallLockMaxAge)
-	recorded, recordState := installLockNumber(lstat, filepath.Join(lock, "deadline"))
-	if at := time.Unix(recorded, 0); recordState == lockNumberValid && at.Before(deadline) {
-		deadline = at
-	}
-	if now.After(deadline) {
-		return true
-	}
-	if recordState == lockNumberUnreadable {
 		return false
 	}
 	for _, name := range InstallLockRecoveryRecords {
@@ -63,7 +51,8 @@ func installLockStale(lstat func(string) (fs.FileInfo, error), home string, info
 			return false
 		}
 	}
-	pid, state := installLockNumber(lstat, filepath.Join(lock, "pid"))
+	made := info.ModTime()
+	pid, written, state := installLockPID(lstat, filepath.Join(home, ".install.lock", "pid"))
 	switch state {
 	case lockNumberUnreadable:
 		return false
@@ -74,10 +63,21 @@ func installLockStale(lstat func(string) (fs.FileInfo, error), home string, info
 		if int(pid) == os.Getpid() {
 			return false
 		}
-		return installLockOwnerGone(int(pid))
+		return installLockOwnerGone(int(pid), written, now)
 	default:
 		return now.Sub(made) > InstallLockNoPIDWait
 	}
+}
+
+// installLockOwnerGone reports an installer proven gone: pid names no
+// process, or a process the system says started more than
+// InstallLockStartSlack after written, when the lock's pid was written.
+func installLockOwnerGone(pid int, written, now time.Time) bool {
+	if installLockOwnerExited(pid) {
+		return true
+	}
+	started, known := processStartTimeOf(pid, now)
+	return known && started.After(written.Add(InstallLockStartSlack))
 }
 
 type lockNumberState int
@@ -88,34 +88,35 @@ const (
 	lockNumberUnreadable
 )
 
-// installLockNumber reads one decimal number of the owner record: absent
-// (missing, empty or not a positive number), valid, or unreadable (not a
-// regular small file, or a read error but its absence).
-func installLockNumber(lstat func(string) (fs.FileInfo, error), path string) (int64, lockNumberState) {
+// installLockPID reads the lock's pid file: its decimal number and when it
+// was written, and whether it is absent (missing, empty or not a positive
+// number), valid, or unreadable (not a regular small file, or a read error
+// but its absence).
+func installLockPID(lstat func(string) (fs.FileInfo, error), path string) (int64, time.Time, lockNumberState) {
 	info, err := lstat(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0, lockNumberAbsent
+			return 0, time.Time{}, lockNumberAbsent
 		}
-		return 0, lockNumberUnreadable
+		return 0, time.Time{}, lockNumberUnreadable
 	}
 	if !info.Mode().IsRegular() || info.Size() > 64 {
-		return 0, lockNumberUnreadable
+		return 0, time.Time{}, lockNumberUnreadable
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0, lockNumberAbsent
+			return 0, time.Time{}, lockNumberAbsent
 		}
-		return 0, lockNumberUnreadable
+		return 0, time.Time{}, lockNumberUnreadable
 	}
 	text := strings.TrimSpace(string(raw))
 	if text == "" || len(text) > 12 || text[0] < '1' || text[0] > '9' {
-		return 0, lockNumberAbsent
+		return 0, time.Time{}, lockNumberAbsent
 	}
 	value, err := strconv.ParseInt(text, 10, 64)
 	if err != nil {
-		return 0, lockNumberAbsent
+		return 0, time.Time{}, lockNumberAbsent
 	}
-	return value, lockNumberValid
+	return value, info.ModTime(), lockNumberValid
 }

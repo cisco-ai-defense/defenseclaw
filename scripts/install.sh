@@ -476,20 +476,16 @@ LOCK_HINT="check the free space (df -h ${DEFENSECLAW_HOME%/*}) and that $(id -un
 mkdir -p "${DEFENSECLAW_HOME}" "${DEFENSECLAW_HOME}/logs" 2>/dev/null \
     || die "Could not create ${DEFENSECLAW_HOME}/logs: ${LOCK_HINT}"
 chmod 700 "${DEFENSECLAW_HOME}" 2>/dev/null || true
-# The owner record of every lock this installer takes: its pid, its start
-# time and a deadline, in Unix seconds. Past the deadline, or once its pid
-# names no process, every hook and `defenseclaw doctor` treat the lock as no
-# lock (hookexec installLockStale), and the next run takes it over. A live
-# install renews the deadline of every lock it holds (start_lock_renewer),
-# however long it waits at a prompt, so only a lock whose installer is gone
-# (killed, or its pid reused by another process) ever reaches its deadline.
+# The owner record of every lock this installer takes: its pid and its start
+# time. Every hook and `defenseclaw doctor` treat a lock as no lock only once
+# its installer is gone: its pid names no process, or a process that started
+# after the pid was written (a reused pid; hookexec installLockStale, the one
+# rule). A live install keeps its locks for as long as it runs, however long
+# it waits at a prompt, and the next run takes over a lock whose installer is
+# gone.
 LOCK_STARTED="$(date +%s)"
-LOCK_LIFETIME=21600
-LOCK_RENEW_SECONDS=300
-LOCK_DEADLINE=$((LOCK_STARTED + LOCK_LIFETIME))
-LOCK_RENEWER_PID=""
 write_lock_owner() {
-    { echo $$ > "$1/pid" && echo "${LOCK_STARTED}" > "$1/started" && echo "${LOCK_DEADLINE}" > "$1/deadline"; } 2>/dev/null
+    { echo $$ > "$1/pid" && echo "${LOCK_STARTED}" > "$1/started"; } 2>/dev/null
 }
 lock_is_ours() {
     # lock_is_ours LOCK: LOCK still records this installer as its owner (its
@@ -506,47 +502,10 @@ assert_locks_ours() {
             || die "The install lock ${lock} is no longer this installer's (another run took it over); nothing more was changed"
     done
 }
-stop_lock_renewer() {
-    [[ -n "${LOCK_RENEWER_PID}" ]] || return 0
-    kill "${LOCK_RENEWER_PID}" 2>/dev/null || true
-    wait "${LOCK_RENEWER_PID}" 2>/dev/null || true
-    LOCK_RENEWER_PID=""
-}
-start_lock_renewer() {
-    # A child that renews the deadline of every lock this installer holds
-    # (and the lock folder's time, which the hooks also bound it by) every
-    # LOCK_RENEW_SECONDS while the installer runs. It stops as soon as the
-    # installer is gone (it is no longer its parent: killed, so its pid can
-    # be reused) and renews only a lock that still names this installer.
-    stop_lock_renewer
-    # shellcheck disable=SC2016
-    bash -c '
-        owner=$1 started=$2 every=$3 lifetime=$4; shift 4
-        nap=""
-        trap '"'"'[ -z "$nap" ] || kill "$nap" 2>/dev/null; exit 0'"'"' TERM INT HUP
-        while :; do
-            sleep "$every" & nap=$!
-            wait "$nap"; nap=""
-            parent="$(ps -o ppid= -p $$ 2>/dev/null | tr -d " ")"
-            [ -z "$parent" ] || [ "$parent" = "$owner" ] || exit 0
-            kill -0 "$owner" 2>/dev/null || exit 0
-            for lock; do
-                [ "$(cat "$lock/pid" 2>/dev/null)" = "$owner" ] || continue
-                [ "$(cat "$lock/started" 2>/dev/null)" = "$started" ] || continue
-                echo $(( $(date +%s) + lifetime )) > "$lock/deadline.new" 2>/dev/null \
-                    && mv -f "$lock/deadline.new" "$lock/deadline" 2>/dev/null \
-                    && touch "$lock" 2>/dev/null
-            done
-        done
-    ' dc-install-lock-renewer "$$" "${LOCK_STARTED}" "${LOCK_RENEW_SECONDS}" "${LOCK_LIFETIME}" \
-        "${LOCK_DIR}" ${DATA_LOCK_DIRS[@]+"${DATA_LOCK_DIRS[@]}"} </dev/null >/dev/null 2>&1 &
-    LOCK_RENEWER_PID=$!
-}
 release_locks() {
-    # The EXIT trap: stop renewing, then give back every lock that is still
-    # this installer's; a lock another run took over stays with that run.
+    # The EXIT trap: give back every lock that is still this installer's; a
+    # lock another run took over stays with that run.
     local lock
-    stop_lock_renewer
     for lock in "${LOCK_DIR}" ${DATA_LOCK_DIRS[@]+"${DATA_LOCK_DIRS[@]}"}; do
         if lock_is_ours "${lock}"; then
             rm -rf "${lock:?}"
@@ -554,13 +513,24 @@ release_locks() {
     done
 }
 lock_owner_live() {
-    # lock_owner_live LOCK HOLDER: the installer HOLDER that wrote LOCK still
-    # runs and its deadline has not passed.
-    local deadline
+    # lock_owner_live LOCK HOLDER: the installer HOLDER that wrote LOCK/pid
+    # still runs: its pid names a process that started no later than a
+    # minute after the pid was written (a later one has a reused pid). A
+    # start ps cannot tell keeps the lock.
+    local written age
     [[ -n "$2" ]] && kill -0 "$2" 2>/dev/null || return 1
-    deadline="$(cat "$1/deadline" 2>/dev/null || true)"
-    [[ "${deadline}" =~ ^[1-9][0-9]{0,11}$ ]] || return 0
-    (( $(date +%s) <= deadline ))
+    written="$(stat -c %Y "$1/pid" 2>/dev/null || stat -f %m "$1/pid" 2>/dev/null)" || return 0
+    age="$(process_age "$2")" || return 0
+    [[ "${written}${age}" =~ ^[0-9]+$ ]] || return 0
+    (( $(date +%s) - age <= written + 60 ))
+}
+process_age() {
+    # process_age PID: how many seconds ago process PID started (ps etime,
+    # [[dd-]hh:]mm:ss); fails when ps cannot say.
+    local t
+    t="$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' \t')" || return 1
+    [[ "${t}" =~ ^(([0-9]+)-)?(([0-9]{1,2}):)?([0-9]{1,2}):([0-9]{1,2})$ ]] || return 1
+    echo $(( ((10#${BASH_REMATCH[2]:-0} * 24 + 10#${BASH_REMATCH[4]:-0}) * 60 + 10#${BASH_REMATCH[5]}) * 60 + 10#${BASH_REMATCH[6]} ))
 }
 if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
     holder="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
@@ -592,7 +562,6 @@ exec > >(trap '' INT TERM; exec tee -a "${LOG}") 2>&1
 # hold_hook_data_dir took; the EXIT trap gives back those still its own.
 DATA_LOCK_DIRS=()
 trap 'release_locks; rm -rf ${SELF_TMP:+"${SELF_TMP}"}' EXIT
-start_lock_renewer
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
 hook_data_dir_of() {
@@ -625,19 +594,19 @@ hold_hook_data_dir() {
     while IFS= read -r data; do
         hold_data_lock "${data}"
     done <<< "${answer}"
-    start_lock_renewer
 }
 
 hold_data_lock() {
     # hold_data_lock DATA: take DATA/.install.lock unless DATA is no folder,
-    # is this install's home or is already held.
+    # is this install's home or is already held, by file identity (device
+    # and inode: a link, a bind mount or another spelling is that folder).
     local data="$1" lock holder held
     [[ -n "${data}" && -d "${data}" ]] || return 0
     data="$(cd -P -- "${data}" 2>/dev/null && pwd -P)" || return 0
-    [[ "${data}" != "$(cd -P -- "${DEFENSECLAW_HOME}" 2>/dev/null && pwd -P)" ]] || return 0
+    [[ ! "${data}" -ef "${DEFENSECLAW_HOME}" ]] || return 0
     lock="${data%/}/.install.lock"
     for held in ${DATA_LOCK_DIRS[@]+"${DATA_LOCK_DIRS[@]}"}; do
-        [[ "${held}" != "${lock}" ]] || return 0
+        [[ ! "${held}" -ef "${lock}" && "${held}" != "${lock}" ]] || return 0
     done
     if ! mkdir "${lock}" 2>/dev/null; then
         holder="$(cat "${lock}/pid" 2>/dev/null || true)"

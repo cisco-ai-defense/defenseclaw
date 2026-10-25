@@ -49,31 +49,23 @@ defenseclaw_install_lock_held() {
   return 1
 }
 # defenseclaw_install_lock_stale DATA returns 0 (true) when DATA/.install.lock
-# is a folder whose deadline has passed (the one its owner record names,
-# never later than six hours after it was made), or, before that, when no
-# interrupted-install record sits beside it and its installer is proven
-# gone: its pid names no process, or it has had no pid for ten minutes. A
-# live or uncertain owner keeps it (hookexec installLockStale, the one rule).
+# is a folder whose installer is proven gone and no interrupted-install
+# record sits beside it: its pid names no process, or a process that started
+# more than a minute after the pid was written (a reused pid), or it has had
+# no pid for ten minutes. A live or uncertain owner keeps it for as long as
+# it runs (hookexec installLockStale, the one rule).
 defenseclaw_install_lock_stale() {
-  local data="${1:-}" lock now made deadline recorded rc pid name
+  local data="${1:-}" lock now made written age rc pid name
   lock="${data}/.install.lock"
   [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
-  now="$(date +%s 2>/dev/null)" || return 1
-  made="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)" || return 1
-  case "$now$made" in ''|*[!0-9]*) return 1 ;; esac
-  deadline=$((made + 21600))
-  rc=0
-  recorded="$(defenseclaw_install_lock_number "${lock}/deadline")" || rc=$?
-  if [ "$rc" = 0 ] && [ "$recorded" -lt "$deadline" ]; then
-    deadline="$recorded"
-  fi
-  [ "$now" -gt "$deadline" ] && return 0
-  [ "$rc" = 2 ] && return 1
   for name in previous.new .repair .rollback-hold .lifecycle-txn.json; do
     if [ -e "${data}/${name}" ] || [ -L "${data}/${name}" ]; then
       return 1
     fi
   done
+  now="$(date +%s 2>/dev/null)" || return 1
+  made="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)" || return 1
+  case "$now$made" in ''|*[!0-9]*) return 1 ;; esac
   rc=0
   pid="$(defenseclaw_install_lock_number "${lock}/pid")" || rc=$?
   [ "$rc" = 2 ] && return 1
@@ -82,14 +74,36 @@ defenseclaw_install_lock_stale() {
     return 1
   fi
   [ "$pid" = "$$" ] && return 1
-  kill -0 "$pid" 2>/dev/null && return 1
-  # A process of another account refuses the signal; only ps proves it gone.
-  command -v ps >/dev/null 2>&1 || return 1
-  ps -p "$pid" >/dev/null 2>&1 && return 1
-  return 0
+  if ! kill -0 "$pid" 2>/dev/null; then
+    # A process of another account refuses the signal; only ps proves it gone.
+    command -v ps >/dev/null 2>&1 || return 1
+    ps -p "$pid" >/dev/null 2>&1 || return 0
+  fi
+  written="$(stat -c %Y "${lock}/pid" 2>/dev/null || stat -f %m "${lock}/pid" 2>/dev/null)" || return 1
+  age="$(defenseclaw_process_age "$pid")" || return 1
+  case "$written$age" in ''|*[!0-9]*) return 1 ;; esac
+  [ $((now - age)) -gt $((written + 60)) ] && return 0
+  return 1
 }
-# defenseclaw_install_lock_number FILE prints the decimal number of one owner
-# record file (pid, deadline). It returns 1 when FILE is absent, empty or
+# defenseclaw_process_age PID prints how many seconds ago process PID
+# started (ps etime, [[dd-]hh:]mm:ss); it returns 1 when ps cannot say.
+defenseclaw_process_age() {
+  local t d=0 h=0 m=0 s=0
+  command -v ps >/dev/null 2>&1 || return 1
+  t="$(ps -o etime= -p "${1:-}" 2>/dev/null)" || return 1
+  t="$(printf '%s' "$t" | tr -d ' \t\r\n')"
+  case "$t" in ''|*[!0-9:-]*) return 1 ;; esac
+  case "$t" in *-*) d="${t%%-*}"; t="${t#*-}" ;; esac
+  s="${t##*:}"
+  case "$t" in *:*) t="${t%:*}" ;; *) return 1 ;; esac
+  m="${t##*:}"
+  case "$t" in *:*) h="${t%:*}" ;; esac
+  case "$d$h$m$s" in ''|*[!0-9]*) return 1 ;; esac
+  d="${d#0}"; h="${h#0}"; m="${m#0}"; s="${s#0}"
+  printf '%s' $(( ((${d:-0} * 24 + ${h:-0}) * 60 + ${m:-0}) * 60 + ${s:-0} ))
+}
+# defenseclaw_install_lock_number FILE prints the decimal number of the owner
+# record file (pid). It returns 1 when FILE is absent, empty or
 # not a positive number, and 2 when it cannot be read (not a small regular
 # file).
 defenseclaw_install_lock_number() {

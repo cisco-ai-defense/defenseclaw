@@ -35,8 +35,10 @@ func shellInstallLockFunctions(t *testing.T, name string) string {
 // oss-outage-open round i (stale lock class): the shell hooks closed every
 // outage under any .install.lock, so a killed installer's lock closed a
 // default-tier account's outages for good. Every shell hook now carries the
-// same rule as hookexec installLockStale: a lock whose deadline passed or
-// whose installer is proven gone is no lock.
+// same rule as hookexec installLockStale: only a lock whose installer is
+// proven gone (its pid names no process, or one that started after the pid
+// was written: a reused pid) is no lock; a live installer keeps it however
+// long it runs (round j).
 func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 	want := shellInstallLockFunctions(t, "_hardening.sh")
 	entries, err := os.ReadDir("hooks")
@@ -69,25 +71,26 @@ func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 	live := strconv.Itoa(os.Getpid())
 	now := time.Now()
 	past := strconv.FormatInt(now.Add(-time.Minute).Unix(), 10)
-	future := strconv.FormatInt(now.Add(time.Hour).Unix(), 10)
 	for _, tc := range []struct {
 		name          string
 		pid, deadline string
-		age           time.Duration
+		age, pidAge   time.Duration
 		record        string
 		held          bool
 	}{
 		{name: "installer exited", pid: dead + "\n", held: false},
 		{name: "installer exited, Windows line end", pid: dead + "\r\n", held: false},
-		{name: "installer running", pid: live + "\n", deadline: future, held: true},
-		{name: "installer running, deadline passed", pid: live, deadline: past, held: false},
-		{name: "installer running, made seven hours ago", pid: live, age: 7 * time.Hour, held: false},
+		{name: "installer running", pid: live + "\n", held: true},
+		{name: "installer running, an earlier build's deadline passed", pid: live, deadline: past, held: true},
+		{name: "installer running, made seven hours ago", pid: live, age: 7 * time.Hour, held: true},
+		{name: "pid reused: its process started after the pid was written", pid: live, age: 7 * time.Hour, pidAge: 7 * time.Hour, held: false},
+		{name: "1.0.2/1.0.3 PID-only lock, pid reused", pid: live, age: 30 * 24 * time.Hour, pidAge: 30 * 24 * time.Hour, held: false},
 		{name: "no pid yet", held: true},
 		{name: "no pid for eleven minutes", age: 11 * time.Minute, held: false},
 		{name: "pid not a number", pid: "abc", held: true},
 		{name: "pid out of range, fresh", pid: "99999999999", held: true},
 		{name: "interrupted install kept previous.new", pid: dead, record: "previous.new", held: true},
-		{name: "interrupted install past its deadline", pid: dead, record: "previous.new", deadline: past, held: false},
+		{name: "interrupted install, an earlier build's deadline passed", pid: dead, record: "previous.new", deadline: past, held: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data := t.TempDir()
@@ -100,6 +103,12 @@ func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 					if err := os.WriteFile(filepath.Join(lock, name), []byte(value), 0o600); err != nil {
 						t.Fatal(err)
 					}
+				}
+			}
+			if tc.pidAge > 0 {
+				then := now.Add(-tc.pidAge)
+				if err := os.Chtimes(filepath.Join(lock, "pid"), then, then); err != nil {
+					t.Fatal(err)
 				}
 			}
 			if tc.record != "" {
@@ -120,6 +129,23 @@ func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 			}
 			if got := strings.TrimSpace(string(out)); got != map[bool]string{true: "held", false: "none"}[tc.held] {
 				t.Fatalf("defenseclaw_install_lock_held = %q, want held %v", got, tc.held)
+			}
+		})
+	}
+	for _, etime := range []struct{ text, seconds string }{
+		{"05:23", "323"}, {"1:02:03", "3723"}, {"2-01:02:03", "176523"}, {"  08:09\n", "489"}, {"00:00", "0"},
+		{"1:2:3:4", ""}, {"abc", ""}, {"", ""},
+	} {
+		t.Run("process age of ps etime "+strconv.Quote(etime.text), func(t *testing.T) {
+			fake := t.TempDir()
+			if err := os.WriteFile(filepath.Join(fake, "ps"), []byte("#!/bin/sh\nprintf '%s' \""+etime.text+"\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			script := "PATH=" + fake + ":$PATH\n" + want + "defenseclaw_process_age 1 || echo none\n"
+			out, _ := exec.Command(bash, "-c", script).CombinedOutput()
+			got := strings.TrimSpace(string(out))
+			if wanted := map[bool]string{true: "none", false: etime.seconds}[etime.seconds == ""]; got != wanted {
+				t.Fatalf("defenseclaw_process_age of %q = %q, want %q", etime.text, got, wanted)
 			}
 		})
 	}

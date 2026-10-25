@@ -102,7 +102,7 @@ func hookOutageFailModeFor(connectorName, hookDir string, installWindow bool) st
 // outage through. The installer stops the gateway and starts it again when
 // it is done; that window is never an outage. It is held when the
 // .install.lock of any folder below exists, as any file type, and is not
-// stale (its deadline passed or its installer is proven gone), or one of
+// stale (its installer is proven gone), or one of
 // those folders exists but is not a folder that can be searched, so the lock
 // cannot be shown absent (hookexec.InstallLockHeld):
 //

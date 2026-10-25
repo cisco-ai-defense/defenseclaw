@@ -28,7 +28,11 @@ import (
 func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) {
 	dead := startedAndExitedPid(t)
 	live := strconv.Itoa(os.Getpid())
+	var makeAgedLock func(pid string, age, pidAge time.Duration) func(*testing.T, string)
 	makeLock := func(pid string, age time.Duration) func(*testing.T, string) {
+		return makeAgedLock(pid, age, 0)
+	}
+	makeAgedLock = func(pid string, age, pidAge time.Duration) func(*testing.T, string) {
 		return func(t *testing.T, lock string) {
 			t.Helper()
 			if err := os.Mkdir(lock, 0o700); err != nil {
@@ -36,6 +40,12 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 			}
 			if pid != "" {
 				if err := os.WriteFile(filepath.Join(lock, "pid"), []byte(pid), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if pidAge > 0 {
+				then := time.Now().Add(-pidAge)
+				if err := os.Chtimes(filepath.Join(lock, "pid"), then, then); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -77,7 +87,11 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 		{name: "no pid for eleven minutes", lock: makeLock("", 11*time.Minute), runs: true},
 		{name: "pid not a number", lock: makeLock("abc", 0)},
 		{name: "pid out of range, fresh", lock: makeLock("99999999999", 0)},
-		{name: "running pid older than six hours", lock: makeLock(live, 7*time.Hour), runs: true},
+		// Round j: a live installer keeps its lock however long it runs; a
+		// pid whose process started after it was written is a reused pid
+		// (also the PID-only lock of 1.0.2 and 1.0.3, GAP-1465).
+		{name: "running installer, lock made seven hours ago", lock: makeLock(live, 7*time.Hour)},
+		{name: "pid reused: its process started after the pid was written", lock: makeAgedLock(live, 7*time.Hour, 7*time.Hour), runs: true},
 		{name: "installer exited, interrupted install kept previous.new", lock: withRecord("previous.new", true)},
 		{name: "installer exited, interrupted install kept .repair", lock: withRecord(".repair", true)},
 		{name: "installer exited, interrupted install kept .rollback-hold", lock: withRecord(".rollback-hold", true)},

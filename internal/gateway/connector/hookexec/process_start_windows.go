@@ -120,6 +120,18 @@ func hookWrapperChain() []hookWrapperProcess {
 	return chain
 }
 
+// processStartTimeOf is when the system created process pid; false when it
+// cannot be opened or read.
+func processStartTimeOf(pid int, _ time.Time) (time.Time, bool) {
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return time.Time{}, false
+	}
+	defer windows.CloseHandle(process)
+	created, err := processCreationTime(process)
+	return created, err == nil
+}
+
 func processCreationTime(process windows.Handle) (time.Time, error) {
 	var creation, exit, kernel, user windows.Filetime
 	if err := windows.GetProcessTimes(process, &creation, &exit, &kernel, &user); err != nil {

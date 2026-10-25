@@ -22,7 +22,8 @@ import (
 // hookDataDirsNow are the data directories a gateway started with this
 // process's environment renders its per-user hooks into, and every folder
 // whose hooks load that config as their own and can open an outage there,
-// one per line for install.sh to hold, the first one the hooks' own folder.
+// one per line for install.sh to hold, the first one the hooks' own folder,
+// then the account's own .defenseclaw, which every per-user hook checks.
 // The data directory is the folder whose
 // .install.lock those hooks look for (hookOutageInstallHeld): the data_dir of
 // the config the gateway loads (config.ConfigPath, so DEFENSECLAW_CONFIG, or
@@ -104,17 +105,50 @@ func hookDataDirsNow() ([]string, error) {
 		}
 	}
 	add(dir)
+	// Every per-user hook of this account also looks for an install in the
+	// account's own .defenseclaw (hookOutageInstallHeld), whatever folder
+	// and name it loads its config by. Holding it closes the outage of a
+	// hook whose config.yaml is the configured file under a name no path
+	// from that file leads to (a hard link, or a link in another folder).
+	if home := outageAccountHome(); home != "" {
+		account := filepath.Join(home, config.DefaultDataDirName)
+		if info, statErr := os.Stat(account); statErr == nil && info.IsDir() {
+			add(account)
+		}
+	}
 	return dirs, nil
 }
 
 // hookConfigFolders are the folders whose hooks may load configFile as
-// their config.yaml: its own folder and, for a link, the folder of the file
-// it resolves to.
+// their config.yaml: the folder of every name on its way to the file (the
+// configured name, each link it passes through, the file itself), told
+// apart by file identity, so a folder reached by a link, a bind mount or
+// another spelling counts once.
 func hookConfigFolders(configFile string) []string {
-	folders := []string{filepath.Dir(configFile)}
+	var folders []string
+	add := func(folder string) {
+		for _, seen := range folders {
+			if pathidentity.Same(seen, folder) {
+				return
+			}
+		}
+		folders = append(folders, folder)
+	}
+	name := configFile
+	for hop := 0; hop < 40; hop++ {
+		add(filepath.Dir(name))
+		target, err := os.Readlink(name)
+		if err != nil {
+			break
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(name), target)
+		}
+		name = filepath.Clean(target)
+	}
 	if real, err := filepath.EvalSymlinks(configFile); err == nil {
-		if real, err = filepath.Abs(real); err == nil && filepath.Dir(real) != folders[0] {
-			folders = append(folders, filepath.Dir(real))
+		if real, err = filepath.Abs(real); err == nil {
+			add(filepath.Dir(real))
 		}
 	}
 	return folders

@@ -26,11 +26,14 @@ def _exited_pid() -> int:
     return proc.pid
 
 
-def _lock(folder: Path, pid: str | None, age: float = 0, deadline: str | None = None) -> Path:
+def _lock(folder: Path, pid: str | None, age: float = 0, deadline: str | None = None, pid_age: float = 0) -> Path:
     lock = folder / ".install.lock"
     lock.mkdir(parents=True)
     if pid is not None:
         (lock / "pid").write_text(pid, encoding="ascii")
+        if pid_age:
+            then = time.time() - pid_age
+            os.utime(lock / "pid", (then, then))
     if deadline is not None:
         (lock / "deadline").write_text(deadline, encoding="ascii")
     if age:
@@ -63,7 +66,7 @@ DEAD = _exited_pid()
         (None, 11 * 60, None, "stale"),
         ("abc", 0, None, "held"),
         ("99999999999", 0, None, "held"),
-        (str(os.getppid()), 7 * 3600, None, "stale"),
+        (str(os.getppid()), 7 * 3600, None, "held"),
         (f"{DEAD}\n", 0, "previous.new", "recovery"),
         (f"{DEAD}\n", 0, ".repair", "recovery"),
         (f"{DEAD}\n", 0, ".rollback-hold", "recovery"),
@@ -78,36 +81,34 @@ def test_install_lock_state_follows_the_plugin_rule(account, pid, age, record, w
 
 
 PAST = str(int(time.time()) - 60)
-FUTURE = str(int(time.time()) + 3600)
 
 
-# oss-outage-open round i: the lock records a deadline (install.sh writes
-# pid, started and deadline). Past it the lock is no lock, also for a running
-# pid (reused) and an interrupted install's kept lock; the six-hour bound
-# caps a later recorded deadline; a deadline that cannot be read holds.
+# oss-outage-open round j (one liveness rule): a live installer keeps its
+# lock for as long as it runs, so neither its age nor a deadline an earlier
+# build recorded expires it; a pid whose process started after the pid was
+# written is a reused pid, also in the PID-only lock of 1.0.2 and 1.0.3
+# (GAP-1465); an interrupted install keeps its lock.
 @pytest.mark.parametrize(
-    ("pid", "age", "deadline", "record", "want"),
+    ("pid", "age", "deadline", "pid_age", "record", "want"),
     [
-        (str(os.getppid()), 0, FUTURE, None, "held"),
-        (str(os.getppid()), 0, PAST, None, "stale"),
-        (str(os.getppid()), 7 * 3600, str(int(time.time()) + 100 * 86400), None, "stale"),
-        (f"{DEAD}\n", 0, FUTURE, None, "stale"),
-        (f"{DEAD}\n", 0, PAST, "previous.new", "stale"),
-        (f"{DEAD}\n", 0, FUTURE, "previous.new", "recovery"),
-        (str(os.getppid()), 0, "soon", None, "held"),
+        (str(os.getppid()), 7 * 3600, PAST, 0, None, "held"),
+        (str(os.getppid()), 7 * 3600, None, 7 * 3600, None, "stale"),
+        (str(os.getppid()), 30 * 86400, None, 30 * 86400, None, "stale"),
+        (f"{DEAD}\n", 3600, None, 3600, None, "stale"),
+        (f"{DEAD}\n", 0, PAST, 0, "previous.new", "recovery"),
+        (str(os.getppid()), 0, "soon", 0, None, "held"),
     ],
 )
-def test_install_lock_state_honours_the_recorded_deadline(account, pid, age, deadline, record, want):
-    _lock(account.data, pid, age, deadline)
+def test_install_lock_state_holds_while_its_owner_runs(account, pid, age, deadline, pid_age, record, want):
+    _lock(account.data, pid, age, deadline, pid_age)
     if record:
         (account.data / record).mkdir()
     assert cmd_doctor._install_lock_state(str(account.data))[0] == want
 
 
-def test_a_deadline_that_cannot_be_read_holds_until_the_six_hour_bound(account):
-    lock = _lock(account.data, f"{DEAD}\n")
-    (lock / "deadline").mkdir()
-    assert cmd_doctor._install_lock_state(str(account.data))[0] == "held"
+def test_the_start_of_another_process_is_read():
+    started = cmd_doctor._process_start_time(os.getppid())
+    assert started is not None and started <= time.time() + 1
 
 
 def test_a_lock_that_is_not_a_folder_or_a_pid_that_is_not_a_file_is_held(account):
@@ -181,4 +182,4 @@ def test_the_repair_is_registered_and_documented():
         body = (REPO / "internal/gateway/connector/hooks" / asset).read_text()
         for record in cmd_doctor._INSTALL_RECOVERY_RECORDS:
             assert f'"{record}"' in body, (asset, record)
-        assert "10 * 60 * 1000" in body and "6 * 60 * 60 * 1000" in body
+        assert "10 * 60 * 1000" in body and "DC_INSTALL_LOCK_START_SLACK_MS = 60 * 1000" in body

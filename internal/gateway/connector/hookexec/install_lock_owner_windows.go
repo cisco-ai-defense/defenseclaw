@@ -11,10 +11,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// installLockOwnerGone reports a pid that names no process: Windows refuses
+// installLockOwnerExited reports a pid that names no process: Windows refuses
 // to open it as an unknown process (ERROR_INVALID_PARAMETER), or it opens a
 // process that has exited. Access denied or any other answer keeps the lock.
-func installLockOwnerGone(pid int) bool {
+func installLockOwnerExited(pid int) bool {
 	const stillActive = 259
 	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
