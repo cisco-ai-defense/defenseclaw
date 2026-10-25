@@ -937,12 +937,15 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		// beside the tries after a refused connection.
 		wait := awaitPerUserGateway(ctx, opts, restartDeadline, resp, err, send)
 		resp, err = wait.resp, wait.err
+		// Only a last try this account's gateway refused or dropped is an
+		// outage; a listener whose owner was not proven fails below.
+		outage := perUserOutageError(opts, err)
 		switch {
-		case wait.recoveryErr != nil:
+		case wait.recoveryErr != nil && outage:
 			// Keep the cause: hook-failures.jsonl is the only record of
 			// why a hook could not start the gateway (GAP-0480).
 			return failUnreachable(withPerUserOutage(opts), sp, failMode, coldStartFailureReason(wait.recoveryErr))
-		case wait.outlasted:
+		case wait.outlasted && outage:
 			return failUnreachable(withPerUserOutage(opts), sp, failMode, perUserGatewayRestartingReason)
 		}
 	}
@@ -1098,6 +1101,8 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// This account's gateway refused or dropped the connection, or
 			// gave none in time, and sent no status: an outage.
 			opts = withPerUserOutage(opts)
+		} else if !opts.ManagedEnterprise && errors.Is(err, errPerUserPeerUnverified) {
+			reason = perUserPeerUnverifiedReason(opts)
 		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}
@@ -2236,12 +2241,13 @@ func withPerUserOutage(opts Options) Options {
 // outage: a connection this account's gateway refused, reset or closed
 // before any status (it exited or is restarting), or none within the
 // restart budget. A call the gateway took and did not answer in time
-// (errGatewayTookCallNoAnswer), an invalid request and every other error
-// are not, and neither is any error after an HTTP status: the gateway
-// answered.
+// (errGatewayTookCallNoAnswer), a listener whose owner was not proven
+// (errPerUserPeerUnverified), an invalid request and every other error are
+// not, and neither is any error after an HTTP status: the gateway answered.
 func perUserOutageError(opts Options, err error) bool {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || err == nil ||
-		opts.answeredErrorStatus != 0 || errors.Is(err, errGatewayTookCallNoAnswer) || errors.Is(err, errInvalidHookRequest) {
+		opts.answeredErrorStatus != 0 || errors.Is(err, errGatewayTookCallNoAnswer) || errors.Is(err, errInvalidHookRequest) ||
+		errors.Is(err, errPerUserPeerUnverified) {
 		return false
 	}
 	return gatewayRestartShaped(err)

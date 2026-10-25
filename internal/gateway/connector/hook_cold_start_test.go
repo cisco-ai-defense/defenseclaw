@@ -572,9 +572,10 @@ func TestShellHookRetriesUntilTheGatewayAnswersOrBudgetExpires(t *testing.T) {
 	for _, tc := range []struct {
 		name, rc string
 	}{
+		// The native helper reports a reset or empty reply before any status
+		// as its outage status 7 (hookexec.PerUserPostOutage); any other
+		// helper failure came after its peer check and is final (T12b loop 2).
 		{name: "refused", rc: "7"},
-		{name: "empty reply", rc: "52"},
-		{name: "reset", rc: "56"},
 	} {
 		for _, hook := range []struct {
 			c      Connector
@@ -624,7 +625,7 @@ func TestShellHookRetriesUntilTheGatewayAnswersOrBudgetExpires(t *testing.T) {
 // A restart or outage longer than the budget blocks the call within about
 // 3 seconds and names this account's unavailable gateway.
 func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
-	for _, rc := range []string{"7", "56"} {
+	for _, rc := range []string{"7"} {
 		t.Run("claude-code/"+rc, func(t *testing.T) {
 			run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, nil,
 				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC="+rc, "DC_COLD_DROP_LISTENER=1")

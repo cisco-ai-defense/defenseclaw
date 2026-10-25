@@ -293,7 +293,8 @@ func connectedManagedGatewayPIDForEndpoints(client, server managedIPv4Endpoint) 
 		}
 	}
 	return 0, fmt.Errorf(
-		"no ESTABLISHED reverse tuple for %v:%d -> %v:%d",
+		"%w: no ESTABLISHED reverse tuple for %v:%d -> %v:%d",
+		errConnectedSocketNotFound,
 		client.addr,
 		client.port,
 		server.addr,

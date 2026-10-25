@@ -157,10 +157,19 @@ func TestPerUserPostOutageClassifiesOnlyAnOutage(t *testing.T) {
 		{"took the call, no answer", fmt.Errorf("%w: %w", errGatewayTookCallNoAnswer, context.DeadlineExceeded), false},
 		{"timeout", context.DeadlineExceeded, false},
 		{"listener unverified", errors.New("per-user gateway connected listener is unverified: owner 1001"), false},
+		// A peer check whose own error is restart-shaped stays a refusal.
+		{"listener unverified, owner gone", fmt.Errorf("%w: %w", errPerUserPeerUnverified, syscall.ENOENT), false},
+		{"listener unverified, closed", fmt.Errorf("%w: %w", errPerUserPeerUnverified, io.EOF), false},
+		{"listener unverified, reset", fmt.Errorf("%w: %w", errPerUserPeerUnverified, syscall.ECONNRESET), false},
+		{"listener unverified at the restart deadline", fmt.Errorf("%w: %w", errGatewayNotConnected,
+			fmt.Errorf("%w: %w", errPerUserPeerUnverified, syscall.ECONNREFUSED)), false},
 		{"none", nil, false},
 	} {
 		if got := PerUserPostOutage(tc.err); got != tc.want {
 			t.Errorf("%s: PerUserPostOutage = %v, want %v", tc.name, got, tc.want)
+		}
+		if got := perUserOutageError(Options{}, tc.err); strings.HasPrefix(tc.name, "listener unverified") && got != tc.want {
+			t.Errorf("%s: perUserOutageError = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

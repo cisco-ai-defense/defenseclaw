@@ -585,13 +585,38 @@ async function defenseclawProvenTCPRequest(path, init, token) {
   return binary;
 }
 
+// defenseclawPerUserHookPostBinary picks the small hook-post helper the POSIX
+// installer puts beside the gateway, so a hook event does not start the full
+// gateway CLI; both read the same JSON request and run the same
+// connected-peer check. An install without it (Windows, or an older
+// installer's roll-forward) keeps the verified gateway CLI. A present but
+// untrusted helper is refused, never bypassed.
+function defenseclawPerUserHookPostBinary() {
+  const gateway = defenseclawPerUserNativePostBinary();
+  const helper = join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-hook-post.exe" : "defenseclaw-hook-post");
+  let info;
+  try {
+    info = lstatSync(helper);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return gateway;
+    throw error;
+  }
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error("per-user hook helper path is untrusted");
+  }
+  if (process.platform !== "win32" && (info.uid !== userInfo().uid || (info.mode & 0o022) !== 0)) {
+    throw new Error("per-user hook helper path is writable by another account");
+  }
+  return helper;
+}
+
 {{end}}// defenseclawFetch posts to the gateway over the managed hook socket when one
 // is configured. A per-user post goes through the native helper, which
 // verifies the same connected socket it sends on.
 async function defenseclawFetch(path, init, token) {
   if (!DC_HOOK_SOCKET) {
     if (DC_PER_USER_NATIVE_POST) {
-      const binary = defenseclawPerUserNativePostBinary();
+      const binary = defenseclawPerUserHookPostBinary();
       const output = execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
         input: JSON.stringify({ path, headers: init.headers || {}, body: String(init.body || "") }),
         timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8",

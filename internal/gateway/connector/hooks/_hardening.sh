@@ -1690,39 +1690,135 @@ defenseclaw_own_gateway_stopped() {
   return 0
 }
 
+# defenseclaw_loopback_targets HOST:PORT sets _DC_LOOPBACK_TARGETS to the
+# loopback addresses the native helper dials for this configured gateway, in
+# its order, and _DC_LOOPBACK_PORT to the port. It returns 1 for anything the
+# helper refuses. This is the shell copy of hookexec perUserLoopbackTargets:
+# localhost is 127.0.0.1 then ::1, an IPv4-mapped address is its IPv4
+# address, and any other spelling of 127.0.0.0/8 or ::1 is itself. Brackets
+# are required exactly for IPv6 and the port has no leading zero. Both copies
+# are tested against testdata/per_user_loopback_addrs.json. Bash 3.2.
+defenseclaw_loopback_targets() {
+  local spec="$1" host="" port="" bracketed="" o1="" o2="" o3="" o4=""
+  _DC_LOOPBACK_TARGETS=()
+  _DC_LOOPBACK_PORT=""
+  port="${spec##*:}" host="${spec%:*}"
+  [ "$host" != "$spec" ] || return 1
+  [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$port" -le 65535 ] || return 1
+  case "$host" in
+    \[*\]) host="${host#\[}" host="${host%\]}" bracketed=1 ;;
+  esac
+  case "$host" in ''|*\[*|*\]*) return 1 ;; esac
+  case "$host" in
+    [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt])
+      [ -z "$bracketed" ] || return 1
+      _DC_LOOPBACK_TARGETS=(127.0.0.1 ::1)
+      ;;
+    *:*)
+      [ -n "$bracketed" ] || return 1
+      defenseclaw_ipv6_loopback "$host" || return 1
+      _DC_LOOPBACK_TARGETS=("$_DC_IPV6_LOOPBACK")
+      ;;
+    *)
+      [ -z "$bracketed" ] || return 1
+      [[ "$host" =~ ^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$ ]] || return 1
+      o1="${BASH_REMATCH[1]}" o2="${BASH_REMATCH[2]}" o3="${BASH_REMATCH[3]}" o4="${BASH_REMATCH[4]}"
+      [ "$o1" = 127 ] && [ "$o2" -le 255 ] && [ "$o3" -le 255 ] && [ "$o4" -le 255 ] || return 1
+      _DC_LOOPBACK_TARGETS=("$host")
+      ;;
+  esac
+  _DC_LOOPBACK_PORT="$port"
+}
+
+# defenseclaw_ipv6_loopback ADDR sets _DC_IPV6_LOOPBACK to ::1 for any
+# spelling of the IPv6 loopback, or to the IPv4 address of an IPv4-mapped
+# 127.0.0.0/8 address, and returns 1 for every other or malformed address
+# (the netip.ParseAddr grammar: 1-4 hex digits per group, at most one ::
+# standing for at least one group, an optional final dotted IPv4, no zone).
+defenseclaw_ipv6_loopback() {
+  local in="$1" head="" tail="" part="" rest="" o1="" o2="" o3="" o4="" n=0 i=0 fill=0
+  local -a groups=() tailgroups=()
+  _DC_IPV6_LOOPBACK=""
+  if [[ "$in" =~ ^(.*:)(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$ ]]; then
+    o1="${BASH_REMATCH[2]}" o2="${BASH_REMATCH[3]}" o3="${BASH_REMATCH[4]}" o4="${BASH_REMATCH[5]}"
+    [ "$o1" -le 255 ] && [ "$o2" -le 255 ] && [ "$o3" -le 255 ] && [ "$o4" -le 255 ] || return 1
+    printf -v in '%s%x:%x' "${BASH_REMATCH[1]}" $((o1 * 256 + o2)) $((o3 * 256 + o4))
+  fi
+  case "$in" in *::*::*|*:::*) return 1 ;; esac
+  head="$in" tail=""
+  case "$in" in *::*) head="${in%%::*}" tail="${in#*::}" fill=1 ;; esac
+  for rest in "$head" "$tail"; do
+    i=$((i + 1))
+    [ -n "$rest" ] || continue
+    while :; do
+      part="${rest%%:*}"
+      [[ "$part" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+      if [ "$i" -eq 1 ]; then
+        groups+=($((16#$part)))
+      else
+        tailgroups+=($((16#$part)))
+      fi
+      [ "$rest" != "$part" ] || break
+      rest="${rest#*:}"
+    done
+  done
+  n=$((${#groups[@]} + ${#tailgroups[@]}))
+  if [ "$fill" -eq 1 ]; then
+    [ "$n" -le 7 ] || return 1
+    while [ "$n" -lt 8 ]; do groups+=(0); n=$((n + 1)); done
+  else
+    [ "$n" -eq 8 ] || return 1
+  fi
+  groups+=(${tailgroups[@]+"${tailgroups[@]}"})
+  [ "${groups[0]}" = 0 ] && [ "${groups[1]}" = 0 ] && [ "${groups[2]}" = 0 ] &&
+    [ "${groups[3]}" = 0 ] && [ "${groups[4]}" = 0 ] || return 1
+  if [ "${groups[5]}" = 0 ] && [ "${groups[6]}" = 0 ] && [ "${groups[7]}" = 1 ]; then
+    _DC_IPV6_LOOPBACK=::1
+    return 0
+  fi
+  [ "${groups[5]}" = 65535 ] && [ $((groups[6] >> 8)) -eq 127 ] || return 1
+  _DC_IPV6_LOOPBACK="127.$((groups[6] & 255)).$((groups[7] >> 8)).$((groups[7] & 255))"
+}
+
 # defenseclaw_api_listener_unproven HOST:PORT returns 0 for a foreign or
 # unknown listener, 1 for this account's listener, and 2 for a proven free
-# port. A stopped gateway, a stale PID record,
-# and unreadable socket tables must never send a token or hook payload to an
-# unverified endpoint. Linux reads /proc/net/tcp*; macOS lsof lists this
-# account's listeners. Managed hooks use their separate verified transport.
+# port. Hooks call it only for a call that got no answer
+# (defenseclaw_gateway_post, defenseclaw_gateway_unreachable_reason), to tell
+# a cold start from a foreign listener; before a send, the native helper's
+# proof of the connected peer decides (GAP-1453). It never allows a send.
+# Linux reads this namespace's procfs socket tables;
+# macOS lsof lists this account's listeners. Managed hooks use their separate
+# verified transport. The endpoints checked are the ones the native helper
+# dials, in its order (defenseclaw_loopback_targets): the first one with a
+# listener decides, because the helper stops at the first that accepts.
 defenseclaw_api_listener_unproven() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
   # The second and third arguments (tests only) replace /proc/net and lsof.
-  local port="${1##*:}" host="${1%:*}" net="${2:-/proc/net}" lsof="${3:-/usr/sbin/lsof}"
-  local uid="${EUID:-}" hex="" table="" owner="" own=""
-  local _sl="" addr="" _rem="" st="" _q="" _t="" _r="" u="" _rest=""
-  case "$port" in ''|*[!0-9]*) return 0 ;; esac
+  local net="${2:-/proc/net}" lsof="${3:-/usr/sbin/lsof}" uid="${EUID:-}" target="" status=2
   [ -n "$uid" ] || return 0
+  if ! defenseclaw_loopback_targets "$1"; then
+    # A numeric port no listener can hold (0, above 65535, a leading zero)
+    # on a valid loopback address is free, as it always was; the helper is
+    # never asked to send. Any other refused address is unproven.
+    case "${1##*:}" in ''|*[!0-9]*) return 0 ;; esac
+    defenseclaw_loopback_targets "${1%:*}:1" && return 2
+    return 0
+  fi
+  # ProcSubset=pid can hide /proc/net, while /proc/self/net still exposes
+  # this process's network namespace. The second argument mirrors that
+  # layout in tests.
+  if [ ! -r "${net}/tcp" ] && [ "${net##*/}" = net ]; then
+    net="${net%/net}/self/net"
+  fi
   if [ -r "${net}/tcp" ]; then
-    hex="$(printf '%04X' "$port")"
-    for table in "${net}/tcp" "${net}/tcp6"; do
-      [ -r "$table" ] || continue
-      while read -r _sl addr _rem st _q _t _r u _rest; do
-        [ "$st" = "0A" ] || continue
-        case "$addr" in
-          # 127.0.0.0/8, 0.0.0.0, ::, ::1 and v4-mapped loopback, kernel byte order.
-          ??????7F:"$hex"|00000000:"$hex"|00000000000000000000000000000000:"$hex"|00000000000000000000000001000000:"$hex"|0000000000000000FFFF0000??????7F:"$hex") ;;
-          *) continue ;;
-        esac
-        if [ "$u" = "$uid" ]; then own=1; else owner="$u"; fi
-      done < "$table"
+    for target in "${_DC_LOOPBACK_TARGETS[@]}"; do
+      status=0
+      defenseclaw_procfs_listener_status "$target" "$_DC_LOOPBACK_PORT" "$net" "$uid" || status=$?
+      [ "$status" = 2 ] || return "$status"
     done
-    [ -n "$owner" ] && return 0
-    [ -n "$own" ] && return 1
     # No listener: the caller may cold-start this account's gateway, then
     # retry ownership proof before it sends. Never send on this status.
     return 2
@@ -1730,12 +1826,128 @@ defenseclaw_api_listener_unproven() {
   if [ -x "$lsof" ]; then
     # A socket this account owns on another address is not proof for the
     # configured destination. Require the exact local address in lsof.
-    case "$host" in 127.*) ;; *) return 0 ;; esac
-    "$lsof" -nP -a -u "$uid" -iTCP@"$host":"$port" -sTCP:LISTEN -t >/dev/null 2>&1 && return 1
-    (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null && return 0
+    for target in "${_DC_LOOPBACK_TARGETS[@]}"; do
+      case "$target" in
+        *:*)
+          "$lsof" -nP -a -u "$uid" -iTCP@"[$target]":"$_DC_LOOPBACK_PORT" -sTCP:LISTEN -t >/dev/null 2>&1 && return 1
+          ;;
+        *)
+          "$lsof" -nP -a -u "$uid" -iTCP@"$target":"$_DC_LOOPBACK_PORT" -sTCP:LISTEN -t >/dev/null 2>&1 && return 1
+          ;;
+      esac
+      (exec 3<>"/dev/tcp/${target}/${_DC_LOOPBACK_PORT}") 2>/dev/null && return 0
+    done
     return 2
   fi
   return 0
+}
+
+# defenseclaw_gateway_unreachable_reason prints the reason a hook gives for a
+# gateway request that got no answer. A per-user hook names another
+# account's listener on this account's port, which a start cannot fix; it
+# reads the socket tables only on this failure path (GAP-1453).
+defenseclaw_gateway_unreachable_reason() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) printf '%s' 'gateway unreachable'; return 0 ;;
+  esac
+  if [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] && [ -n "${API_ADDR:-}" ] &&
+     defenseclaw_api_listener_unproven "$API_ADDR"; then
+    printf '%s' "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent to it. Another account may hold the port. Run \`defenseclaw setup gateway --api-port <free-port>\` to choose a free port"
+    return 0
+  fi
+  printf '%s' 'gateway unreachable'
+  return 0
+}
+
+# defenseclaw_read_socket_table FILE puts FILE's lines in _DC_SOCKET_ROWS
+# with one sequential read. The read builtin seeks back after every line it
+# takes from a seekable file, and procfs rebuilds a socket table from the
+# start on each such seek, so a line-by-line loop cost O(rows^2) per hook
+# call; at 10 Hz the TIME_WAIT rows piled up until hooks timed out
+# (GAP-1453). Linux always has Bash 4 mapfile (one lseek at the end); Bash
+# 3.2 (macOS, which uses lsof, and its fixture tests) reads the file through
+# one command substitution instead.
+defenseclaw_read_socket_table() {
+  local data="" IFS=$'\n' noglob=0
+  _DC_SOCKET_ROWS=()
+  if [ "${BASH_VERSINFO[0]:-0}" -ge 4 ]; then
+    mapfile -t _DC_SOCKET_ROWS < "$1" 2>/dev/null
+    return
+  fi
+  data="$(< "$1")" 2>/dev/null || return 1
+  case "$-" in *f*) noglob=1 ;; esac
+  set -f
+  _DC_SOCKET_ROWS=($data)
+  [ "$noglob" = 1 ] || set +f
+  return 0
+}
+
+# defenseclaw_procfs_listener_status ADDR PORT NET UID classifies the
+# listeners that can serve one normalised loopback endpoint (127.0.0.0/8 or
+# ::1) in NET's tcp and tcp6 tables, with the return codes of
+# defenseclaw_api_listener_unproven. A same-port listener on another
+# loopback address cannot serve it; an exact binding supersedes a wildcard.
+defenseclaw_procfs_listener_status() {
+  local target="$1" port="$2" net="$3" uid="$4" hex="" exact="" mapped="" table="" o2="" o3="" o4=""
+  local owner="" own="" v6_owner="" v6_own="" exact_owner="" exact_own=""
+  local row="" addr="" st="" u="" IFS=$' \t\n'
+  local -a fields=()
+  printf -v hex '%04X' "$port"
+  case "$target" in
+    ::1) exact="00000000000000000000000001000000" ;;
+    127.*)
+      o2="${target#*.}" o4="${o2##*.}" o3="${o2%.*}" o2="${o2%%.*}" o3="${o3#*.}"
+      printf -v exact '7F%02X%02X%02X' "$o2" "$o3" "$o4"
+      exact="${exact:6:2}${exact:4:2}${exact:2:2}${exact:0:2}"
+      mapped="0000000000000000FFFF0000${exact}"
+      ;;
+    *) return 0 ;;
+  esac
+  for table in "${net}/tcp" "${net}/tcp6"; do
+    [ -r "$table" ] || continue
+    defenseclaw_read_socket_table "$table" || continue
+    for row in "${_DC_SOCKET_ROWS[@]}"; do
+      # The state column is the only " 0A " (LISTEN) a row can hold; skip
+      # the TIME_WAIT and connected rows before splitting. procfs rows have
+      # no glob characters, so the unquoted split cannot expand a pattern.
+      case "$row" in *" 0A "*) ;; *) continue ;; esac
+      case "$row" in *[\*?[]*) continue ;; esac
+      fields=($row)
+      addr="${fields[1]:-}" st="${fields[3]:-}" u="${fields[7]:-}"
+      [ "$st" = "0A" ] || continue
+      case "$addr" in
+        "$exact":"$hex"|"${mapped:-$exact}":"$hex")
+          if [ "$u" = "$uid" ]; then exact_own=1; else exact_owner="$u"; fi
+          ;;
+        # An exact binding supersedes a wildcard on this address.
+        00000000:"$hex")
+          [ -n "$mapped" ] || continue
+          if [ "$u" = "$uid" ]; then own=1; else owner="$u"; fi
+          ;;
+        # tcp6 does not report IPV6_V6ONLY. Keep these rows separate: an
+        # IPv6-only wildcard can coexist with an IPv4 wildcard.
+        00000000000000000000000000000000:"$hex")
+          if [ "$u" = "$uid" ]; then v6_own=1; else v6_owner="$u"; fi
+          ;;
+        *) continue ;;
+      esac
+    done
+  done
+  [ -n "$exact_owner" ] && return 0
+  [ -n "$exact_own" ] && return 1
+  [ -n "$owner" ] && return 0
+  [ -n "$own" ] && return 1
+  if [ -n "$v6_owner$v6_own" ]; then
+    # An IPv6 wildcard always serves ::1. For IPv4, a no-payload connect
+    # distinguishes a dual-stack wildcard from an IPv6-only one. The native
+    # helper still proves the held peer before sending the bearer or body.
+    if [ -n "$mapped" ]; then
+      (exec 3<>"/dev/tcp/${target}/${port}") 2>/dev/null || return 2
+    fi
+    [ -n "$v6_owner" ] && return 0
+    return 1
+  fi
+  return 2
 }
 
 defenseclaw_response_failure_reason() {
@@ -2645,25 +2857,54 @@ defenseclaw_keep_nul_visible() {
 # .curlrc there could trace the bearer and body to a file or turn an HTTP 401
 # into a transport failure. Bash 3.2 compatible.
 defenseclaw_gateway_post() {
+  local _dc_post_status=0 _dc_listener_status=0 _dc_post_peer_final=0
+  _dc_gateway_post_once "$@" || _dc_post_status=$?
+  case "$_dc_post_status" in
+    1|28) ;;
+    *) return "$_dc_post_status" ;;
+  esac
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return "$_dc_post_status" ;;
+  esac
+  [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return "$_dc_post_status"
+  # The native helper ran and failed on its own terms, not with its outage
+  # status (7): it reached a listener and refused its owner, or the call it
+  # sent got no usable answer. That result is final. A socket table read
+  # later may no longer show a foreign listener that unbound after the
+  # refusal, and must not turn the refusal into a cold start, the one status
+  # a per-user outage rule may let through.
+  [ "$_dc_post_peer_final" = 0 ] || return 1
+  # A per-user call that never reached a peer (refused, or not sent) reads
+  # the socket tables once, so the outcome is the one the old send-time
+  # preflight gave: no listener is a cold start (7), a foreign or unknown one
+  # fails closed (1).
+  defenseclaw_api_listener_unproven "${API_ADDR:-}" || _dc_listener_status=$?
+  case "$_dc_listener_status" in
+    2) return 7 ;;
+    0) return 1 ;;
+  esac
+  return "$_dc_post_status"
+}
+
+# _dc_gateway_post_once makes one defenseclaw_gateway_post attempt.
+_dc_gateway_post_once() {
   local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
-  local _dc_post_auth="" _dc_post_arg _dc_listener_status=0
+  local _dc_post_auth="" _dc_post_arg
   local _dc_native_post=0 _dc_post_bin _dc_post_prefix _dc_post_path _dc_legacy_post=1
   local _dc_header_name _dc_header_value _dc_post_output _dc_post_headers _dc_post_sep _dc_field_index
   local -a _dc_post_args _dc_post_auth_args _dc_post_fields
-  # This probe still distinguishes a free port for cold start. The native
-  # helper proves the actual connection again before it sends any data.
+  # A per-user post reads no socket table before it sends (GAP-1453): the
+  # native helper proves the owner of the very connection it sends on, with
+  # nothing written before that proof. Only an address the helper would
+  # refuse stops here; defenseclaw_gateway_post classifies every unsent call.
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) ;;
     *)
       if [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ]; then
         [ -n "${API_ADDR:-}" ] || return 1
         case "$_dc_post_url" in "http://""${API_ADDR}/"*) ;; *) return 1 ;; esac
-        defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?
-        case "$_dc_listener_status" in
-          1) _dc_native_post=1 ;; # This account owns the listener now.
-          2) return 7 ;; # No listener: let the existing cold-start retry run.
-          *) return 1 ;; # Foreign or unknown owner: fail closed.
-        esac
+        defenseclaw_loopback_targets "$API_ADDR" || return 1
+        _dc_native_post=1
       fi
       ;;
   esac
@@ -2806,16 +3047,23 @@ defenseclaw_gateway_post() {
       fi |
         (
           if [ -n "${_DC_HOOK_NATIVE_VMEM_LIMIT:-}" ]; then
-            ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 1
+            # 126, as for a helper that cannot run: nothing was sent.
+            ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 126
           fi
           exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
         ) 2>/dev/null |
         defenseclaw_keep_nul_visible
       exit "${PIPESTATUS[1]}"
     )" || {
-      _dc_listener_status=0
-      defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?
-      [ "$_dc_listener_status" -eq 2 ] && return 7
+      # 7 is the helper's outage status (hookexec.PerUserPostOutageExit: no
+      # gateway took the connection) and 126 or 127 a helper that did not
+      # run; neither reached a peer. Every other failure came after the
+      # helper's connected-peer check decided, and stays closed
+      # (defenseclaw_gateway_post).
+      case "$?" in
+        7|126|127) ;;
+        *) _dc_post_peer_final=1 ;;
+      esac
       return 1
     }
     printf '%s' "$_dc_post_output"

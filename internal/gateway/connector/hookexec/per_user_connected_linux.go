@@ -7,6 +7,7 @@ package hookexec
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // procSelfNet holds this network namespace's socket tables. /proc/net is
@@ -23,15 +25,46 @@ import (
 const procSelfNet = "/proc/self/net"
 
 func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
-	uid, err := findConnectedTCPUID(procSelfNet, client, server)
-	if err != nil {
-		return err
-	}
-	if uid != os.Geteuid() {
-		return errors.New("connected gateway socket belongs to another account")
-	}
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return awaitPerUserLinuxSocket(ctx, os.Geteuid(), func() (int, error) {
+		return findConnectedTCPUID(procSelfNet, client, server)
+	})
 }
+
+// Connect can finish before the gateway accepts the same held socket. Until
+// accept() gives the accepted socket a file, its procfs row has inode 0 and
+// the kernel may report UID 0 for it (sock_i_uid without a socket file), so
+// that row proves nothing, not even for a root caller. Only an accepted
+// row's real owner is proof; a foreign owner after accept is final.
+func awaitPerUserLinuxSocket(ctx context.Context, self int, inspect func() (int, error)) error {
+	lastErr := errConnectedSocketNotFound
+	for {
+		if ctx.Err() != nil {
+			return lastErr
+		}
+		uid, err := inspect()
+		switch {
+		case err == nil && uid == self:
+			return nil
+		case err == nil:
+			return errors.New("connected gateway socket belongs to another account")
+		case errors.Is(err, errConnectedSocketNotFound), errors.Is(err, errConnectedSocketNotAccepted):
+			lastErr = err
+		default:
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return lastErr
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// errConnectedSocketNotAccepted is an exact accepted reverse tuple the
+// gateway has not accept()ed yet: its owner is provisional.
+var errConnectedSocketNotAccepted = errors.New("connected gateway server socket is not accepted yet")
 
 // findConnectedTCPUID reads the kernel's accepted server socket, identified
 // by both endpoints. A listening-port lookup is insufficient: its owner can
@@ -45,8 +78,21 @@ func findConnectedTCPUID(procNet string, client, server *net.TCPAddr) (int, erro
 	if err != nil || serverTable != clientTable {
 		return -1, errors.New("connected gateway endpoints have different address families")
 	}
-	file, err := os.Open(filepath.Join(procNet, serverTable))
+	uid, err := readConnectedTCPUID(procNet, serverTable, clientKey, serverKey)
+	if err == nil || !errors.Is(err, errConnectedSocketNotFound) || serverTable != "tcp" {
+		return uid, err
+	}
+	// A dual-stack IPv6 listener records its accepted IPv4 socket in tcp6
+	// using IPv4-mapped addresses, even though this client dialed tcp4.
+	return readConnectedTCPUID(procNet, "tcp6", mappedTCP6Endpoint(client), mappedTCP6Endpoint(server))
+}
+
+func readConnectedTCPUID(procNet, table, clientKey, serverKey string) (int, error) {
+	file, err := os.Open(filepath.Join(procNet, table))
 	if err != nil {
+		if table == "tcp6" && os.IsNotExist(err) {
+			return -1, errConnectedSocketNotFound
+		}
 		return -1, fmt.Errorf("inspect connected gateway sockets: %w", err)
 	}
 	defer file.Close()
@@ -54,7 +100,7 @@ func findConnectedTCPUID(procNet string, client, server *net.TCPAddr) (int, erro
 	scanner.Scan() // header
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
-		if len(fields) < 8 || fields[3] != "01" ||
+		if len(fields) < 10 || fields[3] != "01" ||
 			!strings.EqualFold(fields[1], serverKey) || !strings.EqualFold(fields[2], clientKey) {
 			continue
 		}
@@ -62,12 +108,23 @@ func findConnectedTCPUID(procNet string, client, server *net.TCPAddr) (int, erro
 		if err != nil || uid < 0 {
 			return -1, errors.New("connected gateway socket owner is invalid")
 		}
+		if inode, err := strconv.ParseUint(fields[9], 10, 64); err != nil {
+			return -1, errors.New("connected gateway socket inode is invalid")
+		} else if inode == 0 {
+			return -1, errConnectedSocketNotAccepted
+		}
 		return uid, nil
 	}
 	if err := scanner.Err(); err != nil {
 		return -1, fmt.Errorf("inspect connected gateway sockets: %w", err)
 	}
-	return -1, errors.New("connected gateway server socket was not found")
+	return -1, errConnectedSocketNotFound
+}
+
+func mappedTCP6Endpoint(addr *net.TCPAddr) string {
+	ip := addr.IP.To4()
+	return fmt.Sprintf("0000000000000000FFFF0000%02X%02X%02X%02X:%04X",
+		ip[3], ip[2], ip[1], ip[0], addr.Port)
 }
 
 func procTCPEndpoint(addr *net.TCPAddr) (string, string, error) {
