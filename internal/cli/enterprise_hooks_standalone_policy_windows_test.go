@@ -96,6 +96,62 @@ func TestWindowsForeignCleanupCoversEligibleUsersWithoutRows(t *testing.T) {
 	}
 }
 
+// GAP-0587: a user enrolled for Claude Code has a Claude Code manifest row,
+// but that row is the machine policy registration and never reads the user's
+// settings. The migration skipped every such user, so the older per-user
+// DefenseClaw hooks stayed in ~/.claude/settings.json after a full-five
+// install or upgrade and Copilot blocked every tool call in a home project.
+// It must run for every user, whatever rows the user has.
+func TestWindowsClaudeMigrationRunsForUsersWithClaudeCodeRows(t *testing.T) {
+	previousOptions, previousProfiles := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles
+	previousCleanup, previousBlocks := enterpriseForeignHookCleanup, enterpriseForeignHookCollectBlocks
+	previousRemover, previousProbe := windowsManagedClaudeSettingsRemover, windowsManagedClaudeRegistrationProbe
+	t.Cleanup(func() {
+		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles = previousOptions, previousProfiles
+		enterpriseForeignHookCleanup, enterpriseForeignHookCollectBlocks = previousCleanup, previousBlocks
+		windowsManagedClaudeSettingsRemover, windowsManagedClaudeRegistrationProbe = previousRemover, previousProbe
+		enterpriseHookWindowsForeignCleanupState.last, enterpriseHookWindowsForeignCleanupState.fingerprint = time.Time{}, ""
+	})
+	enterpriseHookWindowsForeignCleanupState.last, enterpriseHookWindowsForeignCleanupState.fingerprint = time.Time{}, ""
+	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
+		return enterprisepolicy.Options{}, []string{"copilot", "cursor"}, true, nil
+	}
+	const std1, std2 = "S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"
+	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) {
+		return []enterprisehooks.TargetCredentials{{UserHome: `C:\Users\dcw-std2`, UID: -1, GID: -1, SID: std2}}, nil
+	}
+	enterpriseForeignHookCleanup = func(enterprisehooks.TargetCredentials, string, string) (enterprisepolicy.CleanupResult, error) {
+		return enterprisepolicy.CleanupResult{}, nil
+	}
+	enterpriseForeignHookCollectBlocks = func(enterprisehooks.TargetCredentials) ([]enterprisepolicy.BlockSummary, int, error) {
+		return nil, 0, nil
+	}
+	var probed, migrated []string
+	windowsManagedClaudeRegistrationProbe = func(home, sid string) (bool, []string, error) {
+		probed = append(probed, sid)
+		return true, nil, nil
+	}
+	windowsManagedClaudeSettingsRemover = func(home, sid, _ string) (int, []string, error) {
+		migrated = append(migrated, sid)
+		return 29, nil, nil
+	}
+	// std1 has the full-five rows, Claude Code and Copilot among them; std2
+	// is an eligible profile without rows.
+	var rows []enterpriseHookReconcileRow
+	for _, name := range []string{"claudecode", "codex", "copilot", "hermes", "opencode"} {
+		rows = append(rows, enterpriseHookReconcileRow{OK: true, SID: std1, UserHome: `C:\Users\dcw-std1`, Connector: name})
+	}
+	var log bytes.Buffer
+	enterpriseHookStandalonePlatformFinish(context.Background(), &log, rows, time.Now())
+	if strings.Join(probed, ",") != std1+","+std2 || strings.Join(migrated, ",") != std1+","+std2 {
+		t.Fatalf("older DefenseClaw Claude hooks must be migrated for every user, a Claude Code row or not: probed %v, migrated %v\n%s",
+			probed, migrated, log.String())
+	}
+	if want := `removed 29 older DefenseClaw hook command(s) from C:\Users\dcw-std1\.claude\settings.json`; !strings.Contains(log.String(), want) {
+		t.Fatalf("migration log lacks %q:\n%s", want, log.String())
+	}
+}
+
 // A settings file holding only DefenseClaw hooks the remover keeps (here
 // an edited launcher guard and a defenseclaw-gateway command) is never
 // rewritten, but each is still reported: the real probe finds them, so
