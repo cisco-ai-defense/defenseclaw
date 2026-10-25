@@ -754,6 +754,103 @@ func TestClaudeNativeOTLPCleanupKeepsUnrecordedTokenShapedBearer(t *testing.T) {
 	}
 }
 
+// TestClaudeNativeOTLPCleanupNamesRetiredCredential is GAP-1511 (loop round
+// 2): after an upgrade Setup records the old Claude OTLP token in
+// RetiredOTLPCredentials and revokes its sidecar, and ManagedEnv is
+// hook-only. An older settings snapshot that restores the exporter on its
+// retired loopback port still carries that token, so managed and per-user
+// Verify report it as residue and repair removes it, on the generic or a
+// signal-specific header key, encoded or not, or in the endpoint itself, and
+// never restores it from the env snapshot. Operator keys stay.
+func TestClaudeNativeOTLPCleanupNamesRetiredCredential(t *testing.T) {
+	retired := strings.Repeat("r", 64)
+	const port = "http://127.0.0.1:4318"
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+	}{
+		{name: "generic headers", env: map[string]string{
+			"OTEL_EXPORTER_OTLP_ENDPOINT": port,
+			"OTEL_EXPORTER_OTLP_HEADERS":  "authorization=Bearer " + retired + ",x-defenseclaw-source=claudecode",
+		}},
+		{name: "encoded generic headers", env: map[string]string{
+			"OTEL_EXPORTER_OTLP_ENDPOINT": port,
+			"OTEL_EXPORTER_OTLP_HEADERS":  "Authorization=Bearer%20" + retired,
+		}},
+		{name: "signal headers", env: map[string]string{
+			"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": port + "/v1/logs",
+			"OTEL_EXPORTER_OTLP_LOGS_HEADERS":  "authorization=Bearer " + retired,
+		}},
+		{name: "endpoint path", env: map[string]string{
+			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": port + "/otlp/" + retired + "/v1/metrics",
+		}},
+	} {
+		for _, opts := range []SetupOpts{{ManagedEnterprise: true}, {}} {
+			t.Run(fmt.Sprintf("%s/managed=%t", tc.name, opts.ManagedEnterprise), func(t *testing.T) {
+				dir := t.TempDir()
+				opts.DataDir = dir
+				settingsPath := filepath.Join(dir, "settings.json")
+				useClaudeSettings(t, settingsPath)
+				env := map[string]string{
+					"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+					"OTEL_LOGS_EXPORTER":           "otlp",
+					"OTEL_METRICS_EXPORTER":        "otlp",
+					"OTEL_RESOURCE_ATTRIBUTES":     "team=ops",
+				}
+				for key, value := range tc.env {
+					env[key] = value
+				}
+				data, err := json.Marshal(map[string]interface{}{"env": env})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				original, err := json.Marshal(tc.env)
+				if err != nil {
+					t.Fatal(err)
+				}
+				backup, err := json.Marshal(claudeCodeBackup{
+					HadEnvKey:              true,
+					OriginalEnv:            original,
+					ManagedEnv:             map[string]string{"DEFENSECLAW_FAIL_MODE": "closed"},
+					RetiredOTLPCredentials: []string{retired},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "claudecode_backup.json"), backup, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				residue, err := UserNativeOTLPResidue("claudecode", opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(residue) == 0 {
+					t.Fatal("restored exporter with a retired credential not reported as residue")
+				}
+				if _, err := RemoveUserNativeOTLP("claudecode", opts); err != nil {
+					t.Fatal(err)
+				}
+				out, err := os.ReadFile(settingsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(out), retired) {
+					t.Fatalf("retired credential survived repair:\n%s", out)
+				}
+				if !strings.Contains(string(out), "team=ops") {
+					t.Fatalf("operator value lost:\n%s", out)
+				}
+				if left, err := UserNativeOTLPResidue("claudecode", opts); err != nil || len(left) != 0 {
+					t.Fatalf("residue after repair: %v, %v", left, err)
+				}
+			})
+		}
+	}
+}
+
 // growUserNativeOTLPFile pads path with valid filler past the check's read
 // limit, keeping the DefenseClaw exporter in it, so only the size can make the
 // check refuse it.

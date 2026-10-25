@@ -1983,7 +1983,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 			// pass below can drop an unchanged product header before the
 			// route it authenticated is inspected.
 			productRoutes := map[string]bool{}
-			known := append(claudeCodeKnownProductTokens(previousManaged, opts), baseBackup.RetiredOTLPCredentials...)
+			known := claudeCodeKnownProductTokens(baseBackup, opts)
 			if !opts.sandboxNativeOTLP {
 				backup.RetiredOTLPCredentials = claudeCodeRetiredOTLPCredentials(
 					baseBackup.RetiredOTLPCredentials, known, existing, backup.OriginalEnv)
