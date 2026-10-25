@@ -8,10 +8,8 @@ package hookexec
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
-	"strconv"
 	"time"
 )
 
@@ -20,32 +18,32 @@ import (
 var perUserConnectedPeer = verifyPerUserConnectedTuple
 
 func newPerUserHookHTTPClient(timeout time.Duration, apiAddr string) (*http.Client, error) {
-	host, rawPort, err := net.SplitHostPort(apiAddr)
+	targets, err := perUserLoopbackTargets(apiAddr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid per-user gateway address: %w", err)
-	}
-	if host != "localhost" {
-		ip := net.ParseIP(host)
-		if ip == nil || !ip.IsLoopback() {
-			return nil, errors.New("per-user gateway target must be loopback")
-		}
-	}
-	port, err := strconv.Atoi(rawPort)
-	if err != nil || port < 1 || port > 65535 {
-		return nil, errors.New("per-user gateway port is invalid")
+		return nil, err
 	}
 	if timeout < 0 {
 		timeout = defaultHookRequestTimeout
 	}
 	dialer := &net.Dialer{Timeout: 2 * time.Second}
 	return verifiedPerUserHTTPClient(timeout, apiAddr,
-		func(ctx context.Context, _, address string) (net.Conn, error) {
-			return dialer.DialContext(ctx, "tcp", address)
+		func(ctx context.Context, _, _ string) (net.Conn, error) {
+			// Dial the normalised endpoints in order, as the shell preflight
+			// checks them: only a refused endpoint moves on to the next.
+			var lastErr error
+			for _, target := range targets {
+				conn, err := dialer.DialContext(ctx, "tcp", target.String())
+				if err == nil || !connectionRefused(err) {
+					return conn, err
+				}
+				lastErr = err
+			}
+			return nil, lastErr
 		},
 		func(conn net.Conn) error {
 			client, clientOK := conn.LocalAddr().(*net.TCPAddr)
 			peer, peerOK := conn.RemoteAddr().(*net.TCPAddr)
-			if !clientOK || !peerOK || !peer.IP.IsLoopback() || peer.Port != port {
+			if !clientOK || !peerOK || !perUserTargetMatches(targets, peer) {
 				return errors.New("connected gateway endpoint is not the configured loopback port")
 			}
 			return perUserConnectedPeer(client, peer)

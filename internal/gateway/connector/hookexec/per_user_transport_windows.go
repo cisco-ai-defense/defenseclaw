@@ -11,34 +11,41 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"strconv"
+	"net/netip"
 	"time"
 
 	"golang.org/x/sys/windows"
 )
 
 func newPerUserHookHTTPClient(timeout time.Duration, apiAddr string) (*http.Client, error) {
-	host, rawPort, err := net.SplitHostPort(apiAddr)
-	if err != nil || (host != "127.0.0.1" && host != "localhost") {
-		return nil, errors.New("per-user gateway target must be an IPv4 loopback endpoint")
+	targets, err := perUserLoopbackTargets(apiAddr)
+	if err != nil {
+		return nil, err
 	}
-	port, err := strconv.Atoi(rawPort)
-	if err != nil || port < 1 || port > 65535 {
-		return nil, errors.New("per-user gateway port is invalid")
+	// The Windows tuple check reads the IPv4 table: dial the first
+	// normalised IPv4 endpoint (localhost is 127.0.0.1).
+	var endpoint netip.AddrPort
+	for _, target := range targets {
+		if target.Addr().Is4() {
+			endpoint = target
+			break
+		}
+	}
+	if !endpoint.IsValid() {
+		return nil, errors.New("per-user gateway target must be an IPv4 loopback endpoint")
 	}
 	if timeout < 0 {
 		timeout = defaultHookRequestTimeout
 	}
 	dialer := &net.Dialer{Timeout: 2 * time.Second}
-	endpoint := net.JoinHostPort("127.0.0.1", rawPort)
 	return verifiedPerUserHTTPClient(timeout, apiAddr,
 		func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return dialer.DialContext(ctx, "tcp4", endpoint)
+			return dialer.DialContext(ctx, "tcp4", endpoint.String())
 		},
 		func(conn net.Conn) error {
 			client, clientOK := conn.LocalAddr().(*net.TCPAddr)
 			server, serverOK := conn.RemoteAddr().(*net.TCPAddr)
-			if !clientOK || !serverOK || !server.IP.IsLoopback() || server.Port != port {
+			if !clientOK || !serverOK || !perUserTargetMatches([]netip.AddrPort{endpoint}, server) {
 				return errors.New("connected gateway endpoint is not the configured loopback port")
 			}
 			return verifyPerUserConnectedTuple(client, server)
