@@ -834,8 +834,14 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 	wholeActionProven := projected.Authoritative() && projected.EnforcementEligible()
 	for _, candidate := range projected.Paths {
 		command, ok := integrityCommandByID(projected, candidate.CommandID)
-		if !ok || !(wholeActionProven && stateCommandMutatesPath(command, candidate) ||
-			provenPartialStateRedirect(facts, command, candidate)) {
+		if !ok {
+			continue
+		}
+		provenMutation := wholeActionProven && stateCommandMutatesPath(command, candidate)
+		if !provenMutation {
+			provenMutation = provenPartialStateRedirect(facts, command, candidate)
+		}
+		if !provenMutation {
 			continue
 		}
 		physical := ""
