@@ -1863,7 +1863,7 @@ func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.Dae
 			out.Allowed = false
 			continue
 		}
-		allowed := managedExplainAllowsHarness(me, connector)
+		allowed := managedExplainAllowsHarness(me, connector) && managedPostureFatal(me) == nil
 		if !allowed {
 			out.Allowed = false
 			out.DeniedHarnesses = append(out.DeniedHarnesses, connector)
@@ -1970,6 +1970,25 @@ func managedExplainAllowsHarness(me sandboxapi.ManagedExplain, name string) bool
 	return slices.ContainsFunc(me.AllowedHarnesses, func(h string) bool {
 		return config.NormalizeConnectorName(h) == name
 	})
+}
+
+// managedPostureFatal is the first fatal violation of the run a policy
+// view resolves (ManagedExplain.Posture), nil without one: a run the
+// organization's pack forbids (its harness.allowed leaves the agent out,
+// for one) is refused at its create even when sandbox.allowed and the
+// agent allowlist let it through, so ready and status must not call it
+// allowed either (GAP-0812).
+func managedPostureFatal(me sandboxapi.ManagedExplain) *sandboxapi.Violation {
+	if me.Posture == nil {
+		return nil
+	}
+	for i := range me.Posture.Violations {
+		if me.Posture.Violations[i].Fatal {
+			v := me.Posture.Violations[i]
+			return &v
+		}
+	}
+	return nil
 }
 
 // managedExplainFloor is the organization floor a managed explain names,
@@ -2317,23 +2336,66 @@ func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []str
 // the gateway's admission limit refused (429) is asked again within that
 // bound; when the bound ends first, the 429 is the view's error, which fails
 // the ready closed unless another agent is allowed.
+//
+// The view decides only once it is settled. A provisional one (the
+// caller's directory lookup had not finished, so the default profile
+// answered) can still change, also to a group the organization denies, and
+// the create's resolve waits for that lookup (sandboxrelay.
+// ResolveIdentityWait): the ready asks again until the view is settled or
+// that wait is over, and then goes by the view as the create would
+// (GAP-0820). A view whose run the organization's pack forbids
+// (managedPostureFatal) refuses the ready with that violation (GAP-0812).
 func (d *SandboxDaemon) readyPolicyView(ctx context.Context, name string) (allowed, sandboxes bool, err error) {
+	settled := time.Now().Add(sandboxrelay.ResolveIdentityWait)
+	for {
+		view, err := d.readyPolicyViewOnce(ctx, name)
+		if err != nil {
+			return false, false, err
+		}
+		if !view.Provisional || !time.Now().Before(settled) {
+			allowed := managedExplainAllowsHarness(view, name)
+			if v := managedPostureFatal(view); v != nil && allowed {
+				return false, view.Allowed, &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
+					Message: firstNonEmpty(v.Message, "Your organization doesn't allow this agent in a sandbox."), Detail: v.Detail, Violation: v}
+			}
+			return allowed, view.Allowed, nil
+		}
+		timer := time.NewTimer(readyProvisionalPoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false, false, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// readyProvisionalPoll paces readyPolicyView's asks while the view is
+// provisional; the managed gateway's explain itself waits a moment for the
+// lookup it runs.
+var readyProvisionalPoll = 500 * time.Millisecond
+
+// readyPolicyViewOnce is one policy view of the agent name for a ready,
+// within one view's bound (managedViewTimeout). A view the gateway's
+// admission limit refused (429) is asked again within that bound; when the
+// bound ends first, the 429 is the view's error.
+func (d *SandboxDaemon) readyPolicyViewOnce(ctx context.Context, name string) (sandboxapi.ManagedExplain, error) {
 	viewCtx, cancel := context.WithTimeout(ctx, managedViewTimeout)
 	defer cancel()
 	wait := readyViewRetryFirst
 	for {
 		view, _, viewErr := d.managedExplain(viewCtx, sandboxapi.ExplainRequest{Harness: name}, nil)
 		if viewErr == nil {
-			return managedExplainAllowsHarness(view, name), view.Allowed, nil
+			return view, nil
 		}
 		if sandboxapi.AsError(viewErr).Status != http.StatusTooManyRequests {
-			return false, false, viewErr
+			return sandboxapi.ManagedExplain{}, viewErr
 		}
 		timer := time.NewTimer(wait)
 		select {
 		case <-viewCtx.Done():
 			timer.Stop()
-			return false, false, viewErr
+			return sandboxapi.ManagedExplain{}, viewErr
 		case <-timer.C:
 		}
 		wait = min(2*wait, readyViewRetryMax)

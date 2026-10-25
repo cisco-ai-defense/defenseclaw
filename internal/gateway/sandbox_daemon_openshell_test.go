@@ -754,6 +754,75 @@ func TestSandboxDaemonReadyRespectsAllowedHarnessesBeforeInstall(t *testing.T) {
 	}
 }
 
+// GAP-0812: sandbox.allowed and the agent allowlist let codex through, but
+// the organization's pack refuses its run (a fatal posture violation): the
+// ready installs nothing and says why, and status does not call codex
+// allowed.
+func TestSandboxDaemonReadyRefusesAPackForbiddenRunBeforeInstall(t *testing.T) {
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.Settings.Operational.Harnesses = []string{"codex"}
+	})
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{Allowed: true, Posture: &sandboxapi.ManagedPosture{Pack: "team", Violations: []sandboxapi.Violation{
+			{Key: "harness", Fatal: true, Admin: true, Constraint: "harness.allowed", Message: "codex is not an allowed harness of pack team"}}}}, nil
+	}
+	f.run(t)
+	client := sandboxapi.NewUnixClient(f.socket)
+	_, err := client.Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "codex"})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) || !strings.Contains(err.Error(), "codex is not an allowed harness of pack team") ||
+		f.os.prepared.Load() != 0 {
+		t.Fatalf("pack-forbidden ready = %v (prepared %d)", err, f.os.prepared.Load())
+	}
+	st, err := client.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Managed == nil || !slices.Contains(st.Managed.DeniedHarnesses, "codex") {
+		t.Fatalf("status after a pack-forbidden view: %+v", st.Managed)
+	}
+}
+
+// GAP-0820: with a cold directory cache the first views answer the
+// provisional default profile, which allows sandboxes; the settled view
+// denies the caller's group. The ready waits for the settled view, as the
+// create's resolve does, and installs nothing.
+func TestSandboxDaemonReadyWaitsForASettledProfileBeforeInstall(t *testing.T) {
+	prev := readyProvisionalPoll
+	readyProvisionalPoll = 10 * time.Millisecond
+	t.Cleanup(func() { readyProvisionalPoll = prev })
+	for _, tc := range []struct {
+		name         string
+		settled      bool
+		wantDenied   bool
+		wantPrepared int64
+	}{
+		{"denied once settled", false, true, 0},
+		{"allowed once settled", true, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+				o.Settings.Operational.Harnesses = []string{"codex"}
+			})
+			var mu sync.Mutex
+			asks := 0
+			f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				asks++
+				if asks <= 2 {
+					return sandboxapi.ManagedExplain{Allowed: true, Provisional: true, Match: "default_lookup_failed"}, nil
+				}
+				return sandboxapi.ManagedExplain{Allowed: tc.settled, Match: "group"}, nil
+			}
+			f.run(t)
+			_, err := sandboxapi.NewUnixClient(f.socket).Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "codex"})
+			if sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) != tc.wantDenied || f.os.prepared.Load() != tc.wantPrepared {
+				t.Fatalf("ready after a provisional view = %v (prepared %d, %d asks)", err, f.os.prepared.Load(), asks)
+			}
+		})
+	}
+}
+
 // A CLI of DefenseClaw 1.0.3 or older readies with an empty object (or no
 // body) and does not say which agent it will run. The daemon asks about its
 // own agent first and readies when the policy allows any agent a create may
