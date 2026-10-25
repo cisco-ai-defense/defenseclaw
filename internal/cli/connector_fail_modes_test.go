@@ -160,17 +160,16 @@ func TestRefreshFailModesClosesAnExternalConfigsOpen(t *testing.T) {
 // A loaded config: an earlier render recorded Copilot's unset mode as open
 // (lowered because its vendor hook surface cannot fail closed) without a
 // source. The native hook does not trust that open; the refresh writes the
-// outage mode of the policy tier with its config source (oss-outage-open):
-// open for the default tier, also when a saved per-user value says something
-// else, closed for strict. Every other native hook failure stays closed.
-func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
+// outage mode selected by an explicit saved value, or by the policy tier
+// when no value was saved. Every other native hook failure stays closed.
+func TestRefreshFailModesWritesSavedOrPolicyTierOutageMode(t *testing.T) {
 	for _, test := range []struct {
 		name, config, want string
 	}{
 		{name: "default tier", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n", want: "open"},
-		{name: "default tier, saved closed", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: action\n  connectors:\n    copilot:\n      hook_fail_mode: closed\n", want: "open"},
+		{name: "default tier, saved closed", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: action\n  connectors:\n    copilot:\n      hook_fail_mode: closed\n", want: "closed"},
 		{name: "strict tier", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  rule_pack: strict\n", want: "closed"},
-		{name: "strict tier, saved open", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  rule_pack: strict\n  connectors:\n    copilot:\n      hook_fail_mode: open\n", want: "closed"},
+		{name: "strict tier, saved open", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  rule_pack: strict\n  connectors:\n    copilot:\n      hook_fail_mode: open\n", want: "open"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -197,17 +196,17 @@ func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
 }
 
 // Cursor: a 1.0.x refresh recorded its observe mode open whatever the
-// config said. The refresh now writes the policy tier's outage mode in
-// observe and action mode alike; a 0.8.x document the release cannot load
+// config said. The refresh now writes the saved mode when present, otherwise
+// the tier's outage mode; a 0.8.x document the release cannot load
 // yet is closed until the migrated config renders the hooks.
-func TestRefreshFailModesGivesCursorThePolicyTiersOutageMode(t *testing.T) {
+func TestRefreshFailModesGivesCursorSavedOrPolicyTierOutageMode(t *testing.T) {
 	const v9 = "config_version: 9\nobservability: {}\nguardrail:\n"
 	const v7 = "config_version: 7\nguardrail:\n"
 	for _, test := range []struct {
 		name, config, read, want string
 	}{
 		{"1.0.x observe, default tier", v9 + "  mode: observe\n", "loaded", "open"},
-		{"1.0.x action, default tier, cursor closed", v9 + "  mode: action\n  connectors:\n    cursor:\n      hook_fail_mode: closed\n", "loaded", "open"},
+		{"1.0.x action, default tier, cursor closed", v9 + "  mode: action\n  connectors:\n    cursor:\n      hook_fail_mode: closed\n", "loaded", "closed"},
 		{"1.0.x action, strict tier", v9 + "  mode: action\n  rule_pack: strict\n", "loaded", "closed"},
 		{"0.8.x observe, unset", v7 + "  mode: observe\n", "document", "closed"},
 		{"0.8.x observe, cursor open", v7 + "  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "document", "closed"},
