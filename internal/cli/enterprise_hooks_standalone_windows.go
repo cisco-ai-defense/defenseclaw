@@ -37,7 +37,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(context.Context) (enterpriseHo
 	return enterpriseHookReconcileRun{Manifest: enterpriseHookManifest}, errEnterpriseHooksStandaloneUnixOnly
 }
 
-func runEnterpriseHookVerifyAttemptStandaloneUnix(context.Context) (enterpriseHookVerifyRun, error) {
+func runEnterpriseHookVerifyAttemptStandaloneUnix(context.Context, bool) (enterpriseHookVerifyRun, error) {
 	return enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}, errEnterpriseHooksStandaloneUnixOnly
 }
 

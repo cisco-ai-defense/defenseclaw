@@ -419,9 +419,10 @@ func TestCheckpointWALIfLargeTakesTheWriterOnlyInAnIdleGap(t *testing.T) {
 
 // floodTheStore commits an audit row every millisecond until the returned stop
 // runs, so the store never has an idle gap.
-func floodTheStore(t *testing.T, store *Store) (stop func()) {
+func floodTheStore(t *testing.T, store *Store) (stop func(), longestWrite *atomic.Int64) {
 	t.Helper()
 	done := make(chan struct{})
+	longestWrite = new(atomic.Int64)
 	var flood sync.WaitGroup
 	flood.Add(1)
 	go func() {
@@ -432,42 +433,59 @@ func floodTheStore(t *testing.T, store *Store) (stop func()) {
 				return
 			default:
 			}
+			started := time.Now()
 			if err := store.LogEvent(Event{Action: "hook_decision", Target: "wal-guard", Severity: "INFO", SessionID: "s"}); err != nil {
 				t.Errorf("flood LogEvent: %v", err)
 				return
+			}
+			for elapsed := time.Since(started).Nanoseconds(); ; {
+				old := longestWrite.Load()
+				if elapsed <= old || longestWrite.CompareAndSwap(old, elapsed) {
+					break
+				}
 			}
 			time.Sleep(time.Millisecond)
 		}
 	}()
 	var once sync.Once
-	return func() { once.Do(func() { close(done); flood.Wait() }) }
+	return func() { once.Do(func() { close(done); flood.Wait() }) }, longestWrite
 }
 
-// Review of G-flood-wal (P1), rel-1-0-3 GAP-0320, GAP-0136: on a slow Windows
-// disk the copy under the writer needs more than walCatchUpCap and a flood
-// leaves no idle gap, so no catch-up ever completed and the WAL grew until the
-// disk could fill. A log over the limit is bounded: the pass takes the writer
-// under the flood and holds it past walCatchUpCap until its copy reaches the
-// end, and SQLite restarts the log. The hooks wait for that copy, and no
-// record is lost.
+// GAP-1303: a persistent final copy three times slower than the ordinary hold
+// must restart the WAL under continuous hook writes before the hard limit.
 func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 	logWALGuardEvents(t, store, 200)
+	// Scale the measured frames to the production band between the emergency
+	// arm and the 256 MiB alarm without allocating a 176 MiB fixture.
+	frames := (walFileSize(t, store) - 32) / (4096 + 24)
+	if frames <= 0 {
+		t.Fatal("no WAL frames to scale")
+	}
+	originalFrameBytes := walFrameBytes
+	walFrameBytes = (WALEmergencyArmBytes + 8<<20) / frames
+	t.Cleanup(func() { walFrameBytes = originalFrameBytes })
 	writes := writeDuringEveryCopy(t, store)
 	slowCopy := 3 * walCatchUpCap
 	original := walWriterPhaseHook
 	walWriterPhaseHook = func(context.Context) { time.Sleep(slowCopy) }
 	t.Cleanup(func() { walWriterPhaseHook = original })
-	stop := floodTheStore(t, store)
+	stop, longestWrite := floodTheStore(t, store)
 	defer stop()
 	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
 	stop()
+	if pass.LogBytes < WALEmergencyArmBytes || pass.LogBytes >= WALHardLimitBytes {
+		t.Fatalf("measured log = %d bytes; want emergency hold armed before the %d-byte ceiling at %d bytes", pass.LogBytes, WALHardLimitBytes, WALEmergencyArmBytes)
+	}
 	if err != nil || !pass.Bounded || !pass.Restarted || pass.WriterDeferred {
 		t.Fatalf("log over the limit under a flood: %+v, %v; want a bounded catch-up that restarts the log", pass, err)
 	}
-	if pass.WriterHeld < slowCopy || pass.WriterHeld > walBoundedCatchUpCap {
-		t.Fatalf("bounded catch-up held the writer for %v; want the %v copy, at most the %v cap", pass.WriterHeld, slowCopy, walBoundedCatchUpCap)
+	if pass.WriterHeld < slowCopy || pass.WriterHeld > time.Second {
+		t.Fatalf("emergency catch-up held the writer for %v; want the %v copy inside a fixed 1s cap", pass.WriterHeld, slowCopy)
+	}
+	if got := time.Duration(longestWrite.Load()); got >= 500*time.Millisecond {
+		t.Fatalf("hook audit write waited %v during the continuous flood; want under 500ms", got)
 	}
 	if store.WALOverLimit() {
 		t.Fatal("a bounded catch-up that restarted the log left the store marked over the WAL limit")
@@ -488,7 +506,7 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	}
 }
 
-// The bounded catch-up still gives the writer back at walBoundedCatchUpCap: a
+// The bounded catch-up still gives the writer back at walCatchUpCap: a
 // copy that takes longer goes on without the writer and the next pass tries
 // again.
 func TestCheckpointWALIfLargeBoundedCatchUpGivesTheWriterBackAtItsCap(t *testing.T) {
@@ -496,21 +514,88 @@ func TestCheckpointWALIfLargeBoundedCatchUpGivesTheWriterBackAtItsCap(t *testing
 	defer cleanup()
 	logWALGuardEvents(t, store, 200)
 	writeDuringEveryCopy(t, store)
-	originalCap := walBoundedCatchUpCap
-	walBoundedCatchUpCap = 2 * walCatchUpCap
-	t.Cleanup(func() { walBoundedCatchUpCap = originalCap })
+	originalCap := walCatchUpCap
+	walCatchUpCap = 40 * time.Millisecond
+	t.Cleanup(func() { walCatchUpCap = originalCap })
 	original := walWriterPhaseHook
-	walWriterPhaseHook = func(context.Context) { time.Sleep(5 * walBoundedCatchUpCap) }
+	walWriterPhaseHook = func(context.Context) { time.Sleep(5 * walCatchUpCap) }
 	t.Cleanup(func() { walWriterPhaseHook = original })
 	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
 	if err != nil || !pass.Bounded || pass.Restarted || !pass.WriterDeferred {
 		t.Fatalf("capped bounded catch-up: %+v, %v; want deferred, not restarted", pass, err)
 	}
-	if pass.WriterHeld < walBoundedCatchUpCap || pass.WriterHeld > walBoundedCatchUpCap+100*time.Millisecond {
-		t.Fatalf("capped bounded catch-up held the writer for %v; want about the %v cap", pass.WriterHeld, walBoundedCatchUpCap)
+	if pass.WriterHeld < walCatchUpCap || pass.WriterHeld > testWALWriterBudget {
+		t.Fatalf("capped bounded catch-up held the writer for %v; want about the %v cap inside the budget", pass.WriterHeld, walCatchUpCap)
 	}
 	if !store.WALOverLimit() {
 		t.Fatal("a log the bounded catch-up could not bring to its end is not marked over the WAL limit")
+	}
+}
+
+// The gateway starts catch-up at 176 MiB. A measured log in the real band
+// between that trigger and the emergency arm must use the 100 ms hold.
+func TestCheckpointWALIfLargeAtProductionTriggerUsesOrdinaryHold(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	const productionTrigger = int64(176 << 20)
+	if _, err := store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	originalFrameBytes := walFrameBytes
+	t.Cleanup(func() { walFrameBytes = originalFrameBytes })
+	originalCopy := walCopyPhaseHook
+	walCopyPhaseHook = func(context.Context) {
+		if err := store.LogEvent(Event{Action: "hook_decision", Target: "wal-guard"}); err != nil {
+			t.Errorf("write during the copy: %v", err)
+			return
+		}
+		frames := (walFileSize(t, store) - 32) / (4096 + 24)
+		if frames <= 0 {
+			t.Error("no WAL frames to scale")
+			return
+		}
+		walFrameBytes = (productionTrigger + 8<<20) / frames
+	}
+	t.Cleanup(func() { walCopyPhaseHook = originalCopy })
+	entered := make(chan struct{}, 1)
+	originalWriter := walWriterPhaseHook
+	walWriterPhaseHook = func(ctx context.Context) {
+		entered <- struct{}{}
+		<-ctx.Done()
+	}
+	t.Cleanup(func() { walWriterPhaseHook = originalWriter })
+	finished := make(chan struct {
+		pass WALCheckpoint
+		err  error
+	}, 1)
+	go func() {
+		pass, err := store.CheckpointWALIfLarge(context.Background(), productionTrigger, testWALWriterBudget)
+		finished <- struct {
+			pass WALCheckpoint
+			err  error
+		}{pass, err}
+	}()
+	select {
+	case <-entered:
+	case got := <-finished:
+		t.Fatalf("catch-up ended before its writer phase: %+v, %v", got.pass, got.err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("bounded catch-up did not reach its writer phase")
+	}
+	started := time.Now()
+	if err := store.LogEvent(Event{Action: "hook_decision", Target: "during-over-limit-catch-up"}); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(started)
+	got := <-finished
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("ordinary catch-up delayed a hook audit write for %v: %+v", elapsed, got.pass)
+	}
+	if got.err != nil || got.pass.LogBytes <= productionTrigger || got.pass.LogBytes >= WALEmergencyArmBytes || !got.pass.Bounded || !got.pass.WriterDeferred || got.pass.Restarted {
+		t.Fatalf("catch-up: %+v, %v; want a deferred hold between trigger and emergency arm", got.pass, got.err)
+	}
+	if got.pass.HoldCap != walCatchUpCap || got.pass.WriterHeld > testWALWriterBudget || !store.WALOverLimit() {
+		t.Fatalf("ordinary catch-up: %+v; want a %v cap inside the writer budget and WAL pressure", got.pass, walCatchUpCap)
 	}
 }
 
@@ -522,50 +607,33 @@ func overrideWALDuration(t *testing.T, variable *time.Duration, value time.Durat
 	t.Cleanup(func() { *variable = original })
 }
 
-// Review of G-flood-wal round 2 (P1): a bounded catch-up whose copy outran
-// its cap gave the writer back, and every later pass had the same cap, so on
-// a disk that slow the log never restarted and grew pass after pass until the
-// volume could fill. Each miss now doubles the next cap until a catch-up
-// restarts the log, and the restart resets it.
-func TestCheckpointWALIfLargeBoundedCatchUpHoldsLongerAfterEachMiss(t *testing.T) {
+// Repeated misses keep the writer hold short. Once the slow copy clears,
+// passive copying plus the short catch-up can restart the log.
+func TestCheckpointWALIfLargeBoundedCatchUpKeepsTheHoldShortAfterEachMiss(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 	logWALGuardEvents(t, store, 200)
 	writeDuringEveryCopy(t, store)
-	overrideWALDuration(t, &walBoundedCatchUpCap, 40*time.Millisecond)
-	overrideWALDuration(t, &walBoundedCatchUpMax, 10*time.Second)
-	slowCopy := 250 * time.Millisecond
+	overrideWALDuration(t, &walCatchUpCap, 40*time.Millisecond)
 	original := walWriterPhaseHook
-	walWriterPhaseHook = func(context.Context) { time.Sleep(slowCopy) }
+	walWriterPhaseHook = func(ctx context.Context) { <-ctx.Done() }
 	t.Cleanup(func() { walWriterPhaseHook = original })
-	var caps []time.Duration
-	restarted := false
-	for range 10 {
+	for miss := range 3 {
 		pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
 		if err != nil || !pass.Bounded {
-			t.Fatalf("pass %d over the limit: %+v, %v; want a bounded catch-up", len(caps), pass, err)
+			t.Fatalf("pass %d over the limit: %+v, %v; want a bounded catch-up", miss, pass, err)
 		}
-		if want := walBoundedCatchUpCap << len(caps); pass.HoldCap != want {
-			t.Fatalf("pass %d hold cap %v, want %v (caps so far %v)", len(caps), pass.HoldCap, want, caps)
+		if pass.HoldCap != walCatchUpCap || pass.WriterHeld > testWALWriterBudget {
+			t.Fatalf("pass %d held %v with cap %v; want a %v cap inside %v", miss,
+				pass.WriterHeld, pass.HoldCap, walCatchUpCap, testWALWriterBudget)
 		}
-		caps = append(caps, pass.HoldCap)
-		if pass.Restarted {
-			if pass.WriterHeld < slowCopy || pass.WriterHeld > pass.HoldCap {
-				t.Fatalf("restarting catch-up held the writer for %v; want the %v copy within the %v cap", pass.WriterHeld, slowCopy, pass.HoldCap)
-			}
-			restarted = true
-			break
+		if pass.Restarted || !pass.WriterDeferred || !store.WALOverLimit() {
+			t.Fatalf("pass %d gave the writer back early: %+v, over limit %t; want deferred and over the limit", miss, pass, store.WALOverLimit())
 		}
-		if !pass.WriterDeferred || !store.WALOverLimit() {
-			t.Fatalf("pass %d gave the writer back early: %+v, over limit %t; want deferred and over the limit", len(caps), pass, store.WALOverLimit())
-		}
-	}
-	if !restarted || len(caps) < 3 {
-		t.Fatalf("hold caps %v: want at least two misses, then a restart", caps)
 	}
 	walWriterPhaseHook = original
-	if pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget); err != nil || pass.HoldCap != walBoundedCatchUpCap {
-		t.Fatalf("pass after the restart: %+v, %v; want the cap back at %v", pass, err, walBoundedCatchUpCap)
+	if pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget); err != nil || !pass.Restarted || store.WALOverLimit() {
+		t.Fatalf("pass after the slow copy cleared: %+v, %v; over limit %t", pass, err, store.WALOverLimit())
 	}
 }
 
@@ -606,8 +674,8 @@ func TestCheckpointWALIfLargeBoundedCatchUpWaitsLongerForABusyWriter(t *testing.
 			t.Fatalf("miss %d with the writer taken: %+v, %v; want a deferred bounded catch-up that never held it", miss, pass, err)
 		}
 	}
-	if policy := store.boundedCatchUpPolicy(); policy.acquire != 4*walBoundedAcquireWait || policy.hold != 4*walBoundedCatchUpCap {
-		t.Fatalf("policy after two misses %+v; want the wait and the cap doubled twice", policy)
+	if policy := store.boundedCatchUpPolicy(testWALWriterBudget); policy.acquire != 4*walBoundedAcquireWait || policy.hold != walCatchUpCap {
+		t.Fatalf("policy after two misses %+v; want the wait doubled twice and the hold unchanged", policy)
 	}
 	released := make(chan struct{})
 	time.AfterFunc(150*time.Millisecond, func() {
@@ -907,6 +975,31 @@ func TestCheckpointWALIfLargeOverTheLimitHoldsTheWriterWithoutSettling(t *testin
 	}
 }
 
+// A missed bounded pass remains over the limit. Its next pass must still
+// attempt the writer promptly: a slow off-writer sync in this branch used to
+// consume the pass deadline while hooks kept appending frames.
+func TestCheckpointWALIfLargeRepeatedOverLimitPassesNeverSettleBeforeTheWriter(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	logWALGuardEvents(t, store, 200)
+	writeDuringEveryCopy(t, store)
+	overrideWALDuration(t, &walCatchUpCap, 40*time.Millisecond)
+	originalWriter, originalSync := walWriterPhaseHook, walSyncPhaseHook
+	walWriterPhaseHook = func(ctx context.Context) { <-ctx.Done() }
+	var syncs atomic.Int64
+	walSyncPhaseHook = func(context.Context) { syncs.Add(1) }
+	t.Cleanup(func() { walWriterPhaseHook, walSyncPhaseHook = originalWriter, originalSync })
+	for passNumber := range 3 {
+		pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+		if err != nil || !pass.Bounded || !pass.WriterDeferred || pass.Syncs != 0 || syncs.Load() != 0 {
+			t.Fatalf("over-limit pass %d: %+v, %v; sync hooks %d, want immediate bounded catch-up", passNumber, pass, err, syncs.Load())
+		}
+		if !store.WALOverLimit() || pass.WriterHeld > testWALWriterBudget {
+			t.Fatalf("over-limit pass %d lost pressure or exceeded writer budget: %+v", passNumber, pass)
+		}
+	}
+}
+
 // Review of G-flood-wal round 3 (P1): a pass that ran out of time while the
 // log was over the limit cleared the store's over-the-limit mark and left the
 // bounded catch-up's misses as they were, so background writers went on and
@@ -918,7 +1011,7 @@ func TestCheckpointWALIfLargePassThatRunsOutOfTimeKeepsThePressureAndEscalates(t
 	defer cleanup()
 	logWALGuardEvents(t, store, 200)
 	writeDuringEveryCopy(t, store)
-	overrideWALDuration(t, &walBoundedCatchUpCap, 40*time.Millisecond)
+	overrideWALDuration(t, &walCatchUpCap, 40*time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	original := walWriterPhaseHook
@@ -932,8 +1025,8 @@ func TestCheckpointWALIfLargePassThatRunsOutOfTimeKeepsThePressureAndEscalates(t
 	if !store.WALOverLimit() {
 		t.Fatal("a pass that ran out of time over the limit cleared the store's over-the-limit mark")
 	}
-	if policy := store.boundedCatchUpPolicy(); policy.acquire != 2*walBoundedAcquireWait || policy.hold != 2*walBoundedCatchUpCap {
-		t.Fatalf("policy after a pass that ran out of time: %+v; want the wait and the cap doubled", policy)
+	if policy := store.boundedCatchUpPolicy(testWALWriterBudget); policy.acquire != 2*walBoundedAcquireWait || policy.hold != walCatchUpCap {
+		t.Fatalf("policy after a pass that ran out of time: %+v; want the wait doubled and the hold unchanged", policy)
 	}
 	walWriterPhaseHook = original
 	cancelled, cancelNow := context.WithCancel(context.Background())
@@ -941,22 +1034,24 @@ func TestCheckpointWALIfLargePassThatRunsOutOfTimeKeepsThePressureAndEscalates(t
 	if _, err := store.CheckpointWALIfLarge(cancelled, 0, testWALWriterBudget); err == nil {
 		t.Fatal("pass with a cancelled context succeeded")
 	}
-	if !store.WALOverLimit() || store.boundedCatchUpPolicy().hold != 4*walBoundedCatchUpCap {
-		t.Fatalf("after a pass that failed before measuring the log: over limit %t, policy %+v; want still over, the cap doubled again", store.WALOverLimit(), store.boundedCatchUpPolicy())
+	if !store.WALOverLimit() || store.boundedCatchUpPolicy(testWALWriterBudget).acquire != 4*walBoundedAcquireWait || store.boundedCatchUpPolicy(testWALWriterBudget).hold != walCatchUpCap {
+		t.Fatalf("after a pass that failed before measuring the log: over limit %t, policy %+v; want more acquisition time without a longer hold", store.WALOverLimit(), store.boundedCatchUpPolicy(testWALWriterBudget))
 	}
 }
 
 // Review of G-flood-wal round 3 (P1): the bounded catch-up held the store's
 // writer connection, which holds off the store's own hooks only. Another
 // store or process with audit.db open that committed during every copy under
-// the writer kept the copy short of the end of the log, so the log never
-// restarted. The catch-up also takes SQLite's write lock now: another writer
-// flooding audit.db waits for it, every pass restarts the log, and none of
-// its writes is lost.
+// the writer kept the copy short of the end of the log. Catch-up takes
+// SQLite's write lock while it has the writer, and repeated passes must keep
+// the hold short, retain all writes, and restart after the flood stops.
 func TestCheckpointWALIfLargeBoundedCatchUpHoldsOffAnotherWriter(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 	logWALGuardEvents(t, store, 200)
+	originalFrameBytes := walFrameBytes
+	walFrameBytes = 512 << 10 // each flooded pass crosses the hard ceiling without allocating it
+	t.Cleanup(func() { walFrameBytes = originalFrameBytes })
 	other, err := openSQLite(store.dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -1030,20 +1125,24 @@ func TestCheckpointWALIfLargeBoundedCatchUpHoldsOffAnotherWriter(t *testing.T) {
 	for i := range passes {
 		logWALGuardEvents(t, store, 50)
 		pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
-		if err != nil || !pass.Bounded || !pass.Restarted || pass.WriterDeferred {
-			t.Fatalf("pass %d with another writer flooding audit.db: %+v, %v (it committed %d times under the writer); want a bounded catch-up that restarts the log", i, pass, err, committed.Load())
+		if err != nil || !pass.Bounded || !pass.Restarted || pass.WriterDeferred || pass.HoldCap != walEmergencyCatchUpCap || pass.WriterHeld >= 500*time.Millisecond {
+			t.Fatalf("pass %d with another writer flooding audit.db: %+v, %v; want a restart on every pass with a short observed writer hold", i, pass, err)
 		}
 	}
 	stopWriters()
-	if committed.Load() != 0 || heldOff.Load() != passes {
-		t.Fatalf("the other writer committed %d times under the writer and was held off %d times; want 0 and %d", committed.Load(), heldOff.Load(), passes)
+	if committed.Load() != 0 || heldOff.Load() == 0 {
+		t.Fatalf("the other writer committed %d times under the writer and was held off %d times; want no commits under the writer and at least one lock", committed.Load(), heldOff.Load())
+	}
+	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+	if err != nil || !pass.Restarted {
+		t.Fatalf("catch-up after the other writer stopped: %+v, %v; want a restarted log", pass, err)
 	}
 	var rows int64
 	if err := other.QueryRow(`SELECT count(*) FROM zz_wal_guard_other`).Scan(&rows); err != nil || rows != inserted.Load() {
 		t.Fatalf("other writer rows = %d, %v; want all %d it wrote", rows, err, inserted.Load())
 	}
 	if store.WALOverLimit() {
-		t.Fatal("passes that restarted the log left the store marked over the WAL limit")
+		t.Fatal("catch-up after the other writer stopped left the store marked over the WAL limit")
 	}
 }
 

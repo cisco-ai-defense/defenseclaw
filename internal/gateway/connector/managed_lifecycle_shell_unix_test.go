@@ -7,14 +7,64 @@ package connector
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+func TestManagedHermesAnswersLifecycleBeforeForeignGuardWait(t *testing.T) {
+	invoke := hookArgvConnectorCase(t, "hermes")
+	data := t.TempDir()
+	hooks := filepath.Join(data, "hooks")
+	guardCalls := filepath.Join(data, "foreign-guard-called")
+	guard := filepath.Join(data, "defenseclaw-hook")
+	guardScript := "#!/bin/sh\n: > '" + guardCalls + "'\nsleep 2\nprintf '{\"deny\":false}\\n'\n"
+	if err := os.WriteFile(guard, []byte(guardScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{
+		DataDir: data, APIAddr: "127.0.0.1:1", APIToken: "test-token",
+		HookFailMode: "closed", GuardrailMode: "action", ManagedEnterprise: true,
+		ManagedHookSocket:      filepath.Join(data, "hook.sock"),
+		ForeignHookGuardBinary: guard,
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hooks, opts, NewHermesConnector()); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(data, "lifecycle.active")
+	hardening := filepath.Join(hooks, "_hardening.sh")
+	script, err := os.ReadFile(hardening)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hardening, bytes.ReplaceAll(script, []byte(shellLifecycleMarkers), []byte(marker)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", append([]string{filepath.Join(hooks, invoke.script)}, invoke.args...)...)
+	cmd.Stdin = strings.NewReader(invoke.stdin)
+	cmd.Env = append(sanitizedTestEnv(), "HOME="+data, "DEFENSECLAW_HOME="+data)
+	cmd.Env = append(cmd.Env, invoke.env...)
+	started := time.Now()
+	output, err := cmd.CombinedOutput()
+	if err != nil || time.Since(started) > time.Second || !bytes.Contains(output, []byte(`"action":"block"`)) ||
+		!bytes.Contains(output, []byte("installed or upgraded")) {
+		t.Fatalf("managed Hermes lifecycle answer took %s: %q (%v)", time.Since(started), output, err)
+	}
+	if _, err := os.Stat(guardCalls); !os.IsNotExist(err) {
+		t.Fatalf("foreign guard ran during the closed lifecycle: %v", err)
+	}
+}
 
 // shellLifecycleMarkers is the marker list of _hardening.sh, the Linux and
 // macOS paths of the lifecycle run marker.

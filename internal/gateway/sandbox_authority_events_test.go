@@ -127,6 +127,27 @@ func TestSandboxForeignRecordsCarryTheCallersProfile(t *testing.T) {
 	}
 }
 
+// The foreign sandbox has no registration of its own. A configured compute
+// driver is still known, while auto must wait for a per-user probe.
+func TestSandboxForeignIdentityCarriesConfiguredDriver(t *testing.T) {
+	for _, tc := range []struct{ configured, want string }{
+		{config.EnterpriseOpenShellDriverVM, "vm"},
+		{config.EnterpriseOpenShellDriverDocker, "docker"},
+		{config.EnterpriseOpenShellDriverAuto, ""},
+	} {
+		t.Run(tc.configured, func(t *testing.T) {
+			f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+			f.cfg.Enterprise.OpenShell.Driver = tc.configured
+			f.publishFirstGeneration()
+			reg := sandboxreg.Registration{UID: sbxAlice.UID, UserName: sbxAlice.Name, Connector: "claudecode"}
+			got := f.api.sandboxForeignIdentity(t.Context(), reg, "foreign-id", "foreign-name", "", "openshell")
+			if got.Driver != tc.want || got.Connector != "" {
+				t.Fatalf("configured %q: foreign identity driver=%q connector=%q; want driver=%q and no claimed harness", tc.configured, got.Driver, got.Connector, tc.want)
+			}
+		})
+	}
+}
+
 // A foreign record of a caller whose groups are unknown, when an assignment
 // needs them, is refused: its stamp carries no candidate profile, digest or
 // matched group, which may be another account's (decision 4 of the 1.0.4

@@ -497,11 +497,6 @@ func runHook(ctx context.Context, opts Options) int {
 		fmt.Fprintf(opts.Stderr, "defenseclaw: unknown hook connector %q\n", opts.Connector)
 		return blockExit
 	}
-	if sp.connector == "copilot" && perUserInstallWindow(opts) {
-		if code, blocked := blockPerUserCopilotInstall(opts, sp); blocked {
-			return code
-		}
-	}
 	// A managed hook's FailMode comes from administrator-owned runtime state
 	// only (internal/cli: the Windows runtime generation or the Unix runtime
 	// descriptor), never from a connector or the caller's environment.
@@ -942,12 +937,15 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		// beside the tries after a refused connection.
 		wait := awaitPerUserGateway(ctx, opts, restartDeadline, resp, err, send)
 		resp, err = wait.resp, wait.err
+		// Only a last try this account's gateway refused or dropped is an
+		// outage; a listener whose owner was not proven fails below.
+		outage := perUserOutageError(opts, err)
 		switch {
-		case wait.recoveryErr != nil:
+		case wait.recoveryErr != nil && outage:
 			// Keep the cause: hook-failures.jsonl is the only record of
 			// why a hook could not start the gateway (GAP-0480).
 			return failUnreachable(withPerUserOutage(opts), sp, failMode, coldStartFailureReason(wait.recoveryErr))
-		case wait.outlasted:
+		case wait.outlasted && outage:
 			return failUnreachable(withPerUserOutage(opts), sp, failMode, perUserGatewayRestartingReason)
 		}
 	}
@@ -1103,6 +1101,8 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// This account's gateway refused or dropped the connection, or
 			// gave none in time, and sent no status: an outage.
 			opts = withPerUserOutage(opts)
+		} else if !opts.ManagedEnterprise && errors.Is(err, errPerUserPeerUnverified) {
+			reason = perUserPeerUnverifiedReason(opts)
 		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}
@@ -1597,11 +1597,6 @@ func (sp spec) decide(opts Options, body []byte) int {
 	// answer whose native output contradicts its action is refused, not
 	// forwarded (GAP-0916).
 	closeDuringInstall(&opts, "")
-	if sp.connector == "copilot" && perUserInstallWindow(opts) {
-		if code, blocked := blockPerUserCopilotInstall(opts, sp); blocked {
-			return code
-		}
-	}
 	if !opts.SecureClient && !validUniqueGatewayResponse(body) {
 		return failResponse(opts, sp, "closed", "invalid or ambiguous JSON response")
 	}
@@ -2246,12 +2241,13 @@ func withPerUserOutage(opts Options) Options {
 // outage: a connection this account's gateway refused, reset or closed
 // before any status (it exited or is restarting), or none within the
 // restart budget. A call the gateway took and did not answer in time
-// (errGatewayTookCallNoAnswer), an invalid request and every other error
-// are not, and neither is any error after an HTTP status: the gateway
-// answered.
+// (errGatewayTookCallNoAnswer), a listener whose owner was not proven
+// (errPerUserPeerUnverified), an invalid request and every other error are
+// not, and neither is any error after an HTTP status: the gateway answered.
 func perUserOutageError(opts Options, err error) bool {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || err == nil ||
-		opts.answeredErrorStatus != 0 || errors.Is(err, errGatewayTookCallNoAnswer) || errors.Is(err, errInvalidHookRequest) {
+		opts.answeredErrorStatus != 0 || errors.Is(err, errGatewayTookCallNoAnswer) || errors.Is(err, errInvalidHookRequest) ||
+		errors.Is(err, errPerUserPeerUnverified) {
 		return false
 	}
 	return gatewayRestartShaped(err)
@@ -2346,9 +2342,12 @@ func perUserInstallWindow(opts Options) bool {
 	return !errors.Is(err, os.ErrNotExist)
 }
 
-// Copilot ignores a failed hook process. During a per-user install it needs
-// the native deny for each actionable event before any launcher or gateway
-// failure can turn into an unchecked call. Lifecycle events have no blocking
+// Copilot ignores a failed hook process. During a per-user install every
+// failure answer (no gateway, an error status, an unusable answer, a missing
+// token) needs the native deny for each actionable event, so no failure
+// turns into an unchecked call. A call the gateway answers keeps that answer
+// in the default and permissive tiers, as every other connector's does
+// (owner decision 2026-10-24, GAP-1372). Lifecycle events have no blocking
 // response and remain neutral so an agent can stop.
 func blockPerUserCopilotInstall(opts Options, sp spec) (int, bool) {
 	if NeutralLifecycleEvent(sp.connector, opts.Event) {

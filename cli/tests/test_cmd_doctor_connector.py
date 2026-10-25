@@ -172,6 +172,35 @@ class TestCodexOtelAlignment(unittest.TestCase):
             self.assertEqual([check["status"] for check in result.checks], ["pass", "pass"], result.checks)
             self.assertIn("no native OTLP", result.checks[0]["detail"])
 
+    def test_retired_legacy_codex_exporter_port_fails_even_with_matching_environment(self) -> None:
+        payload = {
+            "runtime": {"environment": "windows"},
+            "health": {"telemetry": {"state": "running"}},
+        }
+        for marker in (
+            "x-defenseclaw-source = 'codex'",
+            "x-defenseclaw-client = 'codex-otel/1.0'",
+        ):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as home, patch.dict(
+                os.environ, {"CODEX_HOME": home}, clear=False
+            ), patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(200, json.dumps(payload)),
+            ):
+                self._write_codex_config(
+                    home,
+                    "[otel]\nenvironment = 'windows'\n"
+                    "[otel.exporter.otlp-http]\n"
+                    "endpoint = 'http://127.0.0.1:19081/v1/logs'\n"
+                    "[otel.exporter.otlp-http.headers]\n"
+                    "authorization = 'Bearer synthetic-secret'\n" + marker + "\n",
+                )
+                result = _DoctorResult()
+                _check_codex_otel_alignment(self._cfg(), result)
+                self.assertEqual(result.checks[0]["status"], "fail", result.checks)
+                self.assertIn("otel.exporter.otlp-http.endpoint", result.checks[0]["detail"])
+                self.assertNotIn("synthetic-secret", result.checks[0]["detail"])
+
     def test_stale_runtime_environment_fails_authenticated_status(self) -> None:
         payload = {
             "runtime": {"environment": "dev"},

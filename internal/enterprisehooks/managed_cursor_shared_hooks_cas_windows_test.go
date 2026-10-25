@@ -194,10 +194,9 @@ func TestWindowsCursorMachineGuardRebuildUndoNeverReplacesANewerSave(t *testing.
 	}
 }
 
-// Publication rewrites hooks.json when the shared fail mode changes: here an
-// open-mode enrollment for Alice is revoked, and the empty enrollment keeps
-// the closed machine guard. An administrator's save between DefenseClaw's
-// read and its write must be kept, with the closed registration merged in.
+// Publication repairs an unreadable hooks.json when Alice's enrollment is
+// revoked. An administrator's save between DefenseClaw's read and its write
+// must be kept, with the closed registration merged in.
 // (Publication with remaining targets runs the same write; its fixture needs
 // real user profiles.)
 func TestWindowsCursorTargetPublicationKeepsAConcurrentHooksSave(t *testing.T) {
@@ -213,7 +212,7 @@ func TestWindowsCursorTargetPublicationKeepsAConcurrentHooksSave(t *testing.T) {
 		t.Run(publish.name, func(t *testing.T) {
 			paths := installWindowsCursorStandaloneGuardForTest(t, hook, false)
 			addWindowsCursorAdminHookForTest(t, paths.Hooks, "admin-original")
-			// Enroll Alice in open mode: the shared registration is open.
+			// Enroll Alice with an open target mode; the host guard stays closed.
 			data, err := os.ReadFile(paths.State)
 			if err != nil {
 				t.Fatal(err)
@@ -246,6 +245,7 @@ func TestWindowsCursorTargetPublicationKeepsAConcurrentHooksSave(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			protectWindowsCursorHooksForAdminsForTest(t, paths.Hooks)
 			if _, active, err := ReadWindowsCursorManagedPolicyTargets(); err != nil || !active {
 				t.Fatalf("fixture guard: active=%t err=%v", active, err)
 			}

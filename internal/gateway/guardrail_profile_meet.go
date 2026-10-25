@@ -13,41 +13,27 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // The meet of guardrail profiles: what applies when several profiles may.
 //
 // When proven assignments select different profiles, their meet applies.
 // For an unproven identity fact, the meet is diagnostic context and the
-// request is refused. When one candidate enforces at least what each of the
-// others does (profileCovers), it has its own name. Otherwise their meet
-// is config.ProfileMeetName, "strictest.<members>": for every
-// connector, hook and inspect action wherever a member blocks on that path,
-// the lowest block level and strictest HILT of members that block, the lowest
-// alert level, and the rules of the rule pack of every member that blocks on
-// that connector, each scanned as that member scans it (a rule any member
-// enforces there is enforced, also where two packs define one rule ID
-// differently; a member that only observes there adds none, and when none
-// blocks the meet observes with every member's rules), the suppressions
-// those members share (allows are the intersection), every sensitive tool
-// any of them inspects, and the members' sandbox floors tightened together
-// (config.Config.SandboxFloor). hook_fail_mode and enabled are machine
-// settings a profile cannot change, so they are the same for every member.
-// The block message is the base configuration's, so no member's text
-// reaches the caller.
+// request is refused. When one candidate covers every other one, it retains
+// its own name. Otherwise the meet is config.ProfileMeetName,
+// "strictest.<members>". Every member scans with its own rules, including an
+// observer, and the audit records each finding with that member's name.
+// Each member's mode, thresholds and HILT decide only its own findings. The
+// final action is the strongest member action; an observer contributes at
+// most an alert. Members share one semantic budget in proven assignment order.
 //
-// "Blocks" is per request path (profilePath): a hook request takes the
-// levels, HILT and rules of the members whose hook mode blocks there, an
-// inspect or proxy request those of the members whose inspect mode blocks
-// there, so each member is enforced in its own mode on each path and a
-// member that only observes on a path changes nothing there. A request on
-// no one path (explain, ACP, the sandbox authority) takes every member that
-// blocks on either.
+// The derived meet configuration retains a path-specific mode for response
+// handling, a diagnostic coverage projection and the combined sandbox floor.
+// It does not decide the action of a member's rule finding. The base block
+// message prevents a member's text from reaching the caller.
 
 // profileMeet is one meet a set derived, on its first use.
 type profileMeet struct {
@@ -58,10 +44,19 @@ type profileMeet struct {
 	derived config.DerivedGuardrailProfile
 	onPath  [profilePathCount]*config.Config
 	ok      bool
-	// rules and packs hold the merged rule generations and composed packs
-	// by connector and member sources (meetSourcesKey).
+	// rules caches the per-member scan generations by connector and source.
 	rules sync.Map
-	packs sync.Map
+}
+
+func meetMemberContext(ctx context.Context, resolved *resolvedGuardrailProfile, member string) context.Context {
+	memberResolved := &resolvedGuardrailProfile{
+		decision: resolved.decision,
+		set:      resolved.set,
+		derived:  resolved.set.profileConfig(member),
+	}
+	memberResolved.decision.Name = member
+	memberResolved.decision.provenMembers = nil
+	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, memberResolved)
 }
 
 // profileMeetLabel is how a meet is named to the account it applies to: it
@@ -252,11 +247,8 @@ func (set *guardrailProfileSet) requestScanScopes(ctx context.Context, connector
 	return set.profileCoverConnectors(connectorName)
 }
 
-// enforcingMembers are the members of a meet whose rules it scans
-// connectorName with on path: those that block there on that path
-// (configBlocksOn). A member that only observes there adds no rule, so the
-// meet never turns its observation into a block. When no member blocks
-// there, the meet observes with every member's rules.
+// enforcingMembers are the members whose rules can affect enforcement on a
+// path. All members are still scanned and audited by ruleGeneration.
 func (set *guardrailProfileSet) enforcingMembers(members []string, connectorName string, path profilePath) []string {
 	var out []string
 	for _, member := range members {
@@ -402,33 +394,51 @@ func meetSourcesKey[T any](connectorName string, sources []*T) string {
 	return key
 }
 
-// ruleGeneration is the rule generation of the meet for connectorName: the
-// generations of the members whose rules it scans there on the request's
-// path (enforcingMembers),
-// each scanned with its own rules (compiledRulePackCategories.members). Each
+// ruleGeneration is the rule generation of the meet for connectorName: every
+// member is scanned with its own rules (compiledRulePackCategories.members). Each
 // was compiled within the rule and cost limits of one generation, and their
 // union is never compiled as one, so no limit of one generation drops a
 // member's rule or refuses a request: a scan of the meet costs at most its
 // members' scans.
 func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileSet, connectorName string) *compiledRulePackCategories {
 	connectorName = canonicalConnectorRulePackKey(connectorName)
-	var sources []*compiledRulePackCategories
-	for _, member := range set.enforcingMembers(m.members, connectorName, requestProfilePath(ctx)) {
-		if generation := set.memberRuleGeneration(ctx, member, connectorName); generation != nil && !slices.Contains(sources, generation) {
-			sources = append(sources, generation)
+	// Meet names are sorted for stable identity, but the first proven
+	// assignment must get its rules judged before other members spend the
+	// shared semantic budget.
+	order := m.members
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set == set && resolved.evaluationMeet() == m {
+		order = make([]string, 0, len(m.members))
+		candidates := resolved.decision.provenMembers
+		if len(candidates) == 0 {
+			candidates = resolved.decision.Candidates
+		}
+		for _, candidate := range candidates {
+			if slices.Contains(m.members, candidate) && !slices.Contains(order, candidate) {
+				order = append(order, candidate)
+			}
+		}
+		for _, member := range m.members {
+			if !slices.Contains(order, member) {
+				order = append(order, member)
+			}
 		}
 	}
-	switch len(sources) {
-	case 0:
-		return nil
-	case 1:
-		return sources[0]
+	var sources []*compiledRulePackCategories
+	var names []string
+	for _, member := range order {
+		if generation := set.memberRuleGeneration(ctx, member, connectorName); generation != nil {
+			sources = append(sources, generation)
+			names = append(names, member)
+		}
 	}
-	key := meetSourcesKey(connectorName, sources)
+	if len(sources) == 0 {
+		return nil
+	}
+	key := meetSourcesKey(connectorName, sources) + "|" + strings.Join(names, "|")
 	if cached, ok := m.rules.Load(key); ok {
 		return cached.(*compiledRulePackCategories)
 	}
-	value, _ := m.rules.LoadOrStore(key, meetRuleGeneration(sources))
+	value, _ := m.rules.LoadOrStore(key, meetRuleGenerationWithNames(sources, names))
 	return value.(*compiledRulePackCategories)
 }
 
@@ -436,10 +446,15 @@ func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileS
 // rules (members). Its categories and rule titles are their union, for
 // lookups only.
 func meetRuleGeneration(sources []*compiledRulePackCategories) *compiledRulePackCategories {
+	return meetRuleGenerationWithNames(sources, nil)
+}
+
+func meetRuleGenerationWithNames(sources []*compiledRulePackCategories, names []string) *compiledRulePackCategories {
 	merged := &compiledRulePackCategories{
 		categories:         cloneRuleCategories(unionRuleCategories(sources)),
 		ruleIdentityTitles: map[string]map[string]struct{}{},
 		members:            sources,
+		memberNames:        slices.Clone(names),
 		budgetNote:         new(sync.Once),
 	}
 	for _, source := range sources {
@@ -535,132 +550,4 @@ func samePatternRule(a, b PatternRule) bool {
 	return a.ID == b.ID && a.Title == b.Title && a.Severity == b.Severity && a.Expression == b.Expression &&
 		a.ToolCallOnly == b.ToolCallOnly && a.Confidence == b.Confidence && pattern(a) == pattern(b) &&
 		slices.Equal(a.Tags, b.Tags) && a.markedMigratedLiteral == b.markedMigratedLiteral
-}
-
-// memberRulePack is the composed pack member scans connector with (the
-// judge suppressions and sensitive tools): its profile's pack, else the
-// base generation's.
-func (a *APIServer) memberRulePack(ctx context.Context, set *guardrailProfileSet, member, connectorName string) *guardrail.RulePack {
-	if derived, ok := set.profiles[member]; ok && derived.Config != nil {
-		key := effectiveRulePackKey(derived.Config, connectorName)
-		if key != effectiveRulePackKey(set.base, connectorName) {
-			if pack := set.packs[key]; pack != nil {
-				return pack
-			}
-			if retry := set.missing[key]; retry != nil {
-				if pack := retry.rulePack(time.Now()); pack != nil {
-					return pack
-				}
-			}
-		}
-	}
-	return a.generationRulePack(ctx, connectorName)
-}
-
-// generationRulePack is the composed pack of the request's generation for
-// connectorName: the connector's scope, else the global pack.
-func (a *APIServer) generationRulePack(ctx context.Context, connectorName string) *guardrail.RulePack {
-	g := a.decisionGeneration(ctx)
-	if g == nil {
-		return nil
-	}
-	if pack := g.RulePacks["conn:"+connectorName]; pack != nil {
-		return pack
-	}
-	return g.RulePacks["global"]
-}
-
-// rulePack is the composed pack of the meet for connectorName, over the
-// members whose rules it scans there on the request's path
-// (enforcingMembers): the first one's
-// pack with only the suppressions every one's pack has, and every sensitive
-// tool any one's pack inspects, at its strictest.
-func (m *profileMeet) rulePack(ctx context.Context, a *APIServer, set *guardrailProfileSet, connectorName string) *guardrail.RulePack {
-	connectorName = canonicalConnectorRulePackKey(connectorName)
-	var sources []*guardrail.RulePack
-	missing := false
-	for _, member := range set.enforcingMembers(m.members, connectorName, requestProfilePath(ctx)) {
-		pack := a.memberRulePack(ctx, set, member, connectorName)
-		if pack == nil {
-			missing = true
-			continue
-		}
-		if !slices.Contains(sources, pack) {
-			sources = append(sources, pack)
-		}
-	}
-	switch {
-	case len(sources) == 0:
-		return nil
-	case len(sources) == 1 && !missing:
-		return sources[0]
-	}
-	key := meetSourcesKey(connectorName, sources)
-	if missing {
-		key += "|missing"
-	}
-	if cached, ok := m.packs.Load(key); ok {
-		return cached.(*guardrail.RulePack)
-	}
-	merged := mergeRulePacks(sources, missing)
-	value, _ := m.packs.LoadOrStore(key, merged)
-	return value.(*guardrail.RulePack)
-}
-
-// mergeRulePacks is sources[0] with the suppressions of every source (none
-// when one source has no pack, missing) and the sensitive tools of any.
-func mergeRulePacks(sources []*guardrail.RulePack, missing bool) *guardrail.RulePack {
-	merged := *sources[0]
-	if merged.Suppressions != nil {
-		supps := *merged.Suppressions
-		keep := func(rp *guardrail.RulePack, has func(*guardrail.SuppressionsConfig) bool) bool {
-			return rp.Suppressions != nil && has(rp.Suppressions)
-		}
-		supps.PreJudgeStrips = slices.DeleteFunc(slices.Clone(supps.PreJudgeStrips), func(s guardrail.PreJudgeStrip) bool {
-			return missing || slices.ContainsFunc(sources[1:], func(rp *guardrail.RulePack) bool {
-				return !keep(rp, func(c *guardrail.SuppressionsConfig) bool {
-					return slices.ContainsFunc(c.PreJudgeStrips, func(o guardrail.PreJudgeStrip) bool { return reflect.DeepEqual(o, s) })
-				})
-			})
-		})
-		supps.FindingSupps = slices.DeleteFunc(slices.Clone(supps.FindingSupps), func(s guardrail.FindingSuppression) bool {
-			return missing || slices.ContainsFunc(sources[1:], func(rp *guardrail.RulePack) bool {
-				return !keep(rp, func(c *guardrail.SuppressionsConfig) bool {
-					return slices.ContainsFunc(c.FindingSupps, func(o guardrail.FindingSuppression) bool { return reflect.DeepEqual(o, s) })
-				})
-			})
-		})
-		supps.ToolSuppressions = slices.DeleteFunc(slices.Clone(supps.ToolSuppressions), func(s guardrail.ToolSuppression) bool {
-			return missing || slices.ContainsFunc(sources[1:], func(rp *guardrail.RulePack) bool {
-				return !keep(rp, func(c *guardrail.SuppressionsConfig) bool {
-					return slices.ContainsFunc(c.ToolSuppressions, func(o guardrail.ToolSuppression) bool { return reflect.DeepEqual(o, s) })
-				})
-			})
-		})
-		merged.Suppressions = &supps
-	}
-	var tools *guardrail.SensitiveToolsConfig
-	for _, source := range sources {
-		if source.SensitiveTools == nil {
-			continue
-		}
-		if tools == nil {
-			tools = &guardrail.SensitiveToolsConfig{Version: source.SensitiveTools.Version}
-		}
-		for _, tool := range source.SensitiveTools.Tools {
-			i := slices.IndexFunc(tools.Tools, func(have guardrail.SensitiveTool) bool { return have.Name == tool.Name })
-			if i < 0 {
-				tools.Tools = append(tools.Tools, tool)
-				continue
-			}
-			have := &tools.Tools[i]
-			have.ResultInspection = have.ResultInspection || tool.ResultInspection
-			have.JudgeResult = have.JudgeResult || tool.JudgeResult
-			if tool.MinEntitiesAlert > 0 && (have.MinEntitiesAlert <= 0 || tool.MinEntitiesAlert < have.MinEntitiesAlert) {
-				have.MinEntitiesAlert = tool.MinEntitiesAlert
-			}
-		}
-	}
-	merged.SensitiveTools = tools
-	return &merged
 }

@@ -54,6 +54,13 @@ const SourceLinkFactPrefix = "\x00source-link:"
 // opaque, and a missing fact leaves the operand unknown.
 const OpaqueScopeFactPrefix = "\x00opaque-scope:"
 
+// GlobFactPrefix keys the hook client's expansion of one pathname pattern
+// that the action target scan checks, by the absolute pattern. "0" means the
+// user's view expanded it completely and no match reaches a protected file;
+// "1" means a match does. Only a gateway that cannot expand the pattern
+// itself (ProtectHome) reads it; a missing answer keeps its fallback.
+const GlobFactPrefix = "\x00glob:"
+
 // maxWriteTargetLinkDepth matches the Linux kernel limit (MAXSYMLINKS) for
 // one path resolution. Every followed link counts, also in parent components,
 // so a link loop ends here and reports an unresolvable target.
@@ -671,7 +678,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// A connector can name the shell text "cmd" while ActionFacts requires
 	// its canonical command field. Resolve that exact string as a shell too.
 	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded || toolConflict || argsConflict
-	var operands, literalOperands []string
+	var operands, literalOperands, assignedOperands []string
 	var directoryOperands []RedirectOccurrence
 	var directoryUnknown bool
 	links := shellLinks{known: true}
@@ -683,13 +690,14 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	}
 	var safeRedirects []RedirectOccurrence
 	opaqueFacts := map[string]string{}
+	var globFacts map[string]string
 	var unprovenReason string
 	if toolArgs != nil {
 		for _, key := range []string{"command", "cmd"} {
 			var command string
 			if json.Unmarshal(toolArgs[key], &command) == nil && command != "" {
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
-					unprovenReason = ActionCommandDecision(command, cwd, home)
+					unprovenReason = ActionCommandAuditReason(command, cwd, home)
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
@@ -701,6 +709,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				var parsed bool
 				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
 				literalOperands = LiteralWriteOperands(command, cwd, home)
+				assignedOperands = AdjacentAssignedWriteOperands(command, cwd, home)
 				// A bound pathname pattern has no fixed operand to list; the
 				// gateway reads the same result and fails closed on it.
 				boundedOperands, _ := BoundedShellWriteOperands(command, cwd, home)
@@ -715,7 +724,10 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				if !isApplyPatchToolName(tool) {
 					links = commandLinksWithFacts(command, cwd, home, sourceFacts, true)
 					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
-					truncated = truncated || !links.known
+					globFacts = actionGlobFacts(command, cwd, home)
+					// An unresolved program word alone does not make a
+					// concrete write operand or its link walk incomplete.
+					truncated = truncated || links.opaque
 				}
 				break
 			}
@@ -752,6 +764,13 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		if aliasKnown && links.known {
 			resolved, ok = links.resolve(resolutionPath, protected)
+		} else if aliasKnown && !links.opaque {
+			// The command may name an unknown program, but it has no
+			// proved link operation. Resolve this operand in the caller's
+			// filesystem instead of carrying a false unknown-target fact.
+			if direct, directOK := resolveWritePath(resolutionPath, 0); directOK {
+				resolved, ok = protected.target(direct)
+			}
 		} else if aliasKnown && safeRedirect {
 			if direct, directOK := resolveWritePath(resolutionPath, 0); directOK {
 				resolved, ok = protected.target(direct)
@@ -774,6 +793,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		size += entry
 		targets[path] = resolved
+	}
+	// A bounded assignment at the end of a long AND-list is listed first so
+	// ordinary preceding redirects cannot exhaust the client's target map.
+	for _, operand := range assignedOperands {
+		add(operand, true, false)
 	}
 	// Exact shell operands take precedence over a duplicate PathFact. Their
 	// early-redirect exemption must not cover a later command writer.
@@ -832,13 +856,15 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	}
 	// A fact that does not fit is omitted; the gateway reads a missing fact
 	// as unknown, so the map need not be marked truncated for it.
-	for _, key := range slices.Sorted(maps.Keys(opaqueFacts)) {
-		entry := len(jsonString(key)) + 1 + len(jsonString(opaqueFacts[key])) + 1
-		if len(targets)-1 >= MaxWriteTargets || size+entry > maxEncodedTargets {
-			break
+	for _, extra := range []map[string]string{opaqueFacts, globFacts} {
+		for _, key := range slices.Sorted(maps.Keys(extra)) {
+			entry := len(jsonString(key)) + 1 + len(jsonString(extra[key])) + 1
+			if len(targets)-1 >= MaxWriteTargets || size+entry > maxEncodedTargets {
+				break
+			}
+			targets[key] = extra[key]
+			size += entry
 		}
-		targets[key] = opaqueFacts[key]
-		size += entry
 	}
 	if unprovenReason != "" {
 		entry := len(jsonString(UnprovenReasonKey)) + 1 + len(jsonString(unprovenReason)) + 1
@@ -1021,6 +1047,10 @@ func Decode(value string) (map[string]string, bool) {
 		}
 		if strings.HasPrefix(key, OpaqueScopeFactPrefix) && (value != "0" && value != "c" ||
 			!filepath.IsAbs(strings.TrimPrefix(key, OpaqueScopeFactPrefix))) {
+			return nil, false
+		}
+		if strings.HasPrefix(key, GlobFactPrefix) && (value != "0" && value != "1" ||
+			!filepath.IsAbs(strings.TrimPrefix(key, GlobFactPrefix))) {
 			return nil, false
 		}
 	}
@@ -1306,16 +1336,10 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				}
 			}
 		case program == "git":
-			if destination, materializes := gitMaterializationScope(words[1:], static[1:], cwd); materializes {
-				for _, assignment := range call.Assigns {
-					if assignment.Name == nil {
-						continue
-					}
-					switch assignment.Name.Value {
-					case "GIT_WORK_TREE", "GIT_DIR", "GIT_COMMON_DIR":
-						destination = ""
-					}
-				}
+			// A materializing Git command alone does not prove that a later
+			// ordinary project write reaches a protected target.
+			if destination, materializes := gitMaterializationScope(words[1:], static[1:], cwd); materializes &&
+				destination != "" && protectedReachPath(destination, newProtectedFiles(home), filepath.Join(home, ".ssh")) {
 				links.unknownIn(destination)
 			}
 		case slices.Contains(renamePrograms, program):
@@ -1696,6 +1720,12 @@ func SplitOpaqueScopeFacts(targets map[string]string) (rest, facts map[string]st
 		}
 	}
 	return rest, facts
+}
+
+// Known reports that the command's link operations were all read, so Target
+// answers each name as the user-side hook's Resolve does.
+func (l Links) Known() bool {
+	return l.links.known && !l.links.opaque
 }
 
 // Target maps an absolute write operand through the links the command

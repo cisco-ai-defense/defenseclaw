@@ -36,6 +36,7 @@ except ModuleNotFoundError:  # Imported as scripts.check_grafana_dashboards in t
     from local_observability_v1 import compatibility_errors
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "cli"))
 SOURCE_DIR = ROOT / "bundles/local_observability_stack/grafana/dashboards"
 PACKAGED_DIR = ROOT / "cli/defenseclaw/_data/local_observability_stack/grafana/dashboards"
 SOURCE_DATASOURCES = ROOT / "bundles/local_observability_stack/grafana/provisioning/datasources/datasources.yml"
@@ -904,15 +905,29 @@ def request_json(
 ) -> dict[str, Any]:
     if params:
         url = f"{url}?{urllib.parse.urlencode(params)}"
-    request: str | urllib.request.Request = url
     if _GRAFANA_AUTHORIZATION is not None and url.startswith("http://127.0.0.1:3000/"):
-        request = urllib.request.Request(
-            url,
-            headers={"Authorization": _GRAFANA_AUTHORIZATION},
-            method="GET",
-        )
+        # This live audit shares the held-socket verifier used by Grafana
+        # startup. A container check cannot prove who accepted this request.
+        try:
+            from defenseclaw.observability.local_stack import _grafana_verified_get
+        except ImportError as exc:
+            raise AuditError("trusted Grafana connected-peer verifier is unavailable") from exc
+        parsed = urllib.parse.urlsplit(url)
+        path = parsed.path + ("?" + parsed.query if parsed.query else "")
+        try:
+            status, body = _grafana_verified_get(
+                path, _GRAFANA_AUTHORIZATION, timeout=timeout_seconds,
+                max_response_bytes=16 * 1024 * 1024,
+            )
+            if 300 <= status < 400:
+                raise AuditError(f"{url}: Grafana redirect refused (HTTP {status})")
+            if not 200 <= status < 300:
+                raise AuditError(f"{url}: HTTP {status}: {body[:400].decode('utf-8', 'replace')}")
+            return json.loads(body)
+        except (OSError, ValueError) as exc:
+            raise AuditError(f"{url}: {exc}") from exc
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")

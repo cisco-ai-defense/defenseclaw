@@ -1011,6 +1011,13 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		return rescanSkipped
 	}
 
+	// An unfinished MCP install scan was kept under the unverified-server
+	// setting. Its first completed scan must decide admission and enforce the
+	// verdict, even though the definition has not changed since it was kept.
+	if evt.Type == InstallMCP && strings.HasSuffix(baseline.ScannerFingerprint, unverifiedMCPMark) {
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, compareSnapshots(baseline, currentSnap), fingerprint, "rescan")
+	}
+
 	if strings.HasSuffix(baseline.ScannerFingerprint, interruptedAdmissionMark) && !w.secureClientActive() {
 		return w.readmitInterrupted(ctx, evt, currentSnap, fingerprint)
 	}
@@ -1063,6 +1070,12 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		}
 		return rescanSkipped
 	}
+	if evt.Type == InstallMCP && w.hasRecoverableMCPBlock(evt) && !w.secureClientActive() {
+		// A clean recovery scan must run admission so its completed verdict
+		// can release this watcher's earlier rejection or scanner-failure block.
+		// Drift-only scanning recorded the clean finding but left it disabled.
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
+	}
 
 	if reason == "content-changed" && !w.secureClientActive() {
 		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
@@ -1103,6 +1116,10 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 // baseline that install admission allowed without a scan. No scanner
 // fingerprint contains it.
 const admittedWithoutScanMark = "|admitted-without-scan"
+
+// unverifiedMCPMark records an MCP definition kept after an unfinished scan.
+// Its empty scan ID retries through admission until a completed verdict.
+const unverifiedMCPMark = "|mcp-unverified"
 
 // admitsMCPWithoutScan reports an MCP server that install admission allows
 // before any scan: an asset_policy.mcp allowed rule that matches its
@@ -1162,15 +1179,18 @@ func (w *InstallWatcher) rescanMCPAdmittedWithoutScan(ctx context.Context, evt I
 const unenforcedRejectionMark = "|rejected-unenforced"
 
 // admissionFingerprint is the baseline fingerprint for an admission result:
-// fingerprint, marked when the result is a rejection nothing enforced or an
-// MCP server admitted without a scan. Secure Client keeps the baseline of
-// main (issue #1092).
+// fingerprint, marked when a rejection was not enforced, an MCP server was
+// admitted without a scan, or an MCP scan was kept unverified for retry.
+// Secure Client keeps the baseline of main (issue #1092).
 func (w *InstallWatcher) admissionFingerprint(res AdmissionResult, fingerprint string) string {
 	if w.secureClientActive() {
 		return fingerprint
 	}
 	if res.Unenforced {
 		return fingerprint + unenforcedRejectionMark
+	}
+	if res.Event.Type == InstallMCP && res.Verdict == VerdictScanError && strings.HasPrefix(res.Reason, unverifiedMCPReason) {
+		return fingerprint + unverifiedMCPMark
 	}
 	if res.Event.Type == InstallMCP && res.Verdict == VerdictAllowed && res.ScanID == "" {
 		return fingerprint + admittedWithoutScanMark
@@ -1199,18 +1219,21 @@ func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt Ins
 }
 
 // readmitChanged runs install admission for a target whose content changed
-// since its baseline: an installed skill, plugin or MCP server edited to
+// since its baseline, or for an MCP server recovering from this watcher's
+// earlier rejection: an installed skill, plugin or MCP server edited to
 // carry HIGH or CRITICAL content is blocked, quarantined and disabled as a
 // new install would be. The rescan used to scan it and emit drift only, so
 // the rejected verdict was never acted on and the agents kept loading it
 // (GAP-1086). The drift alerts stay. A scan that failed or was cut off
 // leaves the old baseline (F-3188), so the next cycle admits it again. An
-// MCP server whose changed definition admission allows is released from the
+// MCP server explicitly kept unverified instead records its new definition
+// with a retry mark, so its tools do not stay behind the pending gate. An MCP
+// server whose changed definition admission allows is released from the
 // watcher's own rejection of its old one (GAP-0266). source names what saw
 // the change in gateway.log: the rescan cycle, or the watch of the MCP
 // server list. Secure Client keeps main's rescan (issue #1092).
 func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot, deltas []DriftDelta, fingerprint, source string) rescanOutcome {
-	fmt.Fprintf(os.Stderr, "[%s] %s %s changed; running install admission\n", source, evt.Type, evt.Name)
+	fmt.Fprintf(os.Stderr, "[%s] %s %s needs admission; scanning\n", source, evt.Type, evt.Name)
 	res := w.runAdmission(ctx, evt)
 	w.notifyAdmission(res)
 	if res.ScanID != "" {
@@ -1224,6 +1247,10 @@ func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, b
 	switch {
 	case res.Interrupted:
 		w.markInterruptedAdmission(evt, snap, fingerprint)
+	case res.Verdict == VerdictScanError && evt.Type == InstallMCP && strings.HasPrefix(res.Reason, unverifiedMCPReason):
+		if w.targetStillPresent(evt) {
+			w.persistSnapshot(evt, snap, "", w.admissionFingerprint(res, fingerprint))
+		}
 	case res.Verdict == VerdictScanError || strings.HasPrefix(res.Reason, scanFailureReason) || w.movedByAdmission(evt):
 	default:
 		if w.targetStillPresent(evt) {

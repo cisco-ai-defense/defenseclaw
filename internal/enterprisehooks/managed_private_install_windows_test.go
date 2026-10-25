@@ -125,7 +125,7 @@ func TestDiscoverWindowsClaudeLocalWrapperWithoutMetadataIsUnprotected(t *testin
 	if err := os.WriteFile(wrapper, []byte("@echo off\r\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	findings := DiscoverWindowsPrivateAgentInstalls(home, []string{"claudecode"})
+	findings := DiscoverWindowsPrivateAgentInstalls(context.Background(), home, []string{"claudecode"})
 	found := false
 	for _, item := range findings {
 		found = found || item.Path == wrapper && item.Version == "" && !item.Incomplete
@@ -151,7 +151,7 @@ func TestDiscoverWindowsPrivateClaudeWithoutVersionIsUnprotected(t *testing.T) {
 	if err := os.WriteFile(native, []byte("native fixture"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	findings := DiscoverWindowsPrivateAgentInstalls(home, []string{"claudecode"})
+	findings := DiscoverWindowsPrivateAgentInstalls(context.Background(), home, []string{"claudecode"})
 	if len(findings) != 2 || findings[0].Version != "" || findings[1].Version != "" ||
 		findings[0].Path == findings[1].Path {
 		t.Fatalf("unversioned runnable copies = %+v", findings)
@@ -163,7 +163,7 @@ func TestDiscoverWindowsPrivateCodexAndCopilotBelowContract(t *testing.T) {
 	for pkg, entry := range map[string]string{"@openai/codex": `bin\codex.js`, "@github/copilot": "npm-loader.js"} {
 		windowsClaudeCopy(t, filepath.Join(home, "private", "node_modules", filepath.FromSlash(pkg)), "0.0.1", entry)
 	}
-	findings := DiscoverWindowsPrivateAgentInstalls(home, []string{"codex", "copilot"})
+	findings := DiscoverWindowsPrivateAgentInstalls(context.Background(), home, []string{"codex", "copilot"})
 	if len(findings) != 2 || findings[0].Connector != "codex" || findings[1].Connector != "copilot" {
 		t.Fatalf("private npm agent versions = %+v", findings)
 	}

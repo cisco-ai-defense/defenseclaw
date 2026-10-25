@@ -288,6 +288,36 @@ def _secure_client_admission(policy_dir: str, target_type: str) -> CompiledAdmis
     )
 
 
+def _legacy_strict_mcp(adm: Any) -> bool:
+    """Keep the MCP actions a v8 -> v9 strict preset inherited and left unset."""
+    defaults = getattr(adm, "defaults", None)
+    if getattr(defaults, "allow_list_bypass_scan", None) is not False or getattr(defaults, "actions", None):
+        return False
+    skill = _compile_action_map(getattr(getattr(adm, "skill", None), "actions", None))
+    return (skill.get("HIGH") == (_QUARANTINE, False)
+            and skill.get("MEDIUM") == (_QUARANTINE, False)
+            and skill.get("LOW") == (_WARN, False))
+
+
+def _legacy_balanced_default_mcp(adm: Any) -> bool:
+    """Recognize only the MCP actions the pre-1.0.4 default preset stored."""
+    defaults = getattr(adm, "defaults", None)
+    if (getattr(defaults, "scan_on_install", None) is not True
+            or getattr(defaults, "allow_list_bypass_scan", None) is not True):
+        return False
+    defaults_actions = _compile_action_map(getattr(defaults, "actions", None))
+    if defaults_actions != {
+        "CRITICAL": (_QUARANTINE, False), "HIGH": (_QUARANTINE, False),
+        "MEDIUM": (_WARN, False), "LOW": (_WARN, False), "INFO": (_WARN, False),
+    }:
+        return False
+    mcp = _compile_action_map(getattr(getattr(adm, "mcp", None), "actions", None))
+    return mcp == {
+        "MEDIUM": (_QUARANTINE, False),
+        "LOW": (SeverityAction(file="none", runtime="disable", install="none"), False),
+    }
+
+
 def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
     """Compile ``admission:`` for one asset type, as the gateway does (Go
     ``policy.CompileAdmission``). Each field and severity resolves, first
@@ -298,8 +328,12 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
 
     if asset_lists.is_secure_client(cfg):
         return _secure_client_admission(str(getattr(cfg, "policy_dir", "") or ""), target_type)
-    out = _builtin_admission(target_type)
     adm = getattr(cfg, "admission", None)
+    out = _builtin_admission(target_type)
+    if target_type == "mcp" and not _legacy_strict_mcp(adm):
+        # Balanced MCP scans keep findings visible without refusing ordinary
+        # tools. Secure Client keeps its separate 1.0 action map above.
+        out.actions.update({sev: (_WARN, False) for sev in ("HIGH", "MEDIUM", "LOW")})
     if adm is None:
         return out
     defaults = getattr(adm, "defaults", None)
@@ -341,6 +375,12 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
         source = "derived:scanners.skill_scanner"
     elif "defaults" in used:
         source = "config:admission.defaults.actions"
+
+    if target_type == "mcp" and _legacy_balanced_default_mcp(adm):
+        # The selected shipped preset changed in 1.0.4. Preserve explicit
+        # actions and translate only its old stored action shape.
+        actions.update({sev: (_WARN, False) for sev in ("HIGH", "MEDIUM", "LOW")})
+        source = "compat:pre-1.0.4 default"
 
     sources["actions"] = source
     overrides: dict[str, dict[str, tuple[SeverityAction, bool]]] = {}
@@ -482,7 +522,9 @@ def evaluate_admission(
         from defenseclaw.enforce.asset_lists import path_has_components
 
         configured = policy.field_sources.get("first_party_allow_list", "").startswith("config:")
-        path_matches = (
+        # GAP-1212: the shipped CodeGuard skill is trusted by its content in
+        # every connector's skills folder, not only the folders the entry names.
+        path_matches = (not legacy and _content_verified_first_party(target_type, name)) or (
             any(path_has_components(source_path, marker) for marker in fp_constraints)
             if configured else _matches_provenance(fp_constraints, source_path)
         )
@@ -501,6 +543,9 @@ def evaluate_admission(
         return _done(AdmissionDecision("scan", "scan required", source="scan-required"))
 
     finding_count, severity = _scan_summary(scan_result)
+    judge_only = _judge_only_plugin_high(config, policy, target_type, connector, scan_result, severity)
+    if judge_only:
+        policy = replace(policy, actions={**policy.actions, "HIGH": (_WARN, False)})
     action, allow = effective_action_for(policy, severity=severity, scanner=_scanner_name(scan_result))
 
     if finding_count <= 0:
@@ -511,7 +556,34 @@ def evaluate_admission(
         return _done(AdmissionDecision("rejected", detail, action=action, source="scan-rejected"))
     if allow:
         return _done(AdmissionDecision("allowed", detail, action=action, source="scan-allowed"))
-    return _done(AdmissionDecision("warning", detail, action=action, source="scan-warning"))
+    source = "scan-judge-warning" if judge_only else "scan-warning"
+    return _done(AdmissionDecision("warning", detail, action=action, source=source))
+
+
+def _judge_only_plugin_high(cfg: Any, policy: CompiledAdmission, target_type: str, connector: str,
+                            scan_result: Any, severity: str) -> bool:
+    """The GAP-1389 pre-step: Go ``policy.WarnJudgeOnlyPluginHigh``, same rules."""
+    from defenseclaw.enforce import asset_lists
+
+    adm, findings = getattr(cfg, "admission", None), getattr(scan_result, "findings", None)
+    tier = getattr(getattr(cfg, "guardrail", None), "hook_policy_tier", None)
+    medium, _ = effective_action_for(policy, severity="MEDIUM", scanner=_scanner_name(scan_result))
+    if (target_type != "plugin" or cfg is None or asset_lists.is_secure_client(cfg) or severity.upper() != "HIGH"
+            or not isinstance(findings, list) or _legacy_strict_mcp(adm) or not callable(tier)
+            or "HIGH" in policy.scanner_overrides.get(_scanner_name(scan_result), {})
+            or any("HIGH" in _compile_action_map(getattr(getattr(adm, k, None), "actions", None))
+                   for k in ("plugin", "defaults"))
+            or medium.install == "block" or medium.runtime == "disable" or medium.file == "quarantine"):
+        return False
+    judge_high = False
+    for f in findings:
+        rank, rule = _severity_rank(str(getattr(f, "severity", ""))), str(getattr(f, "rule_id", "") or "")
+        judge = (rule.startswith("LLM-") and rule != "LLM-SCAN-ERROR") or rule.startswith("META-LLM-")
+        if rank == 4 and (rule.startswith("LLM-OB-") or rule == "META-LLM-001"):
+            judge_high = True
+        elif rank == 0 or rank >= 4 or (rank == 3 and not judge and rule != "SCAN-LLM-NO-SOURCE"):
+            return False
+    return judge_high and tier(connector) != "strict"
 
 
 def _legacy_allow_decision(
@@ -958,6 +1030,13 @@ def _matches_amp_user_home(
     if os.path.normcase(common_path) != os.path.normcase(resolved_home):
         return False
     return os.path.normcase(resolved_source) == os.path.normcase(expected_source)
+
+
+def _content_verified_first_party(target_type: str, name: str) -> bool:
+    """Whether :func:`_own_first_party_content` checks this entry by the asset's
+    bytes, so its folder markers add nothing. Mirrors Go
+    ``contentVerifiedFirstParty``."""
+    return target_type == "skill" and name == "codeguard"
 
 
 def _own_first_party_content(target_type: str, name: str, source_path: str) -> bool:

@@ -193,3 +193,26 @@ func TestReconcilePreservedConnectorsTearsDownRetiredOmnigent(t *testing.T) {
 		t.Fatalf("reconciliation = %+v", recorder)
 	}
 }
+
+// Review fixes (uninstall lifecycle round b): only an uninstall's connector
+// teardown removes a removed connector's agent-config entries, stub and import
+// path; every other action keeps the deny stub, whatever the parent set.
+func TestOnlyAnUninstallMarksTheRemovedConnectorTeardown(t *testing.T) {
+	t.Setenv(removedConnectorUninstallEnv, "1")
+	dataRoot := filepath.Join(t.TempDir(), ".defenseclaw")
+	for action, want := range map[string]bool{"uninstall": true, "install": false, "repair": false, "upgrade": false} {
+		env := transactionChildEnv(setupTransaction{Action: action, DataRoot: dataRoot})
+		count := 0
+		for _, entry := range env {
+			if name, value, ok := strings.Cut(entry, "="); ok && strings.EqualFold(name, removedConnectorUninstallEnv) {
+				count++
+				if value != "1" {
+					t.Fatalf("%s: %s", action, entry)
+				}
+			}
+		}
+		if (count == 1) != want || count > 1 {
+			t.Fatalf("%s child env holds %s %d times; want it only for an uninstall", action, removedConnectorUninstallEnv, count)
+		}
+	}
+}

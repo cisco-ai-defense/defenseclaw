@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -15,6 +16,66 @@ import (
 // A failed assignment removes the old value: it must never certify a later
 // redirect after an unset, append, read or command substitution changed it.
 type actionValues map[string]string
+
+// AdjacentAssignedWriteOperands proves a redirect whose immediately preceding
+// AND-list statement assigns its path. Earlier commands may create files, but
+// cannot change the value between that assignment and the redirect.
+func AdjacentAssignedWriteOperands(command, cwd, home string) []string {
+	file, ok := parseShell(command)
+	if !ok || !filepath.IsAbs(cwd) {
+		return nil
+	}
+	var statements []*syntax.Stmt
+	var collect func(*syntax.Stmt) bool
+	collect = func(stmt *syntax.Stmt) bool {
+		if stmt == nil || stmt.Background || stmt.Negated || len(statements) > 512 {
+			return false
+		}
+		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+			return len(stmt.Redirs) == 0 && pair.Op == syntax.AndStmt && collect(pair.X) && collect(pair.Y)
+		}
+		if _, ok := stmt.Cmd.(*syntax.CallExpr); !ok {
+			return false
+		}
+		statements = append(statements, stmt)
+		return true
+	}
+	for _, stmt := range file.Stmts {
+		if !collect(stmt) {
+			return nil
+		}
+	}
+	var paths []string
+	for i := 1; i < len(statements); i++ {
+		previous, ok := statements[i-1].Cmd.(*syntax.CallExpr)
+		if !ok || len(previous.Args) != 0 || len(previous.Assigns) != 1 || len(statements[i-1].Redirs) != 0 {
+			continue
+		}
+		assignment := previous.Assigns[0]
+		if assignment.Name == nil || assignment.Value == nil || assignment.Append || assignment.Array != nil || assignment.Index != nil {
+			continue
+		}
+		value, fixed := StaticWord(assignment.Value, home)
+		if !fixed || value == "" {
+			continue
+		}
+		values := actionValues{"HOME": home, assignment.Name.Value: value}
+		for _, redirect := range statements[i].Redirs {
+			if redirect.Word == nil {
+				continue
+			}
+			switch redirect.Op {
+			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+			default:
+				continue
+			}
+			if name, fixed := actionWordValue(redirect.Word, values, cwd, home); fixed && name != "" {
+				paths = append(paths, OperandPath(name, cwd))
+			}
+		}
+	}
+	return paths
+}
 
 // A generated basename is bounded by its literal parent directory, but its
 // exact spelling is not known until execution. Never replace it with a fake
@@ -71,6 +132,10 @@ func actionForgetValues(stmt *syntax.Stmt, values actionValues, home string) {
 }
 
 func actionWordValue(word *syntax.Word, values actionValues, cwd, home string) (string, bool) {
+	return actionWordValueWithGlob(word, values, cwd, home, false)
+}
+
+func actionWordValueWithGlob(word *syntax.Word, values actionValues, cwd, home string, allowGlob bool) (string, bool) {
 	if word == nil {
 		return "", false
 	}
@@ -80,7 +145,7 @@ func actionWordValue(word *syntax.Word, values actionValues, cwd, home string) (
 		for _, item := range items {
 			switch part := item.(type) {
 			case *syntax.Lit:
-				if strings.ContainsAny(part.Value, "*?[\x00\x1f") {
+				if strings.ContainsAny(part.Value, "\x00\x1f") || !allowGlob && strings.ContainsAny(part.Value, "*?[") {
 					return false
 				}
 				out.WriteString(part.Value)
@@ -95,7 +160,7 @@ func actionWordValue(word *syntax.Word, values actionValues, cwd, home string) (
 				}
 			case *syntax.ParamExp:
 				if part.Param == nil || part.Excl || part.Length || part.Width || part.IsSet || part.Slice != nil ||
-					part.Repl != nil || part.Exp != nil || part.NestedParam != nil || part.Flags != nil || len(part.Modifiers) != 0 {
+					part.Repl != nil || part.NestedParam != nil || part.Flags != nil || len(part.Modifiers) != 0 {
 					return false
 				}
 				name := part.Param.Value
@@ -107,6 +172,14 @@ func actionWordValue(word *syntax.Word, values actionValues, cwd, home string) (
 					name += "[0]"
 				}
 				value, ok := values[name]
+				if part.Exp != nil {
+					if part.Exp.Op != syntax.DefaultUnset && part.Exp.Op != syntax.DefaultUnsetOrNull {
+						return false
+					}
+					if !ok || part.Exp.Op == syntax.DefaultUnsetOrNull && value == "" {
+						value, ok = actionWordValueWithGlob(part.Exp.Word, values, cwd, home, allowGlob)
+					}
+				}
 				if !ok {
 					return false
 				}
@@ -127,10 +200,25 @@ func actionWordValue(word *syntax.Word, values actionValues, cwd, home string) (
 		return "", false
 	}
 	value := out.String()
-	if strings.HasPrefix(value, "~/") {
-		value = filepath.Join(home, value[2:])
+	if actionWordTildePrefix(word) {
+		if actionPosixWindowsHome(home) {
+			value = path.Join(home, value[1:])
+		} else {
+			value = filepath.Join(home, value[1:])
+		}
 	}
 	return value, true
+}
+
+// The shell expands a leading tilde only when it is unquoted and unescaped
+// and ends at an unquoted slash or the end of the word. A quoted, escaped or
+// parameter-derived tilde stays a literal directory name below the cwd.
+func actionWordTildePrefix(word *syntax.Word) bool {
+	if len(word.Parts) == 0 {
+		return false
+	}
+	lit, ok := word.Parts[0].(*syntax.Lit)
+	return ok && (strings.HasPrefix(lit.Value, "~/") || lit.Value == "~" && len(word.Parts) == 1)
 }
 
 // actionBoundProgramWords accepts only a simple program parameter immediately
@@ -222,6 +310,15 @@ func actionSubstitutionValue(sub *syntax.CmdSubst, values actionValues, cwd, hom
 		}
 	}
 	switch programBase(words[0]) {
+	case "cat":
+		if len(words) == 2 {
+			if content, ok := readIndirectSource(words[1], cwd); ok {
+				value := strings.TrimSuffix(content, "\n")
+				if value != "" && !strings.ContainsAny(value, "\x00\r\n\t ") {
+					return value, true
+				}
+			}
+		}
 	case "pwd":
 		if len(words) == 1 {
 			return cwd, true

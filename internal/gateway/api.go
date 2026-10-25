@@ -83,6 +83,10 @@ type APIServer struct {
 	hookDeliveryProcessID string
 	// sandboxAuthority is owned by this server and initialized on first use.
 	sandboxAuthority sandboxAuthorityHolder
+	// installWindowWarned is set once this per-user gateway has logged the
+	// install-window warning of strictInstallWindowGate; it clears when a
+	// call finds no install lock.
+	installWindowWarned atomic.Bool
 
 	// projectSkills are the project skill folders the install watcher
 	// watches; nil when no watcher shares them (GAP-1063).
@@ -2821,6 +2825,10 @@ func (a *APIServer) handleAuditEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if event.Action == "" {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action is required"})
+		return
+	}
+	if !audit.IsKnownAction(event.Action) && !audit.IsKnownActionPrefix(event.Action) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported action"})
 		return
 	}
 	// Sandbox attribution comes only from an authenticated sandbox binding

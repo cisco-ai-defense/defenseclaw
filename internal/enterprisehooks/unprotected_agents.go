@@ -46,6 +46,36 @@ func UnprotectedAgentsRecordStale(modTime, now time.Time) bool {
 	return now.Sub(modTime) > UnprotectedAgentsMaxAge || modTime.After(now.Add(5*time.Minute))
 }
 
+// UnprotectedAgentsRecordMissing describes a record no scan has published.
+const UnprotectedAgentsRecordMissing = "missing (no scan has published it yet)"
+
+// UnprotectedAgentsStaleError is a record UnprotectedAgentsRecordStale
+// rejects; Age describes it (UnprotectedAgentsRecordAge).
+type UnprotectedAgentsStaleError struct{ Age string }
+
+func (e UnprotectedAgentsStaleError) Error() string {
+	return "enterprise hooks: unprotected-agents record is stale (" + e.Age + ")"
+}
+
+// UnprotectedAgentsRecordAge describes how old the record is.
+func UnprotectedAgentsRecordAge(modTime, now time.Time) string {
+	if modTime.After(now) {
+		return "dated " + modTime.Sub(now).Round(time.Second).String() + " in the future"
+	}
+	return now.Sub(modTime).Round(time.Second).String() + " old"
+}
+
+// UnprotectedAgentsScanPending is the one NOT COVERED row status and verify
+// show for a missing or stale record, as right after a fresh install or an
+// upgrade: a warning, not a verify failure, because no agent is known to be
+// unprotected and enforcement is unchanged (GAP-1430). An unreadable record
+// still fails verify.
+func UnprotectedAgentsScanPending(age, remedy string) string {
+	return "NOT COVERED (scan pending): the enumerator's unprotected-agents record is " + age +
+		" (limit " + UnprotectedAgentsMaxAge.String() + "), so agents installed since its last scan are not proven protected; " +
+		"enforcement is unchanged; the record refreshes on the next scheduled scan (every five minutes), or now with: " + remedy
+}
+
 // Status codes for an unprotected agent.
 const (
 	// UnprotectedCodeHookContractUnverified: the agent's version has no

@@ -8,6 +8,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -71,17 +73,35 @@ const (
 	codeRotationConfirmed enterprisebundle.Code = "rotation_confirmed"
 )
 
-var confirmedManifestSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var lowerSHA256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// secretTransactionArguments refuses a malformed --if-confirmed or
-// --undo-rotation and a combination with no meaning: --if-confirmed guards a
-// rotation, so it needs --bundle; --undo-rotation puts a value back, so it
-// takes neither.
+// secretTransactionArguments refuses a malformed --if-confirmed,
+// --undo-rotation or --undo-config and a combination with no meaning:
+// --if-confirmed guards a rotation, so it needs --bundle; --undo-rotation
+// puts a value back, so it takes neither; --undo-config belongs to that
+// put-back.
 func secretTransactionArguments(opts *enterpriseSecretOptions) error {
 	for _, flag := range []struct{ name, value string }{{"--if-confirmed", opts.ifConfirmed}, {"--undo-rotation", opts.undoRotation}} {
-		if flag.value != "" && flag.value != "none" && !confirmedManifestSHA256.MatchString(flag.value) {
+		if flag.value != "" && flag.value != "none" && !lowerSHA256Hex.MatchString(flag.value) {
 			return fmt.Errorf("%s takes the confirmed policy bundle's manifest SHA-256 (64 lowercase hex digits) or none, not %q", flag.name, flag.value)
 		}
+	}
+	if opts.undoConfig != "" {
+		if opts.undoConfig != "none" && !lowerSHA256Hex.MatchString(opts.undoConfig) {
+			return fmt.Errorf("--undo-config takes the SHA-256 of the config installed before the rotation (64 lowercase hex digits) or none, not %q", opts.undoConfig)
+		}
+		if opts.undoRotation == "" {
+			return errors.New("--undo-config belongs to a put-back: pass it with --undo-rotation")
+		}
+	}
+	if opts.ifStored != "" && opts.ifStored != "none" && !lowerSHA256Hex.MatchString(opts.ifStored) {
+		return fmt.Errorf("--if-stored takes the SHA-256 of the expected stored value (64 lowercase hex digits) or none for proven absence, not %q", opts.ifStored)
+	}
+	if opts.ifStored == "none" && runtime.GOOS != "windows" {
+		return errors.New("--if-stored none is available only on Windows")
+	}
+	if opts.undoRotation != "" && opts.ifStored == "" {
+		return errors.New("--undo-rotation requires --if-stored to protect a credential changed after the rotation")
 	}
 	if opts.ifConfirmed != "" && opts.bundle == "" {
 		return errors.New("--if-confirmed guards a rotation: pass it with --bundle")
@@ -104,6 +124,14 @@ func secretTransactionArguments(opts *enterpriseSecretOptions) error {
 // secret_ref_mismatch) says nothing about it. The caller holds the lock
 // bundle apply takes, so the confirmed bundle cannot change in between.
 func checkSecretTransaction(name string, opts *enterpriseSecretOptions, stored []byte, storedOK bool) error {
+	if opts.ifStored != "" {
+		sum := sha256.Sum256(stored)
+		if (opts.ifStored == "none" && storedOK) ||
+			(opts.ifStored != "none" && (!storedOK || hex.EncodeToString(sum[:]) != opts.ifStored)) {
+			return &enterprisebundle.Error{Code: "credential_changed", Detail: fmt.Sprintf(
+				"credential %s no longer holds the expected stored value; it was not changed", name)}
+		}
+	}
 	want, code := opts.ifConfirmed, codeConfirmedBundleChanged
 	if opts.undoRotation != "" {
 		want, code = opts.undoRotation, codeRotationConfirmed
@@ -147,6 +175,25 @@ func checkSecretTransaction(name string, opts *enterpriseSecretOptions, stored [
 		}
 	}
 	return nil
+}
+
+// undoRotationOnConfig reports whether a put-back (remove --undo-rotation)
+// runs on the very config that was installed before its rotation: the
+// wrapper journals the SHA-256 of the installed config bytes before it
+// stores the new value and passes it as --undo-config, and installed is the
+// config read now, under the lifecycle lock. Only then may the put-back take
+// a credential that config references: the config already referenced it
+// with no value stored, so removing it restores the state from before the
+// rotation. A config installed since (another ensure, or this run's own
+// lifecycle) may use the value the rotation stored, so the reference stands
+// (credential_in_use) and the wrapper keeps the credential and its journal
+// entry. "none" (no config was installed) never matches.
+func undoRotationOnConfig(opts *enterpriseSecretOptions, installed []byte) bool {
+	if opts.undoRotation == "" || !lowerSHA256Hex.MatchString(opts.undoConfig) {
+		return false
+	}
+	sum := sha256.Sum256(installed)
+	return hex.EncodeToString(sum[:]) == opts.undoConfig
 }
 
 // secretBindingCode is the errors[].code of a checkSecretBinding refusal.

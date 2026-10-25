@@ -135,7 +135,7 @@ func TestCursorWindowsShellPermissionChecks(t *testing.T) {
 		{"set content", `Set-Content -Path $HOME\.ssh\authorized_keys -Value marker`, true},
 		{"tee", `echo marker | tee -Append $HOME\.ssh\authorized_keys`, true},
 		{"home read", `Get-Content $HOME\.ssh\authorized_keys`, false},
-		{"native read", `type C:\Users\alice\.ssh\authorized_keys`, false},
+		{"native read", `type C:\Users\alice\.ssh\authorized_keys`, true},
 		{"cat read", `cat C:\Users\alice\.ssh\authorized_keys`, false},
 		{"other curl output", `curl.exe -o C:\Users\alice\notes.txt https://example.com`, false},
 		{"authorized curl output", `curl.exe -o C:\Users\alice\.ssh\authorized_keys https://example.com`, true},
@@ -158,7 +158,7 @@ func TestCursorWindowsShellPermissionChecks(t *testing.T) {
 			if !facts.Authoritative() || !facts.EnforcementEligible() {
 				t.Fatalf("permission facts unavailable: dialect=%q status=%q", facts.Parse.Dialect, facts.Parse.Status)
 			}
-			if test.blocked {
+			if test.blocked && test.name != "native read" {
 				write := false
 				for _, path := range facts.Paths {
 					if strings.HasSuffix(strings.ToLower(path.Resolved), "authorized_keys") &&

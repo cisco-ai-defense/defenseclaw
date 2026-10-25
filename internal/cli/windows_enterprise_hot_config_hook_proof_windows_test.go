@@ -7,10 +7,110 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+const hermesHotConfigProbeFixtureEnv = "HERMES_HOT_CONFIG_PROBE_FIXTURE"
+const hermesHotConfigProbeManifestEnv = "HERMES_HOT_CONFIG_PROBE_MANIFEST"
+
+// The probe executes the test binary as its installed CLI. The child parses
+// the real readiness flags, then models registered and missing owned hooks.
+func init() {
+	fixture := os.Getenv(hermesHotConfigProbeFixtureEnv)
+	if fixture == "" {
+		return
+	}
+	if len(os.Args) < 5 || os.Args[1] != "enterprise" || os.Args[2] != "hooks" || os.Args[3] != "readiness" {
+		fmt.Fprintln(os.Stderr, "unexpected hot-config hook probe arguments:", os.Args[1:])
+		os.Exit(2)
+	}
+	// Parse the production command's flags before returning fixture rows. An
+	// omitted --manifest would otherwise return a convincing success for the
+	// Unix default path on Windows.
+	if err := enterpriseHooksReadinessCmd.ParseFlags(os.Args[4:]); err != nil ||
+		!enterpriseHooksReadinessCmd.Flags().Changed("json") ||
+		!enterpriseHooksReadinessCmd.Flags().Changed("manifest") ||
+		len(enterpriseHooksReadinessCmd.Flags().Args()) != 0 ||
+		enterpriseHookManifest != os.Getenv(hermesHotConfigProbeManifestEnv) {
+		fmt.Fprintln(os.Stderr, "unexpected hot-config readiness flags or manifest:", os.Args[4:], enterpriseHookManifest, err)
+		os.Exit(2)
+	}
+	row := enterpriseHookReconcileRow{SID: "S-1-5-21-1-2-3-1002", Connector: "hermes"}
+	switch fixture {
+	case "registered":
+		row.OK = true
+	case "absent":
+		row.Error = "owned hook command not present"
+	case "unrelated_failure", "authorization_error":
+		row.OK = true
+	default:
+		fmt.Fprintln(os.Stderr, "unexpected hot-config hook probe fixture:", fixture)
+		os.Exit(2)
+	}
+	rows := []enterpriseHookReconcileRow{row}
+	if fixture == "unrelated_failure" {
+		rows = append(rows, enterpriseHookReconcileRow{SID: "S-1-5-21-1-2-3-1003", Connector: "codex", Error: "other target failed"})
+	}
+	authorizationError := ""
+	if fixture == "authorization_error" {
+		authorizationError = "protected record invalid"
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(struct {
+		OK                 bool                         `json:"ok"`
+		Scope              string                       `json:"scope"`
+		AuthorizationError string                       `json:"authorization_error,omitempty"`
+		Results            []enterpriseHookReconcileRow `json:"results"`
+	}{
+		OK:                 fixture == "registered",
+		Scope:              "machine_hook_registration",
+		AuthorizationError: authorizationError,
+		Results:            rows,
+	}); err != nil {
+		os.Exit(2)
+	}
+	if fixture != "registered" {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func TestWindowsHotConfigHermesRegistrationProof(t *testing.T) {
+	layout, err := managed.StandaloneWindowsLayoutForRoots(`C:\Program Files`, `C:\ProgramData With Spaces`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hermes := enterprisehooks.ManifestTarget{User: "operator", SID: "S-1-5-21-1-2-3-1002", Connector: "hermes"}
+	publicRefusal := enterpriseHookReconcileRow{SID: hermes.SID, Connector: "hermes", Error: "session-only HERMES_HOME cannot be observed"}
+	if got := windowsHotConfigUnprovenTargets([]enterprisehooks.ManifestTarget{hermes}, []enterpriseHookReconcileRow{publicRefusal}); len(got) != 1 {
+		t.Fatalf("public session-home refusal proved Hermes: %+v", got)
+	}
+	for _, tc := range []struct {
+		name     string
+		unproven int
+		wantErr  bool
+	}{
+		{name: "registered", unproven: 0},
+		{name: "absent", unproven: 1},
+		{name: "unrelated_failure", unproven: 0},
+		{name: "authorization_error", unproven: 1, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(hermesHotConfigProbeFixtureEnv, tc.name)
+			t.Setenv(hermesHotConfigProbeManifestEnv, layout.ManifestPath)
+			got, err := windowsEnterpriseHotConfigUnprovenTargetHooks(context.Background(), os.Args[0], layout, []enterprisehooks.ManifestTarget{hermes})
+			if (err != nil) != tc.wantErr || len(got) != tc.unproven {
+				t.Fatalf("Hermes %s registration proof = (%+v, %v), want %d unproven, error %t", tc.name, got, err, tc.unproven, tc.wantErr)
+			}
+		})
+	}
+}
 
 // GAP-0905: the hook proof reads the live verification rows; a target is
 // proven only by its own verified row (SID and connector, whatever their

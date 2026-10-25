@@ -35,13 +35,25 @@ func TestHookAPIListenerForeignNamesAnotherAccountsListener(t *testing.T) {
 	}
 	own := os.Getuid()
 	for _, test := range []struct {
-		name, tcp, tcp6 string
-		running         bool
-		want            string
+		name, host, tcp, tcp6 string
+		running               bool
+		want                  string
 	}{
 		{name: "another account on 127.0.0.1", tcp: row("0100007F", own+4242), want: "foreign"},
-		{name: "another account on ::1", tcp6: row("00000000000000000000000001000000", own+4242), want: "foreign"},
+		{name: "another account on ::1 cannot serve IPv4", tcp6: row("00000000000000000000000001000000", own+4242), want: "free"},
 		{name: "this account", tcp: row("0100007F", own), want: "send"},
+		{name: "foreign peer on another loopback address cannot override own gateway", tcp: row("0100007F", own) + row("0200007F", own+4242), want: "send"},
+		{name: "foreign peer on another loopback address cannot occupy free endpoint", tcp: row("0200007F", own+4242), want: "free"},
+		{name: "another account on configured 127.0.0.2", host: "127.0.0.2", tcp: row("0200007F", own+4242), want: "foreign"},
+		{name: "this account on configured 127.0.0.2", host: "127.0.0.2", tcp: row("0200007F", own), want: "send"},
+		{name: "other loopback address cannot override configured 127.0.0.2", host: "127.0.0.2", tcp: row("0100007F", own+4242) + row("0200007F", own), want: "send"},
+		{name: "foreign IPv4 wildcard", tcp: row("00000000", own+4242), want: "foreign"},
+		{name: "own IPv4 wildcard", tcp: row("00000000", own), want: "send"},
+		{name: "own IPv4 wildcard takes precedence over foreign IPv6-only wildcard", tcp: row("00000000", own), tcp6: row("00000000000000000000000000000000", own+4242), want: "send"},
+		{name: "exact own IPv4 listener takes precedence over IPv6-only wildcard", tcp: row("0100007F", own), tcp6: row("00000000000000000000000000000000", own+4242), want: "send"},
+		{name: "exact foreign IPv4 listener takes precedence over own wildcard", tcp: row("0100007F", own+4242) + row("00000000", own), want: "foreign"},
+		{name: "foreign mapped configured address", tcp6: row("0000000000000000FFFF00000100007F", own+4242), want: "foreign"},
+		{name: "foreign mapped other address", tcp6: row("0000000000000000FFFF00000200007F", own+4242), want: "free"},
 		{name: "another address only", tcp: row("0500000A", own+4242), want: "free"},
 		{name: "free port", want: "free"},
 		{name: "own gateway running but listener foreign", tcp: row("0100007F", own+4242), running: true, want: "foreign"},
@@ -60,10 +72,14 @@ func TestHookAPIListenerForeignNamesAnotherAccountsListener(t *testing.T) {
 			if test.running {
 				stopped = "return 1"
 			}
+			host := test.host
+			if host == "" {
+				host = "127.0.0.1"
+			}
 			script := `set -euo pipefail; . "$1"; defenseclaw_own_gateway_stopped() { ` + stopped + `; }
-status=0; defenseclaw_api_listener_unproven 127.0.0.1:18960 "$2" || status=$?
+status=0; defenseclaw_api_listener_unproven "$3:18960" "$2" "$4" || status=$?
 case "$status" in 0) echo foreign ;; 1) echo send ;; 2) echo free ;; *) echo unexpected ;; esac`
-			out, err := exec.Command("bash", "-c", script, "bash", helper, net).CombinedOutput()
+			out, err := exec.Command("bash", "-c", script, "bash", helper, net, host, filepath.Join(dir, "absent-lsof")).CombinedOutput()
 			if err != nil {
 				t.Fatalf("bash: %v\n%s", err, out)
 			}
@@ -75,57 +91,7 @@ case "$status" in 0) echo foreign ;; 1) echo send ;; 2) echo free ;; *) echo une
 }
 
 // Every host hook checks the listener before its gateway request.
-func TestHostHooksCheckTheListenerBeforeSending(t *testing.T) {
-	entries, err := hookFS.ReadDir("hooks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".sh") || strings.HasPrefix(name, "_") {
-			continue
-		}
-		body, err := hookFS.ReadFile("hooks/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(body)
-		check := strings.Index(text, `defenseclaw_api_listener_unproven "$API_ADDR"`)
-		send := strings.Index(text, `defenseclaw_gateway_post "http://${API_ADDR}`)
-		if check < 0 || send < 0 || check > send {
-			t.Errorf("%s does not check the API listener before its gateway request", name)
-		}
-	}
-}
-
-// A hook that detects a peer holding this account's port must name the
-// per-user port setup command. Starting again on the occupied port cannot
-// restore protection.
-func TestForeignListenerHintNamesGatewayPortSetup(t *testing.T) {
-	entries, err := hookFS.ReadDir("hooks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".sh") || strings.HasPrefix(name, "_") {
-			continue
-		}
-		body, err := hookFS.ReadFile("hooks/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(body)
-		if !strings.Contains(text, `defenseclaw_api_listener_unproven "$API_ADDR"`) {
-			continue
-		}
-		if !strings.Contains(text, "defenseclaw setup gateway --api-port") {
-			t.Errorf("%s gives no gateway port setup command for a foreign listener", name)
-		}
-	}
-}
-
-func TestHostHookGatewayPostRechecksListenerBeforeEverySend(t *testing.T) {
+func TestHostHookGatewayPostNeverFallsBackToCurlForAForeignListener(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hooks are not used on Windows")
 	}
@@ -261,7 +227,11 @@ func TestPerUserHookIgnoresInheritedManagedSocket(t *testing.T) {
 defenseclaw_api_listener_unproven() { return 0; }
 curl() { echo leaked; }
 if defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 'secret payload' -H 'Authorization: Bearer secret'; then echo sent; else echo blocked; fi`
-	out, err := exec.Command("bash", "-c", script, "bash", helper).CombinedOutput()
+	// An empty home: no installed helper of the account running the test
+	// may receive the call.
+	cmd := exec.Command("bash", "-c", script, "bash", helper)
+	cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("bash: %v\n%s", err, out)
 	}

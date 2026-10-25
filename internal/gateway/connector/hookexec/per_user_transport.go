@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -103,6 +104,31 @@ func NewPerUserGatewayHTTPClient(timeout time.Duration, apiAddr string) (*http.C
 // sent a status line.
 var errPerUserAnswerIncomplete = errors.New("per-user gateway answer incomplete")
 
+// errPerUserPeerUnverified wraps every failure of the connected-listener
+// check. A listener this transport could not prove to be this account's is
+// never an outage, whatever the check's own error wraps: a foreign listener
+// that closes or unbinds during the check (ENOENT, EOF, a reset) or a check
+// still running at the restart deadline must keep the refusal closed.
+var errPerUserPeerUnverified = errors.New("per-user gateway connected listener is unverified")
+
+// errPerUserPeerCheckUnfinished ends a per-user hook try (connectBy) whose
+// connection was open at its connect deadline while the listener's owner was
+// still being checked.
+var errPerUserPeerCheckUnfinished = fmt.Errorf("%w: its owner was still being checked at the connect deadline", errPerUserPeerUnverified)
+
+// perUserPeerCheck records, for one try, a connection that is open and whose
+// listener's owner is not proven yet (verifiedPerUserHTTPClient). The dial
+// outlives a canceled request, so only this mark says the try had reached a
+// listener when connectBy ended it.
+type perUserPeerCheck struct{ pending atomic.Bool }
+
+type perUserPeerCheckKey struct{}
+
+func withPerUserPeerCheck(ctx context.Context) (context.Context, *perUserPeerCheck) {
+	check := &perUserPeerCheck{}
+	return context.WithValue(ctx, perUserPeerCheckKey{}, check), check
+}
+
 // PerUserPostOutageExit is the exit status of `hook-post` for a gateway
 // outage (PerUserPostOutage), curl's "could not connect" status, which the
 // shell hooks and in-agent plugins already read as this account's gateway
@@ -115,8 +141,8 @@ const PerUserPostOutageExit = 7
 // whose owner could not be verified, a timeout after the connection and
 // every other error are not.
 func PerUserPostOutage(err error) bool {
-	if err == nil || errors.Is(err, errPerUserAnswerIncomplete) || errors.Is(err, errInvalidHookRequest) ||
-		errors.Is(err, errGatewayTookCallNoAnswer) {
+	if err == nil || errors.Is(err, errPerUserPeerUnverified) || errors.Is(err, errPerUserAnswerIncomplete) ||
+		errors.Is(err, errInvalidHookRequest) || errors.Is(err, errGatewayTookCallNoAnswer) {
 		return false
 	}
 	return gatewayRestartShaped(err)
@@ -204,9 +230,16 @@ func verifiedPerUserHTTPClient(
 				if err != nil {
 					return nil, err
 				}
+				check, _ := ctx.Value(perUserPeerCheckKey{}).(*perUserPeerCheck)
+				if check != nil {
+					check.pending.Store(true)
+				}
 				if err := verify(conn); err != nil {
 					_ = conn.Close()
-					return nil, fmt.Errorf("per-user gateway connected listener is unverified: %w", err)
+					return nil, fmt.Errorf("%w: %w", errPerUserPeerUnverified, err)
+				}
+				if check != nil {
+					check.pending.Store(false)
 				}
 				return conn, nil
 			},

@@ -102,6 +102,9 @@ func TestWindowsStatusV2Blocks(t *testing.T) {
 	if !strings.Contains(string(document), "session-only HERMES_HOME") {
 		t.Fatalf("managed Hermes status omitted the unverified session home: %s", document)
 	}
+	if !strings.Contains(string(document), "NOT COVERED") {
+		t.Fatalf("managed Hermes status did not label unobservable coverage: %s", document)
+	}
 	if result.OpenShell == nil || result.OpenShell.ReasonCode != enterprisestatus.CodePlatformUnsupported || result.OpenShell.DriverAvailable != "none" {
 		t.Fatalf("openshell = %+v", result.OpenShell)
 	}
@@ -110,7 +113,15 @@ func TestWindowsStatusV2Blocks(t *testing.T) {
 	}
 }
 
-func TestWindowsVerifyV2RefusesUnobservableHermesSessionHome(t *testing.T) {
+// GAP-1433: the unobservable session-only home is reported NOT COVERED, never
+// certified, and never a verify failure: lifecycle verify exits 0 with
+// coverage and security incomplete, as on Linux and macOS. Public hooks
+// verify still refuses to attest the home (GAP-0766).
+func TestWindowsVerifyV2ReportsUnobservableHermesSessionHomeNotCovered(t *testing.T) {
+	previousAudit := windowsManagedHermesCoverageAudit
+	checks := 0
+	windowsManagedHermesCoverageAudit = func() error { checks++; return nil }
+	t.Cleanup(func() { windowsManagedHermesCoverageAudit = previousAudit })
 	cfg := windowsStatusV2Config()
 	fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
 		cfg: cfg,
@@ -123,13 +134,17 @@ func TestWindowsVerifyV2RefusesUnobservableHermesSessionHome(t *testing.T) {
 	result := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.4")
 	result.Installed, result.CoverageComplete, result.SecurityComplete = true, true, true
 	applyWindowsEnterpriseStatusV2(result)
-	if code := result.Finish("windows", 0); code != enterprisestatus.WindowsExitFailure || result.OK ||
+	if code := result.Finish("windows", 0); code != 0 || !result.OK || len(result.Errors) != 0 ||
 		result.SecurityComplete || result.CoverageComplete {
-		t.Fatalf("unverified Hermes verify result: code=%d ok=%v security=%v coverage=%v", code, result.OK, result.SecurityComplete, result.CoverageComplete)
+		t.Fatalf("unverified Hermes verify result: code=%d ok=%v errors=%+v security=%v coverage=%v", code, result.OK, result.Errors, result.SecurityComplete, result.CoverageComplete)
 	}
-	if len(result.Errors) == 0 || !strings.Contains(result.Errors[0].Message, "session-only HERMES_HOME") ||
+	if message := strings.Join(messagesOfCode(result.Warnings, enterprisestatus.CodeStatusDetailUnavailable), "\n"); !strings.Contains(message, "session-only HERMES_HOME") ||
+		!strings.Contains(message, "NOT COVERED") ||
 		result.Connectors["hermes"].HooksInstalled != enterprisestatus.HooksInstalledUnknown {
-		t.Fatalf("unverified Hermes cause or coverage missing: errors=%+v connector=%+v", result.Errors, result.Connectors["hermes"])
+		t.Fatalf("unverified Hermes cause or coverage missing: warnings=%+v connector=%+v", result.Warnings, result.Connectors["hermes"])
+	}
+	if err := enterprisehooks.ManagedHermesSessionHomeAttestation("windows", "hermes", true, false); err == nil {
+		t.Fatal("public coverage attestation certified a session-only Hermes home")
 	}
 	// The unknown state publishes no targets: the lifecycle schema forbids them.
 	document, err := json.Marshal(result)
@@ -143,11 +158,15 @@ func TestWindowsVerifyV2RefusesUnobservableHermesSessionHome(t *testing.T) {
 	// Ensure prints no block but cannot certify what verify refuses.
 	ensure := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "1.0.4")
 	ensure.Installed, ensure.CoverageComplete, ensure.SecurityComplete = true, true, true
+	ensure.Readiness.Gateway = true
 	applyWindowsEnterpriseStatusV2(ensure)
 	if code := ensure.Finish("windows", 0); code != 0 || ensure.SecurityComplete || ensure.CoverageComplete || ensure.Connectors != nil ||
 		messagesWithCode(ensure.Warnings, enterprisestatus.CodeStatusDetailUnavailable) != 1 {
 		t.Fatalf("ensure with unverified Hermes: code=%d security=%v coverage=%v connectors=%v warnings=%+v",
 			code, ensure.SecurityComplete, ensure.CoverageComplete, ensure.Connectors, ensure.Warnings)
+	}
+	if checks != 1 || !strings.Contains(ensure.Warnings[0].Message, "NOT COVERED") {
+		t.Fatalf("ensure omitted Hermes coverage audit or reason: checks=%d warnings=%+v", checks, ensure.Warnings)
 	}
 }
 
@@ -225,4 +244,14 @@ func messagesWithCode(messages []enterprisestatus.Message, code string) int {
 		}
 	}
 	return n
+}
+
+func messagesOfCode(messages []enterprisestatus.Message, code string) []string {
+	var out []string
+	for _, message := range messages {
+		if message.Code == code {
+			out = append(out, message.Message)
+		}
+	}
+	return out
 }

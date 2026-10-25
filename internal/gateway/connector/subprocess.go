@@ -60,6 +60,9 @@ type templateData struct {
 	// InstallMarkerJS is the managed deployment's install marker, escaped for
 	// a JavaScript double-quoted string; empty when unused.
 	InstallMarkerJS string
+	// LifecycleMarkerJS is the standalone Unix lifecycle's public, root-owned
+	// run marker. Plugins close promptly while install or upgrade holds it.
+	LifecycleMarkerJS string
 	// ServiceUID is the standalone gateway's service uid trusted as the
 	// hook socket owner (with root); 0 when unused.
 	ServiceUID int

@@ -19,6 +19,7 @@
 package actionfacts
 
 import (
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -472,8 +473,32 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 			result.StaticGlob = staticValue
 		}
 		result.Value = ""
+	} else {
+		result.literalTilde = strings.HasPrefix(staticValue, "~")
 	}
 	return result
+}
+
+// carryPOSIXLiteralTildes keeps the parser's quoted-tilde mark on the argv a
+// wrapper (sudo, env, command, exec) passes on: each child command whose
+// argv is a suffix of the parent's takes the mark of the aligned word.
+func carryPOSIXLiteralTildes(child *parseOutput, parent CommandFact) {
+	if len(parent.Arguments) != len(parent.Argv) {
+		return
+	}
+	for i := range child.commands {
+		command := &child.commands[i]
+		offset := len(parent.Argv) - len(command.Argv)
+		if offset <= 0 || len(command.Arguments) != len(command.Argv) ||
+			!slices.Equal(command.Argv, parent.Argv[offset:]) {
+			continue
+		}
+		for j := range command.Arguments {
+			if parent.Arguments[offset+j].literalTilde {
+				command.Arguments[j].literalTilde = true
+			}
+		}
+	}
 }
 
 func posixControlFlowUncertain(stmt *syntax.Stmt, stack []syntax.Node) bool {
@@ -1080,6 +1105,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 			// The argv was projected exactly by the surrounding POSIX parser;
 			// it does not introduce a second action dialect.
 			child.dialect = DialectPOSIX
+			carryPOSIXLiteralTildes(&child, command)
 		default:
 			continue
 		}

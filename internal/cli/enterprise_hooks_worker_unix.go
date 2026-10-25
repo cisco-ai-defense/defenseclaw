@@ -408,37 +408,13 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		response.CopilotVSCode = vscode
 		return respond(response, 0)
 	case enterpriseHookWorkerOpDiscover:
-		versions := map[string]string{}
-		reasons := map[string]string{}
-		surfaces := map[string][]connector.AgentSurface{}
-		for _, name := range request.Connectors {
-			name = strings.ToLower(strings.TrimSpace(name))
-			if name == "" {
-				continue
-			}
-			var version, reason string
-			if request.StaticDiscovery {
-				version, reason = enterpriseHookWorkerDiscoverStaticVersion(ctx, request.Home, name)
-			} else {
-				version, reason = enterpriseHookWorkerDiscoverVersion(ctx, request.Home, name, true)
-			}
-			if version != "" {
-				versions[name] = version
-			} else if reason != "" {
-				reasons[name] = reason
-			}
-			// Host apps are never run; an engine CLI bundled in one is run
-			// only outside a static (untrusted-home) discovery.
-			if found := enterpriseHookWorkerDiscoverSurfaces(ctx, request.Home, name, !request.StaticDiscovery); len(found) != 0 {
-				surfaces[name] = found
-			}
-			if name == "kiro" {
-				// The Kiro IDE is read, never run, so static discovery reads it too.
-				enterprisehooks.PutUnixKiroIDEForms(enterpriseHookWorkerDiscoverKiroIDE(request.Home), versions, reasons)
-			}
-		}
-		installs := enterprisehooks.DiscoverUnixPrivateAgentInstalls(request.Home, request.Connectors)
-		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons, Surfaces: surfaces, PrivateInstalls: installs}, 0)
+		// The parent can only kill a worker whose request outlives its
+		// deadline. Give discovery its own deadline so the private-home
+		// walk can return an incomplete result while there is still time
+		// to write the response.
+		scanCtx, cancel := context.WithTimeout(ctx, workerTimeout(request)*3/4)
+		defer cancel()
+		return respond(enterpriseHookWorkerDiscoverWithin(scanCtx, request), 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {
 			if target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModeBlockPersonalClaude {
@@ -488,10 +464,11 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 // enterpriseHookWorkerDiscoverSurfaces and
 // enterpriseHookWorkerDiscoverKiroIDE are replaceable in tests.
 var (
-	enterpriseHookWorkerDiscoverVersion       = enterprisehooks.DiscoverUnixAgentVersion
-	enterpriseHookWorkerDiscoverStaticVersion = enterprisehooks.DiscoverUnixAgentVersionStatically
-	enterpriseHookWorkerDiscoverSurfaces      = enterprisehooks.DiscoverUnixAgentSurfaces
-	enterpriseHookWorkerDiscoverKiroIDE       = enterprisehooks.DiscoverUnixKiroIDEForms
+	enterpriseHookWorkerDiscoverVersion         = enterprisehooks.DiscoverUnixAgentVersion
+	enterpriseHookWorkerDiscoverStaticVersion   = enterprisehooks.DiscoverUnixAgentVersionStatically
+	enterpriseHookWorkerDiscoverSurfaces        = enterprisehooks.DiscoverUnixAgentSurfaces
+	enterpriseHookWorkerDiscoverKiroIDE         = enterprisehooks.DiscoverUnixKiroIDEForms
+	enterpriseHookWorkerDiscoverPrivateInstalls = enterprisehooks.DiscoverUnixPrivateAgentInstalls
 )
 
 func validateEnterpriseHookWorkerIdentity(request enterpriseHookWorkerRequest) error {
@@ -1466,3 +1443,135 @@ func sortedWorkerJobs(byUID map[int]*enterpriseHookWorkerJob) []enterpriseHookWo
 }
 
 var errEnterpriseHookWorkerNoResult = errors.New("worker returned no result for this target")
+
+// enterpriseHookWorkerScanGrace is how long a discover worker waits, after
+// its scan deadline, for a scan that observes the deadline to return.
+var enterpriseHookWorkerScanGrace = 2 * time.Second
+
+// enterpriseHookWorkerDiscovery is what one discover worker has found so far.
+type enterpriseHookWorkerDiscovery struct {
+	mu          sync.Mutex
+	versions    map[string]string
+	reasons     map[string]string
+	surfaces    map[string][]connector.AgentSurface
+	unlisted    []enterprisehooks.PrivateAgentInstall
+	installs    []enterprisehooks.PrivateAgentInstall
+	finished    map[string]bool
+	privateDone bool
+}
+
+// enterpriseHookWorkerDiscoverWithin answers by ctx's deadline even when
+// discovery cannot. A file system call that never returns (macOS holding an
+// open() of a home folder for a privacy or file-provider decision, a hung
+// network mount) never observes a context, so a worker that waited for it
+// timed out and the parent discarded every version it had found: a supported
+// installed Hermes stayed unenrolled after a reinstall (GAP-1413). The worker
+// now answers with the versions already found, and names each connector it
+// could not finish, and the private-install scan when it did not return, as
+// incomplete, so the account is reported NOT COVERED with the reason and the
+// next cycle tries again. The worker exits after it answers, which ends the
+// blocked call's goroutine.
+func enterpriseHookWorkerDiscoverWithin(ctx context.Context, request enterpriseHookWorkerRequest) enterpriseHookWorkerResponse {
+	found := &enterpriseHookWorkerDiscovery{
+		versions: map[string]string{},
+		reasons:  map[string]string{},
+		surfaces: map[string][]connector.AgentSurface{},
+		finished: map[string]bool{},
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		enterpriseHookWorkerDiscover(ctx, request, found)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		grace := time.NewTimer(enterpriseHookWorkerScanGrace)
+		select {
+		case <-done:
+		case <-grace.C:
+		}
+		grace.Stop()
+	}
+	return found.response(request.Connectors)
+}
+
+func enterpriseHookWorkerDiscover(ctx context.Context, request enterpriseHookWorkerRequest, found *enterpriseHookWorkerDiscovery) {
+	for _, name := range request.Connectors {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		var version, reason string
+		if request.StaticDiscovery {
+			version, reason = enterpriseHookWorkerDiscoverStaticVersion(ctx, request.Home, name)
+		} else {
+			version, reason = enterpriseHookWorkerDiscoverVersion(ctx, request.Home, name, true)
+		}
+		// Host apps are never run; an engine CLI bundled in one is run
+		// only outside a static (untrusted-home) discovery.
+		surfaces, complete := enterpriseHookWorkerDiscoverSurfaces(ctx, request.Home, name, !request.StaticDiscovery)
+		var kiroIDE []enterprisehooks.KiroForm
+		if name == "kiro" {
+			// The Kiro IDE is read, never run, so static discovery reads it too.
+			kiroIDE = enterpriseHookWorkerDiscoverKiroIDE(request.Home)
+		}
+		found.mu.Lock()
+		if version != "" {
+			found.versions[name] = version
+		} else if reason != "" {
+			found.reasons[name] = reason
+		}
+		if len(surfaces) != 0 {
+			found.surfaces[name] = surfaces
+		}
+		if !complete {
+			found.unlisted = append(found.unlisted, enterprisehooks.PrivateAgentInstall{Connector: name, Incomplete: true, Skipped: enterprisehooks.PrivateInstallSkippedExtensions})
+		}
+		if name == "kiro" {
+			enterprisehooks.PutUnixKiroIDEForms(kiroIDE, found.versions, found.reasons)
+		}
+		found.finished[name] = true
+		found.mu.Unlock()
+	}
+	installs := enterpriseHookWorkerDiscoverPrivateInstalls(ctx, request.Home, request.Connectors)
+	found.mu.Lock()
+	found.installs, found.privateDone = installs, true
+	found.mu.Unlock()
+}
+
+// response is the worker's answer from what was found so far.
+func (found *enterpriseHookWorkerDiscovery) response(connectors []string) enterpriseHookWorkerResponse {
+	found.mu.Lock()
+	defer found.mu.Unlock()
+	response := enterpriseHookWorkerResponse{
+		Versions: make(map[string]string, len(found.versions)),
+		Reasons:  make(map[string]string, len(found.reasons)),
+		Surfaces: make(map[string][]connector.AgentSurface, len(found.surfaces)),
+	}
+	for name, version := range found.versions {
+		response.Versions[name] = version
+	}
+	for name, reason := range found.reasons {
+		response.Reasons[name] = reason
+	}
+	for name, surfaces := range found.surfaces {
+		response.Surfaces[name] = append([]connector.AgentSurface(nil), surfaces...)
+	}
+	installs := append([]enterprisehooks.PrivateAgentInstall(nil), found.installs...)
+	incomplete := func(name string) {
+		installs = append(installs, enterprisehooks.PrivateAgentInstall{Connector: name, Incomplete: true, Skipped: enterprisehooks.PrivateInstallSkippedTimedOut})
+	}
+	if !found.privateDone {
+		for _, name := range enterprisehooks.UnixPrivateInstallConnectors(connectors) {
+			incomplete(name)
+		}
+	}
+	for _, name := range connectors {
+		if name = strings.ToLower(strings.TrimSpace(name)); name != "" && !found.finished[name] {
+			incomplete(name)
+		}
+	}
+	response.PrivateInstalls = append(installs, found.unlisted...)
+	return response
+}

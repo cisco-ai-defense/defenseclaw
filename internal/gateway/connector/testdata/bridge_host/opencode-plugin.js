@@ -56,6 +56,9 @@ const DC_FOREIGN_GUARD = "{{.ForeignHookGuardJS}}";
 // the deployment was uninstalled and this plugin stops failing closed. A
 // standard user cannot remove the marker. Empty keeps the fail mode.
 const DC_INSTALL_MARKER = "{{.InstallMarkerJS}}";
+// The standalone Unix lifecycle publishes this public, root-owned marker
+// before it can stop the gateway and removes it after readiness or recovery.
+const DC_LIFECYCLE_MARKER = "{{.LifecycleMarkerJS}}";
 // Windows standalone installs reach the gateway over loopback TCP, where a
 // local user can hold the port while the gateway restarts, and this plugin
 // cannot compare the listener with the gateway service the way the hook
@@ -307,6 +310,19 @@ async function defenseclawDeploymentRemoved() {
   }
 }
 
+async function defenseclawManagedLifecycleHeld() {
+  if (!DC_LIFECYCLE_MARKER) return false;
+  try {
+    await lstat(DC_LIFECYCLE_MARKER);
+    return true;
+  } catch (err) {
+    // Only a definite absence ends the install window.
+    return !err || err.code !== "ENOENT";
+  }
+}
+
+const DC_MANAGED_LIFECYCLE_TEXT = "DefenseClaw is being installed or upgraded on this computer; try again in a moment.";
+
 // defenseclawGatewayJSON parses a gateway answer and refuses one that
 // repeats a key in any object. JSON.parse keeps the last copy, so
 // {"action":"block","action":"allow"} would read as allow; the native and
@@ -506,13 +522,38 @@ function defenseclawPerUserNativePostBinary() {
   return binary;
 }
 
+// defenseclawPerUserHookPostBinary picks the small hook-post helper the POSIX
+// installer puts beside the gateway, so a hook event does not start the full
+// gateway CLI; both read the same JSON request and run the same
+// connected-peer check. An install without it (Windows, or an older
+// installer's roll-forward) keeps the verified gateway CLI. A present but
+// untrusted helper is refused, never bypassed.
+function defenseclawPerUserHookPostBinary() {
+  const gateway = defenseclawPerUserNativePostBinary();
+  const helper = join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-hook-post.exe" : "defenseclaw-hook-post");
+  let info;
+  try {
+    info = lstatSync(helper);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return gateway;
+    throw error;
+  }
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error("per-user hook helper path is untrusted");
+  }
+  if (process.platform !== "win32" && (info.uid !== userInfo().uid || (info.mode & 0o022) !== 0)) {
+    throw new Error("per-user hook helper path is writable by another account");
+  }
+  return helper;
+}
+
 // defenseclawFetch posts to the gateway over the managed hook socket when one
 // is configured. A per-user post goes through the native helper, which
 // verifies the same connected socket it sends on.
 async function defenseclawFetch(path, init, token) {
   if (!DC_HOOK_SOCKET) {
     if (DC_PER_USER_NATIVE_POST) {
-      const binary = defenseclawPerUserNativePostBinary();
+      const binary = defenseclawPerUserHookPostBinary();
       const output = execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
         input: JSON.stringify({ path, headers: init.headers || {}, body: String(init.body || "") }),
         timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8",
@@ -699,7 +740,9 @@ async function defenseclawLogFailOpen(reason, category) {
 }
 
 // The installer holds this data-directory lock while it replaces this
-// account's stopped gateway. An open outage mode cannot bypass that upgrade.
+// account's stopped gateway. An open outage mode cannot bypass that upgrade:
+// a failure blocks, while a call the gateway answered keeps its answer in the
+// default and permissive tiers (owner decision 2026-10-24, GAP-1372).
 const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account, " +
   "and its gateway starts again when that is done. Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install. `defenseclaw-gateway status` shows its state.";
 
@@ -751,7 +794,7 @@ async function defenseclawFailModeNow(mode, actionable) {
 }
 
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
-  if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+  if (actionable && await defenseclawManagedLifecycleHeld()) return { reason: DC_MANAGED_LIFECYCLE_TEXT };
   let token;
   try {
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
@@ -794,8 +837,10 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       body: JSON.stringify(payload),
       signal: controller.signal,
     }, token), controller.signal);
-    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
     if (!res.ok) {
+      // During an install an error status blocks; an answer is kept
+      // (GAP-1372).
+      if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
       // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
       // is an outage, as in the shell hooks, so strict availability closes it.
       if (await defenseclawFailModeNow(res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE, actionable) === "closed") {
@@ -806,9 +851,10 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       return null;
     }
     const data = defenseclawGatewayJSON(await res.text());
-    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+    if (actionable && await defenseclawManagedLifecycleHeld()) return { reason: DC_MANAGED_LIFECYCLE_TEXT };
 
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+      if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
     const out = data && data.hook_output;
@@ -1017,6 +1063,7 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
   return {
     config: async (config) => {
       defenseclawConfigure(config);
+      if (await defenseclawManagedLifecycleHeld()) return;
       await defenseclawPostLoadHeartbeat(cwd);
     },
     // OpenCode publishes its session lifecycle through the generic event
@@ -1036,6 +1083,7 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
     // The decision is resolved BEFORE the throw so a fail-open transport
     // error never turns into an accidental block.
     "tool.execute.before": async (input, output) => {
+      if (await defenseclawManagedLifecycleHeld()) throw defenseclawBlock(client, DC_MANAGED_LIFECYCLE_TEXT);
       // Every call runs the check, also after a block at load (which holds
       // for the process), so the gateway records each denied call.
       const startupBlock = await defenseclawStartupGuard;

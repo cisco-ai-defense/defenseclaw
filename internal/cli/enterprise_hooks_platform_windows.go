@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -23,6 +24,19 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
+
+var enterpriseHookWindowsRegistrationVerifier = enterprisehooks.VerifyWindowsManagedRegistration
+
+// The guardian publishes readiness for hooks it actually installed. The
+// lifecycle's separate coverage report still refuses to certify a Hermes
+// home selected only by a later user session.
+func enterpriseHookGuardianVerify(ctx context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "hermes") &&
+		cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration() {
+		return enterpriseHookWindowsRegistrationVerifier(ctx, opts)
+	}
+	return enterprisehooks.Verify(ctx, opts)
+}
 
 var enterpriseHookSIDProfilePath = windowsEnterpriseHookSIDProfilePath
 

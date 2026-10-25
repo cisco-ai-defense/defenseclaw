@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -144,7 +145,10 @@ def test_grafana_auth_is_attached_only_to_exact_loopback_grafana_origin(
     # ``\n`` into CRLF on Windows, which this parser intentionally rejects.
     password.write_bytes(b"A" * 32 + b"\n")
     audit.configure_grafana_auth(password)
+    from defenseclaw.observability import local_stack
+
     requests: list[object] = []
+    verified: list[tuple[str, str, float, int]] = []
 
     class Response:
         def __enter__(self):
@@ -160,13 +164,47 @@ def test_grafana_auth_is_attached_only_to_exact_loopback_grafana_origin(
         requests.append(request)
         return Response()
 
-    monkeypatch.setattr(audit.urllib.request, "urlopen", fake_urlopen)
+    def fake_verified_get(path: str, authorization: str, *, timeout: float, max_response_bytes: int):
+        verified.append((path, authorization, timeout, max_response_bytes))
+        return 200, b"{}"
 
-    assert audit.request_json("http://127.0.0.1:3000/api/search") == {}
+    monkeypatch.setattr(audit.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(local_stack, "_grafana_verified_get", fake_verified_get, raising=False)
+
+    assert audit.request_json("http://127.0.0.1:3000/api/search", {"type": "dash-db"}) == {}
     assert audit.request_json("http://localhost:3000/api/search") == {}
-    assert isinstance(requests[0], audit.urllib.request.Request)
-    assert requests[0].get_header("Authorization", "").startswith("Basic ")
-    assert requests[1] == "http://localhost:3000/api/search"
+    assert verified == [("/api/search?type=dash-db", audit._GRAFANA_AUTHORIZATION, audit.DEFAULT_REQUEST_TIMEOUT_SECONDS, 16 * 1024 * 1024)]
+    assert verified[0][1].startswith("Basic ")
+    assert requests == ["http://localhost:3000/api/search"]
+
+    def refuse_peer(_path: str, _authorization: str, *, timeout: float, max_response_bytes: int):
+        raise OSError("connected Grafana peer unverified")
+
+    monkeypatch.setattr(local_stack, "_grafana_verified_get", refuse_peer)
+    with pytest.raises(audit.AuditError, match="unverified"):
+        audit.request_json("http://127.0.0.1:3000/api/search")
+    assert requests == ["http://localhost:3000/api/search"]
+
+    monkeypatch.setattr(local_stack, "_grafana_verified_get", lambda *_args, **_kwargs: (302, b""))
+    with pytest.raises(audit.AuditError, match="redirect"):
+        audit.request_json("http://127.0.0.1:3000/api/search")
+
+
+def test_grafana_live_audit_imports_its_verifier_from_source_without_pythonpath() -> None:
+    source = """
+import importlib.util
+import sys
+spec = importlib.util.spec_from_file_location('audit', 'scripts/check_grafana_dashboards.py')
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+from defenseclaw.observability.local_stack import _grafana_verified_get
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", source], cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": ""}, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_prometheus_label_inventory_includes_unchanged_canonical_v8_fields() -> None:

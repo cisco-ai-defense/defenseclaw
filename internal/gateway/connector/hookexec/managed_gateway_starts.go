@@ -101,8 +101,11 @@ func newManagedHookHTTPClient(ctx context.Context, opts Options, timeout time.Du
 // causes: the service is not running, nothing accepts the connection, or
 // the connection closed before any answer. Any other peer-verification
 // failure is final: a listener that is not the gateway gets no second try.
+// A per-user listener the transport refused is final whatever the check
+// error wraps (one that closed or unbound during its owner check reads
+// ENOENT, EOF, a reset, a refusal or the connect deadline).
 func gatewayRestartShaped(err error) bool {
-	if err == nil {
+	if err == nil || errors.Is(err, errPerUserPeerUnverified) {
 		return false
 	}
 	if errors.Is(err, errManagedGatewayNotRunning) || errors.Is(err, errGatewayNotConnected) {
@@ -326,6 +329,7 @@ func connectBy(ctx context.Context, deadline time.Time) (tryCtx context.Context,
 	connected := make(chan struct{})
 	var once sync.Once
 	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { once.Do(func() { close(connected) }) }}
+	ctx, peerCheck := withPerUserPeerCheck(ctx)
 	tryCtx, cancel := context.WithCancelCause(httptrace.WithClientTrace(ctx, trace))
 	go func() {
 		timer := time.NewTimer(time.Until(deadline))
@@ -335,7 +339,14 @@ func connectBy(ctx context.Context, deadline time.Time) (tryCtx context.Context,
 			select {
 			case <-connected:
 			default:
-				cancel(errGatewayNotConnected)
+				if peerCheck.pending.Load() {
+					// A listener took the connection and its owner is not
+					// proven yet (the Windows tuple wait of one that
+					// closed at once): never an outage.
+					cancel(errPerUserPeerCheckUnfinished)
+				} else {
+					cancel(errGatewayNotConnected)
+				}
 			}
 		case <-connected:
 		case <-tryCtx.Done():

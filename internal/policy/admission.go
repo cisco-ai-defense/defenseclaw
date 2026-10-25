@@ -18,6 +18,7 @@ package policy
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,7 +113,16 @@ func CompileAdmission(cfg *config.Config) map[string]CompiledAdmission {
 			skill := cfg.Scanners.SkillScanner
 			derived = derivedScannerGate(skill.EffectiveFailOnSeverity(), skill.EffectiveReviewQueueMin())
 		}
-		out[assetType] = compileAssetType(assetType, own, adm.Defaults, derived)
+		compiled := compileAssetType(assetType, own, adm.Defaults, derived, assetType == config.AdmissionTypeMCP && legacyStrictMCP(adm))
+		if assetType == config.AdmissionTypeMCP && legacyBalancedDefaultMCP(adm) {
+			// policy activate default on 1.0.0-1.0.3 persisted the old
+			// shipped MCP actions. Treat only that exact preset as balanced.
+			for _, severity := range []string{"HIGH", "MEDIUM", "LOW"} {
+				compiled.Actions[severity] = actionWarn
+			}
+			compiled.Source = "compat:pre-1.0.4 default"
+		}
+		out[assetType] = compiled
 	}
 	return out
 }
@@ -225,8 +235,81 @@ func AdmissionFor(compiled map[string]CompiledAdmission, assetType string) *Comp
 	return &c
 }
 
-func compileAssetType(assetType string, own, defaults config.AdmissionAssetType, derived map[string]CompiledAction) CompiledAdmission {
+// legacyStrictMCP recognizes the v8 -> v9 strict preset representation:
+// migration wrote the strict per-skill actions but left MCP severities equal
+// to the old built-in map unset. Preserve that selected tier on upgrade.
+func legacyStrictMCP(adm config.AdmissionConfig) bool {
+	if adm.Defaults.AllowListBypassScan == nil || *adm.Defaults.AllowListBypassScan || !adm.Defaults.Actions.IsZero() {
+		return false
+	}
+	skill := compileActionMap(adm.Skill.Actions)
+	return skill["HIGH"] == actionQuarantine && skill["MEDIUM"] == actionQuarantine && skill["LOW"] == actionWarn
+}
+
+// legacyBalancedDefaultMCP recognizes the exact MCP action map that the
+// pre-1.0.4 default preset wrote to config.yaml. An explicit changed severity
+// stays an administrator choice and is never translated.
+func legacyBalancedDefaultMCP(adm config.AdmissionConfig) bool {
+	d := adm.Defaults
+	if d.ScanOnInstall == nil || !*d.ScanOnInstall || d.AllowListBypassScan == nil || !*d.AllowListBypassScan {
+		return false
+	}
+	defaults := compileActionMap(d.Actions)
+	if len(defaults) != len(AdmissionSeverities) ||
+		defaults["CRITICAL"] != actionQuarantine || defaults["HIGH"] != actionQuarantine ||
+		defaults["MEDIUM"] != actionWarn || defaults["LOW"] != actionWarn || defaults["INFO"] != actionWarn {
+		return false
+	}
+	mcp := compileActionMap(adm.MCP.Actions)
+	return len(mcp) == 2 && mcp["MEDIUM"] == actionQuarantine &&
+		mcp["LOW"] == (CompiledAction{Install: "none", File: "none", Runtime: "block"})
+}
+
+// WarnJudgeOnlyPluginHigh is the GAP-1389 pre-step before the admission
+// decision: with the built-in plugin HIGH action on the default or permissive
+// tier, a plugin whose only HIGHs are judge findings (LLM-OB-*, META-LLM-001)
+// and that has no static concrete threat (a static MEDIUM or above other than
+// SCAN-LLM-NO-SOURCE) warns at HIGH. Findings keep their severity; explicit
+// actions, scanner overrides, a blocking MEDIUM, strict and Secure Client hold.
+func WarnJudgeOnlyPluginHigh(cfg *config.Config, connector string, input *AdmissionInput) {
+	adm, scan := input.Admission, input.ScanResult
+	if cfg == nil || cfg.SecureClientIntegration() || adm == nil || scan == nil || input.TargetType != config.AdmissionTypePlugin ||
+		cfg.Admission.Plugin.Actions.High != nil || cfg.Admission.Defaults.Actions.High != nil || legacyStrictMCP(cfg.Admission) ||
+		!strings.EqualFold(scan.MaxSeverity, "HIGH") || scan.TotalFindings != len(scan.Findings) {
+		return
+	}
+	if m := effectiveAction(adm, &ScanResultInput{MaxSeverity: "MEDIUM", ScannerName: scan.ScannerName}); m.Install == "block" || m.Runtime == "block" || m.File == "quarantine" {
+		return
+	}
+	judgeHigh := false
+	for _, f := range scan.Findings {
+		rank, id := severityRank(f.Severity), f.RuleID
+		judge := (strings.HasPrefix(id, "LLM-") && id != "LLM-SCAN-ERROR") || strings.HasPrefix(id, "META-LLM-")
+		switch {
+		case rank == 4 && (strings.HasPrefix(id, "LLM-OB-") || id == "META-LLM-001"):
+			judgeHigh = true
+		case rank == 0 || rank >= 4 || (rank == 3 && !judge && id != "SCAN-LLM-NO-SOURCE"):
+			return
+		}
+	}
+	if !judgeHigh || cfg.HookPolicyTierForConnector(connector) == config.HookPolicyTierStrict {
+		return
+	}
+	warned := *adm
+	warned.Actions = maps.Clone(adm.Actions)
+	warned.Actions["HIGH"] = actionWarn
+	input.Admission = &warned
+}
+
+func compileAssetType(assetType string, own, defaults config.AdmissionAssetType, derived map[string]CompiledAction, legacyStrict bool) CompiledAdmission {
 	out := builtinAdmission(assetType)
+	if assetType == config.AdmissionTypeMCP && !legacyStrict {
+		// Balanced MCP scans report findings without refusing ordinary tools.
+		// Secure Client compiles the unchanged 1.0 actions separately.
+		for _, severity := range []string{"HIGH", "MEDIUM", "LOW"} {
+			out.Actions[severity] = actionWarn
+		}
+	}
 	out.ScanOnInstall = firstBool(out.ScanOnInstall, own.ScanOnInstall, defaults.ScanOnInstall)
 	out.AllowListBypassScan = firstBool(out.AllowListBypassScan, own.AllowListBypassScan, defaults.AllowListBypassScan)
 

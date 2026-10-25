@@ -1489,6 +1489,45 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     )
 
 
+# The managed enumerator's unprotected-agents record and the command that runs
+# a scan now, per OS; status and verify call a record older than 16 minutes (or
+# none) a pending scan (GAP-1430).
+_MANAGED_INSTALL_SCAN = {
+    "linux": (
+        "/etc/defenseclaw/hook-guardian/unprotected-agents.json",
+        "sudo systemctl restart defenseclaw-hook-enumerator.service",
+    ),
+    "darwin": (
+        "/opt/cisco/defenseclaw/etc/hook-guardian/unprotected-agents.json",
+        "sudo launchctl kickstart -k system/com.cisco.defenseclaw.hook-enumerator",
+    ),
+}
+
+
+def _managed_install_scan_pending() -> tuple[str, str]:
+    """The managed status/verify scan-pending warning and its remedy, or
+    ("", "") when the record is current or this account cannot see it."""
+    record, remedy = _MANAGED_INSTALL_SCAN.get("linux" if sys.platform.startswith("linux") else sys.platform, ("", ""))
+    if not record:
+        return "", ""
+    try:
+        age = time.time() - os.stat(record).st_mtime
+    except FileNotFoundError:
+        state = "missing (no scan has published it yet)"
+    except OSError:
+        return "", ""
+    else:
+        if -300 <= age <= 16 * 60:
+            return "", ""
+        state = f"dated {int(-age)}s in the future" if age < 0 else f"{int(age) // 60} min old"
+    return (
+        f"NOT COVERED (scan pending): the enumerator's unprotected-agents record is {state} (limit 16 min), "
+        "so agents installed since its last scan are not proven protected; enforcement is unchanged; "
+        "the record refreshes on the next scheduled scan (every five minutes)",
+        remedy,
+    )
+
+
 def _report_uninitialized_install(
     cfg, r: _DoctorResult, *, json_out: bool, write_cache: bool, leftover: str = ""
 ) -> int:
@@ -1529,6 +1568,17 @@ def _report_uninitialized_install(
             reason_code="managed-device",
             remediation="defenseclaw uninstall --all --binaries --yes" if leftover else "",
         )
+        pending, remedy = _managed_install_scan_pending()
+        if pending:
+            _emit(
+                "warn",
+                "Agent install scan",
+                pending,
+                r=r,
+                check_id="doctor.managed.install-scan",
+                reason_code="scan-pending",
+                remediation=remedy,
+            )
     else:
         _emit(
             "fail",
@@ -7350,6 +7400,49 @@ def _codex_otel_exports_to_defenseclaw(otel) -> bool:
     return False
 
 
+def _codex_retired_otel_endpoint(otel, api_port: int) -> str:
+    """Name a marked legacy loopback exporter aimed away from this gateway."""
+    if not isinstance(otel, dict):
+        return ""
+    for key in ("exporter", "trace_exporter", "metrics_exporter"):
+        exporter = otel.get(key)
+        http = exporter.get("otlp-http") if isinstance(exporter, dict) else None
+        if not isinstance(http, dict):
+            continue
+        headers = http.get("headers")
+        if not isinstance(headers, dict) or not (
+            headers.get("x-defenseclaw-source") == "codex"
+            or headers.get("x-defenseclaw-client") == "codex-otel/1.0"
+        ):
+            continue
+        endpoint = http.get("endpoint")
+        if not isinstance(endpoint, str):
+            continue
+        try:
+            parsed = urllib.parse.urlsplit(endpoint)
+            host = parsed.hostname or ""
+        except ValueError:
+            continue
+        if host.rstrip(".").lower() == "localhost":
+            loopback = True
+        else:
+            try:
+                loopback = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                loopback = False
+        if not loopback or parsed.scheme != "http" or parsed.username is not None or parsed.query or parsed.fragment:
+            continue
+        if parsed.path not in ("/v1/logs", "/v1/traces", "/v1/metrics"):
+            continue
+        try:
+            port = parsed.port
+        except ValueError:
+            continue
+        if port and port != api_port:
+            return f"otel.{key}.otlp-http.endpoint"
+    return ""
+
+
 def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
     """Bind Codex's configured OTel tag to trusted live runtime status.
 
@@ -7360,6 +7453,7 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
     """
     expected = str(getattr(cfg, "environment", "") or "").strip()
     config_path = _codex_effective_config_path(cfg)
+    otel = {}
     try:
         with open(config_path, "rb") as fh:
             raw = fh.read(1024 * 1024 + 1)
@@ -7382,6 +7476,14 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
 
     if config_error:
         _emit("fail", "Codex OTel environment", config_error, r=r)
+    elif stale := _codex_retired_otel_endpoint(otel, _gateway_api_port(cfg)):
+        _emit(
+            "fail",
+            "Codex OTel environment",
+            f"config.toml {stale} still points at a retired loopback port; "
+            "remove this exporter, then rerun Codex setup",
+            r=r,
+        )
     elif not _codex_otel_exports_to_defenseclaw(otel):
         # Host Codex sends no native OTLP to DefenseClaw since 1.0.4: setup
         # writes [otel] only inside an OpenShell sandbox and puts the user's
@@ -18229,7 +18331,7 @@ def _drifted_hook_connectors(cfg) -> list[str]:
         unguarded_tool_call_hooks,
     )
 
-    # Codex hook entries left without a command keep Codex from starting, and
+    # Codex hook entries left without a command may leave Codex running unguarded, and
     # an edited hook entry fails or runs unguarded; the restart re-runs the
     # gateway's setup of the connector, which removes or replaces them
     # (GAP-1102, GAP-0906, GAP-0907, rel-1-0-4 GAP-0538).

@@ -136,6 +136,31 @@ func validateAtomicTransformWindowsPrivateHandle(handle windows.Handle) error {
 }
 
 func validateAtomicTransformWindowsPrivateHandleForOwner(handle windows.Handle, expectedOwner *windows.SID) error {
+	return validateAtomicTransformWindowsPrivateHandleShape(handle, expectedOwner, expectedOwner != nil)
+}
+
+// validatePrivateOwnedBy is validatePrivate for a directory the enrolled
+// user created privately in that user's own profile: owner is that user, and
+// only that user, SYSTEM and Administrators hold access. A SYSTEM uninstall
+// meets such a target-local legacy (V1) compare-and-swap namespace beside the
+// user's Claude settings; its owner is the user, never the caller
+// (GAP-1437).
+func (dir *atomicTransformBoundDirectory) validatePrivateOwnedBy(owner *windows.SID) error {
+	if owner == nil {
+		return fmt.Errorf("bound compare-and-swap state directory has no expected owner")
+	}
+	if err := dir.validate(); err != nil {
+		return err
+	}
+	if err := validateAtomicTransformBoundDirectoryPlatform(dir.file, false); err != nil {
+		return err
+	}
+	return validateAtomicTransformWindowsPrivateHandleShape(windows.Handle(dir.file.Fd()), owner, false)
+}
+
+func validateAtomicTransformWindowsPrivateHandleShape(
+	handle windows.Handle, expectedOwner *windows.SID, requireAdministrators bool,
+) error {
 	descriptor, err := windows.GetSecurityInfo(
 		handle, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
@@ -236,7 +261,7 @@ func validateAtomicTransformWindowsPrivateHandleForOwner(handle windows.Handle, 
 	if ownerMask&full != full || systemMask&full != full {
 		return fmt.Errorf("bound private compare-and-swap object does not grant owner and SYSTEM full effective access")
 	}
-	if expectedOwner != nil && administratorsMask&full != full {
+	if requireAdministrators && administratorsMask&full != full {
 		return fmt.Errorf("bound private compare-and-swap object does not grant Administrators full effective access")
 	}
 	return nil

@@ -15,10 +15,12 @@ import (
 
 // The installer holds this lock while it stops and replaces the account's
 // gateway. A plugin rendered for fail mode open must still stop actionable
-// calls until that transaction has completed, for both a refused connection
-// and a gateway error response. Outside the window a per-user plugin is
-// closed whatever mode it was asked for (sa-port-peer): failures block and a
-// valid allow runs.
+// calls until that transaction has completed, for a refused connection, a
+// gateway error response and an answer without a verdict. A valid allow the
+// gateway gave keeps its answer in the window too (owner decision
+// 2026-10-24, GAP-1372: the plugin's deny of it was a benign false block).
+// Outside the window a per-user plugin is closed whatever mode it was asked
+// for (sa-port-peer): failures block and a valid allow runs.
 func pluginInstallWindowCases(t *testing.T, asset, extension, harness string) {
 	t.Helper()
 	nodeForTest(t)
@@ -58,7 +60,11 @@ func pluginInstallWindowCases(t *testing.T, asset, extension, harness string) {
 				t.Fatal(err)
 			}
 			blocked := session.request("during install", "call")
-			if !strings.HasPrefix(blocked, "block:") ||
+			if failure == "valid-allow" {
+				if blocked != "allow" {
+					t.Fatalf("valid allow with install lock = %q; want the gateway's allow", blocked)
+				}
+			} else if !strings.HasPrefix(blocked, "block:") ||
 				!strings.Contains(blocked, "being installed or upgraded") ||
 				!strings.Contains(blocked, "run the installer again") ||
 				strings.Contains(blocked, "defenseclaw-gateway start") {
@@ -136,7 +142,8 @@ for await (const _ of createInterface({ input: process.stdin })) {
 `
 
 func TestAmpPluginInstallWindowBlocksFailOpen(t *testing.T) {
-	// Amp's two actionable boundaries must both block during the same window.
+	// Amp's two actionable boundaries must both block a failure during the
+	// same window.
 	for _, failure := range []string{"transport", "http", "invalid-verdict", "valid-allow"} {
 		t.Run(failure, func(t *testing.T) {
 			dataDir := testenv.PrivateTempDir(t)
@@ -179,7 +186,9 @@ func TestAmpPluginInstallWindowBlocksFailOpen(t *testing.T) {
 			if err := os.Mkdir(lock, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			check("during install", true)
+			// GAP-1372: a valid allow the gateway gave keeps its answer in the
+			// window; every failure blocks both boundaries.
+			check("during install", failure != "valid-allow")
 			if err := os.Remove(lock); err != nil {
 				t.Fatal(err)
 			}

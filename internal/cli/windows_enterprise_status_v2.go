@@ -53,6 +53,12 @@ type windowsEnterpriseStatusV2Inputs struct {
 // tests replace it.
 var windowsEnterpriseStatusV2Read = readWindowsEnterpriseStatusV2Inputs
 
+var windowsManagedHermesCoverageAudit = func() error {
+	return postWindowsManagedCoverageAlert("managed-install-coverage", "managed_hermes_session_home_not_covered", map[string]any{
+		"connector": "hermes", "coverage_reason": "session_only_hermes_home_unobservable", "coverage_state": "incomplete",
+	})
+}
+
 func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 	in := windowsEnterpriseStatusV2Inputs{
 		machinePolicy: enterprisehooks.WindowsStandaloneMachinePolicyHook,
@@ -183,11 +189,20 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 		state.Targets = nil
 		block["hermes"] = state
 		result.CoverageComplete, result.SecurityComplete = false, false
-		message := "connectors.hermes: the guardian's persistent-home registration cannot prove a session-only HERMES_HOME is hooked; Windows managed Hermes coverage cannot be verified"
-		if result.Action == "verify" {
-			result.AddError(enterprisestatus.CodeStatusDetailUnavailable, message)
-		} else {
-			result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, message)
+		// The limit is the same for every Hermes account and is reported,
+		// not certified: lifecycle verify keeps coverage and security
+		// incomplete and exits 0 (as on Linux and macOS), Setup's live
+		// readiness proves each registered hook, and public hooks verify
+		// still refuses to attest the home (GAP-0766, GAP-1433).
+		message := "connectors.hermes: NOT COVERED: the guardian's persistent-home registration cannot prove a session-only HERMES_HOME is hooked; Windows managed Hermes coverage cannot be verified"
+		result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, message)
+		if result.Installed && result.Readiness.Gateway {
+			switch result.Action {
+			case "ensure", "install", "upgrade", "repair":
+				if err := windowsManagedHermesCoverageAudit(); err != nil {
+					result.AddWarning(windowsManagedLaunchAuditUnavailable, "could not audit the unobservable Hermes session home: "+err.Error())
+				}
+			}
 		}
 	}
 	if publish && hidden > 0 {

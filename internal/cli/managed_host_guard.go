@@ -152,10 +152,14 @@ func addManagedWindowsAnswer(root *cobra.Command, name string, answer func(args 
 // It names the administrator's check for this account as well, because the
 // deployment status has no per-account detail.
 func managedWindowsAdminCommandAnswer(where, command string) error {
+	coverage := ""
+	if command == "doctor" {
+		coverage = " If Hermes is enrolled, a session-only HERMES_HOME is NOT COVERED because the managed service cannot observe a home selected only by your shell; the administrator's status and verify name this limit."
+	}
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no per-user "+
 		"deployment to check and nothing for you to do; your administrator can check the managed deployment %s, "+
-		"and your account's agents with `& '%s' enterprise policy show --user %s`. Nothing was changed.",
-		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName())
+		"and your account's agents with `& '%s' enterprise policy show --user %s`.%s Nothing was changed.",
+		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName(), coverage)
 }
 
 // managedWindowsVersionChangeAnswer tells a user on a managed Windows
@@ -360,9 +364,11 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 			return err
 		}
 		// GAP-1196: name the administrator's form of the command too, so
-		// `audit export` reads as an administrator command here.
+		// `audit export` reads as an administrator command here. Only where
+		// that form reads the managed deployment, and never to an
+		// administrator, who just ran it (GAP-1037).
 		asAdmin := ""
-		if command != "this command" {
+		if _, admin := managedStandaloneAdminCaller(nil); !admin && managedHostAdminFormWorks(command) {
 			asAdmin = fmt.Sprintf("run `sudo %s %s` or ", managedHostGatewayCommand(), command)
 		}
 		if errors.Is(err, fs.ErrPermission) {
@@ -371,10 +377,24 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 		}
 		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no "+
 			"per-user gateway to check; an administrator can %scheck the managed deployment with "+
-			"`sudo %s enterprise %s status`. Nothing was changed.",
-			record, command, asAdmin, managedHostGatewayCommand(), managedHostPlatform())
+			"`sudo %s enterprise %s status` or `sudo %s enterprise %s verify`. Nothing was changed.",
+			record, command, asAdmin, managedHostGatewayCommand(), managedHostPlatform(), managedHostGatewayCommand(), managedHostPlatform())
 	}
 	return managedWindowsAdminCommandAnswer(where, command)
+}
+
+// managedHostAdminFormWorks reports whether an administrator's run of
+// command reads the managed deployment (applyManagedStandaloneAdminEnv):
+// status, audit, policy and the enterprise hooks and acp commands. Any
+// other command, connector verify among them, has no managed form, so the
+// answer above must not send the administrator to it.
+func managedHostAdminFormWorks(command string) bool {
+	for _, prefix := range []string{"status", "audit", "policy", "enterprise hooks", "enterprise acp"} {
+		if command == prefix || strings.HasPrefix(command, prefix+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 // managedWindowsSetupRefusal is the answer to `defenseclaw setup <args>` on a

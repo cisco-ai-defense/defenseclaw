@@ -43,10 +43,9 @@ func meetMediumMarker(prefix string) string {
 // "hook only" the Codex hook acts and inspect observes, in "inspect only"
 // inspect acts and the Codex hook observes. It blocks from MEDIUM with a
 // HILT from LOW and its own pack. Profile b sets action (both paths), blocks
-// from HIGH with another pack. On a path where a only observes, the meet is
-// b alone there: b's rules, b's level, b's HILT (none), so an a-only rule or
-// a MEDIUM finding of b's never blocks there. On a path where both act, it
-// is the strictest of both. Checked for the hook route, the inspect route,
+// from HIGH with another pack. A's observe-mode rules still produce audit
+// findings without blocking. B's MEDIUM finding retains b's own threshold
+// even where a acts. Checked for the hook route, the inspect route,
 // the LLM proxy, in both assignment orders (b first is the order of the
 // review's case), and for an uncertain profile that a path's meet does not
 // cover (loop round 2, continuation 3).
@@ -123,7 +122,7 @@ func TestMeetEnforcesEachMemberInItsOwnModeOnEachPath(t *testing.T) {
 					for _, rule := range []struct {
 						prefix string
 						want   bool
-					}{{"PATH-A", path.aActs}, {"PATH-B", true}} {
+					}{{"PATH-A", true}, {"PATH-B", true}} {
 						got := findingWithID(scanAllRulesForConnectorFor(path.ctx, "codex", meetPlainMarker(rule.prefix), "message"), rule.prefix+"-PLAIN")
 						if (got != nil) != rule.want {
 							t.Errorf("%s: %s finding %+v; want one %v", path.name, rule.prefix, got, rule.want)
@@ -131,14 +130,14 @@ func TestMeetEnforcesEachMemberInItsOwnModeOnEachPath(t *testing.T) {
 					}
 				}
 
-				// The real inspect route: an a-only rule and a MEDIUM finding of
-				// b's block only where a acts on inspect.
+				// The real inspect route blocks a's HIGH rule only where a acts;
+				// b's MEDIUM finding alerts under b's own threshold.
 				for _, content := range []struct {
 					text  string
 					block bool
 				}{
 					{meetPlainMarker("PATH-A"), setup.aInspect},
-					{meetMediumMarker("PATH-B"), setup.aInspect},
+					{meetMediumMarker("PATH-B"), false},
 					{meetPlainMarker("PATH-B"), true},
 				} {
 					body := fmt.Sprintf(`{"tool":"message","content":"%s"}`, content.text)
@@ -156,7 +155,7 @@ func TestMeetEnforcesEachMemberInItsOwnModeOnEachPath(t *testing.T) {
 					block bool
 				}{
 					{meetPlainMarker("PATH-A"), setup.aHook},
-					{meetMediumMarker("PATH-B"), setup.aHook},
+					{meetMediumMarker("PATH-B"), false},
 					{meetPlainMarker("PATH-B"), true},
 				} {
 					body := fmt.Sprintf(`{"session_id":"path-session","hook_event_name":"UserPromptSubmit","prompt":"%s"}`, content.text)
@@ -390,8 +389,8 @@ func TestMeetJudgesOneActionWithinOneSemanticBudget(t *testing.T) {
 		if budget.consumed != costB {
 			t.Errorf("meet cost %d; want b's alone (%d): each shared expression judged once", budget.consumed, costB)
 		}
-		if budgetFindings(findings, "BUD-S") != 30 || budgetFindings(findings, "BUD-B") != 1 {
-			t.Fatalf("meet: %d shared + %d own findings; want every rule of both members", budgetFindings(findings, "BUD-S"), budgetFindings(findings, "BUD-B"))
+		if budgetFindings(findings, "BUD-S") != 60 || budgetFindings(findings, "BUD-B") != 1 {
+			t.Fatalf("meet: %d shared + %d own findings; want a separate finding from each member", budgetFindings(findings, "BUD-S"), budgetFindings(findings, "BUD-B"))
 		}
 	})
 }

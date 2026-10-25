@@ -10,6 +10,7 @@ import (
 	"time"
 )
 
+// These parser cases preserve audit classifications; enforcement requires a resolved protected target.
 func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
@@ -20,7 +21,7 @@ func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
 		"sudo -l", "sudo -ll", "sudo --list", "sudo -n -l",
 		"sudo -u root -l", "sudo -l /bin/sh", "sudo -l /bin/r*",
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "" {
+		if got := ActionCommandAuditReason(command, cwd, home); got != "" {
 			t.Errorf("%q: decision = %q, want allow", command, got)
 		}
 	}
@@ -29,7 +30,7 @@ func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
 		`sudo --future-option sh -c 'echo marker >> "$destination"'`,
 		`sudo -l $(sh -c 'echo marker >> "$destination"')`,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got == "" {
+		if got := ActionCommandAuditReason(command, cwd, home); got == "" {
 			t.Errorf("%q: decision = allow, want block", command)
 		}
 	}
@@ -96,7 +97,7 @@ func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
 		{"ordinary redirect", `echo marker >> report.txt`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ActionCommandDecision(tc.command, cwd, home) != ""; got != tc.block {
+			if got := ActionCommandAuditReason(tc.command, cwd, home) != ""; got != tc.block {
 				t.Fatalf("unknown write = %t, want %t", got, tc.block)
 			}
 		})
@@ -138,10 +139,18 @@ func TestR104ActionClassBoundedOrdinaryValues(t *testing.T) {
 		{`if test "$COND"; then v=report.txt; fi; echo ok > "$v"`, true},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
-			if reason := ActionCommandDecision(tc.command, cwd, home); (reason != "") != tc.block {
+			if reason := ActionCommandAuditReason(tc.command, cwd, home); (reason != "") != tc.block {
 				t.Fatalf("reason=%q, want block=%t", reason, tc.block)
 			}
 		})
+	}
+	for _, command := range []string{
+		`read f < target-name.txt; echo ok > "$f"`,
+		`v=alias; if false; then v=report.txt; fi; echo ok > "$v"`,
+	} {
+		if ActionCommandDecision(command, cwd, home) == "" {
+			t.Errorf("resolved protected alias allowed: %q", command)
+		}
 	}
 }
 
@@ -184,7 +193,7 @@ func TestR104ActionClassWrapperRecursion(t *testing.T) {
 		{"exec named child", `exec -a chosen sh -c 'echo marker >> alias'`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if reason := ActionCommandDecision(tc.command, cwd, home); reason == "" {
+			if reason := ActionCommandAuditReason(tc.command, cwd, home); reason == "" {
 				t.Fatal("write-capable wrapper hid an unresolved child target")
 			}
 		})
@@ -212,8 +221,11 @@ func TestR104LeadGapCorpusPOSIX(t *testing.T) {
 		{"GAP-0659 computed program", `$(printf ln) -s report.txt alias`},
 	} {
 		t.Run(row.gap, func(t *testing.T) {
-			if reason := ActionCommandDecision(row.command, cwd, home); reason == "" {
-				t.Fatalf("allowed %q", row.command)
+			if reason := ActionCommandAuditReason(row.command, cwd, home); reason == "" {
+				t.Fatalf("missing audit reason for %q", row.command)
+			}
+			if row.gap != "GAP-0659 computed program" && ActionCommandDecision(row.command, cwd, home) == "" {
+				t.Fatalf("resolved protected target allowed: %q", row.command)
 			}
 		})
 	}
@@ -239,7 +251,7 @@ func TestR104ActionClassGeneratedTargetAlias(t *testing.T) {
 		`x=$(date +%Y%m%d); echo marker > "build/$x.log"`,
 	} {
 		t.Run(command, func(t *testing.T) {
-			if reason := ActionCommandDecision(command, cwd, home); reason == "" {
+			if reason := ActionCommandAuditReason(command, cwd, home); reason == "" {
 				t.Fatal("a generated name can select an existing protected alias")
 			}
 		})
@@ -260,9 +272,13 @@ func TestR104ActionGitArchiveReadOnly(t *testing.T) {
 		{"git archive --output=" + filepath.Join(home, ".ssh", "authorized_keys") + " HEAD", true},
 		{"git archive --exec=unknown HEAD", true},
 	} {
-		if reason := ActionCommandDecision(tc.command, cwd, home); (reason != "") != tc.blocked {
+		if reason := ActionCommandAuditReason(tc.command, cwd, home); (reason != "") != tc.blocked {
 			t.Errorf("%q reason=%q, want blocked=%t", tc.command, reason, tc.blocked)
 		}
+	}
+	protected := "git archive --output=" + filepath.Join(home, ".ssh", "authorized_keys") + " HEAD"
+	if ActionCommandDecision(protected, cwd, home) == "" {
+		t.Fatal("git archive to resolved protected target allowed")
 	}
 }
 
@@ -274,12 +290,346 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 		blocked bool
 	}{
 		{`$output = Join-Path $HOME 'report.txt'; Add-Content -LiteralPath $output -Value 'dummy-key'`, false},
-		{`$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -LiteralPath $target -Value 'dummy-key'`, true},
+		{`$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -LiteralPath $target -Value 'dummy-key'`, false},
 		{`$output = Join-Path $unknown 'report.txt'; Add-Content -LiteralPath $output -Value 'dummy-key'`, true},
 	} {
-		if got := ActionCommandDecision(tc.command, cwd, home) != ""; got != tc.blocked {
+		if got := ActionCommandAuditReason(tc.command, cwd, home) != ""; got != tc.blocked {
 			t.Errorf("%q blocked=%t, want %t", tc.command, got, tc.blocked)
 		}
+	}
+	protected := `$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -LiteralPath $target -Value 'dummy-key'`
+	if ActionCommandDecision(protected, cwd, home) == "" {
+		t.Fatal("resolved Windows authorized-keys target allowed")
+	}
+	positional := `$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -Value 'dummy-key' $target`
+	if ActionCommandDecision(positional, cwd, home) == "" {
+		t.Fatal("resolved Windows authorized-keys positional target allowed after -Value")
+	}
+	data := `$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -LiteralPath report.txt -Value $target`
+	if got := ActionCommandDecision(data, cwd, home); got != "protected-target" {
+		t.Fatalf("protected data mention decision = %q", got)
+	}
+	positionalData := `$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -Value $target report.txt`
+	if got := ActionCommandDecision(positionalData, cwd, home); got != "protected-target" {
+		t.Fatalf("protected positional data mention decision = %q", got)
+	}
+	for _, command := range []string{
+		`Add-Content -Value marker -Path report.txt, C:\Users\alice\.ssh\authorized_keys`,
+		`Add-Content -Value marker -LiteralPath report.txt, C:\Users\alice\.ssh\authorized_keys`,
+		`Add-Content -Va marker C:\Users\alice\.ssh\authorized_keys`,
+		`Set-Content -Val marker C:\Users\alice\.ssh\authorized_keys`,
+		`Add-Content -Value marker -Path report.txt, $env:USERPROFILE\.ssh\authorized_keys`,
+		`Add-Content -Va marker $env:USERPROFILE\.ssh\authorized_keys`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got == "" {
+			t.Errorf("resolved Windows write destination allowed: %q", command)
+		}
+	}
+	for _, command := range []string{
+		`Add-Content -Value C:\Users\alice\.ssh\authorized_keys report.txt`,
+		`Add-Content -Va C:\Users\alice\.ssh\authorized_keys report.txt`,
+		`Set-Content -Val C:\Users\alice\.ssh\authorized_keys report.txt`,
+		`Out-File -Inp C:\Users\alice\.ssh\authorized_keys -FilePath report.txt`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("protected option value decision = %q for %q", got, command)
+		}
+	}
+	for _, command := range []string{
+		`Get-ChildItem C:\Users\alice\.ssh\authorized_keys`,
+		`Get-Content C:\Users\alice\.ssh\authorized_keys`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
+			t.Errorf("read-only path operand blocked: %q, reason=%q", command, got)
+		}
+	}
+	if got := ActionCommandDecision(`git status --short C:\Users\alice\.ssh\authorized_keys`, cwd, home); got != "protected-target" {
+		t.Errorf("git status is outside the protected-target read-only list: %q", got)
+	}
+	for _, tc := range []struct {
+		command string
+		block   bool
+	}{
+		{`Copy-Item C:\Users\alice\.ssh\authorized_keys report.txt`, true},
+		{`Copy-Item -Path C:\Users\alice\.ssh\authorized_keys -Destination report.txt`, true},
+		{`Copy-Item report.txt C:\Users\alice\.ssh\authorized_keys`, true},
+		{`Copy-Item -Path report.txt -Destination C:\Users\alice\.ssh\authorized_keys`, true},
+	} {
+		if got := ActionCommandDecision(tc.command, cwd, home) != ""; got != tc.block {
+			t.Errorf("copy destination proof=%v, want %v for %q", got, tc.block, tc.command)
+		}
+	}
+}
+
+func TestR104ActionWindowsWrappedRedirectRoles(t *testing.T) {
+	home, cwd := `C:\Users\alice`, `C:\Users\alice\project`
+	for _, tc := range []struct {
+		command string
+		block   bool
+	}{
+		{`env -S "cmd /c echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, true},
+		{`env -- BUILD=1 cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, true},
+		{`nice -n 5 cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, true},
+		{`env -S "cmd /c echo %USERPROFILE%\.ssh\authorized_keys"`, true},
+		{`env -- BUILD=1 cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`, true},
+		{`nice -n 5 cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`, true},
+	} {
+		if got := ActionCommandDecision(tc.command, cwd, home) != ""; got != tc.block {
+			t.Errorf("protected write=%v, want %v for %q", got, tc.block, tc.command)
+		}
+	}
+}
+
+func TestR104ActionWindowsKnownWrapperChildren(t *testing.T) {
+	home, cwd := `C:\Users\alice`, `C:\Users\alice\project`
+	for _, prefix := range []string{
+		`sudo -n `, `sudo -D C:\work `, `timeout 5 `, `stdbuf -o L `,
+		`setsid `, `nohup `, `ionice -c 2 `, `chroot C:\work `,
+		`flock C:\work\lock `, `time -p `, `command -p `, `exec `,
+		`busybox `, `unshare -m `, `nsenter -t 1 `,
+	} {
+		for _, tc := range []struct {
+			child string
+			block bool
+		}{
+			{`cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, true},
+			{`cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`, true},
+		} {
+			command := prefix + tc.child
+			if got := ActionCommandDecision(command, cwd, home) != ""; got != tc.block {
+				t.Errorf("protected write=%v, want %v for %q", got, tc.block, command)
+			}
+		}
+	}
+}
+
+func TestR104ActionWindowsProtectedWriterSweep(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	target := `C:\Users\Alice\.ssh\authorized_keys`
+	for _, command := range []string{
+		`cp report.pub /c/Users/Alice/.ssh/authorized_keys`,
+		`cp -t ` + target + ` report.pub`,
+		`mv report.pub ` + target,
+		`mv -t ` + target + ` report.pub`,
+		`ln -sf /c/Users/Alice/project/a.pub ~/.ssh/authorized_keys`,
+		`rsync report.pub ~/.ssh/authorized_keys`,
+		`install report.pub ` + target,
+		`install -t ` + target + ` report.pub`,
+		`sed -i s/a/b/ ~/.ssh/authorized_keys`,
+		`dd if=report.pub of=` + target,
+		`xcopy report.pub ` + target,
+		`robocopy . ` + target + ` report.pub`,
+		`cpi report.pub ` + target,
+		`mi report.pub ` + target,
+		`ni ` + target + ` -ItemType File`,
+		`sc ` + target + ` marker`,
+		`ac ` + target + ` marker`,
+		`ri ` + target,
+		`rni report.pub ` + target,
+		`iwr https://example.com/a.pub -OutFile ` + target,
+		`Invoke-WebRequest https://example.com/a.pub -OutFile $env:USERPROFILE\.ssh\authorized_keys`,
+		`ssh-keygen -f ` + target,
+		`icacls ` + target + ` /grant Everyone:F`,
+		`Copy-Item -Verbose report.pub ` + target,
+		`Copy-Item -Container report.pub ` + target,
+		`Copy-Item -WhatIf report.pub ` + target,
+		`Copy-Item -Filter *.pub report.pub ` + target,
+		`Copy-Item -Exclude *.tmp report.pub ` + target,
+		`Copy-Item -ErrorAction Stop report.pub ` + target,
+		`Copy-Item -FutureSwitch report.pub ` + target,
+		`timeout 5 cp report.pub ~/.ssh/authorized_keys`,
+		`nice -10 cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`,
+		`sudo -nE cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`,
+		`sudo -Ei cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`,
+		`ionice -c2 cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`,
+		`env --split-string="cmd /c echo marker >> %USERPROFILE%\.ssh\authorized_keys"`,
+		`sudo --future-option cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`,
+		`env --future-option cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got == "" {
+			t.Errorf("protected Windows write allowed: %q", command)
+		}
+	}
+	for _, command := range []string{
+		`Get-ChildItem ` + target,
+		`Get-Content ` + target,
+		`Resolve-Path ` + target,
+		`Test-Path ` + target,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
+			t.Errorf("read-only Windows command blocked: %q: %q", command, got)
+		}
+	}
+	for _, command := range []string{
+		`Get-Item ` + target,
+		`Get-Acl ` + target,
+		`git status --short ` + target,
+		`[System.IO.File]::ReadAllText('C:/Users/Alice/.ssh/authorized_keys')`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("program outside the protected-target read-only list: %q: %q", command, got)
+		}
+	}
+	for _, command := range []string{
+		`echo ` + target,
+		`cp ` + target + ` report.pub`,
+		`cp -a ` + target + ` report.pub`,
+		`cp -t report.pub ` + target,
+		`ln -sf ` + target + ` report.pub`,
+		`rsync -av ` + target + ` report.pub`,
+		`install -m 644 ` + target + ` report.pub`,
+		`xcopy /y ` + target + ` report.pub`,
+		`dd if=` + target + ` of=report.pub`,
+		`sed s/a/b/ ` + target,
+		`iwr https://example.com/a.pub -Body ` + target + ` -OutFile report.pub`,
+		`[System.IO.File]::AppendAllText('C:/Users/Alice/.ssh/authorized_keys')`,
+		`Copy-Item -Verbose ` + target + ` report.pub`,
+		`Copy-Item -Container ` + target + ` report.pub`,
+		`Copy-Item -WhatIf ` + target + ` report.pub`,
+		`Copy-Item -Filter *.pub ` + target + ` report.pub`,
+		`Copy-Item -Exclude *.tmp ` + target + ` report.pub`,
+		`Copy-Item -ErrorAction Stop ` + target + ` report.pub`,
+		`nice -10 cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`,
+		`sudo -nE cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`,
+		`ionice -c2 cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("protected Windows mention decision = %q for %q", got, command)
+		}
+	}
+}
+
+func TestR104ActionWindowsMoveSourceIsProtected(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	target := `C:\Users\Alice\.ssh\authorized_keys`
+	for _, command := range []string{
+		`Move-Item ` + target + ` ` + cwd + `\x.pub`,
+		`Move-Item -Path ` + target + ` -Destination report.pub`,
+		`move %USERPROFILE%\.ssh\authorized_keys report.pub`,
+		`mv /c/Users/Alice/.ssh/authorized_keys report.pub`,
+		`mi ` + target + ` report.pub`,
+		`rni ` + target + ` authorized_keys.bak`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got == "" {
+			t.Errorf("protected move source allowed: %q", command)
+		}
+	}
+	if got := ActionCommandDecision(`Move-Item report.pub done.pub`, cwd, home); got != "" {
+		t.Errorf("ordinary move blocked: %q", got)
+	}
+}
+
+func TestR104ActionWindowsRedirectAfterProtectedDestination(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	target := `C:\Users\Alice\.ssh\authorized_keys`
+	for _, program := range []string{"cp", "mv", "ln", "rsync", "install", "xcopy"} {
+		for _, redirect := range []string{`2>&1`, `2>/dev/null`, `> nul`, `> out.log`} {
+			command := program + ` report.pub ` + target + ` ` + redirect
+			if got := ActionCommandDecision(command, cwd, home); got == "" {
+				t.Errorf("protected destination allowed after redirect: %q", command)
+			}
+		}
+	}
+	for _, program := range []string{"cp", "ln", "rsync", "install", "xcopy"} {
+		command := program + ` ` + target + ` report.pub 2>&1`
+		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("protected source mention decision = %q for %q", got, command)
+		}
+	}
+	if got := ActionCommandDecision(`cp `+target+` 2 > out.log`, cwd, home); got != "protected-target" {
+		t.Errorf("protected source before spaced redirect decision = %q", got)
+	}
+	for _, command := range []string{
+		`cp report.pub report.txt 2>` + target,
+		`cp report.pub report.txt 2>>` + target,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got == "" {
+			t.Errorf("protected file-descriptor redirect allowed: %q", command)
+		}
+	}
+}
+
+func TestR104ActionWindowsSedInPlaceSpellings(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	for _, command := range []string{
+		`sed -i.bak s/a/b/ ~/.ssh/authorized_keys`,
+		`sed -Ei s/a/b/ ~/.ssh/authorized_keys`,
+		`sed -ri s/a/b/ /c/Users/Alice/.ssh/authorized_keys`,
+		`sed -ni s/a/b/ ~/.ssh/authorized_keys`,
+		`sed --in-place=.bak s/a/b/ ~/.ssh/authorized_keys`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got == "" {
+			t.Errorf("in-place protected sed allowed: %q", command)
+		}
+	}
+	for _, command := range []string{
+		`sed -einsert ~/.ssh/authorized_keys`,
+		`sed -finput.sed ~/.ssh/authorized_keys`,
+		`sed -E s/a/b/ ~/.ssh/authorized_keys`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("sed protected mention decision = %q for %q", got, command)
+		}
+	}
+}
+
+func TestR104ActionWindowsWebRequestOutputSpellings(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	target := `C:\Users\Alice\.ssh\authorized_keys`
+	for _, command := range []string{
+		`iwr https://example.com/a.pub -OutF ` + target,
+		`Invoke-WebRequest https://example.com/a.pub -OutFi ` + target,
+		`iwr https://example.com/a.pub -OutFile:` + target,
+		`Invoke-WebRequest https://example.com/a.pub -OutF:` + target,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got == "" {
+			t.Errorf("protected web request output allowed: %q", command)
+		}
+	}
+	if got := ActionCommandDecision(`iwr https://example.com/a.pub -Body `+target+` -OutF report.pub`, cwd, home); got != "protected-target" {
+		t.Errorf("web request protected body mention decision = %q", got)
+	}
+}
+
+// A later redirect or option value cannot hide an earlier protected target.
+func TestR104ActionWindowsLaterOperandTargetMention(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	target := `C:\Users\Alice\.ssh\authorized_keys`
+	for _, command := range []string{
+		`cp report.pub ` + target + ` *> out.log`,
+		`cp report.pub ` + target + ` --future-value report.pub`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+				t.Fatalf("decision = %q, want protected-target", got)
+			}
+		})
+	}
+}
+
+func TestR104ActionWindowsIWRPrefixTargetMention(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	target := `C:\Users\Alice\.ssh\authorized_keys`
+	for _, option := range []string{"-Out", "-Ou", "-O"} {
+		command := `Invoke-WebRequest https://example.com/a.pub ` + option + ` ` + target
+		t.Run(option, func(t *testing.T) {
+			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+				t.Fatalf("decision = %q, want protected-target", got)
+			}
+		})
+	}
+}
+
+func TestR104ActionWindowsSedLongAbbreviationTargetMention(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	target := `C:\Users\Alice\.ssh\authorized_keys`
+	for _, option := range []string{"--in", "--in-pl"} {
+		command := `sed ` + option + ` s/a/b/ ` + target
+		t.Run(option, func(t *testing.T) {
+			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+				t.Fatalf("decision = %q, want protected-target", got)
+			}
+		})
 	}
 }
 
@@ -300,7 +650,7 @@ func TestR104ActionWindowsUninspectedScripts(t *testing.T) {
 		{`node C:\Users\alice\outside.js`, true},
 		{`Get-Content C:\Users\alice\project\report.txt`, false},
 	} {
-		if got := ActionCommandDecision(tc.command, cwd, home) != ""; got != tc.blocked {
+		if got := ActionCommandAuditReason(tc.command, cwd, home) != ""; got != tc.blocked {
 			t.Errorf("%q blocked=%t, want %t", tc.command, got, tc.blocked)
 		}
 	}
@@ -328,8 +678,11 @@ func TestR104ActionBoundedFunctionAndProcessInputs(t *testing.T) {
 		{`cat <(sh -c 'echo marker >> "$destination"') > merged.txt`, true},
 		{`cat <(sort -o alias docs/a.txt) > merged.txt`, true},
 	} {
-		if reason := ActionCommandDecision(tc.command, cwd, home); (reason != "") != tc.blocked {
+		if reason := ActionCommandAuditReason(tc.command, cwd, home); (reason != "") != tc.blocked {
 			t.Errorf("%q reason=%q, want blocked=%t", tc.command, reason, tc.blocked)
 		}
+	}
+	if ActionCommandDecision(`cat <(sort -o alias docs/a.txt) > merged.txt`, cwd, home) == "" {
+		t.Fatal("resolved protected process-substitution output allowed")
 	}
 }

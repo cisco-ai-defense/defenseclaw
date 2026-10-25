@@ -16,13 +16,82 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 )
+
+// A hash does not carry its members. Read the registration in a fresh test
+// process so the config package's process-local meet map is really empty.
+func TestLongMeetRegistrationSurvivesRestartAfterAssignmentMove(t *testing.T) {
+	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	profiles := func(cfg *config.Config, both bool) {
+		cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+			a: {Sandbox: &config.OpenShellAdminConfig{EgressBlock: []string{"a.example"}}},
+			b: {Sandbox: &config.OpenShellAdminConfig{EgressBlock: []string{"b.example"}}},
+		}
+		cfg.Guardrail.DefaultProfile = a
+		cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+			{Profile: a, Match: config.ProfileMatch{Groups: []string{"dc-sbx-contractors"}}},
+		}
+		if both {
+			cfg.Guardrail.ProfileAssignments = append(cfg.Guardrail.ProfileAssignments,
+				config.ProfileAssignment{Profile: b, Match: config.ProfileMatch{Groups: []string{"dc-sbx-devs"}}})
+		}
+	}
+	if os.Getenv("DC_TEST_LONG_MEET_REGISTRATION") != "" {
+		path := os.Getenv("DC_TEST_LONG_MEET_REGISTRATION")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			Registrations []sandboxreg.Registration `json:"registrations"`
+		}
+		if err := json.Unmarshal(raw, &doc); err != nil || len(doc.Registrations) != 1 {
+			t.Fatalf("stored registrations: %v, %d", err, len(doc.Registrations))
+		}
+		cfg := &config.Config{}
+		profiles(cfg, false)
+		floor, _, err := sandboxRegistrationFloor(cfg, doc.Registrations[0])
+		if err != nil || !slices.Contains(floor.EgressBlock, "a.example") || !slices.Contains(floor.EgressBlock, "b.example") {
+			t.Fatalf("fresh process lost the create meet's floor: %+v, %v", floor, err)
+		}
+		return
+	}
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	f.setGroups(sbxAlice, "dc-sbx-contractors", "dc-sbx-devs")
+	profiles(f.cfg, true)
+	f.publishFirstGeneration()
+	created := f.live(sbxAlice, 1)
+	meet := config.ProfileMeetName([]string{a, b})
+	if !strings.HasPrefix(meet, "strictest.x") || created.Banner.Profile == a {
+		t.Fatalf("fixture did not create a hashed meet: %q %+v", meet, created.Banner)
+	}
+	path := filepath.Join(f.cfg.DataDir, "sandbox", "registrations", strconv.Itoa(sbxAlice.UID)+".json")
+	checkFreshProcess := func(stage string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestLongMeetRegistrationSurvivesRestartAfterAssignmentMove$")
+		cmd.Env = append(os.Environ(), "DC_TEST_LONG_MEET_REGISTRATION="+path)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s in a fresh gateway process: %v\n%s", stage, err, out)
+		}
+	}
+	checkFreshProcess("before assignment move")
+	moved := newSandboxFixtureOn(t, f)
+	profiles(moved.cfg, false)
+	moved.publishFirstGeneration()
+	if code, current := moved.current(sbxAlice, created.Registration.ID); code != http.StatusOK || current.Profile != a {
+		t.Fatalf("assignment move: %d %+v", code, current)
+	}
+	checkFreshProcess("after assignment move")
+}
 
 // pinnedFloorProfiles makes contractors the strict profile (github.com
 // blocked, no unblock) and engineering the loose one, with contractors

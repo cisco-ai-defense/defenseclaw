@@ -7,6 +7,7 @@ package enterprisehooks
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -41,9 +42,14 @@ func TestKiroDiscoveryCacheVersionMarksTheIDE(t *testing.T) {
 	if got := cachedSetupAgentVersion(dataDir, "kiro"); got != "1.0.182"+KiroIDEVersionSuffix {
 		t.Fatalf("cached Kiro IDE = %q", got)
 	}
-	// Only Kiro has two surfaces under one connector.
-	if got := cachedSetupAgentVersion(dataDir, "codex"); got != "1.0.182" {
-		t.Fatalf("cached codex = %q", got)
+	// Only Kiro has two surfaces under one connector. On Windows a Codex
+	// discovery cache is not the protected setup evidence used for admission.
+	wantCodex := "1.0.182"
+	if runtime.GOOS == "windows" {
+		wantCodex = ""
+	}
+	if got := cachedSetupAgentVersion(dataDir, "codex"); got != wantCodex {
+		t.Fatalf("cached codex = %q, want %q", got, wantCodex)
 	}
 	if got := kiroHookFloorRefusal(resolveHookContract("kiro", cachedSetupAgentVersion(dataDir, "kiro"))); got != "" {
 		t.Fatalf("a supported cached IDE is refused: %s", got)

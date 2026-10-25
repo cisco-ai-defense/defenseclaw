@@ -1480,7 +1480,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	if request.EnforcementCapable &&
-		(trustedAuthorizedKeysWriteProof(input, facts, symlinkWrite) ||
+		(trustedAuthorizedKeysWriteProof(input, facts, symlinkWrite, clientGlobFacts(request)) ||
 			trustedSandboxGuestAuthorizedKeysWrite(request)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {
@@ -1492,13 +1492,6 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				}
 			}
 			title := rule.Title
-			reason := request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey]
-			if reason == "" {
-				reason = hookpaths.ActionCommandDecision(input.Command, input.CWD, input.ActiveHome)
-			}
-			if unproven := hookpaths.UnprovenWriteTitle(reason); unproven != "" {
-				title = unproven + unprovenWriteGuidance
-			}
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
 			}
@@ -1518,8 +1511,13 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 
 // trustedAuthorizedKeysWriteProof reports a bounded positive proof that the
 // call writes an authorized-keys file. input is the request's input with
-// the command text of a shell tool filled in.
-func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool) bool {
+// the command text of a shell tool filled in; globFacts is the managed hook
+// client's evidence (clientGlobFacts), nil for any other caller.
+func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, globFacts map[string]string) bool {
+	if input.Command != "" &&
+		hookpaths.ActionCommandDecisionWithGlobFacts(input.Command, input.CWD, facts.ActiveHome, globFacts) == "protected-target" {
+		return true
+	}
 	enforcementFacts := facts.EnforcementProjection()
 	return enforcementFacts.EnforcementEligible() &&
 		(sshAuthorizedKeysCommandPrerequisite(enforcementFacts) ||
@@ -1658,7 +1656,7 @@ func trustedSandboxGuestAuthorizedKeysWrite(request trustedActionRequest) bool {
 			input.Command = command
 		}
 	}
-	return trustedAuthorizedKeysWriteProof(input, facts, false)
+	return trustedAuthorizedKeysWriteProof(input, facts, false, nil)
 }
 
 func appendTrustedSSHPrivateKeyWriteFinding(

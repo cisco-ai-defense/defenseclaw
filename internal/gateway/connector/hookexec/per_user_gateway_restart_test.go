@@ -112,8 +112,10 @@ func TestPerUserFailOpenHookNamesTheRestart(t *testing.T) {
 }
 
 // Copilot consumes a native denial, not an exit status. While an installer
-// holds the account lock, both actionable events must deny even if the
-// per-user hook was previously configured open and its gateway cannot answer.
+// holds the account lock, both actionable events must deny every failure even
+// if the per-user hook was previously configured open and its gateway cannot
+// answer. A call the gateway answers keeps its answer
+// (TestPerUserInstallWindowKeepsTheGatewaysAnswer).
 func TestPerUserCopilotDeniesDuringInstall(t *testing.T) {
 	fastRestartRetries(t)
 	for _, event := range []string{"preToolUse", "permissionRequest"} {
@@ -124,7 +126,6 @@ func TestPerUserCopilotDeniesDuringInstall(t *testing.T) {
 			{"gateway refused", func() *stubRT { return &stubRT{err: syscall.ECONNREFUSED} }},
 			{"gateway error", func() *stubRT { return &stubRT{status: 503} }},
 			{"invalid verdict", func() *stubRT { return ok(`{"action":"unknown"}`) }},
-			{"gateway allowed", func() *stubRT { return ok(`{"action":"allow"}`) }},
 		} {
 			t.Run(event+"/"+failure.name, func(t *testing.T) {
 				result := run(t, "copilot", failure.rt(), func(opts *Options) {
@@ -161,7 +162,6 @@ func TestPerUserCopilotDeniesWhenInstallStartsDuringGatewayRequest(t *testing.T)
 		}{
 			{"gateway error", http.StatusServiceUnavailable, ""},
 			{"invalid verdict", http.StatusOK, `{"action":"unknown"}`},
-			{"gateway allowed", http.StatusOK, `{"action":"allow"}`},
 		} {
 			t.Run(event+"/"+failure.name, func(t *testing.T) {
 				var lock string
@@ -189,6 +189,69 @@ func TestPerUserCopilotDeniesWhenInstallStartsDuringGatewayRequest(t *testing.T)
 					t.Fatalf("in-flight install call allowed: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
 				}
 			})
+		}
+	}
+}
+
+// GAP-1372 (owner decision 2026-10-24): during this account's install or
+// upgrade window a call the running gateway answers keeps the gateway's
+// answer in the default and permissive tiers. Copilot denied such an allow at
+// hook entry and again when the answer came (a benign false block), while
+// every other connector kept it. Every native tool hook form now keeps the
+// gateway's allow and its block, with the lock taken before the call, during
+// the request, or while the answer is read, in every outage tier; failures in
+// the window still block (TestPerUserCopilotDeniesDuringInstall,
+// TestNativeHookAnswersClosedWhenAnInstallStartsDuringTheCall).
+func TestPerUserInstallWindowKeepsTheGatewaysAnswer(t *testing.T) {
+	for _, form := range nativeToolHookForms {
+		for _, when := range []string{"before the call", "during the request", "while the answer is read"} {
+			for _, tier := range []string{"open", "closed"} {
+				for _, verdict := range []string{"allow", "block"} {
+					t.Run(form.String()+"/"+when+"/outage "+tier+"/"+verdict, func(t *testing.T) {
+						body := `{"action":"allow"}`
+						if verdict == "block" {
+							deny := `{"permissionDecision":"deny","decision":"deny","behavior":"deny","permission":"deny","reason":"policy"}`
+							body = `{"action":"block","reason":"policy","hook_output":` + deny + `,"claude_code_output":` + deny +
+								`,"codex_output":` + deny + `}`
+						}
+						var home string
+						rt := &stubRT{onRequest: func(_ *stubRT, _ *http.Request) (*http.Response, error) {
+							response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+								Body: io.NopCloser(strings.NewReader(body))}
+							switch when {
+							case "during the request":
+								mkdirInstallLock(t, home)
+							case "while the answer is read":
+								response.Body = &installOnBodyRead{t: t, home: home, body: strings.NewReader(body)}
+							}
+							return response, nil
+						}}
+						payload := `{"hook_event_name":"` + form.event + `","tool_name":"Bash","tool_input":{"command":"echo ok"}}`
+						result := run(t, form.connector, rt, func(opts *Options) {
+							home = opts.Home
+							opts.Event = form.event
+							opts.HookSurface = form.surface
+							opts.FailMode = "closed"
+							opts.OutageFailMode = tier
+							opts.Stdin = strings.NewReader(payload)
+							if when == "before the call" {
+								mkdirInstallLock(t, opts.Home)
+							}
+						})
+						if _, err := os.Lstat(filepath.Join(home, installLockName)); err != nil {
+							t.Fatalf("the install lock was not held: %v", err)
+						}
+						blocks := nativeAnswerBlocks(result.code, result.stdout)
+						if blocks != (verdict == "block") {
+							t.Fatalf("gateway %s during the install window: code=%d stdout=%q stderr=%q blocks=%v",
+								verdict, result.code, result.stdout, result.stderr, blocks)
+						}
+						if verdict == "allow" && strings.Contains(result.stdout+result.stderr, "being installed or upgraded") {
+							t.Fatalf("an answered call was refused as an install: stdout=%q stderr=%q", result.stdout, result.stderr)
+						}
+					})
+				}
+			}
 		}
 	}
 }

@@ -46,6 +46,20 @@ func TestShippedPackMeetKeepsTheStrictDefinitionOfASharedRuleID(t *testing.T) {
 	const text = "send the quarterly report to dana.reyes@contoso-mail.net today"
 	for _, order := range [][2]string{{"a-default", "b-strict"}, {"b-default", "a-strict"}} {
 		t.Run(order[0], func(t *testing.T) {
+			// A request scan without a pinned generation can read another
+			// test's process-wide live set instead of this fixture's pack.
+			scan := func(ctx context.Context) *RuleFinding {
+				t.Helper()
+				resolved := resolvedGuardrailProfileFrom(ctx)
+				if resolved == nil {
+					t.Fatal("fixture: no resolved profile")
+				}
+				generation := resolved.ruleGenerationFor(ctx, "codex")
+				if generation == nil {
+					t.Fatal("fixture: no profile rule generation")
+				}
+				return strongestMeetFinding(scanContentRuleCategoryWithGeneration(generation, text, "message", ruleContentScopeUntrusted, ""), "ENT-EMAIL-BULK")
+			}
 			profiles := map[string]config.GuardrailProfile{
 				order[0]: {Mode: "action", BlockAt: "MEDIUM", RulePackDir: filepath.Join(root, "default")},
 				order[1]: {Mode: "action", BlockAt: "MEDIUM", RulePackDir: filepath.Join(root, "strict")},
@@ -54,7 +68,7 @@ func TestShippedPackMeetKeepsTheStrictDefinitionOfASharedRuleID(t *testing.T) {
 			if name := resolvedGuardrailProfileFrom(strictCtx).decision.Name; name != order[1] {
 				t.Fatalf("strict-only decision %q", name)
 			}
-			want := findingWithID(scanContentRulesForConnectorFor(strictCtx, "codex", text, "message", ruleContentScopeUntrusted), "ENT-EMAIL-BULK")
+			want := scan(strictCtx)
 			if want == nil || want.Severity != "MEDIUM" {
 				t.Fatalf("strict profile alone: ENT-EMAIL-BULK %+v; want MEDIUM", want)
 			}
@@ -63,7 +77,7 @@ func TestShippedPackMeetKeepsTheStrictDefinitionOfASharedRuleID(t *testing.T) {
 			if !config.IsProfileMeet(decision.Name) || decision.Refused != "" {
 				t.Fatalf("decision %+v; want the meet of both profiles", decision)
 			}
-			got := findingWithID(scanContentRulesForConnectorFor(ctx, "codex", text, "message", ruleContentScopeUntrusted), "ENT-EMAIL-BULK")
+			got := scan(ctx)
 			if got == nil || got.Severity != "MEDIUM" {
 				t.Fatalf("meet: ENT-EMAIL-BULK %+v; want the strict pack's MEDIUM", got)
 			}
@@ -102,7 +116,7 @@ func TestMeetScansEachDefinitionOfACollidingRuleID(t *testing.T) {
 					sources[0], sources[1] = sources[1], sources[0]
 				}
 				merged := meetRuleGeneration(sources)
-				got := findingWithID(scanRuleGeneration(merged, tc.text, "Bash", ruleScanOptions{}), "R-SHARED")
+				got := strongestMeetFinding(scanRuleGeneration(merged, tc.text, "Bash", ruleScanOptions{}), "R-SHARED")
 				if got == nil || got.Severity != "HIGH" {
 					t.Fatalf("finding %+v; want the stronger member's HIGH", got)
 				}

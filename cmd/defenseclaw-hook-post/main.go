@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // defenseclaw-hook-post is the small POSIX per-user hook transport. Shell
-// hooks select its verified installed path and send a framed request on stdin.
+// hooks select its verified installed path and send a framed request on stdin
+// with --curl-output. The OpenCode and Amp per-user plugins send the gateway
+// CLI's JSON request without it and read the JSON reply, so a hook event does
+// not start the full gateway CLI.
 package main
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -17,7 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
-const maxInput = 6 << 20
+const maxInput = hookexec.MaxPerUserPluginRequest
 
 var (
 	version = "dev"
@@ -44,25 +48,34 @@ func run(args []string, input io.Reader, output io.Writer) error {
 	if flags.NArg() != 0 || *apiAddr == "" || *maxTime < 1 || *maxTime > 30 {
 		return fmt.Errorf("invalid per-user hook transport arguments")
 	}
-	if !*curlOutput {
-		return fmt.Errorf("curl-output is required for the native hook transport")
-	}
 	data, err := io.ReadAll(io.LimitReader(input, maxInput+1))
 	if err != nil {
 		return err
 	}
-	if len(data) > maxInput || !bytes.HasPrefix(data, []byte("DCPOST1\x00")) {
+	if len(data) > maxInput {
 		return fmt.Errorf("native hook input is invalid or too large")
 	}
-	frame, err := hookexec.ReadNativeHookFrame(data)
-	if err != nil {
+	var request hookexec.PerUserPluginRequest
+	if *curlOutput {
+		if !bytes.HasPrefix(data, []byte("DCPOST1\x00")) {
+			return fmt.Errorf("native hook input is invalid or too large")
+		}
+		frame, err := hookexec.ReadNativeHookFrame(data)
+		if err != nil {
+			return err
+		}
+		request = hookexec.PerUserPluginRequest{Path: frame.Path, Headers: frame.Headers, Body: frame.Body}
+	} else if request, err = hookexec.DecodePerUserPluginRequest(data); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*maxTime)*time.Second)
 	defer cancel()
-	response, err := hookexec.PostPerUserHook(ctx, *apiAddr, frame.Path, frame.Headers, []byte(frame.Body))
+	response, err := hookexec.PostPerUserHook(ctx, *apiAddr, request.Path, request.Headers, []byte(request.Body))
 	if err != nil {
 		return err
+	}
+	if !*curlOutput {
+		return json.NewEncoder(output).Encode(response)
 	}
 	_, err = fmt.Fprintf(output, "%s\n%d", response.Body, response.Status)
 	return err

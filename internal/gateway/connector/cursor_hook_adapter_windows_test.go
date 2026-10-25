@@ -40,6 +40,7 @@ const cursorAdapterHelperMode = "TEST_CURSOR_ADAPTER_MODE"
 const cursorAdapterPIDFileEnv = "TEST_CURSOR_ADAPTER_PID_FILE"
 const copilotAdapterHelperMode = "TEST_COPILOT_ADAPTER_MODE"
 const copilotAdapterPIDFileEnv = "TEST_COPILOT_ADAPTER_PID_FILE"
+const copilotAdapterCreateLockEnv = "TEST_COPILOT_ADAPTER_CREATE_LOCK"
 
 // prepareConnectorTestProcess runs the adapter helper modes, which exit,
 // and otherwise installs the connector unit-test fixtures (TestMain).
@@ -56,6 +57,20 @@ func prepareConnectorTestProcess() {
 			os.Exit(5)
 		}
 		fmt.Print(`{"permissionDecision":"deny","permissionDecisionReason":"matched: test"}`)
+		os.Exit(0)
+	case "allow":
+		payload, err := io.ReadAll(os.Stdin)
+		if err != nil || string(payload) != `{"source":"copilot-adapter-probe"}` {
+			fmt.Fprintf(os.Stderr, "Copilot adapter helper received wrong stdin: %q\n", string(payload))
+			os.Exit(6)
+		}
+		if lock := os.Getenv(copilotAdapterCreateLockEnv); lock != "" {
+			if err := os.Mkdir(lock, 0o700); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(6)
+			}
+		}
+		fmt.Print(`{"permissionDecision":"allow"}`)
 		os.Exit(0)
 	case "timeout":
 		writeAdapterLauncherRecord(os.Getenv(copilotAdapterPIDFileEnv))
@@ -285,9 +300,11 @@ func TestCopilotAdapterFailureFailsOpenOnlyWhenConfigured(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(filepath.Dir(filepath.Dir(workingAdapter)), ".install.lock"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// GAP-1372: the native hook's answer reaches Copilot during the install
+	// window; only a launcher failure gets the adapter's install denial.
 	stdout, stderr, code = runCopilotAdapterTest(t, workingAdapter, `{"source":"copilot-adapter-probe"}`)
-	if code != 0 || !strings.Contains(stdout, "being installed or upgraded") {
-		t.Fatalf("adapter accepted a policy answer during install: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	if code != 0 || strings.TrimSpace(stdout) == "" || strings.Contains(stdout+stderr, "being installed or upgraded") {
+		t.Fatalf("adapter replaced the native answer during install: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
 

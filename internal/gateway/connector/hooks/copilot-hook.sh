@@ -32,10 +32,11 @@ trap '_dc_copilot_rc=$?; if [ "$_dc_copilot_rc" -ne 0 ]; then copilot_managed_fa
 # environment is not read, so status and doctor report what runs (GAP-0315).
 # Strict availability closes it.
 case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) FAIL_MODE="closed" ;; esac
-# copilot_per_user_install_block answers with Copilot's native deny while
-# DefenseClaw is being installed or upgraded for this account, whatever the
-# fail mode, even before helpers, the token or the gateway are available
-# (GAP-0649); otherwise it returns 1.
+# copilot_per_user_install_block answers a failure with Copilot's native deny
+# while DefenseClaw is being installed or upgraded for this account, whatever
+# the fail mode, even before helpers, the token or the gateway are available
+# (GAP-0649); otherwise it returns 1. A call the gateway answers keeps that
+# answer (GAP-1372).
 copilot_per_user_install_block() {
   local home="${DEFENSECLAW_HOME:-${HOME:-${USERPROFILE:-}}/.defenseclaw}"
   local installing=0
@@ -278,8 +279,7 @@ case "$COPILOT_HOOK_EVENT" in
     ;;
 esac
 
-{{if and (not .Managed) (not .Sandbox)}}copilot_per_user_install_block "install or upgrade in progress" transport || true
-{{end}}{{if .Sandbox}}defenseclaw_sandbox_require_token copilot copilot-hook "copilot tool"
+{{if .Sandbox}}defenseclaw_sandbox_require_token copilot copilot-hook "copilot tool"
 
 PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
@@ -397,10 +397,7 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/copilot/hook" "$PAYLOAD" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
   fail_unreachable "$(defenseclaw_sandbox_unreachable_reason "$RESPONSE")"
-}{{else}}if defenseclaw_api_listener_unproven "$API_ADDR"; then
-  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Another account may hold the port. Run \`defenseclaw setup gateway --api-port <free-port>\` to choose a free port"
-fi
-# A refused or dropped connection means this account's gateway is
+}{{else}}# A refused or dropped connection means this account's gateway is
 # restarting or not running (after a reboot, for example): send the call
 # again for up to 3 seconds, starting the gateway after a refusal. See
 # defenseclaw_await_gateway in _hardening.sh.
@@ -425,7 +422,7 @@ RESPONSE=$(defenseclaw_hook_post) || {
     defenseclaw_managed_http_result "$HTTP_CODE" incomplete
     fail_unreachable "gateway unreachable"
   }
-{{else}}  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
+{{else}}  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "$(defenseclaw_gateway_unreachable_reason 2>/dev/null || printf 'gateway unreachable')"{{end}}
 }
 defenseclaw_retry_busy _dc_hook_post_response || {{if and .Managed (not .SecureClient) (not .Sandbox)}}fail_response "gateway returned HTTP 429"{{else}}fail_unreachable "gateway unreachable"{{end}}{{end}}
 

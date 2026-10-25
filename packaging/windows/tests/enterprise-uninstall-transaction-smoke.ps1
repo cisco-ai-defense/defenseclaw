@@ -1607,8 +1607,21 @@ targets:
                 # preimage capture). The smoke harness does not need to
                 # branch on it; accepting the parameter keeps the mock
                 # signature-compatible with Invoke-DefenseClawUninstall...
-                [switch]$SkipRedactionKeySnapshot
+                [switch]$SkipRedactionKeySnapshot,
+                # The production function's replacement hook, published
+                # before the services stop (GAP-0993). Production types it
+                # [hashtable]; this harness's sources are plain strings, so
+                # the stub keeps it untyped and records what it was given.
+                [object]$EarlyHookSource
             )
+            if ($null -ne $EarlyHookSource -and
+                $script:HarnessState.operation -in @('uninstall', 'purge')) {
+                throw (
+                    'an uninstall transaction was given a replacement ' +
+                    'hook to publish'
+                )
+            }
+            $script:HarnessState.early_hook_source = $EarlyHookSource
             if (-not $PSBoundParameters.ContainsKey(
                     'PriorDeploymentActive'
                 )) {
@@ -4236,6 +4249,18 @@ targets:
                 $transaction = $script:HarnessState.events.IndexOf(
                     'transaction'
                 )
+                if ($transaction -ge 0) {
+                    Assert-Harness `
+                        -Condition (
+                            [string]$script:HarnessState.early_hook_source -ceq
+                                [string]$sources['hook']
+                        ) `
+                        -Message (
+                            "fresh install attempt $attempt did not give " +
+                            'its transaction the replacement hook source ' +
+                            "(got '$($script:HarnessState.early_hook_source)')"
+                        )
+                }
                 $manifestPublished = $script:HarnessState.events.IndexOf(
                     'manifest-published'
                 )

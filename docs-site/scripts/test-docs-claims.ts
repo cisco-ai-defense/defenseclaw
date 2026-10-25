@@ -48,6 +48,37 @@ function source(name: string): string {
   return readFileSync(join(repo, name), 'utf8');
 }
 
+describe('Managed custom rule-pack apply', () => {
+  it('describes when ensure keeps the gateway running and when it restarts', () => {
+    const hotApply = source('internal/enterpriseunix/hotapply.go')
+      .split('func (l *lifecycle) hotConfigApply(')[1]?.split('// installedConfigReplaced')[0] ?? '';
+    assert.match(hotApply, /l\.opts\.Action != ActionEnsure/);
+    assert.match(hotApply, /l\.opts\.NoStart/);
+    assert.match(hotApply, /configwrite\.ManagedConfigRestartRequired\(/);
+    assert.match(hotApply, /!env\.Services\.Active\(ctx, gateway\)/);
+    assert.match(hotApply, /gatewayPolicyDigest\(body\) != ""/);
+    const lifecycle = source('internal/enterpriseunix/lifecycle.go');
+    assert.match(lifecycle, /hot := l\.hotConfigApply\(ctx, record, p, adopting\)/);
+    assert.match(lifecycle, /if gateway, ok := gatewayUnitOf\(units\); hot && ok \{\s*keep\[gateway\.Name\] = true/);
+    assert.match(lifecycle, /if !l\.opts\.NoStart \{\s*if err := l\.activate\(ctx, units, restartSockets, hot, p\)/);
+    const activate = lifecycle.split('func (l *lifecycle) activate(')[1]?.split('// unitActivationError')[0] ?? '';
+    assert.match(activate, /if err := env\.Services\.Start\(ctx, unit\)/);
+    const settle = source('internal/enterpriseunix/hotapply.go')
+      .split('func (l *lifecycle) settleHotGateway(')[1]?.split('func (', 1)[0] ?? '';
+    assert.match(settle, /if applied \{[\s\S]*?gatewayKeptRunning = true/);
+    assert.match(settle, /if err := restartUnit\(ctx, env\.Services, gateway\)/);
+
+    const reference = page('enterprise/configure/reference.mdx');
+    const customPack = reference.split('### Custom rule packs')[1]?.split('### Network proxy')[0] ?? '';
+    assert.match(customPack, /without `--no-start`.{0,250}custom pack switch.{0,250}without a restart/i);
+    assert.match(customPack, /gateway was running.{0,250}restarts it/i);
+    assert.match(customPack, /gateway was stopped.{0,100}starts it/i);
+    assert.match(customPack, /with `--no-start`.{0,100}does not start or restart/i);
+    assert.match(customPack, /hot reload cannot be confirmed/i);
+    assert.doesNotMatch(customPack, /applies the new pack in the running gateway without a restart/);
+  });
+});
+
 function docsPages(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name);
@@ -324,10 +355,25 @@ function repoText(name: string): string {
 }
 
 describe('1.0.4 audit flood and upgrade claims', () => {
+  it('describes the WAL hold and alarm actually used by the gateway', () => {
+    const wal = page('reference/observability/index.mdx');
+    const enterprise = page('troubleshooting/enterprise/index.mdx');
+    const changelog = source('CHANGELOG.md').split('- **The audit log catches up during a hook flood on a slow disk')[1]?.split('\n- **')[0] ?? '';
+    for (const body of [wal, enterprise, changelog]) {
+      assert.match(body, /audit\.db-wal[\s\S]*?176 MiB[\s\S]*?256 MiB/i);
+      assert.match(body, /100 ms[\s\S]*?1 second/i);
+      assert.match(body, /256 MiB[\s\S]*?warn/i);
+      assert.doesNotMatch(body, /at most 2 s|doubles the next one's wait and cap|up to 10 s and 30 s|never wait for it|up to two seconds|up to 30 seconds|over its 1024 MiB bound|stays near 256 MiB under load/i);
+    }
+    assert.match(source('internal/audit/sqlite_wal_guard.go'), /WALEmergencyArmBytes\s*=\s*WALHardLimitBytes\s*-\s*48\s*<<\s*20/);
+    assert.match(source('internal/gateway/audit_wal_guard.go'), /auditWALGuardTriggerBytes\s*=\s*audit\.WALHardLimitBytes\s*-\s*80\s*<<\s*20/);
+    assert.match(source('internal/gateway/audit_wal_guard.go'), /auditWALAlarmBytes\s*=\s*auditWALLimitBytes/);
+  });
+
   it('describes bounded Windows WAL catch-up and the remaining hook delay', () => {
     const enterprise = page('troubleshooting/enterprise/index.mdx');
-    assert.match(enterprise, /Windows.*audit\.db-wal.*bounded catch-up/i);
-    assert.match(enterprise, /bounded catch-up.*256 MiB/i);
+    assert.match(enterprise, /Windows.*audit\.db-wal.*catch-up/i);
+    assert.match(enterprise, /176 MiB.*256 MiB/i);
     assert.match(enterprise, /0\.9.to.1\.2 GB.*10 calls a second/i);
     assert.match(enterprise, /hook answers.*(?:slow|wait|delay).*default.*closed/i);
     assert.doesNotMatch(enterprise, /audit\.db-wal.*20 GB|fix needs a change to how the audit store indexes hook records and is deferred/i);
@@ -441,7 +487,7 @@ describe('Hook connector setup and teardown', () => {
       assert.ok(!new RegExp(`This keeps ${name}'s settings`, 'i').test(turnOff), `${id} must not imply hooks stay installed`);
       if (id === 'opencode' || id === 'amp') {
         assert.match(turnOff, /removes? DefenseClaw's plugin/i, `${id} must name plugin removal`);
-        assert.match(turnOff, /edited plugin.*(?:is left|is kept)/i, `${id} must explain edited plugins`);
+        assert.match(turnOff, /(?:edited plugin.*(?:is left|is kept)|modified (?:the plugin|bridge).*refuse)/i, `${id} must explain edited plugins`);
         assert.match(turnOff, /guardrail enable.*(?:restores?|reinstalls?) DefenseClaw's plugin/i, `${id} must explain re-enable`);
       } else {
         assert.match(turnOff, /removes? DefenseClaw(?:'s)? hook/i, `${id} must name hook removal`);
@@ -553,6 +599,34 @@ describe('Windows Hermes failure guidance', () => {
     assert.match(windows, /Hermes.*closed by default.*explicitly.*open/i);
     assert.match(windows, /managed host.*administrator.*open.*gateway outage/i);
     assert.match(windows, /Secure Client.*open.*default/i);
+  });
+});
+
+describe('Hermes process failure guidance', () => {
+  it('scopes timeout and spawn outcomes to the loaded hook contract', () => {
+    const entry = /func hermesHookEntry\([^)]*\)[^{]*\{([\s\S]*?)\n\}/
+      .exec(source('internal/gateway/connector/hook_only.go'))?.[1];
+    assert.ok(entry, 'Hermes Setup registration not found');
+    assert.match(entry, /if event == "pre_tool_call" && contractID == "hermes-hooks-v2" && !shellHookSecureClientProfile\(opts\) \{[\s\S]*?entry\["fail_closed"\] = true/);
+
+    const limits = page('connectors/hermes.mdx').split('## Limits')[1]?.split('## On a managed computer')[0] ?? '';
+    assert.match(limits, /0\.19\/0\.20.{0,150}times out or cannot start/i);
+    assert.match(limits, /reviewed 0\.21 contract.{0,200}`fail_closed: true`.{0,200}timeout or spawn error blocks/i);
+    assert.match(limits, /restart.*Hermes host/i);
+    assert.match(limits, /killed hook.{0,150}non-2 exit with empty stdout/i);
+    assert.doesNotMatch(limits, /Hermes runs the call when a hook times out or cannot start/i);
+  });
+});
+
+describe('Hermes install-lock attribution', () => {
+  it('reports the observed permission error without assigning unproved file ownership', () => {
+    const limits = readFileSync(join(docs, 'reference/connectors/hermes.mdx'), 'utf8');
+    const lockLine = limits.split('\n').find((line) => line.includes('.install.lock'));
+    assert.ok(lockLine, 'Hermes install-lock guidance is missing');
+    assert.match(lockLine, /pm-runtime.*install-stamp\.json.*\.install\.lock/);
+    assert.match(lockLine, /Inspect the resolved path, owner, and permissions/);
+    assert.match(lockLine, /No DefenseClaw verdict was recorded/);
+    assert.doesNotMatch(lockLine, /(?:its own|its tools installer|vendor runtime errors)/i);
   });
 });
 
@@ -692,6 +766,19 @@ describe('docs claim CI coverage', () => {
 });
 
 describe('1.0.4 operator routes and limits', () => {
+  it('keeps the TUI host-port ask row aligned with the UI and sandbox guide', () => {
+    const tui = source('docs-site/content/docs/reference/commands/tui.mdx');
+    const asksRow = tui.split('\n').find((line) => line.startsWith('| Asks |')) ?? '';
+    const ui = source('cli/defenseclaw/tui/services/sandbox_state.py');
+    const sandboxGuide = page('reference/sandboxes/cli.mdx');
+    const manager = source('internal/openshell/manager/hostport.go');
+    assert.match(ui, /A port on this machine asks only if the run named it [^\n]*\n[^\n]*with --host-port PORT; approve that ask to open the port/);
+    assert.match(sandboxGuide, /A `--host-port` port reads `asks` until you approve its first connection/);
+    assert.match(manager, /func \(m \*Manager\) hostPortAsk\(/);
+    assert.match(asksRow, /A port on this machine asks only if the run named it with `--host-port PORT`; approve that ask to open the port\./);
+    assert.doesNotMatch(asksRow, /port on this machine never asks/i);
+  });
+
   it('derives the MCP-description YARA signature count from the shipped rules', () => {
     const rules = readFileSync(join(repo, 'policies/yara/mcp-tools/description_injection.yara'), 'utf8');
     const count = (rules.match(/^rule\s+\w+/gm) ?? []).length;
@@ -735,6 +822,25 @@ describe('1.0.4 operator routes and limits', () => {
     const risk = repoText('docs/ENTERPRISE-THREAT-MODEL.md').split('| R25 |')[1]?.split('| R26 |')[0] ?? '';
     assert.match(risk, /engine version.*surface_unverified.*not enrolled/i);
     assert.doesNotMatch(risk, /enrollment finds an agent only through its CLI install/i);
+  });
+
+  it('ties threat-model B17 to the installed hook fail mode', () => {
+    const row = source('docs/ENTERPRISE-THREAT-MODEL.md')
+      .split('\n').find((line) => line.startsWith('| B17 |')) ?? '';
+    const hook = source('internal/gateway/connector/hooks/_hardening.sh');
+    assert.match(hook, /DEFENSECLAW_FAIL_MODE in the agent's environment is not[\s\S]*?read/);
+    assert.match(row, /DEFENSECLAW_FAIL_MODE.*1\.0\.4 hooks do not read.*installed.*mode/i);
+    assert.doesNotMatch(row, /DEFENSECLAW_FAIL_MODE[^|]*honored only when stricter/i);
+  });
+
+  it('describes the managed Unix hook socket directory and listener checks', () => {
+    const transport = source('internal/gateway/connector/hookexec/managed_standalone_transport.go');
+    const row = source('docs-site/content/docs/troubleshooting/enterprise/index.mdx')
+      .split('\n').find((line) => line.startsWith('| `enterprise_managed_gateway_peer_unverified` |')) ?? '';
+    assert.match(transport, /hook socket directory .* is not owned by root or the gateway service account/);
+    assert.match(transport, /hook socket listener uid .* is neither root nor the gateway service uid/);
+    assert.match(row, /Linux and macOS:.*socket directory.*root or the gateway account.*listener UID.*kernel/i);
+    assert.doesNotMatch(row, /hook socket is not owned by root or the gateway account/);
   });
 
   it('does not advertise local files as MCP scan targets', () => {

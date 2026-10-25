@@ -10,7 +10,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -276,7 +278,7 @@ func TestDiscoverUnixPrivateInstallsCoverEveryCopyLayout(t *testing.T) {
 			withPrivateInstallMachinePrefixes(t, l.machineA, l.machineB)
 			tc.build(t, l)
 			var got []string
-			for _, line := range describeInstalls(t, DiscoverUnixPrivateAgentInstalls(l.home, []string{"claudecode", "codex"}), l.home) {
+			for _, line := range describeInstalls(t, DiscoverUnixPrivateAgentInstalls(context.Background(), l.home, []string{"claudecode", "codex"}), l.home) {
 				line = strings.ReplaceAll(line, "/alias/", "/private/") // one copy, whichever name the listing meets first
 				line = strings.ReplaceAll(line, l.machineA, "MACHINE-A")
 				got = append(got, strings.ReplaceAll(line, l.machineB, "MACHINE-B"))
@@ -344,7 +346,7 @@ func TestDiscoverUnixPrivateNPMCopiesNeedAnEntryPoint(t *testing.T) {
 				home := makeHome(t, trustedTestDir(t), "alice")
 				dir := filepath.Join(home, "private", "node_modules", filepath.FromSlash(pkg))
 				tc.build(t, dir, connector, pkg)
-				found := DiscoverUnixPrivateAgentInstalls(home, []string{connector})
+				found := DiscoverUnixPrivateAgentInstalls(context.Background(), home, []string{connector})
 				switch {
 				case tc.skipped != "":
 					if len(found) != 1 || !found[0].Incomplete || found[0].Skipped != tc.skipped {
@@ -378,10 +380,62 @@ func TestDiscoverUnixPrivateInstallsReportsTheFindingLimit(t *testing.T) {
 	for i := 0; i <= privateAgentInstallMaxFindings; i++ {
 		npmCopy(t, claudePackage(filepath.Join(home, fmt.Sprintf("old-%02d", i)), false), "@anthropic-ai/claude-code", "2.0.77", "cli.js")
 	}
-	found := DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode"})
+	found := DiscoverUnixPrivateAgentInstalls(context.Background(), home, []string{"claudecode"})
 	last := found[len(found)-1]
 	if len(found) != privateAgentInstallMaxFindings+1 || !last.Incomplete || installFacts(t, last)["skipped"] != PrivateInstallSkippedFindings {
 		t.Fatalf("%d findings, last %+v", len(found), last)
+	}
+}
+
+// Another account's folder can be unlistable with or without search access.
+// Only the searchable one can hide a runnable copy from the enrolled user.
+func TestPrivateInstallWalkReportsSearchableUnlistableOtherOwner(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		t.Skip("requires a non-root Linux account and a distinct directory owner")
+	}
+	for _, tc := range []struct {
+		name           string
+		mode           os.FileMode
+		wantIncomplete bool
+	}{
+		{"searchable 0711", 0o711, true},
+		{"unsearchable 0700", 0o700, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withPrivateInstallMachinePrefixes(t)
+			home := makeHome(t, trustedTestDir(t), "alice")
+			opaque := filepath.Join(home, "opaque")
+			npmCopy(t, claudePackage(filepath.Join(opaque, "nested"), false), "@anthropic-ai/claude-code", "2.0.77", "cli.js")
+			if err := os.Chmod(opaque, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := exec.Command("sudo", "-n", "chown", "0", opaque).Run(); err != nil {
+				t.Skipf("cannot create a distinct-owner directory: %v", err)
+			}
+			t.Cleanup(func() {
+				_ = exec.Command("sudo", "-n", "chown", fmt.Sprint(os.Geteuid()), opaque).Run()
+				_ = os.Chmod(opaque, 0o700)
+			})
+			_, searchErr := os.Stat(filepath.Join(opaque, "nested"))
+			if tc.wantIncomplete && searchErr != nil || !tc.wantIncomplete && !os.IsPermission(searchErr) {
+				t.Fatalf("search access = %v, want incomplete %t", searchErr, tc.wantIncomplete)
+			}
+			if _, err := os.ReadDir(opaque); !os.IsPermission(err) {
+				t.Fatalf("opaque directory must be unlistable, got %v", err)
+			}
+			found := DiscoverUnixPrivateAgentInstalls(context.Background(), home, []string{"claudecode"})
+			if tc.wantIncomplete {
+				for _, install := range found {
+					if install.Connector == "claudecode" && install.Incomplete && install.Skipped == PrivateInstallSkippedHome {
+						return
+					}
+				}
+				t.Fatal("searchable, unlistable directory was silently treated as fully scanned")
+			}
+			if len(found) != 0 {
+				t.Fatalf("unsearchable other-owner directory cannot hide a runnable copy: %+v", found)
+			}
+		})
 	}
 }
 
@@ -537,7 +591,7 @@ func TestEnumerateUnixHealthyHostIsCleanAndAnOldMachineCopyIsReported(t *testing
 			DiscoverSurfaces: func(ctx context.Context, account unixidentity.Account, names []string) (UnixDiscovery, error) {
 				version, _ := DiscoverUnixAgentVersion(ctx, account.Home, "claudecode", false)
 				return UnixDiscovery{Versions: map[string]string{"claudecode": version},
-					PrivateInstalls: DiscoverUnixPrivateAgentInstalls(account.Home, names)}, nil
+					PrivateInstalls: DiscoverUnixPrivateAgentInstalls(context.Background(), account.Home, names)}, nil
 			},
 		})
 		if err != nil {

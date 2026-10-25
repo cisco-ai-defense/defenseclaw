@@ -522,6 +522,7 @@ scanners:
 | `judge_source` | `inherit` | `inherit` uses the top-level `llm:` block. `override` uses `scanners.mcp_scanner.llm`. |
 | `llm` | empty | The scanner's own judge settings. It must be empty with `inherit` and needs a `model` with `override`. |
 | `scan_prompts`, `scan_resources`, `scan_instructions` | `false` | Also scan the server's prompts, resources and instructions on every scan. |
+| `unverified_server` | `warn` | What `mcp set` and the gateway's install admission do when the scan did not finish (a timeout, an unresolved hostname, a launcher that exited, an unreachable URL) or an OpenCode command is outside the trusted install prefixes. `warn` adds or keeps the server with a warning and an audit record, including on managed standalone hosts; `block` refuses it, and the gateway blocks and disables it (strict). Secure Client uses separate closed admission. |
 
 The Cisco AI Defense endpoint and key are not scanner keys. They stay in `cisco_ai_defense` (`endpoint`, `api_key_env`, `timeout_ms`), shared with the guardrail.
 
@@ -687,7 +688,7 @@ observability destination.
 
 ### Action mapping
 
-The scanner produces a *severity*. What that severity *does* is set in `config.yaml` under `admission:`: `admission.mcp.actions` first, then `admission.defaults.actions`, which every asset type inherits. Unlike the skill scanner, the MCP scanner has no gate keys (`fail_on_severity` and `review_queue_min` belong to the skill scanner), so the action map is the only control. The built-in defaults quarantine CRITICAL, HIGH and MEDIUM servers, disable LOW ones at runtime, and admit INFO findings with a warning:
+The scanner produces a *severity*. What that severity *does* is set in `config.yaml` under `admission:`: `admission.mcp.actions` first, then `admission.defaults.actions`, which every asset type inherits. Unlike the skill scanner, the MCP scanner has no gate keys (`fail_on_severity` and `review_queue_min` belong to the skill scanner), so the action map is the control. Balanced admission quarantines CRITICAL servers and warns on HIGH, MEDIUM, LOW and INFO findings. The scan finding and warning are audited:
 
 ```yaml title="~/.defenseclaw/config.yaml (the built-in defaults, written out)"
 admission:
@@ -695,8 +696,9 @@ admission:
     actions: {critical: quarantine, high: quarantine, medium: warn, low: warn, info: warn}
   mcp:
     actions:
-      medium: quarantine
-      low: {install: none, file: none, runtime: disable}
+      high: warn
+      medium: warn
+      low: warn
 ```
 
 An action is `block`, `quarantine`, `warn` or `allow`, or the exact `{install, file, runtime}` triple (see [Skill scanner](#skill-scanner)). Change one severity with `config set`, and read the map in force with `config get`:
@@ -707,6 +709,8 @@ defenseclaw config get admission.mcp --effective
 ```
 
 `defenseclaw policy edit scanner --type mcp -s <severity> ...` edits the same `admission.mcp.actions`. `defenseclaw policy activate <name>` writes a named policy's actions for every asset type as explicit maps, replacing your edits. [Admission](/docs/reference/scanning/admission) documents the whole block.
+
+For strict MCP admission, set `admission.mcp.actions.high: quarantine` (and any other severities your organization chooses to refuse). Secure Client keeps its separate closed admission.
 
 
 ### Private addresses and local servers

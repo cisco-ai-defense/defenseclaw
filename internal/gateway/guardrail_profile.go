@@ -204,6 +204,9 @@ type profileDecision struct {
 	// alone shows Candidates.
 	Unproven   []string
 	Candidates []string
+	// provenMembers keeps every proven assignment's rule and audit scope
+	// even when one profile covers the others for policy selection.
+	provenMembers []string
 }
 
 // guardrailProfileSet is every profile derived from one configuration.
@@ -522,6 +525,16 @@ type resolvedGuardrailProfile struct {
 	derived  *config.Config
 }
 
+func (r *resolvedGuardrailProfile) evaluationMeet() *profileMeet {
+	if r == nil || r.set == nil {
+		return nil
+	}
+	if len(r.decision.provenMembers) > 1 {
+		return r.set.meet(config.ProfileMeetName(r.decision.provenMembers))
+	}
+	return r.set.meet(r.decision.Name)
+}
+
 type resolvedGuardrailProfileKey struct{}
 type profileRouteConnectorKey struct{}
 type profileRuleScanConnectorKey struct{}
@@ -673,12 +686,13 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 	}
 	connectorName := profileAssignmentConnector(ctx)
 	scans := set.requestScanScopes(ctx, connectorName)
-	decision := set.matchAgent(subject, source, connectorName, scans, agent, legacy)
+	path := requestProfilePath(ctx)
+	decision := set.matchAgent(subject, source, connectorName, scans, path, agent, legacy)
 	resolved := &resolvedGuardrailProfile{decision: decision, set: set}
 	if decision.Name != "" {
 		if meet := set.meet(decision.Name); meet != nil {
 			// A meet decides each path with its members that block there.
-			resolved.derived = meet.pathConfig(requestProfilePath(ctx))
+			resolved.derived = meet.pathConfig(path)
 		} else if derived, ok := set.derivedProfile(decision.Name); ok {
 			resolved.derived = derived.Config
 		}
@@ -1010,18 +1024,18 @@ func accountGroups(account *osuser.User) ([]string, error) {
 // match is selectProfile for a request without an unresolved agents entry
 // (matchAgent has the bridge's answer).
 func (set *guardrailProfileSet) match(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	return set.matchResolved(subject, resolveIdentity(subject, nil), source, connectorName, nil, agent)
+	return set.matchResolved(subject, resolveIdentity(subject, nil), source, connectorName, nil, profilePathAny, agent)
 }
 
 // matchResolved is selectProfile, memoised for repeated subjects whose
 // facts are all proven. An uncertain decision is never cached, including a
 // pending Windows assignment group SID lookup.
-func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res identityResolution, source, connectorName string, scans []string, agent string) profileDecision {
+func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res identityResolution, source, connectorName string, scans []string, path profilePath, agent string) profileDecision {
 	scans = set.scanScopes(connectorName, scans)
 	if set.matches == nil || !res.proven() {
-		return set.selectProfile(subject, res, source, connectorName, scans, agent)
+		return set.selectProfile(subject, res, source, connectorName, scans, path, agent)
 	}
-	key := profileMatchKey(subject, source, connectorName, scans, agent)
+	key := profileMatchKey(subject, source, connectorName, scans, path, agent)
 	if set.groupSIDs != nil {
 		waitForGroup := subject != nil && source != "" && !subject.LookupFailed && len(subject.Groups) > 0
 		set.groupSIDs.refresh(time.Now(), waitForGroup)
@@ -1030,7 +1044,7 @@ func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res ident
 	if decision, ok := set.matches.get(key); ok {
 		return decision
 	}
-	decision := set.selectProfile(subject, res, source, connectorName, scans, agent)
+	decision := set.selectProfile(subject, res, source, connectorName, scans, path, agent)
 	if decision.Refused == "" {
 		set.matches.put(key, decision)
 	}
@@ -1040,7 +1054,7 @@ func (set *guardrailProfileSet) matchResolved(subject *profileSubject, res ident
 // matchUncached is selectProfile without the memo, for a request without an
 // unresolved agents entry.
 func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	return set.selectProfile(subject, resolveIdentity(subject, nil), source, connectorName, nil, agent)
+	return set.selectProfile(subject, resolveIdentity(subject, nil), source, connectorName, nil, profilePathAny, agent)
 }
 
 func (set *guardrailProfileSet) decision(name, reason, group, source string) profileDecision {
@@ -1369,7 +1383,7 @@ func scanContentRulesForConnectorFor(ctx context.Context, connectorName, text, t
 // with every rule of its members' packs, the base generation's included.
 func (r *resolvedGuardrailProfile) ruleGenerationFor(ctx context.Context, connectorName string) *compiledRulePackCategories {
 	if r != nil && r.set != nil {
-		if meet := r.set.meet(r.decision.Name); meet != nil {
+		if meet := r.evaluationMeet(); meet != nil {
 			return meet.ruleGeneration(ctx, r.set, connectorName)
 		}
 	}
@@ -1792,7 +1806,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		agent = ""
 	}
 	scans := set.requestScanScopes(r.Context(), connectorName)
-	decision := set.matchAgent(subject, source, connectorName, scans, agent, nil)
+	decision := set.matchAgent(subject, source, connectorName, scans, profilePathAny, agent, nil)
 	out["profile"] = decision.Name
 	out["digest"] = decision.Digest
 	out["match"] = decision.Match

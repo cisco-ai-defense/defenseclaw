@@ -65,6 +65,7 @@ func TestRescanAdmitsMCPServerAddedLaterWithoutScan(t *testing.T) {
 func TestRescanFirstCycleAdmitsMCPServerPresentAtStart(t *testing.T) {
 	t.Setenv("PATH", "")
 	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Admission.MCP.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionQuarantine}
 	servers := []config.MCPServerEntry{{Name: "usm-time", Command: "uvx", Args: []string{"mcp-server-time"}, Connector: "claudecode"}}
 	var admitted []AdmissionResult
 	w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) { admitted = append(admitted, r) })
@@ -89,6 +90,7 @@ func TestRescanFirstCycleAdmitsMCPServerPresentAtStart(t *testing.T) {
 func TestFirstStartAfterV8MigrationKeepsConfiguredMCPServers(t *testing.T) {
 	t.Setenv("PATH", "")
 	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Scanners.MCPScanner.UnverifiedServer = "block" // the strict tier blocks a server whose scan failed (GAP-1195)
 	record := `{"from_version":8,"to_version":9,"source_sha256":"` + strings.Repeat("a", 64) + `"}`
 	if err := os.WriteFile(config.MigrationRecordPath(filepath.Join(cfg.DataDir, "config.yaml")), []byte(record), 0o600); err != nil {
 		t.Fatal(err)
@@ -184,6 +186,7 @@ func TestRescanAdmitsUnscannedMCPServerWithoutScanWhenScanOnInstallIsOff(t *test
 func TestRescanAdmitsAllowPinnedMCPServerWhoseScanFailed(t *testing.T) {
 	t.Setenv("PATH", "")
 	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Scanners.MCPScanner.UnverifiedServer = "block" // the strict tier blocks a server whose scan failed (GAP-1195)
 	cfg.Watch.RescanContentGated = true
 	server := config.MCPServerEntry{Name: "w2bnotes", URL: "http://127.0.0.1:28561/mcp", Connector: "codex", Home: "/home/u1"}
 	rows := auditRows(t, logger)

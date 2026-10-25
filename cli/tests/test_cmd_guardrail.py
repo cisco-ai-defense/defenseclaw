@@ -765,6 +765,60 @@ def make_multi_ctx(connectors, *, enabled: bool = True):
     return app
 
 
+def test_amp_open_preview_and_help_scope_failure_rows_to_per_user_outages() -> None:
+    """An eligible per-user Amp outage is recorded; managed and sandbox calls are not."""
+    app = make_multi_ctx({"amp": None, "codex": None})
+    app.cfg.guardrail.hook_fail_mode = "closed"
+    state = SimpleNamespace(
+        desired="closed", current=True, runtime="closed", effective="closed", drift=(), limit=None,
+    )
+    with (
+        patch.object(cmd_guardrail, "resolve_connector_fail_mode", return_value=state),
+        patch.object(cmd_guardrail, "_apply_scoped_fail_mode_transaction"),
+        patch.object(cmd_guardrail, "_apply_global_fail_mode_transaction"),
+        patch.object(cmd_guardrail, "_log_guardrail_action"),
+    ):
+        scoped = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--connector", "amp", "--yes"], obj=app)
+        global_result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
+    for result in (scoped, global_result):
+        assert result.exit_code == 0, result.output
+        assert "Amp" in result.output
+        assert "per-user" in result.output and "hook-failures.jsonl" in result.output
+        assert "guardrail-degraded" in result.output
+    help_result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["--help"])
+    assert help_result.exit_code == 0, help_result.output
+    assert "Amp" in help_result.output and "per-user" in help_result.output
+    assert "hook-failures.jsonl" in help_result.output
+    page = (Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/configuration/fail-modes.mdx")
+    page_text = page.read_text(encoding="utf-8")
+    reporting = page_text.split("## Reporting and diagnosis", 1)[1]
+    assert "Amp plugin writes a record only for a call an outage let run" in reporting
+    assert "guardrail-degraded" in reporting
+    assert "managed and sandbox Amp plugins write no record" in reporting
+    for prefix in (
+        "On a per-user install the outage behavior",
+        "| `default` (balanced",
+        "| Gateway service not running",
+        "When the gateway is down or answers 5xx",
+    ):
+        line = next(line for line in page_text.splitlines() if line.startswith(prefix))
+        assert "hook-failures.jsonl" in line, line
+        assert "except for Amp" not in line and "Amp has no such writer" not in line, line
+
+
+def test_per_user_amp_outage_open_template_records_an_actionable_call() -> None:
+    source = (Path(__file__).resolve().parents[2] / "internal/gateway/connector/hooks/amp-plugin.ts").read_text(
+        encoding="utf-8"
+    )
+    branch = source.split("if (await perUserOutageOpen(error)) {", 1)[1].split("\n\t\t\t\t}", 1)[0]
+    assert branch.index('if (actionable) await logFailOpen("gateway unreachable")') < branch.index(
+        'return { action: "allow"'
+    )
+    writer = source.split("async function logFailOpen(", 1)[1].split("async function perUserGatewayDownText", 1)[0]
+    for field in ('"hook-failures.jsonl"', 'connector: "amp"', 'fail_mode: "open"', 'outcome: "fail_open"'):
+        assert field in writer
+
+
 class PerConnectorToggleTests(unittest.TestCase):
     """`guardrail {enable,disable} --connector X` — scoped per-connector."""
 

@@ -23,6 +23,8 @@ type hookDeliveryReceipt struct {
 	length string
 }
 
+type hookDeliveryAdvertisedKey struct{}
+
 type hookDeliveryStartContextKey struct{}
 
 func hookDeliveryReceiptForRequest(r *http.Request) *hookDeliveryReceipt {
@@ -39,18 +41,20 @@ func (a *APIServer) beginHookDeliveryReceipt(w http.ResponseWriter, r *http.Requ
 		r.Header.Get(hookexec.HookDeliveryReceiptHeader) != "1" {
 		return nil
 	}
-	if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
-		// Without full duplex the hook closes its request body after the
-		// short capability wait, so the ordinary bounded request still works.
-		return nil
+	if advertised, _ := r.Context().Value(hookDeliveryAdvertisedKey{}).(bool); !advertised {
+		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
+			// Without full duplex the hook closes its request body after the
+			// short capability wait, so the ordinary bounded request still works.
+			return nil
+		}
+		if r.ProtoMajor == 1 {
+			// The request body stays open across the response. Reusing this
+			// HTTP/1 connection can race the server's next-request reader with
+			// the final receipt read when the hook closes at its deadline.
+			w.Header().Set("Connection", "close")
+		}
+		w.WriteHeader(http.StatusEarlyHints)
 	}
-	if r.ProtoMajor == 1 {
-		// The request body stays open across the response. Reusing this
-		// HTTP/1 connection can race the server's next-request reader with
-		// the final receipt read when the hook closes at its deadline.
-		w.Header().Set("Connection", "close")
-	}
-	w.WriteHeader(http.StatusEarlyHints)
 	return &hookDeliveryReceipt{reader: bufio.NewReader(r.Body),
 		length: r.Header.Get(hookexec.HookDeliveryPayloadBytesHeader)}
 }

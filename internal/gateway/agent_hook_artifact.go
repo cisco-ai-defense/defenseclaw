@@ -92,12 +92,7 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 	}
 	intent := guardrailActionAllow
 	if enforceable := enforceableRuleFindings(findings); len(enforceable) > 0 {
-		intent = guardrailActionForConnector(
-			a.decisionConfig(ctx),
-			req.ConnectorName,
-			HighestSeverity(enforceable),
-			true,
-		)
+		intent = profileMeetActionForFindings(ctx, a.decisionConfig(ctx), req.ConnectorName, enforceable, true, false)
 	}
 	resp = mergeAgentHookFindings(profile, req, resp, findings, intent)
 	if !req.SuppressCorrelationEmit {
@@ -193,6 +188,11 @@ func promotedArtifactFindings(
 				generation:         member,
 				budget:             budget,
 			})
+			if generation != nil && i < len(generation.memberNames) {
+				for j := range matched {
+					matched[j].profile = generation.memberNames[i]
+				}
+			}
 			lists = append(lists, matched)
 			for _, finding := range matched {
 				if _, duplicate := seenRules[i][finding.RuleID]; duplicate {
@@ -208,21 +208,40 @@ func promotedArtifactFindings(
 			recordTelemetry(observed)
 		}
 		if req.toolChain != nil {
-			matched := lists[0]
-			if len(lists) > 1 {
-				matched = strongestRuleFindings(lists, trustedActionFindingKey)
+			chainLists := lists
+			chainEnabled := true
+			if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil {
+				if meet := resolved.evaluationMeet(); meet != nil {
+					chainEnabled = false
+					chainLists = nil
+					for _, member := range meet.members {
+						chainEnabled = chainEnabled || configBlocksOn(resolved.set.profileConfig(member), req.ConnectorName, profilePathHook)
+					}
+					if generation != nil && len(generation.memberNames) == len(lists) {
+						for i, member := range generation.memberNames {
+							if configBlocksOn(resolved.set.profileConfig(member), req.ConnectorName, profilePathHook) {
+								chainLists = append(chainLists, lists[i])
+							}
+						}
+					}
+				}
 			}
-			req.toolChain.recordArtifactTrustedAction(
-				artifactFacts,
-				matched,
-				enforcementCapable,
-			)
+			if chainEnabled {
+				var matched []RuleFinding
+				if len(chainLists) == 1 {
+					matched = chainLists[0]
+				} else if len(chainLists) > 1 {
+					matched = strongestRuleFindings(chainLists, trustedActionFindingKey)
+				}
+				req.toolChain.recordArtifactTrustedAction(artifactFacts, matched, enforcementCapable)
+			}
 		}
 	}
-	if len(findings) == 1 {
-		return findings[0]
+	var all []RuleFinding
+	for _, member := range findings {
+		all = append(all, member...)
 	}
-	return strongestRuleFindings(findings, func(ruleID string) string { return ruleID })
+	return all
 }
 
 // promotedArtifactBodyEnforcementFacts returns the facts that decide whether

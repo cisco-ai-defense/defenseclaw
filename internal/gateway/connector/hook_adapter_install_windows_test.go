@@ -6,11 +6,77 @@
 package connector
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestCopilotAdapterChecksInstallerHomeFromNativeHookState(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hook := filepath.Join(bin, "defenseclaw-hook.exe") // the upgrade has temporarily removed it
+	installerHome := filepath.Join(t.TempDir(), "installer-home")
+	if err := os.Mkdir(installerHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := fmt.Sprintf(`{"schema_version":1,"install_kind":"powershell-windows","install_scope":"user","command_dir":%q,"data_root":%q}`,
+		bin, installerHome)
+	if err := os.WriteFile(filepath.Join(bin, "defenseclaw-hook-state.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := renderPerUserAdapterInDataDir(t, "copilot-hook.ps1", hook, "open", filepath.Join(t.TempDir(), "configured-data"))
+	call := func() (string, string, int) {
+		return runCopilotAdapterTest(t, adapter, `{"source":"copilot-adapter-probe"}`)
+	}
+	if stdout, stderr, code := call(); code != 0 || strings.TrimSpace(stdout) != "" {
+		t.Fatalf("outside install: exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	lock := filepath.Join(installerHome, ".install.lock")
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if stdout, stderr, code := call(); code != 0 || !strings.Contains(stdout, `"permissionDecision":"deny"`) ||
+		!strings.Contains(stderr, "being installed or upgraded") {
+		t.Fatalf("installer home lock missed: exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if stdout, stderr, code := call(); code != 0 || strings.TrimSpace(stdout) != "" {
+		t.Fatalf("after install: exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	// A lock can appear while the native hook runs. The native hook applies
+	// the install window itself, so the answer it gives reaches Copilot
+	// unchanged: an allow the gateway gave keeps its answer (GAP-1372).
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hook, image, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(copilotAdapterHelperMode, "allow")
+	t.Setenv(copilotAdapterCreateLockEnv, lock)
+	if stdout, stderr, code := call(); code != 0 || strings.TrimSpace(stdout) != `{"permissionDecision":"allow"}` ||
+		strings.Contains(stdout+stderr, "being installed or upgraded") {
+		t.Fatalf("native answer replaced during the install window: exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(copilotAdapterCreateLockEnv, "")
+	if stdout, stderr, code := call(); code != 0 || strings.TrimSpace(stdout) != `{"permissionDecision":"allow"}` {
+		t.Fatalf("healthy call after install: exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+}
 
 // renderPerUserAdapterInDataDir renders a per-user Windows adapter in
 // failMode into data\hooks, where setup writes it, and returns its path.

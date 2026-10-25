@@ -150,6 +150,18 @@ type agentHookRequest struct {
 	alertOnlySQLNotice bool
 }
 
+func hookActionCommandAuditExtra(req agentHookRequest, home string) map[string]string {
+	command, ok := trustedBashCommandInput(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs})
+	if !ok {
+		return nil
+	}
+	reason := hookpaths.ActionCommandAuditReason(command, req.CWD, home)
+	if hookpaths.UnprovenWriteTitle(reason) == "" {
+		return nil
+	}
+	return map[string]string{"unresolved_command": reason}
+}
+
 type agentHookResponse struct {
 	Action            string                 `json:"action"`
 	RawAction         string                 `json:"raw_action,omitempty"`
@@ -725,6 +737,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// the caller's proven floor requires in a sandbox.
 			sandboxGate, resp, gated = a.requireSandboxHostRun(ctx, profile, connectorName, req, b, payload, requireSandboxSurface(ctx, r.Header))
 		}
+		if !gated {
+			// The strict tier refuses a call while an install or upgrade of
+			// this account holds its data directory (GAP-1438).
+			resp, gated = a.strictInstallWindowGate(ctx, profile, connectorName, req)
+		}
 		panicked := false
 		if !gated {
 			resp, panicked = a.safeEvaluateHook(evaluationCtx, connectorName, req, b, payload, runtime)
@@ -775,6 +792,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// dedupe get the decision the agent was given (GAP-0286).
 		wireResp := resp
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
+		auditExtra = mergeHookEnvelopeExtra(auditExtra, hookActionCommandAuditExtra(req, hookActiveHome(ctx)))
 		if len(resp.KernelBlocksTold) > 0 {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{kernelBlocksToldExtra: strings.Join(resp.KernelBlocksTold, ",")})
 		}
@@ -2847,7 +2865,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			patchTarget:          hermesV4APatch,
 			SandboxGuestCWD:      sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
 			windowsShellDialect:  dialectHint,
-			record:               toolChainRecorder(req.toolChain),
+			record:               toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
 		}, command, commandTool, hermesWriteViews)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}

@@ -44,6 +44,11 @@ $script:installed = $false
 $script:hashChecks = 0
 $script:goCalls = 0
 $script:purgeContractLocks = $null
+# The caller's per-user purge request (Setup sets it before finalization).
+$script:DefenseClawUninstallPurgeUserState = $false
+# The retry contract is the profile-neutral finalization (no standalone
+# post-commit preparation).
+function Test-DefenseClawStandaloneProfile { return $false }
 
 function Get-DefenseClawDeploymentMetadata {
     param([hashtable]$Layout, [switch]$Required)

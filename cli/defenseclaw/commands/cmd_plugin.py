@@ -2027,7 +2027,7 @@ def _scan_installed_plugin_for_connector(
 
     if not take_action:
         sev_norm = (sev or "").strip().upper()
-        if sev_norm in {"HIGH", "CRITICAL"}:
+        if sev_norm in {"HIGH", "CRITICAL"} and post_decision.source != "scan-judge-warning":
             if rollback:
                 rollback()
             else:

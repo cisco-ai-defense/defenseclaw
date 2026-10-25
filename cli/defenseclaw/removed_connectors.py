@@ -34,8 +34,10 @@ from dataclasses import dataclass
 
 import yaml
 
-_READ_LIMIT = 16 << 20
+# removed.go removedConfigReadLimit: the uninstall cleans and verifies configs up to it.
+_READ_LIMIT = 256 << 20
 _SCRIPT_LIMIT = 1 << 20
+_PTH_NAME = "defenseclaw_omnigent.pth"
 _MARKER_LINES = 3
 # Every stub the 1.0.4 teardown writes says this; the stubs an older teardown
 # left (they allowed every call) do not.
@@ -183,6 +185,26 @@ def _config_names(c: _Removed, data: bytes, names=_text_names) -> tuple[bool, st
 
 def _same_path(left: str, right: str) -> bool:
     return os.path.normcase(os.path.normpath(left)) == os.path.normcase(os.path.normpath(right))
+
+
+def _lost_pth_leftover(data_dir: str, hooks: str) -> Leftover | None:
+    """OmniGent's import-path file when the record of where setup wrote it is gone (removed.go removedLostPthLeftover).
+
+    Every setup that left the other records wrote the file. Only OmniGent's
+    Python knows its site-packages, and DefenseClaw never runs it to ask.
+    """
+    for logical in ("config", "module"):
+        if os.path.lexists(os.path.join(data_dir, "connector_backups", "omnigent", logical + ".json")):
+            return Leftover(
+                _PTH_NAME,
+                "DefenseClaw's record of where it wrote OmniGent's import-path file is gone, so the file may still add "
+                "DefenseClaw's hook folder to OmniGent's Python import path",
+                "in the folder that OmniGent's Python prints for python -c \"import sysconfig; "
+                "print(sysconfig.get_paths()['purelib'])\", remove only the line "
+                + hooks
+                + f" from {_PTH_NAME} (delete the file when that was its only line)",
+            )
+    return None
 
 
 def _pth_leftover(pth: str, hooks: str) -> Leftover | None:
@@ -513,7 +535,7 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str, workspace: str = "") ->
     hooks = os.path.join(data_dir, "hooks")
     if c.name == "omnigent":
         pth = _backup_target(data_dir, c.name, "pth")
-        left = _pth_leftover(pth, hooks) if pth else None
+        left = _pth_leftover(pth, hooks) if pth else _lost_pth_leftover(data_dir, hooks)
         if left:
             items.append(left)
     script = os.path.join(hooks, c.script)

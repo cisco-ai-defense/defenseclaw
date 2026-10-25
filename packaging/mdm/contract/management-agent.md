@@ -998,20 +998,49 @@ off the device. The agent does not read `/health` itself (section 7); the
   it uses an entry only after the folders and the entry pass the
   administrator-only check (an entry it did not write is left as it is).
   Each entry also records the bundle confirmed before the rotation (the
-  manifest SHA-256 `bundle status --json` reports as `current`, or `none`).
-  The rotation passes it as `secret set --bundle B --if-confirmed <sha|none>`
-  (refused `confirmed_bundle_changed`, nothing written, once another bundle
-  is confirmed), and the put-back as `secret set|remove --undo-rotation
-  <sha|none>`: it runs only while that bundle is still confirmed and does
-  not sign the value stored now, and `remove` then also takes a credential
-  the old config references with no value stored. Its refusal
+  manifest SHA-256 `bundle status --json` reports as `current`, or `none`),
+  and the SHA-256 of the exact value the rotation will store.
+  The rotation passes `secret set --bundle B --if-confirmed <sha|none>
+  --if-stored <old-value-sha256|none>`. The last guard compares the current
+  credential with the journaled value or proven absence under the credential
+  and lifecycle locks. A different value returns `credential_changed` before
+  any write; the wrapper retires that unused entry and preserves the
+  administrator's value. A changed confirmed bundle returns
+  `confirmed_bundle_changed` before a write. The put-back passes `secret set|remove --undo-rotation
+  <sha|none> --if-stored <value-sha256>`: it changes the credential only while
+  the credential still holds the rotation's value and that bundle is still
+  confirmed and does not sign the value stored now. On Windows, if the
+  journaled old value is still stored, or a journaled absence is still absent, replay
+  changes no credential but restarts a live gateway before retiring the entry;
+  a failed restart keeps it for the next ensure. A stopped gateway reads the
+  stored value when it starts. A later direct credential change
+  returns `credential_changed`; the journal and that later value stay.
+  Linux and macOS also use `--if-stored` on their in-run put-back under the
+  lifecycle lock. An entry for a credential that was not
+  stored also records the SHA-256 of the installed config (or `none`), and
+  its put-back `secret remove --undo-rotation <sha|none> --undo-config
+  <sha|none>` takes a credential that config references with no value
+  stored only while that same config is installed; when the journal recorded
+  `none`, a still-absent config permits undo of the exact added value. A config installed since
+  may use the value, so the CLI refuses `credential_in_use` and the entry
+  stays. Its refusal
   `rotation_confirmed` is the only proof the rotation committed (the
   confirmed bundle uses the stored value), so only then does the new value
   stay; any other refusal (`credential_in_use`, `secret_ref_mismatch`,
-  `secret_ref_unbound`) keeps the entry, is reported, and no other rotation
-  runs until it is settled. A settled entry is renamed `.retired` in one
+  `secret_ref_unbound`, `credential_changed`) keeps the entry, is reported, and no other rotation
+  runs until it is settled. Earlier rc journal names without the new-value
+  digest may settle only when the old value or absence is already on disk:
+  replay uses that before-state as its compare-and-swap expectation and
+  reloads a live gateway. If another value is present, replay retains the
+  entry for administrator review because that format cannot prove whether
+  the value came from the rotation or a later write. A settled entry is renamed `.retired` in one
   step before it is overwritten and deleted, so a cleanup that stops never
-  leaves an entry a later run would put back.
+  leaves an entry a later run would put back. If replay or journal inspection
+  cannot settle an entry, every Windows ensure, including a config-only ensure
+  or Setup ensure, exits `mdm_secret_failed` before applying a new config or bundle.
+  If inspection of the installed deployment fails, the journal is left for
+  review and the ensure exits. An absent installation marker retains the
+  existing no-CLI settlement behavior.
   `defenseclaw-enterprise.sh` (Linux, macOS) keeps the
   old value in memory only and puts it back when the bundle apply or the
   ensure before it fails, the run stops early, or the MDM stops it (HUP, INT,

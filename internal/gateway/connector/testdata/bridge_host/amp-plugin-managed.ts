@@ -47,6 +47,9 @@ const DC_FOREIGN_GUARD: string = "{{.ForeignHookGuardJS}}"
 // the deployment was uninstalled and this plugin stops failing closed. A
 // standard user cannot remove the marker. Empty keeps the fail mode.
 const DC_INSTALL_MARKER: string = "{{.InstallMarkerJS}}"
+// The standalone Unix lifecycle holds this public, root-owned marker while
+// install, upgrade or recovery may stop the gateway.
+const DC_LIFECYCLE_MARKER: string = "{{.LifecycleMarkerJS}}"
 // Windows standalone installs reach the gateway over loopback TCP, where a
 // local user can hold the port while the gateway restarts, and this plugin
 // cannot compare the listener with the gateway service the way the hook
@@ -394,13 +397,38 @@ function perUserNativePostBinary(): string {
 	return binary
 }
 
+// perUserHookPostBinary picks the small hook-post helper the POSIX installer
+// puts beside the gateway, so a hook event does not start the full gateway
+// CLI; both read the same JSON request and run the same connected-peer check.
+// An install without it (Windows, or an older installer's roll-forward) keeps
+// the verified gateway CLI. A present but untrusted helper is refused, never
+// bypassed.
+function perUserHookPostBinary(): string {
+	const gateway = perUserNativePostBinary()
+	const helper = join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-hook-post.exe" : "defenseclaw-hook-post")
+	let info: ReturnType<typeof lstatSync>
+	try {
+		info = lstatSync(helper)
+	} catch (error) {
+		if (error && (error as { code?: string }).code === "ENOENT") return gateway
+		throw error
+	}
+	if (info.isSymbolicLink() || !info.isFile()) {
+		throw new Error("per-user hook helper path is untrusted")
+	}
+	if (process.platform !== "win32" && (info.uid !== userInfo().uid || (info.mode & 0o022) !== 0)) {
+		throw new Error("per-user hook helper path is writable by another account")
+	}
+	return helper
+}
+
 // gatewayFetch posts over the verified managed hook socket when one is
 // configured (Bun's unix fetch option). A per-user post goes through the
 // native helper, which verifies the same connected socket it sends on.
 async function gatewayFetch(path: string, init: RequestInit, token: string): Promise<Response> {
 	if (!DC_HOOK_SOCKET) {
 		if (DC_PER_USER_NATIVE_POST) {
-			const binary = perUserNativePostBinary()
+			const binary = perUserHookPostBinary()
 			const output = execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
 				input: JSON.stringify({ path, headers: init.headers || {}, body: String(init.body || "") }),
 				timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8",
@@ -565,6 +593,19 @@ async function deploymentRemoved(): Promise<boolean> {
 	}
 }
 
+async function managedLifecycleHeld(): Promise<boolean> {
+	if (!DC_LIFECYCLE_MARKER) return false
+	try {
+		await lstat(DC_LIFECYCLE_MARKER)
+		return true
+	} catch (error) {
+		// Only a definite absence ends the install window.
+		return (error as { code?: unknown } | null)?.code !== "ENOENT"
+	}
+}
+
+const DC_MANAGED_LIFECYCLE_TEXT = "DefenseClaw is being installed or upgraded on this computer; try again in a moment."
+
 // DC_GATEWAY_STOPPED_TEXT is what a managed install says when its gateway
 // service is stopped, in the words of the native hook, instead of the
 // runtime's network error (GAP-0639).
@@ -618,7 +659,8 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	// found at load holds for the whole process.
 	const startupGuard = runForeignHookCheck("session.load", workspaceRoot)
 	const foreignHookCheck = async (event: string): Promise<string> =>
-		(await startupGuard) || (await runForeignHookCheck(event, workspaceRoot))
+		(await managedLifecycleHeld()) ? DC_MANAGED_LIFECYCLE_TEXT :
+			(await startupGuard) || (await runForeignHookCheck(event, workspaceRoot))
 
 	async function agentFacts(threadID: string, ctx: { thread: { agent(): Promise<Agent> } }): Promise<AgentFacts> {
 		const cached = agents.get(threadID)
@@ -695,6 +737,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	}
 
 	async function post(payload: Record<string, unknown>, actionable: boolean): Promise<GatewayResponse> {
+		if (actionable && await managedLifecycleHeld()) return { action: "block", reason: DC_MANAGED_LIFECYCLE_TEXT }
 		let body: string
 		try {
 			body = JSON.stringify(payload)
@@ -771,6 +814,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			}
 
 			const data = gatewayJSON(await response.text()) as GatewayResponse
+			if (actionable && await managedLifecycleHeld()) return { action: "block", reason: DC_MANAGED_LIFECYCLE_TEXT }
 
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
 				return failureResponse("invalid gateway verdict")

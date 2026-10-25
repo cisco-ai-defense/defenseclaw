@@ -287,6 +287,30 @@ def _note_running_agent_restart() -> None:
     )
 
 
+def _refuse_unverified_plugin_teardown(app: AppContext, connectors: list[str]) -> None:
+    """Stop a disable before it saves when a plugin teardown cannot be proven.
+
+    A disable saved with an edited OpenCode or Amp plugin left the gateway
+    unable to start: teardown keeps the edited plugin and then reports itself
+    incomplete (GAP-0986). Refuse first, with the one repair, as remove does.
+    """
+    from defenseclaw.commands import cmd_setup
+
+    for name in connectors:
+        key = str(name or "").strip().lower()
+        if problem := cmd_setup._plugin_teardown_problem(app.cfg, key):
+            ux.err(
+                f"Cannot disable {_connector_label(key)} ({key}): its plugin teardown is unverified ({problem}).",
+                indent="  ",
+            )
+            ux.subhead(
+                f"Preserve your edits, then run `defenseclaw setup {key} --yes --restart` and retry. "
+                "No configuration was saved.",
+                indent="    ",
+            )
+            raise SystemExit(1)
+
+
 def _toggle_connector_guardrail(
     app: AppContext, requested: str, *, enable: bool, restart: bool, yes: bool
 ) -> None:
@@ -342,6 +366,7 @@ def _toggle_connector_guardrail(
 
     if not enable:
         _preflight_config_write(app)
+        _refuse_unverified_plugin_teardown(app, [key])
 
     # Disabling the last remaining enabled connector is effectively a global
     # disable — warn so the operator can use the clearer command.
@@ -1139,6 +1164,7 @@ def disable_cmd(
     _actives = _active_connector_set(app.cfg, connector)
     _already_off = [name for name in _actives if _disabled_on_its_own(gc, name)]
     _torn_down = [name for name in _actives if name not in _already_off]
+    _refuse_unverified_plugin_teardown(app, _torn_down)
 
     click.echo()
     if len(_actives) > 1 or _already_off:
@@ -1598,11 +1624,19 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
             indent="    ",
         )
     else:
-        ux.subhead(
-            f"Invalid or unavailable gateway responses will now ALLOW {label} and log the failure to "
-            "~/.defenseclaw/logs/hook-failures.jsonl.",
-            indent="  ",
-        )
+        if normalize_connector(key) == "amp":
+            ux.subhead(
+                "An eligible per-user Amp outage-open call writes "
+                "~/.defenseclaw/logs/hook-failures.jsonl; the gateway records a "
+                "guardrail-degraded alert when it resumes. Managed and sandbox Amp plugins write no such row.",
+                indent="  ",
+            )
+        else:
+            ux.subhead(
+                f"Invalid or unavailable gateway responses will now ALLOW {label} and log the failure to "
+                "~/.defenseclaw/logs/hook-failures.jsonl.",
+                indent="  ",
+            )
     click.echo()
 
     if not yes and not _confirm_proceed():
@@ -1897,8 +1931,8 @@ def fail_mode_cmd(
     an unparseable JSON body, or no ``action`` field. Two values are supported:
 
       \b
-      open   — allow the tool/prompt and log the failure.
-               A gateway outage never blocks your agent.
+      open   — allow eligible failures where the deployment permits.
+               A per-user Amp call an outage lets run writes hook-failures.jsonl.
       closed — block supported events when inspection is unavailable.
                The default on a new install: every prompt and
                tool call is inspected or blocked.
@@ -2192,6 +2226,14 @@ def fail_mode_cmd(
             indent="  ",
         )
         ux.subhead("open is saved for hook connectors you set up later.", indent="    ")
+    elif "amp" in active_names:
+        ux.subhead(
+            "On a per-user install, eligible Amp outage-open calls write "
+            "~/.defenseclaw/logs/hook-failures.jsonl; the gateway records a "
+            "guardrail-degraded alert when it resumes. Other hook connectors also log eligible "
+            "fail-open calls. Managed and sandbox Amp plugins write no such row.",
+            indent="  ",
+        )
     else:
         ux.subhead(
             ("Once the guardrail is enabled, invalid or unavailable gateway responses will ALLOW"
@@ -6005,7 +6047,19 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
             f"the directory lookup for {user or 'this account'} may be slow (SSSD or the domain controller). Try again."
         )
         raise SystemExit(1) from None
-    except Exception as exc:  # noqa: BLE001 - report any transport or HTTP failure
+    except requests.exceptions.HTTPError as exc:
+        # The gateway answered, so starting it cannot repair this error.
+        # Its 400 response names an unknown connector and the valid names.
+        detail = None
+        try:
+            payload = exc.response.json() if exc.response is not None else None
+            if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+                detail = payload["error"][:300]
+        except ValueError:
+            pass
+        ux.err(f"Gateway rejected profile resolution: {detail or exc}")
+        raise SystemExit(1) from None
+    except Exception as exc:  # noqa: BLE001 - report transport and client failures
         ux.err(f"Could not ask the gateway: {exc}")
         # A running gateway still on its previous port is not "stopped".
         notice = gateway_reload_notice(app.cfg)

@@ -28,6 +28,34 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
+func TestEnrolledPerUserRowReportsOnlyExplicitlyBelowFloorSurface(t *testing.T) {
+	account := unixidentity.Account{Name: "alice", UID: 1001}
+	for _, tc := range []struct {
+		name, version string
+		wantReport    bool
+	}{
+		{name: "old Devin Desktop engine", version: "3000.1.0", wantReport: true},
+		{name: "unknown engine version", version: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			admission := admitSurfaces("devin", connector.UnverifiedVersionsReport, []connector.AgentSurface{{
+				Surface: connector.HostSurfaceDesktop, Host: "devin-desktop", EngineVersion: tc.version,
+			}})
+			got := unixRejectedSurfaces(account, "devin", false, true, admission)
+			if !tc.wantReport {
+				if len(got) != 0 {
+					t.Fatalf("unknown surface beside enrolled CLI was reported as unprotected: %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].Code != UnprotectedCodeSurfaceUnverified ||
+				got[0].Version != tc.version || got[0].Refusal != "" {
+				t.Fatalf("old surface beside enrolled CLI = %+v, want one non-refusal warning", got)
+			}
+		})
+	}
+}
+
 // trustedTestDir returns a directory whose ancestors are not
 // world-writable (t.TempDir() lives under /tmp on Linux and under the
 // /var symlink on macOS, which the home checks rightly refuse).
@@ -1453,6 +1481,52 @@ func TestEnumerateUnixKeepsRefusedSurfacesWhenDiscoveryFails(t *testing.T) {
 	}
 	if len(report.RefusedSurfaces) != 1 || report.RefusedSurfaces[0].User != "alice" || report.RefusedSurfaces[0].Connector != "claudecode" {
 		t.Fatalf("a failed discovery must keep the previous refusal: %+v", report.RefusedSurfaces)
+	}
+}
+
+func TestEnumerateUnixReportsIncompleteMachinePolicySurfaceScanOnFailure(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	alice := makeHome(t, homes, "alice")
+	cfg := enumeratorConfig("claudecode")
+	cfg.Enterprise.Enrollment.UnverifiedVersions = config.EnterpriseUnverifiedRefuse
+	for _, useSurfaces := range []bool{false, true} {
+		name := "legacy"
+		if useSurfaces {
+			name = "surfaces"
+		}
+		t.Run(name, func(t *testing.T) {
+			opts := UnixEnumerateOptions{
+				Resolver: &fakeResolver{accounts: map[string]unixidentity.Account{
+					"alice": {Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"},
+				}, listed: []string{"alice"}},
+				HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1,
+				MachinePolicyConnectors: []string{"claudecode"},
+			}
+			if useSurfaces {
+				opts.DiscoverSurfaces = func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+					return UnixDiscovery{}, errors.New("worker failed")
+				}
+			} else {
+				opts.Discover = func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+					return nil, nil, errors.New("worker failed")
+				}
+			}
+			_, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, agent := range report.Unprotected {
+				if agent.User == "alice" && agent.Connector == "claudecode" && agent.Code == UnprotectedCodeInstallScanIncomplete {
+					return
+				}
+			}
+			t.Fatalf("failed machine-policy surface scan reported healthy: %+v", report.Unprotected)
+		})
 	}
 }
 

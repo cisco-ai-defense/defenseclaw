@@ -89,3 +89,12 @@ def test_connector_set_up_starts_with_init_on_a_new_install(monkeypatch):
         assert f"`{refusal}`" in section, page.name
         checked += 1
     assert checked >= 12
+
+
+def test_hermes_luna_limit_names_the_observed_provider_route() -> None:
+    rows = (DOCS / "reference/connectors/hermes.mdx").read_text(encoding="utf-8").splitlines()
+    row = next(line for line in rows if line.startswith("| Model limit |"))
+    for fact in ("Bedrock-Mantle", "gpt-5.6-luna", "validation_error", "model not supported on this route"):
+        assert fact in row
+    assert "Direct controls with `max_tokens` and `max_completion_tokens`" in row
+    assert "unsupported_parameter" not in row and "request shape" not in row

@@ -61,15 +61,15 @@ func TestStartIndependentDecidesFromTheEnclosingJob(t *testing.T) {
 		{name: "job that outlives its handle", wantFlags: independentBase, wantStarted: true},
 		{name: "kill on close, no breakaway", limits: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, wantBound: true},
 		// GAP-0960: a LocalSystem scheduled task cannot read its own job.
-		// An unreadable job is unknown, never a refusal (loop round 5).
+		// It can still start recovery when it is in no job or can break away.
 		{name: "unreadable job, breakaway accepted", queryErr: windows.ERROR_ACCESS_DENIED, selfInJob: true, accepted: true,
 			wantProbe: true, wantFlags: independentBase | windows.CREATE_BREAKAWAY_FROM_JOB, wantStarted: true},
 		{name: "unreadable job, breakaway refused", queryErr: windows.ERROR_ACCESS_DENIED, selfInJob: true,
-			wantProbe: true, wantFlags: independentBase, wantStarted: true},
+			wantProbe: true, wantBound: true},
 		{name: "unreadable job, membership unknown, breakaway accepted", queryErr: windows.ERROR_ACCESS_DENIED, inJobErr: membershipUnknown, accepted: true,
 			wantProbe: true, wantFlags: independentBase | windows.CREATE_BREAKAWAY_FROM_JOB, wantStarted: true},
 		{name: "unreadable job, membership unknown, breakaway refused", queryErr: windows.ERROR_ACCESS_DENIED, inJobErr: membershipUnknown,
-			wantProbe: true, wantFlags: independentBase, wantStarted: true},
+			wantProbe: true, wantBound: true},
 		{name: "query refused outside any job", queryErr: windows.ERROR_ACCESS_DENIED, wantFlags: independentBase, wantStarted: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -229,8 +229,8 @@ func newSupervisorJob(t *testing.T, limits uint32) windows.Handle {
 // the unreadable rows refuse only the limits query and keep the real job,
 // probe and start: the child asks for CREATE_BREAKAWAY_FROM_JOB when the job
 // accepts it (a job that allows only silent breakaway does, loop round 3
-// review), and an unreadable job that accepts no breakaway still gets its
-// helper, in the job, rather than a refusal (loop round 5). The
+// review), and an unreadable job that accepts no breakaway refuses before
+// anything starts. The
 // scheduled-task test below is the real unreadable context.
 func TestStartIndependentFromAKillOnCloseJob(t *testing.T) {
 	outer, outerErr := currentJobLimits()
@@ -241,9 +241,6 @@ func TestStartIndependentFromAKillOnCloseJob(t *testing.T) {
 		limits     uint32
 		unreadable bool
 		wantStart  bool
-		// inJob: the helper starts, but in the job (an unreadable job
-		// that accepts no breakaway).
-		inJob bool
 	}{
 		{name: "breakaway allowed", limits: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK, wantStart: true},
 		{name: "silent breakaway", limits: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | windows.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, wantStart: true},
@@ -252,7 +249,7 @@ func TestStartIndependentFromAKillOnCloseJob(t *testing.T) {
 			unreadable: true, wantStart: true},
 		{name: "unreadable, silent breakaway", limits: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | windows.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
 			unreadable: true, wantStart: true},
-		{name: "unreadable, breakaway refused", limits: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, unreadable: true, inJob: true},
+		{name: "unreadable, breakaway refused", limits: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, unreadable: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.wantStart && !escapes {
@@ -312,16 +309,6 @@ func TestStartIndependentFromAKillOnCloseJob(t *testing.T) {
 			}
 			if !report.InJob || report.QueryErr != "" {
 				t.Fatalf("the child did not run in a readable job: %+v", report)
-			}
-			if tc.inJob {
-				if report.StartErr != "" || report.Bound || report.Grandchild == 0 || !report.GrandchildInJob {
-					t.Fatalf("an unreadable job that accepts no breakaway did not get its helper in the job: %+v", report)
-				}
-				// The supervisor closes the job: the helper ends with it.
-				_ = windows.CloseHandle(job)
-				jobOpen = false
-				waitProcessGone(t, report.Grandchild, 10*time.Second)
-				return
 			}
 			if !tc.wantStart {
 				if !report.Bound || report.Grandchild != 0 {

@@ -1035,12 +1035,14 @@ func (s *FileStore) UpdateRun(uid int, r Registration, run *Run) error {
 			continue
 		}
 		have.Profile, have.ProfileMatch, have.MatchedGroup = r.Profile, r.ProfileMatch, r.MatchedGroup
+		have.ProfileMembers = slices.Clone(r.ProfileMembers)
 		have.ProfileDigest, have.EffectiveDigest, have.FactsDigest = r.ProfileDigest, r.EffectiveDigest, r.FactsDigest
 		have.Generation, have.Provisional = r.Generation, r.Provisional
 		if have.CreateProfile == nil && r.CreateProfile != nil {
 			// Set once: the profile a sandbox was created under never moves.
 			created := *r.CreateProfile
 			have.CreateProfile = &created
+			have.CreateProfileMembers = slices.Clone(r.CreateProfileMembers)
 		}
 		if r.PolicyAt.After(have.PolicyAt) {
 			have.PolicyAt = r.PolicyAt

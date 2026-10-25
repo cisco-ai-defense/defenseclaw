@@ -363,6 +363,14 @@ func auditDBWindowsProtectedDACLForOwner(
 	directory bool,
 	owner *windows.SID,
 ) (*windows.ACL, error) {
+	return auditDBWindowsProtectedDACLForOwnerWithGatewayProof(directory, owner, true)
+}
+
+func auditDBWindowsProtectedDACLForOwnerWithGatewayProof(
+	directory bool,
+	owner *windows.SID,
+	requireGatewayProof bool,
+) (*windows.ACL, error) {
 	gatewayServiceSID, err := auditDBWindowsPinnedGatewayServiceSID()
 	if err != nil {
 		return nil, err
@@ -384,8 +392,10 @@ func auditDBWindowsProtectedDACLForOwner(
 		inheritance = uint32(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
 	}
 	if gatewayServiceSID != nil {
-		if err := requireAuditDBWindowsGatewayToken(gatewayServiceSID); err != nil {
-			return nil, err
+		if requireGatewayProof {
+			if err := requireAuditDBWindowsGatewayToken(gatewayServiceSID); err != nil {
+				return nil, err
+			}
 		}
 		ownerRights, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerRightsSid)
 		if err != nil {

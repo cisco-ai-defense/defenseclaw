@@ -385,6 +385,20 @@ class PthTests(_Host):
                 self.assertTrue(item.step.startswith(f"remove only the line {self.hooks} "), item.step)
                 self.assertNotIn("delete this file", item.step)
 
+    def test_a_lost_pth_record_is_still_listed(self):
+        # Review loop round 2 (uninstall lifecycle): pth.json gone, the other records there.
+        _backup(self.data, "omnigent", "config", os.path.join(self.home, ".omnigent", "config.yaml"))
+        item = self.items("omnigent").get("defenseclaw_omnigent.pth")
+        self.assertIsNotNone(item)
+        self.assertIn("purelib", item.step)
+        self.assertIn(f"remove only the line {self.hooks} from defenseclaw_omnigent.pth", item.step)
+
+    def test_a_config_past_16_mib_is_still_checked(self):
+        # Review loop round 2: the uninstall cleans configs up to 256 MiB, so the list checks them too.
+        config = self.openhands()
+        _write(config, json.dumps({"pre_tool_use": [], "corp_note": "x" * (17 << 20)}))
+        self.assertNotIn(config, self.items("openhands"))
+
     def test_a_pth_without_defenseclaws_line_is_not_listed(self):
         for body in ("/opt/corp/lib\n", ""):
             with self.subTest(body=body):
@@ -415,6 +429,8 @@ class GoParityTests(unittest.TestCase):
             "copy back what you need (not into DefenseClaw's hooks folder), then delete it",
             " (DefenseClaw's hook folder) from this file, and keep every other line, once no OmniGent config.yaml names ",
             "; it holds other import paths too",
+            "DefenseClaw's record of where it wrote OmniGent's import-path file is gone, so the file may still add DefenseClaw's hook folder to OmniGent's Python import path",
+            "var removedConfigReadLimit = 256 << 20",
             "; it holds nothing else",
             "), so it may still name DefenseClaw's hook",
             " names (hard links); teardown leaves it and its tokens, so every name still reaches the gateway, which blocks every call",

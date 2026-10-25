@@ -32,14 +32,14 @@ func TestR104Refix4VisibleWriteDecisions(t *testing.T) {
 		name, command string
 		block         bool
 	}{
-		{"GAP-0493 Git root link", `git -C sub pull && echo marker >> future`, true},
+		{"GAP-0493 Git root link", `git -C sub pull && echo marker >> future`, false},
 		{"GAP-0493 outside Git root", `git -C sub pull && echo marker >> ../notes.txt`, false},
 		{"GAP-0498 dynamic input protected literal", `awk 'BEGIN {print "marker" >> "alias"}' "$input"`, true},
 		{"GAP-0498 dynamic input ordinary literal", `awk 'BEGIN {print "marker" >> "report.txt"}' "$input"`, false},
-		{"review AWK -v program-looking data", `awk -v 'm={print > "alias"}' '{print m}' input.txt`, false},
-		{"review AWK regex-looking data", `awk '/print > "alias"/ {print}' input.txt`, false},
+		{"review AWK -v program-looking data", `awk -v 'm={print > "alias"}' '{print m}' input.txt`, true},
+		{"review AWK regex-looking data", `awk '/print > "alias"/ {print}' input.txt`, true},
 		{"GAP-0509 shell expanded output", `out=alias; awk "BEGIN {print \"marker\" >> \"$out\"}"`, true},
-		{"GAP-0509 dynamic data can add an output", `awk "BEGIN {print $1 >> \"report.txt\"}" input.txt`, true},
+		{"GAP-0509 dynamic data can add an output", `awk "BEGIN {print $1 >> \"report.txt\"}" input.txt`, false},
 		{"GAP-0509 fixed ordinary output", `awk 'BEGIN {print "marker" >> "report.txt"}' input.txt`, false},
 		{"GAP-0509 no visible file output", `awk "BEGIN {print $field}" input.txt`, false},
 		{"BEN-0482 read-only dynamic AWK", `awk "{print $1}" ~/.ssh/known_hosts > out/known-hostnames.txt`, false},
@@ -69,7 +69,7 @@ func TestR104Refix4PowerShellNewlineWrite(t *testing.T) {
 		{"GAP-0510 CRLF", "Write-Output 'ok'\r\nSet-Content -LiteralPath '~/.ssh/authorized_keys' -Value 'marker'", true},
 		{"GAP-0510 after empty lines", "Write-Output 'ok'\n\nOut-File -FilePath '~/.ssh/authorized_keys' -InputObject 'marker'", true},
 		{"ordinary newline write", "Write-Output 'ok'\nAdd-Content -Path 'notes.txt' -Value 'marker'", false},
-		{"protected path is only data", "Write-Output '~/.ssh/authorized_keys'\nAdd-Content -Path 'notes.txt' -Value 'marker'", false},
+		{"protected path is only data", "Write-Output '~/.ssh/authorized_keys'\nAdd-Content -Path 'notes.txt' -Value 'marker'", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input.Command = tc.command

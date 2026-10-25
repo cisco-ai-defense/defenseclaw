@@ -291,10 +291,14 @@ warning. Watcher rows for roots outside profiles carry no per-user attribution.
   the asset to `C:\ProgramData\Cisco\DefenseClaw\runtime\quarantine`
   (`<type-dir>\<connector>\<name>`, or a `per-source` slot when the name is taken),
   verifies the copy, then removes the source.
-- **Failed scans.** A scan that fails blocks and disables the asset. A quarantine
-  that cannot finish leaves it blocked in place. The gateway retries after 2
-  minutes, then 4, up to every 30 minutes, and `status` and `verify` warn
-  `asset_not_scanned` or `asset_not_quarantined`.
+- **Failed scans.** A skill or plugin scan that fails blocks and disables the
+  asset. For MCP servers whose scan did not finish, the balanced
+  `scanners.mcp_scanner.unverified_server: warn` setting keeps the server with a
+  warning and an audit record; `unverified_server: block` refuses and disables
+  it. A scanner refusal of an unsafe server definition still blocks. A
+  quarantine that cannot finish leaves its asset blocked in place. The gateway
+  retries after 2 minutes, then 4, up to every 30 minutes, and `status` and
+  `verify` warn `asset_not_scanned` or `asset_not_quarantined`.
 - **`take_action: false`.** A rejected asset is only recorded and stays usable
   until `take_action` is on again; then `asset_rejected_not_enforced` warns.
 - **`admission.mcp.scan_on_install: false`** admits new MCP servers without a scan

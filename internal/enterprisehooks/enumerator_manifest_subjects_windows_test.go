@@ -7,11 +7,26 @@ package enterprisehooks
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 )
+
+// The private-copy scanner reports runnable npm packages, not a leftover
+// package.json without the Codex entry point.
+func writeRunnableWindowsCodexCopy(t *testing.T, dir, version string) {
+	t.Helper()
+	writeWindowsAgentPackageJSON(t, dir, version)
+	entry := filepath.Join(dir, "bin", "codex.js")
+	if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(entry, []byte("fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // Under manifest enrollment the administrator's enabled targets are the
 // accounts inspected: a target the group filters would exclude is
@@ -24,7 +39,7 @@ func TestEnumerateWindowsManifestSubjectsAreTheInspectedAccounts(t *testing.T) {
 	stubActiveSessions(t, map[string][]string{testDomainUserA: {testDomainGroupSID}})
 	withOldCodex := func() string {
 		home := codexProfile(t, "0.150.0")
-		writeWindowsAgentPackageJSON(t, filepath.Join(home, "private", "node_modules", "@openai", "codex"), "0.0.1")
+		writeRunnableWindowsCodexCopy(t, filepath.Join(home, "private", "node_modules", "@openai", "codex"), "0.0.1")
 		return home
 	}
 	homeA, homeB, homeC, homeD := withOldCodex(), withOldCodex(), withOldCodex(), withOldCodex()

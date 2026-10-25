@@ -4,10 +4,16 @@
 package enterprisehooks
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // PrivateAgentInstall is static evidence of one agent copy an enrolled
@@ -34,7 +40,6 @@ type PrivateAgentInstall struct {
 	Untrusted bool `json:"untrusted,omitempty"`
 }
 
-const privateAgentInstallMaxEntries = 1024
 const privateAgentInstallMaxFindings = 64
 const PrivateAgentInstallMaxFindings = privateAgentInstallMaxFindings
 
@@ -45,6 +50,260 @@ const PrivateAgentInstallMaxFindings = privateAgentInstallMaxFindings
 // the scan incomplete when a manager holds more.
 const privateAgentInstallMaxVersionDirs = 64
 
+// privateInstallWalkMaxEntries bounds the directory entries the scan lists
+// below one home while it looks for npm prefixes at any depth (GAP-0988).
+// Inside a node_modules tree it lists package names only, never package
+// contents. Tests lower it.
+var privateInstallWalkMaxEntries = 1 << 19
+
+// privateInstallWalk is one bounded walk of a home (walkPrivateNPMPrefixes).
+// open opens a directory to list; unreachable reports a listing error that
+// hides nothing the account can run below dir.
+type privateInstallWalk struct {
+	open        func(dir string) (*os.File, error)
+	openChild   func(parent *os.File, name string) (*os.File, error)
+	unreachable func(dir string, err error) bool
+	// enter supplies a thread-local read privilege for one Windows walker.
+	// A failure to acquire it leaves the existing open behavior in force.
+	enter func() func()
+	// homeLinks returns a link directly below the home that names a
+	// directory as a prefix, without descending into it (Unix only: the
+	// Windows scan never follows a reparse point as LocalSystem).
+	homeLinks bool
+	mu        *sync.Mutex
+	budget    int
+	complete  bool
+	ctx       context.Context
+}
+
+const privateInstallWalkMaxDepth = 64
+const privateInstallWalkParallelism = 32
+
+func (w *privateInstallWalk) fail() {
+	w.mu.Lock()
+	w.complete = false
+	w.mu.Unlock()
+}
+
+func (w *privateInstallWalk) stopped() bool {
+	if w.ctx.Err() != nil {
+		w.fail()
+		return true
+	}
+	w.mu.Lock()
+	exhausted := w.budget < 0
+	w.mu.Unlock()
+	return exhausted
+}
+
+func (w *privateInstallWalk) charge(entries int) bool {
+	w.mu.Lock()
+	w.budget -= entries
+	ok := w.budget >= 0
+	if !ok {
+		w.complete = false
+	}
+	w.mu.Unlock()
+	return ok
+}
+
+// walkPrivateNPMPrefixes returns every npm prefix below home, at any depth:
+// each directory that holds a node_modules directory (npm install --prefix
+// anywhere, a project's own dependencies) and, inside node_modules, each
+// package or pnpm store entry with a node_modules of its own. It never
+// descends through a link or other reparse point, so a link cannot loop
+// it or lead it outside the home. complete is false when the walk ran out
+// of its bound or a directory could not be listed: the scan then says so
+// instead of reporting the account clean.
+func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWalk) (prefixes []string, complete bool) {
+	w.budget, w.complete, w.ctx = privateInstallWalkMaxEntries, true, ctx
+	w.mu = &sync.Mutex{}
+	if w.ctx == nil {
+		w.ctx = context.Background()
+	}
+	var prefixesMu sync.Mutex
+	addPrefix := func(dir string) {
+		prefixesMu.Lock()
+		prefixes = append(prefixes, dir)
+		prefixesMu.Unlock()
+	}
+	// Held parent handles stay open until their child branches finish. Only
+	// Windows has openChild, so Unix keeps its existing serial walk.
+	parallelism := 1
+	if w.openChild != nil {
+		parallelism = privateInstallWalkParallelism
+	}
+	semaphore := make(chan struct{}, parallelism-1)
+	run := func(fn func()) {
+		if w.enter != nil {
+			leave := w.enter()
+			defer leave()
+		}
+		fn()
+	}
+	schedule := func(children *sync.WaitGroup, fn func()) {
+		if parallelism > 1 {
+			select {
+			case semaphore <- struct{}{}:
+				children.Add(1)
+				go func() {
+					defer children.Done()
+					defer func() { <-semaphore }()
+					run(fn)
+				}()
+				return
+			default:
+			}
+		}
+		fn()
+	}
+	var visit func(dir string, parent *os.File, name string, modules bool, depth int, held *os.File)
+	var probe func(pkg string, parent *os.File, name string, depth int)
+	open := func(dir string, parent *os.File, name string) (*os.File, error) {
+		if parent != nil && w.openChild != nil {
+			return w.openChild(parent, name)
+		}
+		return w.open(dir)
+	}
+	probe = func(pkg string, parent *os.File, name string, depth int) {
+		if w.stopped() {
+			return
+		}
+		moduleDir := filepath.Join(pkg, "node_modules")
+		if depth+2 > privateInstallWalkMaxDepth {
+			w.fail()
+			return
+		}
+		if w.openChild == nil {
+			if info, err := os.Lstat(moduleDir); err != nil || info.Mode().Type() != fs.ModeDir {
+				return
+			}
+			addPrefix(pkg)
+			visit(moduleDir, nil, "", true, depth+2, nil)
+			return
+		}
+		packageHandle, err := open(pkg, parent, name)
+		if err != nil {
+			if !w.unreachable(pkg, err) {
+				w.fail()
+			}
+			return
+		}
+		defer packageHandle.Close()
+		// A pathname Lstat of pkg/node_modules would traverse a raced
+		// junction in pkg as LocalSystem. Check both components through
+		// held handles instead, and list the same modules handle.
+		modulesHandle, err := open(moduleDir, packageHandle, "node_modules")
+		if err != nil {
+			if !w.unreachable(moduleDir, err) {
+				w.fail()
+			}
+			return
+		}
+		addPrefix(pkg)
+		visit(moduleDir, nil, "", true, depth+2, modulesHandle)
+	}
+	visit = func(dir string, parent *os.File, name string, modules bool, depth int, held *os.File) {
+		if w.stopped() || depth > privateInstallWalkMaxDepth {
+			w.fail()
+			if held != nil {
+				_ = held.Close()
+			}
+			return
+		}
+		f := held
+		if f == nil {
+			var err error
+			f, err = open(dir, parent, name)
+			if err != nil {
+				if !w.unreachable(dir, err) {
+					w.fail()
+				}
+				return
+			}
+		}
+		defer f.Close()
+		var children sync.WaitGroup
+		defer children.Wait()
+		for _, entry := range w.list(f, dir) {
+			if w.stopped() {
+				return
+			}
+			name, child := entry.Name(), filepath.Join(dir, entry.Name())
+			if entry.Type() != fs.ModeDir {
+				if w.homeLinks && dir == home && entry.Type()&fs.ModeSymlink != 0 {
+					if info, err := os.Stat(child); err == nil && info.IsDir() {
+						addPrefix(child)
+					}
+				}
+				continue
+			}
+			switch {
+			case !modules && name == "node_modules":
+				addPrefix(dir)
+				schedule(&children, func() { visit(child, f, name, true, depth+1, nil) })
+			case !modules:
+				schedule(&children, func() { visit(child, f, name, false, depth+1, nil) })
+			case strings.HasPrefix(name, "@") || name == ".pnpm":
+				if depth+1 > privateInstallWalkMaxDepth {
+					w.fail()
+					continue
+				}
+				scope, err := open(child, f, name)
+				if err != nil {
+					if !w.unreachable(child, err) {
+						w.fail()
+					}
+					continue
+				}
+				var scopeChildren sync.WaitGroup
+				for _, inner := range w.list(scope, child) {
+					if inner.Type() == fs.ModeDir && !w.stopped() {
+						packageDir, packageName := filepath.Join(child, inner.Name()), inner.Name()
+						schedule(&scopeChildren, func() { probe(packageDir, scope, packageName, depth+1) })
+					}
+				}
+				scopeChildren.Wait()
+				_ = scope.Close()
+			default:
+				schedule(&children, func() { probe(child, f, name, depth) })
+			}
+		}
+	}
+	run(func() { visit(home, nil, "", false, 0, nil) })
+	if parallelism > 1 {
+		sort.Strings(prefixes)
+	}
+	w.mu.Lock()
+	complete = w.complete && w.budget >= 0 && w.ctx.Err() == nil
+	w.mu.Unlock()
+	return prefixes, complete
+}
+
+// list reads dir's entries in batches, charging each to the walk's bound.
+func (w *privateInstallWalk) list(f *os.File, dir string) []fs.DirEntry {
+	if w.stopped() {
+		return nil
+	}
+	var out []fs.DirEntry
+	for {
+		if w.stopped() {
+			return out
+		}
+		batch, err := f.ReadDir(256)
+		if !w.charge(len(batch)) {
+			return nil
+		}
+		out = append(out, batch...)
+		if err != nil {
+			if err != io.EOF && !w.unreachable(dir, err) {
+				w.fail()
+			}
+			return out
+		}
+	}
+}
+
 // The parts of the separate-copy scan that can be left unfinished.
 const (
 	PrivateInstallSkippedHome            = "home_unreadable"
@@ -54,16 +313,20 @@ const (
 	PrivateInstallSkippedLocation        = "location_unreadable"
 	PrivateInstallSkippedOutsideRoots    = "path_outside_scan_roots"
 	PrivateInstallSkippedUnresolved      = "account_not_inspected"
+	PrivateInstallSkippedExtensions      = "extensions_folder_limit"
+	PrivateInstallSkippedTimedOut        = "scan_timed_out"
 )
 
 var privateInstallSkippedText = map[string]string{
-	PrivateInstallSkippedHome:            "the account's home could not be listed within the scan bound",
+	PrivateInstallSkippedHome:            "the account's home could not be fully listed within the scan bounds",
 	PrivateInstallSkippedVersionManagers: "a Node version manager holds more installed versions than the scan inspects",
 	PrivateInstallSkippedNativeVersions:  "a native installer or Homebrew cask holds more releases than the scan inspects",
 	PrivateInstallSkippedFindings:        "the account has more unsupported agent copies than the record holds",
 	PrivateInstallSkippedLocation:        "an install location could not be read safely",
 	PrivateInstallSkippedOutsideRoots:    "discovery named a copy outside the locations DefenseClaw scans",
 	PrivateInstallSkippedUnresolved:      "the enrolled account could not be inspected this cycle",
+	PrivateInstallSkippedExtensions:      "an editor's extensions folder holds more entries than the scan reads, or could not be read",
+	PrivateInstallSkippedTimedOut:        "scan timed out: a file system or registry call did not answer by the account's scan deadline; the next cycle retries it",
 }
 
 // KnownPrivateInstallSkipped returns code when it is a PrivateInstallSkipped*

@@ -240,9 +240,7 @@ INSPECT_BODY="$(printf '%s' "$TOOL_OUTPUT" | defenseclaw_inspect_tool_body "$TOO
   "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}")" || {
   fail_unreachable "$(defenseclaw_sandbox_unreachable_reason "$RESPONSE")"
-}{{else}}if defenseclaw_api_listener_unproven "$API_ADDR"; then
-  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Another account may hold the port. Run \`defenseclaw setup gateway --api-port <free-port>\` to choose a free port"
-fi
+}{{else}}
 RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/api/v1/inspect/tool-response" 5 "$INSPECT_BODY" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
@@ -250,7 +248,7 @@ RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/api/v1/inspect/tool-resp
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}") || {
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}  defenseclaw_split_response
   defenseclaw_managed_http_result "$HTTP_CODE" incomplete
-{{end}}  fail_unreachable "gateway unreachable"
+{{end}}  fail_unreachable "$(defenseclaw_gateway_unreachable_reason 2>/dev/null || printf 'gateway unreachable')"
 }{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)

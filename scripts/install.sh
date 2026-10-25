@@ -481,7 +481,10 @@ LOG="${DEFENSECLAW_HOME}/logs/install-$(date +%Y%m%dT%H%M%S).log"
 # tee ignores Ctrl+C: it went down with the installer's process group, and the
 # cancel message then died on a broken pipe (exit 141, GAP-1901).
 exec > >(trap '' INT TERM; exec tee -a "${LOG}") 2>&1
-trap 'rm -rf "${LOCK_DIR}" ${SELF_TMP:+"${SELF_TMP}"}' EXIT
+# A run that stops after it staged the release and before the swap (a
+# refusal, a failed check, a cancel) leaves nothing it staged or added for uv
+# (drop_unswapped_stage, GAP-1120).
+trap '[[ -z "${UNSWAPPED_STAGE:-}" ]] || drop_unswapped_stage; rm -rf "${LOCK_DIR}" ${SELF_TMP:+"${SELF_TMP}"}' EXIT
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
 # ── Existing install ─────────────────────────────────────────────────────────
@@ -525,35 +528,203 @@ installed_version() {
     done
 }
 
-# Older OpenCode and Amp processes retain their plugin in memory. Releases
-# before this one do not inspect .install.lock, so stopping the gateway under
-# one would let an open-mode tool call through. Inspect this account's native
-# agent processes immediately before a gateway swap; an unreadable process
-# list cannot establish that the swap is safe.
+# Older OpenCode and Amp processes retain their plugin in memory. Refuse a
+# gateway swap only when the process is the exact entry installed for that
+# agent. Unproven candidates are audited and do not block the upgrade.
+agent_identity_audit() {
+    printf 'audit: live-agent identity unproven for PID %s: %s\n' "$1" "$2" >&2
+}
+
+# resolved_agent_path FILE: the file's real path, with no PATH search.
+resolved_agent_path() {
+    [[ -f "$1" ]] || return 1
+    if [[ "${OSTYPE:-}" == linux* ]]; then
+        readlink -f -- "$1" 2>/dev/null
+    elif [[ "${OSTYPE:-}" == darwin* ]]; then
+        /usr/bin/perl -MCwd=realpath -e 'my $p = realpath($ARGV[0]); defined($p) or exit 1; print $p' "$1" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
+# The installer's entry evidence: native fixed locations and npm/Bun
+# launcher symlinks to their exact Node entry. A folder name, manifest or
+# command on PATH is not an entry record.
+installed_agent_programs() {
+    local agent name path target base link
+    for agent in OpenCode:opencode Amp:amp; do
+        name="${agent#*:}"
+        path="${HOME}/.${name}/bin/${name}"
+        target="$(resolved_agent_path "${path}")" || continue
+        printf '%s\t%s\n' "${agent%%:*}" "${target}"
+    done
+    for agent in OpenCode:opencode Amp:amp; do
+        name="${agent#*:}"
+        for base in "${HOME}/.npm-global/bin" "${HOME}/.local/bin" "${HOME}/.bun/bin" /usr/local/bin /opt/homebrew/bin; do
+            link="${base}/${name}"
+            [[ -L "${link}" ]] || continue
+            target="$(resolved_agent_path "${link}")" || continue
+            case "${agent}:${target}" in
+                OpenCode:*/node_modules/opencode-ai/bin/opencode | Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
+                    printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
+            esac
+        done
+    done
+}
+
+# npm also puts its launcher beside the Node runtime selected by nvm, fnm,
+# asdf, mise or a system prefix. Only that launcher's exact target is evidence.
+runtime_agent_programs() {
+    local program="${1% (deleted)}" agent name base link target
+    case "${program##*/}" in node | nodejs) ;; *) return 0 ;; esac
+    base="${program%/*}"
+    for agent in OpenCode:opencode Amp:amp; do
+        name="${agent#*:}"
+        link="${base}/${name}"
+        [[ -L "${link}" ]] || continue
+        target="$(resolved_agent_path "${link}")" || continue
+        case "${agent}:${target}" in
+            OpenCode:*/node_modules/opencode-ai/bin/opencode | Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
+                printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
+        esac
+    done
+}
+
+# One proc_pidpath call per PID in one interpreter on macOS. An absent old
+# venv or an unreadable process yields an empty path; never fall back to lsof.
+process_programs() {
+    local pid program python rows
+    if [[ "${OSTYPE:-}" == linux* ]]; then
+        while read -r pid; do
+            [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+            program="$(readlink "/proc/${pid}/exe" 2>/dev/null)" || program=""
+            printf '%s\t%s\n' "${pid}" "${program}"
+        done <<< "$1"
+        return 0
+    fi
+    [[ "${OSTYPE:-}" == darwin* ]] || return 0
+    python="${VENV:-${HOME}/.defenseclaw/.venv}/bin/python"
+    if [[ ! -x "${python}" ]]; then
+        while read -r pid; do [[ "${pid}" =~ ^[0-9]+$ ]] && printf '%s\t\n' "${pid}"; done <<< "$1"
+        return 0
+    fi
+    rows="$("${python}" -I -c '
+import ctypes, sys
+lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+path_for = lib.proc_pidpath
+path_for.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+path_for.restype = ctypes.c_int
+for line in sys.stdin:
+    pid = line.strip()
+    if not pid.isdecimal():
+        continue
+    buf = ctypes.create_string_buffer(4096)
+    size = path_for(int(pid), buf, len(buf))
+    path = buf.value.decode("utf-8", "surrogateescape") if size > 0 else ""
+    print(pid + "\t" + path)
+' <<< "$1" 2>/dev/null)" || {
+        while read -r pid; do [[ "${pid}" =~ ^[0-9]+$ ]] && printf '%s\t\n' "${pid}"; done <<< "$1"
+        return 0
+    }
+    printf '%s\n' "${rows}"
+}
+
+# process_argv PID: kernel argument boundaries, never the flattened ps text.
+process_argv() {
+    if [[ "${OSTYPE:-}" == linux* ]]; then
+        cat "/proc/$1/cmdline" 2>/dev/null
+        return
+    fi
+    [[ "${OSTYPE:-}" == darwin* && -x /usr/bin/perl ]] || return 1
+    /usr/bin/perl -e '
+        my $mib = pack("i3", 1, 49, $ARGV[0]); my $len = pack("Q", 0);
+        syscall(202, $mib, 3, 0, $len, 0, 0) == 0 or exit 1;
+        my $buf = "\0" x unpack("Q", $len);
+        syscall(202, $mib, 3, $buf, $len, 0, 0) == 0 or exit 1;
+        $buf = substr($buf, 0, unpack("Q", $len));
+        my $argc = unpack("i", $buf);
+        my @words = split(/\0/, substr($buf, 4), -1);
+        shift @words;
+        shift @words while @words && $words[0] eq "";
+        $argc = @words if $argc > @words;
+        print map { "$_\0" } @words[0 .. $argc - 1];
+    ' "$1"
+}
+
+# A relative Node entry is resolved from the process's own cwd on Linux.
+# macOS has no bounded cwd lookup here, so such an entry remains unproven.
+process_cwd() {
+    [[ "${OSTYPE:-}" == linux* ]] || return 1
+    readlink "/proc/$1/cwd" 2>/dev/null
+}
+
+# agent_of PROGRAM INSTALLED PID WORD...: only an installed binary, or Node
+# running that installed entry as its immediate script argument, counts.
+# Options cannot be mistaken for a script: a command with Node flags is
+# unproven and skipped rather than guessed from a list of option names.
+agent_of() {
+    local program="$1" installed="$2" pid="$3" agent path script cwd
+    shift 3
+    program="${program% (deleted)}"
+    while IFS=$'\t' read -r agent path; do
+        [[ -n "${path}" && "${program}" == "${path}" ]] && { printf '%s' "${agent}"; return 0; }
+    done <<< "${installed}"
+    case "${program##*/}" in node | nodejs) ;; *) return 0 ;; esac
+    [[ $# -ge 2 && -n "$2" ]] || { agent_identity_audit "${pid}" 'Node script argument unavailable'; return 0; }
+    [[ "$2" != -* ]] || { agent_identity_audit "${pid}" 'Node entry hidden by options'; return 0; }
+    script="$2"
+    if [[ "${script}" != /* ]]; then
+        cwd="$(process_cwd "${pid}")" || { agent_identity_audit "${pid}" 'relative Node script cwd unreadable'; return 0; }
+        script="${cwd%/}/${script}"
+    fi
+    script="$(resolved_agent_path "${script}")" || { agent_identity_audit "${pid}" 'Node script unreadable'; return 0; }
+    while IFS=$'\t' read -r agent path; do
+        [[ -n "${path}" && "${script}" == "${path}" ]] && { printf '%s' "${agent}"; return 0; }
+    done <<< "${installed}"
+    return 0
+}
+
 loaded_plugin_agents() {
-    local processes
-    processes="$(ps -u "$(id -u)" -o pid= -o ucomm= -o args= 2>/dev/null)" || return 2
-    printf '%s\n' "$processes" | awk '
-        {
-            pid=$1; executable=tolower($2); sub(/^.*\//, "", executable)
-            # macOS can truncate the middle column to a launch-path prefix.
-            # argv[0] still carries the executable path in that case.
-            command=tolower($3); sub(/^.*\//, "", command)
-            agent=""
-            if (executable == "opencode" || executable == "opencode.exe" || command == "opencode" || command == "opencode.exe") agent="OpenCode"
-            else if (executable == "amp" || executable == "amp.exe" || command == "amp" || command == "amp.exe") agent="Amp"
-            else if (executable ~ /^(node|bun)(\.exe)?$/) {
-                args=tolower($0)
-                if (args ~ /(^|[\/[:space:]])opencode([\/[:space:]]|$)/) agent="OpenCode"
-                else if (args ~ /@sourcegraph\/amp([\/[:space:]]|$)/ || args ~ /(^|[\/[:space:]])amp([\/[:space:]]|$)/) agent="Amp"
-            }
-            if (agent != "") print agent " (PID " pid ")"
-        }'
+    local pids installed rows runtime pid program agent word fresh
+    local -a argv
+    installed="$(installed_agent_programs)"
+    pids="$(ps -u "$(id -u)" -o pid= 2>/dev/null)" || { [[ -z "${installed}" ]] || agent_identity_audit 0 'process list unreadable'; return 0; }
+    rows="$(process_programs "${pids}")"
+    runtime="$(while IFS=$'\t' read -r pid program; do runtime_agent_programs "${program}"; done <<< "${rows}")"
+    [[ -z "${runtime}" ]] || installed+="${installed:+$'\n'}${runtime}"
+    [[ -n "${installed}" ]] || return 0
+    while IFS=$'\t' read -r pid program; do
+        [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+        if [[ -z "${program}" ]]; then
+            kill -0 "${pid}" 2>/dev/null || agent_identity_audit "${pid}" 'process vanished during lookup'
+            continue
+        fi
+        argv=()
+        case "${program##*/}" in
+            node | nodejs)
+                while IFS= read -r -d '' word; do
+                    argv+=("${word}")
+                    [[ ${#argv[@]} -ge 2 ]] && break
+                done < <(process_argv "${pid}" 2>/dev/null)
+                [[ ${#argv[@]} -gt 0 ]] || { agent_identity_audit "${pid}" 'arguments unreadable'; continue; }
+                ;;
+        esac
+        agent="$(agent_of "${program}" "${installed}" "${pid}" ${argv[@]+"${argv[@]}"})"
+        [[ -n "${agent}" ]] || continue
+        if [[ "${OSTYPE:-}" == linux* ]]; then
+            fresh="$(readlink "/proc/${pid}/exe" 2>/dev/null)" || fresh=""
+            if [[ "${fresh}" != "${program}" ]] || { [[ "${program}" != *' (deleted)' ]] && [[ ! "/proc/${pid}/exe" -ef "${program}" ]]; }; then
+                agent_identity_audit "${pid}" 'executable changed during lookup'
+                continue
+            fi
+        fi
+        printf '%s (PID %s)\n' "${agent}" "${pid}"
+    done <<< "${rows}"
 }
 
 assert_no_loaded_plugin_agents() {
     local agents
-    agents="$(loaded_plugin_agents)" || die "Could not check running OpenCode and Amp processes; the gateway was not stopped"
+    agents="$(loaded_plugin_agents)"
     [[ -z "$agents" ]] || die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: ${agents//$'\n'/, }"
 }
 
@@ -902,10 +1073,18 @@ if ! has uv; then
     has uv || die "uv was installed but is not on PATH"
 fi
 
+# drop_unswapped_stage: a run that stops before the swap removes the release
+# it staged and fetched, and the uv files it added (GAP-1901, GAP-1120).
+drop_unswapped_stage() {
+    rm -rf "${STAGING:?}"
+    [[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME:?}/.uv"
+    [[ -z "${UV_INSTALLED}" ]] || rm -f "${BIN_DIR}/uv" "${BIN_DIR}/uvx" "${BIN_DIR}/defenseclaw-uv.sha256"
+}
 rm -rf "${STAGING}"
 mkdir -p "${STAGING}/bin"
+UNSWAPPED_STAGE=1
 # Ctrl+C before the swap: drop what this run staged and fetched (GAP-1901).
-trap 'printf "\n"; rm -rf "${STAGING}"; [[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"; [[ -z "${UV_INSTALLED}" ]] || rm -f "${BIN_DIR}/uv" "${BIN_DIR}/uvx" "${BIN_DIR}/defenseclaw-uv.sha256"; err "Cancelled; nothing was changed"; exit 130' INT TERM
+trap 'printf "\n"; drop_unswapped_stage; err "Cancelled; nothing was changed"; exit 130' INT TERM
 ARCHIVE="defenseclaw-${VERSION}-${OS}-${ARCH}.tar.gz"
 WHEEL="defenseclaw-${VERSION}-py3-none-any.whl"
 REQUIREMENTS="defenseclaw-${VERSION}-requirements.txt"
@@ -1110,6 +1289,8 @@ if [[ "${REPAIR}" == true ]]; then
 else
     SNAP="${DEFENSECLAW_HOME}/previous.new"
 fi
+# From here the swap owns the staged release: its undo removes it (drop_staging).
+UNSWAPPED_STAGE=""
 trap 'warn "Interrupted; finishing or undoing the swap before exiting"' INT TERM
 trap '' HUP PIPE
 if ! snapshot; then

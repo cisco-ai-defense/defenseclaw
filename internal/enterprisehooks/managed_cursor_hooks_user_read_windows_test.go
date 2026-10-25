@@ -126,6 +126,10 @@ func TestWindowsCursorMachineGuardKeepsHooksReadableByUsers(t *testing.T) {
 		enrollWindowsCursorOpenAliceForTest(t, paths)
 		if protect != nil {
 			protect(t, paths)
+		} else {
+			// Closed hooks no longer need a content rewrite on target
+			// publication. Require an ACL repair to exercise that writer.
+			protectWindowsCursorHooksForAdminsForTest(t, paths.Hooks)
 		}
 		return paths, func() error {
 			return PublishWindowsCursorManagedPolicyTargets([]WindowsCursorManagedRuntimeTarget{})
@@ -186,7 +190,7 @@ func TestWindowsCursorMachineGuardKeepsHooksReadableByUsers(t *testing.T) {
 		{name: "publication just after the write lands", prepare: publish,
 			during: adminOnly, want: "closed", steady: true, keepsEntries: true},
 		{name: "publication rollback while the administrator protects hooks.json", prepare: publish,
-			during: adminOnly, beforeSwap: true, fail: true, want: "open", steady: true, keepsEntries: true},
+			during: adminOnly, beforeSwap: true, fail: true, want: "closed", steady: true, keepsEntries: true},
 		{name: "publication over a protected hooks.json", prepare: publish,
 			protect: adminOnly, want: "closed", steady: true, keepsEntries: true},
 		{name: "publication while the administrator denies a user the read", prepare: publish,

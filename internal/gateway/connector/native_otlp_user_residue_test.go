@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -346,6 +347,12 @@ func TestUserNativeOTLPCleanupRemovesReleasedShapesWithoutBackup(t *testing.T) {
 	claudePath := filepath.Join(dir, "settings.json")
 	useCodexConfig(t, codexPath)
 	useClaudeSettings(t, claudePath)
+	if err := os.MkdirAll(filepath.Join(dir, "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "hooks", ".otlp-claudecode.token"), []byte(strings.Repeat("a1", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	codex := "model = \"gpt-5\"\n[otel]\nlog_user_prompt = true\n"
 	for _, pair := range [][2]string{{"exporter", "logs"}, {"metrics_exporter", "metrics"}, {"trace_exporter", "traces"}} {
 		codex += "[otel." + pair[0] + ".otlp-http]\nendpoint = 'http://127.0.0.1:19010/v1/" + pair[1] + "'\nprotocol = 'json'\n" +
@@ -484,6 +491,12 @@ func TestUserNativeOTLPCleanupKeepsOperatorHeadersBesideDefenseClawOnes(t *testi
 	dir := t.TempDir()
 	claudePath := filepath.Join(dir, "settings.json")
 	useClaudeSettings(t, claudePath)
+	if err := os.MkdirAll(filepath.Join(dir, "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "hooks", ".otlp-claudecode.token"), []byte(strings.Repeat("d", 64)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	mixed := "x-tenant=acme,authorization=Bearer " + strings.Repeat("d", 64) + ",x-defenseclaw-source=claudecode"
 	claude := `{"env":{"OTEL_EXPORTER_OTLP_HEADERS":"` + mixed + `","OTEL_EXPORTER_OTLP_ENDPOINT":"https://collector.example.test"}}`
 	if err := os.WriteFile(claudePath, []byte(claude), 0o600); err != nil {
@@ -507,6 +520,238 @@ func TestUserNativeOTLPCleanupKeepsOperatorHeadersBesideDefenseClawOnes(t *testi
 	}
 	if removed, err := RemoveUserNativeOTLP("claudecode", managed); err != nil || len(removed) != 0 {
 		t.Fatalf("second cleanup changed settings again: %v %v", removed, err)
+	}
+}
+
+func TestClaudeNativeOTLPCleanupKeepsUnrelatedSignalEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	useClaudeSettings(t, settingsPath)
+	productLogs := "http://127.0.0.1:19010/v1/logs"
+	operatorTraces := "http://127.0.0.1:4318/v1/traces"
+	productHeaders := "x-defenseclaw-source=claudecode,x-defenseclaw-client=claudecode-otel/1.0"
+	settings := map[string]interface{}{"env": map[string]string{
+		"CLAUDE_CODE_ENABLE_TELEMETRY":       "1",
+		"OTEL_LOGS_EXPORTER":                 "otlp",
+		"OTEL_TRACES_EXPORTER":               "otlp",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":   productLogs,
+		"OTEL_EXPORTER_OTLP_LOGS_HEADERS":    productHeaders,
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": operatorTraces,
+		"OTEL_EXPORTER_OTLP_TRACES_HEADERS":  "x-operator=traces",
+	}}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backup := claudeCodeBackup{ManagedEnv: map[string]string{
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": productLogs,
+		"OTEL_EXPORTER_OTLP_LOGS_HEADERS":  productHeaders,
+	}}
+	if err := NewClaudeCodeConnector().saveBackup(dir, backup); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{DataDir: dir, ManagedEnterprise: true, APIAddr: "127.0.0.1:18970"}
+	if _, err := RemoveUserNativeOTLP("claudecode", opts); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]map[string]string
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	env := got["env"]
+	if env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] != operatorTraces || env["OTEL_EXPORTER_OTLP_TRACES_HEADERS"] != "x-operator=traces" {
+		t.Fatalf("operator traces exporter changed: %v", env)
+	}
+	if env["OTEL_TRACES_EXPORTER"] != "otlp" || env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" ||
+		env["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] != "http/protobuf" {
+		t.Fatalf("operator traces exporter was disabled: %v", env)
+	}
+	if _, present := env["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"]; present {
+		t.Fatalf("product logs endpoint remains: %v", env)
+	}
+}
+
+func TestClaudeNativeOTLPCleanupKeepsChangedAuthorization(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
+			dir := t.TempDir()
+			settingsPath := filepath.Join(dir, "settings.json")
+			useClaudeSettings(t, settingsPath)
+			product := strings.Repeat("a", 64)
+			operator := strings.Repeat("b", 64)
+			marked := func(token string) string {
+				return "authorization=Bearer " + token + ",x-defenseclaw-source=claudecode,x-defenseclaw-client=claudecode-otel/1.0"
+			}
+			current := product
+			if changed {
+				current = operator
+			}
+			settings := map[string]interface{}{"env": map[string]string{
+				"OTEL_EXPORTER_OTLP_ENDPOINT": "https://collector.example.test",
+				"OTEL_EXPORTER_OTLP_HEADERS":  marked(current),
+			}}
+			data, err := json.Marshal(settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			backup := claudeCodeBackup{ManagedEnv: map[string]string{"OTEL_EXPORTER_OTLP_HEADERS": marked(product)}}
+			if err := NewClaudeCodeConnector().saveBackup(dir, backup); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := RemoveUserNativeOTLP("claudecode", SetupOpts{DataDir: dir, ManagedEnterprise: true}); err != nil {
+				t.Fatal(err)
+			}
+			data, err = os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]map[string]string
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			want := ""
+			if changed {
+				want = "authorization=Bearer " + operator
+			}
+			if got["env"]["OTEL_EXPORTER_OTLP_HEADERS"] != want {
+				t.Fatalf("Authorization after cleanup = %q, want %q", got["env"]["OTEL_EXPORTER_OTLP_HEADERS"], want)
+			}
+			if got["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] != "https://collector.example.test" {
+				t.Fatalf("operator collector changed: %v", got["env"])
+			}
+		})
+	}
+}
+
+func TestClaudeNativeOTLPInspectionDoesNotRequireUntrustedToken(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers string
+		want    string
+		residue bool
+	}{
+		{name: "operator collector", headers: "authorization=Bearer operator-value", want: "authorization=Bearer operator-value"},
+		{name: "marked without authorization", headers: "x-defenseclaw-source=claudecode,x-operator=kept", want: "x-operator=kept", residue: true},
+		{name: "marked with unmatched authorization", headers: "authorization=Bearer " + strings.Repeat("b", 64) + ",x-defenseclaw-source=claudecode", want: "authorization=Bearer " + strings.Repeat("b", 64), residue: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			settingsPath := filepath.Join(dir, "settings.json")
+			useClaudeSettings(t, settingsPath)
+			settings := map[string]interface{}{"env": map[string]string{
+				"OTEL_EXPORTER_OTLP_ENDPOINT": "https://collector.example.test",
+				"OTEL_EXPORTER_OTLP_HEADERS":  tc.headers,
+			}}
+			data, err := json.Marshal(settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tokenPath, err := OTLPPathTokenFilePath(dir, OTLPScopeClaude)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			// A malformed or untrusted token cannot prove ownership of the
+			// Authorization value and must not break inspection.
+			if err := os.WriteFile(tokenPath, []byte("invalid token"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			residue, err := UserNativeOTLPResidue("claudecode", SetupOpts{DataDir: dir, ManagedEnterprise: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The orphaned sidecar is always residue; only the marked
+			// settings add an exporter field to the result.
+			if (len(residue) > 1) != tc.residue || len(residue) == 0 {
+				t.Fatalf("residue = %v, want marked settings %t", residue, tc.residue)
+			}
+			out, _, err := claudeCodeWithoutUserNativeOTLP(data, claudeCodeBackup{}, SetupOpts{DataDir: dir, ManagedEnterprise: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.residue {
+				if out != nil {
+					t.Fatalf("operator collector was changed: %s", out)
+				}
+				return
+			}
+			var got map[string]map[string]string
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got["env"]["OTEL_EXPORTER_OTLP_HEADERS"] != tc.want || got["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] != "https://collector.example.test" {
+				t.Fatalf("operator collector changed: %v", got["env"])
+			}
+		})
+	}
+}
+
+// A product marker proves the marker and old loopback endpoint are ours, but
+// does not prove an Authorization value without a matching backup or sidecar.
+// Keep that value while disabling export so it cannot reach the retired port.
+func TestClaudeNativeOTLPCleanupKeepsUnmatchedBearerOffRetiredPort(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	useClaudeSettings(t, settingsPath)
+	peer, seen := startOTLPPeer(t)
+	unmatched := strings.Repeat("d", 64)
+	settings := map[string]interface{}{"env": map[string]string{
+		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+		"OTEL_LOGS_EXPORTER":           "otlp",
+		"OTEL_EXPORTER_OTLP_ENDPOINT":  peer.URL,
+		"OTEL_EXPORTER_OTLP_HEADERS":   "authorization=Bearer " + unmatched + ",x-defenseclaw-source=claudecode",
+	}}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if fallback := exportLikeClaudeCode(t, settingsPath); fallback {
+		t.Fatal("fixture did not export to its retired endpoint")
+	}
+	before := seen()
+	if len(before) != 1 || !before[0].bearer {
+		t.Fatalf("fixture did not send its bearer to the retired endpoint: %v", before)
+	}
+	out, removed, err := claudeCodeWithoutUserNativeOTLP(data, claudeCodeBackup{}, SetupOpts{DataDir: dir, ManagedEnterprise: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) == 0 {
+		t.Fatal("retired exporter was not removed")
+	}
+	if err := os.WriteFile(settingsPath, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data = out
+	var got map[string]map[string]string
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["env"]["OTEL_EXPORTER_OTLP_HEADERS"] != "authorization=Bearer "+unmatched ||
+		got["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] != "" {
+		t.Fatalf("unmatched credential or retired endpoint changed incorrectly: %v", got["env"])
+	}
+	if fallback := exportLikeClaudeCode(t, settingsPath); fallback || len(seen()) != len(before) {
+		t.Fatalf("retired exporter still active: default=%t peer requests=%d", fallback, len(seen())-len(before))
 	}
 }
 

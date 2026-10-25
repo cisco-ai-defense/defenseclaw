@@ -1596,6 +1596,7 @@ func (s *failingScanner) Scan(context.Context, string) (*scanner.ScanResult, err
 // load. The next scan that succeeds releases it.
 func TestScanFailureDisablesTheAssetAtRuntime(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Scanners.MCPScanner.UnverifiedServer = "block" // the strict tier blocks a server whose scan failed (GAP-1195)
 	w := New(cfg, nil, nil, store, logger, nil, nil)
 	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &failingScanner{countingScanner{name: "mcp-scanner"}} }
 	evt := InstallEvent{Type: InstallMCP, Name: "notes", Path: "mcp:codex:notes", Connector: "codex", Timestamp: time.Now()}

@@ -80,3 +80,49 @@ func TestStatusReportsHookFilesChangedSinceTheGuardianPass(t *testing.T) {
 		t.Fatalf("invalid record: security_complete=%v warnings=%v", bad.SecurityComplete, bad.Warnings)
 	}
 }
+
+func TestVerifyAndEnsureFailNonExecutableRegisteredHermesHook(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			ledger, err := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": true, "target_count": 1, "success_count": 1, "failure_count": 0})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.publishLedger(ledger)
+			script := "/home/u/.defenseclaw/hooks/hermes-hook.sh"
+			writeHostFile(t, h, script, "#!/bin/sh\nexit 0\n")
+			if err := os.Chmod(h.env.P(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			record := enterprisehooks.GuardianOwnedFilesRecord{Version: 1, Targets: []enterprisehooks.GuardianOwnedTarget{{
+				User: "u", UID: 502, Connector: "hermes",
+				Files: []enterprisehooks.GuardianOwnedFile{{Path: script, Fingerprint: enterprisehooks.OwnedFileFingerprint(h.env.P(script))}},
+			}}}
+			data, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recordPath := filepath.Join(h.env.Layout.DataDir, enterprisehooks.GuardianOwnedFilesFile)
+			writeHostFile(t, h, recordPath, string(data))
+			if err := os.Chmod(h.env.P(recordPath), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			requireOK(t, h.run(Options{Action: ActionVerify}))
+			if err := os.Chmod(h.env.P(script), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range []string{ActionVerify, ActionEnsure} {
+				result := h.run(Options{Action: action})
+				if result.OK || !strings.Contains(messagesOf(result.Errors, codeVerify), "registered Hermes hook is not executable") || result.SecurityComplete {
+					t.Fatalf("%s accepted non-executable registered hook: ok=%v complete=%v errors=%v warnings=%v", action, result.OK, result.SecurityComplete, result.Errors, result.Warnings)
+				}
+			}
+			if err := os.Chmod(h.env.P(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			requireOK(t, h.run(Options{Action: ActionVerify}))
+		})
+	}
+}

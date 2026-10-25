@@ -29,8 +29,11 @@ import (
 //     LDAP, winbind or Windows token chain, an ambiguous name or uid, a
 //     pre-1.0.4 agents entry the upgrade did not bind, a group fact newer
 //     than the last macOS account listing).
-//   - A maybe changes nothing when the proven assignments' profile covers
-//     its profile, or when it names the default and no assignment is proven.
+//   - A maybe changes nothing when the profile selected by proven
+//     assignments covers its profile on the request's path, or when no
+//     assignment is proven and its profile enforces equivalently to the
+//     default on a concrete hook, inspect or proxy request. A selection
+//     without a single request path needs proof to name a different profile.
 //     Otherwise the request is refused, naming the facts those maybes need
 //     (profileDecision.Refused); Name is then the strictest combination of
 //     default_profile and every profile that matches or could match, for
@@ -344,8 +347,9 @@ func (set *guardrailProfileSet) groupsState(entries []string, subject *profileSu
 }
 
 // selectProfile is the one profile selection rule (see the top of this
-// file) for subject, verified by source, on connectorName for agent.
-func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res identityResolution, source, connectorName string, scans []string, agent string) profileDecision {
+// file) for subject, verified by source, on connectorName for agent, for a
+// request on path (profilePathAny when it has no single one).
+func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res identityResolution, source, connectorName string, scans []string, path profilePath, agent string) profileDecision {
 	scans = set.scanScopes(connectorName, scans)
 	verified := subject != nil && source != ""
 	type hit struct {
@@ -377,9 +381,11 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		return profileDecision{}, false
 	}
 	// An assignment that may apply changes nothing when the profile selected
-	// by proven assignments already covers it. With no proven assignment,
-	// only an uncertain assignment naming the default changes nothing.
-	// The decision needs only facts that could change the selected profile.
+	// by proven assignments already covers it on the request's path. Without
+	// a proven assignment, the default is only a fallback: on a concrete
+	// request path the two profiles must enforce equivalently so an unproven
+	// weaker assignment cannot silently replace a stronger default. A
+	// pathless selection still needs proof before naming a different profile.
 	proven := set.defaultProfile
 	if len(yes) > 0 {
 		matched := make([]string, 0, len(yes))
@@ -390,7 +396,9 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	}
 	var needed []string
 	for i, name := range maybe {
-		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && set.provenProfileCovers(proven, name, scans) {
+		if set.provenProfileCovers(proven, name, scans, path) &&
+			(len(yes) > 0 || name == proven ||
+				(path != profilePathAny && set.provenProfileCovers(name, proven, scans, path))) {
 			continue
 		}
 		for _, fact := range maybeNeeds[i] {
@@ -428,6 +436,9 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 				decision = set.decision(name, yes[0].reason, yes[0].group, source)
 				decision.Assignment = yes[0].index
 				decision.Candidates = matched
+			}
+			if len(matched) > 1 {
+				decision.provenMembers = matched
 			}
 		}
 		if verified && res.proven() {
@@ -711,32 +722,37 @@ func (set *guardrailProfileSet) scanScopes(connectorName string, scans []string)
 	return set.profileCoverConnectors(connectorName)
 }
 
-// profileCovers compares candidates when choosing a profile. Equal sandbox
-// sections keep an unproven fallback under a combined name instead of
-// disclosing one candidate's profile as if its assignment were proven.
+// profileCovers compares candidates when choosing a profile, on both paths:
+// the profile chosen is named the same for a request on any path. Equal
+// sandbox sections keep an unproven fallback under a combined name instead
+// of disclosing one candidate's profile as if its assignment were proven.
 func (set *guardrailProfileSet) profileCovers(a, b string, connectors []string) bool {
-	return set.profileCoverage(a, b, connectors, false)
+	return set.profileCoverage(a, b, connectors, profilePathAny, false)
 }
 
 // provenProfileCovers asks whether an already proven selection covers an
-// uncertain assignment. Its effective sandbox floor may be stricter than the
-// uncertain profile's floor, including when it is a combination of profiles.
-func (set *guardrailProfileSet) provenProfileCovers(a, b string, connectors []string) bool {
+// uncertain assignment for a request on path. Its effective sandbox floor
+// may be stricter than the uncertain profile's floor, including when it is a
+// combination of profiles.
+func (set *guardrailProfileSet) provenProfileCovers(a, b string, connectors []string, path profilePath) bool {
 	if members, ok := config.ProfileMeetMembers(a); ok && slices.Contains(members, b) && set.meet(a) != nil {
 		return true
 	}
-	return set.profileCoverage(a, b, connectors, true)
+	return set.profileCoverage(a, b, connectors, path, true)
 }
 
-// profileCoverage checks sandbox enforcement and, on each path (hook, or
-// inspect and proxy) where b blocks, that a blocks there too with what it
-// decides that path with (profilePathConfig), scanning every rule pack b
-// scans there (scansRulePacksOf, also for a request on no one path), from a
-// block level at or below b's and a HILT that asks wherever b's asks.
-// Where b only observes, its guardrail settings do not matter. A name that
-// is not a profile is the base configuration. alert_at and block_message do
-// not enforce anything and are not compared.
-func (set *guardrailProfileSet) profileCoverage(a, b string, connectors []string, effectiveSandbox bool) bool {
+// profileCoverage checks the sandbox floor for a pathless decision and the
+// host-run requirement on a standalone enterprise concrete path.
+// On path (on both the hook and inspect path for profilePathAny) where b blocks, a
+// blocks there too with what it decides that path with (profilePathConfig),
+// scanning every rule pack b scans there (scansRulePacksOf, and for
+// profilePathAny every pack b scans on either), from a block level at or
+// below b's and a HILT that asks wherever b's asks. Where b only observes,
+// its guardrail settings do not matter: an uncertain profile that only
+// observes a request's path cannot change that request's decision. A name
+// that is not a profile is the base configuration. alert_at and
+// block_message do not enforce anything and are not compared.
+func (set *guardrailProfileSet) profileCoverage(a, b string, connectors []string, path profilePath, effectiveSandbox bool) bool {
 	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
 	if a == b {
 		return true
@@ -745,16 +761,24 @@ func (set *guardrailProfileSet) profileCoverage(a, b string, connectors []string
 	if ca == nil || cb == nil {
 		return false
 	}
-	if effectiveSandbox {
+	if effectiveSandbox && (path == profilePathAny ||
+		set.base.StandaloneEnterprise() && (set.profileRequiresSandbox(a) || set.profileRequiresSandbox(b))) {
+		// A standalone host hook reads required_for from the selected
+		// profile's floor after this choice. Even on a concrete path, an
+		// uncertain floor that requires a sandbox cannot be dropped.
 		if !set.sandboxFloorCovers(a, b) {
 			return false
 		}
-	} else if !reflect.DeepEqual(set.profileSandbox(a), set.profileSandbox(b)) {
+	} else if !effectiveSandbox && !reflect.DeepEqual(set.profileSandbox(a), set.profileSandbox(b)) {
 		return false
 	}
+	paths := []profilePath{path}
+	if path == profilePathAny {
+		paths = []profilePath{profilePathHook, profilePathInspect}
+	}
 	for _, name := range connectors {
-		for _, path := range []profilePath{profilePathHook, profilePathInspect} {
-			if !set.pathCovers(a, b, name, path) {
+		for _, on := range paths {
+			if !set.pathCovers(a, b, name, on, path) {
 				return false
 			}
 		}
@@ -762,8 +786,17 @@ func (set *guardrailProfileSet) profileCoverage(a, b string, connectors []string
 	return true
 }
 
-// pathCovers is profileCoverage on one connector and path.
-func (set *guardrailProfileSet) pathCovers(a, b, name string, path profilePath) bool {
+func (set *guardrailProfileSet) profileRequiresSandbox(name string) bool {
+	if name == "" {
+		return len(set.base.OpenShell.Admin.RequiredFor) > 0
+	}
+	derived, ok := set.derivedProfile(name)
+	return ok && len(derived.Sandbox.RequiredFor) > 0
+}
+
+// pathCovers is profileCoverage on one connector and path, for a request on
+// request (path, or profilePathAny).
+func (set *guardrailProfileSet) pathCovers(a, b, name string, path, request profilePath) bool {
 	ca, cb := set.profilePathConfig(a, path), set.profilePathConfig(b, path)
 	if !configBlocksOn(cb, name, path) {
 		return true
@@ -771,7 +804,7 @@ func (set *guardrailProfileSet) pathCovers(a, b, name string, path profilePath) 
 	if !configBlocksOn(ca, name, path) {
 		return false
 	}
-	if !set.scansRulePacksOf(a, b, name, path) || !set.scansRulePacksOf(a, b, name, profilePathAny) {
+	if !set.scansRulePacksOf(a, b, name, path) || request != path && !set.scansRulePacksOf(a, b, name, request) {
 		return false
 	}
 	blockA, _ := guardrailThresholdRanks(resolveThresholds(ca, name))
@@ -802,14 +835,10 @@ type rulePackID struct {
 	ref config.RulePackRef
 }
 
-// scannedRulePacks are the rule packs name scans connectorName with on
-// path, in the order its scan composes them: a profile's own (the base
-// configuration's for a name that is no profile), or, for a meet, the packs
-// of its members that block there on path (enforcingMembers), as
-// profileMeet.ruleGeneration and profileMeet.rulePack take them. A meet's
-// own configuration names the base pack, which the meet never scans by that
-// reference, so it is never read here. ok is false for a meet this set
-// cannot derive.
+// scannedRulePacks are the pack IDs relevant to enforcement coverage on a
+// connector and path. An explicit meet also scans observing members for
+// audit; this coverage proof only needs the members that can enforce there.
+// ok is false for a meet this set cannot derive.
 func (set *guardrailProfileSet) scannedRulePacks(name, connectorName string, path profilePath) (packs []rulePackID, ok bool) {
 	members := []string{strings.TrimSpace(name)}
 	if config.IsProfileMeet(members[0]) {
@@ -835,9 +864,8 @@ func (set *guardrailProfileSet) scannedRulePacks(name, connectorName string, pat
 // scansRulePacksOf reports whether a scans connectorName on path with
 // everything b scans there: every rule pack of b's is one of a's (so every rule b
 // enforces is in a's rules, every sensitive tool b inspects is inspected,
-// and a allows only what b allows), and both compose their pack from the
-// same first one, whose judge prompts and local patterns a composed pack
-// keeps (mergeRulePacks). Anything else is not proved: an uncertain
+// and a allows only what b allows). The same first pack is required as a
+// conservative check on judge prompts and local patterns. Anything else is not proved: an uncertain
 // assignment it decides keeps its missing fact.
 func (set *guardrailProfileSet) scansRulePacksOf(a, b, connectorName string, path profilePath) bool {
 	packsA, okA := set.scannedRulePacks(a, connectorName, path)

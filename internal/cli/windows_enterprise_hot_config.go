@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	gwconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -334,16 +336,20 @@ func windowsEnterpriseHotConfigApply(
 		return false, nil
 	}
 	// Adoption and undo both depend on the installed CLI's policy report.
-	// Check that it can run and prove the policy currently enforced before
-	// changing config.yaml. A missing or untrusted CLI is then repaired by
-	// Setup's transaction, while a payload-less bundle is refused intact.
+	// Check that it can run and report the policy currently enforced before
+	// changing config.yaml. A confirmed bundle replay repairs config drift,
+	// so its installed digest can differ from the live one; its signed bundle
+	// identity and post-write adoption are still proved below. Other changes
+	// require the installed and live policies to agree before publication.
 	proof, err := windowsEnterprisePolicyDigest(ctx)
 	if err != nil {
 		return unavailable("the installed CLI cannot prove the running gateway's policy: " + err.Error())
 	}
 	var priorPolicy policyDigestReport
+	confirmedReplay := bundleChange && opts.bundle.prepared != nil && opts.bundle.prepared.AlreadyApplied
 	if json.Unmarshal(proof, &priorPolicy) != nil || priorPolicy.Digest == "" ||
-		priorPolicy.Digest != priorPolicy.GatewayReportedDigest {
+		priorPolicy.GatewayReportedDigest == "" ||
+		(priorPolicy.Digest != priorPolicy.GatewayReportedDigest && !confirmedReplay) {
 		return unavailable("the installed CLI did not prove that the gateway enforces the installed config")
 	}
 	kept := keepWindowsEnterpriseEditedConfig(layout, previous)
@@ -379,6 +385,25 @@ func windowsEnterpriseHotConfigApply(
 	undo := func() {
 		restoreCtx := context.WithoutCancel(ctx)
 		var restoreErr error
+		// A candidate that opened a hook fail mode the previous config had
+		// closed may already have open sidecars: the guardian renders them on
+		// its pass, not when config.yaml goes back. Every standalone hook is
+		// held closed until the affected targets verify with the restored
+		// mode; without that proof the closure stays (review loop 2).
+		holdFailModes := windowsHotConfigHookFailModeChanges(previous, next)
+		holdErr, heldHere, holding := error(nil), false, false
+		if published, err := windowsEnterpriseHotConfigPublishedTargets(layout); err != nil || len(holdFailModes.affected(published, true)) > 0 {
+			holding = true
+			if held, err := windowsEnterpriseHotConfigHooksHeld(); err != nil {
+				holdErr = err
+			} else if !held {
+				if err := windowsEnterpriseHotConfigCloseHooks(layout); err != nil {
+					holdErr = err
+				} else {
+					heldHere = true
+				}
+			}
+		}
 		observed, readErr := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
 		switch {
 		case readErr != nil:
@@ -487,6 +512,34 @@ func windowsEnterpriseHotConfigApply(
 			}
 		}
 		if restoreErr == nil && targetsErr == nil && gatewayErr == nil {
+			if !holding {
+				return
+			}
+			renderErr := holdErr
+			if renderErr == nil {
+				published, err := windowsEnterpriseHotConfigPublishedTargets(layout)
+				if err == nil {
+					if reopened := holdFailModes.affected(published, true); len(reopened) > 0 {
+						err = windowsEnterpriseHotConfigTargetHooksProven(restoreCtx, layout, reopened, windowsEnterpriseHotConfigRenderTimeout)
+					}
+				}
+				renderErr = err
+			}
+			if renderErr == nil {
+				if heldHere {
+					if err := windowsEnterpriseHotConfigReleaseHooks(layout); err != nil {
+						result.AddWarning("hook_closure_kept", "the previous hook fail mode is back for every enrolled target, but the hook closure could not be released ("+
+							windowsEnterpriseBoundedDiagnostic(err.Error())+"); rerun ensure to release it")
+					}
+				}
+				return
+			}
+			closure := "every standalone hook stays forced closed until ensure or repair proves the installed config again"
+			if holdErr != nil {
+				closure = "the hooks could not be held closed (" + windowsEnterpriseBoundedDiagnostic(holdErr.Error()) + ")"
+			}
+			result.AddError("hook_fail_mode_restore_unproven", "the previous config is back and the gateway enforces it, but the hook guardian did not put the previous hook fail mode back for every enrolled target: "+
+				windowsEnterpriseBoundedDiagnostic(renderErr.Error())+"; "+closure+". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify"))
 			return
 		}
 		opts.hotConfigRestoreFailed = true
@@ -633,6 +686,28 @@ func windowsEnterpriseHotConfigApply(
 			return false, nil
 		}
 	}
+	// The hook guardian renders a connector's hook fail mode into every
+	// enrolled target's runtime sidecars when it reloads config.yaml, on its
+	// next pass (about a minute). A verify before that pass read the previous
+	// mode and put the previous config back, so a signed bundle could never
+	// take an explicit open back to closed (GAP-1418). Wait, bounded, until
+	// the published targets verify with the installed config.
+	// Only targets whose effective mode the change moves are waited for: an
+	// explicit closed on a default-closed config renders nothing new (review
+	// loop 2).
+	if failModes := windowsHotConfigHookFailModeChanges(previous, next); failModes.any() {
+		targets, err := windowsEnterpriseHotConfigPublishedTargets(layout)
+		targets = failModes.affected(targets, false)
+		if err == nil && len(targets) > 0 {
+			err = windowsEnterpriseHotConfigTargetHooksProven(ctx, layout, targets, windowsEnterpriseHotConfigRenderTimeout)
+		}
+		if err != nil {
+			undo()
+			failBundle("bundle_post_verify_failed", "the hook guardian did not put the changed hook fail mode in place for every enrolled target: "+
+				windowsEnterpriseBoundedDiagnostic(err.Error()))
+			return false, nil
+		}
+	}
 	verifyReport, verifyRun, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
 		windowsEnterprisePowerShellArgs("verify", windowsEnterpriseEnsureProbeOptions(opts)))
 	if err != nil || !windowsEnterpriseVerifyAcceptable(verifyReport) {
@@ -684,6 +759,239 @@ func windowsEnterpriseHotConfigApply(
 		result.AddWarning("ensure_config_applied", "ensure applied drift:config in the running gateway, without stopping any service: "+applied)
 	}
 	return true, nil
+}
+
+// windowsEnterpriseHotConfigRenderTimeout bounds the wait for the hook
+// guardian's next pass (its interval is one minute) to render a changed hook
+// fail mode into the enrolled targets (GAP-1418).
+var windowsEnterpriseHotConfigRenderTimeout = 3 * time.Minute
+
+// windowsEnterpriseHotConfigPublishedTargets returns the enabled targets of
+// the published targets.yaml; none when it does not exist. A seam for tests.
+var windowsEnterpriseHotConfigPublishedTargets = func(layout managed.StandaloneLayout) ([]enterprisehooks.ManifestTarget, error) {
+	manifest, err := enterprisehooks.LoadManifest(layout.ManifestPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var targets []enterprisehooks.ManifestTarget
+	for _, target := range manifest.Targets {
+		if target.IsEnabled() {
+			targets = append(targets, target)
+		}
+	}
+	return targets, nil
+}
+
+// windowsHotConfigFailModeChange compares the hook fail modes two configs
+// give each connector on a managed standalone Windows host (unset is closed).
+// all marks a change it cannot attribute (an unparseable config, a profile or
+// another unrecognized hook_fail_mode key, application protection switched),
+// which affects every connector.
+type windowsHotConfigFailModeChange struct {
+	all           bool
+	before, after map[string]string
+}
+
+func windowsHotConfigHookFailModeChanges(previous, next []byte) windowsHotConfigFailModeChange {
+	before, beforeOK := windowsHotConfigHookFailModes(previous)
+	after, afterOK := windowsHotConfigHookFailModes(next)
+	change := windowsHotConfigFailModeChange{before: before, after: after}
+	if !beforeOK || !afterOK || windowsHotConfigAppProtectionEnabled(previous) != windowsHotConfigAppProtectionEnabled(next) {
+		change.all = true
+		return change
+	}
+	for _, modes := range []map[string]string{before, after} {
+		for path := range modes {
+			if windowsHotConfigCanonicalFailMode(before[path]) == windowsHotConfigCanonicalFailMode(after[path]) {
+				continue
+			}
+			if _, ok := windowsHotConfigFailModePathConnector(path); !ok {
+				change.all = true
+				return change
+			}
+		}
+	}
+	return change
+}
+
+// any reports whether some connector's mode may change: one named by a
+// hook_fail_mode key, or one with no value of its own.
+func (c windowsHotConfigFailModeChange) any() bool {
+	if c.all {
+		return true
+	}
+	names := map[string]bool{"\x00": true}
+	for _, modes := range []map[string]string{c.before, c.after} {
+		for path := range modes {
+			if name, _ := windowsHotConfigFailModePathConnector(path); name != "" {
+				names[name] = true
+			}
+		}
+	}
+	for name := range names {
+		if c.moves(name, false) {
+			return true
+		}
+	}
+	return false
+}
+
+// affected returns the targets whose connector's mode the change moves;
+// reopened keeps only those it moves from closed to open.
+func (c windowsHotConfigFailModeChange) affected(targets []enterprisehooks.ManifestTarget, reopened bool) []enterprisehooks.ManifestTarget {
+	var out []enterprisehooks.ManifestTarget
+	for _, target := range targets {
+		if c.all || c.moves(target.Connector, reopened) {
+			out = append(out, target)
+		}
+	}
+	return out
+}
+
+// moves resolves connector before and after, under each way application
+// protection can apply (not at all, by its connector entry, by its own
+// guardrail), as Config.configuredHookFailModeForConnector does.
+func (c windowsHotConfigFailModeChange) moves(connector string, reopened bool) bool {
+	if c.all {
+		return true
+	}
+	for overlay := 0; overlay < 3; overlay++ {
+		before := windowsHotConfigResolveFailMode(c.before, connector, overlay)
+		after := windowsHotConfigResolveFailMode(c.after, connector, overlay)
+		if before != after && (!reopened || after == "open") {
+			return true
+		}
+	}
+	return false
+}
+
+func windowsHotConfigResolveFailMode(modes map[string]string, connector string, overlay int) string {
+	want := windowsHotConfigConnectorKey(connector)
+	lookup := func(kind string) string {
+		for path, mode := range modes {
+			if name, ok := windowsHotConfigFailModePathConnector(path); ok && windowsHotConfigFailModePathKind(path) == kind &&
+				(name == "" || windowsHotConfigConnectorKey(name) == want) {
+				if canonical := windowsHotConfigCanonicalFailMode(mode); canonical != "" {
+					return canonical
+				}
+			}
+		}
+		return ""
+	}
+	var chain []string
+	switch overlay {
+	case 1:
+		chain = append(chain, "app-connector")
+	case 2:
+		chain = append(chain, "app-global")
+	}
+	chain = append(chain, "connector", "global")
+	for _, kind := range chain {
+		if mode := lookup(kind); mode != "" {
+			return mode
+		}
+	}
+	return "closed"
+}
+
+// windowsHotConfigFailModePathConnector names the connector of a recognized
+// hook_fail_mode path ("" for a global one); ok is false for any other path.
+func windowsHotConfigFailModePathConnector(path string) (string, bool) {
+	path = strings.TrimPrefix(path, "[0]") // the document node
+	switch {
+	case path == ".guardrail.hook_fail_mode", path == ".application_protection.guardrail.hook_fail_mode":
+		return "", true
+	case strings.HasPrefix(path, ".guardrail.connectors.") && strings.HasSuffix(path, ".hook_fail_mode"):
+		name := strings.TrimSuffix(strings.TrimPrefix(path, ".guardrail.connectors."), ".hook_fail_mode")
+		return name, name != "" && !strings.Contains(name, ".")
+	case strings.HasPrefix(path, ".application_protection.connectors.") && strings.HasSuffix(path, ".guardrail.hook_fail_mode"):
+		name := strings.TrimSuffix(strings.TrimPrefix(path, ".application_protection.connectors."), ".guardrail.hook_fail_mode")
+		return name, name != "" && !strings.Contains(name, ".")
+	}
+	return "", false
+}
+
+func windowsHotConfigFailModePathKind(path string) string {
+	path = strings.TrimPrefix(path, "[0]") // the document node
+	switch {
+	case path == ".guardrail.hook_fail_mode":
+		return "global"
+	case path == ".application_protection.guardrail.hook_fail_mode":
+		return "app-global"
+	case strings.HasPrefix(path, ".guardrail.connectors."):
+		return "connector"
+	}
+	return "app-connector"
+}
+
+func windowsHotConfigConnectorKey(name string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '-' || r == '_' || r == ' ' {
+			return -1
+		}
+		return r
+	}, strings.ToLower(strings.TrimSpace(name)))
+}
+
+// windowsHotConfigCanonicalFailMode is explicitHookFailMode: "" unset, "open"
+// for open in any case, "closed" for every other value.
+func windowsHotConfigCanonicalFailMode(mode string) string {
+	switch mode = strings.ToLower(strings.TrimSpace(mode)); mode {
+	case "":
+		return ""
+	case "open":
+		return "open"
+	}
+	return "closed"
+}
+
+// windowsHotConfigAppProtectionEnabled reads application_protection.enabled.
+func windowsHotConfigAppProtectionEnabled(raw []byte) bool {
+	var doc struct {
+		ApplicationProtection struct {
+			Enabled bool `yaml:"enabled"`
+		} `yaml:"application_protection"`
+	}
+	_ = yaml.Unmarshal(raw, &doc)
+	return doc.ApplicationProtection.Enabled
+}
+
+// windowsHotConfigHookFailModes maps the YAML path of every hook_fail_mode
+// key in raw to its value, trimmed and lowercased.
+func windowsHotConfigHookFailModes(raw []byte) (map[string]string, bool) {
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		return nil, false
+	}
+	modes := map[string]string{}
+	var walk func(node *yaml.Node, path string)
+	walk = func(node *yaml.Node, path string) {
+		switch node.Kind {
+		case yaml.DocumentNode, yaml.SequenceNode:
+			for i, child := range node.Content {
+				walk(child, path+"["+strconv.Itoa(i)+"]")
+			}
+		case yaml.MappingNode:
+			for i := 0; i+1 < len(node.Content); i += 2 {
+				key := strings.ToLower(strings.TrimSpace(node.Content[i].Value))
+				value := node.Content[i+1]
+				if key == "hook_fail_mode" && value.Kind == yaml.ScalarNode {
+					modes[path+"."+key] = strings.ToLower(strings.TrimSpace(value.Value))
+					continue
+				}
+				walk(value, path+"."+key)
+			}
+		case yaml.AliasNode:
+			if node.Alias != nil {
+				walk(node.Alias, path)
+			}
+		}
+	}
+	walk(&document, "")
+	return modes, true
 }
 
 // windowsEnterpriseHotConfigRefreshTargets runs one enumerator cycle with
@@ -776,7 +1084,7 @@ func windowsHotConfigTargetLabels(targets []enterprisehooks.ManifestTarget) []st
 }
 
 // windowsEnterpriseHotConfigTargetHooksProven waits, up to wait, until the
-// installed CLI's read-only live verification (enterprise hooks verify)
+// installed CLI's read-only live registration proof (enterprise hooks readiness)
 // reports each of targets verified, or pending its own Windows session (its
 // hook is registered at that logon), under the service pins. It names the
 // targets still without a verified hook at the deadline. A seam for tests.
@@ -804,36 +1112,73 @@ var windowsEnterpriseHotConfigTargetHooksProven = func(ctx context.Context, layo
 	}
 }
 
-// windowsEnterpriseHotConfigUnprovenTargetHooks runs enterprise hooks verify
-// --json once and returns the targets whose row is neither verified nor
-// pending. The command exits nonzero when any target fails, so its report is
-// read whatever its exit status.
+// windowsEnterpriseHotConfigUnprovenTargetHooks runs enterprise hooks readiness
+// --json for the installed Windows manifest. It returns targets whose row is
+// neither verified nor pending. Unrelated target failures may make the command
+// exit nonzero; protected authorization and the report scope must still hold.
 func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installedCLI string, layout managed.StandaloneLayout, targets []enterprisehooks.ManifestTarget) ([]enterprisehooks.ManifestTarget, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	command := exec.CommandContext(ctx, installedCLI, "enterprise", "hooks", "verify", "--json")
-	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseServicePins(layout))
-	out, runErr := command.Output()
+	out, runErr := windowsEnterpriseHotConfigReadinessCommand(ctx, installedCLI, layout).Output()
 	var report struct {
-		Results []enterpriseHookReconcileRow `json:"results"`
+		OK                 *bool                        `json:"ok"`
+		Scope              string                       `json:"scope"`
+		AuthorizationError string                       `json:"authorization_error"`
+		Results            []enterpriseHookReconcileRow `json:"results"`
+		Excused            []enterpriseHookReconcileRow `json:"excused"`
 	}
 	if err := json.Unmarshal(out, &report); err != nil {
 		if runErr != nil {
-			return targets, fmt.Errorf("enterprise hooks verify: %w", runErr)
+			return targets, fmt.Errorf("enterprise hooks readiness: %w", runErr)
 		}
-		return targets, fmt.Errorf("read the enterprise hooks verify report: %w", err)
+		return targets, fmt.Errorf("read the enterprise hooks readiness report: %w", err)
 	}
-	return windowsHotConfigUnprovenTargets(targets, report.Results), nil
+	if report.OK == nil || report.Scope != "machine_hook_registration" || report.AuthorizationError != "" ||
+		(*report.OK && runErr != nil) {
+		return targets, errors.New("enterprise hooks readiness did not prove protected authorization")
+	}
+	if !*report.OK {
+		unrelatedFailure := false
+		for _, row := range report.Results {
+			if !row.OK && !row.Pending {
+				unrelatedFailure = true
+				break
+			}
+		}
+		if !unrelatedFailure || runErr == nil {
+			return targets, errors.New("enterprise hooks readiness returned an invalid result")
+		}
+	}
+	return windowsHotConfigUnprovenTargets(targets, report.Results, report.Excused...), nil
 }
 
-// windowsHotConfigUnprovenTargets returns each of targets whose verify row is
-// missing, or neither verified nor pending.
-func windowsHotConfigUnprovenTargets(targets []enterprisehooks.ManifestTarget, rows []enterpriseHookReconcileRow) []enterprisehooks.ManifestTarget {
+// windowsEnterpriseHotConfigReadinessCommand runs enterprise hooks readiness
+// under the service pins and the two the guardian's protected records need:
+// its authorization directory and the gateway service name, as the
+// lifecycle's own readiness probe sets them. Without them readiness refused
+// before its report (the authorization directory resolved to a path that
+// does not exist), so no hook proof could pass (GAP-1418).
+func windowsEnterpriseHotConfigReadinessCommand(ctx context.Context, installedCLI string, layout managed.StandaloneLayout) *exec.Cmd {
+	pins := windowsEnterpriseServicePins(layout)
+	pins[managed.HookGuardianAuthorizationDirEnv] = layout.GuardianAuthDir
+	pins[gwconnector.WindowsGatewayServiceNameEnv] = managed.StandaloneWindowsGatewaySvc
+	command := exec.CommandContext(ctx, installedCLI, "enterprise", "hooks", "readiness", "--manifest", layout.ManifestPath, "--json")
+	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), pins)
+	return command
+}
+
+// windowsHotConfigUnprovenTargets returns each of targets whose readiness row is
+// missing, or neither verified nor pending nor excused as verify excuses it
+// (a confirmed removed account, one waiting for its sign-in).
+func windowsHotConfigUnprovenTargets(targets []enterprisehooks.ManifestTarget, rows []enterpriseHookReconcileRow, excused ...enterpriseHookReconcileRow) []enterprisehooks.ManifestTarget {
 	proven := make(map[string]bool, len(rows))
 	for _, row := range rows {
 		if row.OK || row.Pending {
 			proven[strings.ToUpper(strings.TrimSpace(row.SID))+"\x00"+strings.ToLower(strings.TrimSpace(row.Connector))] = true
 		}
+	}
+	for _, row := range excused {
+		proven[strings.ToUpper(strings.TrimSpace(row.SID))+"\x00"+strings.ToLower(strings.TrimSpace(row.Connector))] = true
 	}
 	var unproven []enterprisehooks.ManifestTarget
 	for _, target := range targets {

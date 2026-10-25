@@ -1017,12 +1017,80 @@ func removeWindowsCodexOwnedGroups(hooks, baseHooks map[string]interface{}, opts
 	}
 }
 
+// windowsCodexRemovalCandidate computes the requirements a removal publishes
+// from the live file and the protected ownership record: the recorded
+// preimage when the file is still DefenseClaw's exact publication, cleaned
+// of what an earlier release left in it, or else the live file with
+// DefenseClaw's changes removed surgically. candidateExists false deletes
+// the file.
+func windowsCodexRemovalCandidate(
+	current []byte,
+	currentExists bool,
+	state windowsCodexMachineOwnership,
+	opts WindowsCodexMachineRequirementsOptions,
+) (candidate []byte, candidateExists, changed bool, disposition string, err error) {
+	exactPostimage := currentExists && windowsCodexMachineHash(current) == state.PostimageSHA256
+	// A preimage an earlier release recorded with its own groups (or
+	// their managed directory alone) is DefenseClaw's in those parts:
+	// restoring it verbatim would strand the uninstall on them
+	// (GAP-0907), so it is cleaned as a surgical removal is. A group the
+	// record itself holds is DefenseClaw's in any release's shape, also
+	// this install's command in the SessionStart shape of 1.0.2 and 1.0.3
+	// (GAP-1456): a removal takes it, as it does from a live file.
+	preimageLeftovers := false
+	if exactPostimage && state.PreimageExisted {
+		if preimageLeftovers, err = windowsCodexRecordedRequirementsHoldOwnedLeftovers(state.Preimage, opts); err != nil {
+			return nil, false, false, "", fmt.Errorf("inspect the recorded Codex requirements preimage: %w", err)
+		}
+	}
+	switch {
+	case exactPostimage && state.PreimageExisted && preimageLeftovers:
+		cleaned, _, cleanErr := removeWindowsCodexRequirementsOwnedChanges(state.Preimage, state.Preimage, opts)
+		if cleanErr != nil {
+			return nil, false, false, "", cleanErr
+		}
+		return cleaned, true, !bytes.Equal(current, cleaned), "restored_preimage", nil
+	case exactPostimage && state.PreimageExisted:
+		preimage := append([]byte(nil), state.Preimage...)
+		return preimage, true, !bytes.Equal(current, state.Preimage), "restored_preimage", nil
+	case exactPostimage:
+		return nil, false, currentExists, "restored_preimage", nil
+	default:
+		cleaned, cleanChanged, cleanErr := removeWindowsCodexRequirementsOwnedChanges(current, state.Preimage, opts)
+		if cleanErr != nil {
+			return nil, false, false, "", cleanErr
+		}
+		if len(bytes.TrimSpace(cleaned)) == 0 && !state.PreimageExisted {
+			return nil, false, cleanChanged, "surgical_preservation", nil
+		}
+		return cleaned, true, cleanChanged, "surgical_preservation", nil
+	}
+}
+
+// windowsCodexRecordedRequirementsHoldOwnedLeftovers is
+// windowsCodexRequirementsHoldOwnedLeftovers for requirements DefenseClaw
+// recorded as its preimage. A group the record holds is in its own baseline,
+// so this install's command in a shape this install does not render counts
+// as DefenseClaw's, as removeWindowsCodexOwnedGroups removes it, and not as
+// an administrator's later edit (GAP-1456).
+func windowsCodexRecordedRequirementsHoldOwnedLeftovers(raw []byte, opts WindowsCodexMachineRequirementsOptions) (bool, error) {
+	return windowsCodexRequirementsHoldOwnedLeftoversIn(raw, opts, true)
+}
+
 // windowsCodexRequirementsHoldOwnedLeftovers reports whether raw still holds
 // what a standalone removal takes: a DefenseClaw managed group of any
 // release (not this install's group as an administrator edited it,
 // windowsCodexEditedCurrentGroup), or, with no hook left, a managed directory
 // that names this install's own directory.
 func windowsCodexRequirementsHoldOwnedLeftovers(raw []byte, opts WindowsCodexMachineRequirementsOptions) (bool, error) {
+	return windowsCodexRequirementsHoldOwnedLeftoversIn(raw, opts, false)
+}
+
+func windowsCodexRequirementsHoldOwnedLeftoversIn(
+	raw []byte,
+	opts WindowsCodexMachineRequirementsOptions,
+	recorded bool,
+) (bool, error) {
 	if !windowsCodexOwnedGroupsRecognized(opts) {
 		return false, nil
 	}
@@ -1040,7 +1108,8 @@ func windowsCodexRequirementsHoldOwnedLeftovers(raw []byte, opts WindowsCodexMac
 			continue
 		}
 		for _, group := range groups {
-			if windowsCodexOwnedHookGroup(group, key, opts.HookBinary) && !windowsCodexEditedCurrentGroup(group, key, opts) {
+			if windowsCodexOwnedHookGroup(group, key, opts.HookBinary) &&
+				(recorded || !windowsCodexEditedCurrentGroup(group, key, opts)) {
 				return true, nil
 			}
 		}

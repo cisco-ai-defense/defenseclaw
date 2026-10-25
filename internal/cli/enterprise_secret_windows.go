@@ -82,7 +82,10 @@ var (
 	windowsSecretRecoveryCommand = func(executable string) *exec.Cmd {
 		return exec.Command(executable, "enterprise", "secret", "recover-gateway")
 	}
-	windowsSecretConfigTrusted = managed.ValidateTrustedConfigPath
+	windowsSecretConfigTrusted             = managed.ValidateTrustedConfigPath
+	windowsSecretAbsentConfigParentTrusted = func(path string) error {
+		return managed.ValidateTrustedDirectoryAncestor(path, "installed config directory")
+	}
 	// windowsSecretLockBundleStore, windowsSecretLifecycleLockPath and
 	// windowsSecretLifecycleLock are the two locks set and remove take.
 	windowsSecretLockBundleStore   = lockWindowsBundleStoreWithin
@@ -161,9 +164,14 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		// The success document (secret-result.schema.json) has no warnings.
 		layout, layoutErr := windowsSecretLayout()
 		if layoutErr == nil {
-			layoutErr = recordWindowsChange(layout, change.reservation, ev)
+			warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsChange(layout, change.reservation, ev))
+		} else if change.changed || !change.layoutPreflightFailed {
+			// A post-change or different layout failure still names the
+			// missing audit event.
+			warnChangeUnrecorded(cmd.ErrOrStderr(), layoutErr)
 		}
-		warnChangeUnrecorded(cmd.ErrOrStderr(), layoutErr)
+		// The same unreadable layout before any change is already in the
+		// JSON refusal; retrying it cannot record another refusal event.
 	}
 	// A run that recorded nothing (the stored value, an absent credential)
 	// gives its reservation back here, durably.
@@ -237,6 +245,9 @@ type windowsSecretChange struct {
 	noop      bool
 	// changed is set when the run wrote or removed the credential.
 	changed bool
+	// layoutPreflightFailed means no change could begin because the first
+	// layout lookup failed. Its JSON refusal already names that failure.
+	layoutPreflightFailed bool
 	// reservation holds room for the change event from before the change
 	// until the caller writes the event (or releases it).
 	reservation *enterprisestatus.ChangeReservation
@@ -258,7 +269,7 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	}
 	layout, err := windowsSecretLayout()
 	if err != nil {
-		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+		return windowsSecretChange{layoutPreflightFailed: true}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	if !managed.ValidCredentialName(opts.name) {
 		return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("--name %q must be lowercase letters, digits and dashes", opts.name))
@@ -304,18 +315,51 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	if err := requireWindowsSecretDeployment(); err != nil {
 		return windowsSecretChange{}, err
 	}
+	if opts.undoRotation != "" {
+		// The wrapper writes its journal before secret set. If that set
+		// never wrote its value, the old value (or absence) is already
+		// restored. Check through the pinned store under both locks; no
+		// credential write is needed. A live gateway may still hold the
+		// rotated value, so reload it before retiring the journal.
+		prior, err := openWindowsSecretStore(layout.SecretsDir, false)
+		if err != nil {
+			return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+		}
+		entry, stored, readErr := prior.openCredential(opts.name)
+		if readErr == nil {
+			_ = windows.CloseHandle(entry)
+		}
+		prior.close()
+		if (action == "set" && readErr == nil && bytes.Equal(bytes.TrimSpace(stored), value)) ||
+			(action == "remove" && windowsSecretAbsentRead(readErr)) {
+			return reloadAlreadyRestoredWindowsSecret(opts.name)
+		}
+	}
 	var installedConfig []byte
+	var inUse error
 	if action == "remove" {
-		installedConfig, err = readWindowsSecretInstalledConfig(layout)
+		installedConfig, err = readWindowsSecretInstalledConfig(layout, opts.undoRotation != "" && opts.undoConfig == "none")
 		if err != nil {
 			return windowsSecretChange{}, err
 		}
 		// A put-back (--undo-rotation) removes what a failed rotation added
-		// to the config confirmed before it, which may reference the
-		// credential with no value stored (checkSecretTransaction decides).
-		if at := config.InstalledCredentialReference(layout.ConfigPath, installedConfig, layout.DataDir, opts.name); at != "" && opts.undoRotation == "" {
-			return windowsSecretChange{}, secretFailed("credential_in_use", windowsSecretExitFailure,
-				fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", opts.name, at))
+		// to the config installed before it, which may reference the
+		// credential with no value stored: only while that same config is
+		// installed (--undo-config, read under the lifecycle lock), and
+		// checkSecretTransaction decides the rest. A config installed since
+		// may use the stored value, so it keeps it.
+		if at := config.InstalledCredentialReference(layout.ConfigPath, installedConfig, layout.DataDir, opts.name); at != "" && !undoRotationOnConfig(opts, installedConfig) {
+			err := fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", opts.name, at)
+			if opts.undoRotation != "" {
+				err = fmt.Errorf("the installed config references credential %s at %s and is not the config installed before the rotation (--undo-config), so it may use the value stored now; credential %s was not removed", opts.name, at, opts.name)
+			}
+			inUse = secretFailed("credential_in_use", windowsSecretExitFailure, err)
+			// A put-back first learns whether its rotation committed
+			// (rotation_confirmed, below), the only refusal that retires
+			// the wrapper's entry; neither refusal changes anything.
+			if opts.undoRotation == "" {
+				return windowsSecretChange{}, inUse
+			}
 		}
 	}
 	// Start an independent child before changing credentials, but only arm it
@@ -338,16 +382,22 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	defer store.close()
-	if opts.ifConfirmed != "" || opts.undoRotation != "" {
+	if opts.ifConfirmed != "" || opts.undoRotation != "" || opts.ifStored != "" {
 		var stored []byte
 		entry, raw, readErr := store.openCredential(opts.name)
 		if readErr == nil {
 			_ = windows.CloseHandle(entry)
 			stored = raw
 		}
+		if opts.ifStored == "none" && readErr != nil && !windowsSecretAbsentRead(readErr) {
+			return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, readErr)
+		}
 		if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
 			return windowsSecretChange{}, secretFailed(secretBindingCode(err), windowsSecretExitFailure, err)
 		}
+	}
+	if inUse != nil {
+		return windowsSecretChange{}, inUse
 	}
 	// A change this computer could not audit is not made: the spool must
 	// hold room for its change event before the credential is written or
@@ -399,6 +449,35 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	return change, nil
 }
 
+func windowsSecretAbsentRead(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND)
+}
+
+// An interrupted rotation can find its before-value already on disk while a
+// live gateway still uses the delivered value. Settle the journal only after
+// the gateway has loaded that before-state. A refused restart leaves it for
+// the next ensure, and the recovery child covers a stop that already began.
+func reloadAlreadyRestoredWindowsSecret(name string) (windowsSecretChange, error) {
+	recovery, err := prepareWindowsSecretRecovery()
+	if err != nil {
+		return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure,
+			fmt.Errorf("cannot prepare gateway reload for already-restored credential %s: %w", name, err))
+	}
+	recoverOnExit := false
+	defer func() { _ = recovery.finish(recoverOnExit) }()
+	restarted, err := windowsSecretRestartGateway(recovery.arm)
+	if err != nil {
+		recoverOnExit = !errors.Is(err, errWindowsGatewayStopRefused)
+		return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure,
+			fmt.Errorf("credential %s is restored on disk, but restarting the gateway failed: %w", name, err))
+	}
+	if err := recovery.finish(false); err != nil {
+		return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure,
+			fmt.Errorf("credential %s is restored on disk, but cancelling gateway restart recovery failed: %w", name, err))
+	}
+	return windowsSecretChange{restarted: restarted, noop: !restarted}, nil
+}
+
 // keepIdenticalWindowsSecret reports whether credential name already holds
 // exactly value and still grants the gateway its read, so set need not
 // rewrite it. The gateway reader normalizes whitespace, so the value it
@@ -445,10 +524,26 @@ func requireWindowsSecretDeployment() error {
 // readWindowsSecretInstalledConfig proves the active config can be inspected
 // before remove changes the credential. A missing, unreadable, or malformed
 // config cannot prove that the key is unused (GAP-0674, GAP-1507).
-func readWindowsSecretInstalledConfig(layout managed.StandaloneLayout) ([]byte, error) {
+func readWindowsSecretInstalledConfig(layout managed.StandaloneLayout, allowAbsent bool) ([]byte, error) {
 	if strings.TrimSpace(layout.ConfigPath) == "" {
 		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
 			errors.New("cannot locate the installed config; nothing was removed"))
+	}
+	if allowAbsent {
+		// Only an absent-credential undo that journaled no config may treat
+		// ENOENT as an empty reference roster. The stored-value comparison
+		// still runs under the same locks before removal. Ordinary remove and
+		// a journal from a prior config keep the state_invalid refusal.
+		if _, err := os.Lstat(layout.ConfigPath); errors.Is(err, os.ErrNotExist) {
+			if err := windowsSecretAbsentConfigParentTrusted(filepath.Dir(layout.ConfigPath)); err != nil {
+				return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+					fmt.Errorf("cannot trust the directory of the absent installed config %s (%v); nothing was removed", layout.ConfigPath, err))
+			}
+			return nil, nil
+		} else if err != nil {
+			return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+				fmt.Errorf("cannot inspect the installed config %s (%v); nothing was removed", layout.ConfigPath, err))
+		}
 	}
 	if err := windowsSecretConfigTrusted(layout.ConfigPath); err != nil {
 		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,

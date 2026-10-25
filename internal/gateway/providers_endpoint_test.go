@@ -353,6 +353,72 @@ func TestHandleReloadProviders_MergesNewOverlay(t *testing.T) {
 	}
 }
 
+func TestProviderResponsesReportMalformedOverlayNotApplied(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "custom-providers.json")
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", path)
+	t.Cleanup(func() {
+		t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", "")
+		_ = ReloadProviderRegistry()
+	})
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"Loaded","domains":["loaded.test"]}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReloadProviderRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A changed file has not changed the published registry until reload.
+	before := httptest.NewRecorder()
+	serveListProviders(before, httptest.NewRequest(http.MethodGet, "/v1/config/providers", nil))
+	var loaded providersListResponse
+	if err := json.Unmarshal(before.Body.Bytes(), &loaded); err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.OverlayApplied {
+		t.Fatal("published valid overlay was lost before reload")
+	}
+
+	for _, tc := range []struct {
+		method, route string
+		serve         func(http.ResponseWriter, *http.Request)
+	}{
+		{http.MethodPost, "/v1/config/providers/reload", serveReloadProviders},
+		{http.MethodGet, "/v1/config/providers", serveListProviders},
+	} {
+		w := httptest.NewRecorder()
+		tc.serve(w, httptest.NewRequest(tc.method, tc.route, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s status = %d: %s", tc.route, w.Code, w.Body.String())
+		}
+		var body struct {
+			OverlayApplied bool `json:"overlay_applied"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.OverlayApplied {
+			t.Fatalf("%s claims malformed overlay was applied: %s", tc.route, w.Body.String())
+		}
+	}
+	if err := os.WriteFile(path, []byte(`{"_derived_from":"config.yaml","providers":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReloadProviderRegistry(); err != nil {
+		t.Fatal(err)
+	}
+	derived := httptest.NewRecorder()
+	serveListProviders(derived, httptest.NewRequest(http.MethodGet, "/v1/config/providers", nil))
+	var body providersListResponse
+	if err := json.Unmarshal(derived.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.OverlayApplied {
+		t.Fatalf("derived overlay reported as merged: %s", derived.Body.String())
+	}
+}
+
 // TestCustomProvidersPath_EnvOverride verifies the env var wins
 // over ~/.defenseclaw so tests and container installs can both
 // relocate the overlay without patching code.

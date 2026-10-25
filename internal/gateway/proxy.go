@@ -661,7 +661,7 @@ func (p *GuardrailProxy) toolCallAction(ctx context.Context, findings []RuleFind
 		connectorName = ""
 	}
 	if cfg := requestPolicyConfig(ctx); cfg != nil {
-		return guardrailActionForConnectorFindings(cfg, connectorName, findings, false)
+		return profileMeetActionForFindings(ctx, cfg, connectorName, findings, false, false)
 	}
 	p.rtMu.RLock()
 	gc := p.cfg
@@ -2335,13 +2335,14 @@ var ollamaPorts []int
 // providerRegistry holds the merged provider list as last published, for
 // serving GET /v1/config/providers.
 var providerRegistry *configs.ProvidersConfig
+var providerOverlayApplied bool
 
 func init() {
-	cfg, err := configs.LoadProviders()
+	cfg, applied, err := configs.LoadProvidersWithOverlay()
 	if err != nil {
 		panic("gateway: failed to load embedded providers.json: " + err.Error())
 	}
-	setProviderRegistry(cfg)
+	setProviderRegistryWithOverlay(cfg, applied)
 }
 
 // ReloadProviderRegistry rebuilds the registry from the live generation's
@@ -2357,16 +2358,20 @@ func ReloadProviderRegistry() error {
 		applyGenerationProviders(providers)
 		return nil
 	}
-	cfg, err := configs.LoadProviders()
+	cfg, applied, err := configs.LoadProvidersWithOverlay()
 	if err != nil {
 		return err
 	}
-	setProviderRegistry(cfg)
+	setProviderRegistryWithOverlay(cfg, applied)
 	return nil
 }
 
 // setProviderRegistry publishes cfg as the provider registry.
 func setProviderRegistry(cfg *configs.ProvidersConfig) {
+	setProviderRegistryWithOverlay(cfg, false)
+}
+
+func setProviderRegistryWithOverlay(cfg *configs.ProvidersConfig, applied bool) {
 	domains := make([]providerDomainEntry, 0, len(cfg.Providers)*2)
 	for _, p := range cfg.Providers {
 		for _, d := range p.Domains {
@@ -2377,7 +2382,14 @@ func setProviderRegistry(cfg *configs.ProvidersConfig) {
 	providerDomains = domains
 	ollamaPorts = cfg.OllamaPorts
 	providerRegistry = cfg
+	providerOverlayApplied = applied
 	providerRegistryMu.Unlock()
+}
+
+func providerRegistryResponseSnapshot() (*configs.ProvidersConfig, []int, bool) {
+	providerRegistryMu.RLock()
+	defer providerRegistryMu.RUnlock()
+	return providerRegistry, ollamaPorts, providerOverlayApplied
 }
 
 // providerRegistrySnapshot returns the currently-loaded provider list

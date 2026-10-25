@@ -1502,16 +1502,17 @@ func appendClaudeCodeHookGroups(
 	hooks map[string]interface{}, hookCommand string, hookArgs []string, groups []claudeCodeHookGroup,
 ) {
 	for _, group := range groups {
+		command, args := claudeCodeHandlerInvocation(group.eventType, hookCommand, hookArgs)
 		handler := map[string]interface{}{
 			"type":    "command",
-			"command": hookCommand,
+			"command": command,
 			"timeout": group.timeout,
 		}
 		if group.async {
 			handler["async"] = true
 		}
-		if hookArgs != nil {
-			handler["args"] = hookArgs
+		if args != nil {
+			handler["args"] = args
 		}
 		entry := map[string]interface{}{"hooks": []interface{}{handler}}
 		if group.matcher != "" {
@@ -2779,6 +2780,7 @@ func verifyClaudeCodeHookGroups(
 	expectedEvents := make(map[string]struct{}, len(groups))
 	for _, expected := range groups {
 		expectedEvents[expected.eventType] = struct{}{}
+		expectedCommand, expectedArgs := claudeCodeHandlerInvocation(expected.eventType, expectedCommand, expectedArgs)
 		locations, err := ownedClaudeCodeHookLocations(
 			hooks[expected.eventType], hooksDir, expectedCommand, expectedArgs,
 		)
