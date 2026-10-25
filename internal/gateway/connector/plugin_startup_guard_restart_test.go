@@ -46,7 +46,7 @@ func writeFlakyForeignGuard(t *testing.T, root string) string {
 // A failed startup check is transient. Its first call stays closed, then a
 // later call must retry the check without restarting the agent. A confirmed
 // foreign-plugin denial remains pinned for the life of that process.
-func TestPluginStartupGuardFailureSaysToRestart(t *testing.T) {
+func TestPluginStartupGuardRetriesWithoutRestart(t *testing.T) {
 	root := testenv.PrivateTempDir(t)
 	data := openCodePluginTestData(t, openCodeStubGateway(t))
 	data.ForeignHookGuardJS = javaScriptStringContent(writeFlakyForeignGuard(t, root))
@@ -191,39 +191,9 @@ fi
 printf '{"deny":false}\n'
 `
 
-// G-hooks-upg loop round 2: the gateway outage table says which plugins keep
-// a guard block they got at load for the life of the agent process
-// (HookOutage.GuardCheckedAtLoad). An Amp or OpenCode agent that starts
-// while the gateway cannot answer for its session keeps blocking its tool
-// calls after the gateway is back, with a gateway that allows them; a
-// restarted agent checks again. Only those plugins run the check at load.
-func TestPluginGuardOutageDenialAtLoadHoldsForTheProcess(t *testing.T) {
-	registry := NewDefaultRegistry()
-	checking := map[string]bool{}
-	entries, err := hookFS.ReadDir("hooks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.Contains(name, "-plugin") || strings.Contains(name, "secure-client") {
-			continue // Secure Client has no standalone summary: its guard is a no-op
-		}
-		body, err := hookFS.ReadFile("hooks/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(body), "--foreign-hook-check") {
-			checking[strings.SplitN(name, "-plugin", 2)[0]] = true
-		}
-	}
-	for _, name := range registry.Names() {
-		conn, _ := registry.Get(name)
-		if got := ConnectorHookOutage(conn).GuardCheckedAtLoad; got != checking[name] {
-			t.Errorf("%s: GuardCheckedAtLoad = %v, but its plugin runs the foreign-hook check: %v", name, got, checking[name])
-		}
-	}
-
+// A startup check that denied only because the gateway was down retries on
+// the next call in the same agent process.
+func TestPluginGuardOutageDenialRetriesInTheProcess(t *testing.T) {
 	gateway := openCodeStubGateway(t)
 	root := testenv.PrivateTempDir(t)
 	data := openCodePluginTestData(t, gateway)

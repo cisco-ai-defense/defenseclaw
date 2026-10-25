@@ -56,8 +56,8 @@ type documentedOutage struct {
 	// allow, where only the hook decides.
 	ManagedOpen        string `json:"managedOpen"`
 	ManagedOpenNoGuard string `json:"managedOpenNoGuard"`
-	// HeldUntilRestart: where the guard blocks the outage, an agent that
-	// started during it keeps blocking until it restarts.
+	// HeldUntilRestart tracks a persistent guard outage denial. Current
+	// plugins retry transient denials on the next call.
 	HeldUntilRestart   bool   `json:"heldUntilRestart"`
 	SecureClientClosed string `json:"secureClientClosed"`
 	StrictAvailability string `json:"strictAvailability"`
@@ -121,7 +121,7 @@ func codeOutage(t *testing.T, conn connector.Connector) documentedOutage {
 		PerUserOpen:        outage.PerUserOpen,
 		ManagedOpen:        managedOpen,
 		ManagedOpenNoGuard: noGuard,
-		HeldUntilRestart:   outage.GuardCheckedAtLoad && guardBlocksSomewhere,
+		HeldUntilRestart:   outage.GuardOutageHeldUntilRestart && guardBlocksSomewhere,
 		SecureClientClosed: outage.SecureClientClosed,
 		StrictAvailability: outage.StrictAvailability,
 	}
@@ -180,6 +180,9 @@ func TestDocsCapabilityMatrixOutageMatchesTheHooks(t *testing.T) {
 		if row.Outage == nil {
 			t.Errorf("%s: capability matrix row has no outage entry", row.ID)
 			continue
+		}
+		if (row.ID == "opencode" || row.ID == "amp") && row.Outage.HeldUntilRestart {
+			t.Errorf("%s: an outage denial is retried on the next call, not held until restart", row.ID)
 		}
 		if want := codeOutage(t, conn); *row.Outage != want {
 			t.Errorf("%s: docs outage row %+v, the code says %+v", row.ID, *row.Outage, want)

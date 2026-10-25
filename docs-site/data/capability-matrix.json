@@ -210,7 +210,7 @@
         "supportsFailClosed": true,
         "scope": "user"
       },
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "managedOpenNoGuard": "per-user-route-blocks", "heldUntilRestart": true, "secureClientClosed": "blocks", "strictAvailability": "yes" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "managedOpenNoGuard": "per-user-route-blocks", "heldUntilRestart": false, "secureClientClosed": "blocks", "strictAvailability": "yes" },
       "sandbox": {
         "status": "artifacts",
         "tamperTier": "user",
@@ -244,7 +244,7 @@
         "supportsFailClosed": true,
         "scope": "user"
       },
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "managedOpenNoGuard": "blocks", "heldUntilRestart": true, "secureClientClosed": "blocks", "strictAvailability": "no" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "managedOpenNoGuard": "blocks", "heldUntilRestart": false, "secureClientClosed": "blocks", "strictAvailability": "no" },
       "sandbox": {
         "status": "artifacts",
         "tamperTier": "user",

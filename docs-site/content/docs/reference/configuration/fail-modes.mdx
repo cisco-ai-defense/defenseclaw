@@ -8,22 +8,22 @@ keywords:
   - DEFENSECLAW_FAIL_MODE
 ---
 
-On a per-user install the outage behavior follows the policy tier: with the default (balanced) or permissive rule pack a call runs with one warning and a `hook-failures.jsonl` record while this account's gateway is not running; with the strict rule pack it blocks ([Per-user installs](#per-user-installs)). Every other failure blocks in every tier, and a saved `guardrail.hook_fail_mode` does not change a per-user hook. On a managed standalone host, an administrator can choose `guardrail.hook_fail_mode: open` for a classified outage only. Secure Client has its own open default. A guarded connector (foreign-hook guard) blocks during an outage too. The effective mode is installed with the hooks so the gateway, hooks, status and doctor can agree ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
+On a per-user install with no saved fail mode, the outage behavior follows the policy tier: with the default (balanced) or permissive rule pack a call runs with one warning and a `hook-failures.jsonl` record while this account's gateway is not running; with the strict rule pack it blocks ([Per-user installs](#per-user-installs)). An explicit saved `guardrail.hook_fail_mode` wins. A reachable gateway's block or unusable answer blocks. On a managed standalone host, an administrator can choose `guardrail.hook_fail_mode: open` for a classified outage only. Secure Client has its own open default. A guarded connector (foreign-hook guard) blocks during an outage too. The effective mode is installed with the hooks so the gateway, hooks, status and doctor can agree ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
 
 ## Controls
 
 | Control | Effect | Default and scope |
 | --- | --- | --- |
-| `guardrail.hook_fail_mode` | `closed` blocks supported hook events when delivery or the gateway response fails. Under `closed` a recovered evaluator panic blocks advisory events too, but never a stop, session-end or idle event. Managed refusals below block in either mode. A managed administrator may select `open` for a classified outage. | Per-user: not read; the outage follows the policy tier ([Per-user installs](#per-user-installs)). Managed standalone: `closed` by default. Secure Client: unset is `open` ([Secure Client](#secure-client)). Per connector: `guardrail.connectors.<name>.hook_fail_mode`. |
+| `guardrail.hook_fail_mode` | An explicit saved `open` or `closed` selects outage behavior. Under `closed` a recovered evaluator panic blocks advisory events too, but never a stop, session-end or idle event. Managed refusals below block in either mode. | Per-user: an unset value follows the policy tier ([Per-user installs](#per-user-installs)). Managed standalone: `closed` by default. Secure Client: unset is `open` ([Secure Client](#secure-client)). Per connector: `guardrail.connectors.<name>.hook_fail_mode`. |
 | `DEFENSECLAW_FAIL_MODE` | Not read by 1.0.4 hooks in any profile: the installed mode is the fail mode. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)). | On a per-user host, select the strict policy to block an outage: `defenseclaw guardrail use-pack strict`. |
 
-An explicit value selects the mode only on the standalone enterprise profile, MDM-managed standalone hosts and Secure Client. On a managed computer the value comes from the administrator's config. An administrator-selected `open` permits only eligible outages; integrity and response failures still block as listed below. A per-user install ignores a saved value: its outage mode follows its policy tier. A guarded connector still blocks when the gateway cannot answer its foreign-hook session check, including an outage under an administrator's `open` choice.
+An explicit saved value selects the outage mode on a per-user, managed or Secure Client install. On a managed computer the value comes from the administrator's config. An administrator-selected `open` permits only eligible outages; integrity and response failures still block as listed below. Without a saved value, a per-user install follows its policy tier. A guarded connector still blocks when the gateway cannot answer its foreign-hook session check, including an outage under an administrator's `open` choice.
 
 On a per-user install, `defenseclaw status --json` returns a `connectors` array: identify the entry by `name` and read `connectors[].fail_mode.effective`. On a standalone enterprise install, `enterprise <os> status --json` and `verify --json` use a connector map: read `connectors.<id>.effective_hook_fail_mode`.
 
 ### Which value applies
 
-Per-user connectors resolve from their policy tier ([Per-user installs](#per-user-installs)). Managed connectors resolve as follows:
+Per-user connectors use an explicit saved mode first, then their policy tier ([Per-user installs](#per-user-installs)). Managed connectors resolve as follows:
 
 1. On a managed computer, the automatic-protection value (`application_protection.connectors.<name>.guardrail.hook_fail_mode`, or `application_protection.guardrail.hook_fail_mode`) for a connector it protects.
 2. The connector's own administrator-managed value.
@@ -34,7 +34,7 @@ Any value other than `open` (in any case) is `closed`. Per-user Cursor writes `f
 
 ### Per-user installs
 
-A per-user (OSS) install takes its outage mode from the connector's policy tier, the posture of its guardrail rule pack (`guardrail.rule_pack`, or the connector's own, and for a custom pack the `posture` of its `defenseclaw-pack.json`, else its folder name):
+A per-user (OSS) install without an explicit saved mode takes its outage mode from the connector's policy tier, the posture of its guardrail rule pack (`guardrail.rule_pack`, or the connector's own, and for a custom pack the `posture` of its `defenseclaw-pack.json`, else its folder name):
 
 | Policy tier | Gateway not running | Every other failure |
 | --- | --- | --- |
@@ -45,8 +45,9 @@ An outage is a call that no gateway took: this account's gateway is stopped (als
 
 - An answer the gateway gave: an error status (4xx or 5xx, also a 429 it stays too busy to answer), a malformed, cut-off or oversized answer, or an answer without a verdict.
 - A gateway that took the call and gave no answer in time.
-- Another account's or program's listener on the gateway port, a missing or refused token and input over the hook's size limit.
-- An install or upgrade of this account's DefenseClaw (`.install.lock`).
+- Another account's or program's listener on the gateway port, and a missing or refused token.
+- An oversized input whose bounded prefix cannot be reviewed by the gateway or which the gateway blocks. In default and permissive per-user installs, an oversized call the gateway allows runs with a warning and a HIGH audit row; strict and managed installs block oversized input.
+- A live install or upgrade lock in strict or managed installs. Per-user default and permissive calls that receive a usable gateway allow may proceed; a stale lock expires when its owner is gone or after its bounded lifetime.
 
 The guardrail mode does not change the outage mode: observe and action mode fail the same way. The hooks follow the mode Setup recorded for the connector (`hooks/.hookcfg.<connector>` for the shell hooks, `hooks/.hookcfg` for the native Windows hook, the plugin itself for OpenCode and Amp). A rule-pack change re-renders them; `defenseclaw guardrail fail-mode` shows each connector's mode and any drift.
 
