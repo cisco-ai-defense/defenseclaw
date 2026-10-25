@@ -236,7 +236,7 @@ func discoverWindowsCodexApp(profileHome string) (connector.AgentSurface, bool, 
 	var scanErr error
 	for _, pkg := range packages {
 		if err := winpath.RejectReparseChain(pkg); err != nil {
-			scanErr = errors.Join(scanErr, fmt.Errorf("Codex app folder %s was not inspected: %w", pkg, err))
+			scanErr = errors.Join(scanErr, fmt.Errorf("the Codex app folder %s was not inspected: %w", pkg, err))
 			continue
 		}
 		if info, err := os.Lstat(pkg); err != nil || !info.IsDir() {
@@ -259,7 +259,7 @@ func discoverWindowsDevinDesktop(profileHome string) (connector.AgentSurface, bo
 	var scanErr error
 	for _, dir := range dirs {
 		if err := winpath.RejectReparseChain(dir); err != nil {
-			scanErr = errors.Join(scanErr, fmt.Errorf("Devin Desktop folder %s was not inspected: %w", dir, err))
+			scanErr = errors.Join(scanErr, fmt.Errorf("the Devin Desktop folder %s was not inspected: %w", dir, err))
 			continue
 		}
 		if info, err := os.Lstat(filepath.Join(dir, "Devin.exe")); err != nil || !info.Mode().IsRegular() {
