@@ -185,7 +185,7 @@ case " $* " in
 esac
 if [ ! -f "$0.ran" ]; then
   : > "$0.ran"
-  printf '%s\n' '{"deny":true,"reason":"DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running (enterprise_gateway_not_running)."}'
+  printf '%s\n' '{"deny":true,"reason":"DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running (enterprise_gateway_not_running).","retryable":true}'
   exit 0
 fi
 printf '{"deny":false}\n'
@@ -205,8 +205,9 @@ fi
 printf '{"deny":false}\n'
 `
 
-// A startup check that denied only because the gateway was down retries on
-// the next call in the same agent process. A confirmed foreign-plugin denial
+// A startup check that denied only because the gateway was down (the
+// guard's structured retryable answer) retries on the next call in the same
+// agent process. A confirmed foreign-plugin denial
 // is covered separately and stays pinned.
 func TestPluginGuardOutageDenialRetriesInTheProcess(t *testing.T) {
 	testPluginGuardDenialAtLoad(t, outageDenyOnceGuard, "enterprise_gateway_not_running", true)
