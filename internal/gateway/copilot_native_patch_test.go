@@ -91,8 +91,8 @@ func TestCopilotNativeBenignCorpus(t *testing.T) {
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if count != 10 {
-		t.Fatalf("native benign corpus has %d cases, want 10", count)
+	if count != 12 {
+		t.Fatalf("native benign corpus has %d cases, want 12", count)
 	}
 }
 
