@@ -384,9 +384,10 @@ def resolve_connector_fail_mode(
         claude_env, registered = _claude_registration_state(workspace)
         # Hook renders from 1.0.3 and older read the mode from Claude Code's
         # settings env until the upgrade's connector refresh re-renders them.
-        # A per-user setup writes none there now (a managed one still does):
-        # a value that disagrees is registration drift, and the runtime mode
-        # only of a render that reads it.
+        # A per-user setup writes none there now (a managed one still does)
+        # and takes back the value an earlier setup or release wrote; a value
+        # the user set stays. It is a runtime input, and so drift when it
+        # disagrees, only for a render that reads it (hook-script-env below).
         sources.append(("claude-env", claude_env))
         agent_env = claude_env
         if not registered:
@@ -453,8 +454,14 @@ def resolve_connector_fail_mode(
         if unix_registration:
             drift.append(unix_registration)
 
+    # A 1.0.4 render (baked shell hook, Windows sidecar, managed runtime)
+    # reads no fail mode from Claude Code's settings env: a value the user
+    # kept there changes nothing the hook runs, so it is not drift (GAP-1422).
+    env_read = runtime_source[0] == "hook-script-env"
     for source, mode in sources:
         if source == "config":
+            continue
+        if source == "claude-env" and not env_read:
             continue
         if mode is None:
             # A per-user setup writes no fail mode into Claude Code's settings

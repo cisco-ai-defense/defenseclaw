@@ -751,7 +751,10 @@ def test_stale_persisted_closed_runtime_open_is_not_current(monkeypatch: pytest.
     assert not state.current
     assert state.desired == "closed"
     assert state.runtime == "open"
-    assert "claude-env-open" in state.drift
+    # The sidecar is the stale carrier; the settings env is no input of the
+    # native hook (round h), so it is not reported.
+    assert "windows-sidecar-open" in state.drift
+    assert "claude-env-open" not in state.drift
 
 
 def test_stale_closed_never_reports_already_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1610,8 +1613,9 @@ def test_claude_settings_env_is_never_the_effective_mode(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool, installed: str, settings_env: str
 ) -> None:
     # Claude Code passes its settings env to the hook, which reads no fail
-    # mode from it: a closed installed mode stays closed, and the stale
-    # settings value is registration drift.
+    # mode from it: a closed installed mode stays closed. Setup takes back a
+    # value DefenseClaw wrote and keeps one the user set, so a value left
+    # there is not drift either (round h, GAP-1422).
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": installed})
     _write_current_runtime(cfg, home, {"claudecode": installed})
     settings = home / ".claude" / "settings.json"
@@ -1626,7 +1630,7 @@ def test_claude_settings_env_is_never_the_effective_mode(
         state = resolve_connector_fail_mode(cfg, "claudecode")
     assert state.runtime == installed and state.effective == installed
     assert state.provenance == ("windows-sidecar" if windows else "hook-script")
-    assert f"claude-env-{settings_env}" in state.drift
+    assert not [item for item in state.drift if item.startswith("claude-env")], state.drift
 
 
 @pytest.mark.parametrize("env_value", ["open", "closed"])
@@ -2406,3 +2410,63 @@ def test_claude_settings_without_a_fail_mode_carrier_is_not_drift(
     ):
         state = resolve_connector_fail_mode(cfg, "claudecode")
     assert not [item for item in state.drift if item.startswith("claude-env")], state.drift
+
+
+_RELEASED_CARRIERS = Path(__file__).resolve().parents[2] / "internal/gateway/connector/testdata/released-carriers"
+
+
+@pytest.mark.parametrize("windows", [False, True])
+@pytest.mark.parametrize(("release", "user_value"), [("1.0.2", "closed"), ("1.0.3", "open"), ("1.0.3", "closed")])
+@pytest.mark.parametrize("installed", ["open", "closed"])
+def test_a_claude_settings_carrier_the_user_kept_is_not_drift_for_a_render_that_ignores_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool, release: str, user_value: str, installed: str
+) -> None:
+    # oss-outage-open round h (GAP-1422 class): the upgrade takes back the
+    # DEFENSECLAW_FAIL_MODE that 1.0.2 or 1.0.3 wrote into Claude Code's
+    # settings env, and keeps one the user changed. No 1.0.4 render (baked
+    # shell hook, Windows sidecar) reads it, so status must not report that
+    # kept value as drift; it made status non-current and rolled back the
+    # fail-mode setter's verification. The env is the real released one.
+    released = json.loads((_RELEASED_CARRIERS / release / "claude-settings.json").read_text(encoding="utf-8"))
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": installed})
+    _write_current_runtime(cfg, home, {"claudecode": installed})
+    settings = home / ".claude" / "settings.json"
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    del payload["env"]["DEFENSECLAW_FAIL_MODE"]
+    settings.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+
+    def resolve():
+        with (
+            patch("defenseclaw.fail_mode._is_windows", return_value=windows),
+            patch("defenseclaw.fail_mode.Path.home", return_value=home),
+        ):
+            return resolve_connector_fail_mode(cfg, "claudecode")
+
+    without = resolve()
+    payload["env"] = dict(released["env"], DEFENSECLAW_FAIL_MODE=user_value)
+    settings.write_text(json.dumps(payload), encoding="utf-8")
+    state = resolve()
+    assert not [item for item in state.drift if item.startswith("claude-env")], state.drift
+    assert (state.runtime, state.drift, state.current) == (without.runtime, without.drift, without.current)
+
+
+@pytest.mark.parametrize("user_value", ["open", "closed"])
+def test_a_claude_settings_carrier_is_still_an_input_of_a_render_that_reads_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, user_value: str
+) -> None:
+    # The other half: a 1.0.3 render the refresh has not replaced yet reads
+    # the settings env (FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"), so a
+    # value there is what it runs, and status still says so.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed"})
+    _install_render(cfg, "claudecode", 'FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"')
+    _set_claude_settings_env(home, user_value)
+    state, _report = _unix_report(monkeypatch, cfg, home, "claudecode")
+    assert not state.current
+    assert "hook-script-reads-agent-env" in state.drift, state.drift
+    if user_value == "open":
+        assert state.runtime == "open"
+        assert "claude-env-open" in state.drift, state.drift
+    else:
+        assert "agent-env-unverified" in state.drift, state.drift
