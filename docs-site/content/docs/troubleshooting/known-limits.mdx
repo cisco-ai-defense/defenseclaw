@@ -1,15 +1,30 @@
 ---
 title: Known limits in 1.0.4
-description: Agent hook, local Splunk bridge, upgrade and policy limits in DefenseClaw 1.0.4.
+description: Agent, local Splunk bridge, sandbox, upgrade and policy limits in DefenseClaw 1.0.4.
 ---
 
 ## Claude Code shell
 
 Claude Code does not run its hook for a command you type with `!` in shell mode. DefenseClaw cannot inspect or block that command. Use a normal Claude Code tool action when you need DefenseClaw to check a command. See [Claude Code](/docs/connectors/claudecode#limits).
 
+## Codex
+
+- **Cleanup refused by Codex:** Codex's own command check can refuse a shell command that contains `rm -f` or `rm -rf`, even for build output inside your project. Codex shows `rm -f style commands are not permitted. Use a safer approach` and skips that step. This was seen on Linux with per-user and managed installs, in observe mode. It is a Codex limit, not a DefenseClaw block: DefenseClaw does not write this message, and its audit records the call as allowed with no DefenseClaw rule. Run the cleanup yourself in a terminal.
+- **Stopped pre-tool hook:** Codex runs the tool when its `PreToolUse` hook is stopped, killed or times out. The hook never reaches the gateway, so DefenseClaw makes no decision and writes no pre-tool audit row. This is how Codex hooks work. On a managed computer, `status` and `verify` report `hook_process_fail_open` and `security_complete: false` while Codex is enabled. To prevent it, use application control or EDR that stops users from signalling hook processes. See [Vendor limits](/docs/enterprise/configure/reference#vendor-limits).
+
+See [Codex](/docs/connectors/codex#limits).
+
+## Copilot CLI
+
+Copilot CLI can fail to deliver a tool's permission request, most often after a long model turn. The tool call fails with `Session host did not acknowledge permission.requested delivery within 5 seconds` and the turn stops. Esc and Ctrl+C may not end it. This was seen on Linux with Copilot CLI 1.0.98 in a session that had no DefenseClaw hook, so DefenseClaw gave no verdict. It is a Copilot CLI limit. Ask again; if the session stops responding, quit Copilot and start a new session. See [GitHub Copilot CLI](/docs/connectors/copilot#limits).
+
 ## Local Splunk
 
 The local Splunk bridge works only with an x86_64 Docker engine. On ARM64, use `--enterprise` with an existing Splunk HTTP Event Collector (HEC) endpoint. See [Send to Splunk](/docs/how-to/observability/send-to-splunk#before-you-start).
+
+## Linux sign-out
+
+On Linux, the OpenShell gateway runs in your systemd user manager. Without linger, signing out of your last session stops the gateway and its MicroVMs, even when a disk sync failed, so unsynced work in the guest is lost. Save your work and stop the sandbox before you sign out, or ask an administrator to enable linger for your account. See [A Linux sign-out ends a running MicroVM](/docs/troubleshooting/sandboxes/setup-and-gateway#a-linux-sign-out-ends-a-running-microvm).
 
 ## Upgrade and policy limits
 

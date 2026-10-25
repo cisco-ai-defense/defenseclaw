@@ -70,6 +70,7 @@ Teardown restores the exact earlier file when DefenseClaw's copy is unchanged. O
 - DefenseClaw does not configure Copilot's own OpenTelemetry exporter. Telemetry comes from hook events.
 - Copilot's Windows sandbox does not enforce per-path denials. Do not rely on it for filesystem containment.
 - The VS Code Local harness reads its own hook format. The enterprise profile covers it; see the reference.
+- Copilot CLI can fail to deliver a tool's permission request after a long model turn, and the turn stops. This is a Copilot CLI limit. See [Known limits in 1.0.4](/docs/troubleshooting/known-limits#copilot-cli).
 
 ## Turn it off
 
