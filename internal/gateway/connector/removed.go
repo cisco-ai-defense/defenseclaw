@@ -106,6 +106,7 @@ const (
 	removedOmnigentID          = "omnigent"
 	removedOmnigentModuleName  = "defenseclaw_omnigent_policy"
 	removedOmnigentPolicyKey   = "defenseclaw_guardrail"
+	removedOmnigentPthName     = "defenseclaw_omnigent.pth"
 	// removedScriptReadLimit bounds the read of a hook script: anything
 	// larger is not one DefenseClaw wrote.
 	removedScriptReadLimit = 1 << 20
@@ -931,6 +932,8 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 			if item, ok := removedPthLeftover(pth, filepath.Join(opts.DataDir, "hooks")); ok {
 				out = append(out, item)
 			}
+		} else if item, ok := removedLostPthLeftover(opts.DataDir); ok {
+			out = append(out, item)
 		}
 	}
 	script := c.scriptPath(opts.DataDir)
@@ -1105,11 +1108,16 @@ func (c removedOnlyConnector) configNames(data []byte) (bool, error) {
 
 // configNamesWith is configNames with names deciding what names the script.
 func (c removedOnlyConnector) configNamesWith(data []byte, names func(string) bool) (bool, error) {
+	return c.configNamesWithin(data, names, removedConfigReadLimit)
+}
+
+// configNamesWithin is configNamesWith for a config read up to limit.
+func (c removedOnlyConnector) configNamesWithin(data []byte, names func(string) bool, limit int) (bool, error) {
 	if names(string(data)) {
 		return true, nil
 	}
-	if len(data) > removedConfigReadLimit {
-		return false, fmt.Errorf("it is larger than %d MiB", removedConfigReadLimit>>20)
+	if len(data) > limit {
+		return false, fmt.Errorf("it is larger than %d MiB", limit>>20)
 	}
 	body := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 	if len(bytes.TrimSpace(body)) == 0 {
@@ -1152,9 +1160,15 @@ func (c removedOnlyConnector) registrationRunsScript(opts SetupOpts) (string, bo
 // liveRegistrations are the agent configs that still run or import the
 // script, or that could not be read or checked (they may).
 func (c removedOnlyConnector) liveRegistrations(opts SetupOpts) []string {
+	return c.liveRegistrationsWithin(opts, removedConfigReadLimit)
+}
+
+// liveRegistrationsWithin is liveRegistrations with every config read up to
+// limit.
+func (c removedOnlyConnector) liveRegistrationsWithin(opts SetupOpts, limit int) []string {
 	var live []string
 	for _, path := range c.configPaths(opts) {
-		data, err := readRemovedConfig(path)
+		data, err := readRemovedConfigWithin(path, limit)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -1162,7 +1176,7 @@ func (c removedOnlyConnector) liveRegistrations(opts SetupOpts) []string {
 			live = append(live, path)
 			continue
 		}
-		if names, checkErr := c.configNamesWith(data, c.scriptNames); names || checkErr != nil {
+		if names, checkErr := c.configNamesWithin(data, c.scriptNames, limit); names || checkErr != nil {
 			live = append(live, path)
 		}
 	}
@@ -1333,6 +1347,27 @@ func removedValueNames(value any, names func(string) bool) bool {
 	return false
 }
 
+// removedLostPthLeftover lists OmniGent's import-path file when an older
+// setup's record of where it wrote it (connector_backups/omnigent/pth.json) is
+// gone but its other records are there: every such setup wrote the file. Its
+// path is in the site-packages of OmniGent's Python, which only that Python
+// can tell; an uninstall (SYSTEM or root on a managed host) never runs the
+// user's interpreter to ask, so the step says how to find it.
+func removedLostPthLeftover(dataDir string) (RemovedLeftover, bool) {
+	for _, logical := range []string{"config", "module"} {
+		if _, err := os.Lstat(managedFileBackupPath(dataDir, removedOmnigentID, logical)); err == nil {
+			hooks := filepath.Join(dataDir, "hooks")
+			return RemovedLeftover{
+				Path: removedOmnigentPthName,
+				What: "DefenseClaw's record of where it wrote OmniGent's import-path file is gone, so the file may still add DefenseClaw's hook folder to OmniGent's Python import path",
+				Step: "in the folder that OmniGent's Python prints for python -c \"import sysconfig; print(sysconfig.get_paths()['purelib'])\", remove only the line " +
+					hooks + " from " + removedOmnigentPthName + " (delete the file when that was its only line)",
+			}, true
+		}
+	}
+	return RemovedLeftover{}, false
+}
+
 // removedPthLeftover lists OmniGent's import-path file when it still holds
 // DefenseClaw's line (the hook folder), with a step that takes out only that
 // line when the file holds other import paths too.
@@ -1453,6 +1488,11 @@ func removedAbsolute(value string) string {
 // up to one byte past removedConfigReadLimit (more is a file too large to
 // check).
 func readRemovedConfig(path string) ([]byte, error) {
+	return readRemovedConfigWithin(path, removedConfigReadLimit)
+}
+
+// readRemovedConfigWithin is readRemovedConfig up to one byte past limit.
+func readRemovedConfigWithin(path string, limit int) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -1465,7 +1505,7 @@ func readRemovedConfig(path string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	return io.ReadAll(io.LimitReader(file, removedConfigReadLimit+1))
+	return io.ReadAll(io.LimitReader(file, int64(limit)+1))
 }
 
 // FormatRemovedLeftovers renders leftovers as the lines status, uninstall and

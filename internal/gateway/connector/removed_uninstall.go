@@ -43,6 +43,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// removedUninstallConfigReadLimit bounds the read of an agent config in an
+// uninstall. A valid config larger than removedConfigReadLimit is still
+// cleaned and checked; a larger one than this fails the uninstall (no data is
+// removed) instead of leaving a registration whose stub the data removal
+// would take.
+var removedUninstallConfigReadLimit = 256 << 20 // a var for tests
+
 // RemovedConnectorUninstallEnv set to "1" in the environment of
 // `defenseclaw-gateway connector teardown` marks the teardown as part of an
 // uninstall (defenseclaw uninstall and reset, Windows Setup /uninstall). Only
@@ -65,7 +72,7 @@ func UninstallRemovedConnector(name string, opts SetupOpts) (bool, error) {
 	if err := c.removeRegistrations(opts); err != nil {
 		return true, fmt.Errorf("%s uninstall: %w; the stub that blocks every call was kept", c.name, err)
 	}
-	if len(c.liveRegistrations(opts)) > 0 {
+	if len(c.liveRegistrationsWithin(opts, removedUninstallConfigReadLimit)) > 0 {
 		// Listed with its step; the stub stays for it.
 		return true, nil
 	}
@@ -92,15 +99,23 @@ func UninstallRemovedConnector(name string, opts SetupOpts) (bool, error) {
 
 // removeRegistrations removes DefenseClaw's entries from every agent config
 // the connector's teardown checks (configPaths). A file that cannot be read
-// or parsed is left as it is.
+// or parsed is left as it is (the agent cannot load it either). A valid
+// config that still runs or imports the script afterwards, or one too large
+// to check, is an error: the uninstall must not go on to remove the data the
+// registration still needs.
 func (c removedOnlyConnector) removeRegistrations(opts SetupOpts) error {
 	var errs []error
 	for _, path := range c.configPaths(opts) {
-		data, err := readRemovedConfig(path)
-		if err != nil || len(data) > removedConfigReadLimit {
+		data, err := readRemovedConfigWithin(path, removedUninstallConfigReadLimit)
+		if err != nil {
 			continue
 		}
-		if names, _ := c.configNames(data); !names {
+		if len(data) > removedUninstallConfigReadLimit {
+			errs = append(errs, fmt.Errorf("%s is larger than %d MiB, so DefenseClaw cannot check it for its entries; %s, then run the uninstall again",
+				path, removedUninstallConfigReadLimit>>20, c.configStep))
+			continue
+		}
+		if names, _ := c.configNamesWithin(data, c.textNames, removedUninstallConfigReadLimit); !names {
 			continue
 		}
 		var updated []byte
@@ -110,7 +125,19 @@ func (c removedOnlyConnector) removeRegistrations(opts SetupOpts) error {
 		} else {
 			updated, changed, err = removedOpenHandsConfigWithout(data, c.textNames)
 		}
-		if err != nil || !changed {
+		if err != nil {
+			continue
+		}
+		result := data
+		if changed {
+			result = updated
+		}
+		if c.decodedNames(result) {
+			errs = append(errs, fmt.Errorf("%s still runs or imports %s in a form the uninstall does not remove; %s, then run the uninstall again",
+				path, c.script, c.configStep))
+			continue
+		}
+		if !changed {
 			continue
 		}
 		// The agent reads its config through links; the file it reads is
@@ -130,6 +157,21 @@ func (c removedOnlyConnector) removeRegistrations(opts SetupOpts) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// decodedNames reports whether a parsed agent config still runs or imports
+// the script in one of its values (comments do not count).
+func (c removedOnlyConnector) decodedNames(data []byte) bool {
+	body := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	var doc any
+	if c.name == removedOpenHandsID {
+		if json.Unmarshal(body, &doc) != nil {
+			return false
+		}
+	} else if yaml.Unmarshal(body, &doc) != nil {
+		return false
+	}
+	return removedValueNames(doc, c.scriptNames)
 }
 
 // removedOmnigentConfigWithout returns an OmniGent config.yaml without
@@ -251,7 +293,7 @@ func removedOpenHandsConfigWithout(data []byte, names func(string) bool) ([]byte
 // removedPruneHooks removes DefenseClaw's hooks from a decoded hooks.json
 // value; drop means the value itself goes from its parent (a handler of
 // DefenseClaw's, a command string of DefenseClaw's in a list, or a matcher
-// group whose hooks all went).
+// group whose hooks all went and that holds nothing but its matcher).
 func removedPruneHooks(value any, names func(string) bool) (out any, changed, drop bool) {
 	switch v := value.(type) {
 	case map[string]any:
@@ -278,6 +320,13 @@ func removedPruneHooks(value any, names func(string) bool) (out any, changed, dr
 		}
 		if _, had := v["hooks"]; had {
 			if _, kept := pruned["hooks"]; !kept {
+				for key := range pruned {
+					if key != "matcher" {
+						// The operator's own fields stay, with no hooks.
+						pruned["hooks"] = []any{}
+						return pruned, true, false
+					}
+				}
 				return nil, true, true
 			}
 		}
