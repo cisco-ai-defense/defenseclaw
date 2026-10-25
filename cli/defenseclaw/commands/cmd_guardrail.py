@@ -1593,8 +1593,9 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
             ux.subhead(f"A blocked call {signal}", indent="    ")
     elif outage_only:
         ux.subhead(
-            f"A classified gateway outage will now ALLOW {label} with a warning and per-call audit entry. "
-            "Other failures remain closed.",
+            f"A classified gateway outage (no gateway takes the call) will now ALLOW {label} with a warning "
+            "and per-call audit entry. A gateway that takes the call and does not answer in time, and every "
+            "other failure, still blocks.",
             indent="  ",
         )
     elif mode == "closed" and upstream_fail_open(app.cfg, key):
@@ -1908,7 +1909,9 @@ def fail_mode_cmd(
       closed — block supported events during a gateway outage.
 
     An unset per-user mode follows the rule-pack tier. Managed installs
-    default closed; a managed administrator can select outage-open. Secure
+    default closed; a managed administrator can select open, which allows a
+    call only while the hook proves the gateway service is not running (an
+    accepted call the gateway does not answer in time still blocks). Secure
     Client keeps its own default. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
     forces transport and missing-token failures closed.
 
@@ -2169,8 +2172,9 @@ def fail_mode_cmd(
         ux.warn("A gateway outage will now BLOCK supported calls. Other failures remain closed.", indent="  ")
     elif outage_only:
         ux.subhead(
-            "A classified gateway outage will now ALLOW supported calls with a warning and per-call audit entry. "
-            "Other failures remain closed.", indent="  ",
+            "A classified gateway outage (no gateway takes the call) will now ALLOW supported calls with a "
+            "warning and per-call audit entry. A gateway that takes the call and does not answer in time, and "
+            "every other failure, still blocks.", indent="  ",
         )
     elif mode == "closed" and upstream_open and len(upstream_open) == len(active_names):
         ux.warn(

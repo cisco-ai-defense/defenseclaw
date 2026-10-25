@@ -11,8 +11,9 @@
 package connector
 
 // What a connector's DefenseClaw hook does with a call it cannot check
-// because the gateway is not running, is still restarting or gives no answer
-// in time (a gateway outage).
+// because no gateway takes it: the gateway is not running or still restarting
+// (a gateway outage). A gateway that takes the call and gives no answer in
+// time is not an outage and blocks.
 const (
 	OutageBlocks = "blocks"
 	OutageRuns   = "runs"

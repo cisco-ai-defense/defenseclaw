@@ -9008,8 +9008,8 @@ func TestClaudeCode_Setup_PreservesNonOtelEnvKeys(t *testing.T) {
 	if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "0" {
 		t.Errorf("OTel keys not merged in alongside operator keys (got CLAUDE_CODE_ENABLE_TELEMETRY=%v)", env["CLAUDE_CODE_ENABLE_TELEMETRY"])
 	}
-	if env["DEFENSECLAW_FAIL_MODE"] != "closed" {
-		t.Errorf("DEFENSECLAW_FAIL_MODE not merged: got %v", env["DEFENSECLAW_FAIL_MODE"])
+	if _, present := env["DEFENSECLAW_FAIL_MODE"]; present {
+		t.Errorf("per-user setup wrote DEFENSECLAW_FAIL_MODE, which no hook reads: %v", env["DEFENSECLAW_FAIL_MODE"])
 	}
 }
 

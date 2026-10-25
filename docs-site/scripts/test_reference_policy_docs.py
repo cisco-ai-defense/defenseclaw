@@ -41,6 +41,24 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         self.assertIn("429", row.split("|")[1])
 
 
+    def test_managed_open_never_allows_an_accepted_call_without_an_answer(self):
+        # oss-outage-open review (round g, loop round 2): managed open applies
+        # only to a proven outage (no gateway took the call). A gateway that
+        # accepted the call and gave no answer in time blocks (noAnswerFailMode
+        # is closed for a managed hook); the docs said open could allow it.
+        text = (DOCS / "configuration/fail-modes.mdx").read_text()
+        paragraph = next(line for line in text.splitlines()
+                         if line.startswith("On a managed standalone host `open` applies only to"))
+        self.assertNotIn("or gives no answer in time.", paragraph)
+        self.assertIn("A gateway that accepted the call and gives no answer in time blocks in `open` too", paragraph)
+        behavior = text.split("## Effective behavior", 1)[1]
+        row = next(line for line in behavior.splitlines() if line.startswith("| Gateway service not running"))
+        managed = row.split("|")[3]
+        self.assertIn("A gateway that took the call and gave no answer in time", managed)
+        self.assertIn("blocks", managed)
+        coverage = (DOCS.parent / "appendix/coverage-by-layer.mdx").read_text()
+        self.assertNotIn("stopped, restarting or gives\nno answer in time", coverage)
+
     def test_amp_is_excluded_from_persisted_fail_open_reporting(self):
         text = (DOCS / "configuration/fail-modes.mdx").read_text()
         reporting = text.split("## Reporting and diagnosis", 1)[1]

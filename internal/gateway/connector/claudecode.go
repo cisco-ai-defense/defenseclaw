@@ -1765,13 +1765,8 @@ var claudeCodeOtelEnvKeys = []string{
 // edits made afterward.
 func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	if !opts.sandboxNativeOTLP {
-		failMode := defaultHookFailMode
-		if opts.ManagedEnterprise && strings.TrimSpace(opts.HookFailMode) != "" {
-			failMode = normalizeHookFailMode(opts.HookFailMode)
-		}
-		return map[string]string{
+		env := map[string]string{
 			"CLAUDE_CODE_ENABLE_TELEMETRY": "0",
-			"DEFENSECLAW_FAIL_MODE":        failMode,
 			"OTEL_LOGS_EXPORTER":           "none",
 			"OTEL_METRICS_EXPORTER":        "none",
 			"OTEL_TRACES_EXPORTER":         "none",
@@ -1781,6 +1776,25 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 			"OTEL_LOG_TOOL_CONTENT":        "0",
 			"OTEL_LOG_RAW_API_BODIES":      "0",
 		}
+		// A per-user hook bakes its mode and asks the runtime's config for
+		// an outage; no 1.0.4 render reads DEFENSECLAW_FAIL_MODE from the
+		// agent's environment. A fixed closed here contradicted an unset
+		// default-tier outage that opens, and status reported it as drift
+		// (claude-env-closed). So a per-user setup writes no carrier: an
+		// unchanged value an earlier setup or release wrote is taken back
+		// (ManagedAbsentEnv), and one the user set stays. Renders of 1.0.3
+		// and older that read it are rewritten closed by the installer's
+		// refresh-fail-modes before it stops the gateway, and after a
+		// rollback their own baked mode applies. Managed and Secure Client
+		// installs keep their carrier.
+		if opts.ManagedEnterprise || opts.SecureClientHookDelivery {
+			failMode := defaultHookFailMode
+			if opts.ManagedEnterprise && strings.TrimSpace(opts.HookFailMode) != "" {
+				failMode = normalizeHookFailMode(opts.HookFailMode)
+			}
+			env["DEFENSECLAW_FAIL_MODE"] = failMode
+		}
+		return env
 	}
 	// Spec-driven: render from the connector's declarative
 	// NativeOTLPSpec via spec.EnvBlock(). Returning an empty map on

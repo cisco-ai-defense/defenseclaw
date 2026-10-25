@@ -2381,3 +2381,28 @@ def test_windows_codex_reconcile_refuses_persistent_registration_read_denial(tmp
         with pytest.raises(OSError, match="registration-access-denied"):
             fail_mode_runtime.reconcile_connector_registration(cfg, "codex")
     assert check.call_count == 3
+
+
+@pytest.mark.parametrize("windows", [False, True])
+@pytest.mark.parametrize("installed", ["open", "closed"])
+def test_claude_settings_without_a_fail_mode_carrier_is_not_drift(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, windows: bool, installed: str
+) -> None:
+    # oss-outage-open review (round g, loop round 2): a per-user setup no
+    # longer writes DEFENSECLAW_FAIL_MODE into Claude Code's settings env
+    # (no 1.0.4 render reads it). Status used to report the product-owned
+    # closed it wrote as claude-env-closed next to an open outage, and would
+    # report the carrier's absence as claude-env-missing.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": installed})
+    _write_current_runtime(cfg, home, {"claudecode": installed})
+    settings = home / ".claude" / "settings.json"
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    del payload["env"]["DEFENSECLAW_FAIL_MODE"]
+    settings.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(fail_mode_runtime, "_unix_registration_freshness", lambda *_args: None)
+    with (
+        patch("defenseclaw.fail_mode._is_windows", return_value=windows),
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+    ):
+        state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert not [item for item in state.drift if item.startswith("claude-env")], state.drift

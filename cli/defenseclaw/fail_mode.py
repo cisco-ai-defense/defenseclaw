@@ -382,10 +382,11 @@ def resolve_connector_fail_mode(
     agent_env: str | None = None
     if name == "claudecode":
         claude_env, registered = _claude_registration_state(workspace)
-        # Setup still writes the mode into Claude Code's settings env, which
-        # hook renders from 1.0.3 and older read until the upgrade's connector
-        # refresh re-renders them: a stale value there is registration drift,
-        # and the runtime mode only of a render that reads it.
+        # Hook renders from 1.0.3 and older read the mode from Claude Code's
+        # settings env until the upgrade's connector refresh re-renders them.
+        # A per-user setup writes none there now (a managed one still does):
+        # a value that disagrees is registration drift, and the runtime mode
+        # only of a render that reads it.
         sources.append(("claude-env", claude_env))
         agent_env = claude_env
         if not registered:
@@ -456,10 +457,12 @@ def resolve_connector_fail_mode(
         if source == "config":
             continue
         if mode is None:
-            if source == "windows-managed-runtime":
+            # A per-user setup writes no fail mode into Claude Code's settings
+            # env (no 1.0.4 render reads one), so its absence is not drift; a
+            # render that reads it reports agent-env-unverified above.
+            if source in {"windows-managed-runtime", "claude-env"}:
                 continue
-            if source not in {"claude-env"} or name == "claudecode":
-                drift.append(f"{source}-missing")
+            drift.append(f"{source}-missing")
         elif mode != desired:
             drift.append(f"{source}-{mode}")
 
