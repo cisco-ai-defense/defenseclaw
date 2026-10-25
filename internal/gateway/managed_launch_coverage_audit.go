@@ -28,7 +28,9 @@ var managedLaunchReasons = map[string]map[string]bool{
 		"launch_arguments_unverified": true, "launch_environment_unverified": true},
 	"hermes": {"hermes_safe_mode": true, "hermes_config_relocated": true,
 		"user_config_relocated": true, "launch_arguments_unverified": true,
-		"launch_environment_unverified": true, "session_only_hermes_home_unobservable": true},
+		"launch_environment_unverified": true, "session_only_hermes_home_unobservable": true,
+		// An installed Hermes the enumerator could not enroll (GAP-1420).
+		"unsupported_installed_version": true, "installed_version_unverified": true},
 	"antigravity": {"user_config_relocated": true, "launch_arguments_unverified": true,
 		"launch_environment_unverified": true},
 	"claudecode": {"unsupported_installed_version": true, "installed_version_unverified": true,

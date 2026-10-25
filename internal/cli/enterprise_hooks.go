@@ -45,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winsession"
 )
@@ -672,6 +673,8 @@ var errEnterpriseHookAwaitingSignIn = errors.New(enterpriseHookAwaitingSignInPre
 const (
 	enterpriseHookAwaitingSignInFailClosed = "its hooks fail closed"
 	enterpriseHookAwaitingSignInFailOpen   = "its hooks keep hook fail mode open"
+	// A signed-out account's Hermes home is unobservable (GAP-1433).
+	enterpriseHookAwaitingSignInHermesHome = "its Hermes home cannot be read while the account is signed out"
 )
 
 // enterpriseHookAwaitingSignInCause words, for status and verify, why a
@@ -683,6 +686,9 @@ func enterpriseHookAwaitingSignInCause(guardianErr string) string {
 	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInFailClosed):
 		return "its hooks still fail closed, and the guardian renders hook fail mode open in the account's own " +
 			"Windows session at its next sign-in"
+	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInHermesHome):
+		return "Hermes NOT COVERED: the account is signed out, so its registry hive and the HERMES_HOME it selects " +
+			"cannot be read; its installed hook is unchanged, and the guardian verifies it again at the account's next sign-in"
 	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInFailOpen):
 		return "Windows gave no S4U logon to close its hooks while the account is signed out, so they keep hook " +
 			"fail mode open, allowing calls during a gateway outage, until the guardian closes them at the " +
@@ -736,6 +742,19 @@ func enterpriseHookVerifyOrRepairTarget(
 		// protected and is pending until the account signs in, its hooks
 		// failing closed as a pending target's do.
 		if target.IsDeferred() {
+			// A signed-out account's Hermes home is unobservable, not
+			// changed: Windows has not loaded the registry hive that holds
+			// its HERMES_HOME. One account signing out never fails the host;
+			// the target waits for that account's sign-in (GAP-1433).
+			if !enterpriseHookReconcileSecureClient() &&
+				strings.EqualFold(strings.TrimSpace(target.Connector), "hermes") &&
+				errors.Is(verifyErr, hermespath.ErrAccountSignedOut) {
+				return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+					"%w: %s, so Hermes is NOT COVERED for it until the guardian verifies it at its next sign-in; "+
+						"its exact active Windows session is unavailable (verification: %v)",
+					errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInHermesHome, verifyErr,
+				)
+			}
 			if written, other, releaseErr := enterpriseHookReconcileTargetRelease(opts); releaseErr == nil && other {
 				return enterprisehooks.InstallResult{}, false, fmt.Errorf(
 					"%w: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
@@ -1383,6 +1402,35 @@ func enterpriseHookGuardianRecordComplete(ok bool, successes, failures, pending,
 	return ok && failures == 0 && successes+pending == total
 }
 
+// enterpriseHookPartialGuardianRecord reports a protected guardian record
+// pair of a pass in which some targets failed but every target has exactly
+// one disposition. Only the hidden registration readiness accepts such a
+// pass: it proves each other target, while the failed ones stay failures
+// and readiness stays not ok. Public verify keeps requiring a complete pass.
+func enterpriseHookPartialGuardianRecord(
+	authorization enterpriseHookGuardianAuthorization,
+	activation enterpriseHookGuardianActivation,
+) bool {
+	return !authorization.OK && !activation.OK && authorization.FailureCount > 0 &&
+		authorization.SuccessCount+authorization.PendingCount+authorization.FailureCount == authorization.TargetCount &&
+		activation.SuccessCount+activation.PendingCount+activation.FailureCount == activation.TargetCount
+}
+
+// enterpriseHookPartialRegistrationProof is run with each currently failed
+// row excused from the protected disposition comparison: the protected
+// records carry forward a failed target's prior row, which proves nothing
+// about current readiness. The run itself is unchanged.
+func enterpriseHookPartialRegistrationProof(run enterpriseHookVerifyRun) enterpriseHookVerifyRun {
+	proof := run
+	proof.Excused = append([]enterpriseHookReconcileRow(nil), run.Excused...)
+	for _, row := range run.Rows {
+		if !row.OK && !row.Pending && !enterpriseHookVerifyRowExcused(run, row) {
+			proof.Excused = append(proof.Excused, row)
+		}
+	}
+	return proof
+}
+
 // compareEnterpriseHookGuardianRecordsExcusing is
 // compareEnterpriseHookGuardianRecords that accepts exactly excused failed
 // rows (enterpriseHookExcusedFailures) in all three records.
@@ -2001,12 +2049,20 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 			}
 		}
 	}
+	// Registration readiness scopes a target's own guardian failure to that
+	// target: one target's failure never fails another target's proof (a
+	// hot-config undo or Setup readiness of the rest).
+	recordExcused := excused
+	partialRegistration := registrationOnly && excused == 0 && enterpriseHookPartialGuardianRecord(authorization, activation)
+	if partialRegistration {
+		recordExcused = authorization.FailureCount
+	}
 	if authorizationErr != nil {
 		run.AuthorizationErr = authorizationErr
 	} else if !exists {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is missing")
 	} else if !enterpriseHookGuardianRecordComplete(authorization.OK, authorization.SuccessCount, authorization.FailureCount,
-		authorization.PendingCount, authorization.TargetCount, excused) {
+		authorization.PendingCount, authorization.TargetCount, recordExcused) {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is incomplete (%d succeeded, %d pending, %d total)", authorization.SuccessCount, authorization.PendingCount, authorization.TargetCount)
 	} else if freshnessErr := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); freshnessErr != nil {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is not fresh: %w", freshnessErr)
@@ -2014,7 +2070,7 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 		run.AuthorizationErr = activationErr
 	} else if !activationExists {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian activation is missing")
-	} else if !(activation.OK || (excused > 0 && activation.FailureCount == excused)) ||
+	} else if !(activation.OK || (recordExcused > 0 && activation.FailureCount == recordExcused)) ||
 		activation.UpdatedAt != authorization.UpdatedAt ||
 		activation.ManifestSHA256 != manifestSHA256 {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian activation does not cover the current manifest bytes")
@@ -2034,7 +2090,7 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 				activation,
 				enterpriseHookManifest,
 				manifestSHA256,
-				excused,
+				recordExcused,
 			)
 			if err != nil {
 				run.AuthorizationErr = err
@@ -2171,8 +2227,12 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 		run.Rows = append(run.Rows, row)
 	}
 	if run.AuthorizationErr == nil && exists && activationExists {
+		proof := run
+		if partialRegistration {
+			proof = enterpriseHookPartialRegistrationProof(run)
+		}
 		if issues := enterpriseHookVerifyDispositionIssues(
-			run,
+			proof,
 			authorization,
 			activation,
 		); len(issues) > 0 {
