@@ -454,8 +454,10 @@ func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts S
 			owned = productPart || recorded(key, got)
 			replacement, keepRest = rest, productPart && rest != ""
 		default:
+			earlierValue := claudeCodeEarlierReleaseEnv[key] == got &&
+				(backup.ManagedEnv[key] == "" || backup.ManagedEnv[key] == got)
 			owned = !claudeCodeEnvValueDisablesExport(got) &&
-				(got == reference[key] || claudeCodeEarlierReleaseEnv[key] == got || recorded(key, got))
+				(got == reference[key] || earlierValue || recorded(key, got))
 		}
 		if !owned {
 			continue
