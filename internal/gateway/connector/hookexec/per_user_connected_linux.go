@@ -7,6 +7,7 @@ package hookexec
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // procSelfNet holds this network namespace's socket tables. /proc/net is
@@ -23,14 +25,36 @@ import (
 const procSelfNet = "/proc/self/net"
 
 func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
-	uid, err := findConnectedTCPUID(procSelfNet, client, server)
-	if err != nil {
-		return err
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return awaitPerUserLinuxSocket(ctx, os.Geteuid(), func() (int, error) {
+		return findConnectedTCPUID(procSelfNet, client, server)
+	})
+}
+
+// Connect can finish before the gateway accepts the same held socket.
+// An owner found for the exact tuple is final, including a foreign owner.
+func awaitPerUserLinuxSocket(ctx context.Context, self int, inspect func() (int, error)) error {
+	for {
+		if ctx.Err() != nil {
+			return errConnectedSocketNotFound
+		}
+		uid, err := inspect()
+		if err == nil {
+			if uid != self {
+				return errors.New("connected gateway socket belongs to another account")
+			}
+			return nil
+		}
+		if !errors.Is(err, errConnectedSocketNotFound) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errConnectedSocketNotFound
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
-	if uid != os.Geteuid() {
-		return errors.New("connected gateway socket belongs to another account")
-	}
-	return nil
 }
 
 // findConnectedTCPUID reads the kernel's accepted server socket, identified
@@ -45,8 +69,21 @@ func findConnectedTCPUID(procNet string, client, server *net.TCPAddr) (int, erro
 	if err != nil || serverTable != clientTable {
 		return -1, errors.New("connected gateway endpoints have different address families")
 	}
-	file, err := os.Open(filepath.Join(procNet, serverTable))
+	uid, err := readConnectedTCPUID(procNet, serverTable, clientKey, serverKey)
+	if err == nil || !errors.Is(err, errConnectedSocketNotFound) || serverTable != "tcp" {
+		return uid, err
+	}
+	// A dual-stack IPv6 listener records its accepted IPv4 socket in tcp6
+	// using IPv4-mapped addresses, even though this client dialed tcp4.
+	return readConnectedTCPUID(procNet, "tcp6", mappedTCP6Endpoint(client), mappedTCP6Endpoint(server))
+}
+
+func readConnectedTCPUID(procNet, table, clientKey, serverKey string) (int, error) {
+	file, err := os.Open(filepath.Join(procNet, table))
 	if err != nil {
+		if table == "tcp6" && os.IsNotExist(err) {
+			return -1, errConnectedSocketNotFound
+		}
 		return -1, fmt.Errorf("inspect connected gateway sockets: %w", err)
 	}
 	defer file.Close()
@@ -67,7 +104,13 @@ func findConnectedTCPUID(procNet string, client, server *net.TCPAddr) (int, erro
 	if err := scanner.Err(); err != nil {
 		return -1, fmt.Errorf("inspect connected gateway sockets: %w", err)
 	}
-	return -1, errors.New("connected gateway server socket was not found")
+	return -1, errConnectedSocketNotFound
+}
+
+func mappedTCP6Endpoint(addr *net.TCPAddr) string {
+	ip := addr.IP.To4()
+	return fmt.Sprintf("0000000000000000FFFF0000%02X%02X%02X%02X:%04X",
+		ip[3], ip[2], ip[1], ip[0], addr.Port)
 }
 
 func procTCPEndpoint(addr *net.TCPAddr) (string, string, error) {
