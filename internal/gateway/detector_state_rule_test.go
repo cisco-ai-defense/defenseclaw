@@ -29,7 +29,9 @@ func TestR104DetectorStateWriteRequiresResolvedTarget(t *testing.T) {
 	}{
 		{"active state", `printf marker >> ` + state, true},
 		{"project file", `printf marker >> report.txt`, false},
-		{"state path as data", `printf '%s\n' '` + state + `' > report.txt`, false},
+		// The action target-mention ruling classifies a named active target
+		// independently of this command's output operand.
+		{"state path as data", `printf '%s\n' '` + state + `' > report.txt`, true},
 	}
 	dialect := actionfacts.DialectPOSIX
 	if runtime.GOOS == "windows" {
@@ -40,7 +42,7 @@ func TestR104DetectorStateWriteRequiresResolvedTarget(t *testing.T) {
 		}{
 			{"active state", `Add-Content -LiteralPath '` + state + `' -Value marker`, true},
 			{"project file", `Add-Content -LiteralPath report.txt -Value marker`, false},
-			{"state path as data", `Set-Content -LiteralPath report.txt -Value '` + state + `'`, false},
+			{"state path as data", `Set-Content -LiteralPath report.txt -Value '` + state + `'`, true},
 		}
 	}
 	for _, tc := range tests {
@@ -56,6 +58,51 @@ func TestR104DetectorStateWriteRequiresResolvedTarget(t *testing.T) {
 			}
 			if got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock; got != tc.block {
 				t.Fatalf("tamper verdict block=%t, want %t; findings=%v", got, tc.block, FindingStrings(findings))
+			}
+		})
+	}
+}
+
+func TestR104ActiveStateMentionUsesStateFinding(t *testing.T) {
+	home, cwd := r104ReviewHome(t)
+	state := filepath.Join(home, ".defenseclaw", "config.yaml")
+	installDefaultProfileConnector(t, "claudecode")
+	dialect := actionfacts.DialectPOSIX
+	active := "echo " + state
+	readOnly := "cat " + state
+	project := "echo " + filepath.Join(cwd, ".defenseclaw", "config.yaml")
+	if runtime.GOOS == "windows" {
+		dialect = actionfacts.DialectPowerShell
+		active = "Write-Output " + state
+		readOnly = "Get-Content " + state
+		project = "Write-Output " + filepath.Join(cwd, ".defenseclaw", "config.yaml")
+	}
+	for _, tc := range []struct {
+		name, command string
+		enforce       bool
+		block         bool
+	}{
+		{"action active", active, true, true},
+		{"observe active", active, false, false},
+		{"action read only", readOnly, true, false},
+		{"action project state", project, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
+				ActiveHome: home, DialectHint: dialect}
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, Connector: "claudecode", EnforcementCapable: tc.enforce,
+			})
+			stateFinding := findingWithID(findings, "tamper.detector_state_write")
+			if got := stateFinding != nil && stateFinding.contributesToEnforcement(); got != tc.block {
+				t.Fatalf("state enforcement=%t, want %t; findings=%v", got, tc.block, FindingStrings(findings))
+			}
+			sshFinding := findingWithID(findings, "persistence.ssh_authorized_keys_command")
+			if sshFinding != nil && sshFinding.contributesToEnforcement() {
+				t.Fatalf("state command received SSH enforcement: %v", FindingStrings(findings))
+			}
+			if got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock; got != tc.block {
+				t.Fatalf("block=%t, want %t; findings=%v", got, tc.block, FindingStrings(findings))
 			}
 		})
 	}

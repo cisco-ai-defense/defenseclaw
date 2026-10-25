@@ -18,15 +18,21 @@ import (
 // A resolved protected path in a writable command is enough for the action
 // decision; commands with no such path continue through the existing proof.
 func actionProtectedTargetMention(command, cwd, home string) bool {
-	return actionProtectedTargetMentionDepth(command, cwd, home, 0)
+	return actionProtectedTargetMentionDepth(command, cwd, home, 0, false)
 }
 
-func actionProtectedTargetMentionDepth(command, cwd, home string, depth int) bool {
+// ActionStateTargetMention applies the same independent target scan to the
+// active DefenseClaw security state, without attributing it to SSH keys.
+func ActionStateTargetMention(command, cwd, home string) bool {
+	return actionProtectedTargetMentionDepth(command, cwd, home, 0, true)
+}
+
+func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, stateOnly bool) bool {
 	if command == "" || home == "" || len(command) > MaxPayloadBytes || depth >= 8 {
 		return false
 	}
 	if actionWindowsHome(home) {
-		return actionWindowsTargetMention(command, cwd, home, depth)
+		return actionWindowsTargetMention(command, cwd, home, depth, stateOnly)
 	}
 	if !filepath.IsAbs(cwd) && (!actionPosixWindowsHome(home) || !path.IsAbs(cwd)) {
 		return false
@@ -35,7 +41,7 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int) boo
 	if depth == 0 && parsed && (actionOnlySSHDirectoryNavigation(file, cwd, home) || actionKnownReadOnlyShell(file, home)) {
 		return false
 	}
-	if parsed && actionPosixNestedShellMention(file, cwd, home, depth) {
+	if parsed && actionPosixNestedShellMention(file, cwd, home, depth, stateOnly) {
 		return true
 	}
 	protected := newProtectedFiles(home)
@@ -54,10 +60,17 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int) boo
 		if strings.ContainsAny(value, "*?[]") {
 			return false // A pattern in source text is not a resolved pathname.
 		}
-		if actionPosixWindowsHome(home) && actionPosixWindowsProtected(value, cwd, home) {
-			return true
+		if actionPosixWindowsHome(home) {
+			if stateOnly {
+				return actionPosixWindowsStatePath(value, cwd, home)
+			}
+			return actionPosixWindowsProtected(value, cwd, home)
 		}
-		return protectedReachPath(OperandPath(value, cwd), protected, ssh)
+		operand := OperandPath(value, cwd)
+		if stateOnly {
+			return actionProtectedStatePath(operand, home)
+		}
+		return protectedReachPath(operand, protected, ssh)
 	}
 	if parsed {
 		values := actionValues{"HOME": home, "PWD": cwd}
@@ -136,7 +149,48 @@ func actionPosixWindowsProtected(value, cwd, home string) bool {
 	return false
 }
 
-func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth int) bool {
+func actionPosixWindowsStatePath(value, cwd, home string) bool {
+	resolved := actionPosixWindowsPath(value, cwd, home)
+	return actionProtectedStateRelative(strings.TrimPrefix(resolved, path.Clean(home)+"/"))
+}
+
+// State protection is scoped to the active home and the security-state names
+// owned by the semantic detector. Project-local .defenseclaw files and the
+// product's diagnostic logs are ordinary work.
+func actionProtectedStateRelative(relative string) bool {
+	if !strings.HasPrefix(relative, ".defenseclaw/") {
+		return false
+	}
+	state := strings.TrimPrefix(relative, ".defenseclaw/")
+	switch state {
+	case ".env", "config.yaml", "confidence_policy.yaml", "guardrail_runtime.json",
+		"device.key", "picked_connector", "custom-providers.json", "audit.db",
+		"audit.db-wal", "audit.db-shm", "judge.db", "judge.db-wal",
+		"judge.db-shm", "judge_bodies.db", "judge_bodies.db-wal", "judge_bodies.db-shm":
+		return true
+	}
+	for _, prefix := range []string{"cache/", "policies/", "quarantine/", "receipts/", "registries/"} {
+		if strings.HasPrefix(state, prefix) && len(state) > len(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func actionProtectedStatePath(value, home string) bool {
+	resolved, ok := ResolveWriteTarget(value)
+	if !ok {
+		return false
+	}
+	activeHome, ok := ResolveWriteTarget(home)
+	if !ok {
+		return false
+	}
+	relative, err := filepath.Rel(activeHome, resolved)
+	return err == nil && actionProtectedStateRelative(filepath.ToSlash(relative))
+}
+
+func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth int, stateOnly bool) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if found {
@@ -159,7 +213,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 						continue
 					}
 					if child, childStatic := StaticWord(call.Args[j+1], home); childStatic &&
-						actionProtectedTargetMentionDepth(child, cwd, home, depth+1) {
+						actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly) {
 						found = true
 						return false
 					}
@@ -180,7 +234,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 				if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&
 					!strings.ContainsAny(option, "=/") && strings.Contains(option[1:], "c") {
 					if child, static := StaticWord(call.Args[j+1], home); static &&
-						actionProtectedTargetMentionDepth(child, cwd, home, depth+1) {
+						actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly) {
 						found = true
 					}
 					break
@@ -309,7 +363,7 @@ func actionPosixSSHDirectoryNavigation(args []*syntax.Word, cwd, home string) bo
 	return resolved && sshResolved && samePathName(target, ssh)
 }
 
-func actionWindowsTargetMention(command, cwd, home string, depth int) bool {
+func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool) bool {
 	if depth >= 8 || len(command) > MaxPayloadBytes {
 		return false
 	}
@@ -325,7 +379,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int) bool {
 						break
 					}
 					if (rawWords[j] == "-S" || rawWords[j] == "--split-string") &&
-						actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1) {
+						actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly) {
 						return true
 					}
 				}
@@ -338,7 +392,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int) bool {
 					break
 				}
 				if strings.EqualFold(rawWords[j], "-command") || strings.EqualFold(rawWords[j], "-c") {
-					if actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1) {
+					if actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly) {
 						return true
 					}
 					break
@@ -378,19 +432,19 @@ func actionWindowsTargetMention(command, cwd, home string, depth int) bool {
 		for j := range letters {
 			letters[j] = uint16(encoded[2*j]) | uint16(encoded[2*j+1])<<8
 		}
-		if actionWindowsTargetMention(string(utf16.Decode(letters)), cwd, home, depth+1) {
+		if actionWindowsTargetMention(string(utf16.Decode(letters)), cwd, home, depth+1, stateOnly) {
 			return true
 		}
 	}
 	for _, statement := range actionWindowsResolvedStatements(words, cwd, home) {
 		for _, word := range statement {
-			if actionWindowsWordMentionsTarget(word, cwd, home) {
+			if actionWindowsWordMentionsTarget(word, cwd, home, stateOnly) {
 				return true
 			}
 		}
 	}
 	for _, word := range words {
-		if actionWindowsWordMentionsTarget(word, cwd, home) {
+		if actionWindowsWordMentionsTarget(word, cwd, home, stateOnly) {
 			return true
 		}
 	}
@@ -465,16 +519,23 @@ func actionWindowsSSHDirectoryNavigation(words []string, cwd, home string) bool 
 	return resolved && sshResolved && target == ssh
 }
 
-func actionWindowsWordMentionsTarget(word, cwd, home string) bool {
+func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) bool {
 	check := func(candidate string) bool {
 		candidate = strings.ReplaceAll(candidate, "`", "")
 		resolved, ok := actionWindowsPath(candidate, cwd, home)
 		if !ok {
+			if stateOnly {
+				return false
+			}
 			return actionWindowsUnresolvedUnderSSH(candidate, cwd, home)
 		}
 		root, ok := actionWindowsPath(home, cwd, home)
 		if !ok {
 			return false
+		}
+		if stateOnly {
+			return strings.HasPrefix(resolved, root+"/") &&
+				actionProtectedStateRelative(strings.TrimPrefix(resolved, root+"/"))
 		}
 		if resolved == root+"/.ssh" {
 			return true

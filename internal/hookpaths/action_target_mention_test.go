@@ -192,3 +192,64 @@ func TestR104PosixHomeTargetMentionOnWindows(t *testing.T) {
 		}
 	}
 }
+
+func TestR104ActiveDefenseClawStateTargetMention(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.Mkdir(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(home, ".defenseclaw", "config.yaml")
+	for _, command := range []string{
+		"echo " + state,
+		"cp " + state + " report.txt",
+		"printf marker > " + filepath.Join(home, "project", "..", ".defenseclaw", "config.yaml"),
+		"cp report.txt --future-output=" + state,
+		"echo " + filepath.Join(home, ".defenseclaw", "device.key"),
+		"echo " + filepath.Join(home, ".defenseclaw", "policies", "active.yaml"),
+	} {
+		if !ActionStateTargetMention(command, cwd, home) {
+			t.Errorf("active state %q lacks protected-state mention", command)
+		}
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
+			t.Errorf("active state %q was attributed to SSH: %q", command, got)
+		}
+	}
+	for _, command := range []string{
+		"cat " + state,
+		"printf marker > .defenseclaw/config.yaml",
+		"printf marker > " + filepath.Join(home, ".defenseclaw", "logs", "gateway.log"),
+		"printf marker > " + filepath.Join(home, "other", "config.yaml"),
+	} {
+		if ActionStateTargetMention(command, cwd, home) {
+			t.Errorf("ordinary/read-only %q has protected-state mention", command)
+		}
+	}
+}
+
+func TestR104WindowsActiveDefenseClawStateTargetMention(t *testing.T) {
+	const home = `C:\Users\Alice`
+	const cwd = home + `\project`
+	const state = home + `\.defenseclaw\config.yaml`
+	for _, command := range []string{
+		`echo ` + state,
+		`Copy-Item report.txt -FutureSwitch:` + state,
+		`Set-Content -LiteralPath ` + home + `\project\..\.defenseclaw\config.yaml -Value marker`,
+	} {
+		if !ActionStateTargetMention(command, cwd, home) {
+			t.Errorf("Windows active state %q lacks protected-state mention", command)
+		}
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
+			t.Errorf("Windows active state %q was attributed to SSH: %q", command, got)
+		}
+	}
+	for _, command := range []string{
+		`Get-Content ` + state,
+		`Set-Content -LiteralPath .defenseclaw\config.yaml -Value marker`,
+		`Set-Content -LiteralPath ` + home + `\.defenseclaw\logs\gateway.log -Value marker`,
+	} {
+		if ActionStateTargetMention(command, cwd, home) {
+			t.Errorf("Windows ordinary/read-only %q has protected-state mention", command)
+		}
+	}
+}

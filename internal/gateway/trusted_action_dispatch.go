@@ -299,6 +299,9 @@ func dispatchTrustedActionWith(
 	defer func() {
 		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)
 	}()
+	defer func() {
+		findings = withActiveStateTargetMention(generation, request, findings)
+	}()
 	if !request.simpleCommandPass {
 		defer func() {
 			checkedWholeWrite := false
@@ -721,6 +724,46 @@ func dispatchTrustedActionWith(
 		append(append([]RuleFinding(nil), semanticFindings...), twinLegacy...),
 	)
 	return withTwinProvenBlocks(finalized, twinFindings)
+}
+
+// The action target check treats a resolved active security-state mention as
+// a protected target independently of the command's operand roles. Keep its
+// finding separate from the SSH-key proof and honor the selected rule pack.
+func withActiveStateTargetMention(
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	findings []RuleFinding,
+) []RuleFinding {
+	command, known := trustedBashCommandInput(request.Input)
+	if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
+		return findings
+	}
+	const ruleID = "tamper.detector_state_write"
+	_, rule, ok := trustedActionCatalogRule(generation, ruleID)
+	if !ok {
+		return findings
+	}
+	index := slices.IndexFunc(findings, func(f RuleFinding) bool { return f.RuleID == ruleID })
+	finding := RuleFinding{
+		RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
+		Confidence: rule.Confidence, Tags: append([]string(nil), rule.Tags...),
+		Evidence: trustedActionInputText(request.Input, ""), LineNumber: 1,
+	}
+	if index >= 0 {
+		finding = findings[index]
+	} else {
+		finding = adjustConfidence(request.Input.Tool, finding)
+	}
+	finding.enforcement = findingEnforcementDetectionOnly
+	if request.EnforcementCapable {
+		finding.enforcement = findingEnforcementAllowed
+	}
+	finding = finding.withTrustedActionProof(newExactFallbackFindingProof(ruleID, true, true, true, true))
+	if index >= 0 {
+		findings[index] = finding
+		return findings
+	}
+	return append(findings, finding)
 }
 
 // withMigratedLiteralRuleFindings blocks a tool call that a migrated 0.8.x
