@@ -87,7 +87,8 @@ func TestClaudeReleasedMarkerlessProductBearerUpgrade(t *testing.T) {
 					}
 					currentToken := productToken
 					if proof == "unmatched" {
-						currentToken = strings.Repeat("d", 64)
+						// An operator credential is not of the product token shape.
+						currentToken = "operator-collector-token"
 					}
 					retired := "http://127.0.0.1:19097/v1/logs"
 					data, err := os.ReadFile(settingsPath)
@@ -154,7 +155,7 @@ func TestClaudeManagedCleanupUsesProductBearerOnMarkerlessPort(t *testing.T) {
 			productToken := strings.Repeat("b", 64)
 			currentToken := productToken
 			if proof == "unmatched" {
-				currentToken = strings.Repeat("d", 64)
+				currentToken = "operator-collector-token"
 			}
 			retired := "http://127.0.0.1:19097/v1/logs"
 			env := map[string]string{
@@ -201,7 +202,7 @@ func TestClaudeManagedCleanupUsesProductBearerOnMarkerlessPort(t *testing.T) {
 				headersKey = "OTEL_EXPORTER_OTLP_HEADERS"
 			}
 			if got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] != "" ||
-				got[headersKey] != "x-tenant=logs" ||
+				got[headersKey] != "" ||
 				got["OTEL_LOGS_EXPORTER"] != "" {
 				t.Fatalf("managed cleanup kept retired product route or bearer: endpoint=%q headers=%q gate=%q", got["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"], got[headersKey], got["OTEL_LOGS_EXPORTER"])
 			}

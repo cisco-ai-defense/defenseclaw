@@ -4,137 +4,86 @@
 package connector
 
 import (
-	"net"
 	"net/url"
-	"sort"
-	"strconv"
+	"regexp"
 	"strings"
 )
 
-// Native OTLP exporter ownership is shared by every writer that cleans up a
-// DefenseClaw exporter on upgrade: Codex and Claude Code Setup, the managed
-// per-user cleanup (Linux, macOS and the Windows enterprise module, which calls
-// RemoveUserNativeOTLP), Verify and residue checks. A product-owned route is
-// removed or repointed; an operator-owned route keeps its bytes. The helpers
-// below normalise only what HTTP or the socket layer already treats as equal,
-// so a respelling can neither hide a product credential nor claim an operator
-// setting.
+// Native OTLP exporter ownership is decided by the secret, never by where an
+// exporter points or how its headers are spelled. Every writer that cleans up
+// a DefenseClaw exporter uses this one rule: Codex and Claude Code Setup, the
+// managed per-user cleanup and Verify (RemoveUserNativeOTLP and
+// UserNativeOTLPResidue, which the Linux, macOS and Windows enterprise paths
+// call), VerifyClean, and Doctor through its mirror.
+//
+// An exporter, header or env value that carries a DefenseClaw credential is
+// product-owned. Host Setup no longer exports native OTLP, so cleanup removes
+// it and the credential never reaches a port DefenseClaw does not own.
+// Everything else is the operator's and keeps its bytes, on any host or port,
+// with or without stale x-defenseclaw-* marker headers.
 
-// otlpLocalHost reports a URL host whose connections stay on this machine: the
-// localhost names, any IP loopback address (127.0.0.0/8, ::1, IPv4-mapped
-// loopback), the unspecified address (which Linux and macOS route to the local
-// host) and the inet_aton shorthand forms of those (127.1, 0x7f.1, 2130706433).
-// Ownership still needs product proof (a marker, the scoped path or the scoped
-// bearer), so the wider host set never claims an operator's collector.
-func otlpLocalHost(host string) bool {
-	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
-	if host == "" {
-		return false
-	}
-	lower := strings.ToLower(host)
-	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
-		return true
-	}
-	if zone := strings.IndexByte(host, '%'); zone >= 0 {
-		host = host[:zone]
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback() || ip.IsUnspecified()
-	}
-	ip, ok := otlpInetAtonIPv4(host)
-	return ok && (ip[0] == 127 || ip.Equal(net.IPv4zero.To4()))
-}
+// otlpProductTokenRE matches the shape of every credential DefenseClaw mints
+// (EnsureOTLPPathToken, EnsureGatewayToken and the hook tokens): 32 random
+// bytes as 64 lowercase hex, not part of a longer alphanumeric run. The shape
+// still proves ownership when the issuing sidecar is missing or unreadable.
+var otlpProductTokenRE = regexp.MustCompile(`(?:^|[^0-9A-Za-z])[0-9a-f]{64}(?:[^0-9A-Za-z]|$)`)
 
-// otlpProductRouteHost reports a URL host spelled the way DefenseClaw writes
-// its gateway address: localhost, 127.0.0.1, ::1 or the host of the current
-// API address. Product marker headers prove only a route the product could
-// have written. A retyped local host (127.1, 127.0.0.2, 0.0.0.0) means the
-// operator moved the route, so stale markers alone never claim it; cleanup
-// keeps that route and removes only the headers the product proves. The
-// scoped bearer is a credential, so it still proves a route on any
-// otlpLocalHost.
-func otlpProductRouteHost(host, apiAddr string) bool {
-	host = strings.TrimSpace(host)
-	switch strings.ToLower(strings.TrimSuffix(host, ".")) {
-	case "localhost", "127.0.0.1", "::1":
-		return true
-	}
-	apiHost, _, err := net.SplitHostPort(strings.TrimSpace(apiAddr))
-	return err == nil && apiHost != "" && host == apiHost
-}
+// otlpMinKnownTokenLen keeps a short configured value from matching ordinary
+// text by accident.
+const otlpMinKnownTokenLen = 8
 
-// otlpUnresolvedProductBearer reports Authorization values beside product
-// markers that may carry DefenseClaw's scoped credential while no product
-// credential (known) can be read to compare them. Every scoped token is 64
-// lowercase hex, so a credential of another shape is the operator's. Callers
-// ask only for a route cleanup keeps on a local host (otlpEndpointIsLocal):
-// keeping the bearer there could leave the product token on a port
-// DefenseClaw no longer owns, and removing it could delete an operator
-// credential, so every writer refuses and Verify names it. A remote collector
-// was never a DefenseClaw port; its bearer stays the operator's.
-func otlpUnresolvedProductBearer(values, known []string) bool {
-	if len(known) > 0 {
-		return false
-	}
-	for _, value := range values {
-		if credential, ok := otlpBearerCredential(value); ok && otlpTokenHexRE.MatchString(credential) {
+// otlpCarriesProductCredential reports whether v (a string, or any TOML or
+// JSON table or array) contains one of the known credentials or a value of the
+// product token shape.
+func otlpCarriesProductCredential(v interface{}, known []string) bool {
+	switch value := v.(type) {
+	case string:
+		// OTLP header lists may percent-encode their values ("Bearer%20...").
+		if decoded, err := url.PathUnescape(value); err == nil && decoded != value &&
+			otlpCarriesProductCredential(decoded, known) {
 			return true
+		}
+		if otlpProductTokenRE.MatchString(value) {
+			return true
+		}
+		for _, token := range known {
+			if len(token) >= otlpMinKnownTokenLen && strings.Contains(value, token) {
+				return true
+			}
+		}
+	case map[string]interface{}:
+		for _, item := range value {
+			if otlpCarriesProductCredential(item, known) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, item := range value {
+			if otlpCarriesProductCredential(item, known) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// otlpEndpointIsLocal reports an endpoint URL, of any scheme, path or query,
-// whose host stays on this machine.
-func otlpEndpointIsLocal(endpoint string) bool {
-	parsed, err := url.Parse(strings.TrimSpace(endpoint))
-	return err == nil && otlpLocalHost(parsed.Hostname())
-}
-
-// otlpInetAtonIPv4 parses the one- to four-part numeric IPv4 forms that the C
-// resolver accepts (decimal, 0x hex and leading-zero octal parts).
-func otlpInetAtonIPv4(host string) (net.IP, bool) {
-	parts := strings.Split(host, ".")
-	if len(parts) == 0 || len(parts) > 4 {
-		return nil, false
-	}
-	values := make([]uint64, len(parts))
-	for i, part := range parts {
-		if part == "" || strings.ContainsAny(part, "_+-") {
-			return nil, false
+// otlpKnownProductTokens returns the credentials this install can name: the
+// scoped and hook tokens Setup was given and the scope's token sidecar. A
+// sidecar that cannot be read (missing, or another account's on Windows) adds
+// nothing; the token shape still proves ownership.
+func otlpKnownProductTokens(opts SetupOpts, scope OTLPPathTokenScope) []string {
+	known := []string{strings.TrimSpace(opts.OTLPPathToken), strings.TrimSpace(opts.APIToken)}
+	if opts.DataDir != "" {
+		if token, err := LoadOTLPPathToken(opts.DataDir, scope); err == nil {
+			known = append(known, token)
 		}
-		base, digits := 10, part
-		switch {
-		case len(part) > 2 && (part[:2] == "0x" || part[:2] == "0X"):
-			base, digits = 16, part[2:]
-		case len(part) > 1 && part[0] == '0':
-			base, digits = 8, part[1:]
-		}
-		value, err := strconv.ParseUint(digits, base, 32)
-		if err != nil {
-			return nil, false
-		}
-		values[i] = value
 	}
-	var addr uint64
-	last := len(values) - 1
-	for i := 0; i < last; i++ {
-		if values[i] > 0xff {
-			return nil, false
-		}
-		addr |= values[i] << (24 - 8*uint(i))
-	}
-	if values[last] >= uint64(1)<<(32-8*uint(last)) {
-		return nil, false
-	}
-	addr |= values[last]
-	return net.IPv4(byte(addr>>24), byte(addr>>16), byte(addr>>8), byte(addr)).To4(), true
+	return known
 }
 
 // otlpBearerCredential returns the credential of an Authorization value that
 // uses the Bearer scheme. The scheme is case-insensitive (RFC 9110 section
-// 11.1) and the whitespace around it is not significant, so "bearer <token>"
-// and "BEARER  <token>" carry the same credential as "Bearer <token>".
+// 11.1) and the whitespace around it is not significant.
 func otlpBearerCredential(value string) (string, bool) {
 	value = strings.TrimSpace(value)
 	cut := strings.IndexAny(value, " \t")
@@ -143,28 +92,4 @@ func otlpBearerCredential(value string) (string, bool) {
 	}
 	credential := strings.TrimSpace(value[cut:])
 	return credential, credential != ""
-}
-
-// otlpHeaderKeys returns every spelling of one header name in a headers table,
-// sorted. Header names are case-insensitive (RFC 9110 section 5.1), and a
-// TOML or JSON table keeps "authorization" and "Authorization" as two keys.
-func otlpHeaderKeys(headers map[string]interface{}, name string) []string {
-	var keys []string
-	for key := range headers {
-		if strings.EqualFold(strings.TrimSpace(key), name) {
-			keys = append(keys, key)
-		}
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-// otlpHeaderHas reports a spelling of name whose value is exactly want.
-func otlpHeaderHas(headers map[string]interface{}, name, want string) bool {
-	for _, key := range otlpHeaderKeys(headers, name) {
-		if value, _ := headers[key].(string); value == want {
-			return true
-		}
-	}
-	return false
 }

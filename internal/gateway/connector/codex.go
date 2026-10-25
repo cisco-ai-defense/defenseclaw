@@ -28,7 +28,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -405,16 +404,6 @@ func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
 	cfg := map[string]interface{}{}
 	if err := parseCodexTOML(data, &cfg); err != nil {
 		return refuseForAgentConfig(fmt.Errorf("Codex config %s does not parse (%v); fix the file, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
-	}
-	if otel, ok := cfg["otel"].(map[string]interface{}); ok {
-		for _, key := range codexOtelExporterKeys {
-			if codexExporterHasAmbiguousLegacyPort(otel[key], opts) {
-				return refuseForAgentConfig(fmt.Errorf("Codex config %s has an ambiguous retired native exporter at otel.%s.otlp-http.endpoint; remove that exporter, then run: defenseclaw-gateway restart", path, key)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
-			}
-			if codexExporterHasUnresolvedBearer(otel[key], opts) {
-				return refuseForAgentConfig(codexUnresolvedBearerError("config "+path, key))
-			}
-		}
 	}
 	if raw, exists := cfg["hooks"]; exists {
 		if _, ok := raw.(map[string]interface{}); !ok {
@@ -1867,9 +1856,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 					return fmt.Errorf("load original Codex OTel config: %w", err)
 				}
 			}
-			if err := restoreCodexOtelEntries(cfg, original, opts); err != nil {
-				return fmt.Errorf("restore Codex OTel entries: %w", err)
-			}
+			restoreCodexOtelEntries(cfg, original, opts)
 		}
 
 		// Codex hands its notify program the turn record (prompt, reply and
@@ -2963,9 +2950,7 @@ func restoreOwnedCodexConfigFromTOML(
 	// their saved value (or are deleted if Setup added them), while current
 	// operator-owned exporters/subtables survive verbatim. Ownership detection is
 	// structural and never loads or mints the scoped credential.
-	if err := restoreCodexOtelEntries(cfg, backup, opts); err != nil {
-		return atomicTransformResult{}, fmt.Errorf("restore Codex OTel entries: %w", err)
-	}
+	restoreCodexOtelEntries(cfg, backup, opts)
 
 	if err := restoreCodexNotify(cfg, backup, opts); err != nil {
 		return atomicTransformResult{}, err
@@ -4394,22 +4379,12 @@ func codexValueMatches(a, b interface{}) bool {
 
 var codexOtelExporterKeys = [...]string{"exporter", "trace_exporter", "metrics_exporter"}
 
-func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBackup, opts SetupOpts) error {
+func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBackup, opts SetupOpts) {
 	current, ok := cfg["otel"].(map[string]interface{})
 	if !ok {
 		// A missing or non-table value is a current operator edit. It cannot
 		// contain one of our exporter endpoints, so preserve it.
-		return nil
-	}
-	// Managed Unix Setup skips the per-user settings precheck. Refuse the same
-	// retired-port ambiguity before its shared restore can retain the exporter.
-	for _, key := range codexOtelExporterKeys {
-		if codexExporterHasAmbiguousLegacyPort(current[key], opts) {
-			return fmt.Errorf("Codex native OTLP exporter ownership is unresolved at otel.%s.otlp-http.endpoint; remove the stale exporter from config.toml before retrying", key) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
-		}
-		if codexExporterHasUnresolvedBearer(current[key], opts) {
-			return codexUnresolvedBearerError("config.toml", key)
-		}
+		return
 	}
 
 	currentLooksManaged := codexOtelBlockLooksManaged(current, opts)
@@ -4430,7 +4405,7 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 	// anything, their current table wins and only managed entries are removed.
 	if originalDecoded && original == nil && codexOtelTableIsEntirelyManaged(current, opts) {
 		cfg["otel"] = originalValue
-		return nil
+		return
 	}
 
 	for _, key := range codexOtelExporterKeys {
@@ -4444,28 +4419,16 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 			saved, hadSaved = original[key]
 		}
 		if !codexExporterLooksManaged(value, opts) {
-			// Endpoint drift can make an exporter operator-owned while leaving the
-			// exact pair of DefenseClaw header markers Setup wrote. In that case,
-			// preserve the endpoint, protocol, and unrelated headers, and restore or
-			// remove only the three header entries proven by the paired markers.
-			// A single marker is deliberately not mutation authority; VerifyClean
-			// reports it as residue so uninstall remains fail-closed.
-			if codexExporterHasManagedHeaderPair(value) || codexExporterUsesProductBearer(value, opts) {
-				if err := restoreCodexOwnedExporterHeaders(value, saved, hadSaved, opts); err != nil {
-					return err
-				}
-			}
+			// No DefenseClaw credential: the operator's exporter keeps its
+			// bytes on any host or port, stale marker headers included.
 			continue
 		}
 		if original != nil {
 			if hadSaved {
 				// Field-level backups from older releases may themselves be
-				// contaminated by a prior managed setup. Product-namespaced header
-				// keys remain residue even when a predecessor wrote an obsolete
-				// endpoint or marker value that no longer satisfies the full
-				// current ownership predicate.
-				if !codexExporterLooksManaged(saved, opts) &&
-					!codexExporterHasManagedHeaderResidue(saved) {
+				// contaminated by a prior managed setup; a saved exporter that
+				// carries a DefenseClaw credential never comes back.
+				if !codexExporterLooksManaged(saved, opts) {
 					current[key] = saved
 					continue
 				}
@@ -4538,7 +4501,6 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 	} else {
 		cfg["otel"] = current
 	}
-	return nil
 }
 
 func codexOtelExporterKey(key string) bool {
@@ -4597,21 +4559,8 @@ func codexOtelResidueFields(v interface{}, opts SetupOpts) []string {
 	}
 	var residual []string
 	for _, key := range codexOtelExporterKeys {
-		exporter := otel[key]
-		if codexExporterLooksManaged(exporter, opts) || codexExporterHasAmbiguousLegacyPort(exporter, opts) {
-			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.endpoint retains DefenseClaw exporter", key))
-		}
-		for _, name := range codexExporterProductBearerKeys(exporter, opts) {
-			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.headers.%s retains DefenseClaw credential", key, name))
-		}
-		if codexExporterHasUnresolvedBearer(exporter, opts) {
-			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.headers retains a bearer beside DefenseClaw markers whose owner is unresolved", key))
-		}
-		headers := codexExporterHeaders(exporter)
-		for _, marker := range codexProductMarkerHeaders {
-			for _, name := range otlpHeaderKeys(headers, marker) {
-				residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.headers.%s retains DefenseClaw marker", key, name))
-			}
+		if codexExporterLooksManaged(otel[key], opts) {
+			residual = append(residual, fmt.Sprintf("config.toml otel.%s retains a DefenseClaw exporter credential", key))
 		}
 	}
 	if len(residual) > 0 {
@@ -4619,10 +4568,6 @@ func codexOtelResidueFields(v interface{}, opts SetupOpts) []string {
 	}
 	return residual
 }
-
-// codexProductMarkerHeaders are the namespaced headers every released Codex
-// exporter carried. Any spelling of either name is product residue.
-var codexProductMarkerHeaders = [...]string{"x-defenseclaw-source", "x-defenseclaw-client"}
 
 func codexExporterHeaders(v interface{}) map[string]interface{} {
 	exporter, ok := v.(map[string]interface{})
@@ -4637,278 +4582,15 @@ func codexExporterHeaders(v interface{}) map[string]interface{} {
 	return headers
 }
 
-func codexExporterHasManagedHeaderResidue(v interface{}) bool {
-	headers := codexExporterHeaders(v)
-	return len(otlpHeaderKeys(headers, "x-defenseclaw-source")) > 0 ||
-		len(otlpHeaderKeys(headers, "x-defenseclaw-client")) > 0
-}
-
-func codexExporterHasManagedHeaderPair(v interface{}) bool {
-	headers := codexExporterHeaders(v)
-	return len(otlpHeaderKeys(headers, "x-defenseclaw-source")) > 0 &&
-		len(otlpHeaderKeys(headers, "x-defenseclaw-client")) > 0
-}
-
-// codexExporterHasProductMarker reports a marker header carrying a released
-// product value under any spelling of its name.
-func codexExporterHasProductMarker(headers map[string]interface{}) (source, client bool) {
-	return otlpHeaderHas(headers, "x-defenseclaw-source", "codex"),
-		otlpHeaderHas(headers, "x-defenseclaw-client", "codex-otel/1.0")
-}
-
-// codexProductOTLPToken returns the scoped Codex credential this install
-// issued, or "" when none is recorded.
-func codexProductOTLPToken(opts SetupOpts) (string, error) {
-	if token := strings.TrimSpace(opts.OTLPPathToken); token != "" {
-		return token, nil
-	}
-	if opts.DataDir == "" {
-		return "", nil
-	}
-	return LoadOTLPPathToken(opts.DataDir, OTLPScopeCodex)
-}
-
-// codexExporterAuthorization splits the Authorization spellings of an exporter
-// into those that carry the scoped product bearer and every other credential.
-func codexExporterAuthorization(v interface{}, token string) (product, other []string) {
-	headers := codexExporterHeaders(v)
-	for _, key := range otlpHeaderKeys(headers, "authorization") {
-		value, _ := headers[key].(string)
-		if credential, ok := otlpBearerCredential(value); ok && token != "" && credential == token {
-			product = append(product, key)
-		} else {
-			other = append(other, key)
-		}
-	}
-	return product, other
-}
-
-// codexExporterProductBearerKeys names the header spellings that would send
-// DefenseClaw's scoped credential with this exporter.
-func codexExporterProductBearerKeys(v interface{}, opts SetupOpts) []string {
-	if len(otlpHeaderKeys(codexExporterHeaders(v), "authorization")) == 0 {
-		return nil
-	}
-	token, _ := codexProductOTLPToken(opts)
-	product, _ := codexExporterAuthorization(v, token)
-	return product
-}
-
-func codexExporterUsesProductBearer(v interface{}, opts SetupOpts) bool {
-	return len(codexExporterProductBearerKeys(v, opts)) > 0
-}
-
-// codexExporterHasOnlyProductBearer reports an exporter whose every
-// Authorization spelling is the scoped product bearer. A second spelling with
-// another credential is the operator's edit, so the route stays theirs and
-// cleanup removes only the product spelling.
-func codexExporterHasOnlyProductBearer(v interface{}, opts SetupOpts) bool {
-	if len(otlpHeaderKeys(codexExporterHeaders(v), "authorization")) == 0 {
-		return false
-	}
-	token, _ := codexProductOTLPToken(opts)
-	product, other := codexExporterAuthorization(v, token)
-	return len(product) > 0 && len(other) == 0
-}
-
-func restoreCodexOwnedExporterHeaders(current, saved interface{}, hadSaved bool, opts SetupOpts) error {
-	headers := codexExporterHeaders(current)
-	paired := codexExporterHasManagedHeaderPair(current)
-	if headers == nil || !paired && !codexExporterUsesProductBearer(current, opts) {
-		return nil
-	}
-	productToken, err := codexProductOTLPToken(opts)
-	if err != nil {
-		return fmt.Errorf("inspect Codex native OTLP credential: %w", err)
-	}
-	if paired {
-		for _, marker := range codexProductMarkerHeaders {
-			for _, key := range otlpHeaderKeys(headers, marker) {
-				delete(headers, key)
-			}
-		}
-	}
-
-	// The pair proves only its own namespaced headers. A generic Authorization
-	// value can be the operator's newer collector credential; remove only the
-	// spellings that carry the scoped product credential recorded for this
-	// install, and keep every other spelling as written.
-	product, other := codexExporterAuthorization(current, productToken)
-	for _, key := range product {
-		delete(headers, key)
-	}
-	if len(product) > 0 && len(other) == 0 && hadSaved && !codexExporterHasManagedHeaderResidue(saved) {
-		savedHeaders := codexExporterHeaders(saved)
-		_, savedOther := codexExporterAuthorization(saved, productToken)
-		for _, key := range savedOther {
-			headers[key] = savedHeaders[key]
-		}
-	}
-	exporter := current.(map[string]interface{})
-	otlpHTTP := exporter["otlp-http"].(map[string]interface{})
-	if len(headers) == 0 {
-		delete(otlpHTTP, "headers")
-	} else {
-		otlpHTTP["headers"] = headers
-	}
-	return nil
-}
-
+// codexExporterLooksManaged reports an exporter DefenseClaw owns: its
+// endpoint or one of its headers carries a DefenseClaw credential
+// (otlpCarriesProductCredential), under any header-name, scheme, host or port
+// spelling. Every released exporter carried the scoped bearer.
 func codexExporterLooksManaged(v interface{}, opts SetupOpts) bool {
-	exporter, ok := v.(map[string]interface{})
-	if !ok {
+	if _, ok := v.(map[string]interface{}); !ok {
 		return false
 	}
-	otlpHTTP, ok := exporter["otlp-http"].(map[string]interface{})
-	if !ok {
-		return false
-	}
-	endpoint, _ := otlpHTTP["endpoint"].(string)
-	if codexScopedOTLPEndpointLooksManaged(endpoint) {
-		return true
-	}
-	headers, _ := otlpHTTP["headers"].(map[string]interface{})
-	if headers == nil {
-		return false
-	}
-	// A released direct exporter whose markers were removed remains product
-	// owned when its only bearer is the scoped token, under any spelling of the
-	// header name. An operator's changed endpoint owns its route; restore only
-	// its product headers and bearer there.
-	if codexLegacyDirectOTLPEndpointLooksManaged(endpoint) && codexExporterHasOnlyProductBearer(v, opts) {
-		return true
-	}
-	sourceMarker, clientMarker := codexExporterHasProductMarker(headers)
-	directBase := "http://" + strings.TrimSpace(opts.APIAddr) + "/v1/"
-	if endpoint == directBase+"logs" || endpoint == directBase+"traces" || endpoint == directBase+"metrics" {
-		return sourceMarker || clientMarker
-	}
-	// Older releases used the unscoped /v1/<signal> receiver. A later
-	// operator change to gateway.api_port must not strand that registration,
-	// but port-independent ownership is deliberately stronger: require the
-	// exact pair of product markers and a strict loopback OTLP URL whose host
-	// is spelled as the product writes it. A retyped local host is the
-	// operator's moved route: cleanup keeps it and removes only the headers
-	// the markers and the scoped token prove.
-	return sourceMarker && clientMarker && codexLegacyDirectOTLPEndpointLooksManaged(endpoint) &&
-		codexEndpointHasProductHost(endpoint, opts)
-}
-
-// A single exact product marker on a legacy direct receiver is insufficient
-// authority to remove an exporter after the API port changes. It is still
-// enough evidence to stop Setup: the unchanged bearer could reach a different
-// process on that retired port.
-func codexExporterHasAmbiguousLegacyPort(v interface{}, opts SetupOpts) bool {
-	if codexExporterLooksManaged(v, opts) {
-		return false
-	}
-	exporter, ok := v.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	otlpHTTP, ok := exporter["otlp-http"].(map[string]interface{})
-	if !ok {
-		return false
-	}
-	endpoint, _ := otlpHTTP["endpoint"].(string)
-	if !codexLegacyDirectOTLPEndpointLooksManaged(endpoint) || !codexEndpointHasProductHost(endpoint, opts) {
-		return false
-	}
-	source, client := codexExporterHasProductMarker(codexExporterHeaders(v))
-	return source || client
-}
-
-// codexEndpointHasProductHost reports an endpoint whose host is spelled the
-// way DefenseClaw writes its gateway address (otlpProductRouteHost).
-func codexEndpointHasProductHost(endpoint string, opts SetupOpts) bool {
-	parsed, err := url.Parse(strings.TrimSpace(endpoint))
-	return err == nil && otlpProductRouteHost(parsed.Hostname(), opts.APIAddr)
-}
-
-// codexExporterHasUnresolvedBearer reports a marked exporter that cleanup
-// keeps on a local host (its route is not the product's) whose
-// Authorization may be the
-// scoped product credential while that credential cannot be read to compare
-// (the sidecar is missing or unreadable). Cleanup refuses it and Verify,
-// VerifyClean and Doctor name it, so the bearer is neither left on a retired
-// port nor taken from an operator collector.
-func codexExporterHasUnresolvedBearer(v interface{}, opts SetupOpts) bool {
-	if !codexExporterHasManagedHeaderPair(v) || codexExporterLooksManaged(v, opts) {
-		return false
-	}
-	otlpHTTP, _ := v.(map[string]interface{})["otlp-http"].(map[string]interface{})
-	if endpoint, _ := otlpHTTP["endpoint"].(string); !otlpEndpointIsLocal(endpoint) {
-		return false
-	}
-	headers := codexExporterHeaders(v)
-	keys := otlpHeaderKeys(headers, "authorization")
-	if len(keys) == 0 {
-		return false
-	}
-	var known []string
-	if token, err := codexProductOTLPToken(opts); err == nil && token != "" {
-		known = append(known, token)
-	}
-	values := make([]string, 0, len(keys))
-	for _, key := range keys {
-		value, _ := headers[key].(string)
-		values = append(values, value)
-	}
-	return otlpUnresolvedProductBearer(values, known)
-}
-
-// codexUnresolvedBearerError is the diagnostic every Codex writer returns for
-// codexExporterHasUnresolvedBearer.
-func codexUnresolvedBearerError(where, key string) error {
-	return fmt.Errorf("Codex %s has DefenseClaw marker headers beside an Authorization bearer at otel.%s.otlp-http.headers, and this install's scoped OTLP credential cannot be read to tell whose bearer it is; remove that exporter, or only its x-defenseclaw-* headers if the bearer belongs to your collector, then run: defenseclaw-gateway restart", where, key) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
-}
-
-func codexScopedOTLPEndpointLooksManaged(endpoint string) bool {
-	parsed, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
-		return false
-	}
-	// The random connector-scoped path and the loopback-only authority are the
-	// durable ownership boundary. The API port is mutable configuration, so it
-	// cannot be part of teardown identity. Requiring an explicit port avoids
-	// claiming a generic local HTTP path that the product never emits.
-	if !codexLoopbackOTLPAuthorityLooksManaged(parsed) {
-		return false
-	}
-	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
-	if len(parts) != 5 || parts[0] != "otlp" || parts[1] != "codex" || parts[3] != "v1" || !otlpTokenHexRE.MatchString(parts[2]) {
-		return false
-	}
-	switch parts[4] {
-	case "logs", "metrics", "traces":
-		return true
-	default:
-		return false
-	}
-}
-
-func codexLegacyDirectOTLPEndpointLooksManaged(endpoint string) bool {
-	parsed, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
-		return false
-	}
-	if !codexLoopbackOTLPAuthorityLooksManaged(parsed) {
-		return false
-	}
-	switch parsed.Path {
-	case "/v1/logs", "/v1/metrics", "/v1/traces":
-		return true
-	default:
-		return false
-	}
-}
-
-func codexLoopbackOTLPAuthorityLooksManaged(parsed *url.URL) bool {
-	if parsed == nil || !otlpLocalHost(parsed.Hostname()) {
-		return false
-	}
-	port, err := strconv.Atoi(parsed.Port())
-	return err == nil && port > 0 && port <= 65535
+	return otlpCarriesProductCredential(v, otlpKnownProductTokens(opts, OTLPScopeCodex))
 }
 
 func codexConfigHasManagedOTLPEndpoint(configPath string, opts SetupOpts) (bool, error) {

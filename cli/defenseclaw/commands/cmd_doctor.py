@@ -7359,98 +7359,26 @@ def _codex_header_has_product_marker(headers: dict) -> bool:
     )
 
 
-def _otel_bearer_credential(value) -> str:
-    """The credential of a Bearer Authorization value (scheme case-insensitive)."""
-    if not isinstance(value, str):
-        return ""
-    scheme, _, credential = value.strip().partition(" ")
-    if scheme.lower() != "bearer":
-        return ""
-    return credential.strip()
+# Every credential DefenseClaw mints is 32 random bytes as 64 lowercase hex.
+_OTEL_PRODUCT_TOKEN_RE = re.compile(r"(?:^|[^0-9A-Za-z])[0-9a-f]{64}(?:[^0-9A-Za-z]|$)")
 
 
-def _otel_local_host(host: str) -> bool:
-    """Mirror of the gateway's otlpLocalHost: hosts whose connections stay local."""
-    host = host.strip().rstrip(".")
-    lower = host.lower()
-    if lower == "localhost" or lower.endswith(".localhost"):
-        return True
-    try:
-        address = ipaddress.ip_address(host.split("%", 1)[0])
-    except ValueError:
-        address = None
-    if address is not None:
-        mapped = getattr(address, "ipv4_mapped", None)
-        if mapped is not None:
-            address = mapped
-        return address.is_loopback or address.is_unspecified
-    parts = host.split(".")
-    if not 1 <= len(parts) <= 4:
-        return False
-    values = []
-    for part in parts:
-        if not part or any(ch in part for ch in "_+- "):
-            return False
-        try:
-            if part[:2].lower() == "0x" and len(part) > 2:
-                values.append(int(part[2:], 16))
-            elif len(part) > 1 and part[0] == "0":
-                values.append(int(part[1:], 8))
-            else:
-                values.append(int(part, 10))
-        except ValueError:
-            return False
-    *head, last = values
-    if any(value > 0xFF for value in head) or last >= 1 << (32 - 8 * len(head)):
-        return False
-    address_int = 0
-    for index, value in enumerate(head):
-        address_int |= value << (24 - 8 * index)
-    address_int |= last
-    return address_int >> 24 == 127 or address_int == 0
+def _otel_carries_product_credential(value, known) -> bool:
+    """Mirror of the gateway's otlpCarriesProductCredential.
 
-
-def _otel_product_host(host: str) -> bool:
-    """Mirror of the gateway's otlpProductRouteHost for the default API host.
-
-    Marker headers prove only a route spelled the way DefenseClaw writes it; a
-    retyped local host (127.1, 127.0.0.2, 0.0.0.0) is the operator's route.
+    Ownership is decided by the secret: a value that contains a known product
+    credential or a value of the product token shape is DefenseClaw's, whatever
+    its host, port, header-name or scheme spelling.
     """
-    return host.strip().rstrip(".").lower() in ("localhost", "127.0.0.1", "::1")
-
-
-def _codex_unresolved_otel_bearer(otel, product_token: str) -> str:
-    """Name a marked exporter whose bearer may be the scoped product credential.
-
-    Mirrors the gateway's codexExporterHasUnresolvedBearer: both marker headers,
-    a Bearer credential shaped like a scoped token (64 lowercase hex), no
-    readable scoped credential to compare it with, and a local route. Doctor
-    runs after the retired-port check, which names a product route first.
-    """
-    if product_token or not isinstance(otel, dict):
-        return ""
-    for key in ("exporter", "trace_exporter", "metrics_exporter"):
-        exporter = otel.get(key)
-        http = exporter.get("otlp-http") if isinstance(exporter, dict) else None
-        headers = http.get("headers") if isinstance(http, dict) else None
-        if not isinstance(headers, dict):
-            continue
-        names = {name.strip().lower() for name in headers if isinstance(name, str)}
-        if not {"x-defenseclaw-source", "x-defenseclaw-client"} <= names:
-            continue
-        # Only a kept local route can be a port DefenseClaw no longer owns.
-        try:
-            host = urllib.parse.urlsplit(str(http.get("endpoint") or "")).hostname or ""
-        except ValueError:
-            continue
-        if not _otel_local_host(host):
-            continue
-        if any(
-            re.fullmatch(r"[0-9a-f]{64}", _otel_bearer_credential(value))
-            for value in _otel_header_values(headers, "authorization")
-        ):
-            return f"otel.{key}.otlp-http.headers"
-    return ""
+    if isinstance(value, str):
+        return bool(_OTEL_PRODUCT_TOKEN_RE.search(value)) or any(
+            len(token) >= 8 and token in value for token in known
+        )
+    if isinstance(value, dict):
+        return any(_otel_carries_product_credential(item, known) for item in value.values())
+    if isinstance(value, list):
+        return any(_otel_carries_product_credential(item, known) for item in value)
+    return False
 
 
 def _codex_scoped_otlp_token(cfg) -> str:
@@ -7471,49 +7399,35 @@ def _codex_scoped_otlp_token(cfg) -> str:
         return ""
 
 
-def _codex_retired_otel_endpoint(otel, api_port: int, product_token: str = "") -> str:
-    """Name a product legacy loopback exporter aimed away from this gateway.
+def _codex_credential_off_gateway(otel, api_port: int, product_token: str = "") -> str:
+    """Name a Codex exporter that sends a DefenseClaw credential off this gateway.
 
-    Product proof is a marker header or the scoped bearer, under any spelling of
-    the header name or Bearer scheme, as in the gateway's ownership check.
+    An exporter carrying a DefenseClaw credential is the product's (the token
+    shape proves it even when the scoped sidecar is gone); only the current
+    loopback gateway port may receive it. Exporters without one are the
+    operator's and pass here, on any host or port.
     """
     if not isinstance(otel, dict):
         return ""
+    known = [product_token] if product_token else []
     for key in ("exporter", "trace_exporter", "metrics_exporter"):
         exporter = otel.get(key)
-        http = exporter.get("otlp-http") if isinstance(exporter, dict) else None
-        if not isinstance(http, dict):
+        if not isinstance(exporter, dict) or not _otel_carries_product_credential(exporter, known):
             continue
-        headers = http.get("headers")
-        if not isinstance(headers, dict):
-            continue
-        product_bearer = bool(product_token) and any(
-            _otel_bearer_credential(value) == product_token
-            for value in _otel_header_values(headers, "authorization")
+        http = exporter.get("otlp-http")
+        endpoint = http.get("endpoint") if isinstance(http, dict) else None
+        try:
+            parsed = urllib.parse.urlsplit(endpoint) if isinstance(endpoint, str) else None
+            port = parsed.port if parsed is not None else None
+        except ValueError:
+            parsed, port = None, None
+        on_gateway = (
+            parsed is not None
+            and parsed.scheme == "http"
+            and (parsed.hostname or "") in ("127.0.0.1", "localhost", "::1")
+            and port == api_port
         )
-        marked = _codex_header_has_product_marker(headers)
-        if not (marked or product_bearer):
-            continue
-        endpoint = http.get("endpoint")
-        if not isinstance(endpoint, str):
-            continue
-        try:
-            parsed = urllib.parse.urlsplit(endpoint)
-            host = parsed.hostname or ""
-        except ValueError:
-            continue
-        # The scoped bearer proves a route on any local host; markers alone
-        # prove only a host spelled as DefenseClaw writes it.
-        loopback = _otel_local_host(host) if product_bearer else _otel_product_host(host)
-        if not loopback or parsed.scheme != "http" or parsed.username is not None or parsed.query or parsed.fragment:
-            continue
-        if parsed.path not in ("/v1/logs", "/v1/traces", "/v1/metrics"):
-            continue
-        try:
-            port = parsed.port
-        except ValueError:
-            continue
-        if port and port != api_port:
+        if not on_gateway:
             return f"otel.{key}.otlp-http.endpoint"
     return ""
 
@@ -7551,21 +7465,12 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
 
     if config_error:
         _emit("fail", "Codex OTel environment", config_error, r=r)
-    elif stale := _codex_retired_otel_endpoint(otel, _gateway_api_port(cfg), _codex_scoped_otlp_token(cfg)):
+    elif stale := _codex_credential_off_gateway(otel, _gateway_api_port(cfg), _codex_scoped_otlp_token(cfg)):
         _emit(
             "fail",
             "Codex OTel environment",
-            f"config.toml {stale} still points at a retired loopback port; "
+            f"config.toml {stale} sends a DefenseClaw credential to a port DefenseClaw does not own; "
             "remove this exporter, then rerun Codex setup",
-            r=r,
-        )
-    elif unresolved := _codex_unresolved_otel_bearer(otel, _codex_scoped_otlp_token(cfg)):
-        _emit(
-            "fail",
-            "Codex OTel environment",
-            f"config.toml {unresolved} has DefenseClaw marker headers beside a bearer, and the scoped OTLP "
-            "credential is missing, so its owner cannot be told; remove this exporter, or only its "
-            "x-defenseclaw-* headers if the bearer belongs to your collector, then rerun Codex setup",
             r=r,
         )
     elif not _codex_otel_exports_to_defenseclaw(otel):
