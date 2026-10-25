@@ -17,6 +17,7 @@ import (
 // an agent with another USERPROFILE, HOME and DEFENSECLAW_HOME, closes its
 // outage while that lock is held.
 func TestPackagedWindowsHookOutageClosesWhileTheInstalledDataRootIsLocked(t *testing.T) {
+	isolateOutageHostMarkers(t)
 	_, installed := stageTrustedNativeHookForTest(t, "open")
 	data := filepath.Join(t.TempDir(), "custom-data")
 	writeOutageNowConfig(t, data, "data_dir: "+data+"\n"+outageNowDefaultConfig)

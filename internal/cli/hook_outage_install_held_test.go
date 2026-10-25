@@ -152,6 +152,7 @@ func TestHookOutageFailModeNowClosesWhileAnyInstallerFolderIsLocked(t *testing.T
 			// The runtime's config lives in its custom data_dir, as the CLI
 			// saves it (config_path_for_data_dir).
 			writeOutageNowConfig(t, l.data, "data_dir: "+l.data+"\n"+outageNowDefaultConfig)
+			isolateOutageHostMarkers(t)
 			stubOutageInstallFolders(t, func() string {
 				if tc.noAccount {
 					return ""
@@ -180,6 +181,24 @@ func TestHookOutageFailModeNowClosesWhileAnyInstallerFolderIsLocked(t *testing.T
 			}
 		})
 	}
+}
+
+// isolateOutageHostMarkers makes the build or test host's own machine
+// markers (a managed Setup, Secure Client) absent, so the cases read the
+// same on a managed lane host as on a build box.
+func isolateOutageHostMarkers(t *testing.T) {
+	t.Helper()
+	oldDescriptor, oldWindows := managedHostDescriptorPath, managedHostWindowsStandalone
+	oldSecureClient, oldUncertain := secureClientHost, managedHostWindowsMarkerUncertain
+	missing := filepath.Join(t.TempDir(), "no-runtime-descriptor")
+	managedHostDescriptorPath = func() string { return missing }
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	secureClientHost = func() bool { return false }
+	managedHostWindowsMarkerUncertain = func() bool { return false }
+	t.Cleanup(func() {
+		managedHostDescriptorPath, managedHostWindowsStandalone = oldDescriptor, oldWindows
+		secureClientHost, managedHostWindowsMarkerUncertain = oldSecureClient, oldUncertain
+	})
 }
 
 func stubOutageInstallFolders(t *testing.T, account func() string, state func() (string, bool)) {
