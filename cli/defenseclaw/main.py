@@ -477,7 +477,7 @@ def cli(ctx: click.Context) -> None:
         result = validate_config()
         # Not judged inside a sandbox that hides folder owners: status says
         # so instead of calling the config invalid (GAP-1395).
-        app.config_not_checked = result.not_checked
+        app.config_not_checked = getattr(result, "not_checked", "")
         if _audit_logs_can_read_with_ide_scope_typo(ctx, result):
             ux.echo(
                 "Config warning: ai_discovery.ide_inventory is invalid; log output is still available. "
