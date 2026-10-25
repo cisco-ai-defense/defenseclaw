@@ -546,10 +546,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// A second delivery of one Copilot tool call (see
 		// agent_hook_copilot_dedupe.go) gets the first delivery's verdict,
 		// rendered for its own profile, and is not evaluated or audited
-		// again.
-		earlier, deduped, dedupeTicket := a.copilotDedupe.begin(r.Context(), connectorName, req)
+		// again. The verdict was decided under the same generation and
+		// guardrail profile (the keys carry them); an allow is replayed only
+		// when the live profile and require-sandbox gates pass now, else the
+		// delivery is evaluated on its own.
+		earlier, deduped, dedupeTicket := a.copilotDedupe.begin(r.Context(), connectorName, req, a.copilotDedupePolicy(r.Context()))
 		defer dedupeTicket.release()
-		if deduped {
+		if deduped && a.copilotDedupeReplayable(r.Context(), connectorName, req, requireSandboxSurface(r.Context(), r.Header), earlier) {
 			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, copilotDedupedResponse(profile, req, earlier)))
 			return
 		}
@@ -744,17 +747,29 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// An uncertain identity refuses before any profile-specific gate can
 		// replace its missing-fact explanation.
 		resp, gated := a.refuseProfileHook(ctx, profile, connectorName, req, b, payload)
+		// An unparsed call is answered without evaluation. Its block stands
+		// at once; any other answer (the observe allow of an unreadable
+		// Copilot call) is given only after the live require-sandbox gate,
+		// which refuses a host run whatever the call.
+		var unparsedAnswer *agentHookResponse
 		if !gated && req.ToolCallUnparsed &&
 			toolRoute == connector.ToolEventRouteStructuredAction {
 			a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
-			resp = a.unparsedStructuredHookResponse(ctx, profile, req)
-			gated = true
+			answer := a.unparsedStructuredHookResponse(ctx, profile, req)
+			if answer.Action == "block" {
+				resp, gated = answer, true
+			} else {
+				unparsedAnswer = &answer
+			}
 		}
 		sandboxGate := requireSandboxOutcome{}
 		if !gated {
 			// The require-sandbox gate answers a host run of a connector
 			// the caller's proven floor requires in a sandbox.
 			sandboxGate, resp, gated = a.requireSandboxHostRun(ctx, profile, connectorName, req, b, payload, requireSandboxSurface(ctx, r.Header))
+		}
+		if !gated && unparsedAnswer != nil {
+			resp, gated = *unparsedAnswer, true
 		}
 		panicked := false
 		if !gated {
