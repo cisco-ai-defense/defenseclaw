@@ -643,56 +643,14 @@ func RemoveWindowsCodexMachineRequirements(
 		report.PreimageSHA256 = state.PreimageSHA256
 		report.PostimageSHA256 = windowsCodexMachineHash(requirements.data)
 
-		exactPostimage := requirements.existed && report.PostimageSHA256 == state.PostimageSHA256
-		var candidate []byte
-		var candidateExists bool
-		// A preimage an earlier release recorded with its own groups (or
-		// their managed directory alone) is DefenseClaw's in those parts:
-		// restoring it verbatim would strand the uninstall on them
-		// (GAP-0907), so it is cleaned as a surgical removal is.
-		preimageLeftovers := false
-		if exactPostimage && state.PreimageExisted {
-			if preimageLeftovers, err = windowsCodexRequirementsHoldOwnedLeftovers(state.Preimage, opts); err != nil {
-				return fmt.Errorf("inspect the recorded Codex requirements preimage: %w", err)
-			}
+		candidate, candidateExists, changed, disposition, err := windowsCodexRemovalCandidate(
+			requirements.data, requirements.existed, state, opts,
+		)
+		if err != nil {
+			return err
 		}
-		switch {
-		case exactPostimage && state.PreimageExisted && preimageLeftovers:
-			cleaned, _, cleanErr := removeWindowsCodexRequirementsOwnedChanges(state.Preimage, state.Preimage, opts)
-			if cleanErr != nil {
-				return cleanErr
-			}
-			candidate, candidateExists = cleaned, true
-			report.Changed = !bytes.Equal(requirements.data, cleaned)
-			report.Disposition = "restored_preimage"
-		case exactPostimage && state.PreimageExisted:
-			candidate = append([]byte(nil), state.Preimage...)
-			candidateExists = true
-			report.Changed = !bytes.Equal(requirements.data, state.Preimage)
-			report.Disposition = "restored_preimage"
-		case exactPostimage && !state.PreimageExisted:
-			candidate = nil
-			candidateExists = false
-			report.Changed = requirements.existed
-			report.Disposition = "restored_preimage"
-		default:
-			cleaned, changed, cleanErr := removeWindowsCodexRequirementsOwnedChanges(
-				requirements.data,
-				state.Preimage,
-				opts,
-			)
-			if cleanErr != nil {
-				return cleanErr
-			}
-			candidate = cleaned
-			candidateExists = true
-			if len(bytes.TrimSpace(cleaned)) == 0 && !state.PreimageExisted {
-				candidate = nil
-				candidateExists = false
-			}
-			report.Changed = changed
-			report.Disposition = "surgical_preservation"
-		}
+		report.Changed = changed
+		report.Disposition = disposition
 
 		// Validate the complete candidate before the first mutation. In
 		// particular, an unrelated administrator hook that still points into
