@@ -92,6 +92,10 @@ func TestMeetEnforcesEachMemberInItsOwnModeOnEachPath(t *testing.T) {
 				api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 				api.guardrailProfiles.set.Store(set)
 				subject := context.WithValue(t.Context(), testVerifiedSubjectKey{}, identityTestSubject(p, p.providers[0], stateProven, true))
+				// Requests pin the profile generation before scanning. Keep this
+				// test's profile set independent of another test's process-wide
+				// live set (as meetOfTwoAssignments does).
+				subject = withPinnedGeneration(subject, &Generation{N: 1, Config: cfg, Profiles: set})
 				meetName := config.ProfileMeetName([]string{"a", "b"})
 
 				for _, path := range []struct {
