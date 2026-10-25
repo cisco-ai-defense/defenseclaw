@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -83,9 +84,11 @@ func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 		{name: "installer running", pid: live + "\n", held: true},
 		{name: "installer running, an earlier build's deadline passed", pid: live, deadline: past, held: true},
 		{name: "installer running, made seven hours ago", pid: live, age: 7 * time.Hour, held: true},
-		{name: "pid reused: its process started after the pid was written", pid: live, age: 7 * time.Hour, pidAge: 7 * time.Hour, held: false},
-		{name: "1.0.2/1.0.3 PID-only lock, pid reused an hour after it was written (GAP-1465)", pid: live, age: time.Hour, pidAge: time.Hour, held: false},
-		{name: "1.0.2/1.0.3 PID-only lock, pid reused", pid: live, age: 30 * 24 * time.Hour, pidAge: 30 * 24 * time.Hour, held: false},
+		// Without a proc-start record Linux cannot tell a reused pid from a
+		// live owner after a clock step (loop round 2 P1): it holds.
+		{name: "pid reused: its process started after the pid was written", pid: live, age: 7 * time.Hour, pidAge: 7 * time.Hour, held: runtime.GOOS == "linux"},
+		{name: "1.0.2/1.0.3 PID-only lock, pid reused an hour after it was written (GAP-1465)", pid: live, age: time.Hour, pidAge: time.Hour, held: runtime.GOOS == "linux"},
+		{name: "1.0.2/1.0.3 PID-only lock, pid reused", pid: live, age: 30 * 24 * time.Hour, pidAge: 30 * 24 * time.Hour, held: runtime.GOOS == "linux"},
 		{name: "no pid yet", held: true},
 		{name: "no pid for eleven minutes", age: 11 * time.Minute, held: false},
 		{name: "pid not a number", pid: "abc", held: true},
@@ -158,6 +161,61 @@ func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 		script := want + "defenseclaw_install_lock_held \"$1\" && echo held\n"
 		if out, _ := exec.Command(bash, "-c", script, "hook", data).CombinedOutput(); strings.TrimSpace(string(out)) != "held" {
 			t.Fatalf("a lock that is not a folder = %q, want held", out)
+		}
+	})
+	// Loop round 2 (P2): a lock naming the hook's own pid is a reused pid.
+	t.Run("lock names the hook's own pid", func(t *testing.T) {
+		data := t.TempDir()
+		if err := os.Mkdir(filepath.Join(data, ".install.lock"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		script := want + "echo $$ > \"$1/.install.lock/pid\"\nif defenseclaw_install_lock_held \"$1\"; then echo held; else echo none; fi\n"
+		if out, _ := exec.Command(bash, "-c", script, "hook", data).CombinedOutput(); strings.TrimSpace(string(out)) != "none" {
+			t.Fatalf("a lock naming the hook's own pid = %q, want none (stale)", out)
+		}
+	})
+	// Loop round 2 (P1): on Linux the proc-start record, compared as it is,
+	// tells a live owner from a reused pid however the clock stepped (a pid
+	// file written seven hours before stands in for the step).
+	for _, tc := range []struct {
+		name   string
+		reused bool
+		held   bool
+	}{
+		{name: "live owner with its proc-start record, clock stepped", held: true},
+		{name: "reused pid: another proc-start", reused: true, held: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			identity, other := installLockIdentityOf(t, os.Getpid())
+			if tc.reused {
+				identity = other
+			}
+			data := t.TempDir()
+			lock := filepath.Join(data, ".install.lock")
+			if err := os.Mkdir(lock, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for name, value := range map[string]string{"pid": live + "\n", "proc-start": identity + "\n"} {
+				if err := os.WriteFile(filepath.Join(lock, name), []byte(value), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			then := time.Now().Add(-7 * time.Hour)
+			if err := os.Chtimes(filepath.Join(lock, "pid"), then, then); err != nil {
+				t.Fatal(err)
+			}
+			script := want + "if defenseclaw_install_lock_held \"$1\"; then echo held; else echo none; fi\n"
+			out, _ := exec.Command(bash, "-c", script, "hook", data).CombinedOutput()
+			if got := strings.TrimSpace(string(out)); got != map[bool]string{true: "held", false: "none"}[tc.held] {
+				t.Fatalf("defenseclaw_install_lock_held = %q, want held %v", got, tc.held)
+			}
+		})
+	}
+	t.Run("process identity matches the Go reader", func(t *testing.T) {
+		identity, _ := installLockIdentityOf(t, os.Getpid())
+		out, err := exec.Command(bash, "-c", want+"defenseclaw_process_identity \"$1\"", "hook", live).CombinedOutput()
+		if err != nil || string(out) != identity {
+			t.Fatalf("defenseclaw_process_identity = %q (%v), want %q", out, err, identity)
 		}
 	})
 }

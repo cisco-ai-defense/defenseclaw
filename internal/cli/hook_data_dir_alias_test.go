@@ -174,6 +174,27 @@ func TestHookDataDirsNowLocksEveryAliasOfTheConfiguredFile(t *testing.T) {
 			t.Fatalf("hook-outage-mode while install.sh holds %s = %q, want closed", accountData, mode)
 		}
 	})
+	// Loop round 2 (P1): with a custom home and no ~/.defenseclaw yet, the
+	// account folder was left out, so install.sh locked only its home and
+	// the hard-linked hook opened an outage. It is named before it exists;
+	// install.sh makes it for the install (test_install_sh_hook_data_lock).
+	t.Run("the account's own folder before it exists", func(t *testing.T) {
+		base := t.TempDir()
+		cfg := filepath.Join(base, "cfg")
+		writeAliasConfig(t, filepath.Join(cfg, "policy.yaml"))
+		account := filepath.Join(base, "account")
+		if err := os.MkdirAll(account, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		accountData := filepath.Join(account, ".defenseclaw")
+		dirs := aliasHookDataDirs(t, base, filepath.Join(cfg, "policy.yaml"), account)
+		if len(dirs) == 0 || dirs[len(dirs)-1] != accountData {
+			t.Fatalf("hook-data-dir names %q, not the account's own %s last", dirs, accountData)
+		}
+		if _, err := os.Stat(accountData); !os.IsNotExist(err) {
+			t.Fatalf("hook-data-dir made %s (%v); install.sh makes it", accountData, err)
+		}
+	})
 }
 
 // aliasHookDataDirs runs hook-data-dir with the installer's environment

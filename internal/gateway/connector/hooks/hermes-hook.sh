@@ -50,12 +50,16 @@ defenseclaw_install_lock_held() {
 }
 # defenseclaw_install_lock_stale DATA returns 0 (true) when DATA/.install.lock
 # is a folder whose installer is proven gone and no interrupted-install
-# record sits beside it: its pid names no process, or a process that started
-# more than a minute after the pid was written (a reused pid), or it has had
-# no pid for ten minutes. A live or uncertain owner keeps it for as long as
-# it runs (hookexec installLockStale, the one rule).
+# record sits beside it: its pid names no process, or this hook's own (no
+# hook writes a lock), or another process than its proc-start record names,
+# or, without that record off Linux, a process that started more than a
+# minute after the pid was written (a reused pid), or it has had no pid for
+# ten minutes. A live or uncertain owner keeps it for as long as it runs; so
+# does, on Linux, a pid with no proc-start record (1.0.2, 1.0.3), as a start
+# Linux counts from boot is a time only through the wall clock now
+# (hookexec installLockStale, the one rule).
 defenseclaw_install_lock_stale() {
-  local data="${1:-}" lock now made written age rc pid name
+  local data="${1:-}" lock now made written age rc pid name recorded current
   lock="${data}/.install.lock"
   [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
   for name in previous.new .repair .rollback-hold .lifecycle-txn.json; do
@@ -73,11 +77,21 @@ defenseclaw_install_lock_stale() {
     [ $((now - made)) -gt 600 ] && return 0
     return 1
   fi
-  [ "$pid" = "$$" ] && return 1
+  # A live installer's pid names no other process: this one is reused.
+  [ "$pid" = "$$" ] && return 0
   if ! kill -0 "$pid" 2>/dev/null; then
     # A process of another account refuses the signal; only ps proves it gone.
     command -v ps >/dev/null 2>&1 || return 1
     ps -p "$pid" >/dev/null 2>&1 || return 0
+  fi
+  if [ -e "${lock}/proc-start" ] || [ -L "${lock}/proc-start" ]; then
+    recorded="$(defenseclaw_install_lock_record "${lock}/proc-start")" || return 1
+    current="$(defenseclaw_process_identity "$pid")" || return 1
+    [ "$recorded" != "$current" ] && return 0
+    return 1
+  fi
+  if [ -e /proc/self/stat ] || [ "$(uname -s 2>/dev/null)" = Linux ]; then
+    return 1
   fi
   written="$(stat -c %Y "${lock}/pid" 2>/dev/null || stat -f %m "${lock}/pid" 2>/dev/null)" || return 1
   age="$(defenseclaw_process_age "$pid")" || return 1
@@ -101,6 +115,38 @@ defenseclaw_process_age() {
   case "$d$h$m$s" in ''|*[!0-9]*) return 1 ;; esac
   d="${d#0}"; h="${h#0}"; m="${m#0}"; s="${s#0}"
   printf '%s' $(( ((${d:-0} * 24 + ${h:-0}) * 60 + ${m:-0}) * 60 + ${s:-0} ))
+}
+# defenseclaw_process_identity PID prints the boot id and kernel start of
+# process PID, "<boot_id> <starttime>" (field 22 of /proc/PID/stat), the
+# record install.sh keeps of itself in a lock on Linux (proc-start); neither
+# moves with the wall clock. It returns 1 when /proc does not say.
+defenseclaw_process_identity() {
+  local boot stat IFS=' '
+  boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || return 1
+  stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
+  case "$stat" in *[\)]*) ;; *) return 1 ;; esac
+  stat="${stat##*[\)]}"
+  set -- $stat
+  [ "$#" -ge 20 ] || return 1
+  shift 19
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  case "$boot" in ''|*[!0-9a-f-]*) return 1 ;; esac
+  printf '%s %s' "$boot" "$1"
+}
+# defenseclaw_install_lock_record FILE prints the trimmed text of a small
+# owner record (proc-start); it returns 1 when FILE is not a small regular
+# file or is empty.
+defenseclaw_install_lock_record() {
+  local file="${1:-}" size text
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
+  size="$(wc -c < "$file" 2>/dev/null | tr -d ' ')" || return 1
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$size" -le 128 ] || return 1
+  text="$(cat "$file" 2>/dev/null)" || return 1
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  [ -n "$text" ] || return 1
+  printf '%s' "$text"
 }
 # defenseclaw_install_lock_number FILE prints the decimal number of the owner
 # record file (pid). It returns 1 when FILE is absent, empty or

@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -271,6 +272,7 @@ def test_the_data_dir_lock_records_its_owner(tmp_path: Path) -> None:
         f'hold_hook_data_dir "{_gateway(tmp_path)}"\n'
         'lock="${DATA_LOCK_DIRS[0]}"\n'
         'echo "pid=$(cat "$lock/pid") self=$$ started=$(cat "$lock/started") deadline=$(test -e "$lock/deadline" && echo yes || echo no)"\n'
+        'echo "identity=$(cat "$lock/proc-start" 2>/dev/null | tr " " "@") own=$(process_identity $$ | tr " " "@")"\n'
     )
     before = int(time.time())
     proc = _run(tmp_path, home, body, {"STUB_DATA_DIR": str(data)})
@@ -280,12 +282,37 @@ def test_the_data_dir_lock_records_its_owner(tmp_path: Path) -> None:
     assert fields["pid"] == fields["self"]
     assert before - 1 <= int(fields["started"]) <= int(time.time()) + 1
     assert fields["deadline"] == "no"
+    # Loop round 2 (P1): on Linux the lock records the installer's boot id
+    # and kernel start, the record every reader compares as it is.
+    ids = dict(
+        part.split("=", 1) for part in next(i for i in proc.stdout.splitlines() if i.startswith("identity=")).split()
+    )
+    if sys.platform.startswith("linux"):
+        assert ids["identity"] and ids["identity"] == ids["own"]
+    else:
+        assert ids["identity"] == ""
 
 
+def _identity(pid: int) -> str:
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    line = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    return f"{boot} {line[line.rfind(')') + 1 :].split()[19]}"
+
+
+# Loop round 2 (P1): a forward clock step made a live installer's lock look
+# like a reused pid on Linux (the start Linux counts from boot is a time only
+# through the wall clock now). A pid file written a week before its process
+# started stands in for the step. With its proc-start record the live owner
+# holds and another record is taken over; without one (1.0.2, 1.0.3) Linux
+# holds while the pid names a process, and elsewhere the reused pid is taken
+# over.
 @pytest.mark.parametrize("legacy", [False, True])
 def test_a_live_installer_keeps_its_lock_however_old_and_a_reused_pid_is_taken_over(
     tmp_path: Path, legacy: bool
 ) -> None:
+    linux = sys.platform.startswith("linux")
+    if not legacy and not linux:
+        pytest.skip("the proc-start record is written on Linux")
     home, data = _layout(tmp_path)
     other = subprocess.Popen(["sleep", "30"])
     lock = data / ".install.lock"
@@ -294,22 +321,61 @@ def test_a_live_installer_keeps_its_lock_however_old_and_a_reused_pid_is_taken_o
         (lock / "pid").write_text(f"{other.pid}\n", encoding="utf-8")
         if not legacy:
             (lock / "started").write_text(f"{int(time.time())}\n", encoding="utf-8")
-            (lock / "deadline").write_text(f"{int(time.time()) - 60}\n", encoding="utf-8")
+            (lock / "proc-start").write_text(_identity(other.pid) + "\n", encoding="utf-8")
         week = time.time() - 7 * 86400
         os.utime(lock, (week, week))
         # Its installer runs (it started before it wrote the pid): the lock
-        # holds, however old the folder or a recorded deadline.
+        # holds, however old the folder.
         proc = _run(tmp_path, home, f'hold_hook_data_dir "{_gateway(tmp_path)}"\n', {"STUB_DATA_DIR": str(data)})
         assert proc.returncode == 1
         assert f"Another DefenseClaw install is running (pid {other.pid})" in proc.stderr
-        # The pid was written before its process started: a reused pid.
+        # The pid file is a week older than its process: a clock step, or a
+        # reused pid.
         os.utime(lock / "pid", (week, week))
+        proc = _run(tmp_path, home, f'hold_hook_data_dir "{_gateway(tmp_path)}"\n', {"STUB_DATA_DIR": str(data)})
+        if linux:
+            assert proc.returncode == 1, proc.stdout
+            assert f"Another DefenseClaw install is running (pid {other.pid})" in proc.stderr
+        else:
+            assert proc.returncode == 0, proc.stderr
+            assert _held(proc) == [f"{data.resolve()}/.install.lock"]
+        if legacy:
+            return
+        # Another process than the record names: a reused pid, taken over.
+        boot, ticks = _identity(other.pid).split(" ")
+        (lock / "proc-start").write_text(f"{boot} {int(ticks) + 1}\n", encoding="utf-8")
         proc = _run(tmp_path, home, f'hold_hook_data_dir "{_gateway(tmp_path)}"\n', {"STUB_DATA_DIR": str(data)})
         assert proc.returncode == 0, proc.stderr
         assert _held(proc) == [f"{data.resolve()}/.install.lock"]
     finally:
         other.kill()
         other.wait()
+
+
+# Loop round 2 (P2): a lock naming this installer's own pid is not its own
+# (it did not make it): its writer is gone, so it is taken over.
+def test_a_lock_naming_the_installers_own_pid_is_taken_over(tmp_path: Path) -> None:
+    home, data = _layout(tmp_path)
+    (data / ".install.lock").mkdir()
+    body = f'echo $$ > "{data}/.install.lock/pid"\nhold_hook_data_dir "{_gateway(tmp_path)}"\n'
+    proc = _run(tmp_path, home, body, {"STUB_DATA_DIR": str(data)})
+    assert proc.returncode == 0, proc.stderr
+    assert _held(proc) == [f"{data.resolve()}/.install.lock"]
+
+
+# Loop round 2 (P1): with a custom home and no ~/.defenseclaw, hook-data-dir
+# names the account's own folder, which every per-user hook checks; install.sh
+# makes it for the install, holds its lock, and removes it again on exit.
+# Another missing folder is not made (test_no_second_lock_...[missing]).
+def test_a_missing_account_folder_is_made_held_and_removed(tmp_path: Path) -> None:
+    home, _ = _layout(tmp_path)
+    account = tmp_path / "account"
+    account.mkdir()
+    folder = account / ".defenseclaw"
+    proc = _run(tmp_path, home, f'hold_hook_data_dir "{_gateway(tmp_path)}" required\n', {"STUB_DATA_DIR": str(folder)})
+    assert proc.returncode == 0, proc.stderr
+    assert _held(proc) == [f"{folder.resolve()}/.install.lock"]
+    assert not folder.exists()
 
 
 @pytest.mark.parametrize(

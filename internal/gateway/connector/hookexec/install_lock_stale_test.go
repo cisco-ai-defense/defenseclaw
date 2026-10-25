@@ -48,10 +48,15 @@ func TestInstallLockHeldIgnoresOnlyALockWhoseOwnerIsGone(t *testing.T) {
 		{"installer running", owner{pid: live + "\n"}, true},
 		{"installer running, lock made seven hours ago", owner{pid: live, age: 7 * time.Hour}, true},
 		{"installer running, a deadline an earlier build recorded has passed", owner{pid: live, deadline: past, age: 7 * time.Hour}, true},
-		{"pid reused: its process started after the pid was written", owner{pid: live, age: 7 * time.Hour, pidAge: 7 * time.Hour}, false},
-		{"1.0.2/1.0.3 PID-only lock, pid reused an hour after it was written (GAP-1465)", owner{pid: live, age: time.Hour, pidAge: time.Hour}, false},
+		// Without a proc-start record, Linux cannot tell a reused pid from
+		// a live owner after a clock step (loop round 2 P1): it holds.
+		{"pid reused: its process started after the pid was written", owner{pid: live, age: 7 * time.Hour, pidAge: 7 * time.Hour}, !processStartIsAbsolute},
+		{"1.0.2/1.0.3 PID-only lock, pid reused an hour after it was written (GAP-1465)", owner{pid: live, age: time.Hour, pidAge: time.Hour}, !processStartIsAbsolute},
 		{"1.0.2/1.0.3 PID-only lock, installer exited", owner{pid: dead, age: time.Hour, pidAge: time.Hour}, false},
-		{"1.0.2/1.0.3 PID-only lock, pid reused", owner{pid: live, age: 30 * 24 * time.Hour, pidAge: 30 * 24 * time.Hour}, false},
+		{"1.0.2/1.0.3 PID-only lock, pid reused", owner{pid: live, age: 30 * 24 * time.Hour, pidAge: 30 * 24 * time.Hour}, !processStartIsAbsolute},
+		// Loop round 2 P2: no reader writes a lock, so a lock naming the
+		// reader's own pid is a reused pid, however recently it was written.
+		{"lock names this reader's own pid", owner{pid: strconv.Itoa(os.Getpid())}, false},
 		{"1.0.2/1.0.3 PID-only lock, installer running", owner{pid: live}, true},
 		{"no pid yet", owner{}, true},
 		{"empty pid", owner{pid: " "}, true},

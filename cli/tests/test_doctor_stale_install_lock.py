@@ -81,6 +81,7 @@ def test_install_lock_state_follows_the_plugin_rule(account, pid, age, record, w
 
 
 PAST = str(int(time.time()) - 60)
+_LEGACY_REUSED = "held" if sys.platform.startswith("linux") else "stale"
 
 
 # oss-outage-open round j (one liveness rule): a live installer keeps its
@@ -92,9 +93,13 @@ PAST = str(int(time.time()) - 60)
     ("pid", "age", "deadline", "pid_age", "record", "want"),
     [
         (str(os.getppid()), 7 * 3600, PAST, 0, None, "held"),
-        (str(os.getppid()), 7 * 3600, None, 7 * 3600, None, "stale"),
-        (str(os.getppid()), 3600, None, 3600, None, "stale"),
-        (str(os.getppid()), 30 * 86400, None, 30 * 86400, None, "stale"),
+        # Without a proc-start record Linux cannot tell a reused pid from a
+        # live owner after a clock step (loop round 2 P1): it holds.
+        (str(os.getppid()), 7 * 3600, None, 7 * 3600, None, _LEGACY_REUSED),
+        (str(os.getppid()), 3600, None, 3600, None, _LEGACY_REUSED),
+        (str(os.getppid()), 30 * 86400, None, 30 * 86400, None, _LEGACY_REUSED),
+        # Loop round 2 P2: a lock naming doctor's own pid is a reused pid.
+        (str(os.getpid()), 0, None, 0, None, "stale"),
         (f"{DEAD}\n", 3600, None, 3600, None, "stale"),
         (f"{DEAD}\n", 0, PAST, 0, "previous.new", "recovery"),
         (str(os.getppid()), 0, "soon", 0, None, "held"),
@@ -104,6 +109,28 @@ def test_install_lock_state_holds_while_its_owner_runs(account, pid, age, deadli
     _lock(account.data, pid, age, deadline, pid_age)
     if record:
         (account.data / record).mkdir()
+    assert cmd_doctor._install_lock_state(str(account.data))[0] == want
+
+
+def _identity(pid: int) -> tuple[str, str]:
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    line = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    ticks = int(line[line.rfind(")") + 1 :].split()[19])
+    return f"{boot} {ticks}", f"{boot} {ticks + 1}"
+
+
+# oss-outage-open round j loop round 2 (P1): Linux counts a process start
+# from boot, so a forward clock step made a live installer look like a
+# reused pid. install.sh records its boot id and kernel start (proc-start);
+# compared as it is, it holds a live owner however the clock stepped (a pid
+# file written seven hours before stands in for the step).
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the proc-start record is written on Linux")
+@pytest.mark.parametrize(("reused", "want"), [(False, "held"), (True, "stale")])
+def test_the_proc_start_record_tells_a_live_owner_across_a_clock_step(account, reused, want):
+    identity, other = _identity(os.getppid())
+    assert cmd_doctor._process_identity(os.getppid()) == identity
+    lock = _lock(account.data, str(os.getppid()), 0, None, 7 * 3600)
+    (lock / "proc-start").write_text((other if reused else identity) + "\n", encoding="ascii")
     assert cmd_doctor._install_lock_state(str(account.data))[0] == want
 
 

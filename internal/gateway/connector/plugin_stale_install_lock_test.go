@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -73,6 +74,19 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 			}
 		}
 	}
+	withIdentity := func(reused bool) func(*testing.T, string) {
+		return func(t *testing.T, lock string) {
+			t.Helper()
+			identity, other := installLockIdentityOf(t, os.Getpid())
+			if reused {
+				identity = other
+			}
+			makeAgedLock(live+"\n", 0, 7*time.Hour)(t, lock)
+			if err := os.WriteFile(filepath.Join(lock, "proc-start"), []byte(identity+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	cases := []struct {
 		name   string
 		inHome bool
@@ -91,8 +105,10 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 		// pid whose process started after it was written is a reused pid
 		// (also the PID-only lock of 1.0.2 and 1.0.3, GAP-1465).
 		{name: "running installer, lock made seven hours ago", lock: makeLock(live, 7*time.Hour)},
-		{name: "pid reused: its process started after the pid was written", lock: makeAgedLock(live, 7*time.Hour, 7*time.Hour), runs: true},
-		{name: "1.0.2/1.0.3 PID-only lock, pid reused an hour after it was written (GAP-1465)", lock: makeAgedLock(live, time.Hour, time.Hour), runs: true},
+		// Without a proc-start record Linux cannot tell a reused pid from
+		// a live owner after a clock step (loop round 2 P1): it holds.
+		{name: "pid reused: its process started after the pid was written", lock: makeAgedLock(live, 7*time.Hour, 7*time.Hour), runs: runtime.GOOS != "linux"},
+		{name: "1.0.2/1.0.3 PID-only lock, pid reused an hour after it was written (GAP-1465)", lock: makeAgedLock(live, time.Hour, time.Hour), runs: runtime.GOOS != "linux"},
 		{name: "installer exited, interrupted install kept previous.new", lock: withRecord("previous.new", true)},
 		{name: "installer exited, interrupted install kept .repair", lock: withRecord(".repair", true)},
 		{name: "installer exited, interrupted install kept .rollback-hold", lock: withRecord(".rollback-hold", true)},
@@ -109,6 +125,11 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 			}
 		}},
 		{name: "installer home: installer exited", inHome: true, lock: makeLock(dead+"\n", 0), runs: true},
+		// Loop round 2 (P1): on Linux the proc-start record tells a live
+		// owner from a reused pid however the clock stepped (a pid file
+		// written seven hours before stands in for the step).
+		{name: "live owner with its proc-start record, clock stepped", lock: withIdentity(false)},
+		{name: "reused pid: another proc-start", lock: withIdentity(true), runs: true},
 		{name: "installer home: installer running", inHome: true, lock: makeLock(live+"\n", 0)},
 	}
 	for _, plugin := range []struct{ name, asset, file, harness string }{
@@ -161,6 +182,48 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 				}
 			})
 		}
+	}
+}
+
+// oss-outage-open round j loop round 2 (P2): both plugins held a lock that
+// named their own pid, without asking when that process started, so a
+// killed installer's pid the agent's process later reused held back every
+// healthy answer of a strict or closed session for the whole session. No
+// plugin writes a lock, and a live installer's pid names no other process:
+// a lock naming the plugin's own pid is a reused pid, so the answer runs.
+func TestPerUserPluginsTreatALockNamingTheirOwnPidAsStale(t *testing.T) {
+	for _, plugin := range []struct{ name, asset, file, harness string }{
+		{"opencode", "opencode-plugin.js", "defenseclaw.js", openCodeInstallWindowHarness},
+		{"amp", "amp-plugin.ts", "defenseclaw.mts", ampInstallWindowHarness},
+	} {
+		t.Run(plugin.name, func(t *testing.T) {
+			dataDir := testenv.PrivateTempDir(t)
+			t.Setenv("DEFENSECLAW_HOME", testenv.PrivateTempDir(t))
+			token := filepath.Join(dataDir, "hooks", ".hook-"+plugin.name+".token")
+			if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rendered := writeRenderedPlugin(t, plugin.asset, plugin.file, templateData{
+				APIAddr: "127.0.0.1:1", TokenFileJS: javaScriptStringContent(token), FailMode: "open",
+				WindowsPowerShellJS: javaScriptStringContent(windowsSystemPowerShellExe()),
+			})
+			session := startNodeHarnessSession(t, plugin.harness, rendered, "valid-allow")
+			lock := filepath.Join(dataDir, ".install.lock")
+			if err := os.Mkdir(lock, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(lock, "pid"), []byte(strconv.Itoa(session.cmd.Process.Pid)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got := session.request("own pid", "call")
+			session.close()
+			if ran, _ := pluginStaleLockVerdict(t, plugin.name, got); !ran {
+				t.Fatalf("healthy allow under a lock naming the plugin's own pid = %q; want it to run", got)
+			}
+		})
 	}
 }
 

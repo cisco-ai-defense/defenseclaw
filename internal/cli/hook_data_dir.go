@@ -110,11 +110,10 @@ func hookDataDirsNow() ([]string, error) {
 	// and name it loads its config by. Holding it closes the outage of a
 	// hook whose config.yaml is the configured file under a name no path
 	// from that file leads to (a hard link, or a link in another folder).
+	// It is named even when it is not there yet (a custom DEFENSECLAW_HOME):
+	// install.sh makes it for the install, so the lock is there to find.
 	if home := outageAccountHome(); home != "" {
-		account := filepath.Join(home, config.DefaultDataDirName)
-		if info, statErr := os.Stat(account); statErr == nil && info.IsDir() {
-			add(account)
-		}
+		add(filepath.Join(home, config.DefaultDataDirName))
 	}
 	return dirs, nil
 }

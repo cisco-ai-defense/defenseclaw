@@ -2738,6 +2738,50 @@ _INSTALL_LOCK_NO_PID_SECONDS = 10 * 60
 # A process that started more than this after the lock's pid was written has
 # a reused pid (hookexec InstallLockStartSlack).
 _INSTALL_LOCK_START_SLACK_SECONDS = 60
+# The owner record install.sh writes beside pid on Linux: its boot id and
+# kernel start (hookexec InstallLockIdentityName).
+_INSTALL_LOCK_IDENTITY_NAME = "proc-start"
+
+
+def _process_identity(pid: int) -> str | None:
+    """Process pid as install.sh records its own on Linux: "<boot_id> <starttime>".
+
+    The boot id and field 22 of /proc/<pid>/stat, neither of which moves with
+    the wall clock (hookexec processIdentityOf); None elsewhere or when /proc
+    does not say.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+            boot = handle.read().strip()
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+            line = handle.read()
+    except OSError:
+        return None
+    end = line.rfind(")")
+    fields = line[end + 1 :].split()
+    if end < 0 or len(fields) < 20 or not fields[19].isdigit() or not re.fullmatch(r"[0-9a-f-]+", boot):
+        return None
+    return f"{boot} {fields[19]}"
+
+
+def _install_lock_record(path: str) -> tuple[str, str]:
+    """("absent" | "valid" | "unreadable", text) of the lock's proc-start record."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return ("absent", "")
+    except OSError:
+        return ("unreadable", "")
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 128:
+        return ("unreadable", "")
+    try:
+        with open(path, encoding="ascii", errors="replace") as handle:
+            text = handle.read(128).strip()
+    except OSError:
+        return ("unreadable", "")
+    return ("valid", text) if text else ("unreadable", "")
 
 
 def _process_start_time(pid: int) -> float | None:
@@ -2784,10 +2828,13 @@ def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, 
 
     The one rule of every per-user hook (hookexec installLockStale): "stale"
     when the lock is a folder, no interrupted-install record sits beside it
-    and its installer is gone: its pid names no process, or a process that
-    started more than a minute after the pid was written (a reused pid), or
-    it has had no pid for ten minutes. A live installer keeps its lock for as
-    long as it runs.
+    and its installer is gone: its pid names no process, or doctor's own (no
+    reader writes a lock), or another process than its proc-start record
+    names, or, without that record off Linux, a process that started more
+    than a minute after the pid was written (a reused pid), or it has had no
+    pid for ten minutes. A live installer keeps its lock for as long as it
+    runs; so does, on Linux, a pid with no proc-start record (1.0.2, 1.0.3),
+    as a start Linux counts from boot is a time only through the wall clock.
     """
     from defenseclaw.process_liveness import pid_alive
 
@@ -2830,9 +2877,20 @@ def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, 
             return ("stale", f"{lock} has had no installer pid for more than ten minutes")
         return ("held", f"{lock} was made moments ago")
     if pid == os.getpid():
-        return ("held", f"an installer (pid {pid}) holds {lock}")
+        return ("stale", f"{lock} names pid {pid}, this process; its installer is gone")
     if not pid_alive(pid):
         return ("stale", f"{lock} names installer pid {pid}, which is no longer running")
+    record_state, record = _install_lock_record(os.path.join(lock, _INSTALL_LOCK_IDENTITY_NAME))
+    if record_state != "absent":
+        current = _process_identity(pid) if record_state == "valid" else None
+        if current is not None and current != record:
+            return (
+                "stale",
+                f"{lock} names pid {pid}, another process than the installer that wrote it; its installer is gone",
+            )
+        return ("held", f"an installer (pid {pid}) holds {lock}")
+    if sys.platform.startswith("linux"):
+        return ("held", f"an installer (pid {pid}) holds {lock}")
     started = _process_start_time(pid)
     if started is not None and started > written + _INSTALL_LOCK_START_SLACK_SECONDS:
         return (

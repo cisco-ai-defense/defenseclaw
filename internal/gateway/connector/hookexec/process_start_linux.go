@@ -24,6 +24,32 @@ const linuxClockTicks = 100
 // processStartTimeKnown reports a system that names the process start.
 const processStartTimeKnown = true
 
+// processStartIsAbsolute is false: the kernel counts a process start from
+// boot, and processStartTimeOf turns it into a time with the wall clock now,
+// so a clock step after a lock was written moves it (installLockOwnerGone).
+const processStartIsAbsolute = false
+
+// processIdentityOf names process pid as install.sh records its own in an
+// install lock (InstallLockIdentityName): "<boot_id> <starttime>", the boot
+// id and field 22 of /proc/<pid>/stat. Neither moves with the wall clock;
+// false when /proc does not say.
+func processIdentityOf(pid int) (string, bool) {
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return "", false
+	}
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return "", false
+	}
+	ticks, ok := parseProcStatStartTicks(string(data))
+	id := strings.TrimSpace(string(boot))
+	if !ok || id == "" {
+		return "", false
+	}
+	return id + " " + strconv.FormatUint(ticks, 10), true
+}
+
 func processStartTime(now time.Time) (time.Time, bool) {
 	return procStatStartTime("/proc/self/stat", now)
 }

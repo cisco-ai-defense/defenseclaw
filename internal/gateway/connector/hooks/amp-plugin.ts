@@ -906,15 +906,50 @@ function processStartMs(pid: number): number | null {
 	return null
 }
 
+// processIdentity names process pid as install.sh records its own in a lock
+// on Linux (proc-start): "<boot_id> <starttime>", the boot id and field 22
+// of /proc/<pid>/stat, neither of which moves with the wall clock (hookexec
+// processIdentityOf); null elsewhere or when /proc does not say.
+function processIdentity(pid: number): string | null {
+	if (process.platform !== "linux") return null
+	try {
+		const boot = String(readFileSync("/proc/sys/kernel/random/boot_id", "utf8")).trim()
+		const stat = String(readFileSync("/proc/" + pid + "/stat", "utf8"))
+		const end = stat.lastIndexOf(")")
+		const fields = stat.slice(end + 1).trim().split(/\s+/)
+		if (end < 0 || fields.length < 20 || !/^[0-9]+$/.test(fields[19]) || !/^[0-9a-f-]+$/.test(boot)) return null
+		return boot + " " + fields[19]
+	} catch {
+		return null
+	}
+}
+
+// installLockRecord reads the lock's proc-start record: "absent", "valid"
+// (with its trimmed text), or "unreadable" (not a small regular file, empty,
+// or a read error but its absence).
+async function installLockRecord(path: string): Promise<{ state: "absent" | "valid" | "unreadable"; value: string }> {
+	try {
+		const info = await lstat(path)
+		if (!info.isFile() || info.size > 128) return { state: "unreadable", value: "" }
+		const text = String(readFileSync(path, "utf8")).trim()
+		return text ? { state: "valid", value: text } : { state: "unreadable", value: "" }
+	} catch (error) {
+		return { state: (error as { code?: unknown } | null)?.code === "ENOENT" ? "absent" : "unreadable", value: "" }
+	}
+}
+
 // installLockState is the one install-lock rule of every per-user hook
 // (hookexec installLockStale, the shell hooks, the OpenCode plugin) and of
 // `defenseclaw doctor` (_install_lock_state): "none" when dir has no
 // .install.lock and is a folder or absent; "stale" when the lock is a folder,
 // no interrupted-install record sits beside it and its installer is proven
-// gone: its pid names no process, or a process that started more than a
-// minute after the pid was written (a reused pid), or it has had no pid for
-// ten minutes; "held" for a live install (however long it runs) or an
-// uncertain one, everything else. A stale lock is no lock; `defenseclaw doctor
+// gone: its pid names no process, or this plugin's own (no plugin writes a
+// lock), or another process than its proc-start record names, or, without
+// that record off Linux, a process that started more than a minute after the
+// pid was written (a reused pid), or it has had no pid for ten minutes;
+// "held" for a live install (however long it runs), an uncertain one, and on
+// Linux a pid with no proc-start record (1.0.2, 1.0.3: a start Linux counts
+// from boot is a time only through the wall clock now). A stale lock is no lock; `defenseclaw doctor
 // --fix` or the next installer run removes it.
 async function installLockState(dir: string): Promise<"none" | "stale" | "held"> {
 	const missing = (error: unknown) => (error as { code?: unknown } | null)?.code === "ENOENT"
@@ -946,12 +981,19 @@ async function installLockState(dir: string): Promise<"none" | "stale" | "held">
 	const owner = await installLockNumber(join(lock, "pid"))
 	if (owner.state === "unreadable") return "held"
 	if (owner.state === "absent" || owner.value > 2147483647) return now - info.mtimeMs > DC_INSTALL_LOCK_NO_PID_MS ? "stale" : "held"
-	if (owner.value === process.pid) return "held"
+	// A live installer's pid names no other process: this one is reused.
+	if (owner.value === process.pid) return "stale"
 	try {
 		process.kill(owner.value, 0)
 	} catch (error) {
 		if ((error as { code?: unknown } | null)?.code === "ESRCH") return "stale"
 	}
+	const identity = await installLockRecord(join(lock, "proc-start"))
+	if (identity.state !== "absent") {
+		const current = identity.state === "valid" ? processIdentity(owner.value) : null
+		return current !== null && current !== identity.value ? "stale" : "held"
+	}
+	if (process.platform === "linux") return "held"
 	const started = processStartMs(owner.value)
 	return started !== null && started > owner.writtenMs + DC_INSTALL_LOCK_START_SLACK_MS ? "stale" : "held"
 }

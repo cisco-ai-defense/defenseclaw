@@ -484,8 +484,26 @@ chmod 700 "${DEFENSECLAW_HOME}" 2>/dev/null || true
 # it waits at a prompt, and the next run takes over a lock whose installer is
 # gone.
 LOCK_STARTED="$(date +%s)"
+process_identity() {
+    # process_identity PID: the boot id and kernel start of process PID,
+    # "<boot_id> <starttime>" (field 22 of /proc/PID/stat; hookexec
+    # processIdentityOf); fails off Linux or when /proc does not say. On
+    # Linux every lock records it (proc-start): a process start Linux counts
+    # from boot is a time only through the wall clock now, so a clock step
+    # made a live installer look like a reused pid.
+    local boot stat fields
+    boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || return 1
+    stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+    [[ "${stat}" == *")"* ]] || return 1
+    read -r -a fields <<< "${stat##*)}"
+    (( ${#fields[@]} >= 20 )) || return 1
+    [[ "${fields[19]}" =~ ^[0-9]+$ && "${boot}" =~ ^[0-9a-f-]+$ ]] || return 1
+    echo "${boot} ${fields[19]}"
+}
+LOCK_IDENTITY="$(process_identity $$ || true)"
 write_lock_owner() {
-    { echo $$ > "$1/pid" && echo "${LOCK_STARTED}" > "$1/started"; } 2>/dev/null
+    { echo $$ > "$1/pid" && echo "${LOCK_STARTED}" > "$1/started" \
+        && { [[ -z "${LOCK_IDENTITY}" ]] || echo "${LOCK_IDENTITY}" > "$1/proc-start"; }; } 2>/dev/null
 }
 lock_is_ours() {
     # lock_is_ours LOCK: LOCK still records this installer as its owner (its
@@ -511,18 +529,40 @@ release_locks() {
             rm -rf "${lock:?}"
         fi
     done
+    # A data folder this install made only to hold its lock goes when empty.
+    for lock in ${MADE_DATA_DIRS[@]+"${MADE_DATA_DIRS[@]}"}; do
+        rmdir -- "${lock:?}" 2>/dev/null || true
+    done
 }
 lock_owner_live() {
     # lock_owner_live LOCK HOLDER: the installer HOLDER that wrote LOCK/pid
-    # still runs: its pid names a process that started no later than a
-    # minute after the pid was written (a later one has a reused pid). A
-    # start ps cannot tell keeps the lock.
-    local written age
-    [[ -n "$2" ]] && kill -0 "$2" 2>/dev/null || return 1
+    # still runs: its pid names a process that is not this one, is the one
+    # LOCK/proc-start names, or, without that record off Linux, started no
+    # later than a minute after the pid was written (a later one has a reused
+    # pid). On Linux a lock without that record (1.0.2, 1.0.3) is kept while
+    # its pid names a process; so is one whose start or record cannot be read.
+    local written age recorded current
+    [[ -n "$2" && "$2" != "$$" ]] && kill -0 "$2" 2>/dev/null || return 1
+    if [[ -e "$1/proc-start" || -L "$1/proc-start" ]]; then
+        recorded="$(lock_record "$1/proc-start")" || return 0
+        current="$(process_identity "$2")" || return 0
+        [[ "${recorded}" != "${current}" ]] || return 0
+        return 1
+    fi
+    [[ ! -e /proc/self/stat && "$(uname -s 2>/dev/null)" != Linux ]] || return 0
     written="$(stat -c %Y "$1/pid" 2>/dev/null || stat -f %m "$1/pid" 2>/dev/null)" || return 0
     age="$(process_age "$2")" || return 0
     [[ "${written}${age}" =~ ^[0-9]+$ ]] || return 0
     (( $(date +%s) - age <= written + 60 ))
+}
+lock_record() {
+    # lock_record FILE: the trimmed text of a small owner record (proc-start).
+    local text=""
+    [[ -f "$1" && ! -L "$1" ]] || return 1
+    (( $(wc -c < "$1") <= 128 )) || return 1
+    read -r text < "$1" || [[ -n "${text}" ]] || return 1
+    [[ -n "${text}" ]] || return 1
+    echo "${text}"
 }
 process_age() {
     # process_age PID: how many seconds ago process PID started (ps etime,
@@ -561,6 +601,7 @@ exec > >(trap '' INT TERM; exec tee -a "${LOG}") 2>&1
 # do not open an unset outage). DATA_LOCK_DIRS are the locks
 # hold_hook_data_dir took; the EXIT trap gives back those still its own.
 DATA_LOCK_DIRS=()
+MADE_DATA_DIRS=()
 trap 'release_locks; rm -rf ${SELF_TMP:+"${SELF_TMP}"}' EXIT
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
@@ -600,8 +641,18 @@ hold_data_lock() {
     # hold_data_lock DATA: take DATA/.install.lock unless DATA is no folder,
     # is this install's home or is already held, by file identity (device
     # and inode: a link, a bind mount or another spelling is that folder).
+    # Another missing DATA holds no hooks yet, but a missing .defenseclaw in
+    # a folder that is there (the account's own beside a custom home, which
+    # every per-user hook checks) is made first, so its lock is there to
+    # find while the gateway is down; the EXIT trap removes it again when it
+    # is still empty.
     local data="$1" lock holder held
-    [[ -n "${data}" && -d "${data}" ]] || return 0
+    [[ -n "${data}" ]] || return 0
+    if [[ "${data##*/}" == .defenseclaw && ! -e "${data}" && ! -L "${data}" && -d "${data%/*}" ]] \
+        && mkdir -m 700 -- "${data}" 2>/dev/null; then
+        MADE_DATA_DIRS+=("${data}")
+    fi
+    [[ -d "${data}" ]] || return 0
     data="$(cd -P -- "${data}" 2>/dev/null && pwd -P)" || return 0
     [[ ! "${data}" -ef "${DEFENSECLAW_HOME}" ]] || return 0
     lock="${data%/}/.install.lock"

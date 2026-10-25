@@ -25,6 +25,12 @@ const (
 	// that wrote it (clock resolution, a small clock step). A process that
 	// started later has a reused pid: the installer is gone.
 	InstallLockStartSlack = time.Minute
+	// InstallLockIdentityName is the owner record install.sh writes beside
+	// pid on Linux: the installer's boot id and kernel start, "<boot_id>
+	// <starttime>" (processIdentityOf). Linux counts a process start from
+	// boot, so only that record, compared as it is, tells a reused pid from
+	// a live owner across a wall-clock step.
+	InstallLockIdentityName = "proc-start"
 )
 
 // InstallLockRecoveryRecords are the interrupted-install records install.sh
@@ -36,9 +42,13 @@ var InstallLockRecoveryRecords = []string{"previous.new", ".repair", ".rollback-
 // package, hook-outage-mode, the shell hooks, the OpenCode and Amp plugins)
 // and of `defenseclaw doctor`: a lock folder in home is no lock only when no
 // interrupted-install record sits beside it and its owner is proven gone:
-// its pid names no process, or names a process that started after the pid
-// was written (a reused pid, InstallLockStartSlack), or it has had no valid
-// pid for InstallLockNoPIDWait. A live owner holds it for as long as it
+// its pid names no process, or this reader's own process (no reader writes
+// a lock), or another process than the one its InstallLockIdentityName
+// record names, or, without that record off Linux, a process that started
+// after the pid was written (a reused pid, InstallLockStartSlack), or it has
+// had no valid pid for InstallLockNoPIDWait. On Linux a lock without that
+// record (1.0.2, 1.0.3) holds while its pid names a process: a start Linux
+// counts from boot is a time only through the wall clock now. A live owner holds it for as long as it
 // runs, with no deadline; so does an uncertain one: a pid whose process
 // start cannot be read, a pid that cannot be read, a lock that is not a
 // folder. A deadline file an earlier 1.0.4 build wrote is not read.
@@ -61,23 +71,63 @@ func installLockStale(lstat func(string) (fs.FileInfo, error), home string, info
 			return now.Sub(made) > InstallLockNoPIDWait
 		}
 		if int(pid) == os.Getpid() {
-			return false
+			// A live installer's pid names no other process, and no
+			// reader writes a lock: this pid was reused.
+			return true
 		}
-		return installLockOwnerGone(int(pid), written, now)
+		return installLockOwnerGone(lstat, filepath.Join(home, ".install.lock"), int(pid), written, now)
 	default:
 		return now.Sub(made) > InstallLockNoPIDWait
 	}
 }
 
 // installLockOwnerGone reports an installer proven gone: pid names no
-// process, or a process the system says started more than
-// InstallLockStartSlack after written, when the lock's pid was written.
-func installLockOwnerGone(pid int, written, now time.Time) bool {
+// process, or another process than the lock's identity record names, or,
+// without that record where a process start is a fixed time (not Linux), a
+// process the system says started more than InstallLockStartSlack after
+// written, when the lock's pid was written. A record that cannot be read or
+// compared holds.
+func installLockOwnerGone(lstat func(string) (fs.FileInfo, error), lock string, pid int, written, now time.Time) bool {
 	if installLockOwnerExited(pid) {
 		return true
 	}
+	switch recorded, state := installLockIdentity(lstat, filepath.Join(lock, InstallLockIdentityName)); state {
+	case lockNumberValid:
+		current, known := processIdentityOf(pid)
+		return known && current != recorded
+	case lockNumberUnreadable:
+		return false
+	}
+	if !processStartIsAbsolute {
+		return false
+	}
 	started, known := processStartTimeOf(pid, now)
 	return known && started.After(written.Add(InstallLockStartSlack))
+}
+
+// installLockIdentity reads the lock's identity record: its trimmed text and
+// whether it is absent, valid, or unreadable (not a small regular file,
+// empty, or a read error but its absence).
+func installLockIdentity(lstat func(string) (fs.FileInfo, error), path string) (string, lockNumberState) {
+	info, err := lstat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", lockNumberAbsent
+		}
+		return "", lockNumberUnreadable
+	}
+	if !info.Mode().IsRegular() || info.Size() > 128 {
+		return "", lockNumberUnreadable
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", lockNumberUnreadable
+	}
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return "", lockNumberUnreadable
+	}
+	return text, lockNumberValid
 }
 
 type lockNumberState int
