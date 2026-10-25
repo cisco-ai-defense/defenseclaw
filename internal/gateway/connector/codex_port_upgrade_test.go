@@ -186,6 +186,12 @@ func TestCodexReleasedNativeExporterUpgradeAcrossOS(t *testing.T) {
 				if err := c.Setup(context.Background(), earlier); err != nil {
 					t.Fatalf("seed earlier setup backup: %v", err)
 				}
+				// Review of 70603235: a real upgrade keeps the scoped sidecar,
+				// which names the released bearer.
+				token, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
+				if err != nil {
+					t.Fatal(err)
+				}
 				var cfg map[string]interface{}
 				data, err := os.ReadFile(configPath)
 				if err != nil {
@@ -200,7 +206,7 @@ func TestCodexReleasedNativeExporterUpgradeAcrossOS(t *testing.T) {
 						"endpoint": "http://127.0.0.1:19081/v1/" + signal,
 						"protocol": "json",
 						"headers": map[string]interface{}{
-							"authorization":        "Bearer f00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeed",
+							"authorization":        "Bearer " + token,
 							"x-defenseclaw-source": "codex",
 							"x-defenseclaw-client": "codex-otel/1.0",
 						},
@@ -223,7 +229,7 @@ func TestCodexReleasedNativeExporterUpgradeAcrossOS(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if strings.Contains(string(data), "f00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeed") || strings.Contains(string(data), "http://127.0.0.1:19081/") {
+				if strings.Contains(string(data), token) || strings.Contains(string(data), "http://127.0.0.1:19081/") {
 					t.Fatal("released native exporter or credential survived the port change")
 				}
 				cfg = nil
@@ -295,6 +301,16 @@ func TestCodexReleasedOtelUpgradePreservesOperatorBytes(t *testing.T) {
 						if owner == "product_bearer_operator_endpoint" {
 							fixture = []byte(strings.ReplaceAll(string(fixture), "http://127.0.0.1:19081", "https://collector.example.test"))
 						}
+					}
+					if owner == "product" {
+						// Review of 70603235: only a known credential proves the
+						// released exporter is the product's. A real upgrade keeps
+						// the scoped sidecar, which names the released bearer.
+						productBearer, err = EnsureOTLPPathToken(dir, OTLPScopeCodex)
+						if err != nil {
+							t.Fatal(err)
+						}
+						fixture = []byte(strings.ReplaceAll(string(fixture), "f00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeed", productBearer))
 					}
 					if goos == "windows" {
 						windowsLines := func(data []byte) []byte {

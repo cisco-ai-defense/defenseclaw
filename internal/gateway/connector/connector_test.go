@@ -5748,7 +5748,9 @@ func TestCodexExactRestoreSanitizesStaleManagedTelemetry(t *testing.T) {
 		setHookBinaryOverride(t, filepath.Join(dir, "DefenseClaw", windowsHookBinaryName))
 	}
 
-	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
+	// Review of 70603235: only a known credential proves ownership, so the
+	// install names the token this block carries (managed Setup supplies it).
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", OTLPPathToken: strings.Repeat("a", 64)}
 	otel, err := renderManagedCodexOtelBlockForTest(opts, strings.Repeat("a", 64))
 	if err != nil {
 		t.Fatalf("build stale managed Codex OTel block: %v", err)
@@ -5878,7 +5880,9 @@ func TestCodexSurgicalRestoreRejectsStaleManagedTelemetryBackup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		setHookBinaryOverride(t, filepath.Join(dir, "DefenseClaw", windowsHookBinaryName))
 	}
-	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	// Review of 70603235: only a known credential proves ownership, so the
+	// install names the token this block carries (managed Setup supplies it).
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970", OTLPPathToken: strings.Repeat("b", 64)}
 	currentOtel, err := renderManagedCodexOtelBlockForTest(opts, strings.Repeat("b", 64))
 	if err != nil {
 		t.Fatalf("build managed Codex OTel block: %v", err)
@@ -5930,6 +5934,8 @@ func TestCodexSurgicalRestorePreservesOperatorTelemetryBackup(t *testing.T) {
 		DataDir:              filepath.Join(dir, "defenseclaw"),
 		CodexOtelEnvironment: "windows",
 		APIAddr:              "127.0.0.1:18970",
+		// Review of 70603235: the install names the managed block's token.
+		OTLPPathToken: strings.Repeat("c", 64),
 	}
 	managedOtel, err := renderManagedCodexOtelBlockForTest(opts, strings.Repeat("c", 64))
 	if err != nil {
@@ -5980,7 +5986,9 @@ func TestCodexSurgicalRestorePreservesOperatorTelemetryBackup(t *testing.T) {
 }
 
 func TestCodexSurgicalRestorePreservesEditedTelemetryEnvironment(t *testing.T) {
-	opts := SetupOpts{CodexOtelEnvironment: "windows", APIAddr: "127.0.0.1:18970"}
+	// Review of 70603235: only a known credential proves ownership, so the
+	// install names the token this block carries (managed Setup supplies it).
+	opts := SetupOpts{CodexOtelEnvironment: "windows", APIAddr: "127.0.0.1:18970", OTLPPathToken: strings.Repeat("d", 64)}
 	managedOtel, err := renderManagedCodexOtelBlockForTest(opts, strings.Repeat("d", 64))
 	if err != nil {
 		t.Fatalf("build managed Codex OTel block: %v", err)
@@ -6213,7 +6221,9 @@ func TestRestoreCodexOtelEntriesRemovesManagedExporterAfterGatewayPortDrift(t *t
 	// Native acceptance changes gateway.api_port before uninstall. Exercise
 	// the surgical restore directly: the old scoped exporter is still owned,
 	// while current operator fields and displaced original fields survive.
-	restoreCodexOtelEntries(cfg, backup, SetupOpts{APIAddr: "127.0.0.1:43189"})
+	// The scoped route carries the token the install still names (review of
+	// 70603235: only a known credential proves ownership).
+	restoreCodexOtelEntries(cfg, backup, SetupOpts{APIAddr: "127.0.0.1:43189", OTLPPathToken: strings.Repeat("d", 64)})
 	restored, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -6267,14 +6277,15 @@ func TestRestoreCodexOtelEntriesReplacesProductExporterWithOperatorOriginal(t *t
 	}
 
 	// A backup contaminated by an earlier release holds that release's
-	// exporter: a token-shaped bearer with the product markers. The shape
-	// alone would be an operator's own bearer (review of feb972ad).
+	// exporter, with the product credential the install still names; it is
+	// never restored. The token shape with markers but no known credential
+	// is the operator's (review of 70603235).
 	contaminatedOriginal, err := json.Marshal(map[string]interface{}{
 		"exporter": map[string]interface{}{
 			"otlp-http": map[string]interface{}{
 				"endpoint": "http://127.0.0.1:43189/v1/logs",
 				"headers": map[string]interface{}{
-					"authorization":        "Bearer " + strings.Repeat("5", 64),
+					"authorization":        "Bearer synthetic-product-token",
 					"x-defenseclaw-source": "codex",
 				},
 			},
@@ -6337,6 +6348,18 @@ endpoint = "https://operator.example.test/v1/metrics"
 x-defenseclaw-client = "codex-otel/1.0"
 `
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Review of 70603235: the scoped sidecar names the bearer; only a known
+	// credential proves ownership.
+	tokenPath, pathErr := OTLPPathTokenFilePath(dir, OTLPScopeCodex)
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("5ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	previous := CodexConfigPathOverride
@@ -6571,7 +6594,7 @@ func TestRestoreOwnedCodexConfigFromTOMLRejectsDriftedMarkerResidueInLegacyOrigi
 				"endpoint": fmt.Sprintf("https://otel.example.test/v1/signal-%d", index),
 				"protocol": "json",
 				"headers": map[string]interface{}{
-					"authorization":        "Bearer " + strings.Repeat("7", 64),
+					"authorization":        "Bearer " + opts.OTLPPathToken, // the credential the install names (review of 70603235)
 					"x-defenseclaw-source": "obsolete-marker-value",
 					"x-defenseclaw-client": "obsolete-client-value",
 				},
@@ -6612,7 +6635,7 @@ func TestRestoreOwnedCodexConfigFromTOMLRejectsDriftedMarkerResidueInLegacyOrigi
 		}
 	}
 	if strings.Contains(strings.ToLower(string(restored.Data)), "defenseclaw") ||
-		strings.Contains(string(restored.Data), strings.Repeat("7", 64)) {
+		strings.Contains(string(restored.Data), opts.OTLPPathToken) {
 		t.Fatalf("restore retained contaminated telemetry metadata: %s", restored.Data)
 	}
 }
@@ -12224,7 +12247,8 @@ func TestAuthenticateHookBridgeRequest_MasterKeyOnlyWarnsOnLoopbackBypass(t *tes
 }
 
 func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T) {
-	opts := SetupOpts{APIAddr: "127.0.0.1:18970"}
+	// Review of 70603235: the install names the released bearer.
+	opts := SetupOpts{APIAddr: "127.0.0.1:18970", OTLPPathToken: strings.Repeat("e", 64)}
 	legacy := map[string]interface{}{
 		"log_user_prompt": false,
 		"exporter": map[string]interface{}{
@@ -12250,7 +12274,7 @@ func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T)
 		current := map[string]interface{}{
 			"metrics_exporter": map[string]interface{}{
 				"otlp-http": map[string]interface{}{
-					"endpoint": "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/" + signal,
+					"endpoint": "http://127.0.0.1:18970/otlp/codex/" + opts.OTLPPathToken + "/v1/" + signal,
 					"protocol": "json",
 				},
 			},
@@ -12262,7 +12286,7 @@ func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T)
 	loopbackAlias := map[string]interface{}{
 		"trace_exporter": map[string]interface{}{
 			"otlp-http": map[string]interface{}{
-				"endpoint": "http://localhost:18970/otlp/codex/" + strings.Repeat("b", 64) + "/v1/traces",
+				"endpoint": "http://localhost:18970/otlp/codex/" + opts.OTLPPathToken + "/v1/traces",
 			},
 		},
 	}
@@ -12272,7 +12296,7 @@ func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T)
 	portDrift := map[string]interface{}{
 		"exporter": map[string]interface{}{
 			"otlp-http": map[string]interface{}{
-				"endpoint": "http://127.0.0.1:43189/otlp/codex/" + strings.Repeat("c", 64) + "/v1/logs",
+				"endpoint": "http://127.0.0.1:43189/otlp/codex/" + opts.OTLPPathToken + "/v1/logs",
 			},
 		},
 	}
@@ -12282,10 +12306,10 @@ func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T)
 	// The credential decides, on any host, port, query or path; marker
 	// headers and DefenseClaw-like paths without one are the operator's.
 	for name, endpoint := range map[string]string{
-		"remote host": "http://collector.example/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
-		"query":       "http://127.0.0.1:18970/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs?x=1",
-		"other scope": "http://127.0.0.1:18970/otlp/claudecode/" + strings.Repeat("a", 64) + "/v1/logs",
-		"no port":     "http://localhost/otlp/codex/" + strings.Repeat("a", 64) + "/v1/logs",
+		"remote host": "http://collector.example/otlp/codex/" + opts.OTLPPathToken + "/v1/logs",
+		"query":       "http://127.0.0.1:18970/otlp/codex/" + opts.OTLPPathToken + "/v1/logs?x=1",
+		"other scope": "http://127.0.0.1:18970/otlp/claudecode/" + opts.OTLPPathToken + "/v1/logs",
+		"no port":     "http://localhost/otlp/codex/" + opts.OTLPPathToken + "/v1/logs",
 	} {
 		candidate := map[string]interface{}{"exporter": map[string]interface{}{"otlp-http": map[string]interface{}{"endpoint": endpoint}}}
 		if !codexOtelBlockLooksManaged(candidate, opts) {

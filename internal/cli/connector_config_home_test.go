@@ -19,8 +19,12 @@ import (
 )
 
 // ownedCodexOTLPFixture is a released Codex exporter: the product markers and
-// a bearer of the product token shape. Ownership is decided by the credential,
-// so markers alone would be an operator collector.
+// the scoped bearer. Ownership is decided by a credential the install can
+// name, so the test writes that bearer to the scoped sidecar
+// (ownedCodexOTLPToken); markers or the token shape alone would be an
+// operator collector.
+const ownedCodexOTLPToken = "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+
 const ownedCodexOTLPFixture = `[otel.exporter.otlp-http]
 endpoint = "http://127.0.0.1:18970/v1/logs"
 
@@ -291,6 +295,12 @@ func TestConnectorVerifyUsesExplicitConfigHomeWithoutMutation(t *testing.T) {
 	}
 	t.Setenv("CODEX_HOME", ambient)
 	defer withConnectorState(t, dataDir, "codex")()
+	if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "hooks", ".otlp-codex.token"), []byte(ownedCodexOTLPToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	stdout, stderr, exitCode := runConnectorCmd(
 		t,
