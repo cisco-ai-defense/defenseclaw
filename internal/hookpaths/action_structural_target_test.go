@@ -171,6 +171,25 @@ func TestR104StructuralLiteralTildeAndKeyComponent(t *testing.T) {
 		`tee '~/.ssh/authorized_keys' < payload`,
 		`ln -s '~/.ssh/authorized_keys' link`,
 		`dd if=payload of='~/.ssh/authorized_keys'`,
+		// Loop round 2: transparent wrappers and Git options that only
+		// place the repository keep a quoted tilde literal.
+		`git -C docs commit -m 'Document ~/.ssh/authorized_keys'`,
+		`git -C docs --no-pager log --grep '~/.ssh/authorized_keys'`,
+		`git --no-pager -C docs show HEAD -- '~/.ssh/authorized_keys'`,
+		`git -P diff -- "~/.ssh/authorized_keys"`,
+		`git grep -n '~/.ssh/authorized_keys'`,
+		`command cp payload '~/.ssh/authorized_keys'`,
+		`command -p cp payload "~/.ssh/authorized_keys"`,
+		`command -- mv payload \~/.ssh/authorized_keys`,
+		`builtin echo '~/.ssh/authorized_keys'`,
+		`nohup cp payload '~/.ssh/authorized_keys'`,
+		`nice -n 5 cp payload '~/.ssh/authorized_keys'`,
+		`exec cp payload '~/.ssh/authorized_keys'`,
+		`time cp payload '~/.ssh/authorized_keys'`,
+		`env cp payload '~/.ssh/authorized_keys'`,
+		`env -i LC_ALL=C cp payload '~/.ssh/authorized_keys'`,
+		`LC_ALL=C grep -n '~/.ssh/authorized_keys' README.md`,
+		`command nohup git -C docs commit -m 'Document ~/.ssh/authorized_keys'`,
 	} {
 		t.Run("allow/"+command, func(t *testing.T) {
 			if got := ActionCommandDecision(command, cwd, home); got != "" {
@@ -203,6 +222,30 @@ func TestR104StructuralLiteralTildeAndKeyComponent(t *testing.T) {
 		`cp payload "$prefix/${base}_keys"`,
 		`cp payload "$prefix/$(printf %s authorized_keys)"`,
 		`cp payload "$prefix/${x:+authorized_keys}"`,
+		// Loop round 2 controls: an interpreting wrapper, option or
+		// environment value may expand the quoted tilde later.
+		`git -C docs -c core.pager='cat payload >> ~/.ssh/authorized_keys' log`,
+		`git -c alias.x='!cp payload ~/.ssh/authorized_keys' -C docs commit -m x`,
+		`git --config-env=core.pager=P -C docs log '~/.ssh/authorized_keys'`,
+		`git --exec-path=. -C docs commit -m '~/.ssh/authorized_keys'`,
+		`git -C docs grep -O'cp payload ~/.ssh/authorized_keys' x`,
+		`git grep --open-files-in-pager='cp payload ~/.ssh/authorized_keys' x`,
+		`git grep -nO'cp payload ~/.ssh/authorized_keys' x`,
+		`git -C docs push origin '~/.ssh/authorized_keys'`,
+		`GIT_PAGER='cat payload >> ~/.ssh/authorized_keys' git log`,
+		`export GIT_PAGER='cat payload >> ~/.ssh/authorized_keys'; git log`,
+		`EDITOR='cp payload ~/.ssh/authorized_keys' git -C docs commit`,
+		`env GIT_PAGER='cat payload >> ~/.ssh/authorized_keys' git log`,
+		`LESSOPEN='|cp payload ~/.ssh/authorized_keys' less README.md`,
+		`command eval 'cp payload ~/.ssh/authorized_keys'`,
+		`command sh -c 'cp payload ~/.ssh/authorized_keys'`,
+		`builtin eval 'cp payload ~/.ssh/authorized_keys'`,
+		`nohup sh -c 'cp payload ~/.ssh/authorized_keys'`,
+		`exec sh -c 'cp payload ~/.ssh/authorized_keys'`,
+		`env -S 'cp payload ~/.ssh/authorized_keys'`,
+		`command cp payload '~/.ssh/authorized_keys' > notes.txt`,
+		`nice -n 5 cp payload ~/.ssh/authorized_keys`,
+		`command cp payload ~/.ssh/authorized_keys`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {

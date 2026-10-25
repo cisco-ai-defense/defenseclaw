@@ -201,15 +201,29 @@ func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
 				return false
 			}
 		}
+		if _, ok := node.(*syntax.DeclClause); ok {
+			// export, declare, local, readonly: a value may reach a
+			// program that runs it through a shell (GIT_PAGER, LESSOPEN).
+			literal = false
+			return false
+		}
 		call, ok := node.(*syntax.CallExpr)
-		if !ok || len(call.Args) == 0 {
+		if !ok {
 			return true
 		}
-		program, known := staticProgramWord(call.Args[0], home)
+		if !actionLiteralAssignments(call.Assigns) {
+			literal = false
+			return false
+		}
+		if len(call.Args) == 0 {
+			return true
+		}
+		args, known := actionLiteralCommandWords(call.Args, home)
 		if !known {
 			literal = false
 			return false
 		}
+		program, _ := staticProgramWord(args[0], home)
 		switch programBase(program) {
 		case "echo", "printf", "grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "less", "more",
 			"wc", "ls", "dir", "stat", "file", "sort", "uniq", "cut", "tr", "diff", "cmp", "cd",
@@ -218,24 +232,148 @@ func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
 			// a directory named "~" below the cwd, not the home (round l).
 			"cp", "mv", "touch", "mkdir", "rm", "ln", "install", "tee", "dd":
 		case "git":
-			// A commit or log message is text; global -c options and config
-			// can install commands that run later, so they are not literal.
-			sub, fixed := "", false
-			if len(call.Args) > 1 {
-				sub, fixed = StaticWord(call.Args[1], home)
-			}
-			switch sub {
-			case "commit", "log", "show", "diff", "status", "grep":
-			default:
-				fixed = false
-			}
-			literal = fixed
+			literal = actionLiteralGitWords(args[1:], home)
 		default:
 			literal = false
 		}
 		return literal
 	})
 	return literal
+}
+
+// actionLiteralCommandWords strips the wrappers that pass the rest of argv
+// on as written (command, builtin, nohup, exec, nice, env with plain
+// assignments) and returns the wrapped program's words. known is false for
+// a dynamic word or an option it does not know, such as env -S or -C.
+func actionLiteralCommandWords(args []*syntax.Word, home string) (words []*syntax.Word, known bool) {
+	for wrapper := 0; wrapper < 8 && len(args) > 0; wrapper++ {
+		program, fixed := staticProgramWord(args[0], home)
+		if !fixed {
+			return nil, false
+		}
+		program = programBase(program)
+		index := 1
+		switch program {
+		case "command", "builtin", "nohup", "exec", "nice", "env":
+		default:
+			return args, true
+		}
+		for index < len(args) {
+			word, fixed := StaticWord(args[index], home)
+			if !fixed {
+				return nil, false
+			}
+			if word == "--" {
+				index++
+				break
+			}
+			if program == "env" && !strings.HasPrefix(word, "-") && strings.Contains(word, "=") {
+				name, _, _ := strings.Cut(word, "=")
+				if !actionLiteralEnvironmentName(name) {
+					return nil, false
+				}
+				index++
+				continue
+			}
+			if !strings.HasPrefix(word, "-") {
+				break
+			}
+			switch {
+			case program == "command" && word == "-p",
+				program == "exec" && (word == "-c" || word == "-l"),
+				program == "env" && (word == "-i" || word == "--ignore-environment"):
+				index++
+			case program == "nice" && index == 1 && (word == "-n" || word == "--adjustment"):
+				if index+1 >= len(args) {
+					return nil, false
+				}
+				value, fixed := StaticWord(args[index+1], home)
+				if !fixed || !literalInteger(value) {
+					return nil, false
+				}
+				index += 2
+			case program == "nice" && index == 1 && strings.HasPrefix(word, "--adjustment=") &&
+				literalInteger(strings.TrimPrefix(word, "--adjustment=")):
+				index++
+			case program == "nice" && index == 1 && strings.HasPrefix(word, "-n") && literalInteger(word[2:]):
+				index++
+			default:
+				return nil, false
+			}
+		}
+		if index >= len(args) {
+			return nil, false
+		}
+		args = args[index:]
+	}
+	return nil, false
+}
+
+// actionLiteralAssignments reports whether every assignment of a command
+// sets only a name no listed program hands to a shell. GIT_PAGER, PAGER,
+// EDITOR, LESSOPEN and the like run their value, so they are not literal.
+func actionLiteralAssignments(assigns []*syntax.Assign) bool {
+	for _, assign := range assigns {
+		if assign == nil || assign.Name == nil || assign.Append || assign.Naked || assign.Index != nil ||
+			assign.Array != nil || !actionLiteralEnvironmentName(assign.Name.Value) {
+			return false
+		}
+	}
+	return true
+}
+
+// A lower-case name is a shell variable by convention; the programs above
+// read only upper-case environment names, and of those only the locale and
+// terminal ones are known not to run their value.
+func actionLiteralEnvironmentName(name string) bool {
+	if name != "" && strings.ToLower(name) == name {
+		return true
+	}
+	switch name {
+	case "LANG", "LANGUAGE", "TZ", "NO_COLOR", "TERM", "COLUMNS", "LINES":
+		return true
+	}
+	return strings.HasPrefix(name, "LC_") && len(name) > len("LC_")
+}
+
+// actionLiteralGitWords reports whether a git command only reads or records
+// its message text. Global options that only move or scope the repository
+// are skipped; -c, --config-env, --exec-path and similar can install a
+// command that runs later, and grep -O runs its value through a shell.
+func actionLiteralGitWords(words []*syntax.Word, home string) bool {
+	for len(words) > 0 {
+		option, fixed := StaticWord(words[0], home)
+		if !fixed {
+			return false
+		}
+		switch option {
+		case "-C":
+			if len(words) < 2 {
+				return false
+			}
+			words = words[2:]
+			continue
+		case "--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs", "--glob-pathspecs",
+			"--noglob-pathspecs", "--icase-pathspecs", "--no-replace-objects":
+			words = words[1:]
+			continue
+		}
+		switch option {
+		case "commit", "log", "show", "diff", "status":
+			return true
+		case "grep":
+			for _, word := range words[1:] {
+				value, fixed := StaticWord(word, home)
+				if !fixed || strings.HasPrefix(value, "--o") ||
+					strings.HasPrefix(value, "-") && !strings.HasPrefix(value, "--") && strings.Contains(value, "O") {
+					return false
+				}
+			}
+			return true
+		}
+		return false
+	}
+	return false
 }
 
 // actionMarkLiteralTildes marks each quoted or escaped tilde that starts a
