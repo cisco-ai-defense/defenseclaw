@@ -160,31 +160,25 @@ func copilotWriteCallUnproven(name string, args json.RawMessage, cwd, home strin
 
 // The managed Unix gateway may not traverse an enrolled user's private home.
 // Its native hook can resolve that user's project paths and attest the complete
-// patch. Bind that evidence to every path in the gateway's own patch parse.
+// patch. Bind that evidence to every target of the gateway's own patch parse:
+// the same parse, without the filesystem walk, that the hook ran to key the
+// evidence, so an absolute, home-form or relative directive is proven alike.
 func copilotClientProvedPatchTargets(tool string, args json.RawMessage, cwd, home string, evidence map[string]string) ([]string, bool) {
 	if !filepath.IsAbs(cwd) || evidence[hookpaths.CWDKey] != cwd ||
 		evidence[hookpaths.PatchCompleteKey] != "1" || evidence[hookpaths.TruncatedKey] != "" ||
 		evidence[hookpaths.UnprovenReasonKey] != "" {
 		return nil, false
 	}
-	facts := actionfacts.Analyze(actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home})
-	if !facts.Authoritative() {
+	targets, parsed := hookpaths.ApplyPatchLexicalTargets(tool, args, cwd, home)
+	if !parsed || len(targets) == 0 {
 		return nil, false
 	}
-	var targets []string
-	for _, target := range facts.Paths {
-		switch target.Access {
-		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
-		default:
-			continue
-		}
-		resolved, listed := evidence[target.Resolved]
-		if !listed || !filepath.IsAbs(target.Resolved) || !filepath.IsAbs(resolved) {
+	for _, target := range targets {
+		if !filepath.IsAbs(target) || !filepath.IsAbs(evidence[hookpaths.OperandPath(target, cwd)]) {
 			return nil, false
 		}
-		targets = append(targets, target.Resolved)
 	}
-	return targets, len(targets) > 0
+	return targets, true
 }
 
 func copilotKnownWriteSpelling(name string) bool {

@@ -40,6 +40,22 @@ var patchTargetDirectives = []string{
 // caller must then treat the protected file as a possible target. There is
 // no bound on the number of targets.
 func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, home string) (targets []string, ok bool) {
+	return applyPatchTargets(tool, args, command, cwd, home, true)
+}
+
+// ApplyPatchLexicalTargets lists the same targets as ApplyPatchWriteTargets
+// for an apply_patch tool call, placed in cwd and home but not resolved on
+// this host's filesystem. A managed gateway that cannot traverse a user's
+// private home binds these names to the user-side hook's resolved evidence.
+// Absolute, home-form and relative directives are all listed.
+func ApplyPatchLexicalTargets(tool string, args json.RawMessage, cwd, home string) ([]string, bool) {
+	if !isApplyPatchToolName(tool) {
+		return nil, false
+	}
+	return applyPatchTargets(tool, args, "", cwd, home, false)
+}
+
+func applyPatchTargets(tool string, args json.RawMessage, command, cwd, home string, resolve bool) (targets []string, ok bool) {
 	var fields map[string]json.RawMessage
 	if len(args) != 0 {
 		_ = json.Unmarshal(args, &fields)
@@ -74,7 +90,7 @@ func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, hom
 		}
 		found = found || envelopes > 0
 		for _, path := range paths {
-			resolved, known := patchTargetPaths(path, cwd, home)
+			resolved, known := patchTargetPaths(path, cwd, home, resolve)
 			if !known {
 				return nil, false
 			}
@@ -87,7 +103,7 @@ func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, hom
 			if json.Unmarshal(fields[key], &path) != nil || path == "" {
 				continue
 			}
-			resolved, known := patchTargetPaths(path, cwd, home)
+			resolved, known := patchTargetPaths(path, cwd, home, resolve)
 			if !known {
 				return nil, false
 			}
@@ -472,7 +488,7 @@ func invokesApplyPatch(text string) bool {
 // patchTargetPaths makes a directive path absolute. apply_patch does not
 // expand ~ or variables, but a shell or PowerShell wrapper may, so a home
 // form yields both the home path and the literal path under cwd.
-func patchTargetPaths(path, cwd, home string) ([]string, bool) {
+func patchTargetPaths(path, cwd, home string, resolve bool) ([]string, bool) {
 	if len(path) >= 2 && (path[0] == '"' || path[0] == '\'') && path[len(path)-1] == path[0] {
 		path = path[1 : len(path)-1]
 	}
@@ -501,9 +517,11 @@ func patchTargetPaths(path, cwd, home string) ([]string, bool) {
 		}
 	}
 	paths = append(paths, filepath.Clean(literal))
-	for _, candidate := range paths {
-		if _, known := ResolvePatchWriteTarget(candidate); !known {
-			return nil, false
+	if resolve {
+		for _, candidate := range paths {
+			if _, known := ResolvePatchWriteTarget(candidate); !known {
+				return nil, false
+			}
 		}
 	}
 	return paths, true
