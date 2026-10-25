@@ -150,7 +150,9 @@ func (l *lifecycle) verifyManagedHermesRegistration(ctx context.Context) error {
 		return nil
 	}
 	out, err := l.env.runGatewayCLI(ctx, "enterprise", "hooks", "readiness", "--manifest", l.env.Layout.ManifestPath, "--json")
-	if err != nil {
+	// ExecRunner returns the report together with an error when another
+	// target makes readiness exit nonzero. A launch failure has no exit code.
+	if err != nil && out.ExitCode <= 0 {
 		return fmt.Errorf("live registration check failed: %w", err)
 	}
 	manifest, err := enterprisehooks.LoadStandaloneManifest(l.env.P(l.env.Layout.ManifestPath))
