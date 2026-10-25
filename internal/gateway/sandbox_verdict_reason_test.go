@@ -78,7 +78,7 @@ func sandboxTestBinding(connectorName string) sandboxauth.Binding {
 
 func firstBuiltinRule(t *testing.T, category string) PatternRule {
 	t.Helper()
-	for _, c := range defaultRuleCategories {
+	for _, c := range defaultRuleCategories() {
 		if c.Name == category && len(c.Rules) > 0 {
 			return c.Rules[0]
 		}

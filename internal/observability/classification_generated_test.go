@@ -24,6 +24,7 @@ import (
 
 func TestGeneratedProducerGroupsAreExactPublicClassificationAuthority(t *testing.T) {
 	t.Parallel()
+	ensureGeneratedProducerClassifications()
 
 	if got, want := len(generatedProducerGroups), 253; got != want {
 		t.Fatalf("generated producer groups = %d, want %d", got, want)

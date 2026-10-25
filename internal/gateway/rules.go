@@ -128,20 +128,38 @@ type ruleCategory struct {
 	Rules []PatternRule
 }
 
-// allRuleCategories groups all rule slices for iteration. Seeded from the
-// compiled-in defaults; a rule pack can override individual categories by
-// name via ApplyRulePackOverrides without removing the others.
+// allRuleCategories groups all rule slices for iteration. On first gateway
+// use it is seeded from the compiled-in defaults. A rule pack can override
+// individual categories by name without removing the others.
 //
 // In single-connector mode this is the one active rule set (the connector's
 // pack, or the compiled-in defaults). In multi-connector mode it is the
 // fallback used by ScanAllRulesForConnector when a connector has no
 // dedicated set registered.
-var allRuleGeneration = mustCompileRulePackGeneration(defaultRuleCategories)
+var allRuleGeneration *compiledRulePackCategories
 
 // allRuleCategories remains a package-private compatibility view for the
 // existing lifecycle tests. Production publication and reads use the
 // immutable generation pointer. Both are replaced under ruleCategoriesMu.
-var allRuleCategories = allRuleGeneration.categories
+var allRuleCategories []ruleCategory
+
+// ensureDefaultRuleGeneration leaves the short-lived hook's imported gateway
+// package uncompiled. The first gateway rule read builds the same immutable
+// generation under the publication lock. An override published earlier wins.
+func ensureDefaultRuleGeneration() {
+	ruleCategoriesMu.RLock()
+	ready := allRuleGeneration != nil || allRuleCategories != nil
+	ruleCategoriesMu.RUnlock()
+	if ready {
+		return
+	}
+	ruleCategoriesMu.Lock()
+	defer ruleCategoriesMu.Unlock()
+	if allRuleGeneration == nil && allRuleCategories == nil {
+		allRuleGeneration = mustCompileRulePackGeneration(defaultRuleCategories())
+		allRuleCategories = allRuleGeneration.categories
+	}
+}
 
 // connectorRuleCategories holds a per-connector compiled rule set so each
 // connector scans against its own EffectiveRulePackDir at runtime — the same
@@ -208,7 +226,7 @@ func compileRegexSafe(pattern string) (*regexp.Regexp, error) {
 // Unknown category names (not in the compiled-in set) are appended so rule
 // packs can add new categories without modifying Go source.
 //
-// This function is idempotent: it always starts from defaultRuleCategories,
+// This function is idempotent: it always starts from defaultRuleCategories(),
 // so repeated calls (config reload, tests) converge on the same state.
 func ApplyRulePackOverrides(rp *guardrail.RulePack) error {
 	compiled, err := compileRulePackCategories(rp)
@@ -414,7 +432,7 @@ func publishRulePackOverrides(compiled *compiledRulePackCategories) {
 	allRuleCategories = compiled.categories
 	ruleCategoriesMu.Unlock()
 	fmt.Fprintf(os.Stderr, "[guardrail] rule pack merged: %d categories overridden, %d added, %d defaults retained\n",
-		compiled.overridden, compiled.added, len(defaultRuleCategories)-compiled.overridden)
+		compiled.overridden, compiled.added, len(defaultRuleCategories())-compiled.overridden)
 }
 
 // ApplyConnectorRulePackOverrides registers a connector-scoped rule set built
@@ -455,7 +473,7 @@ func publishConnectorRulePackOverrides(connector string, compiled *compiledRuleP
 	}
 	ruleCategoriesMu.Unlock()
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s rule set: %d categories overridden, %d added, %d defaults retained\n",
-		connector, compiled.overridden, compiled.added, len(defaultRuleCategories)-compiled.overridden)
+		connector, compiled.overridden, compiled.added, len(defaultRuleCategories())-compiled.overridden)
 }
 
 // publishConnectorRulePackGeneration replaces the manual connector portion of
@@ -545,13 +563,14 @@ func registeredRuleGenerationOf(g *Generation, name string) *compiledRulePackCat
 // touches package globals — so both the single-connector global path
 // (ApplyRulePackOverrides) and the per-connector store
 // (ApplyConnectorRulePackOverrides) share identical merge semantics. A nil
-// pack or one with no rule files yields a copy of defaultRuleCategories.
+// pack or one with no rule files yields a copy of defaultRuleCategories().
 func mergeRulePackCategories(
 	rp *guardrail.RulePack,
 	compiler *semantic.Compiler,
 ) (merged []ruleCategory, overridden, added int, err error) {
-	merged = make([]ruleCategory, len(defaultRuleCategories))
-	copy(merged, defaultRuleCategories)
+	defaults := defaultRuleCategories()
+	merged = make([]ruleCategory, len(defaults))
+	copy(merged, defaults)
 	if rp == nil || len(rp.RuleFiles) == 0 {
 		return merged, 0, 0, nil
 	}
@@ -933,6 +952,7 @@ func neutralizeKnownFixtureDataLiterals(text string) string {
 }
 
 func snapshotRulePackGeneration(connector string) *compiledRulePackCategories {
+	ensureDefaultRuleGeneration()
 	connector = canonicalConnectorRulePackKey(connector)
 	ruleCategoriesMu.RLock()
 	generation := allRuleGeneration

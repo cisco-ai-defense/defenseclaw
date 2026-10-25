@@ -77,7 +77,7 @@ func splitMatchLabels(body string) []string {
 }
 
 func trustedBuiltInFindingLabel(label string) bool {
-	for _, category := range defaultRuleCategories {
+	for _, category := range defaultRuleCategories() {
 		for _, rule := range category.Rules {
 			base := rule.ID + ":" + rule.Title
 			if label == base || label == base+obfuscatedFindingLabelSuffix {
@@ -517,6 +517,7 @@ func activeRulePackLabel(id, title string) bool {
 	if id == "" || title == "" {
 		return false
 	}
+	ensureDefaultRuleGeneration()
 	ruleCategoriesMu.RLock()
 	defer ruleCategoriesMu.RUnlock()
 	if allRuleGeneration != nil {
