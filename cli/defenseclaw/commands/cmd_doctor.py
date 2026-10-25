@@ -7410,6 +7410,49 @@ def _otel_local_host(host: str) -> bool:
     return address_int >> 24 == 127 or address_int == 0
 
 
+def _otel_product_host(host: str) -> bool:
+    """Mirror of the gateway's otlpProductRouteHost for the default API host.
+
+    Marker headers prove only a route spelled the way DefenseClaw writes it; a
+    retyped local host (127.1, 127.0.0.2, 0.0.0.0) is the operator's route.
+    """
+    return host.strip().rstrip(".").lower() in ("localhost", "127.0.0.1", "::1")
+
+
+def _codex_unresolved_otel_bearer(otel, product_token: str) -> str:
+    """Name a marked exporter whose bearer may be the scoped product credential.
+
+    Mirrors the gateway's codexExporterHasUnresolvedBearer: both marker headers,
+    a Bearer credential shaped like a scoped token (64 lowercase hex), no
+    readable scoped credential to compare it with, and a local route. Doctor
+    runs after the retired-port check, which names a product route first.
+    """
+    if product_token or not isinstance(otel, dict):
+        return ""
+    for key in ("exporter", "trace_exporter", "metrics_exporter"):
+        exporter = otel.get(key)
+        http = exporter.get("otlp-http") if isinstance(exporter, dict) else None
+        headers = http.get("headers") if isinstance(http, dict) else None
+        if not isinstance(headers, dict):
+            continue
+        names = {name.strip().lower() for name in headers if isinstance(name, str)}
+        if not {"x-defenseclaw-source", "x-defenseclaw-client"} <= names:
+            continue
+        # Only a kept local route can be a port DefenseClaw no longer owns.
+        try:
+            host = urllib.parse.urlsplit(str(http.get("endpoint") or "")).hostname or ""
+        except ValueError:
+            continue
+        if not _otel_local_host(host):
+            continue
+        if any(
+            re.fullmatch(r"[0-9a-f]{64}", _otel_bearer_credential(value))
+            for value in _otel_header_values(headers, "authorization")
+        ):
+            return f"otel.{key}.otlp-http.headers"
+    return ""
+
+
 def _codex_scoped_otlp_token(cfg) -> str:
     """The scoped Codex OTLP credential this install issued, or ""."""
     data_dir = str(getattr(cfg, "data_dir", "") or "")
@@ -7448,7 +7491,8 @@ def _codex_retired_otel_endpoint(otel, api_port: int, product_token: str = "") -
             _otel_bearer_credential(value) == product_token
             for value in _otel_header_values(headers, "authorization")
         )
-        if not (_codex_header_has_product_marker(headers) or product_bearer):
+        marked = _codex_header_has_product_marker(headers)
+        if not (marked or product_bearer):
             continue
         endpoint = http.get("endpoint")
         if not isinstance(endpoint, str):
@@ -7458,7 +7502,9 @@ def _codex_retired_otel_endpoint(otel, api_port: int, product_token: str = "") -
             host = parsed.hostname or ""
         except ValueError:
             continue
-        loopback = _otel_local_host(host)
+        # The scoped bearer proves a route on any local host; markers alone
+        # prove only a host spelled as DefenseClaw writes it.
+        loopback = _otel_local_host(host) if product_bearer else _otel_product_host(host)
         if not loopback or parsed.scheme != "http" or parsed.username is not None or parsed.query or parsed.fragment:
             continue
         if parsed.path not in ("/v1/logs", "/v1/traces", "/v1/metrics"):
@@ -7510,6 +7556,15 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
             "fail",
             "Codex OTel environment",
             f"config.toml {stale} still points at a retired loopback port; remove this exporter, then rerun Codex setup",
+            r=r,
+        )
+    elif unresolved := _codex_unresolved_otel_bearer(otel, _codex_scoped_otlp_token(cfg)):
+        _emit(
+            "fail",
+            "Codex OTel environment",
+            f"config.toml {unresolved} has DefenseClaw marker headers beside a bearer, and the scoped OTLP "
+            "credential is missing, so its owner cannot be told; remove this exporter, or only its "
+            "x-defenseclaw-* headers if the bearer belongs to your collector, then rerun Codex setup",
             r=r,
         )
     elif not _codex_otel_exports_to_defenseclaw(otel):

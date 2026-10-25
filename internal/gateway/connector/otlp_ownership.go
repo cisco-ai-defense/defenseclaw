@@ -5,6 +5,7 @@ package connector
 
 import (
 	"net"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,6 +43,52 @@ func otlpLocalHost(host string) bool {
 	}
 	ip, ok := otlpInetAtonIPv4(host)
 	return ok && (ip[0] == 127 || ip.Equal(net.IPv4zero.To4()))
+}
+
+// otlpProductRouteHost reports a URL host spelled the way DefenseClaw writes
+// its gateway address: localhost, 127.0.0.1, ::1 or the host of the current
+// API address. Product marker headers prove only a route the product could
+// have written. A retyped local host (127.1, 127.0.0.2, 0.0.0.0) means the
+// operator moved the route, so stale markers alone never claim it; cleanup
+// keeps that route and removes only the headers the product proves. The
+// scoped bearer is a credential, so it still proves a route on any
+// otlpLocalHost.
+func otlpProductRouteHost(host, apiAddr string) bool {
+	host = strings.TrimSpace(host)
+	switch strings.ToLower(strings.TrimSuffix(host, ".")) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	apiHost, _, err := net.SplitHostPort(strings.TrimSpace(apiAddr))
+	return err == nil && apiHost != "" && host == apiHost
+}
+
+// otlpUnresolvedProductBearer reports Authorization values beside product
+// markers that may carry DefenseClaw's scoped credential while no product
+// credential (known) can be read to compare them. Every scoped token is 64
+// lowercase hex, so a credential of another shape is the operator's. Callers
+// ask only for a route cleanup keeps on a local host (otlpEndpointIsLocal):
+// keeping the bearer there could leave the product token on a port
+// DefenseClaw no longer owns, and removing it could delete an operator
+// credential, so every writer refuses and Verify names it. A remote collector
+// was never a DefenseClaw port; its bearer stays the operator's.
+func otlpUnresolvedProductBearer(values, known []string) bool {
+	if len(known) > 0 {
+		return false
+	}
+	for _, value := range values {
+		if credential, ok := otlpBearerCredential(value); ok && otlpTokenHexRE.MatchString(credential) {
+			return true
+		}
+	}
+	return false
+}
+
+// otlpEndpointIsLocal reports an endpoint URL, of any scheme, path or query,
+// whose host stays on this machine.
+func otlpEndpointIsLocal(endpoint string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	return err == nil && otlpLocalHost(parsed.Hostname())
 }
 
 // otlpInetAtonIPv4 parses the one- to four-part numeric IPv4 forms that the C

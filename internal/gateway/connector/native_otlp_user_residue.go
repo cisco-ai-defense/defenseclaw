@@ -243,6 +243,9 @@ func codexWithoutUserNativeOTLP(raw []byte, backup codexConfigBackup, opts Setup
 		if codexExporterHasAmbiguousLegacyPort(otel[key], opts) {
 			return nil, nil, fmt.Errorf("Codex native OTLP exporter ownership is unresolved at otel.%s.otlp-http.endpoint; remove the stale exporter from config.toml before retrying", key) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
 		}
+		if codexExporterHasUnresolvedBearer(otel[key], opts) {
+			return nil, nil, codexUnresolvedBearerError("config.toml", key)
+		}
 		if codexExporterLooksManaged(otel[key], opts) || codexExporterHasManagedHeaderPair(otel[key]) || codexExporterUsesProductBearer(otel[key], opts) {
 			owned = true
 			break
@@ -383,6 +386,9 @@ func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts S
 	endpointOwned := func(key, endpoint string) bool {
 		return recorded(key, endpoint) || claudeCodeScopedLoopbackOTLPEndpoint(endpoint) ||
 			claudeCodeLoopbackRouteIsProduct(ownershipEnv, key, endpoint, backup.ManagedEnv, opts)
+	}
+	if key := claudeCodeUnresolvedHeaders(ownershipEnv, backup.ManagedEnv, opts, endpointOwned); key != "" {
+		return nil, nil, claudeCodeUnresolvedHeadersError(key)
 	}
 	// Keeping an operator endpoint also requires keeping the settings that
 	// activate that signal. Otherwise cleanup would leave a valid collector
@@ -636,19 +642,7 @@ func claudeCodeProductBearers(headers string, recordedHeaders map[string]string,
 	isProduct := func(token string) bool {
 		if !loaded {
 			loaded = true
-			for key, value := range recordedHeaders {
-				if !claudeCodeOTLPHeadersKey(key) {
-					continue
-				}
-				for _, entry := range claudeCodeAuthorizationValues(value) {
-					if credential, ok := otlpBearerCredential(entry); ok && otlpTokenHexRE.MatchString(credential) {
-						known = append(known, credential)
-					}
-				}
-			}
-			if sidecar, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeClaude); err == nil && sidecar != "" {
-				known = append(known, sidecar)
-			}
+			known = claudeCodeKnownProductTokens(recordedHeaders, opts)
 		}
 		return slices.Contains(known, token)
 	}
@@ -660,6 +654,92 @@ func claudeCodeProductBearers(headers string, recordedHeaders map[string]string,
 		other++
 	}
 	return product, other
+}
+
+// claudeCodeKnownProductTokens returns the product credentials this install
+// can prove: bearers its backup recorded under any OTLP header key and the
+// trusted scoped-token sidecar.
+func claudeCodeKnownProductTokens(recordedHeaders map[string]string, opts SetupOpts) []string {
+	var known []string
+	for key, value := range recordedHeaders {
+		if !claudeCodeOTLPHeadersKey(key) {
+			continue
+		}
+		for _, entry := range claudeCodeAuthorizationValues(value) {
+			if credential, ok := otlpBearerCredential(entry); ok && otlpTokenHexRE.MatchString(credential) {
+				known = append(known, credential)
+			}
+		}
+	}
+	if sidecar, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeClaude); err == nil && sidecar != "" {
+		known = append(known, sidecar)
+	}
+	return known
+}
+
+// claudeCodeUnresolvedHeaders names the first OTLP headers key in env whose
+// value carries a product marker beside a bearer that may be the product
+// credential while none can be read to compare (otlpUnresolvedProductBearer),
+// and that Claude Code would still send to a local endpoint cleanup keeps.
+// owned reports the endpoints cleanup removes. A signal's headers go to its
+// own endpoint or, when that is absent or removed, to the generic one; the
+// generic headers go to the generic endpoint and to every signal endpoint
+// without headers of its own.
+func claudeCodeUnresolvedHeaders(env map[string]interface{}, recordedHeaders map[string]string, opts SetupOpts, owned func(key, endpoint string) bool) string {
+	kept := func(key string) bool {
+		endpoint, _ := env[key].(string)
+		return endpoint != "" && !claudeCodeEnvValueDisablesExport(endpoint) && !owned(key, endpoint)
+	}
+	keptLocal := func(key string) bool {
+		endpoint, _ := env[key].(string)
+		return kept(key) && otlpEndpointIsLocal(endpoint)
+	}
+	const genericEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	var known []string
+	loaded := false
+	for _, key := range claudeCodeOtelEnvKeys {
+		if !claudeCodeOTLPHeadersKey(key) {
+			continue
+		}
+		headers, _ := env[key].(string)
+		if _, marked := claudeCodeWithoutDefenseClawHeaders(headers); !marked {
+			continue
+		}
+		reachesLocal := false
+		if key == "OTEL_EXPORTER_OTLP_HEADERS" {
+			reachesLocal = keptLocal(genericEndpoint)
+			for _, signal := range AllNativeOTLPSignals() {
+				upper := strings.ToUpper(string(signal))
+				if own, _ := env["OTEL_EXPORTER_OTLP_"+upper+"_HEADERS"].(string); own == "" && keptLocal("OTEL_EXPORTER_OTLP_"+upper+"_ENDPOINT") {
+					reachesLocal = true
+				}
+			}
+		} else {
+			endpointKey := strings.TrimSuffix(key, "_HEADERS") + "_ENDPOINT"
+			if kept(endpointKey) {
+				reachesLocal = keptLocal(endpointKey)
+			} else {
+				reachesLocal = keptLocal(genericEndpoint)
+			}
+		}
+		if !reachesLocal {
+			continue
+		}
+		if !loaded {
+			loaded = true
+			known = claudeCodeKnownProductTokens(recordedHeaders, opts)
+		}
+		if otlpUnresolvedProductBearer(claudeCodeAuthorizationValues(headers), known) {
+			return key
+		}
+	}
+	return ""
+}
+
+// claudeCodeUnresolvedHeadersError is the diagnostic Claude Code Setup and the
+// managed cleanup return for claudeCodeUnresolvedHeaders.
+func claudeCodeUnresolvedHeadersError(key string) error {
+	return fmt.Errorf("Claude Code settings env.%s has DefenseClaw marker headers beside an Authorization bearer, and this install's scoped OTLP credential cannot be read to tell whose bearer it is; remove that entry, or only its x-defenseclaw-* headers if the bearer belongs to your collector, then run: defenseclaw-gateway restart", key) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
 }
 
 // claudeCodeAuthorizationValues returns the decoded value of every
@@ -690,7 +770,8 @@ func claudeCodeLoopbackRouteIsProduct(env map[string]interface{}, endpointKey, e
 		return false
 	}
 	headers := claudeCodeEffectiveEndpointHeaders(env, endpointKey)
-	if _, marked := claudeCodeWithoutDefenseClawHeaders(headers); marked {
+	// A marker proves only a route the product wrote (otlpProductRouteHost).
+	if _, marked := claudeCodeWithoutDefenseClawHeaders(headers); marked && claudeCodeProductGatewayEndpoint(endpoint, opts.APIAddr) {
 		return true
 	}
 	product, other := claudeCodeProductBearers(headers, recordedHeaders, opts)

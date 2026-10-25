@@ -249,6 +249,62 @@ class TestCodexOtelAlignment(unittest.TestCase):
                 self.assertIn("otel.exporter.otlp-http.endpoint", result.checks[0]["detail"])
                 self.assertNotIn(token, result.checks[0]["detail"])
 
+    def test_marked_codex_exporter_ownership_matches_gateway(self) -> None:
+        # Stale markers alone never claim a route the operator retyped to
+        # another local host, and a marked bearer whose owner cannot be told
+        # (scoped credential missing) fails instead of passing silently.
+        payload = {
+            "runtime": {"environment": "windows"},
+            "health": {"telemetry": {"state": "running"}},
+        }
+        token = "c" * 64
+        markers = "x-defenseclaw-source = 'codex'\nx-defenseclaw-client = 'codex-otel/1.0'\n"
+        rows = (
+            ("moved_inet_aton", "http://127.1:4318/v1/logs", "", False, "ok"),
+            ("moved_unspecified", "http://0.0.0.0:4318/v1/logs", "", False, "ok"),
+            ("moved_loopback_alias", "http://127.0.0.2:4318/v1/logs", "", False, "ok"),
+            ("retired_product_host", "http://127.0.0.1:4318/v1/logs", "", False, "retired"),
+            ("unresolved_query", "http://127.0.0.1:19097/v1/logs?tenant=x", f"Bearer {token}", False, "unresolved"),
+            ("unresolved_moved_local", "http://127.1:4318/v1/logs", f"bearer {token}", False, "unresolved"),
+            ("remote_keeps_operator_route", "https://collector.example.test/v1/logs", f"Bearer {token}", False, "ok"),
+            ("resolved_query", "http://127.0.0.1:19097/v1/logs?tenant=x", f"Bearer {token}", True, "ok"),
+            ("operator_shape", "http://127.0.0.1:19097/v1/logs?tenant=x", "Bearer operator-token", False, "ok"),
+        )
+        for name, endpoint, auth, token_present, want in rows:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as home, (
+                tempfile.TemporaryDirectory()
+            ) as data_dir, patch.dict(os.environ, {"CODEX_HOME": home}, clear=False), patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(200, json.dumps(payload)),
+            ):
+                Path(data_dir, "hooks").mkdir()
+                if token_present:
+                    Path(data_dir, "hooks", ".otlp-codex.token").write_text(token + "\n", encoding="ascii")
+                header = f"authorization = '{auth}'\n" if auth else ""
+                self._write_codex_config(
+                    home,
+                    "[otel]\nenvironment = 'windows'\n"
+                    "[otel.exporter.otlp-http]\n"
+                    f"endpoint = '{endpoint}'\n"
+                    "[otel.exporter.otlp-http.headers]\n" + header + markers,
+                )
+                cfg = self._cfg()
+                cfg.data_dir = data_dir
+                result = _DoctorResult()
+                _check_codex_otel_alignment(cfg, result)
+                detail = result.checks[0]["detail"]
+                self.assertNotIn(token, detail)
+                if want == "retired":
+                    self.assertEqual(result.checks[0]["status"], "fail", result.checks)
+                    self.assertIn("retired loopback port", detail)
+                elif want == "unresolved":
+                    self.assertEqual(result.checks[0]["status"], "fail", result.checks)
+                    self.assertIn("otel.exporter.otlp-http.headers", detail)
+                    self.assertIn("owner cannot be told", detail)
+                else:
+                    self.assertNotIn("retired loopback port", detail)
+                    self.assertNotIn("owner cannot be told", detail)
+
     def test_stale_runtime_environment_fails_authenticated_status(self) -> None:
         payload = {
             "runtime": {"environment": "dev"},
