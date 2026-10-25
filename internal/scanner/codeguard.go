@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -165,9 +166,10 @@ func (s *CodeGuardScanner) Scan(ctx context.Context, target string) (*ScanResult
 		return nil, scanErr
 	}
 
+	strict := completeScanRequired(ctx)
 	var files []string
 	if info.IsDir() {
-		files, err = collectCodeFiles(target)
+		files, err = collectCodeFiles(target, strict)
 		if err != nil {
 			scanErr = fmt.Errorf("scanner: codeguard: walk %s: %w", target, err)
 			return nil, scanErr
@@ -180,6 +182,10 @@ func (s *CodeGuardScanner) Scan(ctx context.Context, target string) (*ScanResult
 	for _, f := range files {
 		findings, err := scanFileWithRules(f, rules)
 		if err != nil {
+			// An over-long line is a content limit, not an unread file.
+			if strict && !errors.Is(err, bufio.ErrTooLong) {
+				return nil, fmt.Errorf("scanner: codeguard: %w", incompleteScan(f, err))
+			}
 			continue
 		}
 		result.Findings = append(result.Findings, findings...)
@@ -201,7 +207,9 @@ func IsCodeFile(ext string) bool {
 	return codeExtensions[ext]
 }
 
-func collectCodeFiles(root string) ([]string, error) {
+// collectCodeFiles skips an unreadable directory or entry unless strict, when
+// it fails with ErrIncompleteScan.
+func collectCodeFiles(root string, strict bool) ([]string, error) {
 	// Avarice F-2952: a malicious skill or plugin tree can place a
 	// symlink with a code-extension name pointed at a readable
 	// file outside the scan root (e.g. `attacker.py -> /etc/passwd`).
@@ -214,6 +222,9 @@ func collectCodeFiles(root string) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			if strict {
+				return incompleteScan(path, err)
+			}
 			return nil
 		}
 		if d.IsDir() {
@@ -228,6 +239,9 @@ func collectCodeFiles(root string) ([]string, error) {
 		}
 		info, lerr := os.Lstat(path)
 		if lerr != nil {
+			if strict {
+				return incompleteScan(path, lerr)
+			}
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {

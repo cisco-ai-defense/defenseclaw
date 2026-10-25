@@ -120,3 +120,52 @@ func TestManagedCodeScanPrintsNoPerUserHint(t *testing.T) {
 		}
 	}
 }
+
+// An administrator's `scan code` of a skill directory it can stat but not
+// list (a root-squashed NFS home) must fail as incomplete, never print clean.
+func TestManagedCodeScanOfAnUnlistableSkillIsIncomplete(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root lists mode-000 directories; the restriction cannot be built here")
+	}
+	descriptor := filepath.Join(t.TempDir(), "managed-runtime.json")
+	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restorePath, restoreTrust := managedHostDescriptorPath, managedHostRecordTrusted
+	t.Cleanup(func() { managedHostDescriptorPath, managedHostRecordTrusted = restorePath, restoreTrust })
+	managedHostDescriptorPath = func() string { return descriptor }
+	managedHostRecordTrusted = func(string) error { return nil }
+	skill := filepath.Join(t.TempDir(), "skill")
+	if err := os.Mkdir(skill, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skill, "run.py"), []byte("os.system(cmd)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(skill, 0o100); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skill, 0o700) })
+
+	previousConfig, previousLog := cfg, auditLog
+	previousJSON, previousRaw, previousSchema := scanOutputJSON, scanNoRedact, scanPrintSchema
+	t.Cleanup(func() {
+		cfg, auditLog = previousConfig, previousLog
+		scanOutputJSON, scanNoRedact, scanPrintSchema = previousJSON, previousRaw, previousSchema
+	})
+	cfg, auditLog = nil, nil
+	for _, asJSON := range []bool{false, true} {
+		scanOutputJSON, scanNoRedact, scanPrintSchema = asJSON, false, false
+		cmd := &cobra.Command{}
+		var stdout strings.Builder
+		cmd.SetOut(&stdout)
+		var err error
+		printed := captureStdout(t, func() { err = runScanCode(cmd, []string{skill}) })
+		if !errors.Is(err, scanner.ErrIncompleteScan) || !strings.Contains(err.Error(), "code scan incomplete") {
+			t.Fatalf("json=%v: err = %v, want the incomplete-scan error", asJSON, err)
+		}
+		if out := printed + stdout.String(); out != "" {
+			t.Fatalf("json=%v: an incomplete scan printed a result:\n%s", asJSON, out)
+		}
+	}
+}
