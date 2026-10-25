@@ -59,26 +59,46 @@ const MaxReachedDirectories = 160
 type reachedInstructions struct {
 	Directories map[string]string `json:"d"`
 	Files       map[string]string `json:"f"`
+	// Plain lists the directories that are directories themselves, not a
+	// link, junction or another reparse point. A gateway that cannot read
+	// the user's files binds a directory the session created to its
+	// identity only from these (ReachedPlainDirectories).
+	Plain []string `json:"p,omitempty"`
 }
 
 // reachedEvidence is the ReachedInstructionsKey value for directories, or
-// "" when they hold more instruction files than a snapshot does.
+// "" when they hold more instruction files than a snapshot does. The
+// directory a linked one reaches is read as well, while there is room, so a
+// gateway that cannot read the user's files learns the identity of a
+// directory the session created when the session reaches it through a link.
 func reachedEvidence(directories []string) string {
 	sighting := reachedInstructions{Directories: make(map[string]string)}
 	var read []string
-	for _, directory := range directories {
+	add := func(directory string) {
 		if !filepath.IsAbs(directory) || len(directory) > MaxWriteTargetPathBytes {
-			continue
+			return
 		}
 		directory = filepath.Clean(directory)
-		if _, seen := sighting.Directories[directory]; seen {
-			continue
-		}
-		if len(read) == MaxReachedDirectories {
-			break
+		if _, seen := sighting.Directories[directory]; seen || len(read) == MaxReachedDirectories {
+			return
 		}
 		sighting.Directories[directory] = DirectoryIdentity(directory)
 		read = append(read, directory)
+		if info, err := os.Lstat(directory); err == nil && info.IsDir() &&
+			info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+			sighting.Plain = append(sighting.Plain, directory)
+		}
+	}
+	for _, directory := range directories {
+		add(directory)
+	}
+	for _, directory := range slices.Clone(read) {
+		if sighting.Directories[directory] == "" {
+			continue
+		}
+		if real, err := filepath.EvalSymlinks(directory); err == nil && filepath.IsAbs(real) {
+			add(real)
+		}
 	}
 	sighting.Files = InstructionFilesIn(read)
 	if len(read) == 0 || sighting.Files == nil {
@@ -95,35 +115,60 @@ func reachedEvidence(directories []string) string {
 // directories the client read, with their identities, and the instruction
 // files they held. Every file is in a listed directory.
 func ReachedInstructions(targets map[string]string) (directories, files map[string]string, ok bool) {
+	sighting, ok := decodeReached(targets)
+	if !ok {
+		return nil, nil, false
+	}
+	return sighting.Directories, sighting.Files, true
+}
+
+// ReachedPlainDirectories are the directories of the ReachedInstructionsKey
+// sighting that existed and were directories themselves, with their
+// identities: not a link, junction or another reparse point.
+func ReachedPlainDirectories(targets map[string]string) map[string]string {
+	sighting, ok := decodeReached(targets)
+	if !ok {
+		return nil
+	}
+	plain := make(map[string]string)
+	for _, directory := range sighting.Plain {
+		if identity := sighting.Directories[directory]; identity != "" {
+			plain[directory] = identity
+		}
+	}
+	return plain
+}
+
+func decodeReached(targets map[string]string) (reachedInstructions, bool) {
 	raw, present := targets[ReachedInstructionsKey]
 	if !present || len(raw) > maxEncodedTargets {
-		return nil, nil, false
+		return reachedInstructions{}, false
 	}
 	var sighting reachedInstructions
 	if json.Unmarshal([]byte(raw), &sighting) != nil || len(sighting.Directories) == 0 ||
 		len(sighting.Directories) > MaxReachedDirectories || sighting.Files == nil ||
-		len(sighting.Files) > maxStartupInstructionFiles {
-		return nil, nil, false
+		len(sighting.Files) > maxStartupInstructionFiles || len(sighting.Plain) > len(sighting.Directories) {
+		return reachedInstructions{}, false
 	}
 	for directory, identity := range sighting.Directories {
 		if !filepath.IsAbs(directory) || len(directory) > MaxWriteTargetPathBytes ||
 			filepath.Clean(directory) != directory || identity != "" && !validFileIdentity(identity) {
-			return nil, nil, false
+			return reachedInstructions{}, false
 		}
 	}
 	for file, identity := range sighting.Files {
 		if !filepath.IsAbs(file) || len(file) > MaxWriteTargetPathBytes ||
 			filepath.Clean(file) != file || !validFileIdentity(identity) {
-			return nil, nil, false
+			return reachedInstructions{}, false
 		}
 		if _, named := InstructionFileName(filepath.Base(file), instructionNameFold()); !named {
-			return nil, nil, false
+			return reachedInstructions{}, false
 		}
 		if _, listed := sighting.Directories[filepath.Dir(file)]; !listed {
-			return nil, nil, false
+			return reachedInstructions{}, false
 		}
 	}
-	return sighting.Directories, sighting.Files, true
+	return sighting, true
 }
 
 // DirectoryIdentity is the identity of the directory path reaches,

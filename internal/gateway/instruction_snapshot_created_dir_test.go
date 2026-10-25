@@ -143,25 +143,34 @@ func TestInstructionBenignCreatedDirectoryKeepsItsRecord(t *testing.T) {
 }
 
 // A recorded directory that was missing gets the identity it has once it
-// exists, unless another recorded directory has that identity already.
+// exists. One whose identity another recorded directory has already (moved
+// onto the missing spelling), or that is a link now (stale), loses its empty
+// record and is recorded again as the call sees it.
 func TestInstructionSnapshotBindsCreatedDirectory(t *testing.T) {
 	var cache activeAgentContextCache
 	key := activeAgentContextKey{connector: "codex", sessionID: "live"}
 	cache.beginKey(key)
-	cache.setStartupKey(key, map[string]string{"/x/AGENTS.md": "1:9"}, []string{"/x", "/new", "/moved"}, map[string]string{"/x": "1:2"})
-	if _, unbound, _ := cache.startupDirsKey(key, 1); len(unbound) != 1 || unbound[0] != "/moved" {
+	cache.setStartupKey(key, map[string]string{"/x/AGENTS.md": "1:9"}, []string{"/x", "/new", "/moved", "/linked"}, map[string]string{"/x": "1:2"})
+	if _, unbound, _ := cache.startupDirsKey(key, 1); len(unbound) != 1 || unbound[0] != "/linked" {
 		t.Fatalf("unbound directories: %v", unbound)
 	}
-	if !cache.extendStartupKey(key, map[string]string{"/link/AGENTS.md": "1:5"}, []string{"/link"},
-		map[string]string{"/link": "1:3"}, map[string]string{"/new": "1:3", "/moved": "1:2"}) {
+	if !cache.extendStartupKey(key, map[string]string{"/link/AGENTS.md": "1:5", "/linked/AGENTS.md": "1:7"},
+		[]string{"/link", "/moved", "/linked"}, map[string]string{"/link": "1:3", "/moved": "1:2", "/linked": "1:4"},
+		map[string]string{"/new": "1:3", "/moved": "1:2"}, []string{"/linked"}) {
 		t.Fatal("the created directory was not bound")
 	}
 	got := cache.snapshotKey(key)
 	if !got.startupCovers("/link") || got.startupFiles["/link/AGENTS.md"] != "" {
 		t.Fatalf("another spelling of the created directory did not keep its empty record: %+v", got)
 	}
+	if got.startupFiles["/moved/AGENTS.md"] != "1:9" {
+		t.Fatalf("a directory moved onto a missing spelling did not keep its record: %+v", got)
+	}
+	if got.startupFiles["/linked/AGENTS.md"] != "1:7" {
+		t.Fatalf("a link made at a missing spelling kept the empty record: %+v", got)
+	}
 	session, _ := cache.sessionKey(key)
-	if session.startupDirIDs["/moved"] != "" || session.startupDirIDs["/new"] != "1:3" {
+	if session.startupDirIDs["/new"] != "1:3" {
 		t.Fatalf("bound identities: %v", session.startupDirIDs)
 	}
 }

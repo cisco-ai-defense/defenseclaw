@@ -623,28 +623,35 @@ func (cache *activeAgentContextCache) setStartupKey(key activeAgentContextKey, f
 	cache.sessions[key] = session
 }
 
-// ensureStartupKey pins the first inspect call's snapshot without replacing a
-// concurrent call's snapshot or treating an evicted, unknown session as new.
-func (cache *activeAgentContextCache) ensureStartupKey(key activeAgentContextKey, files map[string]string, dirs []string, dirIDs map[string]string) bool {
+// firstSightingKey gives a session without a snapshot its first sighting:
+// one whose start sent no startup evidence, or the first inspect call of a
+// session without a start hook. It never replaces a concurrent call's
+// snapshot or treats an evicted, unknown session as new.
+func (cache *activeAgentContextCache) firstSightingKey(key activeAgentContextKey, files map[string]string, dirs []string, dirIDs map[string]string) bool {
 	if files == nil || len(dirs) == 0 {
 		return false
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	if _, exists := cache.sessions[key]; exists {
+	session, exists := cache.sessions[key]
+	if exists && session.startupKnown {
 		return false
 	}
-	if _, evicted := cache.evictions[key]; evicted || cache.uncertain {
-		return false
+	if !exists {
+		if _, evicted := cache.evictions[key]; evicted || cache.uncertain {
+			return false
+		}
+		if cache.sessions == nil {
+			cache.sessions = make(map[activeAgentContextKey]activeAgentContextSession)
+		}
+		cache.makeRoomLocked(key)
 	}
-	if cache.sessions == nil {
-		cache.sessions = make(map[activeAgentContextKey]activeAgentContextSession)
-	}
-	cache.makeRoomLocked(key)
-	cache.sessions[key] = activeAgentContextSession{
-		startupFiles: maps.Clone(files), startupDirs: slices.Clone(dirs),
-		startupDirIDs: maps.Clone(dirIDs), startupKnown: true, updatedAt: cache.currentTime(),
-	}
+	session.startupFiles = maps.Clone(files)
+	session.startupDirs = slices.Clone(dirs)
+	session.startupDirIDs = maps.Clone(dirIDs)
+	session.startupKnown = true
+	session.updatedAt = cache.currentTime()
+	cache.sessions[key] = session
 	return true
 }
 
@@ -658,11 +665,13 @@ func (cache *activeAgentContextCache) ensureStartupKey(key activeAgentContextKey
 // like startupFiles and startupDirs; a directory that does not fit stays out.
 //
 // bound gives recorded directories that were missing when the session first
-// reached them the identity they have now (boundInstructionDirectories). It
-// is applied first, so a directory the session created keeps its empty first
+// reached them the identity they have now (instructionSighting.bound). It is
+// applied first, so a directory the session created keeps its empty first
 // record under another spelling too. An identity a recorded directory
-// already has is not given to another one.
-func (cache *activeAgentContextCache) extendStartupKey(key activeAgentContextKey, files map[string]string, dirs []string, dirIDs, bound map[string]string) bool {
+// already has is not given to another one: that directory, like each of
+// stale (one that is a link now), was moved or linked onto the missing
+// spelling, so its empty record is dropped and dirs records it again.
+func (cache *activeAgentContextCache) extendStartupKey(key activeAgentContextKey, files map[string]string, dirs []string, dirIDs, bound map[string]string, stale []string) bool {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	session, ok := cache.sessions[key]
@@ -670,22 +679,40 @@ func (cache *activeAgentContextCache) extendStartupKey(key activeAgentContextKey
 		return false
 	}
 	changed := false
-	for _, dir := range slices.Sorted(maps.Keys(bound)) {
-		identity := bound[dir]
-		if identity == "" || session.startupDirIDs[dir] != "" || !slices.Contains(session.startupDirs, dir) ||
-			startupDirWithIdentity(session, identity) != "" {
-			continue
-		}
+	clone := func() {
 		if !changed {
 			session.startupFiles = maps.Clone(session.startupFiles)
+			if session.startupFiles == nil {
+				session.startupFiles = make(map[string]string)
+			}
 			session.startupDirs = slices.Clone(session.startupDirs)
 			session.startupDirIDs = maps.Clone(session.startupDirIDs)
 			changed = true
 		}
+	}
+	drop := slices.Clone(stale)
+	for _, dir := range slices.Sorted(maps.Keys(bound)) {
+		identity := bound[dir]
+		if identity == "" || session.startupDirIDs[dir] != "" || !slices.Contains(session.startupDirs, dir) {
+			continue
+		}
+		if startupDirWithIdentity(session, identity) != "" {
+			drop = append(drop, dir)
+			continue
+		}
+		clone()
 		if session.startupDirIDs == nil {
 			session.startupDirIDs = make(map[string]string)
 		}
 		session.startupDirIDs[dir] = identity
+	}
+	for _, dir := range drop {
+		if session.startupDirIDs[dir] != "" || !slices.Contains(session.startupDirs, dir) {
+			continue
+		}
+		clone()
+		session.startupDirs = slices.DeleteFunc(session.startupDirs, func(recorded string) bool { return recorded == dir })
+		maps.DeleteFunc(session.startupFiles, func(file, _ string) bool { return instructionParent(file) == dir })
 	}
 	for _, dir := range dirs {
 		if slices.Contains(session.startupDirs, dir) {

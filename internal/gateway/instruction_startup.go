@@ -5,6 +5,8 @@ package gateway
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"maps"
 	"os"
 	"path"
@@ -47,7 +49,7 @@ func (a *APIServer) withInstructionStartup(ctx context.Context, connector, sessi
 	}
 	view := instructionStartupView{snapshot: snapshot}
 	if key, ok := instructionStartupKey(ctx, connector, sessionID); ok {
-		if sighting, ok := instructionSightingFor(ctx); ok {
+		if sighting, ok := instructionSightingFor(ctx, key.connector); ok {
 			view.extend = func(dirs []string) activeAgentContextSnapshot {
 				a.extendInstructionStartupDirs(key, dirs, sighting)
 				return a.activeAgentContext.snapshotKey(key)
@@ -90,34 +92,66 @@ func instructionGatewayReadsFiles(ctx context.Context) bool {
 // instructionSighting takes the first sighting of the directories a call
 // reaches. read returns the instruction files of dirs and each directory's
 // file system identity, keyed by the directory; ok is false when they hold
-// more files than a snapshot does. reached, when set, are the directories
-// the hook client read for this call: they replace the call's own.
+// more files than a snapshot does or cannot be read. reached, when set, are
+// the directories the hook client read for this call: they replace the
+// call's own. plain are those of them that are directories themselves, not
+// links, with their identities (hookpaths.ReachedPlainDirectories).
 type instructionSighting struct {
-	read    func(dirs []string) (files, identities map[string]string, ok bool)
-	reached []string
+	read       func(dirs []string) (files, identities map[string]string, ok bool)
+	reached    []string
+	plain      map[string]string
+	identities map[string]string
 }
 
 // instructionSightingFor is the gateway's own sighting when it reads the
 // caller's files, and otherwise the one the managed hook client took as the
-// user before the call ran (hookpaths.ReachedInstructionsKey). Without
-// either, a directory the session had not reached keeps the call-time proof.
-func instructionSightingFor(ctx context.Context) (instructionSighting, bool) {
+// user before the call ran (hookpaths.ReachedInstructionsKey). An OpenClaw
+// or ZeptoClaw inspect call carries no client evidence: its call-time proof
+// reads this host's files alone, so its sighting does too
+// (readVisibleInstructionSighting). Without any of these, a directory the
+// session had not reached keeps the call-time proof.
+func instructionSightingFor(ctx context.Context, connector string) (instructionSighting, bool) {
 	if instructionGatewayReadsFiles(ctx) {
 		return instructionSighting{read: readInstructionSighting}, true
 	}
 	if isSandboxHookRequest(ctx) {
 		return instructionSighting{}, false
 	}
-	dirs, files, ok := hookpaths.ReachedInstructions(resolvedWritesFromContext(ctx))
+	facts := resolvedWritesFromContext(ctx)
+	dirs, files, ok := hookpaths.ReachedInstructions(facts)
 	if !ok {
+		if len(facts) == 0 && (connector == "openclaw" || connector == "zeptoclaw") &&
+			authenticatedInspectConnector(ctx) == canonicalConnectorRulePackKey(connector) {
+			return instructionSighting{read: readVisibleInstructionSighting}, true
+		}
 		return instructionSighting{}, false
 	}
 	return instructionSighting{
 		read: func([]string) (map[string]string, map[string]string, bool) {
 			return files, dirs, true
 		},
-		reached: slices.Sorted(maps.Keys(dirs)),
+		reached:    slices.Sorted(maps.Keys(dirs)),
+		plain:      hookpaths.ReachedPlainDirectories(facts),
+		identities: dirs,
 	}, true
+}
+
+// readVisibleInstructionSighting is readInstructionSighting for a gateway
+// whose caller may keep files it cannot read: it reads dirs only when this
+// host answers every lookup in them, so a file it is denied is never taken
+// for a missing one.
+func readVisibleInstructionSighting(dirs []string) (map[string]string, map[string]string, bool) {
+	for _, dir := range dirs {
+		if _, err := os.Stat(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, nil, false
+		}
+		for _, name := range hookpaths.InstructionFileNames {
+			if _, err := os.Stat(filepath.Join(dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return nil, nil, false
+			}
+		}
+	}
+	return readInstructionSighting(dirs)
 }
 
 func readInstructionSighting(dirs []string) (map[string]string, map[string]string, bool) {
@@ -223,22 +257,68 @@ func instructionStartupFiles(ctx context.Context, connector, cwd string) (map[st
 // session's call, its parents and the home folders to the snapshot before
 // the call is judged.
 func (a *APIServer) extendInstructionStartup(ctx context.Context, key activeAgentContextKey, cwd string) {
-	sighting, ok := instructionSightingFor(ctx)
+	sighting, ok := instructionSightingFor(ctx, key.connector)
 	if !ok || !filepath.IsAbs(cwd) && sighting.reached == nil {
 		return
 	}
 	a.extendInstructionStartupDirs(key, hookpaths.StartupDirectories(cwd, instructionHome(ctx)), sighting)
 }
 
+// extendInstructionStartupDirs adds the directories of dirs the session had
+// not reached to its snapshot. A session without one (its start sent no
+// startup evidence, as a 1.0.3 hook's does during an upgrade, or it has no
+// start hook) gets its first sighting now: a file that exists now stays
+// protected, and one it creates later is its own. Existence at a later call
+// never proves a file was there first.
 func (a *APIServer) extendInstructionStartupDirs(key activeAgentContextKey, dirs []string, sighting instructionSighting) {
-	known, unbound, ok := a.activeAgentContext.startupDirsKey(key, hookpaths.MaxReachedDirectories)
-	if !ok {
-		return
-	}
-	bound := boundInstructionDirectories(unbound)
 	if sighting.reached != nil {
 		dirs = sighting.reached
 	}
+	known, unbound, ok := a.activeAgentContext.startupDirsKey(key, hookpaths.MaxReachedDirectories)
+	// A recorded directory that was missing and exists now is read again
+	// with this call (extendStartupKey keeps or replaces its record).
+	bound, stale := sighting.bound(unbound)
+	if len(bound)+len(stale) > 0 {
+		known = slices.DeleteFunc(known, func(dir string) bool {
+			_, rebinding := bound[dir]
+			return rebinding || slices.Contains(stale, dir)
+		})
+		if sighting.reached == nil {
+			for _, dir := range append(slices.Sorted(maps.Keys(bound)), stale...) {
+				dirs = append(dirs, instructionHostDirectory(dir))
+			}
+		}
+	}
+	reached := newInstructionDirectories(dirs, known)
+	var retained, keyed map[string]string
+	var reachedKeys []string
+	if len(reached) > 0 {
+		if files, identities, read := sighting.read(reached); read {
+			retained, reachedKeys, keyed = instructionSnapshot(key.connector, files, reached, identities)
+		}
+	}
+	if !ok {
+		// This host's read is a first sighting only when it sees the
+		// working directory (dirs[0]); the hook client's always is.
+		if sighting.reached == nil && (len(dirs) == 0 || hookpaths.DirectoryIdentity(dirs[0]) == "") {
+			return
+		}
+		if len(reachedKeys) > 0 && a.activeAgentContext.firstSightingKey(key, retained, reachedKeys, keyed) {
+			a.saveInstructionLoads(key)
+		}
+		return
+	}
+	if len(reachedKeys) == 0 && len(bound)+len(stale) == 0 {
+		return
+	}
+	if a.activeAgentContext.extendStartupKey(key, retained, reachedKeys, keyed, bound, stale) {
+		a.saveInstructionLoads(key)
+	}
+}
+
+// newInstructionDirectories are the directories of dirs, at most
+// hookpaths.MaxReachedDirectories, whose snapshot key known does not hold.
+func newInstructionDirectories(dirs, known []string) []string {
 	var reached, keys []string
 	for _, dir := range dirs {
 		dirKey, ok := instructionDirectoryKey(dir)
@@ -251,50 +331,78 @@ func (a *APIServer) extendInstructionStartupDirs(key activeAgentContextKey, dirs
 		keys = append(keys, dirKey)
 		reached = append(reached, filepath.Clean(dir))
 	}
-	var retained, keyed map[string]string
-	var reachedKeys []string
-	if len(reached) > 0 {
-		if files, identities, ok := sighting.read(reached); ok {
-			retained, reachedKeys, keyed = instructionSnapshot(key.connector, files, reached, identities)
-		}
-	}
-	if len(reachedKeys) == 0 && len(bound) == 0 {
-		return
-	}
-	if a.activeAgentContext.extendStartupKey(key, retained, reachedKeys, keyed, bound) {
-		a.saveInstructionLoads(key)
-	}
+	return reached
 }
 
-// boundInstructionDirectories is the identity each of dirs, recorded
-// directories that were missing when the session first reached them, has now
-// on this host: a directory the session created since. A directory that is
-// a link or another reparse point itself is left out: it is another spelling
-// of a directory that did not start empty with the session. dirs that
-// cannot be read (another file system, a home the gateway cannot read) stay
-// unbound and keep their record.
-func boundInstructionDirectories(dirs []string) map[string]string {
-	bound := make(map[string]string)
-	for _, dir := range dirs {
-		host := filepath.FromSlash(dir)
-		if strings.HasSuffix(dir, ":") {
-			host += `\`
-		}
-		info, err := os.Lstat(host)
-		if err != nil || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+// bound is the identity each of unbound, recorded directories that were
+// missing when the session first reached them, has now, when it is a
+// directory itself: one the session created. stale are those that exist now
+// as a link, junction or another reparse point: another spelling of a
+// directory that did not start empty with the session. Both come from this
+// host's file system when the gateway reads the caller's files, and
+// otherwise from the hook client's sighting as the user, so a gateway that
+// cannot read the user's home (ProtectHome) binds a directory the session
+// created before it accepts another spelling of it.
+func (s instructionSighting) bound(unbound []string) (map[string]string, []string) {
+	bound, stale := boundInstructionDirectories(unbound)
+	if s.reached == nil {
+		return bound, stale
+	}
+	// The hook client's view as the user wins over this host's.
+	for _, dir := range s.reached {
+		key, ok := instructionDirectoryKey(dir)
+		if !ok || !slices.Contains(unbound, key) {
 			continue
 		}
-		if identity := hookpaths.DirectoryIdentity(host); identity != "" {
-			bound[dir] = identity
+		if identity := s.plain[dir]; identity != "" {
+			bound[key] = identity
+			stale = slices.DeleteFunc(stale, func(recorded string) bool { return recorded == key })
+		} else if s.identities[dir] != "" {
+			delete(bound, key)
+			if !slices.Contains(stale, key) {
+				stale = append(stale, key)
+			}
 		}
 	}
-	return bound
+	return bound, stale
+}
+
+// instructionHostDirectory is a snapshot directory key in this host's
+// spelling.
+func instructionHostDirectory(dir string) string {
+	host := filepath.FromSlash(dir)
+	if strings.HasSuffix(dir, ":") {
+		host += `\`
+	}
+	return host
+}
+
+// boundInstructionDirectories is instructionSighting.bound on this host's
+// file system. dirs that cannot be read (another file system, a home the
+// gateway cannot read) stay unbound and keep their record.
+func boundInstructionDirectories(dirs []string) (map[string]string, []string) {
+	bound := make(map[string]string)
+	var stale []string
+	for _, dir := range dirs {
+		host := instructionHostDirectory(dir)
+		identity := hookpaths.DirectoryIdentity(host)
+		if identity == "" {
+			continue
+		}
+		if info, err := os.Lstat(host); err == nil && info.IsDir() && info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+			bound[dir] = identity
+		} else {
+			stale = append(stale, dir)
+		}
+	}
+	return bound, stale
 }
 
 // applyInstructionInspectStartup gives an authenticated inspect call its
 // session's snapshot. OpenClaw and ZeptoClaw have no SessionStart hook:
 // their first inspect call is the boundary before the agent can run a tool,
-// so it takes the snapshot. Another connector's inspect call shares the
+// so it takes the snapshot, also on a service-account or managed gateway
+// (readVisibleInstructionSighting). Another connector's inspect call shares the
 // snapshot its hooks took for the same session.
 func (a *APIServer) applyInstructionInspectStartup(ctx context.Context, connector, sessionID, cwd string) activeAgentContextSnapshot {
 	if a == nil || authenticatedInspectConnector(ctx) != canonicalConnectorRulePackKey(connector) {
@@ -305,23 +413,14 @@ func (a *APIServer) applyInstructionInspectStartup(ctx context.Context, connecto
 		return activeAgentContextSnapshot{}
 	}
 	a.restoreInstructionLoads(key)
-	if key.connector == "openclaw" || key.connector == "zeptoclaw" {
-		if !filepath.IsAbs(cwd) {
-			cwd = ""
-			if home := instructionHome(ctx); home != "" {
-				cwd = filepath.Join(home, ".openclaw", "workspace")
-			}
-		}
-		if _, exists := a.activeAgentContext.sessionKey(key); !exists && cwd != "" && instructionGatewayReadsFiles(ctx) {
-			dirs := hookpaths.StartupDirectories(cwd, instructionHome(ctx))
-			if files, identities, ok := readInstructionSighting(dirs); ok {
-				retained, keys, keyed := instructionSnapshot(key.connector, files, dirs, identities)
-				if a.activeAgentContext.ensureStartupKey(key, retained, keys, keyed) {
-					a.saveInstructionLoads(key)
-				}
-			}
+	if (key.connector == "openclaw" || key.connector == "zeptoclaw") && !filepath.IsAbs(cwd) {
+		cwd = ""
+		if home := instructionHome(ctx); home != "" {
+			cwd = filepath.Join(home, ".openclaw", "workspace")
 		}
 	}
+	// The first inspect call of a session without a snapshot takes it
+	// (extendInstructionStartupDirs).
 	a.extendInstructionStartup(ctx, key, cwd)
 	return a.activeAgentContext.snapshotKey(key)
 }

@@ -31,10 +31,21 @@ func TestInstructionStartupSurvivesNonterminalSessionError(t *testing.T) {
 	if got := api.applyInstructionStartup(auth, "opencode", "first", "tool.execute.before", project); !got.startupKnown || len(got.startupFiles) != 0 {
 		t.Fatalf("restart lost startup absence after session.error: %+v", got)
 	}
+	// An ended session's record is gone: a later call takes a first
+	// sighting, in which the AGENTS.md that exists now is protected.
+	agents := filepath.Join(project, "AGENTS.md")
 	for _, event := range []string{"SessionEnd", "on_session_end", "on_session_finalize", "session.deleted"} {
+		if err := os.Remove(agents); err != nil {
+			t.Fatal(err)
+		}
 		api.applyInstructionStartup(auth, "opencode", event, "session.created", project)
+		if err := os.WriteFile(agents, []byte("new\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		api.applyInstructionStartup(auth, "opencode", event, event, project)
-		if got := api.applyInstructionStartup(auth, "opencode", event, "tool.execute.before", project); got.startupKnown {
+		got := api.applyInstructionStartup(auth, "opencode", event, "tool.execute.before", project)
+		if normalized, ok := activeAgentInstructionPath(agents, instructionHostFlavor()); !ok ||
+			got.startupKnown && got.startupFiles[normalized] == "" {
 			t.Fatalf("%s retained ended session snapshot: %+v", event, got)
 		}
 	}
