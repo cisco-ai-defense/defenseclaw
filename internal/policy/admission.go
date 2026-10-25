@@ -18,6 +18,7 @@ package policy
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -262,6 +263,42 @@ func legacyBalancedDefaultMCP(adm config.AdmissionConfig) bool {
 	mcp := compileActionMap(adm.MCP.Actions)
 	return len(mcp) == 2 && mcp["MEDIUM"] == actionQuarantine &&
 		mcp["LOW"] == (CompiledAction{Install: "none", File: "none", Runtime: "block"})
+}
+
+// WarnJudgeOnlyPluginHigh is the GAP-1389 pre-step before the admission
+// decision: with the built-in plugin HIGH action on the default or permissive
+// tier, a plugin whose only HIGHs are judge findings (LLM-OB-*, META-LLM-001)
+// and that has no static concrete threat (a static MEDIUM or above other than
+// SCAN-LLM-NO-SOURCE) warns at HIGH. Findings keep their severity; explicit
+// actions, scanner overrides, a blocking MEDIUM, strict and Secure Client hold.
+func WarnJudgeOnlyPluginHigh(cfg *config.Config, connector string, input *AdmissionInput) {
+	adm, scan := input.Admission, input.ScanResult
+	if cfg == nil || cfg.SecureClientIntegration() || adm == nil || scan == nil || input.TargetType != config.AdmissionTypePlugin ||
+		cfg.Admission.Plugin.Actions.High != nil || cfg.Admission.Defaults.Actions.High != nil || legacyStrictMCP(cfg.Admission) ||
+		!strings.EqualFold(scan.MaxSeverity, "HIGH") || scan.TotalFindings != len(scan.Findings) {
+		return
+	}
+	if m := effectiveAction(adm, &ScanResultInput{MaxSeverity: "MEDIUM", ScannerName: scan.ScannerName}); m.Install == "block" || m.Runtime == "block" || m.File == "quarantine" {
+		return
+	}
+	judgeHigh := false
+	for _, f := range scan.Findings {
+		rank, id := severityRank(f.Severity), f.RuleID
+		judge := (strings.HasPrefix(id, "LLM-") && id != "LLM-SCAN-ERROR") || strings.HasPrefix(id, "META-LLM-")
+		switch {
+		case rank == 4 && (strings.HasPrefix(id, "LLM-OB-") || id == "META-LLM-001"):
+			judgeHigh = true
+		case rank == 0 || rank >= 4 || (rank == 3 && !judge && id != "SCAN-LLM-NO-SOURCE"):
+			return
+		}
+	}
+	if !judgeHigh || cfg.HookPolicyTierForConnector(connector) == config.HookPolicyTierStrict {
+		return
+	}
+	warned := *adm
+	warned.Actions = maps.Clone(adm.Actions)
+	warned.Actions["HIGH"] = actionWarn
+	input.Admission = &warned
 }
 
 func compileAssetType(assetType string, own, defaults config.AdmissionAssetType, derived map[string]CompiledAction, legacyStrict bool) CompiledAdmission {
