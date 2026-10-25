@@ -534,6 +534,20 @@ func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 		CWD:           hookFirstString(payload, "cwd"),
 		ToolName:      hookFirstString(payload, "toolName"),
 	}
+	if calls, present := payload["toolCalls"]; present {
+		name, args, ok := copilotargs.NativeSingleCall(calls)
+		if !ok || req.ToolName != "" || payload["toolArgs"] != nil || payload["toolInput"] != nil {
+			req.ToolCallUnparsed = true
+			return req
+		}
+		req.ToolName = name
+		req.ToolArgsAuthoritative = true
+		req.ToolArgs = copilotargs.CLIToolArgs(name, args)
+		if len(req.ToolArgs) == 0 {
+			req.ToolCallUnparsed = true
+		}
+		return req
+	}
 	args, present := payload["toolArgs"]
 	if !present {
 		if hookFirstString(payload, "hookName") == "permissionRequest" {

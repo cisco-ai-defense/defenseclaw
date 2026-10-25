@@ -603,6 +603,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					resp = pending.NoReceipt.response()
 				}
 				a.handleHookPanic(ctx, connectorName, req.HookEventName, recovered)
+				// A later empty permission callback must not reuse an older
+				// pre-tool allow after this call failed before its decision.
+				a.copilotPermission.record(ctx, req, agentHookResponse{Action: "block"})
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
 				enrichAgentHookSpanPanic(ctx)
 				if !finalized {
@@ -713,10 +716,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// An uncertain identity refuses before any profile-specific gate can
 		// replace its missing-fact explanation.
 		resp, gated := a.refuseProfileHook(ctx, profile, connectorName, req, b, payload)
+		// A refused permission delivery still consumes any earlier candidate;
+		// it cannot be replayed as a later argumentless allow.
+		if prior, matched := a.copilotPermission.match(ctx, req, profile); !gated && matched {
+			resp, gated = prior, true
+		}
 		if !gated && req.ToolCallUnparsed &&
 			toolRoute == connector.ToolEventRouteStructuredAction {
 			a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
-			resp = unparsedStructuredHookResponse(profile, req)
+			resp = a.unparsedStructuredHookResponse(ctx, profile, req)
 			gated = true
 		}
 		sandboxGate := requireSandboxOutcome{}
@@ -860,6 +868,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// fail-mode verdict (finalizeAgentHook); the agent, a second Copilot
 		// delivery and the AID accounting all get that one.
 		resp = finalization.Response
+		if finalization.AuditPersisted && !panicked {
+			a.copilotPermission.record(persistCtx, req, resp)
+		} else {
+			a.copilotPermission.record(persistCtx, req, agentHookResponse{Action: "block"})
+		}
 		if delivery == nil && finalization.AuditFailedClosed {
 			wireResp = resp
 		}

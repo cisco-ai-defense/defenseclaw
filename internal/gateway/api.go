@@ -115,6 +115,9 @@ type APIServer struct {
 	// copilotDedupe answers the second delivery of one Copilot tool call
 	// with the first delivery's verdict.
 	copilotDedupe copilotHookDedupe
+	// copilotPermission pairs an argumentless native permission callback
+	// with one recently audited pre-tool allow from the same caller/session.
+	copilotPermission copilotPermissionJoin
 	// hermesTasks gives a Hermes hook that names only its task the session
 	// of that task.
 	hermesTasks hermesTaskSessions

@@ -515,7 +515,11 @@ if [ "$FAIL_MODE" != "open" ]; then
     esac
   fi
 fi
-{{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+{{end}}UNPARSED_WARNING=$(echo "$RESULT" | _dc_jq -r 'if (.action == "allow" or .action == "alert") and ((.rule_ids // []) | index("HOOK-TOOL-CALL-UNPARSED")) then .reason // empty else empty end' 2>/dev/null) || UNPARSED_WARNING=""
+if [ -n "$UNPARSED_WARNING" ]; then
+  printf 'defenseclaw: %s\n' "$UNPARSED_WARNING" >&2
+fi
+if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 fi
 exit 0

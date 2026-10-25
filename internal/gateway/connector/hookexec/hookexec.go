@@ -1717,6 +1717,12 @@ func (sp spec) decide(opts Options, body []byte) int {
 		return 0
 
 	case styleHookEcho:
+		if sp.connector == "copilot" && (action == "allow" || action == "alert") {
+			var ids []string
+			if json.Unmarshal(fields["rule_ids"], &ids) == nil && slices.Contains(ids, "HOOK-TOOL-CALL-UNPARSED") && reason != "" {
+				fmt.Fprintln(opts.Stderr, "defenseclaw: "+reason)
+			}
+		}
 		if output != "" {
 			fmt.Fprintln(opts.Stdout, output)
 		} else if sp.dialect == copilotVSCodeLocalSurface && (action == "block" || action == "confirm") {

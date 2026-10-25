@@ -4,8 +4,10 @@
 package gateway
 
 import (
+	"context"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -137,7 +139,19 @@ func preToolFieldsValid(payload map[string]interface{}) bool {
 	return inputs == 1
 }
 
-func unparsedStructuredHookResponse(profile connector.HookProfile, req agentHookRequest) agentHookResponse {
+func (a *APIServer) unparsedStructuredHookResponse(ctx context.Context, profile connector.HookProfile, req agentHookRequest) agentHookResponse {
+	if req.ConnectorName == "copilot" && req.HookSurface != connector.CopilotHookSurfaceVSCodeLocal &&
+		!isSandboxHookRequest(ctx) && a.agentHookMode(ctx, "copilot") == "observe" {
+		cfg := a.decisionConfig(ctx)
+		if cfg != nil && !cfg.SecureClientIntegration() &&
+			cfg.HookPolicyTierForConnector("copilot") != config.HookPolicyTierStrict {
+			reason := "DefenseClaw could not read this Copilot tool call; it was allowed in observe mode and recorded for review."
+			resp := agentHookResponseForProfile(profile, req, "allow", "alert", "WARN", reason,
+				[]string{hookToolCallUnparsedRuleID}, "observe", false, profile.Capabilities)
+			resp.RuleIDs = []string{hookToolCallUnparsedRuleID}
+			return resp
+		}
+	}
 	reason := unparsedToolCallReason(req.ConnectorName)
 	resp := agentHookResponseForProfile(profile, req, "block", "block", "HIGH", reason,
 		[]string{hookToolCallUnparsedRuleID}, "action", false, profile.Capabilities)
