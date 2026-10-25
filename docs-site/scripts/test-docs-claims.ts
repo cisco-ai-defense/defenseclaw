@@ -24,6 +24,25 @@ const hookConnectors = [
   { id: 'amp', command: 'amp', name: 'Amp' },
 ] as const;
 
+describe('Owner-decided 1.0.4 vendor and platform limits', () => {
+  it('states the Claude Code typed-shell hook limit on both pages', () => {
+    const connector = page('connectors/claudecode.mdx');
+    const limits = page('troubleshooting/known-limits.mdx');
+    for (const text of [connector, limits]) {
+      assert.match(text, /Claude Code does not emit `PreToolUse`[^.]*`!`/i);
+    }
+  });
+
+  it('limits the local Splunk bridge to x86_64 and names the remote HEC route', () => {
+    const bridge = source('cli/defenseclaw/observability/local_splunk.py');
+    assert.match(bridge, /engine_arch not in \{"amd64", "x86_64"\}/);
+    for (const text of [page('how-to/observability/send-to-splunk.mdx'), page('troubleshooting/known-limits.mdx')]) {
+      assert.match(text, /local Splunk bridge[^.]*x86_64/i);
+      assert.match(text, /`--enterprise`[^.]*HEC/i);
+    }
+  });
+});
+
 function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }

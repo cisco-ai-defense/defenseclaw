@@ -1,0 +1,12 @@
+---
+title: Known limits in 1.0.4
+description: Limits of agent hooks and the local Splunk bridge in DefenseClaw 1.0.4.
+---
+
+## Claude Code shell
+
+Claude Code does not emit `PreToolUse` for a command you type with `!` in its shell mode. DefenseClaw cannot inspect or block that command. Use an agent tool call when you need hook protection. See [Claude Code](/docs/connectors/claudecode#limits).
+
+## Local Splunk
+
+The local Splunk bridge is x86_64 only; it needs a `linux/amd64` Docker engine. On ARM64, use `--enterprise` with an existing Splunk HEC endpoint. See [Send to Splunk](/docs/how-to/observability/send-to-splunk#before-you-start).

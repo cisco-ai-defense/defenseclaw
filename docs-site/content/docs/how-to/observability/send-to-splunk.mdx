@@ -27,6 +27,8 @@ A local destination from DefenseClaw 1.0.3 or earlier has no record, so it count
 - For `--enterprise`: a HEC URL, a HEC token, and an index created ahead of time.
 - For `--o11y`: your realm (for example `us1`) and an access token.
 
+The local Splunk bridge is x86_64 only. On an ARM64 Docker engine, use `--enterprise` with an existing Splunk HEC endpoint. See [Known limits in 1.0.4](/docs/troubleshooting/known-limits#local-splunk).
+
 ## Local Splunk
 
 1. Start it.
