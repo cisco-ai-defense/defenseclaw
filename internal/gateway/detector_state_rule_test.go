@@ -12,6 +12,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 func TestR104DetectorStateWriteRequiresResolvedTarget(t *testing.T) {
@@ -89,6 +90,22 @@ func TestGAP1409ObserveSelfProtectionHooks(t *testing.T) {
 	if err := os.Symlink(state, filepath.Join(cwd, "state-alias")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Link(state, filepath.Join(cwd, "state-hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(hook, filepath.Join(cwd, "hook-hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(policy, filepath.Join(cwd, "policy-hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(cwd, "ordinary.txt")
+	if err := os.WriteFile(other, []byte("ordinary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(other, filepath.Join(cwd, "ordinary-hardlink")); err != nil {
+		t.Fatal(err)
+	}
 	rows := []struct {
 		name, command, workdir string
 		block                  bool
@@ -96,6 +113,9 @@ func TestGAP1409ObserveSelfProtectionHooks(t *testing.T) {
 		{"redirect config", "printf changed >> " + state, cwd, true},
 		{"relative config", "printf changed >> config.yaml", stateDir, true},
 		{"symlink config", "printf changed >> state-alias", cwd, true},
+		{"hardlink config", "printf changed >> state-hardlink", cwd, true},
+		{"hardlink hook", "printf changed >> hook-hardlink", cwd, true},
+		{"hardlink policy", "printf changed >> policy-hardlink", cwd, true},
 		{"move config", "mv " + state + " " + filepath.Join(cwd, "saved.yaml"), cwd, true},
 		{"delete config", "rm " + state, cwd, true},
 		{"truncate config", "truncate -s 0 " + state, cwd, true},
@@ -103,6 +123,8 @@ func TestGAP1409ObserveSelfProtectionHooks(t *testing.T) {
 		{"hook runtime", "printf changed >> " + hook, cwd, true},
 		{"policy", "printf changed >> " + policy, cwd, true},
 		{"read config", "cat " + state, cwd, false},
+		{"read config hardlink", "cat state-hardlink", cwd, false},
+		{"unrelated hardlink", "printf changed >> ordinary-hardlink", cwd, false},
 		{"DefenseClaw CLI", "defenseclaw status", cwd, false},
 		{"DefenseClaw config CLI", "defenseclaw config set guardrail.mode observe", cwd, false},
 		{"mention in text", "printf '%s\\n' '" + state + "' > report.txt", cwd, false},
@@ -164,6 +186,21 @@ func TestGAP1409ObserveSelfProtectionWindows(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	hardlink := filepath.Join(cwd, "state-hardlink.yaml")
+	if err := os.Link(state, hardlink); err != nil {
+		t.Fatal(err)
+	}
+	if mapped, same := hookpaths.ResolveActiveStateHardlinkTarget(hardlink, home); !same {
+		t.Fatalf("active state hardlink not mapped: %q", mapped)
+	}
+	ordinary := filepath.Join(cwd, "ordinary.txt")
+	if err := os.WriteFile(ordinary, []byte("ordinary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ordinaryHardlink := filepath.Join(cwd, "ordinary-hardlink.txt")
+	if err := os.Link(ordinary, ordinaryHardlink); err != nil {
+		t.Fatal(err)
+	}
 	api := instructionProtectionTestAPI(t, "codex", "observe", "HIGH")
 	ctx := withManagedHookPeer(t.Context(), managedHookPeer{Home: home})
 	for _, row := range []struct {
@@ -171,9 +208,12 @@ func TestGAP1409ObserveSelfProtectionWindows(t *testing.T) {
 		block         bool
 	}{
 		{"config write", "Set-Content -LiteralPath '" + state + "' -Value marker", true},
+		{"config hardlink write", "Set-Content -LiteralPath '" + hardlink + "' -Value marker", true},
 		{"config delete", "Remove-Item -LiteralPath '" + state + "'", true},
 		{"hook write", "Set-Content -LiteralPath '" + hook + "' -Value marker", true},
 		{"config read", "Get-Content -LiteralPath '" + state + "'", false},
+		{"config hardlink read", "Get-Content -LiteralPath '" + hardlink + "'", false},
+		{"unrelated hardlink write", "Set-Content -LiteralPath '" + ordinaryHardlink + "' -Value marker", false},
 		{"path as text", "Set-Content -LiteralPath '" + filepath.Join(cwd, "report.txt") + "' -Value '" + state + "'", false},
 		{"project lookalike", "Set-Content -LiteralPath '" + filepath.Join(cwd, ".defenseclaw", "config.yaml") + "' -Value marker", false},
 		{"DefenseClaw CLI", "defenseclaw status", false},

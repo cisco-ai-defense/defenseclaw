@@ -866,7 +866,56 @@ func actionProtectedStatePath(value, home string) bool {
 		return false
 	}
 	relative, err := filepath.Rel(activeHome, resolved)
-	return err == nil && actionProtectedStateRelative(filepath.ToSlash(relative))
+	if err == nil && actionProtectedStateRelative(filepath.ToSlash(relative)) {
+		return true
+	}
+	_, same := ResolveActiveStateHardlinkTarget(resolved, home)
+	return same
+}
+
+// ResolveActiveStateHardlinkTarget maps an existing write target back to an
+// active DefenseClaw state file with the same file identity. Ordinary aliases
+// have one link and avoid the walk; only protected state names are compared.
+func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
+	resolved, ok := ResolveWriteTarget(value)
+	if !ok {
+		return "", false
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
+		return "", false
+	}
+	activeRoot, ok := ResolveWriteTarget(filepath.Join(home, ".defenseclaw"))
+	if !ok {
+		return "", false
+	}
+	var matched string
+	_ = filepath.WalkDir(activeRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		relative, err := filepath.Rel(activeRoot, path)
+		if err != nil || relative == "." {
+			return nil
+		}
+		relative = filepath.ToSlash(relative)
+		if entry.IsDir() {
+			if !actionProtectedStateRelative(".defenseclaw/" + relative + "/child") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !actionProtectedStateRelative(".defenseclaw/" + relative) {
+			return nil
+		}
+		other, err := os.Stat(path)
+		if err == nil && other.Mode().IsRegular() && os.SameFile(info, other) {
+			matched = filepath.Join(home, ".defenseclaw", filepath.FromSlash(relative))
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return matched, matched != ""
 }
 
 // actionPosixNestedShellMention scans each static shell -c or env -S body as
@@ -1218,8 +1267,15 @@ func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) boo
 			return false
 		}
 		if stateOnly {
-			return strings.HasPrefix(resolved, root+"/") &&
-				actionProtectedStateRelative(strings.TrimPrefix(resolved, root+"/"))
+			if strings.HasPrefix(resolved, root+"/") &&
+				actionProtectedStateRelative(strings.TrimPrefix(resolved, root+"/")) {
+				return true
+			}
+			if runtime.GOOS == "windows" {
+				_, same := ResolveActiveStateHardlinkTarget(filepath.FromSlash(resolved), home)
+				return same
+			}
+			return false
 		}
 		if resolved == root+"/.ssh" {
 			return true

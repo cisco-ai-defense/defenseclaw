@@ -823,7 +823,8 @@ func withActiveStateTargetMention(
 
 // ActionFacts' executing mutation role plus the physical active target
 // authorize the observe-mode exception. The hook's resolved target map is
-// preferred; local resolution is limited to a per-user, non-sandbox call.
+// preferred; a managed call can use only an OS-proved active-state hard link
+// when that map has no entry.
 func provenStateMutationPath(facts actionfacts.Facts, request trustedActionRequest) bool {
 	projected := facts.EnforcementProjection()
 	if !projected.Authoritative() || !projected.EnforcementEligible() ||
@@ -842,11 +843,20 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 				break
 			}
 		}
-		if physical == "" && !request.ProtectedHomeHook && !request.SkipLocalFilesystemResolution {
-			physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
+		if physical == "" && !request.SkipLocalFilesystemResolution {
+			if request.ProtectedHomeHook {
+				// Only an OS-proved alias is safe to resolve here when the
+				// authenticated hook supplied no target-map entry.
+				physical, _ = hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome)
+			} else {
+				physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
+			}
 		}
 		if physical == "" {
 			continue
+		}
+		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+			physical = active
 		}
 		candidate.Resolved = physical
 		if matchesActiveDefenseClawState(projected, candidate) {
