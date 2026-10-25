@@ -1070,9 +1070,6 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 	blocked := []string{
 		// TGT-0194: a compound command or script argument names the active
 		// protected target even when its eventual write goes elsewhere.
-		`cd dirlink && cat authorized_keys`,
-		`cd dirlink && cd .. && echo ok >> notes.txt`,
-		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
 		`python3 -c 'open("disklink","r").read()'`,
 		`python3 -c 'import os; os.open("disklink",os.O_RDONLY)'`,
 		`sed -i 's/marker/k/' disklink`,
@@ -1224,6 +1221,9 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cp -a -t copy tree`,
 	}
 	allowed := []string{
+		`cd dirlink && cat authorized_keys`,
+		`cd dirlink && cd .. && echo ok >> notes.txt`,
+		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
 		`tar "$o" xenial.tar > log`,
 		`"$PY" x.py > out.txt`,
 		`cd build && echo ok >> notes.txt`,

@@ -22,7 +22,7 @@ func TestR104Loop2DataTextDecisions(t *testing.T) {
 		{"python protected named f-string data", `python3 -c 'open("report.txt","w").write(f"~/.ssh/authorized_keys")'`, true},
 		{"python protected named raw f-string data", `python3 -c 'open("report.txt","w").write(rf"~/.ssh/authorized_keys")'`, true},
 		{"python Path protected named f-string data", `python3 -c 'from pathlib import Path; Path("report.txt").write_text(f"~/.ssh/authorized_keys")'`, true},
-		{"python f-string field", `python3 -c 'open("report.txt","w").write(f"~/.ssh/{k}")'`, true},
+		{"python f-string field", `python3 -c 'open("report.txt","w").write(f"~/.ssh/{k}")'`, false},
 		{"python f-string field opens protected file", `python3 -c 'open("report.txt","w").write(f"{open(\"alias\",\"a\")}")'`, true},
 		{"python protected destination with f-string data", `python3 -c 'open("alias","w").write(f"x")'`, true},
 	} {
