@@ -844,6 +844,13 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		if !provenMutation {
 			continue
 		}
+		if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
+			candidate.Resolved = entry
+			if matchesActiveDefenseClawState(projected, candidate) {
+				return true
+			}
+			continue
+		}
 		physical := ""
 		for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
 			if value, found := request.ResolvedWriteTargets[spelling]; found {
@@ -872,6 +879,46 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		}
 	}
 	return false
+}
+
+// stateDirectoryEntryTarget places an operand that removes or replaces a
+// directory entry: a delete or move source and a move destination. rm,
+// unlink and mv act on the final name itself, so removing, moving or
+// replacing a project symlink or hard link to active state leaves the state
+// untouched. Only the parent directories are followed. ok is false, and the
+// operand is resolved as a write, when the command also writes through the
+// name (shred -u), a trailing separator makes the kernel follow a link, a
+// move lands inside a (linked) directory, a Windows delete may recurse
+// through a directory link, or the gateway cannot place the parent.
+func stateDirectoryEntryTarget(
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+	request trustedActionRequest,
+) (string, bool) {
+	moveDestination := candidate.Access == actionfacts.PathAccessWrite &&
+		hasOperation(command, actionfacts.OperationMove)
+	if candidate.Access != actionfacts.PathAccessDelete && !moveDestination ||
+		request.SkipLocalFilesystemResolution ||
+		hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend,
+			actionfacts.OperationCopy) {
+		return "", false
+	}
+	windows := candidate.Flavor == actionfacts.PathFlavorWindows
+	value := candidate.Resolved
+	if !filepath.IsAbs(value) || strings.HasSuffix(candidate.Value, "/") ||
+		strings.HasSuffix(candidate.Value, "/.") ||
+		windows && (strings.HasSuffix(candidate.Value, `\`) || strings.HasSuffix(candidate.Value, `\.`)) {
+		return "", false
+	}
+	parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(value))
+	if !ok {
+		return "", false
+	}
+	entry := filepath.Join(parent, filepath.Base(value))
+	if info, err := os.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
+		return "", false
+	}
+	return entry, true
 }
 
 func provenPartialStateRedirect(

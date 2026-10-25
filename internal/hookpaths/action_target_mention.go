@@ -13,8 +13,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 	"unicode/utf16"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -841,20 +845,29 @@ func actionProtectedStateRelative(relative string) bool {
 		return false
 	}
 	state := strings.TrimPrefix(relative, ".defenseclaw/")
-	switch state {
-	case ".env", "config.yaml", "confidence_policy.yaml", "guardrail_runtime.json",
-		"device.key", "picked_connector", "custom-providers.json", "audit.db",
-		"audit.db-wal", "audit.db-shm", "judge.db", "judge.db-wal",
-		"judge.db-shm", "judge_bodies.db", "judge_bodies.db-wal", "judge_bodies.db-shm":
+	if slices.Contains(activeStateFiles, state) {
 		return true
 	}
-	for _, prefix := range []string{"cache/", "hooks/", "policies/", "quarantine/", "receipts/", "registries/"} {
-		if strings.HasPrefix(state, prefix) && len(state) > len(prefix) {
+	for _, tree := range activeStateTrees {
+		if strings.HasPrefix(state, tree+"/") && len(state) > len(tree)+1 {
 			return true
 		}
 	}
 	return false
 }
+
+// activeStateFiles and activeStateTrees are the active security state under
+// .defenseclaw. The trees are listed in the order the identity index visits
+// them: hooks and policies first, the large scan cache last.
+var (
+	activeStateFiles = []string{
+		".env", "config.yaml", "confidence_policy.yaml", "guardrail_runtime.json",
+		"device.key", "picked_connector", "custom-providers.json", "audit.db",
+		"audit.db-wal", "audit.db-shm", "judge.db", "judge.db-wal",
+		"judge.db-shm", "judge_bodies.db", "judge_bodies.db-wal", "judge_bodies.db-shm",
+	}
+	activeStateTrees = []string{"hooks", "policies", "registries", "receipts", "quarantine", "cache"}
+)
 
 func actionProtectedStatePath(value, home string) bool {
 	resolved, ok := ResolveWriteTarget(value)
@@ -875,7 +888,8 @@ func actionProtectedStatePath(value, home string) bool {
 
 // ResolveActiveStateHardlinkTarget maps an existing write target back to an
 // active DefenseClaw state file with the same file identity. Ordinary aliases
-// have one link and avoid the walk; only protected state names are compared.
+// have one link and avoid the index; a multiply linked target is compared
+// with the bounded, shared index of the active state files.
 func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
 	resolved, ok := ResolveWriteTarget(value)
 	if !ok {
@@ -889,33 +903,106 @@ func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	var matched string
-	_ = filepath.WalkDir(activeRoot, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil
+	for _, file := range activeStateIdentities(activeRoot) {
+		if !os.SameFile(info, file.info) {
+			continue
 		}
-		relative, err := filepath.Rel(activeRoot, path)
-		if err != nil || relative == "." {
-			return nil
+		// The index can be up to activeStateIndexTTL old: confirm the name
+		// still holds this file before mapping the alias to it.
+		path := filepath.Join(activeRoot, filepath.FromSlash(file.relative))
+		if current, err := os.Stat(path); err == nil && os.SameFile(info, current) {
+			return filepath.Join(home, ".defenseclaw", filepath.FromSlash(file.relative)), true
 		}
-		relative = filepath.ToSlash(relative)
-		if entry.IsDir() {
-			if !actionProtectedStateRelative(".defenseclaw/" + relative + "/child") {
-				return fs.SkipDir
+	}
+	return "", false
+}
+
+// The identity index of one active state tree is built at most once per
+// activeStateIndexTTL and shared by every operand and request in that time,
+// so a command naming many ordinary hard links costs one bounded walk. The
+// walk stops after activeStateIndexEntries entries or activeStateIndexBudget,
+// well inside every hook deadline; a file it did not reach is not mapped (no
+// block), which never refuses ordinary work.
+var (
+	activeStateIndexEntries = 4096
+	activeStateIndexBudget  = 250 * time.Millisecond
+	activeStateIndexTTL     = 2 * time.Second
+	activeStateIndexWalks   atomic.Int64
+	activeStateIndex        struct {
+		sync.Mutex
+		byRoot map[string]activeStateIdentityIndex
+	}
+)
+
+type activeStateIdentity struct {
+	relative string
+	info     os.FileInfo
+}
+
+type activeStateIdentityIndex struct {
+	built time.Time
+	files []activeStateIdentity
+}
+
+func activeStateIdentities(activeRoot string) []activeStateIdentity {
+	activeStateIndex.Lock()
+	defer activeStateIndex.Unlock()
+	now := time.Now()
+	if index, ok := activeStateIndex.byRoot[activeRoot]; ok && now.Sub(index.built) < activeStateIndexTTL {
+		return index.files
+	}
+	for root, index := range activeStateIndex.byRoot {
+		if now.Sub(index.built) >= activeStateIndexTTL {
+			delete(activeStateIndex.byRoot, root)
+		}
+	}
+	if activeStateIndex.byRoot == nil {
+		activeStateIndex.byRoot = make(map[string]activeStateIdentityIndex)
+	}
+	files := walkActiveStateIdentities(activeRoot, now.Add(activeStateIndexBudget))
+	activeStateIndex.byRoot[activeRoot] = activeStateIdentityIndex{built: now, files: files}
+	return files
+}
+
+func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeStateIdentity {
+	activeStateIndexWalks.Add(1)
+	var files []activeStateIdentity
+	visited := 0
+	exhausted := func() bool {
+		visited++
+		return visited > activeStateIndexEntries || time.Now().After(deadline)
+	}
+	add := func(path, relative string) {
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			files = append(files, activeStateIdentity{relative: relative, info: info})
+		}
+	}
+	for _, name := range activeStateFiles {
+		if exhausted() {
+			return files
+		}
+		add(filepath.Join(activeRoot, name), name)
+	}
+	for _, tree := range activeStateTrees {
+		stopped := false
+		_ = filepath.WalkDir(filepath.Join(activeRoot, tree), func(path string, entry fs.DirEntry, walkErr error) error {
+			if exhausted() {
+				stopped = true
+				return fs.SkipAll
+			}
+			if walkErr != nil || entry.IsDir() {
+				return nil
+			}
+			if relative, err := filepath.Rel(activeRoot, path); err == nil {
+				add(path, filepath.ToSlash(relative))
 			}
 			return nil
+		})
+		if stopped {
+			break
 		}
-		if !actionProtectedStateRelative(".defenseclaw/" + relative) {
-			return nil
-		}
-		other, err := os.Stat(path)
-		if err == nil && other.Mode().IsRegular() && os.SameFile(info, other) {
-			matched = filepath.Join(home, ".defenseclaw", filepath.FromSlash(relative))
-			return fs.SkipAll
-		}
-		return nil
-	})
-	return matched, matched != ""
+	}
+	return files
 }
 
 // actionPosixNestedShellMention scans each static shell -c or env -S body as

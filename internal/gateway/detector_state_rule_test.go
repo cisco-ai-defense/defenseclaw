@@ -201,12 +201,22 @@ func TestGAP1409ObserveSelfProtectionWindows(t *testing.T) {
 	if err := os.Link(ordinary, ordinaryHardlink); err != nil {
 		t.Fatal(err)
 	}
+	symlink := filepath.Join(cwd, "state-symlink.yaml")
+	if err := os.Symlink(state, symlink); err != nil {
+		t.Fatalf("create symlink (the Windows lane runs elevated): %v", err)
+	}
 	api := instructionProtectionTestAPI(t, "codex", "observe", "HIGH")
 	ctx := withManagedHookPeer(t.Context(), managedHookPeer{Home: home})
 	for _, row := range []struct {
 		name, command string
 		block         bool
 	}{
+		// Review loop 2: removing or moving an alias leaves the state alone.
+		{"config hardlink delete", "Remove-Item -LiteralPath '" + hardlink + "'", false},
+		{"config hardlink move", "Move-Item -LiteralPath '" + hardlink + "' -Destination '" + filepath.Join(cwd, "moved.yaml") + "'", false},
+		{"config symlink delete", "Remove-Item -LiteralPath '" + symlink + "'", false},
+		{"config symlink write", "Set-Content -LiteralPath '" + symlink + "' -Value marker", true},
+		{"config move", "Move-Item -LiteralPath '" + state + "' -Destination '" + filepath.Join(cwd, "saved.yaml") + "'", true},
 		{"config write", "Set-Content -LiteralPath '" + state + "' -Value marker", true},
 		{"config hardlink write", "Set-Content -LiteralPath '" + hardlink + "' -Value marker", true},
 		{"config delete", "Remove-Item -LiteralPath '" + state + "'", true},
@@ -270,6 +280,109 @@ func TestR104ActiveStateMentionRequiresMutation(t *testing.T) {
 			}
 			if got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock; got != tc.block {
 				t.Fatalf("block=%t, want %t; findings=%v", got, tc.block, FindingStrings(findings))
+			}
+		})
+	}
+}
+
+// GAP-1409 review loop 2: rm, unlink and mv act on the directory entry they
+// name. Removing, moving or replacing a project symlink or hard link to
+// active state leaves the state untouched and stays allowed in observe mode;
+// the same names still block when the command writes through them or when a
+// linked parent directory places the entry inside the active state.
+func TestGAP1409DirectoryEntryOperandsDoNotFollowFinalLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX command matrix; native Windows cases are in TestGAP1409ObserveSelfProtectionWindows")
+	}
+	home, cwd := r104ReviewHome(t)
+	stateDir := filepath.Join(home, ".defenseclaw")
+	guardrailDir := filepath.Join(stateDir, "policies", "guardrail")
+	hooksDir := filepath.Join(stateDir, "hooks")
+	for _, dir := range []string{guardrailDir, hooksDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := filepath.Join(stateDir, "config.yaml")
+	hook := filepath.Join(hooksDir, "codex-hook.sh")
+	for _, file := range []string{state, hook, filepath.Join(guardrailDir, "rules.yaml")} {
+		if err := os.WriteFile(file, []byte("fixture\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, target := range map[string]string{
+		"state-alias": state, "hook-alias": hook,
+		"state-dir": stateDir, "guardrail-dir": guardrailDir,
+	} {
+		if err := os.Symlink(target, filepath.Join(cwd, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Link(state, filepath.Join(cwd, "state-hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "ordinary.txt"), []byte("ordinary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows := []struct {
+		name, command string
+		block         bool
+	}{
+		{"delete config symlink", "rm state-alias", false},
+		{"force delete config symlink", "rm -f -- ./state-alias", false},
+		{"unlink config symlink", "unlink state-alias", false},
+		{"delete hook symlink", "rm " + filepath.Join(cwd, "hook-alias"), false},
+		{"recursive delete linked state dir", "rm -r state-dir", false},
+		{"recursive delete linked policy dir", "rm -rf guardrail-dir", false},
+		{"move config symlink", "mv state-alias moved-alias", false},
+		{"replace config symlink", "mv ordinary.txt state-alias", false},
+		{"delete config hardlink", "rm state-hardlink", false},
+		{"move config hardlink", "mv state-hardlink moved-hardlink", false},
+		{"replace config hardlink", "mv ordinary.txt state-hardlink", false},
+		{"write through config symlink", "printf changed >> state-alias", true},
+		{"truncate through config symlink", "truncate -s 0 state-alias", true},
+		{"chmod through config symlink", "chmod 600 state-alias", true},
+		{"write through config hardlink", "printf changed >> state-hardlink", true},
+		{"delete config via linked parent", "rm state-dir/config.yaml", true},
+		{"move config via linked parent", "mv state-dir/config.yaml saved.yaml", true},
+		{"replace config via linked parent", "mv ordinary.txt state-dir/config.yaml", true},
+		{"delete hook via linked parent", "rm state-dir/hooks/codex-hook.sh", true},
+		{"move into linked policy dir", "mv ordinary.txt guardrail-dir", true},
+		{"delete through linked policy dir", "rm -rf guardrail-dir/", true},
+		{"delete active config", "rm " + state, true},
+	}
+	for _, agent := range []string{"claudecode", "codex", "hermes"} {
+		t.Run(agent, func(t *testing.T) {
+			api := instructionProtectionTestAPI(t, agent, "observe", "HIGH")
+			for _, row := range rows {
+				t.Run(row.name, func(t *testing.T) {
+					var action, reason string
+					switch agent {
+					case "claudecode":
+						resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+							HookEventName: "PreToolUse", CWD: cwd, ToolName: "Bash",
+							ToolInput: map[string]interface{}{"command": row.command},
+						})
+						action, reason = resp.Action, resp.Reason
+					case "codex":
+						resp := api.evaluateCodexHook(context.Background(), codexHookRequest{
+							HookEventName: "PreToolUse", CWD: cwd, ToolName: "exec_command",
+							ToolInput: map[string]interface{}{"cmd": row.command},
+						})
+						action, reason = resp.Action, resp.Reason
+					case "hermes":
+						profile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{})
+						payload := map[string]interface{}{
+							"hook_event_name": "pre_tool_call", "tool_name": "terminal",
+							"tool_input": map[string]interface{}{"command": row.command}, "cwd": cwd,
+						}
+						resp := api.evaluateAgentHook(context.Background(), normalizeAgentHookRequestWithProfile("hermes", payload, profile))
+						action, reason = resp.Action, resp.Reason
+					}
+					if got := action == "block"; got != row.block {
+						t.Fatalf("action=%q want block=%t reason=%q", action, row.block, reason)
+					}
+				})
 			}
 		})
 	}
