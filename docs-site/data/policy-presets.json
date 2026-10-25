@@ -42,13 +42,18 @@
           },
           "scanner_overrides": {
             "mcp": {
+              "HIGH": {
+                "runtime": "allow",
+                "file": "none",
+                "install": "none"
+              },
               "MEDIUM": {
-                "runtime": "block",
-                "file": "quarantine",
-                "install": "block"
+                "runtime": "allow",
+                "file": "none",
+                "install": "none"
               },
               "LOW": {
-                "runtime": "block",
+                "runtime": "allow",
                 "file": "none",
                 "install": "none"
               }
