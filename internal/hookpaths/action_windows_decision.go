@@ -180,6 +180,17 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 					statement[i] = value
 				}
 			}
+			// A here-string piped into apply_patch (@'...'@ | apply_patch)
+			// is the same envelope argument as apply_patch @'...'@.
+			if next, ok := actionWindowsPipedPatch(words, statement, end); ok {
+				if reason, judged := actionWindowsPatchDecision([]string{words[end+1], statement[0]}, cwd, home); judged {
+					if reason != "" {
+						return reason
+					}
+					start = next
+					continue
+				}
+			}
 			if reason := actionWindowsStatement(statement, cwd, home, depth); reason != "" {
 				return reason
 			}
@@ -187,6 +198,24 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 		start = end + 1
 	}
 	return ""
+}
+
+// actionWindowsPipedPatch reports a one-word statement piped into a bare
+// apply_patch statement, and the index after that statement.
+func actionWindowsPipedPatch(words, statement []string, end int) (int, bool) {
+	if len(statement) != 1 || end+1 >= len(words) || words[end] != "|" {
+		return 0, false
+	}
+	next := end + 2
+	if next < len(words) && words[next] != ";" && words[next] != "|" && words[next] != "||" &&
+		words[next] != "&" && words[next] != "&&" {
+		return 0, false
+	}
+	program := strings.ToLower(strings.TrimSuffix(path.Base(strings.ReplaceAll(words[end+1], `\`, "/")), ".exe"))
+	if !isApplyPatchToolName(program) {
+		return 0, false
+	}
+	return next + 1, true
 }
 
 // actionWindowsPatchDecision judges an apply_patch that reads one envelope as

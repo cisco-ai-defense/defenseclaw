@@ -46,6 +46,7 @@ func TestNativeCopilotShellPatchHereString(t *testing.T) {
 	keys := filepath.Join(home, ".ssh", "authorized_keys")
 	for _, tc := range []struct{ name, command string }{
 		{"protected target", "apply_patch @'\n*** Begin Patch\n*** Add File: " + keys + "\n+ssh-ed25519 AAAA attacker\n*** End Patch\n'@"},
+		{"piped protected target", "@'\n*** Begin Patch\n*** Add File: " + keys + "\n+ssh-ed25519 AAAA attacker\n*** End Patch\n'@ | apply_patch"},
 		{"protected target behind a project file", "apply_patch @'\n*** Begin Patch\n*** Add File: notes.txt\n+a\n*** Add File: " + keys + "\n+ssh-ed25519 AAAA attacker\n*** End Patch\n'@"},
 		{"expanding here-string", "apply_patch @\"\n*** Begin Patch\n*** Add File: notes.txt\n+$keys\n*** End Patch\n\"@"},
 	} {
