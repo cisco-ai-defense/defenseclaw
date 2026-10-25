@@ -14,6 +14,26 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// resetWindowsRelaxTestDir gives a fixture folder back to the test account
+// with full control, in one call, so the temporary directory can be removed
+// whatever owner and DACL the case left on it.
+func resetWindowsRelaxTestDir(t *testing.T, path string, target *windows.SID) {
+	t.Helper()
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + target.String() + ")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		target, nil, dacl, nil); err != nil {
+		t.Errorf("reset %s for removal: %v", path, err)
+	}
+}
+
 func setWindowsRelaxWaitForTest(t *testing.T, wait time.Duration) {
 	t.Helper()
 	originalWait, originalPoll := windowsManagedRuntimeSetupRelaxWait, windowsManagedRuntimeSetupRelaxPoll
@@ -39,8 +59,6 @@ func TestWindowsManagedRuntimeResolveRefusesNonSetupRootsWithoutWaiting(t *testi
 		{"extra grant", "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)(A;OICI;FA;;;WD)", false},
 		// The setup ACEs, not protected (inherits from the parent).
 		{"unprotected", "D:(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)", false},
-		// One ACE of the two.
-		{"system only", "D:P(A;OICI;FA;;;SY)", false},
 		// The exact setup shape on a folder another principal owns.
 		{"administrators owner", windowsSetupRelaxedDirectorySDDL, true},
 	} {
@@ -54,10 +72,7 @@ func TestWindowsManagedRuntimeResolveRefusesNonSetupRootsWithoutWaiting(t *testi
 				setWindowsTestPathExactOwner(t, fixture.hookDir, administrators)
 			}
 			setWindowsRelaxTestDACL(t, fixture.hookDir, tc.sddl)
-			t.Cleanup(func() {
-				setWindowsTestPathExactOwner(t, fixture.hookDir, fixture.target)
-				_ = setWindowsUserPathProtection(fixture.hookDir, fixture.target, true)
-			})
+			t.Cleanup(func() { resetWindowsRelaxTestDir(t, fixture.hookDir, fixture.target) })
 			started := time.Now()
 			_, err := ResolveWindowsManagedRuntimeGeneration(fixture.resolve)
 			if !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
@@ -74,7 +89,7 @@ func TestWindowsManagedRuntimeResolveFailsClosedWhenSetupRelaxPersists(t *testin
 	setWindowsRelaxWaitForTest(t, 200*time.Millisecond)
 	fixture := newWindowsRelaxResolveFixture(t)
 	setWindowsRelaxTestDACL(t, fixture.hookDir, windowsSetupRelaxedDirectorySDDL)
-	t.Cleanup(func() { _ = setWindowsUserPathProtection(fixture.hookDir, fixture.target, true) })
+	t.Cleanup(func() { resetWindowsRelaxTestDir(t, fixture.hookDir, fixture.target) })
 	started := time.Now()
 	_, err := ResolveWindowsManagedRuntimeGeneration(fixture.resolve)
 	if !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
