@@ -60,8 +60,10 @@ var enterpriseHookWatchSessionSettle = 5 * time.Second
 // postpone the pass they armed. Every event re-armed the debounce with no
 // limit, so writes faster than the debounce held the pass back until the
 // interval pass, long enough to start an agent without hooks and put the
-// file back unseen (GAP-0532).
-var enterpriseHookWatchDebounceMaxWait = 3 * time.Second
+// file back unseen (GAP-0532). It leaves the pass and its repair audit
+// (about 0.9 s on macOS) inside the 3 s repair bound of a rewrite burst
+// (r103 GAP-0045; 3 s gave 3.9 s).
+var enterpriseHookWatchDebounceMaxWait = 1500 * time.Millisecond
 
 // enterpriseHookWatchDebounceDelay is the delay to arm the debounce with at
 // now for a burst whose first event armed it at first: the debounce, cut to
