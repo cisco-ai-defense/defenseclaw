@@ -43,11 +43,9 @@ func writeFlakyForeignGuard(t *testing.T, root string) string {
 	return guard
 }
 
-// OpenCode and Amp load plugins once, so the foreign-plugin check at load
-// is kept for the life of the process: a plugin loaded then keeps running
-// even if its file is removed later. When that check itself fails, every
-// later tool call stays blocked even once the check would succeed, so the
-// reason says to restart the agent; a restarted agent checks again.
+// A failed startup check is transient. Its first call stays closed, then a
+// later call must retry the check without restarting the agent. A confirmed
+// foreign-plugin denial remains pinned for the life of that process.
 func TestPluginStartupGuardFailureSaysToRestart(t *testing.T) {
 	root := testenv.PrivateTempDir(t)
 	data := openCodePluginTestData(t, openCodeStubGateway(t))
@@ -73,13 +71,8 @@ const restarted = await loaded.DefenseClaw({ directory: "", client: {} });
 await restarted.config({ plugin_origins: [{ spec: href }], mcp: {} });
 console.log(await call(restarted, "C3"));
 `, writeRenderedPlugin(t, "opencode-plugin.js", "defenseclaw.mjs", data))
-	if len(lines) != 3 || lines[2] != "allow" {
-		t.Fatalf("OpenCode verdicts = %q, want two blocks and an allow after the restart", lines)
-	}
-	for _, line := range lines[:2] {
-		if !strings.HasPrefix(line, "block:") || !strings.Contains(line, "Restart the agent") {
-			t.Fatalf("OpenCode: a failed load-time check must keep blocking and say to restart: %q", line)
-		}
+	if len(lines) != 3 || !strings.HasPrefix(lines[0], "block:") || lines[1] != "allow" || lines[2] != "allow" {
+		t.Fatalf("OpenCode verdicts = %q, want first-call block then recovery in the same process", lines)
 	}
 
 	ampRoot := testenv.PrivateTempDir(t)
@@ -256,13 +249,9 @@ const restarted = await loaded.DefenseClaw({ directory: "", client: {} });
 await restarted.config({ plugin_origins: [{ spec: href }], mcp: {} });
 console.log(await call(restarted, "C3"));
 `, writeRenderedPlugin(t, "opencode-plugin.js", "defenseclaw.mjs", data))
-	if len(lines) != 3 || lines[2] != "allow" {
-		t.Fatalf("OpenCode verdicts = %q, want two blocks, then an allow after the restart", lines)
-	}
-	for _, line := range lines[:2] {
-		if !strings.HasPrefix(line, "block:") || !strings.Contains(line, "enterprise_gateway_not_running") {
-			t.Fatalf("OpenCode: the outage denial at load must hold for the process: %q", line)
-		}
+	if len(lines) != 3 || !strings.HasPrefix(lines[0], "block:") ||
+		!strings.Contains(lines[0], "enterprise_gateway_not_running") || lines[1] != "allow" || lines[2] != "allow" {
+		t.Fatalf("OpenCode verdicts = %q, want outage block then recovery in the same process", lines)
 	}
 
 	ampRoot := testenv.PrivateTempDir(t)

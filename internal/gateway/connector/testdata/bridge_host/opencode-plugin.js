@@ -625,16 +625,24 @@ function defenseclawForeignHookCheck(event, cwd) {
 }
 
 // defenseclawForeignCheckFailure is the block reason when the foreign-plugin
-// check itself could not run. OpenCode loads plugins once, so a check that
-// failed at load keeps blocking for the life of this process; that reason
-// says to restart the agent.
+// check itself could not run. A later tool call retries this startup check.
 function defenseclawForeignCheckFailure(event, why) {
   const detail = String(why || "").split(/\r?\n/)[0].trim() || "no answer";
   if (event === "defenseclaw.plugin.loaded") {
     return "DefenseClaw could not check for unapproved plugins when the agent started (" + detail +
-      "), so this tool call is blocked. Restart the agent once DefenseClaw is available.";
+      "), so this tool call is blocked. Retry when DefenseClaw is available.";
   }
   return "DefenseClaw could not check for unapproved plugins (" + detail + "), so this tool call is blocked.";
+}
+
+// A confirmed foreign plugin loaded with OpenCode stays loaded for this
+// process. Availability failures do not prove that one was loaded; retry the
+// startup check on the next call while keeping this call closed.
+function defenseclawStartupCheckRetryable(reason) {
+  return reason.startsWith("DefenseClaw could not check for unapproved plugins") ||
+    reason.includes("could not check this agent session's hook record") ||
+    reason.includes("enterprise_gateway_not_running") ||
+    reason.includes("enterprise_managed_gateway_not_running");
 }
 
 // defenseclawBlockError is the error a blocked tool call fails with. OpenCode
@@ -1031,7 +1039,7 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
   // OpenCode loads plugins once at startup: a foreign plugin present now
   // keeps running for this process even if its file is deleted later, so a
   // block found at load holds for the whole process.
-  const defenseclawStartupGuard = defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
+  let defenseclawStartupGuard = defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
   return {
     config: async (config) => {
       defenseclawConfigure(config);
@@ -1058,7 +1066,11 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
       if (await defenseclawManagedLifecycleHeld()) throw defenseclawBlock(client, DC_MANAGED_LIFECYCLE_TEXT);
       // Every call runs the check, also after a block at load (which holds
       // for the process), so the gateway records each denied call.
+      if (!defenseclawStartupGuard) {
+        defenseclawStartupGuard = defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
+      }
       const startupBlock = await defenseclawStartupGuard;
+      if (startupBlock && defenseclawStartupCheckRetryable(startupBlock)) defenseclawStartupGuard = null;
       const callBlock = await defenseclawForeignHookCheck("tool.execute.before", cwd);
       const blocked = startupBlock || callBlock;
       if (blocked) throw defenseclawBlock(client, blocked);
