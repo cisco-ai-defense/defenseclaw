@@ -112,7 +112,7 @@ func agentDisplayReason(reason string, policy redaction.SinkPolicy) string {
 	if policy != redaction.SinkPolicyDefault {
 		return redaction.ReasonForSink(reason, policy)
 	}
-	if trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) || trustedUnparsedToolCallReason(reason) {
+	if trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) || trustedUnparsedToolCallReason(reason) || trustedStrictInstallWindowReason(reason) {
 		return reason
 	}
 	return redaction.ReasonForAgent(reason)
@@ -125,7 +125,7 @@ func agentDisplayReason(reason string, policy redaction.SinkPolicy) string {
 // ("LLM judge: personal data or credentials"), not as raw judge labels with
 // redaction tokens (GAP-1981).
 func notificationDisplayReason(reason string, policy redaction.SinkPolicy) string {
-	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) || trustedUnparsedToolCallReason(reason)) {
+	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) || trustedUnparsedToolCallReason(reason) || trustedStrictInstallWindowReason(reason)) {
 		return reason
 	}
 	if policy == redaction.SinkPolicyDefault && !managedEnterpriseActive.Load() {
@@ -145,7 +145,7 @@ func notificationDisplayReason(reason string, policy redaction.SinkPolicy) strin
 // defaultSinkDisplayReason applies the catalog carve-out to compatibility
 // response bodies only when no managed override is active.
 func defaultSinkDisplayReason(reason string, policy redaction.SinkPolicy) string {
-	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) || trustedUnparsedToolCallReason(reason)) {
+	if policy == redaction.SinkPolicyDefault && (trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) || trustedUnparsedToolCallReason(reason) || trustedStrictInstallWindowReason(reason)) {
 		return reason
 	}
 	return redaction.ReasonForSink(reason, policy)
