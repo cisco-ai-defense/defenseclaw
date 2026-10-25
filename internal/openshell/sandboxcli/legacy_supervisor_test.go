@@ -89,7 +89,7 @@ func TestDoctorIsNotReadyWhileALegacySandboxRuns(t *testing.T) {
 	if c == nil || c.Status != openshell.StatusFail || c.Fix == nil || !named ||
 		!strings.Contains(c.Detail, "creates and starts no sandbox until they are gone") ||
 		!strings.Contains(c.Fix.Summary, "save the work you need in old-ready, then run `defenseclaw sandbox stop old-ready`, which syncs the VM's disk first") ||
-		!strings.Contains(c.Fix.Summary, "`defenseclaw sandbox delete old-ended` deletes old-ended and its work") {
+		!strings.Contains(c.Fix.Summary, "`defenseclaw sandbox delete old-ended` (DefenseClaw sandbox)") || strings.Contains(c.Fix.Summary, "--end-vm` ends") {
 		t.Fatalf("legacy row = %+v", c)
 	}
 }

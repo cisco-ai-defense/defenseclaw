@@ -333,7 +333,7 @@ func (a *App) legacySandboxCheck(ctx context.Context) *openshell.Check {
 // (sandboxapi.Sandbox.OldSupervisor): the stop of a ready one, which on a
 // MicroVM syncs its disk first because that release's stop does not, and
 // the delete of a MicroVM whose workload ended, which OpenShell does not
-// stop (or its start with --end-vm on OpenShell SupportedMin or later).
+// stop (openshell.EndedVMWayOn: OpenShell 0.1.5 does not start it either).
 func legacyStopWay(sb *sandboxapi.Sandbox) string {
 	if sb.Phase == "ready" {
 		way := "save the work you need in " + sb.Name + ", then run `" + CommandName + " stop " + sb.Name + "`"
@@ -342,8 +342,7 @@ func legacyStopWay(sb *sandboxapi.Sandbox) string {
 		}
 		return way
 	}
-	return "`" + CommandName + " delete " + sb.Name + "` deletes " + sb.Name + " and its work, or on OpenShell " + openshell.SupportedMin + " or later `" +
-		CommandName + " start " + sb.Name + " --end-vm` ends its VM, losing what it has not written to its disk"
+	return openshell.EndedVMWayOn(sb.Name)
 }
 
 // hooksCheck reports the sandboxes whose current session's hooks do not

@@ -239,11 +239,12 @@ func TestALegacyGuestHoldsBackEveryNewRun(t *testing.T) {
 	// Its workload ends: the VM may still run, so it still holds every new
 	// run back.
 	endIn(t, e, "kept", openshell.PhaseCompleted)
-	if got := e.get("kept"); !got.OldSupervisor || !legacyWarned(got, "`defenseclaw sandbox delete kept` deletes it and its work") {
+	if got := e.get("kept"); !got.OldSupervisor || !legacyWarned(got, "`defenseclaw sandbox delete kept` (DefenseClaw sandbox)") {
 		t.Fatalf("the ended legacy MicroVM: %+v", got)
 	}
 	_, err = e.tryCreate(sandboxapi.CreateRequest{Name: "fresh", Copy: true, Project: e.otherProject("fresh")})
-	if apiErr := wantCode(t, err, sandboxapi.CodeConflict); !strings.Contains(apiErr.Detail, "kept: OpenShell does not stop this VM, whose workload ended: `defenseclaw sandbox delete kept`") {
+	if apiErr := wantCode(t, err, sandboxapi.CodeConflict); !strings.Contains(apiErr.Detail, "kept: save or sync any accessible guest work first; nothing in OpenShell writes this MicroVM's disk back or stops it") ||
+		strings.Contains(apiErr.Detail, "--end-vm` ends") {
 		t.Fatalf("create beside an ended legacy MicroVM = %+v", apiErr)
 	}
 	// A second legacy guest holds the first one's own start (--end-vm,
@@ -349,8 +350,7 @@ func TestOldSupervisorWordsForARecordWithoutARelease(t *testing.T) {
 	}
 	ended := oldSupervisorMessage("box", "0.1.3", audit.SandboxPhaseCompleted, string(openshell.DriverVM), "")
 	if !strings.Contains(ended, "its MicroVM may still run background work; its session started on OpenShell 0.1.3") ||
-		!strings.HasSuffix(ended, "`defenseclaw sandbox delete box` deletes it and its work, or on OpenShell "+openshell.SupportedMin+
-			" or later `defenseclaw sandbox start box --end-vm` ends the VM, losing what it has not written to its disk") {
+		!strings.HasSuffix(ended, "`defenseclaw sandbox delete box` (DefenseClaw sandbox) or `openshell sandbox delete box` (raw OpenShell sandbox), which deletes it and its work") {
 		t.Fatalf("ended message = %q", ended)
 	}
 	e := newEnv(t, nil)
