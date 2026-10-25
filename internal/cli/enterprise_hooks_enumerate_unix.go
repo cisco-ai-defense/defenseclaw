@@ -330,6 +330,7 @@ func runEnterpriseHooksEnumerateCycle(
 		SessionUIDs:             enterpriseHookSessionUIDs,
 		DiscoverSurfaces:        enterpriseHooksEnumerateDiscoverSurfaces,
 		DiscoverStaticSurfaces:  enterpriseHooksEnumerateDiscoverStaticSurfaces,
+		DiscoveryBudget:         enterpriseHooksEnumerateDiscoveryBudget(opts.interval),
 		PreviousRefusedSurfaces: readEnterpriseHookRefusedSurfaces(current.DataDir, stderr),
 		MachineVersion:          enterprisehooks.DiscoverUnixMachineAgentVersion,
 		OutsideDiscovery:        enterprisehooks.UnixAgentOutsideDiscovery,
@@ -381,6 +382,24 @@ func runEnterpriseHooksEnumerateCycle(
 		}
 	}
 	return report, nil
+}
+
+// enterpriseHooksEnumerateCycleReserve is the part of the unprotected-agents
+// record's freshness window (enterprisehooks.UnprotectedAgentsMaxAge) a cycle
+// keeps for its work outside the per-account discovery workers: the account
+// and home checks, the directory lookups and the record writes.
+const enterpriseHooksEnumerateCycleReserve = 3 * time.Minute
+
+// enterpriseHooksEnumerateDiscoveryBudget bounds a cycle's discovery workers,
+// all accounts together. The record is written at the end of each cycle and
+// the next cycle starts interval later, so the next record lands within the
+// freshness window however many accounts stall.
+func enterpriseHooksEnumerateDiscoveryBudget(interval time.Duration) time.Duration {
+	budget := enterprisehooks.UnprotectedAgentsMaxAge - interval - enterpriseHooksEnumerateCycleReserve
+	if budget < enterpriseHookWorkerTimeout {
+		budget = enterpriseHookWorkerTimeout
+	}
+	return budget
 }
 
 // The cycle's root-only publications; tests replace them, since only root

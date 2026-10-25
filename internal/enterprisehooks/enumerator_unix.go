@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -140,6 +141,14 @@ type UnixEnumerateOptions struct {
 	// likewise replaces DiscoverStatic.
 	DiscoverSurfaces       UnixDiscoverSurfacesFunc
 	DiscoverStaticSurfaces UnixDiscoverSurfacesFunc
+	// DiscoveryBudget, when positive, bounds the time one cycle spends in
+	// the discovery functions above, all accounts together, so the cycle
+	// publishes its records within their freshness window
+	// (UnprotectedAgentsMaxAge) however many workers stall. A discovery
+	// still running when the budget ends is stopped, and an account not
+	// reached by then is reported as not inspected this cycle, as for a
+	// failed discovery.
+	DiscoveryBudget time.Duration
 	// MachineVersion reads root-owned machine-scoped metadata.
 	MachineVersion func(connector string) string
 	// OutsideDiscovery finds a connector's CLI in an administrator prefix
@@ -276,6 +285,13 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	}
 	if opts.State.Sources == nil {
 		opts.State.Sources = map[string]string{}
+	}
+	if opts.DiscoveryBudget > 0 {
+		deadline := time.Now().Add(opts.DiscoveryBudget)
+		opts.Discover = budgetedUnixDiscover(opts.Discover, deadline)
+		opts.DiscoverStatic = budgetedUnixDiscover(opts.DiscoverStatic, deadline)
+		opts.DiscoverSurfaces = budgetedUnixDiscoverSurfaces(opts.DiscoverSurfaces, deadline)
+		opts.DiscoverStaticSurfaces = budgetedUnixDiscoverSurfaces(opts.DiscoverStaticSurfaces, deadline)
 	}
 	enrollment := cfg.Enterprise.Enrollment
 	connectors := EffectiveUnixHookConnectors(cfg, registry)
@@ -1390,6 +1406,40 @@ func unixSurfaceOnlyRefusals(account unixidentity.Account, conn, cliVersion stri
 		out = append(out, rejected.unprotected(account.Name, "", intPointer(account.UID), conn, consequence, refusal))
 	}
 	return out, !admittedInstall
+}
+
+// errUnixDiscoveryBudgetSpent is the discovery error of an account a cycle
+// did not reach within UnixEnumerateOptions.DiscoveryBudget.
+var errUnixDiscoveryBudgetSpent = errors.New("not inspected this cycle: the cycle's discovery time ran out on earlier accounts")
+
+// budgetedUnixDiscoverSurfaces runs discover only before deadline, and stops
+// it at deadline.
+func budgetedUnixDiscoverSurfaces(discover UnixDiscoverSurfacesFunc, deadline time.Time) UnixDiscoverSurfacesFunc {
+	if discover == nil {
+		return nil
+	}
+	return func(ctx context.Context, account unixidentity.Account, connectors []string) (UnixDiscovery, error) {
+		if !time.Now().Before(deadline) {
+			return UnixDiscovery{}, errUnixDiscoveryBudgetSpent
+		}
+		ctx, cancel := context.WithDeadline(ctx, deadline)
+		defer cancel()
+		return discover(ctx, account, connectors)
+	}
+}
+
+func budgetedUnixDiscover(discover UnixDiscoverFunc, deadline time.Time) UnixDiscoverFunc {
+	if discover == nil {
+		return nil
+	}
+	surfaces := budgetedUnixDiscoverSurfaces(func(ctx context.Context, account unixidentity.Account, connectors []string) (UnixDiscovery, error) {
+		versions, reasons, err := discover(ctx, account, connectors)
+		return UnixDiscovery{Versions: versions, Reasons: reasons}, err
+	}, deadline)
+	return func(ctx context.Context, account unixidentity.Account, connectors []string) (map[string]string, map[string]string, error) {
+		found, err := surfaces(ctx, account, connectors)
+		return found.Versions, found.Reasons, err
+	}
 }
 
 // unixUntrustedHomeAgents reports the agents an eligible user without rows
