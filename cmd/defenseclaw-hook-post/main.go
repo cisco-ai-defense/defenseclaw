@@ -30,6 +30,20 @@ func run(args []string, input io.Reader, output io.Writer) error {
 		_, err := fmt.Fprintf(output, "defenseclaw-hook-post version %s (commit=%s, built=%s)\n", version, commit, date)
 		return err
 	}
+	if len(args) > 0 && args[0] == "prefix-review" {
+		flags := flag.NewFlagSet("prefix-review", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		event := flags.String("event", "", "registered hook event")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+			return fmt.Errorf("invalid bounded review arguments")
+		}
+		prefix, err := io.ReadAll(io.LimitReader(input, (1<<20)+2))
+		if err != nil || len(prefix) > (1<<20)+1 {
+			return fmt.Errorf("bounded review input is invalid or too large")
+		}
+		_, err = output.Write(hookexec.OversizedReviewPayload(prefix, *event))
+		return err
+	}
 	if len(args) == 0 || args[0] != "hook-post" {
 		return fmt.Errorf("expected hook-post subcommand")
 	}

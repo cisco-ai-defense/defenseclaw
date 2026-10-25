@@ -286,10 +286,10 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 {{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
   _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
-  if defenseclaw_allow_oversized_stdin "$_DC_STDIN_RC"; then
-    printf '{"systemMessage":"DefenseClaw warning: this hook payload is too large for the bounded check. The call was allowed and the inspection gap was audited."}\n'
-    exit 0
-  fi
+  if defenseclaw_prepare_oversized_stdin "$_DC_STDIN_RC"; then
+    : # the normal gateway path judges the bounded review payload
+  else
+    FAIL_MODE=closed
 {{end}}  [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" = "open" ] ||
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "stdin body exceeded cap" transport
   echo "defenseclaw: codex hook refusing oversized payload" >&2
@@ -299,6 +299,8 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 {{end}}    exit 2
   fi
   exit 0
+{{if and (not .Managed) (not .Sandbox)}}  fi
+{{end}}
 }
 
 PAYLOAD_EVENT="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || {

@@ -284,6 +284,9 @@ type Options struct {
 	// not be started. Only such a failure takes OutageFailMode; an answer the
 	// gateway gave, a stalled answer and every local failure stay closed.
 	perUserOutage bool
+	// oversizedReview marks a balanced per-user call whose bounded prefix was
+	// sent to the gateway. Only its answered allow gets the size warning.
+	oversizedReview bool
 	// answerBy is the answer deadline of a tool call (answerDeadline);
 	// doRequest sets it, and the request then asks for progress reports.
 	answerBy time.Time
@@ -587,7 +590,7 @@ func runHook(ctx context.Context, opts Options) int {
 	}
 	if overflow {
 		opts.Event = managedHermesPrefixEvent(opts, sp, payload)
-		return handleOversized(opts, sp, failMode, payload)
+		return handleOversized(ctx, opts, sp, failMode, payload, startedAt)
 	}
 	if strings.EqualFold(strings.TrimSpace(opts.Connector), "codex") {
 		event, bindingErr := validateCodexInvocationBinding(
@@ -1204,6 +1207,17 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 
 	code := sp.decide(opts, body)
+	if opts.oversizedReview && validUniqueGatewayResponse(body) {
+		var verdict struct {
+			Action string `json:"action"`
+		}
+		if json.Unmarshal(body, &verdict) == nil && (verdict.Action == "allow" || verdict.Action == "alert") {
+			quiet := opts
+			quiet.Stderr = io.Discard
+			logHookFailure(quiet, sp, "stdin body exceeded cap; bounded prefix reviewed by gateway", "transport", "open", false)
+			fmt.Fprintf(opts.Stderr, "defenseclaw: warning: %s hook payload exceeded the bounded inspection cap; gateway allowed this call and recorded its verdict\n", sp.connector)
+		}
+	}
 	if delivery != nil && resp.StatusCode == http.StatusOK && readErr == nil {
 		opts.answerWatch.setDeliveryReceipt(func(answered, localBlock bool) {
 			// finish calls this only after it writes the answer to the agent.
@@ -2169,17 +2183,20 @@ func handleUnavailableHome(opts Options, sp spec, failMode, reason string) int {
 
 // handleOversized mirrors the per-connector oversized-payload branch. prefix
 // is the start of the payload the hook read before it stopped at its cap.
-func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int {
+func handleOversized(ctx context.Context, opts Options, sp spec, failMode string, prefix []byte, startedAt time.Time) int {
 	failMode = closeDuringInstall(&opts, failMode)
 	// The bounded read has inspected no more than MaxBody+1 bytes. A balanced
-	// per-user hook records that inspection gap and lets normal work continue.
-	// The installed tier mode is separate from the answer's fail mode: a
-	// reachable gateway's refusal or malformed answer never reaches here.
+	// per-user hook asks the gateway to judge the metadata and content prefix.
+	// Only a gateway allow permits the call; a transport outage follows the
+	// existing per-user outage rule in sendToGateway.
 	if !opts.ManagedEnterprise && !opts.SecureClient && !opts.StrictAvailability &&
 		normalizeFailMode(opts.OutageFailMode) == "open" && !perUserInstallWindow(opts) {
-		logHookFailure(opts, sp, "stdin body exceeded cap", "transport", "open", false)
-		fmt.Fprintf(opts.Stderr, "defenseclaw: warning: %s hook payload exceeded the bounded inspection cap; allowing and auditing this call\n", sp.connector)
-		return emitHookResult(opts, sp, sp.openAllow)
+		review := oversizedReviewPayload(prefix, opts.Event)
+		if strings.TrimSpace(opts.Event) == "" {
+			opts.Event = resolveHookEvent("", review)
+		}
+		opts.oversizedReview = true
+		return sendToGateway(ctx, opts, sp, failMode, review, startedAt)
 	}
 	// All managed and strict hooks keep their closed local-failure behavior.
 	failMode = managedNonOutageMode(&opts, failMode)

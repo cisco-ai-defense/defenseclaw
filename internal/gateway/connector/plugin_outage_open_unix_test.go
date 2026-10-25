@@ -7,6 +7,7 @@ package connector
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +29,8 @@ try {
 } catch (error) {
   verdict = "block:" + String(error && error.message || error);
 }
+
+
 await new Promise((resolve) => setTimeout(resolve, 50));
 console.log(JSON.stringify({ verdict, notices: toasts }));
 `
@@ -50,6 +53,59 @@ const call = await handlers.get("tool.call")({ thread: { id: "S" }, toolUseID: "
 const verdict = call.action === "allow" ? "allow" : "block:" + (call.message || call.action);
 console.log(JSON.stringify({ verdict, notices }));
 `
+
+func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
+	nodeForTest(t)
+	for _, plugin := range []struct{ asset, name, connector, harness string }{
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness},
+	} {
+		t.Run(plugin.connector, func(t *testing.T) {
+			var request []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				request, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"action":"block","mode":"action","hook_output":{"decision":"deny","reason":"protected target"}}`)
+			}))
+			t.Cleanup(server.Close)
+			home := t.TempDir()
+			installNativeGatewayForHookTest(t, home)
+			dataDir := filepath.Join(home, ".defenseclaw")
+			token := filepath.Join(dataDir, "hooks", ".hook-"+plugin.connector+".token")
+			if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			body := renderPluginAssetForTest(t, plugin.asset, templateData{
+				APIAddr: strings.TrimPrefix(server.URL, "http://"), TokenFileJS: javaScriptStringContent(token),
+				FailMode: "closed", OutageFailMode: "open",
+			})
+			path := filepath.Join(home, plugin.name)
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			command := `command: "cat /home/user/.ssh/authorized_keys " + "x".repeat(1100000)`
+			harness := strings.ReplaceAll(plugin.harness, `command: "echo marker"`, command)
+			cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", harness, path)
+			cmd.Env = append(sanitizedTestEnv(), "HOME="+home)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("node: %v\n%s", err, out)
+			}
+			var result struct {
+				Verdict string `json:"verdict"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &result); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(result.Verdict, "block:") || !strings.Contains(string(request), `"bounded_prefix_review":true`) || !strings.Contains(string(request), "/home/user/.ssh/authorized_keys") {
+				t.Fatalf("gateway block=%q request=%q", result.Verdict, request)
+			}
+		})
+	}
+}
 
 // oss-outage-open for the in-agent plugins: a per-user OpenCode or Amp plugin
 // in the default or permissive tier lets a tool call run with one warning and
@@ -201,7 +257,7 @@ func TestPerUserPluginOversizedPayloadUsesInstalledTier(t *testing.T) {
 				rows := hookFailureRecords(t, dataDir)
 				if tier.mode == "open" {
 					if result.Verdict != "allow" || len(rows) != 1 || rows[0]["outcome"] != "fail_open" ||
-						!strings.Contains(strings.Join(result.Notices, "\n"), "allowed and audited") {
+						!strings.Contains(strings.Join(result.Notices, "\n"), "fail mode open for an outage") {
 						t.Fatalf("balanced verdict=%q notices=%q rows=%+v", result.Verdict, result.Notices, rows)
 					}
 				} else if !strings.HasPrefix(result.Verdict, "block:") || len(rows) != 0 {

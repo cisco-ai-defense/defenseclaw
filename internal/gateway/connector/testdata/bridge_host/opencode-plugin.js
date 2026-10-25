@@ -840,17 +840,28 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       payload.tool_response = toolResult;
       payload.tool_result = toolResult;
     }
-    const body = JSON.stringify(payload);
-    if (Buffer.byteLength(body, "utf8") > (1 << 20)) {
+    let body = JSON.stringify(payload);
+    const originalBytes = Buffer.byteLength(body, "utf8");
+    let oversizedReview = false;
+    if (originalBytes > (1 << 20)) {
       if (await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
       if (DC_OUTAGE_FAIL_MODE === "open") {
-        await defenseclawLogFailOpen("stdin body exceeded 1048576 byte cap", "transport");
-        const notice = "DefenseClaw warning: this hook payload exceeded the bounded inspection cap; the call was allowed and audited.";
-        if (actionable) return { reason: "", notice };
-        console.warn(notice);
-        return null;
+        const input = payload.tool_input && typeof payload.tool_input === "object" ? payload.tool_input : {};
+        const reviewInput = {};
+        for (const key of ["file_path", "filePath", "path", "command", "CommandLine", "content", "diff"]) {
+          if (typeof input[key] === "string") reviewInput[key] = input[key].slice(0, 8192);
+        }
+        body = JSON.stringify({
+          hook_event_name: payload.hook_event_name, tool_name: payload.tool_name,
+          tool_input: reviewInput, session_id: payload.session_id,
+          turn_id: payload.turn_id, tool_call_id: payload.tool_call_id,
+          cwd: payload.cwd, content_truncated: true, bounded_prefix_review: true,
+          original_body_bytes: originalBytes,
+        });
+        oversizedReview = true;
+      } else if (actionable) {
+        return { reason: "DefenseClaw hook payload too large" };
       }
-      if (actionable) return { reason: "DefenseClaw hook payload too large" };
     }
     const res = await defenseclawRetryBusy(() => defenseclawFetch("/api/v1/opencode/hook", {
       method: "POST",
@@ -860,6 +871,8 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     }, token), controller.signal);
     if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
     if (!res.ok) {
+      if (oversizedReview) return { reason: "DefenseClaw hook failed closed (gateway refused bounded payload review)" };
+
       // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
       // is an outage, as in the shell hooks, so strict availability closes it.
       if (await defenseclawFailModeNow(res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE, actionable) === "closed") {
@@ -882,6 +895,10 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     }
     if (data.action === "block" || data.action === "confirm") {
       return { reason: data.reason || "DefenseClaw hook failed closed (missing native deny)", mode: data.mode || "" };
+    }
+    if (oversizedReview) {
+      await defenseclawLogFailOpen("stdin body exceeded cap; bounded prefix reviewed by gateway", "transport");
+      return { reason: "", mode: data && data.mode || "", notice: "DefenseClaw warning: this hook payload exceeded the bounded inspection cap; the gateway allowed and audited this call." };
     }
     return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
   } catch (err) {

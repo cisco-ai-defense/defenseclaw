@@ -128,6 +128,7 @@ func TestPerUserShellHookOversizedPayloadClosesWhenAnInstallStartsDuringTheRead(
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
 				data := t.TempDir()
+				installNativeHookPostForHookTest(t, data)
 				write := func(stdin io.WriteCloser) {
 					// The hook has started and selected its mode before the
 					// agent is done writing.
@@ -146,12 +147,49 @@ func TestPerUserShellHookOversizedPayloadClosesWhenAnInstallStartsDuringTheRead(
 				}
 				if !install {
 					rows, readErr := os.ReadFile(filepath.Join(data, "logs", "hook-failures.jsonl"))
-					if readErr != nil || !strings.Contains(string(rows), `"outcome":"fail_open"`) || !strings.Contains(stderr, "warning") {
+					if readErr != nil || !strings.Contains(string(rows), `"outcome":"fail_open"`) || !strings.Contains(stderr, "allowing") {
 						t.Fatalf("balanced audit/warning: %q %q %v", rows, stderr, readErr)
 					}
 				}
 			})
 		}
+	}
+}
+
+func TestPerUserShellOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
+	cases := []struct {
+		name, payload string
+	}{
+		{"cursor", `{"hook_event_name":"beforeReadFile","file_path":"/home/user/.defenseclaw/audit.db","content":"` + strings.Repeat("x", 8192) + `"}`},
+		{"claudecode", `{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/home/user/.ssh/authorized_keys","content":"` + strings.Repeat("x", 8192) + `"}}`},
+		{"codex", `{"hook_event_name":"PreToolUse","tool_name":"apply_patch","tool_input":{"file_path":"/home/user/.defenseclaw/hooks/codex-hook.sh","content":"` + strings.Repeat("x", 8192) + `"}}`},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			var got []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"action":"block","mode":"action","hook_output":{"decision":"deny","reason":"protected target"}}`)
+			}))
+			t.Cleanup(server.Close)
+			data := t.TempDir()
+			installNativeHookPostForHookTest(t, data)
+			tc := installInFlightShellCase{item.name, nil, hookArgvConnectorCase(t, item.name)}
+			switch item.name {
+			case "cursor":
+				tc.conn = NewCursorConnector()
+			case "claudecode":
+				tc.conn = NewClaudeCodeConnector()
+			case "codex":
+				tc.conn = NewCodexConnector()
+			}
+			tc.invoke.stdin = item.payload
+			stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, strings.TrimPrefix(server.URL, "http://"), nil)
+			if !shellHookBlocked(err, stdout) || !bytes.Contains(got, []byte(`"bounded_prefix_review":true`)) || !bytes.Contains(got, []byte(`"file_path":`)) {
+				t.Fatalf("protected oversized input must reach gateway and block: err=%v stdout=%q stderr=%q request=%q", err, stdout, stderr, got)
+			}
+		})
 	}
 }
 

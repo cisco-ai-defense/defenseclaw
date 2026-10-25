@@ -755,6 +755,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// the kernel denials its tool calls hit (kernel_block_notice.go).
 			resp = a.safeAddKernelBlockNotice(ctx, profile, connectorName, req, b, payload, resp)
 		}
+		if payload["bounded_prefix_review"] == true && (resp.Action == "allow" || resp.Action == "alert") {
+			// The gateway inspected only the bounded head. Keep the allow
+			// decision, but make its audit and telemetry severity conspicuous.
+			resp.Severity = "HIGH"
+		}
 		// Re-inject the cloud-controlled per-inspection redaction
 		// directive the evaluator resolved (evaluate*'s ctx-injection is
 		// local to that call) so finalizeAgentHook emits the
@@ -776,6 +781,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// dedupe get the decision the agent was given (GAP-0286).
 		wireResp := resp
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
+		if payload["bounded_prefix_review"] == true {
+			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{"bounded_prefix_review": "true"})
+		}
 		if len(resp.KernelBlocksTold) > 0 {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{kernelBlocksToldExtra: strings.Join(resp.KernelBlocksTold, ",")})
 		}

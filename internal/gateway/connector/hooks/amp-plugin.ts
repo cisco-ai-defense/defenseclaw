@@ -962,15 +962,29 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		}
 
 		const originalBytes = utf8Bytes(body)
+		let oversizedReview = false
 		if (originalBytes > DC_MAX_BODY_BYTES) {
 			if (actionable) {
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 				if (DC_OUTAGE_FAIL_MODE === "open") {
-					await logFailOpen(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
-					return { action: "allow", outage_notice: "DefenseClaw warning: this hook payload exceeded the bounded inspection cap; the call was allowed and audited." }
+					const input = payload.tool_input && typeof payload.tool_input === "object" ? payload.tool_input as Record<string, unknown> : {}
+					const reviewInput: Record<string, string> = {}
+					for (const key of ["file_path", "filePath", "path", "command", "CommandLine", "content", "diff"]) {
+						if (typeof input[key] === "string") reviewInput[key] = (input[key] as string).slice(0, 8192)
+					}
+					body = JSON.stringify({
+						hook_event_name: payload.hook_event_name, session_id: payload.session_id,
+						thread_id: payload.thread_id, turn_id: payload.turn_id,
+						tool_call_id: payload.tool_call_id, tool_name: payload.tool_name,
+						tool_input: reviewInput, cwd: payload.cwd,
+						content_truncated: true, bounded_prefix_review: true,
+						original_body_bytes: originalBytes,
+					})
+					oversizedReview = true
 				}
-{{end}}				return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
+{{end}}				if (!oversizedReview) return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
 			}
+			if (!oversizedReview) {
 			const reduced = {
 				hook_event_name: payload.hook_event_name || "",
 				session_id: payload.session_id || "",
@@ -998,6 +1012,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				tool_response: "[DefenseClaw payload omitted: size limit exceeded]",
 			}
 			body = JSON.stringify(reduced)
+			}
 		}
 
 		let token: string
@@ -1032,6 +1047,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			}, token), controller.signal){{end}}
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 {{end}}			if (!response.ok) {
+				if (oversizedReview) return { action: "block", reason: "DefenseClaw hook failed closed (gateway refused bounded payload review)" }
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (response.status >= 500 && (DC_FAIL_MODE === "closed" || await perUserInstallInProgress())) {
 					return { action: "block", reason: await perUserGatewayDownText(null, response.status) }
 				}
@@ -1043,7 +1059,14 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 {{end}}
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
+				if (oversizedReview) return { action: "block", reason: "DefenseClaw hook failed closed (invalid bounded payload verdict)" }
 				return failureResponse("invalid gateway verdict")
+			}
+			if (oversizedReview && (data.action === "allow" || data.action === "alert")) {
+				await logFailOpen("payload exceeded cap; bounded prefix reviewed by gateway")
+				const notice = "DefenseClaw warning: this hook payload exceeded the bounded inspection cap; the gateway allowed and audited this call."
+				if (data.action === "allow") data.outage_notice = notice
+				else await notifyIfForeground(String(payload.thread_id || ""), notice)
 			}
 			return data
 		} catch (error) {

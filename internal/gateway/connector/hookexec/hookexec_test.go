@@ -1016,7 +1016,7 @@ func TestOversizedPayload(t *testing.T) {
 				})
 				if r.code != 0 || strings.Contains(r.stdout, `"decision":"block"`) ||
 					strings.Contains(r.stdout, `"permissionDecision":"deny"`) ||
-					!strings.Contains(r.stderr, "warning") || rt.requests != 0 {
+					!strings.Contains(r.stderr, "warning") || rt.requests != 1 {
 					t.Fatalf("code=%d stdout=%q stderr=%q requests=%d", r.code, r.stdout, r.stderr, rt.requests)
 				}
 				rows, err := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
@@ -1066,6 +1066,40 @@ func TestOversizedPayload(t *testing.T) {
 			}
 			if r.stdout != want.stdout {
 				t.Errorf("stdout = %q, want %q", r.stdout, want.stdout)
+			}
+		})
+	}
+}
+
+func TestOversizedBalancedPreActionAsksGatewayAboutProtectedTarget(t *testing.T) {
+	cases := []struct {
+		name, connector, event, tool, path string
+	}{
+		{"cursor credential store read", "cursor", "beforeReadFile", "Read", "/home/alice/.config/chromium/Default/Cookies"},
+		{"cursor audit database read", "cursor", "beforeReadFile", "Read", "/home/alice/.defenseclaw/audit.db"},
+		{"claude authorized keys write", "claudecode", "PreToolUse", "Write", "/home/alice/.ssh/authorized_keys"},
+		{"codex protected hook write", "codex", "PreToolUse", "Write", "/home/alice/.defenseclaw/hooks/claude-code-hook.sh"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := fmt.Sprintf(`{"hook_event_name":%q,"tool_name":%q,"tool_input":{"file_path":%q,"content":%q}}`,
+				tc.event, tc.tool, tc.path, strings.Repeat("x", 2048))
+			rt := ok(`{"action":"block","reason":"protected target"}`)
+			r := run(t, tc.connector, rt, func(o *Options) {
+				o.Event = tc.event
+				o.OutageFailMode = "open"
+				o.MaxBody = 256
+				o.Stdin = strings.NewReader(payload)
+			})
+			if rt.requests != 1 {
+				t.Fatalf("gateway requests = %d, want 1", rt.requests)
+			}
+			if !bytes.Contains(rt.gotBody, []byte(tc.path)) ||
+				!bytes.Contains(rt.gotBody, []byte(`"content_truncated":true`)) {
+				t.Fatalf("bounded gateway review lost target or truncation marker: %s", rt.gotBody)
+			}
+			if !strings.Contains(r.stdout, "deny") && !strings.Contains(r.stdout, "block") && r.code != blockExit {
+				t.Fatalf("protected call was allowed: code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
 			}
 		})
 	}

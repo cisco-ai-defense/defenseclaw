@@ -263,10 +263,10 @@ fi
 {{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
   _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
-  if defenseclaw_allow_oversized_stdin "$_DC_STDIN_RC"; then
-    antigravity_emit_fallback 0
-    exit 0
-  fi
+  if defenseclaw_prepare_oversized_stdin "$_DC_STDIN_RC"; then
+    : # the normal gateway path judges the bounded review payload
+  else
+    FAIL_MODE=closed
 {{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
 {{end}}  echo "defenseclaw: antigravity hook refusing oversized payload" >&2
   if [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" != "open" ]; then
@@ -275,6 +275,8 @@ fi
     antigravity_emit_fallback 0
   fi
   exit 0
+{{if and (not .Managed) (not .Sandbox)}}  fi
+{{end}}
 }
 API_ADDR="{{.APIAddr}}"
 {{if .Sandbox}}# The per-sandbox binding token is an OpenShell provider placeholder; the

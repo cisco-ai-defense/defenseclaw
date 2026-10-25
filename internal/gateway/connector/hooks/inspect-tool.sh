@@ -178,10 +178,14 @@ TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
 TOOL_INPUT="$(defenseclaw_read_stdin_capped fail_closed)" || {
   _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
-  if defenseclaw_allow_oversized_stdin "$_DC_STDIN_RC"; then exit 0; fi
+  if [ "$_DC_STDIN_RC" = 3 ] && defenseclaw_per_user_oversize_open; then
+    _DC_OVERSIZED_INSPECT=1
+  else
 {{end}}
   echo "defenseclaw: inspect tool refusing oversized payload" >&2
   exit 2
+{{if and (not .Managed) (not .Sandbox)}}  fi
+{{end}}
 }
 
 API_ADDR="{{.APIAddr}}"
@@ -190,6 +194,9 @@ API_ADDR="{{.APIAddr}}"
 # DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
 fail_unreachable() {
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+  if [ "${_DC_OVERSIZED_INSPECT:-0}" = 1 ]; then
+    local DEFENSECLAW_HOOK_CONNECTOR="$RUNTIME_CONNECTOR"
+  fi
 {{end}}  defenseclaw_log_hook_delivery_failure inspect inspect-tool "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
@@ -254,6 +261,9 @@ fi
 INSPECT_BODY="$(printf '%s' "$TOOL_INPUT" | defenseclaw_inspect_tool_body "$TOOL_NAME" args)" || {
   {{if and .Managed (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "failed to build inspect body"
 }
+if [ "${_DC_OVERSIZED_INSPECT:-0}" = 1 ]; then
+  INSPECT_BODY="${INSPECT_BODY%?},\"content_truncated\":true,\"bounded_prefix_review\":true}"
+fi
 {{if .Sandbox}}RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool" "$INSPECT_BODY" \
   "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
   -H "Content-Type: application/json" \
@@ -269,6 +279,7 @@ RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/api/v1/inspect/tool" 5 "
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
   "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}") || {
+  _DC_TRANSPORT_STATUS=$?
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}  defenseclaw_split_response
   defenseclaw_managed_http_result "$HTTP_CODE" incomplete
 {{end}}  fail_unreachable "gateway unreachable"

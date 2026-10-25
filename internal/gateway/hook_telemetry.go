@@ -102,6 +102,10 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 	legacy := renderHookAuditLegacyDetails(env)
 	combined := fmt.Sprintf("connector=%s %s details_json=%s",
 		env.Connector, legacy, strconv.Quote(jsonDetails))
+	auditSeverity := "INFO"
+	if env.Extra["bounded_prefix_review"] == "true" && (env.Action == "allow" || env.Action == "alert") {
+		auditSeverity = "HIGH"
+	}
 	return a.logger.LogEventCtx(ctx, audit.Event{
 		ID:          env.occurrenceID,
 		Generation:  env.configGeneration,
@@ -110,7 +114,7 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		Target:      env.Event,
 		Actor:       "defenseclaw",
 		Details:     combined,
-		Severity:    "INFO",
+		Severity:    auditSeverity,
 		Structured:  structured,
 		// Mirror the structured-envelope identity fields onto the
 		// dedicated SQLite columns (migration 16) so the column data

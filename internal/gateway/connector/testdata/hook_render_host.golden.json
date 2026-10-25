@@ -17,33 +17,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "antigravity-hook.sh": {
       "mode": "-rwx------",
-      "size": 16262,
-      "sha256": "c41bfbd8eb2416c75a7328f9f47295b3a03a890a160a703b84c98b860cbc140b"
+      "size": 16316,
+      "sha256": "203b7636183213d50b27c40ba4c90f8c1b3053059ceeab75636ccabf83275f81"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     }
   },
   "antigravity/managed=1/scoped=1/fail=open": {
@@ -64,33 +64,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "antigravity-hook.sh": {
       "mode": "-rwx------",
-      "size": 13231,
-      "sha256": "bfa2cd82c0b94bb19bdc4cebf91c16d00555bfb208d1650ff07aac04f09c61dd"
+      "size": 13232,
+      "sha256": "3bcd1c42cd04effafebf621a6b8f28d77826d00e789e93faceecd7912724716b"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 7929,
-      "sha256": "54f9f3ee3a5eb263f7b87467a26b845e7742a47ec69443a38129e9322fe57038"
+      "size": 7956,
+      "sha256": "f09d99d263b50f74d08b84bb9b1f45436a156bf4b3d497cbb1bd0ccd82f6345a"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 7116,
-      "sha256": "1d2a765a665ee7c0c3e9102bb9f9029f09656cbcb8724969e6ab5a2ba15b9728"
+      "size": 7143,
+      "sha256": "a2ac8c6b356e730bbbd883b9488914319124b29fc9f3393ad5f2d1f788250504"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 7395,
-      "sha256": "0dbb162741b23b60c7528c5fd461a293b52a0894f2638cac840eeeefac20d6c8"
+      "size": 7566,
+      "sha256": "4a83e4024de923494492ceaaa63152faba5f0148ec21369f3f5a8662df96b77b"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 7780,
-      "sha256": "38669073f67a220e4fee52093971791381216b1118971bf2ae9a7725acffa7d0"
+      "size": 7951,
+      "sha256": "5361c80a47b27b7bd67acaa72741353a505655121942d7249cc56b703ccfcfa8"
     }
   },
   "claudecode/managed=0/scoped=0/fail=closed": {
@@ -111,33 +111,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 24578,
-      "sha256": "14e07610b5ff73974df3ab25c339e4d9e4f7d4a0387ff0cbeb2483b9a27eb2bc"
+      "size": 24519,
+      "sha256": "a87e1e6157ce2804638667af5b7dca34a6e68e88ae2f254971b39928a8e38138"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     }
   },
   "claudecode/managed=0/scoped=0/fail=open": {
@@ -158,33 +158,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 24576,
-      "sha256": "439e3732b76e76b6f200e6831dfcf040393689217eb0fc9d92cafb790e9c277e"
+      "size": 24517,
+      "sha256": "203d6ced91706af870b4b688cbdf4d09d81b94bb2808e5985b9166b3b864e234"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     }
   },
   "claudecode/managed=0/scoped=1/fail=closed": {
@@ -205,33 +205,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 24674,
-      "sha256": "0a090c5879583b6fbe00d8d7a9446539688eaebf878c1dbf58170ad6198667b5"
+      "size": 24615,
+      "sha256": "edfb746eec43f81dc5fab760a3654f9823a415e7fcf46c7025dc550c14c2cadd"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     }
   },
   "claudecode/managed=0/scoped=1/fail=open": {
@@ -252,33 +252,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 24672,
-      "sha256": "0bd96ca3ac7693a74648b14c84ee9b4df6ad2389e57af55082342ace278be0d5"
+      "size": 24613,
+      "sha256": "df983c88758b1de0032bac001d2a19224d53a6b4213849f535a96b4952aa301a"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     }
   },
   "claudecode/managed=1/scoped=0/fail=closed": {
@@ -299,33 +299,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 17347,
-      "sha256": "c6d425261f3404ed6db2acca57675ac472e6b5f6fa7f0650eca2e9757b05e610"
+      "size": 17348,
+      "sha256": "4be9261b7167c44aef614a50696ed1eb0b01c9de9daf2d0286e2530605ab8432"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 7929,
-      "sha256": "54f9f3ee3a5eb263f7b87467a26b845e7742a47ec69443a38129e9322fe57038"
+      "size": 7956,
+      "sha256": "f09d99d263b50f74d08b84bb9b1f45436a156bf4b3d497cbb1bd0ccd82f6345a"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 7116,
-      "sha256": "1d2a765a665ee7c0c3e9102bb9f9029f09656cbcb8724969e6ab5a2ba15b9728"
+      "size": 7143,
+      "sha256": "a2ac8c6b356e730bbbd883b9488914319124b29fc9f3393ad5f2d1f788250504"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 7395,
-      "sha256": "0dbb162741b23b60c7528c5fd461a293b52a0894f2638cac840eeeefac20d6c8"
+      "size": 7566,
+      "sha256": "4a83e4024de923494492ceaaa63152faba5f0148ec21369f3f5a8662df96b77b"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 7780,
-      "sha256": "38669073f67a220e4fee52093971791381216b1118971bf2ae9a7725acffa7d0"
+      "size": 7951,
+      "sha256": "5361c80a47b27b7bd67acaa72741353a505655121942d7249cc56b703ccfcfa8"
     }
   },
   "claudecode/managed=1/scoped=0/fail=open": {
@@ -346,33 +346,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 17345,
-      "sha256": "7a4f2a29b2d04aed9fd50a6db424df8f55c07e4f0ecbd45f8e999b5ab2c41a48"
+      "size": 17346,
+      "sha256": "7b026826815617af479e431670d29b86f9d885fb749dcc5f39a7cb3ab339197f"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 7929,
-      "sha256": "54f9f3ee3a5eb263f7b87467a26b845e7742a47ec69443a38129e9322fe57038"
+      "size": 7956,
+      "sha256": "f09d99d263b50f74d08b84bb9b1f45436a156bf4b3d497cbb1bd0ccd82f6345a"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 7116,
-      "sha256": "1d2a765a665ee7c0c3e9102bb9f9029f09656cbcb8724969e6ab5a2ba15b9728"
+      "size": 7143,
+      "sha256": "a2ac8c6b356e730bbbd883b9488914319124b29fc9f3393ad5f2d1f788250504"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 7395,
-      "sha256": "0dbb162741b23b60c7528c5fd461a293b52a0894f2638cac840eeeefac20d6c8"
+      "size": 7566,
+      "sha256": "4a83e4024de923494492ceaaa63152faba5f0148ec21369f3f5a8662df96b77b"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 7780,
-      "sha256": "38669073f67a220e4fee52093971791381216b1118971bf2ae9a7725acffa7d0"
+      "size": 7951,
+      "sha256": "5361c80a47b27b7bd67acaa72741353a505655121942d7249cc56b703ccfcfa8"
     }
   },
   "claudecode/managed=1/scoped=1/fail=closed": {
@@ -393,33 +393,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 17443,
-      "sha256": "ce024481d28e07fca3082b06d31b80b39a7a40b41f11b4584e2634c2b650c9b6"
+      "size": 17444,
+      "sha256": "425f0f8cd4d26a8a4a57ea0ba337b5a26198cdd6720af9a0f5a18bd0d516697f"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 7929,
-      "sha256": "54f9f3ee3a5eb263f7b87467a26b845e7742a47ec69443a38129e9322fe57038"
+      "size": 7956,
+      "sha256": "f09d99d263b50f74d08b84bb9b1f45436a156bf4b3d497cbb1bd0ccd82f6345a"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 7116,
-      "sha256": "1d2a765a665ee7c0c3e9102bb9f9029f09656cbcb8724969e6ab5a2ba15b9728"
+      "size": 7143,
+      "sha256": "a2ac8c6b356e730bbbd883b9488914319124b29fc9f3393ad5f2d1f788250504"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 7395,
-      "sha256": "0dbb162741b23b60c7528c5fd461a293b52a0894f2638cac840eeeefac20d6c8"
+      "size": 7566,
+      "sha256": "4a83e4024de923494492ceaaa63152faba5f0148ec21369f3f5a8662df96b77b"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 7780,
-      "sha256": "38669073f67a220e4fee52093971791381216b1118971bf2ae9a7725acffa7d0"
+      "size": 7951,
+      "sha256": "5361c80a47b27b7bd67acaa72741353a505655121942d7249cc56b703ccfcfa8"
     }
   },
   "claudecode/managed=1/scoped=1/fail=open": {
@@ -440,33 +440,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 17441,
-      "sha256": "c8eda4ab2e7e2b1a49e1d72986b10b176b42c6cacd7e679329ff32d15af346fc"
+      "size": 17442,
+      "sha256": "d5eb30713ceccb4144b3be130a3e011c7455409b22ff6da7151ae865ace04893"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 7929,
-      "sha256": "54f9f3ee3a5eb263f7b87467a26b845e7742a47ec69443a38129e9322fe57038"
+      "size": 7956,
+      "sha256": "f09d99d263b50f74d08b84bb9b1f45436a156bf4b3d497cbb1bd0ccd82f6345a"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 7116,
-      "sha256": "1d2a765a665ee7c0c3e9102bb9f9029f09656cbcb8724969e6ab5a2ba15b9728"
+      "size": 7143,
+      "sha256": "a2ac8c6b356e730bbbd883b9488914319124b29fc9f3393ad5f2d1f788250504"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 7395,
-      "sha256": "0dbb162741b23b60c7528c5fd461a293b52a0894f2638cac840eeeefac20d6c8"
+      "size": 7566,
+      "sha256": "4a83e4024de923494492ceaaa63152faba5f0148ec21369f3f5a8662df96b77b"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 7780,
-      "sha256": "38669073f67a220e4fee52093971791381216b1118971bf2ae9a7725acffa7d0"
+      "size": 7951,
+      "sha256": "5361c80a47b27b7bd67acaa72741353a505655121942d7249cc56b703ccfcfa8"
     }
   },
   "codex/managed=0/scoped=0/fail=closed": {
@@ -487,33 +487,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 24875,
-      "sha256": "b54be015c9190bb73a86694f27a87a07a7f7e47429b392f99f1d3abbeea0fd94"
+      "size": 24794,
+      "sha256": "15b916ec1023c177bdd055fda14745fe879966503bd6a7f5f227c539427a683a"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     }
   },
   "codex/managed=0/scoped=0/fail=open": {
@@ -534,33 +534,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 24873,
-      "sha256": "2e112f44d3a93d8b27ef8d35e414eb672b4e1240e5c907092fe4faf660a2c84a"
+      "size": 24792,
+      "sha256": "afad31a599d3cd8eac51514093028db3a505446ca29ec0b08899399da6ea8d72"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     }
   },
   "codex/managed=0/scoped=1/fail=closed": {
@@ -581,33 +581,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 24941,
-      "sha256": "8f21c8a8a6ea67661d54796239067df1d46bf838dac8e0ec7fe841cdf72bc7f0"
+      "size": 24860,
+      "sha256": "42c22776e018115ca6832c2ea18fb346e99d8c9f815546d0ed63485a4c1d337b"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     }
   },
   "codex/managed=0/scoped=1/fail=open": {
@@ -628,33 +628,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 24939,
-      "sha256": "205fb256890f20fd3c13646a0b9ef9d005c3d7c7d8e3755d996a0c393ef99f22"
+      "size": 24858,
+      "sha256": "7f7479f28bb606f507ed3b121938786ce3946b0701f87f2f1130d3e253651e9c"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     }
   },
   "codex/managed=1/scoped=0/fail=closed": {
@@ -675,33 +675,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 18322,
-      "sha256": "c108a6e0d450824b8b0b80b66d8c76a95e4987ad51203ba29c78ff8c4969d485"
+      "size": 18323,
+      "sha256": "6a05ae68e76c51c4889592663d81defcd8026ce3123de3f31b407b837a80077f"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 7929,
-      "sha256": "54f9f3ee3a5eb263f7b87467a26b845e7742a47ec69443a38129e9322fe57038"
+      "size": 7956,
+      "sha256": "f09d99d263b50f74d08b84bb9b1f45436a156bf4b3d497cbb1bd0ccd82f6345a"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 7116,
-      "sha256": "1d2a765a665ee7c0c3e9102bb9f9029f09656cbcb8724969e6ab5a2ba15b9728"
+      "size": 7143,
+      "sha256": "a2ac8c6b356e730bbbd883b9488914319124b29fc9f3393ad5f2d1f788250504"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 7395,
-      "sha256": "0dbb162741b23b60c7528c5fd461a293b52a0894f2638cac840eeeefac20d6c8"
+      "size": 7566,
+      "sha256": "4a83e4024de923494492ceaaa63152faba5f0148ec21369f3f5a8662df96b77b"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 7780,
-      "sha256": "38669073f67a220e4fee52093971791381216b1118971bf2ae9a7725acffa7d0"
+      "size": 7951,
+      "sha256": "5361c80a47b27b7bd67acaa72741353a505655121942d7249cc56b703ccfcfa8"
     }
   },
   "codex/managed=1/scoped=0/fail=open": {
@@ -722,33 +722,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 18320,
-      "sha256": "442ee73b066ad165eb49e5a4f2c121aa6480a5524d5ead3c1e37f9437a1d02b1"
+      "size": 18321,
+      "sha256": "eeb7affef335b0ff82eb9d4c795fc68272fcd057d0bdcf210b01659749b3c276"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 7929,
-      "sha256": "54f9f3ee3a5eb263f7b87467a26b845e7742a47ec69443a38129e9322fe57038"
+      "size": 7956,
+      "sha256": "f09d99d263b50f74d08b84bb9b1f45436a156bf4b3d497cbb1bd0ccd82f6345a"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 7116,
-      "sha256": "1d2a765a665ee7c0c3e9102bb9f9029f09656cbcb8724969e6ab5a2ba15b9728"
+      "size": 7143,
+      "sha256": "a2ac8c6b356e730bbbd883b9488914319124b29fc9f3393ad5f2d1f788250504"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 7395,
-      "sha256": "0dbb162741b23b60c7528c5fd461a293b52a0894f2638cac840eeeefac20d6c8"
+      "size": 7566,
+      "sha256": "4a83e4024de923494492ceaaa63152faba5f0148ec21369f3f5a8662df96b77b"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 7780,
-      "sha256": "38669073f67a220e4fee52093971791381216b1118971bf2ae9a7725acffa7d0"
+      "size": 7951,
+      "sha256": "5361c80a47b27b7bd67acaa72741353a505655121942d7249cc56b703ccfcfa8"
     }
   },
   "codex/managed=1/scoped=1/fail=closed": {
@@ -769,33 +769,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 18388,
-      "sha256": "1dcc928874cc20d6cc1e194888a871ffa6f16c8fb9979fed73a073d04ab938c9"
+      "size": 18389,
+      "sha256": "363fbc0a015d6447280f8877c04a01a271fc2ec14c7d679c5f7973093f82d120"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 7929,
-      "sha256": "54f9f3ee3a5eb263f7b87467a26b845e7742a47ec69443a38129e9322fe57038"
+      "size": 7956,
+      "sha256": "f09d99d263b50f74d08b84bb9b1f45436a156bf4b3d497cbb1bd0ccd82f6345a"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 7116,
-      "sha256": "1d2a765a665ee7c0c3e9102bb9f9029f09656cbcb8724969e6ab5a2ba15b9728"
+      "size": 7143,
+      "sha256": "a2ac8c6b356e730bbbd883b9488914319124b29fc9f3393ad5f2d1f788250504"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 7395,
-      "sha256": "0dbb162741b23b60c7528c5fd461a293b52a0894f2638cac840eeeefac20d6c8"
+      "size": 7566,
+      "sha256": "4a83e4024de923494492ceaaa63152faba5f0148ec21369f3f5a8662df96b77b"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 7780,
-      "sha256": "38669073f67a220e4fee52093971791381216b1118971bf2ae9a7725acffa7d0"
+      "size": 7951,
+      "sha256": "5361c80a47b27b7bd67acaa72741353a505655121942d7249cc56b703ccfcfa8"
     }
   },
   "codex/managed=1/scoped=1/fail=open": {
@@ -816,33 +816,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 18386,
-      "sha256": "961fd8ec01aa6af410d254954d71790d1167a28747655f3d96bc85f62828ba80"
+      "size": 18387,
+      "sha256": "f862afdae569d2cdf5b27ca3ec67f73f25f1569c0684c2c60d3ac4179d4ff959"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 7929,
-      "sha256": "54f9f3ee3a5eb263f7b87467a26b845e7742a47ec69443a38129e9322fe57038"
+      "size": 7956,
+      "sha256": "f09d99d263b50f74d08b84bb9b1f45436a156bf4b3d497cbb1bd0ccd82f6345a"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 7116,
-      "sha256": "1d2a765a665ee7c0c3e9102bb9f9029f09656cbcb8724969e6ab5a2ba15b9728"
+      "size": 7143,
+      "sha256": "a2ac8c6b356e730bbbd883b9488914319124b29fc9f3393ad5f2d1f788250504"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 7395,
-      "sha256": "0dbb162741b23b60c7528c5fd461a293b52a0894f2638cac840eeeefac20d6c8"
+      "size": 7566,
+      "sha256": "4a83e4024de923494492ceaaa63152faba5f0148ec21369f3f5a8662df96b77b"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 7780,
-      "sha256": "38669073f67a220e4fee52093971791381216b1118971bf2ae9a7725acffa7d0"
+      "size": 7951,
+      "sha256": "5361c80a47b27b7bd67acaa72741353a505655121942d7249cc56b703ccfcfa8"
     }
   },
   "copilot/managed=0/scoped=1/fail=closed": {
@@ -863,33 +863,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
-      "size": 18756,
-      "sha256": "d7d934a0a9338edb1033f487bfb1368ad45b04a6864f8b17579ea9581b119399"
+      "size": 18700,
+      "sha256": "abfb9afdb4f061656c9b4cbc1d4b464c95539b5f314055f707cb760b4c920e3e"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     }
   },
   "copilot/managed=1/scoped=1/fail=open": {
@@ -910,33 +910,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
-      "size": 11569,
-      "sha256": "98ac7bc61eb532c1509c4b718802bcf50ad24e2ea3193e5550de4b97d3ae7be5"
+      "size": 11570,
+      "sha256": "4805930ddd6812bc4e5a86e8a54bf8ee687827bf21cdfce7594ecba7830cfe1f"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 7929,
-      "sha256": "54f9f3ee3a5eb263f7b87467a26b845e7742a47ec69443a38129e9322fe57038"
+      "size": 7956,
+      "sha256": "f09d99d263b50f74d08b84bb9b1f45436a156bf4b3d497cbb1bd0ccd82f6345a"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 7116,
-      "sha256": "1d2a765a665ee7c0c3e9102bb9f9029f09656cbcb8724969e6ab5a2ba15b9728"
+      "size": 7143,
+      "sha256": "a2ac8c6b356e730bbbd883b9488914319124b29fc9f3393ad5f2d1f788250504"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 7395,
-      "sha256": "0dbb162741b23b60c7528c5fd461a293b52a0894f2638cac840eeeefac20d6c8"
+      "size": 7566,
+      "sha256": "4a83e4024de923494492ceaaa63152faba5f0148ec21369f3f5a8662df96b77b"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 7780,
-      "sha256": "38669073f67a220e4fee52093971791381216b1118971bf2ae9a7725acffa7d0"
+      "size": 7951,
+      "sha256": "5361c80a47b27b7bd67acaa72741353a505655121942d7249cc56b703ccfcfa8"
     }
   },
   "cursor/managed=0/scoped=1/fail=closed": {
@@ -957,33 +957,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "cursor-hook.sh": {
       "mode": "-rwx------",
-      "size": 14696,
-      "sha256": "c90ad83443888edb3f30ebbb80fc7ffd447a8ad8a3cf68024c31e4a617840655"
+      "size": 14760,
+      "sha256": "4c23279fcd15a96d7f13c84681b592c69aef29d5eb083ee171caaa57192c12c1"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     }
   },
   "cursor/managed=1/scoped=1/fail=open": {
@@ -1004,33 +1004,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "cursor-hook.sh": {
       "mode": "-rwx------",
-      "size": 11092,
-      "sha256": "87fe7613d7a961a0945d2cafc2a51f3465ddc16503810fbff576871df4548122"
+      "size": 11093,
+      "sha256": "02ca72b4f9acf6fb50c1cfa88b35b4a0ff34171ea3f620976eadc98d53d015f2"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 7929,
-      "sha256": "54f9f3ee3a5eb263f7b87467a26b845e7742a47ec69443a38129e9322fe57038"
+      "size": 7956,
+      "sha256": "f09d99d263b50f74d08b84bb9b1f45436a156bf4b3d497cbb1bd0ccd82f6345a"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 7116,
-      "sha256": "1d2a765a665ee7c0c3e9102bb9f9029f09656cbcb8724969e6ab5a2ba15b9728"
+      "size": 7143,
+      "sha256": "a2ac8c6b356e730bbbd883b9488914319124b29fc9f3393ad5f2d1f788250504"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 7395,
-      "sha256": "0dbb162741b23b60c7528c5fd461a293b52a0894f2638cac840eeeefac20d6c8"
+      "size": 7566,
+      "sha256": "4a83e4024de923494492ceaaa63152faba5f0148ec21369f3f5a8662df96b77b"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 7780,
-      "sha256": "38669073f67a220e4fee52093971791381216b1118971bf2ae9a7725acffa7d0"
+      "size": 7951,
+      "sha256": "5361c80a47b27b7bd67acaa72741353a505655121942d7249cc56b703ccfcfa8"
     }
   },
   "devin/managed=0/scoped=1/fail=closed": {
@@ -1051,33 +1051,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "devin-hook.sh": {
       "mode": "-rwx------",
-      "size": 12666,
-      "sha256": "f7250bbb886cacd17fa9d63b1616a524cf828fde95f05f1d52457efb144ffb45"
+      "size": 12757,
+      "sha256": "b74b68a8be83b78216682e9ebb7cf5298284b790a79779ca248a8c8bca41c5f7"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     }
   },
   "devin/managed=1/scoped=1/fail=open": {
@@ -1098,33 +1098,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "devin-hook.sh": {
       "mode": "-rwx------",
-      "size": 9375,
-      "sha256": "575758a6bfa74231ae064655b3af18cadc5f75dadd37e3528d538e9ed2e33428"
+      "size": 9376,
+      "sha256": "8900b032552cfc517619602c9a1f6fd0bd0a3f14bec9fabbb2de799e11d29157"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 7929,
-      "sha256": "54f9f3ee3a5eb263f7b87467a26b845e7742a47ec69443a38129e9322fe57038"
+      "size": 7956,
+      "sha256": "f09d99d263b50f74d08b84bb9b1f45436a156bf4b3d497cbb1bd0ccd82f6345a"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 7116,
-      "sha256": "1d2a765a665ee7c0c3e9102bb9f9029f09656cbcb8724969e6ab5a2ba15b9728"
+      "size": 7143,
+      "sha256": "a2ac8c6b356e730bbbd883b9488914319124b29fc9f3393ad5f2d1f788250504"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 7395,
-      "sha256": "0dbb162741b23b60c7528c5fd461a293b52a0894f2638cac840eeeefac20d6c8"
+      "size": 7566,
+      "sha256": "4a83e4024de923494492ceaaa63152faba5f0148ec21369f3f5a8662df96b77b"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 7780,
-      "sha256": "38669073f67a220e4fee52093971791381216b1118971bf2ae9a7725acffa7d0"
+      "size": 7951,
+      "sha256": "5361c80a47b27b7bd67acaa72741353a505655121942d7249cc56b703ccfcfa8"
     }
   },
   "generic/common": {
@@ -1145,42 +1145,42 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     }
   },
   "helpers/managed": {
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     }
   },
   "helpers/unmanaged": {
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     }
   },
   "hermes/managed=0/scoped=1/fail=closed": {
@@ -1201,33 +1201,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "hermes-hook.sh": {
       "mode": "-rwx------",
-      "size": 16843,
-      "sha256": "296afe7b7be3ac8c1f0cad81443bb34139cb1ee19cdf5031be5218f1496ee32f"
+      "size": 16816,
+      "sha256": "82b8e90a4b9591510b90b310e9b2010e6d38740cf66a6d76109d4c05caa60eeb"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     }
   },
   "hermes/managed=1/scoped=1/fail=open": {
@@ -1248,33 +1248,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "hermes-hook.sh": {
       "mode": "-rwx------",
-      "size": 12990,
-      "sha256": "887a943fc40f5f03cefe959186830d32c9fe9a1a87a7895834e4dc4ce983edd4"
+      "size": 12991,
+      "sha256": "25bf344efc4f1f6176ea16de3fbbbab0daa8e4d5d6f723c8c526908980034aef"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 7929,
-      "sha256": "54f9f3ee3a5eb263f7b87467a26b845e7742a47ec69443a38129e9322fe57038"
+      "size": 7956,
+      "sha256": "f09d99d263b50f74d08b84bb9b1f45436a156bf4b3d497cbb1bd0ccd82f6345a"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 7116,
-      "sha256": "1d2a765a665ee7c0c3e9102bb9f9029f09656cbcb8724969e6ab5a2ba15b9728"
+      "size": 7143,
+      "sha256": "a2ac8c6b356e730bbbd883b9488914319124b29fc9f3393ad5f2d1f788250504"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 7395,
-      "sha256": "0dbb162741b23b60c7528c5fd461a293b52a0894f2638cac840eeeefac20d6c8"
+      "size": 7566,
+      "sha256": "4a83e4024de923494492ceaaa63152faba5f0148ec21369f3f5a8662df96b77b"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 7780,
-      "sha256": "38669073f67a220e4fee52093971791381216b1118971bf2ae9a7725acffa7d0"
+      "size": 7951,
+      "sha256": "5361c80a47b27b7bd67acaa72741353a505655121942d7249cc56b703ccfcfa8"
     }
   },
   "kiro/managed=0/scoped=1/fail=closed": {
@@ -1295,33 +1295,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 13038,
-      "sha256": "4a7e57b9e5d88ddf6c5035263eafc56488760f2a7578076149f605fdf9500c90"
+      "size": 13129,
+      "sha256": "5df0c99b97df5d0dac475c03ce63809f0d8426a0d0ce167f1871745c60b53764"
     }
   },
   "kiro/managed=1/scoped=1/fail=open": {
@@ -1342,33 +1342,33 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 7929,
-      "sha256": "54f9f3ee3a5eb263f7b87467a26b845e7742a47ec69443a38129e9322fe57038"
+      "size": 7956,
+      "sha256": "f09d99d263b50f74d08b84bb9b1f45436a156bf4b3d497cbb1bd0ccd82f6345a"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 7116,
-      "sha256": "1d2a765a665ee7c0c3e9102bb9f9029f09656cbcb8724969e6ab5a2ba15b9728"
+      "size": 7143,
+      "sha256": "a2ac8c6b356e730bbbd883b9488914319124b29fc9f3393ad5f2d1f788250504"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 7395,
-      "sha256": "0dbb162741b23b60c7528c5fd461a293b52a0894f2638cac840eeeefac20d6c8"
+      "size": 7566,
+      "sha256": "4a83e4024de923494492ceaaa63152faba5f0148ec21369f3f5a8662df96b77b"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 7780,
-      "sha256": "38669073f67a220e4fee52093971791381216b1118971bf2ae9a7725acffa7d0"
+      "size": 7951,
+      "sha256": "5361c80a47b27b7bd67acaa72741353a505655121942d7249cc56b703ccfcfa8"
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 9747,
-      "sha256": "caf0e5628830867162e96b069c17d284c24a662a4b18b27ea5e85bbcae428411"
+      "size": 9748,
+      "sha256": "7fca46a9efb3765033422b198dd378ec8790082752495c1322c407de0a1cb9e7"
     }
   },
   "legacy/all-scripts": {
@@ -1389,68 +1389,68 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "antigravity-hook.sh": {
       "mode": "-rwx------",
-      "size": 16065,
-      "sha256": "896fcd49d49e079d2144bfb995b6feec9bafe27cac05b67000229bdd0d5235d2"
+      "size": 16119,
+      "sha256": "bfbb9b10d7d7b7048ab297e3d5e0baa31282436b2abbf0fc2d11817bed16a2f7"
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 24466,
-      "sha256": "612701333588a4b00d99c67414c1bce1b135864c2f926b3258a40b8453f8a49c"
+      "size": 24407,
+      "sha256": "e4bfc609adda4c9692b03efce0a93a3ea43cb98d64f37fa2641ad380bea2e396"
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 24763,
-      "sha256": "388601ae19b7a299063c552d6e25208501ea6bcd74b5744e2037838c26e5106d"
+      "size": 24682,
+      "sha256": "34abecebe2c82b381af0d407359cd9fcb42c0a0f9c83e3dca9694174885bc3c7"
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
-      "size": 18579,
-      "sha256": "6fd12a916384dc0bc6cabf30098b5ed45ac73fb145bc7bb24e515131b1a678c2"
+      "size": 18523,
+      "sha256": "dff4a6cb844691fbdcebaa1d813bb23a21370ef4d00285b7590d791c1ad0cc2c"
     },
     "cursor-hook.sh": {
       "mode": "-rwx------",
-      "size": 14512,
-      "sha256": "32074af26304e8e8c30a65486f6701a976caaa739f55da3a32960defe0d40997"
+      "size": 14576,
+      "sha256": "a45b0a98fca03879544f1d74edc628e05e93ae3f9fdfb3c3bcbe4d0d5b5e0e98"
     },
     "devin-hook.sh": {
       "mode": "-rwx------",
-      "size": 12488,
-      "sha256": "b068c4b7a1c6be3c94df2f2a8be12daed0542c814b77cf5f2f2988a77a90e563"
+      "size": 12579,
+      "sha256": "0de674de1ba598da17d39a03dc122a143821e93fb57e39edb969363892abdf20"
     },
     "hermes-hook.sh": {
       "mode": "-rwx------",
-      "size": 16659,
-      "sha256": "b5e13dca58f3b253cdc720986f135dad2ebc96a1b3871d8b4734e8c267915d2f"
+      "size": 16632,
+      "sha256": "caff94ac10468a9cad18394259c53f75f70c60cdf542122fe1e2dc31dd427b0e"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "5568240d856fc6a3bdd7c3410acf8d4957bb5ff0a575f5f0c6f21971ebb7ed10"
+      "size": 12394,
+      "sha256": "83ebece96807ac2216028c5f2627d0df9bfc2602c08ea497d46eeda0850fa556"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "82b07b9c3ed9bd88304b6fc1397d9c13e4a86631b5087614e621ef14c7b1db59"
+      "size": 11585,
+      "sha256": "2cac07341eb5761bf57f98fe13ac651183f80a50929f6f4f777886546cad38d8"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "d4a4d6f5893d84f47854bd7169bd5e6f594a1a2d93c39f5cf32534f8ae843828"
+      "size": 11997,
+      "sha256": "b58392904940dcdb350db70754c503a193ff5a0e0bf079fb0e82949f06b821b1"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "1e9a14d65d5b387aed9058ff2b1f32bc0151a6ee187c7b68704e59edee294377"
+      "size": 12346,
+      "sha256": "b75614ae849cb4d16eb82841ce3c2058ee18c566c14794d131e8e505e66197a7"
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 12866,
-      "sha256": "9b8da3d755fb043c8007ef1e62b23c7f5ad6d38b7a37a40c032a5d95e12c46ef"
+      "size": 12957,
+      "sha256": "d56f62db463632171e1a2977c05d06c5635d2d85c6b8818b14b9be3dbed0736d"
     }
   },
   "legacy/all-scripts-no-token": {
@@ -1471,124 +1471,124 @@
     },
     "_hardening.sh": {
       "mode": "-rw-------",
-      "size": 132274,
-      "sha256": "f32ee0a3de0febfc6afe63379828db5baab91089ea905cb613d596ca08aaba27"
+      "size": 133997,
+      "sha256": "830b4cfa99322f1e77c744166c1e44789e74d4d78eecfcfdae60edeca8020260"
     },
     "antigravity-hook.sh": {
       "mode": "-rwx------",
-      "size": 16065,
-      "sha256": "2915ca1b5162dd0e8d539e6ef1c0dd135af30f378be2ac028a68f8e15fb7a9be"
+      "size": 16119,
+      "sha256": "fa59a5ae5cc1ad03ca510ab985549e92d885575443e90029f11fbe0494aa29bc"
     },
     "claude-code-hook.sh": {
       "mode": "-rwx------",
-      "size": 24466,
-      "sha256": "d136e7f995b283a8269aac36ab2ddd22110951ed6e93708d20955e88144647f7"
+      "size": 24407,
+      "sha256": "092f293f68b9c2094cd22ad7ec56a3ed62390a091414f66717a26ec59e38d667"
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 24763,
-      "sha256": "a6b96d0f9560b161e0c2240976df6b82ea6835fb41003e1d03cb0b26fd539d6f"
+      "size": 24682,
+      "sha256": "5c45e46c23d1fe583c29505f991013b667f2a5cc18f172e55763ba56a4aa3b04"
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
-      "size": 18579,
-      "sha256": "96efad3899867da7797744e6233fd13ad9b9aa68797bdb879fee79dbf02727b3"
+      "size": 18523,
+      "sha256": "b79472726d7e3b05f216827e6608c41d56c4337d336871d319d3b71f8d4c272f"
     },
     "cursor-hook.sh": {
       "mode": "-rwx------",
-      "size": 14512,
-      "sha256": "4d9fd3c1e8064e7432e5ac3154ee87c1a999166c9ad18e2785d69cfbf87c171e"
+      "size": 14576,
+      "sha256": "015375f8ebe15b617100725d86ff4acc274095221fadf5cb0c13f32af62211dc"
     },
     "devin-hook.sh": {
       "mode": "-rwx------",
-      "size": 12488,
-      "sha256": "b7b5c0ce6adaca1e777d3560ec5b31aab1a3900b16a0dcda0f5da129aca00579"
+      "size": 12579,
+      "sha256": "336ec3397b60534498a1bfc8686f37f8c9836b3cc658fef3871f2c189e92e8d4"
     },
     "hermes-hook.sh": {
       "mode": "-rwx------",
-      "size": 16659,
-      "sha256": "4716c82cedfe20e63d10f6ebc75a8134d2c31ef11d987375b1098d240555b80a"
+      "size": 16632,
+      "sha256": "d087c1ddb7292fdca70024448221b44aae6357ae2c684b41928a7fe7dcc0d0c8"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
-      "size": 12180,
-      "sha256": "d6aa388f7b0c18a83459213c84d1e552d01b711704c6da8be5b436099fc5f338"
+      "size": 12394,
+      "sha256": "a688324949c067cb1c1cf5a812eb88ef34e3444aacb1a36ef8b04297ea96e094"
     },
     "inspect-response.sh": {
       "mode": "-rwx------",
-      "size": 11371,
-      "sha256": "8c4b04fbe15957a4ab36e014e418f1c9b626ca80f5d434cab5dfea003b455386"
+      "size": 11585,
+      "sha256": "d6472456ada90f03a1085c25b785677b2c195a76fbb67d1ae50c776ddfb02baa"
     },
     "inspect-tool-response.sh": {
       "mode": "-rwx------",
-      "size": 11673,
-      "sha256": "2b4bf282bb076879d2e4852282493f67ab660094557dacfa8cc02a1a90f61437"
+      "size": 11997,
+      "sha256": "230e73f88361c86f7a1d8b8f3560ae7c3e82a46961cfdf1463e1309d3af6baa9"
     },
     "inspect-tool.sh": {
       "mode": "-rwx------",
-      "size": 12022,
-      "sha256": "05d9170aaeac4f4dcfb4ae175a6fa7c1846ac63e4caa9d5d6c939fae699bfe18"
+      "size": 12346,
+      "sha256": "7450dd30559d4772f01165c54c3d5c0b9b6cf0c26294f663fecd76f84af514b3"
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 12866,
-      "sha256": "9254189937f5cded820032ccf675e39e379606e98fe63a61c071a9204548a2fe"
+      "size": 12957,
+      "sha256": "8108ab3bd8ed64721d274e31b34612f9b8806eb690c34d732ae208412d2b2ed9"
     }
   },
   "plugin/amp-plugin.ts/managed=0/fail=closed": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 51250,
-      "sha256": "b8d764e06f8dc5615fac0c694ae1186595055d7e7a0c118102798198397ae248"
+      "size": 52639,
+      "sha256": "51a6d160a148b073ec829a36b720129f3a31669cf600f03720e8124c2b0723d4"
     }
   },
   "plugin/amp-plugin.ts/managed=0/fail=open": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 51250,
-      "sha256": "b8d764e06f8dc5615fac0c694ae1186595055d7e7a0c118102798198397ae248"
+      "size": 52639,
+      "sha256": "51a6d160a148b073ec829a36b720129f3a31669cf600f03720e8124c2b0723d4"
     }
   },
   "plugin/amp-plugin.ts/managed=1/fail=closed": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 42039,
-      "sha256": "6d82e3fd7a0e0d59176fed2fac513b086472e51c00ca312a6bfac0ecf41830a7"
+      "size": 42831,
+      "sha256": "dd4c324bce9e25aa4e3794b398e2eceb264a4380c59c1f684a7aae69bfb61c0e"
     }
   },
   "plugin/amp-plugin.ts/managed=1/fail=open": {
     "amp-plugin.ts": {
       "mode": "-rw-------",
-      "size": 42039,
-      "sha256": "6d82e3fd7a0e0d59176fed2fac513b086472e51c00ca312a6bfac0ecf41830a7"
+      "size": 42831,
+      "sha256": "dd4c324bce9e25aa4e3794b398e2eceb264a4380c59c1f684a7aae69bfb61c0e"
     }
   },
   "plugin/opencode-plugin.js/managed=0/fail=closed": {
     "opencode-plugin.js": {
       "mode": "-rw-------",
-      "size": 53858,
-      "sha256": "6c7fe0abe6d66e2dca22dc8f18a01955851375abc98b652a7da26a90a86d8067"
+      "size": 54848,
+      "sha256": "ad631d45e335576fe5938252bf10ef19471a6478ef75b2a8313e76f92ffb9044"
     }
   },
   "plugin/opencode-plugin.js/managed=0/fail=open": {
     "opencode-plugin.js": {
       "mode": "-rw-------",
-      "size": 53858,
-      "sha256": "6c7fe0abe6d66e2dca22dc8f18a01955851375abc98b652a7da26a90a86d8067"
+      "size": 54848,
+      "sha256": "ad631d45e335576fe5938252bf10ef19471a6478ef75b2a8313e76f92ffb9044"
     }
   },
   "plugin/opencode-plugin.js/managed=1/fail=closed": {
     "opencode-plugin.js": {
       "mode": "-rw-------",
-      "size": 45387,
-      "sha256": "2c6711102edd26026925735c4462ec0fd2e76bdafb0a0060067c1cf6bf880379"
+      "size": 45388,
+      "sha256": "f79cfa47d81adc0ba2a4bf4c1eddd7c6b353f8067c7044733259e43516a11070"
     }
   },
   "plugin/opencode-plugin.js/managed=1/fail=open": {
     "opencode-plugin.js": {
       "mode": "-rw-------",
-      "size": 45387,
-      "sha256": "2c6711102edd26026925735c4462ec0fd2e76bdafb0a0060067c1cf6bf880379"
+      "size": 45388,
+      "sha256": "f79cfa47d81adc0ba2a4bf4c1eddd7c6b353f8067c7044733259e43516a11070"
     }
   }
 }
