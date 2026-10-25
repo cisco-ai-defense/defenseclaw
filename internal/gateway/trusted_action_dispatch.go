@@ -822,18 +822,20 @@ func withActiveStateTargetMention(
 }
 
 // ActionFacts' executing mutation role plus the physical active target
-// authorize the observe-mode exception. The hook's resolved target map is
-// preferred; a managed call can use only an OS-proved active-state hard link
-// when that map has no entry.
+// authorize the observe-mode exception. A static shell redirect is independently
+// proven even when unrelated command analysis leaves the action partial. The
+// hook's resolved target map is preferred; a managed call can use only an
+// OS-proved active-state hard link when that map has no entry.
 func provenStateMutationPath(facts actionfacts.Facts, request trustedActionRequest) bool {
 	projected := facts.EnforcementProjection()
-	if !projected.Authoritative() || !projected.EnforcementEligible() ||
-		projected.ActiveHome == "" {
+	if projected.ActiveHome == "" {
 		return false
 	}
+	wholeActionProven := projected.Authoritative() && projected.EnforcementEligible()
 	for _, candidate := range projected.Paths {
 		command, ok := integrityCommandByID(projected, candidate.CommandID)
-		if !ok || !stateCommandMutatesPath(command, candidate) {
+		if !ok || !(wholeActionProven && stateCommandMutatesPath(command, candidate) ||
+			provenPartialStateRedirect(facts, command, candidate)) {
 			continue
 		}
 		physical := ""
@@ -864,6 +866,21 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		}
 	}
 	return false
+}
+
+func provenPartialStateRedirect(
+	facts actionfacts.Facts,
+	projected actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	if projected.Kind != actionfacts.CommandKindShellRedirect ||
+		!integrityCommandOwnsStaticRedirect(projected, candidate) {
+		return false
+	}
+	original, ok := integrityCommandByID(facts, projected.ID)
+	return ok && original.Effect == actionfacts.EffectPreview &&
+		!original.ControlFlowUncertain &&
+		integrityCommandOwnsStaticRedirect(original, candidate)
 }
 
 func stateCommandMutatesPath(command actionfacts.CommandFact, candidate actionfacts.PathFact) bool {
