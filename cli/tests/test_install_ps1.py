@@ -2203,6 +2203,12 @@ Finish-InstallLock 1
         assert "LOCK=True PENDING=True CLOSES=1" in out, out
         assert "The install stays locked" in warning, out
         return
+    if case == "close-fails":
+        # GAP-1403: the record is still pending with the gateway down, so the
+        # lock stays although the hooks could not be closed.
+        assert "LOCK=True PENDING=True" in out and "CLOSES=0" not in out, out
+        assert "The install stays locked" in warning, out
+        return
     assert "LOCK=False PENDING=False" in out, out
     assert "the install lock is released" in warning, out
     if case in ("image-without-pid", "renamed-aside", "setup-image", "started-after-close"):
@@ -2215,6 +2221,82 @@ Finish-InstallLock 1
                 "pid-image-unreadable", "nothing-unfinished"):
         # No hook is closed under a gateway that may still render them.
         assert "CLOSES=0" in out, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("case", ["journal-held-gateway", "journal-held-gateway-accept", "no-journal-close-fails",
+                                  "journal-gateway-running"])
+def test_a_held_gateway_retry_keeps_the_lock_while_the_lifecycle_record_is_pending(tmp_path: Path, case: str) -> None:
+    # GAP-1403 (T11 L7-win-W2 e): a published 1.0.2 -> 1.0.4 upgrade stopped
+    # at "Stopping the gateway"; the account's gateway executable is held open
+    # with FileShare.None, so neither it nor a saved copy can run
+    # 'connector refresh-fail-modes --closed'. Both retries failed and named
+    # the next step, but each released the install lock while the lifecycle
+    # record (journal) stayed: hooks could cold-start a gateway for the
+    # unfinished install. The lock now stays, retry after retry, until the
+    # record is settled. Without a record, or with a gateway still running,
+    # the lock goes as before.
+    result = _txn_harness(tmp_path, _resume_functions("Get-InstallGatewayState", "Test-RecoveryPending", "Close-InstallLock",
+                                                      "Finish-InstallLock", "Close-UnfinishedInstallHooks") + f"""
+$Previous = Join-Path $DataDir 'previous'
+$Staging = Join-Path $DataDir '.staging'
+$LockDir = Join-Path $DataDir '.install.lock'
+[void][IO.Directory]::CreateDirectory((Join-Path $DataDir 'hooks'))
+[void][IO.Directory]::CreateDirectory((Join-Path $DataDir 'previous.new'))
+if ('{case}' -ne 'no-journal-close-fails') {{
+    [IO.File]::WriteAllText($LifecycleManifest, '{{"Schema":1,"Bins":{{}},"GatewayWasRunning":true}}')
+}}
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-gateway.exe'), 'held gateway')
+$Ver = '1.0.4'
+$script:warnings = @()
+$script:closes = 0
+function Write-Warn {{ param($Message) $script:warnings += [string]$Message }}
+function Write-Err {{ param($Message) $script:warnings += "ERR $Message" }}
+function Invoke-Quietly {{ param([scriptblock]$Action) try {{ & $Action }} catch {{ Write-Warn $_.Exception.Message }} }}
+function Clear-StagedRelease {{ }}
+function Remove-Tree {{ param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }}
+# The held executable: every closer the run tries fails to start.
+function Invoke-Native {{ param($FilePath, $Arguments, [switch]$Quiet) $script:closes++; return 1 }}
+if ('{case}' -eq 'journal-gateway-running') {{
+    $script:images = @([pscustomobject]@{{ ProcessId = 81; ExecutablePath = (Join-Path $BinDir 'defenseclaw-gateway.exe') }})
+}}
+foreach ($retry in 1, 2) {{
+    # Each retry of the documented install command takes the lock again.
+    [void][IO.Directory]::CreateDirectory($LockDir)
+    $Run.Lock = $true
+    # Without a record, an unfinished restore (previous.new) is still pending.
+    $Run.RestorePending = [bool]('{case}' -eq 'no-journal-close-fails')
+    $Run.UndoPending = $false
+    $Run.UnprovenReplacement = $(if ('{case}' -eq 'journal-held-gateway-accept') {{ $true }} else {{ $null }})
+    $Run.UnprovenReplacementUnchanged = $false
+    $script:warnings = @()
+    Finish-InstallLock 1
+    "RETRY$retry LOCK=$(Test-Path -LiteralPath $LockDir) RECORD=$(Test-Path -LiteralPath $LifecycleManifest) PENDING=$([bool]$Run.RestorePending)"
+    "RETRY$retry WARNINGS=$($script:warnings -join ' | ')"
+}}
+"CLOSES=$script:closes"
+""")
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    if case == "no-journal-close-fails":
+        # Unchanged: nothing pending to settle, so no lock over unclosed hooks.
+        assert "RETRY1 LOCK=False" in out and "RETRY2 LOCK=False" in out, out
+        assert "the install lock is released" in out, out
+        return
+    if case == "journal-gateway-running":
+        # Unchanged: a running gateway renders its own hooks; the record stays.
+        assert "RETRY1 LOCK=False RECORD=True" in out and "RETRY2 LOCK=False RECORD=True" in out, out
+        assert "its gateway is still running" in out, out
+        return
+    for retry in ("RETRY1", "RETRY2"):
+        assert f"{retry} LOCK=True RECORD=True PENDING=True" in out, out
+        warnings = out.split(f"{retry} WARNINGS=")[1].splitlines()[0]
+        assert "the install lock is released" not in warnings, out
+        assert "stays locked until its lifecycle record is settled" in warnings, out
+        assert "-Version '1.0.4' -Yes" in warnings, out
+        assert ("-AcceptCurrentInstall" in warnings) == (case == "journal-held-gateway-accept"), out
+    assert "CLOSES=0" not in out and "could not be closed" in out, out
+
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
