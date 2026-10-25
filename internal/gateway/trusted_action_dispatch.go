@@ -183,6 +183,12 @@ type trustedActionRequest struct {
 	recordTelemetry func(trustedActionTelemetry)
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
+	// parentPatch is the whole shell call of a simple-command child. A stage
+	// such as the apply_patch of @'...'@ | apply_patch reads an envelope that
+	// only the whole text shows: when every apply_patch of that text reads a
+	// literal envelope (hookpaths.ApplyPatchWriteTargets known), the child is
+	// judged on those directive targets, not as a file-fed patch.
+	parentPatch *actionfacts.Input
 	// SandboxGuestCWD is a sandbox call's working directory in the guest's
 	// namespace (sandboxHookGuestCWD); Input.CWD is its host mount. Only
 	// the authorized-keys proofs read it, and only to add a match.
@@ -360,6 +366,11 @@ func dispatchTrustedActionWith(
 				child.conflictSource = nil
 				child.record, child.recordTelemetry = nil, nil
 				child.simpleCommandPass = true
+				parent := request.Input
+				if wholeCommandKnown {
+					parent.Command = wholeCommand
+				}
+				child.parentPatch = &parent
 				// The child is judged by this generation (a meet member) within
 				// the call budget, like its parent.
 				child.generation, child.budget = generation, budget
