@@ -47,6 +47,18 @@ BASH = shutil.which("bash")
 pytestmark = pytest.mark.skipif(os.name == "nt" or BASH is None, reason="POSIX installer")
 
 
+def test_install_data_dir_refresh_shell_contract() -> None:
+    """Run the real refresh and hold function regression, including custom data_dir."""
+    result = subprocess.run(
+        [BASH, str(ROOT / "scripts" / "test-install-data-dir-refresh.sh")],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def _stamped(tmp_path: Path, version: str = "1.0.0") -> Path:
     stamped = tmp_path / "install.sh"
     stamped.write_text(INSTALL_SH.read_text(encoding="utf-8").replace("__DEFENSECLAW_VERSION__", version))
