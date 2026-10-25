@@ -309,6 +309,39 @@
       "since": "1.0.3"
     },
     {
+      "name": "DEFENSECLAW_REMOVED_CONNECTOR_UNINSTALL",
+      "category": "upgrade_internal",
+      "purpose": "Set to 1 only by an uninstall (the Python uninstall's connector teardown child and the native Setup uninstall transaction's connector children) so that connector teardown also removes what an older setup wrote for a removed connector (OpenHands, OmniGent) and a removed DefenseClaw does not keep blocking the agent. Setup strips ambient copies from every other child.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/removed_uninstall.go",
+          "description": "Defines the variable for the removed-connector uninstall teardown"
+        },
+        {
+          "location": "internal/cli/connector_cmd.go",
+          "description": "Connector teardown also removes removed-connector state when it is 1"
+        },
+        {
+          "location": "cmd/defenseclaw-setup/transaction.go",
+          "description": "Filters ambient copies and sets it only for an uninstall transaction's connector children"
+        },
+        {
+          "location": "cli/defenseclaw/commands/cmd_uninstall.py",
+          "description": "Sets it for the uninstall's connector teardown child"
+        }
+      ],
+      "since": "1.0.4",
+      "security_note": "Internal uninstall flag, removed with the OpenHands/OmniGent compatibility teardown (until 1.1). It only widens what an uninstall removes for retired connectors."
+    },
+    {
       "name": "DEFENSECLAW_TEST_WINDOWS_LIFECYCLE_PRIORITY",
       "category": "test_fixture",
       "purpose": "Marks the child process of the Windows lifecycle-priority test that reports the priority class it inherited from a lifecycle run.",
