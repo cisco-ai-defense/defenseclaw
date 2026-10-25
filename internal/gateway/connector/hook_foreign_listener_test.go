@@ -50,6 +50,8 @@ func TestHookAPIListenerForeignNamesAnotherAccountsListener(t *testing.T) {
 		{name: "foreign IPv4 wildcard", tcp: row("00000000", own+4242), want: "foreign"},
 		{name: "own IPv4 wildcard", tcp: row("00000000", own), want: "send"},
 		{name: "foreign IPv6 wildcard", tcp6: row("00000000000000000000000000000000", own+4242), want: "foreign"},
+		{name: "exact own IPv4 listener takes precedence over IPv6-only wildcard", tcp: row("0100007F", own), tcp6: row("00000000000000000000000000000000", own+4242), want: "send"},
+		{name: "exact foreign IPv4 listener takes precedence over own wildcard", tcp: row("0100007F", own+4242) + row("00000000", own), want: "foreign"},
 		{name: "foreign mapped configured address", tcp6: row("0000000000000000FFFF00000100007F", own+4242), want: "foreign"},
 		{name: "foreign mapped other address", tcp6: row("0000000000000000FFFF00000200007F", own+4242), want: "free"},
 		{name: "another address only", tcp: row("0500000A", own+4242), want: "free"},

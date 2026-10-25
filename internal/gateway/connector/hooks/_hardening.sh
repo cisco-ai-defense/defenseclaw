@@ -1704,7 +1704,7 @@ defenseclaw_api_listener_unproven() {
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
   # The second and third arguments (tests only) replace /proc/net and lsof.
   local port="${1##*:}" host="${1%:*}" net="${2:-/proc/net}" lsof="${3:-/usr/sbin/lsof}"
-  local uid="${EUID:-}" hex="" table="" owner="" own="" exact="" o2="" o3="" o4=""
+  local uid="${EUID:-}" hex="" table="" owner="" own="" exact="" exact_owner="" exact_own="" o2="" o3="" o4=""
   local _sl="" addr="" _rem="" st="" _q="" _t="" _r="" u="" _rest=""
   case "$port" in ''|*[!0-9]*) return 0 ;; esac
   [ -n "$uid" ] || return 0
@@ -1730,13 +1730,20 @@ defenseclaw_api_listener_unproven() {
       while read -r _sl addr _rem st _q _t _r u _rest; do
         [ "$st" = "0A" ] || continue
         case "$addr" in
-          # The exact address, or a wildcard that can serve IPv4 loopback.
-          "$exact":"$hex"|00000000:"$hex"|00000000000000000000000000000000:"$hex"|0000000000000000FFFF0000"$exact":"$hex") ;;
+          "$exact":"$hex"|0000000000000000FFFF0000"$exact":"$hex")
+            if [ "$u" = "$uid" ]; then exact_own=1; else exact_owner="$u"; fi
+            ;;
+          # A wildcard can serve this address only when no exact binding
+          # supersedes it. An IPv6-only wildcard can coexist with IPv4.
+          00000000:"$hex"|00000000000000000000000000000000:"$hex")
+            if [ "$u" = "$uid" ]; then own=1; else owner="$u"; fi
+            ;;
           *) continue ;;
         esac
-        if [ "$u" = "$uid" ]; then own=1; else owner="$u"; fi
       done < "$table"
     done
+    [ -n "$exact_owner" ] && return 0
+    [ -n "$exact_own" ] && return 1
     [ -n "$owner" ] && return 0
     [ -n "$own" ] && return 1
     # No listener: the caller may cold-start this account's gateway, then
