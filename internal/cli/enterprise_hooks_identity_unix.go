@@ -46,6 +46,10 @@ const enterpriseHookIdentitySpoolRetryInterval = time.Minute
 // root-only).
 var enterpriseHookLoadIdentityAccounts = enterprisehooks.LoadUnixIdentityAccounts
 
+// The guardian lists local accounts under its root identity, independently
+// of whether an agent's per-user files produced an enrollment row.
+var enterpriseHookLocalAccounts = unixidentity.LocalAccounts
+
 var enterpriseHookIdentitySpoolState struct {
 	sync.Mutex
 	running     bool
@@ -282,6 +286,33 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 		for _, uid := range enterpriseHookRecordedCallerUIDs(dir) {
 			if !seen[uid] {
 				list(uid, canonicalUser(uid), 0)
+			}
+		}
+	}
+	if accepted.everyone && len(cfg.Guardrail.ProfileAssignments) > 0 {
+		// A machine-policy hook can run for a local account before the
+		// enumerator has found any agent in its home. List those accounts in
+		// the privileged spool pass too: only root can prove that SSSD has no
+		// second holder of their uid on an SSSD-first host (GAP-0677).
+		local, err := enterpriseHookLocalAccounts(ctx)
+		if err != nil {
+			fmt.Fprintf(stderr, "[hook-guardian] identity spool: local accounts: %v\n", err)
+		} else {
+			uidMin, uidMax := unixidentity.DefaultUIDRange()
+			if cfg.Enterprise.Enrollment.UIDMin > 0 {
+				uidMin = cfg.Enterprise.Enrollment.UIDMin
+			}
+			if cfg.Enterprise.Enrollment.UIDMax > 0 {
+				uidMax = cfg.Enterprise.Enrollment.UIDMax
+			}
+			for user, uid := range local {
+				if uid < uidMin || uid > uidMax || seen[uid] {
+					continue
+				}
+				if canonical := canonicalUser(uid); canonical != "" {
+					user = canonical
+				}
+				list(uid, user, 0)
 			}
 		}
 	}
