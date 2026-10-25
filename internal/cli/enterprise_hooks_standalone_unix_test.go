@@ -1258,6 +1258,101 @@ func TestStandaloneVerifyRefusesUnattestableHermesHome(t *testing.T) {
 	}
 }
 
+func TestStandaloneHermesReadinessScopesProtectedAuthorization(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	bob := f.home(t, "bob", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice}
+	resolver.accounts["bob"] = unixidentity.Account{Name: "bob", UID: uid, GID: gid, Home: bob}
+	f.writeManifest(t,
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "hermes"},
+		enterprisehooks.ManifestTarget{User: "bob", Connector: "codex"},
+	)
+	_, sha, err := enterprisehooks.LoadManifestWithSHA256(f.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := enterpriseHookReconcileRow{User: "bob", UserHome: bob, Connector: "codex", Error: "path in bob's home refused"}
+	standalone := cfg
+	cfg = &config.Config{DataDir: f.dataDir}
+	err = writeEnterpriseHookGuardianState(f.dataDir, f.manifest, sha, []enterpriseHookReconcileRow{
+		protectedRow("alice", alice, "hermes"), failed,
+	}, 1, true)
+	cfg = standalone
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := enterpriseHookWorkerRunner
+	enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		response, err := worker(ctx, account, request)
+		for i, target := range request.Targets {
+			if target.Options.ConnectorName == "codex" {
+				response.Targets[i].OK = false
+				response.Targets[i].Result = nil
+				response.Targets[i].Error = failed.Error
+			}
+		}
+		return response, err
+	}
+	registration, err := runEnterpriseHookRegistrationAttempt(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registration.AuthorizationErr != nil || registration.Failures != 1 || !registration.Rows[0].OK || registration.Rows[1].OK {
+		t.Fatalf("unrelated user refusal defeated Hermes registration: rows=%+v auth=%v", registration.Rows, registration.AuthorizationErr)
+	}
+	carol := filepath.Join(f.homes, "carol") // the home has not been created yet
+	resolver.accounts["carol"] = unixidentity.Account{Name: "carol", UID: uid, GID: gid, Home: carol}
+	f.writeManifest(t,
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "hermes"},
+		enterprisehooks.ManifestTarget{User: "bob", Connector: "codex"},
+		enterprisehooks.ManifestTarget{User: "carol", Connector: "codex"},
+	)
+	_, sha, err = enterprisehooks.LoadManifestWithSHA256(f.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	standalone = cfg
+	cfg = &config.Config{DataDir: f.dataDir}
+	err = writeEnterpriseHookGuardianState(f.dataDir, f.manifest, sha, []enterpriseHookReconcileRow{
+		protectedRow("alice", alice, "hermes"), failed,
+		{User: "carol", UserHome: carol, Connector: "codex", Pending: true},
+	}, 1, true)
+	cfg = standalone
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, err = runEnterpriseHookRegistrationAttempt(context.Background())
+	if err != nil || registration.AuthorizationErr != nil || registration.Failures != 1 || registration.Pending != 1 ||
+		!registration.Rows[0].OK || !registration.Rows[2].Pending {
+		t.Fatalf("unrelated failure plus authenticated pending defeated Hermes registration: rows=%+v auth=%v run=%v",
+			registration.Rows, registration.AuthorizationErr, err)
+	}
+	activationPath := filepath.Join(f.authDir, hookGuardianActivationFile)
+	data, err := os.ReadFile(activationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var activation enterpriseHookGuardianActivation
+	if err := json.Unmarshal(data, &activation); err != nil {
+		t.Fatal(err)
+	}
+	activation.ProtectedTargets = nil
+	data, err = json.Marshal(activation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(activationPath, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	registration, err = runEnterpriseHookRegistrationAttempt(context.Background())
+	if err != nil || registration.AuthorizationErr == nil {
+		t.Fatalf("missing protected Hermes activation passed: auth=%v run=%v", registration.AuthorizationErr, err)
+	}
+}
+
 func TestResolveEnterpriseHookTargetFallsBackToTheDirectory(t *testing.T) {
 	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{
 		"ldap-only-user": {Name: "ldap-only-user", UID: 1234567, GID: 1234567, Home: "/home/ldap-only-user"},
