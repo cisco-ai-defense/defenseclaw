@@ -93,10 +93,7 @@ def _run(tmp_path: Path, home: Path, body: str, env: dict[str, str] | None = Non
     script.write_text(
         "set -euo pipefail\n"
         "die() { printf '%s\\n' \"$*\" >&2; exit 1; }\nerr() { :; }\n"
-        f"DEFENSECLAW_HOME={home}\nLOCK_DIR={lock}\nmkdir -p \"$LOCK_DIR\"\n"
-        + _functions()
-        + body
-        + _PROBE,
+        f'DEFENSECLAW_HOME={home}\nLOCK_DIR={lock}\nmkdir -p "$LOCK_DIR"\n' + _functions() + body + _PROBE,
         encoding="utf-8",
     )
     run_env = {"HOME": str(tmp_path / "user"), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
@@ -184,7 +181,9 @@ def test_an_older_or_missing_installed_gateway_is_skipped_but_a_staged_one_is_re
 def test_a_config_the_gateway_cannot_read_stops_the_install(tmp_path: Path, required: str) -> None:
     home, data = _layout(tmp_path)
     proc = _run(
-        tmp_path, home, f'hold_hook_data_dir "{_gateway(tmp_path)}"{required}\n',
+        tmp_path,
+        home,
+        f'hold_hook_data_dir "{_gateway(tmp_path)}"{required}\n',
         {"STUB_FAIL": "1", "STUB_DATA_DIR": str(data)},
     )
     assert proc.returncode == 1
@@ -249,7 +248,7 @@ def test_both_holds_come_before_anything_stops_the_gateway() -> None:
     assert text.index('ok "DefenseClaw ${VERSION} is staged and checked"') < staged
     for later in (
         'hold_hook_fail_modes "${OLD_GATEWAY_PID}"',
-        '    refresh_hook_fail_modes \\\n',
+        "    refresh_hook_fail_modes \\\n",
         'if ! stop_gateway "${BIN_DIR}/defenseclaw-gateway"; then',
         "if ! snapshot; then",
         "if ! swap_in; then",
@@ -305,8 +304,17 @@ def test_relative_home_and_config_are_recorded_as_absolute_paths() -> None:
     ):
         cwd = Path(tempfile.mkdtemp()).resolve()
         proc = subprocess.run(
-            [BASH, "-c", script], capture_output=True, text=True, cwd=cwd, check=False, timeout=30,
-            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "DEFENSECLAW_HOME": home, "DEFENSECLAW_CONFIG": config},
+            [BASH, "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            check=False,
+            timeout=30,
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "DEFENSECLAW_HOME": home,
+                "DEFENSECLAW_CONFIG": config,
+            },
         )
         assert proc.returncode == 0, proc.stderr
         assert proc.stdout.strip() == want.format(cwd=cwd)
