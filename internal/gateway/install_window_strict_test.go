@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -258,49 +259,171 @@ func TestStrictInstallWindowFollowsTheRequestsProfileTier(t *testing.T) {
 	}
 	for _, tc := range cases {
 		for _, route := range []string{"hook", "inspect"} {
-			t.Run(tc.name+"/"+route, func(t *testing.T) {
-				t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-				dataDir := t.TempDir()
-				connectorName := "claudecode"
-				if route == "inspect" {
-					connectorName = "openclaw"
-				}
-				matchConnector := connectorName
-				if !tc.matches {
-					matchConnector = "cursor"
-				}
-				api := installWindowServer(t, connectorName, tc.base, "action", dataDir, func(cfg *config.Config) {
-					profile := config.GuardrailProfile{Mode: "action"}
-					if tc.profileTier != "" {
-						dir := filepath.Join(guardrailPoliciesRoot(t), tc.profileTier)
-						if tc.perConnector {
-							profile.Connectors = map[string]config.PerConnectorGuardrailConfig{
-								connectorName: {RulePackDir: dir},
-							}
-						} else {
-							profile.RulePackDir = dir
-						}
+			for _, profileMode := range []string{"action", "observe"} {
+				t.Run(tc.name+"/"+route+"/"+profileMode, func(t *testing.T) {
+					t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+					dataDir := t.TempDir()
+					connectorName := "claudecode"
+					if route == "inspect" {
+						connectorName = "openclaw"
 					}
-					cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"team": profile}
-					cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
-						{Profile: "team", Match: config.ProfileMatch{Connectors: []string{matchConnector}}},
+					matchConnector := connectorName
+					if !tc.matches {
+						matchConnector = "cursor"
+					}
+					api := installWindowServer(t, connectorName, tc.base, "action", dataDir, func(cfg *config.Config) {
+						profile := config.GuardrailProfile{Mode: profileMode}
+						if tc.profileTier != "" {
+							dir := filepath.Join(guardrailPoliciesRoot(t), tc.profileTier)
+							if tc.perConnector {
+								profile.Connectors = map[string]config.PerConnectorGuardrailConfig{
+									connectorName: {RulePackDir: dir},
+								}
+							} else {
+								profile.RulePackDir = dir
+							}
+						}
+						cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"team": profile}
+						cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+							{Profile: "team", Match: config.ProfileMatch{Connectors: []string{matchConnector}}},
+						}
+					})
+					api.setGuardrailProfiles(newGuardrailProfileSetFor(t, api.scannerCfg))
+					holdInstallLock(t, dataDir)
+					var blocked bool
+					var answer string
+					if route == "hook" {
+						_, body := sendInstallWindowCall(t, api, installWindowCalls[0])
+						blocked = strings.Contains(body, hookInstallWindowStrictRuleID)
+						answer = body
+					} else {
+						_, verdict := postInspectForConnector(t, api, "openclaw", `{"tool":"read_file","args":{"path":"/tmp/hello.txt"}}`)
+						blocked = verdict.Action == "block" && verdict.Mode == "action" &&
+							slices.Contains(verdict.Findings, hookInstallWindowStrictRuleID)
+						answer = verdict.Reason
+					}
+					if blocked != tc.blocked {
+						t.Fatalf("install window: blocked=%v, want %v: %s", blocked, tc.blocked, answer)
 					}
 				})
-				api.setGuardrailProfiles(newGuardrailProfileSetFor(t, api.scannerCfg))
-				holdInstallLock(t, dataDir)
-				var blocked bool
-				var answer string
-				if route == "hook" {
-					_, body := sendInstallWindowCall(t, api, installWindowCalls[0])
-					blocked = strings.Contains(body, hookInstallWindowStrictRuleID)
-					answer = body
-				} else {
-					_, verdict := postInspectForConnector(t, api, "openclaw", `{"tool":"read_file","args":{"path":"/tmp/hello.txt"}}`)
-					blocked = verdict.Action == "block" && slices.Contains(verdict.Findings, hookInstallWindowStrictRuleID)
-					answer = verdict.Reason
+			}
+		}
+	}
+}
+
+// GAP-1452: the OpenClaw plugin checks its message tool from
+// before_tool_call with direction "outbound", and it can still refuse the
+// send, so the strict install window blocks it like any tool call, in
+// action and observe mode, whatever the case or spacing of the direction.
+// Only results the caller cannot refuse keep the policy's answer. The
+// default and permissive tiers keep it for every direction. A blocked
+// verdict is in action mode: the plugin enforces a block only then.
+func TestStrictInstallWindowGatesEveryRefusableInspectedCall(t *testing.T) {
+	type inspectCase struct {
+		name, body string
+		refusable  bool
+	}
+	cases := []inspectCase{
+		{"outbound message", `{"tool":"message","content":"hello team","direction":"outbound","args":{"content":"hello team","to":"#ops"}}`, true},
+		{"outbound message upper case", `{"tool":"message","content":"hello team","direction":"OUTBOUND"}`, true},
+		{"outbound message spaced", `{"tool":"message","content":"hello team","direction":" outbound "}`, true},
+		{"outbound message body field", `{"tool":"message","args":{"body":"hello team"},"content":"hello team","direction":"outbound"}`, true},
+		{"prompt", `{"tool":"message","content":"list the files","direction":"prompt"}`, true},
+		{"message without direction", `{"tool":"message","content":"list the files"}`, true},
+		{"tool call", `{"tool":"read_file","args":{"path":"/tmp/hello.txt"}}`, true},
+		{"tool call with tool_call direction", `{"tool":"exec","args":{"command":"echo ok"},"direction":"tool_call"}`, true},
+		{"tool call with an unknown direction", `{"tool":"exec","args":{"command":"echo ok"},"direction":"sideways"}`, true},
+		{"tool result", `{"tool":"message","content":"ok","direction":"tool_result"}`, false},
+		{"tool response", `{"tool":"message","content":"ok","direction":"tool-response"}`, false},
+		{"completion", `{"tool":"message","content":"ok","direction":"completion"}`, false},
+		{"response", `{"tool":"message","content":"ok","direction":"response"}`, false},
+	}
+	for _, tc := range cases {
+		for _, tier := range []string{"strict", "default", "permissive"} {
+			for _, mode := range []string{"action", "observe"} {
+				t.Run(tc.name+"/"+tier+"/"+mode, func(t *testing.T) {
+					t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+					dataDir := t.TempDir()
+					api := installWindowServer(t, "openclaw", tier, mode, dataDir, nil)
+					if _, verdict := postInspectForConnector(t, api, "openclaw", tc.body); verdict.Action == "block" ||
+						slices.Contains(verdict.Findings, hookInstallWindowStrictRuleID) {
+						t.Fatalf("no install lock (control): %+v", verdict)
+					}
+					holdInstallLock(t, dataDir)
+					_, verdict := postInspectForConnector(t, api, "openclaw", tc.body)
+					blocked := verdict.Action == "block" && verdict.Mode == "action" &&
+						slices.Contains(verdict.Findings, hookInstallWindowStrictRuleID) &&
+						trustedStrictInstallWindowReason(verdict.Reason)
+					if want := tier == "strict" && tc.refusable; blocked != want {
+						t.Fatalf("install window, %s tier, %s mode: blocked=%v want %v: %+v", tier, mode, blocked, want, verdict)
+					}
+					if !blocked && (verdict.Action == "block" || slices.Contains(verdict.Findings, hookInstallWindowStrictRuleID)) {
+						t.Fatalf("install window, %s tier: the policy's answer was not kept: %+v", tier, verdict)
+					}
+				})
+			}
+		}
+	}
+}
+
+// The strict install-window block of the outbound message names a tool
+// call (the message tool's send), and of a prompt a prompt; both are the
+// gateway's own text, shown to the agent as written.
+func TestStrictInstallWindowInspectReasonNamesTheCall(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	dataDir := t.TempDir()
+	api := installWindowServer(t, "openclaw", "strict", "action", dataDir, nil)
+	holdInstallLock(t, dataDir)
+	for body, want := range map[string]string{
+		`{"tool":"message","content":"hello team","direction":"outbound"}`:   "DefenseClaw blocked this tool call: ",
+		`{"tool":"message","content":"list the files","direction":"prompt"}`: "DefenseClaw blocked this prompt: ",
+	} {
+		_, verdict := postInspectForConnector(t, api, "openclaw", body)
+		if !strings.HasPrefix(verdict.Reason, want) {
+			t.Fatalf("%s: reason %q, want prefix %q", body, verdict.Reason, want)
+		}
+	}
+}
+
+// postInspectRequestForConnector sends a pre-request prompt check
+// (/api/v1/inspect/request) authenticated for connectorName.
+func postInspectRequestForConnector(t *testing.T, api *APIServer, connectorName, body string) ToolInspectVerdict {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/request", strings.NewReader(body))
+	req = req.WithContext(withAuthenticatedInspectConnector(req.Context(), connectorName))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	api.handleInspectRequest(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("inspect request: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var verdict ToolInspectVerdict
+	if err := json.Unmarshal(recorder.Body.Bytes(), &verdict); err != nil {
+		t.Fatalf("inspect request: %v: %s", err, recorder.Body.String())
+	}
+	return verdict
+}
+
+// The pre-request route checks a prompt before it is sent, so the strict
+// tier refuses it during the install window, in action and observe mode;
+// the default and permissive tiers keep the policy's answer.
+func TestStrictInstallWindowBlocksPreRequestPrompts(t *testing.T) {
+	for _, tier := range []string{"strict", "default", "permissive"} {
+		for _, mode := range []string{"action", "observe"} {
+			t.Run(tier+"/"+mode, func(t *testing.T) {
+				t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+				dataDir := t.TempDir()
+				api := installWindowServer(t, "openclaw", tier, mode, dataDir, nil)
+				body := `{"content":"list the files","model":"m"}`
+				if verdict := postInspectRequestForConnector(t, api, "openclaw", body); verdict.Action == "block" {
+					t.Fatalf("no install lock (control): %+v", verdict)
 				}
-				if blocked != tc.blocked {
-					t.Fatalf("install window: blocked=%v, want %v: %s", blocked, tc.blocked, answer)
+				holdInstallLock(t, dataDir)
+				verdict := postInspectRequestForConnector(t, api, "openclaw", body)
+				blocked := verdict.Action == "block" && verdict.Mode == "action" &&
+					slices.Contains(verdict.Findings, hookInstallWindowStrictRuleID)
+				if want := tier == "strict"; blocked != want {
+					t.Fatalf("install window, %s tier, %s mode: blocked=%v want %v: %+v", tier, mode, blocked, want, verdict)
 				}
 			})
 		}

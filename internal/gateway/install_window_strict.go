@@ -112,24 +112,58 @@ func (a *APIServer) installWindowStrict(ctx context.Context, connectorName strin
 
 // strictInstallWindowInspect is strictInstallWindowGate for the generic
 // inspect route (the OpenClaw plugin's tool and prompt checks): in the
-// strict tier a tool call or a prompt is blocked with the install reason;
-// tool results and completions are not gated.
+// strict tier a tool call or a prompt is blocked with the install reason.
+// Only results the caller cannot refuse (tool results, completions and
+// responses) are not gated. The OpenClaw plugin's message tool is checked
+// from before_tool_call with direction "outbound", so it can still refuse
+// the send: it is gated as a tool call (GAP-1452).
 func (a *APIServer) strictInstallWindowInspect(ctx context.Context, connectorName string, req *ToolInspectRequest, verdict *ToolInspectVerdict) {
 	if verdict == nil || req == nil {
 		return
 	}
-	switch strings.ToLower(strings.TrimSpace(req.Direction)) {
-	case "tool_result", "tool-response", "completion", "outbound", "response":
+	direction := strings.ToLower(strings.TrimSpace(req.Direction))
+	switch direction {
+	case "tool_result", "tool-response", "completion", "response":
 		return
 	}
 	if !a.installWindowStrict(ctx, connectorName) {
 		return
 	}
 	subject := "tool call"
-	if strings.EqualFold(req.Tool, "message") {
+	if strings.EqualFold(req.Tool, "message") && direction != "outbound" {
 		subject = "prompt"
 	}
+	blockForStrictInstallWindow(verdict, subject)
+}
+
+// inspectRequestConnector is the connector an /api/v1/inspect/* request is
+// decided for: the one it authenticated for, else this gateway's connector,
+// as the tool route resolves it.
+func inspectRequestConnector(ctx context.Context, configured string) string {
+	if name := authenticatedInspectConnector(ctx); name != "" {
+		return name
+	}
+	return canonicalConnectorRulePackKey(configured)
+}
+
+// strictInstallWindowInspectPrompt is strictInstallWindowInspect for the
+// pre-request route (/api/v1/inspect/request), whose caller checks a prompt
+// before it is sent and can refuse it.
+func (a *APIServer) strictInstallWindowInspectPrompt(ctx context.Context, connectorName string, verdict *ToolInspectVerdict) {
+	if verdict == nil || !a.installWindowStrict(ctx, connectorName) {
+		return
+	}
+	blockForStrictInstallWindow(verdict, "prompt")
+}
+
+// blockForStrictInstallWindow makes verdict the strict install-window block
+// of subject. The block stands in every guardrail mode, as on the hook
+// route: the verdict is in action mode, because the OpenClaw plugin (and any
+// inspect caller) enforces a block only in action mode, and an observe-mode
+// strict gateway let the call run (loop round 1 review, GAP-1452 class).
+func blockForStrictInstallWindow(verdict *ToolInspectVerdict, subject string) {
 	verdict.Action, verdict.RawAction, verdict.Severity, verdict.Confidence = "block", "block", "HIGH", 1.0
+	verdict.Mode = "action"
 	verdict.WouldBlock = false
 	verdict.Reason = "DefenseClaw blocked this " + subject + strictInstallWindowReasonTail
 	verdict.Findings = append(verdict.Findings, hookInstallWindowStrictRuleID)
