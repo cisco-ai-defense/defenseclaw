@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	gwconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -911,9 +912,7 @@ var windowsEnterpriseHotConfigTargetHooksProven = func(ctx context.Context, layo
 func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installedCLI string, layout managed.StandaloneLayout, targets []enterprisehooks.ManifestTarget) ([]enterprisehooks.ManifestTarget, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	command := exec.CommandContext(ctx, installedCLI, "enterprise", "hooks", "readiness", "--manifest", layout.ManifestPath, "--json")
-	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseServicePins(layout))
-	out, runErr := command.Output()
+	out, runErr := windowsEnterpriseHotConfigReadinessCommand(ctx, installedCLI, layout).Output()
 	var report struct {
 		Results []enterpriseHookReconcileRow `json:"results"`
 	}
@@ -924,6 +923,21 @@ func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installe
 		return targets, fmt.Errorf("read the enterprise hooks readiness report: %w", err)
 	}
 	return windowsHotConfigUnprovenTargets(targets, report.Results), nil
+}
+
+// windowsEnterpriseHotConfigReadinessCommand runs enterprise hooks readiness
+// under the service pins and the two the guardian's protected records need:
+// its authorization directory and the gateway service name, as the
+// lifecycle's own readiness probe sets them. Without them readiness refused
+// before its report (the authorization directory resolved to a path that
+// does not exist), so no hook proof could pass (GAP-1418).
+func windowsEnterpriseHotConfigReadinessCommand(ctx context.Context, installedCLI string, layout managed.StandaloneLayout) *exec.Cmd {
+	pins := windowsEnterpriseServicePins(layout)
+	pins[managed.HookGuardianAuthorizationDirEnv] = layout.GuardianAuthDir
+	pins[gwconnector.WindowsGatewayServiceNameEnv] = managed.StandaloneWindowsGatewaySvc
+	command := exec.CommandContext(ctx, installedCLI, "enterprise", "hooks", "readiness", "--manifest", layout.ManifestPath, "--json")
+	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), pins)
+	return command
 }
 
 // windowsHotConfigUnprovenTargets returns each of targets whose readiness row is

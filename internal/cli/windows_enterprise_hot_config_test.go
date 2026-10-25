@@ -1512,3 +1512,40 @@ func TestWindowsHotConfigHookFailModesChanged(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1418: the hook proof's readiness run carries the guardian's
+// authorization directory and the gateway service name besides the service
+// pins; without them readiness refused before its report on every host.
+func TestWindowsHotConfigReadinessCommandCarriesGuardianPins(t *testing.T) {
+	layout := managed.StandaloneLayout{
+		ConfigPath:      `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+		DataDir:         `C:\ProgramData\Cisco\DefenseClaw\runtime`,
+		ManifestPath:    `C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml`,
+		GuardianAuthDir: `C:\ProgramData\Cisco\DefenseClaw\hook-guardian-state`,
+		ServiceUser:     `NT SERVICE\DefenseClawGateway`,
+	}
+	t.Setenv("DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR", `C:\Users\Public\forged`)
+	command := windowsEnterpriseHotConfigReadinessCommand(context.Background(), `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe`, layout)
+	want := map[string]string{
+		"DEFENSECLAW_CONFIG":                       layout.ConfigPath,
+		"DEFENSECLAW_DEPLOYMENT_MODE":              "managed_enterprise",
+		"DEFENSECLAW_ENTERPRISE_PROFILE":           "standalone",
+		"DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT":      layout.ServiceUser,
+		"DEFENSECLAW_HOME":                         layout.DataDir,
+		"DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR":       layout.GuardianAuthDir,
+		"DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME": "DefenseClawGateway",
+	}
+	got := map[string][]string{}
+	for _, entry := range command.Env {
+		name, value, _ := strings.Cut(entry, "=")
+		got[strings.ToUpper(name)] = append(got[strings.ToUpper(name)], value)
+	}
+	for name, value := range want {
+		if values := got[name]; len(values) != 1 || values[0] != value {
+			t.Errorf("readiness env %s = %q, want exactly %q", name, values, value)
+		}
+	}
+	if args := strings.Join(command.Args[1:], " "); args != "enterprise hooks readiness --manifest "+layout.ManifestPath+" --json" {
+		t.Errorf("readiness args = %q", args)
+	}
+}
