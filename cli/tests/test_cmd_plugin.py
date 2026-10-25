@@ -3676,6 +3676,66 @@ class TestPluginInstallQuarantineNeverWarns(PluginCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(os.path.isdir(scanned[0]))
 
+    def _two_connectors(self, order):
+        roots = {c: os.path.join(self.tmp_dir, f"{c}-plugins") for c in order}
+        for path in roots.values():
+            os.makedirs(path, exist_ok=True)
+        self.app.cfg.active_connectors = lambda: list(order)  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [roots[connector or order[0]]]  # type: ignore[method-assign]
+        return {c: os.path.join(root, "two-pkg") for c, root in roots.items()}
+
+    def _seed_old_copies(self, dests):
+        result, _ = self._install("two-pkg", [], {"install": "none", "file": "none", "runtime": "enable"})
+        self.assertEqual(result.exit_code, 0, result.output)
+        for dest in dests.values():
+            with open(os.path.join(dest, "plugin.py"), "w") as f:
+                f.write("# old copy\n")
+
+    def _content(self, dest):
+        with open(os.path.join(dest, "plugin.py")) as f:
+            return f.read()
+
+    def _assert_no_backup_left(self, dests):
+        for dest in dests.values():
+            parent = os.path.dirname(dest)
+            self.assertEqual([e for e in os.listdir(parent) if e.startswith(".dclaw-")], [], parent)
+
+    def test_a_later_connector_failure_keeps_an_earlier_quarantine(self):
+        """The first connector's quarantine stands with its record; the
+        connector whose quarantine failed gets its old copy back."""
+        dests = self._two_connectors(["openclaw", "hermes"])
+        self._seed_old_copies(dests)
+        real = PluginEnforcer.quarantine
+        calls: list[str] = []
+
+        def quarantine(enforcer, name, path, connector=""):
+            calls.append(connector)
+            return real(enforcer, name, path, connector=connector) if len(calls) == 1 else None
+
+        with patch.object(PluginEnforcer, "quarantine", new=quarantine):
+            result, _ = self._install("two-pkg", ["--force", "--action"], self.FILE_ONLY)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(calls, ["openclaw", "hermes"])
+        self.assertFalse(os.path.exists(dests["openclaw"]), "the quarantined copy's old plugin came back")
+        self.assertTrue(self.app.store.has_action("plugin", "two-pkg", "file", "quarantine", "openclaw"))
+        self.assertEqual(self._content(dests["hermes"]), "# old copy\n")
+        self.assertFalse(self.app.store.has_action("plugin", "two-pkg", "file", "quarantine", "hermes"))
+        self._assert_no_backup_left(dests)
+
+    def test_a_later_connector_failure_keeps_an_earlier_disable(self):
+        """A runtime disable recorded for the first connector stands on the
+        copy it was recorded for; the refused connector gets its old copy."""
+        dests = self._two_connectors(["hermes", "openclaw"])
+        self._seed_old_copies(dests)
+        with patch("defenseclaw.gateway.OrchestratorClient.disable_plugin", side_effect=RuntimeError("down")):
+            result, _ = self._install("two-pkg", ["--force", "--action"], self.RUNTIME_ONLY)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("failed=runtime-disable", "\n".join(e.details for e in self.app.store.list_events(50)))
+        self.assertEqual(self._content(dests["hermes"]), "# plugin code\n")
+        self.assertTrue(self.app.store.has_action("plugin", "two-pkg", "runtime", "disable", "hermes"))
+        self.assertEqual(self._content(dests["openclaw"]), "# old copy\n")
+        self._assert_no_backup_left(dests)
+
     def test_plugin_scan_reports_a_file_only_quarantine_as_rejected(self):
         from datetime import datetime, timedelta, timezone
 

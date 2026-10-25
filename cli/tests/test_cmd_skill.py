@@ -4126,15 +4126,20 @@ class TestSkillInstallQuarantineNeverWarns(SkillCommandTestBase):
         with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
             f.write(f"# {skill_name}\n")
 
-    def _install(self, name, args, action):
+    def _install(self, name, args, action, *, scan_exc=None, clean_root=None):
         self.app.cfg.admission.skill.actions["medium"] = action
         scanned: list[str] = []
 
         def scan(_self, path, *a, **kw):
             scanned.append(path)
+            if scan_exc is not None:
+                raise scan_exc
+            clean = clean_root is not None and path.startswith(clean_root + os.sep)
             return ScanResult(
                 scanner="skill-scanner", target=path, timestamp=datetime.now(timezone.utc),
-                findings=[Finding(id="m1", severity="MEDIUM", title="broad permissions", scanner="skill-scanner")],
+                findings=[] if clean else [
+                    Finding(id="m1", severity="MEDIUM", title="broad permissions", scanner="skill-scanner"),
+                ],
                 duration=timedelta(seconds=0.1),
             )
 
@@ -4178,6 +4183,99 @@ class TestSkillInstallQuarantineNeverWarns(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(os.path.isdir(scanned[0]))
         self.assertTrue([e for e in self.app.store.list_events(50) if e.action == "install-warning"])
+
+    WARN = {"install": "none", "file": "none", "runtime": "enable"}
+
+    def _connector_roots(self, hermes_root=None):
+        roots = {
+            "openclaw": os.path.join(self.tmp_dir, "openclaw-skills"),
+            "hermes": hermes_root or os.path.join(self.tmp_dir, "hermes-skills"),
+        }
+        self.app.cfg.active_connectors = lambda: list(roots)  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: [roots[connector or "openclaw"]]  # type: ignore[method-assign]
+        return roots
+
+    def _seed_old_copy(self, name, args=()):
+        result, scanned = self._install(name, list(args), self.WARN)
+        self.assertEqual(result.exit_code, 0, result.output)
+        for path in scanned:
+            with open(os.path.join(path, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write("# old copy\n")
+        return sorted(set(scanned))
+
+    def _assert_no_backup_left(self, paths):
+        for parent in {os.path.dirname(path) for path in paths}:
+            self.assertEqual([e for e in os.listdir(parent) if e.startswith(".dclaw-")], [], parent)
+
+    def _assert_old_copy_restored(self, result, paths):
+        self.assertEqual(result.exit_code, 1, result.output)
+        for path in paths:
+            with open(os.path.join(path, "SKILL.md"), encoding="utf-8") as f:
+                self.assertEqual(f.read(), "# old copy\n", f"{path}: the replaced skill was not restored")
+        self._assert_no_backup_left(paths)
+
+    def test_a_refused_force_install_restores_the_replaced_skill(self):
+        """A --force install that is refused puts the replaced skill back,
+        on every refusal path (no --action, failed quarantine move, failed
+        gateway disable, failed scan), never deleting it with the new copy."""
+        cases = {
+            "no-action": ([], self.FILE_ONLY, {}, None),
+            "quarantine-move-fails": (["--action"], self.FILE_ONLY, {}, patch(
+                "defenseclaw.commands.cmd_skill._quarantine_skill_with_provenance", return_value=None,
+            )),
+            "gateway-disable-fails": (["--action"], self.RUNTIME_ONLY, {}, patch(
+                "defenseclaw.gateway.OrchestratorClient.disable_skill", side_effect=RuntimeError("down"),
+            )),
+            "scan-fails": ([], self.FILE_ONLY, {"scan_exc": RuntimeError("scanner down")}, None),
+        }
+        for label, (args, action, kw, ctx) in cases.items():
+            with self.subTest(label):
+                name = f"old-{label}"
+                paths = self._seed_old_copy(name)
+                with patch("defenseclaw.commands.cmd_skill._normalize_runtime_connector", return_value="openclaw"):
+                    if ctx is None:
+                        result, _ = self._install(name, ["--force", *args], action, **kw)
+                    else:
+                        with ctx:
+                            result, _ = self._install(name, ["--force", *args], action, **kw)
+                self._assert_old_copy_restored(result, paths)
+
+    def test_a_refusal_on_a_later_connector_restores_every_replaced_copy(self):
+        roots = self._connector_roots()
+        paths = self._seed_old_copy("old-two")
+        self.assertEqual(len(paths), 2)
+        result, _ = self._install("old-two", ["--force"], self.FILE_ONLY, clean_root=roots["openclaw"])
+        self.assertIn("refusing to install", result.output)
+        self._assert_old_copy_restored(result, paths)
+
+    def test_a_shared_root_refusal_restores_only_the_copy_that_was_there(self):
+        shared = os.path.join(self.tmp_dir, "openclaw-skills")
+        self._connector_roots(hermes_root=shared)
+        # Two connectors sharing a root need --force for the second copy.
+        paths = self._seed_old_copy("old-shared", ["--force"])
+        result, _ = self._install("old-shared", ["--force"], self.FILE_ONLY)
+        self._assert_old_copy_restored(result, paths)
+        # Without a prior copy, the first connector's new copy is never
+        # put back as if it had been there.
+        result, scanned = self._install("new-shared", ["--force"], self.FILE_ONLY)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertFalse(os.path.exists(os.path.join(shared, "new-shared")))
+        self._assert_no_backup_left(scanned)
+
+    def test_a_force_install_that_stands_drops_the_replaced_copy(self):
+        paths = self._seed_old_copy("old-stands")
+        result, _ = self._install("old-stands", ["--force"], self.WARN)
+        self.assertEqual(result.exit_code, 0, result.output)
+        with open(os.path.join(paths[0], "SKILL.md"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), "# old-stands\n")
+        self._assert_no_backup_left(paths)
+        # An applied quarantine stands too: the new copy is quarantined and
+        # no backup is left behind.
+        result, _ = self._install("old-stands", ["--force", "--action"], self.FILE_ONLY)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("quarantined", result.output)
+        self.assertFalse(os.path.exists(paths[0]))
+        self._assert_no_backup_left(paths)
 
     def test_skill_scan_reports_a_file_only_quarantine_as_blocking(self):
         from defenseclaw.commands.cmd_skill import _skill_scan_would_install_block

@@ -1540,22 +1540,25 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
                         )
                     continue
 
-                deferred_enforcement_failure = (
-                    _scan_installed_plugin_for_connector(
-                        app,
-                        pe,
-                        scanner,
-                        plugin_name,
-                        plugin_path,
-                        connector=connector,
-                        take_action=take_action,
-                        rollback=transaction.rollback,
-                        scan_result=scan_results[connector],
-                        defer_action_failure=len(targets) > 1,
-                        defer_scan_log=True,
-                    )
-                    or deferred_enforcement_failure
+                enforced = _scan_installed_plugin_for_connector(
+                    app,
+                    pe,
+                    scanner,
+                    plugin_name,
+                    plugin_path,
+                    connector=connector,
+                    take_action=take_action,
+                    rollback=transaction.rollback,
+                    scan_result=scan_results[connector],
+                    defer_action_failure=len(targets) > 1,
+                    defer_scan_log=True,
                 )
+                if enforced:
+                    # The quarantine, disable or block applied for this
+                    # connector stands with its record even when a later
+                    # connector refuses and rolls the install back.
+                    transaction.keep(connector)
+                deferred_enforcement_failure = enforced or deferred_enforcement_failure
         except SystemExit:
             # Enforcement may intentionally move the new canonical copy into
             # quarantine.  Preserve that action, but discard replacement
@@ -1828,6 +1831,7 @@ class _PluginInstallTransaction:
                     "stage": "",
                     "backups": [],
                     "installed": False,
+                    "kept": False,
                 }
             )
 
@@ -1875,8 +1879,20 @@ class _PluginInstallTransaction:
             self.rollback()
             raise
 
+    def keep(self, connector: str) -> None:
+        """Keep what enforcement left for ``connector`` (a quarantined,
+        disabled or blocked copy and its record) when the install is rolled
+        back for another connector: its prior copy is never restored as
+        active next to that record."""
+        for plan in self.plans:
+            if plan["connector"] == connector:
+                plan["kept"] = True
+
     def rollback(self) -> None:
         for plan in reversed(self.plans):
+            if plan["kept"]:
+                self._discard_backups(plan)
+                continue
             destination = plan["destination"]
             if plan["installed"]:
                 if os.path.isdir(destination) and not os.path.islink(destination):
@@ -1894,10 +1910,14 @@ class _PluginInstallTransaction:
 
     def finalize(self) -> None:
         for plan in self.plans:
-            for _original, backup in plan["backups"]:
-                if os.path.isdir(backup) and not os.path.islink(backup):
-                    shutil.rmtree(backup)
-            plan["backups"] = []
+            self._discard_backups(plan)
+
+    @staticmethod
+    def _discard_backups(plan: dict[str, Any]) -> None:
+        for _original, backup in plan["backups"]:
+            if os.path.isdir(backup) and not os.path.islink(backup):
+                shutil.rmtree(backup)
+        plan["backups"] = []
 
 
 def _rollback_plugin_install_paths(paths: list[str]) -> None:
