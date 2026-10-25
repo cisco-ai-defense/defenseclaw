@@ -314,6 +314,13 @@ function Get-DefenseClawManagedHooksTeardownJournalPhase {
 }
 function Remove-DefenseClawStandaloneOpenCodeManagedPlugin { param([hashtable]$Layout) }
 function Set-DefenseClawInstallTreeRetirementAcls { param([hashtable]$Layout, [switch]$Committed) }
+# This deployment's helper prepares the removal against the tombstone
+# (teardown-managed-hooks capabilities); the older-helper paths are covered
+# by enterprise-standalone-uninstall-hook-commit-smoke.ps1.
+function Test-DefenseClawManagedHooksCommittedTeardownSupported {
+    param([hashtable]$Layout, [string]$GatewayServiceName)
+    return $true
+}
 function Invoke-DefenseClawManagedHooksTeardownCommand {
     param(
         [hashtable]$Layout,

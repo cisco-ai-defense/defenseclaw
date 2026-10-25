@@ -1079,8 +1079,27 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector %s teardown: %w", name, err)
 	}
 
+	// until 1.1: in an uninstall, a removed connector's entries in the agent
+	// configs, its stub and its import path go too, so a removed DefenseClaw
+	// does not keep blocking the agent.
+	if os.Getenv(connector.RemovedConnectorUninstallEnv) == "1" {
+		if _, err := connector.UninstallRemovedConnector(name, opts); err != nil {
+			if connectorFlagJSON {
+				_ = json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+					"connector": name,
+					"action":    "teardown",
+					"ok":        false,
+					"error":     err.Error(),
+				})
+				return fmt.Errorf("connector teardown failed")
+			}
+			return fmt.Errorf("connector %s teardown: %w", name, err)
+		}
+	}
+
 	// until 1.1: a removed connector's teardown changes only its hook script
-	// and tokens; the rest is listed with the steps to remove it by hand.
+	// and tokens (outside an uninstall); the rest is listed with the steps to
+	// remove it by hand.
 	leftovers, removed := connector.RemovedConnectorLeftovers(name, opts)
 	if connectorFlagJSON {
 		payload := map[string]any{

@@ -1062,6 +1062,12 @@ func transactionChildEnvForHomes(
 	)
 }
 
+// removedConnectorUninstallEnv is connector.RemovedConnectorUninstallEnv: an
+// uninstall's connector teardown also removes what an older setup wrote for
+// a removed connector (OpenHands, OmniGent), so a removed DefenseClaw does not
+// keep blocking the agent. Only an uninstall sets it. until 1.1.
+const removedConnectorUninstallEnv = "DEFENSECLAW_REMOVED_CONNECTOR_UNINSTALL"
+
 func transactionChildEnvForConnectorHomes(
 	transaction setupTransaction,
 	codexHome, claudeConfigDir, copilotHome, cursorHome, devinConfigDir, devinExecutable, antigravityConfigDir, openCodeConfigDir, omnigentConfigHome, hermesHome string,
@@ -1080,10 +1086,14 @@ func transactionChildEnvForConnectorHomes(
 			strings.EqualFold(name, "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME") ||
 			strings.EqualFold(name, "OPENCODE_CONFIG_DIR") ||
 			strings.EqualFold(name, "OMNIGENT_CONFIG_HOME") ||
+			strings.EqualFold(name, removedConnectorUninstallEnv) ||
 			strings.EqualFold(name, "HERMES_HOME")) {
 			continue
 		}
 		filtered = append(filtered, entry)
+	}
+	if transaction.Action == "uninstall" { // until 1.1
+		filtered = append(filtered, removedConnectorUninstallEnv+"=1")
 	}
 	if codexHome != "" {
 		filtered = append(filtered, "CODEX_HOME="+codexHome)

@@ -113,8 +113,10 @@ _WIN_SYNCHRONIZE = 0x00100000
 _WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 # until 1.1: removed connectors whose older-release state uninstall still
 # tears down (connector_backups markers, the hook script their stub replaces,
-# and active_connector.json names). The teardown only writes the stub and
-# revokes the tokens; uninstall lists what is left.
+# and active_connector.json names). In an uninstall the teardown also removes
+# their entries from the agent configs, the stub and OmniGent's import path
+# (_REMOVED_CONNECTOR_UNINSTALL_ENV); uninstall lists what is left.
+_REMOVED_CONNECTOR_UNINSTALL_ENV = "DEFENSECLAW_REMOVED_CONNECTOR_UNINSTALL"
 _REMOVED_CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
     "omnigent": (
         os.path.join("connector_backups", "omnigent", "config.json"),
@@ -3643,6 +3645,8 @@ def _run_gateway_connector_teardown(
             encoding="utf-8",
             errors="replace",
             timeout=_CONNECTOR_COMMAND_TIMEOUT_S,
+            # until 1.1: so a removed connector's policy does not outlive DefenseClaw.
+            env={**os.environ, _REMOVED_CONNECTOR_UNINSTALL_ENV: "1"},
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         ux.warn(f"gateway connector teardown failed to launch: {exc}")

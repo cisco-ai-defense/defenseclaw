@@ -75,7 +75,9 @@ package connector
 // Nothing else is touched: agent config files (hooks.json, config.yaml),
 // import paths (.pth), runtime records (.hookcfg), backups, every other
 // entry of the hook contract lock and every other connector's files stay as
-// they are.
+// they are. An uninstall then also removes DefenseClaw's entries from the
+// agent configs, the stub and OmniGent's import-path line
+// (removed_uninstall.go), so a removed DefenseClaw does not keep blocking.
 // RemovedConnectorLeftovers lists what is left, with the steps to remove it
 // by hand; status, doctor and every uninstall form show that list. The
 // gateway keeps the old hook routes, which block every call
@@ -104,15 +106,19 @@ const (
 	removedOmnigentID          = "omnigent"
 	removedOmnigentModuleName  = "defenseclaw_omnigent_policy"
 	removedOmnigentPolicyKey   = "defenseclaw_guardrail"
+	removedOmnigentPthName     = "defenseclaw_omnigent.pth"
 	// removedScriptReadLimit bounds the read of a hook script: anything
 	// larger is not one DefenseClaw wrote.
 	removedScriptReadLimit = 1 << 20
 	// removedMarkerLines is how many leading lines may hold the marker.
 	removedMarkerLines = 3
-	// removedConfigReadLimit bounds the read of an agent config; a larger
-	// one cannot be checked and is listed for a check by hand.
-	removedConfigReadLimit = 16 << 20
 )
+
+// removedConfigReadLimit bounds the read of an agent config, the same for
+// every check, the uninstall's cleaning and its verification; a larger one
+// cannot be checked: it is listed for a check by hand and fails an uninstall
+// (removed_uninstall.go). A var for tests.
+var removedConfigReadLimit = 256 << 20
 
 // RemovedConnectorForHookPath returns the removed connector whose gateway
 // hook route path is: the route every 0.8.10 to 1.0.3 OpenHands hook and
@@ -929,6 +935,8 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 			if item, ok := removedPthLeftover(pth, filepath.Join(opts.DataDir, "hooks")); ok {
 				out = append(out, item)
 			}
+		} else if item, ok := removedLostPthLeftover(opts.DataDir); ok {
+			out = append(out, item)
 		}
 	}
 	script := c.scriptPath(opts.DataDir)
@@ -1331,6 +1339,27 @@ func removedValueNames(value any, names func(string) bool) bool {
 	return false
 }
 
+// removedLostPthLeftover lists OmniGent's import-path file when an older
+// setup's record of where it wrote it (connector_backups/omnigent/pth.json) is
+// gone but its other records are there: every such setup wrote the file. Its
+// path is in the site-packages of OmniGent's Python, which only that Python
+// can tell; an uninstall (SYSTEM or root on a managed host) never runs the
+// user's interpreter to ask, so the step says how to find it.
+func removedLostPthLeftover(dataDir string) (RemovedLeftover, bool) {
+	for _, logical := range []string{"config", "module"} {
+		if _, err := os.Lstat(managedFileBackupPath(dataDir, removedOmnigentID, logical)); err == nil {
+			hooks := filepath.Join(dataDir, "hooks")
+			return RemovedLeftover{
+				Path: removedOmnigentPthName,
+				What: "DefenseClaw's record of where it wrote OmniGent's import-path file is gone, so the file may still add DefenseClaw's hook folder to OmniGent's Python import path",
+				Step: "in the folder that OmniGent's Python prints for python -c \"import sysconfig; print(sysconfig.get_paths()['purelib'])\", remove only the line " +
+					hooks + " from " + removedOmnigentPthName + " (delete the file when that was its only line)",
+			}, true
+		}
+	}
+	return RemovedLeftover{}, false
+}
+
 // removedPthLeftover lists OmniGent's import-path file when it still holds
 // DefenseClaw's line (the hook folder), with a step that takes out only that
 // line when the file holds other import paths too.
@@ -1463,7 +1492,7 @@ func readRemovedConfig(path string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	return io.ReadAll(io.LimitReader(file, removedConfigReadLimit+1))
+	return io.ReadAll(io.LimitReader(file, int64(removedConfigReadLimit)+1))
 }
 
 // FormatRemovedLeftovers renders leftovers as the lines status, uninstall and
