@@ -80,6 +80,25 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
     assert swap < wait < publish_body.index("return $preimage")
 
 
+
+def test_standalone_publishes_the_hook_after_the_prior_guardian_stopped() -> None:
+    # GAP-1446: a running 1.0.2 or 1.0.3 guardian took the swapped hook for
+    # damage and restored its own release's hook through a temporary that
+    # the stop left in bin (defenseclaw-hook.exe.restore-<hex>), which the
+    # next uninstall refused. Standalone swaps the hook once that guardian
+    # has exited and its temporaries are removed, while the prior gateway
+    # still answers; Secure Client keeps its order.
+    transaction = _function_body(_text(), "New-DefenseClawTransaction")
+    first = transaction.index("Publish-DefenseClawEarlyHook")
+    standalone = transaction.rindex("Publish-DefenseClawEarlyHook")
+    assert first != standalone
+    assert "if (-not (Test-DefenseClawStandaloneProfile)) {" in transaction[first - 200 : first]
+    guardian = transaction.index("Stop-DefenseClawService -Name $GuardianServiceName")
+    sweep = transaction.index("Remove-DefenseClawStaleReplacementBackups -Destination $Layout.HookPath")
+    gateway = transaction.index("Stop-DefenseClawService -Name $GatewayServiceName")
+    assert first < guardian < sweep < standalone < gateway
+    assert "if (Test-DefenseClawStandaloneProfile) {" in transaction[guardian:sweep]
+
 _HARNESS = r"""
 param([string]$ModulePath, [string]$Scratch, [string]$Case)
 Set-StrictMode -Version Latest
