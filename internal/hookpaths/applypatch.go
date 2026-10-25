@@ -307,23 +307,18 @@ func patchShellInvocationsKnown(text string) (known bool, calls int, fedBody []b
 	return true, calls, fedBody
 }
 
-// patchFedBodyLines marks the content lines of every envelope in a shell
-// text that an apply_patch call reads: added, removed and context lines,
-// not the "***" headers. apply_patch writes only the files its headers
-// name, so a path in those lines is file content (GAP-0781). It is nil when
-// any apply_patch in the text has an unknown input.
-func patchFedBodyLines(text string) []bool {
+// patchFedLines marks the lines inside every envelope in a shell text that
+// an apply_patch call reads: the "***" headers and the added, removed and
+// context lines. apply_patch writes only the files its headers name, so a
+// path in the other lines is file content (GAP-0781). It is nil when any
+// apply_patch in the text has an unknown input.
+func patchFedLines(text string) []bool {
 	known, calls, fedBody := patchShellInvocationsKnown(text)
 	if !known || calls == 0 {
 		return nil
 	}
 	if _, _, parsed := patchEnvelopePaths(text); !parsed {
 		return nil
-	}
-	for i, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "***") {
-			fedBody[i] = false
-		}
 	}
 	return fedBody
 }
