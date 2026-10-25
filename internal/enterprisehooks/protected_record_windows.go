@@ -114,10 +114,18 @@ func readWindowsProtectedRecord(path string, limit int64) ([]byte, error) {
 
 // ReadWindowsUnprotectedAgents reads the enumerator's unprotected-agents
 // record for manifestPath. A missing record is an error: status and verify
-// cannot assert complete coverage before the enumerator publishes it.
+// cannot assert complete coverage before the enumerator publishes it. The
+// record is parsed before its age is checked, as on Linux and macOS: a
+// malformed record is a parse error, and a stale one returns the agents its
+// last scan found with an UnprotectedAgentsStaleError, so verify still fails
+// on a known refusal gap.
 func ReadWindowsUnprotectedAgents(manifestPath string) ([]UnprotectedAgent, error) {
 	path := UnprotectedAgentsPath(manifestPath)
 	data, err := readWindowsProtectedRecord(path, UnprotectedAgentsMaxBytes)
+	if err != nil {
+		return nil, err
+	}
+	agents, err := ParseUnprotectedAgents(data)
 	if err != nil {
 		return nil, err
 	}
@@ -125,10 +133,10 @@ func ReadWindowsUnprotectedAgents(manifestPath string) ([]UnprotectedAgent, erro
 	if err != nil {
 		return nil, err
 	}
-	if UnprotectedAgentsRecordStale(info.ModTime(), time.Now()) {
-		return nil, fmt.Errorf("enterprise hooks: unprotected-agents record is stale")
+	if now := time.Now(); UnprotectedAgentsRecordStale(info.ModTime(), now) {
+		return agents, UnprotectedAgentsStaleError{Age: UnprotectedAgentsRecordAge(info.ModTime(), now)}
 	}
-	return ParseUnprotectedAgents(data)
+	return agents, nil
 }
 
 // WriteWindowsUnprotectedAgents publishes the unprotected-agents record for

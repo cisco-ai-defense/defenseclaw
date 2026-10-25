@@ -2026,6 +2026,18 @@ var windowsEnterpriseUnprotectedAgentsReader = func() ([]enterprisehooks.Unprote
 // are, so verify fails on it.
 func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 	agents, err := windowsEnterpriseUnprotectedAgentsReader()
+	if stale := (enterprisehooks.UnprotectedAgentsStaleError{}); errors.As(err, &stale) || errors.Is(err, os.ErrNotExist) {
+		age := stale.Age
+		if age == "" {
+			age = enterprisehooks.UnprotectedAgentsRecordMissing
+		}
+		result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, enterprisehooks.UnprotectedAgentsScanPending(age,
+			"Restart-Service DefenseClawHookEnumerator (from an elevated prompt)"))
+		result.CoverageComplete, result.SecurityComplete = false, false
+		// Only the pending scan is a warning. A stale record still names the agents its last scan found; they
+		// are reported below, so verify keeps failing on a known gap.
+		err = nil
+	}
 	if err != nil {
 		message := "the enumerator's unprotected-agents record is missing or unreadable: " + err.Error()
 		if errors.Is(err, os.ErrPermission) {
