@@ -16,9 +16,11 @@
 # ~/.defenseclaw and per-user binaries (the lifecycle purge runs before the
 # package goes, so it can act as each user; an account's own personal install
 # from before the enrollment is moved to a ~/.defenseclaw-backup-<UTC time>
-# folder first) and, on Linux, the empty staging folder /var/lib/defenseclaw-mdm
-# the wrapper created. Without it each account keeps ~/.defenseclaw and its
-# sandboxes.
+# folder first) and the wrapper's empty state folder (/var/lib/defenseclaw-mdm,
+# also its staging folder, on Linux; /var/db/defenseclaw-mdm on macOS).
+# Without it each account keeps ~/.defenseclaw and its sandboxes. Every
+# completed uninstall removes the wrapper's credential rotation journal
+# (overwriting each earlier value it holds first), since the credentials go.
 #
 # Idempotent: on a host without the deployment it prints a no-op result and
 # exits 0. Exit codes: 0 removed or nothing to do, 1 failure, 2 invalid
@@ -44,8 +46,9 @@ umask 077
 
 readonly DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_EXIT_BUSY=75
 readonly DC_LINUX_PACKAGE=defenseclaw-enterprise
-# The staging folder the wrapper creates on Linux (dc_stage_parent).
-DC_LINUX_STAGE_PARENT=/var/lib/defenseclaw-mdm
+# The wrapper's root-only state folder (on Linux also its staging folder,
+# dc_stage_parent); it holds the credential rotation journal (rotation/).
+DC_KIT_STATE=/var/lib/defenseclaw-mdm
 DC_STAGE=""
 
 dc_platform() {
@@ -196,15 +199,39 @@ dc_remove_linux_package() {
     dc_log "removed package $DC_LINUX_PACKAGE ($kind)"
 }
 
-# dc_remove_stage_parent: a purge removes the root-only staging folder the
-# wrapper created on Linux once it is empty (#1298). A folder that is not
-# root's own directory, or that a wrapper run still stages in, stays.
+# dc_remove_rotation_journal: the uninstall removed the credentials, so the
+# wrapper's credential rotation journal goes too; each earlier value it
+# holds (<name>.value) is overwritten before it is removed. A journal that
+# is a link or not root's own folder is left as it is and logged.
+dc_remove_rotation_journal() {
+    journal="$DC_KIT_STATE/rotation"
+    [ -e "$journal" ] || [ -L "$journal" ] || return 0
+    if [ -L "$journal" ] || [ ! -d "$journal" ] || [ "$(dc_stat_uid "$journal")" != 0 ]; then
+        dc_log "left $journal as it is: it is not a root-owned folder"
+        return 0
+    fi
+    for value in "$journal"/*.value; do
+        if [ ! -f "$value" ] || [ -L "$value" ]; then continue; fi
+        size=$(wc -c <"$value" | tr -d ' ')
+        dd if=/dev/zero of="$value" bs=1 count="$size" conv=notrunc 2>/dev/null || true
+    done
+    rm -f "${journal:?}"/*.value "${journal:?}"/*.entry "${journal:?}"/*.entry.partial
+    if rmdir "$journal" 2>/dev/null; then
+        dc_log "removed the credential rotation journal $journal"
+    else
+        dc_log "could not remove the credential rotation journal $journal: it holds files the wrapper does not write"
+    fi
+}
+
+# dc_remove_stage_parent: a purge removes the wrapper's root-only state
+# folder once it is empty (#1298). A folder that is not root's own
+# directory, or that a wrapper run still stages in, stays.
 dc_remove_stage_parent() {
-    [ "$DC_PURGE" = 1 ] && [ "$DC_SCRIPT_OS" = linux ] || return 0
-    [ -d "$DC_LINUX_STAGE_PARENT" ] && [ ! -L "$DC_LINUX_STAGE_PARENT" ] || return 0
-    [ "$(dc_stat_uid "$DC_LINUX_STAGE_PARENT")" = 0 ] || return 0
-    if rmdir "$DC_LINUX_STAGE_PARENT" 2>/dev/null; then
-        dc_log "removed the empty staging folder $DC_LINUX_STAGE_PARENT"
+    [ "$DC_PURGE" = 1 ] || return 0
+    [ -d "$DC_KIT_STATE" ] && [ ! -L "$DC_KIT_STATE" ] || return 0
+    [ "$(dc_stat_uid "$DC_KIT_STATE")" = 0 ] || return 0
+    if rmdir "$DC_KIT_STATE" 2>/dev/null; then
+        dc_log "removed the empty folder $DC_KIT_STATE"
     fi
 }
 
@@ -225,7 +252,7 @@ while [ "$#" -gt 0 ]; do
         --purge) DC_PURGE=1; shift ;;
         --keep-package) DC_KEEP_PACKAGE=1; shift ;;
         --log) DC_LOG=${2:-}; shift 2 ;;
-        -h | --help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "unknown argument: $1" ;;
     esac
 done
@@ -233,7 +260,7 @@ done
 [ "$(dc_platform)" = "$DC_SCRIPT_OS" ] ||
     dc_fail_result "$DC_EXIT_INVALID" mdm_wrong_platform "this copy of uninstall.sh is for $DC_SCRIPT_OS"
 if [ "$DC_SCRIPT_OS" = darwin ]; then
-    gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway group=macos
+    gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway group=macos DC_KIT_STATE=/var/db/defenseclaw-mdm
     [ -n "$DC_LOG" ] || DC_LOG=/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log
 else
     gateway=/opt/defenseclaw/bin/defenseclaw-gateway group=linux
@@ -272,6 +299,7 @@ if [ -e "$gateway" ]; then
     if [ -n "$package" ] && [ "$DC_KEEP_PACKAGE" = 0 ]; then
         dc_remove_linux_package "$package"
     fi
+    dc_remove_rotation_journal
     dc_remove_stage_parent
     cat "$DC_STAGE/result.json"
     dc_log "result $(tr -d '\n' <"$DC_STAGE/result.json")"
@@ -279,6 +307,7 @@ if [ -e "$gateway" ]; then
 fi
 
 # No gateway: remove a half-removed package, otherwise nothing to do.
+dc_remove_rotation_journal
 dc_remove_stage_parent
 if [ -n "$package" ] && [ "$DC_KEEP_PACKAGE" = 0 ]; then
     dc_remove_linux_package "$package"

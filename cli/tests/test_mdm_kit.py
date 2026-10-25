@@ -3710,7 +3710,7 @@ def test_standalone_installer_binds_native_output_to_the_process_deadline() -> N
         ("1", "linux", "0", "", True),
         ("1", "linux", "0", "defenseclaw-mdm.abc123", False),
         ("0", "linux", "0", "", False),
-        ("1", "darwin", "0", "", False),
+        ("1", "darwin", "0", "", True),
         ("1", "linux", "501", "", False),
         ("1", "linux", "0", "symlink", False),
     ],
@@ -3729,7 +3729,7 @@ def test_unix_uninstall_purge_removes_the_empty_staging_folder(
             (parent / content).mkdir()
     script = f"""DC_PURGE={purge}
 DC_SCRIPT_OS={platform}
-DC_LINUX_STAGE_PARENT="{parent}"
+DC_KIT_STATE="{parent}"
 dc_log() {{ :; }}
 dc_stat_uid() {{ echo {owner}; }}
 {function}
@@ -3745,7 +3745,11 @@ dc_remove_stage_parent
 def test_unix_uninstall_removes_the_staging_folder_after_the_package_and_without_a_gateway() -> None:
     text = _text(MDM / "linux" / "uninstall.sh")
     assert text.count("\ndc_remove_stage_parent\n") + text.count("    dc_remove_stage_parent\n") == 2
-    assert 'DC_LINUX_STAGE_PARENT=/var/lib/defenseclaw-mdm' in text
+    # The journal goes first, so the purge finds the state folder empty.
+    assert text.count("dc_remove_rotation_journal\n    dc_remove_stage_parent\n") == 1
+    assert text.count("\ndc_remove_rotation_journal\ndc_remove_stage_parent\n") == 1
+    assert 'DC_KIT_STATE=/var/lib/defenseclaw-mdm' in text
+    assert "DC_KIT_STATE=/var/db/defenseclaw-mdm" in text
     assert "DC_STAGE_PARENT=/var/lib/defenseclaw-mdm" in _text(MDM / "linux" / "defenseclaw-enterprise.sh")
 
 
@@ -3841,3 +3845,45 @@ dc_main
     assert not (journal / "ai-key.entry").exists() and not (secrets / "ai-key").exists(), out
     lifecycle = [call for call in calls if call.startswith("lifecycle ")]
     assert len(lifecycle) == 1 and " ensure " in lifecycle[0], calls
+
+
+# R105 mgmt refix 1 (review R1-2): every completed uninstall removes the
+# wrapper's credential rotation journal, overwriting each earlier credential
+# value it holds before removing it, so a purge also finds the state folder
+# empty and removes it (#1298 kept). A journal that is a link or not root's
+# own folder is left as it is.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("case", ["journal", "link", "foreign"])
+def test_unix_uninstall_removes_the_rotation_journal(tmp_path: Path, os_dir: str, case: str) -> None:
+    text = _text(MDM / os_dir / "uninstall.sh")
+    functions = "\n".join(_shell_function(text, name) for name in ("dc_remove_rotation_journal", "dc_remove_stage_parent"))
+    state = tmp_path / "defenseclaw-mdm"
+    state.mkdir(mode=0o700)
+    journal = state / "rotation"
+    target = journal if case != "link" else tmp_path / "elsewhere"
+    target.mkdir(mode=0o700)
+    if case == "link":
+        journal.symlink_to(target)
+    (target / "ai-key.value").write_text("old-secret-value\n", encoding="utf-8")
+    (target / "ai-key.entry").write_text("confirmed=none\n", encoding="utf-8")
+    copy = tmp_path / "copy-of-value"
+    os.link(target / "ai-key.value", copy)
+    owner = "501" if case == "foreign" else "0"
+    script = f"""set -eu
+DC_PURGE=1 DC_KIT_STATE="{state}" DC_LOG=""
+dc_log() {{ printf '%s\\n' "$1"; }}
+dc_stat_uid() {{ echo {owner}; }}
+{functions}
+dc_remove_rotation_journal
+dc_remove_stage_parent
+"""
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    if case == "journal":
+        assert not os.path.lexists(state), result.stdout
+        assert copy.read_bytes() == b"\0" * len("old-secret-value\n"), "the earlier credential value was not overwritten"
+    else:
+        assert "left " in result.stdout and "not a root-owned folder" in result.stdout, result.stdout
+        assert (target / "ai-key.value").read_text(encoding="utf-8") == "old-secret-value\n"
+        assert os.path.lexists(journal)
