@@ -22,14 +22,15 @@ const (
 // HookOutageFailMode is the one decision of what a hook does while its
 // gateway is down (owner decision 2026-10-23, which replaces decision 16 for
 // per-user installs). managedInstall is any managed or enterprise install
-// (rpm, pkg, Setup, any managed profile, Secure Client included), managedMode
-// the mode that install's protected config resolved
-// (EffectiveHookFailModeForConnector), and tier the connector's policy tier
+// (rpm, pkg, Setup, any managed profile, Secure Client included), savedMode
+// the explicit saved mode (or the managed install's resolved mode), and tier
+// the connector's policy tier
 // (HookPolicyTierForConnector).
 //
-//   - A managed install keeps managedMode: closed unless its administrator
+//   - A managed install keeps savedMode: closed unless its administrator
 //     chose open, which outside Secure Client covers a classified outage only.
 //     The tier never opens a managed hook.
+//   - An explicit saved mode wins on a per-user install too.
 //   - A per-user (OSS) install in the strict tier fails closed.
 //   - A per-user install in the default (balanced) or permissive tier fails
 //     open for an outage: the gateway is not running, has stopped or does not
@@ -39,11 +40,13 @@ const (
 // Only an outage can open: an answer the gateway gave (an error status, a
 // malformed, partial or oversized answer), a refusal, a missing credential,
 // another program on the gateway port and the install window stay closed in
-// every tier. A configured per-user guardrail.hook_fail_mode does not change
-// the per-user answer: tier selects it.
-func HookOutageFailMode(managedInstall bool, managedMode, tier string) string {
+// every tier.
+func HookOutageFailMode(managedInstall bool, savedMode, tier string) string {
 	if managedInstall {
-		return explicitHookFailMode(managedMode)
+		return explicitHookFailMode(savedMode)
+	}
+	if strings.TrimSpace(savedMode) != "" {
+		return explicitHookFailMode(savedMode)
 	}
 	if normalizeHookPolicyTier(tier) == HookPolicyTierStrict {
 		return "closed"
@@ -64,7 +67,7 @@ func (c *Config) EffectiveHookOutageFailModeForConnector(connector string) strin
 	if managedInstall {
 		return HookOutageFailMode(true, c.EffectiveHookFailModeForConnector(connector), "")
 	}
-	return HookOutageFailMode(false, "", c.HookPolicyTierForConnector(connector))
+	return HookOutageFailMode(false, c.configuredHookFailModeForConnector(connector), c.HookPolicyTierForConnector(connector))
 }
 
 // HookPolicyTierForConnector is the policy tier of connector's guardrail rule

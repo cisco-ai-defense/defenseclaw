@@ -39,12 +39,16 @@ func TestHookOutageFailModeDecision(t *testing.T) {
 			c.Guardrail.RulePack = "strict"
 			c.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {RulePack: "permissive"}}
 		}, "open"},
-		{"OSS default, saved closed", func(c *Config) { c.Guardrail.HookFailMode = "closed" }, "open"},
+		{"OSS default, saved closed", func(c *Config) { c.Guardrail.HookFailMode = "closed" }, "closed"},
+		{"OSS connector saved closed beats global open", func(c *Config) {
+			c.Guardrail.HookFailMode = "open"
+			c.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {HookFailMode: "closed"}}
+		}, "closed"},
 		{"OSS strict, saved open", func(c *Config) {
 			c.Guardrail.RulePack = "strict"
 			c.Guardrail.HookFailMode = "open"
 			c.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {HookFailMode: "open"}}
-		}, "closed"},
+		}, "open"},
 		{"OSS default, action mode", func(c *Config) { c.Guardrail.Mode = "action" }, "open"},
 		{"OSS strict, observe mode", func(c *Config) { c.Guardrail.Mode = "observe"; c.Guardrail.RulePack = "strict" }, "closed"},
 		{"managed default", standalone, "closed"},
@@ -82,7 +86,8 @@ func TestHookOutageFailModeDecision(t *testing.T) {
 		want           string
 	}{
 		{false, "", "default", "open"}, {false, "", "permissive", "open"}, {false, "", "strict", "closed"},
-		{false, "", "", "open"}, {false, "", "STRICT", "closed"}, {false, "closed", "default", "open"},
+		{false, "", "", "open"}, {false, "", "STRICT", "closed"}, {false, "closed", "default", "closed"},
+		{false, "open", "strict", "open"},
 		{true, "", "default", "closed"}, {true, "closed", "permissive", "closed"}, {true, "open", "strict", "open"},
 		{true, "OPEN", "default", "open"}, {true, "bogus", "default", "closed"},
 	} {
