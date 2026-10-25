@@ -149,6 +149,9 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # published as such.
     "internal/gateway/connector/otlp_token_test.go",
     "internal/observability/redaction/key_store_windows_test.go",
+    # DEFENSECLAW_HOOK_STARTUP_HELPER marks the re-executed hook test binary
+    # that measures package init cost (GAP-1340); it is never read by the hook.
+    "cmd/defenseclaw-hook/main_test.go",
     # Native Windows enterprise tests use synthetic caller-poison, temporary
     # environment, source-file label, and stdout readiness marker names. They
     # are test protocol data, not supported process configuration.
