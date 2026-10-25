@@ -22,20 +22,6 @@ var ErrAccountEnvironmentUnavailable = errors.New("the account's persistent envi
 // home it selects is then unobservable, not changed.
 var ErrAccountSignedOut = errors.New("the account is signed out")
 
-// accountSignedOutError is the error of an account whose registry hive is
-// not loaded. It is both ErrAccountEnvironmentUnavailable and
-// ErrAccountSignedOut.
-type accountSignedOutError struct{ sid string }
-
-func (e accountSignedOutError) Error() string {
-	return ErrAccountEnvironmentUnavailable.Error() + ": the registry hive of " + e.sid +
-		" is not loaded while it is signed out"
-}
-
-func (e accountSignedOutError) Is(target error) bool {
-	return target == ErrAccountEnvironmentUnavailable || target == ErrAccountSignedOut
-}
-
 // ConfigPathForAccount resolves the config.yaml of the Hermes home the
 // account at userHome configured, for a privileged service acting for that
 // account (managed setup and verification). On Windows that is the

@@ -2070,7 +2070,7 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 		run.AuthorizationErr = activationErr
 	} else if !activationExists {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian activation is missing")
-	} else if !(activation.OK || (recordExcused > 0 && activation.FailureCount == recordExcused)) ||
+	} else if (!activation.OK && (recordExcused <= 0 || activation.FailureCount != recordExcused)) ||
 		activation.UpdatedAt != authorization.UpdatedAt ||
 		activation.ManifestSHA256 != manifestSHA256 {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian activation does not cover the current manifest bytes")

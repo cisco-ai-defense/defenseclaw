@@ -57,6 +57,20 @@ var accountMachineWideEnv = []string{
 	"CommonProgramFiles", "CommonProgramFiles(x86)", "CommonProgramW6432", "COMPUTERNAME",
 }
 
+// accountSignedOutError is the error of an account whose registry hive is
+// not loaded. It is both ErrAccountEnvironmentUnavailable and
+// ErrAccountSignedOut.
+type accountSignedOutError struct{ sid string }
+
+func (e accountSignedOutError) Error() string {
+	return ErrAccountEnvironmentUnavailable.Error() + ": the registry hive of " + e.sid +
+		" is not loaded while it is signed out"
+}
+
+func (e accountSignedOutError) Is(target error) bool {
+	return target == ErrAccountEnvironmentUnavailable || target == ErrAccountSignedOut
+}
+
 // accountHomeDir reads the persistent environment of the account whose
 // profile is userHome from its loaded hive and resolves its Hermes home.
 func accountHomeDir(userHome string) (string, error) {
