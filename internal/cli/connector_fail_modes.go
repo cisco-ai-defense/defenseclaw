@@ -182,8 +182,8 @@ func refreshFailModesInstallHeld(dataDir string) bool {
 }
 
 // refreshFailModeResolver returns the outage fail mode the config chooses for
-// each connector (connector.OutageHookFailMode: explicit saved mode first,
-// otherwise the per-user policy tier), how the config was read ("loaded" or "document"; the refresh
+// each connector (connector.OutageHookFailMode: open only where the config
+// sets it), how the config was read ("loaded" or "document"; the refresh
 // reports "install" when an installer holds the data directory), and whether
 // the install is managed, which is left alone.
 func refreshFailModeResolver(cmd *cobra.Command) (func(string) string, string, bool) {

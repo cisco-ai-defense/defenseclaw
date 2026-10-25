@@ -2966,13 +2966,6 @@ func loadConfigSourceCheckedWithLayout(
 		return nil, err
 	}
 	applySecureClientScannerDefaults(&cfg)
-	// Viper's closed default applies to ordinary hook failures, but it is not
-	// an operator-saved outage mode. Preserve absence for per-user installs so
-	// the outage resolver can use the rule-pack tier; an explicit YAML value
-	// remains authoritative.
-	if !managed.IsManagedEnterprise(cfg.DeploymentMode) && !viper.InConfig("guardrail.hook_fail_mode") {
-		cfg.Guardrail.HookFailMode = ""
-	}
 	cfg.CiscoAIDefense.protectedCredentialRequired = cfg.StandaloneEnterprise()
 	if ai := cfg.Enterprise.Inspection.AIDefense; cfg.StandaloneEnterprise() && ai.Enabled {
 		cfg.CiscoAIDefense.protectedCredential = strings.TrimSpace(ai.Credential)
@@ -3800,9 +3793,9 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
-	// "closed" is the default for non-outage hook failures. The loader clears
-	// this implicit value on per-user installs so a gateway outage can follow
-	// the saved-mode-or-tier rule. Pre-existing operators are protected
+	// "closed" is the safer default — transport, authentication, and
+	// invalid-response failures BLOCK supported events rather than silently
+	// allowing them. Pre-existing operators are protected
 	// by _migrate_0_4_0_seed_hook_fail_mode (migrations.py) which
 	// writes ``hook_fail_mode: open`` to existing config.yaml so prior
 	// behavior is preserved on upgrade. Operators who explicitly want

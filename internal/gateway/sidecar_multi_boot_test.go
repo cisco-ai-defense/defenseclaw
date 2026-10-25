@@ -1007,10 +1007,10 @@ func TestMultiConnectorActivePublicationFailureRestoresPreviouslyActivePosture(t
 	s.cfg.Guardrail.Enabled = true
 	s.cfg.Guardrail.Mode = "observe"
 	s.cfg.Guardrail.HookFailMode = "closed"
-	// An explicit open changes the current outage mode from the prior
-	// install's saved closed mode.
+	// The default tier: the current outage mode is open (oss-outage-open),
+	// changed from the prior install's closed.
 	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-		"codex": {Mode: "observe", HookFailMode: "open"},
+		"codex": {Mode: "observe", HookFailMode: "closed"},
 	}
 	s.health = NewSidecarHealth()
 	artifactPath := filepath.Join(testenv.PrivateTempDir(t), "codex-registration-posture")

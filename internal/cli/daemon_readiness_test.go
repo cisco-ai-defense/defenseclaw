@@ -204,16 +204,16 @@ func TestRotationConnectorStateRejectsFallbackPolicyDrift(t *testing.T) {
 	fallback.Guardrail.Mode = "observe"
 	fallback.Guardrail.HookFailMode = "open"
 	fallback.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-		"claudecode": {Mode: "action", HookFailMode: "open"},
+		"claudecode": {Mode: "action", HookFailMode: "closed"},
 		"codex":      {},
 	}
 	if err := verifyRotationConfigState(fallback, expected); err == nil || !strings.Contains(err.Error(), "codex mode changed from action to observe") {
 		t.Fatalf("fallback config verification error = %v, want exact Codex action -> observe drift", err)
 	}
 
-	fallback.Guardrail.Connectors["codex"] = config.PerConnectorGuardrailConfig{Mode: "action", HookFailMode: "open"}
+	fallback.Guardrail.Connectors["codex"] = config.PerConnectorGuardrailConfig{Mode: "action", HookFailMode: "closed"}
 	if err := verifyRotationConfigState(fallback, expected); err != nil {
-		t.Fatalf("exact dual action/open state rejected: %v", err)
+		t.Fatalf("exact dual action/closed state rejected: %v", err)
 	}
 
 	mixed := expected
