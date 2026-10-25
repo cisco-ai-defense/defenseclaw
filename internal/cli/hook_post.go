@@ -15,16 +15,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-type perUserHookInput struct {
-	Path    string            `json:"path"`
-	Headers map[string]string `json:"headers"`
-	Body    string            `json:"body"`
-}
-
-const maxPerUserHookInput = 6 << 20
-
 func postPerUserPluginHook(ctx context.Context, apiAddr string, source io.Reader, output io.Writer, curlOutput bool) error {
-	request, err := readPluginHookInput(source)
+	request, err := hookexec.ReadPerUserPluginRequest(source)
 	if err != nil {
 		return err
 	}
@@ -41,7 +33,7 @@ func postSecureClientPluginHook(ctx context.Context, apiAddr string, source io.R
 	if !secureClientHost() {
 		return fmt.Errorf("secure client gateway service peer cannot be verified on this host")
 	}
-	request, err := readPluginHookInput(source)
+	request, err := hookexec.ReadPerUserPluginRequest(source)
 	if err != nil {
 		return err
 	}
@@ -51,21 +43,6 @@ func postSecureClientPluginHook(ctx context.Context, apiAddr string, source io.R
 		return err
 	}
 	return writePluginHookReply(output, response, false)
-}
-
-func readPluginHookInput(source io.Reader) (perUserHookInput, error) {
-	input, err := io.ReadAll(io.LimitReader(source, maxPerUserHookInput+1))
-	if err != nil {
-		return perUserHookInput{}, err
-	}
-	if len(input) > maxPerUserHookInput {
-		return perUserHookInput{}, fmt.Errorf("plugin hook input is too large")
-	}
-	var request perUserHookInput
-	if err := json.Unmarshal(input, &request); err != nil {
-		return perUserHookInput{}, fmt.Errorf("decode plugin hook input: %w", err)
-	}
-	return request, nil
 }
 
 func writePluginHookReply(output io.Writer, response hookexec.PerUserHookReply, curlOutput bool) error {

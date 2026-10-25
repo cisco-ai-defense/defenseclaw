@@ -1840,6 +1840,29 @@ defenseclaw_api_listener_unproven() {
   return 0
 }
 
+# defenseclaw_read_socket_table FILE puts FILE's lines in _DC_SOCKET_ROWS
+# with one sequential read. The read builtin seeks back after every line it
+# takes from a seekable file, and procfs rebuilds a socket table from the
+# start on each such seek, so a line-by-line loop cost O(rows^2) per hook
+# call; at 10 Hz the TIME_WAIT rows piled up until hooks timed out
+# (GAP-1453). Linux always has Bash 4 mapfile (one lseek at the end); Bash
+# 3.2 (macOS, which uses lsof, and its fixture tests) reads the file through
+# one command substitution instead.
+defenseclaw_read_socket_table() {
+  local data="" IFS=$'\n' noglob=0
+  _DC_SOCKET_ROWS=()
+  if [ "${BASH_VERSINFO[0]:-0}" -ge 4 ]; then
+    mapfile -t _DC_SOCKET_ROWS < "$1" 2>/dev/null
+    return
+  fi
+  data="$(< "$1")" 2>/dev/null || return 1
+  case "$-" in *f*) noglob=1 ;; esac
+  set -f
+  _DC_SOCKET_ROWS=($data)
+  [ "$noglob" = 1 ] || set +f
+  return 0
+}
+
 # defenseclaw_procfs_listener_status ADDR PORT NET UID classifies the
 # listeners that can serve one normalised loopback endpoint (127.0.0.0/8 or
 # ::1) in NET's tcp and tcp6 tables, with the return codes of
@@ -1848,7 +1871,8 @@ defenseclaw_api_listener_unproven() {
 defenseclaw_procfs_listener_status() {
   local target="$1" port="$2" net="$3" uid="$4" hex="" exact="" mapped="" table="" o2="" o3="" o4=""
   local owner="" own="" v6_owner="" v6_own="" exact_owner="" exact_own=""
-  local _sl="" addr="" _rem="" st="" _q="" _t="" _r="" u="" _rest=""
+  local row="" addr="" st="" u="" IFS=$' \t\n'
+  local -a fields=()
   printf -v hex '%04X' "$port"
   case "$target" in
     ::1) exact="00000000000000000000000001000000" ;;
@@ -1862,7 +1886,15 @@ defenseclaw_procfs_listener_status() {
   esac
   for table in "${net}/tcp" "${net}/tcp6"; do
     [ -r "$table" ] || continue
-    while read -r _sl addr _rem st _q _t _r u _rest; do
+    defenseclaw_read_socket_table "$table" || continue
+    for row in "${_DC_SOCKET_ROWS[@]}"; do
+      # The state column is the only " 0A " (LISTEN) a row can hold; skip
+      # the TIME_WAIT and connected rows before splitting. procfs rows have
+      # no glob characters, so the unquoted split cannot expand a pattern.
+      case "$row" in *" 0A "*) ;; *) continue ;; esac
+      case "$row" in *[\*?[]*) continue ;; esac
+      fields=($row)
+      addr="${fields[1]:-}" st="${fields[3]:-}" u="${fields[7]:-}"
       [ "$st" = "0A" ] || continue
       case "$addr" in
         "$exact":"$hex"|"${mapped:-$exact}":"$hex")
@@ -1880,7 +1912,7 @@ defenseclaw_procfs_listener_status() {
           ;;
         *) continue ;;
       esac
-    done < "$table"
+    done
   done
   [ -n "$exact_owner" ] && return 0
   [ -n "$exact_own" ] && return 1
