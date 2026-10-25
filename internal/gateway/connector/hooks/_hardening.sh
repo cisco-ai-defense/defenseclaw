@@ -1707,6 +1707,12 @@ defenseclaw_api_listener_unproven() {
   local _sl="" addr="" _rem="" st="" _q="" _t="" _r="" u="" _rest=""
   case "$port" in ''|*[!0-9]*) return 0 ;; esac
   [ -n "$uid" ] || return 0
+  # ProcSubset=pid can hide /proc/net, while /proc/self/net still exposes
+  # this process's network namespace. The second argument mirrors that
+  # layout in tests.
+  if [ ! -r "${net}/tcp" ] && [ "${net##*/}" = net ]; then
+    net="${net%/net}/self/net"
+  fi
   if [ -r "${net}/tcp" ]; then
     hex="$(printf '%04X' "$port")"
     for table in "${net}/tcp" "${net}/tcp6"; do
