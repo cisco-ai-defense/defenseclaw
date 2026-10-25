@@ -2727,6 +2727,174 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     )
 
 
+# The install-lock rule of the per-user OpenCode and Amp plugins
+# (installLockState) and doctor. Both plugins hold back a healthy gateway's
+# answer while an install may be running, so a lock a killed installer left
+# blocked them for good. An interrupted install keeps its lock on purpose,
+# next to one of these records, until the installer runs again.
+_INSTALL_RECOVERY_RECORDS = ("previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json")
+# install.sh and install.ps1 write the lock's pid right after they make it.
+_INSTALL_LOCK_NO_PID_SECONDS = 10 * 60
+# No install runs this long; past it a reused pid no longer holds the lock.
+_INSTALL_LOCK_MAX_SECONDS = 6 * 60 * 60
+
+
+def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, str]:
+    """("none" | "stale" | "recovery" | "held", detail) of the lock in folder.
+
+    "stale" only on proof that its installer is gone: the lock is a folder, no
+    interrupted-install record sits beside it, and its pid names no process,
+    or it has had no pid for ten minutes, or it is older than six hours.
+    """
+    from defenseclaw.process_liveness import pid_alive
+
+    lock = os.path.join(folder, name)
+    try:
+        info = os.lstat(lock)
+    except FileNotFoundError:
+        return ("none", "")
+    except OSError as exc:
+        return ("held", f"{lock} cannot be inspected ({exc.strerror or exc})")
+    if not stat.S_ISDIR(info.st_mode):
+        return ("held", f"{lock} is not a folder")
+    for record in _INSTALL_RECOVERY_RECORDS:
+        path = os.path.join(folder, record)
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return ("held", f"{path} cannot be inspected")
+        return ("recovery", f"{lock} is kept by an interrupted install ({path})")
+    age = time.time() - info.st_mtime
+    if age > _INSTALL_LOCK_MAX_SECONDS:
+        return ("stale", f"{lock} is older than six hours")
+    pid_file = os.path.join(lock, "pid")
+    text = ""
+    try:
+        pid_info = os.lstat(pid_file)
+        if not stat.S_ISREG(pid_info.st_mode) or pid_info.st_size > 64:
+            return ("held", f"{pid_file} is not a pid file")
+        with open(pid_file, encoding="ascii", errors="replace") as handle:
+            text = handle.read(64).strip()
+    except FileNotFoundError:
+        text = ""
+    except OSError as exc:
+        return ("held", f"{pid_file} cannot be read ({exc.strerror or exc})")
+    pid = int(text) if re.fullmatch(r"[1-9][0-9]{0,9}", text) else 0
+    if not pid or pid > 2_147_483_647:
+        if age > _INSTALL_LOCK_NO_PID_SECONDS:
+            return ("stale", f"{lock} has had no installer pid for more than ten minutes")
+        return ("held", f"{lock} was made moments ago")
+    if pid != os.getpid() and not pid_alive(pid):
+        return ("stale", f"{lock} names installer pid {pid}, which is no longer running")
+    return ("held", f"an installer (pid {pid}) holds {lock}")
+
+
+def _install_lock_folders(cfg) -> list[str]:
+    """The data directory and the installer's home, the folders the plugins check."""
+    home = os.environ.get("DEFENSECLAW_HOME") or os.path.join(os.path.expanduser("~"), ".defenseclaw")
+    folders: list[str] = []
+    for folder in (_configured_gateway_data_dir(cfg), home):
+        if not folder:
+            continue
+        folder = os.path.abspath(folder)
+        if any(_same_install_folder(folder, seen) for seen in folders):
+            continue
+        folders.append(folder)
+    return folders
+
+
+def _same_install_folder(left: str, right: str) -> bool:
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return os.path.normcase(os.path.normpath(left)) == os.path.normcase(os.path.normpath(right))
+
+
+def _check_install_lock(cfg, r: _DoctorResult) -> None:
+    """WARN on an install lock that is still there (oss-outage-open round h).
+
+    OpenCode and Amp block their tool calls while an install may be running.
+    A lock whose installer is proven gone is removed by
+    doctor.install.stale-lock.clear; one an interrupted install keeps waits
+    for the installer.
+    """
+    if _doctor_managed(cfg):
+        return
+    for folder in _install_lock_folders(cfg):
+        state, detail = _install_lock_state(folder)
+        if state == "none":
+            continue
+        if state == "stale":
+            _emit(
+                "warn",
+                "Install lock",
+                f"{detail}; OpenCode and Amp block tool calls while it stays",
+                r=r,
+                check_id="doctor.install.lock",
+                reason_code="install-lock-stale",
+                remediation="defenseclaw doctor --fix --yes (removes the install lock the stopped installer left)",
+            )
+        elif state == "recovery":
+            _emit(
+                "warn",
+                "Install lock",
+                f"{detail}; hooks wait for the installer to finish it",
+                r=r,
+                check_id="doctor.install.lock",
+                reason_code="install-lock-interrupted-install",
+                remediation="run the DefenseClaw installer again to finish or undo the interrupted install",
+            )
+        else:
+            _emit(
+                "warn",
+                "Install lock",
+                f"{detail}; hooks hold tool calls until the install is done",
+                r=r,
+                check_id="doctor.install.lock",
+                reason_code="install-lock-held",
+                remediation="wait for the installer to finish; if it has stopped, run the installer again",
+            )
+
+
+def _fix_stale_install_lock(cfg, *, assume_yes: bool, plan_only: bool = False) -> tuple[str, str]:
+    """Remove an install lock whose installer is proven gone (_install_lock_state)."""
+    if _doctor_managed(cfg):
+        return ("skip", "the installation owns its install lock")
+    stale = [folder for folder in _install_lock_folders(cfg) if _install_lock_state(folder)[0] == "stale"]
+    if not stale:
+        return ("skip", "no install lock is left by an installer that is gone")
+    names = ", ".join(os.path.join(folder, ".install.lock") for folder in stale)
+    if plan_only:
+        return ("plan", f"remove {names}, left by an installer that is no longer running")
+    if not assume_yes and not click.confirm(
+        f"    Remove {names}, left by an installer that is no longer running?", default=True
+    ):
+        return ("skip", "declined by user")
+    for folder in stale:
+        lock = os.path.join(folder, ".install.lock")
+        aside_name = f".install.lock.stale-{uuid.uuid4().hex}"
+        aside = os.path.join(folder, aside_name)
+        try:
+            os.rename(lock, aside)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return ("fail", f"could not remove {lock}: {exc}")
+        # An installer that took the lock over since the check owns it now.
+        if _install_lock_state(folder, aside_name)[0] != "stale":
+            try:
+                os.rename(aside, lock)
+            except OSError as exc:
+                return ("fail", f"an installer took {lock} over; could not put it back from {aside}: {exc}")
+            return ("fail", f"an installer took {lock} over; it was left in place")
+        shutil.rmtree(aside, ignore_errors=True)
+        if os.path.lexists(aside):
+            return ("fail", f"could not remove {aside}")
+    return ("pass", f"removed {names}, left by an installer that is no longer running")
+
+
 def _private_state_files(cfg, data_dir: str) -> tuple[str, ...]:
     """device.key, its provenance files and audit.db: private state other than .env."""
     gateway = getattr(cfg, "gateway", None)
@@ -13117,6 +13285,7 @@ def doctor(
     _check_inventory_storage(cfg, r)
     _check_device_identity(cfg, r)
     _check_private_file_exposure(cfg, r)
+    _check_install_lock(cfg, r)
 
     # S6.5 — surface the active connector + its configured paths
     # before any scanner runs. Operators routinely point doctor at a
@@ -14216,6 +14385,16 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             _fix_private_state_files,
             (),
             ("make device.key, its provenance files and audit.db readable by this account only",),
+            False,
+            False,
+        ),
+        (
+            "doctor.install.stale-lock.clear",
+            "install lock left by a stopped installer",
+            "safe",
+            _fix_stale_install_lock,
+            (),
+            ("remove an .install.lock whose installer is no longer running and that no interrupted install keeps",),
             False,
             False,
         ),

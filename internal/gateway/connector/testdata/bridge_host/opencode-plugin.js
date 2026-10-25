@@ -781,36 +781,98 @@ async function defenseclawLogFailOpen(reason, category, context) {
 const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account, " +
   "and its gateway starts again when that is done. Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install. `defenseclaw-gateway status` shows its state.";
 
-// defenseclawInstallLockHeld reports whether an installer holds this
-// account's DefenseClaw data: the gateway's data_dir (the folder that holds
-// the hook credential) or the folder install.sh and install.ps1 lock,
-// DEFENSECLAW_HOME or else ~/.defenseclaw, which differ when data_dir is set
-// apart from it (GAP-1002); the shell hooks check the same two (GAP-0948).
-// A lock is held when its .install.lock exists, as any file type, or cannot
-// be read for any reason but its absence.
-async function defenseclawInstallLockHeld() {
-  const dirs = [dirname(dirname(DC_TOKEN_FILE)), String(process.env.DEFENSECLAW_HOME || "") || join(homedir(), ".defenseclaw")];
-  for (const dir of dirs) {
-    try {
-      await lstat(join(dir, ".install.lock"));
-      return true;
-    } catch (err) {
-      if (!err || err.code !== "ENOENT") return true;
-    }
+// defenseclawInstallLockDirs are the folders an installer of this account
+// locks: the gateway's data_dir (the folder that holds the hook credential)
+// and the folder install.sh and install.ps1 lock, DEFENSECLAW_HOME or else
+// ~/.defenseclaw, which differ when data_dir is set apart from it
+// (GAP-1002); the shell hooks check the same two (GAP-0948).
+function defenseclawInstallLockDirs() {
+  return [dirname(dirname(DC_TOKEN_FILE)), String(process.env.DEFENSECLAW_HOME || "") || join(homedir(), ".defenseclaw")];
+}
+
+// An interrupted install keeps its lock on purpose, next to one of these,
+// until the installer runs again and finishes or undoes it.
+const DC_INSTALL_RECOVERY_RECORDS = ["previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"];
+// install.sh and install.ps1 write the lock's pid right after they make it,
+// so a lock without a pid is an installer's for this long.
+const DC_INSTALL_LOCK_NO_PID_MS = 10 * 60 * 1000;
+// No install runs this long. Past it, a pid that names a process again (a
+// reused pid) no longer holds a healthy gateway's answer.
+const DC_INSTALL_LOCK_MAX_MS = 6 * 60 * 60 * 1000;
+
+// defenseclawInstallLockState is the install-lock rule of this plugin, the
+// Amp plugin and `defenseclaw doctor` (_install_lock_state): "none" when dir
+// has no .install.lock and is a folder or absent; "stale" when the lock is a
+// folder, no interrupted-install record sits beside it, and its installer is
+// proven gone: its pid names no process, it has had no pid for ten minutes,
+// or it is older than six hours; "held" for a live or uncertain install,
+// everything else. `defenseclaw doctor --fix` removes a stale lock.
+async function defenseclawInstallLockState(dir) {
+  const missing = (err) => Boolean(err) && err.code === "ENOENT";
+  const lock = join(dir, ".install.lock");
+  let info;
+  try {
+    info = await lstat(lock);
+  } catch (err) {
+    if (!missing(err)) return "held";
     try {
       // A folder that is not one cannot be looked in (Windows reports its
       // child as absent).
-      if (!(await lstat(dir)).isDirectory()) return true;
-    } catch (err) {
-      if (!err || err.code !== "ENOENT") return true;
+      if (!(await lstat(dir)).isDirectory()) return "held";
+    } catch (inner) {
+      if (!missing(inner)) return "held";
     }
+    return "none";
+  }
+  if (!info.isDirectory()) return "held";
+  for (const name of DC_INSTALL_RECOVERY_RECORDS) {
+    try {
+      await lstat(join(dir, name));
+      return "held";
+    } catch (err) {
+      if (!missing(err)) return "held";
+    }
+  }
+  const age = Date.now() - info.mtimeMs;
+  if (age > DC_INSTALL_LOCK_MAX_MS) return "stale";
+  let text = "";
+  try {
+    const pidFile = join(lock, "pid");
+    const pidInfo = await lstat(pidFile);
+    if (!pidInfo.isFile() || pidInfo.size > 64) return "held";
+    text = String(readFileSync(pidFile, "utf8")).trim();
+  } catch (err) {
+    if (!missing(err)) return "held";
+  }
+  const pid = /^[1-9][0-9]{0,9}$/.test(text) ? Number(text) : 0;
+  if (!pid || pid > 2147483647) return age > DC_INSTALL_LOCK_NO_PID_MS ? "stale" : "held";
+  if (pid === process.pid) return "held";
+  try {
+    process.kill(pid, 0);
+    return "held";
+  } catch (err) {
+    return err && err.code === "ESRCH" ? "stale" : "held";
+  }
+}
+
+// defenseclawInstallLockHeld reports whether any lock is there, stale or
+// not: every failure and every outage stays closed under it.
+async function defenseclawInstallLockHeld() {
+  for (const dir of defenseclawInstallLockDirs()) {
+    if (await defenseclawInstallLockState(dir) !== "none") return true;
   }
   return false;
 }
 
-// defenseclawInstallWindow is the install check of the tool paths below.
-async function defenseclawInstallWindow() {
-  return await defenseclawInstallLockHeld();
+// defenseclawInstallRunning reports whether an install may still be running:
+// a lock that is not proven stale. Only then is a reachable gateway's answer
+// held back; release plugins forwarded it, and a killed installer's lock must
+// not block every healthy call for good.
+async function defenseclawInstallRunning() {
+  for (const dir of defenseclawInstallLockDirs()) {
+    if (await defenseclawInstallLockState(dir) === "held") return true;
+  }
+  return false;
 }
 
 async function defenseclawPerUserInstallInProgress() {
@@ -829,7 +891,7 @@ async function defenseclawFailModeNow(mode, actionable) {
 }
 
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
-  if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+  if (actionable && await defenseclawInstallRunning()) return { reason: DC_INSTALL_WINDOW_TEXT };
   let token;
   try {
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
@@ -872,8 +934,9 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       body: JSON.stringify(payload),
       signal: controller.signal,
     }, token), controller.signal);
-    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+    if (actionable && await defenseclawInstallRunning()) return { reason: DC_INSTALL_WINDOW_TEXT };
     if (!res.ok) {
+      if (actionable && await defenseclawInstallLockHeld()) return { reason: DC_INSTALL_WINDOW_TEXT };
       // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
       // is an outage, as in the shell hooks, so strict availability closes it.
       if (await defenseclawFailModeNow(res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE, actionable) === "closed") {
@@ -884,11 +947,12 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       return null;
     }
     const data = defenseclawGatewayJSON(await res.text());
-    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
 
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+      if (actionable && await defenseclawInstallLockHeld()) return { reason: DC_INSTALL_WINDOW_TEXT };
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
+    if (actionable && await defenseclawInstallRunning()) return { reason: DC_INSTALL_WINDOW_TEXT };
     const out = data && data.hook_output;
     if (out && (out.decision === "deny" || out.decision === "block")) {
       return { reason: out.reason || "DefenseClaw blocked this tool call.", mode: data.mode || "" };
@@ -912,7 +976,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
-    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+    if (actionable && await defenseclawInstallLockHeld()) return { reason: DC_INSTALL_WINDOW_TEXT };
     if (await defenseclawFailModeNow(DC_TRANSPORT_FAIL_MODE, actionable) === "closed") {
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: await defenseclawPerUserGatewayDownText(err, 0) };
@@ -933,7 +997,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
 async function defenseclawPerUserOutageOpen(err) {
   if (!err || err.status !== 7) return false;
   if (["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || ""))) return false;
-  return !(await defenseclawInstallWindow()) && defenseclawConfigOutageOpen();
+  return !(await defenseclawInstallLockHeld()) && defenseclawConfigOutageOpen();
 }
 
 // defenseclawConfigOutageOpen asks the per-user helper (`hook-outage-mode`,

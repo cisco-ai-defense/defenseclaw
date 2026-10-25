@@ -725,17 +725,6 @@ function gatewayStopped(error: unknown): boolean {
 const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account, " +
 	"and its gateway starts again when that is done. Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install. `defenseclaw-gateway status` shows its state."
 
-async function installWindow(): Promise<boolean> {
-	try {
-		await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"))
-		return true
-	} catch (error) {
-		// Only a missing lock ends the install window. An unreadable lock must
-		// never turn an upgrade into a fail-open outage.
-		return (error as { code?: unknown } | null)?.code !== "ENOENT"
-	}
-}
-
 {{end}}{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}// perUserGatewayDownText is what a per-user install that fails closed says
 // when its gateway gave no usable answer: why (an install or upgrade, a
 // `defenseclaw-gateway stop`, a stopped, busy or failing gateway) and what
@@ -751,7 +740,7 @@ async function installWindow(): Promise<boolean> {
 // not apply (the strict policy tier closes it).
 async function perUserOutageOpen(error: unknown): Promise<boolean> {
 	if ((error as { status?: unknown } | null)?.status !== 7) return false
-	return !(await installWindow()) && configOutageOpen()
+	return !(await installLockHeld()) && configOutageOpen()
 }
 
 // configOutageOpen asks the per-user helper (`hook-outage-mode`, which only
@@ -851,29 +840,96 @@ async function perUserGatewayDownText(error: unknown, status: number): Promise<s
 	return `DefenseClaw blocked this tool call: ${text} \`defenseclaw-gateway status\` shows its state. (${detail})`
 }
 
-{{end}}{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}// installLockHeld reports whether an installer holds this account's
-// DefenseClaw data: the gateway's data_dir (the folder that holds the hook
-// credential) or the folder install.sh and install.ps1 lock,
-// DEFENSECLAW_HOME or else ~/.defenseclaw, which differ when data_dir is set
-// apart from it (GAP-1002); the shell hooks check the same two (GAP-0948).
-// A lock is held when its .install.lock exists, as any file type, or cannot
-// be read for any reason but its absence.
-async function installLockHeld(): Promise<boolean> {
-	const dirs = [dirname(dirname(DC_TOKEN_FILE)), String(process.env.DEFENSECLAW_HOME || "") || join(homedir(), ".defenseclaw")]
-	for (const dir of dirs) {
-		try {
-			await lstat(join(dir, ".install.lock"))
-			return true
-		} catch (error) {
-			if ((error as { code?: unknown } | null)?.code !== "ENOENT") return true
-		}
+{{end}}{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}// installLockDirs are the folders an installer of this account locks: the
+// gateway's data_dir (the folder that holds the hook credential) and the
+// folder install.sh and install.ps1 lock, DEFENSECLAW_HOME or else
+// ~/.defenseclaw, which differ when data_dir is set apart from it (GAP-1002);
+// the shell hooks check the same two (GAP-0948).
+function installLockDirs(): string[] {
+	return [dirname(dirname(DC_TOKEN_FILE)), String(process.env.DEFENSECLAW_HOME || "") || join(homedir(), ".defenseclaw")]
+}
+
+// An interrupted install keeps its lock on purpose, next to one of these,
+// until the installer runs again and finishes or undoes it.
+const DC_INSTALL_RECOVERY_RECORDS = ["previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"]
+// install.sh and install.ps1 write the lock's pid right after they make it,
+// so a lock without a pid is an installer's for this long.
+const DC_INSTALL_LOCK_NO_PID_MS = 10 * 60 * 1000
+// No install runs this long. Past it, a pid that names a process again (a
+// reused pid) no longer holds a healthy gateway's answer.
+const DC_INSTALL_LOCK_MAX_MS = 6 * 60 * 60 * 1000
+
+// installLockState is the install-lock rule of this plugin, the OpenCode
+// plugin and `defenseclaw doctor` (_install_lock_state): "none" when dir has
+// no .install.lock and is a folder or absent; "stale" when the lock is a
+// folder, no interrupted-install record sits beside it, and its installer is
+// proven gone: its pid names no process, it has had no pid for ten minutes,
+// or it is older than six hours; "held" for a live or uncertain install,
+// everything else. `defenseclaw doctor --fix` removes a stale lock.
+async function installLockState(dir: string): Promise<"none" | "stale" | "held"> {
+	const missing = (error: unknown) => (error as { code?: unknown } | null)?.code === "ENOENT"
+	const lock = join(dir, ".install.lock")
+	let info
+	try {
+		info = await lstat(lock)
+	} catch (error) {
+		if (!missing(error)) return "held"
 		try {
 			// A folder that is not one cannot be looked in (Windows reports
 			// its child as absent).
-			if (!(await lstat(dir)).isDirectory()) return true
-		} catch (error) {
-			if ((error as { code?: unknown } | null)?.code !== "ENOENT") return true
+			if (!(await lstat(dir)).isDirectory()) return "held"
+		} catch (inner) {
+			if (!missing(inner)) return "held"
 		}
+		return "none"
+	}
+	if (!info.isDirectory()) return "held"
+	for (const name of DC_INSTALL_RECOVERY_RECORDS) {
+		try {
+			await lstat(join(dir, name))
+			return "held"
+		} catch (error) {
+			if (!missing(error)) return "held"
+		}
+	}
+	const age = Date.now() - info.mtimeMs
+	if (age > DC_INSTALL_LOCK_MAX_MS) return "stale"
+	let text = ""
+	try {
+		const pidFile = join(lock, "pid")
+		const pidInfo = await lstat(pidFile)
+		if (!pidInfo.isFile() || pidInfo.size > 64) return "held"
+		text = String(readFileSync(pidFile, "utf8")).trim()
+	} catch (error) {
+		if (!missing(error)) return "held"
+	}
+	const pid = /^[1-9][0-9]{0,9}$/.test(text) ? Number(text) : 0
+	if (!pid || pid > 2147483647) return age > DC_INSTALL_LOCK_NO_PID_MS ? "stale" : "held"
+	if (pid === process.pid) return "held"
+	try {
+		process.kill(pid, 0)
+		return "held"
+	} catch (error) {
+		return (error as { code?: unknown } | null)?.code === "ESRCH" ? "stale" : "held"
+	}
+}
+
+// installLockHeld reports whether any lock is there, stale or not: every
+// failure and every outage stays closed under it.
+async function installLockHeld(): Promise<boolean> {
+	for (const dir of installLockDirs()) {
+		if (await installLockState(dir) !== "none") return true
+	}
+	return false
+}
+
+// installRunning reports whether an install may still be running: a lock
+// that is not proven stale. Only then is a reachable gateway's answer held
+// back; release plugins forwarded it, and a killed installer's lock must not
+// block every healthy call for good.
+async function installRunning(): Promise<boolean> {
+	for (const dir of installLockDirs()) {
+		if (await installLockState(dir) === "held") return true
 	}
 	return false
 }
@@ -994,19 +1050,19 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	}
 
 	async function post(payload: Record<string, unknown>, actionable: boolean): Promise<GatewayResponse> {
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}		if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}		if (actionable && await installRunning()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 {{end}}		let body: string
 		try {
 			body = JSON.stringify(payload)
 		} catch (error) {
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 {{end}}			return failureResponse(`payload serialization: ${safeError(error)}`)
 		}
 
 		const originalBytes = utf8Bytes(body)
 		if (originalBytes > DC_MAX_BODY_BYTES) {
 			if (actionable) {
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 {{end}}				return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
 			}
 			const reduced = {
@@ -1068,21 +1124,23 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				body,
 				signal: controller.signal,
 			}, token), controller.signal){{end}}
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installRunning()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 {{end}}			if (!response.ok) {
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (response.status >= 500 && (DC_FAIL_MODE === "closed" || await perUserInstallInProgress())) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (actionable && await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (response.status >= 500 && (DC_FAIL_MODE === "closed" || await perUserInstallInProgress())) {
 					return { action: "block", reason: await perUserGatewayDownText(null, response.status) }
 				}
 {{end}}				return failureResponse(`HTTP ${response.status}`)
 			}
 
 			const data = gatewayJSON(await response.text()) as GatewayResponse
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
-{{end}}
+
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
-				return failureResponse("invalid gateway verdict")
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (actionable && await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}				return failureResponse("invalid gateway verdict")
 			}
-			return data
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installRunning()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}			return data
 		} catch (error) {
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (error && typeof error === "object" && "code" in error && error.code === "DC_PEER_UNVERIFIED") {
 				return { action: "block", reason: `DefenseClaw hook failed closed (${safeError(error)})` }
@@ -1104,7 +1162,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				return { action: "block", reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" }
 			}
 {{end}}			if (await deploymentRemoved()) return { action: "allow" }
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 {{end}}			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
 				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
 			}
