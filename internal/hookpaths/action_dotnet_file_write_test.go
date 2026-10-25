@@ -29,7 +29,7 @@ func TestActionWindowsDotNetFileWritesRequireResolvedDestination(t *testing.T) {
 		{"protected path as data", `[System.IO.File]::WriteAllText('report.txt','C:/Users/Alice/.ssh/authorized_keys')`, true},
 		{"quoted method text", `Write-Output "[System.IO.File]::AppendAllText('C:/Users/Alice/.ssh/authorized_keys','marker')"`, true},
 		{"here-string method text", "$text = @'\n[System.IO.File]::AppendAllText('C:/Users/Alice/.ssh/authorized_keys','marker')\n'@\nWrite-Output $text", true},
-		{"read method", `[System.IO.File]::ReadAllText('C:/Users/Alice/.ssh/authorized_keys')`, false},
+		{"read method outside read-only program list", `[System.IO.File]::ReadAllText('C:/Users/Alice/.ssh/authorized_keys')`, true},
 		{"nested PowerShell protected path as data", `pwsh -Command "[System.IO.File]::WriteAllText('report.txt','C:/Users/Alice/.ssh/authorized_keys')"`, true},
 		{"CMD wrapped protected path as data", `cmd /c powershell -NoProfile -Command "[System.IO.File]::WriteAllText('report.txt','C:/Users/Alice/.ssh/authorized_keys')"`, true},
 		{"env wrapped protected path as data", `env pwsh -Command "[System.IO.File]::WriteAllText('report.txt','C:/Users/Alice/.ssh/authorized_keys')"`, true},

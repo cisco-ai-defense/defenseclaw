@@ -40,13 +40,14 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 		return false
 	}
 	file, parsed := parseShell(command)
-	if depth == 0 && parsed && (actionOnlySSHDirectoryNavigation(file, cwd, home) || actionKnownReadOnlyShell(file, home)) {
+	if depth == 0 && parsed && actionKnownReadOnlyShell(file, home) {
 		return false
 	}
 	if parsed && actionPosixNestedShellMention(file, cwd, home, depth, stateOnly) {
 		return true
 	}
 	protected := newProtectedFiles(home)
+	ssh := filepath.Join(home, ".ssh")
 	check := func(value string) bool {
 		if len(value) == 0 || len(value) > MaxWriteTargetPathBytes {
 			return false
@@ -65,7 +66,7 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			if actionPosixWindowsHome(home) {
 				return actionPosixWindowsProtectedGlob(value, cwd, home)
 			}
-			return actionProtectedFileGlobReach(value, cwd, protected)
+			return actionProtectedFileGlobReach(value, cwd, protected, ssh, home)
 		}
 		if actionPosixWindowsHome(home) {
 			if stateOnly {
@@ -77,28 +78,49 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 		if stateOnly {
 			return actionProtectedStatePath(operand, home)
 		}
-		return actionProtectedFileReach(operand, protected)
+		return protectedReachPath(operand, protected, ssh)
 	}
 	if parsed {
 		values := actionValues{"HOME": home, "PWD": cwd}
 		found := false
+		effectiveCWD := cwd
+		var directoryStack []string
 		checkWord := func(word *syntax.Word) bool {
-			value, known := actionWordValue(word, values, cwd, home)
+			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
 			if !known && activeGlob {
-				value, known = actionWordValueWithGlob(word, values, cwd, home, true)
+				value, known = actionWordValueWithGlob(word, values, effectiveCWD, home, true)
 			}
-			return known && (!strings.ContainsAny(value, "*?[]") || activeGlob) && check(value)
+			if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
+				if check(value) {
+					return true
+				}
+				if _, target, attached := strings.Cut(value, "="); attached {
+					return check(target)
+				}
+				return false
+			}
+			return !stateOnly && actionUnknownWordMayNameKey(word, effectiveCWD, home)
 		}
 		syntax.Walk(file, func(node syntax.Node) bool {
 			if found {
 				return false
 			}
+			if iter, ok := node.(*syntax.WordIter); ok {
+				for _, word := range iter.Items {
+					if checkWord(word) {
+						found = true
+						return false
+					}
+				}
+				return true
+			}
 			stmt, ok := node.(*syntax.Stmt)
 			if !ok {
 				return true
 			}
-			actionUpdateValues(stmt, values, cwd, home)
+			values["PWD"] = effectiveCWD
+			actionUpdateValues(stmt, values, effectiveCWD, home)
 			for _, redir := range stmt.Redirs {
 				if redir.Word != nil && checkWord(redir.Word) {
 					found = true
@@ -106,12 +128,19 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 				}
 			}
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
+				for _, assign := range call.Assigns {
+					if assign.Value != nil && checkWord(assign.Value) {
+						found = true
+						return false
+					}
+				}
 				for _, word := range call.Args {
 					if checkWord(word) {
 						found = true
 						return false
 					}
 				}
+				actionPosixAdvanceDirectory(call, values, home, &effectiveCWD, &directoryStack)
 			}
 			return true
 		})
@@ -154,6 +183,9 @@ func actionPosixWindowsPath(value, cwd, home string) string {
 func actionPosixWindowsProtected(value, cwd, home string) bool {
 	resolved := actionPosixWindowsPath(value, cwd, home)
 	ssh := path.Join(home, ".ssh")
+	if resolved == ssh {
+		return true
+	}
 	for _, name := range AuthorizedKeysFiles {
 		if resolved == path.Join(ssh, name) {
 			return true
@@ -164,37 +196,26 @@ func actionPosixWindowsProtected(value, cwd, home string) bool {
 
 func actionPosixWindowsProtectedGlob(value, cwd, home string) bool {
 	resolved := actionPosixWindowsPath(value, cwd, home)
-	parent, base := path.Split(resolved)
-	if strings.ContainsAny(parent, "*?[") {
-		return false
-	}
-	if path.Clean(parent) != path.Join(home, ".ssh") {
-		return false
+	ssh := path.Join(home, ".ssh")
+	if matched, _ := path.Match(resolved, ssh); matched {
+		return true
 	}
 	for _, name := range AuthorizedKeysFiles {
-		if matched, _ := path.Match(base, name); matched {
+		if matched, _ := path.Match(resolved, path.Join(ssh, name)); matched {
 			return true
 		}
 	}
 	return false
 }
 
-// A directory mention alone is not a protected-file mention. The write proof
-// separately retains its directory-as-destination rule.
-func actionProtectedFileReach(operand string, protected protectedFiles) bool {
-	resolved, ok := ResolveWriteTarget(operand)
-	if !ok {
-		return false
+// Match known protected names first, then bounded aliases in a literal parent.
+func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles, ssh, home string) bool {
+	pattern = OperandPath(pattern, cwd)
+	for _, target := range append([]string{ssh}, ProtectedAuthorizedKeysPaths(home)...) {
+		if matched, _ := filepath.Match(pattern, target); matched {
+			return true
+		}
 	}
-	if protected.has(resolved) {
-		return true
-	}
-	mapped, ok := protected.target(resolved)
-	return ok && protected.has(mapped)
-}
-
-// Expand only a bounded literal parent and match files, not the .ssh directory.
-func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles) bool {
 	parent, base := filepath.Dir(pattern), filepath.Base(pattern)
 	if _, err := filepath.Match(base, ""); err != nil || strings.ContainsAny(parent, "*?[") {
 		return false
@@ -210,7 +231,7 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles)
 	}
 	for _, name := range names {
 		if matched, _ := filepath.Match(base, name); matched &&
-			actionProtectedFileReach(OperandPath(name, OperandPath(parent, cwd)), protected) {
+			protectedReachPath(OperandPath(name, parent), protected, ssh) {
 			return true
 		}
 	}
@@ -379,8 +400,18 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 			return false
 		}
 		seen = true
+		for _, arg := range call.Args[1:] {
+			if option, known := StaticWord(arg, home); known && actionReadOptionMayWrite(option) {
+				safe = false
+				return false
+			}
+		}
 		switch programBase(program) {
-		case "cat", "type", "head", "tail", "grep", "sha256sum", "ls", "dir", "stat", "wc", "readlink", "diff", "cmp", "file", "test", "[":
+		case "cat", "head", "tail", "ls", "dir", "stat":
+		case "cd", "pushd", "popd":
+			if len(call.Args) > 3 {
+				safe = false
+			}
 		case "less":
 			for _, arg := range call.Args[1:] {
 				option, known := StaticWord(arg, home)
@@ -389,13 +420,6 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 					break
 				}
 			}
-		case "git":
-			if len(call.Args) < 2 {
-				safe = false
-				break
-			}
-			subcommand, fixed := StaticWord(call.Args[1], home)
-			safe = fixed && subcommand == "status"
 		default:
 			safe = false
 		}
@@ -405,53 +429,14 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 }
 
 func actionLessWritesFile(option string) bool {
-	return option == "-o" || option == "-O" ||
+	if option == "-o" || option == "-O" ||
 		strings.HasPrefix(option, "-o") && !strings.HasPrefix(option, "--") ||
-		strings.HasPrefix(option, "-O") ||
-		strings.HasPrefix(option, "--log-file")
-}
-
-func actionOnlySSHDirectoryNavigation(file *syntax.File, cwd, home string) bool {
-	if len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 {
-		return false
+		strings.HasPrefix(option, "-O") && !strings.HasPrefix(option, "--") {
+		return true
 	}
-	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Assigns) != 0 || len(call.Args) == 0 {
-		return false
-	}
-	program, known := staticProgramWord(call.Args[0], home)
-	if !known || programBase(program) != "cd" && programBase(program) != "pushd" {
-		return false
-	}
-	return actionPosixSSHDirectoryNavigation(call.Args, cwd, home)
-}
-
-func actionPosixSSHDirectoryNavigation(args []*syntax.Word, cwd, home string) bool {
-	var targetWord *syntax.Word
-	if len(args) == 3 {
-		option, known := StaticWord(args[1], home)
-		if !known || option != "--" {
-			return false
-		}
-		targetWord = args[2]
-	} else if len(args) == 2 {
-		targetWord = args[1]
-	} else {
-		return false
-	}
-	if wordHasCommandSubstitution(targetWord) {
-		return false
-	}
-	value, known := actionWordValue(targetWord, actionValues{"HOME": home, "PWD": cwd}, cwd, home)
-	if !known {
-		return false
-	}
-	if actionPosixWindowsHome(home) {
-		return actionPosixWindowsPath(value, cwd, home) == path.Join(home, ".ssh")
-	}
-	target, resolved := ResolveWriteTarget(OperandPath(value, cwd))
-	ssh, sshResolved := ResolveWriteTarget(filepath.Join(home, ".ssh"))
-	return resolved && sshResolved && samePathName(target, ssh)
+	option, _, _ = strings.Cut(strings.ToLower(option), "=")
+	return strings.HasPrefix(option, "--") && len(option) > 2 &&
+		(strings.HasPrefix("--log-file", option) || strings.HasPrefix(option, "--log-file"))
 }
 
 func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool) bool {
@@ -508,7 +493,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 		}
 	}
 	words, ok := actionWindowsWords(normalized.String())
-	if !ok || len(words) == 0 || actionKnownReadOnlyWindows(words, cwd, home) {
+	if !ok || len(words) == 0 || depth == 0 && actionKnownReadOnlyWindows(words) {
 		return false
 	}
 	for i := 0; i+1 < len(words); i++ {
@@ -527,12 +512,15 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 			return true
 		}
 	}
+	effectiveCWD := cwd
+	var directoryStack []string
 	for _, statement := range actionWindowsResolvedStatements(words, cwd, home) {
 		for _, word := range statement {
-			if actionWindowsWordMentionsTarget(word, cwd, home, stateOnly) {
+			if actionWindowsWordMentionsTarget(word, effectiveCWD, home, stateOnly) {
 				return true
 			}
 		}
+		actionWindowsAdvanceDirectory(statement, home, &effectiveCWD, &directoryStack)
 	}
 	for _, word := range words {
 		if actionWindowsWordMentionsTarget(word, cwd, home, stateOnly) {
@@ -542,10 +530,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 	return false
 }
 
-func actionKnownReadOnlyWindows(words []string, cwd, home string) bool {
-	if actionWindowsSSHDirectoryNavigation(words, cwd, home) {
-		return true
-	}
+func actionKnownReadOnlyWindows(words []string) bool {
 	seen, start := false, 0
 	for i, word := range words {
 		if actionWindowsRedirectOperator(word) != "" {
@@ -566,11 +551,6 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 	if len(words) == 0 {
 		return false
 	}
-	call := strings.ToLower(words[0])
-	if strings.HasPrefix(call, "[system.io.file]::readall") || strings.HasPrefix(call, "[io.file]::readall") {
-		return len(words) == 1 && strings.Count(call, "(") == 1 &&
-			strings.Count(call, ")") == 1 && strings.HasSuffix(call, ")")
-	}
 	for _, word := range words {
 		if strings.ContainsAny(word, "(`") || strings.Contains(word, "@{") {
 			return false // A nested command or escaped syntax is not a plain read.
@@ -582,8 +562,13 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 		}
 	}
 	program := strings.TrimSuffix(strings.ToLower(programBase(words[0])), ".exe")
+	for _, option := range words[1:] {
+		if actionReadOptionMayWrite(option) {
+			return false
+		}
+	}
 	switch program {
-	case "cat", "type", "get-content", "get-childitem", "get-item", "get-acl", "get-filehash", "resolve-path", "test-path", "select-string", "select-object", "grep", "head", "tail", "sha256sum", "wc", "dir", "ls", "stat", "readlink", "diff", "cmp", "file", "findstr":
+	case "cat", "get-content", "get-childitem", "resolve-path", "test-path", "head", "tail", "dir", "ls", "stat", "cd", "pushd", "popd", "set-location", "push-location", "pop-location":
 		return true
 	case "less":
 		for _, option := range words[1:] {
@@ -592,35 +577,8 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 			}
 		}
 		return true
-	case "git":
-		return len(words) > 1 && strings.EqualFold(words[1], "status")
 	}
 	return false
-}
-
-func actionWindowsSSHDirectoryNavigation(words []string, cwd, home string) bool {
-	if len(words) == 0 {
-		return false
-	}
-	program := strings.TrimSuffix(strings.ToLower(programBase(words[0])), ".exe")
-	if program != "cd" && program != "pushd" && program != "set-location" && program != "push-location" {
-		return false
-	}
-	if len(words) == 3 {
-		option := strings.ToLower(words[1])
-		if option != "-path" && option != "-literalpath" &&
-			(option != "--" || program != "cd" && program != "pushd") {
-			return false
-		}
-		words = words[2:]
-	} else if len(words) == 2 {
-		words = words[1:]
-	} else {
-		return false
-	}
-	target, resolved := actionWindowsPath(words[0], cwd, home)
-	ssh, sshResolved := actionWindowsPath(strings.TrimRight(home, `\/`)+`/.ssh`, cwd, home)
-	return resolved && sshResolved && target == ssh
 }
 
 func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) bool {
@@ -634,7 +592,8 @@ func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) boo
 			if stateOnly {
 				return false
 			}
-			return actionWindowsUnresolvedUnderSSH(candidate, cwd, home)
+			return actionWindowsUnresolvedUnderSSH(candidate, cwd, home) ||
+				actionWindowsDynamicKeyPath(candidate)
 		}
 		root, ok := actionWindowsPath(home, cwd, home)
 		if !ok {
@@ -644,8 +603,14 @@ func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) boo
 			return strings.HasPrefix(resolved, root+"/") &&
 				actionProtectedStateRelative(strings.TrimPrefix(resolved, root+"/"))
 		}
+		if resolved == root+"/.ssh" {
+			return true
+		}
 		protected, _ := actionWindowsProtected(candidate, cwd, home, false)
-		return protected
+		if protected {
+			return true
+		}
+		return false
 	}
 	if check(word) {
 		return true
@@ -663,8 +628,45 @@ func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) boo
 	return false
 }
 
+func actionWindowsDynamicKeyPath(value string) bool {
+	value = strings.ToLower(strings.ReplaceAll(value, `\`, "/"))
+	if !strings.ContainsAny(value, "$%`") {
+		return false
+	}
+	for _, name := range AuthorizedKeysFiles {
+		if strings.Contains(value, "/.ssh/"+name) {
+			return true
+		}
+	}
+	return false
+}
+
 func actionWindowsProtectedGlobReach(pattern, cwd, home string) bool {
 	pattern = strings.ReplaceAll(pattern, `\`, "/")
+	lower := strings.ToLower(pattern)
+	for _, prefix := range []string{"%userprofile%", "%homedrive%%homepath%", "$env:userprofile", "${env:userprofile}", "$home", "${home}", "~"} {
+		if lower == prefix || strings.HasPrefix(lower, prefix+"/") {
+			pattern = strings.ReplaceAll(home, `\`, "/") + pattern[len(prefix):]
+			break
+		}
+	}
+	if !actionWindowsHome(pattern) {
+		pattern = strings.TrimRight(strings.ReplaceAll(cwd, `\`, "/"), "/") + "/" + pattern
+	}
+	pattern = strings.ToLower(path.Clean(pattern))
+	root, ok := actionWindowsPath(home, cwd, home)
+	if !ok {
+		return false
+	}
+	ssh := root + "/.ssh"
+	if matched, _ := path.Match(pattern, ssh); matched {
+		return true
+	}
+	for _, name := range AuthorizedKeysFiles {
+		if matched, _ := path.Match(pattern, ssh+"/"+name); matched {
+			return true
+		}
+	}
 	parent, base := path.Split(pattern)
 	if parent == "" {
 		parent = "."
@@ -676,12 +678,11 @@ func actionWindowsProtectedGlobReach(pattern, cwd, home string) bool {
 	if !ok {
 		return false
 	}
-	root, ok := actionWindowsPath(home, cwd, home)
-	if !ok || resolved != root+"/.ssh" {
+	if resolved != ssh {
 		return false
 	}
 	if runtime.GOOS == "windows" && actionProtectedFileGlobReach(
-		filepath.Join(filepath.FromSlash(resolved), base), cwd, newProtectedFiles(home)) {
+		filepath.Join(filepath.FromSlash(resolved), base), cwd, newProtectedFiles(home), filepath.Join(home, ".ssh"), home) {
 		return true
 	}
 	for _, name := range AuthorizedKeysFiles {

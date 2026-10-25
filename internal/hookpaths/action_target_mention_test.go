@@ -34,6 +34,7 @@ func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
 		"git show HEAD --output=" + target,
 		"rg --pre='sh -c \"echo marker > " + target + "\"' marker .",
 		"cd " + filepath.Join(home, ".ssh") + " && echo " + target,
+		"grep marker " + target,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
@@ -46,7 +47,6 @@ func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
 		"cat " + target + " | head -n 1",
 		"echo '$HOME/.ssh/authorized_keys'",
 		"echo \\$HOME/.ssh/authorized_keys",
-		"grep marker " + target,
 		"stat " + target,
 		"cd " + filepath.Join(home, ".ssh"),
 		"pushd " + filepath.Join(home, ".ssh"),
@@ -98,6 +98,7 @@ func TestR104WindowsProtectedMentionNormalizationAndReadOnly(t *testing.T) {
 		`env -S 'pwsh -Command "Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value marker"'`,
 		`env -u OLD -S 'pwsh -Command "Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value marker"'`,
 		`env -u OLD --split-string 'pwsh -Command "Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value marker"'`,
+		`Get-Content ` + target + ` | Select-Object -First 1`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
@@ -107,7 +108,6 @@ func TestR104WindowsProtectedMentionNormalizationAndReadOnly(t *testing.T) {
 	}
 	for _, command := range []string{
 		`Get-Content ` + target,
-		`Get-Content ` + target + ` | Select-Object -First 1`,
 		`cat ` + target + ` | head -n 1`,
 		`Test-Path C:\Users\Alice\.ssh`,
 		`cd C:\Users\Alice\.ssh`,
@@ -177,6 +177,8 @@ func TestR104PosixHomeTargetMentionOnWindows(t *testing.T) {
 		"echo $HOME/.ssh/authorized_keys",
 		"echo ~/.ssh/authorized_keys",
 		"cp payload ~/.ssh/authorized_k*",
+		"cd ~/.ssh && echo authorized_keys",
+		`pushd ~/.ssh && sh "$script" authorized_keys`,
 	} {
 		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
 			t.Errorf("POSIX target %q decision = %q", command, got)
@@ -187,6 +189,7 @@ func TestR104PosixHomeTargetMentionOnWindows(t *testing.T) {
 		"cd /home/alice/.ssh",
 		"cd -- /home/alice/.ssh",
 		"cd ~/.ssh && ls -la",
+		"cd ~/.ssh && cat authorized_keys",
 		"echo /repo/report.txt",
 	} {
 		if got := ActionCommandDecision(command, cwd, home); got != "" {
@@ -343,10 +346,8 @@ func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
 	}
 	for _, command := range []string{
 		`cd ~/.ssh && ls -la`,
-		`ls -la ~/.ssh; pwd`,
-		`find ~/.ssh -name '*.pub'`,
-		`cd ~/.ssh && pwd`,
-		`ls ~/.ssh && echo done`,
+		`ls -la ~/.ssh`,
+		`stat ~/.ssh`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := ActionCommandDecision(command, cwd, home); got != "" {
@@ -354,12 +355,20 @@ func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
 			}
 		})
 	}
+	for _, command := range []string{
+		`ls -la ~/.ssh; pwd`,
+		`find ~/.ssh -name '*.pub'`,
+		`cd ~/.ssh && pwd`,
+		`ls ~/.ssh && echo done`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("directory named outside read-only list %q: %q", command, got)
+		}
+	}
 	const winHome = `C:\Users\b00`
 	const winCWD = `C:\work`
 	for _, command := range []string{
 		`Set-Location C:\Users\b00\.ssh; Get-ChildItem`,
-		`Get-ChildItem C:\Users\b00\.ssh | Format-Table Name`,
-		`foreach ($n in Get-ChildItem C:\Users\b00\.ssh) { Write-Output $n.Name }`,
 		`Push-Location C:\Users\b00\.ssh; Get-ChildItem; Pop-Location`,
 	} {
 		t.Run(command, func(t *testing.T) {
@@ -367,6 +376,14 @@ func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
 				t.Fatalf("directory-only decision = %q, want allow", got)
 			}
 		})
+	}
+	for _, command := range []string{
+		`Get-ChildItem C:\Users\b00\.ssh | Format-Table Name`,
+		`foreach ($n in Get-ChildItem C:\Users\b00\.ssh) { Write-Output $n.Name }`,
+	} {
+		if got := ActionCommandDecision(command, winCWD, winHome); got != "protected-target" {
+			t.Errorf("directory named outside read-only list %q: %q", command, got)
+		}
 	}
 }
 

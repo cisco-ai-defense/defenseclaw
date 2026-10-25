@@ -338,11 +338,13 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 	for _, command := range []string{
 		`Get-ChildItem C:\Users\alice\.ssh\authorized_keys`,
 		`Get-Content C:\Users\alice\.ssh\authorized_keys`,
-		`git status --short C:\Users\alice\.ssh\authorized_keys`,
 	} {
 		if got := ActionCommandDecision(command, cwd, home); got != "" {
 			t.Errorf("read-only path operand blocked: %q, reason=%q", command, got)
 		}
+	}
+	if got := ActionCommandDecision(`git status --short C:\Users\alice\.ssh\authorized_keys`, cwd, home); got != "protected-target" {
+		t.Errorf("git status is outside the protected-target read-only list: %q", got)
 	}
 	for _, tc := range []struct {
 		command string
@@ -451,15 +453,21 @@ func TestR104ActionWindowsProtectedWriterSweep(t *testing.T) {
 	for _, command := range []string{
 		`Get-ChildItem ` + target,
 		`Get-Content ` + target,
-		`Get-Item ` + target,
-		`Get-Acl ` + target,
 		`Resolve-Path ` + target,
 		`Test-Path ` + target,
-		`git status --short ` + target,
-		`[System.IO.File]::ReadAllText('C:/Users/Alice/.ssh/authorized_keys')`,
 	} {
 		if got := ActionCommandDecision(command, cwd, home); got != "" {
 			t.Errorf("read-only Windows command blocked: %q: %q", command, got)
+		}
+	}
+	for _, command := range []string{
+		`Get-Item ` + target,
+		`Get-Acl ` + target,
+		`git status --short ` + target,
+		`[System.IO.File]::ReadAllText('C:/Users/Alice/.ssh/authorized_keys')`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("program outside the protected-target read-only list: %q: %q", command, got)
 		}
 	}
 	for _, command := range []string{
