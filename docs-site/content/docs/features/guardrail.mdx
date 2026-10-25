@@ -63,7 +63,7 @@ Human approval is off by default. Its default minimum severity is HIGH. Change t
 
 ## Fail mode
 
-An explicit saved hook fail mode decides a classified gateway outage. With no saved mode, a per-user install follows its policy tier: default and permissive let the call run with a warning and a record; strict blocks it. A bad gateway answer or authentication failure blocks. A managed host defaults to `closed`; an administrator can choose `open` for an outage even with a strict pack. See [Fail modes](/docs/reference/configuration/fail-modes#per-user-installs).
+On the current train the policy tier decides a per-user classified gateway outage even when a mode is saved: default and permissive let the call run with a warning and a record; strict blocks it. A bad gateway answer or authentication failure blocks. A managed host defaults to `closed`; an administrator can choose `open` for an outage even with a strict pack. See [Fail modes](/docs/reference/configuration/fail-modes#per-user-installs).
 
 ## Which agents can ask
 

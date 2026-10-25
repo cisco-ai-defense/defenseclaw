@@ -59,9 +59,9 @@ against the hook code on every change.
 
 <OutageMatrix />
 
-- **Per-user** is an install without a managed deployment. An explicit saved
-  `hook_fail_mode` selects its outage mode. With no saved value, the default
-  (balanced) and permissive tiers let the call run with a warning and a
+- **Per-user** is an install without a managed deployment. On the current
+  train the tier selects its outage mode even when `hook_fail_mode` is saved.
+  The default (balanced) and permissive tiers let the call run with a warning and a
   `hook-failures.jsonl` record; strict blocks it. Other failures block
   ([Fail modes](/docs/reference/configuration/fail-modes#per-user-installs)).
 - **Managed standalone** is an enterprise host outside Secure Client. Its fail

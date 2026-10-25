@@ -71,13 +71,13 @@ The message reads `<connector>'s agent changed`.
 
 **Cause.** The connector runs the strict policy (or the install is managed), whose hooks block while the gateway is not running. Default and permissive let an outage run with a warning. During an install or upgrade, all per-user and managed standalone hooks block supported tool calls even if the gateway answers allow.
 
-**Fix.** Start the gateway: `defenseclaw-gateway start`. If it does not start, `defenseclaw doctor` names the repair. If no explicit fail mode is saved, `defenseclaw guardrail use-pack default` lets classified outages run with a warning and a `hook-failures.jsonl` record.
+**Fix.** Start the gateway: `defenseclaw-gateway start`. If it does not start, `defenseclaw doctor` names the repair. On the current per-user train the tier decides an outage even when a mode is saved: `defenseclaw guardrail use-pack default` lets it run with a warning and a `hook-failures.jsonl` record.
 
 **Check.** `defenseclaw guardrail fail-mode` shows each connector's outage mode and policy tier.
 
 ## The agent says "DefenseClaw is not checking this session"
 
-**Cause.** This account's gateway is not running (stopped, crashed or not started after a reboot), and the connector has an explicit saved `open` or no saved mode with the default or permissive policy. Its hooks let calls run unchecked and record each one in `~/.defenseclaw/logs/hook-failures.jsonl`.
+**Cause.** This account's gateway is not running (stopped, crashed or not started after a reboot), and the connector uses the default or permissive policy. On the current per-user train a saved mode does not override the tier. Its hooks let calls run unchecked and record each one in `~/.defenseclaw/logs/hook-failures.jsonl`.
 
 **Fix.** `defenseclaw-gateway start`. If it does not start, `defenseclaw doctor` names the repair. To block calls during an outage instead: `defenseclaw guardrail use-pack strict`.
 

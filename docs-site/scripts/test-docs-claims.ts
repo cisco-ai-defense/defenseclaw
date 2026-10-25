@@ -73,16 +73,20 @@ describe('Owner-decided outage and install-window modes', () => {
     const command = source('cli/defenseclaw/commands/cmd_guardrail.py');
     assert.match(command, /if mode is not None and not managed_host and not secure_client:\s+_refuse_a_mode_the_policy_tier_does_not_give/);
     for (const name of ['reference/configuration/fail-modes.mdx', 'get-started/upgrade.mdx', 'reference/commands/cli.mdx']) {
-      assert.match(page(name), /per-user[^.]*saved[^.]*tier[^.]*outage/i, name);
+      assert.match(page(name), /per-user[^.]*saved[^.]*tier|per-user[^.]*tier[^.]*saved/i, name);
     }
+    for (const name of ['connectors/claudecode.mdx', 'features/guardrail.mdx', 'reference/connectors/cursor.mdx', 'appendix/coverage-by-layer.mdx']) {
+      assert.match(page(name), /per-user[^.]*tier[^.]*saved|per-user[^.]*saved[^.]*tier|tier[^.]*per-user[^.]*saved/i, name);
+    }
+    assert.match(page('reference/apis/capability-matrix.mdx'), /train the tier selects its outage mode even when `hook_fail_mode` is saved/i);
   });
 
-  it('keeps saved outage choices ahead of tiers, including managed strict', () => {
+  it('keeps managed saved choices and records the per-user release prerequisite', () => {
     const failModes = page('reference/configuration/fail-modes.mdx');
-    assert.match(failModes, /explicit saved `open` or `closed` wins over the policy tier on a per-user install/i);
+    assert.match(failModes, /saved-mode override requires the pending OSS outage fix before release/i);
     assert.match(failModes, /administrator's explicit `hook_fail_mode: open` wins over the strict tier for a classified gateway outage/i);
-    assert.match(page('get-started/upgrade.mdx'), /Per-user hooks honor an explicitly saved outage mode/i);
-    assert.doesNotMatch(failModes, /ignores a saved value|saved `guardrail\.hook_fail_mode` does not change|Per-user: not read/i);
+    assert.match(page('get-started/upgrade.mdx'), /per-user saved mode does not override the tier during an outage/i);
+    assert.match(page('reference/commands/cli.mdx'), /value that disagrees with the tier is refused with exit 1/i);
   });
 
   it('documents the install lock on answered and unanswered calls in each guide', () => {
@@ -182,10 +186,10 @@ describe('Cursor observe outage mode', () => {
     const cursor = page('reference/connectors/cursor.mdx').split('## Fail mode')[1]?.split('## Limits')[0] ?? '';
     // Owner decision 2026-10-23 (oss-outage-open): a per-user outage follows the
     // policy tier; every other failure blocks.
-    assert.match(failModes, /An explicit saved `open` or `closed` wins over the policy tier on a per-user install.{0,300}When no mode is saved/i);
-    assert.match(cursor, /A per-user Cursor hook honors an explicit saved outage mode in observe and action mode/i);
+    assert.match(failModes, /per-user gateway outage follows the policy tier even when a mode is saved/i);
+    assert.match(cursor, /per-user Cursor hook follows its policy tier during an outage in observe and action mode even when a mode is saved/i);
     const coverage = page('appendix/coverage-by-layer.mdx');
-    assert.match(coverage, /On a per-user install an explicit saved mode wins; otherwise the policy tier decides in observe and action mode alike/i);
+    assert.match(coverage, /On the current per-user train the policy tier decides in observe and action mode alike, even when a mode is saved/i);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
     assert.match(managedRegistration, /"failClosed": true,/);
     assert.match(page('reference/connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call. The administrator's resolved fail mode decides/i);
@@ -503,10 +507,10 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     }
   });
 
-  it('says an upgrade gives per-user hooks the outage mode of their tier', () => {
-    assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks honor an explicitly saved outage mode'));
+  it('says a per-user upgrade currently retains but does not apply a saved outage mode', () => {
+    assert.ok(page('get-started/upgrade.mdx').includes('a per-user saved mode does not override the tier during an outage'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
-    assert.ok(page('reference/configuration/fail-modes.mdx').includes('An explicit saved `open` or `closed` wins over the policy tier on a per-user install'));
+    assert.ok(page('reference/configuration/fail-modes.mdx').includes('the current per-user outage resolver does not use it'));
   });
 });
 

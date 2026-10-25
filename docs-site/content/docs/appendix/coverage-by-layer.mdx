@@ -204,7 +204,7 @@ The layers divide the work so that two of them never make the same decision:
 
 | Layer and failure | What happens |
 | --- | --- |
-| A hook cannot reach the gateway | On a per-user install an explicit saved mode wins; otherwise the policy tier decides in observe and action mode alike: default and permissive run the call with a warning and a record, strict denies a supported event. On a managed host `closed` (the default outside Secure Client) denies it and an administrator's `open` runs a classified outage, even under strict. Per-user Cursor registration has `failClosed: true` outside Secure Client, so a hook process that cannot answer blocks. |
+| A hook cannot reach the gateway | On the current per-user train the policy tier decides in observe and action mode alike, even when a mode is saved: default and permissive run the call with a warning and a record, strict denies a supported event. On a managed host `closed` (the default outside Secure Client) denies it and an administrator's `open` runs a classified outage, even under strict. Per-user Cursor registration has `failClosed: true` outside Secure Client, so a hook process that cannot answer blocks. |
 | Managed hooks on a standalone computer, every connector | Closed by default. The administrator's `open` covers a gateway outage only, and not for a connector whose foreign-hook guard checks the session with the gateway. Rate limits, refusals and unusable answers always block |
 | Secure Client hooks | Open by default; an explicit `closed` is kept |
 | Sandbox hooks | Always closed; silence is detected and can stop the sandbox |
