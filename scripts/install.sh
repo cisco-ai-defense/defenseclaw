@@ -481,8 +481,58 @@ LOG="${DEFENSECLAW_HOME}/logs/install-$(date +%Y%m%dT%H%M%S).log"
 # tee ignores Ctrl+C: it went down with the installer's process group, and the
 # cancel message then died on a broken pipe (exit 141, GAP-1901).
 exec > >(trap '' INT TERM; exec tee -a "${LOG}") 2>&1
-trap 'rm -rf "${LOCK_DIR}" ${SELF_TMP:+"${SELF_TMP}"}' EXIT
+# The hooks of a data_dir set apart from DEFENSECLAW_HOME live in that folder
+# and look for this lock there: the shell hooks, the OpenCode and Amp plugins
+# and hook-outage-mode, which alone lets a per-user outage through. This
+# install holds that folder too, for as long as LOCK_DIR, so a gateway it
+# stops is never an outage those hooks let tool calls through in.
+# DATA_LOCK_DIR is the lock hold_hook_data_dir took; the EXIT trap removes it.
+DATA_LOCK_DIR=""
+trap 'rm -rf "${LOCK_DIR}" ${DATA_LOCK_DIR:+"${DATA_LOCK_DIR}"} ${SELF_TMP:+"${SELF_TMP}"}' EXIT
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
+
+config_data_dir() {
+    # The data_dir of the config this install keeps, as an absolute path, or
+    # nothing: no config, no data_dir, or a value this reader does not take
+    # (the hooks still find LOCK_DIR in this account's ~/.defenseclaw and in
+    # their DEFENSECLAW_HOME; hookOutageInstallHeld).
+    local config="${DEFENSECLAW_CONFIG:-${DEFENSECLAW_HOME}/config.yaml}" value
+    [[ -f "${config}" ]] || return 0
+    value="$(awk 'sub(/^data_dir:[ \t]*/, "") { print; exit }' "${config}" 2>/dev/null)" || return 0
+    value="${value%$'\r'}"
+    case "${value}" in
+        \"*) value="${value#\"}"; value="${value%%\"*}" ;;
+        \'*) value="${value#\'}"; value="${value%%\'*}" ;;
+        *) value="${value%%[[:space:]]#*}"; value="${value%"${value##*[![:space:]]}"}" ;;
+    esac
+    case "${value}" in
+        "~") value="${HOME}" ;;
+        "~/"*) value="${HOME}/${value#"~/"}" ;;
+    esac
+    [[ "${value}" == /* ]] || return 0
+    printf '%s' "${value}"
+}
+
+hold_hook_data_dir() {
+    local data lock holder
+    data="$(config_data_dir)"
+    [[ -n "${data}" && -d "${data}" ]] || return 0
+    [[ "$(cd -P -- "${data}" 2>/dev/null && pwd -P)" != "$(cd -P -- "${DEFENSECLAW_HOME}" 2>/dev/null && pwd -P)" ]] || return 0
+    lock="${data%/}/.install.lock"
+    if ! mkdir "${lock}" 2>/dev/null; then
+        holder="$(cat "${lock}/pid" 2>/dev/null || true)"
+        if [[ -n "${holder}" ]] && kill -0 "${holder}" 2>/dev/null; then
+            die "Another DefenseClaw install is running (pid ${holder}) for the data folder ${data}"
+        fi
+        rm -rf "${lock:?}"
+        mkdir "${lock}" 2>/dev/null \
+            || die "Could not create the install lock ${lock}: check that $(id -un) can write ${data}; nothing was changed"
+    fi
+    DATA_LOCK_DIR="${lock}"
+    { echo $$ > "${lock}/pid"; } 2>/dev/null \
+        || die "Could not write the install lock ${lock}/pid: check the free space and that $(id -un) can write ${data}; nothing was changed"
+}
+hold_hook_data_dir
 
 # ── Existing install ─────────────────────────────────────────────────────────
 

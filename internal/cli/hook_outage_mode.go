@@ -6,6 +6,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
@@ -33,6 +35,10 @@ import (
 // DEFENSECLAW_HOME come from the agent and never choose it, so an agent that
 // points them at another default-tier config cannot reopen a strict outage.
 // A config kept outside its data directory closes the outage.
+//
+// An install or upgrade of this account's DefenseClaw is not an outage
+// either: while any folder an installer of this account may hold carries its
+// .install.lock, the answer is "closed" (hookOutageInstallHeld).
 func hookOutageFailModeNow(connectorName, hookDir string) string {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
 	hookDir = strings.TrimSpace(hookDir)
@@ -69,10 +75,79 @@ func hookOutageFailModeNow(connectorName, hookDir string) string {
 	if !pathidentity.Same(loaded.DataDir, dataDir) {
 		return "closed"
 	}
+	if hookOutageInstallHeld(dataDir) {
+		return "closed"
+	}
 	if loaded.EffectiveHookOutageFailModeForConnector(name) == "open" {
 		return "open"
 	}
 	return "closed"
+}
+
+// hookOutageInstallHeld reports whether an installer may hold this
+// account's DefenseClaw while the hook runtime in dataDir asks to let an
+// outage through. The installer stops the gateway and starts it again when
+// it is done; that window is never an outage. It is held when the
+// .install.lock of any folder below exists, as any file type, or one of
+// those folders exists but is not a folder that can be searched, so the lock
+// cannot be shown absent (hookexec.InstallLockHeld):
+//
+//   - dataDir, the runtime's own data directory. install.sh holds a data_dir
+//     set apart from DEFENSECLAW_HOME as well (hold_hook_data_dir).
+//   - This account's .defenseclaw from the account database (getpwuid on
+//     Linux and macOS, the Profile known folder on Windows), the installer's
+//     default DEFENSECLAW_HOME. HOME and USERPROFILE never choose it.
+//   - On Windows, the data root of the installed runtime's protected install
+//     state, install.ps1's DEFENSECLAW_HOME. A recognized state that cannot
+//     be read counts as held.
+//   - The hook process's DEFENSECLAW_HOME, and .defenseclaw in its HOME (and
+//     USERPROFILE on Windows), which a hook started by an agent inherits.
+//
+// The environment can only add a folder to look in. It never replaces one
+// of the others, so an agent that runs the hook with a temporary HOME or
+// another DEFENSECLAW_HOME cannot hide the installer's lock; it can only
+// close an outage. Relative values name no installer folder and are skipped.
+func hookOutageInstallHeld(dataDir string) bool {
+	roots := []string{dataDir}
+	if home := outageAccountHome(); home != "" {
+		roots = append(roots, filepath.Join(home, config.DefaultDataDirName))
+	}
+	if root, recognized := outageInstalledDataRoot(); recognized {
+		if !filepath.IsAbs(root) {
+			return true
+		}
+		roots = append(roots, root)
+	}
+	if home := os.Getenv("DEFENSECLAW_HOME"); filepath.IsAbs(home) {
+		roots = append(roots, home)
+	}
+	for _, name := range outageHomeEnvNames {
+		if home := os.Getenv(name); filepath.IsAbs(home) {
+			roots = append(roots, filepath.Join(home, config.DefaultDataDirName))
+		}
+	}
+	for _, root := range roots {
+		if outageInstallLockHeld(root) {
+			return true
+		}
+	}
+	return false
+}
+
+// outageInstallLockHeld reports whether the installer may hold root:
+// root/.install.lock exists, as any file type, or cannot be shown absent,
+// or root exists but is not a folder (Windows reports a child of a file as
+// absent). A root that does not exist holds no lock; a link to a folder is
+// read as that folder.
+func outageInstallLockHeld(root string) bool {
+	if hookexec.InstallLockHeld(root) {
+		return true
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	return !info.IsDir()
 }
 
 func init() {
