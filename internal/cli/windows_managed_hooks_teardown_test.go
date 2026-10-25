@@ -57,7 +57,7 @@ func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
 		}
 		actions = append(actions, child.Name())
 	}
-	if !slices.Equal(actions, []string{"capabilities", "finalize", "prepare", "rollback", "verify"}) {
+	if !slices.Equal(actions, []string{"finalize", "prepare", "rollback", "verify"}) {
 		t.Fatalf("actions = %v", actions)
 	}
 }
@@ -1403,41 +1403,5 @@ func TestWindowsManagedHooksTeardownPrepareCapturesZeroTargetCodexPolicy(t *test
 		if err := captureWindowsManagedHooksTeardownCodexPolicy(&identity); err != nil || identity.CodexPolicyActive != want {
 			t.Fatalf("%s: active=%t err=%v, want the manifest's bit %t", name, identity.CodexPolicyActive, err, want)
 		}
-	}
-}
-
-// GAP-1443/GAP-1447: Setup asks the installed helper whether it prepares the
-// hook removal against a committed uninstall tombstone before it moves that
-// removal after the commit. This helper says so in exactly one JSON report;
-// the helpers of 1.0.0 to 1.0.3 have no such command, so Setup keeps the
-// precommit order for them.
-func TestWindowsManagedHooksTeardownReportsCommittedStandalonePrepare(t *testing.T) {
-	command := newWindowsManagedHooksTeardownCommand()
-	var out strings.Builder
-	command.SetOut(&out)
-	command.SetErr(&out)
-	command.SetArgs([]string{"capabilities", "--json"})
-	if err := command.Execute(); err != nil {
-		t.Fatalf("capabilities: %v: %s", err, out.String())
-	}
-	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("capabilities wrote %d lines, want one JSON report: %q", len(lines), out.String())
-	}
-	var report map[string]any
-	if err := json.Unmarshal([]byte(lines[0]), &report); err != nil {
-		t.Fatalf("capabilities report: %v: %q", err, lines[0])
-	}
-	if report["schema_version"] != float64(windowsManagedHooksTeardownSchema) || report["action"] != "capabilities" ||
-		report["ok"] != true || report["committed_standalone_prepare"] != true {
-		t.Fatalf("capabilities report = %v", report)
-	}
-	// The committed preparation it reports is the one the validation admits.
-	installed := false
-	metadata := windowsCodexDeploymentMetadata{Installed: &installed}
-	action, committed, err := windowsManagedHooksTeardownValidationAction(
-		metadata, "prepare", true, filepath.Join(t.TempDir(), "pending.json"))
-	if err != nil || action != "finalize" || !committed {
-		t.Fatalf("committed standalone prepare = %q, %v, %v", action, committed, err)
 	}
 }
