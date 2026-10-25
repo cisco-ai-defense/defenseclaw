@@ -129,7 +129,7 @@ def config_validate(quiet: bool) -> None:
     """Verify the config file parses and references valid enums."""
     result = validate_config()
     if quiet:
-        raise SystemExit(0 if result.ok else 1)
+        raise SystemExit(0 if result.ok and not result.not_checked else 1)
 
     click.echo()
     click.echo(f"  {ux.bold('Config:')} {result.path}")
@@ -138,6 +138,11 @@ def config_validate(quiet: bool) -> None:
     else:
         ux.warn(f"file does not exist yet — {config_module.first_run_hint()}")
 
+    if result.not_checked:
+        # Nothing was judged, so nothing is called valid (GAP-1395).
+        ux.warn(f"not checked: {result.not_checked}", indent="  ")
+        click.echo()
+        raise SystemExit(1)
     if result.parse_error:
         ux.err(f"parse error: {result.parse_error}", indent="  ")
     elif result.ok:

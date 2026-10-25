@@ -691,6 +691,8 @@ def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> Non
     from defenseclaw.commands.cmd_config import validate_config
 
     result = validate_config()
+    if not_checked := getattr(result, "not_checked", ""):
+        ux.echo(f"Config check: not run: {not_checked}", err=True)
     if not result.ok and _webhook_url_cleanup(ctx, result):
         # The message says "fix the url, or remove the webhook": list, disable and remove
         # have to run for that to be possible (GAP-0219).

@@ -115,7 +115,9 @@ def inspect_doctor_config_load_failure(load_error: BaseException) -> DoctorStart
     for warning in list(getattr(validation, "warnings", ()) or ())[:_MAX_DIAGNOSTICS]:
         checks.append(DoctorStartupCheck("warn", "Config validation", _bounded_detail(warning)))
 
-    if bool(getattr(validation, "ok", False)):
+    if not_checked := _bounded_detail(getattr(validation, "not_checked", "") or ""):
+        checks.append(DoctorStartupCheck("warn", "Config validation", f"not run: {not_checked}"))
+    elif bool(getattr(validation, "ok", False)):
         detail = (
             f"config validate passes, but config.yaml still could not be loaded "
             f"({loader_detail}); nothing was changed. {remediation}"

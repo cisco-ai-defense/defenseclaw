@@ -135,3 +135,68 @@ def test_managed_config_owner_hidden_by_the_sandbox_is_named_unknown(tmp_path, m
     problem = dcconfig._managed_config_trust_problem(str(managed))
     assert problem and "cannot be checked inside this sandbox" in problem
     assert "not trusted" not in problem
+
+
+# A check that did not run is never reported as passing (GAP-1395 refix).
+_HIDDEN = "the owner of folder /home cannot be checked here"
+
+
+def _not_checked_result() -> cmd_config.ValidationResult:
+    result = cmd_config.ValidationResult()
+    result.path = "/isolated/.defenseclaw/config.yaml"
+    result.exists = True
+    result.not_checked = _HIDDEN
+    return result
+
+
+def _run_cli(args, *, load_error=None):
+    from types import SimpleNamespace
+
+    from defenseclaw.main import cli
+
+    cfg = SimpleNamespace(audit_db="/isolated/audit.db", _source_config_version=8)
+    load = {"side_effect": load_error} if load_error else {"return_value": cfg}
+    with (
+        patch("defenseclaw.config.require_v8_config"),
+        patch("defenseclaw.config.load", **load),
+        patch("defenseclaw.commands.cmd_config.validate_config", side_effect=_not_checked_result),
+        patch("defenseclaw.db.Store"),
+        patch("defenseclaw.logger.Logger.from_config"),
+        patch.object(cmd_config.config_module, "config_path", return_value=Path("/isolated/.defenseclaw/config.yaml")),
+        patch("defenseclaw.gateway.current_gateway_reload_notice", return_value=""),
+    ):
+        return CliRunner().invoke(cli, list(args))
+
+
+@pytest.mark.parametrize("args", (["config", "validate"], ["config", "validate", "--quiet"]))
+def test_config_validate_in_the_sandbox_view_does_not_say_valid(args):
+    result = _run_cli(args)
+    assert result.exit_code == 1, result.output
+    assert "valid" not in result.output and "syntax OK" not in result.output
+    if "--quiet" not in args:
+        assert f"not checked: {_HIDDEN}" in result.output
+
+
+def test_other_commands_say_the_config_check_did_not_run():
+    from defenseclaw.main import cli
+
+    callback = unittest.mock.Mock(return_value=None)
+    with patch.object(cli.commands["alerts"], "callback", callback):
+        result = _run_cli(["alerts"])
+    assert result.exit_code == 0, result.output
+    assert f"Config check: not run: {_HIDDEN}" in result.output
+    callback.assert_called_once()
+
+
+def test_doctor_does_not_say_config_validate_passes_when_it_did_not_run():
+    from defenseclaw.commands import cmd_doctor
+
+    with patch.object(cmd_doctor, "_json_mode", False):
+        result = _run_cli(["doctor", "--json-output"], load_error=TypeError("gateway must be a mapping"))
+    assert result.exit_code == 1, result.output
+    checks = json.loads(result.output)["checks"]
+    assert {"status": "warn", "label": "Config validation"}.items() <= next(
+        item for item in checks if item["label"] == "Config validation"
+    ).items()
+    assert any(f"not run: {_HIDDEN}" in item["detail"] for item in checks)
+    assert not any("config validate passes" in item["detail"] for item in checks)
