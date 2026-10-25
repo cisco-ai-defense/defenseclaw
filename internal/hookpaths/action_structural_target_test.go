@@ -35,6 +35,8 @@ func TestR104StructuralProtectedNamedPOSIX(t *testing.T) {
 		`for p in ~/.ssh/authorized_k*; do cp payload "$p"; done`,
 		`for p in ~/.s*/authorized_keys; do cp payload "$p"; done`,
 		`sh -c 'cat "$HOME/.ssh/authorized_keys"'`,
+		`grep marker ~/.ssh/authorized_keys`,
+		`wc -l ~/.ssh/authorized_keys`,
 		`cd ~/.ssh && echo authorized_keys`,
 		`ls ~/.ssh && echo done`,
 	} {
@@ -47,6 +49,7 @@ func TestR104StructuralProtectedNamedPOSIX(t *testing.T) {
 	for _, command := range []string{
 		`cd ~/.ssh`, `pushd ~/.ssh`, `ls ~/.ssh`, `ls -o ~/.ssh`, `stat ~/.ssh`,
 		`cd ~/.ssh && cat authorized_keys`, `cd ~/.ssh && ls authorized_keys`,
+		`grep marker report.txt`,
 		`cp payload ~/.s*/ordinary.txt`, `cp payload ~/.ssh/*.pub`,
 		`pushd build; popd; cp payload authorized_keys`,
 	} {
@@ -97,6 +100,8 @@ func TestR104StructuralProtectedNamedWindows(t *testing.T) {
 		`Get-Content (Resolve-Path ` + key + `)`,
 		`pwsh -Command 'Get-Content $env:USERPROFILE\.ssh\authorized_keys'`,
 		`Push-Location ` + home + `\.ssh; Pop-Location; Add-Content notes.txt ok`,
+		`Get-ChildItem ` + home + `\.ssh | Format-Table Name`,
+		`foreach ($n in Get-ChildItem ` + home + `\.ssh) { Write-Output $n.Name }`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
@@ -108,6 +113,7 @@ func TestR104StructuralProtectedNamedWindows(t *testing.T) {
 		`cd ` + home + `\.ssh`, `pushd ` + home + `\.ssh`,
 		`ls ` + home + `\.ssh`, `stat ` + home + `\.ssh`,
 		`Test-Path ` + home + `\.ssh`, `Resolve-Path ` + home + `\.ssh`,
+		`Get-ChildItem ` + home + `\.ssh`,
 		`Set-Location ` + home + `\.ssh; Get-Content authorized_keys`,
 		`Push-Location C:\work\build; Pop-Location; Add-Content notes.txt ok`,
 		`Copy-Item payload C:\Users\b00\.s*\ordinary.txt`,

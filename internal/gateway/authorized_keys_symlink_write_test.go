@@ -1216,14 +1216,14 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cp -a tree copy && echo k >> copy/k`,
 		`cd -P ~/.ssh && echo k >> authorized_keys`,
 		`cd ~/.ssh || exit 1; echo k >> authorized_keys`,
+		`cd dirlink && cd .. && echo ok >> notes.txt`,
+		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
 		`ln -s ~/.ssh/authorized_keys freshlink; sed -i 's/marker/k/' freshlink`,
 		`cp --archive disklink notes.txt`,
 		`cp -a -t copy tree`,
 	}
 	allowed := []string{
 		`cd dirlink && cat authorized_keys`,
-		`cd dirlink && cd .. && echo ok >> notes.txt`,
-		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
 		`tar "$o" xenial.tar > log`,
 		`"$PY" x.py > out.txt`,
 		`cd build && echo ok >> notes.txt`,

@@ -75,7 +75,7 @@ func TestTrustedActionW24Continuation(t *testing.T) {
 		{"cmd conditional directory change", `if exist x (cd /d D:\ordinary) & type .ssh\id_rsa`, `C:\Users\alice`, `C:\Users\alice`, "PATH-WIN-SSH-KEY", actionfacts.DialectCMD, true},
 		{"PowerShell conditional path assignment", `if ($false) { $target = 'C:\ordinary' }; Get-Content $target`, `C:\Users\alice`, `C:\Users\alice`, "", actionfacts.DialectPowerShell, false},
 		{"PowerShell foreach block", `foreach ($name in 'a','b') { Write-Output $name; Remove-Item -Recurse -Force C:\ }`, `C:\repo`, `C:\Users\alice`, "CMD-RM-RF", actionfacts.DialectPowerShell, true},
-		{"PowerShell command in foreach header", `foreach ($name in Get-ChildItem C:\Users\alice\.ssh) { Write-Output $name }`, `C:\repo`, `C:\Users\alice`, "", actionfacts.DialectPowerShell, false},
+		{"PowerShell command in foreach header", `foreach ($name in Get-ChildItem C:\Users\alice\.ssh) { Write-Output $name }`, `C:\repo`, `C:\Users\alice`, "", actionfacts.DialectPowerShell, true},
 		{"PowerShell unbalanced block", `Write-Output a; { Remove-Item -Recurse -Force C:\`, `C:\repo`, `C:\Users\alice`, "", actionfacts.DialectPowerShell, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

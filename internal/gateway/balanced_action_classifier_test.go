@@ -39,7 +39,7 @@ func TestBalancedActionOnlyResolvedProtectedTargets(t *testing.T) {
 		"python manage.py test", "python -u manage.py test", "node server.js --port 3000",
 		"echo \"$(id)\" > report.txt", "for f in regular.txt; do cp \"$f\" copy/; done; echo ok > second-report.txt",
 		"git -C sub pull --ff-only && echo benign > notes.txt",
-		"cat ~/.ssh/authorized_keys", "grep marker ~/.ssh/authorized_keys",
+		"cat ~/.ssh/authorized_keys", "grep marker report.txt",
 		"cd ~/.ssh", "pushd ~/.ssh", "ls ~/.ssh", "stat ~/.ssh", "cd ~/.ssh && cat authorized_keys",
 		"f=report.txt; echo marker >> \"${f:-alias}\"",
 		"out=report-0509.txt; awk \"BEGIN {print \\\"marker\\\" >> \\\"$out\\\"}\"",
@@ -56,6 +56,7 @@ func TestBalancedActionOnlyResolvedProtectedTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, command := range []string{
+		"grep marker ~/.ssh/authorized_keys",
 		"echo " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
 		"printf '%s\\n' " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
 		"cat " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",

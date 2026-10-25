@@ -24,8 +24,9 @@ func TestR104WindowsActionTargetMentionReview(t *testing.T) {
 		{"nested .NET write", `[IO.File]::ReadAllText([IO.File]::AppendAllText('C:/Users/b00/.ssh/authorized_keys','marker'))`, true},
 		{"protected glob", `Copy-Item payload C:\Users\b00\.ssh\authorized_k*`, true},
 		{"ordinary glob", `Copy-Item payload C:\Users\b00\.ssh\*.pub`, false},
-		{"directory listing pipeline", `Get-ChildItem C:\Users\b00\.ssh | Format-Table Name`, false},
-		{"directory listing scriptblock", `foreach ($n in Get-ChildItem C:\Users\b00\.ssh) { Write-Output $n.Name }`, false},
+		{"directory listing plain", `Get-ChildItem C:\Users\b00\.ssh`, false},
+		{"directory listing pipeline", `Get-ChildItem C:\Users\b00\.ssh | Format-Table Name`, true},
+		{"directory listing scriptblock", `foreach ($n in Get-ChildItem C:\Users\b00\.ssh) { Write-Output $n.Name }`, true},
 		{"directory navigation", `Push-Location C:\Users\b00\.ssh; Get-ChildItem; Pop-Location`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
