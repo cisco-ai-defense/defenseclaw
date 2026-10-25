@@ -7355,6 +7355,11 @@ def _otel_carries_product_credential(value, known) -> bool:
     its host, port, header-name or scheme spelling.
     """
     if isinstance(value, str):
+        # Header lists and URLs may percent-encode the credential, as the
+        # gateway's url.PathUnescape decodes it.
+        decoded = urllib.parse.unquote(value)
+        if decoded != value and _otel_carries_product_credential(decoded, known):
+            return True
         return bool(_OTEL_PRODUCT_TOKEN_RE.search(value)) or any(
             len(token) >= 8 and token in value for token in known
         )

@@ -236,6 +236,46 @@ class TestCodexOtelAlignment(unittest.TestCase):
                 else:
                     self.assertEqual(result.checks[0]["status"], "pass", result.checks)
 
+    def test_codex_percent_encoded_credential_off_gateway_fails_without_sidecar(self) -> None:
+        # The scoped sidecar is gone and otel.environment is omitted. A
+        # bytewise percent-encoded product token on the retired port is still
+        # DefenseClaw's (the gateway's url.PathUnescape decodes it), so Doctor
+        # fails it instead of passing "no native OTLP".
+        payload = {
+            "runtime": {"environment": "windows"},
+            "health": {"telemetry": {"state": "running"}},
+        }
+        token = "d" * 64
+        encoded = "".join(f"%{byte:02X}" for byte in token.encode("ascii"))
+        rows = (
+            ("endpoint_query", f"http://127.0.0.1:19081/v1/logs?k={encoded}", ""),
+            ("endpoint_path", f"http://127.0.0.1:19081/otlp/codex/{encoded}/v1/logs", ""),
+            ("header", "http://127.0.0.1:19081/v1/logs", f"authorization = 'Bearer%20{encoded}'\n"),
+        )
+        for name, endpoint, header in rows:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as home, (
+                tempfile.TemporaryDirectory()
+            ) as data_dir, patch.dict(os.environ, {"CODEX_HOME": home}, clear=False), patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(200, json.dumps(payload)),
+            ):
+                Path(data_dir, "hooks").mkdir()
+                self._write_codex_config(
+                    home,
+                    "[otel.exporter.otlp-http]\n"
+                    f"endpoint = '{endpoint}'\n"
+                    "[otel.exporter.otlp-http.headers]\n" + header,
+                )
+                cfg = self._cfg()
+                cfg.data_dir = data_dir
+                result = _DoctorResult()
+                _check_codex_otel_alignment(cfg, result)
+                detail = result.checks[0]["detail"]
+                self.assertEqual(result.checks[0]["status"], "fail", result.checks)
+                self.assertIn("otel.exporter.otlp-http.endpoint", detail)
+                self.assertIn("DefenseClaw credential", detail)
+                self.assertNotIn(encoded, detail)
+
     def test_stale_runtime_environment_fails_authenticated_status(self) -> None:
         payload = {
             "runtime": {"environment": "dev"},

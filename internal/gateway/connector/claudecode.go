@@ -1851,7 +1851,7 @@ func claudeCodeOperatorOtelSettings(existing map[string]interface{}, previous ma
 			key == "OTEL_RESOURCE_ATTRIBUTES" || key == "OTEL_SERVICE_NAME" ||
 			strings.HasPrefix(key, "OTEL_LOG_")) &&
 			!claudeCodeOtelValueLooksManaged(key, value, previous[key]) {
-			if claudeCodeOTLPHeadersKey(key) && otlpCarriesProductCredential(value, known) {
+			if otlpCarriesProductCredential(value, known) {
 				continue
 			}
 			keep[key] = true
@@ -2033,8 +2033,11 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 				for key := range productRoutes {
 					delete(existing, key)
 				}
-				for _, key := range claudeCodeOtelEnvKeys {
-					if claudeCodeOTLPHeadersKey(key) && otlpCarriesProductCredential(existing[key], known) {
+				// Any OTLP env value that carries a DefenseClaw credential
+				// (resource attributes and service name included) is the
+				// product's: it never stays beside a retained route.
+				for key, value := range existing {
+					if claudeCodeOTLPEnvKey(key) && otlpCarriesProductCredential(value, known) {
 						delete(existing, key)
 					}
 				}

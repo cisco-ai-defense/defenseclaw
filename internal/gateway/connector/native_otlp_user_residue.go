@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -322,11 +323,12 @@ func claudeCodeUserNativeOTLP(opts SetupOpts, apply bool) ([]string, error) {
 }
 
 // claudeCodeWithoutUserNativeOTLP returns the settings without the
-// DefenseClaw native exporter. Ownership needs proof in the env block: an
-// endpoint or header carrying a DefenseClaw credential
-// (otlpCarriesProductCredential), the exact value the setup backup recorded
-// writing, or the earlier headers helper. Any other route is the operator's.
-// Values that turn export off stay.
+// DefenseClaw native exporter. Ownership needs proof in the env block: any
+// OTLP env value carrying a DefenseClaw credential
+// (otlpCarriesProductCredential), the exact endpoint or header value the setup
+// backup recorded writing, or the earlier headers helper. A credential-bearing
+// value is always removed; any other route is the operator's. Values that turn
+// export off stay.
 func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts SetupOpts) ([]byte, []string, error) {
 	// The repair transform rereads the file under a larger bound.
 	if int64(len(raw)) > userNativeOTLPReadLimit {
@@ -350,8 +352,8 @@ func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts S
 	proof := helperOwned
 	for key, value := range env {
 		got, _ := value.(string)
-		if got != "" && (claudeCodeOTLPEndpointKey(key) || claudeCodeOTLPHeadersKey(key)) &&
-			(recorded(key, got) || otlpCarriesProductCredential(got, known)) {
+		if got != "" && claudeCodeOTLPEnvKey(key) && otlpCarriesProductCredential(got, known) ||
+			got != "" && (claudeCodeOTLPEndpointKey(key) || claudeCodeOTLPHeadersKey(key)) && recorded(key, got) {
 			proof = true
 		}
 	}
@@ -412,7 +414,7 @@ func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts S
 	}
 
 	var removed []string
-	for _, key := range claudeCodeOtelEnvKeys {
+	for _, key := range claudeCodeOTLPEnvKeys(env) {
 		if key == "DEFENSECLAW_FAIL_MODE" {
 			continue
 		}
@@ -420,19 +422,23 @@ func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts S
 		if !isString || got == "" {
 			continue
 		}
-		if keepOperatorSetting[key] {
+		credential := claudeCodeOTLPEnvKey(key) && otlpCarriesProductCredential(got, known)
+		if keepOperatorSetting[key] && !credential {
 			continue
 		}
 		owned := false
 		switch {
+		case credential:
+			// A DefenseClaw credential in any OTLP value (resource attributes
+			// and service name included) never stays beside a kept route.
+			// Verify may be unable to read a target user's sidecar as SYSTEM;
+			// the token shape still proves it.
+			owned = true
 		case claudeCodeOTLPEndpointKey(key):
 			// A credential on logs does not claim another signal's collector.
 			owned = endpointOwned(key, got)
 		case claudeCodeOTLPHeadersKey(key):
-			// A header entry that carries a DefenseClaw credential is the
-			// product's whole entry. Verify may be unable to read a target
-			// user's sidecar as SYSTEM; the token shape still proves it.
-			owned = recorded(key, got) || otlpCarriesProductCredential(got, known)
+			owned = recorded(key, got)
 		default:
 			earlierValue := claudeCodeEarlierReleaseEnv[key] == got &&
 				(backup.ManagedEnv[key] == "" || backup.ManagedEnv[key] == got)
@@ -471,6 +477,26 @@ func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts S
 	return out, removed, nil
 }
 
+// claudeCodeOTLPEnvKey reports an env key the OpenTelemetry SDK reads, so a
+// credential in its value would reach an exporter.
+func claudeCodeOTLPEnvKey(key string) bool {
+	return strings.HasPrefix(key, "OTEL_")
+}
+
+// claudeCodeOTLPEnvKeys returns claudeCodeOtelEnvKeys followed, sorted, by the
+// other OTLP keys env holds, so credential cleanup covers every OTLP value.
+func claudeCodeOTLPEnvKeys(env map[string]interface{}) []string {
+	keys := append([]string(nil), claudeCodeOtelEnvKeys...)
+	var extra []string
+	for key := range env {
+		if claudeCodeOTLPEnvKey(key) && !slices.Contains(claudeCodeOtelEnvKeys, key) {
+			extra = append(extra, key)
+		}
+	}
+	sort.Strings(extra)
+	return append(keys, extra...)
+}
+
 func claudeCodeOTLPEndpointKey(key string) bool {
 	return strings.HasPrefix(key, "OTEL_EXPORTER_OTLP_") && strings.HasSuffix(key, "_ENDPOINT")
 }
@@ -495,8 +521,10 @@ func claudeCodeEnvValueDisablesExport(value string) bool {
 func claudeCodeEnvValueIsDefenseClaw(key string, value interface{}, reference map[string]string) bool {
 	got, _ := value.(string)
 	switch {
+	case claudeCodeOTLPEnvKey(key) && otlpCarriesProductCredential(got, nil):
+		return true
 	case claudeCodeOTLPEndpointKey(key), claudeCodeOTLPHeadersKey(key):
-		return otlpCarriesProductCredential(got, nil)
+		return false
 	default:
 		return got != "" && !claudeCodeEnvValueDisablesExport(got) &&
 			(got == reference[key] || claudeCodeEarlierReleaseEnv[key] == got)

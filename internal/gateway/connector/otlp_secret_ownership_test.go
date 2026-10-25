@@ -6,8 +6,10 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -414,6 +416,128 @@ func TestCodexSecretOwnershipKeepsOperatorBytesBesideProductExporter(t *testing.
 						t.Fatalf("operator collector bytes changed; want:\n%s\ngot:\n%s", want, got)
 					}
 				})
+			}
+		}
+	}
+}
+
+// TestClaudeSecretOwnershipCoversEveryOTLPEnvValue is the class of the
+// round e loop 2 P1: a DefenseClaw credential in any OTLP env value (resource
+// attributes, service name, a log gate, an OTLP key the profile never wrote,
+// percent-encoded or not, with the sidecar present or gone) is removed beside
+// an operator route that carries none, by Setup and the managed cleanup, and
+// managed Verify reports it first. The operator route and its other values
+// keep their bytes.
+func TestClaudeSecretOwnershipCoversEveryOTLPEnvValue(t *testing.T) {
+	encode := func(s string) string {
+		var b strings.Builder
+		for i := 0; i < len(s); i++ {
+			fmt.Fprintf(&b, "%%%02X", s[i])
+		}
+		return b.String()
+	}
+	rows := []struct {
+		name, key, value string
+		dropToken        bool
+	}{
+		{name: "resource_session_id", key: "OTEL_RESOURCE_ATTRIBUTES", value: "team=a,session.id={tok}"},
+		{name: "resource_missing_sidecar", key: "OTEL_RESOURCE_ATTRIBUTES", value: "session.id={tok}", dropToken: true},
+		{name: "resource_percent_encoded", key: "OTEL_RESOURCE_ATTRIBUTES", value: "session.id={enc}", dropToken: true},
+		{name: "service_name", key: "OTEL_SERVICE_NAME", value: "claude-{tok}"},
+		{name: "log_gate", key: "OTEL_LOG_TOOL_DETAILS", value: "{tok}"},
+		{name: "unlisted_otlp_key", key: "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", value: "{tok}", dropToken: true},
+	}
+	const operatorRoute = "http://127.1:19081/v1/traces"
+	for _, release := range []string{"1.0.2", "1.0.3"} {
+		for _, goos := range []string{"linux", "darwin", "windows"} {
+			for _, row := range rows {
+				for _, writer := range []string{"setup", "managed_cleanup"} {
+					t.Run(release+"/"+goos+"/"+row.name+"/"+writer, func(t *testing.T) {
+						dir := t.TempDir()
+						pinClaudeUpgradeTestOwner(t, dir)
+						settingsPath := filepath.Join(dir, "settings.json")
+						prior := ClaudeCodeSettingsPathOverride
+						ClaudeCodeSettingsPathOverride = settingsPath
+						t.Cleanup(func() { ClaudeCodeSettingsPathOverride = prior })
+						conn := NewClaudeCodeConnector()
+						earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", GOOS: goos, sandboxNativeOTLP: true}
+						if err := conn.Setup(context.Background(), earlier); err != nil {
+							t.Fatalf("released %s setup: %v", release, err)
+						}
+						token, err := LoadOTLPPathToken(dir, OTLPScopeClaude)
+						if err != nil || token == "" {
+							t.Fatalf("released scoped token: present=%t err=%v", token != "", err)
+						}
+						data, err := os.ReadFile(settingsPath)
+						if err != nil {
+							t.Fatal(err)
+						}
+						var settings map[string]interface{}
+						if err := json.Unmarshal(data, &settings); err != nil {
+							t.Fatal(err)
+						}
+						// The operator replaced the product routes with one traces
+						// collector that carries no credential.
+						env := map[string]interface{}{
+							"CLAUDE_CODE_ENABLE_TELEMETRY":       "1",
+							"OTEL_TRACES_EXPORTER":               "otlp",
+							"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": operatorRoute,
+							"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
+						}
+						value := strings.NewReplacer("{tok}", token, "{enc}", encode(token)).Replace(row.value)
+						env[row.key] = value
+						settings["env"] = env
+						writeClaudeUpgradeSettings(t, settingsPath, settings)
+						if row.dropToken {
+							if err := RemoveOTLPPathToken(dir, OTLPScopeClaude); err != nil {
+								t.Fatal(err)
+							}
+							if err := os.Remove(filepath.Join(dir, "claudecode_backup.json")); err != nil {
+								t.Fatal(err)
+							}
+						}
+						want := "settings.json env." + row.key
+						if left := otlpSecretResidue(t, "claudecode", dir, "settings.json"); !slices.Contains(left, want) {
+							t.Fatalf("managed Verify before %s = %v, want %s", writer, left, want)
+						}
+
+						if writer == "setup" {
+							upgrade := earlier
+							upgrade.sandboxNativeOTLP = false
+							upgrade.APIAddr = "127.0.0.1:19082"
+							if err := conn.Setup(context.Background(), upgrade); err != nil {
+								t.Fatalf("upgrade: %v", err)
+							}
+						} else {
+							removed, err := RemoveUserNativeOTLP("claudecode", SetupOpts{DataDir: dir, ManagedEnterprise: true})
+							if err != nil {
+								t.Fatalf("managed cleanup: %v", err)
+							}
+							if !slices.Contains(removed, want) {
+								t.Fatalf("managed cleanup removed %v, want %s", removed, want)
+							}
+						}
+						raw, err := os.ReadFile(settingsPath)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if strings.Contains(string(raw), token) || strings.Contains(string(raw), encode(token)) {
+							t.Fatalf("product credential survived in env.%s", row.key)
+						}
+						got := readClaudeUpgradeEnv(t, settingsPath)
+						// Setup may render its own pin ("0") under a gate key.
+						if got[row.key] == value {
+							t.Fatalf("env.%s kept", row.key)
+						}
+						if got["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] != operatorRoute || got["OTEL_TRACES_EXPORTER"] != "otlp" ||
+							got["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] != "http/protobuf" {
+							t.Fatalf("operator traces route changed: %v", got)
+						}
+						if left := otlpSecretResidue(t, "claudecode", dir, "settings.json"); len(left) != 0 {
+							t.Fatalf("residue after %s: %v", writer, left)
+						}
+					})
+				}
 			}
 		}
 	}
