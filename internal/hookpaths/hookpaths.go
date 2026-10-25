@@ -1707,6 +1707,12 @@ func SplitOpaqueScopeFacts(targets map[string]string) (rest, facts map[string]st
 	return rest, facts
 }
 
+// Known reports that the command's link operations were all read, so Target
+// answers each name as the user-side hook's Resolve does.
+func (l Links) Known() bool {
+	return l.links.known && !l.links.opaque
+}
+
 // Target maps an absolute write operand through the links the command
 // creates as Resolve does: a name that reaches one of the user's
 // authorized-keys files maps to that file. ok is false when one of the names

@@ -49,7 +49,9 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
-	check := func(value string, tilde bool) bool {
+	// base places a relative value: the effective cwd for a parsed word,
+	// the request cwd for the text scan.
+	check := func(value string, tilde bool, base string) bool {
 		if len(value) == 0 || len(value) > MaxWriteTargetPathBytes {
 			return false
 		}
@@ -65,17 +67,17 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 				return false
 			}
 			if actionPosixWindowsHome(home) {
-				return actionPosixWindowsProtectedGlob(value, cwd, home)
+				return actionPosixWindowsProtectedGlob(value, base, home)
 			}
-			return actionProtectedFileGlobReach(value, cwd, protected, ssh, home)
+			return actionProtectedFileGlobReach(value, base, protected, ssh, home)
 		}
 		if actionPosixWindowsHome(home) {
 			if stateOnly {
-				return actionPosixWindowsStatePath(value, cwd, home)
+				return actionPosixWindowsStatePath(value, base, home)
 			}
-			return actionPosixWindowsProtected(value, cwd, home)
+			return actionPosixWindowsProtected(value, base, home)
 		}
-		operand := OperandPath(value, cwd)
+		operand := OperandPath(value, base)
 		if stateOnly {
 			return actionProtectedStatePath(operand, home)
 		}
@@ -95,11 +97,11 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
 				// A parsed value has had its shell tilde expanded already;
 				// a remaining "~/" was quoted, escaped or parameter-derived.
-				if check(value, false) {
+				if check(value, false, effectiveCWD) {
 					return true
 				}
 				if _, target, attached := strings.Cut(value, "="); attached {
-					return check(target, actionAttachedTildeExpands(word, command))
+					return check(target, actionAttachedTildeExpands(word, command), effectiveCWD)
 				}
 				return false
 			}
@@ -162,7 +164,7 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 		if strings.ContainsAny(token, "*?[]") && (parsed || !strings.ContainsAny(token, "/\\")) {
 			continue // Shell case labels and patch text are not argv glob operands.
 		}
-		if check(token, !literalTilde) {
+		if check(token, !literalTilde, cwd) {
 			return true
 		}
 	}
@@ -337,34 +339,111 @@ func actionPosixWindowsProtectedGlob(value, cwd, home string) bool {
 	return false
 }
 
-// Match known protected names first, then bounded aliases in a literal parent.
+// Match known protected names first, then expand the pattern as the shell
+// does, one component at a time, so a wildcard in any component that selects
+// a directory alias of ~/.ssh or a key file is followed (GAP-1445). The walk
+// is bounded; past the bound a final component that can select a key or
+// the .ssh directory stays protected-named.
 func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles, ssh, home string) bool {
+	literal := ""
+	if !filepath.IsAbs(pattern) {
+		literal = filepath.Clean(cwd)
+	}
 	pattern = OperandPath(pattern, cwd)
 	for _, target := range append([]string{ssh}, ProtectedAuthorizedKeysPaths(home)...) {
 		if matched, _ := filepath.Match(pattern, target); matched {
 			return true
 		}
 	}
-	parent, base := filepath.Dir(pattern), filepath.Base(pattern)
-	if _, err := filepath.Match(base, ""); err != nil || strings.ContainsAny(parent, "*?[") {
+	if _, err := filepath.Match(pattern, ""); err != nil {
 		return false
 	}
-	directory, err := os.Open(OperandPath(parent, cwd))
-	if err != nil {
-		return false
-	}
-	names, err := directory.Readdirnames(4097)
-	_ = directory.Close()
-	if err != nil && err != io.EOF || len(names) > 4096 {
-		return false
-	}
-	for _, name := range names {
-		if matched, _ := filepath.Match(base, name); matched &&
-			protectedReachPath(OperandPath(name, parent), protected, ssh) {
+	candidates, complete := actionExpandGlob(pattern, literal)
+	for _, candidate := range candidates {
+		if protectedReachPath(candidate, protected, ssh) {
 			return true
 		}
 	}
+	if !complete {
+		base := filepath.Base(pattern)
+		for _, name := range append([]string{".ssh"}, AuthorizedKeysFiles[:]...) {
+			if actionGlobNameMatch(base, name) {
+				return true
+			}
+		}
+	}
 	return false
+}
+
+// Bounds of actionExpandGlob: directories read and names kept per step.
+const (
+	actionGlobMaxReads = 64
+	actionGlobMaxNames = 4096
+)
+
+// actionExpandGlob lists the existing names an absolute pattern selects. A
+// literal component is joined without a lookup, so a final file that does
+// not exist yet is still a candidate; literal is a prefix of pattern taken
+// as written (the cwd of a relative word). complete is false when a bound
+// is exceeded.
+func actionExpandGlob(pattern, literal string) (candidates []string, complete bool) {
+	separator := string(filepath.Separator)
+	start := filepath.VolumeName(pattern) + separator
+	rest := strings.TrimPrefix(pattern, start)
+	if literal != "" && strings.HasPrefix(pattern, literal+separator) {
+		start, rest = literal, pattern[len(literal)+1:]
+	}
+	paths := []string{start}
+	reads := 0
+	for _, component := range strings.Split(rest, separator) {
+		if component == "" {
+			continue
+		}
+		if !strings.ContainsAny(component, "*?[") {
+			for i := range paths {
+				paths[i] = filepath.Join(paths[i], component)
+			}
+			continue
+		}
+		var next []string
+		for _, dir := range paths {
+			if reads++; reads > actionGlobMaxReads {
+				return nil, false
+			}
+			directory, err := os.Open(dir)
+			if err != nil {
+				continue
+			}
+			names, err := directory.Readdirnames(actionGlobMaxNames + 1)
+			_ = directory.Close()
+			if err != nil && err != io.EOF || len(names) > actionGlobMaxNames {
+				return nil, false
+			}
+			for _, name := range names {
+				if actionGlobNameMatch(component, name) {
+					next = append(next, filepath.Join(dir, name))
+				}
+			}
+			if len(next) > actionGlobMaxNames {
+				return nil, false
+			}
+		}
+		if len(next) == 0 {
+			return nil, true
+		}
+		paths = next
+	}
+	return paths, true
+}
+
+// actionGlobNameMatch matches one name component; names compare without case
+// on macOS and Windows, whose file systems usually ignore it.
+func actionGlobNameMatch(pattern, name string) bool {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		pattern, name = strings.ToLower(pattern), strings.ToLower(name)
+	}
+	matched, _ := filepath.Match(pattern, name)
+	return matched
 }
 
 func actionPosixWindowsStatePath(value, cwd, home string) bool {
@@ -823,7 +902,16 @@ func actionWindowsProtectedGlobReach(pattern, cwd, home string) bool {
 	if parent == "" {
 		parent = "."
 	}
-	if _, err := path.Match(base, ""); err != nil || strings.ContainsAny(parent, "*?[") {
+	if _, err := path.Match(base, ""); err != nil {
+		return false
+	}
+	// On the host, expand every component through junctions and links
+	// (GAP-1445).
+	if runtime.GOOS == "windows" && filepath.IsAbs(filepath.FromSlash(pattern)) && actionProtectedFileGlobReach(
+		filepath.FromSlash(pattern), cwd, newProtectedFiles(home), filepath.Join(home, ".ssh"), home) {
+		return true
+	}
+	if strings.ContainsAny(parent, "*?[") {
 		return false
 	}
 	resolved, ok := actionWindowsPath(strings.TrimSuffix(parent, "/"), cwd, home)
@@ -832,10 +920,6 @@ func actionWindowsProtectedGlobReach(pattern, cwd, home string) bool {
 	}
 	if resolved != ssh {
 		return false
-	}
-	if runtime.GOOS == "windows" && actionProtectedFileGlobReach(
-		filepath.Join(filepath.FromSlash(resolved), base), cwd, newProtectedFiles(home), filepath.Join(home, ".ssh"), home) {
-		return true
 	}
 	for _, name := range AuthorizedKeysFiles {
 		if matched, _ := path.Match(strings.ToLower(base), name); matched {

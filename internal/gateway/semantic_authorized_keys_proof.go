@@ -1150,6 +1150,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// A name that a link earlier in the command makes an alias of a
 		// protected file (GAP-1505).
 		if linked, ok := links.Target(target); !ok || isProtected(linked) {
+			// Behind ProtectHome the gateway cannot walk a link the command
+			// creates in the user's home. The managed hook client walked the
+			// same links as the user and keyed its answer by this operand; a
+			// resolved answer decides it, so an ordinary hard link is not a
+			// key write (GAP-1440). An empty answer stays unknown.
+			if !ok && request.ProtectedHomeHook && links.Known() {
+				if resolved := clientTargets[target]; resolved != "" {
+					return isProtected(resolved)
+				}
+			}
 			return true
 		}
 		info, err := os.Lstat(target)
