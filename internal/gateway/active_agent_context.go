@@ -656,7 +656,13 @@ func (cache *activeAgentContextCache) ensureStartupKey(key activeAgentContextKey
 // symlink, a case variant on a case-insensitive volume, a Windows short
 // name): it keeps that directory's first record. files and dirIDs are keyed
 // like startupFiles and startupDirs; a directory that does not fit stays out.
-func (cache *activeAgentContextCache) extendStartupKey(key activeAgentContextKey, files map[string]string, dirs []string, dirIDs map[string]string) bool {
+//
+// bound gives recorded directories that were missing when the session first
+// reached them the identity they have now (boundInstructionDirectories). It
+// is applied first, so a directory the session created keeps its empty first
+// record under another spelling too. An identity a recorded directory
+// already has is not given to another one.
+func (cache *activeAgentContextCache) extendStartupKey(key activeAgentContextKey, files map[string]string, dirs []string, dirIDs, bound map[string]string) bool {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	session, ok := cache.sessions[key]
@@ -664,6 +670,23 @@ func (cache *activeAgentContextCache) extendStartupKey(key activeAgentContextKey
 		return false
 	}
 	changed := false
+	for _, dir := range slices.Sorted(maps.Keys(bound)) {
+		identity := bound[dir]
+		if identity == "" || session.startupDirIDs[dir] != "" || !slices.Contains(session.startupDirs, dir) ||
+			startupDirWithIdentity(session, identity) != "" {
+			continue
+		}
+		if !changed {
+			session.startupFiles = maps.Clone(session.startupFiles)
+			session.startupDirs = slices.Clone(session.startupDirs)
+			session.startupDirIDs = maps.Clone(session.startupDirIDs)
+			changed = true
+		}
+		if session.startupDirIDs == nil {
+			session.startupDirIDs = make(map[string]string)
+		}
+		session.startupDirIDs[dir] = identity
+	}
 	for _, dir := range dirs {
 		if slices.Contains(session.startupDirs, dir) {
 			continue
@@ -743,15 +766,22 @@ func (cache *activeAgentContextCache) endKey(key activeAgentContextKey) {
 }
 
 // startupDirsKey returns the directories of key's instruction-file
-// snapshot, if the session has one.
-func (cache *activeAgentContextCache) startupDirsKey(key activeAgentContextKey) ([]string, bool) {
+// snapshot, if the session has one, and the last of them (at most limit)
+// that have no file system identity: the directories that were missing when
+// the session first reached them.
+func (cache *activeAgentContextCache) startupDirsKey(key activeAgentContextKey, limit int) (dirs, unbound []string, ok bool) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	session, ok := cache.sessions[key]
 	if !ok || !session.startupKnown {
-		return nil, false
+		return nil, nil, false
 	}
-	return slices.Clone(session.startupDirs), true
+	for index := len(session.startupDirs) - 1; index >= 0 && len(unbound) < limit; index-- {
+		if dir := session.startupDirs[index]; session.startupDirIDs[dir] == "" {
+			unbound = append(unbound, dir)
+		}
+	}
+	return slices.Clone(session.startupDirs), unbound, true
 }
 
 // sessionKey returns a copy of the session the cache holds for key.

@@ -18,10 +18,10 @@ func TestInstructionSnapshotAliasesDirectoryIdentity(t *testing.T) {
 	key := activeAgentContextKey{connector: "codex", sessionID: "live"}
 	cache.beginKey(key)
 	cache.setStartupKey(key, map[string]string{"/x/SOUL.md": "1:9"}, []string{"/x"}, map[string]string{"/x": "1:2"})
-	if !cache.extendStartupKey(key, map[string]string{"/y/AGENTS.md": "1:5"}, []string{"/y"}, map[string]string{"/y": "1:2"}) {
+	if !cache.extendStartupKey(key, map[string]string{"/y/AGENTS.md": "1:5"}, []string{"/y"}, map[string]string{"/y": "1:2"}, nil) {
 		t.Fatal("another spelling was not recorded")
 	}
-	cache.extendStartupKey(key, map[string]string{"/z/AGENTS.md": "1:6"}, []string{"/z"}, map[string]string{"/z": "1:3"})
+	cache.extendStartupKey(key, map[string]string{"/z/AGENTS.md": "1:6"}, []string{"/z"}, map[string]string{"/z": "1:3"}, nil)
 	got := cache.snapshotKey(key)
 	if !got.startupCovers("/y") || got.startupFiles["/y/AGENTS.md"] != "" || got.startupFiles["/y/SOUL.md"] != "1:9" {
 		t.Fatalf("another spelling did not keep the first record: %+v", got)

@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"maps"
+	"os"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -194,7 +195,9 @@ func instructionSnapshot(connector string, files map[string]string, dirs []strin
 // instructionStartupFiles is the snapshot of an authenticated SessionStart.
 // A managed hook sends the one its client read as the user; the gateway
 // claims only the places that do not depend on the client's environment. A
-// per-user gateway reads the same files itself.
+// per-user gateway, and a managed gateway that reads the caller's files
+// (instructionGatewayReadsFiles: managed Windows), reads the same files
+// itself when the hook sends none, as a 1.0.3 hook does during an upgrade.
 func instructionStartupFiles(ctx context.Context, connector, cwd string) (map[string]string, []string, map[string]string) {
 	if authenticatedHookConnector(ctx) != connector || !filepath.IsAbs(cwd) || isSandboxHookRequest(ctx) {
 		return nil, nil, nil
@@ -205,7 +208,7 @@ func instructionStartupFiles(ctx context.Context, connector, cwd string) (map[st
 		identities, _, _ := hookpaths.ReachedInstructions(facts)
 		return instructionSnapshot(connector, files, hookpaths.InstructionDirectories(cwd, home), identities)
 	}
-	if _, managed := managedHookPeerFromContext(ctx); managed {
+	if _, managed := managedHookPeerFromContext(ctx); managed && !instructionGatewayReadsFiles(ctx) {
 		return nil, nil, nil
 	}
 	dirs := hookpaths.StartupDirectories(cwd, home)
@@ -228,10 +231,11 @@ func (a *APIServer) extendInstructionStartup(ctx context.Context, key activeAgen
 }
 
 func (a *APIServer) extendInstructionStartupDirs(key activeAgentContextKey, dirs []string, sighting instructionSighting) {
-	known, ok := a.activeAgentContext.startupDirsKey(key)
+	known, unbound, ok := a.activeAgentContext.startupDirsKey(key, hookpaths.MaxReachedDirectories)
 	if !ok {
 		return
 	}
+	bound := boundInstructionDirectories(unbound)
 	if sighting.reached != nil {
 		dirs = sighting.reached
 	}
@@ -247,17 +251,44 @@ func (a *APIServer) extendInstructionStartupDirs(key activeAgentContextKey, dirs
 		keys = append(keys, dirKey)
 		reached = append(reached, filepath.Clean(dir))
 	}
-	if len(reached) == 0 {
+	var retained, keyed map[string]string
+	var reachedKeys []string
+	if len(reached) > 0 {
+		if files, identities, ok := sighting.read(reached); ok {
+			retained, reachedKeys, keyed = instructionSnapshot(key.connector, files, reached, identities)
+		}
+	}
+	if len(reachedKeys) == 0 && len(bound) == 0 {
 		return
 	}
-	files, identities, ok := sighting.read(reached)
-	if !ok {
-		return
-	}
-	retained, reachedKeys, keyed := instructionSnapshot(key.connector, files, reached, identities)
-	if a.activeAgentContext.extendStartupKey(key, retained, reachedKeys, keyed) {
+	if a.activeAgentContext.extendStartupKey(key, retained, reachedKeys, keyed, bound) {
 		a.saveInstructionLoads(key)
 	}
+}
+
+// boundInstructionDirectories is the identity each of dirs, recorded
+// directories that were missing when the session first reached them, has now
+// on this host: a directory the session created since. A directory that is
+// a link or another reparse point itself is left out: it is another spelling
+// of a directory that did not start empty with the session. dirs that
+// cannot be read (another file system, a home the gateway cannot read) stay
+// unbound and keep their record.
+func boundInstructionDirectories(dirs []string) map[string]string {
+	bound := make(map[string]string)
+	for _, dir := range dirs {
+		host := filepath.FromSlash(dir)
+		if strings.HasSuffix(dir, ":") {
+			host += `\`
+		}
+		info, err := os.Lstat(host)
+		if err != nil || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			continue
+		}
+		if identity := hookpaths.DirectoryIdentity(host); identity != "" {
+			bound[dir] = identity
+		}
+	}
+	return bound
 }
 
 // applyInstructionInspectStartup gives an authenticated inspect call its

@@ -55,3 +55,47 @@ func TestInstructionProtectionManagedCodexWindowsCallTimeIdentity(t *testing.T) 
 		t.Fatalf("replacement inherited loaded Windows identity: %+v", got)
 	}
 }
+
+// A 1.0.3 managed hook sends SessionStart without the startup snapshot while
+// a Windows host upgrades. The managed Windows gateway reads the caller's
+// files, so it takes the snapshot itself: an AGENTS.md the session creates
+// stays editable, and one that was there at the start stays protected.
+func TestInstructionProtectionManagedWindowsStartWithoutEvidence(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		project := t.TempDir()
+		file := filepath.Join(project, "AGENTS.md")
+		if existing {
+			if err := os.WriteFile(file, []byte("startup\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		api := instructionProtectionTestAPI(t, "codex", "action", "HIGH")
+		api.scannerCfg.DataDir = t.TempDir()
+		base := withManagedHookPeer(withAuthenticatedHookConnector(t.Context(), "codex"),
+			managedHookPeer{Home: t.TempDir()})
+		api.evaluateCodexHook(base, codexHookRequest{HookEventName: "SessionStart", SessionID: "upgrade", CWD: project})
+		call := func() codexHookResponse {
+			return api.evaluateCodexHook(base, codexHookRequest{
+				HookEventName: "PreToolUse", SessionID: "upgrade", CWD: project,
+				ToolName: "exec_command", ToolInput: map[string]interface{}{
+					"cmd": "Add-Content -LiteralPath 'AGENTS.md' -Value x",
+				},
+			})
+		}
+		if existing {
+			if got := call(); got.Action != guardrailActionBlock || !findingStringHasRuleID(got.Findings, "COG-AGENTS-MD") {
+				t.Fatalf("an AGENTS.md there at the start was not protected: %+v", got)
+			}
+			continue
+		}
+		if got := call(); cogBlocked(got.Action, got.WouldBlock, got.Findings) {
+			t.Fatalf("creating AGENTS.md was blocked: %+v", got)
+		}
+		if err := os.WriteFile(file, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := call(); cogBlocked(got.Action, got.WouldBlock, got.Findings) {
+			t.Fatalf("the session's second edit of its own AGENTS.md was blocked: %+v", got)
+		}
+	}
+}
