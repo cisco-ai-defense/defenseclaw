@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
-	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -36,7 +35,9 @@ const maxInstructionLoadRecordBytes = 1 << 20
 // oldest one lose its record. Its first sighting is lost then, and the
 // pruned index (instructionLoadPrunedName) says so: its next call takes no
 // new first sighting, which would make a file it created look like one that
-// was there before it. Its instruction files keep the call-time proof
+// was there before it. The index keeps the identities of the files the
+// first sighting recorded: those stay protected by identity in every tier.
+// Any other instruction file of the session keeps the call-time proof
 // (existence): a block in the strict tier, a warning with an audit row in
 // default and permissive.
 const (
@@ -45,15 +46,17 @@ const (
 )
 
 // The pruned index lists the record names of sessions whose first sighting
-// the bounds pruned, one per line, until the session starts again or ends.
-// Past maxInstructionLoadPruned it holds instructionLoadPrunedAll alone:
-// every session without a record has lost its first sighting, so none takes
-// a new one. An index that cannot be read is taken as that too.
+// the bounds pruned, oldest first, one per line with the identities that
+// sighting proved (the record name, a space, the identities comma
+// separated), until the session starts again or ends. Past its bounds the
+// oldest entries are dropped: that session's next call takes a new first
+// sighting, which protects every instruction file there then (a loss is
+// only ever applied to the session that owned it). An index that cannot be
+// read is taken as empty, the same way, and replaced on the next write.
 const (
 	instructionLoadPrunedName     = "pruned"
-	instructionLoadPrunedAll      = "*"
 	maxInstructionLoadPruned      = 8 * maxInstructionLoadRecords
-	maxInstructionLoadPrunedBytes = maxInstructionLoadPruned * (sha256.Size*2 + 1)
+	maxInstructionLoadPrunedBytes = 4 << 20
 )
 
 type instructionLoadRecord struct {
@@ -188,16 +191,13 @@ func (cache *activeAgentContextCache) pruneInstructionLoadsLocked(dir string) {
 	changed := false
 	for len(records) > 0 && (len(records) > maxInstructionLoadRecords || total > maxInstructionLoadStoreBytes) {
 		name := filepath.Join(dir, records[0].name)
-		sighted := instructionLoadRecordSighted(name)
-		if os.Remove(name) == nil && sighted && !cache.prunedAll {
-			cache.pruned[strings.TrimSuffix(records[0].name, ".json")] = struct{}{}
+		identities, sighted := instructionLoadRecordSighted(name)
+		if os.Remove(name) == nil && sighted {
+			cache.addPrunedLocked(strings.TrimSuffix(records[0].name, ".json"), identities)
 			changed = true
 		}
 		total -= records[0].size
 		records = records[1:]
-	}
-	if len(cache.pruned) > maxInstructionLoadPruned {
-		cache.pruned, cache.prunedAll = make(map[string]struct{}), true
 	}
 	if changed {
 		cache.writePrunedLocked(dir)
@@ -205,16 +205,59 @@ func (cache *activeAgentContextCache) pruneInstructionLoadsLocked(dir string) {
 }
 
 // instructionLoadRecordSighted reports whether the record name holds a
-// startup snapshot (a first sighting). One that cannot be read is taken to.
-func instructionLoadRecordSighted(name string) bool {
+// startup snapshot (a first sighting), with the identities it proves
+// (lostIdentities). One that cannot be read is taken to, proving none.
+func instructionLoadRecordSighted(name string) ([]string, bool) {
 	data, err := os.ReadFile(name)
 	if err != nil || len(data) > maxInstructionLoadRecordBytes {
-		return true
+		return nil, true
 	}
 	var record struct {
-		StartupKnown bool `json:"startup_known"`
+		StartupKnown     bool              `json:"startup_known"`
+		StartupFiles     map[string]string `json:"startup_files"`
+		LoadedIdentities map[string]string `json:"loaded_identities"`
 	}
-	return json.Unmarshal(data, &record) != nil || record.StartupKnown
+	if json.Unmarshal(data, &record) != nil {
+		return nil, true
+	}
+	return lostIdentities(record.StartupFiles, record.LoadedIdentities), record.StartupKnown
+}
+
+// addPrunedLocked lists name in the pruned index with the identities its
+// first sighting proved, as the newest entry, and drops the oldest entries
+// past the index bounds. The caller holds storeMu.
+func (cache *activeAgentContextCache) addPrunedLocked(name string, identities []string) {
+	cache.removePrunedLocked(name)
+	cache.pruned[name] = identities
+	cache.prunedOrder = append(cache.prunedOrder, name)
+	cache.prunedBytes += len(prunedIndexLine(name, identities)) + 1
+	for len(cache.prunedOrder) > 0 &&
+		(len(cache.prunedOrder) > maxInstructionLoadPruned || cache.prunedBytes > maxInstructionLoadPrunedBytes) {
+		oldest := cache.prunedOrder[0]
+		cache.prunedBytes -= len(prunedIndexLine(oldest, cache.pruned[oldest])) + 1
+		delete(cache.pruned, oldest)
+		cache.prunedOrder = cache.prunedOrder[1:]
+	}
+}
+
+// removePrunedLocked drops name from the pruned index and reports whether
+// it was listed. The caller holds storeMu.
+func (cache *activeAgentContextCache) removePrunedLocked(name string) bool {
+	identities, listed := cache.pruned[name]
+	if !listed {
+		return false
+	}
+	cache.prunedBytes -= len(prunedIndexLine(name, identities)) + 1
+	delete(cache.pruned, name)
+	cache.prunedOrder = slices.DeleteFunc(cache.prunedOrder, func(pruned string) bool { return pruned == name })
+	return true
+}
+
+func prunedIndexLine(name string, identities []string) string {
+	if len(identities) == 0 {
+		return name
+	}
+	return name + " " + strings.Join(identities, ",")
 }
 
 // loadPrunedLocked reads the pruned index once per process. The caller
@@ -224,41 +267,37 @@ func (cache *activeAgentContextCache) loadPrunedLocked(dir string) {
 		return
 	}
 	cache.prunedLoaded = true
-	cache.pruned = make(map[string]struct{})
-	name := filepath.Join(dir, instructionLoadPrunedName)
-	info, err := os.Lstat(name)
-	if errors.Is(err, fs.ErrNotExist) {
+	cache.pruned = make(map[string][]string)
+	cache.prunedOrder, cache.prunedBytes = nil, 0
+	info, err := os.Lstat(filepath.Join(dir, instructionLoadPrunedName))
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxInstructionLoadPrunedBytes {
 		return
 	}
-	var data []byte
-	if err == nil && info.Mode().IsRegular() && info.Size() <= maxInstructionLoadPrunedBytes {
-		data, err = os.ReadFile(name)
-	} else if err == nil {
-		err = fs.ErrInvalid
-	}
+	data, err := os.ReadFile(filepath.Join(dir, instructionLoadPrunedName))
 	if err != nil {
-		cache.prunedAll = true
 		return
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		switch {
-		case line == instructionLoadPrunedAll:
-			cache.prunedAll = true
-		case line != "":
-			cache.pruned[line] = struct{}{}
+		name, list, _ := strings.Cut(line, " ")
+		if len(name) != sha256.Size*2 || strings.Trim(name, "0123456789abcdef") != "" {
+			continue
 		}
-	}
-	if cache.prunedAll || len(cache.pruned) > maxInstructionLoadPruned {
-		cache.pruned, cache.prunedAll = make(map[string]struct{}), true
+		var identities []string
+		for _, identity := range strings.Split(list, ",") {
+			if recordedFileIdentity(identity) {
+				identities = append(identities, identity)
+			}
+		}
+		cache.addPrunedLocked(name, identities)
 	}
 }
 
 // writePrunedLocked saves the pruned index. The caller holds storeMu.
 func (cache *activeAgentContextCache) writePrunedLocked(dir string) {
 	name := filepath.Join(dir, instructionLoadPrunedName)
-	lines := slices.Sorted(maps.Keys(cache.pruned))
-	if cache.prunedAll {
-		lines = []string{instructionLoadPrunedAll}
+	lines := make([]string, 0, len(cache.prunedOrder))
+	for _, pruned := range cache.prunedOrder {
+		lines = append(lines, prunedIndexLine(pruned, cache.pruned[pruned]))
 	}
 	if len(lines) == 0 {
 		_ = os.Remove(name)
@@ -267,23 +306,25 @@ func (cache *activeAgentContextCache) writePrunedLocked(dir string) {
 	_ = writeInstructionLoadFile(dir, name, []byte(strings.Join(lines, "\n")+"\n"))
 }
 
-// instructionFirstSightingLost reports whether key's first sighting is gone:
-// the bounds pruned its record (pruneInstructionLoadsLocked). A later event
-// of the session (a CwdChanged, a load) does not bring it back.
-func (a *APIServer) instructionFirstSightingLost(key activeAgentContextKey) bool {
+// instructionFirstSightingLost reports whether key's first sighting is gone,
+// with the identities it still proves: the bounds pruned its record
+// (pruneInstructionLoadsLocked), or this process lost it
+// (rememberLostLocked). A later event of the session (a CwdChanged, a load)
+// does not bring it back.
+func (a *APIServer) instructionFirstSightingLost(key activeAgentContextKey) ([]string, bool) {
+	if identities, lost := a.activeAgentContext.lostKey(key); lost {
+		return identities, true
+	}
 	dir := a.instructionLoadDir()
 	if dir == "" {
-		return false
+		return nil, false
 	}
 	cache := &a.activeAgentContext
-	_, held := cache.sessionKey(key)
 	cache.storeMu.Lock()
 	defer cache.storeMu.Unlock()
 	cache.loadPrunedLocked(dir)
-	_, pruned := cache.pruned[instructionLoadRecordName(key)]
-	// Past the index bound, any session this process does not hold is
-	// taken as pruned.
-	return pruned || cache.prunedAll && !held
+	identities, pruned := cache.pruned[instructionLoadRecordName(key)]
+	return slices.Clone(identities), pruned
 }
 
 // clearInstructionSightingLoss drops key from the pruned index when the
@@ -298,9 +339,7 @@ func (a *APIServer) clearInstructionSightingLoss(key activeAgentContextKey) {
 	cache.storeMu.Lock()
 	defer cache.storeMu.Unlock()
 	cache.loadPrunedLocked(dir)
-	name := instructionLoadRecordName(key)
-	if _, pruned := cache.pruned[name]; pruned {
-		delete(cache.pruned, name)
+	if cache.removePrunedLocked(instructionLoadRecordName(key)) {
 		cache.writePrunedLocked(dir)
 	}
 }
@@ -319,9 +358,10 @@ func (a *APIServer) restoreInstructionLoads(key activeAgentContextKey) {
 	record, ok := readInstructionLoadRecord(name, key)
 	if !ok {
 		// A record this session cannot restore (unreadable or invalid) held
-		// state the session had: its first sighting is lost.
+		// state the session had: its first sighting is lost, and what it
+		// proved is not known.
 		if _, err := os.Lstat(name); !errors.Is(err, fs.ErrNotExist) {
-			a.activeAgentContext.loseKey(key)
+			a.activeAgentContext.loseKey(key, nil)
 		}
 		return
 	}

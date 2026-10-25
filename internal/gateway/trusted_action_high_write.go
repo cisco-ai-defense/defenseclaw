@@ -144,6 +144,21 @@ func provedHighWriteFindings(
 		}
 		return false
 	}
+	// targetIdentity is the identity of the file a write target names: this
+	// host's when it reads the file, else the hook client's as the user.
+	targetIdentity := func(location, target string, flavor actionfacts.PathFlavor) string {
+		identity := ""
+		if flavor == hostFlavor && !isSandboxHookRequest(ctx) {
+			identity = hookpaths.FileIdentity(filepath.FromSlash(target))
+		}
+		if identity == "" {
+			identity = request.ResolvedWriteTargets[hookpaths.WriteIdentityPrefix+target]
+		}
+		if identity == "" {
+			identity = request.ResolvedWriteTargets[hookpaths.WriteIdentityPrefix+location]
+		}
+		return identity
+	}
 	provedLocation := func(location, target string, flavor actionfacts.PathFlavor) instructionProof {
 		if !instructionLoadLocation(location, flavor, locations) {
 			return instructionNotProved
@@ -159,20 +174,18 @@ func provedHighWriteFindings(
 			if startup.startupFiles[normalized] == "" {
 				return instructionNotProved
 			}
-			identity := ""
-			if flavor == hostFlavor && !isSandboxHookRequest(ctx) {
-				identity = hookpaths.FileIdentity(filepath.FromSlash(target))
-			}
-			if identity == "" {
-				identity = request.ResolvedWriteTargets[hookpaths.WriteIdentityPrefix+target]
-			}
-			if identity == "" {
-				identity = request.ResolvedWriteTargets[hookpaths.WriteIdentityPrefix+location]
-			}
-			if identity != "" && identity == startup.startupFiles[normalized] {
+			if identity := targetIdentity(location, target, flavor); identity != "" && identity == startup.startupFiles[normalized] {
 				return instructionIdentityProved
 			}
 			return instructionNotProved
+		}
+		// A session whose first sighting is lost still knows the files it
+		// proved by identity: one of them is the file the session found,
+		// in every tier; any other file may be one it created.
+		if !startup.startupKnown && len(startupView.lostIdentities) > 0 {
+			if identity := targetIdentity(location, target, flavor); identity != "" && slices.Contains(startupView.lostIdentities, identity) {
+				return instructionIdentityProved
+			}
 		}
 		// A directory the snapshot does not record, or a session without a
 		// snapshot: only the file existing now is known, not that it existed

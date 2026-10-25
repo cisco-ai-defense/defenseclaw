@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func pruneInstructionSession(t *testing.T, s *managedHiddenHomeSession, api *API
 		t.Fatal("the churn did not evict the session from the cache")
 	}
 	index, err := os.ReadFile(filepath.Join(dir, instructionLoadPrunedName))
-	if err != nil || !strings.Contains(string(index), instructionLoadRecordName(key)+"\n") {
+	if err != nil || !strings.Contains(string(index), instructionLoadRecordName(key)) {
 		t.Fatalf("the pruned index does not list the session: %v %q", err, index)
 	}
 }
@@ -50,9 +51,10 @@ func pruneInstructionSession(t *testing.T, s *managedHiddenHomeSession, api *API
 // the AGENTS.md it created never becomes one that was there before it
 // (default and permissive warn, strict blocks on existence, as without a
 // snapshot), in the same gateway process and after a restart. An AGENTS.md
-// that existed before the session keeps its COG-AGENTS-MD finding in every
-// tier and blocks in strict. A new start of the session takes a new
-// snapshot again. (Behind ProtectHome a session without a snapshot is
+// that existed before the session is still proved by the identity the
+// pruned index keeps: it blocks COG-AGENTS-MD in every tier, as with the
+// record (round q: a lost first sighting never turns a pre-existing file
+// into a warning). A new start of the session takes a new snapshot again. (Behind ProtectHome a session without a snapshot is
 // judged by the call-time proof of every rule, as a 1.0.3 hook's is; that
 // is not this test's subject.)
 func TestInstructionBenignPrunedFirstSightingNeverProvesPreexisting(t *testing.T) {
@@ -86,7 +88,7 @@ func TestInstructionBenignPrunedFirstSightingNeverProvesPreexisting(t *testing.T
 					}
 					for range 2 {
 						got := s.patch(s.base, sightingUpdatePatch)
-						checkExistenceTier(t, tier.blocks, "edit after the store pruned the session", got.Action, got.Findings, "COG-AGENTS-MD")
+						checkExistenceTier(t, tier.blocks || existed, "edit after the store pruned the session", got.Action, got.Findings, "COG-AGENTS-MD")
 					}
 					// A new start of the session takes its own snapshot:
 					// the AGENTS.md there now is protected again.
@@ -111,25 +113,39 @@ func TestInstructionBenignPrunedFirstSightingNeverProvesPreexisting(t *testing.T
 // AGENTS.md it created stays its own.
 func TestInstructionBenignUnsavedFirstSightingEvictionNeverProvesPreexisting(t *testing.T) {
 	for _, tier := range instructionExistenceTiers {
-		t.Run(tier.pack, func(t *testing.T) {
-			s := newManagedHiddenHomeSession(t, false)
-			api := instructionProtectionTierTestAPI(t, "codex", tier.pack)
-			s.gateway = func() *APIServer { return api }
-			s.start(true)
-			if got := s.patch(s.base, sightingAddPatch); cogBlocked(got.Action, got.WouldBlock, got.Findings) {
-				t.Fatalf("creating AGENTS.md was blocked: %+v", got)
-			}
-			writeActiveAgentTestFile(t, s.base, "AGENTS.md")
-			churnInstructionSessions(t, s, maxActiveAgentContextSessions+8)
-			key, _ := instructionStartupKey(withManagedHookPeer(t.Context(), managedHookPeer{}), "codex", "live")
-			if _, cached := api.activeAgentContext.sessionKey(key); cached {
-				t.Fatal("the churn did not evict the session from the cache")
-			}
-			for range 2 {
-				got := s.patch(s.base, sightingUpdatePatch)
-				checkExistenceTier(t, tier.blocks, "edit after the unsaved session was evicted", got.Action, got.Findings, "COG-AGENTS-MD")
-			}
-		})
+		for _, existed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, existed %v", tier.pack, existed), func(t *testing.T) {
+				testUnsavedFirstSightingEviction(t, tier.pack, tier.blocks, existed)
+			})
+		}
+	}
+}
+
+// testUnsavedFirstSightingEviction: an AGENTS.md the session created warns
+// (blocks in strict); one that existed before it blocks in every tier, by
+// the identity the lost first sighting keeps.
+func testUnsavedFirstSightingEviction(t *testing.T, pack string, blocks, existed bool) {
+	s := newManagedHiddenHomeSession(t, false)
+	api := instructionProtectionTierTestAPI(t, "codex", pack)
+	s.gateway = func() *APIServer { return api }
+	if existed {
+		writeActiveAgentTestFile(t, s.base, "AGENTS.md")
+	}
+	s.start(true)
+	if !existed {
+		if got := s.patch(s.base, sightingAddPatch); cogBlocked(got.Action, got.WouldBlock, got.Findings) {
+			t.Fatalf("creating AGENTS.md was blocked: %+v", got)
+		}
+		writeActiveAgentTestFile(t, s.base, "AGENTS.md")
+	}
+	churnInstructionSessions(t, s, maxActiveAgentContextSessions+8)
+	key, _ := instructionStartupKey(withManagedHookPeer(t.Context(), managedHookPeer{}), "codex", "live")
+	if _, cached := api.activeAgentContext.sessionKey(key); cached {
+		t.Fatal("the churn did not evict the session from the cache")
+	}
+	for range 2 {
+		got := s.patch(s.base, sightingUpdatePatch)
+		checkExistenceTier(t, blocks || existed, "edit after the unsaved session was evicted", got.Action, got.Findings, "COG-AGENTS-MD")
 	}
 }
 
@@ -144,21 +160,28 @@ func TestInstructionSavedSessionEvictionIsNotLost(t *testing.T) {
 	s.start(true)
 	churnInstructionSessions(t, s, maxActiveAgentContextSessions+8)
 	api.activeAgentContext.mu.Lock()
-	lost, all := len(api.activeAgentContext.lost), api.activeAgentContext.lostAll
+	lost := len(api.activeAgentContext.lost)
 	api.activeAgentContext.mu.Unlock()
-	if lost != 0 || all {
-		t.Fatalf("saved sessions were counted as lost: %d %v", lost, all)
+	if lost != 0 {
+		t.Fatalf("saved sessions were counted as lost: %d", lost)
 	}
 }
 
-// The pruned index past its bound, or unreadable, takes every session the
-// gateway does not hold as pruned; it never drops a pruned session.
-func TestInstructionPrunedIndexSaturates(t *testing.T) {
+// Protected-target corpus (round q). A loss belongs to the session that
+// owned it: past their bounds the pruned index and the lost set drop their
+// oldest entry (that session takes a new first sighting, which protects
+// every file there then), and an unreadable index is taken as empty. No
+// bound or read failure stops another session from taking its first
+// sighting, so a late-start session's pre-existing AGENTS.md is never
+// turned into a warning. The index keeps each entry's identities across a
+// restart.
+func TestInstructionPrunedIndexDropsOnlyTheOldest(t *testing.T) {
 	dir := t.TempDir()
 	lines := make([]string, 0, maxInstructionLoadPruned+1)
 	for index := range maxInstructionLoadPruned + 1 {
 		lines = append(lines, fmt.Sprintf("%064x", index))
 	}
+	lines[len(lines)-1] += " 10:20,xyz,30:40"
 	if err := os.WriteFile(filepath.Join(dir, instructionLoadPrunedName), []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -166,11 +189,24 @@ func TestInstructionPrunedIndexSaturates(t *testing.T) {
 	cache.storeMu.Lock()
 	cache.loadPrunedLocked(dir)
 	cache.storeMu.Unlock()
-	if !cache.prunedAll {
-		t.Fatal("an index past its bound did not take every session as pruned")
+	if _, oldest := cache.pruned[fmt.Sprintf("%064x", 0)]; oldest || len(cache.pruned) != maxInstructionLoadPruned {
+		t.Fatalf("an index past its bound kept %d entries (oldest kept %v)", len(cache.pruned), oldest)
+	}
+	if got := cache.pruned[fmt.Sprintf("%064x", maxInstructionLoadPruned)]; !slices.Equal(got, []string{"10:20", "30:40"}) {
+		t.Fatalf("the newest entry's identities = %v", got)
+	}
+	cache.storeMu.Lock()
+	cache.writePrunedLocked(dir)
+	cache.storeMu.Unlock()
+	var reread activeAgentContextCache
+	reread.storeMu.Lock()
+	reread.loadPrunedLocked(dir)
+	reread.storeMu.Unlock()
+	if len(reread.pruned) != maxInstructionLoadPruned || !slices.Equal(reread.prunedOrder, cache.prunedOrder) {
+		t.Fatal("the index did not read back as written")
 	}
 	_ = os.Remove(filepath.Join(dir, instructionLoadPrunedName))
-	if err := os.WriteFile(filepath.Join(dir, instructionLoadPrunedName), []byte("x"), 0o000); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, instructionLoadPrunedName), []byte(fmt.Sprintf("%064x\n", 1)), 0o000); err != nil {
 		t.Fatal(err)
 	}
 	// Windows file modes do not deny reads, and root reads every file.
@@ -179,9 +215,55 @@ func TestInstructionPrunedIndexSaturates(t *testing.T) {
 		unreadable.storeMu.Lock()
 		unreadable.loadPrunedLocked(dir)
 		unreadable.storeMu.Unlock()
-		if !unreadable.prunedAll {
-			t.Fatal("an unreadable index did not take every session as pruned")
+		if len(unreadable.pruned) != 0 {
+			t.Fatal("an unreadable index listed sessions")
 		}
+	}
+	// The lost set drops its oldest entry, and a session that lost nothing
+	// still takes its first sighting.
+	var lost activeAgentContextCache
+	lost.mu.Lock()
+	for index := range maxInstructionLoadRecords + 1 {
+		key, _ := validActiveAgentContextKey("codex", fmt.Sprintf("lost-%d", index))
+		lost.rememberLostLocked(key, nil)
+	}
+	lost.mu.Unlock()
+	first, _ := validActiveAgentContextKey("codex", "lost-0")
+	if _, kept := lost.lostKey(first); kept {
+		t.Fatal("the lost set kept its oldest entry past its bound")
+	}
+	fresh, _ := validActiveAgentContextKey("codex", "fresh")
+	if !lost.firstSightingKey(fresh, map[string]string{}, []string{"/w"}, nil) {
+		t.Fatal("a full lost set stopped another session's first sighting")
+	}
+}
+
+// Protected-target corpus (round q). A late-start Codex session that sent
+// no startup evidence takes its first sighting even after another session's
+// record was pruned and the store's index is unreadable: its pre-existing
+// AGENTS.md blocks in default.
+func TestInstructionLateStartSessionIsNotLostByAnotherSession(t *testing.T) {
+	s := newManagedHiddenHomeSession(t, false)
+	dataDir := t.TempDir()
+	api := instructionProtectionTierTestAPI(t, "codex", "default")
+	api.scannerCfg.DataDir = dataDir
+	s.gateway = func() *APIServer { return api }
+	s.start(true)
+	pruneInstructionSession(t, s, api)
+	if err := os.WriteFile(filepath.Join(api.instructionLoadDir(), instructionLoadPrunedName), []byte("*\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restarted := instructionProtectionTierTestAPI(t, "codex", "default")
+	restarted.scannerCfg.DataDir = dataDir
+	s.gateway = func() *APIServer { return restarted }
+	other := filepath.Join(s.home, "other")
+	writeActiveAgentTestFile(t, other, "AGENTS.md")
+	input := map[string]interface{}{"command": "printf x >> AGENTS.md"}
+	got := s.judge(instructionResolvedWriteContext(t, other, "Bash", input), codexHookRequest{
+		HookEventName: "PreToolUse", SessionID: "late", CWD: other, ToolName: "Bash", ToolInput: input,
+	})
+	if got.Action != guardrailActionBlock || !findingStringHasRuleID(got.Findings, "COG-AGENTS-MD") {
+		t.Fatalf("another session's lost first sighting weakened a late start: %+v", got)
 	}
 }
 

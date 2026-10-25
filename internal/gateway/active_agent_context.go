@@ -143,18 +143,21 @@ type activeAgentContextCache struct {
 	uncertain                bool
 	caseInsensitiveUncertain bool
 	// lost are sessions this process evicted with a first sighting that no
-	// saved record holds; lostAll is set when more were lost than it holds.
-	// Neither takes a new first sighting (firstSightingKey).
-	lost    map[activeAgentContextKey]struct{}
-	lostAll bool
-	now     func() time.Time
+	// saved record holds, with the identities of the instruction files that
+	// sighting recorded (lostIdentities), oldest first in lostOrder. None
+	// takes a new first sighting (firstSightingKey).
+	lost      map[activeAgentContextKey][]string
+	lostOrder []activeAgentContextKey
+	now       func() time.Time
 	// storeMu orders the writes of a session's load record
 	// (saveInstructionLoads) with the state each one copies. It guards the
-	// store's pruned index too (instructionLoadPrunedName): pruned and
-	// prunedAll hold it once prunedLoaded.
+	// store's pruned index too (instructionLoadPrunedName): pruned (record
+	// name to first-sighting identities) and prunedOrder (oldest first) hold
+	// it once prunedLoaded.
 	storeMu      sync.Mutex
-	pruned       map[string]struct{}
-	prunedAll    bool
+	pruned       map[string][]string
+	prunedOrder  []string
+	prunedBytes  int
 	prunedLoaded bool
 }
 
@@ -344,26 +347,55 @@ func (cache *activeAgentContextCache) makeRoomLocked(needsRoom activeAgentContex
 			cache.rememberEvictionLocked(oldestKey, evicted, isSandbox)
 		}
 		if evicted.startupKnown && !evicted.saved {
-			cache.rememberLostLocked(oldestKey)
+			cache.rememberLostLocked(oldestKey, lostIdentities(evicted.startupFiles, evicted.identities))
 		}
 	}
 }
 
 // rememberLostLocked records that key's first sighting is gone: no saved
-// record restores it. Past the bound every session is taken as lost, so a
-// session's own file never becomes one that was there before it.
-func (cache *activeAgentContextCache) rememberLostLocked(key activeAgentContextKey) {
-	if cache.lostAll {
-		return
-	}
-	if len(cache.lost) >= maxInstructionLoadRecords {
-		cache.lost, cache.lostAll = nil, true
-		return
-	}
+// record restores it. identities are the instruction files it had proved
+// (lostIdentities): they stay protected by identity, and only another file
+// is judged as one the session may have created. Past the bound the oldest
+// lost session is forgotten: its next call takes a new first sighting,
+// which protects every instruction file there then. A loss is never applied
+// to a session that did not own it.
+func (cache *activeAgentContextCache) rememberLostLocked(key activeAgentContextKey, identities []string) {
 	if cache.lost == nil {
-		cache.lost = make(map[activeAgentContextKey]struct{})
+		cache.lost = make(map[activeAgentContextKey][]string)
 	}
-	cache.lost[key] = struct{}{}
+	if _, known := cache.lost[key]; !known {
+		cache.lostOrder = append(cache.lostOrder, key)
+	}
+	cache.lost[key] = identities
+	for len(cache.lostOrder) > maxInstructionLoadRecords {
+		delete(cache.lost, cache.lostOrder[0])
+		cache.lostOrder = cache.lostOrder[1:]
+	}
+}
+
+// forgetLostLocked drops key from the lost sessions.
+func (cache *activeAgentContextCache) forgetLostLocked(key activeAgentContextKey) {
+	if _, known := cache.lost[key]; !known {
+		return
+	}
+	delete(cache.lost, key)
+	cache.lostOrder = slices.DeleteFunc(cache.lostOrder, func(lost activeAgentContextKey) bool { return lost == key })
+}
+
+// lostIdentities are the identities of the instruction files a first
+// sighting recorded and of the files the session loaded, sorted and
+// without repeats: what a lost first sighting still proves.
+func lostIdentities(startupFiles, loaded map[string]string) []string {
+	var identities []string
+	for _, files := range []map[string]string{startupFiles, loaded} {
+		for _, identity := range files {
+			if recordedFileIdentity(identity) && !slices.Contains(identities, identity) {
+				identities = append(identities, identity)
+			}
+		}
+	}
+	slices.Sort(identities)
+	return identities
 }
 
 func (cache *activeAgentContextCache) rememberEvictionLocked(
@@ -645,7 +677,7 @@ func (cache *activeAgentContextCache) resetKey(key activeAgentContextKey, preser
 	delete(cache.evictions, key)
 	if !preserveStartup {
 		// A new generation takes its own snapshot.
-		delete(cache.lost, key)
+		cache.forgetLostLocked(key)
 	}
 	if _, exists := cache.sessions[key]; !exists {
 		cache.makeRoomLocked(key)
@@ -728,13 +760,12 @@ func (cache *activeAgentContextCache) firstSightingKey(key activeAgentContextKey
 	}
 	// A session whose first sighting this process lost is not new, also
 	// when a later event of it is held: a file that exists now may be one
-	// it created. Past the bound, any session it does not hold is taken as
-	// lost.
+	// it created.
 	if _, lost := cache.lost[key]; lost {
 		return false
 	}
 	if !exists {
-		if _, evicted := cache.evictions[key]; evicted || cache.uncertain || cache.lostAll {
+		if _, evicted := cache.evictions[key]; evicted || cache.uncertain {
 			return false
 		}
 		if cache.sessions == nil {
@@ -888,18 +919,27 @@ func (cache *activeAgentContextCache) endKey(key activeAgentContextKey) {
 	cache.mu.Lock()
 	delete(cache.sessions, key)
 	delete(cache.evictions, key)
-	delete(cache.lost, key)
+	cache.forgetLostLocked(key)
 	cache.mu.Unlock()
 }
 
 // loseKey records that key, which the cache does not hold, lost its first
-// sighting (rememberLostLocked).
-func (cache *activeAgentContextCache) loseKey(key activeAgentContextKey) {
+// sighting and what it proved (rememberLostLocked).
+func (cache *activeAgentContextCache) loseKey(key activeAgentContextKey, identities []string) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if _, held := cache.sessions[key]; !held {
-		cache.rememberLostLocked(key)
+		cache.rememberLostLocked(key, identities)
 	}
+}
+
+// lostKey reports whether key's first sighting was lost in this process,
+// with the identities it still proves.
+func (cache *activeAgentContextCache) lostKey(key activeAgentContextKey) ([]string, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	identities, lost := cache.lost[key]
+	return slices.Clone(identities), lost
 }
 
 // markSavedKey records whether key's saved record holds its state as it is
@@ -965,7 +1005,7 @@ func (cache *activeAgentContextCache) restoreKey(key activeAgentContextKey, reco
 	if _, evicted := cache.evictions[key]; evicted {
 		uncertain, caseInsensitiveUncertain = cache.consumeEvictionLocked(key)
 	}
-	delete(cache.lost, key)
+	cache.forgetLostLocked(key)
 	cache.makeRoomLocked(key)
 	cache.sessions[key] = activeAgentContextSession{
 		saved:                    true,

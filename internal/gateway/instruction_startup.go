@@ -45,6 +45,11 @@ type instructionStartupView struct {
 	strict   bool
 	snapshot activeAgentContextSnapshot
 	extend   func(dirs []string) activeAgentContextSnapshot
+	// lostIdentities: the session's first sighting is gone (pruned from
+	// the store, or evicted unsaved); these are the identities of the
+	// instruction files it had proved, so a file with one of them is still
+	// the file the session found.
+	lostIdentities []string
 }
 
 // existenceBlocks reports whether an instruction file proved only by
@@ -57,6 +62,9 @@ func (view instructionStartupView) existenceBlocks() bool {
 func (a *APIServer) withInstructionStartup(ctx context.Context, connector, sessionID string, snapshot activeAgentContextSnapshot) context.Context {
 	view := instructionStartupView{present: true, strict: a.instructionStrictTier(ctx, connector), snapshot: snapshot}
 	if !snapshot.startupKnown {
+		if key, ok := instructionStartupKey(ctx, connector, sessionID); ok {
+			view.lostIdentities, _ = a.instructionFirstSightingLost(key)
+		}
 		return context.WithValue(ctx, instructionStartupContextKey{}, view)
 	}
 	if key, ok := instructionStartupKey(ctx, connector, sessionID); ok {
@@ -340,7 +348,7 @@ func (a *APIServer) extendInstructionStartupDirs(key activeAgentContextKey, dirs
 		// A session whose first sighting the store pruned is not new: a
 		// file that exists now may be one it created
 		// (pruneInstructionLoadsLocked).
-		if a.instructionFirstSightingLost(key) {
+		if _, lost := a.instructionFirstSightingLost(key); lost {
 			return
 		}
 		if len(reachedKeys) > 0 && a.activeAgentContext.firstSightingKey(key, retained, reachedKeys, keyed) {
