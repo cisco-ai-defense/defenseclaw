@@ -45,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -856,11 +857,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		finalization := a.finalizeAgentHook(a.pendingHookDecidedContext(persistCtx, pending, resp),
 			connectorName, req, resp, rawEventIDs, b, elapsed, panicked, auditExtra)
-		// A verdict whose audit row could not be written comes back as the
-		// fail-mode verdict (finalizeAgentHook); the agent, a second Copilot
-		// delivery and the AID accounting all get that one.
+		// A verdict whose audit row could not be written may be adjusted to
+		// a degraded-audit alert or a closed answer. The agent and accounting
+		// must receive the same final verdict.
 		resp = finalization.Response
-		if delivery == nil && finalization.AuditFailedClosed {
+		if delivery == nil && !finalization.AuditPersisted {
 			wireResp = resp
 		}
 		if !panicked && resp.Action != hookActionUnconfirmed {
@@ -1083,16 +1084,16 @@ func (a *APIServer) finalizeAgentHook(
 			if auditErr == nil {
 				auditErr = errors.New("the audit section panicked")
 			}
-			closed, denied := resp, false
+			adjusted, denied := resp, false
 			// A pending occurrence keeps its delivery state for recovery: never
 			// report a retroactive block the agent did not receive (s2-obs).
 			if !recoverable && req.pendingOccurrenceID == "" {
-				closed, denied = a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
+				adjusted, denied = a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
 			}
+			resp = adjusted
+			env.adoptVerdict(resp)
+			result.Enforced, result.Response, result.AuditFailedClosed = env.Enforced, resp, denied
 			if denied {
-				resp = closed
-				env.adoptVerdict(resp)
-				result.Enforced, result.Response, result.AuditFailedClosed = env.Enforced, resp, true
 				safeSection("span", func() {
 					enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
 					enrichAgentHookSpan(ctx, req, resp, elapsed)
@@ -1180,14 +1181,10 @@ func (a *APIServer) finalizeAgentHook(
 
 // hookAuditFailureResponse is the verdict of an accepted hook whose audit row
 // could not be written: the disk is full, or the audit store stayed busy
-// through its busy timeout and retries. Every call DefenseClaw lets go ahead
-// has a durable audit row, so a failed write is a failed check: it follows the
-// local failure policy, like a recovered evaluator error. Closed
-// (the default everywhere but Secure Client) denies a blockable tool or
-// prompt event. Secure Client's unset default or explicit open keeps the
-// verdict, as do a block, a session-ending event and an event the agent
-// cannot block. A managed outage-open choice does not apply to an audit
-// failure. It reports whether it changed the verdict. rawBody is
+// through its busy timeout and retries. A computed allow in a per-user
+// balanced or permissive tier remains allowed with a visible degraded-audit
+// alert. Strict and managed installs stay closed; Secure Client keeps its
+// separate failure contract. An existing block is never weakened. rawBody is
 // the hook's request body: Claude Code's native denial
 // (hookSpecificOutput.permissionDecision) is rendered from the event it
 // names, and without it the denial fell back to a generic decision:block.
@@ -1200,6 +1197,17 @@ func (a *APIServer) hookAuditFailureResponse(
 ) (agentHookResponse, bool) {
 	if resp.Action == "block" {
 		return resp, false
+	}
+	cfg := a.decisionConfig(ctx)
+	if resp.Action == "allow" && cfg != nil && !managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+		cfg.HookPolicyTierForConnector(connectorName) != config.HookPolicyTierStrict &&
+		!sandboxHookForConnector(ctx, connectorName) {
+		resp.RawAction = "alert"
+		resp.Severity = "WARN"
+		resp.WouldBlock = false
+		resp.SourceReason = "defenseclaw audit is degraded"
+		return a.renderSandboxVerdict(ctx, a.hookProfileForRequest(ctx, connectorName), req, rawBody, req.Payload, resp,
+			"DefenseClaw audit is degraded: this call was allowed, but its audit record could not be written. Check the DefenseClaw data directory and gateway log."), false
 	}
 	failure := hookCheckFailure{
 		base: agentHookResponse{
