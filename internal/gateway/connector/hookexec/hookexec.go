@@ -2342,8 +2342,7 @@ func perUserInstallWindow(opts Options) bool {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || strings.TrimSpace(opts.Home) == "" {
 		return false
 	}
-	_, err := os.Lstat(filepath.Join(opts.Home, installLockName))
-	return !errors.Is(err, os.ErrNotExist)
+	return installLockHeld(opts.Home)
 }
 
 // Copilot ignores a failed hook process. During a per-user install it needs
@@ -2810,18 +2809,43 @@ func perUserInstallInProgress(opts Options) bool {
 // installLockLstat reads the install lock; a variable for tests.
 var installLockLstat = os.Lstat
 
-// installLockHeld reports whether the installer holds the per-user data
-// directory home: its .install.lock exists, as any file type (a symlink
-// marker too, so changing its type cannot open a hook during install or
-// upgrade), or it cannot be read for any reason but its absence. A lock
-// whose state cannot be verified is held (GAP-0862).
+// An install lock is temporary even if its owner dies without cleanup.
+const installLockMaxAge = 10 * time.Minute
+
+// installLockHeld reports whether the installer still owns the per-user
+// data directory. An unreadable lock is conservatively held, while an old
+// lock or a lock with a known dead owner cannot freeze hooks indefinitely.
 func installLockHeld(home string) bool {
 	return installLockHeldBy(installLockLstat, home)
 }
 
 func installLockHeldBy(lstat func(string) (fs.FileInfo, error), home string) bool {
-	_, err := lstat(filepath.Join(home, ".install.lock"))
-	return err == nil || !errors.Is(err, fs.ErrNotExist)
+	lock := filepath.Join(home, installLockName)
+	info, err := lstat(lock)
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	age := time.Since(info.ModTime())
+	if age > installLockMaxAge || age < -time.Minute {
+		return false
+	}
+	if !info.IsDir() {
+		return true // a newly created or malformed marker may still be in flight
+	}
+	file, err := os.Open(filepath.Join(lock, "pid"))
+	if err != nil {
+		return true // the installer may not have written its pid yet
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 64))
+	if err != nil {
+		return true
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid < 1 {
+		return true
+	}
+	return installLockOwnerAlive(pid)
 }
 
 // InstallLockHeld is installLockHeld for the hook command, which answers

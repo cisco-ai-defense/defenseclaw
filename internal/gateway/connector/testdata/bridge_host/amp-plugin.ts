@@ -618,14 +618,7 @@ const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw 
 	"and its gateway starts again when that is done. Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install. `defenseclaw-gateway status` shows its state."
 
 async function installWindow(): Promise<boolean> {
-	try {
-		await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"))
-		return true
-	} catch (error) {
-		// Only a missing lock ends the install window. An unreadable lock must
-		// never turn an upgrade into a fail-open outage.
-		return (error as { code?: unknown } | null)?.code !== "ENOENT"
-	}
+	return await installLockHeldAt(dirname(dirname(DC_TOKEN_FILE)))
 }
 
 // perUserGatewayDownText is what a per-user install that fails closed says
@@ -731,17 +724,43 @@ async function perUserGatewayDownText(error: unknown, status: number): Promise<s
 // credential) or the folder install.sh and install.ps1 lock,
 // DEFENSECLAW_HOME or else ~/.defenseclaw, which differ when data_dir is set
 // apart from it (GAP-1002); the shell hooks check the same two (GAP-0948).
-// A lock is held when its .install.lock exists, as any file type, or cannot
-// be read for any reason but its absence.
+// A new marker without a pid is held while the installer writes its owner.
+// A dead owner or a marker older than ten minutes ends the window.
+async function installLockHeldAt(dir: string): Promise<boolean> {
+	const lock = join(dir, ".install.lock")
+	let info
+	try {
+		info = await lstat(lock)
+	} catch (error) {
+		return (error as { code?: unknown } | null)?.code !== "ENOENT"
+	}
+	const age = Date.now() - info.mtimeMs
+	if (age > 600000 || age < -60000) return false
+	if (!info.isDirectory()) return true
+	let file
+	try {
+		file = await open(join(lock, "pid"), "r")
+		const raw = Buffer.alloc(64)
+		const { bytesRead } = await file.read(raw, 0, raw.length, 0)
+		const value = raw.subarray(0, bytesRead).toString("ascii").trim()
+		if (!/^[1-9][0-9]*$/.test(value)) return true
+		try {
+			process.kill(Number(value), 0)
+			return true
+		} catch (error) {
+			return (error as { code?: unknown } | null)?.code !== "ESRCH"
+		}
+	} catch (_) {
+		return true
+	} finally {
+		if (file) await file.close()
+	}
+}
+
 async function installLockHeld(): Promise<boolean> {
 	const dirs = [dirname(dirname(DC_TOKEN_FILE)), String(process.env.DEFENSECLAW_HOME || "") || join(homedir(), ".defenseclaw")]
 	for (const dir of dirs) {
-		try {
-			await lstat(join(dir, ".install.lock"))
-			return true
-		} catch (error) {
-			if ((error as { code?: unknown } | null)?.code !== "ENOENT") return true
-		}
+		if (await installLockHeldAt(dir)) return true
 		try {
 			// A folder that is not one cannot be looked in (Windows reports
 			// its child as absent).

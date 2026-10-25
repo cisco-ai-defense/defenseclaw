@@ -1260,16 +1260,26 @@ defenseclaw_hook_delivery_outcome() {
 }
 
 # defenseclaw_install_lock_held DATA returns 0 (true) while this account's
-# installer holds its data directory DATA: DATA/.install.lock exists as any
-# file type, or DATA exists but cannot be searched, so the lock cannot be
-# shown absent; no DATA to look in counts as held too. The native hook
-# (installLockHeld), the in-agent plugins and the Windows adapters apply the
-# same rule (GAP-0914). defenseclaw_install_held below, the one install check
-# of every shell hook, reads it.
+# installer holds its data directory DATA. A marker is live only while its
+# owner pid lives and it is at most ten minutes old; a newly made marker
+# without a pid is held while the installer writes it. Unsearchable state
+# stays held. Every shell hook carries this same pre-helper check.
 defenseclaw_install_lock_held() {
-  local data="${1:-}"
+  local data="${1:-}" lock modified now pid
   [ -n "$data" ] || return 0
-  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+  lock="${data}/.install.lock"
+  if [ -e "$lock" ] || [ -L "$lock" ]; then
+    modified="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)" || return 0
+    now="$(date +%s)" || return 0
+    case "$modified:$now" in *[!0-9:]*|:*) return 0 ;; esac
+    if [ "$((now - modified))" -gt 600 ] || [ "$((modified - now))" -gt 60 ]; then
+      return 1
+    fi
+    if [ -d "$lock" ] && [ -r "$lock/pid" ]; then
+      pid="$(head -c 64 "$lock/pid" 2>/dev/null)" || return 0
+      case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+      kill -0 "$pid" 2>/dev/null || return 1
+    fi
     return 0
   fi
   if [ -e "$data" ] || [ -L "$data" ]; then
@@ -1515,7 +1525,7 @@ defenseclaw_gateway_cold_start() {
   data="${DEFENSECLAW_HOME:-${home}/.defenseclaw}"
   [ -d "$data" ] && [ -f "${data}/config.yaml" ] || return 1
   [ ! -e "${data}/gateway.stopped" ] || return 1
-  [ ! -e "${data}/.install.lock" ] || return 1
+  ! defenseclaw_install_lock_held "$data" || return 1
   [ ! -e "${data}/.disabled" ] || return 1
   bin="$(defenseclaw_gateway_binary "$data" "$home")" || return 1
   lock="${data}/.cold-start.lock"
@@ -1647,7 +1657,7 @@ defenseclaw_await_gateway() {
     # An operator stop is not a restart: the fail mode applies at once. An
     # install or upgrade stops the gateway the same way and starts it again
     # when it is done (.install.lock), so that one is (GAP-0140).
-    [ ! -e "${data}/gateway.stopped" ] || [ -e "${data}/.install.lock" ] || return "$status"
+    [ ! -e "${data}/gateway.stopped" ] || defenseclaw_install_lock_held "$data" || return "$status"
     if [ "$status" = 7 ] && [ -z "$launched" ]; then
       launched=1
       defenseclaw_gateway_cold_start || true
@@ -1799,7 +1809,7 @@ defenseclaw_should_fail_closed_on_unreachable() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) ;;
     *) [ -n "${DEFENSECLAW_HOOK_SOCKET:-}" ] ||
-      [ ! -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/.install.lock" ] || return 0 ;;
+      ! defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}" || return 0 ;;
   esac
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 0 ;;
@@ -2010,7 +2020,7 @@ defenseclaw_unreachable_next_step() {
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-  if [ -e "${data}/.install.lock" ]; then
+  if defenseclaw_install_lock_held "$data"; then
     printf '%s' 'DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done; try again in a moment, or run the installer again if it has stopped (`defenseclaw-gateway status` shows its state)'
   elif [ -e "${data}/gateway.stopped" ]; then
     printf '%s' 'the gateway was stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection (`defenseclaw-gateway status` shows its state)'

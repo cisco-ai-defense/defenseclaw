@@ -795,17 +795,43 @@ const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw 
 // the hook credential) or the folder install.sh and install.ps1 lock,
 // DEFENSECLAW_HOME or else ~/.defenseclaw, which differ when data_dir is set
 // apart from it (GAP-1002); the shell hooks check the same two (GAP-0948).
-// A lock is held when its .install.lock exists, as any file type, or cannot
-// be read for any reason but its absence.
+// A lock is held while its owner is alive and it is at most ten minutes old.
+// A new marker without a pid is held while the installer writes the pid.
+async function defenseclawInstallLockHeldAt(dir) {
+  const lock = join(dir, ".install.lock");
+  let info;
+  try {
+    info = await lstat(lock);
+  } catch (err) {
+    return !err || err.code !== "ENOENT";
+  }
+  const age = Date.now() - info.mtimeMs;
+  if (age > 600000 || age < -60000) return false;
+  if (!info.isDirectory()) return true;
+  let file;
+  try {
+    file = await open(join(lock, "pid"), "r");
+    const raw = Buffer.alloc(64);
+    const { bytesRead } = await file.read(raw, 0, raw.length, 0);
+    const value = raw.subarray(0, bytesRead).toString("ascii").trim();
+    if (!/^[1-9][0-9]*$/.test(value)) return true;
+    try {
+      process.kill(Number(value), 0);
+      return true;
+    } catch (err) {
+      return !err || err.code !== "ESRCH";
+    }
+  } catch (_) {
+    return true;
+  } finally {
+    if (file) await file.close();
+  }
+}
+
 async function defenseclawInstallLockHeld() {
   const dirs = [dirname(dirname(DC_TOKEN_FILE)), String(process.env.DEFENSECLAW_HOME || "") || join(homedir(), ".defenseclaw")];
   for (const dir of dirs) {
-    try {
-      await lstat(join(dir, ".install.lock"));
-      return true;
-    } catch (err) {
-      if (!err || err.code !== "ENOENT") return true;
-    }
+    if (await defenseclawInstallLockHeldAt(dir)) return true;
     try {
       // A folder that is not one cannot be looked in (Windows reports its
       // child as absent).

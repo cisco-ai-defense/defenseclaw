@@ -12,8 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // shellHookBlocksNatively reports whether the agent a rendered hook answers
@@ -167,6 +169,46 @@ func shellInstallLockCheck(t *testing.T) string {
 		t.Fatal("defenseclaw_install_held has no end")
 	}
 	return text[start : start+held+end+3]
+}
+
+func TestShellInstallLockExpiresWithOwnerOrAge(t *testing.T) {
+	check := shellInstallLockCheck(t)
+	for _, tc := range []struct {
+		name, pid string
+		age       time.Duration
+		held      bool
+	}{
+		{"live installer", strconv.Itoa(os.Getpid()), 0, true},
+		{"dead installer", "99999999", 0, false},
+		{"old live installer", strconv.Itoa(os.Getpid()), 11 * time.Minute, false},
+		{"old orphan marker", "", 11 * time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := t.TempDir()
+			lock := filepath.Join(data, ".install.lock")
+			if err := os.Mkdir(lock, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if tc.pid != "" {
+				if err := os.WriteFile(filepath.Join(lock, "pid"), []byte(tc.pid+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.age != 0 {
+				then := time.Now().Add(-tc.age)
+				if err := os.Chtimes(lock, then, then); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := exec.Command("bash", "-c", "set -euo pipefail\n"+check+`if defenseclaw_install_lock_held "$1"; then echo held; else echo free; fi`, "check", data).CombinedOutput()
+			if err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			if got := strings.TrimSpace(string(out)) == "held"; got != tc.held {
+				t.Fatalf("held=%v, want %v (%s)", got, tc.held, out)
+			}
+		})
+	}
 }
 
 // Every rendered per-user shell hook carries the same install check as

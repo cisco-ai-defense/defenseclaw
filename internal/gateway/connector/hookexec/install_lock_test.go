@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -62,5 +63,44 @@ func TestPerUserInstallLockClosesNativeHookFailures(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestPerUserInstallLockIsBoundedByOwnerAndAge(t *testing.T) {
+	for _, tc := range []struct {
+		name, pid string
+		age       time.Duration
+		held      bool
+	}{
+		{"new lock without pid", "", 0, true},
+		{"dead owner", "99999999", 0, false},
+		{"live owner", strconv.Itoa(os.Getpid()), 0, true},
+		{"aged live owner", strconv.Itoa(os.Getpid()), 11 * time.Minute, false},
+		{"aged lock without pid", "", 11 * time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			lock := filepath.Join(home, ".install.lock")
+			if err := os.Mkdir(lock, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if tc.pid != "" {
+				if err := os.WriteFile(filepath.Join(lock, "pid"), []byte(tc.pid+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.age != 0 {
+				then := time.Now().Add(-tc.age)
+				if err := os.Chtimes(lock, then, then); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := InstallLockHeld(home); got != tc.held {
+				t.Fatalf("held=%v, want %v", got, tc.held)
+			}
+			if got := perUserInstallWindow(Options{Home: home}); got != tc.held {
+				t.Fatalf("native Copilot install window=%v, want %v", got, tc.held)
+			}
+		})
 	}
 }

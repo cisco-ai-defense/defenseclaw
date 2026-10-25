@@ -25,16 +25,26 @@ case "$_DC_HOOK_DATA_DIR" in
   *) _DC_HOOK_DATA_DIR=".." ;;
 esac
 # defenseclaw_install_lock_held DATA returns 0 (true) while this account's
-# installer holds its data directory DATA: DATA/.install.lock exists as any
-# file type, or DATA exists but cannot be searched, so the lock cannot be
-# shown absent; no DATA to look in counts as held too. The native hook
-# (installLockHeld), the in-agent plugins and the Windows adapters apply the
-# same rule (GAP-0914). defenseclaw_install_held below, the one install check
-# of every shell hook, reads it.
+# installer holds its data directory DATA. A marker is live only while its
+# owner pid lives and it is at most ten minutes old; a newly made marker
+# without a pid is held while the installer writes it. Unsearchable state
+# stays held. Every shell hook carries this same pre-helper check.
 defenseclaw_install_lock_held() {
-  local data="${1:-}"
+  local data="${1:-}" lock modified now pid
   [ -n "$data" ] || return 0
-  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+  lock="${data}/.install.lock"
+  if [ -e "$lock" ] || [ -L "$lock" ]; then
+    modified="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)" || return 0
+    now="$(date +%s)" || return 0
+    case "$modified:$now" in *[!0-9:]*|:*) return 0 ;; esac
+    if [ "$((now - modified))" -gt 600 ] || [ "$((modified - now))" -gt 60 ]; then
+      return 1
+    fi
+    if [ -d "$lock" ] && [ -r "$lock/pid" ]; then
+      pid="$(head -c 64 "$lock/pid" 2>/dev/null)" || return 0
+      case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+      kill -0 "$pid" 2>/dev/null || return 1
+    fi
     return 0
   fi
   if [ -e "$data" ] || [ -L "$data" ]; then
