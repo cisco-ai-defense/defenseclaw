@@ -233,3 +233,163 @@ func TestRegistrationReadinessScopesAnotherTargetsGuardianFailure(t *testing.T) 
 		t.Fatalf("readiness accepted a failure the protected records do not name: err=%v authorization=%v", err, swapped.AuthorizationErr)
 	}
 }
+
+// GAP-1433 on the verify side: a managed Windows account that signs out
+// leaves its previously protected Hermes target unobservable. Readiness and
+// public verify report it pending until the account signs in (Hermes NOT
+// COVERED) instead of failing the host, both before and after the guardian
+// records the wait, and while its hive comes back for another logon. Any
+// other failure of that target, and the same error for another connector,
+// still fail.
+func TestVerifyLeavesASignedOutHermesTargetToTheNextSignIn(t *testing.T) {
+	restoreEnterpriseHooksLifecycleTestState(t)
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
+	stubEnterpriseHookTokenSources(t)
+	previousManifest, previousAPI, previousProxy := enterpriseHookManifest, enterpriseHookAPIAddr, enterpriseHookProxyAddr
+	previousVerifier, previousInstaller := enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller
+	previousPublic, previousRegistration := enterpriseHookLivePublicVerifier, enterpriseHookLiveRegistrationVerifier
+	previousSession, previousDeferredSession := enterpriseHookReconcileSessionAvailable, enterpriseHookReconcileDeferredSessionAvailable
+	previousRelease, previousChange := enterpriseHookReconcileTargetRelease, enterpriseHookReconcileTargetFailModeChange
+	previousSecureClient, previousApplies := enterpriseHookReconcileSecureClient, enterpriseHookHermesSignedOutApplies
+	previousCleanup := enterpriseForeignHookCleanup
+	previousStateTrust, previousManifestTrust := enterpriseHookGuardianStateFileTrustCheck, enterpriseHookManifestFileTrustCheck
+	previousStandaloneUnix := enterprisehooks.StandaloneUnix()
+	t.Cleanup(func() {
+		enterpriseHookManifest, enterpriseHookAPIAddr, enterpriseHookProxyAddr = previousManifest, previousAPI, previousProxy
+		enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller = previousVerifier, previousInstaller
+		enterpriseHookLivePublicVerifier, enterpriseHookLiveRegistrationVerifier = previousPublic, previousRegistration
+		enterpriseHookReconcileSessionAvailable, enterpriseHookReconcileDeferredSessionAvailable = previousSession, previousDeferredSession
+		enterpriseHookReconcileTargetRelease, enterpriseHookReconcileTargetFailModeChange = previousRelease, previousChange
+		enterpriseHookReconcileSecureClient, enterpriseHookHermesSignedOutApplies = previousSecureClient, previousApplies
+		enterpriseForeignHookCleanup = previousCleanup
+		enterpriseHookGuardianStateFileTrustCheck, enterpriseHookManifestFileTrustCheck = previousStateTrust, previousManifestTrust
+		enterprisehooks.SetStandaloneUnix(previousStandaloneUnix)
+	})
+	enterpriseForeignHookCleanup = func(enterprisehooks.TargetCredentials, string, string) (enterprisepolicy.CleanupResult, error) {
+		return enterprisepolicy.CleanupResult{}, nil
+	}
+	enterpriseHookGuardianStateFileTrustCheck = func(string) error { return nil }
+	enterpriseHookManifestFileTrustCheck = func(string) error { return nil }
+	// The standalone Windows guardian and verify; off Windows only a
+	// standalone manifest may carry deferred rows.
+	enterprisehooks.SetStandaloneUnix(true)
+	enterpriseHookReconcileSecureClient = func() bool { return false }
+	enterpriseHookHermesSignedOutApplies = func() bool { return true }
+	enterpriseHookReconcileTargetRelease = func(enterprisehooks.InstallOptions) (string, bool, error) { return "", false, nil }
+	enterpriseHookReconcileTargetFailModeChange = func(enterprisehooks.InstallOptions) (string, string, error) { return "", "", nil }
+
+	scope := t.TempDir()
+	dataDir := filepath.Join(scope, "runtime")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(hookGuardianAuthorizationDirEnv, filepath.Join(scope, "authorization"))
+	alice, bob := "S-1-5-21-1-2-3-1017", "S-1-5-21-1-2-3-1018"
+	var manifestBody strings.Builder
+	manifestBody.WriteString("version: 1\ntargets:\n")
+	for _, target := range []struct{ name, sid, connector string }{
+		{"Alice", alice, "codex"}, {"Alice", alice, "hermes"}, {"Bob", bob, "codex"}, {"Bob", bob, "hermes"},
+	} {
+		home := filepath.Join(scope, target.name)
+		if err := os.MkdirAll(home, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&manifestBody,
+			"  - user_home: %q\n    uid: %d\n    gid: %d\n    sid: %s\n    connector: %s\n    enabled: true\n    deferred: true\n",
+			home, os.Getuid(), os.Getgid(), target.sid, target.connector)
+	}
+	manifestPath := filepath.Join(scope, "targets.yaml")
+	if err := os.WriteFile(manifestPath, []byte(manifestBody.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg = &config.Config{DataDir: dataDir, DeploymentMode: "local"}
+	enterpriseHookManifest, enterpriseHookAPIAddr, enterpriseHookProxyAddr = manifestPath, "127.0.0.1:18970", "127.0.0.1:4000"
+	for _, connectorName := range []string{"codex", "hermes"} {
+		if _, err := connector.EnsureHookAPIToken(dataDir, connectorName); err != nil {
+			t.Fatal(err)
+		}
+		if scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName); ok {
+			if _, err := connector.EnsureOTLPPathToken(dataDir, scope); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	signedIn := map[string]bool{alice: true, bob: true}
+	enterpriseHookReconcileSessionAvailable = func(target enterprisehooks.ManifestTarget) (bool, error) { return signedIn[target.SID], nil }
+	enterpriseHookReconcileDeferredSessionAvailable = enterpriseHookReconcileSessionAvailable
+	signedOut := fmt.Errorf("enterprise hooks: connector hermes hook verification failed: hermes hooks not verified: "+
+		"resolve the Hermes home: %w: %w", hermespath.ErrAccountEnvironmentUnavailable, hermespath.ErrAccountSignedOut)
+	live := map[string]error{}
+	result := func(opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		if err := live[opts.OwnerSID+"/"+opts.ConnectorName]; err != nil {
+			return enterprisehooks.InstallResult{}, err
+		}
+		return enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}, nil
+	}
+	stub := func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		return result(opts)
+	}
+	enterpriseHookReconcileInstaller, enterpriseHookReconcileVerifier = stub, stub
+	enterpriseHookLivePublicVerifier, enterpriseHookLiveRegistrationVerifier = stub, stub
+	reconcile := func(wantFailures int) {
+		t.Helper()
+		run, err := runEnterpriseHookReconcileOnce(context.Background())
+		if err != nil || run.StateErr != nil || run.Failures != wantFailures {
+			t.Fatalf("guardian pass: run=%+v err=%v, want %d failure(s)", run, err, wantFailures)
+		}
+	}
+	check := func(name string, wantOK, bobWaits bool) {
+		t.Helper()
+		// Setup readiness and the hot-config undo read the registration
+		// scope; public verify never attests a managed Hermes home (GAP-0766).
+		for _, registration := range []bool{true} {
+			run, err := runEnterpriseHookVerifyAttemptWithScope(context.Background(), registration)
+			if err != nil {
+				t.Fatalf("%s (registration=%t): %v", name, registration, err)
+			}
+			ok := run.Failures-len(run.Excused) == 0 && run.AuthorizationErr == nil
+			if ok != wantOK {
+				t.Fatalf("%s (registration=%t): ok=%t, want %t; authorization=%v rows=%+v", name, registration, ok, wantOK, run.AuthorizationErr, run.Rows)
+			}
+			if !wantOK {
+				continue
+			}
+			for _, row := range run.Rows {
+				if bobWaits && row.SID == bob && row.Connector == "hermes" {
+					note := enterpriseHookVerifyExcusedNote(run, row)
+					if row.OK || !enterpriseHookVerifyRowExcused(run, row) || !strings.Contains(note, "Hermes NOT COVERED") {
+						t.Fatalf("%s (registration=%t): Bob's Hermes row %+v note %q, want pending until sign-in, NOT COVERED", name, registration, row, note)
+					}
+				} else if !row.OK {
+					t.Fatalf("%s (registration=%t): row %+v failed", name, registration, row)
+				}
+			}
+		}
+	}
+
+	reconcile(0)
+	check("both signed in", true, false)
+
+	// Bob signs out; the guardian has not run since.
+	signedIn[bob] = false
+	live[bob+"/hermes"] = signedOut
+	check("signed out before the guardian pass", true, true)
+	// The guardian records the wait.
+	reconcile(1)
+	check("signed out after the guardian pass", true, true)
+	// Another logon loads Bob's hive: live verification passes, but the
+	// guardian has not verified the target since he signed out.
+	delete(live, bob+"/hermes")
+	check("hive loaded while signed out", true, true)
+
+	// Controls: any other failure of that target, or the same error of
+	// another connector, while the guardian last proved it.
+	signedIn[bob] = true
+	reconcile(0)
+	signedIn[bob] = false
+	live[bob+"/hermes"] = errors.New("enterprise hooks: connector hermes hook verification failed: canonical hook matrix is absent")
+	check("owned hook removed", false, false)
+	delete(live, bob+"/hermes")
+	live[bob+"/codex"] = signedOut
+	check("non-Hermes signed-out error", false, false)
+}

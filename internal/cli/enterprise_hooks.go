@@ -1658,8 +1658,12 @@ type enterpriseHookVerifyRun struct {
 	Excused []enterpriseHookReconcileRow
 	// AwaitingSignIn maps the key of each excused row that waits for a
 	// sign-in to the error of the guardian row that records the wait.
-	AwaitingSignIn   map[string]string
-	AuthorizationErr error
+	AwaitingSignIn map[string]string
+	// RecordedProtected names the excused signed-out Hermes rows
+	// (enterpriseHookHermesSignedOutRow) the guardian last recorded as
+	// protected; the protected records are compared with them as protected.
+	RecordedProtected map[string]bool
+	AuthorizationErr  error
 }
 
 // enterpriseHookVerifyExcusedNote is the note of one of run.Excused: for a
@@ -2040,7 +2044,15 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 	// verify accepts exactly those failures, as status does.
 	excused := 0
 	awaitingSignIn := map[string]string{}
+	// The guardian's last row of each target, for a Hermes target whose
+	// account is signed out (enterpriseHookHermesSignedOutRow).
+	recorded := map[string]enterpriseHookReconcileRow{}
 	if guardianStateErr == nil && guardianStateExists {
+		for _, row := range guardianState.Results {
+			if key := enterpriseHookProtectedTargetKey(row); key != "" {
+				recorded[key] = row
+			}
+		}
 		removed, awaiting := enterpriseHookExcusedFailures(guardianState)
 		excused = removed + awaiting
 		for _, row := range guardianState.Results {
@@ -2210,6 +2222,27 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 				targetErr = fmt.Errorf("protected authorization does not cover target")
 			}
 		}
+		if waiting, ok := enterpriseHookHermesSignedOutRow(target, row, targetErr, recorded); ok {
+			// Unobservable, not failed: reported pending until the
+			// account signs in (Hermes NOT COVERED), never protected,
+			// and compared with the protected records as the guardian
+			// last recorded it.
+			row.OK, row.Pending, row.Result, row.Error = false, false, nil, waiting
+			run.Failures++
+			run.Excused = append(run.Excused, row)
+			if run.AwaitingSignIn == nil {
+				run.AwaitingSignIn = map[string]string{}
+			}
+			run.AwaitingSignIn[enterpriseHookProtectedTargetKey(row)] = waiting
+			if last := recorded[enterpriseHookProtectedTargetKey(row)]; last.OK {
+				if run.RecordedProtected == nil {
+					run.RecordedProtected = map[string]bool{}
+				}
+				run.RecordedProtected[enterpriseHookProtectedTargetKey(row)] = true
+			}
+			run.Rows = append(run.Rows, row)
+			continue
+		}
 		if targetErr != nil {
 			row.OK = false
 			row.Error = targetErr.Error()
@@ -2227,9 +2260,9 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 		run.Rows = append(run.Rows, row)
 	}
 	if run.AuthorizationErr == nil && exists && activationExists {
-		proof := run
+		proof := enterpriseHookRecordedProtectionProof(run)
 		if partialRegistration {
-			proof = enterpriseHookPartialRegistrationProof(run)
+			proof = enterpriseHookPartialRegistrationProof(proof)
 		}
 		if issues := enterpriseHookVerifyDispositionIssues(
 			proof,
@@ -2240,6 +2273,74 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 		}
 	}
 	return run, nil
+}
+
+// enterpriseHookHermesSignedOutRow reports a managed standalone Windows
+// Hermes target whose account is signed out (GAP-1433): Windows has not
+// loaded the registry hive that holds its HERMES_HOME, so the home its Hermes
+// reads is unobservable. That is the live verification failing with
+// hermespath.ErrAccountSignedOut, or the guardian's last pass recording the
+// target as waiting for that reason while live verification now passes (the
+// hive comes and goes with other logons; the guardian verifies it again at
+// the account's sign-in). It returns the sign-in wait the row reports.
+// Every other failure, Secure Client and other connectors are unchanged.
+func enterpriseHookHermesSignedOutRow(
+	target enterprisehooks.ManifestTarget,
+	row enterpriseHookReconcileRow,
+	liveErr error,
+	recorded map[string]enterpriseHookReconcileRow,
+) (string, bool) {
+	if !enterpriseHookHermesSignedOutApplies() || !target.IsDeferred() ||
+		!strings.EqualFold(strings.TrimSpace(row.Connector), "hermes") {
+		return "", false
+	}
+	last, known := recorded[enterpriseHookProtectedTargetKey(row)]
+	lastWaits := known && !last.OK && !last.Pending &&
+		strings.HasPrefix(strings.TrimSpace(last.Error), enterpriseHookAwaitingSignInPrefix+": "+enterpriseHookAwaitingSignInHermesHome)
+	switch {
+	case liveErr != nil && errors.Is(liveErr, hermespath.ErrAccountSignedOut):
+		if lastWaits {
+			return strings.TrimSpace(last.Error), true
+		}
+		return fmt.Sprintf("%s: %s, so Hermes is NOT COVERED for it until the guardian verifies it at its next sign-in "+
+			"(verification: %v)", enterpriseHookAwaitingSignInPrefix, enterpriseHookAwaitingSignInHermesHome, liveErr), true
+	case liveErr == nil && lastWaits:
+		return strings.TrimSpace(last.Error), true
+	}
+	return "", false
+}
+
+// enterpriseHookHermesSignedOutApplies reports the managed standalone
+// Windows deployment, the only one whose Hermes home lives in a registry
+// hive. Tests replace it.
+var enterpriseHookHermesSignedOutApplies = func() bool {
+	return runtime.GOOS == "windows" && cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration()
+}
+
+// enterpriseHookRecordedProtectionProof is run with each signed-out Hermes
+// row the guardian last recorded as protected compared as protected: the
+// protected records still describe that target, and verify neither claims
+// nor drops its protection while its home cannot be observed. The run itself
+// is unchanged.
+func enterpriseHookRecordedProtectionProof(run enterpriseHookVerifyRun) enterpriseHookVerifyRun {
+	if len(run.RecordedProtected) == 0 {
+		return run
+	}
+	proof := run
+	proof.Rows = append([]enterpriseHookReconcileRow(nil), run.Rows...)
+	proof.Excused = nil
+	for i, row := range proof.Rows {
+		if run.RecordedProtected[enterpriseHookProtectedTargetKey(row)] {
+			proof.Rows[i].OK, proof.Rows[i].Error = true, ""
+			proof.Failures--
+		}
+	}
+	for _, row := range run.Excused {
+		if !run.RecordedProtected[enterpriseHookProtectedTargetKey(row)] {
+			proof.Excused = append(proof.Excused, row)
+		}
+	}
+	return proof
 }
 
 func enterpriseHookVerifyAuthenticatedPendingTarget(
