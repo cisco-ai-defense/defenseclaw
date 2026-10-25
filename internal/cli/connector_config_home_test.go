@@ -18,10 +18,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
+// ownedCodexOTLPFixture is a released Codex exporter: the product markers and
+// a bearer of the product token shape. Ownership is decided by the credential,
+// so markers alone would be an operator collector.
 const ownedCodexOTLPFixture = `[otel.exporter.otlp-http]
 endpoint = "http://127.0.0.1:18970/v1/logs"
 
 [otel.exporter.otlp-http.headers]
+authorization = "Bearer 0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
 x-defenseclaw-source = "codex"
 x-defenseclaw-client = "codex-otel/1.0"
 `
