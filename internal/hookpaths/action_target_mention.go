@@ -15,7 +15,9 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/syntax"
@@ -244,8 +246,11 @@ func actionWindowsLiteralHereDocumentTarget(file *syntax.File, home string) bool
 					}
 					index += start
 					end := index + len(target)
-					if (index == 0 || !actionWindowsPathByte(body[index-1])) &&
-						(end == len(body) || !actionWindowsPathByte(body[end])) {
+					before, _ := utf8.DecodeLastRuneInString(body[:index])
+					after, _ := utf8.DecodeRuneInString(body[end:])
+					singleQuoted := before == '\'' && after == '\''
+					if (index == 0 || actionWindowsHereDocDelimiter(before) || singleQuoted) &&
+						(end == len(body) || actionWindowsHereDocDelimiter(after) || singleQuoted) {
 						found = true
 						return false
 					}
@@ -258,9 +263,10 @@ func actionWindowsLiteralHereDocumentTarget(file *syntax.File, home string) bool
 	return found
 }
 
-func actionWindowsPathByte(value byte) bool {
-	return value >= 'a' && value <= 'z' || value >= '0' && value <= '9' ||
-		strings.ContainsRune("_./:-", rune(value))
+func actionWindowsHereDocDelimiter(value rune) bool {
+	// Windows filenames may contain punctuation and Unicode. Only whitespace
+	// and characters forbidden in a filename delimit an unquoted path here.
+	return unicode.IsSpace(value) || strings.ContainsRune("\"<>|?*", value)
 }
 
 // The text scan finds paths in payloads another program interprets (inline
