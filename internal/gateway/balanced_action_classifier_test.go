@@ -40,7 +40,7 @@ func TestBalancedActionOnlyResolvedProtectedTargets(t *testing.T) {
 		"echo \"$(id)\" > report.txt", "for f in regular.txt; do cp \"$f\" copy/; done; echo ok > second-report.txt",
 		"git -C sub pull --ff-only && echo benign > notes.txt",
 		"cat ~/.ssh/authorized_keys", "grep marker ~/.ssh/authorized_keys",
-		"cd ~/.ssh", "pushd ~/.ssh", "ls ~/.ssh", "stat ~/.ssh",
+		"cd ~/.ssh", "pushd ~/.ssh", "ls ~/.ssh", "stat ~/.ssh", "cd ~/.ssh && cat authorized_keys",
 		"f=report.txt; echo marker >> \"${f:-alias}\"",
 		"out=report-0509.txt; awk \"BEGIN {print \\\"marker\\\" >> \\\"$out\\\"}\"",
 	} {
@@ -62,7 +62,7 @@ func TestBalancedActionOnlyResolvedProtectedTargets(t *testing.T) {
 		"grep marker " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
 		"rg marker " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
 		"echo marker >> ~/.ssh/authorized_keys",
-		"cd ~/.ssh && cat authorized_keys",
+		"cd ~/.ssh && echo marker >> authorized_keys",
 		"echo marker >> alias",
 		"cp payload alias",
 		"f=other; unset f; echo marker >> \"${f:-alias}\"",
