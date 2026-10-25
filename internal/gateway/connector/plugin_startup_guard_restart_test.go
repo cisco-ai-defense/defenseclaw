@@ -191,14 +191,38 @@ fi
 printf '{"deny":false}\n'
 `
 
+const confirmedDenyOnceGuard = `#!/bin/sh
+cat >/dev/null
+case " $* " in
+  *" --foreign-hook-check "*) ;;
+  *) exit 1 ;;
+esac
+if [ ! -f "$0.ran" ]; then
+  : > "$0.ran"
+  printf '%s\n' '{"deny":true,"reason":"enterprise_foreign_hook_blocked: project file .amp/plugins/foreign.ts"}'
+  exit 0
+fi
+printf '{"deny":false}\n'
+`
+
 // A startup check that denied only because the gateway was down retries on
-// the next call in the same agent process.
+// the next call in the same agent process. A confirmed foreign-plugin denial
+// is covered separately and stays pinned.
 func TestPluginGuardOutageDenialRetriesInTheProcess(t *testing.T) {
+	testPluginGuardDenialAtLoad(t, outageDenyOnceGuard, "enterprise_gateway_not_running", true)
+}
+
+func TestPluginConfirmedForeignDenialAtLoadStaysPinned(t *testing.T) {
+	testPluginGuardDenialAtLoad(t, confirmedDenyOnceGuard, "project file", false)
+}
+
+func testPluginGuardDenialAtLoad(t *testing.T, guardScript, reason string, retryable bool) {
+	t.Helper()
 	gateway := openCodeStubGateway(t)
 	root := testenv.PrivateTempDir(t)
 	data := openCodePluginTestData(t, gateway)
 	guard := filepath.Join(root, "defenseclaw-hook")
-	if err := os.WriteFile(guard, []byte(outageDenyOnceGuard), 0o700); err != nil {
+	if err := os.WriteFile(guard, []byte(guardScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	data.ForeignHookGuardJS = javaScriptStringContent(guard)
@@ -223,9 +247,9 @@ const restarted = await loaded.DefenseClaw({ directory: "", client: {} });
 await restarted.config({ plugin_origins: [{ spec: href }], mcp: {} });
 console.log(await call(restarted, "C3"));
 `, writeRenderedPlugin(t, "opencode-plugin.js", "defenseclaw.mjs", data))
-	if len(lines) != 3 || !strings.HasPrefix(lines[0], "block:") ||
-		!strings.Contains(lines[0], "enterprise_gateway_not_running") || lines[1] != "allow" || lines[2] != "allow" {
-		t.Fatalf("OpenCode verdicts = %q, want outage block then recovery in the same process", lines)
+	if len(lines) != 3 || !strings.HasPrefix(lines[0], "block:") || !strings.Contains(lines[0], reason) ||
+		(retryable && lines[1] != "allow") || (!retryable && !strings.HasPrefix(lines[1], "block:")) || lines[2] != "allow" {
+		t.Fatalf("OpenCode verdicts = %q, retryable=%v", lines, retryable)
 	}
 
 	ampRoot := testenv.PrivateTempDir(t)
@@ -234,7 +258,7 @@ console.log(await call(restarted, "C3"));
 		t.Fatal(err)
 	}
 	ampGuard := filepath.Join(ampRoot, "defenseclaw-hook")
-	if err := os.WriteFile(ampGuard, []byte(outageDenyOnceGuard), 0o700); err != nil {
+	if err := os.WriteFile(ampGuard, []byte(guardScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	lines = runNodeHarness(t, `
@@ -270,8 +294,9 @@ console.log(await call(restarted, "U3"));
 		Managed:            true,
 	}))
 	if len(lines) != 3 || !strings.HasPrefix(lines[0], "reject-and-continue:") ||
-		!strings.Contains(lines[0], "enterprise_gateway_not_running") ||
-		!strings.HasPrefix(lines[1], "allow:") || !strings.HasPrefix(lines[2], "allow:") {
-		t.Fatalf("Amp verdicts = %q, want outage block then recovery in the same process", lines)
+		!strings.Contains(lines[0], reason) ||
+		(retryable && !strings.HasPrefix(lines[1], "allow:")) ||
+		(!retryable && !strings.HasPrefix(lines[1], "reject-and-continue:")) || !strings.HasPrefix(lines[2], "allow:") {
+		t.Fatalf("Amp verdicts = %q, retryable=%v", lines, retryable)
 	}
 }
