@@ -1704,7 +1704,7 @@ defenseclaw_api_listener_unproven() {
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
   # The second and third arguments (tests only) replace /proc/net and lsof.
   local port="${1##*:}" host="${1%:*}" net="${2:-/proc/net}" lsof="${3:-/usr/sbin/lsof}"
-  local uid="${EUID:-}" hex="" table="" owner="" own="" exact="" exact_owner="" exact_own="" o2="" o3="" o4=""
+  local uid="${EUID:-}" hex="" table="" owner="" own="" v6_owner="" v6_own="" exact="" exact_owner="" exact_own="" o2="" o3="" o4=""
   local _sl="" addr="" _rem="" st="" _q="" _t="" _r="" u="" _rest=""
   case "$port" in ''|*[!0-9]*) return 0 ;; esac
   [ -n "$uid" ] || return 0
@@ -1733,10 +1733,14 @@ defenseclaw_api_listener_unproven() {
           "$exact":"$hex"|0000000000000000FFFF0000"$exact":"$hex")
             if [ "$u" = "$uid" ]; then exact_own=1; else exact_owner="$u"; fi
             ;;
-          # A wildcard can serve this address only when no exact binding
-          # supersedes it. An IPv6-only wildcard can coexist with IPv4.
-          00000000:"$hex"|00000000000000000000000000000000:"$hex")
+          # An exact IPv4 binding supersedes a wildcard on this address.
+          00000000:"$hex")
             if [ "$u" = "$uid" ]; then own=1; else owner="$u"; fi
+            ;;
+          # tcp6 does not report IPV6_V6ONLY. Keep these rows separate: an
+          # IPv6-only wildcard can coexist with an IPv4 wildcard.
+          00000000000000000000000000000000:"$hex")
+            if [ "$u" = "$uid" ]; then v6_own=1; else v6_owner="$u"; fi
             ;;
           *) continue ;;
         esac
@@ -1746,6 +1750,14 @@ defenseclaw_api_listener_unproven() {
     [ -n "$exact_own" ] && return 1
     [ -n "$owner" ] && return 0
     [ -n "$own" ] && return 1
+    if [ -n "$v6_owner$v6_own" ]; then
+      # A no-payload connect distinguishes a dual-stack wildcard from an
+      # IPv6-only one. The native helper still proves the held peer before
+      # sending the bearer or hook body.
+      (exec 3<>"/dev/tcp/${host}/${port}") 2>/dev/null || return 2
+      [ -n "$v6_owner" ] && return 0
+      return 1
+    fi
     # No listener: the caller may cold-start this account's gateway, then
     # retry ownership proof before it sends. Never send on this status.
     return 2
