@@ -4322,10 +4322,10 @@ function Invoke-Install {
         # a reused pid (hookexec installLockStale): its installer is gone. No
         # clock is read; a lock without that record (1.0.2, 1.0.3), or a
         # start that cannot be read, keeps its live pid.
-        $recorded = [string](Get-Content -LiteralPath (Join-Path $LockDir "proc-start") -ErrorAction SilentlyContinue | Select-Object -First 1)
-        if ($process -and $recorded.Trim()) {
+        $recorded = "$(Get-Content -LiteralPath (Join-Path $LockDir "proc-start") -ErrorAction SilentlyContinue | Select-Object -First 1)".Trim()
+        if ($process -and $recorded) {
             try {
-                if ([string]$process.StartTime.ToFileTimeUtc() -ne $recorded.Trim()) { $process = $null }
+                if ([string]$process.StartTime.ToFileTimeUtc() -ne $recorded) { $process = $null }
             } catch { }
         }
         if ($process -and $process.ProcessName -match '^(powershell|pwsh)$') { Die "Another DefenseClaw install is running (pid $holder)" }

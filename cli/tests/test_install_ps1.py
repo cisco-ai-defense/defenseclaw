@@ -6185,7 +6185,11 @@ def test_install_ps1_takes_over_a_lock_whose_pid_was_reused() -> None:
     refuse = text.index('Die "Another DefenseClaw install is running (pid $holder)"', take)
     block = text[take:refuse]
     assert '(Join-Path $LockDir "proc-start")' in block
-    assert "[string]$process.StartTime.ToFileTimeUtc() -ne $recorded.Trim()" in block
+    assert "[string]$process.StartTime.ToFileTimeUtc() -ne $recorded" in block
+    # A lock without the record (1.0.2, 1.0.3) reads as "", never $null: a
+    # method call on the missing record stopped the install (round k native run).
+    assert '$recorded = "$(Get-Content -LiteralPath (Join-Path $LockDir "proc-start")' in block and ".Trim()" in block
+    assert "$recorded.Trim()" not in block
     assert "$process = $null" in block
     assert "LastWriteTime" not in block and "AddSeconds" not in block
     write = text.index('Set-Content -LiteralPath (Join-Path $LockDir "pid") -Value $PID -Encoding Ascii')
