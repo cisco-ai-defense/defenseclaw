@@ -1672,9 +1672,12 @@ class RemovedConnectorBackupsKeptTests(unittest.TestCase):
             # The config only the moved record names is still listed.
             self.assertIn(os.path.join(home, "oc", "config.yaml"), text)
             # Every path the uninstall tells the user about is still there.
+            # defenseclaw_omnigent.pth (no pth record here) is a file name to look
+            # for in OmniGent's site-packages, not a path.
             named = re.findall(r"^\s*(?:·\s*)?- (\S.*?): ", text, flags=re.MULTILINE)
             self.assertTrue(named)
-            for path in named:
+            self.assertIn("defenseclaw_omnigent.pth", named)
+            for path in (p for p in named if p != "defenseclaw_omnigent.pth"):
                 self.assertTrue(os.path.lexists(path), f"the uninstall names {path}, which it removed:\n{text}")
 
     def test_a_backup_that_cannot_move_stops_the_uninstall_before_any_removal(self):
