@@ -24340,7 +24340,8 @@ function Get-DefenseClawStandaloneManifestAdoption {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)]$Activation,
-        [Parameter(Mandatory)][string]$InstalledManifestSHA256
+        [Parameter(Mandatory)][string]$InstalledManifestSHA256,
+        [hashtable]$GatewaySource
     )
     $result = {
         param([bool]$Ok, [string]$Reason, [int64]$TargetCount, [string[]]$UntrustedFolders = @())
@@ -24368,7 +24369,8 @@ function Get-DefenseClawStandaloneManifestAdoption {
     while ($true) {
         $report = Get-DefenseClawGuardianStatusReport `
             -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName
+            -GatewayServiceName $GatewayServiceName `
+            -GatewaySource $GatewaySource
         $activatedSHA256 = ''
         if ($null -ne $report -and
             $null -ne $report.PSObject.Properties['activation'] -and
@@ -24599,6 +24601,44 @@ function Add-DefenseClawSignedOutUntrustedFolders {
     $script:DefenseClawSignedOutUntrustedFolders = @($kept)
 }
 
+function Test-DefenseClawInstalledGatewayRecorded {
+    <#
+        True when the installed gateway exists, is no reparse point and has
+        the SHA-256 the deployment metadata records for it. Metadata that
+        records no gateway hash keeps the installed gateway. A Repair or
+        Upgrade must not run a missing or replaced binary before the
+        transaction that restores it (GAP-1417).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata
+    )
+    $path = [string]$Layout.GatewayPath
+    if ([string]::IsNullOrWhiteSpace($path) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+        return $false
+    }
+    try {
+        Assert-DefenseClawNoReparsePath -Path $path
+    }
+    catch {
+        return $false
+    }
+    $hashes = $Metadata.PSObject.Properties['hashes']
+    if ($null -eq $hashes -or $null -eq $hashes.Value -or
+        $null -eq $hashes.Value.PSObject.Properties['gateway']) {
+        return $true
+    }
+    $actual = (
+        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $path -Algorithm SHA256
+    ).Hash
+    return [string]::Equals(
+        $actual,
+        [string]$hashes.Value.gateway,
+        [StringComparison]::OrdinalIgnoreCase
+    )
+}
+
 function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
     <#
         Standalone only. Runs under the lifecycle lock, after any pending
@@ -24611,10 +24651,15 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
         binding check of the transaction sees one manifest generation. Only
         manifest_sha256 and target_count change; the state and the deployment
         generation stay as recorded. Returns $true when it rebound.
+        GatewaySource is the authenticated replacement gateway of a Repair or
+        Upgrade. Their transaction installs it, so it reads the guardian's
+        records when the installed gateway is missing or is not the binary
+        the deployment recorded (GAP-1417).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)][string]$GatewayServiceName
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [hashtable]$GatewaySource
     )
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return $false
@@ -24647,11 +24692,17 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
     if ([string]$activation.manifest_sha256 -ceq $installedManifestSHA256) {
         return $false
     }
+    $probeGatewaySource = $null
+    if ($null -ne $GatewaySource -and
+        -not (Test-DefenseClawInstalledGatewayRecorded -Layout $Layout -Metadata $metadata)) {
+        $probeGatewaySource = $GatewaySource
+    }
     $adoption = Get-DefenseClawStandaloneManifestAdoption `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -Activation $activation `
-        -InstalledManifestSHA256 $installedManifestSHA256
+        -InstalledManifestSHA256 $installedManifestSHA256 `
+        -GatewaySource $probeGatewaySource
     if (-not [bool]$adoption.ok) {
         throw (
             'deployment managed-hook activation evidence does not bind installed targets.yaml' +
@@ -26035,12 +26086,16 @@ function Assert-DefenseClawGatewayServiceAccess {
 function Get-DefenseClawGuardianStatusReport {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)][string]$GatewayServiceName
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        # The authenticated replacement gateway a Repair or Upgrade staged,
+        # used when the installed one cannot run (GAP-1417).
+        [hashtable]$GatewaySource
     )
     try {
         $probe = Invoke-DefenseClawGatewayCommand `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
+            -GatewaySource $GatewaySource `
             -Arguments @('enterprise', 'hooks', 'status', '--manifest', $Layout.ManifestPath, '--json') `
             -Capture `
             -AllowFailure
@@ -38781,9 +38836,17 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             }
         }
         if ($Action -in @('Upgrade', 'Repair', 'Uninstall')) {
+            # Upgrade and Repair install their authenticated gateway in the
+            # transaction, so it may prove the guardian's records when the
+            # installed one is missing or replaced (GAP-1417).
+            $bindingGatewaySource = $null
+            if ($Action -in @('Upgrade', 'Repair') -and $sources.ContainsKey('gateway')) {
+                $bindingGatewaySource = [hashtable]$sources['gateway']
+            }
             [void](Sync-DefenseClawStandaloneManagedHooksActivationBinding `
                 -Layout $layout `
-                -GatewayServiceName $GatewayServiceName)
+                -GatewayServiceName $GatewayServiceName `
+                -GatewaySource $bindingGatewaySource)
         }
         if ($Action -eq 'Uninstall') {
             $nativeCleanupSource = if ($sources.ContainsKey('native_cleanup')) {

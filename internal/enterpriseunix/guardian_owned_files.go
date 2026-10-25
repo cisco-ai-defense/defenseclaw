@@ -28,8 +28,8 @@ const codeGuardianRepairPending = "guardian_repair_pending"
 var guardianOwnedFilesCheckBudget = 5 * time.Second
 
 type changedGuardianTarget struct {
-	user, connector, first string
-	count                  int
+	user, connector, first, nonExecutable string
+	count                                 int
 }
 
 // describeChangedGuardianFiles compares each verified target's hook files
@@ -55,8 +55,24 @@ func (l *lifecycle) describeChangedGuardianFiles() {
 		var changes []changedGuardianTarget
 		for _, target := range record.Targets {
 			changed := target.ChangedFiles(func(path string) string { return enterprisehooks.OwnedFileFingerprint(env.P(path)) })
+			change := changedGuardianTarget{user: target.User, connector: target.Connector, count: len(changed)}
 			if len(changed) > 0 {
-				changes = append(changes, changedGuardianTarget{user: target.User, connector: target.Connector, first: changed[0], count: len(changed)})
+				change.first = changed[0]
+			}
+			if target.Connector == "hermes" && (l.opts.Action == ActionVerify || l.opts.Action == ActionEnsure) {
+				for _, file := range target.Files {
+					if filepath.Base(file.Path) != "hermes-hook.sh" {
+						continue
+					}
+					info, err := os.Lstat(env.P(file.Path))
+					if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o100 == 0 {
+						change.nonExecutable = file.Path
+						break
+					}
+				}
+			}
+			if change.count > 0 || change.nonExecutable != "" {
+				changes = append(changes, change)
 			}
 		}
 		done <- changes
@@ -72,9 +88,15 @@ func (l *lifecycle) describeChangedGuardianFiles() {
 		return
 	}
 	for _, change := range changes {
-		r.AddWarning(codeGuardianRepairPending, fmt.Sprintf(
-			"%d DefenseClaw hook file(s) of user %s for %s changed since the hook guardian last verified them (%s); that agent's hook calls may not be inspected until the guardian puts them back on its next pass. Run `%s` again in a minute",
-			change.count, boundedGuardianReason(change.user), change.connector, boundedGuardianReason(change.first), env.lifecycleCommand("status")))
+		if change.count > 0 {
+			r.AddWarning(codeGuardianRepairPending, fmt.Sprintf(
+				"%d DefenseClaw hook file(s) of user %s for %s changed since the hook guardian last verified them (%s); that agent's hook calls may not be inspected until the guardian puts them back on its next pass. Run `%s` again in a minute",
+				change.count, boundedGuardianReason(change.user), change.connector, boundedGuardianReason(change.first), env.lifecycleCommand("status")))
+		}
+		if change.nonExecutable != "" {
+			r.AddError(codeVerify, fmt.Sprintf("registered Hermes hook is not executable for user %s: %s",
+				boundedGuardianReason(change.user), boundedGuardianReason(change.nonExecutable)))
+		}
 	}
 	if len(changes) > 0 {
 		r.SecurityComplete = false
