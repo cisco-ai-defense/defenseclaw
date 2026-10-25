@@ -61,9 +61,9 @@ func awaitingSpool(facts useridentity.DirectoryFacts) bool {
 // costs a directory cache read. Facts its current record was merged into
 // await nothing: a local Mac account, or an SSSD account whose directory
 // gives no UPN, has none (GAP-0522). Nor does an account the gateway's own
-// Open Directory answer proves is of the local node and not a mobile copy
-// of a directory account (darwinLocalNodeAccount): it has no UPN to wait
-// for, as agentIdentityAccountUPN already holds. Waiting for one left every UPN or
+// Open Directory answer proves local (macOSOwnDirectory: of the local node,
+// not a mobile copy of a directory account and not linked to Platform SSO):
+// it has no UPN to wait for, as agentIdentityAccountUPN already holds. Waiting for one left every UPN or
 // DOMAIN\name assignment a maybe for such an account, so a local account
 // was refused once any such assignment existed (GAP-0532).
 func awaitingSpoolUPN(facts useridentity.DirectoryFacts) bool {
@@ -77,6 +77,21 @@ func awaitingSpoolUPN(facts useridentity.DirectoryFacts) bool {
 		return facts.Directory == "" || facts.UPN == "" && facts.Directory != useridentity.DirectoryLocal
 	}
 	return false
+}
+
+// macOSOwnDirectory is the directory the gateway's own Open Directory answer
+// proves for an account: local for an account of the local node
+// (darwinLocalNodeAccount) that is not linked to Platform SSO, else unknown
+// until the guardian's record names it. A Platform SSO account is held by
+// the local node too, but it is the identity provider's account, and only
+// the guardian's record carries its UPN. Calling it local let a users entry
+// naming that UPN miss it while the record was absent or aged out, so the
+// account got the default profile where it was refused (GAP-0532).
+func macOSOwnDirectory(localNode, platformSSOLinked bool) useridentity.Directory {
+	if localNode && !platformSSOLinked {
+		return useridentity.DirectoryLocal
+	}
+	return ""
 }
 
 // spoolRecordNote is the explain note for an account the enumerator has no
