@@ -30,6 +30,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
@@ -546,16 +547,9 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 		}
 	case "remove":
 		mutate = func(context.Context) error {
-			path := filepath.Join(env.P(env.Layout.SecretsDir), opts.name)
-			if opts.undoRotation != "" || opts.ifStored != "" {
-				stored, readErr := os.ReadFile(path)
-				if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
-					return err
-				}
-			}
-			_, statErr := os.Lstat(path)
+			_, statErr := os.Lstat(filepath.Join(env.P(env.Layout.SecretsDir), opts.name))
 			existed = statErr == nil
-			return env.RemoveSecret(opts.name)
+			return removeUnixSecret(env, opts)
 		}
 	}
 	// A change this device could not audit is not made: the spool must hold
@@ -571,6 +565,35 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	// wakes then finds the change already applied instead of racing it.
 	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret", Mutate: mutate})
 	return result, existed, reservation, nil
+}
+
+// removeUnixSecret is the change of secret remove, under the lifecycle lock.
+// A put-back (--undo-rotation) runs only as checkSecretTransaction allows;
+// it removes a credential the failed rotation added to the config installed
+// before it, which may reference the credential with no value stored, only
+// while that very config is installed (--undo-config, GAP-1173). A config
+// installed since may use the value stored now: credential_in_use, and
+// nothing is removed. Every other remove refuses a referenced credential.
+func removeUnixSecret(env *enterpriseunix.Env, opts *enterpriseSecretOptions) error {
+	path := filepath.Join(env.P(env.Layout.SecretsDir), opts.name)
+	if opts.undoRotation != "" || opts.ifStored != "" {
+		stored, readErr := os.ReadFile(path)
+		if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
+			return err
+		}
+	}
+	if opts.undoRotation != "" {
+		if installed, err := os.ReadFile(env.P(env.Layout.ConfigPath)); err == nil {
+			if at := config.InstalledCredentialReference(env.Layout.ConfigPath, installed, env.Layout.DataDir, opts.name); at != "" {
+				if !undoRotationOnConfig(opts, installed) {
+					return &enterprisebundle.Error{Code: "credential_in_use", Detail: fmt.Sprintf(
+						"the installed config references credential %s at %s and is not the config installed before the rotation (--undo-config), so it may use the value stored now; credential %s was not removed", opts.name, at, opts.name)}
+				}
+				return env.RemoveRotatedSecret(opts.name)
+			}
+		}
+	}
+	return env.RemoveSecret(opts.name)
 }
 
 // secretCallerPID is the parent of this process. A seam for tests.

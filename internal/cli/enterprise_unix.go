@@ -55,11 +55,11 @@ type enterpriseSecretOptions struct {
 	// bundle is confirmed). undoRotation (set|remove --undo-rotation) puts
 	// back a credential a rotation changed, only while the bundle confirmed
 	// before that rotation still is and does not sign the value stored now
-	// (checkSecretTransaction). The Windows MDM wrapper journals the
-	// confirmed bundle before a rotation and passes it to both; a 1.0.4
+	// (checkSecretTransaction). The MDM wrappers journal the
+	// confirmed bundle before a rotation and pass it to both; a 1.0.4
 	// build reporting secret_set_bundle takes them. undoConfig (remove
 	// --undo-rotation --undo-config) is the SHA-256 of the installed config
-	// the wrapper journaled before the rotation: on Windows the put-back
+	// the wrapper journaled before the rotation: the put-back
 	// takes a credential the installed config references only while that
 	// very config is installed (undoRotationOnConfig).
 	ifConfirmed  string
@@ -341,7 +341,7 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 		cmd.Flags().StringVar(&opts.ifStored, "if-stored", "", usage)
 	}
 	if action == "remove" {
-		cmd.Flags().StringVar(&opts.undoConfig, "undo-config", "", "with --undo-rotation (Windows): the SHA-256 of the installed config before the rotation (none: no config); only while that config is still installed does remove take a credential it references, else credential_in_use and nothing is removed")
+		cmd.Flags().StringVar(&opts.undoConfig, "undo-config", "", "with --undo-rotation: the SHA-256 of the installed config before the rotation (none: no config); only while that config is still installed does remove take a credential it references, else credential_in_use and nothing is removed")
 	}
 	if action != "status" {
 		addLockWaitFlag(cmd.Flags(), &opts.lockWait)
