@@ -137,6 +137,9 @@ func TestCopilotEmptyPermissionArgsRejectsAmbiguousEnvelope(t *testing.T) {
 		{"conflicting snake tool", "tool_name", "powershell"},
 		{"conflicting snake input", "tool_input", map[string]any{"file_path": "/home/user/.ssh/authorized_keys"}},
 		{"conflicting snake args", "tool_args", map[string]any{"command": "unsafe"}},
+		{"conflicting snake event", "hook_event_name", "permissionRequest"},
+		{"both argument fields", "toolArgs", map[string]any{}},
+		{"null beside argument field", "toolArgs", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			payload := make(map[string]any, len(base)+1)
@@ -165,11 +168,11 @@ func TestCopilotPermissionJoinCapacityStillInvalidatesPrior(t *testing.T) {
 	for i := 1; i < copilotPermissionJoinMax; i++ {
 		join.entries["other"+strconv.Itoa(i)] = copilotPermissionEntry{at: time.Now()}
 	}
-	join.record(ctx, pre, agentHookResponse{Action: "block"})
+	join.record(ctx, pre, agentHookResponse{Action: "block"}, "")
 	permission := agentHookRequest{ConnectorName: "copilot", HookEventName: "permissionRequest",
 		SessionID: "native", CWD: "/tmp/native", ToolName: "edit",
 		Payload: map[string]any{"hookName": "permissionRequest", "toolName": "edit", "toolInput": map[string]any{}}}
-	if _, ok := join.match(ctx, permission, connector.HookProfile{}, []byte(`{"hookName":"permissionRequest","toolName":"edit","toolInput":{}}`)); ok {
+	if _, ok := join.match(ctx, permission, connector.HookProfile{}, []byte(`{"hookName":"permissionRequest","toolName":"edit","toolInput":{}}`), ""); ok {
 		t.Fatal("protected call left an earlier allowed decision reusable at cache capacity")
 	}
 }

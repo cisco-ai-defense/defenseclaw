@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,17 +20,37 @@ const (
 
 // A native Copilot permissionRequest sometimes omits the call arguments and
 // call id. Only one recent, audited, allowed preToolUse in the same verified
-// caller/session/directory can supply that missing decision.
+// caller/session/directory, decided under the same policy, can supply that
+// missing decision.
 type copilotPermissionJoin struct {
 	mu      sync.Mutex
 	entries map[string]copilotPermissionEntry
 }
 
 type copilotPermissionEntry struct {
-	response  agentHookResponse
-	tool      string
+	response agentHookResponse
+	tool     string
+	// policy is copilotPermissionPolicy of the preToolUse.
+	policy    string
 	at        time.Time
 	ambiguous bool
+}
+
+// copilotPermissionPolicy names the policy a request decides under: the
+// generation it pinned and the guardrail profile it resolved. A config,
+// bundle, asset or profile change between the preToolUse and its permission
+// callback makes the earlier decision stale.
+func (a *APIServer) copilotPermissionPolicy(ctx context.Context) string {
+	var parts []string
+	if g := a.decisionGeneration(ctx); g != nil {
+		parts = append(parts, strconv.FormatUint(g.N, 10), g.Digest)
+	} else {
+		parts = append(parts, "", "")
+	}
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil {
+		parts = append(parts, resolved.decision.Name, resolved.decision.Digest, resolved.decision.Refused)
+	}
+	return strings.Join(parts, "\x00")
 }
 
 func copilotPermissionKey(ctx context.Context, req agentHookRequest) string {
@@ -40,7 +61,7 @@ func copilotPermissionKey(ctx context.Context, req agentHookRequest) string {
 	return scope + "\x00" + req.SessionID + "\x00" + req.CWD
 }
 
-func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest, response agentHookResponse) {
+func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest, response agentHookResponse, policy string) {
 	if req.ConnectorName != "copilot" || req.HookEventName != "preToolUse" ||
 		req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal {
 		return
@@ -74,7 +95,7 @@ func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest
 	if req.ToolCallUnparsed || req.ToolArgsProjectionUncertain || req.ToolName == "" || response.Action != "allow" {
 		return
 	}
-	j.entries[key] = copilotPermissionEntry{response: response, tool: req.ToolName, at: now}
+	j.entries[key] = copilotPermissionEntry{response: response, tool: req.ToolName, policy: policy, at: now}
 }
 
 // match reuses the prior decision only for a callback whose raw body is one
@@ -82,8 +103,11 @@ func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest
 // duplicate toolInput, toolName or hookName could pair a protected call with
 // an empty decoded map. Such a callback still consumes the prior decision
 // and gets its own (unparsed) gate. An argumentless callback is unparsed by
-// design, so the raw body is checked here and not req.ToolCallUnparsed.
-func (j *copilotPermissionJoin) match(ctx context.Context, req agentHookRequest, profile connector.HookProfile, raw []byte) (agentHookResponse, bool) {
+// design (no write evidence), so req.ToolCallUnparsed alone cannot refuse
+// it; any other parser refusal (req.toolCallShapeUnparsed) does. policy is
+// copilotPermissionPolicy of the callback: a decision made under another
+// policy is stale.
+func (j *copilotPermissionJoin) match(ctx context.Context, req agentHookRequest, profile connector.HookProfile, raw []byte, policy string) (agentHookResponse, bool) {
 	if req.ConnectorName != "copilot" || req.HookEventName != "permissionRequest" ||
 		req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal {
 		return agentHookResponse{}, false
@@ -104,7 +128,8 @@ func (j *copilotPermissionJoin) match(ctx context.Context, req agentHookRequest,
 		delete(j.entries, key)
 	}
 	j.mu.Unlock()
-	if !exists || entry.ambiguous || !hookToolCallJSONUnambiguous(req.ConnectorName, raw) ||
+	if !exists || entry.ambiguous || entry.policy != policy || req.toolCallShapeUnparsed ||
+		!hookToolCallJSONUnambiguous(req.ConnectorName, raw) ||
 		!copilotEmptyPermissionArgs(req.Payload) ||
 		!copilotPermissionToolMatches(entry.tool, req.ToolName) {
 		return agentHookResponse{}, false
@@ -120,10 +145,17 @@ func copilotEmptyPermissionArgs(payload map[string]any) bool {
 	if payload == nil || payload["hookName"] != "permissionRequest" {
 		return false
 	}
-	for _, name := range []string{"toolCalls", "tool_name", "tool_input", "tool_args"} {
+	for _, name := range []string{"toolCalls", "tool_name", "tool_input", "tool_args", "hook_event_name"} {
 		if _, present := payload[name]; present {
 			return false
 		}
+	}
+	// Both argument fields, even empty or null, leave which one the agent
+	// reads to the agent.
+	_, hasInput := payload["toolInput"]
+	_, hasArgs := payload["toolArgs"]
+	if hasInput && hasArgs {
+		return false
 	}
 	for _, name := range []string{"toolInput", "toolArgs"} {
 		value, present := payload[name]

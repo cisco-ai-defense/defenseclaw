@@ -59,6 +59,15 @@ func TestNativeCopilotAmbiguousPermissionDoesNotInheritAllow(t *testing.T) {
 		{"duplicate toolArgs", `{"hookName":"permissionRequest","sessionId":"%s","cwd":%s,"toolName":"edit","toolArgs":{"file_path":` + keys + `},"toolArgs":{}}`},
 		{"duplicate hookName", `{"hookName":"preToolUse","hookName":"permissionRequest","sessionId":"%s","cwd":%s,"toolName":"edit","toolInput":{}}`},
 		{"duplicate nested key", `{"hookName":"permissionRequest","sessionId":"%s","cwd":%s,"toolName":"edit","toolInput":{},"permissionSuggestions":[{"path":` + keys + `,"path":"README.md"}]}`},
+		// Field-level ambiguity the handler refuses (agent_hook.go) with no
+		// duplicate key: both argument fields, in either order or null, and
+		// a snake_case dialect decoy (T12b round d review, loop round 2).
+		{"both argument fields empty", `{"hookName":"permissionRequest","sessionId":"%s","cwd":%s,"toolName":"edit","toolInput":{},"toolArgs":{}}`},
+		{"both argument fields reversed", `{"hookName":"permissionRequest","sessionId":"%s","cwd":%s,"toolName":"edit","toolArgs":{},"toolInput":{}}`},
+		{"null toolInput beside toolArgs", `{"hookName":"permissionRequest","sessionId":"%s","cwd":%s,"toolName":"edit","toolInput":null,"toolArgs":{}}`},
+		{"toolInput beside null toolArgs", `{"hookName":"permissionRequest","sessionId":"%s","cwd":%s,"toolName":"edit","toolInput":{},"toolArgs":null}`},
+		{"both argument fields null", `{"hookName":"permissionRequest","sessionId":"%s","cwd":%s,"toolName":"edit","toolInput":null,"toolArgs":null}`},
+		{"snake event decoy", `{"hookName":"permissionRequest","hook_event_name":"permissionRequest","sessionId":"%s","cwd":%s,"toolName":"edit","toolInput":{}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			session := "ambiguous-" + strings.ReplaceAll(tc.name, " ", "-")
