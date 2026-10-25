@@ -25,7 +25,7 @@ import (
 func TestTrustedActionBase64StdinSensitivePathEgress(t *testing.T) {
 	t.Parallel()
 
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	for _, test := range []struct {
 		name          string
 		command       string

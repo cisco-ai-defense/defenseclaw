@@ -614,9 +614,9 @@ func TestGeneratedDefaultShellProfileRuleMatchesShippedYAML(t *testing.T) {
 		t.Fatal("shipped shell-profile rule is missing")
 	}
 	var generated *PatternRule
-	for categoryIndex := range defaultRuleCategories {
-		for ruleIndex := range defaultRuleCategories[categoryIndex].Rules {
-			rule := &defaultRuleCategories[categoryIndex].Rules[ruleIndex]
+	for categoryIndex := range defaultRuleCategories() {
+		for ruleIndex := range defaultRuleCategories()[categoryIndex].Rules {
+			rule := &defaultRuleCategories()[categoryIndex].Rules[ruleIndex]
 			if rule.ID == shipped.ID {
 				generated = rule
 				break

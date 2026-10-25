@@ -1214,7 +1214,7 @@ func trustedActionShippedGitAdvisoryRule(
 		return false
 	}
 	defaultCategory, shipped, ok := trustedActionCatalogRuleInCategories(
-		defaultRuleCategories,
+		defaultRuleCategories(),
 		ruleID,
 	)
 	return ok && category == defaultCategory &&

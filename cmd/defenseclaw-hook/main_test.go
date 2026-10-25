@@ -19,8 +19,48 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"regexp"
+	"strconv"
 	"testing"
 )
+
+// The hook imports the CLI for its command contract. Gateway rules and
+// telemetry catalogs still have to be ready before their first real use, but
+// compiling them in package init makes every short-lived hook pay for them.
+func TestHookStartupInitBudget(t *testing.T) {
+	if os.Getenv("DEFENSECLAW_HOOK_STARTUP_HELPER") == "1" {
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(executable, "-test.run=^TestHookStartupInitBudget$")
+	cmd.Env = append(os.Environ(), "DEFENSECLAW_HOOK_STARTUP_HELPER=1", "GODEBUG=inittrace=1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("hook startup helper: %v\n%s", err, output)
+	}
+	lines := regexp.MustCompile(`(?m)^init github\.com/defenseclaw/defenseclaw/internal/(gateway|telemetry|observability) @[^\n]*?, ([0-9]+) bytes,`)
+	var total int64
+	matches := lines.FindAllSubmatch(output, -1)
+	if len(matches) != 3 {
+		t.Fatalf("expected init traces for gateway, telemetry and observability, got %d", len(matches))
+	}
+	for _, match := range matches {
+		bytes, err := strconv.ParseInt(string(match[2]), 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("%s package init: %d bytes", match[1], bytes)
+		total += bytes
+	}
+	if total > 20<<20 {
+		t.Fatalf("hook imports allocate %d bytes in gateway/telemetry/observability package init, want at most 20 MiB", total)
+	}
+}
 
 func TestIsHookEntrypoint(t *testing.T) {
 	tests := []struct {
