@@ -91,7 +91,9 @@ func TestInstructionProtectionManagedStartupUsesClientSnapshot(t *testing.T) {
 		api.evaluateCodexHook(ctx, codexHookRequest{
 			HookEventName: "SessionStart", SessionID: session, CWD: project,
 		})
-		if got := api.activeAgentContext.snapshot("codex", session); !got.startupKnown {
+		// The state of a managed session is keyed by its verified caller.
+		key, _ := instructionStartupKey(ctx, "codex", session)
+		if got := api.activeAgentContext.snapshotKey(key); !got.startupKnown {
 			t.Fatal("managed gateway lost client startup snapshot")
 		}
 	}
