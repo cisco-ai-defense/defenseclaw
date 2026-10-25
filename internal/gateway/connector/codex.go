@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -4596,18 +4595,14 @@ func codexOtelResidueFields(v interface{}, opts SetupOpts) []string {
 		if codexExporterLooksManaged(exporter, opts) || codexExporterHasAmbiguousLegacyPort(exporter, opts) {
 			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.endpoint retains DefenseClaw exporter", key))
 		}
-		if codexExporterUsesProductBearer(exporter, opts) {
-			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.headers.authorization retains DefenseClaw credential", key))
-		}
-		if !codexExporterHasManagedHeaderResidue(exporter) {
-			continue
+		for _, name := range codexExporterProductBearerKeys(exporter, opts) {
+			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.headers.%s retains DefenseClaw credential", key, name))
 		}
 		headers := codexExporterHeaders(exporter)
-		if _, exists := headers["x-defenseclaw-source"]; exists {
-			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.headers.x-defenseclaw-source retains DefenseClaw marker", key))
-		}
-		if _, exists := headers["x-defenseclaw-client"]; exists {
-			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.headers.x-defenseclaw-client retains DefenseClaw marker", key))
+		for _, marker := range codexProductMarkerHeaders {
+			for _, name := range otlpHeaderKeys(headers, marker) {
+				residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.headers.%s retains DefenseClaw marker", key, name))
+			}
 		}
 	}
 	if len(residual) > 0 {
@@ -4615,6 +4610,10 @@ func codexOtelResidueFields(v interface{}, opts SetupOpts) []string {
 	}
 	return residual
 }
+
+// codexProductMarkerHeaders are the namespaced headers every released Codex
+// exporter carried. Any spelling of either name is product residue.
+var codexProductMarkerHeaders = [...]string{"x-defenseclaw-source", "x-defenseclaw-client"}
 
 func codexExporterHeaders(v interface{}) map[string]interface{} {
 	exporter, ok := v.(map[string]interface{})
@@ -4631,34 +4630,76 @@ func codexExporterHeaders(v interface{}) map[string]interface{} {
 
 func codexExporterHasManagedHeaderResidue(v interface{}) bool {
 	headers := codexExporterHeaders(v)
-	if headers == nil {
-		return false
-	}
-	_, hasSource := headers["x-defenseclaw-source"]
-	_, hasClient := headers["x-defenseclaw-client"]
-	return hasSource || hasClient
+	return len(otlpHeaderKeys(headers, "x-defenseclaw-source")) > 0 ||
+		len(otlpHeaderKeys(headers, "x-defenseclaw-client")) > 0
 }
 
 func codexExporterHasManagedHeaderPair(v interface{}) bool {
 	headers := codexExporterHeaders(v)
-	if headers == nil {
-		return false
+	return len(otlpHeaderKeys(headers, "x-defenseclaw-source")) > 0 &&
+		len(otlpHeaderKeys(headers, "x-defenseclaw-client")) > 0
+}
+
+// codexExporterHasProductMarker reports a marker header carrying a released
+// product value under any spelling of its name.
+func codexExporterHasProductMarker(headers map[string]interface{}) (source, client bool) {
+	return otlpHeaderHas(headers, "x-defenseclaw-source", "codex"),
+		otlpHeaderHas(headers, "x-defenseclaw-client", "codex-otel/1.0")
+}
+
+// codexProductOTLPToken returns the scoped Codex credential this install
+// issued, or "" when none is recorded.
+func codexProductOTLPToken(opts SetupOpts) (string, error) {
+	if token := strings.TrimSpace(opts.OTLPPathToken); token != "" {
+		return token, nil
 	}
-	_, hasSource := headers["x-defenseclaw-source"]
-	_, hasClient := headers["x-defenseclaw-client"]
-	return hasSource && hasClient
+	if opts.DataDir == "" {
+		return "", nil
+	}
+	return LoadOTLPPathToken(opts.DataDir, OTLPScopeCodex)
+}
+
+// codexExporterAuthorization splits the Authorization spellings of an exporter
+// into those that carry the scoped product bearer and every other credential.
+func codexExporterAuthorization(v interface{}, token string) (product, other []string) {
+	headers := codexExporterHeaders(v)
+	for _, key := range otlpHeaderKeys(headers, "authorization") {
+		value, _ := headers[key].(string)
+		if credential, ok := otlpBearerCredential(value); ok && token != "" && credential == token {
+			product = append(product, key)
+		} else {
+			other = append(other, key)
+		}
+	}
+	return product, other
+}
+
+// codexExporterProductBearerKeys names the header spellings that would send
+// DefenseClaw's scoped credential with this exporter.
+func codexExporterProductBearerKeys(v interface{}, opts SetupOpts) []string {
+	if len(otlpHeaderKeys(codexExporterHeaders(v), "authorization")) == 0 {
+		return nil
+	}
+	token, _ := codexProductOTLPToken(opts)
+	product, _ := codexExporterAuthorization(v, token)
+	return product
 }
 
 func codexExporterUsesProductBearer(v interface{}, opts SetupOpts) bool {
-	bearer, _ := codexExporterHeaders(v)["authorization"].(string)
-	if !strings.HasPrefix(bearer, "Bearer ") {
+	return len(codexExporterProductBearerKeys(v, opts)) > 0
+}
+
+// codexExporterHasOnlyProductBearer reports an exporter whose every
+// Authorization spelling is the scoped product bearer. A second spelling with
+// another credential is the operator's edit, so the route stays theirs and
+// cleanup removes only the product spelling.
+func codexExporterHasOnlyProductBearer(v interface{}, opts SetupOpts) bool {
+	if len(otlpHeaderKeys(codexExporterHeaders(v), "authorization")) == 0 {
 		return false
 	}
-	token := strings.TrimSpace(opts.OTLPPathToken)
-	if token == "" && opts.DataDir != "" {
-		token, _ = LoadOTLPPathToken(opts.DataDir, OTLPScopeCodex)
-	}
-	return token != "" && bearer == "Bearer "+token
+	token, _ := codexProductOTLPToken(opts)
+	product, other := codexExporterAuthorization(v, token)
+	return len(product) > 0 && len(other) == 0
 }
 
 func restoreCodexOwnedExporterHeaders(current, saved interface{}, hadSaved bool, opts SetupOpts) error {
@@ -4667,31 +4708,31 @@ func restoreCodexOwnedExporterHeaders(current, saved interface{}, hadSaved bool,
 	if headers == nil || !paired && !codexExporterUsesProductBearer(current, opts) {
 		return nil
 	}
-	productToken := strings.TrimSpace(opts.OTLPPathToken)
-	if productToken == "" && opts.DataDir != "" {
-		var err error
-		productToken, err = LoadOTLPPathToken(opts.DataDir, OTLPScopeCodex)
-		if err != nil {
-			return fmt.Errorf("inspect Codex native OTLP credential: %w", err)
-		}
+	productToken, err := codexProductOTLPToken(opts)
+	if err != nil {
+		return fmt.Errorf("inspect Codex native OTLP credential: %w", err)
 	}
 	if paired {
-		delete(headers, "x-defenseclaw-source")
-		delete(headers, "x-defenseclaw-client")
+		for _, marker := range codexProductMarkerHeaders {
+			for _, key := range otlpHeaderKeys(headers, marker) {
+				delete(headers, key)
+			}
+		}
 	}
 
 	// The pair proves only its own namespaced headers. A generic Authorization
-	// value can be the operator's newer collector credential; remove it only
-	// when it equals the scoped product credential recorded for this install.
-	savedHeaders := map[string]interface{}(nil)
-	if hadSaved && !codexExporterHasManagedHeaderResidue(saved) {
-		savedHeaders = codexExporterHeaders(saved)
+	// value can be the operator's newer collector credential; remove only the
+	// spellings that carry the scoped product credential recorded for this
+	// install, and keep every other spelling as written.
+	product, other := codexExporterAuthorization(current, productToken)
+	for _, key := range product {
+		delete(headers, key)
 	}
-	if productToken != "" && headers["authorization"] == "Bearer "+productToken {
-		if value, exists := savedHeaders["authorization"]; exists && value != headers["authorization"] {
-			headers["authorization"] = value
-		} else {
-			delete(headers, "authorization")
+	if len(product) > 0 && len(other) == 0 && hadSaved && !codexExporterHasManagedHeaderResidue(saved) {
+		savedHeaders := codexExporterHeaders(saved)
+		_, savedOther := codexExporterAuthorization(saved, productToken)
+		for _, key := range savedOther {
+			headers[key] = savedHeaders[key]
 		}
 	}
 	exporter := current.(map[string]interface{})
@@ -4722,13 +4763,13 @@ func codexExporterLooksManaged(v interface{}, opts SetupOpts) bool {
 		return false
 	}
 	// A released direct exporter whose markers were removed remains product
-	// owned when its bearer is the scoped token. An operator's changed endpoint
-	// owns its route; restore only its product headers and bearer there.
-	if codexLegacyDirectOTLPEndpointLooksManaged(endpoint) && codexExporterUsesProductBearer(v, opts) {
+	// owned when its only bearer is the scoped token, under any spelling of the
+	// header name. An operator's changed endpoint owns its route; restore only
+	// its product headers and bearer there.
+	if codexLegacyDirectOTLPEndpointLooksManaged(endpoint) && codexExporterHasOnlyProductBearer(v, opts) {
 		return true
 	}
-	sourceMarker := headers["x-defenseclaw-source"] == "codex"
-	clientMarker := headers["x-defenseclaw-client"] == "codex-otel/1.0"
+	sourceMarker, clientMarker := codexExporterHasProductMarker(headers)
 	directBase := "http://" + strings.TrimSpace(opts.APIAddr) + "/v1/"
 	if endpoint == directBase+"logs" || endpoint == directBase+"traces" || endpoint == directBase+"metrics" {
 		return sourceMarker || clientMarker
@@ -4760,8 +4801,8 @@ func codexExporterHasAmbiguousLegacyPort(v interface{}, opts SetupOpts) bool {
 	if !codexLegacyDirectOTLPEndpointLooksManaged(endpoint) {
 		return false
 	}
-	headers := codexExporterHeaders(v)
-	return headers["x-defenseclaw-source"] == "codex" || headers["x-defenseclaw-client"] == "codex-otel/1.0"
+	source, client := codexExporterHasProductMarker(codexExporterHeaders(v))
+	return source || client
 }
 
 func codexScopedOTLPEndpointLooksManaged(endpoint string) bool {
@@ -4805,19 +4846,11 @@ func codexLegacyDirectOTLPEndpointLooksManaged(endpoint string) bool {
 }
 
 func codexLoopbackOTLPAuthorityLooksManaged(parsed *url.URL) bool {
-	if parsed == nil || !codexLoopbackHost(parsed.Hostname()) {
+	if parsed == nil || !otlpLocalHost(parsed.Hostname()) {
 		return false
 	}
 	port, err := strconv.Atoi(parsed.Port())
 	return err == nil && port > 0 && port <= 65535
-}
-
-func codexLoopbackHost(host string) bool {
-	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 func codexConfigHasManagedOTLPEndpoint(configPath string, opts SetupOpts) (bool, error) {

@@ -1822,11 +1822,8 @@ func claudeCodeOperatorOtelSettings(existing map[string]interface{}, previous ma
 		if endpoint == previous[key] && previous[key] != "" {
 			return true
 		}
-		headers := claudeCodeEffectiveEndpointHeaders(existing, key)
-		_, marked := claudeCodeWithoutDefenseClawHeaders(headers, "")
 		return claudeCodeScopedLoopbackOTLPEndpoint(endpoint) ||
-			(claudeCodeLoopbackGatewayEndpoint(endpoint) &&
-				(marked || claudeCodeMatchedProductBearer(headers, previous, opts) != ""))
+			claudeCodeLoopbackRouteIsProduct(existing, key, endpoint, previous, opts)
 	}
 	operatorEndpoint := func(key string) bool {
 		endpoint, _ := existing[key].(string)
@@ -1860,9 +1857,10 @@ func claudeCodeOperatorOtelSettings(existing map[string]interface{}, previous ma
 			key == "OTEL_RESOURCE_ATTRIBUTES" || key == "OTEL_SERVICE_NAME" ||
 			strings.HasPrefix(key, "OTEL_LOG_")) &&
 			!claudeCodeOtelValueLooksManaged(key, value, previous[key]) {
-			if headers, ok := value.(string); ok && claudeCodeOTLPHeadersKey(key) &&
-				claudeCodeMatchedProductBearer(headers, previous, opts) != "" {
-				continue
+			if headers, ok := value.(string); ok && claudeCodeOTLPHeadersKey(key) {
+				if product, _ := claudeCodeProductBearers(headers, previous, opts); len(product) > 0 {
+					continue
+				}
 			}
 			keep[key] = true
 		}
@@ -1971,10 +1969,23 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 			hadManagedPolicy := len(previousManaged) > 0 || len(previousAbsent) > 0
 			managedEnv := buildClaudeCodeOtelEnv(opts)
 			operatorSettings := map[string]bool{}
+			// Decide product routes on the settings as found: the absence
+			// pass below can drop an unchanged product header before the
+			// route it authenticated is inspected.
+			productRoutes := map[string]bool{}
 			if !opts.sandboxNativeOTLP {
 				operatorSettings = claudeCodeOperatorOtelSettings(existing, previousManaged, opts)
 				for key := range operatorSettings {
 					delete(managedEnv, key)
+				}
+				for _, key := range claudeCodeOtelEnvKeys {
+					if !claudeCodeOTLPEndpointKey(key) {
+						continue
+					}
+					endpoint, _ := existing[key].(string)
+					if claudeCodeLoopbackRouteIsProduct(existing, key, endpoint, previousManaged, opts) {
+						productRoutes[key] = true
+					}
 				}
 			}
 			backup.ManagedEnv = make(map[string]string, len(managedEnv))
@@ -2014,27 +2025,19 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 			}
 			applyClaudeCodeManagedOtelEnv(existing, managedEnv)
 			if !opts.sandboxNativeOTLP {
-				for _, key := range claudeCodeOtelEnvKeys {
-					if !claudeCodeOTLPEndpointKey(key) {
-						continue
-					}
-					endpoint, _ := existing[key].(string)
-					headers := claudeCodeEffectiveEndpointHeaders(existing, key)
-					if claudeCodeLoopbackGatewayEndpoint(endpoint) &&
-						claudeCodeMatchedProductBearer(headers, previousManaged, opts) != "" {
-						delete(existing, key)
-					}
+				for key := range productRoutes {
+					delete(existing, key)
 				}
 				for _, key := range claudeCodeOtelEnvKeys {
 					if !claudeCodeOTLPHeadersKey(key) {
 						continue
 					}
 					headers, _ := existing[key].(string)
-					token := claudeCodeMatchedProductBearer(headers, previousManaged, opts)
-					if token == "" {
+					product, _ := claudeCodeProductBearers(headers, previousManaged, opts)
+					if len(product) == 0 {
 						continue
 					}
-					rest, _ := claudeCodeWithoutDefenseClawHeaders(headers, token)
+					rest, _ := claudeCodeWithoutDefenseClawHeaders(headers, product...)
 					if rest == "" {
 						delete(existing, key)
 					} else {
@@ -2263,17 +2266,15 @@ func claudeCodeEnvSnapshotHasDefenseClawEndpointSet(snapshot map[string]interfac
 }
 
 // claudeCodeLoopbackGatewayEndpoint reports whether value is a plain http
-// endpoint on a loopback host and port with a path DefenseClaw's gateway
-// serves: none, an OTLP signal path or a scoped /otlp/ path.
+// endpoint on a local host (otlpLocalHost) and port with a path DefenseClaw's
+// gateway serves: none, an OTLP signal path or a scoped /otlp/ path.
 func claudeCodeLoopbackGatewayEndpoint(value string) bool {
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" ||
 		parsed.Fragment != "" || parsed.Port() == "" {
 		return false
 	}
-	switch parsed.Hostname() {
-	case "127.0.0.1", "localhost", "::1":
-	default:
+	if !otlpLocalHost(parsed.Hostname()) {
 		return false
 	}
 	path := strings.TrimRight(parsed.Path, "/")

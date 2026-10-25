@@ -201,6 +201,54 @@ class TestCodexOtelAlignment(unittest.TestCase):
                 self.assertIn("otel.exporter.otlp-http.endpoint", result.checks[0]["detail"])
                 self.assertNotIn("synthetic-secret", result.checks[0]["detail"])
 
+    def test_retired_codex_exporter_with_respelled_scoped_bearer_fails(self) -> None:
+        # Released 1.0.2/1.0.3 exporters whose markers an operator removed are
+        # still DefenseClaw's while they carry the scoped bearer, under any
+        # header-name or scheme spelling and on any local address.
+        payload = {
+            "runtime": {"environment": "windows"},
+            "health": {"telemetry": {"state": "running"}},
+        }
+        token = "c" * 64
+        rows = (
+            ("Authorization", "Bearer", "127.0.0.1", True),
+            ("AUTHORIZATION", "bearer", "127.0.0.2", True),
+            ("authorization", "Bearer", "[::ffff:127.0.0.1]", True),
+            ("Authorization", "Bearer", "127.1", True),
+            ("Authorization", "Bearer", "0.0.0.0", True),
+            ("Authorization", "Bearer", "LOCALHOST.", True),
+            ("X-DefenseClaw-Source = 'codex'\nAuthorization", "Bearer", "127.0.0.1", False),
+            ("Authorization", "Bearer", "127.0.0.1", "operator"),
+        )
+        for key, scheme, host, product in rows:
+            with self.subTest(key=key, host=host, product=product), tempfile.TemporaryDirectory() as home, (
+                tempfile.TemporaryDirectory()
+            ) as data_dir, patch.dict(os.environ, {"CODEX_HOME": home}, clear=False), patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(200, json.dumps(payload)),
+            ):
+                Path(data_dir, "hooks").mkdir()
+                Path(data_dir, "hooks", ".otlp-codex.token").write_text(token + "\n", encoding="ascii")
+                credential = "d" * 64 if product in (False, "operator") else token
+                self._write_codex_config(
+                    home,
+                    "[otel]\nenvironment = 'windows'\n"
+                    "[otel.exporter.otlp-http]\n"
+                    f"endpoint = 'http://{host}:19081/v1/logs'\n"
+                    "[otel.exporter.otlp-http.headers]\n"
+                    f"{key} = '{scheme} {credential}'\n",
+                )
+                cfg = self._cfg()
+                cfg.data_dir = data_dir
+                result = _DoctorResult()
+                _check_codex_otel_alignment(cfg, result)
+                if product == "operator":
+                    self.assertEqual(result.checks[0]["status"], "pass", result.checks)
+                    continue
+                self.assertEqual(result.checks[0]["status"], "fail", result.checks)
+                self.assertIn("otel.exporter.otlp-http.endpoint", result.checks[0]["detail"])
+                self.assertNotIn(token, result.checks[0]["detail"])
+
     def test_stale_runtime_environment_fails_authenticated_status(self) -> None:
         payload = {
             "runtime": {"environment": "dev"},

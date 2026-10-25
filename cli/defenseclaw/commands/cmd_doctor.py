@@ -7343,15 +7343,97 @@ def _codex_otel_exports_to_defenseclaw(otel) -> bool:
             continue
         endpoint = str(http.get("endpoint") or "")
         headers = http.get("headers") if isinstance(http.get("headers"), dict) else {}
-        if "/otlp/codex" in endpoint or headers.get("x-defenseclaw-source") == "codex" or (
-            headers.get("x-defenseclaw-client") == "codex-otel/1.0"
-        ):
+        if "/otlp/codex" in endpoint or _codex_header_has_product_marker(headers):
             return True
     return False
 
 
-def _codex_retired_otel_endpoint(otel, api_port: int) -> str:
-    """Name a marked legacy loopback exporter aimed away from this gateway."""
+def _otel_header_values(headers: dict, name: str) -> list:
+    """Every value of one header name; header names are case-insensitive."""
+    return [value for key, value in headers.items() if isinstance(key, str) and key.strip().lower() == name]
+
+
+def _codex_header_has_product_marker(headers: dict) -> bool:
+    return "codex" in _otel_header_values(headers, "x-defenseclaw-source") or (
+        "codex-otel/1.0" in _otel_header_values(headers, "x-defenseclaw-client")
+    )
+
+
+def _otel_bearer_credential(value) -> str:
+    """The credential of a Bearer Authorization value (scheme case-insensitive)."""
+    if not isinstance(value, str):
+        return ""
+    scheme, _, credential = value.strip().partition(" ")
+    if scheme.lower() != "bearer":
+        return ""
+    return credential.strip()
+
+
+def _otel_local_host(host: str) -> bool:
+    """Mirror of the gateway's otlpLocalHost: hosts whose connections stay local."""
+    host = host.strip().rstrip(".")
+    lower = host.lower()
+    if lower == "localhost" or lower.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        address = None
+    if address is not None:
+        mapped = getattr(address, "ipv4_mapped", None)
+        if mapped is not None:
+            address = mapped
+        return address.is_loopback or address.is_unspecified
+    parts = host.split(".")
+    if not 1 <= len(parts) <= 4:
+        return False
+    values = []
+    for part in parts:
+        if not part or any(ch in part for ch in "_+- "):
+            return False
+        try:
+            if part[:2].lower() == "0x" and len(part) > 2:
+                values.append(int(part[2:], 16))
+            elif len(part) > 1 and part[0] == "0":
+                values.append(int(part[1:], 8))
+            else:
+                values.append(int(part, 10))
+        except ValueError:
+            return False
+    *head, last = values
+    if any(value > 0xFF for value in head) or last >= 1 << (32 - 8 * len(head)):
+        return False
+    address_int = 0
+    for index, value in enumerate(head):
+        address_int |= value << (24 - 8 * index)
+    address_int |= last
+    return address_int >> 24 == 127 or address_int == 0
+
+
+def _codex_scoped_otlp_token(cfg) -> str:
+    """The scoped Codex OTLP credential this install issued, or ""."""
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return ""
+    try:
+        with open(os.path.join(data_dir, "hooks", ".otlp-codex.token"), "rb") as fh:
+            raw = fh.read(4097)
+    except OSError:
+        return ""
+    if len(raw) > 4096:
+        return ""
+    try:
+        return raw.decode("ascii").strip()
+    except UnicodeError:
+        return ""
+
+
+def _codex_retired_otel_endpoint(otel, api_port: int, product_token: str = "") -> str:
+    """Name a product legacy loopback exporter aimed away from this gateway.
+
+    Product proof is a marker header or the scoped bearer, under any spelling of
+    the header name or Bearer scheme, as in the gateway's ownership check.
+    """
     if not isinstance(otel, dict):
         return ""
     for key in ("exporter", "trace_exporter", "metrics_exporter"):
@@ -7360,10 +7442,13 @@ def _codex_retired_otel_endpoint(otel, api_port: int) -> str:
         if not isinstance(http, dict):
             continue
         headers = http.get("headers")
-        if not isinstance(headers, dict) or not (
-            headers.get("x-defenseclaw-source") == "codex"
-            or headers.get("x-defenseclaw-client") == "codex-otel/1.0"
-        ):
+        if not isinstance(headers, dict):
+            continue
+        product_bearer = bool(product_token) and any(
+            _otel_bearer_credential(value) == product_token
+            for value in _otel_header_values(headers, "authorization")
+        )
+        if not (_codex_header_has_product_marker(headers) or product_bearer):
             continue
         endpoint = http.get("endpoint")
         if not isinstance(endpoint, str):
@@ -7373,13 +7458,7 @@ def _codex_retired_otel_endpoint(otel, api_port: int) -> str:
             host = parsed.hostname or ""
         except ValueError:
             continue
-        if host.rstrip(".").lower() == "localhost":
-            loopback = True
-        else:
-            try:
-                loopback = ipaddress.ip_address(host).is_loopback
-            except ValueError:
-                loopback = False
+        loopback = _otel_local_host(host)
         if not loopback or parsed.scheme != "http" or parsed.username is not None or parsed.query or parsed.fragment:
             continue
         if parsed.path not in ("/v1/logs", "/v1/traces", "/v1/metrics"):
@@ -7426,7 +7505,7 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
 
     if config_error:
         _emit("fail", "Codex OTel environment", config_error, r=r)
-    elif stale := _codex_retired_otel_endpoint(otel, _gateway_api_port(cfg)):
+    elif stale := _codex_retired_otel_endpoint(otel, _gateway_api_port(cfg), _codex_scoped_otlp_token(cfg)):
         _emit(
             "fail",
             "Codex OTel environment",
