@@ -20,7 +20,8 @@ import (
 // config_writer.apply (cases) or by a live policy edit or TUI Setup row that
 // saves through Config.save (live_edits), or by a 1.0.4 command that chose
 // the old preset's shape (chosen: policy activate of a named policy, a write
-// that made the shape); cli/tests/test_config_writer.py checks that. The gateway compiles every decided MCP severity as written,
+// that made the shape); cli/tests/test_config_writer.py checks that. The
+// gateway compiles every decided MCP severity as written,
 // never as warn.
 func TestWritesOverTheLegacyDefaultCompileInGo(t *testing.T) {
 	raw, err := os.ReadFile("../../testdata/admission_legacy_default_writes.json")

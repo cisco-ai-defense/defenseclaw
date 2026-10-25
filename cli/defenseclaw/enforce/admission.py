@@ -381,7 +381,8 @@ def legacy_default_mcp_pins(before: Any, after: Callable[[], Any], paths: list[t
         # turned another block into the preset's shape. Either way that is
         # what was chosen: name the HIGH that MCP inherits under MCP, so
         # both compilers compile what was written.
-        pins[("admission", "mcp", "actions", "high")] = _inherited_high(after_document["admission"]["defaults"]["actions"])
+        defaults = after_document["admission"]["defaults"]["actions"]
+        pins[("admission", "mcp", "actions", "high")] = _inherited_high(defaults)
     return pins
 
 
