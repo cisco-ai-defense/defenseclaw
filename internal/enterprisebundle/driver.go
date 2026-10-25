@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -838,7 +839,7 @@ func (d *Driver) lastGoodEnforced(rc *Receipt, installed string, policy *Gateway
 		}
 		id, version, signer = ref.BundleID, ref.Version, ref.SignerKeyID
 	} else if rc.BaseConfigSHA256 == NoBaseConfig {
-		return installed == ""
+		return d.noConfigEnforced(rc, installed, policy)
 	} else if rc.BaseConfigSHA256 == "" || rc.BaseConfigSHA256 != installed {
 		return false
 	}
@@ -850,6 +851,26 @@ func (d *Driver) lastGoodEnforced(rc *Receipt, installed string, policy *Gateway
 	record, err := configwrite.ReadGenerationState(d.ConfigPath)
 	return err == nil && record.Generation > 0 && record.ConfigSHA256 == installed && policy.Generation == record.Generation &&
 		record.BundleID == id && record.BundleVersion == version && record.SignerKeyID == signer
+}
+
+// noConfigEnforced proves the last good state of a run that started with no
+// config (GAP-1206): the config file is absent, not merely unreadable (an
+// unreadable file also hashes to ""), and the gateway does not report the
+// candidate's policy or bundle identity.
+func (d *Driver) noConfigEnforced(rc *Receipt, installed string, policy *GatewayPolicy) bool {
+	if installed != "" || d.ConfigPath == "" {
+		return false
+	}
+	if _, err := os.Lstat(d.ConfigPath); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if policy == nil {
+		return true
+	}
+	if policy.BundleID != "" && policy.BundleID == rc.BundleID && policy.BundleVersion == rc.Version {
+		return false
+	}
+	return policy.Digest == "" || (policy.Digest != rc.ExpectedDigest && policy.Digest != rc.EffectivePolicyDigest)
 }
 
 func (d *Driver) fail(rc *Receipt, code Code, message string) error {
