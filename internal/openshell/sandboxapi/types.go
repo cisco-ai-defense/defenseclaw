@@ -17,6 +17,7 @@
 package sandboxapi
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
 	"strconv"
@@ -826,6 +827,32 @@ type DeleteResponse struct {
 	Deleted   bool     `json:"deleted"`
 	Providers []string `json:"providers,omitempty"`
 	Warnings  []string `json:"warnings,omitempty"`
+}
+
+// StopRequest is POST /sandboxes/{name}/stop.
+type StopRequest struct {
+	// AcceptUnsynced is `sandbox stop --yes`: a MicroVM whose stop was
+	// held because its disk sync failed (GAP-1163) is stopped on this
+	// stop even when the sync fails again; it keeps what reached its
+	// disk, and the feed says what may be lost (stop_unflushed). A stop
+	// that was not held first is held as any other.
+	AcceptUnsynced bool `json:"accept_unsynced,omitempty"`
+}
+
+// stopRequestKey carries StopRequest.AcceptUnsynced to the manager
+// through the controllers between (WithUnsyncedStopAccepted).
+type stopRequestKey struct{}
+
+// WithUnsyncedStopAccepted marks ctx's stop as one that accepts the loss
+// of what a failed MicroVM disk sync did not save (StopRequest).
+func WithUnsyncedStopAccepted(ctx context.Context) context.Context {
+	return context.WithValue(ctx, stopRequestKey{}, true)
+}
+
+// UnsyncedStopAccepted reports a stop marked by WithUnsyncedStopAccepted.
+func UnsyncedStopAccepted(ctx context.Context) bool {
+	accepted, _ := ctx.Value(stopRequestKey{}).(bool)
+	return accepted
 }
 
 // StartRequest is POST /sandboxes/{name}/start.

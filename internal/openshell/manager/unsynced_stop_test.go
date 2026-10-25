@@ -75,3 +75,60 @@ func TestAFailedSyncHoldsTheUsersStopButNotTheOrganizations(t *testing.T) {
 		t.Fatalf("the alarm stop's loss was not said once: %+v", got)
 	}
 }
+
+// A guest whose exec or sync keeps failing is not left to a delete that
+// loses all of its work: the user's stop is held, and held again when
+// repeated, also with --yes on a first stop; once a stop was held, the
+// stop that accepts the loss (`sandbox stop --yes`) stops it with what
+// reached its disk and the feed says what may be lost.
+func TestARepeatedStopThatAcceptsTheLossStopsAVMWhoseSyncKeepsFailing(t *testing.T) {
+	e := newVMEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "box", Copy: true})
+	e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		return openshelltest.ExecResponse{Stdout: []byte("exited\n")}
+	}))
+	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+	accept := sandboxapi.WithUnsyncedStopAccepted(t.Context())
+	for i, ctx := range []context.Context{accept, t.Context()} {
+		_, err := e.m.Stop(ctx, "box")
+		if !sandboxapi.IsCode(err, sandboxapi.CodeConflict) || !strings.Contains(err.Error(), "box keeps running") ||
+			!strings.Contains(err.Error(), "`defenseclaw sandbox stop box --yes` stops it anyway") {
+			t.Fatalf("stop %d after a failed sync = %v", i+1, err)
+		}
+	}
+	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
+		t.Fatalf("a held stop called OpenShell's stop %d times", got-stops)
+	}
+	if _, err := e.m.Stop(accept, "box"); err != nil {
+		t.Fatalf("the stop that accepts the loss: %v", err)
+	}
+	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops+1 {
+		t.Fatalf("the accepted stop made %d stop calls, want 1", got-stops)
+	}
+	if got := e.events("box", "", "stop_unflushed"); len(got) != 1 {
+		t.Fatalf("the accepted stop's loss was not said once: %+v", got)
+	}
+	if got := e.get("box"); got.Phase != "stopped" {
+		t.Fatalf("after the accepted stop: %s", got.Phase)
+	}
+}
+
+// The listener-loss containment's stop (StopForPolicy) of a VM whose sync
+// fails is made at once: one OpenShell stop, and the loss is said.
+func TestThePolicyStopOfAVMWhoseSyncFailsIsMadeAtOnce(t *testing.T) {
+	e := newVMEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "box", Copy: true})
+	e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		return openshelltest.ExecResponse{Stdout: []byte("exited\n")}
+	}))
+	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+	if _, err := e.m.StopForPolicy(t.Context(), "box"); err != nil {
+		t.Fatalf("policy stop: %v", err)
+	}
+	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops+1 {
+		t.Fatalf("the policy stop made %d stop calls, want 1", got-stops)
+	}
+	if got := e.events("box", "", "stop_unflushed"); len(got) != 1 {
+		t.Fatalf("the policy stop's loss was not said once: %+v", got)
+	}
+}

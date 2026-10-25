@@ -129,6 +129,10 @@ type box struct {
 	// hooks.on_silence: stop) scheduled this session's stop.
 	tamperStop  bool
 	silenceSent bool
+	// stopHeld is set once a stop was held because the MicroVM's disk sync
+	// failed (GAP-1163), until a stop goes through: the user's next stop
+	// that accepts the loss is made (Manager.Stop).
+	stopHeld bool
 	// oldSupervisorNetworkErr is the last failure to withdraw the network
 	// rules and providers of a live legacy guest (oldSupervisorLive).
 	oldSupervisorNetworkErr string
@@ -806,7 +810,8 @@ func legacyWayOn(name string, phase audit.SandboxPhase, driver string) string {
 	if phase == audit.SandboxPhaseReady {
 		way := "save the work you need, then run `defenseclaw sandbox stop " + name + "`"
 		if stopLosesWrites(driver) {
-			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost)"
+			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost); " +
+				"when the sync fails the stop is held, and `defenseclaw sandbox stop " + name + " --yes` then stops it with what reached its disk"
 		}
 		return way
 	}

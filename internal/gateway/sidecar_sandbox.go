@@ -78,7 +78,8 @@ type sandboxRuntime struct {
 	listening map[string]bool
 
 	// fleet, publish and tel are what containing a lost listener uses
-	// (the manager, its activity feed and the sandbox telemetry recorder);
+	// (the manager's policy stop, policyFleet; its activity feed; and the
+	// sandbox telemetry recorder);
 	// listenBudget bounds the egress bind retries (30s when zero) and
 	// recheck paces the containment (sandboxListenerRecheck when zero).
 	fleet        sandboxFleet
@@ -420,7 +421,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 	api.SetSandboxController(&sandboxStatusController{SandboxController: mgr, runtime: rt})
 	rt.manager, rt.proxy = mgr, proxy
 	feed := mgr.Feed()
-	rt.fleet = mgr
+	rt.fleet = policyFleet{mgr}
 	if deps.telemetry != nil {
 		rt.tel = deps.telemetry
 	}

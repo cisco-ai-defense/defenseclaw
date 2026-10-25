@@ -64,6 +64,10 @@ type API interface {
 	Create(ctx context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error)
 	Delete(ctx context.Context, name string, req sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error)
 	Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
+	// StopAcceptingUnsynced is `stop --yes`'s Stop: a stop held because a
+	// MicroVM's disk sync failed goes ahead the next time
+	// (sandboxapi.StopRequest).
+	StopAcceptingUnsynced(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
 	Start(ctx context.Context, name string, req sandboxapi.StartRequest) (*sandboxapi.Sandbox, error)
 	Undo(ctx context.Context, name string, req sandboxapi.UndoRequest) (*sandboxapi.UndoResponse, error)
 	Review(ctx context.Context, name string, req sandboxapi.ReviewRequest) (*sandboxapi.ReviewResponse, error)

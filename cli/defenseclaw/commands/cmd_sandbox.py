@@ -370,7 +370,10 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "yes",
                 "bool",
-                "stop without asking when a detached run or a session in another terminal is still going",
+                (
+                    "stop without asking when a detached run or a session in another terminal is still going; "
+                    "after a stop held for a failed MicroVM disk sync, stop it anyway with what reached its disk"
+                ),
                 short="y",
             ),
         ),

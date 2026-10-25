@@ -252,7 +252,11 @@ func unconfirmedPhase(v *sandboxapi.Sandbox) {
 }
 
 // Stop stops a sandbox and keeps it (and its mounts and binding) for a
-// later start.
+// later start. A stop held because the MicroVM's disk sync failed is made
+// by the user's next stop that accepts the loss
+// (sandboxapi.UnsyncedStopAccepted, `sandbox stop --yes`): a guest whose
+// exec or sync keeps failing is stopped with what reached its disk, not
+// left to a delete that loses all of it.
 func (m *Manager) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
 	b, unlock, err := m.lockBox(name)
 	if err != nil {
@@ -262,7 +266,10 @@ func (m *Manager) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, e
 	if err := m.refuseRetained(b); err != nil {
 		return nil, err
 	}
-	if err := m.stop(ctx, b, true); err != nil {
+	m.mu.Lock()
+	hold := !b.stopHeld || !sandboxapi.UnsyncedStopAccepted(ctx)
+	m.mu.Unlock()
+	if err := m.stop(ctx, b, hold); err != nil {
 		return nil, err
 	}
 	v := m.viewOf(b)
@@ -412,6 +419,9 @@ func (m *Manager) stop(ctx context.Context, b *box, hold bool) error {
 	run, flushErr := m.endHarness(ctx, gw, b)
 	if flushErr != nil && hold {
 		m.logf("sandbox %s: the stop is held, the sandbox keeps running: %v", name, flushErr)
+		m.mu.Lock()
+		b.stopHeld = true
+		m.mu.Unlock()
 		return unsyncedStopHeld(name, flushErr)
 	}
 	if !ended {
@@ -431,6 +441,11 @@ func (m *Manager) stop(ctx context.Context, b *box, hold bool) error {
 				_, err = gw.Client.StopSandbox(ctx, name)
 			}
 		}
+	}
+	if err == nil {
+		m.mu.Lock()
+		b.stopHeld = false
+		m.mu.Unlock()
 	}
 	if err != nil {
 		m.dropGateway(gw, err)
@@ -502,7 +517,9 @@ func unsyncedStopHeld(name string, err error) error {
 		Message: "sandbox " + name + " keeps running: DefenseClaw could not sync its MicroVM's disk before the stop (" + err.Error() +
 			"), and the stop of a MicroVM loses what was not synced",
 		Detail: "save the work you need first (`defenseclaw sandbox pull " + name + "` brings a copy's changes back), then run `defenseclaw sandbox stop " +
-			name + "` again, which syncs again first; `defenseclaw sandbox delete " + name + "` ends it without keeping its work"}
+			name + "` again, which syncs again first; if the sync keeps failing, `defenseclaw sandbox stop " + name +
+			" --yes` stops it anyway with what reached its disk (what was not synced may be lost); `defenseclaw sandbox delete " + name +
+			"` ends it without keeping any of its work"}
 }
 
 // lockStart takes the gateway's lifecycle lock for a create or a start

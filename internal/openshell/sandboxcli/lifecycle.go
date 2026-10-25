@@ -827,7 +827,9 @@ func execEndedText(sb *sandboxapi.Sandbox) string {
 type StopOptions struct {
 	Name string
 	// Yes stops a sandbox whose detached run is still going, or a MicroVM
-	// whose own disk could not be looked at, without asking. A copy-mode
+	// whose own disk could not be looked at, without asking, and stops a
+	// MicroVM whose earlier stop was held because its disk sync failed
+	// even when the sync fails again (StopAcceptingUnsynced). A copy-mode
 	// MicroVM whose disk is full keeps running even so (fullDiskStop).
 	Yes bool
 }
@@ -903,7 +905,11 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 		copyAt = nil
 		return a.confirmEnding(attachedText(o.Name, others)+" now; stopping the sandbox ends "+them(others), "Stop anyway?", o.Yes)
 	}, func() {
-		stopped, stopErr = api.Stop(ctx, o.Name)
+		if o.Yes {
+			stopped, stopErr = api.StopAcceptingUnsynced(ctx, o.Name)
+		} else {
+			stopped, stopErr = api.Stop(ctx, o.Name)
+		}
 		if stopErr == nil && copyAt != nil && base.unchanged(a, o.Name, stopped) {
 			a.markStoppedCopy(sb, copyAt.Work == workspace.CopyWorkNone, copyAt.Pulled)
 		}

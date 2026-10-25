@@ -465,6 +465,23 @@ func (c *Client) Stop(ctx context.Context, name string) (*Sandbox, error) {
 	return &out, nil
 }
 
+// StopAcceptingUnsynced is Stop that accepts the loss of what a failed
+// MicroVM disk sync did not save, once a stop was held for it
+// (StopRequest.AcceptUnsynced). A daemon of DefenseClaw 1.0.4 or older,
+// whose strict decoder refuses the field, holds no stop: the stop goes
+// again as the empty object it takes.
+func (c *Client) StopAcceptingUnsynced(ctx context.Context, name string) (*Sandbox, error) {
+	var out Sandbox
+	err := c.do(ctx, http.MethodPost, sandboxPath(name, "stop"), nil, StopRequest{AcceptUnsynced: true}, &out)
+	if err != nil && unknownFieldRefused(err, "accept_unsynced") {
+		return c.Stop(ctx, name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Start starts a stopped sandbox with a freshly rotated binding.
 // A daemon of DefenseClaw 1.0.3 or older refuses StartRequest.EndVM, a
 // field its strict decoder does not know; it refuses no start of an ended
