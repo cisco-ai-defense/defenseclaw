@@ -2835,10 +2835,11 @@ def _same_install_folder(left: str, right: str) -> bool:
 def _check_install_lock(cfg, r: _DoctorResult) -> None:
     """WARN on an install lock that is still there (oss-outage-open round h).
 
-    OpenCode and Amp block their tool calls while an install may be running.
-    A lock whose installer is proven gone is removed by
-    doctor.install.stale-lock.clear; one an interrupted install keeps waits
-    for the installer.
+    Hooks close outages, and OpenCode and Amp in the strict tier hold answered
+    calls, while an install may be running; a stale lock (past its deadline,
+    or its installer proven gone) is no lock to them and is removed by
+    doctor.install.stale-lock.clear. One an interrupted install keeps waits
+    for the installer until its deadline.
     """
     if _doctor_managed(cfg):
         return
@@ -2850,7 +2851,7 @@ def _check_install_lock(cfg, r: _DoctorResult) -> None:
             _emit(
                 "warn",
                 "Install lock",
-                f"{detail}; OpenCode and Amp block tool calls while it stays",
+                f"{detail}; hooks ignore it, so it holds no tool call",
                 r=r,
                 check_id="doctor.install.lock",
                 reason_code="install-lock-stale",
@@ -2860,7 +2861,7 @@ def _check_install_lock(cfg, r: _DoctorResult) -> None:
             _emit(
                 "warn",
                 "Install lock",
-                f"{detail}; hooks wait for the installer to finish it",
+                f"{detail}; hooks wait for the installer to finish it, until the lock's deadline",
                 r=r,
                 check_id="doctor.install.lock",
                 reason_code="install-lock-interrupted-install",
