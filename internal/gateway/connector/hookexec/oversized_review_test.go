@@ -69,11 +69,9 @@ func TestOversizedReviewBoundsContextAndRefusesDuplicateKeys(t *testing.T) {
 	}
 }
 
-// Loop round 2 (GAP-1022): a bounded review either carries every command
-// and target value of the prefix whole, or is not sent at all (nil keeps the
-// closed oversize answer). Budgets running out, a value the cap cut, a value
+// Loop round 2 (GAP-1022): budgets running out, a value the cap cut, a value
 // nested too deep or a review over the gateway cap never yield a review the
-// gateway could allow without the command.
+// gateway could allow without the command: every review is marked.
 func TestOversizedReviewMarksACallWithoutItsWholeCommand(t *testing.T) {
 	const secret = "cat ~/.ssh/id_rsa"
 	notes := func(n int) string {
@@ -97,42 +95,41 @@ func TestOversizedReviewMarksACallWithoutItsWholeCommand(t *testing.T) {
 	escaped := `{"tool_input":{"cmd":"` + strings.Repeat(`\u0001`, 160<<10) + `"},"padding":"` + pad + `"}`
 	for _, tc := range []struct {
 		name, body string
-		reviewed   bool // false: the review must be marked uninspected
 		want       []string
 	}{
-		{"reviewer shape: cmd after the budgets ran out", reviewer, true, []string{`"cmd":"` + secret + `"`}},
-		{"amp cmd after many context fields", `{"tool_name":"Bash","tool_input":{` + notes(40) + `"cmd":"` + secret + `"},"padding":"` + pad + `"}`, true, []string{`"cmd":"` + secret + `"`}},
-		{"target after many context fields", `{"tool_name":"Write","tool_input":{` + notes(40) + `"file_path":"/home/a/.ssh/authorized_keys","content":"x"},"padding":"` + pad + `"}`, true, []string{`"file_path":"/home/a/.ssh/authorized_keys"`}},
-		{"command values over the keep budget", `{"tool_input":{"patch":"` + strings.Repeat("q", 600<<10) + `","diff":"` + strings.Repeat("r", 350<<10) + `","cmd":"` + secret + `"},"padding":"` + pad + `"}`, false, nil},
-		{"command cut by the cap", `{"tool_input":{"command":"echo ` + pad + `; ` + secret + `"}}`, false, nil},
-		{"target cut by the cap", `{"tool_input":{"content":"x","file_path":"/home/a/` + pad + `"}}`, false, nil},
-		{"command nested past the depth limit", deep, false, nil},
-		{"copilot toolArgs command cut by the cap", `{"toolName":"bash","toolArgs":"{\"command\":\"echo ` + pad + `\"}"}`, false, nil},
+		{"reviewer shape: cmd after the budgets ran out", reviewer, []string{`"cmd":"` + secret + `"`}},
+		{"amp cmd after many context fields", `{"tool_name":"Bash","tool_input":{` + notes(40) + `"cmd":"` + secret + `"},"padding":"` + pad + `"}`, []string{`"cmd":"` + secret + `"`}},
+		{"target after many context fields", `{"tool_name":"Write","tool_input":{` + notes(40) + `"file_path":"/home/a/.ssh/authorized_keys","content":"x"},"padding":"` + pad + `"}`, []string{`"file_path":"/home/a/.ssh/authorized_keys"`}},
+		{"command values over the keep budget", `{"tool_input":{"patch":"` + strings.Repeat("q", 600<<10) + `","diff":"` + strings.Repeat("r", 350<<10) + `","cmd":"` + secret + `"},"padding":"` + pad + `"}`, nil},
+		{"command cut by the cap", `{"tool_input":{"command":"echo ` + pad + `; ` + secret + `"}}`, nil},
+		{"target cut by the cap", `{"tool_input":{"content":"x","file_path":"/home/a/` + pad + `"}}`, nil},
+		{"command nested past the depth limit", deep, nil},
+		{"copilot toolArgs command cut by the cap", `{"toolName":"bash","toolArgs":"{\"command\":\"echo ` + pad + `\"}"}`, nil},
 		// The cap hides keys after it: a command after a long value of the
 		// call's arguments was never read.
-		{"bash command after a description cut by the cap", `{"tool_name":"Bash","tool_input":{"description":"` + pad + `","command":"` + secret + `"}}`, false, nil},
-		{"write target after content cut by the cap", `{"tool_name":"Write","tool_input":{"content":"` + pad + `","file_path":"/home/a/.ssh/authorized_keys"}}`, false, nil},
-		{"command after a nested context value cut by the cap", `{"tool_name":"Bash","tool_input":{"meta":{"notes":["` + pad + `"]},"command":"` + secret + `"}}`, false, nil},
-		{"command array cut between its elements", `{"tool_input":{"command":["bash","-lc",` + strings.Repeat(`"x",`, 300000) + `"` + secret + `"]}}`, false, nil},
-		{"copilot toolArgs with file text before its path", `{"toolName":"create","toolArgs":"{\"file_text\":\"` + pad + `\",\"path\":\"/home/a/.ssh/authorized_keys\"}"}`, false, nil},
-		{"escaped command over the gateway cap", escaped, false, nil},
-		// Benign oversized calls keep their review (balanced defaults).
-		{"lockfile write", `{"tool_name":"Write","tool_input":{"file_path":"/w/package-lock.json","content":"` + pad + `"}}`, true, []string{`"file_path":"/w/package-lock.json"`}},
-		{"copilot create with a long file text", `{"toolName":"create","toolArgs":"{\"path\":\"/w/gen.go\",\"file_text\":\"` + pad + `\"}"}`, true, []string{`\"path\":\"/w/gen.go\"`}},
-		{"large tool result", `{"hook_event_name":"PostToolUse","tool_name":"mcp__deepwiki__read_wiki_contents","tool_input":{"repoName":"a/b"},"tool_response":"` + pad + `"}`, true, []string{`"repoName":"a/b"`}},
+		{"bash command after a description cut by the cap", `{"tool_name":"Bash","tool_input":{"description":"` + pad + `","command":"` + secret + `"}}`, nil},
+		{"write target after content cut by the cap", `{"tool_name":"Write","tool_input":{"content":"` + pad + `","file_path":"/home/a/.ssh/authorized_keys"}}`, nil},
+		{"command after a nested context value cut by the cap", `{"tool_name":"Bash","tool_input":{"meta":{"notes":["` + pad + `"]},"command":"` + secret + `"}}`, nil},
+		{"command array cut between its elements", `{"tool_input":{"command":["bash","-lc",` + strings.Repeat(`"x",`, 300000) + `"` + secret + `"]}}`, nil},
+		{"copilot toolArgs with file text before its path", `{"toolName":"create","toolArgs":"{\"file_text\":\"` + pad + `\",\"path\":\"/home/a/.ssh/authorized_keys\"}"}`, nil},
+		{"escaped command over the gateway cap", escaped, nil},
+		// Benign oversized calls keep their review, marked too: observe (the
+		// balanced default) allows them with one warning; action blocks.
+		{"lockfile write", `{"tool_name":"Write","tool_input":{"file_path":"/w/package-lock.json","content":"` + pad + `"}}`, []string{`"file_path":"/w/package-lock.json"`}},
+		{"copilot create with a long file text", `{"toolName":"create","toolArgs":"{\"path\":\"/w/gen.go\",\"file_text\":\"` + pad + `\"}"}`, []string{`\"path\":\"/w/gen.go\"`}},
+		{"large tool result", `{"hook_event_name":"PostToolUse","tool_name":"mcp__deepwiki__read_wiki_contents","tool_input":{"repoName":"a/b"},"tool_response":"` + pad + `"}`, []string{`"repoName":"a/b"`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prefix := []byte(tc.body)
 			if int64(len(prefix)) > defaultMaxBody {
 				prefix = prefix[:defaultMaxBody]
 			}
-			review, uninspected := oversizedReview(prefix, "PreToolUse")
+			review := oversizedReviewPayload(prefix, "PreToolUse")
 			if len(review) == 0 || len(review) > oversizedReviewMaxBytes || !json.Valid(review) {
 				t.Fatalf("review is not a valid bounded request: %d bytes", len(review))
 			}
-			marked := strings.Contains(string(review), `"`+OversizeUninspectedField+`":true`)
-			if marked != uninspected || marked == tc.reviewed {
-				t.Fatalf("uninspected=%v marked=%v, want marked=%v: %.300s", uninspected, marked, !tc.reviewed, review)
+			if !strings.Contains(string(review), `"`+OversizeUninspectedField+`":true`) {
+				t.Fatalf("review is not marked uninspected: %.300s", review)
 			}
 			for _, want := range tc.want {
 				if !strings.Contains(string(review), want) {
@@ -145,10 +142,8 @@ func TestOversizedReviewMarksACallWithoutItsWholeCommand(t *testing.T) {
 
 // Loop round 1 review of 06bb83dd (GAP-1022): the call's arguments are
 // written by the model in any order and may carry any key, so a value of
-// them is never cut or dropped without the marker. A cut anywhere in the
-// arguments marks the review, even after a command or target key was read,
-// unless it lies in the file text of a file tool whose one target was read.
-// Every argument value, whatever its key, is kept whole or marks the review.
+// them is never cut or dropped without the marker. Every review is marked,
+// and the values kept whole stay in it.
 func TestOversizedReviewMarksEveryHiddenArgument(t *testing.T) {
 	const secret = "cat ~/.ssh/id_rsa"
 	const target = "/home/a/.ssh/authorized_keys"
@@ -164,50 +159,90 @@ func TestOversizedReviewMarksEveryHiddenArgument(t *testing.T) {
 		strings.Repeat("]", oversizedReviewMaxDepth+2) + `},"padding":"` + pad + `"}`
 	for _, tc := range []struct {
 		name, body string
-		reviewed   bool // false: the review must be marked uninspected
 		want       []string
 	}{
 		// A cut after a command or target key still hides the keys after it.
-		{"codex workdir then a cut justification hides cmd", `{"tool_name":"exec_command","tool_input":{"workdir":"/w","justification":"` + pad + `","cmd":"` + secret + `"}}`, false, nil},
-		{"bash cwd then a cut description hides command", `{"tool_name":"Bash","tool_input":{"cwd":"/w","description":"` + pad + `","command":"` + secret + `"}}`, false, nil},
-		{"bash command then a cut description hides workdir", `{"tool_name":"Bash","tool_input":{"command":"cat id_rsa","description":"` + pad + `","workdir":"/home/a/.ssh"}}`, false, nil},
-		{"mcp source then cut content hides destination", `{"tool_name":"mcp__fs__move_file","tool_input":{"source":"/w/a","content":"` + pad + `","destination":"` + target + `"}}`, false, nil},
-		{"copilot bash command then a cut description hides cwd", `{"toolName":"bash","toolArgs":"{\"command\":\"cat id_rsa\",\"description\":\"` + pad + `\",\"cwd\":\"/home/a/.ssh\"}"}`, false, nil},
-		{"file tool with a second file text cut before its target", `{"tool_name":"Edit","tool_input":{"old_string":"` + pad + `","file_path":"` + target + `"}}`, false, nil},
-		{"tool name after the arguments", `{"tool_input":{"file_path":"/w/a","content":"` + pad + `"},"tool_name":"Write"}`, false, nil},
+		{"codex workdir then a cut justification hides cmd", `{"tool_name":"exec_command","tool_input":{"workdir":"/w","justification":"` + pad + `","cmd":"` + secret + `"}}`, nil},
+		{"bash cwd then a cut description hides command", `{"tool_name":"Bash","tool_input":{"cwd":"/w","description":"` + pad + `","command":"` + secret + `"}}`, nil},
+		{"bash command then a cut description hides workdir", `{"tool_name":"Bash","tool_input":{"command":"cat id_rsa","description":"` + pad + `","workdir":"/home/a/.ssh"}}`, nil},
+		{"mcp source then cut content hides destination", `{"tool_name":"mcp__fs__move_file","tool_input":{"source":"/w/a","content":"` + pad + `","destination":"` + target + `"}}`, nil},
+		{"copilot bash command then a cut description hides cwd", `{"toolName":"bash","toolArgs":"{\"command\":\"cat id_rsa\",\"description\":\"` + pad + `\",\"cwd\":\"/home/a/.ssh\"}"}`, nil},
+		{"file tool with a second file text cut before its target", `{"tool_name":"Edit","tool_input":{"old_string":"` + pad + `","file_path":"` + target + `"}}`, nil},
+		{"tool name after the arguments", `{"tool_input":{"file_path":"/w/a","content":"` + pad + `"},"tool_name":"Write"}`, nil},
 		// Any argument key, not only the command and target names.
-		{"argument nested past the depth limit under any key", deep, false, nil},
-		{"unknown argument cut by the cap", `{"tool_name":"mcp__db__query","tool_input":{"sql":"` + pad + `"}}`, false, nil},
-		{"unknown argument longer than a head is kept whole", `{"tool_name":"mcp__x__run","tool_input":{"location":"` + strings.Repeat("a", 20<<10) + target + `"},"padding":"` + pad + `"}`, true, []string{target + `"`}},
-		{"unknown argument after context notes is kept", `{"tool_name":"mcp__x__run","tool_input":{` + notes(30) + `"location":"` + target + `"},"padding":"` + pad + `"}`, true, []string{`"location":"` + target + `"`}},
-		{"copilot toolArgs unknown argument kept whole", `{"toolName":"mcp_x","toolArgs":"{\"location\":\"` + strings.Repeat("a", 20<<10) + target + `\"}","padding":"` + pad + `"}`, true, []string{target}},
+		{"argument nested past the depth limit under any key", deep, nil},
+		{"unknown argument cut by the cap", `{"tool_name":"mcp__db__query","tool_input":{"sql":"` + pad + `"}}`, nil},
+		{"unknown argument longer than a head is kept whole", `{"tool_name":"mcp__x__run","tool_input":{"location":"` + strings.Repeat("a", 20<<10) + target + `"},"padding":"` + pad + `"}`, []string{target + `"`}},
+		{"unknown argument after context notes is kept", `{"tool_name":"mcp__x__run","tool_input":{` + notes(30) + `"location":"` + target + `"},"padding":"` + pad + `"}`, []string{`"location":"` + target + `"`}},
+		{"copilot toolArgs unknown argument kept whole", `{"toolName":"mcp_x","toolArgs":"{\"location\":\"` + strings.Repeat("a", 20<<10) + target + `\"}","padding":"` + pad + `"}`, []string{target}},
 		// A review over the per-user transports' 900 KiB body cap was refused
 		// by defenseclaw-hook-post and failed closed, even in the default.
-		{"command too long for the per-user transport", `{"tool_name":"Bash","tool_input":{"command":"` + strings.Repeat("a", 905000) + ` ` + secret + `"},"padding":"` + pad + `"}`, false, nil},
-		// Benign oversized calls stay reviewed (balanced defaults, action too).
-		{"edit with a long new string after its path", `{"tool_name":"Edit","tool_input":{"file_path":"/w/a.go","old_string":"x","new_string":"` + pad + `"}}`, true, []string{`"file_path":"/w/a.go"`}},
-		{"multi edit with long edits after its path", `{"tool_name":"MultiEdit","tool_input":{"file_path":"/w/a.go","edits":[{"old_string":"x","new_string":"` + pad + `"}]}}`, true, []string{`"file_path":"/w/a.go"`}},
-		{"notebook edit with a long source", `{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"/w/n.ipynb","new_source":"` + pad + `"}}`, true, []string{`"notebook_path":"/w/n.ipynb"`}},
-		{"long prompt", `{"hook_event_name":"UserPromptSubmit","prompt":"` + pad + `"}`, true, nil},
-		{"long tool result after whole arguments", `{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"cat package-lock.json","description":"` + strings.Repeat("d", 20<<10) + `"},"tool_response":{"stdout":"` + pad + `"}}`, true, []string{`"command":"cat package-lock.json"`}},
+		{"command too long for the per-user transport", `{"tool_name":"Bash","tool_input":{"command":"` + strings.Repeat("a", 905000) + ` ` + secret + `"},"padding":"` + pad + `"}`, nil},
+		// Benign oversized calls keep their review, marked too (observe allows
+		// them with one warning, action blocks).
+		{"edit with a long new string after its path", `{"tool_name":"Edit","tool_input":{"file_path":"/w/a.go","old_string":"x","new_string":"` + pad + `"}}`, []string{`"file_path":"/w/a.go"`}},
+		{"multi edit with long edits after its path", `{"tool_name":"MultiEdit","tool_input":{"file_path":"/w/a.go","edits":[{"old_string":"x","new_string":"` + pad + `"}]}}`, []string{`"file_path":"/w/a.go"`}},
+		{"notebook edit with a long source", `{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"/w/n.ipynb","new_source":"` + pad + `"}}`, []string{`"notebook_path":"/w/n.ipynb"`}},
+		{"long prompt", `{"hook_event_name":"UserPromptSubmit","prompt":"` + pad + `"}`, nil},
+		{"long tool result after whole arguments", `{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"cat package-lock.json","description":"` + strings.Repeat("d", 20<<10) + `"},"tool_response":{"stdout":"` + pad + `"}}`, []string{`"command":"cat package-lock.json"`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prefix := []byte(tc.body)
 			if int64(len(prefix)) > defaultMaxBody {
 				prefix = prefix[:defaultMaxBody]
 			}
-			review, uninspected := oversizedReview(prefix, "PreToolUse")
+			review := oversizedReviewPayload(prefix, "PreToolUse")
 			if len(review) == 0 || len(review) > 900<<10 || !json.Valid(review) {
 				t.Fatalf("review is not a valid bounded request: %d bytes", len(review))
 			}
-			marked := strings.Contains(string(review), `"`+OversizeUninspectedField+`":true`)
-			if marked != uninspected || marked == tc.reviewed {
-				t.Fatalf("uninspected=%v marked=%v, want marked=%v: %.300s", uninspected, marked, !tc.reviewed, review)
+			if !strings.Contains(string(review), `"`+OversizeUninspectedField+`":true`) {
+				t.Fatalf("review is not marked uninspected: %.300s", review)
 			}
 			for _, want := range tc.want {
 				if !strings.Contains(string(review), want) {
 					t.Fatalf("review lacks %q", want)
 				}
+			}
+		})
+	}
+}
+
+// Loop round 2 review of 06bb83dd (GAP-1022): a bounded review keeps only a
+// head of a file text, prompt or tool result, so a configured rule (here a
+// migrated literal past the 8 KiB head, or past the 1 MiB cap) cannot see
+// the rest. Such a review is never treated as fully inspected: it is marked,
+// so the gateway warns in observe mode and blocks in action mode, as the
+// release before the bounded review blocked every oversized call.
+func TestOversizedReviewNeverTreatsOmittedTextAsInspected(t *testing.T) {
+	const literal = "DC-MIGRATED-LITERAL-7f3a"
+	head := strings.Repeat("a", 20<<10)
+	pad := strings.Repeat("p", 2<<20)
+	for _, tc := range []struct{ name, body string }{
+		{"write content past the head", `{"tool_name":"Write","tool_input":{"file_path":"/w/notes.txt","content":"` + head + literal + pad + `"}}`},
+		{"write content past the cap", `{"tool_name":"Write","tool_input":{"file_path":"/w/notes.txt","content":"` + pad + literal + `"}}`},
+		{"edit new string past the head", `{"tool_name":"Edit","tool_input":{"file_path":"/w/a.go","old_string":"x","new_string":"` + head + literal + pad + `"}}`},
+		{"multi edit past the head", `{"tool_name":"MultiEdit","tool_input":{"file_path":"/w/a.go","edits":[{"old_string":"x","new_string":"` + head + literal + pad + `"}]}}`},
+		{"notebook source past the head", `{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"/w/n.ipynb","new_source":"` + head + literal + pad + `"}}`},
+		{"copilot create file text past the head", `{"toolName":"create","toolArgs":"{\"path\":\"/w/gen.go\",\"file_text\":\"` + head + literal + pad + `\"}"}`},
+		{"bash description past the head", `{"tool_name":"Bash","tool_input":{"command":"ls","description":"` + head + literal + pad + `"}}`},
+		{"prompt past the head", `{"hook_event_name":"UserPromptSubmit","prompt":"` + head + literal + pad + `"}`},
+		{"tool result past the head", `{"hook_event_name":"PostToolUse","tool_name":"mcp__x__read","tool_input":{"id":"1"},"tool_response":"` + head + literal + pad + `"}`},
+		{"context field after whole arguments", `{"tool_name":"Write","tool_input":{"file_path":"/w/a","content":"x"},"transcript":"` + head + literal + pad + `"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prefix := []byte(tc.body)
+			if int64(len(prefix)) > defaultMaxBody {
+				prefix = prefix[:defaultMaxBody]
+			}
+			review := oversizedReviewPayload(prefix, "PreToolUse")
+			if len(review) == 0 || len(review) > oversizedReviewMaxBytes || !json.Valid(review) {
+				t.Fatalf("review is not a valid bounded request: %d bytes", len(review))
+			}
+			if strings.Contains(string(review), literal) {
+				t.Fatalf("test shape keeps the literal; it must lie past what the review keeps")
+			}
+			if !strings.Contains(string(review), `"`+OversizeUninspectedField+`":true`) {
+				t.Fatalf("review without the text past its head is not marked uninspected: %.300s", review)
 			}
 		})
 	}

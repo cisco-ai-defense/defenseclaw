@@ -478,19 +478,19 @@ function assistantResponse(messages: ThreadMessage[]): string {
 }
 
 // runForeignHookCheck asks the administrator-owned hook binary for the
-// foreign-hook guard's decision and resolves to a block reason, or "" when
-// no unapproved plugin or hook is present. A binary that cannot be run,
+// foreign-hook guard's decision and resolves to a ForeignCheck: a block
+// reason, or "" when no unapproved plugin or hook is present. A binary that cannot be run,
 // times out, or answers anything but {"deny": false} blocks, unless the
 // managed deployment was uninstalled (its install marker is gone): uninstall
 // removes the hook binary too, and this plugin then stops failing closed as
 // it does for the gateway call.
-function runForeignHookCheck(event: string, cwd: string): Promise<string> {
-	if (!DC_FOREIGN_GUARD) return Promise.resolve("")
+function runForeignHookCheck(event: string, cwd: string): Promise<ForeignCheck> {
+	if (!DC_FOREIGN_GUARD) return Promise.resolve({ reason: "", retryable: false })
 	return new Promise(resolve => {
 		const fail = (why: string) => {
 			void deploymentRemoved().then(removed => resolve(removed
-				? ""
-				: foreignCheckFailure(event, why)))
+				? { reason: "", retryable: false }
+				: { reason: foreignCheckFailure(event, why), retryable: true }))
 		}
 		try {
 			const child = execFile(
@@ -502,7 +502,7 @@ function runForeignHookCheck(event: string, cwd: string): Promise<string> {
 						fail(safeError(error))
 						return
 					}
-					let verdict: { deny?: unknown, reason?: unknown }
+					let verdict: { deny?: unknown, reason?: unknown, retryable?: unknown }
 					try {
 						verdict = JSON.parse(String(stdout))
 					} catch {
@@ -510,12 +510,17 @@ function runForeignHookCheck(event: string, cwd: string): Promise<string> {
 						return
 					}
 					if (verdict && verdict.deny === false) {
-						resolve("")
+						resolve({ reason: "", retryable: false })
 						return
 					}
-					resolve(verdict && typeof verdict.reason === "string" && verdict.reason
-						? verdict.reason
-						: "DefenseClaw blocked this tool call because an unapproved plugin is present.")
+					resolve({
+						reason: verdict && typeof verdict.reason === "string" && verdict.reason
+							? verdict.reason
+							: "DefenseClaw blocked this tool call because an unapproved plugin is present.",
+						// Only the guard's structured answer marks a deny as the
+						// gateway not answering, never the text of its reason.
+						retryable: Boolean(verdict && verdict.retryable === true),
+					})
 				},
 			)
 			child.stdin?.on("error", () => {})
@@ -536,15 +541,13 @@ function foreignCheckFailure(event: string, why: string): string {
 	return `DefenseClaw could not check for unapproved plugins (${detail}), so this tool call is blocked.`
 }
 
-// A confirmed foreign plugin loaded with Amp stays loaded for this process.
-// Availability failures do not prove that one was loaded; retry the startup
-// check on the next call while keeping this call closed.
-function startupCheckRetryable(reason: string): boolean {
-	return reason.startsWith("DefenseClaw could not check for unapproved plugins") ||
-		reason.includes("could not check this agent session's hook record") ||
-		reason.includes("enterprise_gateway_not_running") ||
-		reason.includes("enterprise_managed_gateway_not_running")
-}
+// ForeignCheck is the foreign-plugin check's answer: a block reason ("" for
+// none) and whether the block is an availability failure (the check could
+// not run, or the guard says the gateway could not answer for the session).
+// A confirmed foreign plugin loaded with Amp stays loaded for this process,
+// so only an availability failure lets a later call retry the load-time
+// check, while this call stays closed.
+type ForeignCheck = { reason: string, retryable: boolean }
 
 // promptNotice sets DefenseClaw's hidden agent.start notice apart from the
 // user's prompt. Amp places the message right after the prompt text, and a
@@ -640,13 +643,13 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	// Amp loads plugins once at startup: a foreign plugin present now keeps
 	// running for this process even if its file is deleted later, so a block
 	// found at load holds for the whole process.
-	let startupGuard: Promise<string> | null = runForeignHookCheck("session.load", workspaceRoot)
+	let startupGuard: Promise<ForeignCheck> | null = runForeignHookCheck("session.load", workspaceRoot)
 	const foreignHookCheck = async (event: string): Promise<string> => {
 		if (await managedLifecycleHeld()) return DC_MANAGED_LIFECYCLE_TEXT
 		if (!startupGuard) startupGuard = runForeignHookCheck("session.load", workspaceRoot)
-		const startupBlock = await startupGuard
-		if (startupBlock && startupCheckRetryable(startupBlock)) startupGuard = null
-		return startupBlock || (await runForeignHookCheck(event, workspaceRoot))
+		const startup = await startupGuard
+		if (startup.retryable) startupGuard = null
+		return startup.reason || (await runForeignHookCheck(event, workspaceRoot)).reason
 	}
 
 	async function agentFacts(threadID: string, ctx: { thread: { agent(): Promise<Agent> } }): Promise<AgentFacts> {

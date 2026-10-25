@@ -755,10 +755,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// the kernel denials its tool calls hit (kernel_block_notice.go).
 			resp = a.safeAddKernelBlockNotice(ctx, profile, connectorName, req, b, payload, resp)
 		}
-		if payload[hookexec.OversizeUninspectedField] == true && (resp.Action == "allow" || resp.Action == "alert") {
-			// The hook could not send a command or target of this oversized
-			// call whole: never a silent allow of what was not inspected (an
-			// observe-mode alert already warns and audits its own finding).
+		if oversizeUninspectedPayload(payload) && (resp.Action == "allow" || resp.Action == "alert") {
+			// The hook could not send this oversized call whole: never a
+			// silent allow of what was not inspected (an observe-mode alert
+			// already warns and audits its own finding).
 			// The field only tightens a verdict, so any sender may set it.
 			if mode := a.agentHookMode(ctx, connectorName); resp.Action == "allow" || mode == "action" {
 				resp = oversizeUninspectedHookResponse(profile, req, mode, resp)
@@ -793,7 +793,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if payload["bounded_prefix_review"] == true {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{"bounded_prefix_review": "true"})
 		}
-		if payload[hookexec.OversizeUninspectedField] == true {
+		if oversizeUninspectedPayload(payload) {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{hookexec.OversizeUninspectedField: "true"})
 		}
 		if len(resp.KernelBlocksTold) > 0 {
@@ -2984,13 +2984,20 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	return resp
 }
 
-// hookOversizeUninspectedRuleID is the finding of an oversized call whose
-// bounded review lacks part of a command or target value
-// (hookexec.OversizeUninspectedField).
+// hookOversizeUninspectedRuleID is the finding of an oversized call, which
+// its bounded review never carries whole (hookexec.OversizeUninspectedField).
 const hookOversizeUninspectedRuleID = "HOOK-OVERSIZE-COMMAND-NOT-INSPECTED"
 
-const oversizeUninspectedReason = "oversize, command not inspected: this hook payload is over DefenseClaw's size cap " +
-	"and its command or target did not fit the bounded review."
+const oversizeUninspectedReason = "oversize, command not inspected: this hook payload is over DefenseClaw's size cap, " +
+	"so the gateway could read only part of the call."
+
+// oversizeUninspectedPayload reports a bounded review of an oversized call.
+// Every bounded review lacks part of the call (hookexec.OversizeUninspectedField),
+// so bounded_prefix_review alone marks it too: a sender that drops the
+// marker cannot turn a partial review into an allow in action mode.
+func oversizeUninspectedPayload(payload map[string]any) bool {
+	return payload[hookexec.OversizeUninspectedField] == true || payload["bounded_prefix_review"] == true
+}
 
 // oversizeUninspectedHookResponse answers such a call like an unparsed one,
 // in the connector's mode: observe warns and audits, action blocks. A

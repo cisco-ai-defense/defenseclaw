@@ -574,19 +574,23 @@ async function defenseclawRetryBusy(send, signal) {
 }
 
 // defenseclawForeignHookCheck asks the administrator-owned hook binary for
-// the foreign-hook guard's decision and resolves to a block reason, or ""
-// when no unapproved plugin or hook is present. A binary that cannot be
+// the foreign-hook guard's decision and resolves to { reason, retryable }: a
+// block reason, or "" when no unapproved plugin or hook is present, and
+// whether the block is an availability failure (the check could not run, or
+// the guard says the gateway could not answer for the session). A confirmed
+// foreign plugin loaded with OpenCode stays loaded for this process, so only
+// an availability failure lets a later call retry the load-time check. A binary that cannot be
 // run, times out, or answers anything but {"deny": false} blocks, unless
 // the managed deployment was uninstalled (its install marker is gone):
 // uninstall removes the hook binary too, and this plugin then stops failing
 // closed as it does for the gateway call.
 function defenseclawForeignHookCheck(event, cwd) {
-  if (!DC_FOREIGN_GUARD) return Promise.resolve("");
+  if (!DC_FOREIGN_GUARD) return Promise.resolve({ reason: "", retryable: false });
   return new Promise((resolve) => {
     const fail = (why) => {
       void defenseclawDeploymentRemoved().then((removed) => resolve(removed
-        ? ""
-        : defenseclawForeignCheckFailure(event, why)));
+        ? { reason: "", retryable: false }
+        : { reason: defenseclawForeignCheckFailure(event, why), retryable: true }));
     };
     try {
       const child = execFile(
@@ -606,12 +610,17 @@ function defenseclawForeignHookCheck(event, cwd) {
             return;
           }
           if (verdict && verdict.deny === false) {
-            resolve("");
+            resolve({ reason: "", retryable: false });
             return;
           }
-          resolve(verdict && typeof verdict.reason === "string" && verdict.reason
-            ? verdict.reason
-            : "DefenseClaw blocked this tool call because an unapproved plugin is present.");
+          resolve({
+            reason: verdict && typeof verdict.reason === "string" && verdict.reason
+              ? verdict.reason
+              : "DefenseClaw blocked this tool call because an unapproved plugin is present.",
+            // Only the guard's structured answer marks a deny as the gateway
+            // not answering, never the text of its reason.
+            retryable: Boolean(verdict && verdict.retryable === true),
+          });
         },
       );
       if (child.stdin) {
@@ -635,15 +644,6 @@ function defenseclawForeignCheckFailure(event, why) {
   return "DefenseClaw could not check for unapproved plugins (" + detail + "), so this tool call is blocked.";
 }
 
-// A confirmed foreign plugin loaded with OpenCode stays loaded for this
-// process. Availability failures do not prove that one was loaded; retry the
-// startup check on the next call while keeping this call closed.
-function defenseclawStartupCheckRetryable(reason) {
-  return reason.startsWith("DefenseClaw could not check for unapproved plugins") ||
-    reason.includes("could not check this agent session's hook record") ||
-    reason.includes("enterprise_gateway_not_running") ||
-    reason.includes("enterprise_managed_gateway_not_running");
-}
 
 // defenseclawBlockError is the error a blocked tool call fails with. OpenCode
 // shows it as the tool's error and hands it to the model, so it says that
@@ -815,11 +815,12 @@ const DC_REVIEW_BULK_KEYS = new Set(["content", "oldstring", "newstring", "oldst
 
 // defenseclawBoundedReview reduces an oversized payload to a request under
 // the gateway's 1 MiB cap that keeps every key of the call, so the gateway
-// judges its command and target as at normal size. A review that cannot keep
-// a command or target value whole sends a head of it and is marked
-// oversize_command_not_inspected: the gateway warns and audits it in observe
-// mode and blocks it in action mode. It returns "" only when even the last
-// pass, which keeps no value whole, stays over the cap.
+// judges its command and target as at normal size. Every review is marked
+// oversize_command_not_inspected: it keeps only a head of the call's file
+// text, prompt or tool result, where a configured rule may match past the
+// head, so the gateway warns and audits it in observe mode and blocks it in
+// action mode. It returns null only when even the last pass, which keeps no
+// value whole, stays over the cap.
 function defenseclawBoundedReview(payload, originalBytes) {
   for (let pass = 0; pass <= 4; pass++) {
     // Command and target values are kept whole while they fit; only the
@@ -827,7 +828,6 @@ function defenseclawBoundedReview(payload, originalBytes) {
     // none whole.
     let keep = pass === 4 ? 0 : 832 * 1024;
     let heads = (192 * 1024) >> Math.min(pass, 3);
-    let incomplete = false;
     const walk = (value, inKeep, depth, atArgs = false) => {
       if (typeof value === "string") {
         if (inKeep && value.length <= keep) { keep -= value.length; return value; }
@@ -835,13 +835,12 @@ function defenseclawBoundedReview(payload, originalBytes) {
           try { return JSON.stringify(walk(JSON.parse(value), true, depth + 1)); } catch (_) { /* not JSON */ }
         }
         // A command or target value that does not fit whole: only a head.
-        if (inKeep) incomplete = true;
         const n = Math.max(0, Math.min(value.length, 8192, heads));
         heads -= n;
         return n > 0 || value === "" ? value.slice(0, n) : undefined;
       }
       if (value === null || typeof value !== "object") return value;
-      if (depth >= 128) { incomplete = incomplete || inKeep; return undefined; }
+      if (depth >= 128) return undefined;
       if (Array.isArray(value)) return value.map((item) => walk(item, inKeep, depth + 1));
       const out = {};
       for (const [key, item] of Object.entries(value)) {
@@ -853,13 +852,13 @@ function defenseclawBoundedReview(payload, originalBytes) {
       return out;
     };
     const review = walk(payload, false, 0) || {};
-    if (incomplete) review.oversize_command_not_inspected = true;
+    review.oversize_command_not_inspected = true;
     review.content_truncated = true;
     review.bounded_prefix_review = true;
     review.original_body_bytes = originalBytes;
     const body = JSON.stringify(review);
     // The native helper's transport refuses a body over 900 KiB.
-    if (Buffer.byteLength(body, "utf8") <= 900 * 1024) return { body, uninspected: incomplete };
+    if (Buffer.byteLength(body, "utf8") <= 900 * 1024) return body;
   }
   return null;
 }
@@ -906,15 +905,13 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     let body = JSON.stringify(payload);
     const originalBytes = Buffer.byteLength(body, "utf8");
     let oversizedReview = false;
-    let uninspected = false;
     if (originalBytes > (1 << 20)) {
       if (await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
       if (DC_OUTAGE_FAIL_MODE === "open") {
         const review = defenseclawBoundedReview(payload, originalBytes);
         if (review) {
-          body = review.body;
+          body = review;
           oversizedReview = true;
-          uninspected = review.uninspected;
         }
       }
       if (!oversizedReview && actionable) {
@@ -955,8 +952,8 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       return { reason: data.reason || "DefenseClaw hook failed closed (missing native deny)", mode: data.mode || "" };
     }
     if (oversizedReview) {
-      await defenseclawLogFailOpen(uninspected ? "stdin body exceeded cap; oversize, command not inspected" : "stdin body exceeded cap; bounded prefix reviewed by gateway", "transport");
-      return { reason: "", mode: data && data.mode || "", notice: "DefenseClaw warning: this hook payload exceeded the bounded inspection cap" + (uninspected ? " (oversize, command not inspected)" : "") + "; the gateway allowed and audited this call." };
+      await defenseclawLogFailOpen("stdin body exceeded cap; oversize, command not inspected", "transport");
+      return { reason: "", mode: data && data.mode || "", notice: "DefenseClaw warning: this hook payload exceeded the bounded inspection cap (oversize, command not inspected); the gateway allowed and audited this call." };
     }
     return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
   } catch (err) {
@@ -1183,10 +1180,10 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
       if (!defenseclawStartupGuard) {
         defenseclawStartupGuard = defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
       }
-      const startupBlock = await defenseclawStartupGuard;
-      if (startupBlock && defenseclawStartupCheckRetryable(startupBlock)) defenseclawStartupGuard = null;
-      const callBlock = await defenseclawForeignHookCheck("tool.execute.before", cwd);
-      const blocked = startupBlock || callBlock;
+      const startup = await defenseclawStartupGuard;
+      if (startup.retryable) defenseclawStartupGuard = null;
+      const callBlock = (await defenseclawForeignHookCheck("tool.execute.before", cwd)).reason;
+      const blocked = startup.reason || callBlock;
       if (blocked) throw defenseclawBlock(client, blocked);
       const mcpIdentity = defenseclawResolveMCPServer(input && input.tool);
       const verdict = await defenseclawPost(

@@ -80,6 +80,9 @@ type ToolInspectRequest struct {
 	// selects the connector generation; a mismatched assertion is rejected.
 	Connector     string `json:"connector,omitempty"`
 	MCPServerName string `json:"mcp_server_name,omitempty"`
+	// BoundedPrefixReview is set by the per-user shell inspect hooks on the
+	// bounded review of a call over their size cap (markOversizeUninspected).
+	BoundedPrefixReview bool `json:"bounded_prefix_review,omitempty"`
 	// contentScope is set only after a connector adapter derives content
 	// provenance from its typed hook payload. It is deliberately not accepted
 	// from the public inspect wire, where a caller could otherwise promote its
@@ -163,6 +166,21 @@ type ToolInspectVerdict struct {
 // guardrail.mode=observe were silently still being blocked because
 // the OpenClaw inspect handlers (handleInspect{Tool,Request,Response,
 // ToolResponse}) emitted action=block regardless of mode.
+// markOversizeUninspected answers a bounded review of an oversized call
+// (bounded_prefix_review, from the per-user shell inspect hooks) like the
+// native hook route: never a silent allow of a call the gateway read only in
+// part. It runs before applyMode, so observe mode warns and audits the call
+// and action mode blocks it; a block found in the review stands.
+func (v *ToolInspectVerdict) markOversizeUninspected() {
+	if v.Action == "block" {
+		return
+	}
+	v.Action = "block"
+	v.Severity = "HIGH"
+	v.Reason = oversizeUninspectedReason
+	v.Findings = append([]string{hookOversizeUninspectedRuleID}, v.Findings...)
+}
+
 func (v *ToolInspectVerdict) applyMode(mode string) {
 	mode = strings.TrimSpace(mode)
 	if mode == "" {
@@ -1706,6 +1724,9 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if req.BoundedPrefixReview {
+		verdict.markOversizeUninspected()
+	}
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
 	a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
 

@@ -111,6 +111,8 @@ type RequestInspectRequest struct {
 	Content   string `json:"content"`
 	Model     string `json:"model,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
+	// BoundedPrefixReview: see ToolInspectRequest.
+	BoundedPrefixReview bool `json:"bounded_prefix_review,omitempty"`
 }
 
 // ResponseInspectRequest is the payload for POST /api/v1/inspect/response.
@@ -119,6 +121,8 @@ type ResponseInspectRequest struct {
 	Content   string `json:"content"`
 	Model     string `json:"model,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
+	// BoundedPrefixReview: see ToolInspectRequest.
+	BoundedPrefixReview bool `json:"bounded_prefix_review,omitempty"`
 }
 
 // ToolResponseInspectRequest is the payload for POST /api/v1/inspect/tool-response.
@@ -128,6 +132,8 @@ type ToolResponseInspectRequest struct {
 	Output    json.RawMessage `json:"output,omitempty"`
 	ExitCode  int             `json:"exit_code,omitempty"`
 	SessionID string          `json:"session_id,omitempty"`
+	// BoundedPrefixReview: see ToolInspectRequest.
+	BoundedPrefixReview bool `json:"bounded_prefix_review,omitempty"`
 }
 
 // handleInspectRequest inspects user query content before it is sent to the LLM.
@@ -147,7 +153,7 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 	}
 	req.Content = truncateInspectContent(req.Content, maxInspectContentLen)
 	managedAIDOnly := a.managedAIDOnly()
-	if req.Content == "" && !managedAIDOnly {
+	if req.Content == "" && !managedAIDOnly && !req.BoundedPrefixReview {
 		a.writeJSON(w, http.StatusOK, &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}})
 		return
 	}
@@ -173,6 +179,9 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		// surface. A prompt is never confirmable, so there is no confirm to
 		// demote.
 		verdict = a.buildVerdict(r.Context(), ruleFindings, "prompt", false)
+	}
+	if req.BoundedPrefixReview {
+		verdict.markOversizeUninspected()
 	}
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
@@ -233,7 +242,7 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 	}
 	req.Content = truncateInspectContent(req.Content, maxInspectContentLen)
 	managedAIDOnly := a.managedAIDOnly()
-	if req.Content == "" && !managedAIDOnly {
+	if req.Content == "" && !managedAIDOnly && !req.BoundedPrefixReview {
 		a.writeJSON(w, http.StatusOK, &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}})
 		return
 	}
@@ -256,6 +265,9 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 			return
 		}
 		verdict = a.buildVerdict(r.Context(), ruleFindings, "completion", false)
+	}
+	if req.BoundedPrefixReview {
+		verdict.markOversizeUninspected()
 	}
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
@@ -371,6 +383,9 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	if req.BoundedPrefixReview {
+		verdict.markOversizeUninspected()
+	}
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)

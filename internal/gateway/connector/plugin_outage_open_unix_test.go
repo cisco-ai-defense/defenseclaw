@@ -56,7 +56,8 @@ console.log(JSON.stringify({ verdict, notices }));
 
 // Every command and target key of an oversized plugin call reaches the
 // gateway's bounded review, before or after a long value (Amp Bash "cmd",
-// OpenCode "command", a write's file path after its content).
+// OpenCode "command", a write's file path after its content), and every
+// review is marked uninspected.
 func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 	nodeForTest(t)
 	const pad = `"x".repeat(1100000)`
@@ -66,7 +67,10 @@ func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 	const overBudget = `patch: "q".repeat(600000), diff: "r".repeat(400000), `
 	for _, plugin := range []struct {
 		asset, name, connector, harness, input string
-		uninspected                            bool // the review must be marked oversize_command_not_inspected
+		// targetCut: the review cannot keep the target whole. Every review
+		// is marked oversize_command_not_inspected (loop round 2 review of
+		// 06bb83dd: a review never carries the file text whole).
+		targetCut bool
 	}{
 		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `command: "cat /home/user/.ssh/authorized_keys " + ` + pad, true},
 		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `description: ` + pad + `, command: "cat /home/user/.ssh/authorized_keys"`, false},
@@ -103,8 +107,7 @@ func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 		t.Run(plugin.connector+" "+name, func(t *testing.T) {
 			var request []byte
 			// The gateway (action mode) blocks a request that names the
-			// protected target or is marked uninspected: an unmarked review
-			// without the target would be allowed.
+			// protected target or is marked uninspected.
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				request, _ = io.ReadAll(r.Body)
 				w.Header().Set("Content-Type", "application/json")
@@ -148,8 +151,8 @@ func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 				t.Fatal(err)
 			}
 			marked := strings.Contains(string(request), `"oversize_command_not_inspected":true`)
-			if !strings.HasPrefix(result.Verdict, "block:") || !strings.Contains(string(request), `"bounded_prefix_review":true`) || marked != plugin.uninspected ||
-				!plugin.uninspected && !strings.Contains(string(request), "/home/user/.ssh/authorized_keys") {
+			if !strings.HasPrefix(result.Verdict, "block:") || !strings.Contains(string(request), `"bounded_prefix_review":true`) || !marked ||
+				!plugin.targetCut && !strings.Contains(string(request), "/home/user/.ssh/authorized_keys") {
 				t.Fatalf("gateway block=%q marked=%v request=%.300q", result.Verdict, marked, request)
 			}
 		})

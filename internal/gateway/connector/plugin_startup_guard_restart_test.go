@@ -300,3 +300,107 @@ console.log(await call(restarted, "U3"));
 		t.Fatalf("Amp verdicts = %q, retryable=%v", lines, retryable)
 	}
 }
+
+// onceForeignGuard answers its first foreign-hook check with first and
+// allows afterwards: a foreign plugin that was found at load and then
+// deleted its file (and its session record).
+func onceForeignGuard(t *testing.T, root, first string) string {
+	t.Helper()
+	guard := filepath.Join(root, "defenseclaw-hook")
+	script := "#!/bin/sh\ncat >/dev/null\ncase \" $* \" in\n  *\" --foreign-hook-check \"*) ;;\n  *) exit 1 ;;\nesac\n" +
+		"if [ ! -f \"$0.ran\" ]; then\n  : > \"$0.ran\"\n  printf '%s\\n' '" + first + "'\n  exit 0\nfi\nprintf '{\"deny\":false}\\n'\n"
+	if err := os.WriteFile(guard, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return guard
+}
+
+// Loop round 2 review of 06bb83dd (GAP-1180): the plugins retried their
+// load-time check when the denial's reason text contained an availability
+// phrase, so an unapproved plugin named enterprise_gateway_not_running.ts
+// (or any reason quoting "could not check this agent session's hook record")
+// cleared the pinned denial and, once it deleted its file, its calls were
+// allowed while it stayed loaded. Only the guard's structured retryable
+// answer (or a check that could not run) retries now; a confirmed denial
+// holds for the process whatever its text.
+func TestPluginStartupGuardPinsConfirmedDenialWhateverItsReason(t *testing.T) {
+	denials := map[string]string{
+		"plugin named like a gateway outage": `{"deny":true,"reason":"enterprise_foreign_hook_blocked: project file .amp/plugins/enterprise_gateway_not_running.ts"}`,
+		"plugin named like a managed outage": `{"deny":true,"reason":"enterprise_foreign_hook_blocked: enterprise_managed_gateway_not_running.js"}`,
+		"reason quoting the session phrase":  `{"deny":true,"reason":"enterprise_foreign_hook_blocked: could not check this agent session's hook record.ts"}`,
+		"reason quoting the check failure":   `{"deny":true,"reason":"DefenseClaw could not check for unapproved plugins.js"}`,
+	}
+	const retryable = `{"deny":true,"reason":"enterprise_foreign_hook_blocked: DefenseClaw could not check this agent session's hook record with its gateway","retryable":true}`
+	cases := map[string]struct {
+		first   string
+		recover bool
+	}{"structured retryable answer": {retryable, true}}
+	for name, denial := range denials {
+		cases[name] = struct {
+			first   string
+			recover bool
+		}{denial, false}
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			data := openCodePluginTestData(t, openCodeStubGateway(t))
+			data.ForeignHookGuardJS = javaScriptStringContent(onceForeignGuard(t, root, strings.ReplaceAll(tc.first, "'", `'"'"'`)))
+			data.Managed = true
+			lines := runNodeHarness(t, `
+import { pathToFileURL } from "node:url";
+const href = pathToFileURL(process.argv[1]).href;
+const loaded = await import(href);
+const call = async (plugin, id) => {
+  try {
+    await plugin["tool.execute.before"]({ tool: "bash", sessionID: "S", messageID: "M", callID: id }, { args: { command: "echo marker" } });
+    return "allow";
+  } catch (error) {
+    return "block:" + String(error && error.message || error);
+  }
+};
+const plugin = await loaded.DefenseClaw({ directory: "", client: {} });
+await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
+console.log(await call(plugin, "C1"));
+console.log(await call(plugin, "C2"));
+`, writeRenderedPlugin(t, "opencode-plugin.js", "defenseclaw.mjs", data))
+			if len(lines) != 2 || !strings.HasPrefix(lines[0], "block:") || (lines[1] == "allow") != tc.recover {
+				t.Fatalf("OpenCode verdicts = %q, want first-call block, then recover=%v", lines, tc.recover)
+			}
+
+			ampRoot := testenv.PrivateTempDir(t)
+			ampToken := filepath.Join(ampRoot, ".hook-amp.token")
+			if err := os.WriteFile(ampToken, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			lines = runNodeHarness(t, `
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+globalThis.Bun = { file: (path) => ({ slice: () => ({ text: async () => readFileSync(path, "utf8") }) }) };
+const loaded = await import(pathToFileURL(process.argv[1]).href);
+const handlers = {};
+loaded.default({
+  system: { workspaceRoot: "", executor: { kind: "" }, user: {} },
+  helpers: { filePathFromURI: (uri) => uri, isPluginUINotAvailableError: () => true },
+  on: (event, handler) => { handlers[event] = handler; },
+  activeThread: { current: null },
+  ui: { notify: async () => {} },
+});
+for (const id of ["U1", "U2"]) {
+  const result = await handlers["tool.call"]({ thread: { id: "T" }, toolUseID: id, tool: "Bash", input: {} }, {});
+  console.log(result.action + ":" + (result.message || ""));
+}
+`, writeRenderedPlugin(t, "amp-plugin.ts", "defenseclaw.mts", templateData{
+				APIAddr:            strings.TrimPrefix(openCodeStubGateway(t).URL, "http://"),
+				TokenFileJS:        javaScriptStringContent(ampToken),
+				ForeignHookGuardJS: javaScriptStringContent(onceForeignGuard(t, ampRoot, strings.ReplaceAll(tc.first, "'", `'"'"'`))),
+				FailMode:           "closed",
+				Managed:            true,
+			}))
+			if len(lines) != 2 || !strings.HasPrefix(lines[0], "reject-and-continue:") ||
+				strings.HasPrefix(lines[1], "allow:") != tc.recover {
+				t.Fatalf("Amp verdicts = %q, want first-call block, then recover=%v", lines, tc.recover)
+			}
+		})
+	}
+}
