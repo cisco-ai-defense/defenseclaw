@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"maps"
 	"os"
@@ -144,10 +145,12 @@ type activeAgentContextCache struct {
 	caseInsensitiveUncertain bool
 	// lost are sessions this process evicted with a first sighting that no
 	// saved record holds, with the identities of the instruction files that
-	// sighting recorded (lostIdentities), oldest first in lostOrder. None
-	// takes a new first sighting (firstSightingKey).
+	// sighting recorded (lostIdentities), least recently used first in
+	// lostOrder; lostBytes is the size of those identities. None takes a
+	// new first sighting (firstSightingKey).
 	lost      map[activeAgentContextKey][]string
 	lostOrder []activeAgentContextKey
+	lostBytes int
 	now       func() time.Time
 	// storeMu orders the writes of a session's load record
 	// (saveInstructionLoads) with the state each one copies. It guards the
@@ -352,32 +355,63 @@ func (cache *activeAgentContextCache) makeRoomLocked(needsRoom activeAgentContex
 	}
 }
 
+// maxInstructionLostBytes bounds the identities the lost sessions keep.
+const maxInstructionLostBytes = 4 << 20
+
 // rememberLostLocked records that key's first sighting is gone: no saved
 // record restores it. identities are the instruction files it had proved
 // (lostIdentities): they stay protected by identity, and only another file
-// is judged as one the session may have created. Past the bound the oldest
-// lost session is forgotten: its next call takes a new first sighting,
+// is judged as one the session may have created. key becomes the newest
+// lost session (lostKey makes a session in use the newest again). The lost
+// sessions are bounded as the store's pruned index is: past
+// maxInstructionLostBytes the oldest keep their key alone, still lost, and
+// only past maxInstructionLoadPruned sessions is the least recently used
+// one forgotten, with a log line: its next call takes a new first sighting,
 // which protects every instruction file there then. A loss is never applied
 // to a session that did not own it.
 func (cache *activeAgentContextCache) rememberLostLocked(key activeAgentContextKey, identities []string) {
 	if cache.lost == nil {
 		cache.lost = make(map[activeAgentContextKey][]string)
 	}
-	if _, known := cache.lost[key]; !known {
-		cache.lostOrder = append(cache.lostOrder, key)
-	}
+	cache.forgetLostLocked(key)
 	cache.lost[key] = identities
-	for len(cache.lostOrder) > maxInstructionLoadRecords {
-		delete(cache.lost, cache.lostOrder[0])
-		cache.lostOrder = cache.lostOrder[1:]
+	cache.lostOrder = append(cache.lostOrder, key)
+	cache.lostBytes += lostIdentityBytes(identities)
+	for index := 0; cache.lostBytes > maxInstructionLostBytes && index < len(cache.lostOrder)-1; index++ {
+		oldest := cache.lostOrder[index]
+		if proved := cache.lost[oldest]; len(proved) != 0 {
+			cache.lostBytes -= lostIdentityBytes(proved)
+			cache.lost[oldest] = nil
+		}
 	}
+	dropped := 0
+	for len(cache.lostOrder) > maxInstructionLoadPruned {
+		oldest := cache.lostOrder[0]
+		cache.lostBytes -= lostIdentityBytes(cache.lost[oldest])
+		delete(cache.lost, oldest)
+		cache.lostOrder = cache.lostOrder[1:]
+		dropped++
+	}
+	if dropped > 0 {
+		fmt.Fprintf(os.Stderr, "[instruction-protection] the lost first-sighting set is full: %d least recently used session(s) take a new first sighting on their next call\n", dropped)
+	}
+}
+
+func lostIdentityBytes(identities []string) int {
+	total := 0
+	for _, identity := range identities {
+		total += len(identity) + 1
+	}
+	return total
 }
 
 // forgetLostLocked drops key from the lost sessions.
 func (cache *activeAgentContextCache) forgetLostLocked(key activeAgentContextKey) {
-	if _, known := cache.lost[key]; !known {
+	identities, known := cache.lost[key]
+	if !known {
 		return
 	}
+	cache.lostBytes -= lostIdentityBytes(identities)
 	delete(cache.lost, key)
 	cache.lostOrder = slices.DeleteFunc(cache.lostOrder, func(lost activeAgentContextKey) bool { return lost == key })
 }
@@ -934,11 +968,15 @@ func (cache *activeAgentContextCache) loseKey(key activeAgentContextKey, identit
 }
 
 // lostKey reports whether key's first sighting was lost in this process,
-// with the identities it still proves.
+// with the identities it still proves. A session asked about is in use: it
+// becomes the newest lost session, so the bound forgets it last.
 func (cache *activeAgentContextCache) lostKey(key activeAgentContextKey) ([]string, bool) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	identities, lost := cache.lost[key]
+	if lost && slices.Index(cache.lostOrder, key) < len(cache.lostOrder)/2 {
+		cache.rememberLostLocked(key, identities)
+	}
 	return slices.Clone(identities), lost
 }
 

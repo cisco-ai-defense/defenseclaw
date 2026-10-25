@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path"
@@ -46,17 +47,23 @@ const (
 )
 
 // The pruned index lists the record names of sessions whose first sighting
-// the bounds pruned, oldest first, one per line with the identities that
-// sighting proved (the record name, a space, the identities comma
-// separated), until the session starts again or ends. Past its bounds the
-// oldest entries are dropped: that session's next call takes a new first
-// sighting, which protects every instruction file there then (a loss is
-// only ever applied to the session that owned it). An index that cannot be
-// read is taken as empty, the same way, and replaced on the next write.
+// the bounds pruned, least recently used first, one per line with the
+// identities that sighting proved (the record name, a space, the identities
+// comma separated), until the session starts again or ends. A call of a
+// listed session makes it the newest entry again (instructionFirstSightingLost),
+// so a session in use keeps its place. Past the byte bound the oldest
+// entries keep their name alone: the session stays lost and never takes a
+// new first sighting while it lives; only the identities it proved fall to
+// the call-time proof. Only past the entry bound (sixteen times the saved
+// records) is the least recently used session dropped, with a log line: its
+// next call takes a new first sighting, which protects every instruction
+// file there then (a loss is only ever applied to the session that owned
+// it). An index that cannot be read is taken as empty, the same way, and
+// replaced on the next write.
 const (
 	instructionLoadPrunedName     = "pruned"
-	maxInstructionLoadPruned      = 8 * maxInstructionLoadRecords
-	maxInstructionLoadPrunedBytes = 4 << 20
+	maxInstructionLoadPruned      = 16 * maxInstructionLoadRecords
+	maxInstructionLoadPrunedBytes = 8 << 20
 )
 
 type instructionLoadRecord struct {
@@ -224,19 +231,32 @@ func instructionLoadRecordSighted(name string) ([]string, bool) {
 }
 
 // addPrunedLocked lists name in the pruned index with the identities its
-// first sighting proved, as the newest entry, and drops the oldest entries
-// past the index bounds. The caller holds storeMu.
+// first sighting proved, as the newest entry. Past the byte bound the
+// oldest entries keep their name alone (still lost); past the entry bound
+// the least recently used ones are dropped. The caller holds storeMu.
 func (cache *activeAgentContextCache) addPrunedLocked(name string, identities []string) {
 	cache.removePrunedLocked(name)
 	cache.pruned[name] = identities
 	cache.prunedOrder = append(cache.prunedOrder, name)
 	cache.prunedBytes += len(prunedIndexLine(name, identities)) + 1
+	for index := 0; cache.prunedBytes > maxInstructionLoadPrunedBytes && index < len(cache.prunedOrder)-1; index++ {
+		oldest := cache.prunedOrder[index]
+		if proved := cache.pruned[oldest]; len(proved) != 0 {
+			cache.prunedBytes -= len(prunedIndexLine(oldest, proved)) - len(oldest)
+			cache.pruned[oldest] = nil
+		}
+	}
+	dropped := 0
 	for len(cache.prunedOrder) > 0 &&
 		(len(cache.prunedOrder) > maxInstructionLoadPruned || cache.prunedBytes > maxInstructionLoadPrunedBytes) {
 		oldest := cache.prunedOrder[0]
 		cache.prunedBytes -= len(prunedIndexLine(oldest, cache.pruned[oldest])) + 1
 		delete(cache.pruned, oldest)
 		cache.prunedOrder = cache.prunedOrder[1:]
+		dropped++
+	}
+	if dropped > 0 {
+		fmt.Fprintf(os.Stderr, "[instruction-protection] the pruned first-sighting index is full: %d least recently used session(s) take a new first sighting on their next call\n", dropped)
 	}
 }
 
@@ -310,7 +330,8 @@ func (cache *activeAgentContextCache) writePrunedLocked(dir string) {
 // with the identities it still proves: the bounds pruned its record
 // (pruneInstructionLoadsLocked), or this process lost it
 // (rememberLostLocked). A later event of the session (a CwdChanged, a load)
-// does not bring it back.
+// does not bring it back. A session asked about is in use: it becomes the
+// newest entry, so the bounds drop it last.
 func (a *APIServer) instructionFirstSightingLost(key activeAgentContextKey) ([]string, bool) {
 	if identities, lost := a.activeAgentContext.lostKey(key); lost {
 		return identities, true
@@ -323,7 +344,13 @@ func (a *APIServer) instructionFirstSightingLost(key activeAgentContextKey) ([]s
 	cache.storeMu.Lock()
 	defer cache.storeMu.Unlock()
 	cache.loadPrunedLocked(dir)
-	identities, pruned := cache.pruned[instructionLoadRecordName(key)]
+	name := instructionLoadRecordName(key)
+	identities, pruned := cache.pruned[name]
+	// The index is written again at most once per half of its entries.
+	if pruned && slices.Index(cache.prunedOrder, name) < len(cache.prunedOrder)/2 {
+		cache.addPrunedLocked(name, identities)
+		cache.writePrunedLocked(dir)
+	}
 	return slices.Clone(identities), pruned
 }
 

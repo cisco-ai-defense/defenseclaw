@@ -168,9 +168,10 @@ func TestInstructionSavedSessionEvictionIsNotLost(t *testing.T) {
 }
 
 // Protected-target corpus (round q). A loss belongs to the session that
-// owned it: past their bounds the pruned index and the lost set drop their
-// oldest entry (that session takes a new first sighting, which protects
-// every file there then), and an unreadable index is taken as empty. No
+// owned it: past their entry bounds the pruned index and the lost set drop
+// their least recently used entry (that session takes a new first
+// sighting, which protects every file there then), and an unreadable index
+// is taken as empty. No
 // bound or read failure stops another session from taking its first
 // sighting, so a late-start session's pre-existing AGENTS.md is never
 // turned into a warning. The index keeps each entry's identities across a
@@ -219,11 +220,12 @@ func TestInstructionPrunedIndexDropsOnlyTheOldest(t *testing.T) {
 			t.Fatal("an unreadable index listed sessions")
 		}
 	}
-	// The lost set drops its oldest entry, and a session that lost nothing
-	// still takes its first sighting.
+	// The lost set drops its least recently used entry past its entry
+	// bound, and a session that lost nothing still takes its first
+	// sighting.
 	var lost activeAgentContextCache
 	lost.mu.Lock()
-	for index := range maxInstructionLoadRecords + 1 {
+	for index := range maxInstructionLoadPruned + 1 {
 		key, _ := validActiveAgentContextKey("codex", fmt.Sprintf("lost-%d", index))
 		lost.rememberLostLocked(key, nil)
 	}
