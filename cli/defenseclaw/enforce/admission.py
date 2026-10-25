@@ -444,8 +444,13 @@ def evaluate_admission(
     action_entry: Any | None = None,
     include_quarantine: bool = False,
     allow_first_party: bool = True,
+    content_path: str = "",
 ) -> AdmissionDecision:
     """Evaluate admission for a target from config.yaml.
+
+    ``content_path`` is where the asset's bytes are when they are not yet
+    at ``source_path`` (an install decides its staged copy before it is
+    swapped in); path rules always use ``source_path``.
 
     ``config`` defaults to ``pe.cfg``; ``asset_policy`` to its
     ``asset_policy``. Operator block entries always win. Operator allow
@@ -536,7 +541,7 @@ def evaluate_admission(
             any(path_has_components(source_path, marker) for marker in fp_constraints)
             if configured else _matches_provenance(fp_constraints, source_path)
         )
-        if path_matches and (legacy or _own_first_party_content(target_type, name, source_path)):
+        if path_matches and (legacy or _own_first_party_content(target_type, name, content_path or source_path)):
             return _done(AdmissionDecision(
                 "allowed", f"{target_type} '{name}' is on the allow list — scan skipped", source="policy-allow",
             ))

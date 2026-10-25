@@ -213,8 +213,11 @@ the same thing to the asset; they differ only in the verdict they record. A
 severity that no layer covers fails closed, as a block.
 
 A rejected verdict is always a refusal. `skill install` and `plugin install`
-remove the copy again and fail, with or without `--action`, and also when the
-quarantine move or the gateway disable fails. When you change the admission
+scan and decide the new copy in a private staging folder before it is
+installed. A refused or quarantined copy never replaces what is installed:
+with `--force`, the skill or plugin that was there stays as it was. The
+install fails, with or without `--action`, and also when the quarantine move
+or the gateway disable fails. When you change the admission
 actions, the watcher's next rescan decides the installed skills, plugins and
 MCP servers again and applies the new verdict, so tightening a severity to
 `quarantine` or `block` refuses an unchanged asset that was admitted with a

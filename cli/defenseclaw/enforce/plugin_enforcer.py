@@ -48,6 +48,39 @@ def _remove_owned(path: str) -> None:
         pass
 
 
+def move_into_place_no_replace(stage: str, dest: str) -> None:
+    """Move ``stage`` (a staging path the caller owns, next to ``dest``) to
+    ``dest`` without ever replacing what is there. A directory claims
+    ``dest`` with an atomic ``mkdir`` (it fails on any existing path, also
+    an empty directory another process just made) and then takes the staged
+    entries; a file is hard-linked (never replaces) and then unlinked. On
+    failure the staged entries are back in ``stage`` and nothing at ``dest``
+    that this call did not create is touched."""
+    if os.path.isdir(stage) and not os.path.islink(stage):
+        os.mkdir(dest)
+        moved: list[str] = []
+        try:
+            for name in sorted(os.listdir(stage)):
+                os.rename(os.path.join(stage, name), os.path.join(dest, name))
+                moved.append(name)
+            shutil.copystat(stage, dest, follow_symlinks=False)
+            os.rmdir(stage)
+        except BaseException:
+            for name in reversed(moved):
+                try:
+                    os.rename(os.path.join(dest, name), os.path.join(stage, name))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(dest)
+            except OSError:
+                pass
+            raise
+        return
+    os.link(stage, dest)
+    os.unlink(stage)
+
+
 def _move_back(stage: str, original: str) -> None:
     """Put a staged copy back where it was so the caller's rollback finds it."""
     try:
@@ -149,11 +182,7 @@ class PluginEnforcer:
         try:
             if os.path.lexists(dest):
                 raise FileExistsError(f"quarantine destination appeared: {dest}")
-            if os.path.isdir(stage) and not os.path.islink(stage):
-                os.rename(stage, dest)  # never replaces a non-empty directory
-            else:
-                os.link(stage, dest)  # never replaces an existing file
-                os.unlink(stage)
+            move_into_place_no_replace(stage, dest)
         except BaseException:
             _move_back(stage, real_path)
             raise
