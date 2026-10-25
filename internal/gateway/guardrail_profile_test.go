@@ -939,13 +939,15 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 	}
 	// GAP-0575: so is an Open Directory answer without the guardian's UPN or
 	// without its directory (an Active Directory account before the
-	// guardian's record, which Open Directory may list as a local node
-	// account), but not one the record named.
+	// guardian's record), but not one the record named. GAP-0532: an account
+	// the answer proves is of the local node (not a mobile copy) has no UPN
+	// to wait for.
 	if !awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory}) ||
-		!awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryLocal}) ||
+		!awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryActiveDirectory}) ||
+		awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryLocal}) ||
 		awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryActiveDirectory,
 			UPN: "alice@corp.example.com"}) {
-		t.Fatal("Open Directory facts without a UPN or a directory must await the guardian record, facts the record named must not")
+		t.Fatal("Open Directory facts without a UPN or a directory must await the guardian record; a local node account and facts the record named must not")
 	}
 	setIdentitySpoolDir("")
 	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()) != "" {
