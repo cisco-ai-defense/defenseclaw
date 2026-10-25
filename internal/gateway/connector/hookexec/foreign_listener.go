@@ -38,6 +38,19 @@ func perUserForeignListener(opts Options) int {
 	return foreignListenerPID(host, port, opts.Home)
 }
 
+// perUserPeerUnverifiedReason is the reason of a per-user call whose
+// connected listener the transport refused: it names the other account's
+// process while it holds the port, and still says what happened once it has
+// closed or unbound.
+func perUserPeerUnverifiedReason(opts Options) string {
+	if pid := perUserForeignListener(opts); pid > 0 {
+		return foreignListenerReason(opts.APIAddr, pid)
+	}
+	return foreignListenerReasonPrefix + ", or a listener whose owner DefenseClaw could not prove, took this " +
+		"account's gateway connection on " + opts.APIAddr + ", so DefenseClaw sent it nothing. " +
+		"Check this account's gateway with `defenseclaw-gateway status`"
+}
+
 func foreignListenerReason(addr string, pid int) string {
 	return fmt.Sprintf(
 		"%s (PID %d) holds this account's gateway port %s, so DefenseClaw sent it nothing. "+

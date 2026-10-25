@@ -942,12 +942,15 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		// beside the tries after a refused connection.
 		wait := awaitPerUserGateway(ctx, opts, restartDeadline, resp, err, send)
 		resp, err = wait.resp, wait.err
+		// Only a last try this account's gateway refused or dropped is an
+		// outage; a listener whose owner was not proven fails below.
+		outage := perUserOutageError(opts, err)
 		switch {
-		case wait.recoveryErr != nil:
+		case wait.recoveryErr != nil && outage:
 			// Keep the cause: hook-failures.jsonl is the only record of
 			// why a hook could not start the gateway (GAP-0480).
 			return failUnreachable(withPerUserOutage(opts), sp, failMode, coldStartFailureReason(wait.recoveryErr))
-		case wait.outlasted:
+		case wait.outlasted && outage:
 			return failUnreachable(withPerUserOutage(opts), sp, failMode, perUserGatewayRestartingReason)
 		}
 	}
@@ -1103,6 +1106,8 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// This account's gateway refused or dropped the connection, or
 			// gave none in time, and sent no status: an outage.
 			opts = withPerUserOutage(opts)
+		} else if !opts.ManagedEnterprise && errors.Is(err, errPerUserPeerUnverified) {
+			reason = perUserPeerUnverifiedReason(opts)
 		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}

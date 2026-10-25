@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -109,6 +110,24 @@ var errPerUserAnswerIncomplete = errors.New("per-user gateway answer incomplete"
 // that closes or unbinds during the check (ENOENT, EOF, a reset) or a check
 // still running at the restart deadline must keep the refusal closed.
 var errPerUserPeerUnverified = errors.New("per-user gateway connected listener is unverified")
+
+// errPerUserPeerCheckUnfinished ends a per-user hook try (connectBy) whose
+// connection was open at its connect deadline while the listener's owner was
+// still being checked.
+var errPerUserPeerCheckUnfinished = fmt.Errorf("%w: its owner was still being checked at the connect deadline", errPerUserPeerUnverified)
+
+// perUserPeerCheck records, for one try, a connection that is open and whose
+// listener's owner is not proven yet (verifiedPerUserHTTPClient). The dial
+// outlives a canceled request, so only this mark says the try had reached a
+// listener when connectBy ended it.
+type perUserPeerCheck struct{ pending atomic.Bool }
+
+type perUserPeerCheckKey struct{}
+
+func withPerUserPeerCheck(ctx context.Context) (context.Context, *perUserPeerCheck) {
+	check := &perUserPeerCheck{}
+	return context.WithValue(ctx, perUserPeerCheckKey{}, check), check
+}
 
 // PerUserPostOutageExit is the exit status of `hook-post` for a gateway
 // outage (PerUserPostOutage), curl's "could not connect" status, which the
@@ -211,9 +230,16 @@ func verifiedPerUserHTTPClient(
 				if err != nil {
 					return nil, err
 				}
+				check, _ := ctx.Value(perUserPeerCheckKey{}).(*perUserPeerCheck)
+				if check != nil {
+					check.pending.Store(true)
+				}
 				if err := verify(conn); err != nil {
 					_ = conn.Close()
 					return nil, fmt.Errorf("%w: %w", errPerUserPeerUnverified, err)
+				}
+				if check != nil {
+					check.pending.Store(false)
 				}
 				return conn, nil
 			},
