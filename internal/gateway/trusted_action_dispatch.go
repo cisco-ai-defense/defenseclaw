@@ -167,6 +167,10 @@ type trustedActionRequest struct {
 	recordTelemetry func(trustedActionTelemetry)
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
+	// evidenceCWD places a simple command whose cwd the gateway cannot see
+	// (ProtectHome) where the managed hook client keyed its evidence: the
+	// client's cwd followed through the command's static cd.
+	evidenceCWD string
 	// SandboxGuestCWD is a sandbox call's working directory in the guest's
 	// namespace (sandboxHookGuestCWD); Input.CWD is its host mount. Only
 	// the authorized-keys proofs read it, and only to add a match.
@@ -307,7 +311,9 @@ func dispatchTrustedActionWith(
 			checkedWholeWrite := false
 			wholeWriteSafe := false
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
-			for _, simple := range actionfacts.SimpleCommands(request.Input, facts) {
+			simples := actionfacts.SimpleCommands(request.Input, facts)
+			evidenceCWDs := trustedSimpleCommandEvidenceCWDs(request, simples)
+			for index, simple := range simples {
 				if simple.EvaluationFailure != "" {
 					if simple.EvaluationFailure != "limit" {
 						// A parser gap is already represented by the whole-action
@@ -327,6 +333,9 @@ func dispatchTrustedActionWith(
 				child := request
 				child.Input.Command = simple.Text
 				child.Input.CWD = simple.CWD
+				if evidenceCWDs != nil {
+					child.evidenceCWD = evidenceCWDs[index]
+				}
 				// The managed hook has already walked a static cd. Its write
 				// targets are keyed in that physical directory, which may
 				// differ from the shell's logical PWD through a symlink.
@@ -357,8 +366,8 @@ func dispatchTrustedActionWith(
 					if !checkedWholeWrite {
 						checkedWholeWrite = true
 						wholeWriteSafe = wholeCommandKnown &&
-							hookpaths.ActionCommandDecision(wholeCommand,
-								request.Input.CWD, request.Input.ActiveHome) == ""
+							hookpaths.ActionCommandDecisionWithGlobFacts(wholeCommand,
+								request.Input.CWD, request.Input.ActiveHome, clientGlobFacts(request)) == ""
 					}
 					if wholeWriteSafe {
 						// A child with a missing action-local value cannot prove a
@@ -6463,4 +6472,56 @@ func trustedSameHostHome() string {
 		return ""
 	}
 	return filepath.Clean(home)
+}
+
+// clientGlobFacts is the evidence map whose pathname-pattern answers
+// (hookpaths.GlobFactPrefix) the action target scan may use. Only a
+// kernel-verified managed hook client expands the user's patterns for a
+// gateway that ProtectHome keeps out of the home.
+func clientGlobFacts(request trustedActionRequest) map[string]string {
+	if !request.ProtectedHomeHook {
+		return nil
+	}
+	return request.ResolvedWriteTargets
+}
+
+// trustedSimpleCommandEvidenceCWDs places each simple command of a managed
+// hook call whose cwd the gateway cannot see (ProtectHome) in the directory
+// the hook client keyed its evidence in: the client's cwd, followed through
+// the command's static cd, so a child after cd is not judged in the
+// starting directory. It is nil when the gateway knows the cwd, the client
+// sent none, or the placed commands differ; an unplaced child stays "".
+func trustedSimpleCommandEvidenceCWDs(request trustedActionRequest, simples []actionfacts.SimpleCommand) []string {
+	clientCWD := request.ResolvedWriteTargets[hookpaths.CWDKey]
+	if !request.ProtectedHomeHook || filepath.IsAbs(request.Input.CWD) || !filepath.IsAbs(clientCWD) {
+		return nil
+	}
+	placed := request.Input
+	placed.CWD = filepath.Clean(clientCWD)
+	// The unplaced split can add evaluation failures (a relative operand in
+	// an unknown directory); match the commands in order and skip those.
+	var placedCommands []actionfacts.SimpleCommand
+	for _, simple := range actionfacts.SimpleCommands(placed, actionfacts.Analyze(placed)) {
+		if simple.EvaluationFailure == "" {
+			placedCommands = append(placedCommands, simple)
+		}
+	}
+	cwds := make([]string, len(simples))
+	next := 0
+	for index, simple := range simples {
+		if simple.EvaluationFailure != "" {
+			continue
+		}
+		if next >= len(placedCommands) || placedCommands[next].Text != simple.Text {
+			return nil
+		}
+		if filepath.IsAbs(placedCommands[next].CWD) {
+			cwds[index] = filepath.Clean(placedCommands[next].CWD)
+		}
+		next++
+	}
+	if next != len(placedCommands) {
+		return nil
+	}
+	return cwds
 }

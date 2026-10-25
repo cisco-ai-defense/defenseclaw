@@ -23,7 +23,19 @@ import (
 // dynamic command and blocked every one of them (GAP-0958). A launcher with
 // an empty child has an audit reason but no resolved protected target.
 func ActionCommandDecision(command, cwd, home string) string {
-	if actionProtectedTargetMention(command, cwd, home) {
+	return ActionCommandDecisionWithGlobFacts(command, cwd, home, nil)
+}
+
+// ActionCommandDecisionWithGlobFacts is ActionCommandDecision for a gateway
+// that may be unable to expand the user's pathname patterns (ProtectHome).
+// facts is the managed hook client's evidence map; its GlobFactPrefix
+// answers stand in only for a pattern the gateway cannot expand itself.
+func ActionCommandDecisionWithGlobFacts(command, cwd, home string, facts map[string]string) string {
+	var globs *actionGlobs
+	if facts != nil {
+		globs = &actionGlobs{facts: facts}
+	}
+	if actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs) {
 		return "protected-target"
 	}
 	if actionPureMake(command, home) {

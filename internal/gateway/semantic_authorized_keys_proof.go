@@ -1000,6 +1000,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	// The client's opaque-scope facts stand in only for the link-scope walk;
 	// every other check sees the map as before.
+	globFacts := clientGlobFacts(request)
 	var opaqueFacts map[string]string
 	request.ResolvedWriteTargets, opaqueFacts = hookpaths.SplitOpaqueScopeFacts(request.ResolvedWriteTargets)
 	// The operands the client described, before any connector scoping. A
@@ -1051,7 +1052,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	clientCWD := facts.CWD
 	if !filepath.IsAbs(clientCWD) {
-		if cwd := request.ResolvedWriteTargets[hookpaths.CWDKey]; filepath.IsAbs(cwd) {
+		if filepath.IsAbs(request.evidenceCWD) {
+			// A simple command after a static cd, in the directory the
+			// client keyed it in (trustedSimpleCommandEvidenceCWDs).
+			clientCWD = request.evidenceCWD
+		} else if cwd := request.ResolvedWriteTargets[hookpaths.CWDKey]; filepath.IsAbs(cwd) {
 			clientCWD = filepath.Clean(cwd)
 		}
 	}
@@ -1201,7 +1206,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
-	if hookpaths.ActionCommandDecision(input.Command, input.CWD, facts.ActiveHome) != "" {
+	if hookpaths.ActionCommandDecisionWithGlobFacts(input.Command, input.CWD, facts.ActiveHome, globFacts) != "" {
 		return true
 	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {

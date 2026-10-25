@@ -137,7 +137,7 @@ func TestR104NestedShellProtectedPath(t *testing.T) {
 				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
 			facts := actionfacts.Analyze(input)
 			write := trustedExistingAuthorizedKeysSymlinkWrite(trustedActionRequest{Input: input}, facts)
-			if got := trustedAuthorizedKeysWriteProof(input, facts, write); got != tc.block {
+			if got := trustedAuthorizedKeysWriteProof(input, facts, write, nil); got != tc.block {
 				t.Fatalf("protected write = %v, want %v", got, tc.block)
 			}
 		})

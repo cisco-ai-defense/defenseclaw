@@ -54,6 +54,13 @@ const SourceLinkFactPrefix = "\x00source-link:"
 // opaque, and a missing fact leaves the operand unknown.
 const OpaqueScopeFactPrefix = "\x00opaque-scope:"
 
+// GlobFactPrefix keys the hook client's expansion of one pathname pattern
+// that the action target scan checks, by the absolute pattern. "0" means the
+// user's view expanded it completely and no match reaches a protected file;
+// "1" means a match does. Only a gateway that cannot expand the pattern
+// itself (ProtectHome) reads it; a missing answer keeps its fallback.
+const GlobFactPrefix = "\x00glob:"
+
 // maxWriteTargetLinkDepth matches the Linux kernel limit (MAXSYMLINKS) for
 // one path resolution. Every followed link counts, also in parent components,
 // so a link loop ends here and reports an unresolvable target.
@@ -683,6 +690,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	}
 	var safeRedirects []RedirectOccurrence
 	opaqueFacts := map[string]string{}
+	var globFacts map[string]string
 	var unprovenReason string
 	if toolArgs != nil {
 		for _, key := range []string{"command", "cmd"} {
@@ -716,6 +724,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				if !isApplyPatchToolName(tool) {
 					links = commandLinksWithFacts(command, cwd, home, sourceFacts, true)
 					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
+					globFacts = actionGlobFacts(command, cwd, home)
 					// An unresolved program word alone does not make a
 					// concrete write operand or its link walk incomplete.
 					truncated = truncated || links.opaque
@@ -847,13 +856,15 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	}
 	// A fact that does not fit is omitted; the gateway reads a missing fact
 	// as unknown, so the map need not be marked truncated for it.
-	for _, key := range slices.Sorted(maps.Keys(opaqueFacts)) {
-		entry := len(jsonString(key)) + 1 + len(jsonString(opaqueFacts[key])) + 1
-		if len(targets)-1 >= MaxWriteTargets || size+entry > maxEncodedTargets {
-			break
+	for _, extra := range []map[string]string{opaqueFacts, globFacts} {
+		for _, key := range slices.Sorted(maps.Keys(extra)) {
+			entry := len(jsonString(key)) + 1 + len(jsonString(extra[key])) + 1
+			if len(targets)-1 >= MaxWriteTargets || size+entry > maxEncodedTargets {
+				break
+			}
+			targets[key] = extra[key]
+			size += entry
 		}
-		targets[key] = opaqueFacts[key]
-		size += entry
 	}
 	if unprovenReason != "" {
 		entry := len(jsonString(UnprovenReasonKey)) + 1 + len(jsonString(unprovenReason)) + 1
@@ -1036,6 +1047,10 @@ func Decode(value string) (map[string]string, bool) {
 		}
 		if strings.HasPrefix(key, OpaqueScopeFactPrefix) && (value != "0" && value != "c" ||
 			!filepath.IsAbs(strings.TrimPrefix(key, OpaqueScopeFactPrefix))) {
+			return nil, false
+		}
+		if strings.HasPrefix(key, GlobFactPrefix) && (value != "0" && value != "1" ||
+			!filepath.IsAbs(strings.TrimPrefix(key, GlobFactPrefix))) {
 			return nil, false
 		}
 	}

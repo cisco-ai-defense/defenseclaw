@@ -20,20 +20,17 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// actionProtectedTargetMention is independent of a program's operand roles.
-// A resolved protected path in a writable command is enough for the action
-// decision; commands with no such path continue through the existing proof.
-func actionProtectedTargetMention(command, cwd, home string) bool {
-	return actionProtectedTargetMentionDepth(command, cwd, home, 0, false)
-}
-
 // ActionStateTargetMention applies the same independent target scan to the
 // active DefenseClaw security state, without attributing it to SSH keys.
 func ActionStateTargetMention(command, cwd, home string) bool {
-	return actionProtectedTargetMentionDepth(command, cwd, home, 0, true)
+	return actionProtectedTargetMentionDepth(command, cwd, home, 0, true, nil)
 }
 
-func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, stateOnly bool) bool {
+// actionProtectedTargetMentionDepth is independent of a program's operand
+// roles. A resolved protected path in a writable command is enough for the
+// action decision; commands with no such path continue through the existing
+// proof. globs carries the hook client's pattern answers (actionGlobs).
+func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) bool {
 	if command == "" || home == "" || len(command) > MaxPayloadBytes || depth >= 8 {
 		return false
 	}
@@ -50,7 +47,7 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 	var nestedBodies []*syntax.Word
 	if parsed {
 		var nestedFound bool
-		nestedBodies, nestedFound = actionPosixNestedShellMention(file, cwd, home, depth, stateOnly)
+		nestedBodies, nestedFound = actionPosixNestedShellMention(file, cwd, home, depth, stateOnly, globs)
 		if nestedFound {
 			return true
 		}
@@ -59,7 +56,7 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 	ssh := filepath.Join(home, ".ssh")
 	// base places a relative value: the effective cwd for a parsed word,
 	// the request cwd for the text scan.
-	check := func(value string, tilde bool, base string) bool {
+	checkValue := func(value string, tilde bool, base string) bool {
 		if len(value) == 0 || len(value) > MaxWriteTargetPathBytes {
 			return false
 		}
@@ -77,7 +74,7 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			if actionPosixWindowsHome(home) {
 				return actionPosixWindowsProtectedGlob(value, base, home)
 			}
-			return actionProtectedFileGlobReach(value, base, protected, ssh, home)
+			return actionProtectedFileGlobReach(value, base, protected, ssh, home, globs)
 		}
 		if actionPosixWindowsHome(home) {
 			if stateOnly {
@@ -90,6 +87,11 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			return actionProtectedStatePath(operand, home)
 		}
 		return protectedReachPath(operand, protected, ssh)
+	}
+	// The hook client records an answer for every pattern the scan checks,
+	// so while recording it never stops at a match.
+	check := func(value string, tilde bool, base string) bool {
+		return checkValue(value, tilde, base) && !globs.recording()
 	}
 	if parsed {
 		values := actionValues{"HOME": home, "PWD": cwd}
@@ -113,7 +115,7 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 				}
 				return false
 			}
-			return !stateOnly && actionUnknownWordMayNameKey(word, effectiveCWD, home)
+			return !stateOnly && !globs.recording() && actionUnknownWordMayNameKey(word, effectiveCWD, home)
 		}
 		syntax.Walk(file, func(node syntax.Node) bool {
 			if found {
@@ -603,7 +605,13 @@ func actionPosixWindowsProtectedGlob(value, cwd, home string) bool {
 // a directory alias of ~/.ssh or a key file is followed (GAP-1445). The walk
 // is bounded; past the bound a final component that can select a key or
 // the .ssh directory stays protected-named.
-func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles, ssh, home string) bool {
+//
+// A gateway behind ProtectHome cannot read the user's directories, so its
+// walk is incomplete. The managed hook client expands the same pattern as
+// the user and sends its answer (GlobFactPrefix); that answer decides, as
+// the walk of a gateway that can see the home would (GAP-1460 review). With
+// no answer, the name fallback below keeps the pattern closed.
+func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles, ssh, home string, globs *actionGlobs) bool {
 	literal := ""
 	if !filepath.IsAbs(pattern) {
 		literal = filepath.Clean(cwd)
@@ -614,30 +622,80 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 			return true
 		}
 	}
-	if _, err := filepath.Match(pattern, ""); err != nil {
+	if _, err := filepath.Match(pattern, ""); err != nil || globs.full() {
 		return false
 	}
 	candidates, complete, unseen := actionExpandGlob(pattern, literal, actionGlobViewHidden(cwd, home))
 	for _, candidate := range candidates {
 		if protectedReachPath(candidate, protected, ssh) {
+			globs.note(pattern, "1")
 			return true
 		}
 	}
-	if !complete {
-		base := filepath.Base(pattern)
-		if unseen && !strings.ContainsAny(filepath.Dir(pattern), "*?[") && !actionGlobHasLiteral(base) {
-			// Only the last component is a pattern, in a directory this
-			// process cannot read, and it names nothing (git add *): no
-			// directory alias can be selected, so it stays ordinary.
-			return false
-		}
-		for _, name := range append([]string{".ssh"}, AuthorizedKeysFiles[:]...) {
-			if actionGlobNameMatch(base, name) {
-				return true
-			}
+	if complete {
+		globs.note(pattern, "0")
+		return false
+	}
+	if answer := globs.answer(pattern); unseen && answer != "" {
+		// Only a walk this process could not see defers to the client;
+		// past a bound the fallback below decides.
+		return answer == "1"
+	}
+	base := filepath.Base(pattern)
+	if unseen && !strings.ContainsAny(filepath.Dir(pattern), "*?[") && !actionGlobHasLiteral(base) {
+		// Only the last component is a pattern, in a directory this
+		// process cannot read, and it names nothing (git add *): no
+		// directory alias can be selected, so it stays ordinary.
+		return false
+	}
+	for _, name := range append([]string{".ssh"}, AuthorizedKeysFiles[:]...) {
+		if actionGlobNameMatch(base, name) {
+			return true
 		}
 	}
 	return false
+}
+
+// actionGlobs carries the hook client's pathname-pattern answers through
+// one target scan, keyed GlobFactPrefix plus the absolute pattern. A
+// gateway reads facts; the hook client fills record. A plain scan has none.
+type actionGlobs struct {
+	facts  map[string]string
+	record map[string]string
+}
+
+// maxGlobFacts bounds the patterns the hook client expands for one call. A
+// pattern past it has no answer, so the gateway keeps its fallback.
+const maxGlobFacts = 32
+
+func (g *actionGlobs) recording() bool { return g != nil && g.record != nil }
+
+func (g *actionGlobs) full() bool { return g.recording() && len(g.record) >= maxGlobFacts }
+
+// note records the client's answer: "1" when a match reaches a protected
+// file, "0" when its walk was complete and no match does.
+func (g *actionGlobs) note(pattern, answer string) {
+	if !g.recording() || len(GlobFactPrefix)+len(pattern) > MaxWriteTargetPathBytes {
+		return
+	}
+	if key := GlobFactPrefix + pattern; g.record[key] != "1" {
+		g.record[key] = answer
+	}
+}
+
+func (g *actionGlobs) answer(pattern string) string {
+	if g == nil || g.facts == nil {
+		return ""
+	}
+	return g.facts[GlobFactPrefix+pattern]
+}
+
+// actionGlobFacts expands, as the user, each pathname pattern the action
+// target scan of command checks, and returns the answers for the gateway.
+func actionGlobFacts(command, cwd, home string) map[string]string {
+	globs := &actionGlobs{record: map[string]string{}}
+	actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs)
+	return globs.record
 }
 
 // Bounds of actionExpandGlob: directories read and names kept per step.
@@ -690,6 +748,11 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 			}
 			names, err := directory.Readdirnames(actionGlobMaxNames + 1)
 			_ = directory.Close()
+			if err != nil && err != io.EOF && actionGlobNotDirectory(dir, err) {
+				// A file the previous component matched has no entries;
+				// the shell skips it (*/* in a project with files).
+				continue
+			}
 			if err != nil && err != io.EOF || len(names) > actionGlobMaxNames {
 				return nil, false, false
 			}
@@ -708,6 +771,16 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 		paths = next
 	}
 	return paths, true, false
+}
+
+// actionGlobNotDirectory reports that a listing failed because dir, or the
+// file a link there names, is not a directory.
+func actionGlobNotDirectory(dir string, err error) bool {
+	if errors.Is(err, syscall.ENOTDIR) {
+		return true
+	}
+	info, statErr := os.Stat(dir)
+	return statErr == nil && !info.IsDir()
 }
 
 // actionGlobHasLiteral reports whether a pattern component keeps a literal
@@ -798,7 +871,7 @@ func actionProtectedStatePath(value, home string) bool {
 
 // actionPosixNestedShellMention scans each static shell -c or env -S body as
 // its own command. bodies are the words it scanned without a match.
-func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth int, stateOnly bool) (bodies []*syntax.Word, found bool) {
+func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) (bodies []*syntax.Word, found bool) {
 	if depth+1 >= 8 {
 		return nil, false
 	}
@@ -823,7 +896,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 						continue
 					}
 					if child, childStatic := StaticWord(call.Args[j+1], home); childStatic {
-						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly) {
+						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs) {
 							found = true
 							return false
 						}
@@ -846,7 +919,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 				if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&
 					!strings.ContainsAny(option, "=/") && strings.Contains(option[1:], "c") {
 					if child, static := StaticWord(call.Args[j+1], home); static {
-						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly) {
+						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs) {
 							found = true
 						} else {
 							bodies = append(bodies, call.Args[j+1])
@@ -1244,7 +1317,7 @@ func actionWindowsProtectedGlobReach(pattern, cwd, home string) bool {
 	// On the host, expand every component through junctions and links
 	// (GAP-1445).
 	if runtime.GOOS == "windows" && filepath.IsAbs(filepath.FromSlash(pattern)) && actionProtectedFileGlobReach(
-		filepath.FromSlash(pattern), cwd, newProtectedFiles(home), filepath.Join(home, ".ssh"), home) {
+		filepath.FromSlash(pattern), cwd, newProtectedFiles(home), filepath.Join(home, ".ssh"), home, nil) {
 		return true
 	}
 	if strings.ContainsAny(parent, "*?[") {
