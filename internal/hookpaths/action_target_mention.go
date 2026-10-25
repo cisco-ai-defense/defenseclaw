@@ -607,10 +607,7 @@ func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) boo
 			return true
 		}
 		protected, _ := actionWindowsProtected(candidate, cwd, home, false)
-		if protected {
-			return true
-		}
-		return false
+		return protected
 	}
 	if check(word) {
 		return true
