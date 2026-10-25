@@ -53,6 +53,8 @@ If the `defenseclaw` command does not start, run the install command again. It r
 A running OpenShell sandbox keeps running, but its hooks fail closed while the gateway is stopped (usually under a minute). Upgrade between sessions, or let the agent retry afterwards.
 </Callout>
 
+For a legacy MicroVM guest, save accessible work before upgrading. If it is ready afterward, keep the guest: run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`. See [Known limits in 1.0.4](/docs/troubleshooting/known-limits#upgrade-and-policy-limits) for completed or failed guests and data-loss risks.
+
 ## Rollback
 
 ```bash
