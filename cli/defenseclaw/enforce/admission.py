@@ -570,6 +570,7 @@ def _judge_only_plugin_high(cfg: Any, policy: CompiledAdmission, target_type: st
     medium, _ = effective_action_for(policy, severity="MEDIUM", scanner=_scanner_name(scan_result))
     if (target_type != "plugin" or cfg is None or asset_lists.is_secure_client(cfg) or severity.upper() != "HIGH"
             or not isinstance(findings, list) or _legacy_strict_mcp(adm) or not callable(tier)
+            or "HIGH" in policy.scanner_overrides.get(_scanner_name(scan_result), {})
             or any("HIGH" in _compile_action_map(getattr(getattr(adm, k, None), "actions", None))
                    for k in ("plugin", "defaults"))
             or medium.install == "block" or medium.runtime == "disable" or medium.file == "quarantine"):

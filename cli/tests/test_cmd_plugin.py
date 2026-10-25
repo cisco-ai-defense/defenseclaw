@@ -2927,6 +2927,17 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
         self.assertIn("refusing to install", result.output)
         self.assertFalse(os.path.exists(os.path.join(self.app.cfg.plugin_dir, "exfil-pkg")))
 
+        # Review loop 2: a file-only plugin-scanner HIGH quarantine is the
+        # administrator's action, so the judge-only plugin is refused again.
+        self.app.cfg.admission.plugin.scanner_overrides["plugin-scanner"] = {
+            "high": {"file": "quarantine", "runtime": "enable", "install": "none"}}
+        mock_scan.return_value = scan(*judge)
+        mock_fetch.return_value = self._create_plugin_dir("fmt-q-pkg")
+        result = self._invoke_install(["install", "fmt-q-pkg"])
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        self.assertIn("refusing to install", result.output)
+        self.assertFalse(os.path.exists(os.path.join(self.app.cfg.plugin_dir, "fmt-q-pkg")))
+
     @patch("defenseclaw.registry.fetch_npm_package")
     def test_install_network_error(self, mock_fetch):
         from defenseclaw.registry import RegistryError

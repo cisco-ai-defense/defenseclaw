@@ -165,3 +165,24 @@ def test_permissive_preset_and_secure_client_are_unchanged(pe, monkeypatch) -> N
     pe.cfg.admission.defaults.actions.pop("high")
     monkeypatch.setattr(asset_lists, "is_secure_client", lambda _cfg: True)
     assert _decide(pe, _judge_only()).source != "scan-judge-warning"
+
+
+_FILE_ONLY = {"file": "quarantine", "runtime": "enable", "install": "none"}
+
+
+@pytest.mark.parametrize("name, edit", [
+    ("plugin scanner override HIGH file-only quarantine",
+     lambda c: c.admission.plugin.scanner_overrides.update({"plugin-scanner": {"high": dict(_FILE_ONLY)}})),
+    ("defaults scanner override HIGH file-only quarantine",
+     lambda c: c.admission.defaults.scanner_overrides.update({"plugin-scanner": {"high": dict(_FILE_ONLY)}})),
+    ("plugin scanner override HIGH warn", lambda c: c.admission.plugin.scanner_overrides.update(
+        {"plugin-scanner": {"high": "warn"}})),
+])
+def test_scanner_override_at_high_skips_the_pre_step(pe, name, edit) -> None:
+    """Review loop 2: any plugin-scanner HIGH override is the administrator's
+    action, so the judge-only pre-step never applies and the result is never a
+    ``scan-judge-warning`` (the CLI exempts only that source from the
+    no-``--action`` HIGH refusal)."""
+    edit(pe.cfg)
+    decision = _decide(pe, _judge_only())
+    assert decision.source != "scan-judge-warning", (name, decision)
