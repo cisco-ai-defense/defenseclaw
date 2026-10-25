@@ -21254,6 +21254,93 @@ function Test-DefenseClawManagedHooksCommittedTeardownSupported {
     )
 }
 
+function Invoke-DefenseClawLegacyHelperTombstoneHookTeardown {
+    <#
+        GAP-1443, GAP-1447: recovers a tombstone that an earlier 1.0.4 Setup
+        committed over a 1.0.0 to 1.0.3 (or earlier 1.0.4) deployment before
+        it asked whether that deployment's helper can remove hooks after the
+        commit. That helper is the only one allowed to remove its own hooks
+        and it prepares the removal only against active deployment metadata,
+        as its own release's uninstall did before the commit. The tombstone
+        names this exact deployment (identity, artifact hashes and activation
+        evidence were authenticated by the caller) and no removal started, so
+        the helper is shown the same record with installed=true for prepare
+        and verify only, and the byte-exact tombstone, with its protected
+        access list, is put back before anything else runs. The Codex
+        requirements access list is restored from its backup as the
+        precommit order does. Finalization then proceeds as for a tombstone
+        whose removal the helper prepared before the commit.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $path = [string]$Layout.MetadataPath
+    Assert-DefenseClawNoReparsePath -Path $path
+    $tombstoneBytes = [IO.File]::ReadAllBytes($path)
+    $text = [Text.UTF8Encoding]::new($false).GetString($tombstoneBytes)
+    $pattern = [regex]'"installed"\s*:\s*false'
+    if ($pattern.Matches($text).Count -ne 1) {
+        throw 'legacy tombstone recovery requires exactly one inactive installed flag'
+    }
+    $activeBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+        $pattern.Replace($text, '"installed": true', 1)
+    )
+    Write-DefenseClawDeploymentMetadataBytes -Path $path -Bytes $activeBytes
+    try {
+        [void](Invoke-DefenseClawManagedHooksTeardownCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -Action prepare)
+        [void](Invoke-DefenseClawManagedHooksTeardownCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -Action verify)
+        if (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $Layout.CodexRequirementsAclBackupPath `
+                -PathType Leaf) {
+            $codexRemoval = Invoke-DefenseClawCodexRequirementsCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Action remove
+            Complete-DefenseClawCodexRequirementsRemoval `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Report $codexRemoval
+        }
+    }
+    finally {
+        Write-DefenseClawDeploymentMetadataBytes -Path $path -Bytes $tombstoneBytes
+    }
+}
+
+function Write-DefenseClawDeploymentMetadataBytes {
+    # Publishes exact deployment metadata bytes with the canonical
+    # Administrators-only access list Get-DefenseClawDeploymentMetadata
+    # requires, through a protected sibling and an atomic replace.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][byte[]]$Bytes
+    )
+    $temporary = "$Path.new.$([Guid]::NewGuid().ToString('N'))"
+    try {
+        [IO.File]::WriteAllBytes($temporary, $Bytes)
+        Set-DefenseClawPathAcl `
+            -Path $temporary `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+        Microsoft.PowerShell.Management\Move-Item -LiteralPath $temporary -Destination $Path -Force
+    }
+    finally {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $temporary -Force
+        }
+    }
+}
+
 function Invoke-DefenseClawManagedHooksTeardownCommand {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -28060,22 +28147,35 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
         }
         if ($teardownPhase -cne 'prepared' -and
             $teardownPhase -cne 'finalized') {
-            if (-not $committedPrepare) {
+            if ($committedPrepare) {
+                [void](Invoke-DefenseClawManagedHooksTeardownCommand `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName `
+                    -Action prepare)
+                [void](Invoke-DefenseClawManagedHooksTeardownCommand `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName `
+                    -Action verify)
+            }
+            elseif ($teardownPhase -ceq '' -or $teardownPhase -ceq 'rolled_back') {
+                # GAP-1443, GAP-1447: an earlier 1.0.4 Setup committed this
+                # tombstone over an older deployment and then handed the hook
+                # removal to that deployment's helper, which refuses a
+                # tombstone. No removal started (no journal) or it was rolled
+                # back, so every hook is still registered as installed.
+                Invoke-DefenseClawLegacyHelperTombstoneHookTeardown `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName
+            }
+            else {
                 throw (
                     'the installed DefenseClaw cannot remove its managed hooks after an uninstall committed, ' +
                     "and this uninstall did not prepare their removal before its commit (teardown phase '$teardownPhase')"
                 )
             }
-            [void](Invoke-DefenseClawManagedHooksTeardownCommand `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName `
-                -Action prepare)
-            [void](Invoke-DefenseClawManagedHooksTeardownCommand `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName `
-                -Action verify)
             $teardownPhase = 'prepared'
         }
         if ($teardownPhase -ceq 'prepared') {
@@ -33365,6 +33465,28 @@ function Invoke-DefenseClawPreLayoutRecovery {
                     -GatewayServiceName $GatewayServiceName `
                     -GuardianServiceName $GuardianServiceName `
                     -Metadata $committedMetadata
+            if ($null -eq $retiredContractReceipt -and
+                (Test-DefenseClawStandaloneProfile) -and
+                (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Layout.InstallRoot `
+                    -PathType Container)) {
+                # GAP-1443, GAP-1447: the tombstone's hook removal never ran
+                # (an earlier 1.0.4 Setup committed it over an older
+                # deployment), so its helper never published the receipt.
+                # Finishing that uninstall first removes those hooks with the
+                # helper that installed them and publishes the receipt.
+                [void](Invoke-DefenseClawCommittedUninstallCleanup `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName `
+                    -NativeCleanupSource $nativeCleanupSource)
+                $retiredContractReceipt =
+                    Get-DefenseClawManagedHookContractCleanupReceipt `
+                        -Layout $Layout `
+                        -GatewayServiceName $GatewayServiceName `
+                        -GuardianServiceName $GuardianServiceName `
+                        -Metadata $committedMetadata
+            }
             if ($null -eq $retiredContractReceipt) {
                 throw (
                     'the retained deployment predates scope-bound connector ' +

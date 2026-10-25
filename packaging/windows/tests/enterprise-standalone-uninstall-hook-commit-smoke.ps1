@@ -207,25 +207,143 @@ try {
             if (@($script:HookCommitEvents | Microsoft.PowerShell.Core\Where-Object { $_ -like 'hooks:*' -or $_ -ceq 'capabilities' }).Count -ne 0) {
                 $failures.Add("a finalized journal asked the older helper again: $($script:HookCommitEvents -join ',')")
             }
-            # Without a preparation an older helper is never asked to prepare
-            # against the tombstone (it refuses); the refusal says why.
+            # GAP-1443, GAP-1447: an earlier 1.0.4 Setup committed a tombstone
+            # over an older deployment without preparing the removal (no
+            # journal) or the removal rolled back. The older helper is never
+            # asked to prepare against the tombstone (it refuses): the legacy
+            # recovery runs it against the reactivated record instead, and
+            # the finalize follows. Any other phase is still refused.
+            $realLegacy = ${function:Invoke-DefenseClawLegacyHelperTombstoneHookTeardown}
+            function script:Invoke-DefenseClawLegacyHelperTombstoneHookTeardown {
+                param($Layout, $GatewayServiceName, $GuardianServiceName)
+                $script:HookCommitEvents.Add('legacy-recovery')
+                [IO.File]::WriteAllText($Layout.ManagedHooksTeardownJournalPath, 'prepared')
+                $script:HookCommitPhase = 'prepared'
+            }
+            foreach ($phase in @('', 'rolled_back')) {
+                $script:HookCommitEvents.Clear()
+                $script:HookCommitPhase = $phase
+                if ($phase -ceq '') {
+                    [IO.File]::Delete($layout.ManagedHooksTeardownJournalPath)
+                }
+                else {
+                    [IO.File]::WriteAllText($layout.ManagedHooksTeardownJournalPath, $phase)
+                }
+                [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+                    -Layout $layout `
+                    -GatewayServiceName DefenseClawGateway `
+                    -GuardianServiceName DefenseClawHookGuardian)
+                $expected = 'artifact-proof,shape-proof,capabilities,legacy-recovery,opencode-removed,install-tree-locked,retirement-acl-proof,artifact-proof,hooks:finalize'
+                $observed = $script:HookCommitEvents -join ','
+                if ($observed -cne $expected) {
+                    $failures.Add("legacy tombstone recovery order (phase '$phase'): $observed")
+                }
+            }
             $script:HookCommitEvents.Clear()
-            $script:HookCommitPhase = ''
-            [IO.File]::Delete($layout.ManagedHooksTeardownJournalPath)
+            $script:HookCommitPhase = 'captured'
+            [IO.File]::WriteAllText($layout.ManagedHooksTeardownJournalPath, 'captured')
             try {
                 [void](Complete-DefenseClawCommittedManagedHooksFinalization `
                     -Layout $layout `
                     -GatewayServiceName DefenseClawGateway `
                     -GuardianServiceName DefenseClawHookGuardian)
-                $failures.Add('an unprepared committed uninstall finished with an older helper')
+                $failures.Add('a captured older-helper journal finished without its rollback')
             }
             catch {
                 if ($_.Exception.Message -notlike '*cannot remove its managed hooks after an uninstall committed*') {
                     $failures.Add("older helper refusal: $($_.Exception.Message)")
                 }
             }
-            if (@($script:HookCommitEvents | Microsoft.PowerShell.Core\Where-Object { $_ -like 'hooks:*' -or $_ -like 'codex:*' }).Count -ne 0) {
-                $failures.Add("the older helper was asked to act on the tombstone: $($script:HookCommitEvents -join ',')")
+            if (@($script:HookCommitEvents | Microsoft.PowerShell.Core\Where-Object { $_ -like 'hooks:*' -or $_ -like 'codex:*' -or $_ -ceq 'legacy-recovery' }).Count -ne 0) {
+                $failures.Add("the older helper was asked to act on a captured journal: $($script:HookCommitEvents -join ',')")
+            }
+            Microsoft.PowerShell.Management\Set-Item -Path function:script:Invoke-DefenseClawLegacyHelperTombstoneHookTeardown -Value $realLegacy
+
+            # The legacy recovery itself: the helper sees installed=true for
+            # prepare and verify only; the byte-exact tombstone is back
+            # afterwards, also when the helper fails, and the Codex
+            # requirements access list is restored when its backup exists.
+            $metadataPath = [IO.Path]::Combine($Root, 'deployment.json')
+            $aclBackup = [IO.Path]::Combine($Root, 'codex-requirements-acl-backup.json')
+            $tombstoneText = "{`r`n    ""schema_version"":  1,`r`n    ""installed"":  false,`r`n    ""product_version"":  ""1.0.2""`r`n}"
+            $tombstoneBytes = [Text.UTF8Encoding]::new($false).GetBytes($tombstoneText)
+            $legacyLayout = @{
+                MetadataPath = $metadataPath
+                CodexRequirementsAclBackupPath = $aclBackup
+                ManagedHooksTeardownJournalPath = $layout.ManagedHooksTeardownJournalPath
+            }
+            function script:Set-DefenseClawPathAcl {
+                param($Path, $Kind, $GatewayServiceSID)
+                if ($Kind -cne 'AdminFile') { throw "unexpected ACL kind $Kind" }
+                $script:HookCommitEvents.Add('acl:AdminFile')
+            }
+            $script:LegacyFail = ''
+            function script:Invoke-DefenseClawManagedHooksTeardownCommand {
+                param($Layout, $GatewayServiceName, $GuardianServiceName,
+                    [string]$Action, [switch]$PurgeContractLocks)
+                $seen = [IO.File]::ReadAllText($Layout.MetadataPath)
+                if ($seen -notmatch '"installed":\s*true' -or $seen -match '"installed":\s*false') {
+                    throw "legacy helper $Action saw an inactive record"
+                }
+                $script:HookCommitEvents.Add("hooks:$Action")
+                if ($script:LegacyFail -ceq $Action) { throw "helper $Action failed" }
+                return [pscustomobject]@{ ok = $true }
+            }
+            foreach ($case in @(
+                @{ name = 'with Codex backup'; backup = $true; fail = ''; want = 'acl:AdminFile,hooks:prepare,hooks:verify,codex:remove,acl:AdminFile' },
+                @{ name = 'without Codex backup'; backup = $false; fail = ''; want = 'acl:AdminFile,hooks:prepare,hooks:verify,acl:AdminFile' },
+                @{ name = 'prepare fails'; backup = $true; fail = 'prepare'; want = 'acl:AdminFile,hooks:prepare,acl:AdminFile' }
+            )) {
+                [IO.File]::WriteAllBytes($metadataPath, $tombstoneBytes)
+                if ($case.backup) { [IO.File]::WriteAllText($aclBackup, '{}') } else { [IO.File]::Delete($aclBackup) }
+                $script:LegacyFail = $case.fail
+                $script:HookCommitEvents.Clear()
+                try {
+                    Invoke-DefenseClawLegacyHelperTombstoneHookTeardown `
+                        -Layout $legacyLayout `
+                        -GatewayServiceName DefenseClawGateway `
+                        -GuardianServiceName DefenseClawHookGuardian
+                    if ($case.fail -cne '') { $failures.Add("legacy recovery, $($case.name): a failed helper was not reported") }
+                }
+                catch {
+                    if ($case.fail -ceq '' -or $_.Exception.Message -notlike "*helper $($case.fail) failed*") {
+                        $failures.Add("legacy recovery, $($case.name): $($_.Exception.Message)")
+                    }
+                }
+                $observed = $script:HookCommitEvents -join ','
+                if ($observed -cne $case.want) {
+                    $failures.Add("legacy recovery, $($case.name): $observed")
+                }
+                $after = [IO.File]::ReadAllBytes($metadataPath)
+                if ([Convert]::ToBase64String($after) -cne [Convert]::ToBase64String($tombstoneBytes)) {
+                    $failures.Add("legacy recovery, $($case.name): the tombstone was not restored byte for byte")
+                }
+                if (@([IO.Directory]::GetFiles($Root, 'deployment.json.new.*')).Count -ne 0) {
+                    $failures.Add("legacy recovery, $($case.name): a metadata temporary was left")
+                }
+            }
+            # An active record or a record with two flags is never rewritten.
+            foreach ($bad in @(
+                "{""installed"":  true}",
+                "{""installed"":  false, ""x"": {""installed"": false}}"
+            )) {
+                [IO.File]::WriteAllText($metadataPath, $bad)
+                $script:HookCommitEvents.Clear()
+                try {
+                    Invoke-DefenseClawLegacyHelperTombstoneHookTeardown `
+                        -Layout $legacyLayout `
+                        -GatewayServiceName DefenseClawGateway `
+                        -GuardianServiceName DefenseClawHookGuardian
+                    $failures.Add("legacy recovery accepted $bad")
+                }
+                catch {
+                    if ($_.Exception.Message -notlike '*exactly one inactive installed flag*') {
+                        $failures.Add("legacy recovery refusal for ${bad}: $($_.Exception.Message)")
+                    }
+                }
+                if ($script:HookCommitEvents.Count -ne 0 -or [IO.File]::ReadAllText($metadataPath) -cne $bad) {
+                    $failures.Add("legacy recovery changed state for $bad")
+                }
             }
             $layout.CodexTargetEnabled = $false
             $script:HookCommitCapable = $true
