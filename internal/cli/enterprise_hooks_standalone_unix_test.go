@@ -375,8 +375,8 @@ func TestEnterpriseHookWorkerAnswersWhenDiscoveryBlocks(t *testing.T) {
 			}
 			incomplete := map[string]bool{}
 			for _, install := range response.PrivateInstalls {
-				if !install.Incomplete || install.Skipped != enterprisehooks.PrivateInstallSkippedHome {
-					t.Fatalf("private installs = %+v, want only home_unreadable rows", response.PrivateInstalls)
+				if !install.Incomplete || install.Skipped != enterprisehooks.PrivateInstallSkippedTimedOut {
+					t.Fatalf("private installs = %+v, want only scan_timed_out rows", response.PrivateInstalls)
 				}
 				incomplete[install.Connector] = true
 			}

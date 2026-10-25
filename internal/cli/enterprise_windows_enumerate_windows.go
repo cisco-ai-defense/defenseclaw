@@ -403,7 +403,7 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 			return nil
 		}
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN the manifest-mode install scan did not finish; the enrolled accounts it did not inspect are reported incomplete: %s\n", enumeratorErrorText(err))
-		agents = enterprisehooks.WindowsManifestScanIncomplete(opts.ManifestSubjects, opts.ExcludeUsers, opts.ExemptUsers, agents)
+		agents = enterprisehooks.WindowsManifestScanIncomplete(opts.ManifestSubjects, opts.ExcludeUsers, opts.ExemptUsers, agents, err)
 	}
 	agents = append(agents, ownerUnknown...)
 	if _, err := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, agents); err != nil {

@@ -1560,7 +1560,7 @@ func (found *enterpriseHookWorkerDiscovery) response(connectors []string) enterp
 	}
 	installs := append([]enterprisehooks.PrivateAgentInstall(nil), found.installs...)
 	incomplete := func(name string) {
-		installs = append(installs, enterprisehooks.PrivateAgentInstall{Connector: name, Incomplete: true, Skipped: enterprisehooks.PrivateInstallSkippedHome})
+		installs = append(installs, enterprisehooks.PrivateAgentInstall{Connector: name, Incomplete: true, Skipped: enterprisehooks.PrivateInstallSkippedTimedOut})
 	}
 	if !found.privateDone {
 		for _, name := range enterprisehooks.UnixPrivateInstallConnectors(connectors) {

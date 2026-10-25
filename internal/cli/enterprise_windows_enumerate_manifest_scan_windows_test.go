@@ -38,14 +38,15 @@ func TestEnterpriseWindowsManifestModeScanFailureNeverFailsTheCycle(t *testing.T
 		writerErr   error
 		wantWritten bool
 		want        []string // sid/connector/code
+		wantReason  string   // in the reason of each account the scan did not inspect
 	}{
-		{name: "cycle deadline", manifest: authored, scanErr: context.DeadlineExceeded, wantWritten: true,
+		{name: "cycle deadline", manifest: authored, scanErr: context.DeadlineExceeded, wantWritten: true, wantReason: "scan timed out",
 			want: []string{aliceSID + "/claudecode/agent_install_scan_incomplete", aliceSID + "/hermes/agent_install_scan_incomplete", bobSID + "/codex/agent_install_scan_incomplete"}},
-		{name: "profile list unreadable", manifest: authored, scanErr: errors.New("registry: access denied"), wantWritten: true,
+		{name: "profile list unreadable", manifest: authored, scanErr: errors.New("registry: access denied"), wantWritten: true, wantReason: "could not be inspected this cycle",
 			want: []string{aliceSID + "/claudecode/agent_install_scan_incomplete", aliceSID + "/hermes/agent_install_scan_incomplete", bobSID + "/codex/agent_install_scan_incomplete"}},
 		{name: "excluded account stays out", manifest: authored, exclude: []string{"bob"}, scanErr: context.DeadlineExceeded, wantWritten: true,
 			want: []string{aliceSID + "/claudecode/agent_install_scan_incomplete", aliceSID + "/hermes/agent_install_scan_incomplete"}},
-		{name: "partial findings kept once", manifest: authored, scanErr: context.Canceled, wantWritten: true,
+		{name: "partial findings kept once", manifest: authored, scanErr: context.Canceled, wantWritten: true, wantReason: "scan timed out",
 			partial: []enterprisehooks.UnprotectedAgent{{User: "alice", SID: aliceSID, Connector: "claudecode", Code: enterprisehooks.UnprotectedCodeInstallScanIncomplete, Reason: "home"}},
 			want:    []string{aliceSID + "/claudecode/agent_install_scan_incomplete", aliceSID + "/hermes/agent_install_scan_incomplete", bobSID + "/codex/agent_install_scan_incomplete"}},
 		{name: "unreadable targets leave the record", manifest: "", scanErr: context.DeadlineExceeded, wantWritten: false},
@@ -76,6 +77,9 @@ func TestEnterpriseWindowsManifestModeScanFailureNeverFailsTheCycle(t *testing.T
 				written = true
 				for _, agent := range agents {
 					published = append(published, agent.SID+"/"+agent.Connector+"/"+agent.Code)
+					if tc.wantReason != "" && agent.Reason != "home" && !strings.Contains(agent.Reason, tc.wantReason) {
+						t.Errorf("%s/%s reason = %q, want it to say %q", agent.SID, agent.Connector, agent.Reason, tc.wantReason)
+					}
 				}
 				return true, tc.writerErr
 			}
