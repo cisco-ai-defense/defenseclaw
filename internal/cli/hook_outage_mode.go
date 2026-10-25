@@ -71,8 +71,10 @@ func hookOutageFailModeNow(connectorName, hookDir string) string {
 		}
 	}
 	// An environment that moves the loader's data directory, or a config
-	// whose data_dir is elsewhere, is not this runtime's config.
-	if !pathidentity.Same(loaded.DataDir, dataDir) {
+	// whose data_dir is elsewhere, is not this runtime's config. A relative
+	// data_dir names a folder only from some working directory (the agent's
+	// here, the installer's when it locks), so it is never this one.
+	if !filepath.IsAbs(loaded.DataDir) || !pathidentity.Same(loaded.DataDir, dataDir) {
 		return "closed"
 	}
 	if hookOutageInstallHeld(dataDir) {

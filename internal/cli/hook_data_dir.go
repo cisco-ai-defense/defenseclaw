@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
@@ -42,7 +43,18 @@ import (
 // install.sh already holds its home (LOCK_DIR), so the answer is then the
 // config's folder, when the config is a config.yaml with a hooks folder
 // beside it.
+//
+// A relative DEFENSECLAW_CONFIG or DEFENSECLAW_HOME names a folder from
+// install.sh's working directory, the one this command runs in. Both are
+// made absolute first (absoluteInstallerEnv): a relative spelling named no
+// folder ("") and install.sh then held only its home, while hooks beside
+// the config load it by its absolute path and could open an outage.
 func hookDataDirNow() (string, error) {
+	restore, err := absoluteInstallerEnv()
+	if err != nil {
+		return "", err
+	}
+	defer restore()
 	configFile := filepath.Clean(config.ConfigPath())
 	dir, err := hookDataDirOfConfig(configFile)
 	if err != nil || dir == "" {
@@ -88,6 +100,35 @@ func hookDataDirOfConfig(configFile string) (string, error) {
 		return absoluteOrEmpty(config.DefaultDataPath()), nil
 	}
 	return absoluteOrEmpty(dir), nil
+}
+
+// absoluteInstallerEnv binds a relative DEFENSECLAW_CONFIG and
+// DEFENSECLAW_HOME to this process's working directory, as install.sh's own
+// paths are, so the loader and the hook folder below see the absolute
+// folders, and returns the function that puts the values back.
+func absoluteInstallerEnv() (func(), error) {
+	var undo []func()
+	restore := func() {
+		for i := len(undo) - 1; i >= 0; i-- {
+			undo[i]()
+		}
+	}
+	for _, name := range []string{managed.ConfigPathEnv, "DEFENSECLAW_HOME"} {
+		value := os.Getenv(name)
+		if value == "" || filepath.IsAbs(value) {
+			continue
+		}
+		absolute, err := filepath.Abs(value)
+		if err == nil {
+			err = os.Setenv(name, absolute)
+		}
+		if err != nil {
+			restore()
+			return nil, fmt.Errorf("resolve %s %q: %w", name, value, err)
+		}
+		undo = append(undo, func() { _ = os.Setenv(name, value) })
+	}
+	return restore, nil
 }
 
 func absoluteOrEmpty(dir string) string {
