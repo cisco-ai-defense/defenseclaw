@@ -41,6 +41,7 @@ import time
 from pathlib import Path
 
 import pytest
+from defenseclaw.commands import cmd_doctor
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL_SH = ROOT / "scripts" / "install.sh"
@@ -282,37 +283,35 @@ def test_the_data_dir_lock_records_its_owner(tmp_path: Path) -> None:
     assert fields["pid"] == fields["self"]
     assert before - 1 <= int(fields["started"]) <= int(time.time()) + 1
     assert fields["deadline"] == "no"
-    # Loop round 2 (P1): on Linux the lock records the installer's boot id
-    # and kernel start, the record every reader compares as it is.
+    # Rounds j and k: the lock records the installer's process identity (the
+    # Linux boot id and kernel start, the macOS creation second), the record
+    # every reader compares as it is, and doctor's reader names it the same.
     ids = dict(
         part.split("=", 1) for part in next(i for i in proc.stdout.splitlines() if i.startswith("identity=")).split()
     )
-    if sys.platform.startswith("linux"):
+    if sys.platform.startswith("linux") or sys.platform == "darwin":
         assert ids["identity"] and ids["identity"] == ids["own"]
     else:
         assert ids["identity"] == ""
 
 
 def _identity(pid: int) -> str:
-    boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
-    line = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    return f"{boot} {line[line.rfind(')') + 1 :].split()[19]}"
+    identity = cmd_doctor._process_identity(pid)
+    assert identity, f"no process identity for pid {pid}"
+    return identity
 
 
-# Loop round 2 (P1): a forward clock step made a live installer's lock look
-# like a reused pid on Linux (the start Linux counts from boot is a time only
-# through the wall clock now). A pid file written a week before its process
-# started stands in for the step. With its proc-start record the live owner
-# holds and another record is taken over; without one (1.0.2, 1.0.3) Linux
-# holds while the pid names a process, and elsewhere the reused pid is taken
-# over.
+# Rounds j and k (no clock): a pid file dated a week before or after its
+# process started stands in for a clock step either way. With its proc-start
+# record the live owner holds however the clock stepped, and another record
+# (a reused pid) is taken over; without one (1.0.2, 1.0.3) the lock holds
+# while its pid names a process, on every system.
 @pytest.mark.parametrize("legacy", [False, True])
 def test_a_live_installer_keeps_its_lock_however_old_and_a_reused_pid_is_taken_over(
     tmp_path: Path, legacy: bool
 ) -> None:
-    linux = sys.platform.startswith("linux")
-    if not legacy and not linux:
-        pytest.skip("the proc-start record is written on Linux")
+    if not legacy and not (sys.platform.startswith("linux") or sys.platform == "darwin"):
+        pytest.skip("install.sh records a process identity on Linux and macOS")
     home, data = _layout(tmp_path)
     other = subprocess.Popen(["sleep", "30"])
     lock = data / ".install.lock"
@@ -322,28 +321,18 @@ def test_a_live_installer_keeps_its_lock_however_old_and_a_reused_pid_is_taken_o
         if not legacy:
             (lock / "started").write_text(f"{int(time.time())}\n", encoding="utf-8")
             (lock / "proc-start").write_text(_identity(other.pid) + "\n", encoding="utf-8")
-        week = time.time() - 7 * 86400
-        os.utime(lock, (week, week))
-        # Its installer runs (it started before it wrote the pid): the lock
-        # holds, however old the folder.
-        proc = _run(tmp_path, home, f'hold_hook_data_dir "{_gateway(tmp_path)}"\n', {"STUB_DATA_DIR": str(data)})
-        assert proc.returncode == 1
-        assert f"Another DefenseClaw install is running (pid {other.pid})" in proc.stderr
-        # The pid file is a week older than its process: a clock step, or a
-        # reused pid.
-        os.utime(lock / "pid", (week, week))
-        proc = _run(tmp_path, home, f'hold_hook_data_dir "{_gateway(tmp_path)}"\n', {"STUB_DATA_DIR": str(data)})
-        if linux:
-            assert proc.returncode == 1, proc.stdout
+        for step in (0, -7 * 86400, 7 * 86400):
+            then = time.time() + step
+            for path in (lock / "pid", lock):
+                os.utime(path, (then, then))
+            proc = _run(tmp_path, home, f'hold_hook_data_dir "{_gateway(tmp_path)}"\n', {"STUB_DATA_DIR": str(data)})
+            assert proc.returncode == 1, (step, proc.stdout)
             assert f"Another DefenseClaw install is running (pid {other.pid})" in proc.stderr
-        else:
-            assert proc.returncode == 0, proc.stderr
-            assert _held(proc) == [f"{data.resolve()}/.install.lock"]
         if legacy:
             return
         # Another process than the record names: a reused pid, taken over.
-        boot, ticks = _identity(other.pid).split(" ")
-        (lock / "proc-start").write_text(f"{boot} {int(ticks) + 1}\n", encoding="utf-8")
+        identity = _identity(other.pid)
+        (lock / "proc-start").write_text(identity[:-1] + str((int(identity[-1]) + 1) % 10) + "\n", encoding="utf-8")
         proc = _run(tmp_path, home, f'hold_hook_data_dir "{_gateway(tmp_path)}"\n', {"STUB_DATA_DIR": str(data)})
         assert proc.returncode == 0, proc.stderr
         assert _held(proc) == [f"{data.resolve()}/.install.lock"]
@@ -376,21 +365,6 @@ def test_a_missing_account_folder_is_made_held_and_removed(tmp_path: Path) -> No
     assert proc.returncode == 0, proc.stderr
     assert _held(proc) == [f"{folder.resolve()}/.install.lock"]
     assert not folder.exists()
-
-
-@pytest.mark.parametrize(
-    ("etime", "seconds"), [("05:23", 323), ("1:02:03", 3723), ("2-01:02:03", 176523), ("08:09", 489)]
-)
-def test_process_age_reads_every_ps_etime_form(tmp_path: Path, etime: str, seconds: int) -> None:
-    fake = tmp_path / "bin"
-    fake.mkdir()
-    (fake / "ps").write_text(f"#!/bin/sh\necho '  {etime}'\n", encoding="utf-8")
-    (fake / "ps").chmod(0o755)
-    proc = _run(
-        tmp_path, tmp_path / "home", "process_age 1\n", {"PATH": f"{fake}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.splitlines()[0] == str(seconds)
 
 
 def test_relative_home_and_config_are_recorded_as_absolute_paths() -> None:

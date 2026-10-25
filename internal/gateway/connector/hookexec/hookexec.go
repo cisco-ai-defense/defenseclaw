@@ -2835,7 +2835,7 @@ func installLockHeldBy(lstat func(string) (fs.FileInfo, error), home string) boo
 	if err != nil {
 		return !errors.Is(err, fs.ErrNotExist)
 	}
-	return !installLockStale(lstat, home, info, time.Now())
+	return !installLockStale(lstat, home, info)
 }
 
 // InstallLockHeld is installLockHeld for the hook command, which answers

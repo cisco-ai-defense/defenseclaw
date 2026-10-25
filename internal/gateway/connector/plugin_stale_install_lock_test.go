@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -44,13 +43,13 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 					t.Fatal(err)
 				}
 			}
-			if pidAge > 0 {
+			if pidAge != 0 {
 				then := time.Now().Add(-pidAge)
 				if err := os.Chtimes(filepath.Join(lock, "pid"), then, then); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if age > 0 {
+			if age != 0 {
 				then := time.Now().Add(-age)
 				if err := os.Chtimes(lock, then, then); err != nil {
 					t.Fatal(err)
@@ -74,14 +73,14 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 			}
 		}
 	}
-	withIdentity := func(reused bool) func(*testing.T, string) {
+	withIdentity := func(reused bool, step time.Duration) func(*testing.T, string) {
 		return func(t *testing.T, lock string) {
 			t.Helper()
 			identity, other := installLockIdentityOf(t, os.Getpid())
 			if reused {
 				identity = other
 			}
-			makeAgedLock(live+"\n", 0, 7*time.Hour)(t, lock)
+			makeAgedLock(live+"\n", 0, step)(t, lock)
 			if err := os.WriteFile(filepath.Join(lock, "proc-start"), []byte(identity+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -98,17 +97,17 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 		{name: "installer running", lock: makeLock(live+"\n", 0)},
 		{name: "no pid yet", lock: makeLock("", 0)},
 		{name: "empty pid file", lock: makeLock(" ", 0)},
-		{name: "no pid for eleven minutes", lock: makeLock("", 11*time.Minute), runs: true},
+		// Round k: no wait expires a lock without a pid (no clock is read).
+		{name: "no pid for eleven minutes", lock: makeLock("", 11*time.Minute)},
 		{name: "pid not a number", lock: makeLock("abc", 0)},
 		{name: "pid out of range, fresh", lock: makeLock("99999999999", 0)},
-		// Round j: a live installer keeps its lock however long it runs; a
-		// pid whose process started after it was written is a reused pid
-		// (also the PID-only lock of 1.0.2 and 1.0.3, GAP-1465).
+		// Round j: a live installer keeps its lock however long it runs.
 		{name: "running installer, lock made seven hours ago", lock: makeLock(live, 7*time.Hour)},
-		// Without a proc-start record Linux cannot tell a reused pid from
-		// a live owner after a clock step (loop round 2 P1): it holds.
-		{name: "pid reused: its process started after the pid was written", lock: makeAgedLock(live, 7*time.Hour, 7*time.Hour), runs: runtime.GOOS != "linux"},
-		{name: "1.0.2/1.0.3 PID-only lock, pid reused an hour after it was written (GAP-1465)", lock: makeAgedLock(live, time.Hour, time.Hour), runs: runtime.GOOS != "linux"},
+		// Round k: without a proc-start record no clock may tell a reused
+		// pid from a live owner: a 1.0.2/1.0.3 PID-only lock holds while its
+		// pid names a process, whenever the pid was written.
+		{name: "1.0.2/1.0.3 PID-only lock, pid written a week before", lock: makeAgedLock(live, 7*24*time.Hour, 7*24*time.Hour)},
+		{name: "1.0.2/1.0.3 PID-only lock, pid written a week ahead", lock: makeAgedLock(live, -7*24*time.Hour, -7*24*time.Hour)},
 		{name: "installer exited, interrupted install kept previous.new", lock: withRecord("previous.new", true)},
 		{name: "installer exited, interrupted install kept .repair", lock: withRecord(".repair", true)},
 		{name: "installer exited, interrupted install kept .rollback-hold", lock: withRecord(".rollback-hold", true)},
@@ -125,11 +124,13 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 			}
 		}},
 		{name: "installer home: installer exited", inHome: true, lock: makeLock(dead+"\n", 0), runs: true},
-		// Loop round 2 (P1): on Linux the proc-start record tells a live
-		// owner from a reused pid however the clock stepped (a pid file
-		// written seven hours before stands in for the step).
-		{name: "live owner with its proc-start record, clock stepped", lock: withIdentity(false)},
-		{name: "reused pid: another proc-start", lock: withIdentity(true), runs: true},
+		// Loop round 2 (P1, P2) and round k: on every system the proc-start
+		// record tells a live owner from a reused pid however the clock
+		// stepped (a pid file dated a week back or ahead stands in for it).
+		{name: "live owner with its proc-start record, clock stepped back", lock: withIdentity(false, 7*24*time.Hour)},
+		{name: "live owner with its proc-start record, clock stepped ahead", lock: withIdentity(false, -7*24*time.Hour)},
+		{name: "reused pid: another proc-start", lock: withIdentity(true, 0), runs: true},
+		{name: "reused pid: another proc-start, clock stepped back", lock: withIdentity(true, 7*24*time.Hour), runs: true},
 		{name: "installer home: installer running", inHome: true, lock: makeLock(live+"\n", 0)},
 	}
 	for _, plugin := range []struct{ name, asset, file, harness string }{

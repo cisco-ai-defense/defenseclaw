@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -37,9 +36,9 @@ func shellInstallLockFunctions(t *testing.T, name string) string {
 // outage under any .install.lock, so a killed installer's lock closed a
 // default-tier account's outages for good. Every shell hook now carries the
 // same rule as hookexec installLockStale: only a lock whose installer is
-// proven gone (its pid names no process, or one that started after the pid
-// was written: a reused pid) is no lock; a live installer keeps it however
-// long it runs (round j).
+// proven gone (its pid names no process, or another process than its
+// proc-start record names: a reused pid) is no lock; a live installer keeps
+// it however long it runs (round j), and no clock is read (round k).
 func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 	want := shellInstallLockFunctions(t, "_hardening.sh")
 	entries, err := os.ReadDir("hooks")
@@ -70,88 +69,65 @@ func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 	}
 	dead := strconv.Itoa(exited.ProcessState.Pid())
 	live := strconv.Itoa(os.Getpid())
-	now := time.Now()
-	past := strconv.FormatInt(now.Add(-time.Minute).Unix(), 10)
+	// Round k (no clock): every row runs with the lock and its pid file dated
+	// now, a week back and a week ahead (a wall-clock step either way).
 	for _, tc := range []struct {
 		name          string
 		pid, deadline string
-		age, pidAge   time.Duration
 		record        string
 		held          bool
 	}{
 		{name: "installer exited", pid: dead + "\n", held: false},
 		{name: "installer exited, Windows line end", pid: dead + "\r\n", held: false},
 		{name: "installer running", pid: live + "\n", held: true},
-		{name: "installer running, an earlier build's deadline passed", pid: live, deadline: past, held: true},
-		{name: "installer running, made seven hours ago", pid: live, age: 7 * time.Hour, held: true},
-		// Without a proc-start record Linux cannot tell a reused pid from a
-		// live owner after a clock step (loop round 2 P1): it holds.
-		{name: "pid reused: its process started after the pid was written", pid: live, age: 7 * time.Hour, pidAge: 7 * time.Hour, held: runtime.GOOS == "linux"},
-		{name: "1.0.2/1.0.3 PID-only lock, pid reused an hour after it was written (GAP-1465)", pid: live, age: time.Hour, pidAge: time.Hour, held: runtime.GOOS == "linux"},
-		{name: "1.0.2/1.0.3 PID-only lock, pid reused", pid: live, age: 30 * 24 * time.Hour, pidAge: 30 * 24 * time.Hour, held: runtime.GOOS == "linux"},
-		{name: "no pid yet", held: true},
-		{name: "no pid for eleven minutes", age: 11 * time.Minute, held: false},
+		{name: "installer running, an earlier build's deadline", pid: live, deadline: "1", held: true},
+		// Without a proc-start record no clock may tell a reused pid from a
+		// live owner: a 1.0.2/1.0.3 PID-only lock holds while its pid names
+		// a process, on every system.
+		{name: "1.0.2/1.0.3 PID-only lock, its pid names a process", pid: live, held: true},
+		{name: "no pid", held: true},
 		{name: "pid not a number", pid: "abc", held: true},
-		{name: "pid out of range, fresh", pid: "99999999999", held: true},
+		{name: "pid out of range", pid: "99999999999", held: true},
 		{name: "interrupted install kept previous.new", pid: dead, record: "previous.new", held: true},
-		{name: "interrupted install, an earlier build's deadline passed", pid: dead, record: "previous.new", deadline: past, held: true},
+		{name: "interrupted install, an earlier build's deadline", pid: dead, record: "previous.new", deadline: "1", held: true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			data := t.TempDir()
-			lock := filepath.Join(data, ".install.lock")
-			if err := os.Mkdir(lock, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			for name, value := range map[string]string{"pid": tc.pid, "deadline": tc.deadline} {
-				if value != "" {
-					if err := os.WriteFile(filepath.Join(lock, name), []byte(value), 0o600); err != nil {
+		for _, step := range []time.Duration{0, -7 * 24 * time.Hour, 7 * 24 * time.Hour} {
+			t.Run(tc.name+"/times "+step.String(), func(t *testing.T) {
+				data := t.TempDir()
+				lock := filepath.Join(data, ".install.lock")
+				if err := os.Mkdir(lock, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				for name, value := range map[string]string{"pid": tc.pid, "deadline": tc.deadline} {
+					if value != "" {
+						if err := os.WriteFile(filepath.Join(lock, name), []byte(value), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if tc.record != "" {
+					if err := os.Mkdir(filepath.Join(data, tc.record), 0o700); err != nil {
 						t.Fatal(err)
 					}
 				}
-			}
-			if tc.pidAge > 0 {
-				then := now.Add(-tc.pidAge)
-				if err := os.Chtimes(filepath.Join(lock, "pid"), then, then); err != nil {
-					t.Fatal(err)
+				if step != 0 {
+					then := time.Now().Add(step)
+					for _, path := range []string{filepath.Join(lock, "pid"), lock} {
+						if err := os.Chtimes(path, then, then); err != nil && !os.IsNotExist(err) {
+							t.Fatal(err)
+						}
+					}
 				}
-			}
-			if tc.record != "" {
-				if err := os.Mkdir(filepath.Join(data, tc.record), 0o700); err != nil {
-					t.Fatal(err)
+				script := want + "if defenseclaw_install_lock_held \"$1\"; then echo held; else echo none; fi\n"
+				out, err := exec.Command(bash, "-c", script, "hook", data).CombinedOutput()
+				if err != nil {
+					t.Fatalf("bash: %v: %s", err, out)
 				}
-			}
-			if tc.age > 0 {
-				then := now.Add(-tc.age)
-				if err := os.Chtimes(lock, then, then); err != nil {
-					t.Fatal(err)
+				if got := strings.TrimSpace(string(out)); got != map[bool]string{true: "held", false: "none"}[tc.held] {
+					t.Fatalf("defenseclaw_install_lock_held = %q, want held %v", got, tc.held)
 				}
-			}
-			script := want + "if defenseclaw_install_lock_held \"$1\"; then echo held; else echo none; fi\n"
-			out, err := exec.Command(bash, "-c", script, "hook", data).CombinedOutput()
-			if err != nil {
-				t.Fatalf("bash: %v: %s", err, out)
-			}
-			if got := strings.TrimSpace(string(out)); got != map[bool]string{true: "held", false: "none"}[tc.held] {
-				t.Fatalf("defenseclaw_install_lock_held = %q, want held %v", got, tc.held)
-			}
-		})
-	}
-	for _, etime := range []struct{ text, seconds string }{
-		{"05:23", "323"}, {"1:02:03", "3723"}, {"2-01:02:03", "176523"}, {"  08:09\n", "489"}, {"00:00", "0"},
-		{"1:2:3:4", ""}, {"abc", ""}, {"", ""},
-	} {
-		t.Run("process age of ps etime "+strconv.Quote(etime.text), func(t *testing.T) {
-			fake := t.TempDir()
-			if err := os.WriteFile(filepath.Join(fake, "ps"), []byte("#!/bin/sh\nprintf '%s' \""+etime.text+"\"\n"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			script := "PATH=" + fake + ":$PATH\n" + want + "defenseclaw_process_age 1 || echo none\n"
-			out, _ := exec.Command(bash, "-c", script).CombinedOutput()
-			got := strings.TrimSpace(string(out))
-			if wanted := map[bool]string{true: "none", false: etime.seconds}[etime.seconds == ""]; got != wanted {
-				t.Fatalf("defenseclaw_process_age of %q = %q, want %q", etime.text, got, wanted)
-			}
-		})
+			})
+		}
 	}
 	t.Run("lock that is a file", func(t *testing.T) {
 		data := t.TempDir()
@@ -174,9 +150,10 @@ func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 			t.Fatalf("a lock naming the hook's own pid = %q, want none (stale)", out)
 		}
 	})
-	// Loop round 2 (P1): on Linux the proc-start record, compared as it is,
-	// tells a live owner from a reused pid however the clock stepped (a pid
-	// file written seven hours before stands in for the step).
+	// Loop round 2 (P1) and round k: the proc-start record (the Linux boot id
+	// and kernel start, the macOS creation second), compared as it is, tells
+	// a live owner from a reused pid however the clock stepped (a pid file
+	// written a week before stands in for the step), on Linux and macOS.
 	for _, tc := range []struct {
 		name   string
 		reused bool
@@ -200,7 +177,7 @@ func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			then := time.Now().Add(-7 * time.Hour)
+			then := time.Now().Add(-7 * 24 * time.Hour)
 			if err := os.Chtimes(filepath.Join(lock, "pid"), then, then); err != nil {
 				t.Fatal(err)
 			}

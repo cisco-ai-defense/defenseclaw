@@ -2733,37 +2733,68 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
 # blocked them for good. An interrupted install keeps its lock on purpose,
 # next to one of these records, until the installer runs again.
 _INSTALL_RECOVERY_RECORDS = ("previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json")
-# install.sh and install.ps1 write the lock's pid right after they make it.
-_INSTALL_LOCK_NO_PID_SECONDS = 10 * 60
-# A process that started more than this after the lock's pid was written has
-# a reused pid (hookexec InstallLockStartSlack).
-_INSTALL_LOCK_START_SLACK_SECONDS = 60
-# The owner record install.sh writes beside pid on Linux: its boot id and
-# kernel start (hookexec InstallLockIdentityName).
+# The owner record install.sh and install.ps1 write beside the lock's pid:
+# the installer's process identity (hookexec InstallLockIdentityName).
 _INSTALL_LOCK_IDENTITY_NAME = "proc-start"
 
 
 def _process_identity(pid: int) -> str | None:
-    """Process pid as install.sh records its own on Linux: "<boot_id> <starttime>".
+    """Process pid as install.sh and install.ps1 record their own in a lock.
 
-    The boot id and field 22 of /proc/<pid>/stat, neither of which moves with
-    the wall clock (hookexec processIdentityOf); None elsewhere or when /proc
-    does not say.
+    What the system keeps of the process's creation, which no clock step
+    moves (hookexec procidentity): on Linux "<boot_id> <starttime>" (field
+    22 of /proc/<pid>/stat), on macOS its creation second as
+    ``LC_ALL=C TZ=UTC ps -o lstart=`` prints it, on Windows its creation
+    FILETIME in decimal. None when the system does not say.
     """
-    if not sys.platform.startswith("linux"):
-        return None
-    try:
-        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
-            boot = handle.read().strip()
-        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
-            line = handle.read()
-    except OSError:
-        return None
-    end = line.rfind(")")
-    fields = line[end + 1 :].split()
-    if end < 0 or len(fields) < 20 or not fields[19].isdigit() or not re.fullmatch(r"[0-9a-f-]+", boot):
-        return None
-    return f"{boot} {fields[19]}"
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+                boot = handle.read().strip()
+            with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+                line = handle.read()
+        except OSError:
+            return None
+        end = line.rfind(")")
+        fields = line[end + 1 :].split()
+        if end < 0 or len(fields) < 20 or not fields[19].isdigit() or not re.fullmatch(r"[0-9a-f-]+", boot):
+            return None
+        return f"{boot} {fields[19]}"
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                env={"LC_ALL": "C", "TZ": "UTC", "PATH": "/usr/bin:/bin"},
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        fields = out.stdout.split()
+        return " ".join(fields) if out.returncode == 0 and len(fields) == 5 else None
+    if os.name == "nt":  # pragma: no cover - Windows only
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.GetProcessTimes.argtypes = (wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not kernel32.GetProcessTimes(handle, *(ctypes.byref(item) for item in times)):
+                return None
+            ticks = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+            return str(ticks) if ticks else None
+        finally:
+            kernel32.CloseHandle(handle)
+    return None
 
 
 def _install_lock_record(path: str) -> tuple[str, str]:
@@ -2784,57 +2815,17 @@ def _install_lock_record(path: str) -> tuple[str, str]:
     return ("valid", text) if text else ("unreadable", "")
 
 
-def _process_start_time(pid: int) -> float | None:
-    """When process pid started (Unix seconds), or None when the system does not say."""
-    if os.name == "nt":  # pragma: no cover - Windows only
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-        kernel32.GetProcessTimes.argtypes = (wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4
-        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return None
-        try:
-            times = [wintypes.FILETIME() for _ in range(4)]
-            if not kernel32.GetProcessTimes(handle, *(ctypes.byref(item) for item in times)):
-                return None
-            ticks = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
-            return ticks / 10_000_000 - 11_644_473_600
-        finally:
-            kernel32.CloseHandle(handle)
-    for ps in ("/bin/ps", "/usr/bin/ps"):
-        try:
-            out = subprocess.run(
-                [ps, "-o", "etime=", "-p", str(pid)], capture_output=True, text=True, timeout=5, check=False
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if out.returncode != 0:
-            continue
-        age = re.fullmatch(r"(?:(?:(\d{1,6})-)?(\d{1,2}):)?(\d{1,2}):(\d{1,2})", out.stdout.strip())
-        if not age:
-            return None
-        days, hours, minutes, seconds = (int(part or 0) for part in age.groups())
-        return time.time() - (((days * 24 + hours) * 60 + minutes) * 60 + seconds)
-    return None
-
-
 def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, str]:
     """("none" | "stale" | "recovery" | "held", detail) of the lock in folder.
 
-    The one rule of every per-user hook (hookexec installLockStale): "stale"
-    when the lock is a folder, no interrupted-install record sits beside it
-    and its installer is gone: its pid names no process, or doctor's own (no
-    reader writes a lock), or another process than its proc-start record
-    names, or, without that record off Linux, a process that started more
-    than a minute after the pid was written (a reused pid), or it has had no
-    pid for ten minutes. A live installer keeps its lock for as long as it
-    runs; so does, on Linux, a pid with no proc-start record (1.0.2, 1.0.3),
-    as a start Linux counts from boot is a time only through the wall clock.
+    The one rule of every per-user hook (hookexec installLockStale). It reads
+    no clock: "stale" when the lock is a folder, no interrupted-install
+    record sits beside it and its installer is gone: its pid names no
+    process, or doctor's own (no reader writes a lock), or another process
+    than its proc-start record names (a reused pid). A live installer keeps
+    its lock for as long as it runs; so do a lock without a valid pid, a
+    lock without a proc-start record whose pid names a process (1.0.2,
+    1.0.3) and an owner whose identity cannot be read.
     """
     from defenseclaw.process_liveness import pid_alive
 
@@ -2856,15 +2847,12 @@ def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, 
         except OSError:
             return ("held", f"{path} cannot be inspected")
         return ("recovery", f"{lock} is kept by an interrupted install ({path})")
-    age = time.time() - info.st_mtime
     pid_file = os.path.join(lock, "pid")
     text = ""
-    written = 0.0
     try:
         pid_info = os.lstat(pid_file)
         if not stat.S_ISREG(pid_info.st_mode) or pid_info.st_size > 64:
             return ("held", f"{pid_file} is not a pid file")
-        written = pid_info.st_mtime
         with open(pid_file, encoding="ascii", errors="replace") as handle:
             text = handle.read(64).strip()
     except FileNotFoundError:
@@ -2873,30 +2861,22 @@ def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, 
         return ("held", f"{pid_file} cannot be read ({exc.strerror or exc})")
     pid = int(text) if re.fullmatch(r"[1-9][0-9]{0,9}", text) else 0
     if not pid or pid > 2_147_483_647:
-        if age > _INSTALL_LOCK_NO_PID_SECONDS:
-            return ("stale", f"{lock} has had no installer pid for more than ten minutes")
-        return ("held", f"{lock} was made moments ago")
+        return (
+            "held",
+            f"{lock} names no installer pid yet; if no install is running, run the installer again to clear it",
+        )
     if pid == os.getpid():
         return ("stale", f"{lock} names pid {pid}, this process; its installer is gone")
     if not pid_alive(pid):
         return ("stale", f"{lock} names installer pid {pid}, which is no longer running")
     record_state, record = _install_lock_record(os.path.join(lock, _INSTALL_LOCK_IDENTITY_NAME))
-    if record_state != "absent":
-        current = _process_identity(pid) if record_state == "valid" else None
+    if record_state == "valid":
+        current = _process_identity(pid)
         if current is not None and current != record:
             return (
                 "stale",
                 f"{lock} names pid {pid}, another process than the installer that wrote it; its installer is gone",
             )
-        return ("held", f"an installer (pid {pid}) holds {lock}")
-    if sys.platform.startswith("linux"):
-        return ("held", f"an installer (pid {pid}) holds {lock}")
-    started = _process_start_time(pid)
-    if started is not None and started > written + _INSTALL_LOCK_START_SLACK_SECONDS:
-        return (
-            "stale",
-            f"{lock} names pid {pid}, a process that started after the lock was written; its installer is gone",
-        )
     return ("held", f"an installer (pid {pid}) holds {lock}")
 
 

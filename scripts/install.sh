@@ -476,29 +476,37 @@ LOCK_HINT="check the free space (df -h ${DEFENSECLAW_HOME%/*}) and that $(id -un
 mkdir -p "${DEFENSECLAW_HOME}" "${DEFENSECLAW_HOME}/logs" 2>/dev/null \
     || die "Could not create ${DEFENSECLAW_HOME}/logs: ${LOCK_HINT}"
 chmod 700 "${DEFENSECLAW_HOME}" 2>/dev/null || true
-# The owner record of every lock this installer takes: its pid and its start
-# time. Every hook and `defenseclaw doctor` treat a lock as no lock only once
-# its installer is gone: its pid names no process, or a process that started
-# after the pid was written (a reused pid; hookexec installLockStale, the one
-# rule). A live install keeps its locks for as long as it runs, however long
-# it waits at a prompt, and the next run takes over a lock whose installer is
-# gone.
+# The owner record of every lock this installer takes: its pid, the second
+# it took the lock (started, which tells this run's lock from another's) and
+# its process identity (proc-start, process_identity). Every hook and
+# `defenseclaw doctor` treat a lock as no lock only once its installer is
+# gone: its pid names no process, or another process than proc-start names
+# (a reused pid; hookexec installLockStale, the one rule). No clock decides
+# it: a live install keeps its locks for as long as it runs, however long it
+# waits at a prompt or the clock is stepped, and the next run takes over a
+# lock whose installer is gone.
 LOCK_STARTED="$(date +%s)"
 process_identity() {
-    # process_identity PID: the boot id and kernel start of process PID,
-    # "<boot_id> <starttime>" (field 22 of /proc/PID/stat; hookexec
-    # processIdentityOf); fails off Linux or when /proc does not say. On
-    # Linux every lock records it (proc-start): a process start Linux counts
-    # from boot is a time only through the wall clock now, so a clock step
-    # made a live installer look like a reused pid.
+    # process_identity PID: the identity of process PID as the system keeps
+    # it from its creation (hookexec procidentity), which no clock step
+    # moves: on Linux "<boot_id> <starttime>" (field 22 of /proc/PID/stat),
+    # on macOS its creation second as `LC_ALL=C TZ=UTC ps -o lstart=` prints
+    # it, one space apart. Fails when the system does not say.
     local boot stat fields
-    boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || return 1
-    stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
-    [[ "${stat}" == *")"* ]] || return 1
-    read -r -a fields <<< "${stat##*)}"
-    (( ${#fields[@]} >= 20 )) || return 1
-    [[ "${fields[19]}" =~ ^[0-9]+$ && "${boot}" =~ ^[0-9a-f-]+$ ]] || return 1
-    echo "${boot} ${fields[19]}"
+    if [[ -e /proc/self/stat ]]; then
+        boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || return 1
+        stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+        [[ "${stat}" == *")"* ]] || return 1
+        read -r -a fields <<< "${stat##*)}"
+        (( ${#fields[@]} >= 20 )) || return 1
+        [[ "${fields[19]}" =~ ^[0-9]+$ && "${boot}" =~ ^[0-9a-f-]+$ ]] || return 1
+        echo "${boot} ${fields[19]}"
+        return 0
+    fi
+    [[ "$(uname -s 2>/dev/null)" == Darwin && -x /bin/ps ]] || return 1
+    read -r -a fields <<< "$(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p "$1" 2>/dev/null)"
+    (( ${#fields[@]} == 5 )) || return 1
+    echo "${fields[*]}"
 }
 LOCK_IDENTITY="$(process_identity $$ || true)"
 write_lock_owner() {
@@ -536,24 +544,17 @@ release_locks() {
 }
 lock_owner_live() {
     # lock_owner_live LOCK HOLDER: the installer HOLDER that wrote LOCK/pid
-    # still runs: its pid names a process that is not this one, is the one
-    # LOCK/proc-start names, or, without that record off Linux, started no
-    # later than a minute after the pid was written (a later one has a reused
-    # pid). On Linux a lock without that record (1.0.2, 1.0.3) is kept while
-    # its pid names a process; so is one whose start or record cannot be read.
-    local written age recorded current
+    # still runs: its pid names a process that is not this one and, when
+    # LOCK/proc-start is there, is the process that record names. No clock
+    # is read. A lock without that record (1.0.2, 1.0.3) is kept while its
+    # pid names a process; so is one whose record or process identity cannot
+    # be read.
+    local recorded current
     [[ -n "$2" && "$2" != "$$" ]] && kill -0 "$2" 2>/dev/null || return 1
-    if [[ -e "$1/proc-start" || -L "$1/proc-start" ]]; then
-        recorded="$(lock_record "$1/proc-start")" || return 0
-        current="$(process_identity "$2")" || return 0
-        [[ "${recorded}" != "${current}" ]] || return 0
-        return 1
-    fi
-    [[ ! -e /proc/self/stat && "$(uname -s 2>/dev/null)" != Linux ]] || return 0
-    written="$(stat -c %Y "$1/pid" 2>/dev/null || stat -f %m "$1/pid" 2>/dev/null)" || return 0
-    age="$(process_age "$2")" || return 0
-    [[ "${written}${age}" =~ ^[0-9]+$ ]] || return 0
-    (( $(date +%s) - age <= written + 60 ))
+    [[ -e "$1/proc-start" || -L "$1/proc-start" ]] || return 0
+    recorded="$(lock_record "$1/proc-start")" || return 0
+    current="$(process_identity "$2")" || return 0
+    [[ "${recorded}" == "${current}" ]]
 }
 lock_record() {
     # lock_record FILE: the trimmed text of a small owner record (proc-start).
@@ -563,14 +564,6 @@ lock_record() {
     read -r text < "$1" || [[ -n "${text}" ]] || return 1
     [[ -n "${text}" ]] || return 1
     echo "${text}"
-}
-process_age() {
-    # process_age PID: how many seconds ago process PID started (ps etime,
-    # [[dd-]hh:]mm:ss); fails when ps cannot say.
-    local t
-    t="$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' \t')" || return 1
-    [[ "${t}" =~ ^(([0-9]+)-)?(([0-9]{1,2}):)?([0-9]{1,2}):([0-9]{1,2})$ ]] || return 1
-    echo $(( ((10#${BASH_REMATCH[2]:-0} * 24 + 10#${BASH_REMATCH[4]:-0}) * 60 + 10#${BASH_REMATCH[5]}) * 60 + 10#${BASH_REMATCH[6]} ))
 }
 if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
     holder="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"

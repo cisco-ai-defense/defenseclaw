@@ -11,5 +11,3 @@ import "time"
 const processStartTimeKnown = false
 
 func processStartTime(time.Time) (time.Time, bool) { return time.Time{}, false }
-
-func processStartTimeOf(int, time.Time) (time.Time, bool) { return time.Time{}, false }

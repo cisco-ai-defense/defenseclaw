@@ -82,6 +82,10 @@ case "$_DC_HOOK_DATA_DIR" in
   */*) _DC_HOOK_DATA_DIR="${_DC_HOOK_DATA_DIR%/*}/.." ;;
   *) _DC_HOOK_DATA_DIR=".." ;;
 esac
+# _DC_HOOK_HOME is the data directory the gateway rendered this hook into,
+# written into the file: a hard link, a symlink or a copy of the hook, run
+# from any folder, still finds the installer's lock there.
+_DC_HOOK_HOME={{.HookHomeSH}}
 # defenseclaw_install_lock_held DATA returns 0 (true) while this account's
 # installer holds its data directory DATA: DATA/.install.lock exists as any
 # file type and is not stale (defenseclaw_install_lock_stale), or DATA
@@ -108,15 +112,13 @@ defenseclaw_install_lock_held() {
 # defenseclaw_install_lock_stale DATA returns 0 (true) when DATA/.install.lock
 # is a folder whose installer is proven gone and no interrupted-install
 # record sits beside it: its pid names no process, or this hook's own (no
-# hook writes a lock), or another process than its proc-start record names,
-# or, without that record off Linux, a process that started more than a
-# minute after the pid was written (a reused pid), or it has had no pid for
-# ten minutes. A live or uncertain owner keeps it for as long as it runs; so
-# does, on Linux, a pid with no proc-start record (1.0.2, 1.0.3), as a start
-# Linux counts from boot is a time only through the wall clock now
-# (hookexec installLockStale, the one rule).
+# hook writes a lock), or another process than its proc-start record names
+# (a reused pid). It reads no clock (hookexec installLockStale, the one
+# rule): a live owner keeps the lock for as long as it runs, and so do a
+# lock without a valid pid, a lock without a proc-start record whose pid
+# names a process (1.0.2, 1.0.3) and an owner whose identity cannot be read.
 defenseclaw_install_lock_stale() {
-  local data="${1:-}" lock now made written age rc pid name recorded current
+  local data="${1:-}" lock rc pid name recorded current
   lock="${data}/.install.lock"
   [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
   for name in previous.new .repair .rollback-hold .lifecycle-txn.json; do
@@ -124,16 +126,10 @@ defenseclaw_install_lock_stale() {
       return 1
     fi
   done
-  now="$(date +%s 2>/dev/null)" || return 1
-  made="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)" || return 1
-  case "$now$made" in ''|*[!0-9]*) return 1 ;; esac
   rc=0
   pid="$(defenseclaw_install_lock_number "${lock}/pid")" || rc=$?
-  [ "$rc" = 2 ] && return 1
-  if [ "$rc" != 0 ] || [ "$pid" -gt 2147483647 ]; then
-    [ $((now - made)) -gt 600 ] && return 0
-    return 1
-  fi
+  [ "$rc" = 0 ] || return 1
+  [ "$pid" -le 2147483647 ] || return 1
   # A live installer's pid names no other process: this one is reused.
   [ "$pid" = "$$" ] && return 0
   if ! kill -0 "$pid" 2>/dev/null; then
@@ -141,54 +137,39 @@ defenseclaw_install_lock_stale() {
     command -v ps >/dev/null 2>&1 || return 1
     ps -p "$pid" >/dev/null 2>&1 || return 0
   fi
-  if [ -e "${lock}/proc-start" ] || [ -L "${lock}/proc-start" ]; then
-    recorded="$(defenseclaw_install_lock_record "${lock}/proc-start")" || return 1
-    current="$(defenseclaw_process_identity "$pid")" || return 1
-    [ "$recorded" != "$current" ] && return 0
-    return 1
-  fi
-  if [ -e /proc/self/stat ] || [ "$(uname -s 2>/dev/null)" = Linux ]; then
-    return 1
-  fi
-  written="$(stat -c %Y "${lock}/pid" 2>/dev/null || stat -f %m "${lock}/pid" 2>/dev/null)" || return 1
-  age="$(defenseclaw_process_age "$pid")" || return 1
-  case "$written$age" in ''|*[!0-9]*) return 1 ;; esac
-  [ $((now - age)) -gt $((written + 60)) ] && return 0
+  [ -e "${lock}/proc-start" ] || [ -L "${lock}/proc-start" ] || return 1
+  recorded="$(defenseclaw_install_lock_record "${lock}/proc-start")" || return 1
+  current="$(defenseclaw_process_identity "$pid")" || return 1
+  [ "$recorded" != "$current" ] && return 0
   return 1
 }
-# defenseclaw_process_age PID prints how many seconds ago process PID
-# started (ps etime, [[dd-]hh:]mm:ss); it returns 1 when ps cannot say.
-defenseclaw_process_age() {
-  local t d=0 h=0 m=0 s=0
-  command -v ps >/dev/null 2>&1 || return 1
-  t="$(ps -o etime= -p "${1:-}" 2>/dev/null)" || return 1
-  t="$(printf '%s' "$t" | tr -d ' \t\r\n')"
-  case "$t" in ''|*[!0-9:-]*) return 1 ;; esac
-  case "$t" in *-*) d="${t%%-*}"; t="${t#*-}" ;; esac
-  s="${t##*:}"
-  case "$t" in *:*) t="${t%:*}" ;; *) return 1 ;; esac
-  m="${t##*:}"
-  case "$t" in *:*) h="${t%:*}" ;; esac
-  case "$d$h$m$s" in ''|*[!0-9]*) return 1 ;; esac
-  d="${d#0}"; h="${h#0}"; m="${m#0}"; s="${s#0}"
-  printf '%s' $(( ((${d:-0} * 24 + ${h:-0}) * 60 + ${m:-0}) * 60 + ${s:-0} ))
-}
-# defenseclaw_process_identity PID prints the boot id and kernel start of
-# process PID, "<boot_id> <starttime>" (field 22 of /proc/PID/stat), the
-# record install.sh keeps of itself in a lock on Linux (proc-start); neither
-# moves with the wall clock. It returns 1 when /proc does not say.
+# defenseclaw_process_identity PID prints the identity of process PID as the
+# system keeps it from its creation, the record install.sh keeps of itself
+# in a lock (proc-start; hookexec procidentity): on Linux its boot id and
+# kernel start, "<boot_id> <starttime>" (field 22 of /proc/PID/stat); on
+# macOS its creation second as `LC_ALL=C TZ=UTC ps -o lstart=` prints it,
+# one space apart. No clock step moves either. It returns 1 when the system
+# does not say.
 defenseclaw_process_identity() {
-  local boot stat IFS=' '
-  boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || return 1
-  stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
-  case "$stat" in *[\)]*) ;; *) return 1 ;; esac
-  stat="${stat##*[\)]}"
-  set -- $stat
-  [ "$#" -ge 20 ] || return 1
-  shift 19
-  case "$1" in ''|*[!0-9]*) return 1 ;; esac
-  case "$boot" in ''|*[!0-9a-f-]*) return 1 ;; esac
-  printf '%s %s' "$boot" "$1"
+  local boot stat out IFS=' '
+  if [ -e /proc/self/stat ]; then
+    boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || return 1
+    stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
+    case "$stat" in *[\)]*) ;; *) return 1 ;; esac
+    stat="${stat##*[\)]}"
+    set -- $stat
+    [ "$#" -ge 20 ] || return 1
+    shift 19
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    case "$boot" in ''|*[!0-9a-f-]*) return 1 ;; esac
+    printf '%s %s' "$boot" "$1"
+    return 0
+  fi
+  [ "$(uname -s 2>/dev/null)" = Darwin ] && [ -x /bin/ps ] || return 1
+  out="$(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p "${1:-}" 2>/dev/null)" || return 1
+  set -- $out
+  [ "$#" -eq 5 ] || return 1
+  printf '%s %s %s %s %s' "$1" "$2" "$3" "$4" "$5"
 }
 # defenseclaw_install_lock_record FILE prints the trimmed text of a small
 # owner record (proc-start); it returns 1 when FILE is not a small regular
@@ -232,7 +213,13 @@ defenseclaw_install_lock_number() {
 # folder), which the gateway rendered it into from its resolved data
 # directory. An agent that runs the hook without DEFENSECLAW_HOME, or a
 # data_dir apart from DEFENSECLAW_HOME, still finds the lock (GAP-0948).
+# A per-user render also checks the data directory the gateway rendered it
+# into (_DC_HOOK_HOME, written into the file), so a hard link, a symlink or a
+# copy of the hook, run from any folder, is held by that install's lock.
 defenseclaw_install_held() {
+  if [ -n "${_DC_HOOK_HOME:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_HOME}"; then
+    return 0
+  fi
   defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}" && return 0
   [ -n "${_DC_HOOK_DATA_DIR:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_DATA_DIR}"
 }

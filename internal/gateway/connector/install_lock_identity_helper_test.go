@@ -4,35 +4,26 @@
 package connector
 
 import (
-	"os"
 	"runtime"
-	"strconv"
-	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/procidentity"
 )
 
-// installLockIdentityOf is the proc-start record install.sh writes on Linux
-// for process pid ("<boot_id> <starttime>", hookexec processIdentityOf), and
-// the same record with another start (a reused pid); it skips off Linux.
+// installLockIdentityOf is the proc-start record install.sh and install.ps1
+// write for process pid (procidentity.Of: the Linux boot id and kernel
+// start, the macOS creation second, the Windows creation FILETIME), and the
+// record of another process that had the same pid (its last digit changed:
+// a reused pid). It skips where the system names no process identity.
 func installLockIdentityOf(t *testing.T, pid int) (identity, reused string) {
 	t.Helper()
-	if runtime.GOOS != "linux" {
-		t.Skip("the proc-start record is written on Linux")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+		t.Skip("no process identity reader on " + runtime.GOOS)
 	}
-	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
-	if err != nil {
-		t.Fatal(err)
+	identity, ok := procidentity.Of(pid)
+	if !ok || identity == "" {
+		t.Fatalf("no process identity for pid %d", pid)
 	}
-	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(stat)
-	fields := strings.Fields(text[strings.LastIndexByte(text, ')')+1:])
-	ticks, err := strconv.ParseUint(fields[19], 10, 64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	id := strings.TrimSpace(string(boot))
-	return id + " " + strconv.FormatUint(ticks, 10), id + " " + strconv.FormatUint(ticks+1, 10)
+	last := identity[len(identity)-1]
+	return identity, identity[:len(identity)-1] + string(rune('0'+(last-'0'+1)%10))
 }

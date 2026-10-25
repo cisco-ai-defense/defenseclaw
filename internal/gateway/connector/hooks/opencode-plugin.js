@@ -856,73 +856,54 @@ function defenseclawInstallLockDirs() {
 // until the installer runs again and finishes or undoes it
 // (hookexec.InstallLockRecoveryRecords).
 const DC_INSTALL_RECOVERY_RECORDS = ["previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"];
-// install.sh and install.ps1 write the lock's pid right after they make it,
-// so a lock without a pid is an installer's for this long.
-const DC_INSTALL_LOCK_NO_PID_MS = 10 * 60 * 1000;
-// A process that started more than this after the lock's pid was written
-// has a reused pid (hookexec InstallLockStartSlack).
-const DC_INSTALL_LOCK_START_SLACK_MS = 60 * 1000;
 
 // defenseclawInstallLockNumber reads the lock's pid file: "absent" (missing,
-// empty or not a positive number), "valid" (with when it was written), or
-// "unreadable" (not a small regular file, or a read error but its absence).
+// empty or not a positive number), "valid", or "unreadable" (not a small
+// regular file, or a read error but its absence).
 async function defenseclawInstallLockNumber(path) {
   try {
     const info = await lstat(path);
-    if (!info.isFile() || info.size > 64) return { state: "unreadable", value: 0, writtenMs: 0 };
+    if (!info.isFile() || info.size > 64) return { state: "unreadable", value: 0 };
     const text = String(readFileSync(path, "utf8")).trim();
-    return /^[1-9][0-9]{0,11}$/.test(text) ? { state: "valid", value: Number(text), writtenMs: info.mtimeMs } : { state: "absent", value: 0, writtenMs: 0 };
+    return /^[1-9][0-9]{0,11}$/.test(text) ? { state: "valid", value: Number(text) } : { state: "absent", value: 0 };
   } catch (err) {
-    return { state: err && err.code === "ENOENT" ? "absent" : "unreadable", value: 0, writtenMs: 0 };
+    return { state: err && err.code === "ENOENT" ? "absent" : "unreadable", value: 0 };
   }
 }
 
-// defenseclawProcessStartMs is when process pid started (Unix ms), as the
-// system names it: ps etime ([[dd-]hh:]mm:ss) on Linux and macOS, the
-// process's start time on Windows; null when it does not say.
-function defenseclawProcessStartMs(pid) {
+// defenseclawProcessIdentity names process pid as install.sh and install.ps1
+// record their own in a lock (proc-start; hookexec procidentity), from what
+// the system keeps of its creation, which no clock step moves: on Linux
+// "<boot_id> <starttime>" (field 22 of /proc/<pid>/stat), on macOS its
+// creation second as `LC_ALL=C TZ=UTC ps -o lstart=` prints it, on Windows
+// its creation FILETIME; null when the system does not say.
+function defenseclawProcessIdentity(pid) {
   try {
+    if (process.platform === "linux") {
+      const boot = String(readFileSync("/proc/sys/kernel/random/boot_id", "utf8")).trim();
+      const stat = String(readFileSync("/proc/" + pid + "/stat", "utf8"));
+      const end = stat.lastIndexOf(")");
+      const fields = stat.slice(end + 1).trim().split(/\s+/);
+      if (end < 0 || fields.length < 20 || !/^[0-9]+$/.test(fields[19]) || !/^[0-9a-f-]+$/.test(boot)) return null;
+      return boot + " " + fields[19];
+    }
+    if (process.platform === "darwin") {
+      const fields = String(execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)],
+        { encoding: "utf8", timeout: 5000, env: { LC_ALL: "C", TZ: "UTC", PATH: "/usr/bin:/bin" }, stdio: ["ignore", "pipe", "ignore"] })).trim().split(/\s+/);
+      return fields.length === 5 ? fields.join(" ") : null;
+    }
     if (process.platform === "win32") {
       // Arguments apart: the helper ACL check is the plugin's one inline PowerShell call (its repair marker).
-      const startArgs = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-        "[DateTimeOffset]::new((Get-Process -Id " + pid + " -ErrorAction Stop).StartTime).ToUnixTimeMilliseconds()"];
-      const text = String(execFileSync(DC_WINDOWS_POWERSHELL, startArgs,
+      const identityArgs = ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+        "(Get-Process -Id " + Number(pid) + " -ErrorAction Stop).StartTime.ToFileTimeUtc()"];
+      const text = String(execFileSync(DC_WINDOWS_POWERSHELL, identityArgs,
         { encoding: "utf8", timeout: 10000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] })).trim();
-      return /^[1-9][0-9]{0,15}$/.test(text) ? Number(text) : null;
-    }
-    for (const ps of ["/bin/ps", "/usr/bin/ps"]) {
-      let text;
-      try {
-        text = String(execFileSync(ps, ["-o", "etime=", "-p", String(pid)], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })).trim();
-      } catch (_) {
-        continue;
-      }
-      const age = /^(?:(?:(\d{1,6})-)?(\d{1,2}):)?(\d{1,2}):(\d{1,2})$/.exec(text);
-      if (!age) return null;
-      return Date.now() - (((Number(age[1] || 0) * 24 + Number(age[2] || 0)) * 60 + Number(age[3])) * 60 + Number(age[4])) * 1000;
+      return /^[1-9][0-9]{0,19}$/.test(text) ? text : null;
     }
   } catch (_) {
     // Fall through: the system does not say.
   }
   return null;
-}
-
-// defenseclawProcessIdentity names process pid as install.sh records its own
-// in a lock on Linux (proc-start): "<boot_id> <starttime>", the boot id and
-// field 22 of /proc/<pid>/stat, neither of which moves with the wall clock
-// (hookexec processIdentityOf); null elsewhere or when /proc does not say.
-function defenseclawProcessIdentity(pid) {
-  if (process.platform !== "linux") return null;
-  try {
-    const boot = String(readFileSync("/proc/sys/kernel/random/boot_id", "utf8")).trim();
-    const stat = String(readFileSync("/proc/" + pid + "/stat", "utf8"));
-    const end = stat.lastIndexOf(")");
-    const fields = stat.slice(end + 1).trim().split(/\s+/);
-    if (end < 0 || fields.length < 20 || !/^[0-9]+$/.test(fields[19]) || !/^[0-9a-f-]+$/.test(boot)) return null;
-    return boot + " " + fields[19];
-  } catch (_) {
-    return null;
-  }
 }
 
 // defenseclawInstallLockRecord reads the lock's proc-start record: "absent",
@@ -941,17 +922,17 @@ async function defenseclawInstallLockRecord(path) {
 
 // defenseclawInstallLockState is the one install-lock rule of every
 // per-user hook (hookexec installLockStale, the shell hooks, the Amp
-// plugin) and of `defenseclaw doctor` (_install_lock_state): "none" when dir
-// has no .install.lock and is a folder or absent; "stale" when the lock is a
+// plugin) and of `defenseclaw doctor` (_install_lock_state). It reads no
+// clock and keeps no answer between calls: "none" when dir has no
+// .install.lock and is a folder or absent; "stale" when the lock is a
 // folder, no interrupted-install record sits beside it and its installer is
 // proven gone: its pid names no process, or this plugin's own (no plugin
-// writes a lock), or another process than its proc-start record names, or,
-// without that record off Linux, a process that started more than a minute
-// after the pid was written (a reused pid), or it has had no pid for ten
-// minutes; "held" for a live install (however long it runs), an uncertain
-// one, and on Linux a pid with no proc-start record (1.0.2, 1.0.3: a start
-// Linux counts from boot is a time only through the wall clock now). A stale lock is no lock;
-// `defenseclaw doctor --fix` or the next installer run removes it.
+// writes a lock), or another process than its proc-start record names (a
+// reused pid); "held" for a live install however long it runs, a lock
+// without a valid pid, a lock without a proc-start record whose pid names a
+// process (1.0.2, 1.0.3), and an owner whose identity cannot be read. A
+// stale lock is no lock; `defenseclaw doctor --fix` or the next installer
+// run removes it.
 async function defenseclawInstallLockState(dir) {
   const missing = (err) => Boolean(err) && err.code === "ENOENT";
   const lock = join(dir, ".install.lock");
@@ -970,7 +951,6 @@ async function defenseclawInstallLockState(dir) {
     return "none";
   }
   if (!info.isDirectory()) return "held";
-  const now = Date.now();
   for (const name of DC_INSTALL_RECOVERY_RECORDS) {
     try {
       await lstat(join(dir, name));
@@ -980,8 +960,7 @@ async function defenseclawInstallLockState(dir) {
     }
   }
   const owner = await defenseclawInstallLockNumber(join(lock, "pid"));
-  if (owner.state === "unreadable") return "held";
-  if (owner.state === "absent" || owner.value > 2147483647) return now - info.mtimeMs > DC_INSTALL_LOCK_NO_PID_MS ? "stale" : "held";
+  if (owner.state !== "valid" || owner.value > 2147483647) return "held";
   // A live installer's pid names no other process: this one is reused.
   if (owner.value === process.pid) return "stale";
   try {
@@ -990,13 +969,9 @@ async function defenseclawInstallLockState(dir) {
     if (err && err.code === "ESRCH") return "stale";
   }
   const identity = await defenseclawInstallLockRecord(join(lock, "proc-start"));
-  if (identity.state !== "absent") {
-    const current = identity.state === "valid" ? defenseclawProcessIdentity(owner.value) : null;
-    return current !== null && current !== identity.value ? "stale" : "held";
-  }
-  if (process.platform === "linux") return "held";
-  const started = defenseclawProcessStartMs(owner.value);
-  return started !== null && started > owner.writtenMs + DC_INSTALL_LOCK_START_SLACK_MS ? "stale" : "held";
+  if (identity.state !== "valid") return "held";
+  const current = defenseclawProcessIdentity(owner.value);
+  return current !== null && current !== identity.value ? "stale" : "held";
 }
 
 // defenseclawInstallLocks reads the lock of every folder an installer of

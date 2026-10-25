@@ -83,10 +83,17 @@ type templateData struct {
 	// Every shell hook uses the installed mode, never the agent environment.
 	SecureClientDelivery bool
 	TokenFile            string
-	ScopedToken          bool
-	ConnectorName        string
-	HookBinaryPS         string // absolute launcher path, escaped for a PowerShell single-quoted literal
-	HookTimeoutMS        int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
+	// HookHomeSH is the data directory a per-user host render is written
+	// into, quoted for a POSIX shell. The shell hooks look for the
+	// installer's lock there as well, so a hard link, a symlink or a copy of
+	// a hook run from any folder is held by that install's lock (oss-outage-
+	// open round k). Empty for managed and sandbox renders and for a folder
+	// that is not absolute.
+	HookHomeSH    string
+	ScopedToken   bool
+	ConnectorName string
+	HookBinaryPS  string // absolute launcher path, escaped for a PowerShell single-quoted literal
+	HookTimeoutMS int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
 	// Cursor's 30-second host contract must also cover the stable launcher's
 	// custody verification and the adapter's bounded child cleanup.
 	CursorHookTimeoutMS int
@@ -629,7 +636,7 @@ func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, fail
 		return err
 	}
 
-	scripts, err := renderHookScripts(apiAddr, failMode, tokenFile, extras, managed, connectorName, scopedToken, socketTransport, foreignGuard, secureClient, secureClientDelivery)
+	scripts, err := renderHookScripts(apiAddr, failMode, tokenFile, extras, managed, connectorName, scopedToken, socketTransport, foreignGuard, secureClient, secureClientDelivery, filepath.Dir(filepath.Clean(hookDir)))
 	if err != nil {
 		return err
 	}
@@ -662,12 +669,17 @@ type renderedHookScript struct {
 // renderHookScripts renders, without writing anything, the shared inspect-*
 // scripts and the connector-owned lifecycle scripts named in extras, in the
 // order writeHookScriptsCommonWithTransport writes them. tokenFile is the
-// basename of the token file the connector scripts read.
-func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient, secureClientDelivery bool) ([]renderedHookScript, error) {
+// basename of the token file the connector scripts read; hookHome is the
+// data directory the hooks are written into (HookHomeSH).
+func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient, secureClientDelivery bool, hookHome string) ([]renderedHookScript, error) {
 	// A per-user script bakes closed for non-outage failures. Its current
 	// config decides a classified outage at call time.
+	homeSH := ""
 	if !managed {
 		failMode = "closed"
+		if filepath.IsAbs(hookHome) {
+			homeSH = shellSingleQuote(filepath.Clean(hookHome))
+		}
 	}
 	connectorData := templateData{
 		APIAddr:              apiAddr,
@@ -677,6 +689,7 @@ func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, man
 		SecureClient:         secureClient,
 		SecureClientDelivery: secureClient && secureClientDelivery,
 		TokenFile:            tokenFile,
+		HookHomeSH:           homeSH,
 		ScopedToken:          scopedToken,
 		ConnectorName:        strings.ToLower(strings.TrimSpace(connectorName)),
 		HookBinaryPS:         strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
@@ -693,7 +706,7 @@ func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, man
 	// identity and scoped credential selection happen at invocation time.  The
 	// connector-owned lifecycle scripts retain the selected connector data.
 	sharedData := templateData{APIAddr: apiAddr, Managed: managed, SecureClient: connectorData.SecureClient,
-		SecureClientDelivery: connectorData.SecureClientDelivery}
+		SecureClientDelivery: connectorData.SecureClientDelivery, HookHomeSH: homeSH}
 	// renderHookScriptSet is the one renderer the host and sandbox hook
 	// files share (hook_render.go).
 	set, err := renderHookScriptSet(connectorData, sharedData, extras)
@@ -795,7 +808,7 @@ func renderedHookRuntimeFiles(conn Connector, opts SetupOpts) ([]renderedHookRun
 	}
 	scripts, err := renderHookScripts(opts.APIAddr, render.failMode, tokenFile, render.extras, opts.ManagedEnterprise,
 		conn.Name(), render.scopedToken, render.socketTransport, render.foreignGuard, shellHookSecureClientProfile(opts),
-		shellHookSecureClientDelivery(opts))
+		shellHookSecureClientDelivery(opts), opts.DataDir)
 	if err != nil {
 		return nil, err
 	}

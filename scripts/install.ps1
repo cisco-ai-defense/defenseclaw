@@ -4318,12 +4318,14 @@ function Invoke-Install {
     try { New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null } catch {
         $holder = [string](Get-Content -LiteralPath (Join-Path $LockDir "pid") -ErrorAction SilentlyContinue | Select-Object -First 1)
         $process = if ($holder -match '^\d+$' -and [int]$holder -ne $PID) { Get-Process -Id ([int]$holder) -ErrorAction SilentlyContinue } else { $null }
-        # A process that started more than a minute after the pid was written
-        # has a reused pid (hookexec installLockStale): its installer is gone.
-        if ($process) {
+        # A process other than the one the lock's proc-start record names has
+        # a reused pid (hookexec installLockStale): its installer is gone. No
+        # clock is read; a lock without that record (1.0.2, 1.0.3), or a
+        # start that cannot be read, keeps its live pid.
+        $recorded = [string](Get-Content -LiteralPath (Join-Path $LockDir "proc-start") -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($process -and $recorded.Trim()) {
             try {
-                $written = (Get-Item -LiteralPath (Join-Path $LockDir "pid") -Force -ErrorAction Stop).LastWriteTimeUtc
-                if ($process.StartTime.ToUniversalTime() -gt $written.AddSeconds(60)) { $process = $null }
+                if ([string]$process.StartTime.ToFileTimeUtc() -ne $recorded.Trim()) { $process = $null }
             } catch { }
         }
         if ($process -and $process.ProcessName -match '^(powershell|pwsh)$') { Die "Another DefenseClaw install is running (pid $holder)" }
@@ -4332,6 +4334,12 @@ function Invoke-Install {
     }
     $Run.Lock = $true
     Set-Content -LiteralPath (Join-Path $LockDir "pid") -Value $PID -Encoding Ascii
+    # The owner's identity (hookexec InstallLockIdentityName): its creation
+    # FILETIME, which no clock step moves and a later process with this pid
+    # does not share.
+    try {
+        Set-Content -LiteralPath (Join-Path $LockDir "proc-start") -Value ([string](Get-Process -Id $PID -ErrorAction Stop).StartTime.ToFileTimeUtc()) -Encoding Ascii
+    } catch { }
     $Run.Log = Join-Path $DataDir ("logs\install-" + (Get-Date -Format "yyyyMMddTHHmmss") + ".log")
     try { Start-Transcript -LiteralPath $Run.Log -Append | Out-Null; $Run.Transcript = $true } catch {
         Write-Warn "Could not write the install log $($Run.Log)"

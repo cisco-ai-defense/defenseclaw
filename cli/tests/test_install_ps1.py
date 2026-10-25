@@ -6174,15 +6174,22 @@ def test_the_windows_stopped_upgrade_reconcile_names_the_cause(
         assert "defenseclaw-gateway.exe is missing" in text, text
 
 
-# oss-outage-open round j: install.ps1 takes over a lock whose pid names a
-# process that started more than a minute after the pid was written (a
-# reused pid), as every hook does (hookexec installLockStale); a live
-# installer keeps its lock for as long as it runs (no renewer, no deadline).
+# oss-outage-open rounds j and k: install.ps1 records its own identity (its
+# creation FILETIME, proc-start) beside the pid, and takes over a lock whose
+# pid names another process than that record (a reused pid), as every hook
+# does (hookexec installLockStale). No clock is read: a live installer keeps
+# its lock for as long as it runs (no renewer, no deadline, no pid file age).
 def test_install_ps1_takes_over_a_lock_whose_pid_was_reused() -> None:
     text = INSTALL_PS1.read_text(encoding="utf-8")
     take = text.index('try { New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null } catch {')
     refuse = text.index('Die "Another DefenseClaw install is running (pid $holder)"', take)
     block = text[take:refuse]
-    assert '.LastWriteTimeUtc' in block and "$process.StartTime.ToUniversalTime() -gt $written.AddSeconds(60)" in block
+    assert '(Join-Path $LockDir "proc-start")' in block
+    assert "[string]$process.StartTime.ToFileTimeUtc() -ne $recorded.Trim()" in block
     assert "$process = $null" in block
+    assert "LastWriteTime" not in block and "AddSeconds" not in block
+    write = text.index('Set-Content -LiteralPath (Join-Path $LockDir "pid") -Value $PID -Encoding Ascii')
+    owner = text[write : write + 600]
+    assert 'Set-Content -LiteralPath (Join-Path $LockDir "proc-start")' in owner
+    assert "(Get-Process -Id $PID -ErrorAction Stop).StartTime.ToFileTimeUtc()" in owner
     assert "LockRenewer" not in text and "InstallLockMaxAge" not in text

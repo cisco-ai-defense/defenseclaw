@@ -250,7 +250,7 @@ func TestHookOutageEnvFailModeMatchesTheRenderedHooks(t *testing.T) {
 			names := conn.(HookScriptOwner).HookScriptNames(SetupOpts{})
 			for _, delivery := range []bool{false, true} {
 				for _, managed := range []bool{false, true} {
-					scripts, err := renderHookScripts("127.0.0.1:18970", "closed", ".token", names, managed, name, true, "", "", managed, delivery)
+					scripts, err := renderHookScripts("127.0.0.1:18970", "closed", ".token", names, managed, name, true, "", "", managed, delivery, "")
 					if err != nil {
 						t.Fatal(err)
 					}

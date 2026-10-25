@@ -184,6 +184,10 @@ func snapshotHookDir(t *testing.T, dir string) map[string]hostHookGoldenFile {
 		if err != nil {
 			return err
 		}
+		// A per-user shell hook names the data directory it was written
+		// into (HookHomeSH); the test's temporary folder stands for the
+		// golden one.
+		data = bytes.ReplaceAll(data, []byte(shellSingleQuote(filepath.Dir(dir))), []byte("'/home/golden/.defenseclaw'"))
 		sum := sha256.Sum256(data)
 		out[filepath.ToSlash(rel)] = hostHookGoldenFile{
 			Mode:   info.Mode().Perm().String(),
