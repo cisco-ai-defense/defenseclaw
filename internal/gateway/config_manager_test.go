@@ -1790,9 +1790,9 @@ func TestAPIServerHookPostureUsesPublishedRuntimeConfig(t *testing.T) {
 	}
 	for _, row := range rows {
 		name, _ := row["connector"].(string)
-		// hook_fail_mode is the hooks' outage mode: the default tier's open.
-		if row["policy_mode"] != "action" || row["hook_fail_mode"] != "open" || row["enabled"] != true {
-			t.Fatalf("%s published posture = %#v, want action/open/enabled", name, row)
+		// A saved per-connector mode wins over the default tier's outage mode.
+		if row["policy_mode"] != "action" || row["hook_fail_mode"] != "closed" || row["enabled"] != true {
+			t.Fatalf("%s published posture = %#v, want action/closed/enabled", name, row)
 		}
 	}
 	if boot.EffectiveGuardrailModeForConnector("codex") != "observe" ||
@@ -1869,9 +1869,9 @@ func TestConnectorSetChangeIsHotOffSecureClient(t *testing.T) {
 	}
 }
 
-// A legacy per-user open-to-closed edit cannot change the already-closed
-// runtime or the set of connectors that setup must install.
-func TestLegacyPerUserOpenEditDoesNotChangeConnectorSetup(t *testing.T) {
+// A saved per-user outage-mode edit updates rendered hooks without changing
+// the connector set or the closed handling of non-outage failures.
+func TestExplicitPerUserOutageModeEditRerunsConnectorSetup(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	oldCfg.Guardrail.Enabled = true
 	oldCfg.Guardrail.Connector = "codex"
@@ -1882,8 +1882,10 @@ func TestLegacyPerUserOpenEditDoesNotChangeConnectorSetup(t *testing.T) {
 	newCfg.Guardrail.HookFailMode = "closed"
 	if oldCfg.EffectiveHookFailModeForConnector("codex") != "closed" ||
 		newCfg.EffectiveHookFailModeForConnector("codex") != "closed" ||
-		connectorSetChanged(oldCfg, newCfg) || hookPolicyNeedsSetup(oldCfg, newCfg) {
-		t.Fatal("legacy per-user open edit changed effective setup posture")
+		oldCfg.EffectiveHookOutageFailModeForConnector("codex") != "open" ||
+		newCfg.EffectiveHookOutageFailModeForConnector("codex") != "closed" ||
+		connectorSetChanged(oldCfg, newCfg) || !hookPolicyNeedsSetup(oldCfg, newCfg) {
+		t.Fatal("saved per-user outage mode edit did not refresh hook setup")
 	}
 }
 

@@ -32,7 +32,7 @@ const guardTestDebounce = 40 * time.Millisecond
 // mock that can conceal installation/repair policy drift. Both boot paths use
 // connectorSetupOptsChecked; repair must reproduce those same bytes. This is
 // an OSS install: the plugin bakes closed for every failure, and its outage
-// mode follows the policy tier (oss-outage-open), never a saved value, in
+// mode follows an explicit saved value, then the policy tier when unset, in
 // both observe and action mode.
 func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 	for _, mode := range []string{"observe", "action"} {
@@ -41,10 +41,11 @@ func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 		}{
 			{"default", "", "", "", "open", "open"},
 			{"explicit-open", "open", "", "", "open", "open"},
-			{"global-closed", "closed", "", "", "open", "open"},
+			{"global-closed", "closed", "", "", "closed", "closed"},
 			{"override-open", "closed", "open", "", "open", "open"},
-			{"override-closed", "open", "closed", "", "open", "open"},
-			{"strict", "open", "open", "strict", "closed", "closed"},
+			{"override-closed", "open", "closed", "", "closed", "closed"},
+			{"strict-unset", "", "", "strict", "closed", "closed"},
+			{"strict-explicit-open", "open", "open", "strict", "open", "open"},
 		} {
 			want := tc.wantAction
 			if mode == "observe" {
