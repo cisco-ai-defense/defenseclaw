@@ -91,57 +91,7 @@ case "$status" in 0) echo foreign ;; 1) echo send ;; 2) echo free ;; *) echo une
 }
 
 // Every host hook checks the listener before its gateway request.
-func TestHostHooksCheckTheListenerBeforeSending(t *testing.T) {
-	entries, err := hookFS.ReadDir("hooks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".sh") || strings.HasPrefix(name, "_") {
-			continue
-		}
-		body, err := hookFS.ReadFile("hooks/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(body)
-		check := strings.Index(text, `defenseclaw_api_listener_unproven "$API_ADDR"`)
-		send := strings.Index(text, `defenseclaw_gateway_post "http://${API_ADDR}`)
-		if check < 0 || send < 0 || check > send {
-			t.Errorf("%s does not check the API listener before its gateway request", name)
-		}
-	}
-}
-
-// A hook that detects a peer holding this account's port must name the
-// per-user port setup command. Starting again on the occupied port cannot
-// restore protection.
-func TestForeignListenerHintNamesGatewayPortSetup(t *testing.T) {
-	entries, err := hookFS.ReadDir("hooks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".sh") || strings.HasPrefix(name, "_") {
-			continue
-		}
-		body, err := hookFS.ReadFile("hooks/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(body)
-		if !strings.Contains(text, `defenseclaw_api_listener_unproven "$API_ADDR"`) {
-			continue
-		}
-		if !strings.Contains(text, "defenseclaw setup gateway --api-port") {
-			t.Errorf("%s gives no gateway port setup command for a foreign listener", name)
-		}
-	}
-}
-
-func TestHostHookGatewayPostRechecksListenerBeforeEverySend(t *testing.T) {
+func TestHostHookGatewayPostNeverFallsBackToCurlForAForeignListener(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hooks are not used on Windows")
 	}
@@ -277,7 +227,11 @@ func TestPerUserHookIgnoresInheritedManagedSocket(t *testing.T) {
 defenseclaw_api_listener_unproven() { return 0; }
 curl() { echo leaked; }
 if defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 'secret payload' -H 'Authorization: Bearer secret'; then echo sent; else echo blocked; fi`
-	out, err := exec.Command("bash", "-c", script, "bash", helper).CombinedOutput()
+	// An empty home: no installed helper of the account running the test
+	// may receive the call.
+	cmd := exec.Command("bash", "-c", script, "bash", helper)
+	cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("bash: %v\n%s", err, out)
 	}

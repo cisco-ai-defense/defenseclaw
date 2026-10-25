@@ -388,10 +388,7 @@ RESOLVED_HEADER_ARGS=()
 if [ -n "${_DC_RESOLVED_WRITES}" ]; then
   RESOLVED_HEADER_ARGS=(-H "X-DefenseClaw-Resolved-Writes: ${_DC_RESOLVED_WRITES}")
 fi
-{{end}}if defenseclaw_api_listener_unproven "$API_ADDR"; then
-  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Another account may hold the port. Run \`defenseclaw setup gateway --api-port <free-port>\` to choose a free port"
-fi
-# A refused or dropped connection means this account's gateway is
+{{end}}# A refused or dropped connection means this account's gateway is
 # restarting or not running (after a reboot, for example): send the call
 # again for up to 3 seconds, starting the gateway after a refusal. See
 # defenseclaw_await_gateway in _hardening.sh.
@@ -420,7 +417,7 @@ RESPONSE=$(defenseclaw_hook_post) || {
     defenseclaw_managed_http_result "$HTTP_CODE" incomplete
     fail_unreachable "gateway unreachable"
   }
-{{else}}  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
+{{else}}  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "$(defenseclaw_gateway_unreachable_reason 2>/dev/null || printf 'gateway unreachable')"{{end}}
 }
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# The gateway answered 429, so it is up: a resend that fails after it is no
 # outage in a standalone managed hook.

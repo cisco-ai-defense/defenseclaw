@@ -1782,9 +1782,11 @@ defenseclaw_ipv6_loopback() {
 
 # defenseclaw_api_listener_unproven HOST:PORT returns 0 for a foreign or
 # unknown listener, 1 for this account's listener, and 2 for a proven free
-# port. A stopped gateway, a stale PID record,
-# and unreadable socket tables must never send a token or hook payload to an
-# unverified endpoint. Linux reads this namespace's procfs socket tables;
+# port. Hooks call it only for a call that got no answer
+# (defenseclaw_gateway_post, defenseclaw_gateway_unreachable_reason), to tell
+# a cold start from a foreign listener; before a send, the native helper's
+# proof of the connected peer decides (GAP-1453). It never allows a send.
+# Linux reads this namespace's procfs socket tables;
 # macOS lsof lists this account's listeners. Managed hooks use their separate
 # verified transport. The endpoints checked are the ones the native helper
 # dials, in its order (defenseclaw_loopback_targets): the first one with a
@@ -1837,6 +1839,23 @@ defenseclaw_api_listener_unproven() {
     done
     return 2
   fi
+  return 0
+}
+
+# defenseclaw_gateway_unreachable_reason prints the reason a hook gives for a
+# gateway request that got no answer. A per-user hook names another
+# account's listener on this account's port, which a start cannot fix; it
+# reads the socket tables only on this failure path (GAP-1453).
+defenseclaw_gateway_unreachable_reason() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) printf '%s' 'gateway unreachable'; return 0 ;;
+  esac
+  if [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] && [ -n "${API_ADDR:-}" ] &&
+     defenseclaw_api_listener_unproven "$API_ADDR"; then
+    printf '%s' "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent to it. Another account may hold the port. Run \`defenseclaw setup gateway --api-port <free-port>\` to choose a free port"
+    return 0
+  fi
+  printf '%s' 'gateway unreachable'
   return 0
 }
 
@@ -2838,25 +2857,46 @@ defenseclaw_keep_nul_visible() {
 # .curlrc there could trace the bearer and body to a file or turn an HTTP 401
 # into a transport failure. Bash 3.2 compatible.
 defenseclaw_gateway_post() {
+  local _dc_post_status=0 _dc_listener_status=0
+  _dc_gateway_post_once "$@" || _dc_post_status=$?
+  case "$_dc_post_status" in
+    1|28) ;;
+    *) return "$_dc_post_status" ;;
+  esac
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return "$_dc_post_status" ;;
+  esac
+  [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return "$_dc_post_status"
+  # A per-user call that was not answered reads the socket tables once, so
+  # the outcome is the one the old send-time preflight gave: no listener is
+  # a cold start (7), a foreign or unknown one fails closed (1).
+  defenseclaw_api_listener_unproven "${API_ADDR:-}" || _dc_listener_status=$?
+  case "$_dc_listener_status" in
+    2) return 7 ;;
+    0) return 1 ;;
+  esac
+  return "$_dc_post_status"
+}
+
+# _dc_gateway_post_once makes one defenseclaw_gateway_post attempt.
+_dc_gateway_post_once() {
   local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
-  local _dc_post_auth="" _dc_post_arg _dc_listener_status=0
+  local _dc_post_auth="" _dc_post_arg
   local _dc_native_post=0 _dc_post_bin _dc_post_prefix _dc_post_path _dc_legacy_post=1
   local _dc_header_name _dc_header_value _dc_post_output _dc_post_headers _dc_post_sep _dc_field_index
   local -a _dc_post_args _dc_post_auth_args _dc_post_fields
-  # This probe still distinguishes a free port for cold start. The native
-  # helper proves the actual connection again before it sends any data.
+  # A per-user post reads no socket table before it sends (GAP-1453): the
+  # native helper proves the owner of the very connection it sends on, with
+  # nothing written before that proof. Only an address the helper would
+  # refuse stops here; defenseclaw_gateway_post classifies every unsent call.
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) ;;
     *)
       if [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ]; then
         [ -n "${API_ADDR:-}" ] || return 1
         case "$_dc_post_url" in "http://""${API_ADDR}/"*) ;; *) return 1 ;; esac
-        defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?
-        case "$_dc_listener_status" in
-          1) _dc_native_post=1 ;; # This account owns the listener now.
-          2) return 7 ;; # No listener: let the existing cold-start retry run.
-          *) return 1 ;; # Foreign or unknown owner: fail closed.
-        esac
+        defenseclaw_loopback_targets "$API_ADDR" || return 1
+        _dc_native_post=1
       fi
       ;;
   esac
@@ -3005,12 +3045,7 @@ defenseclaw_gateway_post() {
         ) 2>/dev/null |
         defenseclaw_keep_nul_visible
       exit "${PIPESTATUS[1]}"
-    )" || {
-      _dc_listener_status=0
-      defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?
-      [ "$_dc_listener_status" -eq 2 ] && return 7
-      return 1
-    }
+    )" || return 1
     printf '%s' "$_dc_post_output"
     return 0
   fi

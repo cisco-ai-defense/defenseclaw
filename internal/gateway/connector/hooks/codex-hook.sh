@@ -456,9 +456,6 @@ if [ -n "${_DC_RESOLVED_WRITES}" ]; then
   RESOLVED_HEADER_ARGS=(-H "X-DefenseClaw-Resolved-Writes: ${_DC_RESOLVED_WRITES}")
 fi
 {{end}}
-if defenseclaw_api_listener_unproven "$API_ADDR"; then
-  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Another account may hold the port. Run \`defenseclaw setup gateway --api-port <free-port>\` to choose a free port"
-fi
 
 # defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the hook
 # event on descriptors, never on its command line.
@@ -510,7 +507,7 @@ unset API_TOKEN PAYLOAD
 if [ "$CURL_STATUS" -ne 0 ]; then
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}  defenseclaw_split_response
   defenseclaw_managed_http_result "$HTTP_CODE" incomplete
-{{end}}  fail_unreachable "gateway unreachable"
+{{end}}  fail_unreachable "$(defenseclaw_gateway_unreachable_reason 2>/dev/null || printf 'gateway unreachable')"
 fi{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
