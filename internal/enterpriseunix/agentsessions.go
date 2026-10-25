@@ -81,6 +81,10 @@ var scriptHosts = map[string]bool{"node": true, "nodejs": true, "bun": true, "de
 // agentModuleNames are agents launched through a script host's -c or -m argument.
 var agentModuleNames = map[string]string{"hermes_cli": "hermes"}
 
+// packageRunnerTitles are the package runners whose process title names the
+// runner first.
+var packageRunnerTitles = map[string]bool{"npm": true, "npx": true, "pnpm": true, "pnpx": true, "yarn": true, "bunx": true}
+
 func isScriptHost(name string) bool {
 	return scriptHosts[name] || strings.HasPrefix(name, "python3.")
 }
@@ -95,6 +99,13 @@ func agentCLIOf(argv []string) string {
 	}
 	// Node can replace its argv area with a short process title padded by
 	// spaces. Claude Code does this during an interactive npm session.
+	// npm exec and npx replace their argv with one title, "npm exec <package>
+	// <arguments>". That process is the package runner, not the agent: an MCP
+	// server it runs for Claude Code ends in a project path that may be named
+	// claude (GAP-1273). An agent the runner starts is its own process.
+	if title := strings.Fields(argv[0]); len(argv) == 1 && len(title) > 1 && packageRunnerTitles[filepath.Base(title[0])] {
+		return ""
+	}
 	name := strings.TrimSpace(filepath.Base(argv[0]))
 	if agentCLINames[name] {
 		return name
