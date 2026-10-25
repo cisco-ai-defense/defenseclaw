@@ -457,10 +457,7 @@ func (a *APIServer) applyInstructionStartup(ctx context.Context, connector, sess
 	}
 	switch canonicalEvent(event) {
 	case "sessionstart", "onsessionstart", "onsessionreset", "sessioncreated":
-		a.activeAgentContext.beginKey(key)
-		files, dirs, identities := instructionStartupFiles(ctx, connector, cwd)
-		a.activeAgentContext.setStartupKey(key, files, dirs, identities)
-		a.saveInstructionLoads(key)
+		a.startInstructionSession(ctx, key, cwd)
 	case "sessionend", "onsessionend", "onsessionfinalize", "sessiondeleted":
 		a.activeAgentContext.endKey(key)
 		a.saveInstructionLoads(key)
@@ -475,6 +472,17 @@ func (a *APIServer) applyInstructionStartup(ctx context.Context, connector, sess
 		return a.activeAgentContext.snapshotKey(key)
 	}
 	return activeAgentContextSnapshot{}
+}
+
+// startInstructionSession records a session start and its startup snapshot
+// (activeAgentContextCache.startKey). A call that reached a restarted
+// gateway before the late start left its record, so the record is read
+// first.
+func (a *APIServer) startInstructionSession(ctx context.Context, key activeAgentContextKey, cwd string) {
+	a.restoreInstructionLoads(key)
+	files, dirs, identities := instructionStartupFiles(ctx, key.connector, cwd)
+	a.activeAgentContext.startKey(key, files, dirs, identities)
+	a.saveInstructionLoads(key)
 }
 
 // recordedStartupFile reports a snapshot file as instructionSnapshot records

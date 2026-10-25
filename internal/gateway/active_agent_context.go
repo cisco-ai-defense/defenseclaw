@@ -91,7 +91,12 @@ type activeAgentContextSession struct {
 	// identities maps each loaded file to the hook client's file identity
 	// of it (hookpaths.LoadedIdentityPrefix). Two loaded names of one file
 	// (hard links) keep one entry each (GAP-1414).
-	identities               map[string]string
+	identities map[string]string
+	// awaitingStart is set while no start event of the session has reached
+	// the gateway: a call (or load) came first (GAP-0973). Its first start
+	// is then the start of the same session, not a new generation, so it
+	// keeps what the calls before it recorded (startKey).
+	awaitingStart            bool
 	caseInsensitiveUncertain bool
 	uncertain                bool
 	updatedAt                time.Time
@@ -393,19 +398,28 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 func (cache *activeAgentContextCache) seedKey(key activeAgentContextKey, filePath, identity string) {
 	canonicalPath, caseInsensitive, valid := exactActiveAgentFile(filePath)
 	if !valid {
-		if syntacticActiveAgentFileCandidate(filePath) {
-			now := cache.currentTime()
-			cache.markUncertain(key, now)
-			// A symlinked instruction file is the file it reaches: keep the
-			// loaded name too, so a write to that file under another name is
-			// judged by its identity (GAP-0971, hookpaths.InstructionFiles).
-			// A gateway that cannot read the file (ProtectHome) keeps the
-			// identity the hook client read (GAP-1064).
-			if info, err := os.Stat(filePath); err == nil && info.Mode().IsRegular() || identity != "" {
-				cache.seedLoadedFile(key, filePath, false, now)
-				cache.seedLoadedIdentity(key, filePath, identity)
-			}
+		if !syntacticActiveAgentFileCandidate(filePath) {
+			return
 		}
+		now := cache.currentTime()
+		// A symlinked instruction file (or one under a linked directory) is
+		// the file it reaches: keep the loaded name and the identity of that
+		// file, so a write to it under another name is judged by its
+		// identity (GAP-0971, hookpaths.InstructionFiles), also after the
+		// link is moved. The hook client's identity, read as the user, wins
+		// (a gateway that cannot read the file, ProtectHome, GAP-1064). A
+		// load proved this way is no loss of context, so it does not make
+		// every instruction-named write of the session suspect; only a load
+		// whose file cannot be identified does.
+		if identity == "" {
+			identity = hookpaths.FileIdentity(filePath)
+		}
+		if identity == "" {
+			cache.markUncertain(key, now)
+			return
+		}
+		cache.seedLoadedFile(key, filePath, false, now)
+		cache.seedLoadedIdentity(key, filePath, identity)
 		return
 	}
 	cache.seedLoadedFile(
@@ -488,6 +502,7 @@ func (cache *activeAgentContextCache) markUncertain(
 		session = activeAgentContextSession{
 			caseInsensitiveUncertain: caseInsensitiveUncertain,
 			uncertain:                uncertain,
+			awaitingStart:            !uncertain,
 		}
 	}
 	// The authenticated event identifies an instruction-file candidate, but
@@ -517,6 +532,7 @@ func (cache *activeAgentContextCache) seedLoadedFile(
 		session = activeAgentContextSession{
 			caseInsensitiveUncertain: caseInsensitiveUncertain,
 			uncertain:                uncertain,
+			awaitingStart:            !uncertain,
 			updatedAt:                now,
 		}
 	}
@@ -594,12 +610,46 @@ func (cache *activeAgentContextCache) resetKey(key activeAgentContextKey, preser
 	previous := cache.sessions[key]
 	next := activeAgentContextSession{updatedAt: now}
 	if preserveStartup {
+		next.awaitingStart = previous.awaitingStart
 		next.startupFiles = maps.Clone(previous.startupFiles)
 		next.startupKnown = previous.startupKnown
 		next.startupDirs = slices.Clone(previous.startupDirs)
 		next.startupDirIDs = maps.Clone(previous.startupDirIDs)
 	}
 	cache.sessions[key] = next
+}
+
+// startKey records a start event of key with its startup snapshot. The
+// first start of a session whose calls reached the gateway before it
+// (awaitingStart) is that session's own late start: what those calls
+// recorded stands, a directory they sighted keeps its first record (so a
+// file the session created there stays its own), and the start only adds
+// the directories they had not reached. Any other start, a later start of
+// the same session ID (resume, clear, reset) included, is a new generation:
+// it resets the session and takes a new snapshot.
+func (cache *activeAgentContextCache) startKey(key activeAgentContextKey, files map[string]string, dirs []string, dirIDs map[string]string) {
+	cache.mu.Lock()
+	session, exists := cache.sessions[key]
+	late := exists && session.awaitingStart
+	if late {
+		session.awaitingStart = false
+		session.updatedAt = cache.currentTime()
+		cache.sessions[key] = session
+	}
+	cache.mu.Unlock()
+	if !late {
+		cache.beginKey(key)
+		cache.setStartupKey(key, files, dirs, dirIDs)
+		return
+	}
+	if files == nil || len(dirs) == 0 {
+		return
+	}
+	if session.startupKnown {
+		cache.extendStartupKey(key, files, dirs, dirIDs, nil, nil)
+		return
+	}
+	cache.setStartupKey(key, files, dirs, dirIDs)
 }
 
 func (cache *activeAgentContextCache) setStartupKey(key activeAgentContextKey, files map[string]string, dirs []string, dirIDs map[string]string) {
@@ -641,6 +691,7 @@ func (cache *activeAgentContextCache) firstSightingKey(key activeAgentContextKey
 			cache.sessions = make(map[activeAgentContextKey]activeAgentContextSession)
 		}
 		cache.makeRoomLocked(key)
+		session.awaitingStart = true
 	}
 	session.startupFiles = maps.Clone(files)
 	session.startupDirs = slices.Clone(dirs)
@@ -849,6 +900,7 @@ func (cache *activeAgentContextCache) restoreKey(key activeAgentContextKey, reco
 		startupKnown:             record.StartupKnown,
 		startupDirs:              slices.Clone(record.StartupDirs),
 		startupDirIDs:            maps.Clone(record.StartupDirIDs),
+		awaitingStart:            record.AwaitingStart && !uncertain,
 		uncertain:                uncertain,
 		caseInsensitiveUncertain: caseInsensitiveUncertain,
 		updatedAt:                now,
@@ -919,10 +971,7 @@ func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req c
 	}
 	switch req.HookEventName {
 	case "SessionStart":
-		a.activeAgentContext.beginKey(key)
-		files, dirs, dirIDs := instructionStartupFiles(ctx, connectorName, req.CWD)
-		a.activeAgentContext.setStartupKey(key, files, dirs, dirIDs)
-		a.saveInstructionLoads(key)
+		a.startInstructionSession(ctx, key, req.CWD)
 	case "CwdChanged":
 		a.restoreInstructionLoads(key)
 		a.activeAgentContext.beginKeyPreservingStartup(key)

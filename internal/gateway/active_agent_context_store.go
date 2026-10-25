@@ -39,6 +39,10 @@ type instructionLoadRecord struct {
 	StartupKnown     bool              `json:"startup_known,omitempty"`
 	StartupDirs      []string          `json:"startup_dirs,omitempty"`
 	StartupDirIDs    map[string]string `json:"startup_dir_ids,omitempty"`
+	// AwaitingStart: the session's calls came before any start of it
+	// (activeAgentContextSession.awaitingStart). A record without it is a
+	// started session's, as every record of earlier builds is.
+	AwaitingStart bool `json:"awaiting_start,omitempty"`
 }
 
 func (a *APIServer) instructionLoadDir() string {
@@ -73,7 +77,7 @@ func (a *APIServer) saveInstructionLoads(key activeAgentContextKey) {
 		Files: session.files, CaseInsensitiveFiles: session.caseInsensitiveFiles,
 		LoadedIdentities: session.identities, StartupFiles: session.startupFiles,
 		StartupKnown: session.startupKnown, StartupDirs: session.startupDirs,
-		StartupDirIDs: session.startupDirIDs,
+		StartupDirIDs: session.startupDirIDs, AwaitingStart: session.awaitingStart,
 	})
 	if err != nil || len(data) > maxInstructionLoadRecordBytes || os.MkdirAll(dir, 0o700) != nil {
 		return
