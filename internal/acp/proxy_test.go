@@ -542,6 +542,56 @@ func (e *failingEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error
 	return Verdict{Action: "allow"}, nil
 }
 
+type outageAfterPromptEvaluator struct{ aggregateOnly bool }
+
+func (e outageAfterPromptEvaluator) Evaluate(_ context.Context, in Evaluation) (Verdict, error) {
+	if in.Direction == AgentToClient && in.Method == "session/update" && (!e.aggregateOnly || in.Aggregate) {
+		return Verdict{}, errors.New("gateway did not answer")
+	}
+	return Verdict{Action: "allow"}, nil
+}
+
+// Once a prompt reached the agent, a later ACP outage cannot undo a tool
+// effect. The editor must not tell the user it was never delivered and invite
+// a blind retry, even when the agent's completed answer cannot be released.
+func TestCopyFramesActionOutageAfterDeliveredPromptNamesPossibleToolEffect(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		mode          Mode
+		managed       bool
+		aggregateOnly bool
+	}{
+		{name: "action agent update", mode: ModeAction},
+		{name: "action completed turn", mode: ModeAction, aggregateOnly: true},
+		{name: "managed observe agent update", mode: ModeObserve, managed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+			var agentInput, clientOutput bytes.Buffer
+			opts := ProxyOptions{Mode: tc.mode, Managed: tc.managed, Evaluator: outageAfterPromptEvaluator{aggregateOnly: tc.aggregateOnly}, Stderr: io.Discard}
+			prompt := `{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"s","prompt":[{"type":"text","text":"run a terminal command"}]}}` + "\n"
+			if err := copyFrames(context.Background(), opts, state, ClientToAgent, strings.NewReader(prompt), &agentInput, &clientOutput); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(agentInput.String(), `"method":"session/prompt"`) {
+				t.Fatalf("prompt was not delivered to agent: %q", agentInput.String())
+			}
+			agentInput.Reset()
+			updates := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"terminal-1","status":"completed","content":[{"type":"text","text":"command exited 0"}]}}}` + "\n" +
+				`{"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}` + "\n"
+			if err := copyFrames(context.Background(), opts, state, AgentToClient, strings.NewReader(updates), &clientOutput, &agentInput); err != nil {
+				t.Fatal(err)
+			}
+			text, stop := blockedTurn(t, clientOutput.Bytes(), "7")
+			if stop != "end_turn" || !strings.Contains(text, "may have run") || !strings.Contains(text, "before retrying") ||
+				strings.Contains(text, "not delivered") || strings.Contains(text, "Try again") ||
+				strings.Contains(clientOutput.String(), "command exited 0") {
+				t.Fatalf("post-delivery outage was reported as safe to retry: %q / %q", text, stop)
+			}
+		})
+	}
+}
+
 // One slow gateway answer must not end the agent session: the guard retries
 // once, then refuses only that prompt and keeps proxying (GAP-1834).
 func TestCopyFramesActionEvaluationTimeoutRefusesOnlyThatFrame(t *testing.T) {
