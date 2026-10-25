@@ -75,6 +75,18 @@ describe('Owner-decided outage and install-window modes', () => {
   });
 });
 
+describe('Fail-mode source and command wording during the 1.0.4 integration', () => {
+  it('does not claim every per-user hook uses only an installed mode or reject a saved-mode setter', () => {
+    const reference = page('reference/configuration/fail-modes.mdx');
+    const matrix = page('reference/apis/capability-matrix.mdx');
+    const commands = page('reference/commands/cli.mdx');
+    assert.doesNotMatch(reference, /the installed mode is the fail mode|passing a value to this per-user command is refused/i);
+    assert.doesNotMatch(matrix, /the installed mode is the fail mode/i);
+    assert.doesNotMatch(commands, /Passing a value here is refused/i);
+    assert.match(reference, /`DEFENSECLAW_FAIL_MODE`[^|]*Not read by 1\.0\.4 hooks/i);
+  });
+});
+
 function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }

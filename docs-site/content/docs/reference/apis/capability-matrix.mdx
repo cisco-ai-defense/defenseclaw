@@ -86,8 +86,8 @@ against the hook code on every change.
   default when no fail mode is set.
 - **`DEFENSECLAW_STRICT_AVAILABILITY=1`** makes an outage block on a hook that
   reads it, whatever the fail mode.
-- **`DEFENSECLAW_FAIL_MODE`** is not read by any 1.0.4 hook: the installed
-  mode is the fail mode
+- **`DEFENSECLAW_FAIL_MODE`** is not read by any 1.0.4 hook. The outage
+  rules are in the fail-mode reference
   ([Fail modes](/docs/reference/configuration/fail-modes#the-environment-does-not-set-the-fail-mode)).
 - A proxy-backed connector has no hooks: its requests are blocked while the
   gateway is down.

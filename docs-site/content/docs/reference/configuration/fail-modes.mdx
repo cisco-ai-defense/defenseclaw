@@ -15,7 +15,7 @@ An explicit saved `open` or `closed` wins over the policy tier on a per-user ins
 | Control | Effect | Default and scope |
 | --- | --- | --- |
 | `guardrail.hook_fail_mode` | An explicit saved `open` or `closed` selects the outage mode. Other failures still block outside Secure Client. Under `closed` a recovered evaluator panic blocks advisory events too, but never a stop, session-end or idle event. | Per-user: unset follows the policy tier ([Per-user installs](#per-user-installs)). Managed standalone: `closed` by default. Secure Client: unset is `open` ([Secure Client](#secure-client)). Per connector: `guardrail.connectors.<name>.hook_fail_mode`. |
-| `DEFENSECLAW_FAIL_MODE` | Not read by 1.0.4 hooks in any profile: the installed mode is the fail mode. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)). | On a per-user host, select the strict policy to block an outage: `defenseclaw guardrail use-pack strict`. |
+| `DEFENSECLAW_FAIL_MODE` | Not read by 1.0.4 hooks. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)). | Use a saved `guardrail.hook_fail_mode` choice or the policy tier for a per-user outage. |
 
 On a managed computer the saved value comes from the administrator's config. The administrator's explicit `hook_fail_mode: open` wins over the strict tier for a classified gateway outage. It does not open integrity failures, bad answers or the install window. A guarded connector still blocks when the gateway cannot answer its foreign-hook session check.
 
@@ -134,7 +134,7 @@ On a managed Linux or macOS host the hook is the administrator-owned `defensecla
 
 ## Persisted fail mode
 
-A per-user install honors an explicit saved `guardrail.hook_fail_mode` or connector `hook_fail_mode` during a classified outage. With neither saved, it follows the policy tier ([Per-user installs](#per-user-installs)). A saved mode stays in effect after a tier change until you clear it. `defenseclaw guardrail fail-mode` shows each connector's effective outage mode and any registration drift; passing a value to this per-user command is refused.
+A per-user install honors an explicit saved `guardrail.hook_fail_mode` or connector `hook_fail_mode` during a classified outage. With neither saved, it follows the policy tier ([Per-user installs](#per-user-installs)). A saved mode stays in effect after a tier change until you clear it. `defenseclaw guardrail fail-mode` shows each connector's effective outage mode and any registration drift.
 
 An upgrade from 1.0.0 through 1.0.3 keeps a saved mode. In particular, older Cursor setup could save `open` without recording whether the user chose it; the upgrade keeps that value and names how to clear it. Restart running agents after upgrading. See [Upgrade](/docs/get-started/upgrade#upgrade).
 
