@@ -91,8 +91,8 @@ func TestCopilotNativeBenignCorpus(t *testing.T) {
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if count != 8 {
-		t.Fatalf("native benign corpus has %d cases, want 8", count)
+	if count != 10 {
+		t.Fatalf("native benign corpus has %d cases, want 10", count)
 	}
 }
 
@@ -169,7 +169,7 @@ func TestCopilotPermissionJoinCapacityStillInvalidatesPrior(t *testing.T) {
 	permission := agentHookRequest{ConnectorName: "copilot", HookEventName: "permissionRequest",
 		SessionID: "native", CWD: "/tmp/native", ToolName: "edit",
 		Payload: map[string]any{"hookName": "permissionRequest", "toolName": "edit", "toolInput": map[string]any{}}}
-	if _, ok := join.match(ctx, permission, connector.HookProfile{}); ok {
+	if _, ok := join.match(ctx, permission, connector.HookProfile{}, []byte(`{"hookName":"permissionRequest","toolName":"edit","toolInput":{}}`)); ok {
 		t.Fatal("protected call left an earlier allowed decision reusable at cache capacity")
 	}
 }

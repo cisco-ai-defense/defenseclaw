@@ -718,7 +718,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		resp, gated := a.refuseProfileHook(ctx, profile, connectorName, req, b, payload)
 		// A refused permission delivery still consumes any earlier candidate;
 		// it cannot be replayed as a later argumentless allow.
-		if prior, matched := a.copilotPermission.match(ctx, req, profile); !gated && matched {
+		if prior, matched := a.copilotPermission.match(ctx, req, profile, rawBody); !gated && matched {
 			resp, gated = prior, true
 		}
 		if !gated && req.ToolCallUnparsed &&

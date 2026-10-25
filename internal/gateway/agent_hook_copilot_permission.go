@@ -77,7 +77,13 @@ func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest
 	j.entries[key] = copilotPermissionEntry{response: response, tool: req.ToolName, at: now}
 }
 
-func (j *copilotPermissionJoin) match(ctx context.Context, req agentHookRequest, profile connector.HookProfile) (agentHookResponse, bool) {
+// match reuses the prior decision only for a callback whose raw body is one
+// unambiguous JSON value: a decoder keeps the last of duplicate keys, so a
+// duplicate toolInput, toolName or hookName could pair a protected call with
+// an empty decoded map. Such a callback still consumes the prior decision
+// and gets its own (unparsed) gate. An argumentless callback is unparsed by
+// design, so the raw body is checked here and not req.ToolCallUnparsed.
+func (j *copilotPermissionJoin) match(ctx context.Context, req agentHookRequest, profile connector.HookProfile, raw []byte) (agentHookResponse, bool) {
 	if req.ConnectorName != "copilot" || req.HookEventName != "permissionRequest" ||
 		req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal {
 		return agentHookResponse{}, false
@@ -98,7 +104,8 @@ func (j *copilotPermissionJoin) match(ctx context.Context, req agentHookRequest,
 		delete(j.entries, key)
 	}
 	j.mu.Unlock()
-	if !exists || entry.ambiguous || !copilotEmptyPermissionArgs(req.Payload) ||
+	if !exists || entry.ambiguous || !hookToolCallJSONUnambiguous(req.ConnectorName, raw) ||
+		!copilotEmptyPermissionArgs(req.Payload) ||
 		!copilotPermissionToolMatches(entry.tool, req.ToolName) {
 		return agentHookResponse{}, false
 	}
