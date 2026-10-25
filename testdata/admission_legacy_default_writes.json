@@ -1,5 +1,5 @@
 {
- "_comment": "GAP-1488: config writes over the pre-1.0.4 default preset (legacy). cli/tests/test_config_writer.py applies each case's writes with the config writer and checks the written admission block and the Python verdicts; internal/policy compiles the same admission block in Go. verdicts are for one MCP finding of that severity.",
+ "_comment": "GAP-1488: config writes over the pre-1.0.4 default preset (legacy). cli/tests/test_config_writer.py applies each case's writes with the config writer and checks the written admission block and the Python verdicts; internal/policy compiles the same admission block in Go. verdicts are for one MCP finding of that severity. live_edits: the same over the other write paths (policy edit actions/scanner, TUI Setup rows) that save through Config.save; cli are policy command arguments (run with --no-reload), tui are Setup rows.",
  "legacy": {
   "defaults": {
    "scan_on_install": true,
@@ -861,6 +861,997 @@
     "skill": {
      "actions": {
       "high": "block"
+     }
+    }
+   }
+  }
+ ],
+ "live_edits": [
+  {
+   "name": "policy edit actions HIGH --file quarantine (the preset's own value)",
+   "cli": [
+    "edit",
+    "actions",
+    "--severity",
+    "high",
+    "--file",
+    "quarantine"
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "rejected",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "skill": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "policy edit actions HIGH --install block (the preset's own value)",
+   "cli": [
+    "edit",
+    "actions",
+    "--severity",
+    "high",
+    "--install",
+    "block"
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "rejected",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "skill": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "policy edit actions HIGH --runtime disable (the preset's own value)",
+   "cli": [
+    "edit",
+    "actions",
+    "--severity",
+    "high",
+    "--runtime",
+    "disable"
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "rejected",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "skill": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "policy edit actions CRITICAL --file quarantine",
+   "cli": [
+    "edit",
+    "actions",
+    "--severity",
+    "critical",
+    "--file",
+    "quarantine"
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "warning",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": "warn",
+      "high": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "skill": {
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "policy edit actions MEDIUM --install block (MCP keeps its own MEDIUM)",
+   "cli": [
+    "edit",
+    "actions",
+    "--severity",
+    "medium",
+    "--install",
+    "block"
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "warning",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "block"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": "warn",
+      "high": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "skill": {
+     "actions": {
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "block"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "policy edit scanner mcp HIGH --file quarantine",
+   "cli": [
+    "edit",
+    "scanner",
+    "--type",
+    "mcp",
+    "--severity",
+    "high",
+    "--file",
+    "quarantine"
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "rejected",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": "warn",
+      "high": {
+       "install": "none",
+       "file": "quarantine",
+       "runtime": "enable"
+      }
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "policy edit scanner mcp MEDIUM --file quarantine (the preset's own value)",
+   "cli": [
+    "edit",
+    "scanner",
+    "--type",
+    "mcp",
+    "--severity",
+    "medium",
+    "--file",
+    "quarantine"
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "warning",
+    "MEDIUM": "rejected",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "low": "warn",
+      "high": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "policy edit scanner mcp LOW --runtime disable (the preset's own value)",
+   "cli": [
+    "edit",
+    "scanner",
+    "--type",
+    "mcp",
+    "--severity",
+    "low",
+    "--runtime",
+    "disable"
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "warning",
+    "MEDIUM": "warning",
+    "LOW": "rejected"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": {
+       "file": "none",
+       "runtime": "disable",
+       "install": "none"
+      },
+      "high": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "policy edit scanner mcp MEDIUM --remove",
+   "cli": [
+    "edit",
+    "scanner",
+    "--type",
+    "mcp",
+    "--severity",
+    "medium",
+    "--remove"
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "warning",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "low": "warn",
+      "high": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "policy edit scanner skill HIGH --install block",
+   "cli": [
+    "edit",
+    "scanner",
+    "--type",
+    "skill",
+    "--severity",
+    "high",
+    "--install",
+    "block"
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "warning",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "disable",
+       "install": "none"
+      }
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "skill": {
+     "actions": {
+      "high": {
+       "install": "block",
+       "file": "quarantine",
+       "runtime": "disable"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "TUI Setup admission.defaults.actions.high quarantine",
+   "tui": [
+    [
+     "admission.defaults.actions.high",
+     "quarantine"
+    ]
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "rejected",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": "quarantine",
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "TUI Setup admission.mcp.actions.high quarantine",
+   "tui": [
+    [
+     "admission.mcp.actions.high",
+     "quarantine"
+    ]
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "rejected",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": "warn",
+      "high": "quarantine"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "TUI Setup admission.mcp.actions.medium blank (unset)",
+   "tui": [
+    [
+     "admission.mcp.actions.medium",
+     ""
+    ]
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "warning",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "low": "warn",
+      "high": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
      }
     }
    }

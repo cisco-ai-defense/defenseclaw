@@ -1006,3 +1006,69 @@ def test_a_write_over_the_legacy_default_keeps_what_it_decides(tmp_path, monkeyp
         written = yaml.safe_load(open(path, encoding="utf-8"))["admission"]
         assert written == case["admission"], case["name"]
         assert verdicts(written) == case["verdicts"], case["name"]
+
+
+def _live_edit_over_the_legacy_default(folder, case, legacy_admission):
+    """Run one ``fixture["live_edits"]`` case on a config.yaml holding the
+    pre-1.0.4 default preset and return (written admission, Config)."""
+    from click.testing import CliRunner
+    from defenseclaw import config as config_module
+    from defenseclaw.commands.cmd_policy import policy
+    from defenseclaw.context import AppContext
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    path = _config(folder, yaml.safe_dump({"admission": legacy_admission}, sort_keys=False))
+    cfg = config_module.load(data_dir=str(folder))
+    if "cli" in case:
+        app = AppContext()
+        app.cfg = cfg
+        result = CliRunner().invoke(policy, [*case["cli"], "--no-reload"], obj=app, catch_exceptions=False)
+        assert result.exit_code == 0, (case["name"], result.output)
+    else:
+        for key, value in case["tui"]:
+            apply_config_field(cfg, key, value)
+        cfg.save()
+    with open(path, encoding="utf-8") as stream:
+        return yaml.safe_load(stream)["admission"], cfg
+
+
+def test_a_live_policy_edit_over_the_legacy_default_keeps_what_it_decides(tmp_path, monkeypatch):
+    """GAP-1488, the write paths other than config_writer.apply: ``policy edit
+    actions`` and ``policy edit scanner`` (and its --remove) and a TUI Setup
+    admission row save through Config.save. Over the pre-1.0.4 default
+    preset, the severity they decide compiles as written, also when the
+    value equals the preset's (``policy edit actions --severity high --file
+    quarantine``), and the MCP severities they leave keep their warn. The
+    saved Config reads as the file it wrote. internal/policy compiles the
+    same written blocks in Go (TestWritesOverTheLegacyDefaultCompileInGo)."""
+    import json
+    from pathlib import Path
+
+    from defenseclaw.config import _merge_admission, default_config
+    from defenseclaw.enforce.admission import action_blocks, compile_admission
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(config_writer, "_use_go_validator", lambda: False)
+    monkeypatch.setattr(config_writer, "refuse_when_managed", lambda *args, **kwargs: None)
+    fixture = json.loads(
+        (Path(__file__).resolve().parents[2] / "testdata" / "admission_legacy_default_writes.json").read_text()
+    )
+
+    def verdicts(cfg):
+        actions = compile_admission(cfg, "mcp").actions
+        return {sev: "rejected" if action_blocks(actions[sev][0]) else "warning"
+                for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW")}
+
+    def of(admission):
+        cfg = default_config()
+        cfg.admission = _merge_admission(admission)
+        return cfg
+
+    assert len(fixture["live_edits"]) >= 10
+    for index, case in enumerate(fixture["live_edits"]):
+        folder = tmp_path / str(index)
+        folder.mkdir()
+        written, cfg = _live_edit_over_the_legacy_default(folder, case, json.loads(json.dumps(fixture["legacy"])))
+        assert written == case["admission"], case["name"]
+        assert verdicts(of(written)) == case["verdicts"], case["name"]
+        assert verdicts(cfg) == case["verdicts"], case["name"]

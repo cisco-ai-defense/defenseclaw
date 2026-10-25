@@ -16,9 +16,11 @@ import (
 
 // GAP-1488: the config writer keeps the pre-1.0.4 default MCP compatibility
 // only for what a write did not decide. Each admission block in the fixture is
-// what the writer wrote for one write over the old default preset
-// (cli/tests/test_config_writer.py checks that); the gateway compiles every
-// decided MCP severity as written, never as warn.
+// what the writer wrote for one write over the old default preset, by
+// config_writer.apply (cases) or by a live policy edit or TUI Setup row that
+// saves through Config.save (live_edits); cli/tests/test_config_writer.py
+// checks that. The gateway compiles every decided MCP severity as written,
+// never as warn.
 func TestWritesOverTheLegacyDefaultCompileInGo(t *testing.T) {
 	raw, err := os.ReadFile("../../testdata/admission_legacy_default_writes.json")
 	if err != nil {
@@ -31,6 +33,11 @@ func TestWritesOverTheLegacyDefaultCompileInGo(t *testing.T) {
 			Verdicts  map[string]string `json:"verdicts"`
 			Admission json.RawMessage   `json:"admission"`
 		} `json:"cases"`
+		LiveEdits []struct {
+			Name      string            `json:"name"`
+			Verdicts  map[string]string `json:"verdicts"`
+			Admission json.RawMessage   `json:"admission"`
+		} `json:"live_edits"`
 	}
 	if err := json.Unmarshal(raw, &fixture); err != nil {
 		t.Fatal(err)
@@ -62,10 +69,13 @@ func TestWritesOverTheLegacyDefaultCompileInGo(t *testing.T) {
 	}
 	check("untouched legacy default", fixture.Legacy,
 		map[string]string{"CRITICAL": "rejected", "HIGH": "warning", "MEDIUM": "warning", "LOW": "warning"})
-	if len(fixture.Cases) == 0 {
+	if len(fixture.Cases) == 0 || len(fixture.LiveEdits) == 0 {
 		t.Fatal("no cases")
 	}
 	for _, c := range fixture.Cases {
+		check(c.Name, c.Admission, c.Verdicts)
+	}
+	for _, c := range fixture.LiveEdits {
 		check(c.Name, c.Admission, c.Verdicts)
 	}
 }

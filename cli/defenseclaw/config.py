@@ -4442,6 +4442,17 @@ class Config:
             return
         _existing_document_for_save(path, current)
 
+    def decide(self, *paths: str) -> None:
+        """Name config keys the next :meth:`save` writes as the caller's
+        decision, also when the value written equals the one on disk.
+
+        A save over the pre-1.0.4 default preset keeps its balanced MCP
+        compatibility only for the MCP severities no decided key covers
+        (GAP-1488, as :func:`defenseclaw.config_writer.apply` does for its
+        changes), so an explicit quarantine is never compiled as a warning.
+        """
+        self.__dict__.setdefault("_decided_paths", []).extend(paths)
+
     def save(self, *, actor: str | None = None, reason: str = "") -> Any:
         """Persist this :class:`Config` through the single config writer.
 
@@ -4498,12 +4509,15 @@ class Config:
         from defenseclaw import config_writer
 
         dataclass_data = _config_to_dict(self)
+        decided = [config_writer.parse_path(key) for key in self.__dict__.pop("_decided_paths", [])]
 
         def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
             merged = self._merged_document(path, dataclass_data, current)
             expanded = _expand_home_policy_dir(merged)
             if expanded:
                 self.policy_dir = expanded
+            if decided:
+                self._pin_legacy_default_mcp(current, merged, dataclass_data, decided)
             _assert_config_write_allowed(path, merged, actor)
             candidate = config_writer.render_document(current, merged, source_name)
             return candidate, config_writer.diff_documents(current, candidate)
@@ -4519,6 +4533,27 @@ class Config:
             self._source_config_version = CURRENT_CONFIG_VERSION
         self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
         return result
+
+    def _pin_legacy_default_mcp(
+        self, current: bytes, merged: dict[str, Any], dataclass_data: dict[str, Any], decided: list[tuple],
+    ) -> None:
+        """GAP-1488: add the ``admission.mcp.actions`` a save over the
+        pre-1.0.4 default preset needs so that only the MCP severities the
+        *decided* keys leave open keep their balanced ``warn``; a decided one
+        compiles as written. The pins go into this Config too, so it reads as
+        the file it wrote."""
+        from defenseclaw import config_writer
+        from defenseclaw.enforce.admission import legacy_default_mcp_pins
+
+        try:
+            before = config_writer._parse_config_document(current) if current.strip() else None
+        except (UnicodeDecodeError, yaml.YAMLError):
+            return
+        for parts, value in legacy_default_mcp_pins(before, lambda: merged, decided).items():
+            severity = parts[-1]
+            for document in (merged, dataclass_data):
+                document.setdefault("admission", {}).setdefault("mcp", {}).setdefault("actions", {})[severity] = value
+            self.admission.mcp.actions[severity] = value
 
     def _merged_document(self, path: str, dataclass_data: dict[str, Any], current: bytes) -> dict[str, Any]:
         """The on-disk document (``current``) with this Config's changed modeled values."""

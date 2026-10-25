@@ -1510,6 +1510,7 @@ def _edit_live_actions(
         # the gate covers every severity, so the edit is also the skill's own.
         app.cfg.admission.skill.actions[severity] = dict(value) if isinstance(value, dict) else value
         updated.append(f"admission.skill.actions.{severity}")
+    app.cfg.decide(*updated)
     app.cfg.save()
     ux.ok(f"Updated {' and '.join(updated)}: {', '.join(changed)}")
     _reload_after_edit(app, "live", synced=True, reload_gateway=reload_gateway)
@@ -1585,6 +1586,7 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
                 click.echo(f"No override found for {scanner_type}/{severity.upper()}.")
                 return
             del actions[severity]
+            app.cfg.decide(f"admission.{scanner_type}.actions.{severity}")
             app.cfg.save()
             ux.ok(f"Removed admission.{scanner_type}.actions.{severity}.")
             _reload_after_edit(app, "live", synced=True, reload_gateway=reload_gateway)
