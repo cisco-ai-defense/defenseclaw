@@ -56,6 +56,21 @@ try {
             }
             $script:HookCommitEvents = [Collections.Generic.List[string]]::new()
             $script:HookCommitPhase = ''
+            $script:HookCommitCapable = $true
+            $realProbe = ${function:Test-DefenseClawManagedHooksCommittedTeardownSupported}
+            function script:Test-DefenseClawManagedHooksCommittedTeardownSupported {
+                param($Layout, $GatewayServiceName)
+                $script:HookCommitEvents.Add('capabilities')
+                return $script:HookCommitCapable
+            }
+            function script:Invoke-DefenseClawCodexRequirementsCommand {
+                param($Layout, $GatewayServiceName, $Action)
+                $script:HookCommitEvents.Add("codex:$Action")
+                return [pscustomobject]@{ ok = $true }
+            }
+            function script:Complete-DefenseClawCodexRequirementsRemoval {
+                param($Layout, $GatewayServiceName, $Report)
+            }
             function script:Get-DefenseClawDeploymentMetadata {
                 param($Layout, [switch]$Required)
                 return [pscustomobject]@{ installed = $false }
@@ -135,13 +150,119 @@ try {
                 -Layout $layout `
                 -GatewayServiceName DefenseClawGateway `
                 -GuardianServiceName DefenseClawHookGuardian)
-            $expected = 'artifact-proof,shape-proof,hooks:prepare,hooks:verify,opencode-removed,install-tree-locked,retirement-acl-proof,artifact-proof,hooks:finalize'
+            $expected = 'artifact-proof,shape-proof,capabilities,hooks:prepare,hooks:verify,opencode-removed,install-tree-locked,retirement-acl-proof,artifact-proof,hooks:finalize'
             $observed = $script:HookCommitEvents -join ','
             if ($observed -cne $expected) {
                 $failures.Add("committed cleanup order: $observed")
             }
             if ($script:HookCommitPhase -cne 'finalized') {
                 $failures.Add('committed cleanup did not finish the journal')
+            }
+
+            # A helper that prepares against the tombstone also removes the
+            # Codex requirements after the commit.
+            $layout.CodexTargetEnabled = $true
+            $script:HookCommitEvents.Clear()
+            $script:HookCommitPhase = ''
+            [IO.File]::Delete($layout.ManagedHooksTeardownJournalPath)
+            [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+                -Layout $layout `
+                -GatewayServiceName DefenseClawGateway `
+                -GuardianServiceName DefenseClawHookGuardian)
+            $expected = 'artifact-proof,shape-proof,capabilities,hooks:prepare,hooks:verify,codex:remove,opencode-removed,install-tree-locked,retirement-acl-proof,artifact-proof,hooks:finalize'
+            $observed = $script:HookCommitEvents -join ','
+            if ($observed -cne $expected) {
+                $failures.Add("committed cleanup order with Codex: $observed")
+            }
+
+            # GAP-1443, GAP-1447: the helper of an older deployment (1.0.0 to
+            # 1.0.3, an earlier 1.0.4 build) cannot prepare against the
+            # tombstone. Its uninstall prepared the removal, and removed the
+            # Codex requirements, before the commit: only the finalize is
+            # left, and nothing asks the old helper to prepare or to remove
+            # the Codex requirements again.
+            $script:HookCommitCapable = $false
+            $script:HookCommitEvents.Clear()
+            $script:HookCommitPhase = 'prepared'
+            [IO.File]::WriteAllText($layout.ManagedHooksTeardownJournalPath, 'prepared')
+            [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+                -Layout $layout `
+                -GatewayServiceName DefenseClawGateway `
+                -GuardianServiceName DefenseClawHookGuardian)
+            $expected = 'artifact-proof,shape-proof,capabilities,opencode-removed,install-tree-locked,retirement-acl-proof,artifact-proof,hooks:finalize'
+            $observed = $script:HookCommitEvents -join ','
+            if ($observed -cne $expected) {
+                $failures.Add("committed cleanup order with an older helper: $observed")
+            }
+            if ($script:HookCommitPhase -cne 'finalized') {
+                $failures.Add('committed cleanup with an older helper did not finish the journal')
+            }
+            # A finalized journal of an older helper is complete: the helper
+            # is not asked again.
+            $script:HookCommitEvents.Clear()
+            [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+                -Layout $layout `
+                -GatewayServiceName DefenseClawGateway `
+                -GuardianServiceName DefenseClawHookGuardian)
+            if (@($script:HookCommitEvents | Microsoft.PowerShell.Core\Where-Object { $_ -like 'hooks:*' -or $_ -ceq 'capabilities' }).Count -ne 0) {
+                $failures.Add("a finalized journal asked the older helper again: $($script:HookCommitEvents -join ',')")
+            }
+            # Without a preparation an older helper is never asked to prepare
+            # against the tombstone (it refuses); the refusal says why.
+            $script:HookCommitEvents.Clear()
+            $script:HookCommitPhase = ''
+            [IO.File]::Delete($layout.ManagedHooksTeardownJournalPath)
+            try {
+                [void](Complete-DefenseClawCommittedManagedHooksFinalization `
+                    -Layout $layout `
+                    -GatewayServiceName DefenseClawGateway `
+                    -GuardianServiceName DefenseClawHookGuardian)
+                $failures.Add('an unprepared committed uninstall finished with an older helper')
+            }
+            catch {
+                if ($_.Exception.Message -notlike '*cannot remove its managed hooks after an uninstall committed*') {
+                    $failures.Add("older helper refusal: $($_.Exception.Message)")
+                }
+            }
+            if (@($script:HookCommitEvents | Microsoft.PowerShell.Core\Where-Object { $_ -like 'hooks:*' -or $_ -like 'codex:*' }).Count -ne 0) {
+                $failures.Add("the older helper was asked to act on the tombstone: $($script:HookCommitEvents -join ',')")
+            }
+            $layout.CodexTargetEnabled = $false
+            $script:HookCommitCapable = $true
+
+            # The capability report: only one well-formed report that says
+            # so counts. A 1.0.2 or 1.0.3 helper answers an unknown command
+            # with an error or with help text.
+            $script:ProbeAnswer = $null
+            Microsoft.PowerShell.Management\Set-Item -Path function:script:Test-DefenseClawManagedHooksCommittedTeardownSupported -Value $realProbe
+            function script:Invoke-DefenseClawGatewayCommand {
+                param($Layout, $GatewayServiceName, [string[]]$Arguments, [switch]$Capture,
+                    [switch]$AllowFailure, [int]$TimeoutSeconds)
+                if (($Arguments -join ' ') -cne 'enterprise windows teardown-managed-hooks capabilities --json') {
+                    throw "unexpected helper call: $($Arguments -join ' ')"
+                }
+                return $script:ProbeAnswer
+            }
+            $good = '{"schema_version":4,"action":"capabilities","ok":true,"committed_standalone_prepare":true}'
+            foreach ($case in @(
+                @{ name = 'this helper'; code = 0; output = @($good); want = $true },
+                @{ name = 'this helper with a log line'; code = 0; output = @('note: x', $good); want = $true },
+                @{ name = 'unknown flag (1.0.2)'; code = 1; output = @('Error: unknown flag: --json'); want = $false },
+                @{ name = 'help text'; code = 0; output = @('Transactionally revoke managed hook machine wiring', 'Usage:'); want = $false },
+                @{ name = 'failed run with a report'; code = 1; output = @($good); want = $false },
+                @{ name = 'two reports'; code = 0; output = @($good, $good); want = $false },
+                @{ name = 'malformed report'; code = 0; output = @('{"committed_standalone_prepare":tru'); want = $false },
+                @{ name = 'says no'; code = 0; output = @('{"schema_version":4,"action":"capabilities","ok":true,"committed_standalone_prepare":false}'); want = $false },
+                @{ name = 'string true'; code = 0; output = @('{"schema_version":4,"action":"capabilities","ok":true,"committed_standalone_prepare":"true"}'); want = $false },
+                @{ name = 'another action'; code = 0; output = @('{"schema_version":4,"action":"prepare","ok":true,"committed_standalone_prepare":true}'); want = $false },
+                @{ name = 'not ok'; code = 0; output = @('{"schema_version":4,"action":"capabilities","ok":false,"committed_standalone_prepare":true}'); want = $false },
+                @{ name = 'no output'; code = 0; output = @(); want = $false }
+            )) {
+                $script:ProbeAnswer = [pscustomobject]@{ exit_code = $case.code; output = $case.output }
+                $got = Test-DefenseClawManagedHooksCommittedTeardownSupported -Layout $layout -GatewayServiceName DefenseClawGateway
+                if ($got -isnot [bool] -or $got -ne $case.want) {
+                    $failures.Add("capability probe, $($case.name): $got, want $($case.want)")
+                }
             }
 
             # The common lifecycle module is used by Setup and by
@@ -173,7 +294,7 @@ try {
                     for ($parent = $call.Parent; $null -ne $parent; $parent = $parent.Parent) {
                         if ($parent -is [Management.Automation.Language.IfStatementAst]) {
                             foreach ($clause in $parent.Clauses) {
-                                if ($clause.Item1.Extent.Text -match '-not\s*\(Test-DefenseClawStandaloneProfile\)') {
+                                if ($clause.Item1.Extent.Text -match '-not\s*(\(Test-DefenseClawStandaloneProfile\)|\$postCommitHookTeardown)') {
                                     $guarded = $true
                                     break
                                 }
@@ -184,6 +305,29 @@ try {
                     if (-not $guarded) {
                         $failures.Add("$name can remove standalone hook state before commit")
                     }
+                }
+            }
+            # The precommit removal runs only for Secure Client and for an
+            # older helper (GAP-1443): the switch is the standalone profile
+            # and this helper's report, decided before the transaction.
+            $decision = @($uninstall.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left.Extent.Text -ceq '$postCommitHookTeardown'
+            }, $true))
+            if ($decision.Count -ne 1 -or
+                $decision[0].Right.Extent.Text -notmatch 'Test-DefenseClawStandaloneProfile' -or
+                $decision[0].Right.Extent.Text -notmatch 'Test-DefenseClawManagedHooksCommittedTeardownSupported') {
+                $failures.Add('the uninstall does not decide the hook removal order from the profile and the helper')
+            }
+            else {
+                $transaction = $uninstall.Find({
+                    param($node)
+                    $node -is [Management.Automation.Language.CommandAst] -and
+                        $node.GetCommandName() -ceq 'New-DefenseClawTransaction'
+                }, $true)
+                if ($null -eq $transaction -or $decision[0].Extent.StartOffset -gt $transaction.Extent.StartOffset) {
+                    $failures.Add('the hook removal order is decided after the uninstall transaction started')
                 }
             }
         }

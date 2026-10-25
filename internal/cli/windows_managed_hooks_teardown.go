@@ -407,7 +407,50 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 		}
 		command.AddCommand(child)
 	}
+	command.AddCommand(newWindowsManagedHooksTeardownCapabilitiesCommand())
 	return command
+}
+
+// windowsManagedHooksTeardownCapabilities is the report of
+// "teardown-managed-hooks capabilities --json": what this helper accepts.
+// A standalone Setup removes the hooks after the uninstall tombstone commits
+// only with a helper that prepares that removal against the tombstone
+// (windowsManagedHooksTeardownValidationAction). The helpers of 1.0.0 to
+// 1.0.3 and of earlier 1.0.4 builds have no capabilities command and refuse
+// that preparation, so Setup asks first and, without this report, prepares
+// the removal before the commit, as those releases did (GAP-1443,
+// GAP-1447). The command reads nothing and changes nothing.
+type windowsManagedHooksTeardownCapabilities struct {
+	SchemaVersion              int    `json:"schema_version"`
+	Action                     string `json:"action"`
+	OK                         bool   `json:"ok"`
+	CommittedStandalonePrepare bool   `json:"committed_standalone_prepare"`
+}
+
+func newWindowsManagedHooksTeardownCapabilitiesCommand() *cobra.Command {
+	var jsonOutput bool
+	child := &cobra.Command{
+		Use:          "capabilities",
+		Short:        "report the managed hook teardown actions this helper accepts",
+		Hidden:       true,
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			report := windowsManagedHooksTeardownCapabilities{
+				SchemaVersion:              windowsManagedHooksTeardownSchema,
+				Action:                     "capabilities",
+				OK:                         true,
+				CommittedStandalonePrepare: true,
+			}
+			if jsonOutput {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(report)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "committed standalone prepare: %v\n", report.CommittedStandalonePrepare)
+			return nil
+		},
+	}
+	child.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
+	return child
 }
 
 func runWindowsManagedHooksTeardown(
