@@ -77,7 +77,7 @@ func DiscoverUnixPrivateAgentInstalls(ctx context.Context, home string, connecto
 		scan.skipAll(wanted, PrivateInstallSkippedVersionManagers)
 	}
 	roots = append(roots, prefixes...)
-	nested, complete := walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{open: os.Open, unreachable: unixPrivateWalkUnreachable, homeLinks: true})
+	nested, complete := walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{open: unixPrivateWalkOpener(home), unreachable: unixPrivateWalkUnreachable, homeLinks: true})
 	if !complete {
 		scan.skipAll(wanted, PrivateInstallSkippedHome)
 	}
