@@ -7555,7 +7555,8 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
         _emit(
             "fail",
             "Codex OTel environment",
-            f"config.toml {stale} still points at a retired loopback port; remove this exporter, then rerun Codex setup",
+            f"config.toml {stale} still points at a retired loopback port; "
+            "remove this exporter, then rerun Codex setup",
             r=r,
         )
     elif unresolved := _codex_unresolved_otel_bearer(otel, _codex_scoped_otlp_token(cfg)):
