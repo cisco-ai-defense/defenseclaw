@@ -740,8 +740,10 @@ func TestPOSIXNoExecScriptRedirectRetainsStateMutationDetection(t *testing.T) {
 		EnforcementCapable: true,
 	})
 	matched := findingWithID(findings, "tamper.detector_state_write")
-	if matched == nil || matched.contributesToEnforcement() {
-		t.Fatalf("redirect lost fallback tamper finding: %v", FindingStrings(findings))
+	// The independent target proof resolves the active quarantine redirect
+	// even though unrelated script analysis leaves ActionFacts partial.
+	if matched == nil || !matched.contributesToEnforcement() {
+		t.Fatalf("redirect lost protected-state enforcement: %v", FindingStrings(findings))
 	}
 }
 
