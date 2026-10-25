@@ -7327,35 +7327,19 @@ def _check_codex_telemetry_proxy(cfg, r: _DoctorResult) -> None:
     _emit(tag, "Codex telemetry proxy", detail, r=r, remediation=remediation)
 
 
-def _codex_otel_exports_to_defenseclaw(otel) -> bool:
+def _codex_otel_exports_to_defenseclaw(otel, product_token: str = "") -> bool:
     """Whether a Codex [otel] table holds an exporter DefenseClaw wrote.
 
-    The markers are the ones the gateway's codexExporterLooksManaged reads:
-    DefenseClaw's product headers or its scoped /otlp/codex endpoint.
+    Ownership mirrors the gateway's codexExporterLooksManaged: an exporter that
+    carries a DefenseClaw credential. Stale x-defenseclaw-* markers alone are
+    the operator's collector and need no DefenseClaw environment.
     """
     if not isinstance(otel, dict):
         return False
-    for value in otel.values():
-        if not isinstance(value, dict):
-            continue
-        http = value.get("otlp-http")
-        if not isinstance(http, dict):
-            continue
-        endpoint = str(http.get("endpoint") or "")
-        headers = http.get("headers") if isinstance(http.get("headers"), dict) else {}
-        if "/otlp/codex" in endpoint or _codex_header_has_product_marker(headers):
-            return True
-    return False
-
-
-def _otel_header_values(headers: dict, name: str) -> list:
-    """Every value of one header name; header names are case-insensitive."""
-    return [value for key, value in headers.items() if isinstance(key, str) and key.strip().lower() == name]
-
-
-def _codex_header_has_product_marker(headers: dict) -> bool:
-    return "codex" in _otel_header_values(headers, "x-defenseclaw-source") or (
-        "codex-otel/1.0" in _otel_header_values(headers, "x-defenseclaw-client")
+    known = [product_token] if product_token else []
+    return any(
+        isinstance(otel.get(key), dict) and _otel_carries_product_credential(otel.get(key), known)
+        for key in ("exporter", "trace_exporter", "metrics_exporter")
     )
 
 
@@ -7473,7 +7457,7 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
             "remove this exporter, then rerun Codex setup",
             r=r,
         )
-    elif not _codex_otel_exports_to_defenseclaw(otel):
+    elif not _codex_otel_exports_to_defenseclaw(otel, _codex_scoped_otlp_token(cfg)):
         # Host Codex sends no native OTLP to DefenseClaw since 1.0.4: setup
         # writes [otel] only inside an OpenShell sandbox and puts the user's
         # own [otel] back on upgrade (GAP-1101). Hook telemetry carries

@@ -85,7 +85,9 @@ from defenseclaw.commands.cmd_doctor import (
 
 
 # The exporter DefenseClaw writes into a sandboxed Codex config.
-_DEFENSECLAW_CODEX_EXPORTER = '[otel.exporter.otlp-http]\nendpoint = "http://127.0.0.1:18970/otlp/codex/logs"\n'
+_DEFENSECLAW_CODEX_EXPORTER = (
+    '[otel.exporter.otlp-http]\nendpoint = "http://127.0.0.1:18970/otlp/codex/' + "a" * 64 + '/v1/logs"\n'
+)
 
 
 class TestCodexOtelAlignment(unittest.TestCase):
@@ -157,7 +159,14 @@ class TestCodexOtelAlignment(unittest.TestCase):
             "runtime": {"environment": "windows"},
             "health": {"telemetry": {"state": "running"}},
         }
-        for body in ("", "[otel]\nlog_user_prompt = true\n"):
+        for body in (
+            "",
+            "[otel]\nlog_user_prompt = true\n",
+            # An operator collector that kept stale product markers.
+            "[otel.trace_exporter.otlp-http]\nendpoint = 'http://127.0.0.1:4318/v1/traces'\n"
+            "[otel.trace_exporter.otlp-http.headers]\nx-defenseclaw-source = 'codex'\n"
+            "x-defenseclaw-client = 'codex-otel/1.0'\n",
+        ):
             with tempfile.TemporaryDirectory() as home, patch.dict(
                 os.environ,
                 {"CODEX_HOME": home},

@@ -347,3 +347,74 @@ func TestOTLPCarriesProductCredentialIsTheSecretShape(t *testing.T) {
 		t.Error("a short known value matched ordinary text")
 	}
 }
+
+// Upgrade cleanup removes a released product exporter from an [otel] table
+// that also holds operator collectors. The operator's lines, comments and
+// layout stay byte for byte, through Setup and the managed cleanup.
+func TestCodexSecretOwnershipKeepsOperatorBytesBesideProductExporter(t *testing.T) {
+	operator := "# operator traces collector\n[otel.trace_exporter.otlp-http]\nendpoint = 'http://127.0.0.1:4318/v1/traces' # keep\nprotocol = 'json'\n\n" +
+		"[otel.trace_exporter.otlp-http.headers]\nx-defenseclaw-source = 'codex'\nX-Tenant = 'ops'\n"
+	for _, release := range []string{"1.0.2", "1.0.3"} {
+		for _, goos := range []string{"linux", "darwin", "windows"} {
+			for _, writer := range []string{"setup", "managed_cleanup"} {
+				t.Run(release+"/"+goos+"/"+writer, func(t *testing.T) {
+					dir := t.TempDir()
+					configPath := filepath.Join(dir, "config.toml")
+					if err := os.WriteFile(configPath, []byte("model = 'gpt-5'\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					prior := CodexConfigPathOverride
+					CodexConfigPathOverride = configPath
+					t.Cleanup(func() { CodexConfigPathOverride = prior })
+					conn := NewCodexConnector()
+					earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", APIToken: "test-hook-token", GOOS: goos, CodexOtelEnvironment: goos}
+					if err := conn.Setup(context.Background(), earlier); err != nil {
+						t.Fatalf("seed released setup: %v", err)
+					}
+					base, err := os.ReadFile(configPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					token, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
+					if err != nil {
+						t.Fatal(err)
+					}
+					row := otlpSecretRow{base: "http://127.0.0.1:19081", auth: "Authorization = 'Bearer {tok}'", markers: "keep"}
+					product := strings.ReplaceAll(codexSecretFixture(t, release, "linux", row, token), "\n[otel.trace_exporter]\n", "\n[otel.unused_trace_exporter]\n")
+					// Keep only the logs and metrics product exporters; the operator owns traces.
+					if cut := strings.Index(product, "\n[otel.unused_trace_exporter]"); cut >= 0 {
+						product = product[:cut+1]
+					}
+					text := strings.ReplaceAll(string(base), "\r\n", "\n") + product + "\n" + operator
+					want := operator
+					if goos == "windows" {
+						text = strings.ReplaceAll(text, "\n", "\r\n")
+						want = strings.ReplaceAll(operator, "\n", "\r\n")
+					}
+					if err := os.WriteFile(configPath, []byte(text), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if writer == "setup" {
+						upgrade := earlier
+						upgrade.APIAddr = "127.0.0.1:19082"
+						if err := conn.Setup(context.Background(), upgrade); err != nil {
+							t.Fatalf("upgrade: %v", err)
+						}
+					} else if _, err := RemoveUserNativeOTLP("codex", SetupOpts{DataDir: dir, ManagedEnterprise: true}); err != nil {
+						t.Fatalf("managed cleanup: %v", err)
+					}
+					got, err := os.ReadFile(configPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if strings.Contains(string(got), token) || strings.Contains(string(got), "otel.exporter") || strings.Contains(string(got), "otel.metrics_exporter") {
+						t.Fatalf("product exporter survived:\n%s", got)
+					}
+					if !strings.Contains(string(got), want) {
+						t.Fatalf("operator collector bytes changed; want:\n%s\ngot:\n%s", want, got)
+					}
+				})
+			}
+		}
+	}
+}
