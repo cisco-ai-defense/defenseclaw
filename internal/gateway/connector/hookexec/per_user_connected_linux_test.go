@@ -14,7 +14,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -84,40 +83,44 @@ func TestPerUserLinuxWaitsOnlyForMissingAcceptedTuple(t *testing.T) {
 	if err != nil || reads != 3 {
 		t.Fatalf("same-account accepted row after connect: reads=%d err=%v", reads, err)
 	}
-	if self != 0 {
-		t.Run("provisional root uid becomes same account", func(t *testing.T) {
-			reads := 0
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			err := awaitPerUserLinuxSocket(ctx, self, func() (int, error) {
-				reads++
-				if reads < 3 {
-					return 0, nil
-				}
-				return self, nil
-			})
-			if err != nil || reads != 3 {
-				t.Fatalf("provisional kernel uid changed to peer owner: reads=%d err=%v", reads, err)
+	t.Run("unaccepted row becomes same account", func(t *testing.T) {
+		reads := 0
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		err := awaitPerUserLinuxSocket(ctx, self, func() (int, error) {
+			reads++
+			if reads < 3 {
+				return -1, errConnectedSocketNotAccepted
 			}
+			return self, nil
 		})
-		t.Run("persistent root listener stays refused", func(t *testing.T) {
-			reads := 0
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
-			defer cancel()
-			err := awaitPerUserLinuxSocket(ctx, self, func() (int, error) {
-				reads++
-				return 0, nil
-			})
-			if err == nil || !strings.Contains(err.Error(), "belongs to another account") || reads < 2 {
-				t.Fatalf("persistent foreign root owner was accepted or not checked: reads=%d err=%v", reads, err)
-			}
+		if err != nil || reads != 3 {
+			t.Fatalf("provisional kernel row changed to peer owner: reads=%d err=%v", reads, err)
+		}
+	})
+	t.Run("persistent unaccepted row stays refused", func(t *testing.T) {
+		reads := 0
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+		defer cancel()
+		err := awaitPerUserLinuxSocket(ctx, self, func() (int, error) {
+			reads++
+			return -1, errConnectedSocketNotAccepted
 		})
-	}
+		if !errors.Is(err, errConnectedSocketNotAccepted) || reads < 2 {
+			t.Fatalf("unaccepted owner was accepted or not rechecked: reads=%d err=%v", reads, err)
+		}
+	})
 	for _, tc := range []struct {
 		name    string
 		inspect func() (int, error)
 	}{
 		{"foreign owner", func() (int, error) { return self + 1, nil }},
+		{"accepted root owner", func() (int, error) {
+			if self == 0 {
+				return 4242, nil
+			}
+			return 0, nil
+		}},
 		{"table read error", func() (int, error) { return -1, errors.New("table unreadable") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

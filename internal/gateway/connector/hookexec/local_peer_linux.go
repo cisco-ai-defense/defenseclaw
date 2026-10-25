@@ -6,22 +6,29 @@
 package hookexec
 
 import (
-	"errors"
+	"context"
 	"net"
 	"os"
+	"time"
 )
 
 func verifyLocalPeerTuple(client, server *net.TCPAddr) error {
 	return verifyLocalPeerIn(procSelfNet, client, server)
 }
 
+// verifyLocalPeerIn accepts this account or the system account as the owner
+// of the accepted server socket. A row the service has not accept()ed yet
+// reports a provisional UID 0, so it waits for accept like the per-user
+// gateway check instead of reading that 0 as the system account.
 func verifyLocalPeerIn(procNet string, client, server *net.TCPAddr) error {
-	uid, err := findConnectedTCPUID(procNet, client, server)
-	if err != nil {
-		return err
-	}
-	if uid != os.Geteuid() && uid != 0 {
-		return errors.New("local peer socket belongs to another account")
-	}
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	self := os.Geteuid()
+	return awaitPerUserLinuxSocket(ctx, self, func() (int, error) {
+		uid, err := findConnectedTCPUID(procNet, client, server)
+		if err == nil && uid == 0 {
+			return self, nil
+		}
+		return uid, err
+	})
 }

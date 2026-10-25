@@ -32,28 +32,26 @@ func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
 	})
 }
 
-// Connect can finish before the gateway accepts the same held socket.
-// Linux can briefly report UID 0 for that exact accepted tuple before
-// assigning the listener's UID. A nonzero foreign owner is final.
+// Connect can finish before the gateway accepts the same held socket. Until
+// accept() gives the accepted socket a file, its procfs row has inode 0 and
+// the kernel may report UID 0 for it (sock_i_uid without a socket file), so
+// that row proves nothing, not even for a root caller. Only an accepted
+// row's real owner is proof; a foreign owner after accept is final.
 func awaitPerUserLinuxSocket(ctx context.Context, self int, inspect func() (int, error)) error {
-	foreignOwner := errors.New("connected gateway socket belongs to another account")
 	lastErr := errConnectedSocketNotFound
 	for {
 		if ctx.Err() != nil {
 			return lastErr
 		}
 		uid, err := inspect()
-		if err == nil {
-			if uid == self {
-				return nil
-			}
-			if uid != 0 {
-				return foreignOwner
-			}
-			lastErr = foreignOwner
-		} else if errors.Is(err, errConnectedSocketNotFound) {
-			lastErr = errConnectedSocketNotFound
-		} else {
+		switch {
+		case err == nil && uid == self:
+			return nil
+		case err == nil:
+			return errors.New("connected gateway socket belongs to another account")
+		case errors.Is(err, errConnectedSocketNotFound), errors.Is(err, errConnectedSocketNotAccepted):
+			lastErr = err
+		default:
 			return err
 		}
 		select {
@@ -63,6 +61,10 @@ func awaitPerUserLinuxSocket(ctx context.Context, self int, inspect func() (int,
 		}
 	}
 }
+
+// errConnectedSocketNotAccepted is an exact accepted reverse tuple the
+// gateway has not accept()ed yet: its owner is provisional.
+var errConnectedSocketNotAccepted = errors.New("connected gateway server socket is not accepted yet")
 
 // findConnectedTCPUID reads the kernel's accepted server socket, identified
 // by both endpoints. A listening-port lookup is insufficient: its owner can
@@ -98,13 +100,18 @@ func readConnectedTCPUID(procNet, table, clientKey, serverKey string) (int, erro
 	scanner.Scan() // header
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
-		if len(fields) < 8 || fields[3] != "01" ||
+		if len(fields) < 10 || fields[3] != "01" ||
 			!strings.EqualFold(fields[1], serverKey) || !strings.EqualFold(fields[2], clientKey) {
 			continue
 		}
 		uid, err := strconv.Atoi(fields[7])
 		if err != nil || uid < 0 {
 			return -1, errors.New("connected gateway socket owner is invalid")
+		}
+		if inode, err := strconv.ParseUint(fields[9], 10, 64); err != nil {
+			return -1, errors.New("connected gateway socket inode is invalid")
+		} else if inode == 0 {
+			return -1, errConnectedSocketNotAccepted
 		}
 		return uid, nil
 	}
