@@ -27,8 +27,8 @@ func TestEnterpriseWindowsManifestModeScanFailureNeverFailsTheCycle(t *testing.T
 	const bobSID = "S-1-5-21-1004336348-1177238915-682003330-1002"
 	authored := "version: 1\ntargets:\n" +
 		"  - {user: alice, user_home: 'C:\\Users\\alice', sid: " + aliceSID + ", connector: claudecode, agent_version: 2.1.187}\n" +
-		"  - {user: alice, user_home: 'C:\\Users\\alice', sid: " + aliceSID + ", connector: hermes, agent_version: 0.11.0}\n" +
-		"  - {user: bob, user_home: 'C:\\Users\\bob', sid: " + bobSID + ", connector: codex, agent_version: 0.120.0}\n"
+		"  - {user: alice, user_home: 'C:\\Users\\alice', sid: " + aliceSID + ", connector: hermes, agent_version: 0.21.5}\n" +
+		"  - {user: bob, user_home: 'C:\\Users\\bob', sid: " + bobSID + ", connector: codex, agent_version: 0.140.0}\n"
 	cases := []struct {
 		name        string
 		manifest    string
