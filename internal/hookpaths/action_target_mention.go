@@ -1093,7 +1093,11 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 	}
 	// The argument to PowerShell -Command is parsed again by the child shell.
 	// Quotes that are literal in the outer command do not stop expansion there.
-	rawWords, rawOK := actionWindowsWords(command)
+	rawCommand := command
+	if dialect == actionfacts.DialectPowerShell {
+		rawCommand = actionPowerShellChildDollars(command)
+	}
+	rawWords, rawOK := actionWindowsWords(rawCommand)
 	if rawOK {
 		for i := 0; i+2 < len(rawWords); i++ {
 			program := strings.TrimSuffix(strings.ToLower(programBase(rawWords[i])), ".exe")
@@ -1162,6 +1166,45 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 		}
 	}
 	return false
+}
+
+// A backtick-dollar in the outer PowerShell command passes a dollar to a
+// quoted child command. The child shell then expands it. Inside an outer
+// single-quoted argument the backtick itself is passed through, so keep it.
+func actionPowerShellChildDollars(command string) string {
+	var child strings.Builder
+	child.Grow(len(command))
+	var quote byte
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if c == '`' && quote != '\'' && i+1 < len(command) {
+			next := command[i+1]
+			if next == '$' || next == '`' {
+				child.WriteByte(next)
+			} else {
+				child.WriteByte(c)
+				child.WriteByte(next)
+			}
+			i++
+			continue
+		}
+		if c == '\'' && quote == 0 {
+			quote = '\''
+		} else if c == '\'' && quote == '\'' {
+			if i+1 < len(command) && command[i+1] == '\'' {
+				child.WriteString("''")
+				i++
+				continue
+			}
+			quote = 0
+		} else if c == '"' && quote == 0 {
+			quote = '"'
+		} else if c == '"' && quote == '"' {
+			quote = 0
+		}
+		child.WriteByte(c)
+	}
+	return child.String()
 }
 
 func actionKnownReadOnlyWindows(words []string) bool {

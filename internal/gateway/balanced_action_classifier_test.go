@@ -195,6 +195,7 @@ func TestR104WindowsPowerShellLiteralTargets(t *testing.T) {
 		{"block comment", `Write-Output ok <# $HOME/.ssh/authorized_keys #>`, false},
 		{"expanded dollar", `Write-Output $HOME/.ssh/authorized_keys`, true},
 		{"after block comment", `Write-Output ok <# $HOME/.ssh/authorized_keys #>; Write-Output $HOME/.ssh/authorized_keys`, true},
+		{"outer escape reaches nested PowerShell", "pwsh -Command \"Write-Output `$HOME/.ssh/authorized_keys\"", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input.Command = tc.command

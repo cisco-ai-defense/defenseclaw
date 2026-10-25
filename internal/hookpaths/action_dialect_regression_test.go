@@ -26,6 +26,7 @@ func TestR104WindowsActionExplicitDialect(t *testing.T) {
 		{"POSIX protected redirect", `echo marker > ~/.ssh/authorized_keys`, actionfacts.DialectPOSIX, "protected-target"},
 		{"PowerShell escaped dollar", "Write-Output \"`$HOME/.ssh/authorized_keys\"", actionfacts.DialectPowerShell, ""},
 		{"nested PowerShell escaped dollar", "pwsh -Command 'Write-Output \"`$HOME/.ssh/authorized_keys\"'", actionfacts.DialectPowerShell, ""},
+		{"outer escape reaches nested PowerShell", "pwsh -Command \"Write-Output `$HOME/.ssh/authorized_keys\"", actionfacts.DialectPowerShell, "protected-target"},
 		{"PowerShell expanded dollar", `Write-Output "$HOME/.ssh/authorized_keys"`, actionfacts.DialectPowerShell, "protected-target"},
 		{"PowerShell line comment", `Write-Output ok # $HOME/.ssh/authorized_keys`, actionfacts.DialectPowerShell, ""},
 		{"PowerShell block comment", `Write-Output ok <# $HOME/.ssh/authorized_keys #>`, actionfacts.DialectPowerShell, ""},
