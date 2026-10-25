@@ -163,7 +163,7 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			return true
 		}
 	}
-	text := actionMaskLiteralMetacharacters(command)
+	text := actionBlankPatchBodies(command, actionMaskLiteralMetacharacters(command))
 	if parsed && actionLiteralArgumentProgramsOnly(file, home) {
 		text = actionMarkLiteralTildes(text)
 	}
@@ -183,6 +183,34 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 		}
 	}
 	return false
+}
+
+// actionBlankPatchBodies blanks, in the text scan, the content lines of the
+// patch envelopes apply_patch calls read: those calls write only the files
+// their headers name, which stay (GAP-0781, GAP-1106). text is command with
+// its literal metacharacters masked, line for line.
+func actionBlankPatchBodies(command, text string) string {
+	if !strings.Contains(command, patchBeginMarker) {
+		return text
+	}
+	body := patchFedBodyLines(command)
+	lines := strings.Split(text, "\n")
+	if body == nil || len(lines) != len(body) {
+		return text
+	}
+	for i, line := range strings.Split(command, "\n") {
+		if !body[i] && strings.Contains(line, "PATH") {
+			// A changed PATH may run another apply_patch that reads the
+			// body as a script.
+			return text
+		}
+	}
+	for i, fed := range body {
+		if fed {
+			lines[i] = strings.Repeat(" ", len(lines[i]))
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // The text scan finds paths in payloads another program interprets (inline
@@ -625,7 +653,8 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 	if _, err := filepath.Match(pattern, ""); err != nil || globs.full() {
 		return false
 	}
-	candidates, complete, unseen := actionExpandGlob(pattern, literal, actionGlobViewHidden(cwd, home))
+	hidden := actionGlobViewHidden(cwd, home)
+	candidates, complete, unseen := actionExpandGlob(pattern, literal, hidden)
 	for _, candidate := range candidates {
 		if protectedReachPath(candidate, protected, ssh) {
 			globs.note(pattern, "1")
@@ -636,24 +665,35 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 		globs.note(pattern, "0")
 		return false
 	}
-	if answer := globs.answer(pattern); unseen && answer != "" {
-		// Only a walk this process could not see defers to the client;
-		// past a bound the fallback below decides.
-		return answer == "1"
-	}
-	base := filepath.Base(pattern)
-	if unseen && !strings.ContainsAny(filepath.Dir(pattern), "*?[") && !actionGlobHasLiteral(base) {
-		// Only the last component is a pattern, in a directory this
-		// process cannot read, and it names nothing (git add *): no
-		// directory alias can be selected, so it stays ordinary.
-		return false
-	}
-	for _, name := range append([]string{".ssh"}, AuthorizedKeysFiles[:]...) {
-		if actionGlobNameMatch(base, name) {
-			return true
+	if hidden && unseen {
+		if answer := globs.answer(pattern); answer != "" {
+			// A walk this process could not see defers to the client,
+			// which expanded the pattern as the user.
+			return answer == "1"
+		}
+		if !globs.fromClient() {
+			// No client evidence at all (an older hook client): the
+			// name fallback of round m.
+			base := filepath.Base(pattern)
+			if !strings.ContainsAny(filepath.Dir(pattern), "*?[") && !actionGlobHasLiteral(base) {
+				// Only the last component is a pattern, in a directory
+				// this process cannot read, and it names nothing (git
+				// add *): no directory alias can be selected.
+				return false
+			}
+			for _, name := range append([]string{".ssh"}, AuthorizedKeysFiles[:]...) {
+				if actionGlobNameMatch(base, name) {
+					return true
+				}
+			}
+			return false
 		}
 	}
-	return false
+	// The walk (this one, or the client's that sent no answer) stopped at
+	// a bound or at a directory it could not read, so an alias of any name
+	// may be among the names it did not see: the pattern is unproved,
+	// never an allow (GAP-1481).
+	return true
 }
 
 // actionGlobs carries the hook client's pathname-pattern answers through
@@ -683,6 +723,10 @@ func (g *actionGlobs) note(pattern, answer string) {
 	}
 }
 
+// fromClient reports a scan that carries the hook client's evidence, so a
+// pattern it sent no answer for is one its own walk could not prove.
+func (g *actionGlobs) fromClient() bool { return g != nil && g.facts != nil }
+
 func (g *actionGlobs) answer(pattern string) string {
 	if g == nil || g.facts == nil {
 		return ""
@@ -708,7 +752,9 @@ const (
 // literal component is joined without a lookup, so a final file that does
 // not exist yet is still a candidate; literal is a prefix of pattern taken
 // as written (the cwd of a relative word). complete is false when a bound
-// is exceeded or a directory cannot be read; unseen tells the latter.
+// is exceeded or a directory cannot be read; unseen tells the latter. The
+// walk keeps every match it found before or beside a directory it could not
+// read or past a bound, so such a directory never hides a match (GAP-1481).
 //
 // hidden is set when the process cannot see the request's cwd or home
 // (systemd ProtectHome on a managed gateway): a directory missing from
@@ -722,6 +768,7 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 	}
 	paths := []string{start}
 	reads := 0
+	complete = true
 	for _, component := range strings.Split(rest, separator) {
 		if component == "" {
 			continue
@@ -734,8 +781,9 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 		}
 		var next []string
 		for _, dir := range paths {
-			if reads++; reads > actionGlobMaxReads {
-				return nil, false, false
+			if reads++; reads > actionGlobMaxReads || len(next) >= actionGlobMaxNames {
+				complete = false
+				break
 			}
 			directory, err := os.Open(dir)
 			if err != nil {
@@ -744,7 +792,9 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 				}
 				// Permission denied, or a home this process cannot see:
 				// the user's shell may still expand the pattern there.
-				return nil, false, true
+				// The siblings are still read.
+				complete, unseen = false, true
+				continue
 			}
 			names, err := directory.Readdirnames(actionGlobMaxNames + 1)
 			_ = directory.Close()
@@ -754,23 +804,20 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 				continue
 			}
 			if err != nil && err != io.EOF || len(names) > actionGlobMaxNames {
-				return nil, false, false
+				complete = false
 			}
 			for _, name := range names {
 				if actionGlobNameMatch(component, name) {
 					next = append(next, filepath.Join(dir, name))
 				}
 			}
-			if len(next) > actionGlobMaxNames {
-				return nil, false, false
-			}
 		}
 		if len(next) == 0 {
-			return nil, true, false
+			return nil, complete, unseen
 		}
 		paths = next
 	}
-	return paths, true, false
+	return paths, complete, unseen
 }
 
 // actionGlobNotDirectory reports that a listing failed because dir, or the
@@ -1060,6 +1107,8 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 	if depth >= 8 || len(command) > MaxPayloadBytes {
 		return false
 	}
+	// The content lines of a here-string apply_patch reads are file content.
+	command = actionBlankPatchBodies(command, command)
 	// The argument to PowerShell -Command is parsed again by the child shell.
 	// Quotes that are literal in the outer command do not stop expansion there.
 	rawWords, rawOK := actionWindowsWords(command)
