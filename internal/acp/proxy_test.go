@@ -838,3 +838,29 @@ func TestCopyFramesRejectedCredentialNamesTheRevocation(t *testing.T) {
 		}
 	}
 }
+
+type refusingEvaluator struct{}
+
+func (refusingEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
+	return Verdict{}, &GatewayRefusedError{Status: 400, Message: "invalid ACP evaluation body"}
+}
+
+// A gateway that answered with a refusal is reported as that refusal: the
+// editor read it as "the gateway did not answer" and retried for ever
+// (GAP-1327). The frame stays refused in action mode.
+func TestCopyFramesGatewayRefusalIsNotReportedAsNoAnswer(t *testing.T) {
+	for _, managed := range []bool{false, true} {
+		state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+		var agentInput, clientOutput bytes.Buffer
+		opts := ProxyOptions{Mode: ModeAction, Managed: managed, Evaluator: refusingEvaluator{}, Stderr: io.Discard}
+		load := `{"jsonrpc":"2.0","id":3,"method":"session/load","params":{"sessionId":"s","cwd":"/p","mcpServers":[]}}` + "\n"
+		if err := copyFrames(context.Background(), opts, state, ClientToAgent, strings.NewReader(load), &agentInput, &clientOutput); err != nil {
+			t.Fatal(err)
+		}
+		out := clientOutput.String()
+		if agentInput.Len() != 0 || !strings.Contains(out, "refused to check it") ||
+			!strings.Contains(out, "invalid ACP evaluation body") || strings.Contains(out, "did not answer") {
+			t.Fatalf("managed=%v: agent got %q, editor got %q", managed, agentInput.String(), out)
+		}
+	}
+}

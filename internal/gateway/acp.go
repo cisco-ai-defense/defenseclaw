@@ -72,7 +72,16 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, acp.MaxTurnEvaluationBytes+(64<<10))
+	body := r.Body
+	if plaintext, ok := r.Context().Value(acpSignedPlaintextKey{}).([]byte); ok {
+		// The signed evaluation was opened and bounded by this route's own
+		// limit (authenticateACPSignedRequest). The generic 1 MiB API body cap
+		// that wraps r.Body after that refused full-size frames and completed
+		// turns the guard sends, which the editor read as a gateway that did
+		// not answer (GAP-1327, GAP-1318).
+		body = io.NopCloser(bytes.NewReader(plaintext))
+	}
+	r.Body = http.MaxBytesReader(w, body, acp.MaxTurnEvaluationBytes+(64<<10))
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	var req acp.Evaluation
@@ -779,6 +788,7 @@ func (a *APIServer) authenticateACPSignedRequest(r *http.Request) (*http.Request
 			return r, "", "", false
 		}
 		r.Body = io.NopCloser(bytes.NewReader(plaintext))
+		r = r.WithContext(context.WithValue(r.Context(), acpSignedPlaintextKey{}, plaintext))
 		r.ContentLength = int64(len(plaintext))
 		r.Header.Set("Content-Type", "application/json")
 	}
@@ -786,6 +796,10 @@ func (a *APIServer) authenticateACPSignedRequest(r *http.Request) (*http.Request
 	r.Header.Set(acp.AuthNonceHeader, nonce)
 	return r, token, nonce, true
 }
+
+// acpSignedPlaintextKey carries the opened, size-checked plaintext of a
+// signed ACP evaluation to its handler.
+type acpSignedPlaintextKey struct{}
 
 type acpSignedResponse struct {
 	header http.Header

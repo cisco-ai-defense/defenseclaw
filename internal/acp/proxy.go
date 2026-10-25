@@ -730,6 +730,7 @@ func (s *proxyState) refusalReason(opts ProxyOptions, err error) string {
 	}
 	const prefix = "DefenseClaw could not check this step because "
 	next := "if it keeps happening, contact your administrator."
+	var refused *GatewayRefusedError
 	switch {
 	case errors.Is(err, ErrACPDisabled) && opts.Managed:
 		return prefix + "your administrator switched ACP checking off, so it was not delivered. Contact your administrator."
@@ -749,6 +750,12 @@ func (s *proxyState) refusalReason(opts ProxyOptions, err error) string {
 			rerun = "Run '" + opts.SetupCommand + "' again."
 		}
 		return prefix + "the gateway did not accept the ACP token, so it was not delivered. " + rerun
+	case errors.As(err, &refused) && opts.Managed:
+		return prefix + "the gateway refused to check it (" + refused.Error() + "), so it was not delivered. " +
+			"Contact your administrator if it keeps happening."
+	case errors.As(err, &refused):
+		return prefix + "the gateway refused to check it (" + refused.Error() + "), so it was not delivered. " +
+			"Run defenseclaw acp status; if it keeps happening, report this message."
 	case !opts.Managed:
 		return unavailableReason(err)
 	case errors.Is(err, ErrGatewayNotReady):
