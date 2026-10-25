@@ -10,3 +10,11 @@ Claude Code does not emit `PreToolUse` for a command you type with `!` in its sh
 ## Local Splunk
 
 The local Splunk bridge is x86_64 only; it needs a `linux/amd64` Docker engine. On ARM64, use `--enterprise` with an existing Splunk HEC endpoint. See [Send to Splunk](/docs/how-to/observability/send-to-splunk#before-you-start).
+
+## Conditional limits
+
+These entries apply only if their fixes do not ship in 1.0.4. The release lead removes an entry when its fix ships.
+
+- **MicroVM legacy guests:** save accessible work outside the guest, stop it through DefenseClaw, and recreate it on 1.0.4. Avoid raw OpenShell commands during the upgrade.
+- **Managed policy view before agent launch:** keep policy files root-owned through MDM or an administrator, and use doctor to check the view before starting the agent. Repair a missing view before use.
+- **Managed upgrade window with old hooks (1.0.2 and 1.0.3):** stop agent sessions before upgrading and keep them stopped until the gateway is healthy. Restart OpenCode and Amp sessions after the upgrade. See [Managed hook limits](/docs/troubleshooting/enterprise#known-limits-for-managed-hooks).

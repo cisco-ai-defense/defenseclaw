@@ -43,6 +43,17 @@ describe('Owner-decided 1.0.4 vendor and platform limits', () => {
   });
 });
 
+describe('Conditional 1.0.4 fallback limits', () => {
+  it('names each pending class and its mitigation without presenting it as shipped', () => {
+    const limits = page('troubleshooting/known-limits.mdx').split('## Conditional limits')[1] ?? '';
+    assert.match(limits, /only if (?:their|the) fixes do not ship in 1\.0\.4/i);
+    assert.match(limits, /MicroVM legacy guests[^.]*save[^.]*recreate/i);
+    assert.match(limits, /managed policy view[^.]*root-owned[^.]*doctor/i);
+    assert.match(limits, /managed upgrade window[^.]*1\.0\.2[^.]*1\.0\.3[^.]*stop agent sessions[^.]*gateway is healthy/i);
+    assert.match(page('get-started/upgrade.mdx'), /If the \[legacy MicroVM limit\].{0,160}save the guest's work[^.]*recreate it after upgrading/i);
+  });
+});
+
 function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }
