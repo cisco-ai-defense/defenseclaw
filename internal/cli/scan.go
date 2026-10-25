@@ -193,7 +193,7 @@ func printCodeScanResults(result *scanner.ScanResult) {
 		fmt.Printf("Code scan: %s\n", result.Target)
 		fmt.Println("  No findings — clean")
 		fmt.Printf("  Duration: %s\n", result.Duration)
-		printHint("Run full audit:  defenseclaw doctor")
+		printCodeScanHint("Run full audit:  defenseclaw doctor")
 		return
 	}
 
@@ -209,5 +209,16 @@ func printCodeScanResults(result *scanner.ScanResult) {
 
 	fmt.Println()
 	fmt.Printf("  Duration: %s\n", result.Duration)
-	printHint("View alerts:  defenseclaw alerts")
+	printCodeScanHint("View alerts:  defenseclaw alerts")
+}
+
+// printCodeScanHint prints the per-user follow-up command after a code scan.
+// A managed computer has no per-user doctor or alerts: there `scan code` is
+// the administrator's check of a skill's files (GAP-1234), and the hint
+// named a command its launcher refuses.
+func printCodeScanHint(hint string) {
+	if managedStandaloneHost() {
+		return
+	}
+	printHint(hint)
 }

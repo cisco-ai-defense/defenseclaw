@@ -11,6 +11,10 @@ Claude Code does not run its hook for a command you type with `!` in shell mode.
 
 The local Splunk bridge works only with an x86_64 Docker engine. On ARM64, use `--enterprise` with an existing Splunk HTTP Event Collector (HEC) endpoint. See [Send to Splunk](/docs/how-to/observability/send-to-splunk#before-you-start).
 
+## Managed Linux and macOS scans
+
+The managed Linux and macOS packages include no skill, MCP or plugin scanner; only the managed Windows package does. On those computers `defenseclaw-gateway scan skill`, `scan mcp` and `scan plugin` say so and scan nothing. An administrator checks a skill's or plugin's files with `sudo /opt/defenseclaw/bin/defenseclaw-gateway scan code PATH` on Linux or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan code PATH` on macOS. Users add MCP servers through the agent's own MCP configuration. The full scans run on a per-user installation or a managed Windows computer. See [Scan a skill](/docs/how-to/scanning/scan-a-skill#before-you-start).
+
 ## Upgrade and policy limits
 
 - **Legacy MicroVM guests:** after upgrading, run `defenseclaw sandbox status NAME` to check the guest's state and why it stopped.
