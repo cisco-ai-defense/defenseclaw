@@ -47,7 +47,7 @@ An outage is a call that no gateway took: this account's gateway is stopped (als
 - A gateway that took the call and gave no answer in time.
 - Another account's or program's listener on the gateway port, a missing or refused token and input over the hook's size limit.
 
-During an install or upgrade, a default or permissive per-user hook follows the gateway's verdict when the gateway answers: an allow runs and a block stays blocked. The strict tier and managed standalone hooks block even if the gateway answers allow. If the gateway does not answer during this window, per-user and managed standalone hooks block. Secure Client keeps its separate fail mode. An explicit outage-open mode does not bypass the install lock.
+During an install or upgrade, all per-user and managed standalone hooks block supported tool calls even if the gateway answers allow. The install lock forces closed mode and strict availability in every policy tier. Secure Client keeps its separate fail mode. An explicit outage-open mode does not bypass the install lock.
 
 The guardrail mode does not change the outage mode: observe and action mode fail the same way. The per-user hook reads the saved mode or tier from its runtime config for an outage; a missing or unreadable config closes it. `defenseclaw guardrail fail-mode` shows each connector's effective mode and any registration drift.
 

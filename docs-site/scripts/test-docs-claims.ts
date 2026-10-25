@@ -55,6 +55,28 @@ describe('Conditional 1.0.4 fallback limits', () => {
 });
 
 describe('Owner-decided outage and install-window modes', () => {
+  it('pins the current install lock to the hook source and all operator guides', () => {
+    const hook = source('internal/gateway/connector/hookexec/hookexec.go');
+    const close = hook.split('func closeDuringInstall(')[1]?.split('\n}')[0] ?? '';
+    assert.match(close, /perUserInstallInProgress\(\*opts\).*managedLifecycleActive\(\*opts\)/);
+    assert.match(close, /opts\.FailMode = "closed"\s+opts\.StrictAvailability = true\s+return "closed"/);
+    for (const name of ['reference/configuration/fail-modes.mdx', 'reference/commands/installer.mdx', 'troubleshooting/hooks-and-blocking.mdx']) {
+      const text = page(name);
+      assert.match(text, /install or upgrade[^.]*(?:all|every)[^.]*block[^.]*gateway answers allow/i, name);
+      assert.doesNotMatch(text, /install or upgrade[^.]*default or permissive[^.]*follows (?:the gateway's|its) verdict/i, name);
+    }
+  });
+
+  it('pins the current per-user tier resolver and command refusal to the docs', () => {
+    const resolver = source('internal/config/hook_outage_fail_mode.go');
+    assert.match(resolver, /return HookOutageFailMode\(false, "", c\.HookPolicyTierForConnector\(connector\)\)/);
+    const command = source('cli/defenseclaw/commands/cmd_guardrail.py');
+    assert.match(command, /if mode is not None and not managed_host and not secure_client:\s+_refuse_a_mode_the_policy_tier_does_not_give/);
+    for (const name of ['reference/configuration/fail-modes.mdx', 'get-started/upgrade.mdx', 'reference/commands/cli.mdx']) {
+      assert.match(page(name), /per-user[^.]*saved[^.]*tier[^.]*outage/i, name);
+    }
+  });
+
   it('keeps saved outage choices ahead of tiers, including managed strict', () => {
     const failModes = page('reference/configuration/fail-modes.mdx');
     assert.match(failModes, /explicit saved `open` or `closed` wins over the policy tier on a per-user install/i);
@@ -63,15 +85,12 @@ describe('Owner-decided outage and install-window modes', () => {
     assert.doesNotMatch(failModes, /ignores a saved value|saved `guardrail\.hook_fail_mode` does not change|Per-user: not read/i);
   });
 
-  it('distinguishes answered calls from an install-window outage in each guide', () => {
+  it('documents the install lock on answered and unanswered calls in each guide', () => {
     const reference = page('reference/configuration/fail-modes.mdx');
-    assert.match(reference, /During an install or upgrade[^.]*default or permissive[^.]*follows the gateway's verdict when the gateway answers/i);
-    assert.match(reference, /strict tier and managed standalone[^.]*block even if the gateway answers allow/i);
-    assert.match(reference, /If the gateway does not answer[^.]*block/i);
+    assert.match(reference, /During an install or upgrade[^.]*all per-user and managed standalone hooks block[^.]*gateway answers allow/i);
     for (const name of ['reference/commands/installer.mdx', 'troubleshooting/hooks-and-blocking.mdx']) {
-      assert.match(page(name), /install or upgrade[^.]*gateway answers[^.]*default or permissive[^.]*follows its verdict/i, name);
+      assert.match(page(name), /install or upgrade[^.]*all per-user and managed standalone hooks block[^.]*gateway answers allow/i, name);
     }
-    assert.doesNotMatch(page('reference/commands/installer.mdx'), /During an install or upgrade every hook blocks/i);
   });
 });
 
