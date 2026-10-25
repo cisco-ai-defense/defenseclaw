@@ -2551,7 +2551,9 @@ def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_pat
     assert run(newer).returncode == 0
     assert calls.read_text(encoding="utf-8").splitlines() == [
         "connector refresh-fail-modes --help",
-        f"connector refresh-fail-modes --data-dir {home}",
+        # The staged command loads config.yaml and uses its data_dir. An
+        # installer-supplied home would override a custom data_dir.
+        "connector refresh-fail-modes",
     ]
     calls.unlink()
     older = _fake_gateway(tmp_path / "older", "defenseclaw-gateway connector [command]", calls)
@@ -2643,7 +2645,7 @@ def test_a_running_gateway_cannot_reopen_its_hooks_while_it_stops(tmp_path: Path
     assert result.returncode == 0, result.stdout + result.stderr
     lines = calls.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "connector refresh-fail-modes --help", lines
-    assert lines[1].startswith(f"connector refresh-fail-modes --data-dir {home} --hold-until-exit "), lines
+    assert lines[1].startswith("connector refresh-fail-modes --hold-until-exit "), lines
     assert lines[2:] == ["holding", "stopping", "second refresh", "finished"], lines
     assert "Hook fail modes set from the config: codex" in result.stdout
     assert "Holding the hook fail modes" not in result.stdout
