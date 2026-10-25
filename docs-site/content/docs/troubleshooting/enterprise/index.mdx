@@ -326,9 +326,9 @@ report `enterprise_managed_runtime_state_invalid` instead.
   the log in use passes 256 MiB; it kept the log from growing without bound in the measured flood. In Windows
   runner tests, the file peaked at 0.9 to 1.2 GB at 10 calls a second; that is an observation, not
   a disk-space guarantee. Catch-up may hold the audit writer, so some hook answers can still wait
-  seconds or exceed their answer budget. Those calls block in every fail mode (`enterprise_managed_gateway_no_answer`): an
-  administrator's `open` allows a call only while the hook proves the gateway service is stopped, never
-  a call the gateway took and did not answer in time. Calls of guarded connectors (`foreign_hooks: remove`)
+  seconds or exceed their answer budget. Those calls block under the default `closed` mode and under an
+  administrator's `open` too (`enterprise_managed_gateway_no_answer`): `open` allows a call only while
+  the hook proves the gateway service is stopped, never a call the gateway took and did not answer in time. Calls of guarded connectors (`foreign_hooks: remove`)
   block during an outage too, as in 1.0.3 (GAP-0352). If the gateway logs a persistent
   `audit WAL` over-bound warning, check for a long-running reader and available disk space.
 - A tool call that DefenseClaw allowed while the gateway was running still runs if you approve it in
