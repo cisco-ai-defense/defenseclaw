@@ -8,6 +8,7 @@ a live, uncertain or interrupted install keeps its lock."""
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -190,19 +191,164 @@ def test_fix_keeps_a_lock_an_interrupted_install_keeps(account):
     assert lock.exists()
 
 
-def test_fix_puts_back_a_lock_an_installer_took_over(account, monkeypatch):
+def _live_owner(lock: Path) -> None:
+    """A running installer's record: this test's parent pid and its identity."""
+    (lock / "pid").write_text(f"{os.getppid()}\n", encoding="ascii")
+    identity = cmd_doctor._process_identity(os.getppid())
+    if identity:
+        (lock / "proc-start").write_text(identity + "\n", encoding="ascii")
+
+
+def _replace(lock: Path, *, owner=None) -> None:
+    """An installer's takeover: the old folder goes and a new one takes its path."""
+    shutil.rmtree(lock)
+    lock.mkdir()
+    if owner is not None:
+        owner(lock)
+
+
+def _other_stale(lock: Path) -> None:
+    (lock / "pid").write_text(f"{_exited_pid()}\n", encoding="ascii")
+
+
+def _symlink_to_stale(lock: Path) -> None:
+    shutil.rmtree(lock)
+    other = _lock(lock.parent / "elsewhere", f"{DEAD}\n")
+    lock.symlink_to(other, target_is_directory=True)
+
+
+def _file_in_place(lock: Path) -> None:
+    shutil.rmtree(lock)
+    lock.write_text(str(os.getppid()), encoding="ascii")
+
+
+def _lock_view(lock: Path):
+    """What a hook and an installer see at the lock path."""
+    if not os.path.lexists(lock):
+        return None
+    info = os.lstat(lock)
+    if not lock.is_dir() or lock.is_symlink():
+        return (info.st_ino, "not a folder")
+    return (info.st_ino, tuple(sorted((p.name, p.read_bytes()) for p in lock.iterdir())))
+
+
+# oss-outage-open round k loop 2 (P2): doctor classified a lock as stale,
+# then, after its prompt, moved whatever lock was at the path aside. An
+# installer that had taken the lock over meanwhile (and stopped the gateway)
+# lost its canonical lock until doctor put it back, so a default-tier hook
+# saw no install and failed open, and a second installer could take the
+# vacant path. The stale decision is now bound to the folder's identity and
+# its owner record, and doctor never moves or removes a lock that changed.
+RACES = {
+    "a new folder of a live installer": lambda lock: _replace(lock, owner=_live_owner),
+    "a new folder whose installer has not written its pid yet": lambda lock: _replace(lock),
+    "a new folder of another stopped installer": lambda lock: _replace(lock, owner=_other_stale),
+    "a live installer's record in the same folder": _live_owner,
+    "an interrupted install beside it": lambda lock: (lock.parent / "previous.new").mkdir(),
+    "a file": _file_in_place,
+    "a link to a stale lock": _symlink_to_stale,
+}
+
+
+@pytest.mark.parametrize("race", sorted(RACES))
+def test_fix_never_moves_a_lock_that_changed_after_its_check(account, monkeypatch, race):
+    if race == "a link to a stale lock" and os.name == "nt":
+        pytest.skip("folder links need a privilege on Windows")
     lock = _lock(account.data, f"{DEAD}\n")
-    real = cmd_doctor._install_lock_state
+    seen: list = []
+    after: list = []
 
-    def took_over(folder, name=".install.lock"):
-        if name != ".install.lock":
-            (Path(folder) / name / "pid").write_text(str(os.getppid()))
-        return real(folder, name)
+    def watch(real):
+        def call(*args, **kwargs):
+            result = real(*args, **kwargs)
+            seen.append(_lock_view(lock))
+            return result
 
-    monkeypatch.setattr(cmd_doctor, "_install_lock_state", took_over)
-    tag, _ = cmd_doctor._fix_stale_install_lock(account.cfg, assume_yes=True)
-    assert tag == "fail"
-    assert (lock / "pid").read_text() == str(os.getppid())
+        return call
+
+    def prompt(*_args, **_kwargs):
+        RACES[race](lock)
+        after.append(_lock_view(lock))
+        # From here on, every change doctor makes is checked against it.
+        for name in ("rename", "replace", "unlink", "remove", "rmdir"):
+            monkeypatch.setattr(os, name, watch(getattr(os, name)))
+        monkeypatch.setattr(shutil, "rmtree", watch(shutil.rmtree))
+        return True
+
+    monkeypatch.setattr(cmd_doctor.click, "confirm", prompt)
+    tag, detail = cmd_doctor._fix_stale_install_lock(account.cfg, assume_yes=False)
+    assert tag == "skip", detail
+    assert "changed since the check" in detail
+    assert after[0] is not None
+    # Never missing, never another folder, never another content.
+    assert all(view == after[0] for view in seen), seen
+    assert _lock_view(lock) == after[0]
+    assert not [p for p in account.data.iterdir() if p.name.startswith(".install.lock.")]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the pinned handle refuses the takeover on Windows (native test below)")
+def test_fix_keeps_a_lock_an_installer_takes_over_while_doctor_removes_the_old_one(account, monkeypatch):
+    lock = _lock(account.data, f"{DEAD}\n")
+    (lock / "started").write_text("1", encoding="ascii")
+    real_unlink = os.unlink
+    after: list = []
+
+    def unlink(path, *args, **kwargs):
+        if not after:
+            # The takeover lands after doctor's last check, before its first removal.
+            after.append(None)
+            _replace(lock, owner=_live_owner)
+            after[0] = _lock_view(lock)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    tag, detail = cmd_doctor._fix_stale_install_lock(account.cfg, assume_yes=True)
+    assert tag == "skip", detail
+    assert after and _lock_view(lock) == after[0]
+    assert cmd_doctor._install_lock_state(str(account.data))[0] == "held"
+
+
+def test_fix_removes_the_pid_first_and_shows_no_missing_lock_until_the_folder_goes(account, monkeypatch):
+    lock = _lock(account.data, f"{DEAD}\n")
+    for name in ("started", "proc-start", "deadline"):
+        (lock / name).write_text("1", encoding="ascii")
+    states: list = []
+    real_unlink = os.unlink
+
+    def unlink(path, *args, **kwargs):
+        result = real_unlink(path, *args, **kwargs)
+        states.append(cmd_doctor._install_lock_state(str(account.data))[0])
+        return result
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    tag, detail = cmd_doctor._fix_stale_install_lock(account.cfg, assume_yes=True)
+    assert tag == "pass", detail
+    assert states == ["held"] * 4
+    assert not os.path.lexists(lock)
+
+
+def test_fix_leaves_a_lock_with_a_folder_inside_whole(account):
+    lock = _lock(account.data, f"{DEAD}\n")
+    (lock / "inner").mkdir()
+    tag, detail = cmd_doctor._fix_stale_install_lock(account.cfg, assume_yes=True)
+    assert tag == "fail" and "holds a folder" in detail
+    assert (lock / "pid").read_text() == f"{DEAD}\n" and (lock / "inner").is_dir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows only")
+def test_a_pinned_lock_cannot_be_moved_or_removed_and_goes_by_its_handle(account):
+    lock = _lock(account.data, None)
+    held = cmd_doctor._open_install_lock(str(lock), pin=True)
+    assert held is not None
+    try:
+        with pytest.raises(OSError):
+            os.rename(lock, account.data / "aside")
+        with pytest.raises(OSError):
+            os.rmdir(lock)
+        assert cmd_doctor._remove_held_install_lock(str(lock), held) == "removed"
+    finally:
+        cmd_doctor._close_install_lock(held)
+    assert not os.path.lexists(lock)
 
 
 def test_managed_install_is_left_alone(account):

@@ -2797,25 +2797,35 @@ def _process_identity(pid: int) -> str | None:
     return None
 
 
-def _install_lock_record(path: str) -> tuple[str, str]:
-    """("absent" | "valid" | "unreadable", text) of the lock's proc-start record."""
+def _install_lock_file(lock: str, name: str, limit: int, held: _HeldInstallLock | None = None) -> tuple[str, str]:
+    """("absent" | "valid" | "invalid" | "unreadable", text) of a small owner file in the lock.
+
+    "invalid" is anything but a regular file of at most limit bytes. With
+    held (_open_install_lock), the file is read in that very folder: through
+    its descriptor on POSIX, by a path the held folder pins on Windows.
+    """
+    dir_fd = held.dir_fd if held is not None else None
+    path = os.path.join(lock, name)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     try:
-        info = os.lstat(path)
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False) if dir_fd is not None else os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return ("invalid", "")
+        fd = os.open(name, flags, dir_fd=dir_fd) if dir_fd is not None else os.open(path, flags)
+        try:
+            data = os.read(fd, limit + 1)
+        finally:
+            os.close(fd)
     except FileNotFoundError:
         return ("absent", "")
-    except OSError:
-        return ("unreadable", "")
-    if not stat.S_ISREG(info.st_mode) or info.st_size > 128:
-        return ("unreadable", "")
-    try:
-        with open(path, encoding="ascii", errors="replace") as handle:
-            text = handle.read(128).strip()
-    except OSError:
-        return ("unreadable", "")
-    return ("valid", text) if text else ("unreadable", "")
+    except OSError as exc:
+        return ("invalid", "") if exc.errno == errno.ELOOP else ("unreadable", "")
+    if len(data) > limit:
+        return ("invalid", "")
+    return ("valid", data.decode("ascii", errors="replace").strip())
 
 
-def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, str]:
+def _install_lock_state(folder: str, held: _HeldInstallLock | None = None) -> tuple[str, str]:
     """("none" | "stale" | "recovery" | "held", detail) of the lock in folder.
 
     The one rule of every per-user hook (hookexec installLockStale). It reads
@@ -2825,19 +2835,22 @@ def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, 
     than its proc-start record names (a reused pid). A live installer keeps
     its lock for as long as it runs; so do a lock without a valid pid, a
     lock without a proc-start record whose pid names a process (1.0.2,
-    1.0.3) and an owner whose identity cannot be read.
+    1.0.3) and an owner whose identity cannot be read. With held, the owner
+    files are read in the folder doctor holds open, whatever the path names
+    now (_fix_stale_install_lock).
     """
     from defenseclaw.process_liveness import pid_alive
 
-    lock = os.path.join(folder, name)
-    try:
-        info = os.lstat(lock)
-    except FileNotFoundError:
-        return ("none", "")
-    except OSError as exc:
-        return ("held", f"{lock} cannot be inspected ({exc.strerror or exc})")
-    if not stat.S_ISDIR(info.st_mode):
-        return ("held", f"{lock} is not a folder")
+    lock = os.path.join(folder, ".install.lock")
+    if held is None:
+        try:
+            info = os.lstat(lock)
+        except FileNotFoundError:
+            return ("none", "")
+        except OSError as exc:
+            return ("held", f"{lock} cannot be inspected ({exc.strerror or exc})")
+        if not stat.S_ISDIR(info.st_mode):
+            return ("held", f"{lock} is not a folder")
     for record in _INSTALL_RECOVERY_RECORDS:
         path = os.path.join(folder, record)
         try:
@@ -2848,17 +2861,11 @@ def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, 
             return ("held", f"{path} cannot be inspected")
         return ("recovery", f"{lock} is kept by an interrupted install ({path})")
     pid_file = os.path.join(lock, "pid")
-    text = ""
-    try:
-        pid_info = os.lstat(pid_file)
-        if not stat.S_ISREG(pid_info.st_mode) or pid_info.st_size > 64:
-            return ("held", f"{pid_file} is not a pid file")
-        with open(pid_file, encoding="ascii", errors="replace") as handle:
-            text = handle.read(64).strip()
-    except FileNotFoundError:
-        text = ""
-    except OSError as exc:
-        return ("held", f"{pid_file} cannot be read ({exc.strerror or exc})")
+    pid_state, text = _install_lock_file(lock, "pid", 64, held)
+    if pid_state == "invalid":
+        return ("held", f"{pid_file} is not a pid file")
+    if pid_state == "unreadable":
+        return ("held", f"{pid_file} cannot be read")
     pid = int(text) if re.fullmatch(r"[1-9][0-9]{0,9}", text) else 0
     if not pid or pid > 2_147_483_647:
         return (
@@ -2869,8 +2876,8 @@ def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, 
         return ("stale", f"{lock} names pid {pid}, this process; its installer is gone")
     if not pid_alive(pid):
         return ("stale", f"{lock} names installer pid {pid}, which is no longer running")
-    record_state, record = _install_lock_record(os.path.join(lock, _INSTALL_LOCK_IDENTITY_NAME))
-    if record_state == "valid":
+    record_state, record = _install_lock_file(lock, _INSTALL_LOCK_IDENTITY_NAME, 128, held)
+    if record_state == "valid" and record:
         current = _process_identity(pid)
         if current is not None and current != record:
             return (
@@ -2948,40 +2955,263 @@ def _check_install_lock(cfg, r: _DoctorResult) -> None:
             )
 
 
+@dataclass
+class _HeldInstallLock:
+    """An install lock folder doctor holds open (_open_install_lock).
+
+    identity is the folder's file identity: (st_dev, st_ino) on POSIX, the
+    volume serial and file index on Windows.
+    """
+
+    identity: tuple[int, int]
+    dir_fd: int | None = None
+    handle: int | None = None
+
+
+def _open_install_lock(lock: str, *, pin: bool = False) -> _HeldInstallLock | None:
+    """Hold the lock folder itself open, or None when lock is no plain folder.
+
+    On POSIX a descriptor of the folder (no link followed): doctor reads and
+    removes the owner files through it, so it never touches a folder an
+    installer put at the path since, and the open folder keeps its inode, so
+    no new folder gets its identity while doctor holds it. On Windows a
+    handle; with pin it shares no delete access, so no other process can
+    remove or rename the folder (an installer's takeover fails, and the
+    folder stays at its path) until doctor closes it, and the handle removes
+    exactly that folder (_remove_held_install_lock). Raises OSError when the
+    folder cannot be opened.
+    """
+    if os.name != "nt":
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        try:
+            dir_fd = os.open(lock, flags)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                return None
+            raise
+        info = os.fstat(dir_fd)
+        return _HeldInstallLock(identity=(info.st_dev, info.st_ino), dir_fd=dir_fd)
+    import ctypes  # pragma: no cover - Windows only
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    kernel32.GetFileInformationByHandle.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ByHandleFileInformation))
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    # FILE_READ_ATTRIBUTES, plus DELETE to remove it by this handle; share
+    # read and write, and delete only when not pinned.
+    access = 0x80 | (0x00010000 if pin else 0)
+    share = 0x1 | 0x2 | (0 if pin else 0x4)
+    # OPEN_EXISTING; FILE_FLAG_BACKUP_SEMANTICS (a folder), FILE_FLAG_OPEN_REPARSE_POINT (no link followed).
+    handle = kernel32.CreateFileW(lock, access, share, None, 3, 0x02000000 | 0x00200000, None)
+    if handle in (None, ctypes.c_void_p(-1).value):
+        code = ctypes.get_last_error()
+        if code in (2, 3):  # ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND
+            return None
+        raise ctypes.WinError(code)
+    info = _ByHandleFileInformation()
+    if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+        code = ctypes.get_last_error()
+        kernel32.CloseHandle(handle)
+        raise ctypes.WinError(code)
+    # FILE_ATTRIBUTE_DIRECTORY, and no FILE_ATTRIBUTE_REPARSE_POINT (a junction or link).
+    if not info.dwFileAttributes & 0x10 or info.dwFileAttributes & 0x400:
+        kernel32.CloseHandle(handle)
+        return None
+    identity = (int(info.dwVolumeSerialNumber), (int(info.nFileIndexHigh) << 32) | int(info.nFileIndexLow))
+    return _HeldInstallLock(identity=identity, handle=int(handle))
+
+
+def _close_install_lock(held: _HeldInstallLock) -> None:
+    if held.dir_fd is not None:
+        os.close(held.dir_fd)
+        held.dir_fd = None
+    if held.handle is not None:  # pragma: no cover - Windows only
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle(held.handle)
+        held.handle = None
+
+
+def _install_lock_entries(lock: str, held: _HeldInstallLock) -> list[str]:
+    return sorted(os.listdir(held.dir_fd if held.dir_fd is not None else lock))
+
+
+def _install_lock_owner(lock: str, held: _HeldInstallLock) -> tuple:
+    """What the held lock records of its owner: its entries and owner files.
+
+    A stale decision holds only for this record and the folder's identity:
+    an installer that took the lock over since, in place or by a new folder,
+    changes one of them (_fix_stale_install_lock).
+    """
+    return (
+        held.identity,
+        tuple(_install_lock_entries(lock, held)),
+        tuple(_install_lock_file(lock, name, 128, held) for name in ("pid", "started", _INSTALL_LOCK_IDENTITY_NAME)),
+    )
+
+
+def _stale_install_lock(folder: str) -> tuple | None:
+    """The owner record (_install_lock_owner) of the stale lock in folder, or None."""
+    lock = os.path.join(folder, ".install.lock")
+    try:
+        held = _open_install_lock(lock)
+    except OSError:
+        return None
+    if held is None:
+        return None
+    try:
+        if _install_lock_state(folder, held)[0] != "stale":
+            return None
+        return _install_lock_owner(lock, held)
+    except OSError:
+        return None
+    finally:
+        _close_install_lock(held)
+
+
+def _remove_held_install_lock(lock: str, held: _HeldInstallLock) -> str:
+    """Remove the held lock folder and its owner files: "removed", "changed" or why not.
+
+    Its pid goes first, so a hook reads the lock as held (no installer pid
+    yet), never as missing, until the folder itself goes. A lock with a
+    folder inside is left whole. On POSIX the files go through the
+    descriptor, and the folder goes only while the path still names it; on
+    Windows the pinned handle removes it.
+    """
+    dir_fd = held.dir_fd
+    names = _install_lock_entries(lock, held)
+    for name in names:
+        if dir_fd is not None:
+            info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        else:
+            info = os.lstat(os.path.join(lock, name))
+        if stat.S_ISDIR(info.st_mode):
+            return f"{lock} holds a folder ({name}); it was left in place"
+    for name in sorted(names, key=lambda item: item != "pid"):
+        try:
+            if dir_fd is not None:
+                os.unlink(name, dir_fd=dir_fd)
+            else:
+                os.unlink(os.path.join(lock, name))
+        except FileNotFoundError:
+            continue
+    if dir_fd is not None:
+        try:
+            info = os.lstat(lock)
+        except FileNotFoundError:
+            return "removed"
+        # The descriptor keeps this folder's inode: another identity at the
+        # path is a lock an installer took since, which stays.
+        if (info.st_dev, info.st_ino) != held.identity:
+            return "changed"
+        try:
+            os.rmdir(lock)
+        except FileNotFoundError:
+            return "removed"
+        except OSError as exc:
+            if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                return "changed"
+            raise
+        return "removed"
+    import ctypes  # pragma: no cover - Windows only
+    from ctypes import wintypes
+
+    class _FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("DeleteFile", wintypes.BOOLEAN)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.SetFileInformationByHandle.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    disposition = _FileDispositionInfo(True)
+    # FileDispositionInfo: the folder goes when doctor closes the handle.
+    if not kernel32.SetFileInformationByHandle(held.handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)):
+        code = ctypes.get_last_error()
+        if code == 145:  # ERROR_DIR_NOT_EMPTY
+            return "changed"
+        raise ctypes.WinError(code)
+    return "removed"
+
+
 def _fix_stale_install_lock(cfg, *, assume_yes: bool, plan_only: bool = False) -> tuple[str, str]:
-    """Remove an install lock whose installer is proven gone (_install_lock_state)."""
+    """Remove an install lock whose installer is proven gone (_install_lock_state).
+
+    The stale decision is bound to the lock it was made on: the folder's
+    file identity and its owner record (_install_lock_owner). After the
+    prompt doctor holds the folder open and removes it only when both are
+    unchanged and its installer is still gone; a lock an installer took over
+    meanwhile, in place or by a new folder, stays where it is. The canonical
+    lock is never moved away, so no hook sees a running install without it.
+    """
     if _doctor_managed(cfg):
         return ("skip", "the installation owns its install lock")
-    stale = [folder for folder in _install_lock_folders(cfg) if _install_lock_state(folder)[0] == "stale"]
+    stale = [(folder, owner) for folder in _install_lock_folders(cfg) if (owner := _stale_install_lock(folder))]
     if not stale:
         return ("skip", "no install lock is left by an installer that is gone")
-    names = ", ".join(os.path.join(folder, ".install.lock") for folder in stale)
+    names = ", ".join(os.path.join(folder, ".install.lock") for folder, _ in stale)
     if plan_only:
         return ("plan", f"remove {names}, left by an installer that is no longer running")
     if not assume_yes and not click.confirm(
         f"    Remove {names}, left by an installer that is no longer running?", default=True
     ):
         return ("skip", "declined by user")
-    for folder in stale:
+    removed: list[str] = []
+    changed: list[str] = []
+    for folder, owner in stale:
         lock = os.path.join(folder, ".install.lock")
-        aside_name = f".install.lock.stale-{uuid.uuid4().hex}"
-        aside = os.path.join(folder, aside_name)
         try:
-            os.rename(lock, aside)
-        except FileNotFoundError:
+            held = _open_install_lock(lock, pin=True)
+        except OSError as exc:
+            return ("fail", f"could not open {lock}: {exc}")
+        if held is None:
+            changed.append(lock)
             continue
+        try:
+            if _install_lock_owner(lock, held) != owner or _install_lock_state(folder, held)[0] != "stale":
+                outcome = "changed"
+            else:
+                outcome = _remove_held_install_lock(lock, held)
         except OSError as exc:
             return ("fail", f"could not remove {lock}: {exc}")
-        # An installer that took the lock over since the check owns it now.
-        if _install_lock_state(folder, aside_name)[0] != "stale":
-            try:
-                os.rename(aside, lock)
-            except OSError as exc:
-                return ("fail", f"an installer took {lock} over; could not put it back from {aside}: {exc}")
-            return ("fail", f"an installer took {lock} over; it was left in place")
-        shutil.rmtree(aside, ignore_errors=True)
-        if os.path.lexists(aside):
-            return ("fail", f"could not remove {aside}")
+        finally:
+            _close_install_lock(held)
+        if outcome == "removed":
+            removed.append(lock)
+        elif outcome == "changed":
+            changed.append(lock)
+        else:
+            return ("fail", outcome)
+    if changed:
+        left = ", ".join(changed)
+        detail = f"{left} changed since the check (an installer took it over or removed it); it was left in place"
+        return ("pass", f"removed {', '.join(removed)}; {detail}") if removed else ("skip", detail)
     return ("pass", f"removed {names}, left by an installer that is no longer running")
 
 
