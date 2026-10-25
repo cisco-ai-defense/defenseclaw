@@ -2897,6 +2897,47 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Installed plugin: low-warn-pkg", result.output)
 
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    @patch("defenseclaw.registry.fetch_npm_package")
+    def test_install_no_action_warns_on_a_judge_only_high_plugin(self, mock_fetch, mock_scan):
+        """GAP-1389: judge-only HIGHs (LLM-OB-*, META-LLM-001) install with a
+        warning in default; a static HIGH beside them is still refused."""
+        from datetime import datetime, timezone
+
+        from defenseclaw.models import Finding, ScanResult
+
+        def scan(*rules):
+            return ScanResult(scanner="plugin-scanner", target="x", timestamp=datetime.now(timezone.utc), findings=[
+                Finding(id=r, severity=s, title=r, scanner="plugin-scanner", rule_id=r) for r, s in rules])
+
+        judge = (("LLM-OB-009-001", "HIGH"), ("META-LLM-001", "HIGH"), ("PERM-NONE", "LOW"))
+        mock_scan.return_value = scan(*judge)
+        mock_fetch.return_value = self._create_plugin_dir("fmt-pkg")
+        result = self._invoke_install(["install", "fmt-pkg"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Installed plugin: fmt-pkg", result.output)
+        self.assertIn("3 HIGH findings", result.output)
+        events = [e for e in self.app.store.list_events(20) if e.action == "install-warning"]
+        self.assertTrue(any("severity=HIGH" in e.details for e in events), [e.details for e in events])
+
+        mock_scan.return_value = scan(*judge, ("SRC-EXFIL-001", "HIGH"))
+        mock_fetch.return_value = self._create_plugin_dir("exfil-pkg")
+        result = self._invoke_install(["install", "exfil-pkg"])
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        self.assertIn("refusing to install", result.output)
+        self.assertFalse(os.path.exists(os.path.join(self.app.cfg.plugin_dir, "exfil-pkg")))
+
+        # Review loop 2: a file-only plugin-scanner HIGH quarantine is the
+        # administrator's action, so the judge-only plugin is refused again.
+        self.app.cfg.admission.plugin.scanner_overrides["plugin-scanner"] = {
+            "high": {"file": "quarantine", "runtime": "enable", "install": "none"}}
+        mock_scan.return_value = scan(*judge)
+        mock_fetch.return_value = self._create_plugin_dir("fmt-q-pkg")
+        result = self._invoke_install(["install", "fmt-q-pkg"])
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        self.assertIn("refusing to install", result.output)
+        self.assertFalse(os.path.exists(os.path.join(self.app.cfg.plugin_dir, "fmt-q-pkg")))
+
     @patch("defenseclaw.registry.fetch_npm_package")
     def test_install_network_error(self, mock_fetch):
         from defenseclaw.registry import RegistryError

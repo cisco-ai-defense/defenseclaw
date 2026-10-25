@@ -543,6 +543,9 @@ def evaluate_admission(
         return _done(AdmissionDecision("scan", "scan required", source="scan-required"))
 
     finding_count, severity = _scan_summary(scan_result)
+    judge_only = _judge_only_plugin_high(config, policy, target_type, connector, scan_result, severity)
+    if judge_only:
+        policy = replace(policy, actions={**policy.actions, "HIGH": (_WARN, False)})
     action, allow = effective_action_for(policy, severity=severity, scanner=_scanner_name(scan_result))
 
     if finding_count <= 0:
@@ -553,7 +556,34 @@ def evaluate_admission(
         return _done(AdmissionDecision("rejected", detail, action=action, source="scan-rejected"))
     if allow:
         return _done(AdmissionDecision("allowed", detail, action=action, source="scan-allowed"))
-    return _done(AdmissionDecision("warning", detail, action=action, source="scan-warning"))
+    source = "scan-judge-warning" if judge_only else "scan-warning"
+    return _done(AdmissionDecision("warning", detail, action=action, source=source))
+
+
+def _judge_only_plugin_high(cfg: Any, policy: CompiledAdmission, target_type: str, connector: str,
+                            scan_result: Any, severity: str) -> bool:
+    """The GAP-1389 pre-step: Go ``policy.WarnJudgeOnlyPluginHigh``, same rules."""
+    from defenseclaw.enforce import asset_lists
+
+    adm, findings = getattr(cfg, "admission", None), getattr(scan_result, "findings", None)
+    tier = getattr(getattr(cfg, "guardrail", None), "hook_policy_tier", None)
+    medium, _ = effective_action_for(policy, severity="MEDIUM", scanner=_scanner_name(scan_result))
+    if (target_type != "plugin" or cfg is None or asset_lists.is_secure_client(cfg) or severity.upper() != "HIGH"
+            or not isinstance(findings, list) or _legacy_strict_mcp(adm) or not callable(tier)
+            or "HIGH" in policy.scanner_overrides.get(_scanner_name(scan_result), {})
+            or any("HIGH" in _compile_action_map(getattr(getattr(adm, k, None), "actions", None))
+                   for k in ("plugin", "defaults"))
+            or medium.install == "block" or medium.runtime == "disable" or medium.file == "quarantine"):
+        return False
+    judge_high = False
+    for f in findings:
+        rank, rule = _severity_rank(str(getattr(f, "severity", ""))), str(getattr(f, "rule_id", "") or "")
+        judge = (rule.startswith("LLM-") and rule != "LLM-SCAN-ERROR") or rule.startswith("META-LLM-")
+        if rank == 4 and (rule.startswith("LLM-OB-") or rule == "META-LLM-001"):
+            judge_high = True
+        elif rank == 0 or rank >= 4 or (rank == 3 and not judge and rule != "SCAN-LLM-NO-SOURCE"):
+            return False
+    return judge_high and tier(connector) != "strict"
 
 
 def _legacy_allow_decision(

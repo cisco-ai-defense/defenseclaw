@@ -1938,6 +1938,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		return res
 	}
 
+	policy.WarnJudgeOnlyPluginHigh(decisionPolicy.Config, connector, &input)
 	out = w.evaluateAdmissionSnapshot(ctx, input, decisionPolicy)
 	w.applyPostScanEnforcement(ctx, out, evt, targetType, result, s.Name())
 	scanID := w.logScanID(ctx, evt, result, out.Verdict)
@@ -3579,6 +3580,7 @@ func toFindingInputs(findings []scanner.Finding) []policy.FindingInput {
 			Severity: string(f.Severity),
 			Scanner:  f.Scanner,
 			Title:    f.Title,
+			RuleID:   f.RuleID,
 		})
 	}
 	return out
