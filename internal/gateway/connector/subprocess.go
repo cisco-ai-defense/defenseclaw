@@ -239,6 +239,13 @@ func WriteShimScripts(shimDir, apiAddr string) error {
 // persists a .token sidecar so each shim can authenticate inspection
 // calls. See F-2029 / F-3397 for the security rationale.
 func WriteShimScriptsWithToken(shimDir, apiAddr, token string) error {
+	return writeShimScriptsWithMode(shimDir, apiAddr, token, defaultHookFailMode)
+}
+
+// writeShimScriptsWithMode records the installed outage choice in the shim.
+// A reachable gateway's block or malformed answer is handled by the shim
+// itself and is never opened by this mode.
+func writeShimScriptsWithMode(shimDir, apiAddr, token, failMode string) error {
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
 		return fmt.Errorf("create shim dir: %w", err)
 	}
@@ -256,7 +263,7 @@ func WriteShimScriptsWithToken(shimDir, apiAddr, token string) error {
 		return fmt.Errorf("write shim token file: %w", err)
 	}
 
-	data := templateData{APIAddr: apiAddr, FailMode: defaultHookFailMode, TokenFile: ".token"}
+	data := templateData{APIAddr: apiAddr, FailMode: normalizeHookFailMode(failMode), TokenFile: ".token"}
 	peerHelper, err := shimFS.ReadFile("shims/peer.inc")
 	if err != nil {
 		return fmt.Errorf("read shim peer helper: %w", err)
@@ -2208,7 +2215,7 @@ func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 		// the shim scripts so every inspection call carries an
 		// Authorization header. Pre-fix the shim had no auth token
 		// available and silently downgraded a 401 to "allow".
-		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
+		if err := writeShimScriptsWithMode(shimDir, opts.APIAddr, opts.APIToken, opts.HookFailMode); err != nil {
 			return fmt.Errorf("shim scripts: %w", err)
 		}
 
