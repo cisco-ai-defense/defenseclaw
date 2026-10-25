@@ -54,6 +54,27 @@ describe('Conditional 1.0.4 fallback limits', () => {
   });
 });
 
+describe('Owner-decided outage and install-window modes', () => {
+  it('keeps saved outage choices ahead of tiers, including managed strict', () => {
+    const failModes = page('reference/configuration/fail-modes.mdx');
+    assert.match(failModes, /explicit saved `open` or `closed` wins over the policy tier on a per-user install/i);
+    assert.match(failModes, /administrator's explicit `hook_fail_mode: open` wins over the strict tier for a classified gateway outage/i);
+    assert.match(page('get-started/upgrade.mdx'), /Per-user hooks honor an explicitly saved outage mode/i);
+    assert.doesNotMatch(failModes, /ignores a saved value|saved `guardrail\.hook_fail_mode` does not change|Per-user: not read/i);
+  });
+
+  it('distinguishes answered calls from an install-window outage in each guide', () => {
+    const reference = page('reference/configuration/fail-modes.mdx');
+    assert.match(reference, /During an install or upgrade[^.]*default or permissive[^.]*follows the gateway's verdict when the gateway answers/i);
+    assert.match(reference, /strict tier and managed standalone[^.]*block even if the gateway answers allow/i);
+    assert.match(reference, /If the gateway does not answer[^.]*block/i);
+    for (const name of ['reference/commands/installer.mdx', 'troubleshooting/hooks-and-blocking.mdx']) {
+      assert.match(page(name), /install or upgrade[^.]*gateway answers[^.]*default or permissive[^.]*follows its verdict/i, name);
+    }
+    assert.doesNotMatch(page('reference/commands/installer.mdx'), /During an install or upgrade every hook blocks/i);
+  });
+});
+
 function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }
@@ -130,10 +151,10 @@ describe('Cursor observe outage mode', () => {
     const cursor = page('reference/connectors/cursor.mdx').split('## Fail mode')[1]?.split('## Limits')[0] ?? '';
     // Owner decision 2026-10-23 (oss-outage-open): a per-user outage follows the
     // policy tier; every other failure blocks.
-    assert.match(failModes, /On a per-user install the outage behavior follows the policy tier.{0,600}Every other failure blocks in every tier/i);
-    assert.match(cursor, /A per-user Cursor hook makes the outage decision of its policy tier in observe and action mode/i);
+    assert.match(failModes, /An explicit saved `open` or `closed` wins over the policy tier on a per-user install.{0,300}When no mode is saved/i);
+    assert.match(cursor, /A per-user Cursor hook honors an explicit saved outage mode in observe and action mode/i);
     const coverage = page('appendix/coverage-by-layer.mdx');
-    assert.match(coverage, /On a per-user install the policy tier decides, in observe and action mode alike/i);
+    assert.match(coverage, /On a per-user install an explicit saved mode wins; otherwise the policy tier decides in observe and action mode alike/i);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
     assert.match(managedRegistration, /"failClosed": true,/);
     assert.match(page('reference/connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call. The administrator's resolved fail mode decides/i);
@@ -452,9 +473,9 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
   });
 
   it('says an upgrade gives per-user hooks the outage mode of their tier', () => {
-    assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks take the outage mode of their policy tier'));
+    assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks honor an explicitly saved outage mode'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
-    assert.ok(page('reference/configuration/fail-modes.mdx').includes('A per-user install ignores a saved value'));
+    assert.ok(page('reference/configuration/fail-modes.mdx').includes('An explicit saved `open` or `closed` wins over the policy tier on a per-user install'));
   });
 });
 

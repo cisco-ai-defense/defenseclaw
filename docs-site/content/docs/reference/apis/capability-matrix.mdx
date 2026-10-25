@@ -59,15 +59,15 @@ against the hook code on every change.
 
 <OutageMatrix />
 
-- **Per-user** is an install without a managed deployment. Its outage mode
-  follows the connector's policy tier (rule pack): the default (balanced) and
-  permissive policies let the call run with a warning and a
-  `hook-failures.jsonl` record, the strict policy blocks it. Every other
-  failure blocks in every tier
+- **Per-user** is an install without a managed deployment. An explicit saved
+  `hook_fail_mode` selects its outage mode. With no saved value, the default
+  (balanced) and permissive tiers let the call run with a warning and a
+  `hook-failures.jsonl` record; strict blocks it. Other failures block
   ([Fail modes](/docs/reference/configuration/fail-modes#per-user-installs)).
 - **Managed standalone** is an enterprise host outside Secure Client. Its fail
   mode is the administrator's `hook_fail_mode`: `closed`, the default, blocks
-  the outage on every connector, and the two managed columns give `open`. A
+  the outage on every connector, and the two managed columns give `open`. An
+  explicit administrator `open` wins over the strict tier for an outage. A
   managed connector runs either through vendor
   [machine policy](/docs/enterprise/configure/machine-policy) (the
   administrator-owned `defenseclaw-hook --enterprise-managed`) or through a

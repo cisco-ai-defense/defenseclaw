@@ -69,15 +69,15 @@ The message reads `<connector>'s agent changed`.
 
 ## Every tool call is blocked while the gateway is down
 
-**Cause.** The connector runs the strict policy (or the install is managed), whose hooks block while the gateway is not running. With the default or permissive policy an outage lets calls run with a warning instead; an install or upgrade in progress blocks in every policy.
+**Cause.** The connector runs the strict policy (or the install is managed), whose hooks block while the gateway is not running unless an explicit saved `open` applies to this outage. With no saved mode, default and permissive let an outage run with a warning. During an install or upgrade, when the gateway answers, default or permissive follows its verdict; strict and managed standalone block. Without an answer, the install lock blocks per-user and managed standalone hooks.
 
-**Fix.** Start the gateway: `defenseclaw-gateway start`. If it does not start, `defenseclaw doctor` names the repair. To let calls run with a warning during an outage, use the default policy: `defenseclaw guardrail use-pack default` (your decision; `hook-failures.jsonl` records each unchecked call).
+**Fix.** Start the gateway: `defenseclaw-gateway start`. If it does not start, `defenseclaw doctor` names the repair. If no explicit fail mode is saved, `defenseclaw guardrail use-pack default` lets classified outages run with a warning and a `hook-failures.jsonl` record.
 
 **Check.** `defenseclaw guardrail fail-mode` shows each connector's outage mode and policy tier.
 
 ## The agent says "DefenseClaw is not checking this session"
 
-**Cause.** This account's gateway is not running (stopped, crashed or not started after a reboot), and the connector runs the default or permissive policy, so its hooks let calls run unchecked and record each one in `~/.defenseclaw/logs/hook-failures.jsonl`.
+**Cause.** This account's gateway is not running (stopped, crashed or not started after a reboot), and the connector has an explicit saved `open` or no saved mode with the default or permissive policy. Its hooks let calls run unchecked and record each one in `~/.defenseclaw/logs/hook-failures.jsonl`.
 
 **Fix.** `defenseclaw-gateway start`. If it does not start, `defenseclaw doctor` names the repair. To block calls during an outage instead: `defenseclaw guardrail use-pack strict`.
 
