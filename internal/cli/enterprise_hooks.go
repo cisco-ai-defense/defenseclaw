@@ -1697,7 +1697,16 @@ func enterpriseHookVerifyAwaitingSignIn(
 	target enterprisehooks.ManifestTarget,
 	row enterpriseHookReconcileRow,
 ) bool {
-	if _, ok := awaiting[enterpriseHookProtectedTargetKey(row)]; !ok || !target.IsDeferred() {
+	guardianErr, ok := awaiting[enterpriseHookProtectedTargetKey(row)]
+	if !ok || !target.IsDeferred() {
+		return false
+	}
+	if enterpriseHookHermesSignedOutApplies() && strings.EqualFold(strings.TrimSpace(row.Connector), "hermes") &&
+		enterpriseHookHermesHomeWaitRecorded(enterpriseHookReconcileRow{Error: guardianErr}, true) {
+		// That wait excused only an unreadable Hermes home, which
+		// enterpriseHookHermesSignedOutRow already reports. A Hermes target
+		// whose home now reads and whose hook fails is a failure, signed in
+		// or not, until the guardian classifies it again (GAP-1433).
 		return false
 	}
 	available, err := enterpriseHookReconcileSessionAvailable(target)
@@ -2295,8 +2304,7 @@ func enterpriseHookHermesSignedOutRow(
 		return "", false
 	}
 	last, known := recorded[enterpriseHookProtectedTargetKey(row)]
-	lastWaits := known && !last.OK && !last.Pending &&
-		strings.HasPrefix(strings.TrimSpace(last.Error), enterpriseHookAwaitingSignInPrefix+": "+enterpriseHookAwaitingSignInHermesHome)
+	lastWaits := enterpriseHookHermesHomeWaitRecorded(last, known)
 	switch {
 	case liveErr != nil && errors.Is(liveErr, hermespath.ErrAccountSignedOut):
 		if lastWaits {
@@ -2306,7 +2314,7 @@ func enterpriseHookHermesSignedOutRow(
 			"(verification: %v)", enterpriseHookAwaitingSignInPrefix, enterpriseHookAwaitingSignInHermesHome, liveErr), true
 	case liveErr == nil && lastWaits:
 		return strings.TrimSpace(last.Error), true
-	case liveErr != nil && known && !last.OK && !last.Pending && enterpriseHookAwaitingSignInError(last):
+	case liveErr != nil && known && !lastWaits && enterpriseHookAwaitingSignInError(last):
 		// The guardian left the target waiting for its sign-in for another
 		// cause (an earlier release protected it, GAP-0644). The wait
 		// excuses the live failure only with fresh evidence that the
@@ -2325,6 +2333,14 @@ func enterpriseHookHermesSignedOutRow(
 		}
 	}
 	return "", false
+}
+
+// enterpriseHookHermesHomeWaitRecorded reports a guardian row that waits for
+// its account's sign-in only because the account's Hermes home could not be
+// read (hermespath.ErrAccountSignedOut).
+func enterpriseHookHermesHomeWaitRecorded(last enterpriseHookReconcileRow, known bool) bool {
+	return known && enterpriseHookAwaitingSignInError(last) &&
+		strings.HasPrefix(strings.TrimSpace(last.Error), enterpriseHookAwaitingSignInPrefix+": "+enterpriseHookAwaitingSignInHermesHome)
 }
 
 // enterpriseHookTargetHasNoSession reports, from the Windows session list,

@@ -381,6 +381,28 @@ func TestVerifyLeavesASignedOutHermesTargetToTheNextSignIn(t *testing.T) {
 	// guardian has not verified the target since he signed out.
 	delete(live, bob+"/hermes")
 	check("hive loaded while signed out", true, true)
+	// Review round d: the hive is loaded, so Bob's Hermes home is readable,
+	// and his owned hook is gone. The recorded wait excused only the
+	// unreadable home: a hook that is present and failing is a failure while
+	// he is signed out too, through the Hermes rule and through the sign-in
+	// wait every connector has on a managed standalone deployment.
+	live[bob+"/hermes"] = errors.New("enterprise hooks: connector hermes hook verification failed: canonical hook matrix is absent: owned hook command not present")
+	check("hive loaded while signed out, owned hook removed", false, false)
+	// The sign-in wait every connector has on a managed standalone
+	// deployment does not excuse it either.
+	bobEnabled := true
+	bobHermes := enterprisehooks.ManifestTarget{SID: bob, Connector: "hermes", Enabled: &bobEnabled, Deferred: true}
+	bobRow := enterpriseHookReconcileRow{SID: bob, UserHome: filepath.Join(scope, "Bob"), Connector: "hermes", Error: live[bob+"/hermes"].Error()}
+	hermesHomeWait := enterpriseHookAwaitingSignInPrefix + ": " + enterpriseHookAwaitingSignInHermesHome + ", so Hermes is NOT COVERED for it"
+	if enterpriseHookVerifyAwaitingSignIn(map[string]string{enterpriseHookProtectedTargetKey(bobRow): hermesHomeWait}, bobHermes, bobRow) {
+		t.Fatal("hive loaded while signed out, owned hook removed: the sign-in wait excused a Hermes hook that is present and failing")
+	}
+	earlierRelease := enterpriseHookAwaitingSignInPrefix + ": DefenseClaw 1.0.2 protected it"
+	if !enterpriseHookVerifyAwaitingSignIn(map[string]string{enterpriseHookProtectedTargetKey(bobRow): earlierRelease}, bobHermes, bobRow) {
+		t.Fatal("control: an earlier release's sign-in wait of a signed-out account no longer excuses its target")
+	}
+	delete(live, bob+"/hermes")
+	check("hive loaded while signed out, hook restored", true, true)
 
 	// GAP-1433 as observed: an upgrade from 1.0.2 while Bob is signed out
 	// leaves his Hermes target waiting for his sign-in (an earlier release
