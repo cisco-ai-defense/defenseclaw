@@ -1568,6 +1568,23 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
             else:
                 transaction.rollback()
             raise
+        except Exception as exc:
+            # A thrown error while deciding or enforcing is a refused
+            # install, never a rejected copy left in place (GAP-1483): every
+            # connector whose enforcement did not apply gets its prior copy back.
+            transaction.rollback()
+            ux.echo(
+                f"error: refusing to install {plugin_name!r} for connector={connector} — "
+                f"enforcement failed: {exc}; the install was rolled back",
+                err=True,
+            )
+            if app.logger:
+                saved_change_audit(app.logger).log_action(
+                    "install-rejected",
+                    plugin_name,
+                    f"connector={connector} result=refused reason=enforcement-failed failed=error",
+                )
+            raise SystemExit(1)
 
         if app.logger:
             for scanned_connector, result in scan_results.items():
@@ -2090,42 +2107,59 @@ def _scan_installed_plugin_for_connector(
     enforcement_reason = f"post-install scan: {len(result.findings)} findings, max={sev}"
     applied_actions: list[str] = []
     failed_actions: list[str] = []
+    q_dest: str | None = None
 
     if action_cfg.file == "quarantine":
         pe.set_source_path("plugin", plugin_name, plugin_path, connector)
         se = PluginEnforcer(app.cfg.quarantine_dir)
-        q_dest = se.quarantine(plugin_name, plugin_path, connector=connector)
+        q_dest = _quarantine_new_plugin_copy(se, plugin_name, plugin_path, connector)
         if q_dest:
             applied_actions.append(f"quarantined to {q_dest}")
-            pe.quarantine_for_connector("plugin", plugin_name, connector, enforcement_reason)
+            try:
+                pe.quarantine_for_connector("plugin", plugin_name, connector, enforcement_reason)
+            except Exception as exc:
+                click.echo(
+                    f"[install] warning: {plugin_name!r} is quarantined; recording it failed: {exc}",
+                    err=True,
+                )
         else:
             click.echo("[install] quarantine failed", err=True)
             failed_actions.append("quarantine")
 
     if action_cfg.runtime == "disable":
         target_connector = _normalize_runtime_connector(connector)
-        if target_connector == "openclaw":
-            client = _sidecar_client(app)
-            try:
-                client.disable_plugin(plugin_name)
-                applied_actions.append("disabled via gateway")
-                pe.disable_for_connector("plugin", plugin_name, connector, enforcement_reason)
-            except Exception as exc:
-                click.echo(f"[install] gateway disable failed: {exc}", err=True)
-                failed_actions.append("runtime disable")
-        else:
-            applied_actions.append(f"runtime disable recorded for connector={connector}")
+        try:
+            if target_connector == "openclaw":
+                _sidecar_client(app).disable_plugin(plugin_name)
             pe.disable_for_connector("plugin", plugin_name, connector, enforcement_reason)
+            applied_actions.append(
+                "disabled via gateway"
+                if target_connector == "openclaw"
+                else f"runtime disable recorded for connector={connector}"
+            )
+        except Exception as exc:
+            label = "gateway disable" if target_connector == "openclaw" else "runtime disable record"
+            click.echo(f"[install] {label} failed: {exc}", err=True)
+            failed_actions.append("runtime disable")
 
     if action_cfg.install == "block":
-        pe.record_scan_block("plugin", plugin_name, connector, enforcement_reason)
-        applied_actions.append("install blocked by this scan")
+        try:
+            pe.record_scan_block("plugin", plugin_name, connector, enforcement_reason)
+            applied_actions.append("install blocked by this scan")
+        except Exception as exc:
+            click.echo(f"[install] install block record failed: {exc}", err=True)
+            failed_actions.append("install block")
 
-    # A failed quarantine leaves the files in place, and a failed disable
-    # with nothing else applied leaves the asset active: either way the
-    # refusal did not take effect. A gateway that is down while the
-    # quarantine or install block applied refuses nothing less.
-    if "quarantine" in failed_actions or (post_decision.verdict == "rejected" and not applied_actions):
+    # A failed quarantine leaves the files in place, a failed install block
+    # with no quarantine leaves them installed, and a failed disable with
+    # nothing else applied leaves the asset active: either way the refusal
+    # did not take effect. A gateway that is down while the quarantine or
+    # install block applied refuses nothing less.
+    if (
+        "quarantine" in failed_actions
+        or ("install block" in failed_actions and not q_dest)
+        or (post_decision.verdict == "rejected" and not applied_actions)
+    ):
         # A refusal whose quarantine or disable could not be applied is
         # still a refusal: the install is rolled back and the command fails,
         # never a warning with the plugin left in place (GAP-1457).
@@ -2173,6 +2207,27 @@ def _scan_installed_plugin_for_connector(
     if app.logger:
         saved_change_audit(app.logger).log_action("install-warning", plugin_name, detail)
     return False
+
+
+def _quarantine_new_plugin_copy(se: Any, plugin_name: str, plugin_path: str, connector: str) -> str | None:
+    """Move the copy this install wrote into quarantine. A thrown error is a
+    failed quarantine (GAP-1483): a partial quarantine copy it left is
+    removed, and the caller refuses the install and rolls it back."""
+    dest = se.quarantine_path(plugin_name, connector)
+    pre_existing = bool(dest) and os.path.lexists(dest)
+    try:
+        return se.quarantine(plugin_name, plugin_path, connector=connector)
+    except Exception as exc:
+        click.echo(f"[install] quarantine move failed: {exc}", err=True)
+        if dest and not pre_existing and os.path.lexists(dest):
+            try:
+                if os.path.isdir(dest) and not os.path.islink(dest):
+                    shutil.rmtree(dest)
+                else:
+                    os.unlink(dest)
+            except OSError as rm_exc:
+                click.echo(f"[install] warning: could not remove partial quarantine copy {dest}: {rm_exc}", err=True)
+        return None
 
 
 def _print_install_result(name: str, result) -> None:

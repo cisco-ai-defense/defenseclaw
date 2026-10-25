@@ -48,6 +48,10 @@ class PluginEnforcer:
             return None
         return safe
 
+    def quarantine_path(self, plugin_name: str, connector: str = "") -> str | None:
+        """Return the validated quarantine location for an identity."""
+        return self._quarantine_path(plugin_name, connector)
+
     def _quarantine_path(self, plugin_name: str, connector: str = "") -> str | None:
         # GAP-2464: a Hermes plugin in a category folder is quarantined by the
         # gateway watcher as <connector>/<category>/<name>, in its own tree

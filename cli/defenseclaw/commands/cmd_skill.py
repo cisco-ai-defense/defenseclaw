@@ -4209,12 +4209,16 @@ def _quarantine_skill_with_provenance(
         click.echo("error: could not persist quarantine provenance", err=True)
         return None
 
-    moved_to = enforcer.quarantine(
-        skill_name,
-        skill_path,
-        connector=connector,
-        expected_hash=content_hash,
-    )
+    try:
+        moved_to = enforcer.quarantine(
+            skill_name,
+            skill_path,
+            connector=connector,
+            expected_hash=content_hash,
+        )
+    except Exception as exc:  # noqa: BLE001 - a thrown move is a failed quarantine (GAP-1483).
+        click.echo(f"error: quarantine of {skill_name!r} failed: {exc}", err=True)
+        moved_to = None
     if moved_to is None:
         physical_hash = enforcer.content_hash(destination) if os.path.lexists(destination) else None
         if physical_hash != content_hash:
@@ -5602,6 +5606,20 @@ def _rollback_skill_install_paths(
                 err=True,
             )
     _discard_skill_backups(backups)
+    # A second rollback must never remove a copy this one put back.
+    paths.clear()
+
+
+def _keep_skill_enforcement(
+    skill_path: str, installed_paths: list[str], backups: list[tuple[str, str]],
+) -> None:
+    """What enforcement left at ``skill_path`` (a quarantine, disable or
+    block and its record) stands: a later connector's refusal neither removes
+    it nor puts the replaced copy back as active next to that record."""
+    installed_paths[:] = [path for path in installed_paths if path != skill_path]
+    kept = [entry for entry in backups if entry[0] == skill_path]
+    backups[:] = [entry for entry in backups if entry[0] != skill_path]
+    _discard_skill_backups(kept)
 
 
 def _discard_skill_backups(backups: list[tuple[str, str]] | None) -> None:
@@ -5635,14 +5653,18 @@ def _scan_installed_skill_for_connector(
     take_action: bool,
     rollback_paths: list[str] | None = None,
     backups: list[tuple[str, str]] | None = None,
-) -> None:
+    defer_action_failure: bool = False,
+) -> bool:
+    """Scan and decide one connector's new copy. True when an enforcement
+    applied and ``defer_action_failure`` asks the caller to fail once every
+    connector is decided; a refusal rolls back and exits."""
     from defenseclaw.enforce.admission import evaluate_admission
 
     click.echo(f"[install] scanning {skill_path} (connector={connector})...")
     try:
         result = scanner.scan(skill_path)
     except Exception as exc:
-        _rollback_skill_install_paths(rollback_paths or [skill_path], backups)
+        _rollback_skill_install_paths([skill_path] if rollback_paths is None else rollback_paths, backups)
         click.echo(
             f"error: scan failed for connector={connector}: {exc}",
             err=True,
@@ -5664,7 +5686,7 @@ def _scan_installed_skill_for_connector(
     )
 
     if post_decision.verdict == "blocked" and not asset_lists.is_secure_client(app.cfg):
-        _rollback_skill_install_paths(rollback_paths or [skill_path], backups)
+        _rollback_skill_install_paths([skill_path] if rollback_paths is None else rollback_paths, backups)
         ux.echo(f"error: skill {skill_name!r} blocked for connector={connector}: "
                 f"{post_decision.reason}", err=True)
         if app.logger:
@@ -5688,7 +5710,7 @@ def _scan_installed_skill_for_connector(
                 skill_name,
                 f"reason=admission-action-allow connector={connector}" + _decision_generation(app),
             )
-        return
+        return False
 
     if post_decision.verdict == "allowed":
         ux.echo(
@@ -5701,7 +5723,7 @@ def _scan_installed_skill_for_connector(
                 skill_name,
                 f"reason=allow-listed-post-scan connector={connector}" + _decision_generation(app),
             )
-        return
+        return False
 
     if post_decision.verdict == "clean":
         click.echo(f"[install] {skill_name!r} installed and clean (connector={connector})")
@@ -5709,7 +5731,7 @@ def _scan_installed_skill_for_connector(
             saved_change_audit(app.logger).log_action(
                 "install-clean", skill_name, f"verdict=clean connector={connector}" + _decision_generation(app),
             )
-        return
+        return False
 
     sev = result.max_severity()
     detail = f"severity={sev} findings={len(result.findings)} connector={connector}" + _decision_generation(app)
@@ -5719,7 +5741,7 @@ def _scan_installed_skill_for_connector(
             # A verdict the admission policy rejects (a quarantine or block)
             # refuses the install without --action, as for plugins; it is
             # never installed with a warning (GAP-1466).
-            _rollback_skill_install_paths(rollback_paths or [skill_path], backups)
+            _rollback_skill_install_paths([skill_path] if rollback_paths is None else rollback_paths, backups)
             ux.echo(
                 f"error: refusing to install {skill_name!r} for connector={connector} — "
                 f"the admission policy rejects its {len(result.findings)} {sev} findings "
@@ -5740,7 +5762,7 @@ def _scan_installed_skill_for_connector(
         )
         if app.logger:
             saved_change_audit(app.logger).log_action("install-warning", skill_name, detail)
-        return
+        return False
 
     action_cfg = post_decision.action
     enforcement_reason = (
@@ -5766,32 +5788,42 @@ def _scan_installed_skill_for_connector(
 
     if action_cfg.runtime == "disable":
         target_connector = _normalize_runtime_connector(connector)
-        if target_connector == "openclaw":
-            client = _sidecar_client(app)
-            try:
-                client.disable_skill(skill_name)
-                applied_actions.append("disabled via gateway")
-                pe.disable_for_connector("skill", skill_name, connector, enforcement_reason)
-            except Exception as exc:
-                click.echo(f"[install] gateway disable failed: {exc}", err=True)
-                failed_actions.append("runtime disable")
-        else:
-            applied_actions.append(f"runtime disable recorded for connector={connector}")
+        try:
+            if target_connector == "openclaw":
+                _sidecar_client(app).disable_skill(skill_name)
             pe.disable_for_connector("skill", skill_name, connector, enforcement_reason)
+            applied_actions.append(
+                "disabled via gateway"
+                if target_connector == "openclaw"
+                else f"runtime disable recorded for connector={connector}"
+            )
+        except Exception as exc:
+            label = "gateway disable" if target_connector == "openclaw" else "runtime disable record"
+            click.echo(f"[install] {label} failed: {exc}", err=True)
+            failed_actions.append("runtime disable")
 
     if action_cfg.install == "block":
-        pe.record_scan_block("skill", skill_name, connector, enforcement_reason)
-        applied_actions.append("install blocked by this scan")
+        try:
+            pe.record_scan_block("skill", skill_name, connector, enforcement_reason)
+            applied_actions.append("install blocked by this scan")
+        except Exception as exc:
+            click.echo(f"[install] install block record failed: {exc}", err=True)
+            failed_actions.append("install block")
 
-    # A failed quarantine leaves the files in place, and a failed disable
-    # with nothing else applied leaves the asset active: either way the
-    # refusal did not take effect. A gateway that is down while the
-    # quarantine or install block applied refuses nothing less.
-    if "quarantine" in failed_actions or (post_decision.verdict == "rejected" and not applied_actions):
+    # A failed quarantine leaves the files in place, a failed install block
+    # with no quarantine leaves them installed, and a failed disable with
+    # nothing else applied leaves the asset active: either way the refusal
+    # did not take effect. A gateway that is down while the quarantine or
+    # install block applied refuses nothing less.
+    if (
+        "quarantine" in failed_actions
+        or ("install block" in failed_actions and "quarantined" not in applied_actions)
+        or (post_decision.verdict == "rejected" and not applied_actions)
+    ):
         # A refusal whose quarantine or disable could not be applied is
         # still a refusal: the install is rolled back and the command fails,
         # never a warning with the skill left in place (GAP-1457, GAP-1466).
-        _rollback_skill_install_paths(rollback_paths or [skill_path], backups)
+        _rollback_skill_install_paths([skill_path] if rollback_paths is None else rollback_paths, backups)
         failed = ", ".join(failed_actions) or "enforcement"
         ux.echo(
             f"error: refusing to install {skill_name!r} for connector={connector} — "
@@ -5821,6 +5853,8 @@ def _scan_installed_skill_for_connector(
             f"— actions applied: {actions_str}",
             err=True,
         )
+        if defer_action_failure:
+            return True
         raise SystemExit(1)
 
     click.echo(
@@ -5829,6 +5863,7 @@ def _scan_installed_skill_for_connector(
     )
     if app.logger:
         saved_change_audit(app.logger).log_action("install-warning", skill_name, detail)
+    return False
 
 
 @skill.command()
@@ -5965,44 +6000,62 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                 )
 
         pack_cache: RulePackOverlayCache = {}
-        for connector, _install_root in targets:
-            skill_path = installed_by_connector[connector]
-            pre_decision = pre_decisions[connector]
-            if pre_decision.verdict == "allowed":
-                if pre_decision.source == "scan-disabled":
-                    click.echo(
-                        f"[install] policy allows {skill_name!r} without scan "
-                        f"(connector={connector})"
-                    )
-                else:
-                    ux.echo(
-                        f"[install] {skill_name!r} is on the allow list for "
-                        f"connector={connector} — skipping scan"
-                    )
-                pe.set_source_path("skill", skill_name, skill_path, connector)
-                if app.logger:
-                    saved_change_audit(app.logger).log_action(
-                        "install-allowed",
-                        skill_name,
-                        f"reason=allow-listed connector={connector}" + _decision_generation(app),
-                    )
-                continue
+        enforced = False
+        try:
+            for connector, _install_root in targets:
+                skill_path = installed_by_connector[connector]
+                if not os.path.lexists(skill_path):
+                    # Quarantined for another connector that shares the root.
+                    continue
+                pre_decision = pre_decisions[connector]
+                if pre_decision.verdict == "allowed":
+                    if pre_decision.source == "scan-disabled":
+                        click.echo(
+                            f"[install] policy allows {skill_name!r} without scan "
+                            f"(connector={connector})"
+                        )
+                    else:
+                        ux.echo(
+                            f"[install] {skill_name!r} is on the allow list for "
+                            f"connector={connector} — skipping scan"
+                        )
+                    pe.set_source_path("skill", skill_name, skill_path, connector)
+                    if app.logger:
+                        saved_change_audit(app.logger).log_action(
+                            "install-allowed",
+                            skill_name,
+                            f"reason=allow-listed connector={connector}" + _decision_generation(app),
+                        )
+                    continue
 
-            _scan_installed_skill_for_connector(
-                app,
-                pe,
-                _build_skill_scanner(
+                if _scan_installed_skill_for_connector(
                     app,
+                    pe,
+                    _build_skill_scanner(
+                        app,
+                        connector=connector,
+                        pack_cache=pack_cache,
+                    ),
+                    skill_name,
+                    skill_path,
                     connector=connector,
-                    pack_cache=pack_cache,
-                ),
-                skill_name,
-                skill_path,
-                connector=connector,
-                take_action=take_action,
-                rollback_paths=installed_paths,
-                backups=backups,
-            )
+                    take_action=take_action,
+                    rollback_paths=installed_paths,
+                    backups=backups,
+                    defer_action_failure=True,
+                ):
+                    # Every connector is decided before the install fails,
+                    # so no new copy is left unscanned (and no replaced copy
+                    # lost) behind an earlier connector's quarantine.
+                    _keep_skill_enforcement(skill_path, installed_paths, backups)
+                    enforced = True
+        except BaseException:
+            # A refusal or a thrown error: every connector whose enforcement
+            # did not apply gets back exactly what was there (GAP-1483).
+            _rollback_skill_install_paths(installed_paths, backups)
+            raise
+        if enforced:
+            raise SystemExit(1)
     finally:
         _discard_skill_backups(backups)
 

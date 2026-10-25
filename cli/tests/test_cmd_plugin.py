@@ -3736,6 +3736,59 @@ class TestPluginInstallQuarantineNeverWarns(PluginCommandTestBase):
         self.assertEqual(self._content(dests["openclaw"]), "# old copy\n")
         self._assert_no_backup_left(dests)
 
+    BLOCK_ONLY = {"install": "block", "file": "none", "runtime": "enable"}
+
+    def test_a_thrown_enforcement_error_refuses_and_keeps_the_old_plugin(self):
+        """GAP-1483: an exception while the quarantine moves the copy, while
+        a disable or install block is recorded, or anywhere else in the
+        decision is a refused install: the rejected copy is gone, no partial
+        quarantine copy or record is left, and the replaced plugin is back
+        byte for byte."""
+
+        def partial_move(_src, dst, *a, **kw):
+            os.makedirs(dst)
+            with open(os.path.join(dst, "plugin.py"), "w") as f:
+                f.write("# partial\n")
+            raise OSError("no space left on device")
+
+        cases = {
+            "quarantine-move-raises": (self.FILE_ONLY, patch(
+                "defenseclaw.enforce.plugin_enforcer.shutil.move", side_effect=partial_move,
+            ), "failed=quarantine"),
+            "disable-record-raises": (self.RUNTIME_ONLY, patch.object(
+                PolicyEngine, "disable_for_connector", side_effect=RuntimeError("database is locked"),
+            ), "failed=runtime-disable"),
+            "block-record-raises": (self.BLOCK_ONLY, patch.object(
+                PolicyEngine, "record_scan_block", side_effect=RuntimeError("database is locked"),
+            ), "failed=install-block"),
+            "other-error": (self.FILE_ONLY, patch.object(
+                PolicyEngine, "set_source_path", side_effect=RuntimeError("database is locked"),
+            ), "failed=error"),
+        }
+        for label, (action, ctx, reason) in cases.items():
+            with self.subTest(label):
+                name = f"thrown-{label}"
+                dests = {"openclaw": os.path.join(self.app.cfg.plugin_dirs("openclaw")[0], name)}
+                self._seed_old_copies_named(name, dests)
+                with patch("defenseclaw.commands.cmd_plugin._normalize_runtime_connector", return_value="hermes"), ctx:
+                    result, _ = self._install(name, ["--force", "--action"], action)
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn("refusing to install", result.output)
+                self.assertEqual(self._content(dests["openclaw"]), "# old copy\n")
+                self._assert_no_backup_left(dests)
+                details = [e.details for e in self.app.store.list_events(50) if e.action == "install-rejected"]
+                self.assertTrue([d for d in details if reason in d], details)
+                quarantine = PluginEnforcer(self.app.cfg.quarantine_dir).quarantine_path(name, "openclaw")
+                self.assertFalse(os.path.lexists(quarantine), "a partial quarantine copy was left")
+                self.assertFalse(self.app.store.has_action("plugin", name, "file", "quarantine", "openclaw"))
+
+    def _seed_old_copies_named(self, name, dests):
+        result, _ = self._install(name, [], {"install": "none", "file": "none", "runtime": "enable"})
+        self.assertEqual(result.exit_code, 0, result.output)
+        for dest in dests.values():
+            with open(os.path.join(dest, "plugin.py"), "w") as f:
+                f.write("# old copy\n")
+
     def test_plugin_scan_reports_a_file_only_quarantine_as_rejected(self):
         from datetime import datetime, timedelta, timezone
 

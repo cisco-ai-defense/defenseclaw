@@ -4277,6 +4277,79 @@ class TestSkillInstallQuarantineNeverWarns(SkillCommandTestBase):
         self.assertFalse(os.path.exists(paths[0]))
         self._assert_no_backup_left(paths)
 
+    BLOCK_ONLY = {"install": "block", "file": "none", "runtime": "enable"}
+
+    def test_a_thrown_enforcement_error_restores_the_replaced_skill(self):
+        """GAP-1483: an exception while the quarantine moves the copy, while
+        a disable or install block is recorded, or while the scanner is
+        built is a refused install: the rejected copy is gone, no quarantine
+        record is left, and the replaced skill is back byte for byte."""
+        from defenseclaw.enforce.skill_enforcer import SkillEnforcer
+
+        cases = {
+            "quarantine-move-raises": (self.FILE_ONLY, patch.object(
+                SkillEnforcer, "quarantine", side_effect=OSError("no space left on device"),
+            ), "failed=quarantine"),
+            "disable-record-raises": (self.RUNTIME_ONLY, patch.object(
+                PolicyEngine, "disable_for_connector", side_effect=RuntimeError("database is locked"),
+            ), "failed=runtime-disable"),
+            "block-record-raises": (self.BLOCK_ONLY, patch.object(
+                PolicyEngine, "record_scan_block", side_effect=RuntimeError("database is locked"),
+            ), "failed=install-block"),
+            "scanner-build-raises": (self.FILE_ONLY, patch(
+                "defenseclaw.commands.cmd_skill._build_skill_scanner", side_effect=RuntimeError("bad rule pack"),
+            ), None),
+        }
+        for label, (action, ctx, reason) in cases.items():
+            with self.subTest(label):
+                name = f"thrown-{label}"
+                paths = self._seed_old_copy(name)
+                with patch("defenseclaw.commands.cmd_skill._normalize_runtime_connector", return_value="hermes"), ctx:
+                    result, _ = self._install(name, ["--force", "--action"], action)
+                self._assert_old_copy_restored(result, paths)
+                if reason:
+                    details = [e.details for e in self.app.store.list_events(50) if e.action == "install-rejected"]
+                    self.assertTrue([d for d in details if reason in d], details)
+                self.assertEqual(self.app.store.list_quarantine_records("skill", name), [])
+
+    def test_an_earlier_quarantine_still_decides_every_later_connector(self):
+        """A quarantine applied on the first connector does not end the
+        install before the second connector is decided: the second one's
+        failed quarantine refuses and puts its replaced copy back, and the
+        first one's quarantine stands without its old copy coming back."""
+        from defenseclaw.commands import cmd_skill as cmd_skill_module
+
+        self._connector_roots()
+        paths = dict(zip(["hermes", "openclaw"], self._seed_old_copy("old-q2")))
+        real = cmd_skill_module._quarantine_skill_with_provenance
+        calls: list[str] = []
+
+        def quarantine(app, pe, skill_name, skill_path, connector, reason):
+            calls.append(connector)
+            if len(calls) == 1:
+                return real(app, pe, skill_name, skill_path, connector, reason)
+            return None
+
+        with patch("defenseclaw.commands.cmd_skill._quarantine_skill_with_provenance", new=quarantine):
+            result, _ = self._install("old-q2", ["--force", "--action"], self.FILE_ONLY)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(calls, ["openclaw", "hermes"])
+        self.assertFalse(os.path.exists(paths["openclaw"]), "the quarantined copy's old skill came back")
+        with open(os.path.join(paths["hermes"], "SKILL.md"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), "# old copy\n")
+        self._assert_no_backup_left(list(paths.values()))
+
+    def test_an_earlier_quarantine_lets_a_clean_later_connector_stand(self):
+        roots = self._connector_roots()
+        paths = dict(zip(["hermes", "openclaw"], self._seed_old_copy("old-q3")))
+        result, scanned = self._install("old-q3", ["--force", "--action"], self.FILE_ONLY, clean_root=roots["hermes"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(len(scanned), 2, "the later connector was never scanned")
+        self.assertFalse(os.path.exists(paths["openclaw"]))
+        with open(os.path.join(paths["hermes"], "SKILL.md"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), "# old-q3\n")
+        self._assert_no_backup_left(list(paths.values()))
+
     def test_skill_scan_reports_a_file_only_quarantine_as_blocking(self):
         from defenseclaw.commands.cmd_skill import _skill_scan_would_install_block
 
