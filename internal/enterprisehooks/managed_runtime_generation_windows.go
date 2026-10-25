@@ -49,6 +49,16 @@ var (
 	windowsManagedRuntimeSelectorLockRetry                   = 50 * time.Millisecond
 	windowsManagedRuntimeSelectorMutationAuthorize           = requireWindowsEnterpriseAdministrator
 	windowsManagedRuntimeSelectorVerifyAuthorize             = requireWindowsEnterpriseAdministrator
+	// A guardian repair of a per-user connector gives <data dir> and
+	// <data dir>\hooks the owner-private setup DACL for the length of the
+	// connector's setup (relaxWindowsStandalonePerUserDirectory), about a
+	// third of a second live. A hook resolving meanwhile waits up to this
+	// long for the canonical DACL to return (GAP-1502).
+	windowsManagedRuntimeSetupRelaxWait = 2 * time.Second
+	windowsManagedRuntimeSetupRelaxPoll = 25 * time.Millisecond
+	// windowsManagedRuntimeResolveSelectorRead runs after each first selector
+	// read of a resolve attempt; a seam for the publication race test.
+	windowsManagedRuntimeResolveSelectorRead = func() {}
 )
 
 type windowsManagedRuntimeSelector struct {
@@ -318,6 +328,7 @@ func resolveWindowsManagedRuntimeGenerationPlatform(
 				ErrWindowsManagedRuntimeGenerationPending,
 			)
 		}
+		windowsManagedRuntimeResolveSelectorRead()
 		entry, ok := windowsManagedRuntimeSelectorTargetForSID(selector, opts.TargetSID)
 		if !ok {
 			return result, fmt.Errorf(
@@ -328,11 +339,17 @@ func resolveWindowsManagedRuntimeGenerationPlatform(
 		if err := validateWindowsManagedRuntimeSelectorTargetAgainstResolve(entry, opts); err != nil {
 			return result, err
 		}
-		if err := validateWindowsManagedRuntimeGenerationRoots(opts.DataDir, target); err != nil {
+		if err := settledWindowsManagedRuntimeGenerationRoots(opts.DataDir, target); err != nil {
 			return result, err
 		}
 		bundle, _, _, err := loadWindowsManagedRuntimeBundle(entry, target)
 		if err != nil {
+			// A reconcile that published a new generation retires the
+			// bundle this attempt's selector named. Only a selector that
+			// changed since that read makes a missing bundle a retry.
+			if errors.Is(err, os.ErrNotExist) && windowsManagedRuntimeSelectorChangedSince(opts.Connector, first) {
+				continue
+			}
 			return result, err
 		}
 		if err := validateWindowsManagedRuntimeBundleAgainstSelector(bundle, entry); err != nil {
@@ -1712,6 +1729,70 @@ func validateWindowsManagedRuntimeGenerationRoots(dataDir string, target *window
 		}
 	}
 	return nil
+}
+
+// settledWindowsManagedRuntimeGenerationRoots is the hook-side root check.
+// The guardian relaxes <data dir> (Hermes) and <data dir>\hooks to the exact
+// owner-private setup DACL while it runs a per-user connector's setup or
+// teardown, then hardens them again. Every managed hook of that account
+// resolving in that window was refused as "not set up correctly" (GAP-1502).
+// Only that exact target-owned shape waits, at most
+// windowsManagedRuntimeSetupRelaxWait, and the check then runs once more; any
+// other DACL, and a relaxed one that does not return, fails as before.
+func settledWindowsManagedRuntimeGenerationRoots(dataDir string, target *windows.SID) error {
+	err := validateWindowsManagedRuntimeGenerationRoots(dataDir, target)
+	if err == nil || !windowsManagedRuntimeRootsSetupRelaxed(dataDir, target) {
+		return err
+	}
+	deadline := time.Now().Add(windowsManagedRuntimeSetupRelaxWait)
+	for windowsManagedRuntimeRootsSetupRelaxed(dataDir, target) && time.Now().Before(deadline) {
+		time.Sleep(windowsManagedRuntimeSetupRelaxPoll)
+	}
+	return validateWindowsManagedRuntimeGenerationRoots(dataDir, target)
+}
+
+// windowsManagedRuntimeRootsSetupRelaxed reports whether <data dir> or its
+// hooks child is a plain directory owned by target whose DACL is exactly the
+// guardian's setup shape (windowsSetupRelaxedDirectorySDDL).
+func windowsManagedRuntimeRootsSetupRelaxed(dataDir string, target *windows.SID) bool {
+	for _, path := range []string{dataDir, filepath.Join(dataDir, "hooks")} {
+		if windowsManagedRuntimeDirSetupRelaxed(path, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func windowsManagedRuntimeDirSetupRelaxed(path string, target *windows.SID) bool {
+	if target == nil {
+		return false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	owner, _, err := sd.Owner()
+	if err != nil || owner == nil || !owner.Equals(target) {
+		return false
+	}
+	relaxed, err := windowsSetupRelaxedDirectoryDACL(sd)
+	return err == nil && relaxed
+}
+
+// windowsManagedRuntimeSelectorChangedSince reports whether the connector's
+// protected selector now differs from the bytes first read.
+func windowsManagedRuntimeSelectorChangedSince(connectorName string, first []byte) bool {
+	_, current, exists, err := readWindowsManagedRuntimeSelector(connectorName, true)
+	return err == nil && exists && !bytes.Equal(first, current)
 }
 
 func newWindowsManagedRuntimeGenerationID() (string, error) {
