@@ -810,8 +810,8 @@ var windowsEnterpriseHotConfigTargetHooksProven = func(ctx context.Context, layo
 
 // windowsEnterpriseHotConfigUnprovenTargetHooks runs enterprise hooks readiness
 // --json for the installed Windows manifest. It returns targets whose row is
-// neither verified nor pending. The command exits nonzero when any target
-// fails, so its report is read whatever its exit status.
+// neither verified nor pending. Unrelated target failures may make the command
+// exit nonzero; protected authorization and the report scope must still hold.
 func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installedCLI string, layout managed.StandaloneLayout, targets []enterprisehooks.ManifestTarget) ([]enterprisehooks.ManifestTarget, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -819,13 +819,32 @@ func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installe
 	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseServicePins(layout))
 	out, runErr := command.Output()
 	var report struct {
-		Results []enterpriseHookReconcileRow `json:"results"`
+		OK                 *bool                        `json:"ok"`
+		Scope              string                       `json:"scope"`
+		AuthorizationError string                       `json:"authorization_error"`
+		Results            []enterpriseHookReconcileRow `json:"results"`
 	}
 	if err := json.Unmarshal(out, &report); err != nil {
 		if runErr != nil {
 			return targets, fmt.Errorf("enterprise hooks readiness: %w", runErr)
 		}
 		return targets, fmt.Errorf("read the enterprise hooks readiness report: %w", err)
+	}
+	if report.OK == nil || report.Scope != "machine_hook_registration" || report.AuthorizationError != "" ||
+		(*report.OK && runErr != nil) {
+		return targets, errors.New("enterprise hooks readiness did not prove protected authorization")
+	}
+	if !*report.OK {
+		unrelatedFailure := false
+		for _, row := range report.Results {
+			if !row.OK && !row.Pending {
+				unrelatedFailure = true
+				break
+			}
+		}
+		if !unrelatedFailure || runErr == nil {
+			return targets, errors.New("enterprise hooks readiness returned an invalid result")
+		}
 	}
 	return windowsHotConfigUnprovenTargets(targets, report.Results), nil
 }
