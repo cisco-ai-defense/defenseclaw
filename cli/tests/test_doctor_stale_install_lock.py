@@ -349,7 +349,11 @@ def test_a_pinned_lock_cannot_be_moved_or_removed_and_goes_by_its_handle(account
             os.rename(lock, account.data / "aside")
         with pytest.raises(OSError):
             os.rmdir(lock)
-        assert cmd_doctor._remove_held_install_lock(str(lock), held) == "removed"
+        # Doctor claims the pinned lock (a file in it) and the handle then
+        # removes exactly that folder, its claim last.
+        claim = cmd_doctor._claim_install_lock(str(lock), held)
+        assert (lock / claim).read_text(encoding="ascii").splitlines()[0] == str(os.getpid())
+        assert cmd_doctor._remove_held_install_lock(str(lock), held, (), claim) == "removed"
     finally:
         cmd_doctor._close_install_lock(held)
     assert not os.path.lexists(lock)

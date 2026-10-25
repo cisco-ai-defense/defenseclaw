@@ -17,7 +17,11 @@ func TestEndedTellsAnExitedUnreapedProcessFromALiveOne(t *testing.T) {
 	if Ended(os.Getpid()) {
 		t.Fatal("this process reads as ended")
 	}
-	child := exec.Command(os.Args[0], "-test.run=^$")
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(self, "-test.run=^$")
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
