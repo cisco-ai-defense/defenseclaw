@@ -24,6 +24,7 @@ import functools
 import json
 import os
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -324,6 +325,64 @@ def _legacy_balanced_default_mcp(adm: Any) -> bool:
         "MEDIUM": (_QUARANTINE, False),
         "LOW": (SeverityAction(file="none", runtime="disable", install="none"), False),
     }
+
+
+#: The keys :func:`_legacy_balanced_default_mcp` (and Go
+#: legacyBalancedDefaultMCP) read.
+_LEGACY_DEFAULT_MCP_INPUTS = (
+    ("admission", "defaults", "scan_on_install"),
+    ("admission", "defaults", "allow_list_bypass_scan"),
+    ("admission", "defaults", "actions"),
+    ("admission", "mcp", "actions"),
+)
+
+
+def _write_touches(path: tuple, key: tuple) -> bool:
+    """Whether a write at *path* sets or unsets *key* (one is a prefix of the other)."""
+    n = min(len(path), len(key))
+    return tuple(path[:n]) == tuple(key[:n])
+
+
+def legacy_default_mcp_pins(before: Any, after: Callable[[], Any], paths: list[tuple]) -> dict[tuple, Any]:
+    """The ``admission.mcp.actions`` a config write adds so the pre-1.0.4
+    default MCP compatibility covers only an untouched preset (GAP-1488).
+
+    *before* is config.yaml, parsed, before a write of the key *paths*, and
+    *after()* returns it parsed after the write. When *before* is the old default preset and the write touches a
+    key the compatibility rule reads, each MCP HIGH, MEDIUM and LOW the write
+    did not decide keeps its translated ``warn`` as an explicit
+    ``admission.mcp.actions.<severity>``. One it decided (its own MCP key, or
+    the defaults key MCP inherits it from) compiles as written, in Go and in
+    Python, never as warn. Empty when the write needs nothing."""
+    from defenseclaw.config import _merge_admission
+
+    def legacy(document: Any) -> bool:
+        return isinstance(document, dict) and _legacy_balanced_default_mcp(_merge_admission(document.get("admission")))
+
+    paths = [tuple(path) for path in paths]
+    if not any(_write_touches(path, key) for path in paths for key in _LEGACY_DEFAULT_MCP_INPUTS):
+        return {}
+    if not legacy(before):
+        return {}
+    written = {str(sev).lower() for sev in before["admission"]["mcp"]["actions"]}
+    pins: dict[tuple, Any] = {}
+    for severity in ("high", "medium", "low"):
+        own = ("admission", "mcp", "actions", severity)
+        inherited = ("admission", "defaults", "actions", severity)
+        decided = any(_write_touches(path, own) for path in paths) or (
+            severity not in written and any(_write_touches(path, inherited) for path in paths)
+        )
+        if not decided:
+            pins[own] = "warn"
+    if not pins and legacy(after_document := after()):
+        # The write decided all three with the preset's own values. Name the
+        # HIGH that MCP inherits under MCP, so the shape is no longer the
+        # preset's and both compilers compile what was written.
+        defaults = after_document["admission"]["defaults"]["actions"]
+        pins[("admission", "mcp", "actions", "high")] = next(
+            value for sev, value in defaults.items() if str(sev).lower() == "high"
+        )
+    return pins
 
 
 def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:

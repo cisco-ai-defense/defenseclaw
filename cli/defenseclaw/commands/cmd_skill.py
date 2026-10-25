@@ -5553,6 +5553,39 @@ def _stage_skill_tree_for_connector(
     return real_target
 
 
+def _decision_inputs_for_shared_skill_paths(
+    stages: dict[str, tuple[str, str, str]], staged_by_connector: dict[str, str], skill_name: str,
+) -> dict[str, str]:
+    """The copy each connector scans and enforces on. A connector alone on
+    its install path decides the staged copy. Connectors that share one get
+    a copy each inside that path's stage directory, so a quarantine on one
+    never takes the input of another, and the staged copy stays for the
+    swap. Made before any decision: a failure here changes nothing."""
+    import tempfile
+
+    sharing: dict[str, list[str]] = {}
+    for connector, key in staged_by_connector.items():
+        sharing.setdefault(key, []).append(connector)
+    inputs: dict[str, str] = {}
+    for key, connectors in sharing.items():
+        stage_dir, staged_path, _target = stages[key]
+        for connector in connectors:
+            if len(connectors) == 1:
+                inputs[connector] = staged_path
+                continue
+            path = os.path.join(tempfile.mkdtemp(prefix=".dclaw-stage-input-", dir=stage_dir), skill_name)
+            try:
+                shutil.copytree(staged_path, path, symlinks=True)
+            except OSError as exc:
+                click.echo(f"error: could not stage {skill_name!r} for connector={connector}: {exc}", err=True)
+                raise SystemExit(1) from exc
+            if not _validate_staged_skill_tree(path):
+                click.echo("error: copied ClawHub skill contains an unsafe path alias", err=True)
+                raise SystemExit(1)
+            inputs[connector] = path
+    return inputs
+
+
 def _swap_staged_skill(
     stage_dir: str,
     staged_path: str,
@@ -6000,17 +6033,18 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                 staged_by_connector[connector] = _stage_skill_tree_for_connector(
                     staged_skill, install_root, skill_name, force=force, stages=stages,
                 )
+        inputs = _decision_inputs_for_shared_skill_paths(stages, staged_by_connector, skill_name)
 
         pack_cache: RulePackOverlayCache = {}
         refused: set[str] = set()
         for connector, _install_root in targets:
+            # Every connector decides and enforces on its own input, also
+            # after another connector that shares the install path refused
+            # or quarantined it, so none is left without its disable or block
+            # record. The shared copy is swapped in only if none refuses.
             key = staged_by_connector[connector]
-            _stage_root, staged_path, skill_path = stages[key]
-            if key in refused or not os.path.lexists(staged_path):
-                # Refused or quarantined for another connector that shares
-                # the install path: that copy is never swapped in.
-                refused.add(key)
-                continue
+            skill_path = stages[key][2]
+            staged_path = inputs[connector]
             pre_decision = pre_decisions[connector]
             if pre_decision.verdict == "allowed":
                 if pre_decision.source == "scan-disabled":

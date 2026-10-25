@@ -55,10 +55,12 @@ from tests.helpers import cleanup_app, make_app_context
 
 def _installed_path(path):
     """The install path of a copy an install staged in its own
-    ``.dclaw-stage-*`` directory (scanners see the staged copy)."""
+    ``.dclaw-stage-*`` directory (scanners see the staged copy, or a
+    connector's own copy inside it when connectors share the path)."""
     parent = os.path.dirname(path)
-    if os.path.basename(parent).startswith(".dclaw-stage-"):
-        return os.path.join(os.path.dirname(parent), os.path.basename(path))
+    while os.path.basename(parent).startswith(".dclaw-stage-"):
+        path = os.path.join(os.path.dirname(parent), os.path.basename(path))
+        parent = os.path.dirname(path)
     return path
 
 
@@ -4453,6 +4455,42 @@ class TestSkillInstallQuarantineNeverWarns(SkillCommandTestBase):
                     else:
                         self.assertFalse(os.path.lexists(paths[0]), "the refused shared copy is live")
                         self._assert_no_backup_left(paths)
+
+    def test_a_shared_root_refusal_still_decides_and_enforces_every_connector(self):
+        """Two connectors share one skill path. A quarantine or refusal on
+        the first never takes the second one's input: each connector is
+        scanned and gets its own quarantine, disable and block records, the
+        installed skill stays as it was, and the new copy is never live."""
+        shared = os.path.join(self.tmp_dir, "openclaw-skills")
+        cases = {
+            "quarantine": ("quarantine", ("file", "runtime", "install")),
+            "file-and-disable": ({"install": "none", "file": "quarantine", "runtime": "disable"}, ("file", "runtime")),
+            "install-only-block": (self.BLOCK_ONLY, ("install",)),
+            "runtime-only-disable": (self.RUNTIME_ONLY, ("runtime",)),
+        }
+        expected = {"file": "quarantine", "runtime": "disable", "install": "block"}
+        for label, (action, fields) in cases.items():
+            for order in (["openclaw", "hermes"], ["hermes", "openclaw"]):
+                with self.subTest(label, order=order):
+                    self._connector_roots(hermes_root=shared)
+                    self.app.cfg.active_connectors = lambda order=order: list(order)  # type: ignore[method-assign]
+                    name = f"shd-{label}-{order[0]}"
+                    paths = self._seed_old_copy(name)
+                    with patch("defenseclaw.commands.cmd_skill._normalize_runtime_connector", return_value="hermes"):
+                        result, scanned = self._install(name, ["--force", "--action"], action)
+                    self.assertEqual(scanned, [os.path.join(shared, name)] * 2, "a connector was never decided")
+                    self._assert_old_copy_restored(result, paths)
+                    for connector in order:
+                        entry = self.app.store.get_action("skill", name, connector)
+                        self.assertIsNotNone(entry, f"no enforcement record for connector={connector}")
+                        for field_name in fields:
+                            self.assertEqual(getattr(entry.actions, field_name), expected[field_name],
+                                             f"connector={connector} {field_name}")
+                        if "file" in fields:
+                            self.assertTrue(
+                                self.app.store.list_quarantine_records("skill", name, connector=connector),
+                                f"no quarantine for connector={connector}",
+                            )
 
     def test_a_shared_root_allow_and_refusal_never_swaps_the_copy_in(self):
         """GAP-1495: one connector finds the shared copy clean, the other

@@ -965,3 +965,41 @@ def test_schema_length_error_names_the_fields_limit() -> None:
     assert config_writer.plain_error(caught.value, value="a" * 513) == (
         "openshell.admin.request_access is longer than 512 characters (it has 513)"
     )
+
+
+def test_a_write_over_the_legacy_default_keeps_what_it_decides(tmp_path, monkeypatch):
+    """GAP-1488: the pre-1.0.4 default MCP compatibility (HIGH, MEDIUM, LOW
+    warn) covers only an untouched preset. A write that decides an MCP
+    severity, also with the preset's own value, compiles it as written; one
+    it did not decide keeps its warn. internal/policy compiles the same
+    admission blocks in Go (TestWritesOverTheLegacyDefaultCompileInGo)."""
+    import json
+    from pathlib import Path
+
+    from defenseclaw.config import _merge_admission, default_config
+    from defenseclaw.enforce.admission import action_blocks, compile_admission
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(config_writer, "_use_go_validator", lambda: False)
+    fixture = json.loads(
+        (Path(__file__).resolve().parents[2] / "testdata" / "admission_legacy_default_writes.json").read_text()
+    )
+
+    def verdicts(admission):
+        cfg = default_config()
+        cfg.admission = _merge_admission(admission)
+        actions = compile_admission(cfg, "mcp").actions
+        return {sev: "rejected" if action_blocks(actions[sev][0]) else "warning"
+                for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW")}
+
+    assert verdicts(fixture["legacy"]) == {"CRITICAL": "rejected", "HIGH": "warning", "MEDIUM": "warning", "LOW": "warning"}
+    for index, case in enumerate(fixture["cases"]):
+        folder = tmp_path / str(index)
+        folder.mkdir()
+        legacy = yaml.safe_dump({"admission": json.loads(json.dumps(fixture["legacy"]))}, sort_keys=False)
+        path = _config(folder, legacy)
+        changes = [Change(w[0], w[1]) if len(w) == 2 else Change(w[0], unset=True) for w in case["writes"]]
+        config_writer.apply(changes, "cli:test", "test", path=path)
+        written = yaml.safe_load(open(path, encoding="utf-8"))["admission"]
+        assert written == case["admission"], case["name"]
+        assert verdicts(written) == case["verdicts"], case["name"]

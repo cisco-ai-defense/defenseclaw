@@ -1,0 +1,869 @@
+{
+ "_comment": "GAP-1488: config writes over the pre-1.0.4 default preset (legacy). cli/tests/test_config_writer.py applies each case's writes with the config writer and checks the written admission block and the Python verdicts; internal/policy compiles the same admission block in Go. verdicts are for one MCP finding of that severity.",
+ "legacy": {
+  "defaults": {
+   "scan_on_install": true,
+   "allow_list_bypass_scan": true,
+   "actions": {
+    "critical": {
+     "file": "quarantine",
+     "runtime": "disable",
+     "install": "block"
+    },
+    "high": {
+     "file": "quarantine",
+     "runtime": "disable",
+     "install": "block"
+    },
+    "medium": {
+     "file": "none",
+     "runtime": "enable",
+     "install": "none"
+    },
+    "low": {
+     "file": "none",
+     "runtime": "enable",
+     "install": "none"
+    },
+    "info": {
+     "file": "none",
+     "runtime": "enable",
+     "install": "none"
+    }
+   }
+  },
+  "mcp": {
+   "actions": {
+    "medium": {
+     "file": "quarantine",
+     "runtime": "disable",
+     "install": "block"
+    },
+    "low": {
+     "file": "none",
+     "runtime": "disable",
+     "install": "none"
+    }
+   }
+  },
+  "plugin": {
+   "actions": {
+    "high": {
+     "file": "quarantine",
+     "runtime": "disable",
+     "install": "block"
+    },
+    "medium": {
+     "file": "none",
+     "runtime": "enable",
+     "install": "none"
+    }
+   }
+  }
+ },
+ "cases": [
+  {
+   "name": "defaults HIGH set to the quarantine shorthand",
+   "writes": [
+    [
+     "admission.defaults.actions.high",
+     "quarantine"
+    ]
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "rejected",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": "quarantine",
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "defaults HIGH set to the preset's own triple",
+   "writes": [
+    [
+     "admission.defaults.actions.high",
+     {
+      "file": "quarantine",
+      "runtime": "disable",
+      "install": "block"
+     }
+    ]
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "rejected",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "MCP HIGH set to quarantine",
+   "writes": [
+    [
+     "admission.mcp.actions.high",
+     "quarantine"
+    ]
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "rejected",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": "warn",
+      "high": "quarantine"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "MCP MEDIUM set to the preset's quarantine as a shorthand",
+   "writes": [
+    [
+     "admission.mcp.actions.medium",
+     "quarantine"
+    ]
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "warning",
+    "MEDIUM": "rejected",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "quarantine",
+      "low": "warn",
+      "high": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "MCP LOW set to the preset's own triple",
+   "writes": [
+    [
+     "admission.mcp.actions.low",
+     {
+      "file": "none",
+      "runtime": "disable",
+      "install": "none"
+     }
+    ]
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "warning",
+    "MEDIUM": "warning",
+    "LOW": "rejected"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": {
+       "file": "none",
+       "runtime": "disable",
+       "install": "none"
+      },
+      "high": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "all three set to the preset's own values",
+   "writes": [
+    [
+     "admission.defaults.actions.high",
+     {
+      "file": "quarantine",
+      "runtime": "disable",
+      "install": "block"
+     }
+    ],
+    [
+     "admission.mcp.actions.medium",
+     {
+      "file": "quarantine",
+      "runtime": "disable",
+      "install": "block"
+     }
+    ],
+    [
+     "admission.mcp.actions.low",
+     {
+      "file": "none",
+      "runtime": "disable",
+      "install": "none"
+     }
+    ]
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "rejected",
+    "MEDIUM": "rejected",
+    "LOW": "rejected"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "disable",
+       "install": "none"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      }
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "the whole MCP action map set",
+   "writes": [
+    [
+     "admission.mcp.actions",
+     {
+      "high": "quarantine"
+     }
+    ]
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "rejected",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "high": "quarantine"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "an unrelated defaults flag set",
+   "writes": [
+    [
+     "admission.defaults.allow_list_bypass_scan",
+     false
+    ]
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "warning",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": false,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": "warn",
+      "high": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "defaults MEDIUM set to allow",
+   "writes": [
+    [
+     "admission.defaults.actions.medium",
+     "allow"
+    ]
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "warning",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": "allow",
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": "warn",
+      "low": "warn",
+      "high": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "MCP MEDIUM unset",
+   "writes": [
+    [
+     "admission.mcp.actions.medium"
+    ]
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "warning",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "low": "warn",
+      "high": "warn"
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "a skill action set",
+   "writes": [
+    [
+     "admission.skill.actions.high",
+     "block"
+    ]
+   ],
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "warning",
+    "MEDIUM": "warning",
+    "LOW": "warning"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "disable",
+       "install": "none"
+      }
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "skill": {
+     "actions": {
+      "high": "block"
+     }
+    }
+   }
+  }
+ ]
+}

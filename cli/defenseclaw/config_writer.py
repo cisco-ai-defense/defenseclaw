@@ -1015,14 +1015,29 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
             _check_destination_index(document, change.path, parts)
             mutations.append(V8YAMLMutation.set(parts, change.value))
         changed.append(change.path)
-    if not mutations:
-        return current, []
-    if not current.strip():
+    # GAP-1488: a write over the pre-1.0.4 default preset keeps the MCP
+    # balanced compatibility only for what it did not decide. This also
+    # applies when the written value equals the preset's.
+    from defenseclaw.enforce.admission import legacy_default_mcp_pins
+
+    def prepare(edits: list[Any]) -> bytes:
+        return prepare_v8_yaml_write(current, _ordered_mutations(edits), source_name=source_name, any_path=True).candidate
+
+    if mutations and not current.strip():
         from defenseclaw.config import CURRENT_CONFIG_VERSION
 
         current = f"config_version: {CURRENT_CONFIG_VERSION}\n".encode()
-    prepared = prepare_v8_yaml_write(current, _ordered_mutations(mutations), source_name=source_name, any_path=True)
-    return prepared.candidate, changed
+    candidate = prepare(mutations) if mutations else current
+    explicit = [parse_path(change.path) for change in changes]
+    pins = legacy_default_mcp_pins(document, lambda: _parse_config_document(candidate), explicit)
+    for parts, value in pins.items():
+        mutations.append(V8YAMLMutation.set(parts, value))
+        changed.append(format_path(parts))
+    if not mutations:
+        return current, []
+    if pins:
+        candidate = prepare(mutations)
+    return candidate, changed
 
 
 def render_document(current: bytes, document: dict[str, Any], source_name: str) -> bytes:
