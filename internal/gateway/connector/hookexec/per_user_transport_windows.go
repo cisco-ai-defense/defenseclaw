@@ -36,11 +36,12 @@ func newPerUserHookHTTPClient(timeout time.Duration, apiAddr string) (*http.Clie
 			return dialer.DialContext(ctx, "tcp4", endpoint)
 		},
 		func(conn net.Conn) error {
-			pid, err := managedEnterpriseConnectedPID(conn)
-			if err != nil {
-				return err
+			client, clientOK := conn.LocalAddr().(*net.TCPAddr)
+			server, serverOK := conn.RemoteAddr().(*net.TCPAddr)
+			if !clientOK || !serverOK || !server.IP.IsLoopback() || server.Port != port {
+				return errors.New("connected gateway endpoint is not the configured loopback port")
 			}
-			return connectedPerUserProcessOwned(pid)
+			return verifyPerUserConnectedTuple(client, server)
 		},
 	), nil
 }
@@ -82,9 +83,31 @@ func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
 	if err != nil {
 		return err
 	}
-	pid, err := connectedManagedGatewayPIDForEndpoints(clientEndpoint, serverEndpoint)
-	if err != nil {
-		return err
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return awaitPerUserWindowsSocket(ctx, func() (uint32, error) {
+		return connectedManagedGatewayPIDForEndpoints(clientEndpoint, serverEndpoint)
+	}, connectedPerUserProcessOwned)
+}
+
+// Connect can complete before GetExtendedTcpTable exposes the accepted row.
+// Keep the connection held and retry only an absent exact reverse tuple.
+func awaitPerUserWindowsSocket(ctx context.Context, inspect func() (uint32, error), owned func(uint32) error) error {
+	for {
+		if ctx.Err() != nil {
+			return errConnectedSocketNotFound
+		}
+		pid, err := inspect()
+		if err == nil {
+			return owned(pid)
+		}
+		if !errors.Is(err, errConnectedSocketNotFound) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errConnectedSocketNotFound
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
-	return connectedPerUserProcessOwned(pid)
 }
