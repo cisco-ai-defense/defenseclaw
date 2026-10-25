@@ -153,7 +153,7 @@ func TestEnterpriseWindowsManifestModeStalledScanPublishesByTheDeadline(t *testi
 		return enterprisehooks.Manifest{}, nil
 	}
 	want := aliceSID + "/claudecode/agent_install_scan_incomplete," + aliceSID + "/hermes/agent_install_scan_incomplete," + bobSID + "/codex/agent_install_scan_incomplete"
-	cycle := func(name string, guard time.Duration) {
+	cycle := func(name string, guard time.Duration, scanLog bool) {
 		t.Helper()
 		var published []string
 		enterpriseWindowsEnumerateUnprotectedWriter = func(_ string, agents []enterprisehooks.UnprotectedAgent) (bool, error) {
@@ -182,13 +182,13 @@ func TestEnterpriseWindowsManifestModeStalledScanPublishesByTheDeadline(t *testi
 		if got := strings.Join(published, ","); got != want {
 			t.Fatalf("%s: published = %s, want %s", name, got, want)
 		}
-		if !strings.Contains(stderr.String(), "did not finish") || !strings.Contains(stderr.String(), "before the stall") {
-			t.Fatalf("%s: log = %q, want the scan log and a did-not-finish warning", name, stderr.String())
+		if !strings.Contains(stderr.String(), "did not finish") || strings.Contains(stderr.String(), "before the stall") != scanLog || strings.Contains(stderr.String(), "after the stall") {
+			t.Fatalf("%s: log = %q, want a did-not-finish warning and only this cycle's scan log", name, stderr.String())
 		}
 	}
-	cycle("stalled cycle", 6*time.Second)
+	cycle("stalled cycle", 6*time.Second, true)
 	// The call is still stalled: the next cycle answers at once, scan timed out.
-	cycle("next cycle while stalled", time.Second)
+	cycle("next cycle while stalled", time.Second, false)
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("enumerator calls = %d, want 1: a cycle started a second scan behind the stalled one", got)
 	}
