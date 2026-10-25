@@ -120,9 +120,12 @@ func TestInstructionBenignCreatedDirectoryKeepsItsRecord(t *testing.T) {
 			if err := os.Symlink(other, filepath.Join(s.base, "new")); err != nil {
 				t.Skipf("symlinks unavailable: %v", err)
 			}
-			if got := call(t, s, other, sightingUpdatePatch); got.Action != guardrailActionBlock ||
-				!findingStringHasRuleID(got.Findings, "COG-AGENTS-MD") {
-				t.Fatalf("a link at a missing spelling made an existing AGENTS.md writable: %+v", got)
+			// Through the link at the missing spelling and at the directory.
+			for _, cwd := range []string{filepath.Join(s.base, "new"), other} {
+				if got := call(t, s, cwd, sightingUpdatePatch); got.Action != guardrailActionBlock ||
+					!findingStringHasRuleID(got.Findings, "COG-AGENTS-MD") {
+					t.Fatalf("a link at a missing spelling made an existing AGENTS.md writable at %s: %+v", cwd, got)
+				}
 			}
 		})
 	}

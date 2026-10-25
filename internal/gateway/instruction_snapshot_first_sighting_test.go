@@ -158,9 +158,12 @@ func TestInstructionBenignManagedCreatedDirectoryHiddenHome(t *testing.T) {
 		if err := os.Symlink(other, filepath.Join(s.base, "new")); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
-		if got := s.patch(other, sightingUpdatePatch); got.Action != guardrailActionBlock ||
-			!findingStringHasRuleID(got.Findings, "COG-AGENTS-MD") {
-			t.Fatalf("a link at a missing spelling made an existing AGENTS.md writable: %+v", got)
+		// Through the link at the missing spelling and at the directory.
+		for _, cwd := range []string{filepath.Join(s.base, "new"), other} {
+			if got := s.patch(cwd, sightingUpdatePatch); got.Action != guardrailActionBlock ||
+				!findingStringHasRuleID(got.Findings, "COG-AGENTS-MD") {
+				t.Fatalf("a link at a missing spelling made an existing AGENTS.md writable at %s: %+v", cwd, got)
+			}
 		}
 	})
 	t.Run("a directory moved onto a missing spelling keeps its file protected", func(t *testing.T) {
