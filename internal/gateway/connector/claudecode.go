@@ -1817,15 +1817,16 @@ func applyClaudeCodeManagedOtelEnv(existing map[string]interface{}, managed map[
 // A retained operator endpoint needs its signal's enablement and protocol.
 // The native exporter cleanup owns product routes; this map prevents the host
 // Setup writer from disabling the unrelated collector it leaves in place.
-func claudeCodeOperatorOtelSettings(existing map[string]interface{}, previous map[string]string) map[string]bool {
+func claudeCodeOperatorOtelSettings(existing map[string]interface{}, previous map[string]string, opts SetupOpts) map[string]bool {
 	ownedEndpoint := func(key, endpoint string) bool {
 		if endpoint == previous[key] && previous[key] != "" {
 			return true
 		}
-		headers, _ := existing[strings.TrimSuffix(key, "_ENDPOINT")+"_HEADERS"].(string)
+		headers := claudeCodeEffectiveEndpointHeaders(existing, key)
 		_, marked := claudeCodeWithoutDefenseClawHeaders(headers, "")
 		return claudeCodeScopedLoopbackOTLPEndpoint(endpoint) ||
-			(claudeCodeLoopbackGatewayEndpoint(endpoint) && marked)
+			(claudeCodeLoopbackGatewayEndpoint(endpoint) &&
+				(marked || claudeCodeMatchedProductBearer(headers, previous, opts) != ""))
 	}
 	operatorEndpoint := func(key string) bool {
 		endpoint, _ := existing[key].(string)
@@ -1859,6 +1860,10 @@ func claudeCodeOperatorOtelSettings(existing map[string]interface{}, previous ma
 			key == "OTEL_RESOURCE_ATTRIBUTES" || key == "OTEL_SERVICE_NAME" ||
 			strings.HasPrefix(key, "OTEL_LOG_")) &&
 			!claudeCodeOtelValueLooksManaged(key, value, previous[key]) {
+			if headers, ok := value.(string); ok && claudeCodeOTLPHeadersKey(key) &&
+				claudeCodeMatchedProductBearer(headers, previous, opts) != "" {
+				continue
+			}
 			keep[key] = true
 		}
 	}
@@ -1967,7 +1972,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 			managedEnv := buildClaudeCodeOtelEnv(opts)
 			operatorSettings := map[string]bool{}
 			if !opts.sandboxNativeOTLP {
-				operatorSettings = claudeCodeOperatorOtelSettings(existing, previousManaged)
+				operatorSettings = claudeCodeOperatorOtelSettings(existing, previousManaged, opts)
 				for key := range operatorSettings {
 					delete(managedEnv, key)
 				}
@@ -2008,6 +2013,35 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 				backup.ManagedAbsentEnv = append(backup.ManagedAbsentEnv, key)
 			}
 			applyClaudeCodeManagedOtelEnv(existing, managedEnv)
+			if !opts.sandboxNativeOTLP {
+				for _, key := range claudeCodeOtelEnvKeys {
+					if !claudeCodeOTLPEndpointKey(key) {
+						continue
+					}
+					endpoint, _ := existing[key].(string)
+					headers := claudeCodeEffectiveEndpointHeaders(existing, key)
+					if claudeCodeLoopbackGatewayEndpoint(endpoint) &&
+						claudeCodeMatchedProductBearer(headers, previousManaged, opts) != "" {
+						delete(existing, key)
+					}
+				}
+				for _, key := range claudeCodeOtelEnvKeys {
+					if !claudeCodeOTLPHeadersKey(key) {
+						continue
+					}
+					headers, _ := existing[key].(string)
+					token := claudeCodeMatchedProductBearer(headers, previousManaged, opts)
+					if token == "" {
+						continue
+					}
+					rest, _ := claudeCodeWithoutDefenseClawHeaders(headers, token)
+					if rest == "" {
+						delete(existing, key)
+					} else {
+						existing[key] = rest
+					}
+				}
+			}
 			removeClaudeCodeOTLPHeadersHelper(settings, &backup)
 			backupNeedsSave = true
 			backupToSave = backup
