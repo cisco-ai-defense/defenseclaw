@@ -6172,3 +6172,26 @@ def test_the_windows_stopped_upgrade_reconcile_names_the_cause(
         ), text
     if not binary:
         assert "defenseclaw-gateway.exe is missing" in text, text
+
+
+# oss-outage-open round i loop 2 (P1, a live installer lost its lock after
+# six hours): hooks bound a lock by its folder time plus six hours, and
+# install.ps1 never refreshed it, so a Windows install waiting at a prompt
+# that long lost its lock to the hooks. A job renews the folder time while
+# the installer (pid and start time) runs and the lock names it, and stops
+# before the lock is given back or kept for the next run.
+def test_a_live_windows_install_renews_its_lock_and_stops_before_closing_it() -> None:
+    text = _text()
+    take = text.index('Set-Content -LiteralPath (Join-Path $LockDir "pid") -Value $PID -Encoding Ascii')
+    assert text.index("$Run.LockRenewer = Start-InstallLockRenewer", take) - take < 200
+    renewer = text[text.index("function Start-InstallLockRenewer {") : text.index("function Stop-InstallLockRenewer {")]
+    assert "StartTime.ToUniversalTime().Ticks -ne $Started" in renewer
+    assert '(Join-Path $Lock "pid")' in renewer and "-ne [string]$Owner" in renewer
+    assert ".LastWriteTime = Get-Date" in renewer
+    assert "$script:LockRenewSeconds = 300" in text
+    close = text[text.index("function Close-InstallLock {") : text.index("function Finish-InstallLock(")]
+    assert (
+        close.index("Stop-InstallLockRenewer")
+        < close.index("Test-RecoveryPending")
+        < close.index("Remove-Tree $LockDir")
+    )

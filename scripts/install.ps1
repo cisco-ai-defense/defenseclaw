@@ -147,7 +147,8 @@ if ($RunAsFile -and $PSVersionTable.PSEdition -ne "Core" -and $env:PSModulePath)
     $env:PSModulePath = $modulePath -join ";"
 }
 $RunByUpgrade = $RunAsFile -and (Split-Path -Leaf (Split-Path -Parent $PSCommandPath)) -match '^defenseclaw-(upgrade|rollback)-'
-$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false; UsageError = $false; UndoPending = $false; RestorePending = $false; UnprovenReplacement = $null; UnprovenReplacementUnchanged = $false; UnprovenGatewayWasRunning = $false; UnprovenAcceptedBins = $null; UnprovenConnectors = @(); UnprovenCloserSha256 = "" }
+$script:LockRenewSeconds = 300
+$Run = @{ Lock = $false; LockRenewer = $null; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false; UsageError = $false; UndoPending = $false; RestorePending = $false; UnprovenReplacement = $null; UnprovenReplacementUnchanged = $false; UnprovenGatewayWasRunning = $false; UnprovenAcceptedBins = $null; UnprovenConnectors = @(); UnprovenCloserSha256 = "" }
 
 function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundColor Blue }
 function Write-Ok([string]$Message) { Write-Host "  + $Message" -ForegroundColor Green }
@@ -2904,7 +2905,40 @@ function Get-UnchangedNote {
     return "nothing was changed"
 }
 
+function Start-InstallLockRenewer {
+    # Hooks and doctor treat a lock folder untouched for six hours as stale
+    # (hookexec InstallLockMaxAge), so a live install that waits that long at
+    # a prompt would lose its lock to them. A job refreshes the folder's time
+    # every five minutes while this installer runs (its pid and its start
+    # time, so a reused pid does not count) and the lock still names it, and
+    # ends as soon as either stops being true: a killed install leaves a lock
+    # the next calls treat as stale.
+    try { $started = (Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime().Ticks } catch { return $null }
+    $renew = {
+        param([int]$Owner, [long]$Started, [string]$Lock, [int]$Every)
+        while ($true) {
+            Start-Sleep -Seconds $Every
+            $process = Get-Process -Id $Owner -ErrorAction SilentlyContinue
+            if (-not $process) { return }
+            try { if ($process.StartTime.ToUniversalTime().Ticks -ne $Started) { return } } catch { return }
+            $holder = [string](Get-Content -LiteralPath (Join-Path $Lock "pid") -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($holder.Trim() -ne [string]$Owner) { return }
+            try { (Get-Item -LiteralPath $Lock -Force -ErrorAction Stop).LastWriteTime = Get-Date } catch { }
+        }
+    }
+    try { return Start-Job -ScriptBlock $renew -ArgumentList $PID, $started, $LockDir, $script:LockRenewSeconds } catch { return $null }
+}
+
+function Stop-InstallLockRenewer {
+    if (-not $Run.ContainsKey("LockRenewer") -or -not $Run.LockRenewer) { return }
+    Invoke-Quietly { Stop-Job -Job $Run.LockRenewer; Remove-Job -Job $Run.LockRenewer -Force }
+    $Run.LockRenewer = $null
+}
+
 function Close-InstallLock {
+    # The renewer stops first: a lock kept for the next run ages like any
+    # interrupted install's from here.
+    Stop-InstallLockRenewer
     # An undo or a restore that did not finish keeps .install.lock, so hooks
     # wait for the install instead of starting a gateway for a mixed install.
     # The next run takes the lock over and finishes the restore. A failed run
@@ -4324,6 +4358,7 @@ function Invoke-Install {
     }
     $Run.Lock = $true
     Set-Content -LiteralPath (Join-Path $LockDir "pid") -Value $PID -Encoding Ascii
+    $Run.LockRenewer = Start-InstallLockRenewer
     $Run.Log = Join-Path $DataDir ("logs\install-" + (Get-Date -Format "yyyyMMddTHHmmss") + ".log")
     try { Start-Transcript -LiteralPath $Run.Log -Append | Out-Null; $Run.Transcript = $true } catch {
         Write-Warn "Could not write the install log $($Run.Log)"
