@@ -44,7 +44,11 @@ func TestHookOutageModeAndHookDataDirShareOneDataDirRule(t *testing.T) {
 			return "{config_version: 9, observability: {}, guardrail: {mode: observe}, data_dir: .}\n"
 		}},
 	}
-	exited := exec.Command(os.Args[0], "-test.run=^$")
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exited := exec.Command(self, "-test.run=^$")
 	if err := exited.Run(); err != nil {
 		t.Fatal(err)
 	}

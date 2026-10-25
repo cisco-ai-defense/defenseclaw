@@ -20,7 +20,11 @@ import (
 // live or uncertain owner, or an interrupted install's kept lock before its
 // deadline, still holds it.
 func TestInstallLockHeldIgnoresALockWhoseOwnerIsGoneOrWhoseDeadlinePassed(t *testing.T) {
-	exited := exec.Command(os.Args[0], "-test.run=^$")
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exited := exec.Command(self, "-test.run=^$")
 	if err := exited.Run(); err != nil {
 		t.Fatal(err)
 	}
