@@ -86,12 +86,29 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 			}
 		}
 	}
+	// Round l loop 1 (P2): an installer that exited but is not reaped (a
+	// zombie, or on Windows a process object a handle keeps) keeps its pid and
+	// its start; its lock is no lock.
+	ended, endedIdentity := endedInstallerPid(t)
+	withEnded := func(record bool) func(*testing.T, string) {
+		return func(t *testing.T, lock string) {
+			t.Helper()
+			makeLock(ended+"\n", 0)(t, lock)
+			if record && endedIdentity != "" {
+				if err := os.WriteFile(filepath.Join(lock, "proc-start"), []byte(endedIdentity+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
 	cases := []struct {
 		name   string
 		inHome bool
 		lock   func(*testing.T, string)
 		runs   bool
 	}{
+		{name: "installer exited, not reaped (zombie), with its proc-start record", lock: withEnded(true), runs: true},
+		{name: "installer exited, not reaped (zombie), PID-only lock", lock: withEnded(false), runs: true},
 		{name: "installer exited", lock: makeLock(dead+"\n", 0), runs: true},
 		{name: "installer exited, Windows line end", lock: makeLock(dead+"\r\n", 0), runs: true},
 		{name: "installer running", lock: makeLock(live+"\n", 0)},

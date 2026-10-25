@@ -49,6 +49,14 @@ Fixes for installer messages and failed upgrades on macOS, Linux and Windows.
 
 **Check.** The command proceeds.
 
+## `Another DefenseClaw install or doctor run is taking over the install lock`
+
+**Cause.** Another installer, or `defenseclaw doctor --fix`, is taking over the same stale lock. Only one of them may do it, and this one waited 10 seconds for the other to finish.
+
+**Fix.** Let the other run finish, then run the command again.
+
+**Check.** The command proceeds, or reports `Another DefenseClaw install is running` while the other install runs.
+
 ## `defenseclaw upgrade` changes nothing over SSH (Windows)
 
 **Cause.** The installer continues in a new window, and an SSH session has no desktop.

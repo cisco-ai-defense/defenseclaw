@@ -76,7 +76,7 @@ printf '%s\\n' "${STUB_DATA_DIR:-}"
 def _functions() -> str:
     text = INSTALL_SH.read_text(encoding="utf-8")
     owner = text.index('LOCK_STARTED="$(date +%s)"')
-    owner_end = text.index('if ! mkdir "${LOCK_DIR}" 2>/dev/null; then', owner)
+    owner_end = text.index('take_lock "${LOCK_DIR}" "${LOCK_HINT}"', owner)
     start = text.index("DATA_LOCK_DIRS=()")
     end = text.index('\nhold_hook_data_dir "${BIN_DIR}/defenseclaw-gateway"\n', start)
     return text[owner:owner_end] + text[start:end] + "\n"
@@ -245,7 +245,7 @@ def test_both_holds_come_before_anything_stops_the_gateway() -> None:
     assert not re.search(r"awk[^\n]*data_dir", text)
     installed = text.index('\nhold_hook_data_dir "${BIN_DIR}/defenseclaw-gateway"\n')
     staged = text.index('\nhold_hook_data_dir "${STAGING}/bin/defenseclaw-gateway" required\n')
-    assert text.index('if ! mkdir "${LOCK_DIR}"') < installed < text.index("# ── Existing install")
+    assert text.index('\ntake_lock "${LOCK_DIR}" "${LOCK_HINT}"\n') < installed < text.index("# ── Existing install")
     # The installed gateway's answer is held before an interrupted run is
     # recovered and before a rollback stops the gateway.
     assert installed < text.index("\nrecover_interrupted_run\n") < text.index('if [[ "${ROLLBACK}" == true ]]; then')
@@ -448,3 +448,129 @@ def test_the_install_checks_its_locks_after_the_prompt_and_before_the_swap() -> 
             'stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"'
         )
     )
+
+
+def _wait_zombie(proc: subprocess.Popen) -> None:
+    deadline = time.time() + 20
+    while not cmd_doctor._process_ended(proc.pid):
+        assert time.time() < deadline, f"pid {proc.pid} never became a zombie"
+        time.sleep(0.01)
+
+
+# oss-outage-open round l loop 1 (P2): an installer that exited but is not
+# reaped (a zombie) keeps its pid and its start; its lock is taken over.
+@pytest.mark.parametrize("record", [True, False])
+def test_the_lock_of_an_exited_unreaped_installer_is_taken_over(tmp_path: Path, record: bool) -> None:
+    home, data = _layout(tmp_path)
+    proc = subprocess.Popen(["true"])
+    try:
+        identity = cmd_doctor._process_identity(proc.pid)
+        _wait_zombie(proc)
+        identity = identity or cmd_doctor._process_identity(proc.pid)
+        lock = data / ".install.lock"
+        lock.mkdir()
+        (lock / "pid").write_text(f"{proc.pid}\n", encoding="utf-8")
+        if record and identity:
+            (lock / "proc-start").write_text(identity + "\n", encoding="utf-8")
+        run = _run(tmp_path, home, f'hold_hook_data_dir "{_gateway(tmp_path)}"\n', {"STUB_DATA_DIR": str(data)})
+        assert run.returncode == 0, run.stderr
+        assert _held(run) == [f"{data.resolve()}/.install.lock"]
+    finally:
+        proc.wait()
+
+
+# oss-outage-open round l loop 1 (P2): two installers that both read an old
+# lock as stale each removed the path and made it again, so the slower one
+# deleted the live lock of the faster. A takeover is now in place, behind a
+# claim in the folder: the slower one sees the faster one's claim or its
+# owner and stops, and the lock the faster one holds is never removed. Each
+# race runs right after the slower one's first stale decision.
+_RACES = {
+    # The faster installer claimed the folder and wrote its owner in place.
+    "claimed and taken over in place": (
+        'printf "%s\\n%s\\n" "$B_PID" "$B_ID" > "$1/claim-$B_PID-1"\n'
+        'printf "%s\\n" "$B_ID" > "$1/proc-start"; echo "$B_PID" > "$1/pid"\n',
+        "is running (pid {b})",
+    ),
+    # It claimed the folder and has not written its owner yet.
+    "claimed, owner not written yet": (
+        'printf "%s\\n%s\\n" "$B_PID" "$B_ID" > "$1/claim-$B_PID-1"\n',
+        "is taking over the install lock",
+    ),
+    # The old folder went (its owner gave it back) and the faster one made a
+    # new one and claimed it, no pid yet.
+    "a new folder, claimed, no pid yet": (
+        'rm -rf "${1:?}"; mkdir "$1"; printf "%s\\n%s\\n" "$B_PID" "$B_ID" > "$1/claim-$B_PID-1"\n',
+        "is taking over the install lock",
+    ),
+    # A new folder with its live owner written.
+    "a new folder with its live owner": (
+        'rm -rf "${1:?}"; mkdir "$1"; printf "%s\\n" "$B_ID" > "$1/proc-start"; echo "$B_PID" > "$1/pid"\n',
+        "is running (pid {b})",
+    ),
+}
+
+
+@pytest.mark.parametrize("race", sorted(_RACES))
+def test_a_takeover_race_never_removes_the_lock_another_installer_holds(tmp_path: Path, race: str) -> None:
+    home, data = _layout(tmp_path)
+    lock = data / ".install.lock"
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    lock.mkdir()
+    (lock / "pid").write_text(f"{dead.pid}\n", encoding="utf-8")
+    other = subprocess.Popen(["sleep", "30"])
+    action, message = _RACES[race]
+    racer = tmp_path / "race.sh"
+    racer.write_text(action, encoding="utf-8")
+    try:
+        body = (
+            "LOCK_TAKE_TRIES=2\n"
+            'eval "orig_$(declare -f lock_owner_live)"\n'
+            'raced=""\n'
+            "lock_owner_live() {\n"
+            "    local rc=0\n"
+            '    orig_lock_owner_live "$@" || rc=$?\n'
+            f'    if [[ -z "${{raced}}" ]]; then raced=1; bash "{racer}" "$1"; ls -di "$1" > "{tmp_path}/after"; fi\n'
+            "    return $rc\n"
+            "}\n"
+            f'hold_hook_data_dir "{_gateway(tmp_path)}"\n'
+        )
+        env = {"STUB_DATA_DIR": str(data), "B_PID": str(other.pid), "B_ID": _identity(other.pid)}
+        proc = _run(tmp_path, home, body, env)
+        assert proc.returncode == 1, (proc.stdout, proc.stderr)
+        assert message.format(b=other.pid) in proc.stderr
+        # The folder the faster installer holds is the one at the path, whole.
+        inode = (tmp_path / "after").read_text(encoding="utf-8").split()[0]
+        assert str(os.lstat(lock).st_ino) == inode
+        names = {p.name for p in lock.iterdir()}
+        assert (f"claim-{other.pid}-1" in names) == ("claim-" in action)
+        assert not [n for n in names if n.startswith("claim-") and n != f"claim-{other.pid}-1"]
+        if race in ("claimed and taken over in place", "a new folder with its live owner"):
+            assert (lock / "pid").read_text(encoding="utf-8").strip() == str(other.pid)
+    finally:
+        other.kill()
+        other.wait()
+
+
+# A claim of a run that is still taking the lock over is waited for; once
+# that run is gone, the lock is taken over in place (the same folder).
+def test_a_live_claim_is_waited_for_and_the_lock_is_taken_over_in_place(tmp_path: Path) -> None:
+    home, data = _layout(tmp_path)
+    lock = data / ".install.lock"
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    lock.mkdir()
+    (lock / "pid").write_text(f"{dead.pid}\n", encoding="utf-8")
+    other = subprocess.Popen(["sleep", "1.5"])
+    try:
+        (lock / f"claim-{other.pid}-1").write_text(f"{other.pid}\n{_identity(other.pid)}\n", encoding="utf-8")
+        inode = os.lstat(lock).st_ino
+        body = f'hold_hook_data_dir "{_gateway(tmp_path)}"\nls -di "{lock}" > "{tmp_path}/held"\n'
+        proc = _run(tmp_path, home, body, {"STUB_DATA_DIR": str(data)})
+        assert proc.returncode == 0, proc.stderr
+        assert _held(proc) == [f"{data.resolve()}/.install.lock"]
+        assert (tmp_path / "held").read_text(encoding="utf-8").split()[0] == str(inode)
+    finally:
+        other.kill()
+        other.wait()

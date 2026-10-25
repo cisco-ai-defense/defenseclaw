@@ -510,8 +510,15 @@ process_identity() {
 }
 LOCK_IDENTITY="$(process_identity $$ || true)"
 write_lock_owner() {
-    { echo $$ > "$1/pid" && echo "${LOCK_STARTED}" > "$1/started" \
-        && { [[ -z "${LOCK_IDENTITY}" ]] || echo "${LOCK_IDENTITY}" > "$1/proc-start"; }; } 2>/dev/null
+    # The identity first and the pid last: a lock taken over in place never
+    # names this installer's pid beside the identity of the one before it.
+    {
+        if [[ -n "${LOCK_IDENTITY}" ]]; then
+            echo "${LOCK_IDENTITY}" > "$1/proc-start"
+        else
+            rm -f -- "$1/proc-start"
+        fi && echo "${LOCK_STARTED}" > "$1/started" && echo $$ > "$1/pid"
+    } 2>/dev/null
 }
 lock_is_ours() {
     # lock_is_ours LOCK: LOCK still records this installer as its owner (its
@@ -550,11 +557,99 @@ lock_owner_live() {
     # pid names a process; so is one whose record or process identity cannot
     # be read.
     local recorded current
-    [[ -n "$2" && "$2" != "$$" ]] && kill -0 "$2" 2>/dev/null || return 1
+    [[ -n "$2" && "$2" != "$$" ]] && pid_running "$2" || return 1
     [[ -e "$1/proc-start" || -L "$1/proc-start" ]] || return 0
     recorded="$(lock_record "$1/proc-start")" || return 0
     current="$(process_identity "$2")" || return 0
     [[ "${recorded}" == "${current}" ]]
+}
+pid_running() {
+    # pid_running PID: PID names a process that has not ended. A zombie (an
+    # exited process its parent has not reaped) keeps its pid and its start,
+    # and kill -0 still reaches it, but it runs nothing: it is gone. When the
+    # system does not say, the process runs.
+    local stat fields
+    kill -0 "$1" 2>/dev/null || return 1
+    if [[ -e /proc/self/stat ]]; then
+        stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
+        [[ "${stat}" == *")"* ]] || return 0
+        read -r -a fields <<< "${stat##*)}"
+        [[ "${fields[0]:-}" != [ZXx] ]]
+        return
+    fi
+    [[ -x /bin/ps ]] || return 0
+    stat="$(LC_ALL=C /bin/ps -o stat= -p "$1" 2>/dev/null)" || return 0
+    stat="${stat#"${stat%%[![:space:]]*}"}"
+    [[ "${stat}" != Z* ]]
+}
+lock_claim_live() {
+    # lock_claim_live FILE: the run that left the takeover claim FILE in a
+    # lock (take_lock, or `defenseclaw doctor --fix`: its pid, then its
+    # process identity) still runs. A claim that names no other pid is none;
+    # one whose identity cannot be read holds.
+    local cpid="" cid="" current
+    [[ -f "$1" && ! -L "$1" ]] || return 1
+    { IFS= read -r cpid || true; IFS= read -r cid || true; } < "$1" 2>/dev/null || return 1
+    cpid="${cpid//[[:space:]]/}"
+    [[ "${cpid}" =~ ^[1-9][0-9]{0,9}$ && "${cpid}" != "$$" ]] || return 1
+    pid_running "${cpid}" || return 1
+    cid="${cid%$'\r'}"
+    [[ -n "${cid}" ]] || return 0
+    current="$(process_identity "${cpid}")" || return 0
+    [[ "${cid}" == "${current}" ]]
+}
+# How often take_lock looks again, a second apart, while another run's claim
+# is in the lock.
+LOCK_TAKE_TRIES=10
+take_lock() {
+    # take_lock LOCK HINT [WHAT]: make LOCK this installer's, or stop. A
+    # lock whose installer is gone is taken over in place: the folder stays
+    # at its path, so no hook sees a running install without it, and only
+    # its owner files change. Takeovers are serialized: a taker first puts
+    # its claim in the folder (claim-<pid>-<started>: its pid and process
+    # identity, put in place by one rename) and goes on only while no other
+    # run's claim there is live; `defenseclaw doctor --fix` claims the same
+    # way before it removes a stale lock. A claim made before another
+    # taker's check is seen by it, so two takers never both go on; one that
+    # sees a live claim takes its own back and looks again. An installer
+    # removes no lock it did not take.
+    local lock="$1" hint="$2" what="${3:-}" claim="claim-$$-${LOCK_STARTED}" holder entry busy try
+    for (( try = 1; try <= LOCK_TAKE_TRIES; try++ )); do
+        if ! mkdir "${lock}" 2>/dev/null; then
+            [[ -d "${lock}" && ! -L "${lock}" ]] || die "Could not create the install lock ${lock}: ${hint}"
+            holder="$(cat "${lock}/pid" 2>/dev/null || true)"
+            if lock_owner_live "${lock}" "${holder}"; then
+                die "Another DefenseClaw install is running (pid ${holder})${what}"
+            fi
+        fi
+        if ! { printf '%s\n%s\n' "$$" "${LOCK_IDENTITY}" > "${lock}/.${claim}" \
+                && mv -f -- "${lock}/.${claim}" "${lock}/${claim}"; } 2>/dev/null; then
+            rm -f -- "${lock}/.${claim}" 2>/dev/null || true
+            # The lock was given back meanwhile: make it again.
+            [[ -d "${lock}" ]] && die "Could not create the install lock ${lock}: ${hint}"
+            continue
+        fi
+        busy=""
+        for entry in "${lock}"/claim-*; do
+            if [[ "${entry}" != "${lock}/${claim}" ]] && lock_claim_live "${entry}"; then
+                busy=1
+                break
+            fi
+        done
+        if [[ -z "${busy}" ]]; then
+            holder="$(cat "${lock}/pid" 2>/dev/null || true)"
+            if lock_owner_live "${lock}" "${holder}"; then
+                rm -f -- "${lock}/${claim}"
+                die "Another DefenseClaw install is running (pid ${holder})${what}"
+            fi
+            write_lock_owner "${lock}" && return 0
+            rm -rf "${lock:?}"
+            die "Could not write the install lock ${lock}/pid: ${hint}"
+        fi
+        rm -f -- "${lock}/${claim}"
+        (( try < LOCK_TAKE_TRIES )) && sleep 1
+    done
+    die "Another DefenseClaw install or doctor run is taking over the install lock ${lock}; run the installer again once it is done"
 }
 lock_record() {
     # lock_record FILE: the trimmed text of a small owner record (proc-start).
@@ -565,18 +660,7 @@ lock_record() {
     [[ -n "${text}" ]] || return 1
     echo "${text}"
 }
-if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
-    holder="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
-    if lock_owner_live "${LOCK_DIR}" "${holder}"; then
-        die "Another DefenseClaw install is running (pid ${holder})"
-    fi
-    rm -rf "${LOCK_DIR}"
-    mkdir "${LOCK_DIR}" 2>/dev/null || die "Could not create the install lock ${LOCK_DIR}: ${LOCK_HINT}"
-fi
-if ! write_lock_owner "${LOCK_DIR}"; then
-    rm -rf "${LOCK_DIR}"
-    die "Could not write the install lock ${LOCK_DIR}/pid: ${LOCK_HINT}"
-fi
+take_lock "${LOCK_DIR}" "${LOCK_HINT}"
 LOG="${DEFENSECLAW_HOME}/logs/install-$(date +%Y%m%dT%H%M%S).log"
 # tee ignores Ctrl+C: it went down with the installer's process group, and the
 # cancel message then died on a broken pipe (exit 141, GAP-1901).
@@ -639,7 +723,7 @@ hold_data_lock() {
     # every per-user hook checks) is made first, so its lock is there to
     # find while the gateway is down; the EXIT trap removes it again when it
     # is still empty.
-    local data="$1" lock holder held
+    local data="$1" lock held
     [[ -n "${data}" ]] || return 0
     if [[ "${data##*/}" == .defenseclaw && ! -e "${data}" && ! -L "${data}" && -d "${data%/*}" ]] \
         && mkdir -m 700 -- "${data}" 2>/dev/null; then
@@ -652,19 +736,8 @@ hold_data_lock() {
     for held in ${DATA_LOCK_DIRS[@]+"${DATA_LOCK_DIRS[@]}"}; do
         [[ ! "${held}" -ef "${lock}" && "${held}" != "${lock}" ]] || return 0
     done
-    if ! mkdir "${lock}" 2>/dev/null; then
-        holder="$(cat "${lock}/pid" 2>/dev/null || true)"
-        if lock_owner_live "${lock}" "${holder}"; then
-            die "Another DefenseClaw install is running (pid ${holder}) for the data folder ${data}"
-        fi
-        rm -rf "${lock:?}"
-        mkdir "${lock}" 2>/dev/null \
-            || die "Could not create the install lock ${lock}: check that $(id -un) can write ${data}; nothing was changed"
-    fi
-    if ! write_lock_owner "${lock}"; then
-        rm -rf "${lock:?}"
-        die "Could not write the install lock ${lock}/pid: check the free space and that $(id -un) can write ${data}; nothing was changed"
-    fi
+    take_lock "${lock}" "check the free space and that $(id -un) can write ${data}; nothing was changed" \
+        " for the data folder ${data}"
     DATA_LOCK_DIRS+=("${lock}")
 }
 hold_hook_data_dir "${BIN_DIR}/defenseclaw-gateway"

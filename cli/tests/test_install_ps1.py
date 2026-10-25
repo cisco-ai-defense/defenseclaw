@@ -6180,19 +6180,40 @@ def test_the_windows_stopped_upgrade_reconcile_names_the_cause(
 # its lock for as long as it runs (no renewer, no deadline, no pid file age).
 def test_install_ps1_takes_over_a_lock_whose_pid_was_reused() -> None:
     text = INSTALL_PS1.read_text(encoding="utf-8")
-    take = text.index('try { New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null } catch {')
-    refuse = text.index('Die "Another DefenseClaw install is running (pid $holder)"', take)
-    block = text[take:refuse]
-    assert '(Join-Path $LockDir "proc-start")' in block
-    assert "[string]$process.StartTime.ToFileTimeUtc() -ne $recorded" in block
+    owner = text[text.index("function Get-InstallLockLiveOwner([string]$Lock) {") :]
+    owner = owner[: owner.index("\n}\n")]
+    assert '(Join-Path $Lock "proc-start")' in owner
+    assert "[string]$process.StartTime.ToFileTimeUtc() -ne $recorded" in owner
     # A lock without the record (1.0.2, 1.0.3) reads as "", never $null: a
     # method call on the missing record stopped the install (round k native run).
-    assert '$recorded = "$(Get-Content -LiteralPath (Join-Path $LockDir "proc-start")' in block and ".Trim()" in block
-    assert "$recorded.Trim()" not in block
-    assert "$process = $null" in block
-    assert "LastWriteTime" not in block and "AddSeconds" not in block
+    assert '$recorded = "$(Get-Content -LiteralPath (Join-Path $Lock "proc-start")' in owner and ".Trim()" in owner
+    assert "$recorded.Trim()" not in owner
+    assert "$process = $null" in owner
+    assert "LastWriteTime" not in owner and "AddSeconds" not in owner
     write = text.index('Set-Content -LiteralPath (Join-Path $LockDir "pid") -Value $PID -Encoding Ascii')
-    owner = text[write : write + 600]
-    assert 'Set-Content -LiteralPath (Join-Path $LockDir "proc-start")' in owner
-    assert "(Get-Process -Id $PID -ErrorAction Stop).StartTime.ToFileTimeUtc()" in owner
+    take = text.rindex("    $taken = $false\n", 0, write)
+    block = text[take:write]
+    # The identity goes first and the pid last (a lock taken over in place).
+    assert 'Set-Content -LiteralPath (Join-Path $LockDir "proc-start") -Value $identity' in block
+    assert "(Get-Process -Id $PID -ErrorAction Stop).StartTime.ToFileTimeUtc()" in text[text.rindex("$identity = ", 0, take) : take]
     assert "LockRenewer" not in text and "InstallLockMaxAge" not in text
+
+
+# oss-outage-open round l loop 1 (P2): two installers that both read an old
+# lock as stale each removed the canonical path and made it again, so the
+# slower one deleted the live lock of the faster. A takeover is now in place
+# and serialized by a claim in the folder (install.sh take_lock, doctor).
+def test_install_ps1_takes_a_stale_lock_over_in_place_behind_a_claim() -> None:
+    text = INSTALL_PS1.read_text(encoding="utf-8")
+    write = text.index('Set-Content -LiteralPath (Join-Path $LockDir "pid") -Value $PID -Encoding Ascii')
+    take = text.rindex("    $taken = $false\n", 0, write)
+    block = text[take:write]
+    assert "Remove-Tree" not in block and "Remove-Item -LiteralPath $LockDir" not in block
+    claim = block.index("[IO.File]::Move($part, (Join-Path $LockDir $claim))")
+    check = block.index("Test-InstallLockClaimLive $_.FullName", claim)
+    owner = block.index("$holder = Get-InstallLockLiveOwner $LockDir", check)
+    assert claim < check < owner < block.index("$taken = $true", owner)
+    assert 'Remove-Item -LiteralPath (Join-Path $LockDir $claim)' in block
+    live = text[text.index("function Test-InstallLockClaimLive([string]$Path) {") :]
+    live = live[: live.index("\n}\n")]
+    assert "[int]$claimer -eq $PID" in live and "StartTime.ToFileTimeUtc() -eq $recorded" in live

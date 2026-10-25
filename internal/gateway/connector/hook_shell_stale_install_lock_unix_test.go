@@ -129,6 +129,35 @@ func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 			})
 		}
 	}
+	// Round l loop 1 (P2): an installer that exited but is not reaped (a
+	// zombie) keeps its pid and its start; its lock is no lock, with its
+	// proc-start record or without one.
+	ended, endedIdentity := endedInstallerPid(t)
+	for _, record := range []bool{true, false} {
+		t.Run("installer exited, not reaped (zombie), record "+strconv.FormatBool(record), func(t *testing.T) {
+			data := t.TempDir()
+			lock := filepath.Join(data, ".install.lock")
+			if err := os.Mkdir(lock, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(lock, "pid"), []byte(ended+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if record && endedIdentity != "" {
+				if err := os.WriteFile(filepath.Join(lock, "proc-start"), []byte(endedIdentity+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			script := want + "if defenseclaw_install_lock_held \"$1\"; then echo held; else echo none; fi\n"
+			out, err := exec.Command(bash, "-c", script, "hook", data).CombinedOutput()
+			if err != nil {
+				t.Fatalf("bash: %v: %s", err, out)
+			}
+			if got := strings.TrimSpace(string(out)); got != "none" {
+				t.Fatalf("defenseclaw_install_lock_held = %q for an exited, unreaped installer", got)
+			}
+		})
+	}
 	t.Run("lock that is a file", func(t *testing.T) {
 		data := t.TempDir()
 		if err := os.WriteFile(filepath.Join(data, ".install.lock"), []byte(dead), 0o600); err != nil {

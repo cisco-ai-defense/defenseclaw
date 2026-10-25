@@ -229,7 +229,10 @@ def _lock_view(lock: Path):
     info = os.lstat(lock)
     if not lock.is_dir() or lock.is_symlink():
         return (info.st_ino, "not a folder")
-    return (info.st_ino, tuple(sorted((p.name, p.read_bytes()) for p in lock.iterdir())))
+    # The claim doctor itself puts in the lock (claim-<pid>-...) is no change.
+    own = (f"claim-{os.getpid()}-", f".claim-{os.getpid()}-")
+    entries = (p for p in lock.iterdir() if not p.name.startswith(own))
+    return (info.st_ino, tuple(sorted((p.name, p.read_bytes()) for p in entries)))
 
 
 # oss-outage-open round k loop 2 (P2): doctor classified a lock as stale,
@@ -323,7 +326,8 @@ def test_fix_removes_the_pid_first_and_shows_no_missing_lock_until_the_folder_go
     monkeypatch.setattr(os, "unlink", unlink)
     tag, detail = cmd_doctor._fix_stale_install_lock(account.cfg, assume_yes=True)
     assert tag == "pass", detail
-    assert states == ["held"] * 4
+    # The four owner files, then doctor's own claim, each leave the lock held.
+    assert states == ["held"] * 5
     assert not os.path.lexists(lock)
 
 
@@ -373,3 +377,101 @@ def test_the_repair_is_registered_and_documented():
             assert f'"{record}"' in body, (asset, record)
         # One identity record, and no clock (round k).
         assert '"proc-start"' in body and "NO_PID_MS" not in body and "START_SLACK" not in body
+
+
+def _wait_ended(proc: subprocess.Popen) -> None:
+    """Wait until proc has exited but is not reaped (a zombie; on Windows its handle stays open)."""
+    deadline = time.time() + 20
+    while not (cmd_doctor._process_ended(proc.pid) if os.name != "nt" else not cmd_doctor._pid_running(proc.pid)):
+        assert time.time() < deadline, f"pid {proc.pid} never read as ended"
+        time.sleep(0.01)
+
+
+# oss-outage-open round l loop 1 (P2): an installer that exited but is not
+# reaped (a zombie) keeps its pid and its start, so doctor and every hook
+# held its lock for good. Its lock is stale, with its record or without one.
+@pytest.mark.parametrize("record", [True, False])
+def test_the_lock_of_an_exited_unreaped_installer_is_stale(account, record):
+    proc = subprocess.Popen([sys.executable, "-c", ""])
+    try:
+        identity = cmd_doctor._process_identity(proc.pid)
+        _wait_ended(proc)
+        identity = identity or cmd_doctor._process_identity(proc.pid)
+        lock = _lock(account.data, f"{proc.pid}\n")
+        if record and identity:
+            (lock / "proc-start").write_text(identity + "\n", encoding="ascii")
+        state, detail = cmd_doctor._install_lock_state(str(account.data))
+        assert state == "stale", detail
+    finally:
+        proc.wait()
+
+
+def _claim(lock: Path, pid: int, identity: str | None, name: str | None = None) -> Path:
+    path = lock / (name or f"claim-{pid}-1")
+    path.write_text(f"{pid}\n{identity or ''}\n", encoding="ascii")
+    return path
+
+
+# oss-outage-open round l loop 1 (P2): doctor and installers take a stale lock
+# over one at a time. Doctor claims the lock (install.sh take_lock) before its
+# last check, so an installer that claims it later waits; and a lock another
+# run has claimed stays whole, its claim with it.
+def test_fix_claims_the_lock_before_its_last_check_and_removes_its_claim_last(account, monkeypatch):
+    lock = _lock(account.data, f"{DEAD}\n")
+    real_state = cmd_doctor._install_lock_state
+    claims: list = []
+
+    def state(folder, held=None):
+        if held is not None:
+            claims.extend(
+                (p.name, p.read_text(encoding="ascii")) for p in lock.iterdir() if p.name.startswith("claim-")
+            )
+        return real_state(folder, held)
+
+    monkeypatch.setattr(cmd_doctor, "_install_lock_state", state)
+    tag, detail = cmd_doctor._fix_stale_install_lock(account.cfg, assume_yes=True)
+    assert tag == "pass", detail
+    assert len(claims) == 1, claims
+    name, body = claims[0]
+    assert name.startswith(f"claim-{os.getpid()}-")
+    assert body.splitlines()[0] == str(os.getpid())
+    identity = cmd_doctor._process_identity(os.getpid())
+    if identity:
+        assert body.splitlines()[1] == identity
+    assert not os.path.lexists(lock)
+
+
+def test_fix_leaves_a_lock_another_run_has_claimed_whole(account):
+    lock = _lock(account.data, f"{DEAD}\n")
+    other = subprocess.Popen(
+        ["sleep", "30"] if os.name != "nt" else [sys.executable, "-c", "import time; time.sleep(30)"]
+    )
+    try:
+        claim = _claim(lock, other.pid, cmd_doctor._process_identity(other.pid))
+        before = _lock_view(lock)
+        tag, detail = cmd_doctor._fix_stale_install_lock(account.cfg, assume_yes=True)
+        assert tag == "skip" and "changed since the check" in detail, detail
+        assert _lock_view(lock) == before and claim.exists()
+        assert not [p for p in lock.iterdir() if p.name.startswith((f"claim-{os.getpid()}-", f".claim-{os.getpid()}-"))]
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_fix_removes_a_lock_whose_claims_are_of_runs_that_are_gone(account):
+    lock = _lock(account.data, f"{DEAD}\n")
+    _claim(lock, DEAD, None)
+    alive = subprocess.Popen(
+        ["sleep", "30"] if os.name != "nt" else [sys.executable, "-c", "import time; time.sleep(30)"]
+    )
+    try:
+        identity = cmd_doctor._process_identity(alive.pid)
+        if identity:
+            # A reused pid: the claim names another process than this one.
+            _claim(lock, alive.pid, identity + "0", name=f"claim-{alive.pid}-2")
+        tag, detail = cmd_doctor._fix_stale_install_lock(account.cfg, assume_yes=True)
+        assert tag == "pass", detail
+        assert not os.path.lexists(lock)
+    finally:
+        alive.kill()
+        alive.wait()

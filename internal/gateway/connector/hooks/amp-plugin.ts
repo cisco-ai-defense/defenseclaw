@@ -905,6 +905,30 @@ function processIdentity(pid: number): string | null {
 	return null
 }
 
+// processEnded reports a process that has exited but keeps its pid: a
+// zombie its parent has not reaped (hookexec procidentity.Ended). It keeps
+// its start but runs nothing. On Windows process.kill already reads the
+// exit code of a process object a handle keeps. False when the system does
+// not say.
+function processEnded(pid: number): boolean {
+	try {
+		if (process.platform === "linux") {
+			const stat = String(readFileSync("/proc/" + pid + "/stat", "utf8"))
+			const end = stat.lastIndexOf(")")
+			const state = end < 0 ? "" : stat.slice(end + 1).trim().split(/\s+/)[0]
+			return state === "Z" || state === "X" || state === "x"
+		}
+		if (process.platform === "darwin") {
+			const state = String(execFileSync("/bin/ps", ["-o", "stat=", "-p", String(pid)],
+				{ encoding: "utf8", timeout: 5000, env: { LC_ALL: "C", PATH: "/usr/bin:/bin" }, stdio: ["ignore", "pipe", "ignore"] })).trim()
+			return state.startsWith("Z")
+		}
+	} catch {
+		// Fall through: the system does not say.
+	}
+	return false
+}
+
 // installLockRecord reads the lock's proc-start record: "absent", "valid"
 // (with its trimmed text), or "unreadable" (not a small regular file, empty,
 // or a read error but its absence).
@@ -967,6 +991,7 @@ async function installLockState(dir: string): Promise<"none" | "stale" | "held">
 	} catch (error) {
 		if ((error as { code?: unknown } | null)?.code === "ESRCH") return "stale"
 	}
+	if (processEnded(owner.value)) return "stale"
 	const identity = await installLockRecord(join(lock, "proc-start"))
 	if (identity.state !== "valid") return "held"
 	const current = processIdentity(owner.value)

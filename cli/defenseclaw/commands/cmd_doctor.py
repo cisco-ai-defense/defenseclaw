@@ -36,6 +36,7 @@ import os
 import posixpath
 import queue
 import re
+import secrets
 import select
 import shlex
 import shutil
@@ -2736,6 +2737,49 @@ _INSTALL_RECOVERY_RECORDS = ("previous.new", ".repair", ".rollback-hold", ".life
 # The owner record install.sh and install.ps1 write beside the lock's pid:
 # the installer's process identity (hookexec InstallLockIdentityName).
 _INSTALL_LOCK_IDENTITY_NAME = "proc-start"
+# A takeover claim in a lock (install.sh take_lock, install.ps1): its pid,
+# then its process identity. Doctor claims a stale lock the same way before
+# it removes it, so it and an installer never both take one.
+_INSTALL_LOCK_CLAIM_PREFIX = "claim-"
+
+
+def _process_ended(pid: int) -> bool:
+    """A process that has exited but keeps its pid: a zombie its parent has not reaped.
+
+    It keeps its start (_process_identity) and still answers a signal, but
+    it runs nothing, so its install lock is no lock (hookexec
+    procidentity.Ended). Windows (pid_alive) reads the exit code of a
+    process object a handle keeps. False when the system does not say.
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+                line = handle.read()
+        except OSError:
+            return False
+        end = line.rfind(")")
+        fields = line[end + 1 :].split()
+        return end >= 0 and bool(fields) and fields[0] in ("Z", "X", "x")
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["/bin/ps", "-o", "stat=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return out.returncode == 0 and out.stdout.strip().startswith("Z")
+    return False
+
+
+def _pid_running(pid: int) -> bool:
+    from defenseclaw.process_liveness import pid_alive
+
+    return pid_alive(pid) and not _process_ended(pid)
 
 
 def _process_identity(pid: int) -> str | None:
@@ -2831,7 +2875,7 @@ def _install_lock_state(folder: str, held: _HeldInstallLock | None = None) -> tu
     The one rule of every per-user hook (hookexec installLockStale). It reads
     no clock: "stale" when the lock is a folder, no interrupted-install
     record sits beside it and its installer is gone: its pid names no
-    process, or doctor's own (no reader writes a lock), or another process
+    process or one that has ended (a zombie), or doctor's own (no reader writes a lock), or another process
     than its proc-start record names (a reused pid). A live installer keeps
     its lock for as long as it runs; so do a lock without a valid pid, a
     lock without a proc-start record whose pid names a process (1.0.2,
@@ -2839,8 +2883,6 @@ def _install_lock_state(folder: str, held: _HeldInstallLock | None = None) -> tu
     files are read in the folder doctor holds open, whatever the path names
     now (_fix_stale_install_lock).
     """
-    from defenseclaw.process_liveness import pid_alive
-
     lock = os.path.join(folder, ".install.lock")
     if held is None:
         try:
@@ -2874,7 +2916,7 @@ def _install_lock_state(folder: str, held: _HeldInstallLock | None = None) -> tu
         )
     if pid == os.getpid():
         return ("stale", f"{lock} names pid {pid}, this process; its installer is gone")
-    if not pid_alive(pid):
+    if not _pid_running(pid):
         return ("stale", f"{lock} names installer pid {pid}, which is no longer running")
     record_state, record = _install_lock_file(lock, _INSTALL_LOCK_IDENTITY_NAME, 128, held)
     if record_state == "valid" and record:
@@ -3065,18 +3107,82 @@ def _install_lock_entries(lock: str, held: _HeldInstallLock) -> list[str]:
     return sorted(os.listdir(held.dir_fd if held.dir_fd is not None else lock))
 
 
-def _install_lock_owner(lock: str, held: _HeldInstallLock) -> tuple:
+def _install_lock_owner(lock: str, held: _HeldInstallLock, claim: str = "") -> tuple:
     """What the held lock records of its owner: its entries and owner files.
 
     A stale decision holds only for this record and the folder's identity:
     an installer that took the lock over since, in place or by a new folder,
-    changes one of them (_fix_stale_install_lock).
+    or that claimed it to, changes one of them (_fix_stale_install_lock).
+    Doctor's own claim is not part of it.
     """
     return (
         held.identity,
-        tuple(_install_lock_entries(lock, held)),
+        tuple(name for name in _install_lock_entries(lock, held) if name != claim),
         tuple(_install_lock_file(lock, name, 128, held) for name in ("pid", "started", _INSTALL_LOCK_IDENTITY_NAME)),
     )
+
+
+def _claim_install_lock(lock: str, held: _HeldInstallLock) -> str:
+    """Put doctor's takeover claim in the held lock (install.sh take_lock); its name.
+
+    The claim is written apart and put in place by one rename, so a reader
+    never sees half of it. Raises OSError when it cannot be written.
+    """
+    claim = f"{_INSTALL_LOCK_CLAIM_PREFIX}{os.getpid()}-{secrets.token_hex(4)}"
+    body = f"{os.getpid()}\n{_process_identity(os.getpid()) or ''}\n".encode("ascii", errors="replace")
+    part = "." + claim
+    dir_fd = held.dir_fd
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    if dir_fd is not None:
+        fd = os.open(part, flags, 0o600, dir_fd=dir_fd)
+    else:
+        fd = os.open(os.path.join(lock, part), flags, 0o600)
+    try:
+        os.write(fd, body)
+    finally:
+        os.close(fd)
+    if dir_fd is not None:
+        os.rename(part, claim, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    else:
+        os.rename(os.path.join(lock, part), os.path.join(lock, claim))
+    return claim
+
+
+def _unclaim_install_lock(lock: str, held: _HeldInstallLock, claim: str) -> None:
+    for name in (claim, "." + claim):
+        try:
+            if held.dir_fd is not None:
+                os.unlink(name, dir_fd=held.dir_fd)
+            else:
+                os.unlink(os.path.join(lock, name))
+        except OSError:
+            continue
+
+
+def _install_lock_claimed(lock: str, held: _HeldInstallLock, claim: str) -> bool:
+    """Another run's live takeover claim is in the held lock (install.sh lock_claim_live).
+
+    A claim whose pid names no other running process is none; one whose
+    identity cannot be read holds.
+    """
+    for name in _install_lock_entries(lock, held):
+        if not name.startswith(_INSTALL_LOCK_CLAIM_PREFIX) or name == claim:
+            continue
+        state, text = _install_lock_file(lock, name, 128, held)
+        if state != "valid":
+            continue
+        lines = text.splitlines()
+        pid_text = lines[0].strip() if lines else ""
+        if not re.fullmatch(r"[1-9][0-9]{0,9}", pid_text):
+            continue
+        pid = int(pid_text)
+        if pid == os.getpid() or pid > 2_147_483_647 or not _pid_running(pid):
+            continue
+        recorded = lines[1].strip() if len(lines) > 1 else ""
+        current = _process_identity(pid) if recorded else None
+        if not recorded or current is None or current == recorded:
+            return True
+    return False
 
 
 def _stale_install_lock(folder: str) -> tuple | None:
@@ -3098,17 +3204,18 @@ def _stale_install_lock(folder: str) -> tuple | None:
         _close_install_lock(held)
 
 
-def _remove_held_install_lock(lock: str, held: _HeldInstallLock) -> str:
+def _remove_held_install_lock(lock: str, held: _HeldInstallLock, names: tuple[str, ...], claim: str) -> str:
     """Remove the held lock folder and its owner files: "removed", "changed" or why not.
 
-    Its pid goes first, so a hook reads the lock as held (no installer pid
-    yet), never as missing, until the folder itself goes. A lock with a
-    folder inside is left whole. On POSIX the files go through the
+    Only the entries doctor checked (names) go, its pid first, so a hook
+    reads the lock as held (no installer pid yet), never as missing, until
+    the folder itself goes; doctor's claim (claim) goes last. A file an
+    installer put there since stays, and so does the folder then. A lock
+    with a folder inside is left whole. On POSIX the files go through the
     descriptor, and the folder goes only while the path still names it; on
     Windows the pinned handle removes it.
     """
     dir_fd = held.dir_fd
-    names = _install_lock_entries(lock, held)
     for name in names:
         if dir_fd is not None:
             info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
@@ -3116,7 +3223,7 @@ def _remove_held_install_lock(lock: str, held: _HeldInstallLock) -> str:
             info = os.lstat(os.path.join(lock, name))
         if stat.S_ISDIR(info.st_mode):
             return f"{lock} holds a folder ({name}); it was left in place"
-    for name in sorted(names, key=lambda item: item != "pid"):
+    for name in [*sorted(names, key=lambda item: item != "pid"), claim]:
         try:
             if dir_fd is not None:
                 os.unlink(name, dir_fd=dir_fd)
@@ -3165,10 +3272,14 @@ def _fix_stale_install_lock(cfg, *, assume_yes: bool, plan_only: bool = False) -
 
     The stale decision is bound to the lock it was made on: the folder's
     file identity and its owner record (_install_lock_owner). After the
-    prompt doctor holds the folder open and removes it only when both are
-    unchanged and its installer is still gone; a lock an installer took over
-    meanwhile, in place or by a new folder, stays where it is. The canonical
-    lock is never moved away, so no hook sees a running install without it.
+    prompt doctor holds the folder open, puts its takeover claim in it
+    (_claim_install_lock, as install.sh and install.ps1 do before they take
+    a lock over), and removes it only when both are unchanged, no other
+    run's claim there is live and its installer is still gone; a lock an
+    installer took over or claimed meanwhile, in place or by a new folder,
+    stays where it is. An installer that claims it later sees doctor's
+    claim and waits. The canonical lock is never moved away, so no hook sees
+    a running install without it.
     """
     if _doctor_managed(cfg):
         return ("skip", "the installation owns its install lock")
@@ -3193,14 +3304,21 @@ def _fix_stale_install_lock(cfg, *, assume_yes: bool, plan_only: bool = False) -
         if held is None:
             changed.append(lock)
             continue
+        claim = ""
+        outcome = "changed"
         try:
-            if _install_lock_owner(lock, held) != owner or _install_lock_state(folder, held)[0] != "stale":
-                outcome = "changed"
-            else:
-                outcome = _remove_held_install_lock(lock, held)
+            claim = _claim_install_lock(lock, held)
+            if (
+                _install_lock_owner(lock, held, claim) == owner
+                and not _install_lock_claimed(lock, held, claim)
+                and _install_lock_state(folder, held)[0] == "stale"
+            ):
+                outcome = _remove_held_install_lock(lock, held, owner[1], claim)
         except OSError as exc:
-            return ("fail", f"could not remove {lock}: {exc}")
+            outcome = f"could not remove {lock}: {exc}"
         finally:
+            if claim and outcome != "removed":
+                _unclaim_install_lock(lock, held, claim)
             _close_install_lock(held)
         if outcome == "removed":
             removed.append(lock)

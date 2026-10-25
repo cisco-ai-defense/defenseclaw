@@ -80,6 +80,9 @@ defenseclaw_install_lock_stale() {
     command -v ps >/dev/null 2>&1 || return 1
     ps -p "$pid" >/dev/null 2>&1 || return 0
   fi
+  # An installer that exited but is not reaped (a zombie) keeps its pid and
+  # its start, but runs nothing.
+  defenseclaw_process_ended "$pid" && return 0
   [ -e "${lock}/proc-start" ] || [ -L "${lock}/proc-start" ] || return 1
   recorded="$(defenseclaw_install_lock_record "${lock}/proc-start")" || return 1
   current="$(defenseclaw_process_identity "$pid")" || return 1
@@ -113,6 +116,26 @@ defenseclaw_process_identity() {
   set -- $out
   [ "$#" -eq 5 ] || return 1
   printf '%s %s %s %s %s' "$1" "$2" "$3" "$4" "$5"
+}
+# defenseclaw_process_ended PID returns 0 when process PID has exited but
+# keeps its pid: a zombie its parent has not reaped (hookexec
+# procidentity.Ended). It returns 1 while it runs or when the system does
+# not say.
+defenseclaw_process_ended() {
+  local stat IFS=' '
+  if [ -e /proc/self/stat ]; then
+    stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
+    case "$stat" in *[\)]*) ;; *) return 1 ;; esac
+    stat="${stat##*[\)]}"
+    set -- $stat
+    case "${1:-}" in Z|X|x) return 0 ;; esac
+    return 1
+  fi
+  [ -x /bin/ps ] || return 1
+  stat="$(LC_ALL=C /bin/ps -o stat= -p "${1:-}" 2>/dev/null)" || return 1
+  set -- $stat
+  case "${1:-}" in Z*) return 0 ;; esac
+  return 1
 }
 # defenseclaw_install_lock_record FILE prints the trimmed text of a small
 # owner record (proc-start); it returns 1 when FILE is not a small regular
