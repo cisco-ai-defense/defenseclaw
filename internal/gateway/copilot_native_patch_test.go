@@ -251,8 +251,9 @@ func TestNativeCopilotEmptyPermissionReusesAuditedPreToolAllow(t *testing.T) {
 		t.Fatalf("permission after mismatched callback action=%s: %s", action, body)
 	}
 	created := filepath.Join(project, "new.txt")
-	diff := "\ndiff --git a" + created + " b" + created +
-		"\ncreate file mode 100644\nindex 0000000..0000000\n--- a/dev/null\n+++ b" + created +
+	gitPath := strings.TrimPrefix(strings.ReplaceAll(created, `\`, "/"), "/")
+	diff := "\ndiff --git a/" + gitPath + " b/" + gitPath +
+		"\ncreate file mode 100644\nindex 0000000..0000000\n--- a/dev/null\n+++ b/" + gitPath +
 		"\n@@ -1,0 +1 @@\n+ordinary content\n"
 	if action, body := post("permissionRequest", map[string]any{"hookName": "permissionRequest",
 		"sessionId": "diff-session", "cwd": project, "toolName": "edit",
