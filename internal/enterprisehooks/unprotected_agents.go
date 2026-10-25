@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // The standalone enumerator records installed agents and surfaces that
@@ -44,6 +45,34 @@ const UnprotectedAgentsMaxAge = 16 * time.Minute
 // unchanged result.
 func UnprotectedAgentsRecordStale(modTime, now time.Time) bool {
 	return now.Sub(modTime) > UnprotectedAgentsMaxAge || modTime.After(now.Add(5*time.Minute))
+}
+
+// UnprotectedAgentsGeneration is the install generation a record carries:
+// the DefenseClaw build that wrote it. The enumerator and status/verify run
+// the same installed build, so a record whose generation differs was
+// written before the current install, upgrade or downgrade and proves
+// nothing about the agents runnable now, however recent it is (GAP-1454).
+func UnprotectedAgentsGeneration() string { return version.Current().BinaryVersion }
+
+// UnprotectedAgentsRecordGeneration is the generation data carries; ""
+// for a record written before records carried one (1.0.4 and earlier).
+func UnprotectedAgentsRecordGeneration(data []byte) string {
+	var record struct {
+		Generation string `json:"generation"`
+	}
+	if json.Unmarshal(data, &record) != nil {
+		return ""
+	}
+	return record.Generation
+}
+
+// UnprotectedAgentsRecordFromEarlierInstall describes a record of another
+// generation for UnprotectedAgentsScanPending.
+func UnprotectedAgentsRecordFromEarlierInstall(written string) string {
+	if written == "" {
+		written = "an earlier release"
+	}
+	return "from an earlier install (written by " + boundedStatusText(written, 64) + ", this install is " + UnprotectedAgentsGeneration() + ")"
 }
 
 // UnprotectedAgentsRecordMissing describes a record no scan has published.
@@ -129,8 +158,9 @@ type UnprotectedAgent struct {
 }
 
 type unprotectedAgentsFile struct {
-	Version int                `json:"version"`
-	Agents  []UnprotectedAgent `json:"agents"`
+	Version    int                `json:"version"`
+	Generation string             `json:"generation,omitempty"`
+	Agents     []UnprotectedAgent `json:"agents"`
 }
 
 // UnprotectedAgentsPath is the unprotected-agents record for manifestPath.
@@ -192,7 +222,7 @@ func (a UnprotectedAgent) Message() string {
 // so an unchanged set rewrites nothing.
 func MarshalUnprotectedAgents(agents []UnprotectedAgent) ([]byte, error) {
 	normalized := normalizeUnprotectedAgents(agents)
-	data, err := json.MarshalIndent(unprotectedAgentsFile{Version: 1, Agents: normalized}, "", "  ")
+	data, err := json.MarshalIndent(unprotectedAgentsFile{Version: 1, Generation: UnprotectedAgentsGeneration(), Agents: normalized}, "", "  ")
 	if err != nil {
 		return nil, err
 	}

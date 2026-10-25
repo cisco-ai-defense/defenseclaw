@@ -395,7 +395,7 @@ func (l *lifecycle) guardianTargetFailedSince(since time.Time) bool {
 const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
 
 // reportInstallScanPending reports a missing or stale unprotected-agents
-// record as one NOT COVERED warning, verify included (GAP-1430). Only that
+// record, or one an earlier install wrote, as one NOT COVERED warning, verify included (GAP-1430). Only that
 // condition is a warning: every other check, and every agent a stale record
 // names, keeps its own verdict.
 func (l *lifecycle) reportInstallScanPending(age string) {
@@ -453,6 +453,10 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		r.CoverageComplete, r.SecurityComplete = false, false
 	} else if now := time.Now(); enterprisehooks.UnprotectedAgentsRecordStale(info.ModTime(), now) {
 		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordAge(info.ModTime(), now))
+	} else if written := enterprisehooks.UnprotectedAgentsRecordGeneration(data); written != enterprisehooks.UnprotectedAgentsGeneration() {
+		// A recent record of the previous install is not this install's
+		// scan (GAP-1454): pending until the current enumerator publishes.
+		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordFromEarlierInstall(written))
 	}
 	for _, agent := range agents {
 		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified ||
