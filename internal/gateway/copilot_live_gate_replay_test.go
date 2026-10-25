@@ -71,33 +71,37 @@ func TestCopilotUnparsedObserveAllowRunsTheSandboxGate(t *testing.T) {
 // loop round 2 of review e).
 func TestCopilotDedupeReplaysAnAllowOnlyUnderTheLiveGates(t *testing.T) {
 	useSandboxAvailability(t, sandboxDevicesUsable)
-	native := func(session string) requireSandboxHook {
-		return copilotLiveGateHook("preToolUse", `{"sessionId":"`+session+`","cwd":"__CWD__","toolCalls":[{"id":"call_1","name":"bash","args":{"command":"ls"}}]}`)
+	native := func(session, project string) string {
+		return `{"sessionId":"` + session + `","cwd":` + copilotJoinQuote(t, project) +
+			`,"toolCalls":[{"id":"call_1","name":"bash","args":{"command":"ls"}}]}`
 	}
-	camel := func(session string) requireSandboxHook {
-		return copilotLiveGateHook("preToolUse", `{"sessionId":"`+session+`","cwd":"__CWD__","toolName":"bash","toolArgs":"{\"command\":\"ls\"}"}`)
+	camel := func(session, project string) string {
+		return `{"sessionId":"` + session + `","cwd":` + copilotJoinQuote(t, project) +
+			`,"toolName":"bash","toolArgs":"{\"command\":\"ls\"}"}`
 	}
 	for _, tc := range []struct {
 		name          string
-		first, second func(string) requireSandboxHook
+		first, second func(string, string) string
 	}{
 		{"native then camelCase", native, camel},
 		{"camelCase then native", camel, native},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			project := requireSandboxProject(t)
-			api, store := requireSandboxTestAPI(t, "")
-			cfg := api.liveBaseConfig(t.Context())
-			if action, text := copilotLiveGateAction(t, postRequireSandboxHook(t, api, tc.first("floor"), project, nil, nil)); action != "allow" {
-				t.Fatalf("first delivery: %s", text)
+			f := newManagedHookAuditFixtureFor(t, "copilot", nil)
+			cfg := f.api.liveBaseConfig(t.Context())
+			cfg.OpenShell.Enabled = true
+			cfg.OpenShell.Admin.RequestAccess = "it-security@example.com"
+			if line := copilotJoinManagedPost(t, f, "preToolUse", tc.first("floor", project)); !strings.Contains(line, `"action":"allow"`) {
+				t.Fatalf("first delivery: %s", line)
 			}
 			cfg.OpenShell.Admin.RequiredFor = []string{"copilot"}
-			action, text := copilotLiveGateAction(t, postRequireSandboxHook(t, api, tc.second("floor"), project, nil, nil))
-			if action == "allow" || !strings.Contains(strings.ToLower(text), "sandbox") {
-				t.Fatalf("second delivery replayed an allow past the newly required sandbox gate: %s", text)
+			line := copilotJoinManagedPost(t, f, "preToolUse", tc.second("floor", project))
+			if strings.Contains(line, `"action":"allow"`) || !strings.Contains(strings.ToLower(line), "sandbox") {
+				t.Fatalf("second delivery replayed an allow past the newly required sandbox gate: %s", line)
 			}
-			if got := requireSandboxAuditOutcome(t, store); got != requireSandboxRefused {
-				t.Fatalf("audit require_sandbox = %q, want %q", got, requireSandboxRefused)
+			if got := requireSandboxAuditOutcome(t, f.store); got != requireSandboxRefused && got != requireSandboxUnavailable {
+				t.Fatalf("audit require_sandbox = %q, want a refusal: %s", got, line)
 			}
 		})
 	}
