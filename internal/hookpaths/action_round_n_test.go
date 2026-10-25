@@ -136,10 +136,10 @@ func TestR104RoundNApplyPatchAfterQuotedText(t *testing.T) {
 		`.venv/bin/python -m build --wheel --outdir dist && printf 'INFO Started\nNOTICE Café prêt\nERROR Failed\n' > sample.log && printf '%s\n' '--- installed CLI output ---' && .venv-wheel/bin/log-summary sample.log && ` +
 			"apply_patch <<'PATCH'\n*** Begin Patch\n*** Delete File: sample.log\n*** End Patch\nPATCH\n" +
 			`git add .gitignore README.md && git commit -m 'Package library' && printf '\n--- final status ---\n' && git status --short --branch && git log -1 --format='%h %an <%ae> %s'`: {"sample.log"},
-		`printf '%s\n' start; ` + envelope("*** Update File: race.txt"):                      {"race.txt"},
-		`grep -q 'done$' race.txt || ` + envelope("*** Add File: race.txt"):                   {"race.txt"},
+		`printf '%s\n' start; ` + envelope("*** Update File: race.txt"):                               {"race.txt"},
+		`grep -q 'done$' race.txt || ` + envelope("*** Add File: race.txt"):                           {"race.txt"},
 		`echo 'see $(date) and ${HOME} and \` + "`x`" + `' && ` + envelope("*** Add File: notes.txt"): {"notes.txt"},
-		`printf 'x\n' >/dev/null` + "\n" + envelope("*** Add File: src/c.go"):                   {filepath.Join("src", "c.go")},
+		`printf 'x\n' >/dev/null` + "\n" + envelope("*** Add File: src/c.go"):                         {filepath.Join("src", "c.go")},
 		"apply_patch <<'PATCH'\n*** Begin Patch\n*** Update File: README.md\n@@\n+Append your key: cat key.pub >> ~/.ssh/authorized_keys\n+cp key.pub ~/.ssh/authorized_keys\n*** End Patch\nPATCH": {"README.md"},
 	}
 	for command, want := range allowed {
