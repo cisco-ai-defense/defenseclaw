@@ -165,6 +165,46 @@ func TestBalancedActionWindowsOrdinaryCommands(t *testing.T) {
 	}
 }
 
+func TestR104WindowsHomeHonorsExplicitPOSIXDialect(t *testing.T) {
+	input := actionfacts.Input{Tool: "exec_command", CWD: `C:\Users\alice\project`,
+		ActiveHome: `C:\Users\alice`, DialectHint: actionfacts.DialectPOSIX}
+	for _, tc := range []struct {
+		command string
+		blocked bool
+	}{
+		{`echo \$HOME/.ssh/authorized_keys`, false},
+		{`echo $HOME/.ssh/authorized_keys`, true},
+		{`echo marker > ~/.ssh/authorized_keys`, true},
+	} {
+		input.Command = tc.command
+		if got := trustedWindowsLocationAuthorizedKeysWrite(input); got != tc.blocked {
+			t.Errorf("%q: protected target = %t, want %t", tc.command, got, tc.blocked)
+		}
+	}
+}
+
+func TestR104WindowsPowerShellLiteralTargets(t *testing.T) {
+	input := actionfacts.Input{Tool: "exec_command", CWD: `C:\Users\alice\project`,
+		ActiveHome: `C:\Users\alice`, DialectHint: actionfacts.DialectPowerShell}
+	for _, tc := range []struct {
+		name, command string
+		blocked       bool
+	}{
+		{"escaped dollar", "Write-Output \"`$HOME/.ssh/authorized_keys\"", false},
+		{"line comment", `Write-Output ok # $HOME/.ssh/authorized_keys`, false},
+		{"block comment", `Write-Output ok <# $HOME/.ssh/authorized_keys #>`, false},
+		{"expanded dollar", `Write-Output $HOME/.ssh/authorized_keys`, true},
+		{"after block comment", `Write-Output ok <# $HOME/.ssh/authorized_keys #>; Write-Output $HOME/.ssh/authorized_keys`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input.Command = tc.command
+			if got := trustedWindowsLocationAuthorizedKeysWrite(input); got != tc.blocked {
+				t.Fatalf("protected target = %t, want %t", got, tc.blocked)
+			}
+		})
+	}
+}
+
 func TestBalancedActionWindowsUnboundRedirectIsAuditOnly(t *testing.T) {
 	for _, command := range []string{
 		"git status --short --branch 2>$null",

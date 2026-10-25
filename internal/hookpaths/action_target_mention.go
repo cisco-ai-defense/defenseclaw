@@ -17,27 +17,29 @@ import (
 	"syscall"
 	"unicode/utf16"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/syntax"
 )
 
 // ActionStateTargetMention applies the same independent target scan to the
 // active DefenseClaw security state, without attributing it to SSH keys.
 func ActionStateTargetMention(command, cwd, home string) bool {
-	return actionProtectedTargetMentionDepth(command, cwd, home, 0, true, nil)
+	return actionProtectedTargetMentionDepth(command, cwd, home, 0, true, nil, "")
 }
 
 // actionProtectedTargetMentionDepth is independent of a program's operand
 // roles. A resolved protected path in a writable command is enough for the
 // action decision; commands with no such path continue through the existing
 // proof. globs carries the hook client's pattern answers (actionGlobs).
-func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) bool {
+func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, stateOnly bool, globs *actionGlobs, dialect actionfacts.Dialect) bool {
 	if command == "" || home == "" || len(command) > MaxPayloadBytes || depth >= 8 {
 		return false
 	}
-	if actionWindowsHome(home) {
-		return actionWindowsTargetMention(command, cwd, home, depth, stateOnly)
+	nativePOSIX := actionWindowsHome(home) && dialect == actionfacts.DialectPOSIX
+	if actionWindowsHome(home) && !nativePOSIX {
+		return actionWindowsTargetMention(command, cwd, home, depth, stateOnly, dialect)
 	}
-	if !filepath.IsAbs(cwd) && (!actionPosixWindowsHome(home) || !path.IsAbs(cwd)) {
+	if !filepath.IsAbs(cwd) && !nativePOSIX && (!actionPosixWindowsHome(home) || !path.IsAbs(cwd)) {
 		return false
 	}
 	file, parsed := parseShell(command)
@@ -47,7 +49,7 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 	var nestedBodies []*syntax.Word
 	if parsed {
 		var nestedFound bool
-		nestedBodies, nestedFound = actionPosixNestedShellMention(file, cwd, home, depth, stateOnly, globs)
+		nestedBodies, nestedFound = actionPosixNestedShellMention(file, cwd, home, depth, stateOnly, globs, dialect)
 		if nestedFound {
 			return true
 		}
@@ -66,6 +68,32 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			} else {
 				value = filepath.Join(home, value[2:])
 			}
+		}
+		if nativePOSIX {
+			// The POSIX parser has already expanded HOME and unquoted tildes.
+			// Native $home and %USERPROFILE% expansion would turn POSIX
+			// literals into protected Windows paths.
+			if strings.ContainsAny(value, "$%`") || !tilde &&
+				(value == "~" || strings.HasPrefix(value, "~/")) {
+				return false
+			}
+			if strings.ContainsAny(value, "*?[]") {
+				return !stateOnly && actionWindowsProtectedGlobReach(value, base, home)
+			}
+			resolved, ok := actionWindowsPath(value, base, home)
+			if !ok {
+				return false
+			}
+			root, ok := actionWindowsPath(home, base, home)
+			if !ok {
+				return false
+			}
+			if stateOnly {
+				return strings.HasPrefix(resolved, root+"/") &&
+					actionProtectedStateRelative(strings.TrimPrefix(resolved, root+"/"))
+			}
+			protected, _ := actionWindowsProtected(value, base, home, false)
+			return resolved == root+"/.ssh" || protected
 		}
 		if strings.ContainsAny(value, "*?[]") {
 			if stateOnly {
@@ -694,7 +722,7 @@ func (g *actionGlobs) answer(pattern string) string {
 // target scan of command checks, and returns the answers for the gateway.
 func actionGlobFacts(command, cwd, home string) map[string]string {
 	globs := &actionGlobs{record: map[string]string{}}
-	actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs)
+	actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs, "")
 	return globs.record
 }
 
@@ -871,7 +899,7 @@ func actionProtectedStatePath(value, home string) bool {
 
 // actionPosixNestedShellMention scans each static shell -c or env -S body as
 // its own command. bodies are the words it scanned without a match.
-func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) (bodies []*syntax.Word, found bool) {
+func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth int, stateOnly bool, globs *actionGlobs, dialect actionfacts.Dialect) (bodies []*syntax.Word, found bool) {
 	if depth+1 >= 8 {
 		return nil, false
 	}
@@ -896,7 +924,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 						continue
 					}
 					if child, childStatic := StaticWord(call.Args[j+1], home); childStatic {
-						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs) {
+						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs, dialect) {
 							found = true
 							return false
 						}
@@ -919,7 +947,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 				if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&
 					!strings.ContainsAny(option, "=/") && strings.Contains(option[1:], "c") {
 					if child, static := StaticWord(call.Args[j+1], home); static {
-						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs) {
+						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs, dialect) {
 							found = true
 						} else {
 							bodies = append(bodies, call.Args[j+1])
@@ -1056,9 +1084,12 @@ func actionLessWritesFile(option string) bool {
 		(strings.HasPrefix("--log-file", option) || strings.HasPrefix(option, "--log-file"))
 }
 
-func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool) bool {
+func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool, dialect actionfacts.Dialect) bool {
 	if depth >= 8 || len(command) > MaxPayloadBytes {
 		return false
+	}
+	if dialect == actionfacts.DialectPowerShell {
+		command = actionPowerShellCode(command)
 	}
 	// The argument to PowerShell -Command is parsed again by the child shell.
 	// Quotes that are literal in the outer command do not stop expansion there.
@@ -1072,7 +1103,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 						break
 					}
 					if (rawWords[j] == "-S" || rawWords[j] == "--split-string") &&
-						actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly) {
+						actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly, dialect) {
 						return true
 					}
 				}
@@ -1085,7 +1116,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 					break
 				}
 				if strings.EqualFold(rawWords[j], "-command") || strings.EqualFold(rawWords[j], "-c") {
-					if actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly) {
+					if actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly, actionfacts.DialectPowerShell) {
 						return true
 					}
 					break
@@ -1093,23 +1124,9 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 			}
 		}
 	}
-	// PowerShell does not expand variables inside single quoted literals.
-	// Preserve the literal pathname there while keeping its dollar sign from
-	// being mistaken for a resolvable home variable.
-	var normalized strings.Builder
-	normalized.Grow(len(command))
-	singleQuoted := false
-	for i := 0; i < len(command); i++ {
-		if command[i] == '\'' {
-			singleQuoted = !singleQuoted
-		}
-		if singleQuoted && command[i] == '$' {
-			normalized.WriteByte('@')
-		} else {
-			normalized.WriteByte(command[i])
-		}
-	}
-	words, ok := actionWindowsWords(normalized.String())
+	// Literal dollars do not expand in PowerShell single quotes or after a
+	// backtick. The raw child-command pass above sees each nested body first.
+	words, ok := actionWindowsWords(actionWindowsLiteralDollars(command, string(dialect)))
 	if !ok || len(words) == 0 || depth == 0 && actionKnownReadOnlyWindows(words) {
 		return false
 	}
@@ -1125,7 +1142,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 		for j := range letters {
 			letters[j] = uint16(encoded[2*j]) | uint16(encoded[2*j+1])<<8
 		}
-		if actionWindowsTargetMention(string(utf16.Decode(letters)), cwd, home, depth+1, stateOnly) {
+		if actionWindowsTargetMention(string(utf16.Decode(letters)), cwd, home, depth+1, stateOnly, actionfacts.DialectPowerShell) {
 			return true
 		}
 	}
