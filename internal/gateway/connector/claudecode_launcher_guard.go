@@ -43,9 +43,20 @@ import (
 // turn that began before the launcher went missing is not let through. Started
 // by Cursor without arguments it gives no answer. The launcher delegates every
 // call to that same installed hook, so its absence already leaves no hook to
-// run; the guard adds no file a call depends on. A launcher with no separate
-// installed hook (a repository build) keeps the cmd.exe guard on PreToolUse
-// too, so a missing launcher blocks there as well.
+// run; the guard adds no file a call depends on.
+//
+// A launcher with no separate installed hook (the one-line install's
+// ~/.local/bin\defenseclaw-hook.exe, a repository build) has no second file
+// to run as that guard, so its PreToolUse handler is the exec form (command =
+// launcher, args = hook --connector claudecode), which Cursor starts without
+// args and which then gives no answer. The cmd.exe guard must never be the
+// PreToolUse command there: Cursor starts cmd.exe with no arguments and the
+// tool call event on stdin, so cmd.exe printed its banner instead of JSON and
+// read that event as commands; every Cursor tool call was blocked (GAP-1011).
+// The other events keep the cmd.exe guard, so after the launcher goes missing
+// the next prompt is blocked with the guard sentence (UserPromptSubmit); only
+// a tool call of a turn already running sees Claude Code's non-blocking start
+// error.
 //
 // Hook-shape compatibility rule (GAP-1284): a hook entry that release N
 // writes must keep a shape that every earlier 1.x teardown recognises, or
@@ -283,10 +294,10 @@ func claudeCodeWindowsHookInvocation(opts SetupOpts, executable string) (string,
 // so that handler runs the PreToolUse guard instead (see the top of this
 // file): started by Cursor with no arguments it gives no answer, and started
 // by Claude Code it blocks when the launcher is missing, also in a turn that
-// began before the launcher went missing. Every other event keeps the cmd.exe
-// guard (GAP-1091), and so does PreToolUse when there is no separate installed
-// hook to run as its guard: a missing launcher must block, never let a tool
-// call through.
+// began before the launcher went missing. Without a separate installed hook
+// to run as that guard, PreToolUse runs the launcher in the exec form, which
+// Cursor's argument-free start also leaves without an answer (see the top of
+// this file). Every other event keeps the cmd.exe guard (GAP-1091).
 func claudeCodeHandlerInvocation(eventType, command string, args []string) (string, []string) {
 	if eventType != "PreToolUse" {
 		return command, args
@@ -302,7 +313,7 @@ func claudeCodeHandlerInvocation(eventType, command string, args []string) (stri
 			return guard, guardArgs
 		}
 	}
-	return command, args
+	return launcher, hookArgs
 }
 
 // claudeCodeRollbackBackupName is the copy of settings.json taken before
