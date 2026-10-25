@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/contracttest"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // statusV2Host is an installed host with the published sample config
@@ -126,6 +127,11 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
+			var audited []managed.LaunchCoverageReport
+			h.env.ReportLaunchCoverage = func(_ context.Context, report managed.LaunchCoverageReport) error {
+				audited = append(audited, report)
+				return nil
+			}
 			file, home := "linux-standalone.yaml", "/home/alice"
 			if goos == "darwin" {
 				file, home = "macos-standalone.yaml", "/Users/alice"
@@ -144,6 +150,8 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
 				t.Fatal(err)
 			}
+			readiness := "defenseclaw-gateway enterprise hooks readiness --manifest " + h.env.Layout.ManifestPath + " --json"
+			h.runner.replies = map[string]fakeReply{readiness: {result: CommandResult{Stdout: []byte(`{"ok":true,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[{"connector":"hermes","user":"alice","user_home":"` + home + `","uid":1001,"ok":true}]}`)}}}
 			for _, action := range []string{ActionStatus, ActionVerify} {
 				r := h.run(Options{Action: action})
 				contracttest.Compile(t).ValidateValue(t, "lifecycle-result.schema.json", r)
@@ -158,9 +166,14 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 				if !strings.Contains(messages, "session-only HERMES_HOME") {
 					t.Fatalf("%s did not name the unknown home: %q", action, messages)
 				}
-				if action == ActionVerify && r.ExitCode == 0 {
-					t.Fatal("verify certified an unobservable Hermes launch home")
+				if action == ActionVerify && (r.ExitCode != 0 || !r.OK) {
+					t.Fatalf("registration proof was rejected even though coverage remains incomplete: errors=%+v", r.Errors)
 				}
+			}
+			h.runner.replies[readiness] = fakeReply{err: errors.New("owned Hermes hook command is missing")}
+			missing := h.run(Options{Action: ActionVerify})
+			if missing.ExitCode == 0 || !strings.Contains(messagesOf(missing.Errors, codeVerify), "owned Hermes hook command is missing") {
+				t.Fatalf("missing owned hook passed lifecycle verify: %+v", missing.Errors)
 			}
 			// A no-op ensure describes the same managed deployment without
 			// status-v2 blocks. It must not certify coverage that verify rejects.
@@ -171,6 +184,54 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 			}
 			if message := messagesOf(ensure.Warnings, enterprisestatus.CodeStatusDetailUnavailable); !strings.Contains(message, "session-only HERMES_HOME") {
 				t.Fatalf("ensure did not name the unobservable home: %q", message)
+			}
+			if message := messagesOf(ensure.Warnings, enterprisestatus.CodeStatusDetailUnavailable); !strings.Contains(message, "NOT COVERED") {
+				t.Fatalf("ensure did not label the Hermes limit: %q", message)
+			}
+			if len(audited) == 0 || audited[len(audited)-1].Connector != "hermes" ||
+				audited[len(audited)-1].Reason != "session_only_hermes_home_unobservable" {
+				t.Fatalf("ensure did not audit the managed Hermes coverage limit: %+v", audited)
+			}
+		})
+	}
+}
+
+func TestManagedHermesRegistrationScopesRowsAndRequiresAuthorization(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			home := "/home/"
+			if goos == "darwin" {
+				home = "/Users/"
+			}
+			writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n"+
+				"  - user: alice\n    uid: 1001\n    user_home: "+home+"alice\n    connector: hermes\n"+
+				"  - user: bob\n    uid: 1002\n    user_home: "+home+"bob\n    connector: hermes\n")
+			l := &lifecycle{env: h.env, result: &enterprisestatus.Result{Connectors: map[string]enterprisestatus.ConnectorState{
+				"hermes": {Enabled: true, HooksInstalled: enterprisestatus.HooksInstalledUnknown},
+			}}}
+			readiness := "defenseclaw-gateway enterprise hooks readiness --manifest " + h.env.Layout.ManifestPath + " --json"
+			for _, tc := range []struct {
+				name, payload string
+				wantError     bool
+			}{
+				{"unrelated failure", `{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[{"connector":"hermes","user":"alice","user_home":"HOMEalice","uid":1001,"ok":true},{"connector":"hermes","user":"bob","user_home":"HOMEbob","uid":1002,"ok":true},{"connector":"codex","user":"carol","ok":false}]}`, false},
+				{"invalid authorization", `{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","authorization_error":"protected record invalid","results":[{"connector":"hermes","user":"alice","user_home":"HOMEalice","uid":1001,"ok":true},{"connector":"hermes","user":"bob","user_home":"HOMEbob","uid":1002,"ok":true}]}`, true},
+				{"missing target", `{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[{"connector":"hermes","user":"alice","user_home":"HOMEalice","uid":1001,"ok":true}]}`, true},
+				{"failed target", `{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[{"connector":"hermes","user":"alice","user_home":"HOMEalice","uid":1001,"ok":true},{"connector":"hermes","user":"bob","user_home":"HOMEbob","uid":1002,"ok":false}]}`, true},
+				{"conflicting duplicate", `{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[{"connector":"hermes","user":"alice","user_home":"HOMEalice","uid":1001,"ok":true},{"connector":"hermes","user":"bob","user_home":"HOMEbob","uid":1002,"ok":true},{"connector":"hermes","user":"bob","user_home":"HOMEbob","uid":1002,"ok":false}]}`, true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					payload := strings.ReplaceAll(tc.payload, "HOME", home)
+					// ExecRunner returns both the JSON and an error for exit 1.
+					h.runner.replies = map[string]fakeReply{readiness: {
+						result: CommandResult{Stdout: []byte(payload), ExitCode: 1},
+						err:    errors.New("readiness exited 1"),
+					}}
+					if err := l.verifyManagedHermesRegistration(context.Background()); (err != nil) != tc.wantError {
+						t.Fatalf("registration error = %v, want error %t", err, tc.wantError)
+					}
+				})
 			}
 		})
 	}

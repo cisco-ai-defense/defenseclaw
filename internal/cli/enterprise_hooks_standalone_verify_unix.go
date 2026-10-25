@@ -31,7 +31,7 @@ import (
 // Unix guardian without mutating anything. Every per-user check runs in
 // the target user's worker; a target whose home is unavailable right now
 // is pending only when the last reconcile recorded it pending too.
-func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpriseHookVerifyRun, error) {
+func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrationOnly bool) (enterpriseHookVerifyRun, error) {
 	run := enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}
 	if err := enterpriseHookManifestFileTrustCheck(enterpriseHookManifest); err != nil {
 		return run, fmt.Errorf("enterprise hooks verify: manifest trust check failed: %w", err)
@@ -48,13 +48,21 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 	activation, activationExists, activationErr := records.Activation, records.ActivationExists, records.ActivationErr
 	guardianState, guardianStateExists, guardianStateErr := records.State, records.StateExists, records.StateErr
 	freshnessErr := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now())
+	// Unix registration readiness can inspect each target even when another
+	// target failed the guardian pass. The protected records must still have
+	// matching, complete dispositions for that pass; pending proof still
+	// requires an exact, authenticated record of each pending target.
+	partialRegistration := registrationOnly && !authorization.OK && !activation.OK &&
+		authorization.FailureCount > 0 &&
+		authorization.SuccessCount+authorization.PendingCount+authorization.FailureCount == authorization.TargetCount &&
+		activation.SuccessCount+activation.PendingCount+activation.FailureCount == activation.TargetCount
 	switch {
 	case authorizationErr != nil:
 		run.AuthorizationErr = authorizationErr
 	case !exists:
 		run.AuthorizationErr = errors.New("protected hook guardian authorization is missing")
-	case !authorization.OK || authorization.FailureCount != 0 ||
-		authorization.SuccessCount+authorization.PendingCount != authorization.TargetCount:
+	case (!authorization.OK || authorization.FailureCount != 0 ||
+		authorization.SuccessCount+authorization.PendingCount != authorization.TargetCount) && !partialRegistration:
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is incomplete (%d succeeded, %d pending, %d total)", authorization.SuccessCount, authorization.PendingCount, authorization.TargetCount)
 	case freshnessErr != nil:
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is not fresh: %w", freshnessErr)
@@ -62,7 +70,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 		run.AuthorizationErr = activationErr
 	case !activationExists:
 		run.AuthorizationErr = errors.New("protected hook guardian activation is missing")
-	case !activation.OK || activation.UpdatedAt != authorization.UpdatedAt || activation.ManifestSHA256 != manifestSHA256:
+	case (!activation.OK && !partialRegistration) || activation.UpdatedAt != authorization.UpdatedAt || activation.ManifestSHA256 != manifestSHA256:
 		run.AuthorizationErr = errors.New("protected hook guardian activation does not cover the current manifest bytes")
 	}
 	authenticatedPending := map[string]struct{}{}
@@ -73,7 +81,11 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 		case !guardianStateExists:
 			run.AuthorizationErr = errors.New("hook guardian state is missing for pending verification")
 		default:
-			authenticatedPending, err = enterpriseHookStandaloneAuthenticatedPending(manifest, guardianState, authorization, activation, enterpriseHookManifest, manifestSHA256)
+			excused := 0
+			if partialRegistration {
+				excused = authorization.FailureCount
+			}
+			authenticatedPending, err = enterpriseHookStandaloneAuthenticatedPending(manifest, guardianState, authorization, activation, enterpriseHookManifest, manifestSHA256, excused)
 			if err != nil {
 				run.AuthorizationErr = err
 			}
@@ -208,6 +220,9 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 		if row.Connector != "hermes" || !row.OK {
 			continue
 		}
+		if registrationOnly {
+			continue
+		}
 		if err := enterprisehooks.ManagedHermesSessionHomeAttestation(runtime.GOOS, row.Connector, true, false); err != nil {
 			row.OK = false
 			row.Pending = false
@@ -225,7 +240,17 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 		}
 	}
 	if run.AuthorizationErr == nil && exists && activationExists {
-		if issues := enterpriseHookVerifyDispositionIssues(run, authorization, activation); len(issues) > 0 {
+		proof := run
+		if partialRegistration {
+			for _, row := range run.Rows {
+				if !row.OK && !row.Pending {
+					// A prior protected row may be carried forward for the
+					// failed target. It proves nothing about current readiness.
+					proof.Excused = append(proof.Excused, row)
+				}
+			}
+		}
+		if issues := enterpriseHookVerifyDispositionIssues(proof, authorization, activation); len(issues) > 0 {
 			run.AuthorizationErr = errors.New(strings.Join(issues, "; "))
 		}
 	}
@@ -253,8 +278,9 @@ func enterpriseHookStandaloneAuthenticatedPending(
 	activation enterpriseHookGuardianActivation,
 	manifestPath,
 	manifestSHA256 string,
+	excused int,
 ) (map[string]struct{}, error) {
-	if issues := compareEnterpriseHookGuardianRecords(state, authorization, activation, manifestPath, manifestSHA256); len(issues) != 0 {
+	if issues := compareEnterpriseHookGuardianRecordsExcusing(state, authorization, activation, manifestPath, manifestSHA256, excused); len(issues) != 0 {
 		return nil, fmt.Errorf("protected guardian pending proof is invalid: %s", strings.Join(issues, "; "))
 	}
 	expected := map[string]struct{}{}

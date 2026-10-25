@@ -180,6 +180,11 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	problems = append(problems, l.describeMachinePolicy(record)...)
 	problems = append(problems, l.describeTetragon(ctx)...)
 	l.describeStatusV2(record)
+	if strict && record != nil {
+		if err := l.verifyManagedHermesRegistration(ctx); err != nil {
+			problems = append(problems, "managed Hermes hook registration: "+err.Error())
+		}
+	}
 	if machinePolicyIncomplete(r) {
 		r.SecurityComplete = false
 	}
