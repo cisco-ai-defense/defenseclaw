@@ -1119,7 +1119,7 @@ const knownLimitEntries = [
   {
     gaps: 'GAP-0794, GAP-1006',
     section: 'Codex',
-    phrases: ['Codex runs the tool when its `PreToolUse` hook is stopped, killed or times out.', '`hook_process_fail_open`', '/docs/enterprise/configure/reference#vendor-limits'],
+    phrases: ['Codex runs the tool when its `PreToolUse` hook is stopped, killed or times out.', 'If the hook stopped before it reached the gateway', 'If it reached the gateway first, the gateway can still record the call', 'It does not prevent a timeout', '`hook_process_fail_open`', '/docs/enterprise/configure/reference#vendor-limits'],
     from: ['connectors/codex.mdx'],
   },
   {
@@ -1127,6 +1127,18 @@ const knownLimitEntries = [
     section: 'Copilot CLI',
     phrases: ['`Session host did not acknowledge permission.requested delivery within 5 seconds`', 'It is a Copilot CLI limit.', 'quit Copilot and start a new session'],
     from: ['connectors/copilot.mdx'],
+  },
+  {
+    gaps: 'the approved Copilot CLI hook-timeout limit',
+    section: 'Copilot CLI',
+    phrases: ["Copilot CLI runs the tool when its `preToolUse` hook times out or cannot start, even when DefenseClaw's fail mode is `closed`.", 'per-user and managed installs on every OS', 'If it reached the gateway first, the gateway can still record the call', '`hook_process_fail_open`', '/docs/enterprise/configure/reference#vendor-limits'],
+    from: ['connectors/copilot.mdx'],
+  },
+  {
+    gaps: 'the approved Antigravity hook-timeout limit',
+    section: 'Antigravity',
+    phrases: ["Antigravity can run a tool when its `PreToolUse` hook times out or cannot start, even when DefenseClaw's fail mode is `closed`.", 'every install on every OS', 'If it reached the gateway first, the gateway can still record the call', '`hook_process_fail_open`'],
+    from: ['connectors/antigravity.mdx'],
   },
   {
     gaps: 'GAP-1164',
@@ -1179,7 +1191,7 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
   it('lists every section in the troubleshooting index summary', () => {
     const index = page('troubleshooting/index.mdx');
     const line = index.split('[Known limits in 1.0.4](/docs/troubleshooting/known-limits):')[1]?.split(' - [')[0] ?? '';
-    for (const words of ['Codex', 'Copilot CLI', 'Linux sign-out']) {
+    for (const words of ['Codex', 'Copilot CLI', 'Antigravity', 'Linux sign-out']) {
       assert.ok(line.includes(words), `troubleshooting index summary omits ${words}`);
     }
   });
@@ -1190,10 +1202,33 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
     }
   });
 
-  it('matches the managed hook_process_fail_open warning for Codex', () => {
+  it('matches the managed hook_process_fail_open warning for Codex, Copilot and Antigravity', () => {
     const status = source('internal/enterprisestatus/hook_process_failure.go');
     assert.ok(status.includes('CodeHookProcessFailOpen = "hook_process_fail_open"'));
     assert.match(status, /case "claudecode", "codex":\s*behavior = "a killed PreToolUse hook or PreToolUse timeout is non-blocking"/);
+    assert.match(status, /case "copilot":\s*behavior = "a timed-out preToolUse hook is non-blocking; a later permission hook may still deny"/);
+    assert.match(status, /case "antigravity":\s*behavior = "a command hook that cannot start or reaches its timeout has no vendor-guaranteed deny"/);
     assert.match(status, /r\.SecurityComplete = false/);
+  });
+
+  // A hook that times out may already have reached the gateway, which can then
+  // record the call. Every timeout entry must keep the "no audit row" claim to
+  // hooks that never reached it, and must not offer signal protection as a cure
+  // for timeouts.
+  it('scopes every hook-timeout entry on the page', () => {
+    const raw = readFileSync(join(docs, 'troubleshooting/known-limits.mdx'), 'utf8');
+    const entries = raw.split(/\n(?=- |\n)/).map((part) => part.split(/\s+/).join(' '))
+      .filter((part) => /\btimes? out\b|\btimed-out\b/.test(part) && /hook/.test(part));
+    assert.ok(entries.length >= 3, `expected the Codex, Copilot CLI and Antigravity timeout entries, found ${entries.length}`);
+    for (const entry of entries) {
+      assert.ok(!/never reaches the gateway/.test(entry), `unscoped no-request claim: ${entry.slice(0, 120)}`);
+      if (/no pre-tool audit row/.test(entry)) {
+        assert.match(entry, /If the hook (never reached|stopped before it reached) the gateway/, `no-audit claim is not scoped: ${entry.slice(0, 120)}`);
+        assert.ok(entry.includes('If it reached the gateway first, the gateway can still record the call'), `reached-gateway case missing: ${entry.slice(0, 120)}`);
+      }
+      if (/signall?ing hook processes/.test(entry)) {
+        assert.ok(entry.includes('It does not prevent a timeout'), `signal protection offered as a timeout fix: ${entry.slice(0, 120)}`);
+      }
+    }
   });
 });
