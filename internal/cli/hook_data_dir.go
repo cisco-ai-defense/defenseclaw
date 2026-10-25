@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // hookDataDirNow is the data directory a gateway started with this process's
@@ -32,8 +33,33 @@ import (
 // The answer is "" when the data directory is not an absolute path: the
 // hooks of such a runtime never let an outage through (hookOutageFailModeNow
 // compares an absolute folder).
+//
+// A config kept apart from the installer's home (DEFENSECLAW_CONFIG) whose
+// data_dir is that home, set or by default, is also the config of hooks in
+// its own folder: loaded there without DEFENSECLAW_CONFIG, as a hook loads
+// it, the runtime takes the config's folder as its data directory
+// (loadConfigSourceChecked), so hook-outage-mode can open an outage there.
+// install.sh already holds its home (LOCK_DIR), so the answer is then the
+// config's folder, when the config is a config.yaml with a hooks folder
+// beside it.
 func hookDataDirNow() (string, error) {
 	configFile := filepath.Clean(config.ConfigPath())
+	dir, err := hookDataDirOfConfig(configFile)
+	if err != nil || dir == "" {
+		return dir, err
+	}
+	folder := filepath.Dir(configFile)
+	// Hooks read only <data dir>/config.yaml (hookOutageFailModeNow).
+	if filepath.Base(configFile) == config.DefaultConfigName &&
+		pathidentity.Same(dir, config.DefaultDataPath()) && !pathidentity.Same(folder, dir) {
+		if info, statErr := os.Stat(filepath.Join(folder, "hooks")); statErr == nil && info.IsDir() {
+			return absoluteOrEmpty(folder), nil
+		}
+	}
+	return dir, nil
+}
+
+func hookDataDirOfConfig(configFile string) (string, error) {
 	if _, err := os.Lstat(configFile); errors.Is(err, fs.ErrNotExist) {
 		return absoluteOrEmpty(config.DefaultDataPath()), nil
 	} else if err != nil {
