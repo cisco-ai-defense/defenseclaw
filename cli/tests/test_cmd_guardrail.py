@@ -795,8 +795,8 @@ def test_amp_open_preview_and_help_scope_failure_rows_to_per_user_outages() -> N
     assert "Amp plugin writes a record only for a call an outage let run" in reporting
     assert "guardrail-degraded" in reporting
     assert "managed and sandbox Amp plugins write no record" in reporting
-    assert "A per-user (OSS) install without an explicit saved mode" in page_text
     for prefix in (
+        "On a per-user install the outage behavior",
         "| `default` (balanced",
         "| Gateway service not running",
     ):
