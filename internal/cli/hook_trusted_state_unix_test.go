@@ -37,7 +37,7 @@ func withStandaloneHookRuntime(
 	oldGOOS, oldLoad, oldPolicy, oldSC := standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir
 	oldContext, oldReport := standaloneLinuxHookContext, reportStandaloneHookRefusal
 	standaloneLinuxHookContext = func() string { return "" }
-	reportStandaloneHookRefusal = func(string, int, string, string) {}
+	reportStandaloneHookRefusal = func(string, string, string) {}
 	standaloneHookGOOS = goos
 	standaloneRuntimeDescriptorLoad = load
 	standaloneMachinePolicyOptions = policy
@@ -183,7 +183,7 @@ func TestStandaloneHookRefusesPrivateAgentContextWithValidDescriptor(t *testing.
 		noMarkers, "/nonexistent-secure-client")
 	standaloneLinuxHookContext = func() string { return hookexec.ManagedUserNamespaceReason }
 	reported := ""
-	reportStandaloneHookRefusal = func(_ string, _ int, connectorName, reason string) { reported = connectorName + " " + reason }
+	reportStandaloneHookRefusal = func(_ string, connectorName, reason string) { reported = connectorName + " " + reason }
 	if prepareEnterpriseManagedHookRuntime("codex") {
 		t.Fatal("a private-context hook became a no-op")
 	}
@@ -511,7 +511,7 @@ func TestStandaloneHookRuntimeFailsClosed(t *testing.T) {
 				}
 				return ""
 			}
-			reportStandaloneHookRefusal = func(_ string, _ int, connectorName, reason string) { reported = connectorName + " " + reason }
+			reportStandaloneHookRefusal = func(_ string, connectorName, reason string) { reported = connectorName + " " + reason }
 			if prepareEnterpriseManagedHookRuntime("claudecode") {
 				t.Fatal("a failed standalone runtime is never a no-op")
 			}
@@ -627,5 +627,55 @@ func TestStandaloneMissingDescriptorDeniesToolCallsWithOrWithoutMachinePolicy(t 
 				}
 			}
 		}
+	}
+}
+
+// realReportStandaloneHookRefusal is the production reporter; the runtime
+// fixtures above replace the package variable with a stub.
+var realReportStandaloneHookRefusal = reportStandaloneHookRefusal
+
+// A hook refused for its process context reports the refusal to the gateway
+// even though the refused runtime has no service uid and, from a private
+// user namespace, the listener proof cannot pass: before the fix the report
+// never left the hook, so the admin saw no audit row and no gateway log
+// line (GAP-1335).
+func TestProcessContextRefusalReachesTheGatewayWithoutAListenerProof(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "dcr1335")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "hook.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type report struct{ method, path, connector, reason string }
+	got := make(chan report, 1)
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- report{r.Method, r.URL.Path, r.Header.Get("X-DefenseClaw-Connector"), r.Header.Get(hookexec.ClientRefusalHeader)}
+		w.WriteHeader(http.StatusForbidden)
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	for _, reason := range []string{hookexec.ManagedUserNamespaceReason, hookexec.ManagedTracedProcessReason} {
+		realReportStandaloneHookRefusal(socket, "claudecode", reason)
+		select {
+		case r := <-got:
+			if r.method != http.MethodPost || r.path != "/api/v1/inspect/tool" || r.connector != "claudecode" || r.reason != reason {
+				t.Fatalf("report = %+v; want POST /api/v1/inspect/tool for claudecode with reason %s", r, reason)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s refusal never reached the gateway socket", reason)
+		}
+	}
+	// A relative or empty socket path sends nothing.
+	realReportStandaloneHookRefusal("hook.sock", "claudecode", hookexec.ManagedUserNamespaceReason)
+	realReportStandaloneHookRefusal("", "claudecode", hookexec.ManagedUserNamespaceReason)
+	select {
+	case r := <-got:
+		t.Fatalf("an unusable socket path sent %+v", r)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
