@@ -22,7 +22,7 @@ The command downloads the latest release's installer (`install.sh` on macOS and 
 3. Stops the gateway, keeps the current install in `~/.defenseclaw/previous`, swaps in the new version and runs `defenseclaw migrate`.
 4. Starts the gateway and waits for it to report healthy.
 
-An upgrade refreshes the installed hooks. On the current train, a per-user saved mode does not override the tier during an outage: default and permissive let a classified outage run with a warning, while strict blocks. Use `defenseclaw guardrail use-pack strict` to block outages. Every other failure blocks; restart running agents so they discard old hook settings. Older Cursor setup could save `open` without recording whether the user chose it; the upgrade keeps that value, but the current per-user outage resolver does not use it. Managed standalone hooks default closed and honor an administrator's explicit outage-only `open`, even with a strict pack. Secure Client keeps its managed fail mode.
+An upgrade refreshes the installed hooks. Per-user hooks take the outage mode of their policy tier (the default and permissive policies let a call run with a warning while the gateway is down, strict blocks it) whatever an earlier config or registration saved, and fail closed for every other failure; restart running agents so they discard old hook and native telemetry settings already loaded in memory. Managed standalone hooks default closed and honor an administrator's explicit outage-only `open`; Secure Client keeps its managed fail mode.
 
 End every running agent session before upgrading. Quit OpenCode and Amp
 processes completely, then start a new agent process after the installer

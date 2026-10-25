@@ -59,15 +59,15 @@ against the hook code on every change.
 
 <OutageMatrix />
 
-- **Per-user** is an install without a managed deployment. On the current
-  train the tier selects its outage mode even when `hook_fail_mode` is saved.
-  The default (balanced) and permissive tiers let the call run with a warning and a
-  `hook-failures.jsonl` record; strict blocks it. Other failures block
+- **Per-user** is an install without a managed deployment. Its outage mode
+  follows the connector's policy tier (rule pack): the default (balanced) and
+  permissive policies let the call run with a warning and a
+  `hook-failures.jsonl` record, the strict policy blocks it. Every other
+  failure blocks in every tier
   ([Fail modes](/docs/reference/configuration/fail-modes#per-user-installs)).
 - **Managed standalone** is an enterprise host outside Secure Client. Its fail
   mode is the administrator's `hook_fail_mode`: `closed`, the default, blocks
-  the outage on every connector, and the two managed columns give `open`. An
-  explicit administrator `open` wins over the strict tier for an outage. A
+  the outage on every connector, and the two managed columns give `open`. A
   managed connector runs either through vendor
   [machine policy](/docs/enterprise/configure/machine-policy) (the
   administrator-owned `defenseclaw-hook --enterprise-managed`) or through a
@@ -86,8 +86,8 @@ against the hook code on every change.
   default when no fail mode is set.
 - **`DEFENSECLAW_STRICT_AVAILABILITY=1`** makes an outage block on a hook that
   reads it, whatever the fail mode.
-- **`DEFENSECLAW_FAIL_MODE`** is not read by any 1.0.4 hook. The outage
-  rules are in the fail-mode reference
+- **`DEFENSECLAW_FAIL_MODE`** is not read by any 1.0.4 hook: the installed
+  mode is the fail mode
   ([Fail modes](/docs/reference/configuration/fail-modes#the-environment-does-not-set-the-fail-mode)).
 - A proxy-backed connector has no hooks: its requests are blocked while the
   gateway is down.

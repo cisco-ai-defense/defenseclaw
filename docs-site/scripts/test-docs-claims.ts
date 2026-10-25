@@ -24,6 +24,27 @@ const hookConnectors = [
   { id: 'amp', command: 'amp', name: 'Amp' },
 ] as const;
 
+describe('Public outage guidance', () => {
+  it('has no release coordination notes or reassigned install-window claims', () => {
+    for (const name of [
+      'appendix/coverage-by-layer.mdx',
+      'connectors/claudecode.mdx',
+      'features/guardrail.mdx',
+      'get-started/upgrade.mdx',
+      'reference/apis/capability-matrix.mdx',
+      'reference/commands/cli.mdx',
+      'reference/commands/installer.mdx',
+      'reference/configuration/fail-modes.mdx',
+      'reference/connectors/cursor.mdx',
+      'troubleshooting/hooks-and-blocking.mdx',
+    ]) {
+      const text = page(name);
+      assert.doesNotMatch(text, /\bcurrent (?:1\.0\.4 )?train\b|pending OSS outage fix|saved-mode override requires/i, name);
+      assert.doesNotMatch(text, /all per-user and managed standalone hooks block supported tool calls even if the gateway answers allow/i, name);
+    }
+  });
+});
+
 describe('Owner-decided 1.0.4 vendor and platform limits', () => {
   it('states the Claude Code typed-shell hook limit on both pages', () => {
     const connector = page('connectors/claudecode.mdx');
@@ -51,62 +72,6 @@ describe('Conditional 1.0.4 fallback limits', () => {
     assert.match(limits, /managed policy view[^.]*root-owned[^.]*doctor/i);
     assert.match(limits, /managed upgrade window[^.]*1\.0\.2[^.]*1\.0\.3[^.]*stop agent sessions[^.]*gateway is healthy/i);
     assert.match(page('get-started/upgrade.mdx'), /If the \[legacy MicroVM limit\].{0,160}save the guest's work[^.]*recreate it after upgrading/i);
-  });
-});
-
-describe('Owner-decided outage and install-window modes', () => {
-  it('pins the current install lock to the hook source and all operator guides', () => {
-    const hook = source('internal/gateway/connector/hookexec/hookexec.go');
-    const close = hook.split('func closeDuringInstall(')[1]?.split('\n}')[0] ?? '';
-    assert.match(close, /perUserInstallInProgress\(\*opts\).*managedLifecycleActive\(\*opts\)/);
-    assert.match(close, /opts\.FailMode = "closed"\s+opts\.StrictAvailability = true\s+return "closed"/);
-    for (const name of ['reference/configuration/fail-modes.mdx', 'reference/commands/installer.mdx', 'troubleshooting/hooks-and-blocking.mdx']) {
-      const text = page(name);
-      assert.match(text, /install or upgrade[^.]*(?:all|every)[^.]*block[^.]*gateway answers allow/i, name);
-      assert.doesNotMatch(text, /install or upgrade[^.]*default or permissive[^.]*follows (?:the gateway's|its) verdict/i, name);
-    }
-  });
-
-  it('pins the current per-user tier resolver and command refusal to the docs', () => {
-    const resolver = source('internal/config/hook_outage_fail_mode.go');
-    assert.match(resolver, /return HookOutageFailMode\(false, "", c\.HookPolicyTierForConnector\(connector\)\)/);
-    const command = source('cli/defenseclaw/commands/cmd_guardrail.py');
-    assert.match(command, /if mode is not None and not managed_host and not secure_client:\s+_refuse_a_mode_the_policy_tier_does_not_give/);
-    for (const name of ['reference/configuration/fail-modes.mdx', 'get-started/upgrade.mdx', 'reference/commands/cli.mdx']) {
-      assert.match(page(name), /per-user[^.]*saved[^.]*tier|per-user[^.]*tier[^.]*saved/i, name);
-    }
-    for (const name of ['connectors/claudecode.mdx', 'features/guardrail.mdx', 'reference/connectors/cursor.mdx', 'appendix/coverage-by-layer.mdx']) {
-      assert.match(page(name), /per-user[^.]*tier[^.]*saved|per-user[^.]*saved[^.]*tier|tier[^.]*per-user[^.]*saved/i, name);
-    }
-    assert.match(page('reference/apis/capability-matrix.mdx'), /train the tier selects its outage mode even when `hook_fail_mode` is saved/i);
-  });
-
-  it('keeps managed saved choices and records the per-user release prerequisite', () => {
-    const failModes = page('reference/configuration/fail-modes.mdx');
-    assert.match(failModes, /saved-mode override requires the pending OSS outage fix before release/i);
-    assert.match(failModes, /administrator's explicit `hook_fail_mode: open` wins over the strict tier for a classified gateway outage/i);
-    assert.match(page('get-started/upgrade.mdx'), /per-user saved mode does not override the tier during an outage/i);
-    assert.match(page('reference/commands/cli.mdx'), /value that disagrees with the tier is refused with exit 1/i);
-  });
-
-  it('documents the install lock on answered and unanswered calls in each guide', () => {
-    const reference = page('reference/configuration/fail-modes.mdx');
-    assert.match(reference, /During an install or upgrade[^.]*all per-user and managed standalone hooks block[^.]*gateway answers allow/i);
-    for (const name of ['reference/commands/installer.mdx', 'troubleshooting/hooks-and-blocking.mdx']) {
-      assert.match(page(name), /install or upgrade[^.]*all per-user and managed standalone hooks block[^.]*gateway answers allow/i, name);
-    }
-  });
-});
-
-describe('Fail-mode source and command wording during the 1.0.4 integration', () => {
-  it('does not claim every per-user hook uses only an installed mode or reject a saved-mode setter', () => {
-    const reference = page('reference/configuration/fail-modes.mdx');
-    const matrix = page('reference/apis/capability-matrix.mdx');
-    const commands = page('reference/commands/cli.mdx');
-    assert.doesNotMatch(reference, /the installed mode is the fail mode|passing a value to this per-user command is refused/i);
-    assert.doesNotMatch(matrix, /the installed mode is the fail mode/i);
-    assert.doesNotMatch(commands, /Passing a value here is refused/i);
-    assert.match(reference, /`DEFENSECLAW_FAIL_MODE`[^|]*Not read by 1\.0\.4 hooks/i);
   });
 });
 
@@ -186,10 +151,10 @@ describe('Cursor observe outage mode', () => {
     const cursor = page('reference/connectors/cursor.mdx').split('## Fail mode')[1]?.split('## Limits')[0] ?? '';
     // Owner decision 2026-10-23 (oss-outage-open): a per-user outage follows the
     // policy tier; every other failure blocks.
-    assert.match(failModes, /per-user gateway outage follows the policy tier even when a mode is saved/i);
-    assert.match(cursor, /per-user Cursor hook follows its policy tier during an outage in observe and action mode even when a mode is saved/i);
+    assert.match(failModes, /On a per-user install the outage behavior follows the policy tier.{0,600}Every other failure blocks in every tier/i);
+    assert.match(cursor, /A per-user Cursor hook makes the outage decision of its policy tier in observe and action mode/i);
     const coverage = page('appendix/coverage-by-layer.mdx');
-    assert.match(coverage, /On the current per-user train the policy tier decides in observe and action mode alike, even when a mode is saved/i);
+    assert.match(coverage, /On a per-user install the policy tier decides, in observe and action mode alike/i);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
     assert.match(managedRegistration, /"failClosed": true,/);
     assert.match(page('reference/connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call. The administrator's resolved fail mode decides/i);
@@ -507,10 +472,10 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     }
   });
 
-  it('says a per-user upgrade currently retains but does not apply a saved outage mode', () => {
-    assert.ok(page('get-started/upgrade.mdx').includes('a per-user saved mode does not override the tier during an outage'));
+  it('says an upgrade gives per-user hooks the outage mode of their tier', () => {
+    assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks take the outage mode of their policy tier'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
-    assert.ok(page('reference/configuration/fail-modes.mdx').includes('the current per-user outage resolver does not use it'));
+    assert.ok(page('reference/configuration/fail-modes.mdx').includes('A per-user install ignores a saved value'));
   });
 });
 
