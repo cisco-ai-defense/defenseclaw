@@ -1300,6 +1300,18 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			message += "; last SQLite failure class: " + class
 		}
 		l.result.AddWarning(codeAuditWriteFailed, message+"; inspect the gateway /health telemetry details")
+	} else if class := health.Telemetry.Details.LastSQLiteClass; class != "" {
+		// Any later record clears the active failure, so one that fails
+		// only some records (one agent's hook calls) showed as healthy
+		// while those calls were refused (GAP-0773).
+		switch class {
+		case "busy_locked", "deadline", "full", "io", "readonly_cantopen", "constraint_corrupt", "unavailable", "other":
+		default:
+			class = "other"
+		}
+		l.gatewayAuditFailure = true
+		l.result.AddWarning(codeAuditWriteFailed, "the gateway failed to write a mandatory audit record since it started (last SQLite failure class: "+class+
+			"); later records were written, but a failure that hits only some records can still refuse those calls; inspect the gateway /health telemetry details, and restart the gateway once the cause is fixed")
 	}
 	// A judge that stops answering silently downgrades detection to the
 	// static rules; only /health and the journal said so (GAP-0626).
