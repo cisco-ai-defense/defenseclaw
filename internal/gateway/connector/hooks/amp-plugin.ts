@@ -965,6 +965,10 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		if (originalBytes > DC_MAX_BODY_BYTES) {
 			if (actionable) {
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+				if (DC_OUTAGE_FAIL_MODE === "open") {
+					await logFailOpen(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
+					return { action: "allow", outage_notice: "DefenseClaw warning: this hook payload exceeded the bounded inspection cap; the call was allowed and audited." }
+				}
 {{end}}				return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
 			}
 			const reduced = {
@@ -1229,6 +1233,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			)
 			return
 		default:
+			if (verdict.outage_notice) await notifyIfForeground(threadID, verdict.outage_notice)
 			// Returning void preserves Amp's original status and output.
 			return
 		}

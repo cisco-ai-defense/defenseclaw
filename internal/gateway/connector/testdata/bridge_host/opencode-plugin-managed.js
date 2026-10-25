@@ -708,6 +708,7 @@ async function defenseclawLogFailOpen(reason, category) {
         reason: String(reason || "unknown"),
         category,
         fail_mode: "open",
+        outcome: "fail_open",
       }) + "\n");
     } finally {
       await file.close();
@@ -769,10 +770,11 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       payload.tool_response = toolResult;
       payload.tool_result = toolResult;
     }
+    const body = JSON.stringify(payload);
     const res = await defenseclawRetryBusy(() => defenseclawFetch("/api/v1/opencode/hook", {
       method: "POST",
       headers,
-      body: JSON.stringify(payload),
+      body,
       signal: controller.signal,
     }, token), controller.signal);
     if (!res.ok) {

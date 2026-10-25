@@ -776,6 +776,7 @@ async function defenseclawLogFailOpen(reason, category) {
         reason: String(reason || "unknown"),
         category,
         fail_mode: "open",
+        outcome: "fail_open",
       }) + "\n");
     } finally {
       await file.close();
@@ -903,10 +904,22 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       payload.tool_response = toolResult;
       payload.tool_result = toolResult;
     }
-    const res = await {{if .Sandbox}}defenseclawFetch(headers, JSON.stringify(payload));{{else}}defenseclawRetryBusy(() => defenseclawFetch("/api/v1/opencode/hook", {
+    const body = JSON.stringify(payload);
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    if (Buffer.byteLength(body, "utf8") > (1 << 20)) {
+      if (await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+      if (DC_OUTAGE_FAIL_MODE === "open") {
+        await defenseclawLogFailOpen("stdin body exceeded 1048576 byte cap", "transport");
+        const notice = "DefenseClaw warning: this hook payload exceeded the bounded inspection cap; the call was allowed and audited.";
+        if (actionable) return { reason: "", notice };
+        console.warn(notice);
+        return null;
+      }
+      if (actionable) return { reason: "DefenseClaw hook payload too large" };
+    }
+{{end}}    const res = await {{if .Sandbox}}defenseclawFetch(headers, body);{{else}}defenseclawRetryBusy(() => defenseclawFetch("/api/v1/opencode/hook", {
       method: "POST",
       headers,
-      body: JSON.stringify(payload),
+      body,
       signal: controller.signal,
     }, token), controller.signal);{{end}}
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };

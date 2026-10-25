@@ -21,7 +21,7 @@ func TestCodexDeepWikiResultOverOneMiBUsesInstalledTier(t *testing.T) {
 		allow             bool
 	}{
 		{"balanced post-tool result", "open", "PostToolUse", true},
-		{"balanced pre-tool action", "open", "PreToolUse", false},
+		{"balanced pre-tool action", "open", "PreToolUse", true},
 		{"strict post-tool result", "closed", "PostToolUse", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

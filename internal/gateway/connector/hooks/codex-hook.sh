@@ -286,11 +286,8 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 {{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
   _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
-  # A post-tool MCP result can exceed the bounded prefix read even though
-  # the tool already ran. The installed balanced tier keeps its result usable
-  # and records the inspection gap; actionable pre-tool calls still close.
-  if [ "$_DC_STDIN_RC" -eq 3 ] && [ "$BOUND_EVENT" = PostToolUse ] && defenseclaw_per_user_oversize_open; then
-    printf '{"systemMessage":"DefenseClaw warning: this tool result is too large for the bounded hook check. The result was allowed and the inspection gap was audited."}\n'
+  if defenseclaw_allow_oversized_stdin "$_DC_STDIN_RC"; then
+    printf '{"systemMessage":"DefenseClaw warning: this hook payload is too large for the bounded check. The call was allowed and the inspection gap was audited."}\n'
     exit 0
   fi
 {{end}}  [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" = "open" ] ||

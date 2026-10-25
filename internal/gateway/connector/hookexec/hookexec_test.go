@@ -1003,6 +1003,29 @@ func TestCodexUserPromptSubmitBlockSchema(t *testing.T) {
 
 func TestOversizedPayload(t *testing.T) {
 	big := strings.Repeat("a", 64)
+	t.Run("balanced per-user bounded oversized call warns and audits", func(t *testing.T) {
+		for _, connector := range []string{"claudecode", "codex", "cursor", "copilot", "amp"} {
+			t.Run(connector, func(t *testing.T) {
+				rt := ok(`{"action":"allow"}`)
+				var home string
+				r := run(t, connector, rt, func(o *Options) {
+					home = o.Home
+					o.OutageFailMode = "open"
+					o.MaxBody = 8
+					o.Stdin = strings.NewReader(big)
+				})
+				if r.code != 0 || strings.Contains(r.stdout, `"decision":"block"`) ||
+					strings.Contains(r.stdout, `"permissionDecision":"deny"`) ||
+					!strings.Contains(r.stderr, "warning") || rt.requests != 0 {
+					t.Fatalf("code=%d stdout=%q stderr=%q requests=%d", r.code, r.stdout, r.stderr, rt.requests)
+				}
+				rows, err := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
+				if err != nil || !strings.Contains(string(rows), `"outcome":"fail_open"`) {
+					t.Fatalf("balanced audit = %q, %v", rows, err)
+				}
+			})
+		}
+	})
 	t.Run("per-user open still blocks, never calls gateway", func(t *testing.T) {
 		rt := ok(`{"action":"allow"}`)
 		r := run(t, "claudecode", rt, func(o *Options) {

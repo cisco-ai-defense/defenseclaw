@@ -2171,9 +2171,17 @@ func handleUnavailableHome(opts Options, sp spec, failMode, reason string) int {
 // is the start of the payload the hook read before it stopped at its cap.
 func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int {
 	failMode = closeDuringInstall(&opts, failMode)
-	// An input the hook cannot fully read is a local parse failure, never
-	// an outage. Outside Secure Client it closes even if a per-user hook
-	// had an explicit open outage preference.
+	// The bounded read has inspected no more than MaxBody+1 bytes. A balanced
+	// per-user hook records that inspection gap and lets normal work continue.
+	// The installed tier mode is separate from the answer's fail mode: a
+	// reachable gateway's refusal or malformed answer never reaches here.
+	if !opts.ManagedEnterprise && !opts.SecureClient && !opts.StrictAvailability &&
+		normalizeFailMode(opts.OutageFailMode) == "open" && !perUserInstallWindow(opts) {
+		logHookFailure(opts, sp, "stdin body exceeded cap", "transport", "open", false)
+		fmt.Fprintf(opts.Stderr, "defenseclaw: warning: %s hook payload exceeded the bounded inspection cap; allowing and auditing this call\n", sp.connector)
+		return emitHookResult(opts, sp, sp.openAllow)
+	}
+	// All managed and strict hooks keep their closed local-failure behavior.
 	failMode = managedNonOutageMode(&opts, failMode)
 	if !opts.SecureClient {
 		failMode, opts.FailMode = "closed", "closed"

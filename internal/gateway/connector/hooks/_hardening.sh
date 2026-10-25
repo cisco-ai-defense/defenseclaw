@@ -1246,9 +1246,9 @@ defenseclaw_per_user_outage_open() {
   [ "$recorded" = "$connector" ] && [ "$mode" = open ] && [ "$source" = config ]
 }
 
-# A completed bounded read that found an oversized post-tool result may be
-# surfaced in the balanced per-user tier. The installed flat record carries
-# that tier; this check does not classify a gateway answer as an outage.
+# A completed bounded read that found oversized input may be surfaced in the
+# balanced per-user tier. The installed flat record carries that tier; this
+# check does not classify a gateway answer as an outage.
 defenseclaw_per_user_oversize_open() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in 1|true|TRUE|yes|YES) return 1 ;; esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
@@ -1256,13 +1256,23 @@ defenseclaw_per_user_oversize_open() {
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in 1|true|TRUE|yes|YES) return 1 ;; esac
   ! defenseclaw_install_held || return 1
   local connector="${DEFENSECLAW_HOOK_CONNECTOR:-}" record="" recorded="" mode="" source=""
-  case "$connector" in ""|inspect|*[!a-z0-9_-]*) return 1 ;; esac
+  [ "$connector" != inspect ] || connector="${RUNTIME_CONNECTOR:-}"
+  case "$connector" in ""|*[!a-z0-9_-]*) return 1 ;; esac
   [ -n "${HOOK_DIR:-}" ] || return 1
   record="${HOOK_DIR}/.hookcfg.${connector}"
   recorded="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_CONNECTOR 2>/dev/null)" || return 1
   mode="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_FAIL_MODE 2>/dev/null)" || return 1
   source="$(defenseclaw_flat_hookcfg_value "$record" FAIL_MODE_SOURCE 2>/dev/null)" || return 1
   [ "$recorded" = "$connector" ] && [ "$mode" = open ] && [ "$source" = config ]
+}
+
+# A reader returns 3 only after its bounded cap+1 probe. NUL bytes and other
+# local errors retain their existing closed answer. The reader already wrote
+# the audit row; emit the one visible warning at the allow exit.
+defenseclaw_allow_oversized_stdin() {
+  [ "${1:-}" = 3 ] && defenseclaw_per_user_oversize_open || return 1
+  printf 'defenseclaw: warning: hook payload exceeded the bounded inspection cap; allowing and auditing this call\n' >&2
+  return 0
 }
 
 defenseclaw_hook_delivery_outcome() {
@@ -2261,8 +2271,7 @@ _dc_stdin_refused() {
     return 0
   fi
   local outcome="$3" log_mode="${FAIL_MODE:-closed}"
-  if [ "$connector" = codex ] && [ "${_DC_CODEX_EVENT:-}" = PostToolUse ] &&
-     defenseclaw_per_user_oversize_open; then
+  if defenseclaw_per_user_oversize_open; then
     outcome=fail_open
     log_mode=open
   fi

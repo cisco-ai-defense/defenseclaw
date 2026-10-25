@@ -118,9 +118,8 @@ func TestPerUserShellHookAnswersClosedWhenAnInstallStartsDuringTheCall(t *testin
 // closes the oversized-payload answer too (GAP-0894).
 func TestPerUserShellHookOversizedPayloadClosesWhenAnInstallStartsDuringTheRead(t *testing.T) {
 	for _, tc := range installInFlightShellCases(t) {
-		if !strings.HasSuffix(tc.invoke.script, "-hook.sh") {
-			continue // the inspect hooks refuse an oversized payload in every mode
-		}
+		// Every per-user hook form must make the same bounded, audited
+		// balanced-tier choice; an active installer still closes it.
 		for _, install := range []bool{false, true} {
 			name := tc.name + "/no install"
 			if install {
@@ -142,9 +141,14 @@ func TestPerUserShellHookOversizedPayloadClosesWhenAnInstallStartsDuringTheRead(
 					_ = stdin.Close()
 				}
 				stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, freeAPIAddr(t), write)
-				// Oversized input blocks a per-user hook in every mode (sa-port-peer).
-				if got := shellHookBlocked(err, stdout); !got {
-					t.Fatalf("blocks=%v, want true (install %v): err=%v stdout=%q stderr=%q", got, install, err, stdout, stderr)
+				if got := shellHookBlocked(err, stdout); got != install {
+					t.Fatalf("blocks=%v, want %v (install %v): err=%v stdout=%q stderr=%q", got, install, install, err, stdout, stderr)
+				}
+				if !install {
+					rows, readErr := os.ReadFile(filepath.Join(data, "logs", "hook-failures.jsonl"))
+					if readErr != nil || !strings.Contains(string(rows), `"outcome":"fail_open"`) || !strings.Contains(stderr, "warning") {
+						t.Fatalf("balanced audit/warning: %q %q %v", rows, stderr, readErr)
+					}
 				}
 			})
 		}
@@ -161,6 +165,9 @@ func runInstallInFlightShellHook(t *testing.T, tc installInFlightShellCase, data
 		// Cursor's connector setup renders its action hook closed in every
 		// mode; the open render is the one an observe install runs.
 		if err := writeHookScriptsCommonWithFailMode(hooks, addr, "test-token", "open", []string{"cursor-hook.sh"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeHookConfigSidecar(hooks, addr, "cursor", "open", false); err != nil {
 			t.Fatal(err)
 		}
 	} else {

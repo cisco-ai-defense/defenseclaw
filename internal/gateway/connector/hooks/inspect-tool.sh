@@ -176,6 +176,10 @@ unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
 TOOL_INPUT="$(defenseclaw_read_stdin_capped fail_closed)" || {
+  _DC_STDIN_RC=$?
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+  if defenseclaw_allow_oversized_stdin "$_DC_STDIN_RC"; then exit 0; fi
+{{end}}
   echo "defenseclaw: inspect tool refusing oversized payload" >&2
   exit 2
 }

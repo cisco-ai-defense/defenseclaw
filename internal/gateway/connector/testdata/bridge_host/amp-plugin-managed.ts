@@ -977,6 +977,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			)
 			return
 		default:
+			if (verdict.outage_notice) await notifyIfForeground(threadID, verdict.outage_notice)
 			// Returning void preserves Amp's original status and output.
 			return
 		}

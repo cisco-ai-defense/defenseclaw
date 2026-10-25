@@ -39,8 +39,8 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 129865,
-      "sha256": "c586be22bda90ff2acc3ad35ebe8ac5a3e6a0f9557494f860f4a3151a374dc20"
+      "size": 132265,
+      "sha256": "833e6d21665cf35dc7285e4a986498624d031a6b1262f536fd5fa477c4ff3ad7"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
@@ -51,8 +51,8 @@
     "/usr/local/lib/defenseclaw/hooks/codex-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 15520,
-      "sha256": "3edbeec94451597ad9a7655d21b4a5767c67f13fdb1f78401dbb97e03d9301da"
+      "size": 15538,
+      "sha256": "1d145a567a540715c2247e3f381a5083813a7140bf675d6542f6a85358d12ea2"
     },
     "/usr/local/lib/defenseclaw/hooks/codex-notify.sh": {
       "mode": "-rwxr-xr-x",
@@ -63,26 +63,26 @@
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7029,
-      "sha256": "79c735a8118db546f20da455871cf778379b474e6dbee68051290a14f035a715"
+      "size": 7048,
+      "sha256": "641e6dc31e9d57ef20e030e79482e82ba48eb2031d5c826ebab060ff21b5e4b2"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6220,
-      "sha256": "e99c7d8b38107f957942753ff81490ac90ce13101b7b31a65bdfe6c53d897513"
+      "size": 6239,
+      "sha256": "92d106365cf24d718bb4457c0d2db4b438ac00b5c332f37a6b46a3eb8bb7f7a0"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6648,
-      "sha256": "2bcd846ead887c3e66e32315f79b86070ef2a1674347c589e5c5769ee7706377"
+      "size": 6667,
+      "sha256": "71c944e363a3134cb9436dc75448f8c18737e391bde5d11e354d6edffbe016ee"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6997,
-      "sha256": "e406fd88632898b545bc2689e0d6702c02af1ff16e7838d42b7780973fc67433"
+      "size": 7016,
+      "sha256": "86629603eafcc18ff4c797560bbe9f978da32ebe472b3f73e3013c99fda51ffb"
     }
   }
 }

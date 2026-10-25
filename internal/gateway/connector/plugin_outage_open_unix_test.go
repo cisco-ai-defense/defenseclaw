@@ -157,3 +157,57 @@ func TestPerUserPluginOutageOpenOnlyForAnOutage(t *testing.T) {
 		}
 	}
 }
+
+func TestPerUserPluginOversizedPayloadUsesInstalledTier(t *testing.T) {
+	nodeForTest(t)
+	for _, plugin := range []struct{ asset, name, connector, harness string }{
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness},
+	} {
+		for _, tier := range []struct{ name, mode string }{{"balanced", "open"}, {"strict", "closed"}} {
+			t.Run(plugin.connector+"/"+tier.name, func(t *testing.T) {
+				home := t.TempDir()
+				installNativeGatewayForHookTest(t, home)
+				dataDir := filepath.Join(home, ".defenseclaw")
+				token := filepath.Join(dataDir, "hooks", ".hook-"+plugin.connector+".token")
+				if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				body := renderPluginAssetForTest(t, plugin.asset, templateData{
+					APIAddr: "127.0.0.1:1", TokenFileJS: javaScriptStringContent(token),
+					FailMode: "closed", OutageFailMode: tier.mode,
+				})
+				path := filepath.Join(home, plugin.name)
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				harness := strings.ReplaceAll(plugin.harness, `command: "echo marker"`, `command: "x".repeat(1100000)`)
+				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", harness, path)
+				cmd.Env = append(sanitizedTestEnv(), "HOME="+home)
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("node: %v\n%s", err, out)
+				}
+				var result struct {
+					Verdict string   `json:"verdict"`
+					Notices []string `json:"notices"`
+				}
+				if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &result); err != nil {
+					t.Fatalf("harness output %q: %v", out, err)
+				}
+				rows := hookFailureRecords(t, dataDir)
+				if tier.mode == "open" {
+					if result.Verdict != "allow" || len(rows) != 1 || rows[0]["outcome"] != "fail_open" ||
+						!strings.Contains(strings.Join(result.Notices, "\n"), "allowed and audited") {
+						t.Fatalf("balanced verdict=%q notices=%q rows=%+v", result.Verdict, result.Notices, rows)
+					}
+				} else if !strings.HasPrefix(result.Verdict, "block:") || len(rows) != 0 {
+					t.Fatalf("strict verdict=%q rows=%+v", result.Verdict, rows)
+				}
+			})
+		}
+	}
+}
