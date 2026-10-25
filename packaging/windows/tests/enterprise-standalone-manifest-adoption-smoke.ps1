@@ -59,9 +59,11 @@ try {
         $script:TestGuardianReport = $null
         $script:TestGuardianProbes = 0
         $script:TestGuardianCatchUp = $null
+        $script:TestGuardianSources = [Collections.Generic.List[object]]::new()
         function Get-DefenseClawGuardianStatusReport {
-            param($Layout, $GatewayServiceName)
+            param($Layout, $GatewayServiceName, $GatewaySource)
             $script:TestGuardianProbes++
+            $script:TestGuardianSources.Add($GatewaySource)
             if ($null -ne $script:TestGuardianCatchUp -and $script:TestGuardianProbes -ge 2) {
                 return $script:TestGuardianCatchUp
             }
@@ -114,7 +116,7 @@ try {
                 [IO.File]::WriteAllText($layout.ManifestPath, $Body, $utf8)
                 return (Get-TestSha256 $layout.ManifestPath)
             }
-            function Set-TestMetadata([string]$ManifestSHA256, [string]$State, [int64]$TargetCount) {
+            function Set-TestMetadata([string]$ManifestSHA256, [string]$State, [int64]$TargetCount, [string]$GatewayHash = '') {
                 $value = [ordered]@{
                     schema_version = 1
                     installed = $true
@@ -133,6 +135,9 @@ try {
                 }
                 if (-not [bool]$layout.BrokerEnabled) {
                     $value['profile'] = 'standalone'
+                }
+                if (-not [string]::IsNullOrEmpty($GatewayHash)) {
+                    $value['hashes'] = [ordered]@{ gateway = $GatewayHash }
                 }
                 [IO.File]::WriteAllText(
                     $layout.MetadataPath,
@@ -431,6 +436,64 @@ try {
                 }
             }
 
+            # GAP-1417: Repair and Upgrade install their authenticated
+            # gateway inside the transaction. Before it, a missing or
+            # replaced installed gateway cannot prove the guardian's records,
+            # so the staged replacement reads them; a recorded installed
+            # gateway still does, and a call without a replacement (Verify,
+            # Reconcile, Uninstall) keeps the installed one.
+            if ($canRewrite) {
+                $layout.GatewayPath = [IO.Path]::Combine($installRoot, 'bin', 'defenseclaw-gateway.exe')
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($layout.GatewayPath))
+                $recordedGateway = [IO.Path]::Combine($Root, 'recorded-gateway.bin')
+                [IO.File]::WriteAllText($recordedGateway, 'recorded gateway', $utf8)
+                $recordedGatewayHash = Get-TestSha256 $recordedGateway
+                $replacement = @{ path = [IO.Path]::Combine($Root, 'staged-gateway.exe'); sha256 = 'staged' }
+                foreach ($case in @(
+                    @{ label = 'missing installed gateway'; bytes = $null; source = $replacement; want = 'replacement' },
+                    @{ label = 'replaced installed gateway'; bytes = 'tampered gateway'; source = $replacement; want = 'replacement' },
+                    @{ label = 'recorded installed gateway'; bytes = 'recorded gateway'; source = $replacement; want = 'installed' },
+                    @{ label = 'missing gateway without a replacement'; bytes = $null; source = $null; want = 'installed' }
+                )) {
+                    if ($null -eq $case.bytes) {
+                        if ([IO.File]::Exists($layout.GatewayPath)) {
+                            [IO.File]::Delete($layout.GatewayPath)
+                        }
+                    }
+                    else {
+                        [IO.File]::WriteAllText($layout.GatewayPath, [string]$case.bytes, $utf8)
+                    }
+                    Set-TestMetadata $activatedSHA256 'activated' 1 $recordedGatewayHash
+                    Set-TestGuardian $true $republishedSHA256 2
+                    $script:TestGuardianSources.Clear()
+                    try {
+                        if (-not (Sync-DefenseClawStandaloneManagedHooksActivationBinding `
+                                -Layout $layout `
+                                -GatewayServiceName 'DefenseClawGateway' `
+                                -GatewaySource $case.source)) {
+                            $failures.Add("$($case.label): the republished manifest was not rebound")
+                        }
+                    }
+                    catch {
+                        $failures.Add("$($case.label): the rebind refused: $($_.Exception.Message)")
+                    }
+                    $usedReplacement = $script:TestGuardianSources.Count -gt 0 -and
+                        @($script:TestGuardianSources | Microsoft.PowerShell.Core\Where-Object {
+                            -not [object]::ReferenceEquals($_, $replacement)
+                        }).Count -eq 0
+                    $usedInstalled = $script:TestGuardianSources.Count -gt 0 -and
+                        @($script:TestGuardianSources | Microsoft.PowerShell.Core\Where-Object {
+                            $null -ne $_
+                        }).Count -eq 0
+                    if (($case.want -ceq 'replacement' -and -not $usedReplacement) -or
+                        ($case.want -ceq 'installed' -and -not $usedInstalled)) {
+                        $failures.Add("$($case.label): the guardian records were not read with the $($case.want) gateway")
+                    }
+                }
+                $layout.Remove('GatewayPath')
+                Set-TestMetadata $activatedSHA256 'activated' 1
+            }
+
             # Secure Client never adopts, and its message is unchanged.
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
             $layout.BrokerEnabled = $true
@@ -476,6 +539,10 @@ try {
             }
             $dispatcher = $functions['Invoke-DefenseClawEnterpriseLifecycle']
             $syncCalls = ([regex]::Matches($dispatcher, 'Sync-DefenseClawStandaloneManagedHooksActivationBinding')).Count
+            if (-not $dispatcher.Contains("`$Action -in @('Upgrade', 'Repair') -and `$sources.ContainsKey('gateway')") -or
+                -not $dispatcher.Contains('-GatewaySource $bindingGatewaySource')) {
+                $failures.Add('Upgrade and Repair do not let their replacement gateway prove the guardian records (GAP-1417)')
+            }
             if ($syncCalls -ne 2 -or
                 $dispatcher.IndexOf('Sync-DefenseClawStandaloneManagedHooksActivationBinding') -gt
                     $dispatcher.IndexOf('return Invoke-DefenseClawReconcileLifecycle') -or
