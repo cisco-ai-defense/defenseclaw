@@ -407,6 +407,47 @@ func TestVerifyLeavesASignedOutHermesTargetToTheNextSignIn(t *testing.T) {
 		return true, nil
 	}
 	enterpriseHookReconcileSessionAvailable = adminView
+	previousHasNoSession := enterpriseHookTargetHasNoSession
+	t.Cleanup(func() { enterpriseHookTargetHasNoSession = previousHasNoSession })
+	sessionList := func(signedOut bool, err error) {
+		enterpriseHookTargetHasNoSession = func(target enterprisehooks.ManifestTarget) (bool, error) {
+			if target.SID != bob {
+				return false, nil
+			}
+			return signedOut, err
+		}
+	}
+	// Bob signs in while his owned hook is missing: the administrator
+	// cannot query his session, but the session list shows him signed in,
+	// so the wait no longer excuses the live failure. A session list that
+	// cannot be read proves nothing either.
+	for _, tc := range []struct {
+		name      string
+		signedOut bool
+		err       error
+	}{
+		{"administrator verify, account signed in", false, nil},
+		{"administrator verify, session list unreadable", true, errors.New("access denied")},
+	} {
+		sessionList(tc.signedOut, tc.err)
+		run, err := runEnterpriseHookVerifyAttemptWithScope(context.Background(), true)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		for _, row := range run.Rows {
+			if row.SID == bob && row.Connector == "hermes" {
+				for _, excused := range run.Excused {
+					if excused.SID == bob && excused.Connector == "hermes" {
+						t.Fatalf("%s: the live failure was excused as a sign-in wait: rows=%+v", tc.name, run.Rows)
+					}
+				}
+			}
+		}
+		if run.Failures == len(run.Excused) {
+			t.Fatalf("%s: rows=%+v, want the unhooked target failing", tc.name, run.Rows)
+		}
+	}
+	sessionList(true, nil)
 	checkNote := func(name, want string) {
 		t.Helper()
 		run, err := runEnterpriseHookVerifyAttemptWithScope(context.Background(), true)

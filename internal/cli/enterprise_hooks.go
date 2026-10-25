@@ -2308,17 +2308,30 @@ func enterpriseHookHermesSignedOutRow(
 		return strings.TrimSpace(last.Error), true
 	case liveErr != nil && known && !last.OK && !last.Pending && enterpriseHookAwaitingSignInError(last):
 		// The guardian left the target waiting for its sign-in for another
-		// cause (an earlier release protected it, GAP-0644). An elevated
-		// administrator's verify cannot query another account's session,
-		// so, as on Secure Client, the LocalSystem guardian's fresh
-		// protected record of the wait stands while the account has no
-		// session it can see (GAP-1433).
+		// cause (an earlier release protected it, GAP-0644). The wait
+		// excuses the live failure only with fresh evidence that the
+		// account is still signed out: the session check, or, for an
+		// elevated administrator, who cannot query another account's
+		// session token, the session list read now. Being unable to query
+		// the session is never taken as a sign-out (GAP-1433).
 		available, err := enterpriseHookReconcileSessionAvailable(target)
-		if (err == nil && !available) || (err != nil && enterpriseHookSessionCheckNotLocalSystem(err)) {
+		if err == nil && !available {
 			return strings.TrimSpace(last.Error), true
+		}
+		if err != nil && enterpriseHookSessionCheckNotLocalSystem(err) {
+			if signedOut, listErr := enterpriseHookTargetHasNoSession(target); listErr == nil && signedOut {
+				return strings.TrimSpace(last.Error), true
+			}
 		}
 	}
 	return "", false
+}
+
+// enterpriseHookTargetHasNoSession reports, from the Windows session list,
+// that no session is signed in as the target's account. It works without
+// LocalSystem. Tests replace it.
+var enterpriseHookTargetHasNoSession = func(target enterprisehooks.ManifestTarget) (bool, error) {
+	return enterprisehooks.WindowsTargetHasNoSession(target.SID)
 }
 
 // enterpriseHookHermesSignedOutApplies reports the managed standalone
