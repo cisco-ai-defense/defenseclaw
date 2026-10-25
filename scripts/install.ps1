@@ -220,6 +220,8 @@ function Get-InstallLockLiveOwner([string]$Lock) {
     # keeps its live pid.
     $holder = "$(Get-Content -LiteralPath (Join-Path $Lock "pid") -ErrorAction SilentlyContinue | Select-Object -First 1)".Trim()
     $process = if ($holder -match '^\d{1,9}$' -and [int]$holder -ne $PID) { Get-Process -Id ([int]$holder) -ErrorAction SilentlyContinue } else { $null }
+    # A process that has exited but whose process object a handle keeps runs nothing.
+    if ($process) { try { if ($process.HasExited) { $process = $null } } catch { } }
     $recorded = "$(Get-Content -LiteralPath (Join-Path $Lock "proc-start") -ErrorAction SilentlyContinue | Select-Object -First 1)".Trim()
     if ($process -and $recorded) {
         try {
@@ -239,6 +241,7 @@ function Test-InstallLockClaimLive([string]$Path) {
     if ($claimer -notmatch '^[1-9]\d{0,8}$' -or [int]$claimer -eq $PID) { return $false }
     $process = Get-Process -Id ([int]$claimer) -ErrorAction SilentlyContinue
     if (-not $process) { return $false }
+    try { if ($process.HasExited) { return $false } } catch { }
     $recorded = if ($lines.Count -gt 1) { "$($lines[1])".Trim() } else { "" }
     if (-not $recorded) { return $true }
     try { return [string]$process.StartTime.ToFileTimeUtc() -eq $recorded } catch { return $true }

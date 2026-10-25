@@ -6189,6 +6189,8 @@ def test_install_ps1_takes_over_a_lock_whose_pid_was_reused() -> None:
     assert '$recorded = "$(Get-Content -LiteralPath (Join-Path $Lock "proc-start")' in owner and ".Trim()" in owner
     assert "$recorded.Trim()" not in owner
     assert "$process = $null" in owner
+    # An exited installer whose process object a handle keeps is gone (round l).
+    assert "$process.HasExited" in owner
     assert "LastWriteTime" not in owner and "AddSeconds" not in owner
     write = text.index('Set-Content -LiteralPath (Join-Path $LockDir "pid") -Value $PID -Encoding Ascii')
     take = text.rindex("    $taken = $false\n", 0, write)
@@ -6217,3 +6219,4 @@ def test_install_ps1_takes_a_stale_lock_over_in_place_behind_a_claim() -> None:
     live = text[text.index("function Test-InstallLockClaimLive([string]$Path) {") :]
     live = live[: live.index("\n}\n")]
     assert "[int]$claimer -eq $PID" in live and "StartTime.ToFileTimeUtc() -eq $recorded" in live
+    assert "$process.HasExited" in live
