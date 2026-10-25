@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -152,31 +153,60 @@ func (l *lifecycle) verifyManagedHermesRegistration(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("live registration check failed: %w", err)
 	}
+	manifest, err := enterprisehooks.LoadStandaloneManifest(l.env.P(l.env.Layout.ManifestPath))
+	if err != nil {
+		return fmt.Errorf("read managed Hermes targets: %w", err)
+	}
 	var proof struct {
 		OK                    bool   `json:"ok"`
 		Scope                 string `json:"scope"`
 		HermesSessionCoverage string `json:"hermes_session_coverage"`
+		AuthorizationError    string `json:"authorization_error"`
 		Results               []struct {
 			Connector string `json:"connector"`
+			User      string `json:"user"`
+			UserHome  string `json:"user_home"`
 			OK        bool   `json:"ok"`
 			Pending   bool   `json:"pending"`
 		} `json:"results"`
 	}
-	if out.ExitCode != 0 || json.Unmarshal(out.Stdout, &proof) != nil || !proof.OK ||
-		proof.Scope != "machine_hook_registration" || proof.HermesSessionCoverage != "not_covered" {
+	if json.Unmarshal(out.Stdout, &proof) != nil || proof.Scope != "machine_hook_registration" ||
+		proof.HermesSessionCoverage != "not_covered" || proof.AuthorizationError != "" ||
+		(out.ExitCode == 0) != proof.OK {
 		return errors.New("live registration check did not prove the current managed Hermes target")
 	}
-	found := false
-	for _, row := range proof.Results {
-		if row.Connector == "hermes" {
-			found = true
-			if !row.OK && !row.Pending {
-				return errors.New("live registration check reported an unprotected Hermes target")
-			}
+	expected := make(map[string]bool)
+	key := func(connector, user, home string) string {
+		return strings.ToLower(strings.TrimSpace(connector)) + "\x00" + strings.TrimSpace(user) + "\x00" +
+			strings.TrimSpace(home)
+	}
+	for _, target := range manifest.Targets {
+		if target.IsEnabled() && strings.EqualFold(target.Connector, "hermes") {
+			expected[key(target.Connector, target.User, target.UserHome)] = false
 		}
 	}
-	if !found {
+	if len(expected) == 0 {
 		return errors.New("live registration check omitted the managed Hermes target")
+	}
+	unrelatedFailure := false
+	for _, row := range proof.Results {
+		if !strings.EqualFold(row.Connector, "hermes") {
+			unrelatedFailure = unrelatedFailure || !row.OK && !row.Pending
+			continue
+		}
+		rowKey := key(row.Connector, row.User, row.UserHome)
+		if _, enrolled := expected[rowKey]; !enrolled || expected[rowKey] || !row.OK && !row.Pending {
+			return errors.New("live registration check reported an unprotected Hermes target")
+		}
+		expected[rowKey] = true
+	}
+	for _, found := range expected {
+		if !found {
+			return errors.New("live registration check omitted the managed Hermes target")
+		}
+	}
+	if !proof.OK && !unrelatedFailure {
+		return errors.New("live registration check did not prove the current managed Hermes target")
 	}
 	return nil
 }
