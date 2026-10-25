@@ -300,9 +300,11 @@ func TestCopilotAdapterFailureFailsOpenOnlyWhenConfigured(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(filepath.Dir(filepath.Dir(workingAdapter)), ".install.lock"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// GAP-1372: the native hook's answer reaches Copilot during the install
+	// window; only a launcher failure gets the adapter's install denial.
 	stdout, stderr, code = runCopilotAdapterTest(t, workingAdapter, `{"source":"copilot-adapter-probe"}`)
-	if code != 0 || !strings.Contains(stdout, "being installed or upgraded") {
-		t.Fatalf("adapter accepted a policy answer during install: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	if code != 0 || strings.TrimSpace(stdout) == "" || strings.Contains(stdout+stderr, "being installed or upgraded") {
+		t.Fatalf("adapter replaced the native answer during install: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
 

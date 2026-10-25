@@ -715,7 +715,9 @@ async function defenseclawLogFailOpen(reason, category) {
 }
 
 // The installer holds this data-directory lock while it replaces this
-// account's stopped gateway. An open outage mode cannot bypass that upgrade.
+// account's stopped gateway. An open outage mode cannot bypass that upgrade:
+// a failure blocks, while a call the gateway answered keeps its answer in the
+// default and permissive tiers (owner decision 2026-10-24, GAP-1372).
 const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account, " +
   "and its gateway starts again when that is done. Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install. `defenseclaw-gateway status` shows its state.";
 
@@ -768,7 +770,6 @@ async function defenseclawFailModeNow(mode, actionable) {
 
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
   if (actionable && await defenseclawManagedLifecycleHeld()) return { reason: DC_MANAGED_LIFECYCLE_TEXT };
-  if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
   let token;
   try {
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
@@ -811,8 +812,10 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       body: JSON.stringify(payload),
       signal: controller.signal,
     }, token), controller.signal);
-    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
     if (!res.ok) {
+      // During an install an error status blocks; an answer is kept
+      // (GAP-1372).
+      if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
       // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
       // is an outage, as in the shell hooks, so strict availability closes it.
       if (await defenseclawFailModeNow(res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE, actionable) === "closed") {
@@ -824,9 +827,9 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     }
     const data = defenseclawGatewayJSON(await res.text());
     if (actionable && await defenseclawManagedLifecycleHeld()) return { reason: DC_MANAGED_LIFECYCLE_TEXT };
-    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
 
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
+      if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
     }
     const out = data && data.hook_output;

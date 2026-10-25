@@ -921,8 +921,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 
 	async function post(payload: Record<string, unknown>, actionable: boolean): Promise<GatewayResponse> {
 		if (actionable && await managedLifecycleHeld()) return { action: "block", reason: DC_MANAGED_LIFECYCLE_TEXT }
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}		if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
-{{end}}		let body: string
+		let body: string
 		try {
 			body = JSON.stringify(payload)
 		} catch (error) {
@@ -995,9 +994,11 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				body,
 				signal: controller.signal,
 			}, token), controller.signal){{end}}
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
-{{end}}			if (!response.ok) {
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (response.status >= 500 && (DC_FAIL_MODE === "closed" || await perUserInstallInProgress())) {
+			if (!response.ok) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				// During an install an error status blocks; an answer is kept
+				// (GAP-1372).
+				if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (response.status >= 500 && (DC_FAIL_MODE === "closed" || await perUserInstallInProgress())) {
 					return { action: "block", reason: await perUserGatewayDownText(null, response.status) }
 				}
 {{end}}				return failureResponse(`HTTP ${response.status}`)
@@ -1005,10 +1006,10 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 
 			const data = gatewayJSON(await response.text()) as GatewayResponse
 			if (actionable && await managedLifecycleHeld()) return { action: "block", reason: DC_MANAGED_LIFECYCLE_TEXT }
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
-{{end}}
+
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
-				return failureResponse("invalid gateway verdict")
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}				return failureResponse("invalid gateway verdict")
 			}
 			return data
 		} catch (error) {

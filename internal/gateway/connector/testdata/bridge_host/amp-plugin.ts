@@ -862,7 +862,6 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 
 	async function post(payload: Record<string, unknown>, actionable: boolean): Promise<GatewayResponse> {
 		if (actionable && await managedLifecycleHeld()) return { action: "block", reason: DC_MANAGED_LIFECYCLE_TEXT }
-		if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 		let body: string
 		try {
 			body = JSON.stringify(payload)
@@ -936,8 +935,10 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				body,
 				signal: controller.signal,
 			}, token), controller.signal)
-			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 			if (!response.ok) {
+				// During an install an error status blocks; an answer is kept
+				// (GAP-1372).
+				if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 				if (response.status >= 500 && (DC_FAIL_MODE === "closed" || await perUserInstallInProgress())) {
 					return { action: "block", reason: await perUserGatewayDownText(null, response.status) }
 				}
@@ -946,9 +947,9 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 
 			const data = gatewayJSON(await response.text()) as GatewayResponse
 			if (actionable && await managedLifecycleHeld()) return { action: "block", reason: DC_MANAGED_LIFECYCLE_TEXT }
-			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
+				if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 				return failureResponse("invalid gateway verdict")
 			}
 			return data

@@ -49,8 +49,9 @@ func TestCopilotAdapterChecksInstallerHomeFromNativeHookState(t *testing.T) {
 	if stdout, stderr, code := call(); code != 0 || strings.TrimSpace(stdout) != "" {
 		t.Fatalf("after install: exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
-	// A lock can appear after the adapter's first check while the native hook
-	// runs. Its allowing response must still be replaced by an install denial.
+	// A lock can appear while the native hook runs. The native hook applies
+	// the install window itself, so the answer it gives reaches Copilot
+	// unchanged: an allow the gateway gave keeps its answer (GAP-1372).
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -64,9 +65,9 @@ func TestCopilotAdapterChecksInstallerHomeFromNativeHookState(t *testing.T) {
 	}
 	t.Setenv(copilotAdapterHelperMode, "allow")
 	t.Setenv(copilotAdapterCreateLockEnv, lock)
-	if stdout, stderr, code := call(); code != 0 || !strings.Contains(stdout, `"permissionDecision":"deny"`) ||
-		!strings.Contains(stderr, "being installed or upgraded") {
-		t.Fatalf("lock acquired during native answer was missed: exit %d stdout %q stderr %q", code, stdout, stderr)
+	if stdout, stderr, code := call(); code != 0 || strings.TrimSpace(stdout) != `{"permissionDecision":"allow"}` ||
+		strings.Contains(stdout+stderr, "being installed or upgraded") {
+		t.Fatalf("native answer replaced during the install window: exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
 	if err := os.Remove(lock); err != nil {
 		t.Fatal(err)

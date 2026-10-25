@@ -497,11 +497,6 @@ func runHook(ctx context.Context, opts Options) int {
 		fmt.Fprintf(opts.Stderr, "defenseclaw: unknown hook connector %q\n", opts.Connector)
 		return blockExit
 	}
-	if sp.connector == "copilot" && perUserInstallWindow(opts) {
-		if code, blocked := blockPerUserCopilotInstall(opts, sp); blocked {
-			return code
-		}
-	}
 	// A managed hook's FailMode comes from administrator-owned runtime state
 	// only (internal/cli: the Windows runtime generation or the Unix runtime
 	// descriptor), never from a connector or the caller's environment.
@@ -1597,11 +1592,6 @@ func (sp spec) decide(opts Options, body []byte) int {
 	// answer whose native output contradicts its action is refused, not
 	// forwarded (GAP-0916).
 	closeDuringInstall(&opts, "")
-	if sp.connector == "copilot" && perUserInstallWindow(opts) {
-		if code, blocked := blockPerUserCopilotInstall(opts, sp); blocked {
-			return code
-		}
-	}
 	if !opts.SecureClient && !validUniqueGatewayResponse(body) {
 		return failResponse(opts, sp, "closed", "invalid or ambiguous JSON response")
 	}
@@ -2346,9 +2336,12 @@ func perUserInstallWindow(opts Options) bool {
 	return !errors.Is(err, os.ErrNotExist)
 }
 
-// Copilot ignores a failed hook process. During a per-user install it needs
-// the native deny for each actionable event before any launcher or gateway
-// failure can turn into an unchecked call. Lifecycle events have no blocking
+// Copilot ignores a failed hook process. During a per-user install every
+// failure answer (no gateway, an error status, an unusable answer, a missing
+// token) needs the native deny for each actionable event, so no failure
+// turns into an unchecked call. A call the gateway answers keeps that answer
+// in the default and permissive tiers, as every other connector's does
+// (owner decision 2026-10-24, GAP-1372). Lifecycle events have no blocking
 // response and remain neutral so an agent can stop.
 func blockPerUserCopilotInstall(opts Options, sp spec) (int, bool) {
 	if NeutralLifecycleEvent(sp.connector, opts.Event) {
