@@ -149,6 +149,25 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 			return out
 		}
 	}
+	if mode == "blocked-private" || mode == "blocked-version" {
+		// A file system call that never returns and never observes the
+		// context (GAP-1413: macOS held an open() in the home walk).
+		enterpriseHookWorkerDiscoverVersion = func(_ context.Context, _, connector string, _ bool) (string, string) {
+			switch {
+			case connector == "hermes":
+				return "0.21.5", ""
+			case connector == "codex" && mode == "blocked-version":
+				select {}
+			}
+			return "", "not installed"
+		}
+		enterpriseHookWorkerDiscoverSurfaces = func(context.Context, string, string, bool) ([]connector.AgentSurface, bool) {
+			return nil, true
+		}
+		enterpriseHookWorkerDiscoverPrivateInstalls = func(context.Context, string, []string) []enterprisehooks.PrivateAgentInstall {
+			select {}
+		}
+	}
 	os.Exit(enterpriseHookWorkerMain(context.Background(), os.Stdin, os.Stdout, os.Stderr))
 }
 
@@ -322,6 +341,54 @@ func TestEnterpriseHookWorkerSlowPrivateScanReturnsPartialResponse(t *testing.T)
 	if len(response.PrivateInstalls) != 1 || !response.PrivateInstalls[0].Incomplete ||
 		response.PrivateInstalls[0].Skipped != enterprisehooks.PrivateInstallSkippedHome {
 		t.Fatalf("slow private scan = %+v, want home_unreadable", response.PrivateInstalls)
+	}
+}
+
+// GAP-1413: a discover worker blocked in a file system call that never
+// returns timed out, and the parent discarded every version it had found, so
+// a supported installed Hermes stayed unenrolled after a reinstall. The
+// worker answers by its own deadline with what it found and names what it
+// could not finish as incomplete (NOT COVERED with its reason).
+func TestEnterpriseHookWorkerAnswersWhenDiscoveryBlocks(t *testing.T) {
+	for _, tc := range []struct {
+		mode       string
+		connectors []string
+		hermes     string
+		incomplete []string
+	}{
+		// The private-home scan blocks after the versions are found.
+		{"blocked-private", []string{"hermes", "codex"}, "0.21.5", []string{"codex"}},
+		// One connector's version discovery blocks before Hermes is reached.
+		{"blocked-version", []string{"codex", "hermes"}, "", []string{"codex", "hermes"}},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			useEnterpriseHookWorkerHelper(t, tc.mode)
+			account := selfWorkerAccount(t)
+			response, err := runEnterpriseHookWorker(context.Background(), account, enterpriseHookWorkerRequest{
+				Operation: enterpriseHookWorkerOpDiscover, Connectors: tc.connectors, TimeoutSeconds: 20,
+			})
+			if err != nil {
+				t.Fatalf("a blocked discovery left the worker without an answer: %v", err)
+			}
+			if response.Versions["hermes"] != tc.hermes {
+				t.Fatalf("versions = %v, want hermes %q", response.Versions, tc.hermes)
+			}
+			incomplete := map[string]bool{}
+			for _, install := range response.PrivateInstalls {
+				if !install.Incomplete || install.Skipped != enterprisehooks.PrivateInstallSkippedTimedOut {
+					t.Fatalf("private installs = %+v, want only scan_timed_out rows", response.PrivateInstalls)
+				}
+				incomplete[install.Connector] = true
+			}
+			if len(incomplete) != len(tc.incomplete) {
+				t.Fatalf("incomplete = %v, want %v", incomplete, tc.incomplete)
+			}
+			for _, name := range tc.incomplete {
+				if !incomplete[name] {
+					t.Fatalf("incomplete = %v, want %v", incomplete, tc.incomplete)
+				}
+			}
+		})
 	}
 }
 

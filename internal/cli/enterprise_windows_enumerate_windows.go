@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -373,14 +374,12 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN enrollment group cache is unreadable; starting from signed-in sessions only: %v\n", err)
 		cache = enterprisehooks.NewWindowsEnrollmentGroupCache()
 	}
-	var agents []enterprisehooks.UnprotectedAgent
+	sink := &enterpriseWindowsManifestScanSink{logf: enumerationLoggerForStderr(stderr)}
 	opts := standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{
 		ExistingManifestPath: manifestPath,
 		GroupCache:           cache,
-		Logger:               enumerationLoggerForStderr(stderr),
-		ReportUnprotected: func(agent enterprisehooks.UnprotectedAgent) {
-			agents = append(agents, agent)
-		},
+		Logger:               sink.log,
+		ReportUnprotected:    sink.report,
 	})
 	// The administrator's enabled targets are the enrollment: only they are
 	// inspected, whatever the automatic filters say (GAP-0906). An
@@ -393,17 +392,106 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 	enterprisehooks.SetUnverifiedVersionsPolicy(cfg.Enterprise.Enrollment.UnverifiedVersionsFor)
 	var ownerUnknown []enterprisehooks.UnprotectedAgent
 	opts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg))
-	if _, err := enterpriseWindowsEnumerateProfileEnumerator(ctx, cfg, opts); err != nil {
-		return fmt.Errorf("enterprise windows enumerate: inspect manifest-mode profiles: %w", err)
+	// The scan never decides targets in manifest mode, so a scan that did not
+	// finish (the cycle ran out of time, ProfileList was unreadable, a call
+	// stalled) never fails or holds the cycle or the install: the accounts it
+	// did not inspect are published incomplete, and the next cycle scans
+	// again.
+	err = runEnterpriseWindowsManifestScanBounded(ctx, func() error {
+		_, scanErr := enterpriseWindowsEnumerateProfileEnumerator(ctx, cfg, opts)
+		return scanErr
+	})
+	agents := sink.close()
+	if err != nil {
+		if opts.ManifestSubjects == nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] WARN the manifest-mode install scan did not finish and the administrator's targets are unreadable; the coverage record is left as it was: %s\n", enumeratorErrorText(err))
+			return nil
+		}
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN the manifest-mode install scan did not finish; the enrolled accounts it did not inspect are reported incomplete: %s\n", enumeratorErrorText(err))
+		agents = enterprisehooks.WindowsManifestScanIncomplete(opts.ManifestSubjects, opts.ExcludeUsers, agents, err)
 	}
 	agents = append(agents, ownerUnknown...)
 	if _, err := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, agents); err != nil {
-		return fmt.Errorf("enterprise windows enumerate: publish manifest-mode unprotected agents: %w", err)
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %s\n", enumeratorErrorText(err))
 	}
 	for _, agent := range agents {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN %s: %s\n", agent.Code, agent.Message())
 	}
 	return nil
+}
+
+// enterpriseWindowsManifestScanGrace is how long past the cycle deadline the
+// manifest-mode install scan may run before the cycle publishes without it.
+var enterpriseWindowsManifestScanGrace = 2 * time.Second
+
+// enterpriseWindowsManifestScanInFlight is set while a manifest-mode install
+// scan has not returned. A call that stalls (an offline redirected home, a
+// registry or account lookup that does not answer) never observes the
+// context, so a later cycle answers timed out at once instead of starting a
+// second scan behind the stalled one.
+var enterpriseWindowsManifestScanInFlight atomic.Bool
+
+// runEnterpriseWindowsManifestScanBounded runs scan in a worker and answers
+// by ctx's deadline plus enterpriseWindowsManifestScanGrace. When the worker
+// has not answered by then, its result is abandoned and the answer is a
+// deadline error, so the caller publishes the uninspected accounts as scan
+// timed out.
+func runEnterpriseWindowsManifestScanBounded(ctx context.Context, scan func() error) error {
+	if !enterpriseWindowsManifestScanInFlight.CompareAndSwap(false, true) {
+		return fmt.Errorf("an earlier install scan has not returned: %w", context.DeadlineExceeded)
+	}
+	done := make(chan error, 1)
+	go func() {
+		err := scan()
+		enterpriseWindowsManifestScanInFlight.Store(false)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+	}
+	grace := time.NewTimer(enterpriseWindowsManifestScanGrace)
+	defer grace.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-grace.C:
+		return fmt.Errorf("the install scan did not answer by the cycle deadline: %w", context.DeadlineExceeded)
+	}
+}
+
+// enterpriseWindowsManifestScanSink collects what the manifest-mode install
+// scan reports and logs until close; an abandoned scan's later reports and
+// log lines are dropped.
+type enterpriseWindowsManifestScanSink struct {
+	mu     sync.Mutex
+	closed bool
+	agents []enterprisehooks.UnprotectedAgent
+	logf   enterprisehooks.EnumerationLogger
+}
+
+func (s *enterpriseWindowsManifestScanSink) report(agent enterprisehooks.UnprotectedAgent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.agents = append(s.agents, agent)
+	}
+}
+
+func (s *enterpriseWindowsManifestScanSink) log(subject, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.logf(subject, reason)
+	}
+}
+
+func (s *enterpriseWindowsManifestScanSink) close() []enterprisehooks.UnprotectedAgent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	return append([]enterprisehooks.UnprotectedAgent(nil), s.agents...)
 }
 
 // reconcileEnterpriseWindowsInventoryGrants revokes the gateway's inventory

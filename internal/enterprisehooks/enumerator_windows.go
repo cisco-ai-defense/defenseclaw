@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -239,7 +240,17 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	// newly discovered rows as deferred; the Secure Client profile keeps its
 	// historical filter and row state exactly.
 	standalone := cfg.StandaloneEnterprise()
-	profiles, err := listWindowsUserProfiles(ctx, opts.Logger, standalone)
+	// Manifest mode inspects only the administrator's enrolled accounts, so
+	// another account's home is never opened: an offline redirected or
+	// network home of an unrelated profile cannot hold the cycle.
+	var checkHome func(sid string) bool
+	if opts.ManifestSubjects != nil {
+		checkHome = func(sid string) bool {
+			_, enrolled := opts.ManifestSubjects[sid]
+			return enrolled
+		}
+	}
+	profiles, err := listWindowsUserProfiles(ctx, opts.Logger, standalone, checkHome)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -447,15 +458,13 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 
 	// A manifest subject ProfileList does not list as an interactive
 	// profile is still enrolled: its authored home is inspected directly,
-	// and an unreadable one is reported incomplete (GAP-0906).
+	// and an unreadable one is reported incomplete (GAP-0906). An exempt
+	// account keeps its enabled rows, so it is inspected as a listed one is.
 	if opts.ReportUnprotected != nil {
 		for _, sid := range sortedManifestSubjects(opts.ManifestSubjects) {
-			if visited[sid] || windowsEnrollmentListMatches(opts.ExcludeUsers, []string{sid}) || windowsEnrollmentListMatches(opts.ExemptUsers, []string{sid}) {
-				continue
-			}
 			subject := opts.ManifestSubjects[sid]
 			user := filepath.Base(subject.Home)
-			if windowsEnrollmentListMatches(opts.ExcludeUsers, []string{user}) || windowsEnrollmentListMatches(opts.ExemptUsers, []string{user}) {
+			if visited[sid] || windowsEnrollmentListMatches(opts.ExcludeUsers, []string{sid, user}) {
 				continue
 			}
 			judged[sid] = true
@@ -466,17 +475,8 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 				}
 				continue
 			}
-			if info, err := os.Lstat(subject.Home); err != nil || !info.IsDir() {
-				if err == nil || !os.IsNotExist(err) {
-					for _, conn := range subject.Connectors {
-						opts.ReportUnprotected(UnprotectedAgent{User: user, SID: sid, Connector: conn, Code: UnprotectedCodeInstallScanIncomplete,
-							Reason: privateInstallIncompleteReason(PrivateInstallSkippedHome)})
-					}
-				}
-				continue // no profile folder yet: nothing the account could run
-			}
 			profileCtx, cancel := context.WithTimeout(ctx, windowsPrivateProfileBudget(ctx, 1))
-			reportWindowsPrivateInstalls(profileCtx, opts.ReportUnprotected, user, sid, subject.Home, subject.Connectors)
+			reportWindowsProfileScan(profileCtx, opts.ReportUnprotected, user, sid, subject.Home, subject.Connectors, true)
 			cancel()
 		}
 	}
@@ -1325,7 +1325,7 @@ func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOpt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	profiles, err := listWindowsUserProfiles(ctx, nil, true)
+	profiles, err := listWindowsUserProfiles(ctx, nil, true, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1377,7 +1377,11 @@ func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOpt
 // ctx bounds the walk: a per-subkey ctx.Err() check ensures a
 // wedged os.Stat on one profile cannot starve the interval-loop's
 // 60 s cycle timeout.
-func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standalone bool) ([]windowsUserProfile, error) {
+//
+// checkHome, when not nil, names the canonical SIDs whose home is checked
+// (it exists, is a directory, has no reparse point). Any other profile is
+// listed from the registry alone and its home is never opened.
+func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standalone bool, checkHome func(sid string) bool) ([]windowsUserProfile, error) {
 	subkeyNames, err := windowsProfileListSubkeyReader()
 	if err != nil {
 		return nil, err
@@ -1419,25 +1423,27 @@ func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standa
 			logfSafely(logf, name, "ProfileImagePath is empty or not absolute")
 			continue
 		}
-		info, err := os.Stat(home)
-		if err != nil {
-			logfSafely(logf, name, fmt.Sprintf("ProfileImagePath does not resolve to an existing directory: %v", err))
-			continue
-		}
-		if !info.IsDir() {
-			logfSafely(logf, name, "ProfileImagePath is not a directory")
-			continue
-		}
-		if err := winpath.RejectReparseChain(home); err != nil {
-			logfSafely(logf, name, fmt.Sprintf("ProfileImagePath contains a reparse point in its ancestor chain: %v", err))
-			continue
-		}
-		mtime := info.ModTime().UnixNano()
-
 		canon := canonicalManifestTargetSID(name)
 		if canon == "" {
 			logfSafely(logf, name, "SID canonicalisation returned empty")
 			continue
+		}
+		var mtime int64
+		if checkHome == nil || checkHome(canon) {
+			info, err := windowsProfileHomeStat(home)
+			if err != nil {
+				logfSafely(logf, name, fmt.Sprintf("ProfileImagePath does not resolve to an existing directory: %v", err))
+				continue
+			}
+			if !info.IsDir() {
+				logfSafely(logf, name, "ProfileImagePath is not a directory")
+				continue
+			}
+			if err := winpath.RejectReparseChain(home); err != nil {
+				logfSafely(logf, name, fmt.Sprintf("ProfileImagePath contains a reparse point in its ancestor chain: %v", err))
+				continue
+			}
+			mtime = info.ModTime().UnixNano()
 		}
 		if prev, dup := byCanonSID[canon]; dup {
 			if mtime <= prev.HomeMtime {
@@ -1477,6 +1483,8 @@ func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standa
 var (
 	windowsProfileListSubkeyReader = readProfileListSubkeyNames
 	windowsProfileImagePathReader  = readAndExpandProfileImagePath
+	// windowsProfileHomeStat checks a listed profile's home.
+	windowsProfileHomeStat = os.Stat
 )
 
 func readProfileListSubkeyNames() ([]string, error) {
@@ -1762,35 +1770,178 @@ func sortedManifestSubjects(subjects map[string]WindowsManifestSubject) []string
 	return out
 }
 
+// windowsPrivateInstallGrace is how long past its profile deadline a
+// private-home scan may run before the profile's scan is reported timed out.
+var windowsPrivateInstallGrace = 2 * time.Second
+
+// windowsPrivateInstallsInFlight holds the homes whose scan worker has not
+// returned. A directory open or listing that stalls (an offline redirected
+// folder, a cloud placeholder, a hung share) never observes the context, so
+// a later cycle reports that home's scan timed out instead of starting a
+// second worker behind the stalled one.
+var windowsPrivateInstallsInFlight = struct {
+	sync.Mutex
+	homes map[string]bool
+}{homes: map[string]bool{}}
+
+// windowsProfileScanBounded runs scan, which makes every file system and
+// registry call of one profile's private-install scan, in a worker and
+// answers by ctx's deadline plus a short grace. A call that stalls never
+// observes the context, so when the worker has not answered, timedOut's
+// answer (NOT COVERED: scan timed out) is returned for this profile only:
+// the cycle goes on to the next profile and publishes on time, and the
+// worker's result is abandoned. While the call stays stalled, later cycles
+// answer timed out at once for that home and start no second worker; the
+// next cycle after it returns scans the home again.
+func windowsProfileScanBounded(ctx context.Context, home string, scan, timedOut func() []UnprotectedAgent) []UnprotectedAgent {
+	key := strings.ToLower(filepath.Clean(home))
+	windowsPrivateInstallsInFlight.Lock()
+	if windowsPrivateInstallsInFlight.homes[key] {
+		windowsPrivateInstallsInFlight.Unlock()
+		return timedOut()
+	}
+	windowsPrivateInstallsInFlight.homes[key] = true
+	windowsPrivateInstallsInFlight.Unlock()
+	done := make(chan []UnprotectedAgent, 1)
+	go func() {
+		agents := scan()
+		windowsPrivateInstallsInFlight.Lock()
+		delete(windowsPrivateInstallsInFlight.homes, key)
+		windowsPrivateInstallsInFlight.Unlock()
+		done <- agents
+	}()
+	select {
+	case agents := <-done:
+		return agents
+	case <-ctx.Done():
+	}
+	grace := time.NewTimer(windowsPrivateInstallGrace)
+	defer grace.Stop()
+	select {
+	case agents := <-done:
+		return agents
+	case <-grace.C:
+		return timedOut()
+	}
+}
+
+// WindowsManifestScanIncomplete returns reported plus an install-scan-
+// incomplete entry (scan_timed_out when scanErr is the cycle's deadline,
+// else account_not_inspected) for each connector of each
+// administrator-enrolled subject that reported does not already name
+// incomplete. Manifest mode publishes it when its profile scan did not
+// finish, so an uninspected account is NOT COVERED with a reason and the
+// install or cycle goes on. Excluded accounts are left out, as the scan
+// leaves them out. An exempt account keeps its enabled rows, so a failed
+// scan never clears its NOT COVERED rows.
+func WindowsManifestScanIncomplete(subjects map[string]WindowsManifestSubject, excludeUsers []string, reported []UnprotectedAgent, scanErr error) []UnprotectedAgent {
+	skipped := PrivateInstallSkippedUnresolved
+	if errors.Is(scanErr, context.DeadlineExceeded) || errors.Is(scanErr, context.Canceled) {
+		skipped = PrivateInstallSkippedTimedOut
+	}
+	named := map[string]bool{}
+	for _, agent := range reported {
+		if agent.Code == UnprotectedCodeInstallScanIncomplete {
+			named[canonicalManifestTargetSID(agent.SID)+"\x00"+strings.ToLower(strings.TrimSpace(agent.Connector))] = true
+		}
+	}
+	out := append([]UnprotectedAgent(nil), reported...)
+	for _, sid := range sortedManifestSubjects(subjects) {
+		subject := subjects[sid]
+		user := filepath.Base(subject.Home)
+		if windowsEnrollmentListMatches(excludeUsers, []string{sid, user}) {
+			continue
+		}
+		for _, conn := range subject.Connectors {
+			if named[sid+"\x00"+conn] {
+				continue
+			}
+			out = append(out, UnprotectedAgent{User: user, SID: sid, Connector: conn, Code: UnprotectedCodeInstallScanIncomplete,
+				Reason: privateInstallIncompleteReason(skipped)})
+		}
+	}
+	return out
+}
+
 // reportWindowsPrivateInstalls reports each unsupported, unversioned or
 // uninspected agent copy the profile at home can run.
 var windowsPrivateInstallsForEnumeration = DiscoverWindowsPrivateAgentInstalls
 
+// windowsAuthoredHomeLstat checks an administrator-authored home that
+// ProfileList does not list.
+var windowsAuthoredHomeLstat = os.Lstat
+
 func reportWindowsPrivateInstalls(ctx context.Context, report func(UnprotectedAgent), user, sid, home string, connectors []string) {
-	installs := windowsPrivateInstallsForEnumeration(ctx, home, connectors)
-	if ctx.Err() == nil {
-		installs = append(installs, discoverWindowsWinGetCopies(sid, connectors)...)
-	} else {
-		// The WinGet pass was not reached. The home walk already marks its
-		// connectors incomplete; name any other connector the skipped pass
-		// could have covered so the deadline never looks like a clean scan.
-		incomplete := make(map[string]bool, len(installs))
-		for _, install := range installs {
-			if install.Incomplete {
-				incomplete[install.Connector] = true
-			}
+	reportWindowsProfileScan(ctx, report, user, sid, home, connectors, false)
+}
+
+// reportWindowsProfileScan reports what the profile's private-install scan
+// finds, by the profile deadline in ctx. authored marks a manifest home
+// ProfileList does not list: it is checked first (GAP-0906), so a missing
+// folder has nothing to run and any other unreadable one leaves every
+// connector of the account incomplete.
+func reportWindowsProfileScan(ctx context.Context, report func(UnprotectedAgent), user, sid, home string, connectors []string, authored bool) {
+	incomplete := func(names []string, skipped string) []UnprotectedAgent {
+		var out []UnprotectedAgent
+		for _, conn := range names {
+			agent, _ := privateInstallUnprotected(PrivateAgentInstall{Connector: conn, Incomplete: true, Skipped: skipped})
+			agent.User, agent.SID = user, sid
+			out = append(out, agent)
 		}
-		for _, conn := range connectors {
-			if (conn == "claudecode" || conn == "codex" || conn == "copilot") && !incomplete[conn] {
-				installs = append(installs, PrivateAgentInstall{Connector: conn, Incomplete: true, Skipped: PrivateInstallSkippedHome})
-			}
+		return out
+	}
+	// The connectors the home walk and the WinGet pass cover.
+	var scanned []string
+	for _, conn := range connectors {
+		if conn == "claudecode" || conn == "codex" || conn == "copilot" {
+			scanned = append(scanned, conn)
 		}
 	}
-	for _, install := range installs {
-		if agent, ok := privateInstallUnprotected(install); ok {
-			agent.User, agent.SID = user, sid
-			report(agent)
+	scan := func() []UnprotectedAgent {
+		if authored {
+			if info, err := windowsAuthoredHomeLstat(home); err != nil || !info.IsDir() {
+				if err == nil || !os.IsNotExist(err) {
+					return incomplete(connectors, PrivateInstallSkippedHome)
+				}
+				return nil // no profile folder yet: nothing the account could run
+			}
 		}
+		installs := windowsPrivateInstallsForEnumeration(ctx, home, connectors)
+		if ctx.Err() == nil {
+			installs = append(installs, discoverWindowsWinGetCopies(sid, connectors)...)
+		} else {
+			// The WinGet pass was not reached. The home walk already marks its
+			// connectors incomplete; name any other connector the skipped pass
+			// could have covered so the deadline never looks like a clean scan.
+			named := make(map[string]bool, len(installs))
+			for _, install := range installs {
+				if install.Incomplete {
+					named[install.Connector] = true
+				}
+			}
+			for _, conn := range scanned {
+				if !named[conn] {
+					installs = append(installs, PrivateAgentInstall{Connector: conn, Incomplete: true, Skipped: PrivateInstallSkippedTimedOut})
+				}
+			}
+		}
+		var out []UnprotectedAgent
+		for _, install := range installs {
+			if agent, ok := privateInstallUnprotected(install); ok {
+				agent.User, agent.SID = user, sid
+				out = append(out, agent)
+			}
+		}
+		return out
+	}
+	timedOut := func() []UnprotectedAgent {
+		if authored {
+			return incomplete(connectors, PrivateInstallSkippedTimedOut)
+		}
+		return incomplete(scanned, PrivateInstallSkippedTimedOut)
+	}
+	for _, agent := range windowsProfileScanBounded(ctx, home, scan, timedOut) {
+		report(agent)
 	}
 }
 

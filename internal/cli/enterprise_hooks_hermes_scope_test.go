@@ -381,6 +381,28 @@ func TestVerifyLeavesASignedOutHermesTargetToTheNextSignIn(t *testing.T) {
 	// guardian has not verified the target since he signed out.
 	delete(live, bob+"/hermes")
 	check("hive loaded while signed out", true, true)
+	// Review round d: the hive is loaded, so Bob's Hermes home is readable,
+	// and his owned hook is gone. The recorded wait excused only the
+	// unreadable home: a hook that is present and failing is a failure while
+	// he is signed out too, through the Hermes rule and through the sign-in
+	// wait every connector has on a managed standalone deployment.
+	live[bob+"/hermes"] = errors.New("enterprise hooks: connector hermes hook verification failed: canonical hook matrix is absent: owned hook command not present")
+	check("hive loaded while signed out, owned hook removed", false, false)
+	// The sign-in wait every connector has on a managed standalone
+	// deployment does not excuse it either.
+	bobEnabled := true
+	bobHermes := enterprisehooks.ManifestTarget{SID: bob, Connector: "hermes", Enabled: &bobEnabled, Deferred: true}
+	bobRow := enterpriseHookReconcileRow{SID: bob, UserHome: filepath.Join(scope, "Bob"), Connector: "hermes", Error: live[bob+"/hermes"].Error()}
+	hermesHomeWait := enterpriseHookAwaitingSignInPrefix + ": " + enterpriseHookAwaitingSignInHermesHome + ", so Hermes is NOT COVERED for it"
+	if enterpriseHookVerifyAwaitingSignIn(map[string]string{enterpriseHookProtectedTargetKey(bobRow): hermesHomeWait}, bobHermes, bobRow) {
+		t.Fatal("hive loaded while signed out, owned hook removed: the sign-in wait excused a Hermes hook that is present and failing")
+	}
+	earlierRelease := enterpriseHookAwaitingSignInPrefix + ": DefenseClaw 1.0.2 protected it"
+	if !enterpriseHookVerifyAwaitingSignIn(map[string]string{enterpriseHookProtectedTargetKey(bobRow): earlierRelease}, bobHermes, bobRow) {
+		t.Fatal("control: an earlier release's sign-in wait of a signed-out account no longer excuses its target")
+	}
+	delete(live, bob+"/hermes")
+	check("hive loaded while signed out, hook restored", true, true)
 
 	// GAP-1433 as observed: an upgrade from 1.0.2 while Bob is signed out
 	// leaves his Hermes target waiting for his sign-in (an earlier release
@@ -407,6 +429,47 @@ func TestVerifyLeavesASignedOutHermesTargetToTheNextSignIn(t *testing.T) {
 		return true, nil
 	}
 	enterpriseHookReconcileSessionAvailable = adminView
+	previousHasNoSession := enterpriseHookTargetHasNoSession
+	t.Cleanup(func() { enterpriseHookTargetHasNoSession = previousHasNoSession })
+	sessionList := func(signedOut bool, err error) {
+		enterpriseHookTargetHasNoSession = func(target enterprisehooks.ManifestTarget) (bool, error) {
+			if target.SID != bob {
+				return false, nil
+			}
+			return signedOut, err
+		}
+	}
+	// Bob signs in while his owned hook is missing: the administrator
+	// cannot query his session, but the session list shows him signed in,
+	// so the wait no longer excuses the live failure. A session list that
+	// cannot be read proves nothing either.
+	for _, tc := range []struct {
+		name      string
+		signedOut bool
+		err       error
+	}{
+		{"administrator verify, account signed in", false, nil},
+		{"administrator verify, session list unreadable", true, errors.New("access denied")},
+	} {
+		sessionList(tc.signedOut, tc.err)
+		run, err := runEnterpriseHookVerifyAttemptWithScope(context.Background(), true)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		for _, row := range run.Rows {
+			if row.SID == bob && row.Connector == "hermes" {
+				for _, excused := range run.Excused {
+					if excused.SID == bob && excused.Connector == "hermes" {
+						t.Fatalf("%s: the live failure was excused as a sign-in wait: rows=%+v", tc.name, run.Rows)
+					}
+				}
+			}
+		}
+		if run.Failures == len(run.Excused) {
+			t.Fatalf("%s: rows=%+v, want the unhooked target failing", tc.name, run.Rows)
+		}
+	}
+	sessionList(true, nil)
 	checkNote := func(name, want string) {
 		t.Helper()
 		run, err := runEnterpriseHookVerifyAttemptWithScope(context.Background(), true)

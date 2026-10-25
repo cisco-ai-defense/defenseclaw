@@ -40,6 +40,12 @@ func privateInstallContractReason(connector, version string) string {
 	return unixNewRowVersionRefused(connector, version)
 }
 
+// UnixPrivateInstallConnectors names the connectors of names that
+// DiscoverUnixPrivateAgentInstalls inspects.
+func UnixPrivateInstallConnectors(names []string) []string {
+	return privateInstallConnectors(names, func(name string) bool { return privateUnixNPMPackages[name] != "" })
+}
+
 // DiscoverUnixPrivateAgentInstalls runs in the enrolled user's discovery
 // worker, with the user's credentials. It reads metadata only; no user
 // executable runs. It inspects every npm-style prefix the version probe
@@ -54,7 +60,7 @@ func DiscoverUnixPrivateAgentInstalls(ctx context.Context, home string, connecto
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	wanted := privateInstallConnectors(connectors, func(name string) bool { return privateUnixNPMPackages[name] != "" })
+	wanted := UnixPrivateInstallConnectors(connectors)
 	if len(wanted) == 0 {
 		return nil
 	}
@@ -71,7 +77,7 @@ func DiscoverUnixPrivateAgentInstalls(ctx context.Context, home string, connecto
 		scan.skipAll(wanted, PrivateInstallSkippedVersionManagers)
 	}
 	roots = append(roots, prefixes...)
-	nested, complete := walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{open: os.Open, unreachable: unixPrivateWalkUnreachable, homeLinks: true})
+	nested, complete := walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{open: unixPrivateWalkOpener(home), unreachable: unixPrivateWalkUnreachable, homeLinks: true})
 	if !complete {
 		scan.skipAll(wanted, PrivateInstallSkippedHome)
 	}

@@ -314,6 +314,7 @@ const (
 	PrivateInstallSkippedOutsideRoots    = "path_outside_scan_roots"
 	PrivateInstallSkippedUnresolved      = "account_not_inspected"
 	PrivateInstallSkippedExtensions      = "extensions_folder_limit"
+	PrivateInstallSkippedTimedOut        = "scan_timed_out"
 )
 
 var privateInstallSkippedText = map[string]string{
@@ -325,6 +326,7 @@ var privateInstallSkippedText = map[string]string{
 	PrivateInstallSkippedOutsideRoots:    "discovery named a copy outside the locations DefenseClaw scans",
 	PrivateInstallSkippedUnresolved:      "the enrolled account could not be inspected this cycle",
 	PrivateInstallSkippedExtensions:      "an editor's extensions folder holds more entries than the scan reads, or could not be read",
+	PrivateInstallSkippedTimedOut:        "scan timed out: a file system or registry call did not answer by the account's scan deadline; the next cycle retries it",
 }
 
 // KnownPrivateInstallSkipped returns code when it is a PrivateInstallSkipped*
