@@ -237,14 +237,9 @@ func codexWithoutUserNativeOTLP(raw []byte, backup codexConfigBackup, opts Setup
 	if !ok {
 		return nil, nil, nil
 	}
-	owned := false
-	for _, key := range codexOtelExporterKeys {
-		if codexExporterLooksManaged(otel[key], opts) {
-			owned = true
-			break
-		}
-	}
-	if !owned {
+	// Any [otel] value that carries a DefenseClaw credential is the
+	// product's, an exporter or not.
+	if !otlpCarriesProductCredential(otel, otlpKnownProductTokens(opts, OTLPScopeCodex)) {
 		return nil, nil, nil
 	}
 	before := make(map[string]string, len(otel))

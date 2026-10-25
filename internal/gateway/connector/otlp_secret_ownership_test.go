@@ -345,8 +345,161 @@ func TestOTLPCarriesProductCredentialIsTheSecretShape(t *testing.T) {
 	if !otlpCarriesProductCredential(map[string]interface{}{"otlp-http": map[string]interface{}{"headers": map[string]interface{}{"X-Api-Key": "configured-token"}}}, []string{"configured-token"}) {
 		t.Error("known credential under another header name not found")
 	}
+	// Review of 95ed75a6: one stray "%" must not stop the decode (Doctor's
+	// unquote is lenient too), and a table key is searched like a value.
+	enc := otlpTestPercentEncode(token)
+	for _, value := range []interface{}{
+		"load=90%,session.id=" + enc,
+		"Bearer%20" + enc + "%zz",
+		"http://dc:" + enc + "@127.0.0.1:19081/v1/logs?p=5%",
+		"x=%" + enc,
+		"configured%2Dtoken%",
+		map[string]interface{}{"resource_attributes": map[string]interface{}{token: "session"}},
+		[]interface{}{"a", map[string]interface{}{"k": "v=100%,t=" + enc}},
+	} {
+		if !otlpCarriesProductCredential(value, []string{"configured-token"}) {
+			t.Errorf("credential not found in %#v", value)
+		}
+	}
+	for _, value := range []string{"load=90%,tenant=ops", "%zz%", "100%", "Bearer%20" + enc[:len(enc)-3]} {
+		if otlpCarriesProductCredential(value, nil) {
+			t.Errorf("operator value %q claimed", value)
+		}
+	}
 	if otlpCarriesProductCredential("abc", []string{"ab"}) {
 		t.Error("a short known value matched ordinary text")
+	}
+}
+
+// otlpTestPercentEncode percent-encodes every byte of s.
+func otlpTestPercentEncode(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		fmt.Fprintf(&b, "%%%02X", s[i])
+	}
+	return b.String()
+}
+
+// TestCodexSecretOwnershipCoversEveryOtelValue is the Codex side of the
+// review of 95ed75a6: a DefenseClaw credential in any [otel] value (the
+// environment that becomes a resource attribute, a resource or other table,
+// a table key, an exporter's header list, endpoint userinfo or query),
+// percent-encoded beside a stray "%" or not, with the sidecar present or gone,
+// is reported by VerifyClean and managed Verify and removed by Setup and the
+// managed cleanup. The operator collector, environment and prompt preference
+// keep their bytes.
+func TestCodexSecretOwnershipCoversEveryOtelValue(t *testing.T) {
+	const operator = "[otel.trace_exporter.otlp-http]\nendpoint = 'http://127.0.0.1:4318/v1/traces'\nprotocol = 'json'\n\n" +
+		"[otel.trace_exporter.otlp-http.headers]\nX-Tenant = 'ops'\n"
+	rows := []struct {
+		name, environment, block, gone string
+		dropToken                      bool
+	}{
+		{name: "environment_token", environment: "{tok}", gone: "environment"},
+		{name: "environment_encoded_stray_percent", environment: "ops-%{enc}", gone: "environment", dropToken: true},
+		{name: "resource_table_value", block: "[otel.resource_attributes]\n'session.id' = '{tok}'\n", gone: "resource_attributes"},
+		{name: "resource_table_key", block: "[otel.resource_attributes]\n'{tok}' = 'session'\n", gone: "resource_attributes", dropToken: true},
+		{name: "resource_list_encoded_stray_percent", block: "[otel.resource_attributes]\nlist = 'load=90%,session.id={enc}'\n", gone: "resource_attributes", dropToken: true},
+		{name: "exporter_header_list_stray_percent", block: "[otel.exporter.otlp-http]\nendpoint = 'http://127.0.0.1:19081/v1/logs'\nprotocol = 'binary'\n\n" +
+			"[otel.exporter.otlp-http.headers]\nx-list = 'a=50%,Authorization=Bearer%20{enc}'\n", gone: "exporter", dropToken: true},
+		{name: "exporter_userinfo_encoded", block: "[otel.exporter.otlp-http]\nendpoint = 'http://dc:{enc}@127.0.0.1:19081/v1/logs?note=100%'\nprotocol = 'binary'\n", gone: "exporter", dropToken: true},
+		{name: "metrics_query_encoded", block: "[otel.metrics_exporter.otlp-http]\nendpoint = 'http://127.0.0.1:19081/v1/metrics?load=9%&key={enc}'\nprotocol = 'binary'\n", gone: "metrics_exporter", dropToken: true},
+	}
+	for _, release := range []string{"1.0.2", "1.0.3"} {
+		for _, goos := range []string{"linux", "darwin", "windows"} {
+			for _, row := range rows {
+				for _, writer := range []string{"setup", "managed_cleanup"} {
+					t.Run(release+"/"+goos+"/"+row.name+"/"+writer, func(t *testing.T) {
+						dir := t.TempDir()
+						configPath := filepath.Join(dir, "config.toml")
+						if err := os.WriteFile(configPath, []byte("model = 'gpt-5'\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+						prior := CodexConfigPathOverride
+						CodexConfigPathOverride = configPath
+						t.Cleanup(func() { CodexConfigPathOverride = prior })
+						conn := NewCodexConnector()
+						earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", APIToken: "test-hook-token", GOOS: goos, CodexOtelEnvironment: goos}
+						if err := conn.Setup(context.Background(), earlier); err != nil {
+							t.Fatalf("seed %s setup: %v", release, err)
+						}
+						base, err := os.ReadFile(configPath)
+						if err != nil {
+							t.Fatal(err)
+						}
+						token, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
+						if err != nil {
+							t.Fatal(err)
+						}
+						fill := strings.NewReplacer("{tok}", token, "{enc}", otlpTestPercentEncode(token))
+						environment := "ops-env"
+						if row.environment != "" {
+							environment = fill.Replace(row.environment)
+						}
+						text := strings.ReplaceAll(string(base), "\r\n", "\n") + "\n[otel]\nenvironment = '" + environment + "'\nlog_user_prompt = false\n\n" +
+							operator + "\n" + fill.Replace(row.block)
+						want := operator
+						if goos == "windows" {
+							text = strings.ReplaceAll(text, "\n", "\r\n")
+							want = strings.ReplaceAll(operator, "\n", "\r\n")
+						}
+						if err := os.WriteFile(configPath, []byte(text), 0o600); err != nil {
+							t.Fatal(err)
+						}
+						if row.dropToken {
+							if err := RemoveOTLPPathToken(dir, OTLPScopeCodex); err != nil {
+								t.Fatal(err)
+							}
+						}
+						var parsed map[string]interface{}
+						if err := toml.Unmarshal([]byte(text), &parsed); err != nil {
+							t.Fatal(err)
+						}
+						field := "config.toml otel." + row.gone
+						if fields := codexOtelResidueFields(parsed["otel"], SetupOpts{DataDir: dir}); !slices.ContainsFunc(fields, func(f string) bool { return strings.HasPrefix(f, field+" ") }) {
+							t.Fatalf("VerifyClean = %v, want %s", fields, field)
+						}
+						if residue := otlpSecretResidue(t, "codex", dir, "config.toml"); !slices.Contains(residue, field) {
+							t.Fatalf("managed Verify = %v, want %s", residue, field)
+						}
+
+						if writer == "setup" {
+							upgrade := earlier
+							upgrade.APIAddr = "127.0.0.1:19082"
+							if err := conn.Setup(context.Background(), upgrade); err != nil {
+								t.Fatalf("upgrade: %v", err)
+							}
+						} else if _, err := RemoveUserNativeOTLP("codex", SetupOpts{DataDir: dir, ManagedEnterprise: true}); err != nil {
+							t.Fatalf("managed cleanup: %v", err)
+						}
+						got, err := os.ReadFile(configPath)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if strings.Contains(string(got), token) || strings.Contains(string(got), otlpTestPercentEncode(token)) {
+							t.Fatalf("product credential survived:\n%s", got)
+						}
+						if !strings.Contains(string(got), want) {
+							t.Fatalf("operator collector bytes changed; want:\n%s\ngot:\n%s", want, got)
+						}
+						var after map[string]interface{}
+						if err := toml.Unmarshal(got, &after); err != nil {
+							t.Fatal(err)
+						}
+						otel, _ := after["otel"].(map[string]interface{})
+						if _, kept := otel[row.gone]; kept {
+							t.Fatalf("otel.%s kept", row.gone)
+						}
+						if otel["log_user_prompt"] != false || row.gone != "environment" && otel["environment"] != "ops-env" {
+							t.Fatalf("operator [otel] values changed: %v", otel)
+						}
+						if left := otlpSecretResidue(t, "codex", dir, "config.toml"); len(left) != 0 {
+							t.Fatalf("residue after %s: %v", writer, left)
+						}
+					})
+				}
+			}
+		}
 	}
 }
 
@@ -446,6 +599,13 @@ func TestClaudeSecretOwnershipCoversEveryOTLPEnvValue(t *testing.T) {
 		{name: "service_name", key: "OTEL_SERVICE_NAME", value: "claude-{tok}"},
 		{name: "log_gate", key: "OTEL_LOG_TOOL_DETAILS", value: "{tok}"},
 		{name: "unlisted_otlp_key", key: "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", value: "{tok}", dropToken: true},
+		// Review of 95ed75a6: the decode is lenient, so one stray "%" in a
+		// comma/equals list, a URL or a query never hides an encoded token.
+		{name: "resource_list_stray_percent", key: "OTEL_RESOURCE_ATTRIBUTES", value: "load=90%,session.id={enc}", dropToken: true},
+		{name: "resource_encoded_separator", key: "OTEL_RESOURCE_ATTRIBUTES", value: "team=a%2Csession.id%3D{tok}", dropToken: true},
+		{name: "logs_headers_list_stray_percent", key: "OTEL_EXPORTER_OTLP_LOGS_HEADERS", value: "x-a=50%,Authorization=Bearer%20{enc}", dropToken: true},
+		{name: "metrics_endpoint_userinfo_encoded", key: "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", value: "http://dc:{enc}@127.0.0.1:19081/v1/metrics?load=9%", dropToken: true},
+		{name: "generic_endpoint_query_encoded", key: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", value: "http://127.0.0.1:19081/v1/logs?n=100%&k={enc}", dropToken: true},
 	}
 	const operatorRoute = "http://127.1:19081/v1/traces"
 	for _, release := range []string{"1.0.2", "1.0.3"} {

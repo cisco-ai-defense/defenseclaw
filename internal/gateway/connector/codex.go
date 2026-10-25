@@ -23,11 +23,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 
@@ -4437,6 +4439,13 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 		delete(current, key)
 	}
 
+	// Any other [otel] value that carries a DefenseClaw credential
+	// (otel.environment, a resource or other table, a string exporter) is the
+	// product's too. It is removed; a saved operator value comes back below
+	// only when it carries none.
+	known := otlpKnownProductTokens(opts, OTLPScopeCodex)
+	dropCodexOtelCredentials(current, known)
+
 	// Setup owns otel.environment only while it retains the exact value Setup
 	// wrote and either the current table still carries a managed exporter or a
 	// pristine [otel] pre-image proves which value preceded Setup. This avoids
@@ -4495,11 +4504,22 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 			current[key] = saved
 		}
 	}
+	dropCodexOtelCredentials(current, known)
 
 	if len(current) == 0 {
 		delete(cfg, "otel")
 	} else {
 		cfg["otel"] = current
+	}
+}
+
+// dropCodexOtelCredentials deletes every [otel] entry whose value carries a
+// DefenseClaw credential (otlpCarriesProductCredential).
+func dropCodexOtelCredentials(otel map[string]interface{}, known []string) {
+	for key, value := range otel {
+		if otlpCarriesProductCredential(value, known) {
+			delete(otel, key)
+		}
 	}
 }
 
@@ -4562,6 +4582,14 @@ func codexOtelResidueFields(v interface{}, opts SetupOpts) []string {
 		if codexExporterLooksManaged(otel[key], opts) {
 			residual = append(residual, fmt.Sprintf("config.toml otel.%s retains a DefenseClaw exporter credential", key))
 		}
+	}
+	known := otlpKnownProductTokens(opts, OTLPScopeCodex)
+	for _, key := range slices.Sorted(maps.Keys(otel)) {
+		if codexOtelExporterKey(key) && codexExporterLooksManaged(otel[key], opts) ||
+			!otlpCarriesProductCredential(otel[key], known) {
+			continue
+		}
+		residual = append(residual, fmt.Sprintf("config.toml otel.%s retains a DefenseClaw credential", key))
 	}
 	if len(residual) > 0 {
 		residual = append([]string{"config.toml [otel] still contains DefenseClaw-owned fields"}, residual...)

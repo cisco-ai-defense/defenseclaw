@@ -78,6 +78,7 @@ from defenseclaw.commands.cmd_doctor import (
     _DoctorResult,
     _fix_plugin_registry_required,
     _opencode_load_heartbeat_status,
+    _otel_carries_product_credential,
     _plugin_registry_required_offenders,
     _probe_cursor_windows_runtime,
     _run_cursor_windows_runtime_process,
@@ -275,6 +276,92 @@ class TestCodexOtelAlignment(unittest.TestCase):
                 self.assertIn("otel.exporter.otlp-http.endpoint", detail)
                 self.assertIn("DefenseClaw credential", detail)
                 self.assertNotIn(encoded, detail)
+
+    def test_codex_credential_in_any_otel_value_fails(self) -> None:
+        # Review of 95ed75a6: ownership is the secret in every [otel] value,
+        # not only an exporter endpoint or header. A token in
+        # otel.environment, a resource table value or key, or a list with a
+        # stray "%" beside the encoded token fails Doctor, as the gateway's
+        # VerifyClean and managed Verify report it. The token is never echoed.
+        payload = {
+            "runtime": {"environment": "windows"},
+            "health": {"telemetry": {"state": "running"}},
+        }
+        token = "e" * 64
+        encoded = "".join(f"%{byte:02X}" for byte in token.encode("ascii"))
+        rows = (
+            ("environment", f"[otel]\nenvironment = '{token}'\n", "otel.environment"),
+            ("environment_stray_percent", f"[otel]\nenvironment = 'ops-%{encoded}'\n", "otel.environment"),
+            (
+                "resource_value",
+                f"[otel]\nenvironment = 'windows'\n[otel.resource_attributes]\n'session.id' = '{token}'\n",
+                "otel.resource_attributes",
+            ),
+            ("resource_key", f"[otel.resource_attributes]\n'{token}' = 'session'\n", "otel.resource_attributes"),
+            (
+                "resource_list_stray_percent",
+                f"[otel.resource_attributes]\nlist = 'load=90%,session.id={encoded}'\n",
+                "otel.resource_attributes",
+            ),
+            (
+                "exporter_header_list_stray_percent",
+                "[otel.exporter.otlp-http]\nendpoint = 'http://127.0.0.1:19081/v1/logs'\n"
+                f"[otel.exporter.otlp-http.headers]\nx-list = 'a=50%,Authorization=Bearer%20{encoded}'\n",
+                "otel.exporter.otlp-http.endpoint",
+            ),
+        )
+        for name, body, field in rows:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as home, (
+                tempfile.TemporaryDirectory()
+            ) as data_dir, patch.dict(os.environ, {"CODEX_HOME": home}, clear=False), patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(200, json.dumps(payload)),
+            ):
+                Path(data_dir, "hooks").mkdir()
+                self._write_codex_config(home, body)
+                cfg = self._cfg()
+                cfg.data_dir = data_dir
+                result = _DoctorResult()
+                _check_codex_otel_alignment(cfg, result)
+                detail = result.checks[0]["detail"]
+                self.assertEqual(result.checks[0]["status"], "fail", result.checks)
+                self.assertIn(field, detail)
+                self.assertIn("DefenseClaw credential", detail)
+                self.assertNotIn(token, detail)
+                self.assertNotIn(encoded, detail)
+
+    def test_otel_credential_rule_matches_the_gateway_vectors(self) -> None:
+        # The same vectors as the gateway's
+        # TestOTLPCarriesProductCredentialIsTheSecretShape: one rule.
+        token = "0123456789abcdef" * 4
+        encoded = "".join(f"%{byte:02X}" for byte in token.encode("ascii"))
+        known = ["configured-token"]
+        for value in (
+            token,
+            "Bearer " + token,
+            "bearer%20" + token,
+            "a=1,Authorization=Bearer " + token,
+            "load=90%,session.id=" + encoded,
+            "Bearer%20" + encoded + "%zz",
+            "http://dc:" + encoded + "@127.0.0.1:19081/v1/logs?p=5%",
+            "x=%" + encoded,
+            "configured%2Dtoken%",
+            {"resource_attributes": {token: "session"}},
+            ["a", {"k": "v=100%,t=" + encoded}],
+            {"otlp-http": {"headers": {"X-Api-Key": "configured-token"}}},
+        ):
+            self.assertTrue(_otel_carries_product_credential(value, known), value)
+        for value in (
+            "Bearer " + token.upper(),
+            "Bearer x" + token,
+            "Bearer " + token + "0",
+            "Bearer " + token[:63],
+            "load=90%,tenant=ops",
+            "%zz%",
+            "100%",
+            "Bearer%20" + encoded[:-3],
+        ):
+            self.assertFalse(_otel_carries_product_credential(value, []), value)
 
     def test_stale_runtime_environment_fails_authenticated_status(self) -> None:
         payload = {

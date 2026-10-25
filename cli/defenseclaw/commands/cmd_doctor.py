@@ -7355,8 +7355,8 @@ def _otel_carries_product_credential(value, known) -> bool:
     its host, port, header-name or scheme spelling.
     """
     if isinstance(value, str):
-        # Header lists and URLs may percent-encode the credential, as the
-        # gateway's url.PathUnescape decodes it.
+        # Header and resource lists, URLs and queries may percent-encode the
+        # credential; unquote is lenient, as the gateway's otlpPercentDecode.
         decoded = urllib.parse.unquote(value)
         if decoded != value and _otel_carries_product_credential(decoded, known):
             return True
@@ -7364,7 +7364,10 @@ def _otel_carries_product_credential(value, known) -> bool:
             len(token) >= 8 and token in value for token in known
         )
     if isinstance(value, dict):
-        return any(_otel_carries_product_credential(item, known) for item in value.values())
+        return any(
+            _otel_carries_product_credential(key, known) or _otel_carries_product_credential(item, known)
+            for key, item in value.items()
+        )
     if isinstance(value, list):
         return any(_otel_carries_product_credential(item, known) for item in value)
     return False
@@ -7418,6 +7421,13 @@ def _codex_credential_off_gateway(otel, api_port: int, product_token: str = "") 
         )
         if not on_gateway:
             return f"otel.{key}.otlp-http.endpoint"
+    # Any other [otel] value that carries one (otel.environment, a resource
+    # table, a string exporter) is DefenseClaw residue wherever Codex sends it.
+    for key, value in otel.items():
+        if key in ("exporter", "trace_exporter", "metrics_exporter") and isinstance(value, dict):
+            continue
+        if _otel_carries_product_credential(value, known):
+            return f"otel.{key}"
     return ""
 
 
@@ -7455,13 +7465,14 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
     if config_error:
         _emit("fail", "Codex OTel environment", config_error, r=r)
     elif stale := _codex_credential_off_gateway(otel, _gateway_api_port(cfg), _codex_scoped_otlp_token(cfg)):
-        _emit(
-            "fail",
-            "Codex OTel environment",
+        detail = (
             f"config.toml {stale} sends a DefenseClaw credential to a port DefenseClaw does not own; "
-            "remove this exporter, then rerun Codex setup",
-            r=r,
+            "remove this exporter, then rerun Codex setup"
+            if stale.endswith(".endpoint")
+            else f"config.toml {stale} carries a DefenseClaw credential that Codex sends with its telemetry; "
+            "remove it, then rerun Codex setup"
         )
+        _emit("fail", "Codex OTel environment", detail, r=r)
     elif not _codex_otel_exports_to_defenseclaw(otel, _codex_scoped_otlp_token(cfg)):
         # Host Codex sends no native OTLP to DefenseClaw since 1.0.4: setup
         # writes [otel] only inside an OpenShell sandbox and puts the user's

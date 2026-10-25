@@ -4,7 +4,6 @@
 package connector
 
 import (
-	"net/url"
 	"regexp"
 	"strings"
 )
@@ -33,13 +32,15 @@ var otlpProductTokenRE = regexp.MustCompile(`(?:^|[^0-9A-Za-z])[0-9a-f]{64}(?:[^
 const otlpMinKnownTokenLen = 8
 
 // otlpCarriesProductCredential reports whether v (a string, or any TOML or
-// JSON table or array) contains one of the known credentials or a value of the
-// product token shape.
+// JSON table or array, keys included) contains one of the known credentials or
+// a value of the product token shape.
 func otlpCarriesProductCredential(v interface{}, known []string) bool {
 	switch value := v.(type) {
 	case string:
-		// OTLP header lists may percent-encode their values ("Bearer%20...").
-		if decoded, err := url.PathUnescape(value); err == nil && decoded != value &&
+		// OTLP header and resource lists, endpoint userinfo and queries may
+		// percent-encode a value ("Bearer%20..."). One stray "%" elsewhere in
+		// the string must not hide it, so the decode is lenient.
+		if decoded := otlpPercentDecode(value); decoded != value &&
 			otlpCarriesProductCredential(decoded, known) {
 			return true
 		}
@@ -52,8 +53,8 @@ func otlpCarriesProductCredential(v interface{}, known []string) bool {
 			}
 		}
 	case map[string]interface{}:
-		for _, item := range value {
-			if otlpCarriesProductCredential(item, known) {
+		for key, item := range value {
+			if otlpCarriesProductCredential(key, known) || otlpCarriesProductCredential(item, known) {
 				return true
 			}
 		}
@@ -65,6 +66,41 @@ func otlpCarriesProductCredential(v interface{}, known []string) bool {
 		}
 	}
 	return false
+}
+
+// otlpPercentDecode decodes every valid %XX escape in s and keeps every other
+// byte as is, the way Doctor's urllib.parse.unquote does.
+func otlpPercentDecode(s string) string {
+	if !strings.Contains(s, "%") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) {
+			if hi, ok := otlpUnhex(s[i+1]); ok {
+				if lo, ok := otlpUnhex(s[i+2]); ok {
+					b.WriteByte(hi<<4 | lo)
+					i += 2
+					continue
+				}
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func otlpUnhex(c byte) (byte, bool) {
+	switch {
+	case '0' <= c && c <= '9':
+		return c - '0', true
+	case 'a' <= c && c <= 'f':
+		return c - 'a' + 10, true
+	case 'A' <= c && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
 }
 
 // otlpKnownProductTokens returns the credentials this install can name: the
