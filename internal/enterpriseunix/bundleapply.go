@@ -1002,13 +1002,21 @@ func (l *lifecycle) committedBundleEnforced(ctx context.Context, record *Deploym
 
 // failBundle ends the receipt of run as failed(code), records whether the
 // transaction rolled back and what the gateway enforces now, and reports the
-// code in the result.
+// code in the result. A receipt states only what the gateway proved
+// (GAP-1205): rolled_back once the run restored the previous deployment
+// without a rollback error and the gateway reports the policy the restored
+// config computes to (a rejected reload of the candidate leaves that policy
+// enforcing, so it does not count against it). Restored files alone are not
+// a rollback: a gateway that kept the candidate, or that does not answer,
+// leaves rolled_back false and the result says so.
 func (l *lifecycle) failBundle(ctx context.Context, run *bundleRun, record *Deployment, code enterprisebundle.Code, message string) {
 	r := l.result
 	rc := run.receipt
-	rc.RolledBack = hasMessageCode(r.Warnings, codeRolledBack)
+	restored := hasMessageCode(r.Warnings, codeRolledBack) && !hasMessageCode(r.Errors, codeRollbackFailed)
+	rc.RolledBack = false
 	enforces := "the last good policy keeps enforcing"
-	if owner := installedPendingPredecessor(run.store, rc, record); owner != nil {
+	owner := installedPendingPredecessor(run.store, rc, record)
+	if owner != nil {
 		// The rollback put back a config another run committed and the
 		// gateway has not confirmed: that is not the last good bundle, so it
 		// is reported as itself, never as rolled_back.
@@ -1020,6 +1028,14 @@ func (l *lifecycle) failBundle(ctx context.Context, run *bundleRun, record *Depl
 	}
 	if record != nil {
 		rc.EnforcingDigest, _ = l.gatewayPolicyNow(ctx, record.ServiceUID)
+	}
+	if restored && owner == nil && record != nil {
+		if want, _, err := l.computePolicy(ctx); err == nil && rc.EnforcingDigest != "" && rc.EnforcingDigest == want {
+			rc.RolledBack = true
+		} else {
+			enforces = "the previous deployment's files are back, but the gateway has not proven that it enforces their policy again (it reports " +
+				shortDigest(rc.EnforcingDigest) + "); the next lifecycle run checks it again"
+		}
 	}
 	if err := run.store.Fail(rc, code, message); err != nil {
 		r.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), "could not record the failed policy bundle receipt: "+err.Error())
