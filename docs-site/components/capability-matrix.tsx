@@ -202,7 +202,6 @@ interface OutageRow {
   // connector), and with foreign_hooks report or allow.
   managedOpen: ManagedOpen | 'runs-blocks-with-hooks-only-preserve';
   managedOpenNoGuard: ManagedOpen;
-  heldUntilRestart: boolean;
   secureClientClosed: 'blocks' | 'runs';
   strictAvailability: 'yes' | 'no' | 'n/a';
 }

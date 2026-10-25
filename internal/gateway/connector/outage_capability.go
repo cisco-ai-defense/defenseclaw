@@ -54,10 +54,6 @@ type HookOutage struct {
 	// not the Secure Client profile (shellHookSecureClientProfile), so
 	// templateData.ManagedOutageClosed renders it closed on every OS.
 	ManagedPluginOutageClosedEveryOS bool
-	// GuardOutageHeldUntilRestart records a guard outage denial that persists
-	// after the gateway returns. Plugins retry transient startup denials on
-	// their next call, so this is false for the current connectors.
-	GuardOutageHeldUntilRestart bool
 }
 
 // managedUnixOutageClosed names the connectors whose per-user-route hooks a

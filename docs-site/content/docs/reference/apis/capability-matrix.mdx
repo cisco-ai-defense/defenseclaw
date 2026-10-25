@@ -62,8 +62,10 @@ against the hook code on every change.
 - **Per-user** is an install without a managed deployment. Its outage mode
   follows the connector's policy tier (rule pack): the default (balanced) and
   permissive policies let the call run with a warning and a
-  `hook-failures.jsonl` record, the strict policy blocks it. Every other
-  failure blocks in every tier
+  `hook-failures.jsonl` record, the strict policy blocks it. Input over the
+  1 MiB hook cap is not an outage: in the default and permissive policies the
+  hook sends the gateway a bounded review of it and follows the verdict, and
+  the strict policy blocks it. Every other failure blocks in every tier
   ([Fail modes](/docs/reference/configuration/fail-modes#per-user-installs)).
 - **Managed standalone** is an enterprise host outside Secure Client. Its fail
   mode is the administrator's `hook_fail_mode`: `closed`, the default, blocks
