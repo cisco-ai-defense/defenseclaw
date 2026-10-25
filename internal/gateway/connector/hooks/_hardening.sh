@@ -1797,7 +1797,14 @@ defenseclaw_api_listener_unproven() {
   # The second and third arguments (tests only) replace /proc/net and lsof.
   local net="${2:-/proc/net}" lsof="${3:-/usr/sbin/lsof}" uid="${EUID:-}" target="" status=2
   [ -n "$uid" ] || return 0
-  defenseclaw_loopback_targets "$1" || return 0
+  if ! defenseclaw_loopback_targets "$1"; then
+    # A numeric port no listener can hold (0, above 65535, a leading zero)
+    # on a valid loopback address is free, as it always was; the helper is
+    # never asked to send. Any other refused address is unproven.
+    case "${1##*:}" in ''|*[!0-9]*) return 0 ;; esac
+    defenseclaw_loopback_targets "${1%:*}:1" && return 2
+    return 0
+  fi
   # ProcSubset=pid can hide /proc/net, while /proc/self/net still exposes
   # this process's network namespace. The second argument mirrors that
   # layout in tests.

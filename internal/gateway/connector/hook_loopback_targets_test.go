@@ -80,7 +80,7 @@ func TestHookAPIListenerAcceptsEveryLoopbackSpelling(t *testing.T) {
 	}
 	const v4one, v4two, v6one, v6any = "0100007F", "0200007F", "00000000000000000000000001000000", "00000000000000000000000000000000"
 	for _, test := range []struct {
-		name, host, tcp, tcp6, want string
+		name, host, addr, tcp, tcp6, want string
 	}{
 		{name: "localhost own IPv4", host: "localhost", tcp: row(v4one, own), want: "send"},
 		{name: "LOCALHOST own IPv4", host: "LOCALHOST", tcp: row(v4one, own), want: "send"},
@@ -102,6 +102,12 @@ func TestHookAPIListenerAcceptsEveryLoopbackSpelling(t *testing.T) {
 		{name: "mapped spelling foreign IPv4", host: "[::ffff:127.0.0.1]", tcp: row(v4one, own+4242), want: "foreign"},
 		{name: "unbracketed ::1 is refused", host: "::1", tcp6: row(v6one, own), want: "foreign"},
 		{name: "non-loopback name is refused", host: "gateway.local", tcp: row(v4one, own), want: "foreign"},
+		// A port no listener can hold stays a free port (cold start, then
+		// the outage rule), as before the shared address rule.
+		{name: "out-of-range port on loopback is free", addr: "127.0.0.1:99999", want: "free"},
+		{name: "zero port on localhost is free", addr: "localhost:0", want: "free"},
+		{name: "out-of-range port on a non-loopback name is refused", addr: "gateway.local:99999", want: "foreign"},
+		{name: "non-numeric port is refused", addr: "127.0.0.1:http", want: "foreign"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			net := filepath.Join(t.TempDir(), "net")
@@ -115,9 +121,13 @@ func TestHookAPIListenerAcceptsEveryLoopbackSpelling(t *testing.T) {
 				}
 			}
 			script := `set -euo pipefail; . "$1"
-status=0; defenseclaw_api_listener_unproven "$3:18960" "$2" "$4" || status=$?
+status=0; defenseclaw_api_listener_unproven "$3" "$2" "$4" || status=$?
 case "$status" in 0) echo foreign ;; 1) echo send ;; 2) echo free ;; *) echo unexpected ;; esac`
-			out, err := exec.Command("bash", "-c", script, "bash", helper, net, test.host, filepath.Join(filepath.Dir(net), "absent-lsof")).CombinedOutput()
+			addr := test.host + ":18960"
+			if test.addr != "" {
+				addr = test.addr
+			}
+			out, err := exec.Command("bash", "-c", script, "bash", helper, net, addr, filepath.Join(filepath.Dir(net), "absent-lsof")).CombinedOutput()
 			if err != nil {
 				t.Fatalf("bash: %v\n%s", err, out)
 			}
