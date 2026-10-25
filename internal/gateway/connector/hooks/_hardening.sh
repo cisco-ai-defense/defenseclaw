@@ -1694,8 +1694,9 @@ defenseclaw_own_gateway_stopped() {
 # unknown listener, 1 for this account's listener, and 2 for a proven free
 # port. A stopped gateway, a stale PID record,
 # and unreadable socket tables must never send a token or hook payload to an
-# unverified endpoint. Linux reads /proc/net/tcp*; macOS lsof lists this
-# account's listeners. Managed hooks use their separate verified transport.
+# unverified endpoint. Linux reads this namespace's procfs socket tables;
+# macOS lsof lists this account's listeners. Managed hooks use their separate
+# verified transport.
 defenseclaw_api_listener_unproven() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
@@ -1703,10 +1704,19 @@ defenseclaw_api_listener_unproven() {
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
   # The second and third arguments (tests only) replace /proc/net and lsof.
   local port="${1##*:}" host="${1%:*}" net="${2:-/proc/net}" lsof="${3:-/usr/sbin/lsof}"
-  local uid="${EUID:-}" hex="" table="" owner="" own=""
+  local uid="${EUID:-}" hex="" table="" owner="" own="" exact="" o2="" o3="" o4=""
   local _sl="" addr="" _rem="" st="" _q="" _t="" _r="" u="" _rest=""
   case "$port" in ''|*[!0-9]*) return 0 ;; esac
   [ -n "$uid" ] || return 0
+  # A same-port listener on another 127/8 address cannot serve this hook's
+  # destination. Convert the configured IPv4 loopback address to procfs's
+  # little-endian hex form before looking at any owner.
+  [[ "$host" =~ ^127\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 0
+  o2=$((10#${BASH_REMATCH[1]}))
+  o3=$((10#${BASH_REMATCH[2]}))
+  o4=$((10#${BASH_REMATCH[3]}))
+  [ "$o2" -le 255 ] && [ "$o3" -le 255 ] && [ "$o4" -le 255 ] || return 0
+  printf -v exact '%02X%02X%02X7F' "$o4" "$o3" "$o2"
   # ProcSubset=pid can hide /proc/net, while /proc/self/net still exposes
   # this process's network namespace. The second argument mirrors that
   # layout in tests.
@@ -1720,8 +1730,8 @@ defenseclaw_api_listener_unproven() {
       while read -r _sl addr _rem st _q _t _r u _rest; do
         [ "$st" = "0A" ] || continue
         case "$addr" in
-          # 127.0.0.0/8, 0.0.0.0, ::, ::1 and v4-mapped loopback, kernel byte order.
-          ??????7F:"$hex"|00000000:"$hex"|00000000000000000000000000000000:"$hex"|00000000000000000000000001000000:"$hex"|0000000000000000FFFF0000??????7F:"$hex") ;;
+          # The exact address, or a wildcard that can serve IPv4 loopback.
+          "$exact":"$hex"|00000000:"$hex"|00000000000000000000000000000000:"$hex"|0000000000000000FFFF0000"$exact":"$hex") ;;
           *) continue ;;
         esac
         if [ "$u" = "$uid" ]; then own=1; else owner="$u"; fi
