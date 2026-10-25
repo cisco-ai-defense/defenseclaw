@@ -176,21 +176,22 @@ def render_status_strip(
 
 
 def render_status_with_hint(model: StatusModel, hint: str, width: int) -> str:
-    """Reserve the narrow footer for health before fitting a transient hint."""
+    """Fit the current view and essential health into a narrow footer."""
     from rich.text import Text
 
     primary = status_segments(model)[: 4 if model.applied_policy else 3]
     # Details remain in Overview. The footer keeps each subsystem's label
     # and state, including the applied policy, even when the hint is long.
     primary = [StatusSegment(segment.label, segment.state) for segment in primary]
-    health = _SEPARATOR.join(segment.render() for segment in primary)
-    remaining = max(0, width - Text.from_markup(health).cell_len - _SEPARATOR_CELLS)
+    separator = " [#444444]│[/] "
+    health = separator.join(segment.render() for segment in primary)
+    remaining = max(0, width - Text.from_markup(health).cell_len - 3)
     try:
         text = Text.from_markup(hint)
     except Exception:  # malformed operator text remains literal
         text = Text(hint)
     text.truncate(remaining, overflow="ellipsis")
-    return health + (_SEPARATOR + text.markup if remaining and text.plain else "")
+    return (text.markup + separator if remaining and text.plain else "") + health
 
 
 class StatusStrip(_Static):
