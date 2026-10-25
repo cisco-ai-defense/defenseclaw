@@ -56,11 +56,12 @@ func TestInstructionProtectionManagedCodexWindowsCallTimeIdentity(t *testing.T) 
 	}
 }
 
-// A 1.0.3 managed hook sends SessionStart without the startup snapshot while
-// a Windows host upgrades. The managed Windows gateway reads the caller's
-// files, so it takes the snapshot itself: an AGENTS.md the session creates
-// stays editable, and one that was there at the start stays protected.
-func TestInstructionProtectionManagedWindowsStartWithoutEvidence(t *testing.T) {
+// Benign corpus (GAP-1416). A 1.0.3 managed hook sends SessionStart without
+// the startup snapshot while a Windows host upgrades. The managed Windows
+// gateway reads the caller's files, so it takes the snapshot itself: an
+// AGENTS.md the session creates stays editable, and one that was there at
+// the start stays protected.
+func TestInstructionBenignManagedWindowsStartWithoutEvidence(t *testing.T) {
 	for _, existing := range []bool{false, true} {
 		project := t.TempDir()
 		file := filepath.Join(project, "AGENTS.md")

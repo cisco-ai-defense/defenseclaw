@@ -15,13 +15,13 @@ import (
 
 const createdDirAddPatch = "*** Begin Patch\n*** Add File: new/AGENTS.md\n+x\n*** End Patch"
 
-// A directory that was missing when the session first reached it starts
-// empty: an AGENTS.md the session creates there, with the directory, is the
-// session's own file under every later spelling of the directory (a
-// symlink, a rename, a case variant), also after a gateway restart. A link
-// the session makes at a missing spelling does not empty the directory it
-// points to.
-func TestInstructionSnapshotCreatedDirectoryKeepsItsRecord(t *testing.T) {
+// Benign corpus (GAP-1415), with a protected-target control. A directory
+// that was missing when the session first reached it starts empty: an
+// AGENTS.md the session creates there, with the directory, is the session's
+// own file under every later spelling of the directory (a symlink, a
+// rename, a case variant), also after a gateway restart. A link the session
+// makes at a missing spelling does not empty the directory it points to.
+func TestInstructionBenignCreatedDirectoryKeepsItsRecord(t *testing.T) {
 	type session struct {
 		base    string
 		ctx     context.Context
