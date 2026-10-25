@@ -102,11 +102,23 @@ func TestR104RoundNReviewGlobLeadingDot(t *testing.T) {
 			t.Errorf("%q: ActionCommandDecision = %q, want protected-target", command, got)
 		}
 	}
-	// A startup file that sets dotglob makes the user's shell match it.
-	if err := os.WriteFile(filepath.Join(home, ".bashrc"), []byte("shopt -s dotglob\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	// An inherited setting, or a startup file that sets dotglob, makes the
+	// user's shell match it.
+	t.Setenv("GLOBIGNORE", "x")
 	if got := ActionCommandDecision(`git add */*`, cwd, home); got != "protected-target" {
-		t.Errorf("dotglob in .bashrc: ActionCommandDecision = %q, want protected-target", got)
+		t.Errorf("GLOBIGNORE inherited: ActionCommandDecision = %q, want protected-target", got)
+	}
+	t.Setenv("GLOBIGNORE", "")
+	for _, name := range []string{".bashrc", ".bash_aliases", ".zshenv"} {
+		file := filepath.Join(home, name)
+		if err := os.WriteFile(file, []byte("shopt -s dotglob\nsetopt GLOB_DOTS\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := ActionCommandDecision(`git add */*`, cwd, home); got != "protected-target" {
+			t.Errorf("dotglob in %s: ActionCommandDecision = %q, want protected-target", name, got)
+		}
+		if err := os.Remove(file); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

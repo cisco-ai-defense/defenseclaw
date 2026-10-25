@@ -760,14 +760,23 @@ func actionCommandMayDotglob(command string) bool {
 		actionDotglobQualifier.MatchString(command)
 }
 
-// actionShellProfileMayDotglob reports a startup file of the user's shell
-// that may set dotglob, or a home this process cannot read.
+// actionShellProfileMayDotglob reports a startup file of the user's or the
+// system's shell, or an inherited BASHOPTS or GLOBIGNORE, that may set
+// dotglob, or a home this process cannot read.
 func actionShellProfileMayDotglob(home string) bool {
-	if _, err := os.Stat(home); err != nil {
+	if _, err := os.Stat(home); err != nil || strings.Contains(os.Getenv("BASHOPTS"), "dotglob") || os.Getenv("GLOBIGNORE") != "" {
 		return true
 	}
-	for _, name := range []string{".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshenv", ".zprofile", ".zshrc", ".zlogin"} {
-		file, err := os.Open(filepath.Join(home, name))
+	files := []string{"/etc/profile", "/etc/bashrc", "/etc/bash.bashrc", "/etc/zshenv", "/etc/zsh/zshenv",
+		"/etc/zprofile", "/etc/zsh/zprofile", "/etc/zshrc", "/etc/zsh/zshrc", "/etc/zlogin", "/etc/zsh/zlogin"}
+	if profiles, err := filepath.Glob("/etc/profile.d/*.sh"); err == nil {
+		files = append(files, profiles...)
+	}
+	for _, name := range []string{".bashrc", ".bash_profile", ".bash_login", ".bash_aliases", ".profile", ".zshenv", ".zprofile", ".zshrc", ".zlogin"} {
+		files = append(files, filepath.Join(home, name))
+	}
+	for _, name := range files {
+		file, err := os.Open(name)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
