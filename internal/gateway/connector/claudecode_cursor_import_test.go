@@ -56,8 +56,9 @@ func claudeHandlersOf(t *testing.T, hooks map[string]interface{}, event string) 
 	return handlers
 }
 
-// A launcher with no separate installed hook (the one-line install's
-// ~/.local/bin, a repository build) has no PreToolUse guard to run. Its
+// A launcher with no guard program beside it (a repository build: no
+// separate installed hook and no defenseclaw-gateway.exe) has no PreToolUse
+// guard to run. Its
 // PreToolUse handler kept the cmd.exe guard, which Cursor imports from
 // ~/.claude/settings.json and starts without arguments: cmd.exe answered with
 // its banner instead of JSON and Cursor blocked every tool call, also with no

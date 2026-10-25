@@ -45,18 +45,23 @@ import (
 // call to that same installed hook, so its absence already leaves no hook to
 // run; the guard adds no file a call depends on.
 //
-// A launcher with no separate installed hook (the one-line install's
-// ~/.local/bin\defenseclaw-hook.exe, a repository build) has no second file
-// to run as that guard, so its PreToolUse handler is the exec form (command =
-// launcher, args = hook --connector claudecode), which Cursor starts without
-// args and which then gives no answer. The cmd.exe guard must never be the
-// PreToolUse command there: Cursor starts cmd.exe with no arguments and the
-// tool call event on stdin, so cmd.exe printed its banner instead of JSON and
-// read that event as commands; every Cursor tool call was blocked (GAP-1011).
-// The other events keep the cmd.exe guard, so after the launcher goes missing
-// the next prompt is blocked with the guard sentence (UserPromptSubmit); only
-// a tool call of a turn already running sees Claude Code's non-blocking start
-// error.
+// The one-line install has no separate installed hook: its launcher is
+// ~/.local/bin\defenseclaw-hook.exe. Its PreToolUse handler starts the
+// defenseclaw-gateway.exe beside that launcher as the same guard, with the
+// same argv:
+//
+//	<bin>\defenseclaw-gateway.exe launcher-guard <launcher> hook --connector claudecode
+//
+// so a launcher removed in the middle of a turn still blocks the next tool
+// call; a direct start of the missing launcher was a non-blocking error that
+// let the call run uninspected. Started by Cursor without arguments and a
+// Cursor event on stdin, the gateway gives no answer either. Only a launcher
+// with neither guard program (a repository build) keeps the exec form
+// (command = launcher, args = hook --connector claudecode) on PreToolUse. The
+// cmd.exe guard is never the PreToolUse command: Cursor starts cmd.exe with no
+// arguments and the tool call event on stdin, so cmd.exe printed its banner
+// instead of JSON and read that event as commands; every Cursor tool call was
+// blocked (GAP-1011).
 //
 // Hook-shape compatibility rule (GAP-1284): a hook entry that release N
 // writes must keep a shape that every earlier 1.x teardown recognises, or
@@ -190,11 +195,23 @@ func claudeCodeAbsoluteHookExecutable(path string) bool {
 	return strings.EqualFold(path[strings.LastIndexAny(path, `\/`)+1:], windowsHookBinaryName)
 }
 
+// claudeCodePreToolGuardProgram reports a program that can run as the
+// PreToolUse guard: an absolute defenseclaw-hook.exe (the installed full hook
+// of a packaged install) or defenseclaw-gateway.exe (the one-line install's
+// gateway beside its launcher), both of which answer the launcher-guard argv.
+func claudeCodePreToolGuardProgram(path string) bool {
+	if !claudeCodeLauncherGuardable(path) || (!isWindowsAbsolutePath(path) && !filepath.IsAbs(path)) {
+		return false
+	}
+	name := path[strings.LastIndexAny(path, `\/`)+1:]
+	return strings.EqualFold(name, windowsHookBinaryName) || strings.EqualFold(name, windowsGatewayBinaryName)
+}
+
 // claudeCodePreToolGuardParts returns the launcher and hook argv of an exact
 // generated PreToolUse guard handler.
 func claudeCodePreToolGuardParts(hook map[string]interface{}) (string, []string, bool) {
 	command, _ := hook["command"].(string)
-	if !claudeCodeLauncherGuardable(command) || !claudeCodeAbsoluteHookExecutable(command) {
+	if !claudeCodePreToolGuardProgram(command) {
 		return "", nil, false
 	}
 	args, ok := claudeCodeNativeExecArguments(hook)
@@ -209,10 +226,31 @@ func claudeCodePreToolGuardParts(hook map[string]interface{}) (string, []string,
 }
 
 // claudeCodePreToolGuardExecutable returns the program the PreToolUse
-// handler starts for launcher, or "" to keep the cmd.exe guard. Tests
-// replace it.
+// handler starts for launcher, or "" when there is none and PreToolUse runs
+// the launcher in the exec form. Tests replace it.
 var claudeCodePreToolGuardExecutable = func(launcher string) string {
-	return claudeCodePreToolGuardFor(launcher, canonicalNativeWindowsHookBinary(), canonicalNativeWindowsInstalledHookBinary())
+	if guard := claudeCodePreToolGuardFor(launcher, canonicalNativeWindowsHookBinary(), canonicalNativeWindowsInstalledHookBinary()); guard != "" {
+		return guard
+	}
+	return claudeCodeGatewayPreToolGuardFor(launcher)
+}
+
+// claudeCodeGatewayPreToolGuardFor returns the defenseclaw-gateway.exe beside
+// launcher, the one-line install's ~/.local/bin layout, when it is a regular
+// file; otherwise "".
+func claudeCodeGatewayPreToolGuardFor(launcher string) string {
+	if !claudeCodeAbsoluteHookExecutable(launcher) || !claudeCodeLauncherGuardable(launcher) {
+		return ""
+	}
+	gateway := launcher[:strings.LastIndexAny(launcher, `\/`)+1] + windowsGatewayBinaryName
+	if !claudeCodePreToolGuardProgram(gateway) {
+		return ""
+	}
+	info, err := os.Lstat(gateway)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return gateway
 }
 
 // claudeCodePreToolGuardFor returns installed, the installed full hook, when
@@ -294,10 +332,10 @@ func claudeCodeWindowsHookInvocation(opts SetupOpts, executable string) (string,
 // so that handler runs the PreToolUse guard instead (see the top of this
 // file): started by Cursor with no arguments it gives no answer, and started
 // by Claude Code it blocks when the launcher is missing, also in a turn that
-// began before the launcher went missing. Without a separate installed hook
-// to run as that guard, PreToolUse runs the launcher in the exec form, which
-// Cursor's argument-free start also leaves without an answer (see the top of
-// this file). Every other event keeps the cmd.exe guard (GAP-1091).
+// began before the launcher went missing. The one-line install runs its
+// gateway as that guard; only a launcher with neither guard program runs in
+// the exec form on PreToolUse (see the top of this file). Every other event
+// keeps the cmd.exe guard (GAP-1091).
 func claudeCodeHandlerInvocation(eventType, command string, args []string) (string, []string) {
 	if eventType != "PreToolUse" {
 		return command, args

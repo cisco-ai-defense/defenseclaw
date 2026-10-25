@@ -445,13 +445,29 @@ def _claude_guardable_hook_executable(path: str) -> bool:
     )
 
 
+# The PreToolUse guard program: the installed full hook of a packaged install,
+# or the one-line install's gateway beside its launcher. Keep it identical to
+# claudeCodePreToolGuardProgram.
+_CLAUDE_PRETOOL_GUARD_PROGRAMS = ("defenseclaw-hook.exe", "defenseclaw-gateway.exe")
+
+
+def _claude_pretool_guard_program(path: str) -> bool:
+    return (
+        path.strip() == path
+        and path != ""
+        and not any(ch in path for ch in '"%!\r\n')
+        and (ntpath.isabs(path) or os.path.isabs(path))
+        and ntpath.basename(path).lower() in _CLAUDE_PRETOOL_GUARD_PROGRAMS
+    )
+
+
 def _claude_pretool_guard_view(handler: dict, command: str, args: list[str]) -> dict | None:
     if len(args) != 5 or args[0] != CLAUDE_LAUNCHER_GUARD_SUBCOMMAND:
         return None
     if args[2:] != ["hook", "--connector", "claudecode"]:
         return None
     launcher = args[1]
-    if not _claude_guardable_hook_executable(command) or not _claude_guardable_hook_executable(launcher):
+    if not _claude_pretool_guard_program(command) or not _claude_guardable_hook_executable(launcher):
         return None
     if ntpath.normcase(ntpath.normpath(command)) == ntpath.normcase(ntpath.normpath(launcher)):
         return None
