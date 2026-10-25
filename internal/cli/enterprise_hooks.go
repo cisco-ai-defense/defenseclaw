@@ -1751,10 +1751,16 @@ func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool
 		}
 		if len(run.Excused) != 0 {
 			warnings := make([]string, 0, len(run.Excused))
+			// The excused targets by SID and connector, so a caller that waits
+			// for the guardian (a signed bundle's hook proof) treats them as
+			// verify does instead of waiting for a sign-in (review loop 2).
+			excused := make([]map[string]string, 0, len(run.Excused))
 			for _, row := range run.Excused {
 				warnings = append(warnings, enterpriseHookTargetLabel(row)+": "+row.Error+enterpriseHookVerifyExcusedNote(run, row))
+				excused = append(excused, map[string]string{"sid": row.SID, "connector": row.Connector})
 			}
 			payload["warnings"] = warnings
+			payload["excused"] = excused
 		}
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(payload); err != nil {
 			return err
