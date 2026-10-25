@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -110,12 +111,21 @@ class TestCodexOtelAlignment(unittest.TestCase):
     def _write_codex_config(self, home: str, body: str) -> None:
         Path(home, "config.toml").write_text(body, encoding="utf-8")
 
+    def _cfg_with_exporter_token(self, data_dir: str) -> MagicMock:
+        # The sidecar names _DEFENSECLAW_CODEX_EXPORTER's scoped token; a
+        # token-shaped route alone is not proof the exporter is DefenseClaw's.
+        Path(data_dir, "hooks").mkdir()
+        Path(data_dir, "hooks", ".otlp-codex.token").write_text("a" * 64 + "\n", encoding="ascii")
+        cfg = self._cfg()
+        cfg.data_dir = data_dir
+        return cfg
+
     def test_configured_and_live_environment_agree(self) -> None:
         payload = {
             "runtime": {"environment": "windows"},
             "health": {"telemetry": {"state": "running"}},
         }
-        with tempfile.TemporaryDirectory() as home, patch.dict(
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as data_dir, patch.dict(
             os.environ,
             {"CODEX_HOME": home},
             clear=False,
@@ -125,7 +135,7 @@ class TestCodexOtelAlignment(unittest.TestCase):
         ):
             self._write_codex_config(home, '[otel]\nenvironment = "windows"\n' + _DEFENSECLAW_CODEX_EXPORTER)
             result = _DoctorResult()
-            _check_codex_otel_alignment(self._cfg(), result)
+            _check_codex_otel_alignment(self._cfg_with_exporter_token(data_dir), result)
 
         self.assertEqual([check["status"] for check in result.checks], ["pass", "pass"])
         self.assertIn("'windows'", result.checks[0]["detail"])
@@ -136,7 +146,7 @@ class TestCodexOtelAlignment(unittest.TestCase):
             "runtime": {"environment": "windows"},
             "health": {"telemetry": {"state": "running"}},
         }
-        with tempfile.TemporaryDirectory() as home, patch.dict(
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as data_dir, patch.dict(
             os.environ,
             {"CODEX_HOME": home},
             clear=False,
@@ -146,7 +156,7 @@ class TestCodexOtelAlignment(unittest.TestCase):
         ):
             self._write_codex_config(home, "[otel]\nlog_user_prompt = true\n" + _DEFENSECLAW_CODEX_EXPORTER)
             result = _DoctorResult()
-            _check_codex_otel_alignment(self._cfg(), result)
+            _check_codex_otel_alignment(self._cfg_with_exporter_token(data_dir), result)
 
         self.assertEqual(result.checks[0]["status"], "fail")
         self.assertIn("Codex would use 'dev'", result.checks[0]["detail"])
@@ -184,9 +194,12 @@ class TestCodexOtelAlignment(unittest.TestCase):
 
     def test_codex_exporter_ownership_follows_the_credential(self) -> None:
         # Real released 1.0.2/1.0.3 exporters carry the scoped bearer. Doctor
-        # fails any exporter that would send a DefenseClaw credential off this
-        # gateway (any header-name or scheme spelling, any host, the sidecar
-        # present or gone) and passes operator collectors with stale markers.
+        # fails any exporter that would send a DefenseClaw credential the
+        # sidecar names off this gateway (any header-name or scheme spelling,
+        # any host) and passes operator collectors with stale markers. Review
+        # of 70603235: with the sidecar gone no known credential proves a
+        # token-shaped bearer or route is DefenseClaw's, so the marked
+        # exporter is the operator's (the gateway keeps it) and passes.
         payload = {
             "runtime": {"environment": "windows"},
             "health": {"telemetry": {"state": "running"}},
@@ -197,10 +210,11 @@ class TestCodexOtelAlignment(unittest.TestCase):
             ("released_retired_port", "http://127.0.0.1:19081/v1/logs", f"authorization = 'Bearer {token}'", True, True),
             ("capitalized_key", "http://127.0.0.1:19081/v1/logs", f"Authorization = 'Bearer {token}'", True, True),
             ("upper_key_lower_scheme", "http://127.0.0.2:19081/v1/logs", f"AUTHORIZATION = 'bearer {token}'", True, True),
-            ("missing_scoped_token", "http://127.0.0.1:19097/v1/logs?tenant=x", f"Authorization = 'Bearer {token}'", False, True),
-            ("missing_token_moved_host", "http://127.1:4318/v1/logs", f"authorization = 'BEARER {token}'", False, True),
+            ("missing_scoped_token", "http://127.0.0.1:19097/v1/logs?tenant=x", f"Authorization = 'Bearer {token}'", False, False),
+            ("missing_token_moved_host", "http://127.1:4318/v1/logs", f"authorization = 'BEARER {token}'", False, False),
             ("remote_collector", "https://collector.example.test/v1/logs", f"Authorization = 'Bearer {token}'", True, True),
-            ("scoped_path", f"http://127.0.0.1:19081/otlp/codex/{token}/v1/logs", "", False, True),
+            ("scoped_path", f"http://127.0.0.1:19081/otlp/codex/{token}/v1/logs", "", False, False),
+            ("scoped_path_known", f"http://127.0.0.1:19081/otlp/codex/{token}/v1/logs", "", True, True),
             ("current_gateway", "http://127.0.0.1:18970/v1/logs", f"authorization = 'Bearer {token}'", True, False),
             ("operator_127_0_0_1", "http://127.0.0.1:4318/v1/logs", "", True, False),
             ("operator_localhost_bearer", "http://localhost:4318/v1/logs", "Authorization = 'Bearer operator-token'", False, False),
@@ -237,12 +251,13 @@ class TestCodexOtelAlignment(unittest.TestCase):
                 else:
                     self.assertEqual(result.checks[0]["status"], "pass", result.checks)
 
-    def test_codex_percent_encoded_credential_off_gateway_fails_without_sidecar(self) -> None:
-        # The scoped sidecar is gone and otel.environment is omitted. A
-        # bytewise percent-encoded product token in a released (marked)
-        # exporter on the retired port is still DefenseClaw's (the gateway
-        # decodes it too), so Doctor fails it instead of passing "no native
-        # OTLP".
+    def test_codex_percent_encoded_credential_off_gateway_needs_a_known_token(self) -> None:
+        # otel.environment is omitted. A bytewise percent-encoded product token
+        # in a released (marked) exporter on the retired port is DefenseClaw's
+        # while the scoped sidecar names it (the gateway decodes it too), so
+        # Doctor fails it instead of passing "no native OTLP". Review of
+        # 70603235: with the sidecar gone no known credential proves it, so it
+        # is the operator's exporter (the gateway keeps it) and Doctor passes.
         payload = {
             "runtime": {"environment": "windows"},
             "health": {"telemetry": {"state": "running"}},
@@ -254,14 +269,16 @@ class TestCodexOtelAlignment(unittest.TestCase):
             ("endpoint_path", f"http://127.0.0.1:19081/otlp/codex/{encoded}/v1/logs", ""),
             ("header", "http://127.0.0.1:19081/v1/logs", f"authorization = 'Bearer%20{encoded}'\n"),
         )
-        for name, endpoint, header in rows:
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as home, (
+        for (name, endpoint, header), sidecar in itertools.product(rows, (True, False)):
+            with self.subTest(name=name, sidecar=sidecar), tempfile.TemporaryDirectory() as home, (
                 tempfile.TemporaryDirectory()
             ) as data_dir, patch.dict(os.environ, {"CODEX_HOME": home}, clear=False), patch(
                 "defenseclaw.commands.cmd_doctor._http_probe",
                 return_value=(200, json.dumps(payload)),
             ):
                 Path(data_dir, "hooks").mkdir()
+                if sidecar:
+                    Path(data_dir, "hooks", ".otlp-codex.token").write_text(token + "\n", encoding="ascii")
                 self._write_codex_config(
                     home,
                     "[otel.exporter.otlp-http]\n"
@@ -273,16 +290,21 @@ class TestCodexOtelAlignment(unittest.TestCase):
                 result = _DoctorResult()
                 _check_codex_otel_alignment(cfg, result)
                 detail = result.checks[0]["detail"]
+                self.assertNotIn(encoded, json.dumps(result.checks))
+                if not sidecar:
+                    self.assertEqual(result.checks[0]["status"], "pass", result.checks)
+                    continue
                 self.assertEqual(result.checks[0]["status"], "fail", result.checks)
                 self.assertIn("otel.exporter.otlp-http.endpoint", detail)
                 self.assertIn("DefenseClaw credential", detail)
-                self.assertNotIn(encoded, detail)
 
     def test_codex_basic_credential_off_gateway_fails(self) -> None:
         # Review of feb972ad (P1): a released exporter whose Authorization was
-        # changed to HTTP Basic with the scoped token as the password, with
-        # the sidecar present (markers or not) or gone (marked), fails Doctor
-        # like the bearer. Neither the token nor its encoding is echoed.
+        # changed to HTTP Basic with the scoped token as the password, markers
+        # or not, fails Doctor like the bearer while the sidecar names the
+        # token. Review of 70603235: with the sidecar gone the token is
+        # unknown, so the marked exporter is the operator's and passes.
+        # Neither the token nor its encoding is echoed.
         payload = {
             "runtime": {"environment": "windows"},
             "health": {"telemetry": {"state": "running"}},
@@ -296,6 +318,7 @@ class TestCodexOtelAlignment(unittest.TestCase):
             ("basic_no_markers", f"authorization = 'Basic {basic}'\n", True),
             ("basic_urlsafe_lower", f"Authorization = 'basic {urlsafe}'\n", True),
             ("basic_missing_sidecar_marked", f"Authorization = 'Basic {basic}'\n" + markers, False),
+            ("basic_in_header_list", f"x-list = 'a=1,Authorization=Basic%20{basic}'\n", True),
         )
         for name, headers, sidecar in rows:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as home, (
@@ -317,18 +340,23 @@ class TestCodexOtelAlignment(unittest.TestCase):
                 result = _DoctorResult()
                 _check_codex_otel_alignment(cfg, result)
                 detail = result.checks[0]["detail"]
-                self.assertEqual(result.checks[0]["status"], "fail", result.checks)
-                self.assertIn("otel.exporter.otlp-http.endpoint", detail)
                 for secret in (token, basic, urlsafe):
                     self.assertNotIn(secret, json.dumps(result.checks))
+                if not sidecar:
+                    self.assertEqual(result.checks[0]["status"], "pass", result.checks)
+                    continue
+                self.assertEqual(result.checks[0]["status"], "fail", result.checks)
+                self.assertIn("otel.exporter.otlp-http.endpoint", detail)
 
     def test_codex_token_shaped_operator_value_is_kept_and_reported(self) -> None:
-        # Review of feb972ad (P2): an operator collector with its own 64-hex
-        # bearer and no DefenseClaw marker, or an operator's sha256 resource
-        # attribute, is not proof of a DefenseClaw credential. Doctor does
-        # not fail it (the gateway keeps it); it warns that ownership is
-        # unproven. A 2,403-byte value of 1,200 nested %25 escapes finishes
-        # with bounded work and a diagnostic.
+        # Review of 70603235: an operator collector with its own 64-hex bearer,
+        # with or without stale DefenseClaw markers, an operator's sha256
+        # resource attribute or a hex route segment is not a DefenseClaw
+        # credential. Doctor passes it with no ownership warning (the gateway
+        # keeps it). Only a value encoded past the decode budget (a 2,403-byte
+        # value of 1,200 nested %25 escapes, a third percent layer, a Basic
+        # password encoded again, a value over 64 KiB) is named in a warning,
+        # after bounded work. The sidecar's token is never in these values.
         payload = {
             "runtime": {"environment": "windows"},
             "health": {"telemetry": {"state": "running"}},
@@ -336,18 +364,47 @@ class TestCodexOtelAlignment(unittest.TestCase):
         operator_hex = "c0ffee00" * 8
         nested = "%" + "25" * 1200 + "41"
         self.assertEqual(len(nested), 2403)
+        three_layers = operator_hex
+        for _ in range(3):
+            three_layers = "".join(f"%{byte:02X}" for byte in three_layers.encode("ascii"))
+        basic_encoded_again = base64.b64encode(b"ops:%41" + operator_hex.encode("ascii")).decode("ascii")
+        big = "x" * (64 << 10) + "%41"
+        markers = "x-defenseclaw-source = 'codex'\nx-defenseclaw-client = 'codex-otel/1.0'\n"
         rows = (
             (
                 "remote_hex_bearer",
                 "[otel.exporter.otlp-http]\nendpoint = 'https://collector.example.test/v1/logs'\n"
                 f"[otel.exporter.otlp-http.headers]\nAuthorization = 'Bearer {operator_hex}'\n",
-                "otel.exporter",
-                "shaped like a DefenseClaw token",
+                "",
             ),
-            ("resource_sha", f"[otel.resource_attributes]\n'deploy.sha' = '{operator_hex}'\n", "otel.resource_attributes", "shaped like"),
-            ("nested_escapes", f"[otel]\nenvironment = '{nested}'\n", "otel.environment", "too deeply"),
+            (
+                "marked_retired_port_hex_bearer",
+                "[otel.exporter.otlp-http]\nendpoint = 'http://127.0.0.1:19081/v1/logs'\n"
+                f"[otel.exporter.otlp-http.headers]\nAuthorization = 'Bearer {operator_hex}'\n" + markers,
+                "",
+            ),
+            (
+                "marked_hex_route_basic",
+                f"[otel.exporter.otlp-http]\nendpoint = 'http://127.0.0.1:19081/otlp/codex/{operator_hex}/v1/logs'\n"
+                "[otel.exporter.otlp-http.headers]\nAuthorization = 'Basic "
+                + base64.b64encode(f"ops:{operator_hex}".encode("ascii")).decode("ascii")
+                + "'\n"
+                + markers,
+                "",
+            ),
+            ("resource_sha", f"[otel.resource_attributes]\n'deploy.sha' = '{operator_hex}'\n", ""),
+            ("marked_environment_sha", f"[otel]\nenvironment = 'x-defenseclaw-source=codex,{operator_hex}'\n", ""),
+            ("nested_escapes", f"[otel]\nenvironment = '{nested}'\n", "otel.environment"),
+            ("three_layers", f"[otel.resource_attributes]\nlist = 'k={three_layers}'\n", "otel.resource_attributes"),
+            (
+                "basic_encoded_again",
+                "[otel.exporter.otlp-http]\nendpoint = 'https://collector.example.test/v1/logs'\n"
+                f"[otel.exporter.otlp-http.headers]\nAuthorization = 'Basic {basic_encoded_again}'\n",
+                "otel.exporter",
+            ),
+            ("over_size_cap", f"[otel]\nenvironment = '{big}'\n", "otel.environment"),
         )
-        for name, body, field, why in rows:
+        for name, body, field in rows:
             for sidecar in (False, True):
                 with self.subTest(name=name, sidecar=sidecar), tempfile.TemporaryDirectory() as home, (
                     tempfile.TemporaryDirectory()
@@ -365,11 +422,14 @@ class TestCodexOtelAlignment(unittest.TestCase):
                     _check_codex_otel_alignment(cfg, result)
                     self.assertEqual(result.checks[0]["status"], "pass", result.checks)
                     ownership = [check for check in result.checks if check["label"] == "Codex OTel ownership"]
+                    self.assertNotIn(operator_hex, json.dumps(result.checks))
+                    if not field:
+                        self.assertEqual(ownership, [], result.checks)
+                        continue
                     self.assertEqual(len(ownership), 1, result.checks)
                     self.assertEqual(ownership[0]["status"], "warn")
                     self.assertIn(field, ownership[0]["detail"])
-                    self.assertIn(why, ownership[0]["detail"])
-                    self.assertNotIn(operator_hex, json.dumps(result.checks))
+                    self.assertIn("too deeply", ownership[0]["detail"])
 
     def test_codex_credential_in_any_otel_value_fails(self) -> None:
         # Review of 95ed75a6: ownership is the secret in every [otel] value,
@@ -427,7 +487,7 @@ class TestCodexOtelAlignment(unittest.TestCase):
 
     def test_otel_credential_rule_matches_the_gateway_vectors(self) -> None:
         # The same vectors as the gateway's
-        # TestOTLPCarriesProductCredentialIsTheSecretShape: one rule.
+        # TestOTLPCarriesProductCredentialIsAKnownSecret: one rule.
         token = "0123456789abcdef" * 4
         encoded = "".join(f"%{byte:02X}" for byte in token.encode("ascii"))
         basic = base64.b64encode(f"dc:{token}".encode("ascii")).decode("ascii")
@@ -442,12 +502,24 @@ class TestCodexOtelAlignment(unittest.TestCase):
             "Authorization=Basic%20" + basic,
             "basic " + base64.urlsafe_b64encode(f"{token}:".encode("ascii")).decode("ascii").rstrip("="),
         ):
-            # Review of feb972ad: the shape alone is no proof; DefenseClaw
-            # provenance in the same value is.
+            # Review of 70603235: only a known credential is proof. The token
+            # shape is not, with a DefenseClaw marker or the scoped route
+            # beside it or not.
             self.assertTrue(_otel_carries_product_credential(value, [token]), value)
             self.assertFalse(_otel_carries_product_credential(value, []), value)
-            self.assertTrue(_otel_carries_product_credential("x-defenseclaw-source=codex," + value, []), value)
-        self.assertTrue(_otel_carries_product_credential(f"http://127.1:1/otlp/codex/{token}/v1/logs", []))
+            self.assertFalse(_otel_carries_product_credential("x-defenseclaw-source=codex," + value, []), value)
+        self.assertFalse(_otel_carries_product_credential(f"http://127.1:1/otlp/codex/{token}/v1/logs", []))
+        self.assertTrue(_otel_carries_product_credential(f"http://127.1:1/otlp/codex/{token}/v1/logs", [token]))
+        # The decode budget: two percent layers, one Basic decode, 64 KiB.
+        twice = "".join(f"%{byte:02X}" for byte in encoded.encode("ascii"))
+        thrice = "".join(f"%{byte:02X}" for byte in twice.encode("ascii"))
+        self.assertTrue(_otel_carries_product_credential("k=" + twice, [token]))
+        self.assertFalse(_otel_carries_product_credential("k=" + thrice, [token]))
+        self.assertFalse(
+            _otel_carries_product_credential("Basic " + base64.b64encode(f"dc:{encoded}".encode("ascii")).decode("ascii"), [token])
+        )
+        self.assertTrue(_otel_carries_product_credential("x" * (64 << 10) + token, [token]))
+        self.assertFalse(_otel_carries_product_credential("x" * (64 << 10) + encoded, [token]))
         for value in (
             "load=90%,session.id=" + encoded,
             "Bearer%20" + encoded + "%zz",
@@ -461,9 +533,8 @@ class TestCodexOtelAlignment(unittest.TestCase):
             self.assertTrue(_otel_carries_product_credential(value, known), value)
         for value in (
             "Bearer " + token.upper(),
-            "Bearer x" + token,
-            "Bearer " + token + "0",
             "Bearer " + token[:63],
+            "Bearer " + "c0ffee00" * 8,
             "load=90%,tenant=ops",
             "%zz%",
             "100%",
@@ -471,7 +542,7 @@ class TestCodexOtelAlignment(unittest.TestCase):
             "Basic " + base64.b64encode(b"ops:operator-collector-token").decode("ascii"),
             "Basic !!!!",
         ):
-            self.assertFalse(_otel_carries_product_credential("x-defenseclaw-source=codex," + value, []), value)
+            self.assertFalse(_otel_carries_product_credential("x-defenseclaw-source=codex," + value, known), value)
 
     def test_stale_runtime_environment_fails_authenticated_status(self) -> None:
         payload = {

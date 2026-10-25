@@ -22,9 +22,12 @@ import (
 // the Linux, macOS and Windows enterprise paths call, and VerifyClean). The
 // rule is the secret: a route that carries a DefenseClaw credential is the
 // product's and is removed, whatever its host, port, query, header-name or
-// scheme spelling, and even when the scoped token sidecar is gone. A route
+// scheme spelling, while the install can name that credential. A route
 // without one is the operator's and keeps its bytes, stale marker headers
-// included, on any loopback address or port.
+// included, on any loopback address or port. Review of 70603235: a released
+// exporter whose token no sidecar, Setup option or backup names any more is
+// the operator's too; the token shape, markers or the scoped route are no
+// proof.
 type otlpSecretRow struct {
 	name      string
 	base      string // replaces the released http://127.0.0.1:19081 route base
@@ -32,6 +35,7 @@ type otlpSecretRow struct {
 	auth      string // Authorization lines; {tok} is the product token
 	markers   string // keep, drop or caps
 	scoped    bool   // the product token is in the endpoint path
+	scopedHex bool   // an operator's own 64-hex segment is in the endpoint path
 	dropToken bool   // the scoped sidecar (and the Claude backup) is gone
 	product   bool
 	// recorded: Claude Code's backup recorded writing this exact logs
@@ -47,12 +51,13 @@ func otlpSecretRows() []otlpSecretRow {
 		{name: "released_retired_port", base: "http://127.0.0.1:19081", auth: "authorization = 'Bearer {tok}'", markers: "keep", product: true},
 		{name: "capitalized_authorization", base: "http://127.0.0.1:19081", auth: "Authorization = 'Bearer {tok}'", markers: "drop", product: true},
 		{name: "upper_key_lower_scheme_moved_host", base: "http://127.0.0.2:19081", auth: "AUTHORIZATION = 'bearer {tok}'", markers: "drop", product: true},
-		{name: "missing_scoped_token", base: "http://127.0.0.1:19081", query: "?tenant=x", auth: "authorization = 'Bearer {tok}'", markers: "keep", dropToken: true, product: true},
-		{name: "missing_token_moved_host", base: "http://127.1:19081", query: "?tenant=x", auth: "Authorization = 'BEARER {tok}'", markers: "caps", dropToken: true, product: true},
+		{name: "missing_scoped_token", base: "http://127.0.0.1:19081", query: "?tenant=x", auth: "authorization = 'Bearer {tok}'", markers: "keep", dropToken: true},
+		{name: "missing_token_moved_host", base: "http://127.1:19081", query: "?tenant=x", auth: "Authorization = 'BEARER {tok}'", markers: "caps", dropToken: true},
 		{name: "localhost_retired_port", base: "http://localhost:19081", auth: "Authorization = 'Bearer {tok}'", markers: "drop", product: true},
 		{name: "remote_collector", base: "https://collector.example.test", auth: "Authorization = 'Bearer {tok}'", markers: "drop", product: true},
 		{name: "beside_operator_credential", base: "http://127.0.0.1:19081", auth: "Authorization = 'Bearer {tok}'\nauthorization = 'Bearer " + otlpSecretOperatorBearer + "'", markers: "drop", product: true},
-		{name: "scoped_path_token", base: "http://127.0.0.1:19081", markers: "drop", scoped: true, dropToken: true, product: true},
+		{name: "scoped_path_token", base: "http://127.0.0.1:19081", markers: "drop", scoped: true, product: true},
+		{name: "scoped_path_missing_token", base: "http://127.0.0.1:19081", markers: "keep", scoped: true, dropToken: true},
 		{name: "operator_127_0_0_1_stale_markers", base: "http://127.0.0.1:4318", markers: "keep"},
 		{name: "operator_localhost_own_bearer", base: "http://localhost:4318", auth: "Authorization = 'Bearer " + otlpSecretOperatorBearer + "'", markers: "caps"},
 		{name: "operator_localhost_missing_token", base: "http://localhost:4318", auth: "authorization = 'Bearer " + otlpSecretOperatorBearer + "'", markers: "keep", dropToken: true},
@@ -64,13 +69,19 @@ func otlpSecretRows() []otlpSecretRow {
 		{name: "basic_scoped_password", base: "http://127.0.0.1:19081", auth: "Authorization = 'Basic {basic}'", markers: "keep", product: true},
 		{name: "basic_no_markers", base: "http://127.1:19081", auth: "authorization = 'Basic {basic}'", markers: "drop", product: true},
 		{name: "basic_urlsafe_lower_scheme", base: "http://localhost:19081", auth: "Authorization = 'basic {basicurl}'", markers: "drop", product: true},
-		{name: "basic_missing_sidecar_marked", base: "http://127.0.0.1:19081", auth: "Authorization = 'Basic {basic}'", markers: "keep", dropToken: true, product: true},
+		{name: "basic_missing_sidecar_marked", base: "http://127.0.0.1:19081", auth: "Authorization = 'Basic {basic}'", markers: "keep", dropToken: true},
+		{name: "basic_in_encoded_header_list", base: "http://127.0.0.1:19081", auth: "x-list = 'a=1,Authorization=Basic%20{basic}'", markers: "drop", product: true},
 		// Review of feb972ad (P2): an operator collector with its own 64-hex
 		// bearer and no DefenseClaw provenance keeps its bytes, the sidecar
 		// present or gone, Bearer or Basic.
 		{name: "operator_remote_own_hex_bearer", base: "https://collector.example.test", auth: "Authorization = 'Bearer {ophex}'", markers: "drop"},
 		{name: "operator_remote_own_hex_missing_sidecar", base: "https://collector.example.test", auth: "Authorization = 'Bearer {ophex}'", markers: "drop", dropToken: true},
 		{name: "operator_loopback_own_hex_basic", base: "http://127.0.0.1:4318", auth: "Authorization = 'Basic {opbasic}'", markers: "drop", dropToken: true},
+		// Review of 70603235 (P2): the token shape with stale DefenseClaw
+		// markers or in the scoped route position is no proof either.
+		{name: "operator_marked_own_hex_bearer", base: "http://127.0.0.1:19081", auth: "Authorization = 'Bearer {ophex}'", markers: "keep", recorded: true},
+		{name: "operator_marked_own_hex_basic", base: "http://127.0.0.1:19081", auth: "Authorization = 'Basic {opbasic}'", markers: "caps", recorded: true},
+		{name: "operator_marked_hex_route", base: "http://127.0.0.1:19081", markers: "keep", scopedHex: true},
 	}
 }
 
@@ -126,6 +137,9 @@ func codexSecretFixture(t *testing.T, release, goos string, row otlpSecretRow, t
 	route := row.base + "/"
 	if row.scoped {
 		route += "otlp/codex/" + token + "/"
+	}
+	if row.scopedHex {
+		route += "otlp/codex/" + otlpSecretOperatorHex + "/"
 	}
 	for _, signal := range []string{"logs", "traces", "metrics"} {
 		body = strings.ReplaceAll(body, "'http://127.0.0.1:19081/v1/"+signal+"'", "'"+route+"v1/"+signal+row.query+"'")
@@ -216,7 +230,7 @@ func TestCodexSecretOwnershipAcrossWriters(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						if otlpSecretLeaked(string(got), token) {
+						if row.product && otlpSecretLeaked(string(got), token) {
 							t.Fatal("product credential survived")
 						}
 						if left := otlpSecretResidue(t, "codex", dir, "config.toml"); len(left) != 0 {
@@ -293,6 +307,9 @@ func TestClaudeSecretOwnershipAcrossWriters(t *testing.T) {
 						if row.scoped {
 							route += "otlp/claudecode/" + token + "/"
 						}
+						if row.scopedHex {
+							route += "otlp/claudecode/" + otlpSecretOperatorHex + "/"
+						}
 						route += "v1/logs" + row.query
 						var parts []string
 						if row.auth != "" {
@@ -335,7 +352,7 @@ func TestClaudeSecretOwnershipAcrossWriters(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						if otlpSecretLeaked(string(raw), token) {
+						if row.product && otlpSecretLeaked(string(raw), token) {
 							t.Fatal("product credential survived")
 						}
 						got := readClaudeUpgradeEnv(t, settingsPath)
@@ -371,7 +388,7 @@ func TestClaudeSecretOwnershipAcrossWriters(t *testing.T) {
 	}
 }
 
-func TestOTLPCarriesProductCredentialIsTheSecretShape(t *testing.T) {
+func TestOTLPCarriesProductCredentialIsAKnownSecret(t *testing.T) {
 	token := strings.Repeat("0123456789abcdef", 4)
 	basic := base64.StdEncoding.EncodeToString([]byte("dc:" + token))
 	for _, value := range []string{token, "Bearer " + token, "bearer%20" + token, "a=1,Authorization=Bearer " + token,
@@ -380,25 +397,23 @@ func TestOTLPCarriesProductCredentialIsTheSecretShape(t *testing.T) {
 		if !otlpCarriesProductCredential(value, []string{token}) {
 			t.Errorf("known credential not found in %q", value)
 		}
-		// Review of feb972ad (P2): the shape alone is no proof; DefenseClaw
-		// provenance in the same value is.
-		if otlpCarriesProductCredential(value, nil) {
-			t.Errorf("token shape alone claimed %q", value)
-		}
-		if !otlpCarriesProductCredential("x-defenseclaw-source=codex,"+value, nil) {
-			t.Errorf("token shape with a marker not found in %q", value)
+		// Review of 70603235 (P2): only a known credential is proof; the
+		// token shape is not, with a DefenseClaw marker beside it or not.
+		if otlpCarriesProductCredential(value, nil) || otlpCarriesProductCredential("x-defenseclaw-source=codex,"+value, nil) {
+			t.Errorf("token shape claimed %q", value)
 		}
 	}
-	if !otlpCarriesProductCredential("http://127.1:1/otlp/codex/"+token+"/v1/logs", nil) {
-		t.Error("token in the scoped route not found")
+	route := "http://127.1:1/otlp/codex/" + token + "/v1/logs"
+	if otlpCarriesProductCredential(route, nil) || !otlpCarriesProductCredential(route, []string{token}) {
+		t.Error("the scoped route is the product's only when its token is known")
 	}
-	if !otlpCarriesProductCredential(map[string]interface{}{"otlp-http": map[string]interface{}{"headers": map[string]interface{}{
+	if otlpCarriesProductCredential(map[string]interface{}{"otlp-http": map[string]interface{}{"headers": map[string]interface{}{
 		"X-DefenseClaw-Client": "codex-otel/1.0", "authorization": "Basic " + basic}}}, nil) {
-		t.Error("marked exporter with a token-shaped Basic password not found")
+		t.Error("marked exporter with an unknown token-shaped Basic password claimed")
 	}
-	for _, value := range []string{"Bearer " + strings.ToUpper(token), "Bearer x" + token, "Bearer " + token + "0", "Bearer " + token[:63], "Bearer operator-collector-token", "http://127.0.0.1:4318/v1/logs",
+	for _, value := range []string{"Bearer " + strings.ToUpper(token), "Bearer " + token[:63], "Bearer " + otlpSecretOperatorHex, "Bearer operator-collector-token", "http://127.0.0.1:4318/v1/logs",
 		"Basic " + base64.StdEncoding.EncodeToString([]byte("ops:operator-collector-token")), "Basic !!!!"} {
-		if otlpCarriesProductCredential("x-defenseclaw-source=codex,"+value, nil) {
+		if otlpCarriesProductCredential("x-defenseclaw-source=codex,"+value, []string{token, "configured-token"}) {
 			t.Errorf("operator value %q claimed", value)
 		}
 	}
@@ -431,36 +446,54 @@ func TestOTLPCarriesProductCredentialIsTheSecretShape(t *testing.T) {
 	}
 }
 
-// Review of feb972ad (P2): nested percent escapes and repeated Basic values
-// cost bounded, linear work. A token behind three encode layers is still
-// found.
+// Review of 70603235 (P2): the decode budget is fixed and complete. Two
+// percent layers (an env-string list value, encoded once more) and one Basic
+// decode in each are checked; a value past that, or over the size cap, is
+// reported as limited and its deeper forms are not, so it stays the
+// operator's. The work is linear in the value whatever its nesting.
 func TestOTLPValueFormsAreBounded(t *testing.T) {
+	maxForms := (1 + otlpMaxPercentLayers) * (1 + otlpMaxBasicCredentials)
 	nested := "%" + strings.Repeat("25", 1200) + "41"
 	if len(nested) != 2403 {
 		t.Fatalf("fixture is %d bytes", len(nested))
 	}
 	forms, limited := otlpValueForms(nested)
-	if len(forms) != otlpMaxValueForms || !limited {
+	if len(forms) != 1+otlpMaxPercentLayers || !limited {
 		t.Fatalf("nested escapes: %d forms, limited=%t", len(forms), limited)
 	}
 	var repeated strings.Builder
 	for i := range 500 {
-		fmt.Fprintf(&repeated, "Basic %s ", base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("a:%%25%d", 1000+i))))
+		fmt.Fprintf(&repeated, "Basic %s ", base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("a:x%d", 1000+i))))
 	}
 	forms, limited = otlpValueForms(repeated.String())
-	if len(forms) > otlpMaxValueForms || !limited {
+	if len(forms) > maxForms || !limited {
 		t.Fatalf("repeated Basic: %d forms, limited=%t", len(forms), limited)
 	}
 	token := strings.Repeat("0123456789abcdef", 4)
-	encoded := token
-	for range 3 {
-		encoded = otlpTestPercentEncode(encoded)
-	}
-	if !otlpCarriesProductCredential("k="+encoded, []string{token}) {
-		t.Error("three-layer encoded token not found")
-	}
-	if forms, limited := otlpValueForms("load=90%,tenant=ops"); len(forms) != 1 || limited {
-		t.Fatalf("plain value: %v limited=%t", forms, limited)
+	once := otlpTestPercentEncode(token)
+	twice := otlpTestPercentEncode(once)
+	thrice := otlpTestPercentEncode(twice)
+	basicOf := func(s string) string { return "Basic " + base64.StdEncoding.EncodeToString([]byte("dc:"+s)) }
+	for _, row := range []struct {
+		name, value    string
+		found, limited bool
+	}{
+		{"raw", "k=" + token, true, false},
+		{"one_layer", "k=" + once, true, false},
+		{"two_layers", "k=" + twice, true, false},
+		{"three_layers", "k=" + thrice, false, true},
+		{"basic", basicOf(token), true, false},
+		{"basic_in_two_layers", otlpTestPercentEncode(otlpTestPercentEncode(basicOf(token))), true, false},
+		{"basic_payload_encoded_again", basicOf(once), false, true},
+		{"basic_in_basic", "Basic " + base64.StdEncoding.EncodeToString([]byte("x:"+basicOf(token))), false, true},
+		{"over_size_cap_raw", strings.Repeat("x", otlpMaxDecodeBytes) + token, true, false},
+		{"over_size_cap_encoded", strings.Repeat("x", otlpMaxDecodeBytes) + once, false, true},
+		{"plain", "load=90%,tenant=ops", false, false},
+	} {
+		forms, limited := otlpValueForms(row.value)
+		if found := otlpCarriesProductCredential(row.value, []string{token}); found != row.found || limited != row.limited || len(forms) > maxForms {
+			t.Errorf("%s: found=%t limited=%t forms=%d, want found=%t limited=%t", row.name, found, limited, len(forms), row.found, row.limited)
+		}
 	}
 }
 
@@ -474,14 +507,19 @@ func TestOTLPCredentialCheckWorkIsBounded(t *testing.T) {
 	}
 }
 
-// Review of feb972ad (P2): a token-shaped value without a recorded token or
-// DefenseClaw provenance (an operator's sha256 resource attribute or
-// environment, a nested-escape value) is ambiguous. Setup, the managed
-// cleanup, VerifyClean and managed Verify keep it byte for byte, with the
-// sidecar present or gone.
+// Review of feb972ad and 70603235 (P2): a token-shaped value that carries no
+// known credential (an operator's sha256 resource attribute or environment,
+// with stale DefenseClaw markers or not, a nested-escape value) is the
+// operator's. Setup, the managed cleanup, VerifyClean and managed Verify keep
+// it byte for byte, with the sidecar present or gone.
 func TestOTLPShapeOnlyValueKeepsOperatorBytes(t *testing.T) {
 	nested := "%" + strings.Repeat("25", 1200) + "41"
-	values := map[string]string{"sha_environment": "deploy-" + otlpSecretOperatorHex, "nested_escapes": nested}
+	values := map[string]string{
+		"sha_environment": "deploy-" + otlpSecretOperatorHex,
+		"nested_escapes":  nested,
+		// Review of 70603235: stale markers beside the shape are no proof.
+		"marked_sha": "x-defenseclaw-source=codex,deploy-" + otlpSecretOperatorHex,
+	}
 	for _, goos := range []string{"linux", "darwin", "windows"} {
 		for name, value := range values {
 			for _, drop := range []bool{false, true} {
@@ -919,5 +957,47 @@ func TestClaudeSecretOwnershipCoversEveryOTLPEnvValue(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// Review of 70603235: the Claude cleanup restores a backed-up value only when
+// it carries no known product credential. With no token-shape rule, the
+// restore check must use the known credentials, or a backup holding the
+// scoped token would put it back.
+func TestClaudeOTLPCleanupDoesNotRestoreBackedUpProductCredential(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			dir := t.TempDir()
+			pinClaudeUpgradeTestOwner(t, dir)
+			token, err := EnsureOTLPPathToken(dir, OTLPScopeClaude)
+			if err != nil {
+				t.Fatal(err)
+			}
+			original, err := json.Marshal(map[string]string{"OTEL_SERVICE_NAME": "svc-" + token, "OTEL_RESOURCE_ATTRIBUTES": "team=ops"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(map[string]interface{}{"env": map[string]interface{}{
+				"OTEL_SERVICE_NAME":        "claude-" + token,
+				"OTEL_RESOURCE_ATTRIBUTES": "team=ops",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			backup := claudeCodeBackup{HadEnvKey: true, OriginalEnv: original}
+			out, removed, err := claudeCodeWithoutUserNativeOTLP(raw, backup, SetupOpts{DataDir: dir, GOOS: goos})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Contains(removed, "settings.json env.OTEL_SERVICE_NAME") {
+				t.Fatalf("removed = %v", removed)
+			}
+			if strings.Contains(string(out), token) {
+				t.Fatalf("backed-up product credential restored:\n%s", out)
+			}
+			if !strings.Contains(string(out), "team=ops") {
+				t.Fatalf("operator value lost:\n%s", out)
+			}
+		})
 	}
 }

@@ -426,8 +426,6 @@ func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts S
 		case credential:
 			// A DefenseClaw credential in any OTLP value (resource attributes
 			// and service name included) never stays beside a kept route.
-			// Verify may be unable to read a target user's sidecar as SYSTEM;
-			// a token-shaped value with DefenseClaw provenance still proves it.
 			owned = true
 		case claudeCodeOTLPEndpointKey(key):
 			// A credential on logs does not claim another signal's collector.
@@ -444,7 +442,7 @@ func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts S
 			continue
 		}
 		removed = append(removed, "settings.json env."+key)
-		if prior, existed := original[key]; existed && !claudeCodeEnvValueIsDefenseClaw(key, prior, reference) {
+		if prior, existed := original[key]; existed && !claudeCodeEnvValueIsDefenseClaw(key, prior, reference, known) {
 			env[key] = prior
 		} else {
 			delete(env, key)
@@ -512,11 +510,12 @@ func claudeCodeEnvValueDisablesExport(value string) bool {
 }
 
 // claudeCodeEnvValueIsDefenseClaw reports a backed-up value that is itself
-// DefenseClaw's, so it must not come back.
-func claudeCodeEnvValueIsDefenseClaw(key string, value interface{}, reference map[string]string) bool {
+// DefenseClaw's, so it must not come back: one that carries a known product
+// credential, or a value an earlier profile wrote.
+func claudeCodeEnvValueIsDefenseClaw(key string, value interface{}, reference map[string]string, known []string) bool {
 	got, _ := value.(string)
 	switch {
-	case claudeCodeOTLPEnvKey(key) && otlpCarriesProductCredential(got, nil):
+	case claudeCodeOTLPEnvKey(key) && otlpCarriesProductCredential(got, known):
 		return true
 	case claudeCodeOTLPEndpointKey(key), claudeCodeOTLPHeadersKey(key):
 		return false
