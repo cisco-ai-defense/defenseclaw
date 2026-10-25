@@ -65,7 +65,7 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         # (hookexec.ManagedOutageFailsOpen). A restart it cannot prove stopped
         # and an accepted call without an answer in time block. No sentence
         # anywhere in the docs may say the administrator's open allows,
-        # applies to or covers either.
+        # applies to or covers either (docs-site pages and docs/*.md).
         import re
 
         content = DOCS.parent
@@ -74,7 +74,8 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         claim = re.compile(allow + r"\b[^.;]*?\b" + window, re.I)
         negation = re.compile(r"\b(?:block|never|not|cannot|only while|proves?)\b", re.I)
         offenders = []
-        for page in sorted(content.rglob("*.mdx")):
+        repo_docs = DOCS.parents[3] / "docs"
+        for page in sorted(content.rglob("*.mdx")) + sorted(repo_docs.glob("*.md")):
             flat = re.sub(r"\s+", " ", page.read_text())
             for sentence in re.split(r"(?<=[.;])\s+", flat):
                 if not re.search(r"administrator|admin\b|managed", sentence, re.I):
@@ -83,7 +84,7 @@ class ReferencePolicyDocsTest(unittest.TestCase):
                     continue
                 for match in claim.finditer(sentence):
                     if not negation.search(match.group(0)):
-                        offenders.append(f"{page.relative_to(content)}: {sentence[:240]}")
+                        offenders.append(f"{page.name}: {sentence[:240]}")
         self.assertEqual(offenders, [])
 
     def test_amp_is_excluded_from_persisted_fail_open_reporting(self):
