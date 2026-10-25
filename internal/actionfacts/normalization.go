@@ -187,10 +187,12 @@ func posixCommandExpandsTilde(
 		if argument.Value != fact.Value {
 			continue
 		}
+		// A static word keeps its "~/" only when the source quoted or
+		// escaped the tilde, or a wrapper (sudo, env, command, exec)
+		// passed an already-literal argv on: the program gets the name as
+		// written (GAP-1455, round m).
 		matched = true
-		expands = expands &&
-			!argument.Expands &&
-			argument.Quote == QuoteNone
+		expands = false
 	}
 	for _, redirect := range command.Redirects {
 		if redirect.Target != fact.Value || redirect.Access != fact.Access {

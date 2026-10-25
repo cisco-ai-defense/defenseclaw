@@ -5,13 +5,16 @@ package hookpaths
 
 import (
 	"encoding/base64"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
 	"unicode/utf16"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -44,8 +47,13 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 	if depth == 0 && parsed && actionKnownReadOnlyShell(file, home) {
 		return false
 	}
-	if parsed && actionPosixNestedShellMention(file, cwd, home, depth, stateOnly) {
-		return true
+	var nestedBodies []*syntax.Word
+	if parsed {
+		var nestedFound bool
+		nestedBodies, nestedFound = actionPosixNestedShellMention(file, cwd, home, depth, stateOnly)
+		if nestedFound {
+			return true
+		}
 	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
@@ -157,6 +165,10 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 	if parsed && actionLiteralArgumentProgramsOnly(file, home) {
 		text = actionMarkLiteralTildes(text)
 	}
+	// A static nested shell body was scanned above in its own quoting, so a
+	// tilde quoted inside it is literal and an unquoted one is the home. The
+	// outer quotes around the body say nothing about that (round m).
+	text = actionBlankWords(text, nestedBodies)
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "${HOME}/", home+"/"), "$HOME/", home+"/")
 	for _, token := range actionMentionToken.FindAllString(text, -1) {
 		literalTilde := strings.HasPrefix(token, actionLiteralTilde)
@@ -254,10 +266,12 @@ func actionLiteralCommandWords(args []*syntax.Word, home string) (words []*synta
 		program = programBase(program)
 		index := 1
 		switch program {
-		case "command", "builtin", "nohup", "exec", "nice", "env":
+		case "command", "builtin", "nohup", "exec", "nice", "env", "sudo", "doas", "timeout",
+			"stdbuf", "ionice", "setsid":
 		default:
 			return args, true
 		}
+		durationPending := program == "timeout"
 		for index < len(args) {
 			word, fixed := StaticWord(args[index], home)
 			if !fixed {
@@ -276,7 +290,20 @@ func actionLiteralCommandWords(args []*syntax.Word, home string) (words []*synta
 				continue
 			}
 			if !strings.HasPrefix(word, "-") {
+				if durationPending {
+					// timeout DURATION COMMAND: the duration is not the program.
+					if !literalDuration(word) {
+						return nil, false
+					}
+					durationPending = false
+					index++
+					continue
+				}
 				break
+			}
+			if consumed, ok := actionLiteralWrapperOption(program, word, args[index+1:], home); ok {
+				index += consumed
+				continue
 			}
 			switch {
 			case program == "command" && word == "-p",
@@ -301,12 +328,103 @@ func actionLiteralCommandWords(args []*syntax.Word, home string) (words []*synta
 				return nil, false
 			}
 		}
-		if index >= len(args) {
+		if index >= len(args) || durationPending {
 			return nil, false
 		}
 		args = args[index:]
 	}
 	return nil, false
+}
+
+// actionLiteralWrapperOption reports how many words an option of sudo, doas,
+// timeout, stdbuf, ionice, setsid or env takes when the wrapper still runs
+// the next words as argv. Options that start a shell, edit a file, change
+// the directory or list instead of running (sudo -s/-i/-e/-D/-l, doas -s,
+// env -C/-S) are not listed, so the command stays on the home spelling.
+func actionLiteralWrapperOption(program, word string, rest []*syntax.Word, home string) (int, bool) {
+	value := func() bool {
+		if len(rest) == 0 {
+			return false
+		}
+		_, fixed := StaticWord(rest[0], home)
+		return fixed
+	}
+	switch program {
+	case "sudo":
+		switch word {
+		case "-n", "--non-interactive", "-E", "--preserve-env", "-H", "--set-home", "-S", "--stdin",
+			"-k", "--reset-timestamp", "-b", "--background", "-P", "--preserve-groups":
+			return 1, true
+		case "-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--close-from",
+			"-T", "--command-timeout", "-r", "--role", "-t", "--type", "-U", "--other-user":
+			return 2, value()
+		}
+		for _, prefix := range []string{"--user=", "--group=", "--host=", "--prompt=", "--close-from=",
+			"--command-timeout=", "--role=", "--type="} {
+			if strings.HasPrefix(word, prefix) {
+				return 1, true
+			}
+		}
+		if len(word) > 2 && !strings.HasPrefix(word, "--") && strings.Trim(word[1:], "nEHSkbP") == "" {
+			return 1, true // combined switches such as -nE
+		}
+	case "doas":
+		switch word {
+		case "-n":
+			return 1, true
+		case "-u":
+			return 2, value()
+		}
+	case "timeout":
+		switch word {
+		case "--foreground", "--preserve-status", "-v", "--verbose":
+			return 1, true
+		case "-k", "--kill-after", "-s", "--signal":
+			return 2, value()
+		}
+		if strings.HasPrefix(word, "--kill-after=") || strings.HasPrefix(word, "--signal=") ||
+			strings.HasPrefix(word, "-k") || strings.HasPrefix(word, "-s") {
+			return 1, true
+		}
+	case "stdbuf":
+		switch word {
+		case "-i", "-o", "-e", "--input", "--output", "--error":
+			return 2, value()
+		}
+		if len(word) > 2 && (strings.HasPrefix(word, "-i") || strings.HasPrefix(word, "-o") ||
+			strings.HasPrefix(word, "-e")) && !strings.HasPrefix(word, "--") ||
+			strings.HasPrefix(word, "--input=") || strings.HasPrefix(word, "--output=") ||
+			strings.HasPrefix(word, "--error=") {
+			return 1, true
+		}
+	case "ionice":
+		switch word {
+		case "-c", "--class", "-n", "--classdata":
+			return 2, value()
+		case "-t", "--ignore":
+			return 1, true
+		}
+		if len(word) > 2 && (strings.HasPrefix(word, "-c") || strings.HasPrefix(word, "-n")) &&
+			!strings.HasPrefix(word, "--") {
+			return 1, true
+		}
+	case "setsid":
+		switch word {
+		case "-f", "--fork", "-w", "--wait", "-c", "--ctty":
+			return 1, true
+		}
+	case "env":
+		switch word {
+		case "-u", "--unset":
+			return 2, value()
+		case "-0", "--null":
+			return 1, true
+		}
+		if strings.HasPrefix(word, "--unset=") {
+			return 1, true
+		}
+	}
+	return 0, false
 }
 
 // actionLiteralAssignments reports whether every assignment of a command
@@ -499,7 +617,7 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 	if _, err := filepath.Match(pattern, ""); err != nil {
 		return false
 	}
-	candidates, complete := actionExpandGlob(pattern, literal)
+	candidates, complete := actionExpandGlob(pattern, literal, actionGlobViewHidden(cwd, home))
 	for _, candidate := range candidates {
 		if protectedReachPath(candidate, protected, ssh) {
 			return true
@@ -527,7 +645,11 @@ const (
 // not exist yet is still a candidate; literal is a prefix of pattern taken
 // as written (the cwd of a relative word). complete is false when a bound
 // is exceeded.
-func actionExpandGlob(pattern, literal string) (candidates []string, complete bool) {
+//
+// hidden is set when the process cannot see the request's cwd or home
+// (systemd ProtectHome on a managed gateway): a directory missing from
+// that view is not proof the user's shell finds no match (GAP-1460).
+func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string, complete bool) {
 	separator := string(filepath.Separator)
 	start := filepath.VolumeName(pattern) + separator
 	rest := strings.TrimPrefix(pattern, start)
@@ -553,7 +675,12 @@ func actionExpandGlob(pattern, literal string) (candidates []string, complete bo
 			}
 			directory, err := os.Open(dir)
 			if err != nil {
-				continue
+				if errors.Is(err, fs.ErrNotExist) && !hidden || errors.Is(err, syscall.ENOTDIR) {
+					continue
+				}
+				// Permission denied, or a home this process cannot see:
+				// the user's shell may still expand the pattern there.
+				return nil, false
 			}
 			names, err := directory.Readdirnames(actionGlobMaxNames + 1)
 			_ = directory.Close()
@@ -575,6 +702,20 @@ func actionExpandGlob(pattern, literal string) (candidates []string, complete bo
 		paths = next
 	}
 	return paths, true
+}
+
+// actionGlobViewHidden reports whether this process cannot see the cwd or
+// the home the hook reported, as a managed gateway behind ProtectHome.
+func actionGlobViewHidden(cwd, home string) bool {
+	for _, dir := range []string{cwd, home} {
+		if dir == "" {
+			continue
+		}
+		if _, err := os.Stat(dir); err != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // actionGlobNameMatch matches one name component; names compare without case
@@ -628,8 +769,12 @@ func actionProtectedStatePath(value, home string) bool {
 	return err == nil && actionProtectedStateRelative(filepath.ToSlash(relative))
 }
 
-func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth int, stateOnly bool) bool {
-	found := false
+// actionPosixNestedShellMention scans each static shell -c or env -S body as
+// its own command. bodies are the words it scanned without a match.
+func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth int, stateOnly bool) (bodies []*syntax.Word, found bool) {
+	if depth+1 >= 8 {
+		return nil, false
+	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if found {
 			return false
@@ -650,10 +795,12 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 					if !optionStatic || option != "-S" && option != "--split-string" {
 						continue
 					}
-					if child, childStatic := StaticWord(call.Args[j+1], home); childStatic &&
-						actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly) {
-						found = true
-						return false
+					if child, childStatic := StaticWord(call.Args[j+1], home); childStatic {
+						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly) {
+							found = true
+							return false
+						}
+						bodies = append(bodies, call.Args[j+1])
 					}
 				}
 			}
@@ -671,9 +818,12 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 				}
 				if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&
 					!strings.ContainsAny(option, "=/") && strings.Contains(option[1:], "c") {
-					if child, static := StaticWord(call.Args[j+1], home); static &&
-						actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly) {
-						found = true
+					if child, static := StaticWord(call.Args[j+1], home); static {
+						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly) {
+							found = true
+						} else {
+							bodies = append(bodies, call.Args[j+1])
+						}
 					}
 					break
 				}
@@ -681,7 +831,25 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 		}
 		return !found
 	})
-	return found
+	return bodies, found
+}
+
+// actionBlankWords replaces the bytes of each word with spaces.
+func actionBlankWords(text string, words []*syntax.Word) string {
+	if len(words) == 0 {
+		return text
+	}
+	out := []byte(text)
+	for _, word := range words {
+		start, end := int(word.Pos().Offset()), int(word.End().Offset())
+		if start < 0 || end > len(out) || start >= end {
+			continue
+		}
+		for i := start; i < end; i++ {
+			out[i] = ' '
+		}
+	}
+	return string(out)
 }
 
 // Quoted or escaped dollar signs and glob characters do not expand in the
