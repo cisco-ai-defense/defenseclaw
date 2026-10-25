@@ -99,9 +99,7 @@ func provedHighWriteFindings(
 		home:   request.Input.ActiveHome,
 		loaded: append([]string(nil), request.Input.ActiveAgentFiles...),
 	}
-	for _, loaded := range slices.Sorted(maps.Keys(request.ActiveAgentFileIdentities)) {
-		locations.loaded = append(locations.loaded, loaded)
-	}
+	locations.loaded = append(locations.loaded, slices.Sorted(maps.Keys(request.ActiveAgentFileIdentities))...)
 	startupView := instructionStartupFromContext(ctx)
 	startup := startupView.snapshot
 	if startupView.extend != nil {
