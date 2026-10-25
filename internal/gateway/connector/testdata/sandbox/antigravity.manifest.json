@@ -45,8 +45,8 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 132265,
-      "sha256": "833e6d21665cf35dc7285e4a986498624d031a6b1262f536fd5fa477c4ff3ad7"
+      "size": 134342,
+      "sha256": "0f44da411dc73c54daa8b980c53a1d3ffc3a9d9855bcef4bbdc00a5f2a1b6e5a"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
@@ -57,32 +57,32 @@
     "/usr/local/lib/defenseclaw/hooks/antigravity-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 12811,
-      "sha256": "13f3efccbeb31196afdcb4a1ee090e535a095af2601475f30838a7fd43e26f67"
+      "size": 12812,
+      "sha256": "82fd86981263cd8a5b24a72bf2c38bcf8c2b7c96bad75489644b02f65b6eab74"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7054,
-      "sha256": "65df7bad84b54b19d948401ae11bfadcbb024055ad939fdb694a1b2296a9ef6d"
+      "size": 7055,
+      "sha256": "418ba34842a71fae087f1f300262bdb91ea6fd21a3ca98ae30c8d6bc1360ae46"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6245,
-      "sha256": "60bfba0a7e42ec45622fbb1db45d3c27c9480c315e52c450bbb6e4655833a3d9"
+      "size": 6246,
+      "sha256": "320dff13091a74154975fadbe2e66fafec515570c203b367db64c3e5e6fb76ac"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6673,
-      "sha256": "daa77b711111b35097291e9911e3eca66e787e7e1feb7175078cb82cb7e55f76"
+      "size": 6818,
+      "sha256": "99f2ac73343a0ac004d27bdcda55739215ff1248cb178cef781c15ba72030daa"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7022,
-      "sha256": "49e30e1ceecc80862a5fe37d9103a6b7485e367dd2d993ee7845c86fa65f5c20"
+      "size": 7167,
+      "sha256": "beb771f04083de142c13d508bb3e49806194b905ef4aabf054d00c297909f807"
     }
   }
 }

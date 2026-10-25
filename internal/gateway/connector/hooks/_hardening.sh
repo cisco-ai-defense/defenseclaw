@@ -1269,6 +1269,17 @@ defenseclaw_per_user_oversize_open() {
 # uses the same JSON encoder as the native hook. A missing or changed helper
 # is a local failure and stays closed; it cannot create another allow path.
 defenseclaw_prepare_oversized_stdin() {
+  if _defenseclaw_prepare_oversized_stdin_impl "$@"; then
+    return 0
+  fi
+  if [ "${1:-}" = 3 ]; then
+    defenseclaw_log_hook_failure "${DEFENSECLAW_HOOK_CONNECTOR:-unknown}" "${DEFENSECLAW_HOOK_NAME:-unknown}" \
+      "oversized prefix review unavailable" transport closed fail_closed
+  fi
+  return 1
+}
+
+_defenseclaw_prepare_oversized_stdin_impl() {
   [ "${1:-}" = 3 ] && defenseclaw_per_user_oversize_open || return 1
   local root="${DEFENSECLAW_AGENT_HOME:-}" bin mode path
   case "$root" in /*) ;; *) return 1 ;; esac

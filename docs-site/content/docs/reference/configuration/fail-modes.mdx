@@ -134,7 +134,7 @@ On a managed Linux or macOS host the hook is the administrator-owned `defensecla
 
 ## Persisted fail mode
 
-On a per-user install `guardrail.hook_fail_mode` does not set the hooks' behavior: the outage mode follows the policy tier ([Per-user installs](#per-user-installs)). Run bare, `defenseclaw guardrail fail-mode` prints each active connector's outage mode, its tier and any drift between the config and the installed hooks:
+On a per-user install, an explicit saved `guardrail.hook_fail_mode` or per-connector override sets the outage mode. Without one, the outage mode follows the policy tier ([Per-user installs](#per-user-installs)). Run bare, `defenseclaw guardrail fail-mode` prints each active connector's outage mode, its tier and any drift between the config and the installed hooks:
 
 ```text
   gateway outage: follows the policy tier (rule pack)
@@ -196,6 +196,8 @@ The shared `inspect-*.sh` scripts serve every connector of one data directory, a
 On Windows, environment keys are case-insensitive; do not define case-variants with different values.
 
 ## Reporting and diagnosis
+
+In an OpenShell sandbox the shell hooks write the same record inside the guest at `/sandbox/.defenseclaw/logs/hook-failures.jsonl`. The Amp and OpenCode sandbox plugins write no record.
 
 ```bash
 defenseclaw guardrail status      # configured and runtime fail mode per connector

@@ -26,6 +26,8 @@ func TestCodexDeepWikiResultOverOneMiBUsesInstalledTier(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
+			installNativeHookPostForHookTest(t, home)
+			installNativeGatewayForHookTest(t, home)
 			hooks := filepath.Join(home, "hooks")
 			if err := WriteHookScriptsForConnectorObjectWithOpts(hooks,
 				SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", HookFailMode: tc.mode}, NewCodexConnector()); err != nil {
@@ -43,8 +45,8 @@ func TestCodexDeepWikiResultOverOneMiBUsesInstalledTier(t *testing.T) {
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
 			err := cmd.Run()
 			if tc.allow {
-				if err != nil || !strings.Contains(stdout.String(), `"systemMessage"`) ||
-					!strings.Contains(stdout.String(), "too large") || strings.Contains(stdout.String(), `"decision":"block"`) {
+				if err != nil || !strings.Contains(stderr.String(), "gateway unreachable") ||
+					strings.Contains(stdout.String(), `"decision":"block"`) || strings.Contains(stdout.String(), `"permissionDecision":"deny"`) {
 					t.Fatalf("balanced DeepWiki read: err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 				}
 				log, readErr := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
@@ -54,7 +56,8 @@ func TestCodexDeepWikiResultOverOneMiBUsesInstalledTier(t *testing.T) {
 				var row struct {
 					Outcome string `json:"outcome"`
 				}
-				if json.Unmarshal(bytes.TrimSpace(log), &row) != nil || row.Outcome != "fail_open" {
+				lines := bytes.Split(bytes.TrimSpace(log), []byte("\n"))
+				if json.Unmarshal(lines[len(lines)-1], &row) != nil || row.Outcome != "fail_open" {
 					t.Fatalf("balanced oversize audit = %q", log)
 				}
 			} else if err == nil && !strings.Contains(stdout.String(), `"decision":"block"`) &&

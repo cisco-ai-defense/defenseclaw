@@ -22,7 +22,7 @@ for arg do
 done
 test -d "$DC_TEST_DATA_DIR/hooks" || exit 4
 printf '%s\n' "$*" >> "$DC_TEST_REFRESH_CALLS"
-case " $* " in *" --hold-until-exit "*) echo 'Holding the hook fail modes' ;; esac
+case " $* " in *" --hold-until-exit "*) echo 'Holding the hook fail modes'; sleep 0.2 ;; esac
 SH
 chmod 700 "$STAGING/bin/defenseclaw-gateway"
 
