@@ -1592,12 +1592,7 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
             )
             ux.subhead(f"A blocked call {signal}", indent="    ")
     elif outage_only:
-        ux.subhead(
-            f"A classified gateway outage (no gateway takes the call) will now ALLOW {label} with a warning "
-            "and per-call audit entry. A gateway that takes the call and does not answer in time, and every "
-            "other failure, still blocks.",
-            indent="  ",
-        )
+        ux.subhead(_outage_open_note(app, f"{label} calls"), indent="  ")
     elif mode == "closed" and upstream_fail_open(app.cfg, key):
         ux.warn(
             f"{label} will remain fail-open; this value is stored only as requested policy provenance.",
@@ -1825,6 +1820,31 @@ def _secure_client_fail_mode(app: AppContext) -> bool:
     return callable(outside) and not outside()
 
 
+def _outage_open_note(app: AppContext, calls: str) -> str:
+    """What a saved open does outside Secure Client (GAP-1419, GAP-1434).
+
+    Open covers only a gateway outage, a call no gateway took. A reachable
+    gateway's block or error, a malformed or cut-off answer and an accepted
+    call without an answer in time block in every mode
+    (hookexec.ManagedOutageFailsOpen, noAnswerFailMode). On a managed
+    computer the administrator's open is honored, also under the strict
+    tier (GAP-1319), and only for a gateway service the hook proves stopped.
+    """
+    note = (
+        f"A gateway outage will now ALLOW {calls} with a warning and a per-call audit entry. Open applies "
+        "only when no gateway is reachable (stopped, crashed or not started). A reachable gateway's block "
+        "or error, a malformed or cut-off answer, and a gateway that takes the call but does not answer in "
+        "time still block."
+    )
+    managed = getattr(app.cfg, "managed_outside_secure_client", None)
+    if callable(managed) and managed():
+        note += (
+            " On this managed computer the administrator's open is honored, also under the strict "
+            "policy, and only while the hook proves the gateway service is stopped."
+        )
+    return note
+
+
 _PER_USER_OUTAGE_RULE = (
     "On a per-user install an explicit saved mode wins. When unset, the gateway-outage mode follows the "
     "policy tier: the default (balanced) and permissive rule packs let a call run with a warning while "
@@ -1905,13 +1925,16 @@ def fail_mode_cmd(
     block. Two values are supported:
 
       \b
-      open   — allow an eligible outage call with a warning and audit row.
+      open   — while no gateway is reachable (an outage), allow the call
+               with a warning and audit row. A reachable gateway's block,
+               a malformed answer or a timeout still blocks.
       closed — block supported events during a gateway outage.
 
     An unset per-user mode follows the rule-pack tier. Managed installs
-    default closed; a managed administrator can select open, which allows a
-    call only while the hook proves the gateway service is not running (an
-    accepted call the gateway does not answer in time still blocks). Secure
+    default closed; a managed administrator's open is honored (also under
+    the strict policy) and allows a call only while the hook proves the
+    gateway service is not running (an accepted call the gateway does not
+    answer in time still blocks). Secure
     Client keeps its own default. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
     forces transport and missing-token failures closed.
 
@@ -2171,11 +2194,7 @@ def fail_mode_cmd(
     elif outage_only and mode == "closed":
         ux.warn("A gateway outage will now BLOCK supported calls. Other failures remain closed.", indent="  ")
     elif outage_only:
-        ux.subhead(
-            "A classified gateway outage (no gateway takes the call) will now ALLOW supported calls with a "
-            "warning and per-call audit entry. A gateway that takes the call and does not answer in time, and "
-            "every other failure, still blocks.", indent="  ",
-        )
+        ux.subhead(_outage_open_note(app, "supported calls"), indent="  ")
     elif mode == "closed" and upstream_open and len(upstream_open) == len(active_names):
         ux.warn(
             f"{upstream_labels} will remain fail-open; closed is stored only as requested policy provenance.",

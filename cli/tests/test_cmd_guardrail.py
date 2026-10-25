@@ -1456,10 +1456,10 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(app.cfg.guardrail.connectors["cursor"].hook_fail_mode, "open")
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "open")
         output = " ".join(result.output.split())
-        self.assertIn("classified gateway outage", output)
-        # Round g loop 2: open never covers an accepted call without an answer.
-        self.assertIn("A gateway that takes the call and does not answer in time", output)
-        self.assertIn("still blocks", output)
+        self.assertIn("A gateway outage will now ALLOW", output)
+        # Rounds g and h: open never covers an accepted call without an answer
+        # (test_fail_mode_open_wording.py has the full wording).
+        self.assertIn("a gateway that takes the call but does not answer in time still block", output)
 
     def test_confirm_refuses_when_output_is_piped(self):
         # GAP-1432: `fail-mode open 2>&1 | tail` hid the prompt in the pipe
