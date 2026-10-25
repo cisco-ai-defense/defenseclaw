@@ -148,15 +148,18 @@ func TestR104GAP0768NativePOSIXHookRoutes(t *testing.T) {
 			api := &APIServer{scannerCfg: cfg}
 			var action, raw string
 			var findings []string
+			// An authenticated hook route, as production serves it: the
+			// session's first call sights the file that is there.
+			ctx := withAuthenticatedHookConnector(t.Context(), tc.connector)
 			if tc.connector == "claudecode" {
-				response := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
-					HookEventName: "PreToolUse", ToolName: "Bash", CWD: root,
+				response := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+					HookEventName: "PreToolUse", SessionID: "gap0768", ToolName: "Bash", CWD: root,
 					ToolInput: map[string]interface{}{"command": command},
 				})
 				action, raw, findings = response.Action, response.RawAction, response.Findings
 			} else {
-				response := api.evaluateCodexHook(t.Context(), codexHookRequest{
-					HookEventName: "PreToolUse", ToolName: "Bash", CWD: root,
+				response := api.evaluateCodexHook(ctx, codexHookRequest{
+					HookEventName: "PreToolUse", SessionID: "gap0768", ToolName: "Bash", CWD: root,
 					ToolInput: map[string]interface{}{"command": command},
 				})
 				action, raw, findings = response.Action, response.RawAction, response.Findings
