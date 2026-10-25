@@ -395,12 +395,14 @@ func (f *InstructionFiles) identify() {
 	}
 }
 
-// Identity reports the existing instruction file a write target names, by
-// file identity, whether through its own name or an alias. A missing target
-// never supplies an identity fact to the gateway.
-func (f *InstructionFiles) Identity(path string) string {
+// Identities reports the existing instruction files a write target names,
+// by file identity, whether through its own name or an alias: every one of
+// them, so a write to one file with two instruction names (CLAUDE.md and
+// SOUL.md hard-linked) is judged by both names' rules (GAP-1127). A missing
+// target never supplies an identity fact to the gateway.
+func (f *InstructionFiles) Identities(path string) []string {
 	if f == nil || !filepath.IsAbs(path) {
-		return ""
+		return nil
 	}
 	path = filepath.Clean(path)
 	real := path
@@ -409,36 +411,36 @@ func (f *InstructionFiles) Identity(path string) string {
 	}
 	info, err := os.Stat(real)
 	if err != nil || !info.Mode().IsRegular() {
-		return ""
+		return nil
 	}
 	f.identify()
+	var files []string
 	for _, file := range f.files {
 		if os.SameFile(info, file.info) {
-			return file.path
+			files = append(files, file.path)
 		}
 	}
-	return ""
+	return files
 }
 
-// Alias reports the protected instruction file that an existing write target
-// is under another name: a symlink or hard link to one of the call's
+// Aliases reports the protected instruction files that an existing write
+// target is under another name: a symlink or hard link to one of the call's
 // instruction files (whatever the link is named), the physical file a
 // symlinked one reaches, a path through a symlinked or case-variant
 // directory, or a case, short-name or stream variant of one. Only the call's
 // instruction files count: an instruction-named file in no load location
 // that the session did not load is ordinary, and so is every other name of
 // it. A missing file, one that is not regular and an instruction file named
-// as the call names it report nothing: the name rules judge the last.
-func (f *InstructionFiles) Alias(path string) string {
+// as the call names it report nothing: the name rules judge the last. Every
+// other instruction name of the same file is reported (GAP-1127).
+func (f *InstructionFiles) Aliases(path string) []string {
 	if f == nil || !filepath.IsAbs(path) {
-		return ""
+		return nil
 	}
 	path = filepath.Clean(path)
-	instruction := f.Identity(path)
-	if instruction == path || instructionNameFold() && strings.EqualFold(instruction, path) {
-		return ""
-	}
-	return instruction
+	return slices.DeleteFunc(f.Identities(path), func(instruction string) bool {
+		return instruction == path || instructionNameFold() && strings.EqualFold(instruction, path)
+	})
 }
 
 // Located returns the spelling of path that names it in the directory of a

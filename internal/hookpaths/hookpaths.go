@@ -731,18 +731,23 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	writeIdentities := make(map[string]string)
 	instructions := NewInstructionFiles(cwd, home, nil)
 	noteIdentity := func(resolved string) {
-		instruction := instructions.Identity(resolved)
-		if filepath.IsAbs(instruction) &&
-			len(instruction) <= MaxWriteTargetPathBytes && !slices.Contains(identities, instruction) {
-			identities = append(identities, instruction)
+		// Every instruction name of the target's file (GAP-1127).
+		named := instructions.Identities(resolved)
+		for _, instruction := range named {
+			if filepath.IsAbs(instruction) &&
+				len(instruction) <= MaxWriteTargetPathBytes && !slices.Contains(identities, instruction) {
+				identities = append(identities, instruction)
+			}
 		}
 		if identity := FileIdentity(resolved); identity != "" {
 			if !slices.Contains(fileIdentities, identity) {
 				fileIdentities = append(fileIdentities, identity)
 			}
-			if instruction != "" {
+			if len(named) > 0 {
 				writeIdentities[resolved] = identity
-				writeIdentities[instruction] = identity
+				for _, instruction := range named {
+					writeIdentities[instruction] = identity
+				}
 			}
 		}
 	}
@@ -957,6 +962,18 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		reached = append(reached, filepath.Dir(target))
 		if resolved := targets[target]; filepath.IsAbs(resolved) {
 			reached = append(reached, filepath.Dir(resolved))
+		}
+	}
+	// A directory the call moves or removes is sighted before it goes, so
+	// a directory the session created keeps its identity under the name a
+	// mv gives it, also when no call reached it before (GAP-1432).
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessDelete || !filepath.IsAbs(candidate.Resolved) {
+			continue
+		}
+		if info, err := os.Lstat(candidate.Resolved); err == nil && info.IsDir() &&
+			info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+			reached = append(reached, filepath.Clean(candidate.Resolved))
 		}
 	}
 	if value := reachedEvidence(append(reached, InstructionDirectories(cwd, home)...)); value != "" {

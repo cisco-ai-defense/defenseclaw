@@ -610,3 +610,11 @@ func TestInstructionAliasAndLocationOfInstructionNames(t *testing.T) {
 		})
 	}
 }
+
+// Alias is the first of Aliases, for the single-name cases above.
+func (f *InstructionFiles) Alias(path string) string {
+	if aliases := f.Aliases(path); len(aliases) > 0 {
+		return aliases[0]
+	}
+	return ""
+}

@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -32,6 +33,18 @@ var instructionRuleFiles = map[string]string{
 }
 
 const instructionAliasTitle = " (written through another name of the file)"
+
+// instructionProof is how a write target is proved to be an instruction
+// file the session must keep: by identity (a load the session reported, or
+// the file its snapshot recorded when the session reached the directory),
+// or only by existing now in a directory the snapshot does not record.
+type instructionProof int
+
+const (
+	instructionNotProved instructionProof = iota
+	instructionExistenceProved
+	instructionIdentityProved
+)
 
 // provedHighWriteFindings joins a native action's resolved write target to a
 // HIGH or CRITICAL catalog rule whose expression names a write access. The
@@ -86,7 +99,7 @@ func provedHighWriteFindings(
 		home:   request.Input.ActiveHome,
 		loaded: append([]string(nil), request.Input.ActiveAgentFiles...),
 	}
-	for _, loaded := range request.ActiveAgentFileIdentities {
+	for _, loaded := range slices.Sorted(maps.Keys(request.ActiveAgentFileIdentities)) {
 		locations.loaded = append(locations.loaded, loaded)
 	}
 	startupView := instructionStartupFromContext(ctx)
@@ -132,12 +145,12 @@ func provedHighWriteFindings(
 		}
 		return false
 	}
-	provedLocation := func(location, target string, flavor actionfacts.PathFlavor) bool {
+	provedLocation := func(location, target string, flavor actionfacts.PathFlavor) instructionProof {
 		if !instructionLoadLocation(location, flavor, locations) {
-			return false
+			return instructionNotProved
 		}
 		if loadedAtRuntime(location, flavor) {
-			return true
+			return instructionIdentityProved
 		}
 		// A file in a directory the session's snapshot records is protected
 		// only while it is the file that was there when the session reached
@@ -145,7 +158,7 @@ func provedHighWriteFindings(
 		if normalized, ok := activeAgentInstructionPath(location, flavor); ok &&
 			startup.startupCovers(instructionParent(normalized)) {
 			if startup.startupFiles[normalized] == "" {
-				return false
+				return instructionNotProved
 			}
 			identity := ""
 			if flavor == hostFlavor && !isSandboxHookRequest(ctx) {
@@ -157,33 +170,44 @@ func provedHighWriteFindings(
 			if identity == "" {
 				identity = request.ResolvedWriteTargets[hookpaths.WriteIdentityPrefix+location]
 			}
-			return identity != "" && identity == startup.startupFiles[normalized]
+			if identity != "" && identity == startup.startupFiles[normalized] {
+				return instructionIdentityProved
+			}
+			return instructionNotProved
 		}
+		// A directory the snapshot does not record, or a session without a
+		// snapshot: only the file existing now is known, not that it existed
+		// before the session (instructionExistenceProved). The hook client's
+		// identity is that proof when a managed gateway cannot read the
+		// user's files.
 		if clientIdentified(location, flavor) {
-			return true
+			return instructionExistenceProved
 		}
-		// A startup location alone does not prove that its instruction file
-		// existed for this call. The hook client's identity above is the
-		// proof when a managed gateway cannot read the user's files.
 		if flavor != hostFlavor || isSandboxHookRequest(ctx) {
-			return false
+			return instructionNotProved
 		}
-		info, err := os.Stat(filepath.FromSlash(location))
-		return err == nil && info.Mode().IsRegular()
+		if info, err := os.Stat(filepath.FromSlash(location)); err == nil && info.Mode().IsRegular() {
+			return instructionExistenceProved
+		}
+		return instructionNotProved
 	}
-	instructionTarget := func(resolved string, flavor actionfacts.PathFlavor) bool {
-		if provedLocation(resolved, resolved, flavor) {
-			return true
-		}
+	instructionTarget := func(resolved string, flavor actionfacts.PathFlavor) instructionProof {
+		proof := provedLocation(resolved, resolved, flavor)
 		// A symlinked or case-variant spelling of a load location's
 		// directory, on this host's file system, is judged as the spelling
 		// of the location it reaches.
-		if flavor != hostFlavor || isSandboxHookRequest(ctx) {
-			return false
+		if proof == instructionIdentityProved || flavor != hostFlavor || isSandboxHookRequest(ctx) {
+			return proof
 		}
-		located := instructions.Located(filepath.FromSlash(resolved))
-		return located != "" && provedLocation(located, resolved, flavor)
+		if located := instructions.Located(filepath.FromSlash(resolved)); located != "" {
+			proof = max(proof, provedLocation(located, resolved, flavor))
+		}
+		return proof
 	}
+	// Existence alone protects a file only in the strict tier; elsewhere it
+	// is a warning with an audit row (BALANCED-DEFAULTS: no snapshot or an
+	// unknown directory never blocks in default/permissive).
+	existenceBlocks := startupView.existenceBlocks()
 	// File-identity evidence names the instruction file a target writes
 	// under its own path, so every target, however it was found, is judged
 	// by the same instructionTarget once.
@@ -193,7 +217,8 @@ func provedHighWriteFindings(
 			return
 		}
 		seenTargets[resolved] = true
-		instruction := instructionTarget(resolved, flavor)
+		instructionProof := instructionTarget(resolved, flavor)
+		instruction := instructionProof != instructionNotProved
 		for _, category := range generation.categories {
 			for _, rule := range category.Rules {
 				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, resolved, flavor, instruction) {
@@ -203,19 +228,28 @@ func provedHighWriteFindings(
 				if !proof.authorizes(rule.ID) {
 					continue
 				}
+				_, instructionRule := instructionRuleFiles[rule.ID]
+				alertOnly := instructionRule && instructionProof == instructionExistenceProved && !existenceBlocks
 				index := slices.IndexFunc(proved, func(finding RuleFinding) bool {
 					return finding.RuleID == rule.ID
 				})
 				if index >= 0 {
-					proved[index].enforcement = findingEnforcementAllowed
-					proved[index].proof = proof
+					// Existence alone never makes a finding enforceable.
+					if !alertOnly {
+						proved[index].enforcement = findingEnforcementAllowed
+						proved[index].proof = proof
+					}
 					continue
+				}
+				enforcement := findingEnforcementAllowed
+				if alertOnly {
+					enforcement = findingEnforcementAlertOnly
 				}
 				proved = append(proved, adjustConfidence(request.Input.Tool, RuleFinding{
 					RuleID: rule.ID, Title: rule.Title + note, Severity: rule.Severity,
 					Confidence: rule.Confidence, Evidence: path.Base(strings.ReplaceAll(resolved, `\`, "/")),
 					Tags:       append([]string(nil), rule.Tags...),
-					LineNumber: 1, enforcement: findingEnforcementAllowed,
+					LineNumber: 1, enforcement: enforcement,
 					proof: proof,
 				}))
 			}
@@ -230,7 +264,8 @@ func provedHighWriteFindings(
 		if flavor != hostFlavor || isSandboxHookRequest(ctx) {
 			return
 		}
-		if instruction := instructions.Alias(filepath.FromSlash(resolved)); instruction != "" {
+		// Every instruction name of the file (GAP-1127).
+		for _, instruction := range instructions.Aliases(filepath.FromSlash(resolved)) {
 			addTarget(instruction, flavor, exactProof, instructionAliasTitle)
 		}
 	}
@@ -287,8 +322,10 @@ func provedHighWriteFindings(
 			addClientTarget(identity, instructionAliasTitle)
 		}
 	}
-	for _, identity := range hookpaths.FileIdentities(request.ResolvedWriteTargets) {
-		if loaded := request.ActiveAgentFileIdentities[identity]; filepath.IsAbs(loaded) {
+	// Every loaded name of a written file counts (GAP-1414).
+	written := hookpaths.FileIdentities(request.ResolvedWriteTargets)
+	for _, loaded := range slices.Sorted(maps.Keys(request.ActiveAgentFileIdentities)) {
+		if filepath.IsAbs(loaded) && slices.Contains(written, request.ActiveAgentFileIdentities[loaded]) {
 			addClientTarget(loaded, instructionAliasTitle)
 		}
 	}

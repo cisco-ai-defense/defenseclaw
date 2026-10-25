@@ -159,7 +159,7 @@ type trustedActionRequest struct {
 	// ActiveAgentFileIdentities maps the hook client's file identity of each
 	// instruction file the session loaded to that file, for a gateway that
 	// cannot read it (hookpaths.LoadedIdentityPrefix).
-	ActiveAgentFileIdentities map[string]string
+	ActiveAgentFileIdentities map[string]string // loaded file -> identity
 	// Hermes' native patch parser can reinterpret a symlink target containing
 	// a line break as another file directive. Its write views require the
 	// narrower patch-target proof, including in guest-directory views.

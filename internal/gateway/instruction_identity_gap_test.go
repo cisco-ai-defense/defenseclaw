@@ -162,7 +162,9 @@ func TestInstructionProtectionSymlinkedInstructionTarget(t *testing.T) {
 }
 
 // The gateway behind ProtectHome reads no file: the hook client's identity
-// evidence alone decides.
+// evidence alone decides. Without a sighting (a 1.0.3 hook binary) it proves
+// only that the file exists now, which blocks in the strict tier and warns
+// elsewhere (instructionExistenceTiers).
 func TestInstructionProtectionClientIdentityEvidence(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the client evidence is POSIX-only")
@@ -174,13 +176,13 @@ func TestInstructionProtectionClientIdentityEvidence(t *testing.T) {
 	}
 	ctx := withAuthenticatedHookConnector(context.WithValue(t.Context(), resolvedWritesContextKey{}, targets), "claudecode")
 	input := map[string]interface{}{"command": "printf changed >> /home/alice/scratch/notes.txt"}
-	response := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH").evaluateClaudeCodeHook(
-		ctx, claudeCodeHookRequest{
-			HookEventName: "PreToolUse", SessionID: "protect-home", CWD: "/home/alice/project",
-			ToolName: "Bash", ToolInput: input,
-		})
-	if response.Action != guardrailActionBlock || !findingStringHasRuleID(response.Findings, "COG-CLAUDE-MD") {
-		t.Fatalf("client identity: action=%q findings=%v", response.Action, response.Findings)
+	for _, tier := range instructionExistenceTiers {
+		response := instructionProtectionTierTestAPI(t, "claudecode", tier.pack).evaluateClaudeCodeHook(
+			ctx, claudeCodeHookRequest{
+				HookEventName: "PreToolUse", SessionID: "protect-home", CWD: "/home/alice/project",
+				ToolName: "Bash", ToolInput: input,
+			})
+		checkExistenceTier(t, tier.blocks, "client identity "+tier.pack, response.Action, response.Findings, "COG-CLAUDE-MD")
 	}
 }
 

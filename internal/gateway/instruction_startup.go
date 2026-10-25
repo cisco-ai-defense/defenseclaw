@@ -37,17 +37,28 @@ type instructionStartupContextKey struct{}
 
 // instructionStartupView is the snapshot a call is judged with. extend adds
 // the directories the call reaches first and returns the snapshot after
-// that; it is nil when the gateway cannot take a first sighting.
+// that; it is nil when the gateway cannot take a first sighting. strict is
+// the call's rule pack posture: only there does an instruction file that
+// merely exists now, in a directory the snapshot does not record, block.
 type instructionStartupView struct {
+	present  bool
+	strict   bool
 	snapshot activeAgentContextSnapshot
 	extend   func(dirs []string) activeAgentContextSnapshot
 }
 
+// existenceBlocks reports whether an instruction file proved only by
+// existing now is enforced: in the strict tier, and on a path that judges
+// without a view (the behaviour before the view carried the tier).
+func (view instructionStartupView) existenceBlocks() bool {
+	return !view.present || view.strict
+}
+
 func (a *APIServer) withInstructionStartup(ctx context.Context, connector, sessionID string, snapshot activeAgentContextSnapshot) context.Context {
+	view := instructionStartupView{present: true, strict: a.instructionStrictTier(ctx, connector), snapshot: snapshot}
 	if !snapshot.startupKnown {
-		return ctx
+		return context.WithValue(ctx, instructionStartupContextKey{}, view)
 	}
-	view := instructionStartupView{snapshot: snapshot}
 	if key, ok := instructionStartupKey(ctx, connector, sessionID); ok {
 		if sighting, ok := instructionSightingFor(ctx, key.connector); ok {
 			view.extend = func(dirs []string) activeAgentContextSnapshot {
@@ -57,6 +68,17 @@ func (a *APIServer) withInstructionStartup(ctx context.Context, connector, sessi
 		}
 	}
 	return context.WithValue(ctx, instructionStartupContextKey{}, view)
+}
+
+// instructionStrictTier reports whether connector's rule pack for the call
+// (its profile's, else the configuration's) has the strict posture.
+func (a *APIServer) instructionStrictTier(ctx context.Context, connector string) bool {
+	cfg := a.decisionConfig(ctx)
+	if cfg == nil {
+		return false
+	}
+	ref := cfg.EffectiveRulePackRefForConnector(connector)
+	return packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref)) == "strict"
 }
 
 func instructionStartupFromContext(ctx context.Context) instructionStartupView {

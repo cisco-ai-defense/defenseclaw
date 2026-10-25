@@ -88,8 +88,9 @@ type activeAgentContextSession struct {
 	// startupDirIDs are the file system identities of startupDirs, where
 	// known: another spelling of a recorded directory keeps its record.
 	startupDirIDs map[string]string
-	// identities maps the hook client's file identity of a loaded file
-	// (hookpaths.LoadedIdentityPrefix) to that file.
+	// identities maps each loaded file to the hook client's file identity
+	// of it (hookpaths.LoadedIdentityPrefix). Two loaded names of one file
+	// (hard links) keep one entry each (GAP-1414).
 	identities               map[string]string
 	caseInsensitiveUncertain bool
 	uncertain                bool
@@ -193,16 +194,11 @@ func syntacticActiveAgentFileCandidate(filePath string) bool {
 		filepath.Base(filePath) == canonicalName)
 }
 
+// canonicalActiveAgentFileName is the instruction name value spells: every
+// protected name, openclaw.json included, so a loaded openclaw.json keeps
+// its load record and identity like the others (GAP-1126).
 func canonicalActiveAgentFileName(value string) (string, bool) {
-	for _, canonical := range []string{
-		"AGENTS.md",
-		"CLAUDE.md",
-		"gateway.json",
-		"IDENTITY.md",
-		"MEMORY.md",
-		"SOUL.md",
-		"TOOLS.md",
-	} {
+	for _, canonical := range hookpaths.InstructionFileNames {
 		if activeAgentASCIIEqualFold(value, canonical) {
 			return canonical, true
 		}
@@ -432,13 +428,13 @@ func (cache *activeAgentContextCache) seedLoadedIdentity(key activeAgentContextK
 	defer cache.mu.Unlock()
 	session, ok := cache.sessions[key]
 	if !ok || !slices.Contains(session.files, filePath) ||
-		len(session.identities) >= maxActiveAgentContextFiles {
+		len(session.identities) >= maxActiveAgentContextFiles && session.identities[filePath] == "" {
 		return
 	}
 	if session.identities == nil {
 		session.identities = make(map[string]string)
 	}
-	session.identities[identity] = filePath
+	session.identities[filePath] = identity
 	cache.sessions[key] = session
 }
 
@@ -848,7 +844,7 @@ func (cache *activeAgentContextCache) restoreKey(key activeAgentContextKey, reco
 	cache.sessions[key] = activeAgentContextSession{
 		files:                    slices.Clone(record.Files),
 		caseInsensitiveFiles:     slices.Clone(record.CaseInsensitiveFiles),
-		identities:               maps.Clone(record.Identities),
+		identities:               maps.Clone(record.LoadedIdentities),
 		startupFiles:             maps.Clone(record.StartupFiles),
 		startupKnown:             record.StartupKnown,
 		startupDirs:              slices.Clone(record.StartupDirs),

@@ -144,6 +144,24 @@ func TestInstructionBenignManagedCreatedDirectoryHiddenHome(t *testing.T) {
 			t.Fatalf("a mv made the session's own AGENTS.md pre-existing: %+v", got)
 		}
 	})
+	t.Run("mv before any call reaches it", func(t *testing.T) {
+		// GAP-1432: the mv call itself sights the directory it moves.
+		s := newManagedHiddenHomeSession(t, true)
+		s.start(true)
+		create(t, s)
+		if got := s.call(s.base, "Bash", map[string]interface{}{"command": "mv new renamed"}); cogBlocked(got.Action, got.WouldBlock, got.Findings) {
+			t.Fatalf("mv of the session's own directory was blocked: %+v", got)
+		}
+		renamed := filepath.Join(s.base, "renamed")
+		if err := os.Rename(filepath.Join(s.base, "new"), renamed); err != nil {
+			t.Fatal(err)
+		}
+		for range 2 {
+			if got := s.patch(renamed, sightingUpdatePatch); cogBlocked(got.Action, got.WouldBlock, got.Findings) {
+				t.Fatalf("a mv made the session's own AGENTS.md pre-existing: %+v", got)
+			}
+		}
+	})
 	t.Run("a link at a missing spelling keeps its target protected", func(t *testing.T) {
 		s := newManagedHiddenHomeSession(t, true)
 		s.start(true)

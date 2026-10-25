@@ -25,16 +25,20 @@ import (
 const maxInstructionLoadRecordBytes = 1 << 20
 
 type instructionLoadRecord struct {
-	Scope                string            `json:"scope,omitempty"`
-	Connector            string            `json:"connector"`
-	Session              string            `json:"session"`
-	Files                []string          `json:"files,omitempty"`
-	CaseInsensitiveFiles []string          `json:"case_insensitive_files,omitempty"`
-	Identities           map[string]string `json:"identities,omitempty"`
-	StartupFiles         map[string]string `json:"startup_files,omitempty"`
-	StartupKnown         bool              `json:"startup_known,omitempty"`
-	StartupDirs          []string          `json:"startup_dirs,omitempty"`
-	StartupDirIDs        map[string]string `json:"startup_dir_ids,omitempty"`
+	Scope                string   `json:"scope,omitempty"`
+	Connector            string   `json:"connector"`
+	Session              string   `json:"session"`
+	Files                []string `json:"files,omitempty"`
+	CaseInsensitiveFiles []string `json:"case_insensitive_files,omitempty"`
+	// LoadedIdentities maps each loaded file to its identity. It replaced
+	// the identity-keyed "identities" map of unreleased 1.0.4 candidates,
+	// which kept one of two hard-linked names (GAP-1414); such a record
+	// restores without client identities.
+	LoadedIdentities map[string]string `json:"loaded_identities,omitempty"`
+	StartupFiles     map[string]string `json:"startup_files,omitempty"`
+	StartupKnown     bool              `json:"startup_known,omitempty"`
+	StartupDirs      []string          `json:"startup_dirs,omitempty"`
+	StartupDirIDs    map[string]string `json:"startup_dir_ids,omitempty"`
 }
 
 func (a *APIServer) instructionLoadDir() string {
@@ -67,7 +71,7 @@ func (a *APIServer) saveInstructionLoads(key activeAgentContextKey) {
 	data, err := json.Marshal(instructionLoadRecord{
 		Scope: key.scope, Connector: key.connector, Session: key.sessionID,
 		Files: session.files, CaseInsensitiveFiles: session.caseInsensitiveFiles,
-		Identities: session.identities, StartupFiles: session.startupFiles,
+		LoadedIdentities: session.identities, StartupFiles: session.startupFiles,
 		StartupKnown: session.startupKnown, StartupDirs: session.startupDirs,
 		StartupDirIDs: session.startupDirIDs,
 	})
@@ -150,7 +154,7 @@ func readInstructionLoadRecord(name string, key activeAgentContextKey) (instruct
 		record.Connector != key.connector || record.Session != key.sessionID ||
 		!record.StartupKnown && len(record.Files) == 0 ||
 		len(record.Files) > maxActiveAgentContextFiles ||
-		len(record.Identities) > maxActiveAgentContextFiles {
+		len(record.LoadedIdentities) > maxActiveAgentContextFiles {
 		return instructionLoadRecord{}, false
 	}
 	for _, file := range record.Files {
@@ -163,9 +167,8 @@ func readInstructionLoadRecord(name string, key activeAgentContextKey) (instruct
 			return instructionLoadRecord{}, false
 		}
 	}
-	for identity, file := range record.Identities {
-		if identity == "" || len(identity) > 64 || strings.Trim(identity, "0123456789abcdef:") != "" ||
-			!slices.Contains(record.Files, file) {
+	for file, identity := range record.LoadedIdentities {
+		if !recordedFileIdentity(identity) || !slices.Contains(record.Files, file) {
 			return instructionLoadRecord{}, false
 		}
 	}
