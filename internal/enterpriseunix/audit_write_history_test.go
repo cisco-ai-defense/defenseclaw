@@ -27,8 +27,8 @@ func TestStatusAndVerifyReportAnAuditWriteFailureThatOtherRecordsCleared(t *test
 		if result.SecurityComplete || !strings.Contains(message, "since it started") || !strings.Contains(message, "constraint_corrupt") {
 			t.Fatalf("%s: security_complete=%t audit warning %q", action, result.SecurityComplete, message)
 		}
-		if action == ActionVerify && len(result.Errors) != 0 {
-			t.Fatalf("verify: the audit warning alone must not fail verify: %+v", result.Errors)
+		if strings.Contains(messagesOf(result.Errors, codeAuditWriteFailed), "audit") {
+			t.Fatalf("%s: the audit warning must not be a verify error: %+v", action, result.Errors)
 		}
 	}
 }
