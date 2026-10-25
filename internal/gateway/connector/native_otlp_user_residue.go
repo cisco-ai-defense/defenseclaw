@@ -427,7 +427,7 @@ func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts S
 			// A DefenseClaw credential in any OTLP value (resource attributes
 			// and service name included) never stays beside a kept route.
 			// Verify may be unable to read a target user's sidecar as SYSTEM;
-			// the token shape still proves it.
+			// a token-shaped value with DefenseClaw provenance still proves it.
 			owned = true
 		case claudeCodeOTLPEndpointKey(key):
 			// A credential on logs does not claim another signal's collector.
@@ -559,12 +559,12 @@ func claudeCodeKnownProductTokens(recordedHeaders map[string]string, opts SetupO
 }
 
 // claudeCodeRouteIsProduct reports a Claude Code OTLP endpoint DefenseClaw
-// owns: the endpoint, or the headers Claude Code sends with it, carries a
-// DefenseClaw credential. Any other endpoint is the operator's collector, on
-// any host or port.
+// owns: the route (the endpoint and the headers Claude Code sends with it)
+// carries a DefenseClaw credential. Any other endpoint is the operator's
+// collector, on any host or port.
 func claudeCodeRouteIsProduct(env map[string]interface{}, endpointKey, endpoint string, known []string) bool {
-	return endpoint != "" && (otlpCarriesProductCredential(endpoint, known) ||
-		otlpCarriesProductCredential(claudeCodeEffectiveEndpointHeaders(env, endpointKey), known))
+	return endpoint != "" && otlpCarriesProductCredential(
+		[]interface{}{endpoint, claudeCodeEffectiveEndpointHeaders(env, endpointKey)}, known)
 }
 
 // claudeCodeAuthorizationValues returns the decoded value of every

@@ -7345,32 +7345,113 @@ def _codex_otel_exports_to_defenseclaw(otel, product_token: str = "") -> bool:
 
 # Every credential DefenseClaw mints is 32 random bytes as 64 lowercase hex.
 _OTEL_PRODUCT_TOKEN_RE = re.compile(r"(?:^|[^0-9A-Za-z])[0-9a-f]{64}(?:[^0-9A-Za-z]|$)")
+# The scoped route DefenseClaw writes (/otlp/<connector>/<token>/...).
+_OTEL_SCOPED_ROUTE_RE = re.compile(r"/otlp/[0-9a-z_-]+/[0-9a-f]{64}(?:[^0-9A-Za-z]|$)")
+# The base64 user:password of an HTTP Basic Authorization value (RFC 7617).
+_OTEL_BASIC_CREDENTIAL_RE = re.compile(r"(?:^|[^0-9A-Za-z])basic[ \t]+([0-9A-Za-z+/_-]{4,}=*)", re.IGNORECASE)
+# Bound on the decoded forms checked for one string (gateway otlpMaxValueForms).
+_OTEL_MAX_VALUE_FORMS = 16
+
+
+def _otel_base64_decode(text: str):
+    """Standard or URL-safe base64, padded or not (gateway otlpBase64Decode)."""
+    raw = text.rstrip("=")
+    padded = (raw + "=" * (-len(raw) % 4)).encode("ascii")
+    for alphabet in (None, b"-_"):
+        try:
+            return base64.b64decode(padded, altchars=alphabet, validate=True).decode("latin-1")
+        except ValueError:  # binascii.Error included
+            continue
+    return None
+
+
+def _otel_value_forms(text: str) -> tuple[list[str], bool]:
+    """Mirror of the gateway's otlpValueForms.
+
+    The value, each percent-decode layer and each Basic credential, at most
+    _OTEL_MAX_VALUE_FORMS of them, found iteratively so nesting cannot exhaust
+    the stack. The flag reports that the bound left a form unchecked.
+    """
+    pending, seen, forms = [text], set(), []
+    while pending:
+        value = pending.pop()
+        if value in seen:
+            continue
+        if len(forms) == _OTEL_MAX_VALUE_FORMS:
+            return forms, True
+        seen.add(value)
+        forms.append(value)
+        decoded = urllib.parse.unquote(value, encoding="latin-1")
+        if decoded != value:
+            pending.append(decoded)
+        for match in list(_OTEL_BASIC_CREDENTIAL_RE.finditer(value))[:_OTEL_MAX_VALUE_FORMS]:
+            credential = _otel_base64_decode(match.group(1))
+            if credential is not None:
+                pending.append(credential)
+    return forms, False
+
+
+def _otel_credential_evidence(value, known) -> dict:
+    """What a value shows: a known credential, the product token shape,
+    DefenseClaw provenance (an x-defenseclaw-* marker or the scoped route),
+    and whether the decode bound left a form unchecked."""
+    evidence = {"known": False, "shape": False, "provenance": False, "limited": False}
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            forms, limited = _otel_value_forms(item)
+            evidence["limited"] = evidence["limited"] or limited
+            for form in forms:
+                if any(len(token) >= 8 and token in form for token in known):
+                    evidence["known"] = True
+                if _OTEL_PRODUCT_TOKEN_RE.search(form):
+                    evidence["shape"] = True
+                if "x-defenseclaw-" in form.lower() or _OTEL_SCOPED_ROUTE_RE.search(form):
+                    evidence["provenance"] = True
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                stack.extend((key, child))
+        elif isinstance(item, list):
+            stack.extend(item)
+    return evidence
 
 
 def _otel_carries_product_credential(value, known) -> bool:
     """Mirror of the gateway's otlpCarriesProductCredential.
 
     Ownership is decided by the secret: a value that contains a known product
-    credential or a value of the product token shape is DefenseClaw's, whatever
-    its host, port, header-name or scheme spelling.
+    credential (percent-encoded or inside a Basic credential included), or a
+    value of the product token shape with DefenseClaw provenance, is
+    DefenseClaw's, whatever its host, port, header-name or scheme spelling.
+    The token shape alone is the operator's.
     """
-    if isinstance(value, str):
-        # Header and resource lists, URLs and queries may percent-encode the
-        # credential; unquote is lenient, as the gateway's otlpPercentDecode.
-        decoded = urllib.parse.unquote(value)
-        if decoded != value and _otel_carries_product_credential(decoded, known):
-            return True
-        return bool(_OTEL_PRODUCT_TOKEN_RE.search(value)) or any(
-            len(token) >= 8 and token in value for token in known
-        )
-    if isinstance(value, dict):
-        return any(
-            _otel_carries_product_credential(key, known) or _otel_carries_product_credential(item, known)
-            for key, item in value.items()
-        )
-    if isinstance(value, list):
-        return any(_otel_carries_product_credential(item, known) for item in value)
-    return False
+    evidence = _otel_credential_evidence(value, known)
+    return evidence["known"] or (evidence["shape"] and evidence["provenance"])
+
+
+def _codex_otel_unproven_value(otel, product_token: str = "") -> tuple[str, str]:
+    """Name a Codex [otel] value DefenseClaw kept although it may be a credential.
+
+    A token-shaped value without a recorded token or DefenseClaw provenance is
+    ambiguous, so cleanup keeps it; one encoded too deeply to check is kept
+    too. Doctor reports both so the operator can decide.
+    """
+    if not isinstance(otel, dict):
+        return "", ""
+    known = [product_token] if product_token else []
+    for key in sorted(otel, key=str):
+        evidence = _otel_credential_evidence(otel[key], known)
+        if evidence["known"] or (evidence["shape"] and evidence["provenance"]):
+            continue
+        if evidence["limited"]:
+            return f"otel.{key}", "is percent-encoded too deeply for Doctor to check for a DefenseClaw credential"
+        if evidence["shape"]:
+            return f"otel.{key}", (
+                "holds a value shaped like a DefenseClaw token, but no recorded token or DefenseClaw marker "
+                "proves it is one, so DefenseClaw kept it"
+            )
+    return "", ""
 
 
 def _codex_scoped_otlp_token(cfg) -> str:
@@ -7394,10 +7475,11 @@ def _codex_scoped_otlp_token(cfg) -> str:
 def _codex_credential_off_gateway(otel, api_port: int, product_token: str = "") -> str:
     """Name a Codex exporter that sends a DefenseClaw credential off this gateway.
 
-    An exporter carrying a DefenseClaw credential is the product's (the token
-    shape proves it even when the scoped sidecar is gone); only the current
-    loopback gateway port may receive it. Exporters without one are the
-    operator's and pass here, on any host or port.
+    An exporter carrying a DefenseClaw credential is the product's (a
+    token-shaped value with DefenseClaw provenance proves it even when the
+    scoped sidecar is gone); only the current loopback gateway port may receive
+    it. Exporters without one are the operator's and pass here, on any host or
+    port.
     """
     if not isinstance(otel, dict):
         return ""
@@ -7502,6 +7584,17 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
         )
     else:
         _emit("pass", "Codex OTel environment", f"config.toml and DefenseClaw use {expected!r}", r=r)
+
+    if not config_error:
+        unproven, why = _codex_otel_unproven_value(otel, _codex_scoped_otlp_token(cfg))
+        if unproven:
+            _emit(
+                "warn",
+                "Codex OTel ownership",
+                f"config.toml {unproven} {why}",
+                r=r,
+                remediation="if it is a DefenseClaw token, remove it; otherwise no action is needed",
+            )
 
     try:
         api_port = int(getattr(cfg.gateway, "api_port", 0) or 0)

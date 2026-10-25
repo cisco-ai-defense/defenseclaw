@@ -4,6 +4,7 @@
 package connector
 
 import (
+	"encoding/base64"
 	"regexp"
 	"strings"
 )
@@ -15,57 +16,131 @@ import (
 // UserNativeOTLPResidue, which the Linux, macOS and Windows enterprise paths
 // call), VerifyClean, and Doctor through its mirror.
 //
-// An exporter, header or env value that carries a DefenseClaw credential is
-// product-owned. Host Setup no longer exports native OTLP, so cleanup removes
-// it and the credential never reaches a port DefenseClaw does not own.
-// Everything else is the operator's and keeps its bytes, on any host or port,
-// with or without stale x-defenseclaw-* marker headers.
+// An exporter, header or env value is product-owned when it carries a
+// credential this install can name (the scoped token sidecar, the tokens
+// Setup was given, the bearers Claude Code's backup recorded), or a value of
+// the product token shape together with DefenseClaw provenance in the same
+// value: an x-defenseclaw-* marker or the scoped /otlp/<connector>/<token>
+// route. Host Setup no longer exports native OTLP, so cleanup removes it and
+// the credential never reaches a port DefenseClaw does not own.
+//
+// The token shape alone proves nothing: an operator collector may use its own
+// 64-hex bearer, and a resource attribute may hold a sha256. Such a value, and
+// one too deeply encoded to check, is the operator's and keeps its bytes;
+// Doctor names it. Everything else is the operator's too, on any host or
+// port, with or without stale x-defenseclaw-* marker headers.
 
 // otlpProductTokenRE matches the shape of every credential DefenseClaw mints
 // (EnsureOTLPPathToken, EnsureGatewayToken and the hook tokens): 32 random
-// bytes as 64 lowercase hex, not part of a longer alphanumeric run. The shape
-// still proves ownership when the issuing sidecar is missing or unreadable.
+// bytes as 64 lowercase hex, not part of a longer alphanumeric run.
 var otlpProductTokenRE = regexp.MustCompile(`(?:^|[^0-9A-Za-z])[0-9a-f]{64}(?:[^0-9A-Za-z]|$)`)
+
+// otlpScopedRouteRE matches the scoped route DefenseClaw writes
+// (/otlp/<connector>/<token>/...), which is provenance for its token.
+var otlpScopedRouteRE = regexp.MustCompile(`/otlp/[0-9a-z_-]+/[0-9a-f]{64}(?:[^0-9A-Za-z]|$)`)
+
+// otlpBasicCredentialRE finds the credential of an HTTP Basic Authorization
+// value (RFC 7617), whose user:password is base64. The scheme is
+// case-insensitive.
+var otlpBasicCredentialRE = regexp.MustCompile(`(?i)(?:^|[^0-9A-Za-z])basic[ \t]+([0-9A-Za-z+/_-]{4,}=*)`)
 
 // otlpMinKnownTokenLen keeps a short configured value from matching ordinary
 // text by accident.
 const otlpMinKnownTokenLen = 8
 
+// otlpMaxValueForms bounds the decoded forms checked for one string: the
+// value, each percent-decode layer and each Basic credential. The work is
+// linear in the value, whatever its nesting.
+const otlpMaxValueForms = 16
+
 // otlpCarriesProductCredential reports whether v (a string, or any TOML or
-// JSON table or array, keys included) contains one of the known credentials or
-// a value of the product token shape.
+// JSON table or array, keys included) is product-owned under the rule above.
 func otlpCarriesProductCredential(v interface{}, known []string) bool {
+	var evidence otlpCredentialEvidence
+	evidence.scan(v, known)
+	return evidence.owned()
+}
+
+// otlpCredentialEvidence is what one value shows: a known credential, the
+// product token shape and DefenseClaw provenance.
+type otlpCredentialEvidence struct {
+	known, shape, provenance bool
+}
+
+func (e *otlpCredentialEvidence) owned() bool {
+	return e.known || e.shape && e.provenance
+}
+
+func (e *otlpCredentialEvidence) scan(v interface{}, known []string) {
 	switch value := v.(type) {
 	case string:
-		// OTLP header and resource lists, endpoint userinfo and queries may
-		// percent-encode a value ("Bearer%20..."). One stray "%" elsewhere in
-		// the string must not hide it, so the decode is lenient.
-		if decoded := otlpPercentDecode(value); decoded != value &&
-			otlpCarriesProductCredential(decoded, known) {
-			return true
-		}
-		if otlpProductTokenRE.MatchString(value) {
-			return true
-		}
-		for _, token := range known {
-			if len(token) >= otlpMinKnownTokenLen && strings.Contains(value, token) {
-				return true
+		// Forms past the bound are not checked; Doctor names such a value.
+		forms, _ := otlpValueForms(value)
+		for _, form := range forms {
+			for _, token := range known {
+				if len(token) >= otlpMinKnownTokenLen && strings.Contains(form, token) {
+					e.known = true
+				}
+			}
+			if otlpProductTokenRE.MatchString(form) {
+				e.shape = true
+			}
+			if strings.Contains(strings.ToLower(form), "x-defenseclaw-") || otlpScopedRouteRE.MatchString(form) {
+				e.provenance = true
 			}
 		}
 	case map[string]interface{}:
 		for key, item := range value {
-			if otlpCarriesProductCredential(key, known) || otlpCarriesProductCredential(item, known) {
-				return true
-			}
+			e.scan(key, known)
+			e.scan(item, known)
 		}
 	case []interface{}:
 		for _, item := range value {
-			if otlpCarriesProductCredential(item, known) {
-				return true
+			e.scan(item, known)
+		}
+	}
+}
+
+// otlpValueForms returns s and the forms a collector can recover from it:
+// every percent-decode layer (header and resource lists, endpoint userinfo
+// and queries may percent-encode a value) and the user:password of every
+// Basic credential, at most otlpMaxValueForms of them. limited reports that
+// the bound left a form unchecked. The walk is iterative, so nesting cannot
+// exhaust the stack.
+func otlpValueForms(s string) (forms []string, limited bool) {
+	pending := []string{s}
+	seen := map[string]bool{}
+	for len(pending) > 0 {
+		value := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if seen[value] {
+			continue
+		}
+		if len(forms) == otlpMaxValueForms {
+			return forms, true
+		}
+		seen[value] = true
+		forms = append(forms, value)
+		if decoded := otlpPercentDecode(value); decoded != value {
+			pending = append(pending, decoded)
+		}
+		for _, match := range otlpBasicCredentialRE.FindAllStringSubmatch(value, otlpMaxValueForms) {
+			if decoded, ok := otlpBase64Decode(match[1]); ok {
+				pending = append(pending, decoded)
 			}
 		}
 	}
-	return false
+	return forms, false
+}
+
+// otlpBase64Decode decodes standard or URL-safe base64, padded or not.
+func otlpBase64Decode(s string) (string, bool) {
+	for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if decoded, err := encoding.DecodeString(s); err == nil {
+			return string(decoded), true
+		}
+	}
+	return "", false
 }
 
 // otlpPercentDecode decodes every valid %XX escape in s and keeps every other
@@ -106,7 +181,7 @@ func otlpUnhex(c byte) (byte, bool) {
 // otlpKnownProductTokens returns the credentials this install can name: the
 // scoped and hook tokens Setup was given and the scope's token sidecar. A
 // sidecar that cannot be read (missing, or another account's on Windows) adds
-// nothing; the token shape still proves ownership.
+// nothing; a token-shaped value then needs DefenseClaw provenance.
 func otlpKnownProductTokens(opts SetupOpts, scope OTLPPathTokenScope) []string {
 	known := []string{strings.TrimSpace(opts.OTLPPathToken), strings.TrimSpace(opts.APIToken)}
 	if opts.DataDir != "" {
