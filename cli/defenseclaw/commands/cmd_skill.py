@@ -5740,7 +5740,11 @@ def _scan_installed_skill_for_connector(
         pe.record_scan_block("skill", skill_name, connector, enforcement_reason)
         applied_actions.append("install blocked by this scan")
 
-    if failed_actions or (post_decision.verdict == "rejected" and not applied_actions):
+    # A failed quarantine leaves the files in place, and a failed disable
+    # with nothing else applied leaves the asset active: either way the
+    # refusal did not take effect. A gateway that is down while the
+    # quarantine or install block applied refuses nothing less.
+    if "quarantine" in failed_actions or (post_decision.verdict == "rejected" and not applied_actions):
         # A refusal whose quarantine or disable could not be applied is
         # still a refusal: the install is rolled back and the command fails,
         # never a warning with the skill left in place (GAP-1457, GAP-1466).
