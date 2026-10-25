@@ -130,9 +130,7 @@ _SEPARATOR_CELLS = 5
 _MORE = "…"
 
 
-def fit_status_segments(
-    segments: list[StatusSegment], width: int, *, separator_cells: int = _SEPARATOR_CELLS
-) -> tuple[list[StatusSegment], bool]:
+def fit_status_segments(segments: list[StatusSegment], width: int) -> tuple[list[StatusSegment], bool]:
     """The leading segments that fit ``width`` cells whole, and whether any were left out.
 
     The strip is one line, cut at the terminal edge: at 80 columns it ended
@@ -143,14 +141,14 @@ def fit_status_segments(
     from rich.cells import cell_len
 
     widths = [cell_len(segment.plain()) for segment in segments]
-    total = sum(widths) + separator_cells * max(0, len(widths) - 1)
+    total = sum(widths) + _SEPARATOR_CELLS * max(0, len(widths) - 1)
     if total <= width:
         return list(segments), False
-    room = width - separator_cells - cell_len(_MORE)
+    room = width - _SEPARATOR_CELLS - cell_len(_MORE)
     kept: list[StatusSegment] = []
     used = 0
     for segment, cells in zip(segments, widths):
-        need = cells + (separator_cells if kept else 0)
+        need = cells + (_SEPARATOR_CELLS if kept else 0)
         if used + need > room:
             break
         kept.append(segment)
@@ -178,39 +176,22 @@ def render_status_strip(
 
 
 def render_status_with_hint(model: StatusModel, hint: str, width: int) -> str:
-    """Fit compact health beside the full hint when the footer is narrow."""
-    from rich.cells import cell_len
+    """Fit the current view and essential health into a narrow footer."""
     from rich.text import Text
 
-    separator = " [#444444]│[/] "
-    separator_cells = 3
-    try:
-        action = Text.from_markup(hint)
-    except Exception:  # malformed operator text remains literal
-        action = Text(hint)
-    action.truncate(max(0, width), overflow="ellipsis")
-    remaining = width - action.cell_len - separator_cells
-    if remaining <= 0:
-        return action.markup
-
     primary = status_segments(model)[: 4 if model.applied_policy else 3]
-    # Keep the three subsystem labels. Show the applied generation too when
-    # it fits beside the complete action; details remain in Overview.
-    health = [StatusSegment(segment.label, segment.state) for segment in primary]
-    if model.applied_policy:
-        generation = health.pop(1)
-        with_generation = health[:1] + [generation] + health[1:]
-        generation_width = sum(cell_len(segment.plain()) for segment in with_generation)
-        generation_width += separator_cells * (len(with_generation) - 1)
-        if generation_width <= remaining:
-            health = with_generation
-    kept, cut = fit_status_segments(health, remaining, separator_cells=separator_cells)
-    if not kept:
-        return action.markup
-    parts = [segment.render() for segment in kept]
-    if cut:
-        parts.append(_MORE)
-    return action.markup + separator + separator.join(parts)
+    # Details remain in Overview. The footer keeps each subsystem's label
+    # and state, including the applied policy, even when the hint is long.
+    primary = [StatusSegment(segment.label, segment.state) for segment in primary]
+    separator = " [#444444]│[/] "
+    health = separator.join(segment.render() for segment in primary)
+    remaining = max(0, width - Text.from_markup(health).cell_len - 3)
+    try:
+        text = Text.from_markup(hint)
+    except Exception:  # malformed operator text remains literal
+        text = Text(hint)
+    text.truncate(remaining, overflow="ellipsis")
+    return (text.markup + separator if remaining and text.plain else "") + health
 
 
 class StatusStrip(_Static):

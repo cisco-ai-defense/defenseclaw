@@ -3752,7 +3752,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # Don't carry stale finish/rejection state into a fresh command
         # entry. Idle = strip is hidden, exactly what we want here.
         self._strip_clear()
-        self._set_status("Command palette")
+        self._set_status("Command palette. Type or pick.")
 
     def action_open_panel_jumper(self) -> None:
         """Open the Ctrl+P fuzzy panel jumper modal.
@@ -3980,7 +3980,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # Closing the palette by running a row left its open hint
         # in the status bar (GAP-1213). Callers that report something else
         # set their own status after this.
-        if self.status_text == "Command palette":
+        if self.status_text == "Command palette. Type or pick.":
             self._set_status(self._status_text())
 
     def _handle_command_palette_key(self, event: events.Key) -> bool:
@@ -13042,7 +13042,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     order = setup_catalog.section_order(self.setup_model.sections)
                     if order:
                         self.setup_model.select_section(order[0])
-                return SetupPanelAction(True, hint="Config editor")
+                return SetupPanelAction(True, hint="Config editor. Esc/w: tasks.")
             self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, delta)
             return SetupPanelAction(True)
         if key == "i":
@@ -13060,7 +13060,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if key in {"c", "`"}:
             self.setup_model.mode = "config"
             self.setup_model.active_line = self.setup_model.first_editable_line()
-            return SetupPanelAction(True, hint="Config editor")
+            return SetupPanelAction(True, hint="Config editor. Esc/w: tasks.")
         if key == "r":
             return SetupPanelAction(True, refresh_credentials=True, hint="Reloading API keys...")
         if self.setup_model.active_wizard == SetupWizard.CREDENTIALS and key in {"f", "s"}:
