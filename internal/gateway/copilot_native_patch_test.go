@@ -35,10 +35,11 @@ func TestCopilotNativeBenignCorpus(t *testing.T) {
 	for scanner.Scan() {
 		count++
 		var item struct {
-			ID    string         `json:"id"`
-			OS    string         `json:"os"`
-			Event string         `json:"event"`
-			Input map[string]any `json:"input"`
+			ID      string         `json:"id"`
+			OS      string         `json:"os"`
+			Fixture string         `json:"fixture"`
+			Event   string         `json:"event"`
+			Input   map[string]any `json:"input"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &item); err != nil {
 			t.Fatal(err)
@@ -60,7 +61,7 @@ func TestCopilotNativeBenignCorpus(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if item.OS != runtime.GOOS {
+			if item.OS != runtime.GOOS || item.Fixture == "managed-private-home" {
 				name, args, ok := copilotargs.NativeSingleCall(item.Input["toolCalls"])
 				if !ok || name != "apply_patch" || len(copilotargs.CLIToolArgs(name, args)) == 0 {
 					t.Fatalf("%s native patch did not project", item.OS)
@@ -90,8 +91,8 @@ func TestCopilotNativeBenignCorpus(t *testing.T) {
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if count != 5 {
-		t.Fatalf("native benign corpus has %d cases, want 5", count)
+	if count != 6 {
+		t.Fatalf("native benign corpus has %d cases, want 6", count)
 	}
 }
 

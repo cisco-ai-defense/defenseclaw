@@ -1348,6 +1348,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	patchTargets, patchKnown := hookpaths.ApplyPatchWriteTargets(
 		request.Input.Tool, request.Input.Args, input.Command, clientCWD, facts.ActiveHome,
 	)
+	if !patchKnown && request.Connector == "copilot" && request.ProtectedHomeHook && input.Command == "" {
+		// A managed gateway cannot traverse the user's private project, but
+		// the native hook resolved every path before it sent the request.
+		patchTargets, patchKnown = copilotClientProvedPatchTargets(
+			request.Input.Tool, request.Input.Args, clientCWD, facts.ActiveHome, request.ResolvedWriteTargets,
+		)
+	}
 	if !patchKnown {
 		return true
 	}

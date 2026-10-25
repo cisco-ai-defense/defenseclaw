@@ -489,7 +489,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					req.ToolCallUnparsed = true
 				}
 			}
-			if connectorName == "copilot" && copilotWriteCallUnproven(req.ToolName, req.ToolArgs, req.CWD, hookActiveHome(r.Context())) {
+			if connectorName == "copilot" && copilotWriteCallUnproven(req.ToolName, req.ToolArgs, req.CWD, hookActiveHome(r.Context()), copilotManagedPatchEvidence(r.Context())) {
 				req.ToolCallUnparsed = true
 			}
 		}
