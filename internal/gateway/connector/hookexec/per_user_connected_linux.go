@@ -33,25 +33,32 @@ func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
 }
 
 // Connect can finish before the gateway accepts the same held socket.
-// An owner found for the exact tuple is final, including a foreign owner.
+// Linux can briefly report UID 0 for that exact accepted tuple before
+// assigning the listener's UID. A nonzero foreign owner is final.
 func awaitPerUserLinuxSocket(ctx context.Context, self int, inspect func() (int, error)) error {
+	foreignOwner := errors.New("connected gateway socket belongs to another account")
+	lastErr := errConnectedSocketNotFound
 	for {
 		if ctx.Err() != nil {
-			return errConnectedSocketNotFound
+			return lastErr
 		}
 		uid, err := inspect()
 		if err == nil {
-			if uid != self {
-				return errors.New("connected gateway socket belongs to another account")
+			if uid == self {
+				return nil
 			}
-			return nil
-		}
-		if !errors.Is(err, errConnectedSocketNotFound) {
+			if uid != 0 {
+				return foreignOwner
+			}
+			lastErr = foreignOwner
+		} else if errors.Is(err, errConnectedSocketNotFound) {
+			lastErr = errConnectedSocketNotFound
+		} else {
 			return err
 		}
 		select {
 		case <-ctx.Done():
-			return errConnectedSocketNotFound
+			return lastErr
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
