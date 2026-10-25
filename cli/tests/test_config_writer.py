@@ -1049,7 +1049,10 @@ def test_a_live_policy_edit_over_the_legacy_default_keeps_what_it_decides(tmp_pa
 
     monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
     monkeypatch.setattr(config_writer, "_use_go_validator", lambda: False)
-    monkeypatch.setattr(config_writer, "refuse_when_managed", lambda *args, **kwargs: None)
+    # Not about managed devices: a test host with a machine-managed config
+    # must not refuse these writes.
+    monkeypatch.setattr(config_writer, "managed_refuses", lambda current, actor: False)
+    monkeypatch.setattr(config_writer, "machine_managed_standalone", lambda: False)
     fixture = json.loads(
         (Path(__file__).resolve().parents[2] / "testdata" / "admission_legacy_default_writes.json").read_text()
     )
