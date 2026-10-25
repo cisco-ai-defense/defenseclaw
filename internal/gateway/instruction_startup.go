@@ -337,6 +337,12 @@ func (a *APIServer) extendInstructionStartupDirs(key activeAgentContextKey, dirs
 		if sighting.reached == nil && (len(dirs) == 0 || hookpaths.DirectoryIdentity(dirs[0]) == "") {
 			return
 		}
+		// A session whose first sighting the store pruned is not new: a
+		// file that exists now may be one it created
+		// (pruneInstructionLoadsLocked).
+		if a.instructionFirstSightingLost(key) {
+			return
+		}
 		if len(reachedKeys) > 0 && a.activeAgentContext.firstSightingKey(key, retained, reachedKeys, keyed) {
 			a.saveInstructionLoads(key)
 		}
@@ -473,6 +479,7 @@ func (a *APIServer) applyInstructionStartup(ctx context.Context, connector, sess
 	case "sessionend", "onsessionend", "onsessionfinalize", "sessiondeleted":
 		a.activeAgentContext.endKey(key)
 		a.saveInstructionLoads(key)
+		a.clearInstructionSightingLoss(key)
 	default:
 		// Any other lifecycle event, an OpenCode session.error included,
 		// leaves the snapshot as it is.
@@ -502,6 +509,7 @@ func (a *APIServer) startInstructionSession(ctx context.Context, key activeAgent
 	files, dirs, identities := instructionStartupFiles(ctx, key.connector, cwd)
 	a.activeAgentContext.startKey(key, newGeneration, files, dirs, identities)
 	a.saveInstructionLoads(key)
+	a.clearInstructionSightingLoss(key)
 }
 
 // recordedStartupFile reports a snapshot file as instructionSnapshot records

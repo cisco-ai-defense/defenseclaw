@@ -103,7 +103,11 @@ type activeAgentContextSession struct {
 	awaitingStart            bool
 	caseInsensitiveUncertain bool
 	uncertain                bool
-	updatedAt                time.Time
+	// saved: the session's saved record holds its startup snapshot as it
+	// is now (saveInstructionLoads). An eviction of a snapshot no record
+	// holds loses the session's first sighting (lost).
+	saved     bool
+	updatedAt time.Time
 }
 
 type activeAgentContextSnapshot struct {
@@ -138,10 +142,20 @@ type activeAgentContextCache struct {
 	// eviction index itself saturates.
 	uncertain                bool
 	caseInsensitiveUncertain bool
-	now                      func() time.Time
+	// lost are sessions this process evicted with a first sighting that no
+	// saved record holds; lostAll is set when more were lost than it holds.
+	// Neither takes a new first sighting (firstSightingKey).
+	lost    map[activeAgentContextKey]struct{}
+	lostAll bool
+	now     func() time.Time
 	// storeMu orders the writes of a session's load record
-	// (saveInstructionLoads) with the state each one copies.
-	storeMu sync.Mutex
+	// (saveInstructionLoads) with the state each one copies. It guards the
+	// store's pruned index too (instructionLoadPrunedName): pruned and
+	// prunedAll hold it once prunedLoaded.
+	storeMu      sync.Mutex
+	pruned       map[string]struct{}
+	prunedAll    bool
+	prunedLoaded bool
 }
 
 func (cache *activeAgentContextCache) currentTime() time.Time {
@@ -329,7 +343,27 @@ func (cache *activeAgentContextCache) makeRoomLocked(needsRoom activeAgentContex
 		if evicted.uncertain || len(evicted.files) != 0 {
 			cache.rememberEvictionLocked(oldestKey, evicted, isSandbox)
 		}
+		if evicted.startupKnown && !evicted.saved {
+			cache.rememberLostLocked(oldestKey)
+		}
 	}
+}
+
+// rememberLostLocked records that key's first sighting is gone: no saved
+// record restores it. Past the bound every session is taken as lost, so a
+// session's own file never becomes one that was there before it.
+func (cache *activeAgentContextCache) rememberLostLocked(key activeAgentContextKey) {
+	if cache.lostAll {
+		return
+	}
+	if len(cache.lost) >= maxInstructionLoadRecords {
+		cache.lost, cache.lostAll = nil, true
+		return
+	}
+	if cache.lost == nil {
+		cache.lost = make(map[activeAgentContextKey]struct{})
+	}
+	cache.lost[key] = struct{}{}
 }
 
 func (cache *activeAgentContextCache) rememberEvictionLocked(
@@ -609,6 +643,10 @@ func (cache *activeAgentContextCache) resetKey(key activeAgentContextKey, preser
 		cache.sessions = make(map[activeAgentContextKey]activeAgentContextSession)
 	}
 	delete(cache.evictions, key)
+	if !preserveStartup {
+		// A new generation takes its own snapshot.
+		delete(cache.lost, key)
+	}
 	if _, exists := cache.sessions[key]; !exists {
 		cache.makeRoomLocked(key)
 	}
@@ -670,6 +708,7 @@ func (cache *activeAgentContextCache) setStartupKey(key activeAgentContextKey, f
 	session.startupDirs = slices.Clone(dirs)
 	session.startupDirIDs = maps.Clone(dirIDs)
 	session.startupKnown = true
+	session.saved = false
 	cache.sessions[key] = session
 }
 
@@ -687,8 +726,15 @@ func (cache *activeAgentContextCache) firstSightingKey(key activeAgentContextKey
 	if exists && session.startupKnown {
 		return false
 	}
+	// A session whose first sighting this process lost is not new, also
+	// when a later event of it is held: a file that exists now may be one
+	// it created. Past the bound, any session it does not hold is taken as
+	// lost.
+	if _, lost := cache.lost[key]; lost {
+		return false
+	}
 	if !exists {
-		if _, evicted := cache.evictions[key]; evicted || cache.uncertain {
+		if _, evicted := cache.evictions[key]; evicted || cache.uncertain || cache.lostAll {
 			return false
 		}
 		if cache.sessions == nil {
@@ -701,6 +747,7 @@ func (cache *activeAgentContextCache) firstSightingKey(key activeAgentContextKey
 	session.startupDirs = slices.Clone(dirs)
 	session.startupDirIDs = maps.Clone(dirIDs)
 	session.startupKnown = true
+	session.saved = false
 	session.updatedAt = cache.currentTime()
 	cache.sessions[key] = session
 	return true
@@ -809,6 +856,7 @@ func (cache *activeAgentContextCache) extendStartupKey(key activeAgentContextKey
 		}
 	}
 	if changed {
+		session.saved = false
 		cache.sessions[key] = session
 	}
 	return changed
@@ -840,7 +888,29 @@ func (cache *activeAgentContextCache) endKey(key activeAgentContextKey) {
 	cache.mu.Lock()
 	delete(cache.sessions, key)
 	delete(cache.evictions, key)
+	delete(cache.lost, key)
 	cache.mu.Unlock()
+}
+
+// loseKey records that key, which the cache does not hold, lost its first
+// sighting (rememberLostLocked).
+func (cache *activeAgentContextCache) loseKey(key activeAgentContextKey) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if _, held := cache.sessions[key]; !held {
+		cache.rememberLostLocked(key)
+	}
+}
+
+// markSavedKey records whether key's saved record holds its state as it is
+// now (saveInstructionLoads).
+func (cache *activeAgentContextCache) markSavedKey(key activeAgentContextKey, saved bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if session, ok := cache.sessions[key]; ok {
+		session.saved = saved
+		cache.sessions[key] = session
+	}
 }
 
 // startupDirsKey returns the directories of key's instruction-file
@@ -895,8 +965,10 @@ func (cache *activeAgentContextCache) restoreKey(key activeAgentContextKey, reco
 	if _, evicted := cache.evictions[key]; evicted {
 		uncertain, caseInsensitiveUncertain = cache.consumeEvictionLocked(key)
 	}
+	delete(cache.lost, key)
 	cache.makeRoomLocked(key)
 	cache.sessions[key] = activeAgentContextSession{
+		saved:                    true,
 		files:                    slices.Clone(record.Files),
 		caseInsensitiveFiles:     slices.Clone(record.CaseInsensitiveFiles),
 		identities:               maps.Clone(record.LoadedIdentities),
@@ -979,6 +1051,7 @@ func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req c
 	case "SessionEnd":
 		a.activeAgentContext.endKey(key)
 		a.saveInstructionLoads(key)
+		a.clearInstructionSightingLoss(key)
 	case "InstructionsLoaded":
 		// A load recorded before this gateway started is still this
 		// session's load.

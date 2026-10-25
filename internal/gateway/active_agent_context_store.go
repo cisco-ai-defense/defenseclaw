@@ -7,6 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -30,11 +33,27 @@ const maxInstructionLoadRecordBytes = 1 << 20
 // its first sighting from its record until it ends: churn through newer
 // sessions never turns a file it created into one that was there before it.
 // Only when the saved sessions that never ended pass these bounds does the
-// oldest one lose its record; its next call then takes a new first sighting,
-// which protects every instruction file that exists then (never fewer).
+// oldest one lose its record. Its first sighting is lost then, and the
+// pruned index (instructionLoadPrunedName) says so: its next call takes no
+// new first sighting, which would make a file it created look like one that
+// was there before it. Its instruction files keep the call-time proof
+// (existence): a block in the strict tier, a warning with an audit row in
+// default and permissive.
 const (
 	maxInstructionLoadRecords    = 16 * maxActiveAgentContextSessions
 	maxInstructionLoadStoreBytes = 64 << 20
+)
+
+// The pruned index lists the record names of sessions whose first sighting
+// the bounds pruned, one per line, until the session starts again or ends.
+// Past maxInstructionLoadPruned it holds instructionLoadPrunedAll alone:
+// every session without a record has lost its first sighting, so none takes
+// a new one. An index that cannot be read is taken as that too.
+const (
+	instructionLoadPrunedName     = "pruned"
+	instructionLoadPrunedAll      = "*"
+	maxInstructionLoadPruned      = 8 * maxInstructionLoadRecords
+	maxInstructionLoadPrunedBytes = maxInstructionLoadPruned * (sha256.Size*2 + 1)
 )
 
 type instructionLoadRecord struct {
@@ -69,13 +88,19 @@ func (a *APIServer) instructionLoadDir() string {
 }
 
 func instructionLoadRecordPath(dir string, key activeAgentContextKey) string {
+	return filepath.Join(dir, instructionLoadRecordName(key)+".json")
+}
+
+// instructionLoadRecordName is the name of key's record without its
+// extension, as the pruned index lists it.
+func instructionLoadRecordName(key activeAgentContextKey) string {
 	name := key.scope + "\x00" + key.connector + "\x00" + key.sessionID
 	if key.caller != "" {
 		// A per-user gateway's record keeps the name earlier builds gave it.
 		name += "\x00caller\x00" + key.caller
 	}
 	sum := sha256.Sum256([]byte(name))
-	return filepath.Join(dir, hex.EncodeToString(sum[:])+".json")
+	return hex.EncodeToString(sum[:])
 }
 
 // saveInstructionLoads records authenticated loads and the startup snapshot.
@@ -100,26 +125,36 @@ func (a *APIServer) saveInstructionLoads(key activeAgentContextKey) {
 		StartupKnown: session.startupKnown, StartupDirs: session.startupDirs,
 		StartupDirIDs: session.startupDirIDs, AwaitingStart: session.awaitingStart,
 	})
-	if err != nil || len(data) > maxInstructionLoadRecordBytes || os.MkdirAll(dir, 0o700) != nil {
-		return
+	saved := err == nil && len(data) <= maxInstructionLoadRecordBytes && writeInstructionLoadFile(dir, record, data)
+	a.activeAgentContext.markSavedKey(key, saved)
+	if saved {
+		a.activeAgentContext.pruneInstructionLoadsLocked(dir)
+	}
+}
+
+// writeInstructionLoadFile replaces name, a file of dir, with data.
+func writeInstructionLoadFile(dir, name string, data []byte) bool {
+	if os.MkdirAll(dir, 0o700) != nil {
+		return false
 	}
 	temp, err := os.CreateTemp(dir, ".record-*")
 	if err != nil {
-		return
+		return false
 	}
 	_, writeErr := temp.Write(data)
 	closeErr := temp.Close()
-	if writeErr != nil || closeErr != nil || os.Rename(temp.Name(), record) != nil {
+	if writeErr != nil || closeErr != nil || os.Rename(temp.Name(), name) != nil {
 		_ = os.Remove(temp.Name())
-		return
+		return false
 	}
-	pruneInstructionLoads(dir)
+	return true
 }
 
-// pruneInstructionLoads keeps the newest records within
+// pruneInstructionLoadsLocked keeps the newest records within
 // maxInstructionLoadRecords and maxInstructionLoadStoreBytes; a session that
-// never sent SessionEnd ages out.
-func pruneInstructionLoads(dir string) {
+// never sent SessionEnd ages out. A pruned record that held a first sighting
+// goes into the pruned index. The caller holds storeMu.
+func (cache *activeAgentContextCache) pruneInstructionLoadsLocked(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -149,10 +184,124 @@ func pruneInstructionLoads(dir string) {
 		}
 		return strings.Compare(left.name, right.name)
 	})
+	cache.loadPrunedLocked(dir)
+	changed := false
 	for len(records) > 0 && (len(records) > maxInstructionLoadRecords || total > maxInstructionLoadStoreBytes) {
-		_ = os.Remove(filepath.Join(dir, records[0].name))
+		name := filepath.Join(dir, records[0].name)
+		sighted := instructionLoadRecordSighted(name)
+		if os.Remove(name) == nil && sighted && !cache.prunedAll {
+			cache.pruned[strings.TrimSuffix(records[0].name, ".json")] = struct{}{}
+			changed = true
+		}
 		total -= records[0].size
 		records = records[1:]
+	}
+	if len(cache.pruned) > maxInstructionLoadPruned {
+		cache.pruned, cache.prunedAll = make(map[string]struct{}), true
+	}
+	if changed {
+		cache.writePrunedLocked(dir)
+	}
+}
+
+// instructionLoadRecordSighted reports whether the record name holds a
+// startup snapshot (a first sighting). One that cannot be read is taken to.
+func instructionLoadRecordSighted(name string) bool {
+	data, err := os.ReadFile(name)
+	if err != nil || len(data) > maxInstructionLoadRecordBytes {
+		return true
+	}
+	var record struct {
+		StartupKnown bool `json:"startup_known"`
+	}
+	return json.Unmarshal(data, &record) != nil || record.StartupKnown
+}
+
+// loadPrunedLocked reads the pruned index once per process. The caller
+// holds storeMu.
+func (cache *activeAgentContextCache) loadPrunedLocked(dir string) {
+	if cache.prunedLoaded {
+		return
+	}
+	cache.prunedLoaded = true
+	cache.pruned = make(map[string]struct{})
+	name := filepath.Join(dir, instructionLoadPrunedName)
+	info, err := os.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	var data []byte
+	if err == nil && info.Mode().IsRegular() && info.Size() <= maxInstructionLoadPrunedBytes {
+		data, err = os.ReadFile(name)
+	} else if err == nil {
+		err = fs.ErrInvalid
+	}
+	if err != nil {
+		cache.prunedAll = true
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		switch {
+		case line == instructionLoadPrunedAll:
+			cache.prunedAll = true
+		case line != "":
+			cache.pruned[line] = struct{}{}
+		}
+	}
+	if cache.prunedAll || len(cache.pruned) > maxInstructionLoadPruned {
+		cache.pruned, cache.prunedAll = make(map[string]struct{}), true
+	}
+}
+
+// writePrunedLocked saves the pruned index. The caller holds storeMu.
+func (cache *activeAgentContextCache) writePrunedLocked(dir string) {
+	name := filepath.Join(dir, instructionLoadPrunedName)
+	lines := slices.Sorted(maps.Keys(cache.pruned))
+	if cache.prunedAll {
+		lines = []string{instructionLoadPrunedAll}
+	}
+	if len(lines) == 0 {
+		_ = os.Remove(name)
+		return
+	}
+	_ = writeInstructionLoadFile(dir, name, []byte(strings.Join(lines, "\n")+"\n"))
+}
+
+// instructionFirstSightingLost reports whether key's first sighting is gone:
+// the bounds pruned its record (pruneInstructionLoadsLocked). A later event
+// of the session (a CwdChanged, a load) does not bring it back.
+func (a *APIServer) instructionFirstSightingLost(key activeAgentContextKey) bool {
+	dir := a.instructionLoadDir()
+	if dir == "" {
+		return false
+	}
+	cache := &a.activeAgentContext
+	_, held := cache.sessionKey(key)
+	cache.storeMu.Lock()
+	defer cache.storeMu.Unlock()
+	cache.loadPrunedLocked(dir)
+	_, pruned := cache.pruned[instructionLoadRecordName(key)]
+	// Past the index bound, any session this process does not hold is
+	// taken as pruned.
+	return pruned || cache.prunedAll && !held
+}
+
+// clearInstructionSightingLoss drops key from the pruned index when the
+// session starts again or ends: a new start takes its own snapshot, and a
+// session ID used after an end is a new session.
+func (a *APIServer) clearInstructionSightingLoss(key activeAgentContextKey) {
+	dir := a.instructionLoadDir()
+	if dir == "" {
+		return
+	}
+	cache := &a.activeAgentContext
+	cache.storeMu.Lock()
+	defer cache.storeMu.Unlock()
+	cache.loadPrunedLocked(dir)
+	name := instructionLoadRecordName(key)
+	if _, pruned := cache.pruned[name]; pruned {
+		delete(cache.pruned, name)
+		cache.writePrunedLocked(dir)
 	}
 }
 
@@ -169,6 +318,11 @@ func (a *APIServer) restoreInstructionLoads(key activeAgentContextKey) {
 	name := instructionLoadRecordPath(dir, key)
 	record, ok := readInstructionLoadRecord(name, key)
 	if !ok {
+		// A record this session cannot restore (unreadable or invalid) held
+		// state the session had: its first sighting is lost.
+		if _, err := os.Lstat(name); !errors.Is(err, fs.ErrNotExist) {
+			a.activeAgentContext.loseKey(key)
+		}
 		return
 	}
 	now := a.activeAgentContext.currentTime()
