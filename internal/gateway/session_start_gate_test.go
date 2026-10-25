@@ -19,7 +19,7 @@ import (
 func TestSessionStartGateHoldsCallsForTheStartVerdict(t *testing.T) {
 	var gate sessionStartGate
 	ctx := t.Context()
-	if reason, refuse := gate.await(ctx, "codex\x00\x00unknown", time.Millisecond); refuse {
+	if reason, refuse := gate.await(ctx, "codex\x00\x00unknown", time.Millisecond, 0); refuse {
 		t.Fatalf("a session without a recorded start was refused: %s", reason)
 	}
 
@@ -28,27 +28,27 @@ func TestSessionStartGateHoldsCallsForTheStartVerdict(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		allowed.finish(false, "")
 	}()
-	if reason, refuse := gate.await(ctx, "allowed", 5*time.Second); refuse {
+	if reason, refuse := gate.await(ctx, "allowed", 5*time.Second, 0); refuse {
 		t.Fatalf("a call did not wait for its allowed start: %s", reason)
 	}
 
 	pending := gate.begin("pending")
-	if reason, refuse := gate.await(ctx, "pending", 20*time.Millisecond); !refuse || reason != sessionStartPendingReason {
+	if reason, refuse := gate.await(ctx, "pending", 20*time.Millisecond, 0); !refuse || reason != sessionStartPendingReason {
 		t.Fatalf("a call ran while its start was still judged: refuse=%t reason=%q", refuse, reason)
 	}
 	pending.finish(true, "unapproved hook ~/.claude/settings.json")
-	reason, refuse := gate.await(ctx, "pending", time.Millisecond)
+	reason, refuse := gate.await(ctx, "pending", time.Millisecond, 0)
 	if !refuse || !strings.Contains(reason, "unapproved hook") {
 		t.Fatalf("a blocked start did not block its session: refuse=%t reason=%q", refuse, reason)
 	}
 	// Only the first verdict counts.
 	pending.finish(false, "")
-	if _, refuse := gate.await(ctx, "pending", time.Millisecond); !refuse {
+	if _, refuse := gate.await(ctx, "pending", time.Millisecond, 0); !refuse {
 		t.Fatal("a second finish replaced the start verdict")
 	}
 	// Starting the session again replaces the block.
 	gate.begin("pending").finish(false, "")
-	if reason, refuse := gate.await(ctx, "pending", time.Millisecond); refuse {
+	if reason, refuse := gate.await(ctx, "pending", time.Millisecond, 0); refuse {
 		t.Fatalf("a new allowed start kept the old block: %s", reason)
 	}
 
@@ -57,7 +57,7 @@ func TestSessionStartGateHoldsCallsForTheStartVerdict(t *testing.T) {
 	for i := range sessionStartGateLimit + 8 {
 		gate.begin("blocked-"+strconv.Itoa(i)).finish(true, "x")
 	}
-	if _, refuse := gate.await(ctx, "held", time.Millisecond); !refuse {
+	if _, refuse := gate.await(ctx, "held", time.Millisecond, 0); !refuse {
 		t.Fatal("eviction dropped a pending session start")
 	}
 	held.finish(false, "")

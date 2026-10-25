@@ -15,6 +15,9 @@ import (
 
 func TestMain(m *testing.M) {
 	prepareGatewayTestProcess()
+	// A call never waits for a start that is not coming; the gate's tests
+	// (TestSessionStartGateCallBeforeItsStart) set the arrival wait.
+	sessionStartArrivalWait = 0
 	cleanup, err := hermespath.IsolateHostForTests()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "isolate the tests from the host's Hermes:", err)

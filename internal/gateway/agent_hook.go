@@ -729,7 +729,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			gated = true
 		}
 		if !gated && !hookSideRefusal(ctx) && sessionStartGateEvent(req.HookEventName) {
-			if reason, refuse := a.sessionStartGate.await(ctx, startGateKey, sessionStartGateWait(connectorName, req.HookEventName)); refuse {
+			if reason, refuse := a.sessionStartGate.await(ctx, startGateKey, sessionStartGateWait(connectorName, req.HookEventName),
+				a.sessionStartArrival(ctx, profile, connectorName)); refuse {
 				resp, gated = a.sessionStartGateRefusal(ctx, profile, connectorName, req, payload, reason), true
 			}
 		}
