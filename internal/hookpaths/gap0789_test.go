@@ -27,9 +27,12 @@ func TestGAP0789PrivateKeyReadInCompoundCommand(t *testing.T) {
 		{"Windows ordinary read", `Get-Content .\report.txt; Write-Output done`, `C:\Users\alice\project`, `C:\Users\alice`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ActionCommandDecision(tc.command, tc.cwd, tc.home)
-			if (got != "") != tc.block {
-				t.Fatalf("decision = %q, want block=%v", got, tc.block)
+			got := ActionPrivateKeyRead(tc.command, tc.cwd, tc.home)
+			if got != tc.block {
+				t.Fatalf("private-key proof = %v, want %v", got, tc.block)
+			}
+			if reason := ActionCommandDecision(tc.command, tc.cwd, tc.home); reason != "" {
+				t.Fatalf("private-key read classified as persistence: %q", reason)
 			}
 		})
 	}

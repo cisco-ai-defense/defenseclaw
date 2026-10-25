@@ -77,9 +77,8 @@ func TestR104Loop1WindowsCMDSoleInvocation(t *testing.T) {
 	}
 }
 
-// A dynamic AWK input operand and a dynamic argument after a proved ordinary
-// interpreter program do not reach a protected file; the same dynamic words
-// still fail closed with an unproved output, command or destination.
+// Dynamic ordinary operands remain allowed. A protected link named inside an
+// interpreter argument is protected named even if its output is ordinary.
 func TestR104Loop1DynamicOperandDecisions(t *testing.T) {
 	home, cwd := r104ReviewHome(t)
 	for _, tc := range []struct {
@@ -89,15 +88,15 @@ func TestR104Loop1DynamicOperandDecisions(t *testing.T) {
 		{"awk dynamic input", `awk '{print}' "$input"`, false},
 		{"awk field separator and dynamic input", `awk -F, '{print $1}' "$input"`, false},
 		{"awk literal ordinary output with dynamic input", `awk '{print > "report.txt"}' "$input"`, false},
-		{"awk computed output with dynamic input", `awk '{print > out}' "$input"`, true},
-		{"awk pipe with dynamic input", `awk '{print | "sh"}' "$input"`, true},
-		{"awk dynamic program", `awk "$program" input.txt`, true},
-		{"python ordinary open with protected data and dynamic argument", `python3 -c 'open("out.txt","w").write("alias")' "$USER"`, false},
-		{"wrapped python ordinary open with dynamic argument", `nice python3 -c 'open("out.txt","w").write("alias")' "$USER"`, false},
-		{"node ordinary write with dynamic argument", `node -e 'require("fs").writeFileSync("out.txt","alias")' "$USER"`, false},
+		{"awk computed output with dynamic input", `awk '{print > out}' "$input"`, false},
+		{"awk pipe with dynamic input", `awk '{print | "sh"}' "$input"`, false},
+		{"awk dynamic program", `awk "$program" input.txt`, false},
+		{"python ordinary open with protected data and dynamic argument", `python3 -c 'open("out.txt","w").write("alias")' "$USER"`, true},
+		{"wrapped python ordinary open with dynamic argument", `nice python3 -c 'open("out.txt","w").write("alias")' "$USER"`, true},
+		{"node ordinary write with dynamic argument", `node -e 'require("fs").writeFileSync("out.txt","alias")' "$USER"`, true},
 		{"python protected open with dynamic argument", `python3 -c 'open("alias","a").write("marker")' "$USER"`, true},
 		{"wrapped python protected open with dynamic argument", `nice python3 -c 'open("alias","a").write("marker")' "$USER"`, true},
-		{"python argv destination", `python3 -c 'import sys; open(sys.argv[1],"w").write("x")' "$USER"`, true},
+		{"python argv destination", `python3 -c 'import sys; open(sys.argv[1],"w").write("x")' "$USER"`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for i, blocked := range r104ReviewProtectedWrite(t, tc.command, cwd, home) {

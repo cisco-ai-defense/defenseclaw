@@ -1224,6 +1224,24 @@ func canonicalPowerShellPathMutatorParameter(program, key string) string {
 	}
 }
 
+// These content parameters have unambiguous prefixes for the three file
+// writers. Binding them as data prevents a value from becoming a write path.
+func canonicalPowerShellContentParameter(program, key string) string {
+	switch program {
+	case "set-content", "add-content", "out-file":
+	default:
+		return key
+	}
+	switch {
+	case len(key) >= 3 && strings.HasPrefix("-value", key):
+		return "-value"
+	case len(key) >= 4 && strings.HasPrefix("-inputobject", key):
+		return "-inputobject"
+	default:
+		return key
+	}
+}
+
 type structuredPowerShellControlState struct {
 	whatIfSeen  bool
 	confirmSeen bool
@@ -2046,7 +2064,7 @@ func classifyStructuredPowerShellPathMutator(
 			continue
 		}
 		key, joinedValue, joined := powerShellParameter(arg)
-		key = canonicalPowerShellPathMutatorParameter(program, key)
+		key = canonicalPowerShellContentParameter(program, canonicalPowerShellPathMutatorParameter(program, key))
 		consume := func() (string, bool) {
 			if _, duplicate := seen[key]; duplicate {
 				return "", false

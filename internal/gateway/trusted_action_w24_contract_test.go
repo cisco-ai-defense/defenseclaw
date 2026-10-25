@@ -103,9 +103,9 @@ func TestTrustedActionW24StartupDirectoryAndBoundVariableLimits(t *testing.T) {
 		name, command, rule string
 		block               bool
 	}{
-		{"login body relative path uses class", `bash -lc 'cat .ssh/id_rsa'`, "persistence.ssh_authorized_keys_command", true},
+		{"login body relative private key read", `bash -lc 'cat .ssh/id_rsa'`, "PATH-SSH-KEY", true},
 		{"login body home path", `bash -lc 'cat ~/.ssh/id_rsa'`, "PATH-SSH-KEY", true},
-		{"use before later binding", `printf ok > "$f"; f=out/report.txt`, "persistence.ssh_authorized_keys_command", true},
+		{"use before later binding", `printf ok > "$f"; f=out/report.txt`, "", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "shell", Command: tt.command, CWD: home,

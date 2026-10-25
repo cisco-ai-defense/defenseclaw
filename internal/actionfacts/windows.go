@@ -4179,7 +4179,7 @@ func windowsAddPowerShellPrimaryPath(
 			builder.out.markPartial(IssueDynamicWord)
 			continue
 		}
-		lower := strings.ToLower(arg.value)
+		lower := canonicalPowerShellContentParameter(program, strings.ToLower(arg.value))
 		unquoted := arg.quote == QuoteNone
 		if unquoted && pathParams[lower] {
 			if i+1 >= len(args) || args[i+1].expands {

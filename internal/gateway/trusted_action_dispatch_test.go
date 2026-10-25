@@ -619,7 +619,10 @@ func TestDetectorStateFallbackRequiresSemanticMutationProofForEnforcement(t *tes
 			legacyText: `{"path":"/home/alice/.defenseclaw/audit.db","query":"SELECT 1"}`,
 		},
 		{
-			name: "read-only shell query is not enforceable",
+			// sqlite3 can execute extensions and shell commands, so -readonly
+			// does not make the whole program a known read-only command.
+			// The action target-mention ruling applies to the active audit DB.
+			name: "sqlite readonly flag still names protected state",
 			input: actionfacts.Input{
 				Tool:       "shell",
 				Command:    "sqlite3 -readonly /home/alice/.defenseclaw/audit.db 'SELECT 1'",
@@ -627,6 +630,8 @@ func TestDetectorStateFallbackRequiresSemanticMutationProofForEnforcement(t *tes
 				ActiveHome: "/home/alice",
 			},
 			legacyText: "sqlite3 -readonly /home/alice/.defenseclaw/audit.db 'SELECT 1'",
+			want:       true,
+			enforce:    true,
 		},
 		{
 			name: "malformed action is diagnostic only",

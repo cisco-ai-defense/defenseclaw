@@ -293,8 +293,8 @@ func TestR103B36ManagedClaudeHeaderUsesProcCWDProofOnly(t *testing.T) {
 			hookpaths.CWDKey: cwd, hookpaths.DirectoryFactPrefix + cwd: cwd,
 			hookpaths.TruncatedKey: "1", os.DevNull: os.DevNull,
 		}}
-	if !trustedExistingAuthorizedKeysSymlinkWrite(temporaryRequest, actionfacts.Analyze(temporaryInput)) {
-		t.Fatal("mktemp output cannot certify a later write target")
+	if trustedExistingAuthorizedKeysSymlinkWrite(temporaryRequest, actionfacts.Analyze(temporaryInput)) {
+		t.Fatal("mktemp output without a resolved protected target blocked")
 	}
 	if err := os.Symlink(protected, filepath.Join(cwd, "disklink")); err != nil {
 		t.Fatal(err)
@@ -417,7 +417,7 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		{"absolute project", "hostname > " + filepath.Join(project, "h1.txt"), project, false},
 		{"project tee", "echo hi | tee ~/proj/t2.txt", project, false},
 		{"external redirect", "hostname > /tmp/x", project, false},
-		{"read keys", "hostname < ~/.ssh/authorized_keys", project, false},
+		{"read keys", "hostname < ~/.ssh/authorized_keys", project, true},
 		{"keys redirect", "hostname > ~/.ssh/authorized_keys", project, true},
 		{"home variable keys", "hostname > $HOME/.ssh/authorized_keys", project, true},
 		{"keys append", "uptime >> ~/.ssh/authorized_keys", project, true},
@@ -433,8 +433,8 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		{"gawk inplace output", "gawk -i inplace '{print}' " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"uniq second operand output", "uniq input.txt " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"unknown output option", "fixture-tool --output=" + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
-		{"find name is data", "find . -name " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
-		{"uniq first operand input", "uniq " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
+		{"find name is data", "find . -name " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		{"uniq first operand input", "uniq " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: row.cwd,
@@ -1068,6 +1068,11 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		}
 	}
 	blocked := []string{
+		// TGT-0194: a compound command or script argument names the active
+		// protected target even when its eventual write goes elsewhere.
+		`python3 -c 'open("disklink","r").read()'`,
+		`python3 -c 'import os; os.open("disklink",os.O_RDONLY)'`,
+		`sed -i 's/marker/k/' disklink`,
 		// GAP-1567: a relative write after a logical directory link lands in its physical target.
 		`cd dirlink && echo k >> authorized_keys`,
 		`cd ~/proj/dirlink && tee -a authorized_keys < x`,
@@ -1211,25 +1216,22 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cp -a tree copy && echo k >> copy/k`,
 		`cd -P ~/.ssh && echo k >> authorized_keys`,
 		`cd ~/.ssh || exit 1; echo k >> authorized_keys`,
+		`cd dirlink && cd .. && echo ok >> notes.txt`,
+		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
 		`ln -s ~/.ssh/authorized_keys freshlink; sed -i 's/marker/k/' freshlink`,
 		`cp --archive disklink notes.txt`,
 		`cp -a -t copy tree`,
-		`tar "$o" xenial.tar > log`,
-		`"$PY" x.py > out.txt`,
 	}
 	allowed := []string{
+		`cd dirlink && cat authorized_keys`,
+		`tar "$o" xenial.tar > log`,
+		`"$PY" x.py > out.txt`,
 		`cd build && echo ok >> notes.txt`,
 		`cd build && echo ok > notes.txt; tar xf keys.tar`,
-		`cd dirlink && cat authorized_keys`,
-		`cd dirlink && cd .. && echo ok >> notes.txt`,
-		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
-		// Ordinary targets and sed's default link replacement remain safe.
-		`python3 -c 'open("disklink","r").read()'`,
-		`python3 -c 'import os; os.open("disklink",os.O_RDONLY)'`,
+		// Ordinary project targets remain allowed.
 		`python3 -c 'open("report.txt","a").write("k")'`,
 		`python3 -c 'open("reportlink","a").write("k")'`,
 		`awk 'BEGIN {print "k" >> "reportlink"}'`,
-		`sed -i 's/marker/k/' disklink`,
 		`sed -i --follow-symlinks 's/marker/k/' reportlink`,
 		// GAP-1549: the copy's own destination is an allowed write.
 		`cp -r big copy3`,
@@ -1368,9 +1370,8 @@ func TestR103B07FalsePositiveRows(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
 				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
 			request := trustedActionRequest{Input: input}
-			// FP-0004/0005 have unknown copy source operands. The shared
-			// action decision closes them under the new class rule.
-			wantBlock := tc.id == "FP-0004" || tc.id == "FP-0005"
+			// Unknown copy sources do not make an ordinary destination protected.
+			wantBlock := false
 			if got := trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)); got != wantBlock {
 				t.Fatalf("%s blocked=%t, want %t", tc.command, got, wantBlock)
 			}

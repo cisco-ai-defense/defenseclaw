@@ -49,9 +49,18 @@ func actionWindowsPath(value, cwd, home string) (string, bool) {
 	if !actionWindowsHome(value) {
 		value = strings.TrimRight(strings.ReplaceAll(cwd, `\`, "/"), "/") + "/" + value
 	}
-	for _, part := range strings.Split(value, "/") {
-		if strings.TrimRight(part, " ") == ".." || strings.Contains(part, "~") {
-			return "", false // junction traversal and short names need file identity
+	// Remove lexical traversal before asking the filesystem to expand a short
+	// name. GetLongPathName cannot expand a nonexistent intermediate component.
+	unc := strings.HasPrefix(value, "//")
+	value = path.Clean(value)
+	if unc {
+		value = "/" + value
+	}
+	if strings.Contains(value, "~") {
+		var expanded bool
+		value, expanded = actionWindowsExpandShortPath(value)
+		if !expanded {
+			return "", false
 		}
 	}
 	value = strings.ToLower(value)
@@ -87,7 +96,8 @@ func actionWindowsProtected(value, cwd, home string, readOnly bool) (bool, bool)
 }
 
 // actionWindowsWords treats a quoted command body as one word and emits each
-// redirection separately. An unclosed quote leaves the command unproved.
+// redirection separately, preserving an attached file descriptor. An unclosed
+// quote leaves the command unproved.
 func actionWindowsWords(command string) ([]string, bool) {
 	var words []string
 	var word strings.Builder
@@ -120,6 +130,18 @@ func actionWindowsWords(command string) ([]string, bool) {
 				i += 2
 				continue
 			}
+			if c == '>' || c == '<' {
+				fd := word.String()
+				if len(fd) > 0 && strings.IndexFunc(fd, func(r rune) bool { return r < '0' || r > '9' }) == -1 {
+					word.WriteByte(c)
+					if i+1 < len(command) && command[i+1] == c {
+						word.WriteByte(c)
+						i++
+					}
+					flush()
+					continue
+				}
+			}
 			flush()
 			if i+1 < len(command) && command[i+1] == c && (c == '>' || c == '<' || c == '&' || c == '|') {
 				words = append(words, command[i:i+2])
@@ -135,6 +157,24 @@ func actionWindowsWords(command string) ([]string, bool) {
 	return words, quote == 0
 }
 
+func actionWindowsRedirectOperator(word string) string {
+	switch word {
+	case ">", ">>", "<", "<<":
+		return word
+	}
+	i := 0
+	for i < len(word) && word[i] >= '0' && word[i] <= '9' {
+		i++
+	}
+	if i > 0 {
+		switch word[i:] {
+		case ">", ">>", "<", "<<":
+			return word[i:]
+		}
+	}
+	return ""
+}
+
 func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 	if command == "" || depth >= 8 || len(command) > MaxPayloadBytes {
 		return "dynamic-command"
@@ -143,7 +183,19 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 	if !ok || len(words) == 0 {
 		return "shell-parse"
 	}
+	for _, statement := range actionWindowsResolvedStatements(words, cwd, home) {
+		if reason := actionWindowsStatement(statement, cwd, home, depth); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+// Keep bounded assignment resolution common to audit and enforcement. Only
+// literal assignments and Join-Path children are substituted into commands.
+func actionWindowsResolvedStatements(words []string, cwd, home string) [][]string {
 	values := make(map[string]string)
+	var statements [][]string
 	for start := 0; start < len(words); {
 		end := start
 		for end < len(words) && words[end] != ";" && words[end] != "|" && words[end] != "||" && words[end] != "&" && words[end] != "&&" {
@@ -180,13 +232,11 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 					statement[i] = value
 				}
 			}
-			if reason := actionWindowsStatement(statement, cwd, home, depth); reason != "" {
-				return reason
-			}
+			statements = append(statements, statement)
 		}
 		start = end + 1
 	}
-	return ""
+	return statements
 }
 
 func actionWindowsStatement(words []string, cwd, home string, depth int) string {
@@ -195,22 +245,23 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 	}
 	program := strings.ToLower(strings.TrimSuffix(path.Base(strings.ReplaceAll(words[0], `\`, "/")), ".exe"))
 	for i := 1; i < len(words); i++ {
-		if words[i] != ">" && words[i] != ">>" && words[i] != "<" && words[i] != "<<" {
+		redirect := actionWindowsRedirectOperator(words[i])
+		if redirect == "" {
 			continue
 		}
 		if i+1 >= len(words) {
 			return "dynamic-argument"
 		}
-		if protected, resolved := actionWindowsProtected(words[i+1], cwd, home, words[i] == "<"); protected ||
-			!resolved && (words[i] != "<" || actionProgramMayWrite(program)) {
+		if protected, resolved := actionWindowsProtected(words[i+1], cwd, home, redirect == "<"); protected ||
+			!resolved && (redirect != "<" || actionProgramMayWrite(program)) {
 			return "dynamic-argument"
 		}
 	}
 	if strings.ContainsAny(program, "$%`") || strings.HasPrefix(program, "(") {
 		return "dynamic-command"
 	}
-	// This decision has no body proof for these sourced or directly launched
-	// scripts and interpreter hosts. Fail closed on those forms.
+	// This audit decision has no body proof for sourced or directly launched
+	// scripts and interpreter hosts, so it records uncertainty for them.
 	if program == "." || program == "source" {
 		return "eval-source"
 	}
@@ -284,12 +335,12 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 	if strings.Contains(" env nice ionice timeout stdbuf setsid chroot unshare nsenter flock sudo su script xargs find parallel busybox time nohup command exec ", " "+program+" ") {
 		return actionWindowsWrapperDecision(program, words, cwd, home, depth+1)
 	}
-	writeCapable := actionProgramMayWrite(program) || strings.Contains(commandLike(words), ">")
+	writeCapable := actionProgramMayWrite(program)
 	for i, word := range words[1:] {
-		if word == ">" || word == ">>" || word == "<" || word == "<<" {
+		if actionWindowsRedirectOperator(word) != "" {
 			continue
 		}
-		if i > 0 && (words[i] == ">" || words[i] == ">>" || words[i] == "<" || words[i] == "<<") {
+		if i > 0 && actionWindowsRedirectOperator(words[i]) != "" {
 			continue
 		}
 		if word == "<<<" || word == "@'" || word == `@"` {
@@ -304,47 +355,14 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 			continue
 		}
 		if strings.ContainsAny(word, "/\\$%") || len(word) >= 2 && word[1] == ':' {
-			readOnly := program == "cat" || program == "type" || program == "get-content" ||
-				program == "get-childitem" || program == "grep"
-			protected, resolved := actionWindowsProtected(word, cwd, home, readOnly)
-			if protected || !resolved && writeCapable && actionWindowsPathPosition(program, i+1, words) &&
-				!actionWindowsBoundedSourceGlob(program, i+1, words, word, cwd, home) {
+			_, resolved := actionWindowsProtected(word, cwd, home, false)
+			if !resolved && writeCapable {
 				return "dynamic-argument"
 			}
 		}
 	}
 	return ""
 }
-
-func actionWindowsPathPosition(program string, index int, words []string) bool {
-	switch program {
-	case "echo", "printf", "write-output":
-		return false
-	case "add-content", "set-content", "out-file":
-		for i := 1; i < index; i++ {
-			if strings.EqualFold(words[i], "-Value") {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func actionWindowsBoundedSourceGlob(program string, index int, words []string, word, cwd, home string) bool {
-	if program != "compress-archive" || index < 2 || !strings.EqualFold(words[index-1], "-Path") ||
-		!strings.HasSuffix(word, "/*") && !strings.HasSuffix(word, `\*`) {
-		return false
-	}
-	prefix := word[:len(word)-1]
-	resolved, ok := actionWindowsPath(prefix, cwd, home)
-	if !ok {
-		return false
-	}
-	protected, _ := actionWindowsProtected(prefix, cwd, home, true)
-	return !protected && !strings.Contains(resolved, "/.ssh/")
-}
-
-func commandLike(words []string) string { return strings.Join(words, " ") }
 
 func actionWindowsWrapperDecision(program string, words []string, cwd, home string, depth int) string {
 	if depth >= 8 {

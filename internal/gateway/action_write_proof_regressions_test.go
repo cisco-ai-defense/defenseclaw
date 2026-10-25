@@ -73,9 +73,9 @@ func TestR104ReviewFixDecisions(t *testing.T) {
 	}{
 		{"called function writer", `f() { python3 -c 'open("alias","a").write("marker")'; }; f`, true},
 		{"nested called function writer", `f() { python3 -c 'open("alias","a").write("marker")'; }; g() { f; }; g`, true},
-		{"uncalled function writer", `f() { python3 -c 'open("alias","a").write("marker")'; }; echo ok`, false},
-		{"dormant caller", `f() { python3 -c 'open("alias","a").write("marker")'; }; g() { f; }; echo ok`, false},
-		{"argument is not a call", `f() { python3 -c 'open("alias","a").write("marker")'; }; echo f`, false},
+		{"uncalled function protected mention", `f() { python3 -c 'open("alias","a").write("marker")'; }; echo ok`, true},
+		{"dormant caller protected mention", `f() { python3 -c 'open("alias","a").write("marker")'; }; g() { f; }; echo ok`, true},
+		{"function argument protected mention", `f() { python3 -c 'open("alias","a").write("marker")'; }; echo f`, true},
 		{"literal writer in reachable caller", `f() { python3 -c 'open("alias","a").write("marker")'; }; g() { f; }; g`, true},
 		{"Python FileIO", `python3 -c 'import io; io.FileIO("alias","w").write(b"marker")'`, true},
 		{"Python imported FileIO", `python3 -c 'from io import FileIO; FileIO("alias",mode="a").write(b"marker")'`, true},
@@ -89,9 +89,9 @@ func TestR104ReviewFixDecisions(t *testing.T) {
 		{"Perl File Copy", `perl -e 'use File::Copy; copy("payload","alias")'`, true},
 		{"Perl qualified copy", `perl -e 'File::Copy::copy("payload","alias")'`, true},
 		{"Perl bare copy", `perl -e 'use File::Copy; copy "payload", "alias"'`, true},
-		{"FileIO read control", `python3 -c 'import io; io.FileIO("alias","r").read()'`, false},
-		{"Perl unrelated copy control", `perl -e 'sub copy { return 1 }; copy("payload","alias")'`, false},
-		{"copy source control", `node -e 'require("fs").copyFileSync("alias","out.txt")'`, false},
+		{"FileIO protected named read", `python3 -c 'import io; io.FileIO("alias","r").read()'`, true},
+		{"Perl protected named copy", `perl -e 'sub copy { return 1 }; copy("payload","alias")'`, true},
+		{"protected named copy source", `node -e 'require("fs").copyFileSync("alias","out.txt")'`, true},
 		{"copy destination control", `python3 -c 'import shutil; shutil.copy2("payload","out.txt")'`, false},
 		// The project contains a symlink, so T7's import-path proof cannot
 		// certify that Python keeps an inert string inert at runtime.

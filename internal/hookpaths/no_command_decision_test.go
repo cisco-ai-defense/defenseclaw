@@ -12,7 +12,7 @@ import (
 // Task/Agent, any other delegation, file or MCP tool) has no shell action to
 // decide. The Windows grammar used to return dynamic-command for it, so the
 // gateway blocked every such call on Windows as an SSH persistence write.
-// Protected writes and launchers with an empty child stay blocked.
+// Protected writes still block; empty launchers carry an audit note.
 func TestGAP0958NoCommandTextHasNoActionDecision(t *testing.T) {
 	// The home is a real path: on macOS the temporary directory is under the
 	// /var -> /private/var link, which the protected-file proof resolves.
@@ -36,19 +36,23 @@ func TestGAP0958NoCommandTextHasNoActionDecision(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name, command, cwd, home string
+		block                    bool
 	}{
-		{"POSIX protected write", `echo key >> ~/.ssh/authorized_keys`, posixCWD, posixHome},
-		{"POSIX empty nested shell", `sh -c`, posixCWD, posixHome},
-		{"PowerShell protected write", `Add-Content -Path "$env:USERPROFILE\.ssh\authorized_keys" -Value key`, `C:\Users\alice\project`, `C:\Users\alice`},
-		{"cmd protected write", `echo key>>%USERPROFILE%\.ssh\authorized_keys`, `C:\Users\alice\project`, `C:\Users\alice`},
-		{"cmd launcher without a child", `cmd /c`, `C:\Users\alice\project`, `C:\Users\alice`},
-		{"cmd launcher with a blank child", `cmd /c ""`, `C:\Users\alice\project`, `C:\Users\alice`},
-		{"pwsh launcher without a child", `pwsh -Command`, `C:\Users\alice\project`, `C:\Users\alice`},
-		{"pwsh stdin", `pwsh -`, `C:\Users\alice\project`, `C:\Users\alice`},
-		{"Windows backtick command in a write", "Set-Content -Path `$x -Value key", `C:\Users\alice\project`, `C:\Users\alice`},
+		{"POSIX protected write", `echo key >> ~/.ssh/authorized_keys`, posixCWD, posixHome, true},
+		{"POSIX empty nested shell", `sh -c`, posixCWD, posixHome, false},
+		{"PowerShell protected write", `Add-Content -Path "$env:USERPROFILE\.ssh\authorized_keys" -Value key`, `C:\Users\alice\project`, `C:\Users\alice`, true},
+		{"cmd protected write", `echo key>>%USERPROFILE%\.ssh\authorized_keys`, `C:\Users\alice\project`, `C:\Users\alice`, true},
+		{"cmd launcher without a child", `cmd /c`, `C:\Users\alice\project`, `C:\Users\alice`, false},
+		{"cmd launcher with a blank child", `cmd /c ""`, `C:\Users\alice\project`, `C:\Users\alice`, false},
+		{"pwsh launcher without a child", `pwsh -Command`, `C:\Users\alice\project`, `C:\Users\alice`, false},
+		{"pwsh stdin", `pwsh -`, `C:\Users\alice\project`, `C:\Users\alice`, false},
+		{"Windows backtick command in a write", "Set-Content -Path `$x -Value key", `C:\Users\alice\project`, `C:\Users\alice`, false},
 	} {
-		if got := ActionCommandDecision(tc.command, tc.cwd, tc.home); got == "" {
-			t.Errorf("%s: %q decision is empty, want a block", tc.name, tc.command)
+		if got := ActionCommandDecision(tc.command, tc.cwd, tc.home) != ""; got != tc.block {
+			t.Errorf("%s: %q block=%v, want %v", tc.name, tc.command, got, tc.block)
+		}
+		if !tc.block && ActionCommandAuditReason(tc.command, tc.cwd, tc.home) == "" {
+			t.Errorf("%s: %q has no audit reason", tc.name, tc.command)
 		}
 	}
 }

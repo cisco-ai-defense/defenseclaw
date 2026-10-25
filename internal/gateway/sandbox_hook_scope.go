@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -459,7 +460,11 @@ func sandboxHookManagedV8(ctx context.Context) audit.SandboxManagedV8 {
 // envelope.
 func hookRequestAuditExtra(ctx context.Context, profile connector.HookProfile) map[string]string {
 	extra := mergeHookEnvelopeExtra(hookCompatibilityExtra(profile), sandboxHookAuditExtra(ctx))
-	return mergeHookEnvelopeExtra(extra, agentHostExtra(ctx))
+	extra = mergeHookEnvelopeExtra(extra, agentHostExtra(ctx))
+	if reason := resolvedWritesFromContext(ctx)[hookpaths.UnprovenReasonKey]; hookpaths.UnprovenWriteTitle(reason) != "" {
+		extra = mergeHookEnvelopeExtra(extra, map[string]string{"unresolved_command": reason})
+	}
+	return extra
 }
 
 // sandboxBindingEnvelope overlays the binding's identity onto env.

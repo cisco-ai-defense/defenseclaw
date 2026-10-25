@@ -187,10 +187,14 @@ func posixCommandExpandsTilde(
 		if argument.Value != fact.Value {
 			continue
 		}
+		// A quoted or escaped tilde, also one a wrapper (sudo, env,
+		// command, exec) passed on, is the literal name the program gets
+		// (GAP-1455, round m). Structured argv keeps the home spelling.
 		matched = true
 		expands = expands &&
 			!argument.Expands &&
-			argument.Quote == QuoteNone
+			argument.Quote == QuoteNone &&
+			!argument.literalTilde
 	}
 	for _, redirect := range command.Redirects {
 		if redirect.Target != fact.Value || redirect.Access != fact.Access {

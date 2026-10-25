@@ -54,12 +54,13 @@ func TestR104Refix4GitWorktreeRoot(t *testing.T) {
 		name, command, target string
 		opaque                bool
 	}{
-		{"GAP-0493 pull can update root", `git -C sub pull && echo marker >> future`, "future", true},
-		{"GAP-0493 checkout can update root", `git -C sub checkout -- future && echo marker >> future`, "future", true},
+		{"GAP-0493 pull can update root", `git -C sub pull && echo marker >> future`, "future", false},
+		{"GAP-0493 checkout can update root", `git -C sub checkout -- future && echo marker >> future`, "future", false},
 		{"outside repository", `git -C sub pull && echo marker >> ../notes.txt`, "../notes.txt", false},
-		{"explicit worktree environment", `GIT_WORK_TREE=.. git -C sub pull && echo marker >> ../notes.txt`, "../notes.txt", true},
-		{"explicit worktree config", `git -C sub -c core.worktree=.. pull && echo marker >> ../notes.txt`, "../notes.txt", true},
-		{"case-folded worktree config", `git -C sub -c CoRe.WorkTree=.. pull && echo marker >> ../notes.txt`, "../notes.txt", true},
+		{"explicit worktree environment", `GIT_WORK_TREE=.. git -C sub pull && echo marker >> ../notes.txt`, "../notes.txt", false},
+		{"explicit worktree config", `git -C sub -c core.worktree=.. pull && echo marker >> ../notes.txt`, "../notes.txt", false},
+		{"case-folded worktree config", `git -C sub -c CoRe.WorkTree=.. pull && echo marker >> ../notes.txt`, "../notes.txt", false},
+		{"materialization beside protected link", `git -C sub pull && echo marker >> alias`, "alias", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			links := commandLinksWithFacts(tc.command, cwd, home, nil, false)

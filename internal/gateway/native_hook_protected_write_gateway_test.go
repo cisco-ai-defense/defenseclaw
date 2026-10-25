@@ -81,11 +81,11 @@ func TestR104ProtectedWriteRefix3(t *testing.T) {
 		{"awk ordinary target", `awk 'BEGIN { target="report.txt"; print "marker" >> target }'`, false},
 		{"python computed Path receiver", `python3 -c 'from pathlib import Path; p=Path("alias"); p.write_text("marker")'`, true},
 		{"python concatenated Path receiver", `python3 -c 'from pathlib import Path; p=Path("ali"+"as"); p.write_text("marker")'`, true},
-		{"python ordinary Path destination with protected data", `python3 -c 'from pathlib import Path; Path("out/result.json").write_text("alias")'`, false},
-		{"python ordinary Path destination with escaped data", `python3 -c 'from pathlib import Path; Path("out/result.json").write_text("alias\n")'`, false},
-		{"python ordinary open destination with protected data", `python3 -c 'open("out.txt","w").write("alias")'`, false},
+		{"python ordinary Path destination with protected data", `python3 -c 'from pathlib import Path; Path("out/result.json").write_text("alias")'`, true},
+		{"python ordinary Path destination with escaped data", `python3 -c 'from pathlib import Path; Path("out/result.json").write_text("alias\n")'`, true},
+		{"python ordinary open destination with protected data", `python3 -c 'open("out.txt","w").write("alias")'`, true},
 		{"shell parse error after redirect", `echo marker >> alias; if (`, true},
-		{"shell parse error after dynamic redirect", `echo marker >> "$destination"; if (`, true},
+		{"shell parse error after dynamic redirect", `echo marker >> "$destination"; if (`, false},
 		{"shell parse error after copy", `cp report.txt alias; if (`, true},
 		{"shell parse error after Python write", `python3 -c 'open("alias","a").write("marker")'; if (`, true},
 		{"shell parse error after ordinary copy", `cp report.txt out.txt; if (`, false},
@@ -101,7 +101,7 @@ func TestR104ProtectedWriteRefix3(t *testing.T) {
 		{"copyfile ordinary destination", `python3 -c 'import shutil; shutil.copyfile("payload","out.txt")'`, false},
 		{"GAP-0475 trailing Python argument", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("marker")}"""' .`, true},
 		{"GAP-0475 exact Python argument", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; f"""{p.write_text("marker")}"""'`, true},
-		{"GAP-0475 triple string beside the protected path", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; """{p.write_text("marker")}"""'`, true},
+		{"GAP-0475 triple string beside the protected path", `python3 -c 'from pathlib import Path; p = Path.home() / ".ssh" / "authorized_keys"; """{p.write_text("marker")}"""'`, false},
 		{"GAP-0495 nested bash login shell", `bash -lc 'echo marker >> alias'`, true},
 		{"GAP-0495 nested sh shell", `sh -c 'echo marker >> alias'`, true},
 		{"GAP-0495 separate login option", `bash -l -c 'echo marker >> alias'`, true},
@@ -137,7 +137,7 @@ func TestR104NestedShellProtectedPath(t *testing.T) {
 				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
 			facts := actionfacts.Analyze(input)
 			write := trustedExistingAuthorizedKeysSymlinkWrite(trustedActionRequest{Input: input}, facts)
-			if got := trustedAuthorizedKeysWriteProof(input, facts, write); got != tc.block {
+			if got := trustedAuthorizedKeysWriteProof(input, facts, write, nil); got != tc.block {
 				t.Fatalf("protected write = %v, want %v", got, tc.block)
 			}
 		})
@@ -156,11 +156,11 @@ func TestR104MaterializedLinkWriteRefix3(t *testing.T) {
 		name, command string
 		block         bool
 	}{
-		{"GAP-1550 git clone", `git clone ../repo d && echo marker >> d/k`, true},
-		{"GAP-1550 git checkout", `git checkout -- k && echo marker >> k`, true},
-		{"GAP-1550 git switch", `git switch updated && echo marker >> k`, true},
-		{"GAP-1550 git pull", `git pull && echo marker >> k`, true},
-		{"GAP-1550 git apply", `git apply link.patch && echo marker >> k`, true},
+		{"GAP-1550 git clone", `git clone ../repo d && echo marker >> d/k`, false},
+		{"GAP-1550 git checkout", `git checkout -- k && echo marker >> k`, false},
+		{"GAP-1550 git switch", `git switch updated && echo marker >> k`, false},
+		{"GAP-1550 git pull", `git pull && echo marker >> k`, false},
+		{"GAP-1550 git apply", `git apply link.patch && echo marker >> k`, false},
 		{"GAP-1550 remote rsync", `rsync -a host:src/ copy/ && echo marker >> copy/k`, true},
 		{"GAP-1550 jar extraction", `jar xf keys.jar && echo marker >> n1.txt`, true},
 		{"GAP-1550 ditto extraction", `ditto -x -k keys.zip unpack && echo marker >> unpack/n`, true},
@@ -194,7 +194,7 @@ func TestR104WindowsRegisteredHookWriteRefix3(t *testing.T) {
 		{"GAP-0421 Codex Join-Path variable", "codex", "exec_command", `$sshDirectory = Join-Path $HOME '.ssh'; $authorizedKeys = Join-Path $sshDirectory 'authorized_keys'; New-Item -ItemType Directory -Path $sshDirectory -Force | Out-Null; Add-Content -LiteralPath $authorizedKeys -Value 'dummy-key'; Write-Output "Appended literal string to $authorizedKeys"`, true},
 		{"Codex Join-Path ordinary variable", "codex", "exec_command", `$output = Join-Path $HOME 'report.txt'; Add-Content -LiteralPath $output -Value 'dummy-key'`, false},
 		{"Codex Join-Path ordinary quoted variable", "codex", "exec_command", `$output = Join-Path $HOME 'report.txt'; Add-Content -LiteralPath "$output" -Value 'dummy-key'`, false},
-		{"Codex unknown write variable", "codex", "exec_command", `Add-Content -LiteralPath $destination -Value 'dummy-key'`, true},
+		{"Codex unknown write variable is audit only", "codex", "exec_command", `Add-Content -LiteralPath $destination -Value 'dummy-key'`, false},
 		{"GAP-0510 Codex newline", "codex", "exec_command", "Write-Output 'ok'\nAdd-Content -Path '~/.ssh/authorized_keys' -Value 'marker'", true},
 		{"GAP-0510 CMD prefix then newline", "codex", "exec_command", "cmd.exe /c \"echo ok\"\nAdd-Content -Path '~/.ssh/authorized_keys' -Value 'marker'", true},
 		{"GAP-0510 Copilot CRLF", "copilot", "powershell", "Write-Output 'ok'\r\nSet-Content -Path '~/.ssh/authorized_keys' -Value 'marker'", true},

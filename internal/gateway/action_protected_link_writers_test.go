@@ -83,8 +83,6 @@ func TestR104ExistingProtectedLinkWriters(t *testing.T) {
 		})
 	}
 	for _, command := range []string{
-		`f() { echo marker >> alias; }; echo ok`,
-		`f() { echo marker >> ~/.ssh/authorized_keys; }; echo ok`,
 		`python3 -c 'open("report.txt","a").write("marker")'`,
 		`for f in safe; do echo marker >> "$f"; done`,
 	} {
@@ -92,6 +90,16 @@ func TestR104ExistingProtectedLinkWriters(t *testing.T) {
 			DialectHint: actionfacts.DialectPOSIX}
 		if trustedExistingAuthorizedKeysSymlinkWrite(trustedActionRequest{Input: input}, actionfacts.Analyze(input)) {
 			t.Fatalf("ordinary command was treated as a protected write: %q", command)
+		}
+	}
+	for _, command := range []string{
+		`f() { echo marker >> alias; }; echo ok`,
+		`f() { echo marker >> ~/.ssh/authorized_keys; }; echo ok`,
+	} {
+		input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home,
+			DialectHint: actionfacts.DialectPOSIX}
+		if !trustedExistingAuthorizedKeysSymlinkWrite(trustedActionRequest{Input: input}, actionfacts.Analyze(input)) {
+			t.Fatalf("protected target in an inert definition was missed: %q", command)
 		}
 	}
 }
@@ -251,7 +259,7 @@ func TestR104OrdinaryChainedRedirectInManagedMode(t *testing.T) {
 	}
 }
 
-func TestR104StoredPatchTextHasNoProtectedEdit(t *testing.T) {
+func TestR104StoredPatchTextNamesProtectedTarget(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -262,7 +270,7 @@ func TestR104StoredPatchTextHasNoProtectedEdit(t *testing.T) {
 	command := "cat > review.patch <<'EOF'\n" + patch + "EOF"
 	input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home,
 		DialectHint: actionfacts.DialectPOSIX}
-	if trustedExistingAuthorizedKeysSymlinkWrite(trustedActionRequest{Input: input}, actionfacts.Analyze(input)) {
-		t.Fatal("stored patch text was treated as an executed edit")
+	if !trustedExistingAuthorizedKeysSymlinkWrite(trustedActionRequest{Input: input}, actionfacts.Analyze(input)) {
+		t.Fatal("stored patch text omitted its protected target mention")
 	}
 }
