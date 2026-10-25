@@ -1974,12 +1974,7 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 		result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, enterprisehooks.UnprotectedAgentsScanPending(age,
 			"Restart-Service DefenseClawHookEnumerator (from an elevated prompt)"))
 		result.CoverageComplete, result.SecurityComplete = false, false
-		if result.Action == "status" || result.Action == "verify" {
-			if err := windowsManagedScanPendingAudit(age); err != nil {
-				result.AddWarning(windowsManagedLaunchAuditUnavailable, "could not audit the pending agent install scan: "+err.Error())
-			}
-		}
-		// A stale record still names the agents its last scan found; they
+		// Only the pending scan is a warning. A stale record still names the agents its last scan found; they
 		// are reported below, so verify keeps failing on a known gap.
 		err = nil
 	}

@@ -21,7 +21,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const windowsManagedLaunchUninspected = "managed_launch_uninspected"
@@ -133,13 +132,6 @@ func reportWindowsManagedInstallCoverage(agent enterprisehooks.UnprotectedAgent)
 		details["actor_id"] = agent.SID
 	}
 	return postWindowsManagedCoverageAlert("managed-install-coverage", "managed_agent_install_unprotected", details)
-}
-
-// windowsManagedScanPendingAudit audits a missing or stale unprotected-agents
-// record (GAP-1430); tests replace it.
-var windowsManagedScanPendingAudit = func(age string) error {
-	return postWindowsManagedCoverageAlert("managed-install-coverage", "managed_agent_install_scan_pending", map[string]any{
-		"coverage_reason": managed.LaunchCoverageScanPending, "coverage_state": "pending", "scan_record": age})
 }
 
 func postWindowsManagedCoverageAlert(source, summary string, details map[string]any) error {

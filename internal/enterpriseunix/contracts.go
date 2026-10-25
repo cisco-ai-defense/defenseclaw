@@ -395,22 +395,16 @@ func (l *lifecycle) guardianTargetFailedSince(since time.Time) bool {
 const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
 
 // reportInstallScanPending reports a missing or stale unprotected-agents
-// record as one NOT COVERED warning, verify included, and audits it in the
-// gateway (GAP-1430).
+// record as one NOT COVERED warning, verify included (GAP-1430). Only that
+// condition is a warning: every other check, and every agent a stale record
+// names, keeps its own verdict.
 func (l *lifecycle) reportInstallScanPending(age string) {
-	env, r := l.env, l.result
 	remedy := "sudo systemctl restart " + unitEnumerator
-	if env.GOOS == "darwin" {
+	if l.env.GOOS == "darwin" {
 		remedy = "sudo launchctl kickstart -k system/" + labelEnumerator
 	}
-	r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, enterprisehooks.UnprotectedAgentsScanPending(age, remedy))
-	r.CoverageComplete, r.SecurityComplete = false, false
-	if (l.opts.Action == ActionStatus || l.opts.Action == ActionVerify) && env.ReportLaunchCoverage != nil {
-		if err := env.ReportLaunchCoverage(context.Background(), managed.LaunchCoverageReport{
-			Reason: managed.LaunchCoverageScanPending, ScanState: age}); err != nil {
-			r.AddWarning(codeManagedLaunchAuditUnavailable, "could not audit the pending agent install scan: "+err.Error())
-		}
-	}
+	l.result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, enterprisehooks.UnprotectedAgentsScanPending(age, remedy))
+	l.result.CoverageComplete, l.result.SecurityComplete = false, false
 }
 
 // describeUnprotectedAgents reports the agents the enumerator found

@@ -30,9 +30,6 @@ func stubWindowsUnprotectedAgents(t *testing.T, agents []enterprisehooks.Unprote
 	previous := windowsEnterpriseUnprotectedAgentsReader
 	t.Cleanup(func() { windowsEnterpriseUnprotectedAgentsReader = previous })
 	windowsEnterpriseUnprotectedAgentsReader = func() ([]enterprisehooks.UnprotectedAgent, error) { return agents, err }
-	previousAudit := windowsManagedScanPendingAudit
-	t.Cleanup(func() { windowsManagedScanPendingAudit = previousAudit })
-	windowsManagedScanPendingAudit = func(string) error { return nil }
 }
 
 // Agents the enumerator found installed but could not enroll run without
@@ -125,7 +122,7 @@ func TestWindowsPrivateClaudeInstallReportsAndAuditsEachCopy(t *testing.T) {
 
 // GAP-1430: a missing or stale protected record (an upgrade before the new
 // enumerator's first scan) is one NOT COVERED (scan pending) warning with the
-// record's age and one audit row; verify does not fail for it alone. An
+// record's age; verify does not fail for it alone. An
 // unreadable record still fails verify (TestWindowsUnreadableProtectedRecordExplainsElevation).
 func TestWindowsPendingUnprotectedRecordIsAWarningNotAVerifyFailure(t *testing.T) {
 	for _, tc := range []struct {
@@ -136,8 +133,6 @@ func TestWindowsPendingUnprotectedRecordIsAWarningNotAVerifyFailure(t *testing.T
 		{fmt.Errorf("read: %w", enterprisehooks.UnprotectedAgentsStaleError{Age: "2h0m0s old"}), "record is 2h0m0s old (limit 16m0s)"},
 	} {
 		stubWindowsUnprotectedAgents(t, nil, tc.err)
-		var audited []string
-		windowsManagedScanPendingAudit = func(age string) error { audited = append(audited, age); return nil }
 		for _, action := range []string{"status", "verify"} {
 			result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
 			result.CoverageComplete, result.SecurityComplete = true, true
@@ -150,47 +145,74 @@ func TestWindowsPendingUnprotectedRecordIsAWarningNotAVerifyFailure(t *testing.T
 				t.Fatalf("%v %s: %+v", tc.err, action, result)
 			}
 		}
-		if len(audited) != 2 || !strings.Contains(tc.want, audited[0]) {
-			t.Fatalf("%v scan-pending audits = %q", tc.err, audited)
-		}
 	}
 }
 
-// GAP-1430 review: a stale record's agents are still reported, so a
-// refusal=missing entry or a Kiro IDE below its floor keeps failing verify
-// next to the pending warning; a malformed record fails verify, not pending.
-func TestWindowsStaleProtectedRecordStillFailsVerifyOnKnownGaps(t *testing.T) {
+// GAP-1430 review: on Windows too a missing or stale record only adds the
+// scan-pending warning. Each failure verify reports beside a fresh record
+// (the lifecycle's hook, guardian target or ACL errors, a record agent that
+// fails verify) fails verify with the same errors and exit code beside it.
+func TestWindowsPendingRecordKeepsEveryOtherVerifyFailure(t *testing.T) {
+	records := []struct {
+		name   string
+		agents []enterprisehooks.UnprotectedAgent
+		fails  bool
+	}{
+		{"empty", nil, false},
+		{"unprotected agent", []enterprisehooks.UnprotectedAgent{{User: "carol", SID: "S-1-5-21-1-2-3-1003", Connector: "codex",
+			Version: "1.0.0", Code: enterprisehooks.UnprotectedCodeAgentUnprotected, Reason: "could not enroll"}}, false},
+		{"refusal missing", []enterprisehooks.UnprotectedAgent{{User: "alice", SID: "S-1-5-21-1-2-3-1001", Connector: "cursor",
+			Version: "4.1.0", Code: enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "not verified",
+			Refusal: enterprisehooks.RefusalMissing}}, true},
+		{"kiro below floor", []enterprisehooks.UnprotectedAgent{{User: "bob", SID: "S-1-5-21-1-2-3-1002", Connector: "kiro",
+			Version: "0.1.0", Code: enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor, Reason: "below floor"}}, true},
+	}
 	stale := fmt.Errorf("read: %w", enterprisehooks.UnprotectedAgentsStaleError{Age: "2h0m0s old"})
-	stubWindowsUnprotectedAgents(t, []enterprisehooks.UnprotectedAgent{
-		{User: "alice", SID: "S-1-5-21-1-2-3-1001", Connector: "cursor", Version: "4.1.0",
-			Code: enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "not verified", Refusal: enterprisehooks.RefusalMissing},
-		{User: "bob", SID: "S-1-5-21-1-2-3-1002", Connector: "kiro", Version: "0.1.0",
-			Code: enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor, Reason: "below floor"},
-		{User: "carol", SID: "S-1-5-21-1-2-3-1003", Connector: "codex", Version: "1.0.0",
-			Code: enterprisehooks.UnprotectedCodeAgentUnprotected, Reason: "could not enroll"},
-	}, stale)
-	verify := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.4")
-	verify.CoverageComplete, verify.SecurityComplete = true, true
-	applyWindowsEnterpriseUnprotectedAgents(verify)
-	if verify.CoverageComplete || verify.SecurityComplete || len(verify.Errors) != 2 || len(verify.Warnings) != 2 ||
-		verify.Errors[0].Code != enterprisehooks.UnprotectedCodeHookContractUnverified ||
-		verify.Errors[1].Code != enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor ||
-		!strings.Contains(verify.Warnings[0].Message, "NOT COVERED (scan pending)") ||
-		verify.Warnings[1].Code != enterprisehooks.UnprotectedCodeAgentUnprotected {
-		t.Fatalf("verify on a stale record with known gaps = %+v", verify)
+	onlyScanPendingAdded := func(name string, want, got *enterprisestatus.Result) {
+		t.Helper()
+		var wantWarnings, gotWarnings []string
+		for _, w := range want.Warnings {
+			wantWarnings = append(wantWarnings, w.Code)
+		}
+		pending := 0
+		for _, w := range got.Warnings {
+			if w.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete && strings.Contains(w.Message, "NOT COVERED (scan pending)") {
+				pending++
+				continue
+			}
+			gotWarnings = append(gotWarnings, w.Code)
+		}
+		if pending != 1 || got.OK != want.OK || got.ExitCode != want.ExitCode ||
+			fmt.Sprint(got.Errors) != fmt.Sprint(want.Errors) || fmt.Sprint(gotWarnings) != fmt.Sprint(wantWarnings) {
+			t.Fatalf("%s: verify exit %d errors %+v warnings %v (%d pending); want exit %d errors %+v warnings %v plus one pending row",
+				name, got.ExitCode, got.Errors, gotWarnings, pending, want.ExitCode, want.Errors, wantWarnings)
+		}
 	}
-	status := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.4")
-	applyWindowsEnterpriseUnprotectedAgents(status)
-	if len(status.Errors) != 0 || len(status.Warnings) != 4 {
-		t.Fatalf("status on a stale record with known gaps = %+v", status)
-	}
-
-	stubWindowsUnprotectedAgents(t, nil, errors.New("enterprise hooks: parse unprotected agents record: invalid character"))
-	malformed := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.4")
-	applyWindowsEnterpriseUnprotectedAgents(malformed)
-	if len(malformed.Errors) != 1 || malformed.Errors[0].Code != enterprisehooks.UnprotectedCodeInstallScanIncomplete ||
-		strings.Contains(fmt.Sprint(malformed.Warnings, malformed.Errors), "scan pending") {
-		t.Fatalf("verify on a malformed record = %+v", malformed)
+	for _, lifecycleErrors := range [][]string{
+		nil,
+		{`hook binary C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe is missing`},
+		{"hook guardian target carol/codex failed: executable is not in a trusted install prefix"},
+		{`C:\ProgramData\Cisco\DefenseClaw\config.yaml grants write access to BUILTIN\Users`},
+	} {
+		verify := func(agents []enterprisehooks.UnprotectedAgent, err error) *enterprisestatus.Result {
+			stubWindowsUnprotectedAgents(t, agents, err)
+			result := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.4")
+			applyWindowsEnterpriseInstallerReport(result, &windowsEnterpriseLifecycleOptions{}, &windowsEnterpriseInstallerReport{
+				OK: len(lifecycleErrors) == 0, Installed: true, SecurityComplete: true, GuardianReady: true, GatewayReady: true,
+				Errors: lifecycleErrors}, windowsEnterpriseStandaloneRun{})
+			result.Finish("windows", 0)
+			return result
+		}
+		for _, record := range records {
+			fresh := verify(record.agents, nil)
+			if (record.fails || len(lifecycleErrors) != 0) && fresh.ExitCode == 0 {
+				t.Fatalf("%s %q: verify beside a fresh record passed: %+v", record.name, lifecycleErrors, fresh)
+			}
+			onlyScanPendingAdded(record.name+" stale", fresh, verify(record.agents, stale))
+			if record.agents == nil {
+				onlyScanPendingAdded("missing", fresh, verify(nil, os.ErrNotExist))
+			}
+		}
 	}
 }
 

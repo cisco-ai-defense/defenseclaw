@@ -9,6 +9,7 @@ package enterpriseunix
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -166,29 +168,22 @@ func TestManifestModeStatusAndVerifyWaitForPrivateInstallScan(t *testing.T) {
 
 // GAP-1430: an upgraded host keeps the previous release's record until the
 // new enumerator finishes a scan. A missing, stale or future-dated record is
-// one NOT COVERED (scan pending) warning naming its age and the remedy, and
-// one gateway audit row; status and verify still exit 0 for it alone.
+// one NOT COVERED (scan pending) warning naming its age and the remedy;
+// status and verify still exit 0 for it alone.
 func TestPendingUnprotectedRecordIsAWarningNotAVerifyFailure(t *testing.T) {
 	for _, platform := range []string{"linux", "darwin"} {
 		for _, tc := range []struct {
-			name, want, audit string
-			mtime             time.Duration // 0 removes the record
+			name, want string
+			mtime      time.Duration // 0 removes the record
 		}{
-			{"stale", " old (limit 16m0s)", `"scan_state":"1h0m`, -time.Hour},
-			{"future", " in the future (limit 16m0s)", `in the future"`, time.Hour},
-			{"missing", "record is missing (no scan has published it yet) (limit 16m0s)",
-				`"scan_state":"missing (no scan has published it yet)"`, 0},
+			{"stale", " old (limit 16m0s)", -time.Hour},
+			{"future", " in the future (limit 16m0s)", time.Hour},
+			{"missing", "record is missing (no scan has published it yet) (limit 16m0s)", 0},
 		} {
 			t.Run(platform+"/"+tc.name, func(t *testing.T) {
 				h := newTestHost(t, platform)
 				requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 				writeFreshLedger(t, h)
-				var audited []string
-				h.env.ReportLaunchCoverage = func(_ context.Context, report managed.LaunchCoverageReport) error {
-					data, _ := json.Marshal(report)
-					audited = append(audited, string(data))
-					return nil
-				}
 				path := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
 				if tc.mtime == 0 {
 					if err := os.Remove(path); err != nil {
@@ -211,62 +206,122 @@ func TestPendingUnprotectedRecordIsAWarningNotAVerifyFailure(t *testing.T) {
 							result.OK, result.ExitCode, result.CoverageComplete, result.SecurityComplete, result.Errors, messages)
 					}
 				}
-				if len(audited) != 2 || !strings.Contains(audited[1], `"reason":"agent_install_scan_pending"`) ||
-					!strings.Contains(audited[1], `"connector":""`) || !strings.Contains(audited[1], tc.audit) {
-					t.Fatalf("scan-pending audit = %q", audited)
-				}
 			})
 		}
 	}
 }
 
-// Only the pending scan is softened: an unreadable record and every other
-// verify failure still fail verify beside a stale record (GAP-1430).
+// GAP-1430 review: a missing or stale record only adds the scan-pending
+// warning. Each failure verify reports beside a fresh record (a record agent
+// that fails verify, a replaced hook binary, a failed guardian target, a
+// config other accounts can write) fails verify with the same errors and
+// exit code beside a stale or missing one, and an unreadable stale record
+// still fails verify.
 func TestPendingUnprotectedRecordKeepsRealVerifyFailures(t *testing.T) {
+	records := []struct {
+		name   string
+		agents []enterprisehooks.UnprotectedAgent
+		fails  bool
+	}{
+		{"empty", nil, false},
+		{"unprotected agent", []enterprisehooks.UnprotectedAgent{{User: "alice", Connector: "codex", Version: "0.1.0",
+			Code: enterprisehooks.UnprotectedCodeAgentUnprotected, Reason: "could not enroll"}}, false},
+		{"refusal missing", []enterprisehooks.UnprotectedAgent{{User: "alice", Connector: "cursor", Version: "4.1.0",
+			Code: enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "not verified against a known hook contract",
+			Refusal: enterprisehooks.RefusalMissing}}, true},
+		{"kiro below floor", []enterprisehooks.UnprotectedAgent{{User: "alice", Connector: "kiro", Version: "1.0.181",
+			Code: enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor, Reason: "Kiro IDE 1.0.181 cannot read the global hooks file"}}, true},
+	}
+	failures := []struct {
+		name   string
+		inject func(*testing.T, *testHost)
+	}{
+		{"none", func(*testing.T, *testHost) {}},
+		{"replaced hook binary", func(t *testing.T, h *testHost) {
+			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.BinDir, binHook)), []byte("replaced\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"failed guardian target", func(t *testing.T, h *testHost) {
+			data, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"),
+				"ok": false, "target_count": 2, "success_count": 1, "failure_count": 1})
+			h.publishLedger(data)
+			state, _ := json.Marshal(map[string]any{"results": []map[string]any{
+				{"user": "alice", "connector": "codex", "ok": true},
+				{"user": "carol", "connector": "codex", "ok": false, "error": "enterprise hooks: connector codex setup failed: executable is not in a trusted install prefix"},
+			}})
+			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"config writable by others", func(t *testing.T, h *testHost) {
+			if err := os.Chmod(h.env.P(h.env.Layout.ConfigPath), 0o666); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	onlyScanPendingAdded := func(t *testing.T, name string, want, got *enterprisestatus.Result) {
+		t.Helper()
+		var wantWarnings, gotWarnings []string
+		for _, w := range want.Warnings {
+			wantWarnings = append(wantWarnings, w.Code)
+		}
+		pending := 0
+		for _, w := range got.Warnings {
+			if w.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete && strings.Contains(w.Message, "NOT COVERED (scan pending)") {
+				pending++
+				continue
+			}
+			gotWarnings = append(gotWarnings, w.Code)
+		}
+		if pending != 1 || got.OK != want.OK || got.ExitCode != want.ExitCode ||
+			fmt.Sprint(got.Errors) != fmt.Sprint(want.Errors) || fmt.Sprint(gotWarnings) != fmt.Sprint(wantWarnings) {
+			t.Fatalf("%s: verify exit %d errors %+v warnings %v (%d pending); want exit %d errors %+v warnings %v plus one pending row",
+				name, got.ExitCode, got.Errors, gotWarnings, pending, want.ExitCode, want.Errors, wantWarnings)
+		}
+	}
 	for _, platform := range []string{"linux", "darwin"} {
-		t.Run(platform, func(t *testing.T) {
-			h := newTestHost(t, platform)
-			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-			writeFreshLedger(t, h)
-			h.env.ReportLaunchCoverage = func(context.Context, managed.LaunchCoverageReport) error { return nil }
-			path := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
-			old := time.Now().Add(-time.Hour)
-			stale := func(data []byte) {
-				t.Helper()
-				if err := os.WriteFile(path, data, 0o600); err != nil {
+		for _, failure := range failures {
+			t.Run(platform+"/"+failure.name, func(t *testing.T) {
+				h := newTestHost(t, platform)
+				requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+				writeFreshLedger(t, h)
+				failure.inject(t, h)
+				path := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
+				old := time.Now().Add(-time.Hour)
+				for _, record := range records {
+					data, _ := enterprisehooks.MarshalUnprotectedAgents(record.agents)
+					if err := os.WriteFile(path, data, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					fresh := h.run(Options{Action: ActionVerify})
+					if wantFail := record.fails || failure.name != "none"; (fresh.ExitCode != 0) != wantFail {
+						t.Fatalf("%s: verify beside a fresh record exit %d errors %+v", record.name, fresh.ExitCode, fresh.Errors)
+					}
+					if err := os.Chtimes(path, old, old); err != nil {
+						t.Fatal(err)
+					}
+					onlyScanPendingAdded(t, record.name+" stale", fresh, h.run(Options{Action: ActionVerify}))
+					if record.agents == nil {
+						if err := os.Remove(path); err != nil {
+							t.Fatal(err)
+						}
+						onlyScanPendingAdded(t, "missing", fresh, h.run(Options{Action: ActionVerify}))
+					}
+				}
+				if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				if err := os.Chtimes(path, old, old); err != nil {
 					t.Fatal(err)
 				}
-			}
-			stale([]byte("{not json"))
-			if r := h.run(Options{Action: ActionVerify}); r.OK || r.ExitCode == 0 ||
-				!strings.Contains(messagesOf(r.Errors, enterprisehooks.UnprotectedCodeInstallScanIncomplete), "unreadable") {
-				t.Fatalf("verify passed an unreadable record: %+v", r)
-			}
-			kiro, _ := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
-				User: "alice", Connector: "kiro", Version: "1.0.181", Code: enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor,
-				Reason: "Kiro IDE 1.0.181 cannot read the global hooks file",
-			}})
-			stale(kiro)
-			if r := h.run(Options{Action: ActionVerify}); r.OK || r.ExitCode == 0 ||
-				messagesOf(r.Errors, enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor) == "" ||
-				!hasWarningContaining(r, enterprisehooks.UnprotectedCodeInstallScanIncomplete, "scan pending") {
-				t.Fatalf("a stale record hid an agent that fails verify: %+v", r)
-			}
-			empty, _ := enterprisehooks.MarshalUnprotectedAgents(nil)
-			stale(empty)
-			requireOK(t, h.run(Options{Action: ActionVerify}))
-			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.BinDir, binHook)), []byte("replaced\n"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			r := h.run(Options{Action: ActionVerify})
-			requireError(t, r, codeVerify)
-			if !hasWarningContaining(r, enterprisehooks.UnprotectedCodeInstallScanIncomplete, "scan pending") {
-				t.Fatalf("verify with a replaced hook binary: %+v", r)
-			}
-		})
+				if r := h.run(Options{Action: ActionVerify}); r.OK || r.ExitCode == 0 ||
+					!strings.Contains(messagesOf(r.Errors, enterprisehooks.UnprotectedCodeInstallScanIncomplete), "unreadable") ||
+					hasWarningContaining(r, enterprisehooks.UnprotectedCodeInstallScanIncomplete, "scan pending") {
+					t.Fatalf("verify on an unreadable stale record: %+v", r)
+				}
+			})
+		}
 	}
 }
 
