@@ -110,7 +110,7 @@ func runScanCode(cmd *cobra.Command, args []string) error {
 
 	result, err := scanner.ScanCode(context.Background(), target, rulesDir)
 	if errors.Is(err, scanner.ErrIncompleteScan) {
-		return fmt.Errorf("code scan incomplete, nothing was reported as clean (run it as a user who can read every file under %s): %w", target, err)
+		return fmt.Errorf("code scan incomplete: part of %s could not be read, so nothing was reported as clean: %w", target, err)
 	}
 	if err != nil {
 		return fmt.Errorf("code scan failed: %w", err)
