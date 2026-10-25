@@ -8,7 +8,7 @@ endpoint = 'http://127.0.0.1:19081/v1/logs'
 protocol = 'json'
 
 [otel.exporter.otlp-http.headers]
-authorization = 'Bearer released-static-token'
+authorization = 'Bearer f00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeed'
 x-defenseclaw-client = 'codex-otel/1.0'
 x-defenseclaw-source = 'codex'
 
@@ -18,7 +18,7 @@ endpoint = 'http://127.0.0.1:19081/v1/metrics'
 protocol = 'json'
 
 [otel.metrics_exporter.otlp-http.headers]
-authorization = 'Bearer released-static-token'
+authorization = 'Bearer f00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeed'
 x-defenseclaw-client = 'codex-otel/1.0'
 x-defenseclaw-source = 'codex'
 
@@ -28,6 +28,6 @@ endpoint = 'http://127.0.0.1:19081/v1/traces'
 protocol = 'json'
 
 [otel.trace_exporter.otlp-http.headers]
-authorization = 'Bearer released-static-token'
+authorization = 'Bearer f00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeed'
 x-defenseclaw-client = 'codex-otel/1.0'
 x-defenseclaw-source = 'codex'

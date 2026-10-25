@@ -339,7 +339,9 @@ func TestUserNativeOTLPCleanupStopsDeliveryToAPeerOnTheStalePort(t *testing.T) {
 
 // The R5 host had no restore metadata for those exporters: the files below are
 // the exact released shapes (unscoped /v1/<signal> URLs, paired product
-// headers, a 64-hex bearer) on a port other than the managed gateway's.
+// headers, a 64-hex bearer) on a port other than the managed gateway's. The
+// earlier per-user install left its scoped sidecars, which name the bearer
+// (review of 70603235: only a known credential proves ownership).
 func TestUserNativeOTLPCleanupRemovesReleasedShapesWithoutBackup(t *testing.T) {
 	bearer := "Bearer " + strings.Repeat("a1", 32)
 	dir := t.TempDir()
@@ -350,8 +352,10 @@ func TestUserNativeOTLPCleanupRemovesReleasedShapesWithoutBackup(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "hooks"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "hooks", ".otlp-claudecode.token"), []byte(strings.Repeat("a1", 32)), 0o600); err != nil {
-		t.Fatal(err)
+	for _, sidecar := range []string{".otlp-claudecode.token", ".otlp-codex.token"} {
+		if err := os.WriteFile(filepath.Join(dir, "hooks", sidecar), []byte(strings.Repeat("a1", 32)), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	codex := "model = \"gpt-5\"\n[otel]\nlog_user_prompt = true\n"
 	for _, pair := range [][2]string{{"exporter", "logs"}, {"metrics_exporter", "metrics"}, {"trace_exporter", "traces"}} {
@@ -440,11 +444,12 @@ func TestUserNativeOTLPCleanupLeavesOperatorExportersAlone(t *testing.T) {
 	claudePath := filepath.Join(dir, "settings.json")
 	useCodexConfig(t, codexPath)
 	useClaudeSettings(t, claudePath)
+	// Operator credentials are not of the DefenseClaw token shape.
 	codex := "[otel]\nlog_user_prompt = true\n[otel.exporter.otlp-http]\nendpoint = 'http://127.0.0.1:4318/v1/logs'\n" +
-		"protocol = 'json'\n[otel.exporter.otlp-http.headers]\nauthorization = 'Bearer " + strings.Repeat("c", 64) + "'\n"
+		"protocol = 'json'\n[otel.exporter.otlp-http.headers]\nauthorization = 'Bearer operator-collector-token'\n"
 	claude := `{"env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1","OTEL_LOGS_EXPORTER":"otlp",` +
 		`"OTEL_EXPORTER_OTLP_ENDPOINT":"http://127.0.0.1:4318","OTEL_EXPORTER_OTLP_HEADERS":"authorization=Bearer ` +
-		strings.Repeat("c", 64) + `","OTEL_LOG_USER_PROMPTS":"1"}}`
+		`operator-collector-token","OTEL_LOG_USER_PROMPTS":"1"}}`
 	if err := os.WriteFile(codexPath, []byte(codex), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -485,8 +490,8 @@ func TestUserNativeOTLPCleanupLeavesOperatorExportersAlone(t *testing.T) {
 	}
 }
 
-// A header value that mixes an operator header with DefenseClaw's keeps the
-// operator's part and loses the product markers and DefenseClaw's bearer.
+// A header value that carries DefenseClaw's bearer is the product's whole entry,
+// even beside an operator header, and so is the route it authenticates.
 func TestUserNativeOTLPCleanupKeepsOperatorHeadersBesideDefenseClawOnes(t *testing.T) {
 	dir := t.TempDir()
 	claudePath := filepath.Join(dir, "settings.json")
@@ -514,9 +519,8 @@ func TestUserNativeOTLPCleanupKeepsOperatorHeadersBesideDefenseClawOnes(t *testi
 	if err := json.Unmarshal(data, &settings); err != nil {
 		t.Fatal(err)
 	}
-	if settings["env"]["OTEL_EXPORTER_OTLP_HEADERS"] != "x-tenant=acme" ||
-		settings["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] != "https://collector.example.test" {
-		t.Fatalf("mixed headers not narrowed to the operator's: %v", settings["env"])
+	if len(settings["env"]) != 0 {
+		t.Fatalf("product headers or their route survived: %v", settings["env"])
 	}
 	if removed, err := RemoveUserNativeOTLP("claudecode", managed); err != nil || len(removed) != 0 {
 		t.Fatalf("second cleanup changed settings again: %v %v", removed, err)
@@ -586,7 +590,7 @@ func TestClaudeNativeOTLPCleanupKeepsChangedAuthorization(t *testing.T) {
 			settingsPath := filepath.Join(dir, "settings.json")
 			useClaudeSettings(t, settingsPath)
 			product := strings.Repeat("a", 64)
-			operator := strings.Repeat("b", 64)
+			operator := "operator-changed-token"
 			marked := func(token string) string {
 				return "authorization=Bearer " + token + ",x-defenseclaw-source=claudecode,x-defenseclaw-client=claudecode-otel/1.0"
 			}
@@ -620,15 +624,17 @@ func TestClaudeNativeOTLPCleanupKeepsChangedAuthorization(t *testing.T) {
 			if err := json.Unmarshal(data, &got); err != nil {
 				t.Fatal(err)
 			}
-			want := ""
+			// The product bearer takes its whole route; a changed operator
+			// credential keeps the collector byte for byte.
+			want, wantEndpoint := "", ""
 			if changed {
-				want = "authorization=Bearer " + operator
+				want, wantEndpoint = marked(operator), "https://collector.example.test"
 			}
 			if got["env"]["OTEL_EXPORTER_OTLP_HEADERS"] != want {
 				t.Fatalf("Authorization after cleanup = %q, want %q", got["env"]["OTEL_EXPORTER_OTLP_HEADERS"], want)
 			}
-			if got["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] != "https://collector.example.test" {
-				t.Fatalf("operator collector changed: %v", got["env"])
+			if got["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] != wantEndpoint {
+				t.Fatalf("collector endpoint = %q, want %q", got["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"], wantEndpoint)
 			}
 		})
 	}
@@ -642,8 +648,10 @@ func TestClaudeNativeOTLPInspectionDoesNotRequireUntrustedToken(t *testing.T) {
 		residue bool
 	}{
 		{name: "operator collector", headers: "authorization=Bearer operator-value", want: "authorization=Bearer operator-value"},
-		{name: "marked without authorization", headers: "x-defenseclaw-source=claudecode,x-operator=kept", want: "x-operator=kept", residue: true},
-		{name: "marked with unmatched authorization", headers: "authorization=Bearer " + strings.Repeat("b", 64) + ",x-defenseclaw-source=claudecode", want: "authorization=Bearer " + strings.Repeat("b", 64), residue: true},
+		{name: "marked without authorization", headers: "x-defenseclaw-source=claudecode,x-operator=kept", want: "x-defenseclaw-source=claudecode,x-operator=kept"},
+		// Review of 70603235: with the sidecar untrusted nothing names the
+		// bearer, so its token shape and marker are no proof.
+		{name: "product-shaped bearer, sidecar untrusted", headers: "authorization=Bearer " + strings.Repeat("b", 64) + ",x-defenseclaw-source=claudecode", want: "authorization=Bearer " + strings.Repeat("b", 64) + ",x-defenseclaw-source=claudecode"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -695,17 +703,18 @@ func TestClaudeNativeOTLPInspectionDoesNotRequireUntrustedToken(t *testing.T) {
 			if err := json.Unmarshal(out, &got); err != nil {
 				t.Fatal(err)
 			}
-			if got["env"]["OTEL_EXPORTER_OTLP_HEADERS"] != tc.want || got["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] != "https://collector.example.test" {
-				t.Fatalf("operator collector changed: %v", got["env"])
+			if got["env"]["OTEL_EXPORTER_OTLP_HEADERS"] != tc.want || got["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] != "" {
+				t.Fatalf("product route survived: %v", got["env"])
 			}
 		})
 	}
 }
 
-// A product marker proves the marker and old loopback endpoint are ours, but
-// does not prove an Authorization value without a matching backup or sidecar.
-// Keep that value while disabling export so it cannot reach the retired port.
-func TestClaudeNativeOTLPCleanupKeepsUnmatchedBearerOffRetiredPort(t *testing.T) {
+// Review of 70603235: a marked bearer of the DefenseClaw token shape that no
+// backup, sidecar or Setup option names is the operator's. A false delete
+// would lose the operator's collector, so cleanup keeps the route and its
+// bytes; only a known credential proves ownership.
+func TestClaudeNativeOTLPCleanupKeepsUnrecordedTokenShapedBearer(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")
 	useClaudeSettings(t, settingsPath)
@@ -724,34 +733,24 @@ func TestClaudeNativeOTLPCleanupKeepsUnmatchedBearerOffRetiredPort(t *testing.T)
 	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if fallback := exportLikeClaudeCode(t, settingsPath); fallback {
-		t.Fatal("fixture did not export to its retired endpoint")
+	if fallback := exportLikeClaudeCode(t, settingsPath); fallback || len(seen()) != 1 {
+		t.Fatal("fixture did not export to its collector")
 	}
-	before := seen()
-	if len(before) != 1 || !before[0].bearer {
-		t.Fatalf("fixture did not send its bearer to the retired endpoint: %v", before)
-	}
-	out, removed, err := claudeCodeWithoutUserNativeOTLP(data, claudeCodeBackup{}, SetupOpts{DataDir: dir, ManagedEnterprise: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(removed) == 0 {
-		t.Fatal("retired exporter was not removed")
-	}
-	if err := os.WriteFile(settingsPath, out, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	data = out
-	var got map[string]map[string]string
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got["env"]["OTEL_EXPORTER_OTLP_HEADERS"] != "authorization=Bearer "+unmatched ||
-		got["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] != "" {
-		t.Fatalf("unmatched credential or retired endpoint changed incorrectly: %v", got["env"])
-	}
-	if fallback := exportLikeClaudeCode(t, settingsPath); fallback || len(seen()) != len(before) {
-		t.Fatalf("retired exporter still active: default=%t peer requests=%d", fallback, len(seen())-len(before))
+	for _, opts := range []SetupOpts{{DataDir: dir, ManagedEnterprise: true}, {DataDir: dir}} {
+		out, removed, err := claudeCodeWithoutUserNativeOTLP(data, claudeCodeBackup{}, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out != nil || len(removed) != 0 {
+			t.Fatalf("unrecorded token-shaped route removed %v:\n%s", removed, out)
+		}
+		residue, err := UserNativeOTLPResidue("claudecode", opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(residue) != 0 {
+			t.Fatalf("unrecorded token-shaped route reported as residue: %v", residue)
+		}
 	}
 }
 

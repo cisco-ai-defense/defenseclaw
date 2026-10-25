@@ -16,6 +16,27 @@ import (
 // order in the rest of config.toml; a whole-document TOML marshal loses all
 // three. The caller validates the decoded result before publishing it.
 func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, error) {
+	out, err := editCodexOwnedTOMLWith(raw, desired, true)
+	if err != nil {
+		return nil, err
+	}
+	// A layout the line editor cannot narrow (an inline otel table) falls
+	// back to rendering the whole [otel] table.
+	var check map[string]interface{}
+	if parseCodexTOML(out, &check) == nil {
+		got, hasGot := check["otel"]
+		want, hasWant := desired["otel"]
+		if gotTable, ok := got.(map[string]interface{}); ok && len(gotTable) == 0 && !hasWant {
+			hasGot = false
+		}
+		if hasGot == hasWant && codexValueMatches(got, want) {
+			return out, nil
+		}
+	}
+	return editCodexOwnedTOMLWith(raw, desired, false)
+}
+
+func editCodexOwnedTOMLWith(raw []byte, desired map[string]interface{}, narrowOtel bool) ([]byte, error) {
 	bom := []byte(nil)
 	if bytes.HasPrefix(raw, []byte{0xef, 0xbb, 0xbf}) {
 		bom, raw = raw[:3], raw[3:]
@@ -31,6 +52,15 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 	currentOtel, hasCurrentOtel := current["otel"]
 	desiredOtel, hasDesiredOtel := desired["otel"]
 	keepOtelBytes := hasCurrentOtel == hasDesiredOtel && codexValueMatches(currentOtel, desiredOtel)
+	// Upgrade cleanup usually only deletes product entries from [otel]. Then
+	// drop just their lines, so the operator's exporters beside them keep
+	// their bytes, comments and layout.
+	removedOtel := map[string]bool(nil)
+	if narrowOtel && !keepOtelBytes {
+		removedOtel = codexOtelRemovedOnly(currentOtel, desiredOtel, hasDesiredOtel)
+	}
+	narrow := len(removedOtel) > 0
+	keepOtelBytes = keepOtelBytes || narrow
 	newline := "\n"
 	if bytes.Contains(raw, []byte("\r\n")) {
 		newline = "\r\n"
@@ -78,6 +108,9 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 	// quoted one, which Codex refuses to load (p0 GAP-1300).
 	sectionPath := []string(nil)
 	skipValue := false
+	// Comments and blank lines at the end of a dropped [otel] subtable
+	// belong to the table after it; hold them until that table is kept.
+	pending := ""
 	for _, line := range lines {
 		inMultiline, inArray := syntax.multiline != 0, syntax.arrayDepth != 0
 		visible := syntax.visible(line)
@@ -98,12 +131,28 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 		if section == "hooks" || section == "otel" && !keepOtelBytes {
 			continue
 		}
+		dropped := narrow && section == "otel" && (len(sectionPath) > 1 && removedOtel[sectionPath[1]] || len(sectionPath) == 1 && !hasDesiredOtel)
+		if dropped {
+			if !inMultiline && !inArray && trimmed == "" {
+				pending += line
+			} else {
+				pending = ""
+			}
+			continue
+		}
+		out.WriteString(pending)
+		pending = ""
 		var key []string
 		if !inMultiline && !inArray && strings.Contains(trimmed, "=") && !strings.HasPrefix(trimmed, "[") {
 			key = tomlKeyPath(line)
 		}
+		if narrow && section == "otel" && len(sectionPath) == 1 && len(key) > 0 && removedOtel[key[0]] {
+			skipValue = syntax.arrayDepth != 0 || syntax.multiline != 0
+			continue
+		}
 		if section == "" && len(key) > 0 {
-			owned := key[0] == "hooks" || key[0] == "otel" && !keepOtelBytes
+			owned := key[0] == "hooks" || key[0] == "otel" && !keepOtelBytes ||
+				narrow && len(key) > 1 && key[0] == "otel" && removedOtel[key[1]]
 			if len(key) == 1 && (key[0] == "notify" || key[0] == "openai_base_url" && desired[key[0]] == nil) {
 				owned = true
 				if key[0] == "notify" {
@@ -372,4 +421,31 @@ func retainCodexTOMLBOM(original, rendered []byte) []byte {
 		return append([]byte{0xef, 0xbb, 0xbf}, rendered...)
 	}
 	return rendered
+}
+
+// codexOtelRemovedOnly returns the [otel] keys cleanup deleted when it changed
+// nothing else in the table, or nil when it added or changed a value.
+func codexOtelRemovedOnly(current, desired interface{}, hasDesired bool) map[string]bool {
+	currentTable, ok := current.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	desiredTable := map[string]interface{}{}
+	if hasDesired {
+		if desiredTable, ok = desired.(map[string]interface{}); !ok {
+			return nil
+		}
+	}
+	for key, value := range desiredTable {
+		if previous, exists := currentTable[key]; !exists || !codexValueMatches(previous, value) {
+			return nil
+		}
+	}
+	removed := map[string]bool{}
+	for key := range currentTable {
+		if _, kept := desiredTable[key]; !kept {
+			removed[key] = true
+		}
+	}
+	return removed
 }

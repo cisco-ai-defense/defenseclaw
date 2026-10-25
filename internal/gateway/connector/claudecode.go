@@ -1815,6 +1815,64 @@ func applyClaudeCodeManagedOtelEnv(existing map[string]interface{}, managed map[
 	}
 }
 
+// A retained operator endpoint needs its signal's enablement and protocol.
+// The native exporter cleanup owns product routes; this map prevents the host
+// Setup writer from disabling the unrelated collector it leaves in place.
+func claudeCodeOperatorOtelSettings(existing map[string]interface{}, previous map[string]string, known []string) map[string]bool {
+	ownedEndpoint := claudeCodeSetupOwnedEndpoint(existing, previous, known)
+	operatorEndpoint := func(key string) bool {
+		endpoint, _ := existing[key].(string)
+		return endpoint != "" && !claudeCodeEnvValueDisablesExport(endpoint) && !ownedEndpoint(key, endpoint)
+	}
+	keep := map[string]bool{}
+	if operatorEndpoint("OTEL_EXPORTER_OTLP_ENDPOINT") {
+		keep["OTEL_EXPORTER_OTLP_ENDPOINT"] = true
+		keep["OTEL_EXPORTER_OTLP_PROTOCOL"] = true
+		for _, signal := range AllNativeOTLPSignals() {
+			upper := strings.ToUpper(string(signal))
+			keep["OTEL_"+upper+"_EXPORTER"] = true
+			keep["OTEL_EXPORTER_OTLP_"+upper+"_PROTOCOL"] = true
+		}
+	}
+	for _, signal := range AllNativeOTLPSignals() {
+		upper := strings.ToUpper(string(signal))
+		endpointKey := "OTEL_EXPORTER_OTLP_" + upper + "_ENDPOINT"
+		if operatorEndpoint(endpointKey) {
+			keep[endpointKey] = true
+			keep["OTEL_"+upper+"_EXPORTER"] = true
+			keep["OTEL_EXPORTER_OTLP_"+upper+"_PROTOCOL"] = true
+		}
+	}
+	if len(keep) == 0 {
+		return keep
+	}
+	keep["CLAUDE_CODE_ENABLE_TELEMETRY"] = true
+	for key, value := range existing {
+		if (strings.HasPrefix(key, "OTEL_EXPORTER_OTLP_") && strings.HasSuffix(key, "_HEADERS") ||
+			key == "OTEL_RESOURCE_ATTRIBUTES" || key == "OTEL_SERVICE_NAME" ||
+			strings.HasPrefix(key, "OTEL_LOG_")) &&
+			!claudeCodeOtelValueLooksManaged(key, value, previous[key]) {
+			if otlpCarriesProductCredential(value, known) {
+				continue
+			}
+			keep[key] = true
+		}
+	}
+	return keep
+}
+
+// claudeCodeSetupOwnedEndpoint reports the endpoints host Setup treats as the
+// product's in the env as found: the exact value it recorded writing, or a
+// route carrying a DefenseClaw credential (claudeCodeRouteIsProduct).
+func claudeCodeSetupOwnedEndpoint(existing map[string]interface{}, previous map[string]string, known []string) func(key, endpoint string) bool {
+	return func(key, endpoint string) bool {
+		if endpoint == previous[key] && previous[key] != "" {
+			return true
+		}
+		return claudeCodeRouteIsProduct(existing, key, endpoint, known)
+	}
+}
+
 // patchClaudeCodeOtelEnv merges OpenTelemetry env vars into
 // ~/.claude/settings.json's `env` block. Claude Code reads this
 // block at startup and exports it into the CLI process environment
@@ -1915,6 +1973,27 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 			}
 			hadManagedPolicy := len(previousManaged) > 0 || len(previousAbsent) > 0
 			managedEnv := buildClaudeCodeOtelEnv(opts)
+			operatorSettings := map[string]bool{}
+			// Decide product routes on the settings as found: the absence
+			// pass below can drop an unchanged product header before the
+			// route it authenticated is inspected.
+			productRoutes := map[string]bool{}
+			known := claudeCodeKnownProductTokens(previousManaged, opts)
+			if !opts.sandboxNativeOTLP {
+				operatorSettings = claudeCodeOperatorOtelSettings(existing, previousManaged, known)
+				for key := range operatorSettings {
+					delete(managedEnv, key)
+				}
+				for _, key := range claudeCodeOtelEnvKeys {
+					if !claudeCodeOTLPEndpointKey(key) {
+						continue
+					}
+					endpoint, _ := existing[key].(string)
+					if claudeCodeRouteIsProduct(existing, key, endpoint, known) {
+						productRoutes[key] = true
+					}
+				}
+			}
 			backup.ManagedEnv = make(map[string]string, len(managedEnv))
 			for key, value := range managedEnv {
 				backup.ManagedEnv[key] = value
@@ -1927,6 +2006,9 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 			// already owned. A newly-added operator value transfers ownership.
 			backup.ManagedAbsentEnv = nil
 			for _, key := range claudeCodeOtelEnvKeys {
+				if operatorSettings[key] {
+					continue
+				}
 				if _, rendered := managedEnv[key]; rendered {
 					continue
 				}
@@ -1948,6 +2030,19 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 				backup.ManagedAbsentEnv = append(backup.ManagedAbsentEnv, key)
 			}
 			applyClaudeCodeManagedOtelEnv(existing, managedEnv)
+			if !opts.sandboxNativeOTLP {
+				for key := range productRoutes {
+					delete(existing, key)
+				}
+				// Any OTLP env value that carries a DefenseClaw credential
+				// (resource attributes and service name included) is the
+				// product's: it never stays beside a retained route.
+				for key, value := range existing {
+					if claudeCodeOTLPEnvKey(key) && otlpCarriesProductCredential(value, known) {
+						delete(existing, key)
+					}
+				}
+			}
 			removeClaudeCodeOTLPHeadersHelper(settings, &backup)
 			backupNeedsSave = true
 			backupToSave = backup
@@ -2137,6 +2232,7 @@ func claudeCodeEnvSnapshotIsOrphanedDefenseClawBlock(snapshot map[string]interfa
 			}
 			pin = true
 		case strings.HasPrefix(key, "OTEL_EXPORTER_OTLP_") && strings.HasSuffix(key, "_ENDPOINT"):
+			// Only product-written values make a snapshot DefenseClaw's.
 			if !claudeCodeLoopbackGatewayEndpoint(got) {
 				return false
 			}
@@ -2169,8 +2265,10 @@ func claudeCodeEnvSnapshotHasDefenseClawEndpointSet(snapshot map[string]interfac
 }
 
 // claudeCodeLoopbackGatewayEndpoint reports whether value is a plain http
-// endpoint on a loopback host and port with a path DefenseClaw's gateway
-// serves: none, an OTLP signal path or a scoped /otlp/ path.
+// endpoint on the loopback host and port DefenseClaw writes, with a path its
+// gateway serves: none, an OTLP signal path or a scoped /otlp/ path. Only the
+// GAP-1107 snapshot classifier uses it; exporter ownership is decided by the
+// credential (otlpCarriesProductCredential).
 func claudeCodeLoopbackGatewayEndpoint(value string) bool {
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" ||

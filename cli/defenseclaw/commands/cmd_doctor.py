@@ -7377,69 +7377,191 @@ def _check_codex_telemetry_proxy(cfg, r: _DoctorResult) -> None:
     _emit(tag, "Codex telemetry proxy", detail, r=r, remediation=remediation)
 
 
-def _codex_otel_exports_to_defenseclaw(otel) -> bool:
+def _codex_otel_exports_to_defenseclaw(otel, product_token: str = "") -> bool:
     """Whether a Codex [otel] table holds an exporter DefenseClaw wrote.
 
-    The markers are the ones the gateway's codexExporterLooksManaged reads:
-    DefenseClaw's product headers or its scoped /otlp/codex endpoint.
+    Ownership mirrors the gateway's codexExporterLooksManaged: an exporter that
+    carries a DefenseClaw credential. Stale x-defenseclaw-* markers alone are
+    the operator's collector and need no DefenseClaw environment.
     """
     if not isinstance(otel, dict):
         return False
-    for value in otel.values():
-        if not isinstance(value, dict):
+    known = [product_token] if product_token else []
+    return any(
+        isinstance(otel.get(key), dict) and _otel_carries_product_credential(otel.get(key), known)
+        for key in ("exporter", "trace_exporter", "metrics_exporter")
+    )
+
+
+# The base64 user:password of an HTTP Basic Authorization value (RFC 7617).
+_OTEL_BASIC_CREDENTIAL_RE = re.compile(r"(?:^|[^0-9A-Za-z])basic[ \t]+([0-9A-Za-z+/_-]{4,}=*)", re.IGNORECASE)
+# The decode budget for one string (gateway otlpMaxPercentLayers,
+# otlpMaxBasicCredentials and otlpMaxDecodeBytes).
+_OTEL_MAX_PERCENT_LAYERS = 2
+_OTEL_MAX_BASIC_CREDENTIALS = 4
+_OTEL_MAX_DECODE_BYTES = 64 << 10
+
+
+def _otel_base64_decode(text: str):
+    """Standard or URL-safe base64, padded or not (gateway otlpBase64Decode)."""
+    raw = text.rstrip("=")
+    padded = (raw + "=" * (-len(raw) % 4)).encode("ascii")
+    for alphabet in (None, b"-_"):
+        try:
+            return base64.b64decode(padded, altchars=alphabet, validate=True).decode("latin-1")
+        except ValueError:  # binascii.Error included
             continue
-        http = value.get("otlp-http")
-        if not isinstance(http, dict):
-            continue
-        endpoint = str(http.get("endpoint") or "")
-        headers = http.get("headers") if isinstance(http.get("headers"), dict) else {}
-        if "/otlp/codex" in endpoint or headers.get("x-defenseclaw-source") == "codex" or (
-            headers.get("x-defenseclaw-client") == "codex-otel/1.0"
-        ):
+    return None
+
+
+def _otel_percent_decode(text: str) -> str:
+    """Lenient %XX decode, as the gateway's otlpPercentDecode."""
+    return urllib.parse.unquote(text, encoding="latin-1")
+
+
+def _otel_value_forms(text: str) -> tuple[list[str], bool]:
+    """Mirror of the gateway's otlpValueForms.
+
+    The value, up to _OTEL_MAX_PERCENT_LAYERS percent-decode layers, and the
+    base64-decoded user:password of each Basic credential in those. The flag
+    reports a value the budget did not finish: larger than
+    _OTEL_MAX_DECODE_BYTES, a further percent layer, more Basic credentials, or
+    a Basic credential encoded again. The work is linear in the value.
+    """
+    forms = [text]
+    if len(text.encode("utf-8", "surrogatepass")) > _OTEL_MAX_DECODE_BYTES:
+        return forms, "%" in text or bool(_OTEL_BASIC_CREDENTIAL_RE.search(text))
+    layer, limited = text, False
+    for _ in range(_OTEL_MAX_PERCENT_LAYERS):
+        decoded = _otel_percent_decode(layer)
+        if decoded == layer:
+            break
+        forms.append(decoded)
+        layer = decoded
+    if _otel_percent_decode(layer) != layer:
+        limited = True
+    for form in list(forms):
+        matches = []
+        for match in _OTEL_BASIC_CREDENTIAL_RE.finditer(form):
+            if len(matches) == _OTEL_MAX_BASIC_CREDENTIALS:
+                limited = True
+                break
+            matches.append(match.group(1))
+        for credential in matches:
+            decoded = _otel_base64_decode(credential)
+            if decoded is None:
+                continue
+            forms.append(decoded)
+            if _otel_percent_decode(decoded) != decoded or _OTEL_BASIC_CREDENTIAL_RE.search(decoded):
+                limited = True
+    return forms, limited
+
+
+def _otel_strings(value):
+    """Every string in a value, TOML table keys included, without recursion."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            yield item
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                stack.extend((key, child))
+        elif isinstance(item, list):
+            stack.extend(item)
+
+
+def _otel_carries_product_credential(value, known) -> bool:
+    """Mirror of the gateway's otlpCarriesProductCredential.
+
+    Ownership is decided by the secret: a value that contains a credential
+    this install can name (percent-encoded or inside a Basic credential
+    included, within the decode budget) is DefenseClaw's, whatever its host,
+    port, header-name or scheme spelling. A value that only looks like a
+    DefenseClaw token, with or without x-defenseclaw-* markers, is the
+    operator's.
+    """
+    known = [token for token in known if len(token) >= 8]
+    if not known:
+        return False
+    for text in _otel_strings(value):
+        forms, _ = _otel_value_forms(text)
+        if any(token in form for form in forms for token in known):
             return True
     return False
 
 
-def _codex_retired_otel_endpoint(otel, api_port: int) -> str:
-    """Name a marked legacy loopback exporter aimed away from this gateway."""
+def _codex_otel_unchecked_value(otel, product_token: str = "") -> str:
+    """Name a Codex [otel] value encoded past the decode budget.
+
+    Cleanup cannot tell whether such a value holds a DefenseClaw credential,
+    so it keeps it; Doctor reports it so the operator can decide.
+    """
     if not isinstance(otel, dict):
         return ""
+    known = [product_token] if product_token else []
+    for key in sorted(otel, key=str):
+        if _otel_carries_product_credential(otel[key], known):
+            continue
+        if any(_otel_value_forms(text)[1] for text in _otel_strings(otel[key])):
+            return f"otel.{key}"
+    return ""
+
+
+def _codex_scoped_otlp_token(cfg) -> str:
+    """The scoped Codex OTLP credential this install issued, or ""."""
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return ""
+    try:
+        with open(os.path.join(data_dir, "hooks", ".otlp-codex.token"), "rb") as fh:
+            raw = fh.read(4097)
+    except OSError:
+        return ""
+    if len(raw) > 4096:
+        return ""
+    try:
+        return raw.decode("ascii").strip()
+    except UnicodeError:
+        return ""
+
+
+def _codex_credential_off_gateway(otel, api_port: int, product_token: str = "") -> str:
+    """Name a Codex exporter that sends a DefenseClaw credential off this gateway.
+
+    An exporter carrying a DefenseClaw credential this install can name is the
+    product's; only the current loopback gateway port may receive it. Exporters
+    without one are the operator's and pass here, on any host or port.
+    """
+    if not isinstance(otel, dict):
+        return ""
+    known = [product_token] if product_token else []
     for key in ("exporter", "trace_exporter", "metrics_exporter"):
         exporter = otel.get(key)
-        http = exporter.get("otlp-http") if isinstance(exporter, dict) else None
-        if not isinstance(http, dict):
+        if not isinstance(exporter, dict) or not _otel_carries_product_credential(exporter, known):
             continue
-        headers = http.get("headers")
-        if not isinstance(headers, dict) or not (
-            headers.get("x-defenseclaw-source") == "codex"
-            or headers.get("x-defenseclaw-client") == "codex-otel/1.0"
-        ):
-            continue
-        endpoint = http.get("endpoint")
-        if not isinstance(endpoint, str):
-            continue
+        http = exporter.get("otlp-http")
+        endpoint = http.get("endpoint") if isinstance(http, dict) else None
         try:
-            parsed = urllib.parse.urlsplit(endpoint)
-            host = parsed.hostname or ""
+            parsed = urllib.parse.urlsplit(endpoint) if isinstance(endpoint, str) else None
+            port = parsed.port if parsed is not None else None
         except ValueError:
-            continue
-        if host.rstrip(".").lower() == "localhost":
-            loopback = True
-        else:
-            try:
-                loopback = ipaddress.ip_address(host).is_loopback
-            except ValueError:
-                loopback = False
-        if not loopback or parsed.scheme != "http" or parsed.username is not None or parsed.query or parsed.fragment:
-            continue
-        if parsed.path not in ("/v1/logs", "/v1/traces", "/v1/metrics"):
-            continue
-        try:
-            port = parsed.port
-        except ValueError:
-            continue
-        if port and port != api_port:
+            parsed, port = None, None
+        on_gateway = (
+            parsed is not None
+            and parsed.scheme == "http"
+            and (parsed.hostname or "") in ("127.0.0.1", "localhost", "::1")
+            and port == api_port
+        )
+        if not on_gateway:
             return f"otel.{key}.otlp-http.endpoint"
+    # Any other [otel] value that carries one (otel.environment, a resource
+    # table, a string exporter) is DefenseClaw residue wherever Codex sends it.
+    for key, value in otel.items():
+        if key in ("exporter", "trace_exporter", "metrics_exporter") and isinstance(value, dict):
+            continue
+        if _otel_carries_product_credential(value, known):
+            return f"otel.{key}"
     return ""
 
 
@@ -7476,15 +7598,16 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
 
     if config_error:
         _emit("fail", "Codex OTel environment", config_error, r=r)
-    elif stale := _codex_retired_otel_endpoint(otel, _gateway_api_port(cfg)):
-        _emit(
-            "fail",
-            "Codex OTel environment",
-            f"config.toml {stale} still points at a retired loopback port; "
-            "remove this exporter, then rerun Codex setup",
-            r=r,
+    elif stale := _codex_credential_off_gateway(otel, _gateway_api_port(cfg), _codex_scoped_otlp_token(cfg)):
+        detail = (
+            f"config.toml {stale} sends a DefenseClaw credential to a port DefenseClaw does not own; "
+            "remove this exporter, then rerun Codex setup"
+            if stale.endswith(".endpoint")
+            else f"config.toml {stale} carries a DefenseClaw credential that Codex sends with its telemetry; "
+            "remove it, then rerun Codex setup"
         )
-    elif not _codex_otel_exports_to_defenseclaw(otel):
+        _emit("fail", "Codex OTel environment", detail, r=r)
+    elif not _codex_otel_exports_to_defenseclaw(otel, _codex_scoped_otlp_token(cfg)):
         # Host Codex sends no native OTLP to DefenseClaw since 1.0.4: setup
         # writes [otel] only inside an OpenShell sandbox and puts the user's
         # own [otel] back on upgrade (GAP-1101). Hook telemetry carries
@@ -7513,6 +7636,18 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
         )
     else:
         _emit("pass", "Codex OTel environment", f"config.toml and DefenseClaw use {expected!r}", r=r)
+
+    if not config_error:
+        unchecked = _codex_otel_unchecked_value(otel, _codex_scoped_otlp_token(cfg))
+        if unchecked:
+            _emit(
+                "warn",
+                "Codex OTel ownership",
+                f"config.toml {unchecked} is encoded too deeply for Doctor to check for a DefenseClaw credential, "
+                "so DefenseClaw kept it",
+                r=r,
+                remediation="if it is a DefenseClaw token, remove it; otherwise no action is needed",
+            )
 
     try:
         api_port = int(getattr(cfg.gateway, "api_port", 0) or 0)
