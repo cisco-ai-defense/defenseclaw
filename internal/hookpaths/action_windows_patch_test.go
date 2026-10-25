@@ -41,6 +41,14 @@ func TestActionWindowsPatchHereString(t *testing.T) {
 		{"indented closer", "apply_patch @'\n*** Begin Patch\n*** Add File: a.txt\n  '@\n+x\n*** End Patch\n'@", "shell-parse"},
 		{"unterminated here-string", "apply_patch @'\n*** Begin Patch\n*** Add File: a.txt\n+It's\n*** End Patch\n", "shell-parse"},
 		{"expanding body with an apostrophe", "apply_patch @\"\n*** Begin Patch\n*** Add File: notes.txt\n+It's $k\n*** End Patch\n\"@", "dynamic-argument"},
+		// A literal @'...'@ body expands nothing: $ and the backtick are
+		// characters there (T12b round c, loop round 1).
+		{"literal dollar and backtick in content", envelope("*** Update File: src\\run.ps1\n@@\n-$a = 1\n+$a = \"`t$(Get-Date)\"\n"), ""},
+		{"piped literal dollar and backtick in content", "@'\n*** Begin Patch\n*** Add File: C:\\Users\\dcw4-std2\\copilot-cp2\\s.js\n+const s = `it's ${x}`;\n*** End Patch\n'@ | apply_patch", ""},
+		{"literal dollar beside a protected target", envelope("*** Add File: a.ps1\n+$x = 1\n*** Add File: ~\\.ssh\\authorized_keys\n+k\n"), "dynamic-argument"},
+		{"piped literal dollar beside a protected target", "@'\n*** Begin Patch\n*** Add File: a.ps1\n+$x\n*** Delete File: C:\\Users\\dcw4-std2\\.ssh\\authorized_keys\n*** End Patch\n'@ | apply_patch", "dynamic-argument"},
+		{"literal here-string with a trailing word", "apply_patch @'\n*** Begin Patch\n*** Add File: a.txt\n+$x\n*** End Patch\n'@x", "dynamic-argument"},
+		{"double-quoted text that looks like a literal here-string", "apply_patch \"@'\n*** Begin Patch\n*** Add File: a.txt\n+$(whoami)\n*** End Patch\n'@\"", "dynamic-argument"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := ActionCommandDecision(tc.command, cwd, home); got != tc.want {

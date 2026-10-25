@@ -90,16 +90,23 @@ func actionWindowsProtected(value, cwd, home string, readOnly bool) (bool, bool)
 // redirection separately. An unclosed quote leaves the command unproved. A
 // PowerShell here-string (@' or @" at the end of its line) is one word,
 // "@" + body + "@", and runs to the line that starts with its closing '@ or
-// "@: a quote inside the body (It's, "x") does not end it.
-func actionWindowsWords(command string) ([]string, bool) {
-	var words []string
+// "@: a quote inside the body (It's, "x") does not end it. literal[i] reports
+// a word that is exactly one @'...'@ here-string, whose body PowerShell does
+// not expand ($ and the backtick are characters there).
+func actionWindowsWords(command string) (words []string, literal []bool, ok bool) {
 	var word strings.Builder
 	var quote byte
+	hereLen := -1
+	emit := func(value string, isLiteral bool) {
+		words = append(words, value)
+		literal = append(literal, isLiteral)
+	}
 	flush := func() {
 		if word.Len() > 0 {
-			words = append(words, word.String())
+			emit(word.String(), word.Len() == hereLen)
 			word.Reset()
 		}
+		hereLen = -1
 	}
 	for i := 0; i < len(command); i++ {
 		c := command[i]
@@ -116,10 +123,13 @@ func actionWindowsWords(command string) ([]string, bool) {
 			if word.String() == "@" {
 				if end, here, ok := actionWindowsHereStringEnd(command, i); here {
 					if !ok {
-						return words, false
+						return words, literal, false
 					}
 					word.WriteString(command[i+1 : end])
 					word.WriteByte('@')
+					if c == '\'' {
+						hereLen = word.Len()
+					}
 					i = end + 1
 					continue
 				}
@@ -136,17 +146,17 @@ func actionWindowsWords(command string) ([]string, bool) {
 			}
 			flush()
 			if i+1 < len(command) && command[i+1] == c && (c == '>' || c == '<' || c == '&' || c == '|') {
-				words = append(words, command[i:i+2])
+				emit(command[i:i+2], false)
 				i++
 			} else {
-				words = append(words, command[i:i+1])
+				emit(command[i:i+1], false)
 			}
 		default:
 			word.WriteByte(c)
 		}
 	}
 	flush()
-	return words, quote == 0
+	return words, literal, quote == 0
 }
 
 // actionWindowsHereStringEnd reads the here-string whose opening quote is at
@@ -182,7 +192,7 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 	if command == "" || depth >= 8 || len(command) > MaxPayloadBytes {
 		return "dynamic-command"
 	}
-	words, ok := actionWindowsWords(command)
+	words, literal, ok := actionWindowsWords(command)
 	if !ok || len(words) == 0 {
 		return "shell-parse"
 	}
@@ -226,11 +236,22 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 			// A here-string piped into apply_patch (@'...'@ | apply_patch)
 			// is the same envelope argument as apply_patch @'...'@.
 			if next, ok := actionWindowsPipedPatch(words, statement, end); ok {
-				if reason, judged := actionWindowsPatchDecision([]string{words[end+1], statement[0]}, cwd, home); judged {
+				if reason, judged := actionWindowsPatchDecision([]string{words[end+1], statement[0]}, literal[start], cwd, home); judged {
 					if reason != "" {
 						return reason
 					}
 					start = next
+					continue
+				}
+			}
+			// apply_patch @'...'@ reads a literal envelope ($ and ` included).
+			if len(statement) == 2 && literal[start+1] && isApplyPatchToolName(
+				strings.ToLower(strings.TrimSuffix(path.Base(strings.ReplaceAll(statement[0], `\`, "/")), ".exe"))) {
+				if reason, judged := actionWindowsPatchDecision(statement, true, cwd, home); judged {
+					if reason != "" {
+						return reason
+					}
+					start = end + 1
 					continue
 				}
 			}
@@ -267,14 +288,15 @@ func actionWindowsPipedPatch(words, statement []string, end int) (int, bool) {
 // protected-file check as a redirect operand. The envelope word was read as a
 // path before, so every patch naming an absolute or nested project file was
 // denied as a dynamic argument. Any other form (more than one argument or
-// envelope, a body PowerShell could expand: $ or a backtick, as in an
-// @"..."@ here-string) is not judged here and keeps the generic word check.
-func actionWindowsPatchDecision(words []string, cwd, home string) (string, bool) {
+// envelope, a body PowerShell could expand: $ or a backtick outside a
+// literal @'...'@ here-string, as in an @"..."@ one) is not judged here and
+// keeps the generic word check.
+func actionWindowsPatchDecision(words []string, literal bool, cwd, home string) (string, bool) {
 	if len(words) != 2 {
 		return "", false
 	}
 	envelope := strings.TrimSuffix(strings.TrimPrefix(words[1], "@"), "@")
-	if strings.ContainsAny(envelope, "$`") || !strings.HasPrefix(strings.TrimSpace(envelope), patchBeginMarker) {
+	if !literal && strings.ContainsAny(envelope, "$`") || !strings.HasPrefix(strings.TrimSpace(envelope), patchBeginMarker) {
 		return "", false
 	}
 	paths, envelopes, ok := patchEnvelopePaths(envelope)
@@ -296,7 +318,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 	}
 	program := strings.ToLower(strings.TrimSuffix(path.Base(strings.ReplaceAll(words[0], `\`, "/")), ".exe"))
 	if isApplyPatchToolName(program) {
-		if reason, judged := actionWindowsPatchDecision(words, cwd, home); judged {
+		if reason, judged := actionWindowsPatchDecision(words, false, cwd, home); judged {
 			return reason
 		}
 	}

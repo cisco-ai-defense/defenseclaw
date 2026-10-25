@@ -30,13 +30,16 @@ func TestNativeCopilotShellPatchHereString(t *testing.T) {
 		{"powershell piped here-string then a read", "powershell", piped("*** Add File: notes-cp2.txt\n+x\n") + "; Get-Content notes-cp2.txt"},
 		{"powershell here-string with an apostrophe", "powershell", "apply_patch @'\n*** Begin Patch\n*** Add File: notes-cp2.txt\n+It's fine.\n*** End Patch\n'@"},
 		{"powershell piped here-string with quotes", "powershell", piped("*** Add File: " + filepath.Join(project, "notes-cp2.txt") + "\n+It's \"fine\".\n")},
+		// A literal @'...'@ body expands nothing (T12b round c, loop round 1).
+		{"powershell here-string with a literal dollar and backtick", "powershell", "apply_patch @'\n*** Begin Patch\n*** Add File: " + filepath.Join(project, "run.ps1") + "\n+$name = \"x\"\n+Write-Output \"`t$name $(Get-Date)\"\n*** End Patch\n'@"},
+		{"powershell piped here-string with a literal dollar and an apostrophe", "powershell", piped("*** Add File: src\\greet.js\n+const greet = (n) => `It's ${n}`;\n")},
 		{"bash heredoc absolute", "bash", "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: " + filepath.Join(project, "notes-cp2.txt") + "\n+edit\n*** End Patch\nEOF"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.tool == "bash" && runtime.GOOS == "windows" {
 				t.Skip("Copilot CLI on Windows runs PowerShell; the Windows grammar does not read POSIX heredocs")
 			}
-			if (strings.Contains(tc.name, "piped") || strings.Contains(tc.name, "apostrophe")) && runtime.GOOS != "windows" {
+			if (strings.Contains(tc.name, "piped") || strings.Contains(tc.name, "apostrophe") || strings.Contains(tc.name, "literal")) && runtime.GOOS != "windows" {
 				t.Skip("Copilot CLI runs bash on Linux and macOS; a PowerShell pipeline is not a POSIX command")
 			}
 			body, err := json.Marshal(map[string]any{"sessionId": "native-shell-patch", "cwd": project,
@@ -65,6 +68,8 @@ func TestNativeCopilotShellPatchHereString(t *testing.T) {
 		{"piped project patch then a protected write", piped("*** Add File: notes.txt\n+a\n") + "; Set-Content -Path " + keys + " -Value k"},
 		{"piped project patch then a file-fed patch", piped("*** Add File: notes.txt\n+a\n") + "; Get-Content " + filepath.Join(project, "next.patch") + " | apply_patch"},
 		{"protected target with an apostrophe", "apply_patch @'\n*** Begin Patch\n*** Add File: notes.txt\n+It's\n*** Add File: " + keys + "\n+k\n*** End Patch\n'@"},
+		{"protected target beside a literal dollar", "apply_patch @'\n*** Begin Patch\n*** Add File: a.ps1\n+$x = 1\n*** Add File: " + keys + "\n+k\n*** End Patch\n'@"},
+		{"piped protected target beside a literal dollar", piped("*** Add File: a.ps1\n+$x\n*** Delete File: " + keys + "\n")},
 		{"expanding here-string", "apply_patch @\"\n*** Begin Patch\n*** Add File: notes.txt\n+$keys\n*** End Patch\n\"@"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
