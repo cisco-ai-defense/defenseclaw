@@ -1032,6 +1032,94 @@ def _live_edit_over_the_legacy_default(folder, case, legacy_admission):
         return yaml.safe_load(stream)["admission"], cfg
 
 
+def _chosen_old_default_shape(folder, case):
+    """Run one ``fixture["chosen"]`` case and return (written admission,
+    active policy name). *base* is the admission block before it (None: no
+    admission); the case runs config_writer.apply *writes*, policy *cli*
+    arguments, TUI Setup *tui* rows, or activates the policy file *activate*
+    (repo relative) saved as the named policy ``mine``."""
+    import json
+    from pathlib import Path
+
+    from click.testing import CliRunner
+    from defenseclaw import config as config_module
+    from defenseclaw import policy_catalog
+    from defenseclaw.commands.cmd_policy import policy
+    from defenseclaw.context import AppContext
+
+    base = case["base"]
+    if "writes" in case or "activate" in case:
+        text = "" if base is None else yaml.safe_dump({"admission": json.loads(json.dumps(base))}, sort_keys=False)
+        path = _config(folder, text)
+    if "writes" in case:
+        changes = [Change(w[0], w[1]) if len(w) == 2 else Change(w[0], unset=True) for w in case["writes"]]
+        config_writer.apply(changes, "cli:test", "test", path=path)
+    elif "activate" in case:
+        policy_dir = folder / "policies"
+        policy_dir.mkdir()
+        text = (Path(__file__).resolve().parents[2] / case["activate"]).read_text(encoding="utf-8")
+        (policy_dir / "mine.yaml").write_text(text.replace("name: default", "name: mine", 1), encoding="utf-8")
+        app = AppContext()
+        app.cfg = config_module.load(data_dir=str(folder))
+        app.cfg.policy_dir = str(policy_dir)
+        result = CliRunner().invoke(policy, ["activate", "mine", "--no-reload"], obj=app, catch_exceptions=False)
+        assert result.exit_code == 0, (case["name"], result.output)
+        loaded = config_module.load(data_dir=str(folder))
+        with open(path, encoding="utf-8") as stream:
+            return yaml.safe_load(stream)["admission"], policy_catalog.active_policy_name(str(policy_dir), loaded)
+    else:
+        return _live_edit_over_the_legacy_default(folder, case, json.loads(json.dumps(base)))[0], None
+    with open(path, encoding="utf-8") as stream:
+        return yaml.safe_load(stream)["admission"], None
+
+
+def test_a_chosen_old_default_shape_compiles_as_written(tmp_path, monkeypatch):
+    """GAP-1488, review round d: only an untouched 1.0.0-1.0.3 config holds
+    the pre-1.0.4 default preset's MCP shape without having chosen it in this
+    release. A block that a 1.0.4 command writes with that shape compiles as
+    written, MCP HIGH, MEDIUM and LOW refused as on rel/1.0.4: ``policy
+    activate`` of a named policy with the 1.0.3 default actions (on a config
+    with no admission and over the upgraded preset; it stays the active
+    policy), and a config, ``policy edit`` or TUI Setup write that turns
+    another block into that shape. internal/policy compiles the same blocks
+    in Go (TestWritesOverTheLegacyDefaultCompileInGo)."""
+    import json
+    from pathlib import Path
+
+    from defenseclaw.config import _merge_admission, default_config
+    from defenseclaw.enforce.admission import action_blocks, compile_admission
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(config_writer, "_use_go_validator", lambda: False)
+    # Not about managed devices: a test host with a machine-managed config
+    # must not refuse these writes.
+    monkeypatch.setattr(config_writer, "managed_refuses", lambda current, actor: False)
+    monkeypatch.setattr(config_writer, "machine_managed_standalone", lambda: False)
+    fixture = json.loads(
+        (Path(__file__).resolve().parents[2] / "testdata" / "admission_legacy_default_writes.json").read_text()
+    )
+
+    def verdicts(admission):
+        cfg = default_config()
+        cfg.admission = _merge_admission(admission)
+        actions = compile_admission(cfg, "mcp").actions
+        return {sev: "rejected" if action_blocks(actions[sev][0]) else "warning"
+                for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW")}
+
+    assert len(fixture["chosen"]) >= 6
+    for index, case in enumerate(fixture["chosen"]):
+        # A base other than the upgraded preset compiles unlike it.
+        base = case["base"]
+        assert base is None or base == fixture["legacy"] or verdicts(base) != verdicts(fixture["legacy"]), case["name"]
+        folder = tmp_path / str(index)
+        folder.mkdir()
+        written, active = _chosen_old_default_shape(folder, case)
+        assert written == case["admission"], case["name"]
+        assert verdicts(written) == case["verdicts"], case["name"]
+        if "activate" in case:
+            assert active == "mine", case["name"]
+
+
 def test_a_live_policy_edit_over_the_legacy_default_keeps_what_it_decides(tmp_path, monkeypatch):
     """GAP-1488, the write paths other than config_writer.apply: ``policy edit
     actions`` and ``policy edit scanner`` (and its --remove) and a TUI Setup

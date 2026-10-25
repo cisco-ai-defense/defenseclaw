@@ -353,7 +353,10 @@ def legacy_default_mcp_pins(before: Any, after: Callable[[], Any], paths: list[t
     did not decide keeps its translated ``warn`` as an explicit
     ``admission.mcp.actions.<severity>``. One it decided (its own MCP key, or
     the defaults key MCP inherits it from) compiles as written, in Go and in
-    Python, never as warn. Empty when the write needs nothing."""
+    Python, never as warn. A write that leaves the old preset's shape, from
+    that preset or from any other block, gets its inherited MCP HIGH written
+    under MCP, so what it wrote compiles as written too. Empty when the write
+    needs nothing."""
     from defenseclaw.config import _merge_admission
 
     def legacy(document: Any) -> bool:
@@ -362,27 +365,43 @@ def legacy_default_mcp_pins(before: Any, after: Callable[[], Any], paths: list[t
     paths = [tuple(path) for path in paths]
     if not any(_write_touches(path, key) for path in paths for key in _LEGACY_DEFAULT_MCP_INPUTS):
         return {}
-    if not legacy(before):
-        return {}
-    written = {str(sev).lower() for sev in before["admission"]["mcp"]["actions"]}
     pins: dict[tuple, Any] = {}
-    for severity in ("high", "medium", "low"):
-        own = ("admission", "mcp", "actions", severity)
-        inherited = ("admission", "defaults", "actions", severity)
-        decided = any(_write_touches(path, own) for path in paths) or (
-            severity not in written and any(_write_touches(path, inherited) for path in paths)
-        )
-        if not decided:
-            pins[own] = "warn"
+    if legacy(before):
+        written = {str(sev).lower() for sev in before["admission"]["mcp"]["actions"]}
+        for severity in ("high", "medium", "low"):
+            own = ("admission", "mcp", "actions", severity)
+            inherited = ("admission", "defaults", "actions", severity)
+            decided = any(_write_touches(path, own) for path in paths) or (
+                severity not in written and any(_write_touches(path, inherited) for path in paths)
+            )
+            if not decided:
+                pins[own] = "warn"
     if not pins and legacy(after_document := after()):
-        # The write decided all three with the preset's own values. Name the
-        # HIGH that MCP inherits under MCP, so the shape is no longer the
-        # preset's and both compilers compile what was written.
-        defaults = after_document["admission"]["defaults"]["actions"]
-        pins[("admission", "mcp", "actions", "high")] = next(
-            value for sev, value in defaults.items() if str(sev).lower() == "high"
-        )
+        # The write decided all three with the preset's own values, or it
+        # turned another block into the preset's shape. Either way that is
+        # what was chosen: name the HIGH that MCP inherits under MCP, so
+        # both compilers compile what was written.
+        pins[("admission", "mcp", "actions", "high")] = _inherited_high(after_document["admission"]["defaults"]["actions"])
     return pins
+
+
+def _inherited_high(defaults_actions: Any) -> Any:
+    """The ``admission.defaults.actions`` HIGH entry, whatever its key case."""
+    return next(value for sev, value in defaults_actions.items() if str(sev).lower() == "high")
+
+
+def pin_explicit_legacy_shape(adm: Any) -> None:
+    """Make an admission block chosen now compile as written (GAP-1488).
+
+    Only a 1.0.0-1.0.3 config can hold the pre-1.0.4 default preset's
+    shape without having chosen it in this release, so both compilers read
+    that shape as the untouched upgraded preset. A block a 1.0.4 command
+    chooses with that shape (``policy activate`` of a named policy with the
+    old default actions) gets the HIGH that MCP inherits from
+    ``admission.defaults`` written under ``admission.mcp.actions`` too. That
+    changes no action, and the block is no longer the preset's shape."""
+    if _legacy_balanced_default_mcp(adm):
+        adm.mcp.actions["high"] = _inherited_high(adm.defaults.actions)
 
 
 def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:

@@ -1036,6 +1036,11 @@ def _admission_from_policy(data: dict, skipped: list[str] | None = None):  # noq
     # admission.skill.actions the scanner gate would decide skills instead.
     for sev, action in adm.defaults.actions.items():
         adm.skill.actions.setdefault(sev, action)
+    # They are an explicit choice for MCP as well, also when they equal the
+    # pre-1.0.4 default preset's (GAP-1488).
+    from defenseclaw.enforce.admission import pin_explicit_legacy_shape
+
+    pin_explicit_legacy_shape(adm)
     return adm
 
 
