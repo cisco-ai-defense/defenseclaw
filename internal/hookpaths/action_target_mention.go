@@ -173,8 +173,8 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 
 // The text scan finds paths in payloads another program interprets (inline
 // interpreter code, nested shells), where a quoted "~/" may still expand.
-// When every program in the command only reads or prints its arguments and
-// nothing is redirected to a file, a quoted or escaped "~/" is the literal
+// When every program in the command only reads, prints or writes its file
+// operands as written and nothing is redirected to a file, a quoted or escaped "~/" is the literal
 // name the shell passes. It is marked so the scan resolves it below the cwd,
 // not the home. Writers and redirects keep the conservative home spelling.
 const actionLiteralTilde = "\x1e"
@@ -213,7 +213,10 @@ func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
 		switch programBase(program) {
 		case "echo", "printf", "grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "less", "more",
 			"wc", "ls", "dir", "stat", "file", "sort", "uniq", "cut", "tr", "diff", "cmp", "cd",
-			"pushd", "popd", "pwd", "true", "false", "test", "[", "basename", "dirname":
+			"pushd", "popd", "pwd", "true", "false", "test", "[", "basename", "dirname",
+			// File writers take their operands as written: a quoted "~/" is
+			// a directory named "~" below the cwd, not the home (round l).
+			"cp", "mv", "touch", "mkdir", "rm", "ln", "install", "tee", "dd":
 		case "git":
 			// A commit or log message is text; global -c options and config
 			// can install commands that run later, so they are not literal.

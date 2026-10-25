@@ -163,6 +163,14 @@ func TestR104StructuralLiteralTildeAndKeyComponent(t *testing.T) {
 		`cp report "$dir/$(date +%s)-authorized_keys.bak"`,
 		`cp report "$dir/${name}s"`,
 		`cp report "$dir/$name"`,
+		`cp payload '~/.ssh/authorized_keys'`,
+		`cp payload "~/.ssh/authorized_keys"`,
+		`mv payload \~/.ssh/authorized_keys`,
+		`touch '~/.ssh/authorized_keys'`,
+		`mkdir -p '~/.ssh' && cp payload '~/.ssh/authorized_keys'`,
+		`tee '~/.ssh/authorized_keys' < payload`,
+		`ln -s '~/.ssh/authorized_keys' link`,
+		`dd if=payload of='~/.ssh/authorized_keys'`,
 	} {
 		t.Run("allow/"+command, func(t *testing.T) {
 			if got := ActionCommandDecision(command, cwd, home); got != "" {
@@ -175,7 +183,10 @@ func TestR104StructuralLiteralTildeAndKeyComponent(t *testing.T) {
 		`echo ~/".ssh/authorized_keys"`,
 		`echo '~/.ssh/authorized_keys' > notes.txt`,
 		`echo "check ~/.ssh/authorized_keys" > notes.txt`,
-		`cp payload '~/.ssh/authorized_keys'`,
+		`cp payload ~/.ssh/authorized_keys`,
+		`cp payload '~/.ssh/authorized_keys' > notes.txt`,
+		`cp payload '~/x' && sh -c 'cat payload >> ~/.ssh/authorized_keys'`,
+		`tee '~/.ssh/authorized_keys' < payload | sh`,
 		`x=~/.ssh/authorized_keys; cp payload "$x"`,
 		`dd if=payload of=~/.ssh/authorized_keys`,
 		`python3 -c "import os; open(os.path.expanduser('~/.ssh/authorized_keys'),'a').write('k')"`,
