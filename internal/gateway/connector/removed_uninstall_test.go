@@ -5,6 +5,7 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,16 @@ import (
 func readRemovedTestFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// removedJSONString is s as a JSON string: a Windows path holds backslashes.
+func removedJSONString(t *testing.T, s string) string {
+	t.Helper()
+	data, err := json.Marshal(s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,6 +63,11 @@ func TestUninstallRemovesTheRemovedConnectorsPolicyFromTheAgent(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			h := newRemovedHost(t)
 			h.stage(t, c)
+			if c.name == removedOpenHandsID {
+				// What setup wrote, as valid JSON on every OS.
+				writeRemovedFile(t, h.agentConfig, `{"pre_tool_use":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/local/bin/audit-hook"}]},`+
+					`{"matcher":"*","hooks":[{"type":"command","command":`+removedJSONString(t, h.script(c))+`,"timeout":60}]}]}`, 0o600)
+			}
 			codexConfig := filepath.Join(h.home, ".codex", "config.toml")
 			codexScript := filepath.Join(h.dataDir, "hooks", "codex-hook.sh")
 			codexBefore := readRemovedTestFile(t, codexConfig) + readRemovedTestFile(t, codexScript)
@@ -125,7 +141,7 @@ func TestUninstallRemovesEveryShapeOfDefenseClawsEntries(t *testing.T) {
 		writeRemovedFile(t, h.agentConfig, `{"pre_tool_use":[{"matcher":"*","hooks":[`+
 			`{"type":"command","command":"\"C:\\Program Files\\DefenseClaw\\defenseclaw-hook.exe\" --connector openhands"},`+
 			`{"type":"command","command":"/usr/local/bin/audit-hook"}]}],`+
-			`"stop":[{"matcher":"*","hooks":[{"type":"command","command":"`+h.script(removedOpenHands)+`"}]}]}`, 0o600)
+			`"stop":[{"matcher":"*","hooks":[{"type":"command","command":`+removedJSONString(t, h.script(removedOpenHands))+`}]}]}`, 0o600)
 		uninstallRemoved(t, removedOpenHands, h.opts)
 		config := readRemovedTestFile(t, h.agentConfig)
 		if names, _ := removedOpenHands.configNames([]byte(config)); names || !strings.Contains(config, "/usr/local/bin/audit-hook") || strings.Contains(config, `"stop"`) {
@@ -139,7 +155,7 @@ func TestUninstallRemovesEveryShapeOfDefenseClawsEntries(t *testing.T) {
 			h.stage(t, c)
 			broken := "policy_modules: [" + removedOmnigentModuleName + "\n"
 			if c.name == removedOpenHandsID {
-				broken = `{"pre_tool_use":[{"command":"` + h.script(c) + `"}`
+				broken = `{"pre_tool_use":[{"command":` + removedJSONString(t, h.script(c)) + `}`
 			}
 			writeRemovedFile(t, h.agentConfig, broken, 0o600)
 			uninstallRemoved(t, c, h.opts)
