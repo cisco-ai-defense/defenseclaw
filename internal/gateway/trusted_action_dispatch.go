@@ -873,12 +873,12 @@ func provenPartialStateRedirect(
 	projected actionfacts.CommandFact,
 	candidate actionfacts.PathFact,
 ) bool {
-	if projected.Kind != actionfacts.CommandKindShellRedirect ||
-		!integrityCommandOwnsStaticRedirect(projected, candidate) {
+	if !integrityCommandOwnsStaticRedirect(projected, candidate) {
 		return false
 	}
 	original, ok := integrityCommandByID(facts, projected.ID)
-	return ok && original.Effect == actionfacts.EffectPreview &&
+	return ok && (original.Effect == actionfacts.EffectExecute ||
+		original.Effect == actionfacts.EffectPreview) &&
 		!original.ControlFlowUncertain &&
 		integrityCommandOwnsStaticRedirect(original, candidate)
 }
