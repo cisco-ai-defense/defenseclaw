@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -1762,12 +1763,105 @@ func sortedManifestSubjects(subjects map[string]WindowsManifestSubject) []string
 	return out
 }
 
+// windowsPrivateInstallGrace is how long past its profile deadline a
+// private-home scan may run before the profile is reported unreadable.
+var windowsPrivateInstallGrace = 2 * time.Second
+
+// windowsPrivateInstallsInFlight holds the homes whose scan worker has not
+// returned. A directory open or listing that stalls (an offline redirected
+// folder, a cloud placeholder, a hung share) never observes the context, so
+// a later cycle reports that home unreadable instead of starting a second
+// worker behind the stalled one.
+var windowsPrivateInstallsInFlight = struct {
+	sync.Mutex
+	homes map[string]bool
+}{homes: map[string]bool{}}
+
+// windowsPrivateInstallsBounded runs the profile's private-install scan in a
+// worker and answers by ctx's deadline plus a short grace. When the worker
+// has not answered, each connector the scan covers is reported incomplete
+// (home_unreadable) for this profile only, so the cycle goes on to the next
+// profile and publishes on time; the worker ends when the stalled call
+// returns.
+func windowsPrivateInstallsBounded(ctx context.Context, home string, connectors []string) []PrivateAgentInstall {
+	unreadable := func() []PrivateAgentInstall {
+		var out []PrivateAgentInstall
+		for _, conn := range connectors {
+			if conn == "claudecode" || conn == "codex" || conn == "copilot" {
+				out = append(out, PrivateAgentInstall{Connector: conn, Incomplete: true, Skipped: PrivateInstallSkippedHome})
+			}
+		}
+		return out
+	}
+	key := strings.ToLower(filepath.Clean(home))
+	windowsPrivateInstallsInFlight.Lock()
+	if windowsPrivateInstallsInFlight.homes[key] {
+		windowsPrivateInstallsInFlight.Unlock()
+		return unreadable()
+	}
+	windowsPrivateInstallsInFlight.homes[key] = true
+	windowsPrivateInstallsInFlight.Unlock()
+	done := make(chan []PrivateAgentInstall, 1)
+	go func() {
+		installs := windowsPrivateInstallsForEnumeration(ctx, home, connectors)
+		windowsPrivateInstallsInFlight.Lock()
+		delete(windowsPrivateInstallsInFlight.homes, key)
+		windowsPrivateInstallsInFlight.Unlock()
+		done <- installs
+	}()
+	select {
+	case installs := <-done:
+		return installs
+	case <-ctx.Done():
+	}
+	grace := time.NewTimer(windowsPrivateInstallGrace)
+	defer grace.Stop()
+	select {
+	case installs := <-done:
+		return installs
+	case <-grace.C:
+		return unreadable()
+	}
+}
+
+// WindowsManifestScanIncomplete returns reported plus an install-scan-
+// incomplete entry (account_not_inspected) for each connector of each
+// administrator-enrolled subject that reported does not already name
+// incomplete. Manifest mode publishes it when its profile scan did not
+// finish, so an uninspected account is NOT COVERED with a reason and the
+// install or cycle goes on. Excluded and exempt accounts are left out, as
+// the scan leaves them out.
+func WindowsManifestScanIncomplete(subjects map[string]WindowsManifestSubject, excludeUsers, exemptUsers []string, reported []UnprotectedAgent) []UnprotectedAgent {
+	named := map[string]bool{}
+	for _, agent := range reported {
+		if agent.Code == UnprotectedCodeInstallScanIncomplete {
+			named[canonicalManifestTargetSID(agent.SID)+"\x00"+strings.ToLower(strings.TrimSpace(agent.Connector))] = true
+		}
+	}
+	out := append([]UnprotectedAgent(nil), reported...)
+	for _, sid := range sortedManifestSubjects(subjects) {
+		subject := subjects[sid]
+		user := filepath.Base(subject.Home)
+		if windowsEnrollmentListMatches(excludeUsers, []string{sid, user}) || windowsEnrollmentListMatches(exemptUsers, []string{sid, user}) {
+			continue
+		}
+		for _, conn := range subject.Connectors {
+			if named[sid+"\x00"+conn] {
+				continue
+			}
+			out = append(out, UnprotectedAgent{User: user, SID: sid, Connector: conn, Code: UnprotectedCodeInstallScanIncomplete,
+				Reason: privateInstallIncompleteReason(PrivateInstallSkippedUnresolved)})
+		}
+	}
+	return out
+}
+
 // reportWindowsPrivateInstalls reports each unsupported, unversioned or
 // uninspected agent copy the profile at home can run.
 var windowsPrivateInstallsForEnumeration = DiscoverWindowsPrivateAgentInstalls
 
 func reportWindowsPrivateInstalls(ctx context.Context, report func(UnprotectedAgent), user, sid, home string, connectors []string) {
-	installs := windowsPrivateInstallsForEnumeration(ctx, home, connectors)
+	installs := windowsPrivateInstallsBounded(ctx, home, connectors)
 	if ctx.Err() == nil {
 		installs = append(installs, discoverWindowsWinGetCopies(sid, connectors)...)
 	} else {

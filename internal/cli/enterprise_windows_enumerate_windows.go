@@ -393,12 +393,21 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 	enterprisehooks.SetUnverifiedVersionsPolicy(cfg.Enterprise.Enrollment.UnverifiedVersionsFor)
 	var ownerUnknown []enterprisehooks.UnprotectedAgent
 	opts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg))
+	// The scan never decides targets in manifest mode, so a scan that did not
+	// finish (the cycle ran out of time, ProfileList was unreadable) never
+	// fails the cycle or the install: the accounts it did not inspect are
+	// published incomplete, and the next cycle scans again.
 	if _, err := enterpriseWindowsEnumerateProfileEnumerator(ctx, cfg, opts); err != nil {
-		return fmt.Errorf("enterprise windows enumerate: inspect manifest-mode profiles: %w", err)
+		if opts.ManifestSubjects == nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] WARN the manifest-mode install scan did not finish and the administrator's targets are unreadable; the coverage record is left as it was: %s\n", enumeratorErrorText(err))
+			return nil
+		}
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN the manifest-mode install scan did not finish; the enrolled accounts it did not inspect are reported incomplete: %s\n", enumeratorErrorText(err))
+		agents = enterprisehooks.WindowsManifestScanIncomplete(opts.ManifestSubjects, opts.ExcludeUsers, opts.ExemptUsers, agents)
 	}
 	agents = append(agents, ownerUnknown...)
 	if _, err := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, agents); err != nil {
-		return fmt.Errorf("enterprise windows enumerate: publish manifest-mode unprotected agents: %w", err)
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %s\n", enumeratorErrorText(err))
 	}
 	for _, agent := range agents {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN %s: %s\n", agent.Code, agent.Message())
