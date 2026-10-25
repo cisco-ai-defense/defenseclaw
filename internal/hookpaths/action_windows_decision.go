@@ -189,11 +189,45 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 	return ""
 }
 
+// actionWindowsPatchDecision judges an apply_patch that reads one envelope as
+// its only argument, the way Copilot CLI on Windows sends a patch through its
+// PowerShell tool (apply_patch @'...'@). Each directive path gets the same
+// protected-file check as a redirect operand. The envelope word was read as a
+// path before, so every patch naming an absolute or nested project file was
+// denied as a dynamic argument. Any other form (more than one argument or
+// envelope, a body PowerShell could expand: $ or a backtick, as in an
+// @"..."@ here-string) is not judged here and keeps the generic word check.
+func actionWindowsPatchDecision(words []string, cwd, home string) (string, bool) {
+	if len(words) != 2 {
+		return "", false
+	}
+	envelope := strings.TrimSuffix(strings.TrimPrefix(words[1], "@"), "@")
+	if strings.ContainsAny(envelope, "$`") || !strings.HasPrefix(strings.TrimSpace(envelope), patchBeginMarker) {
+		return "", false
+	}
+	paths, envelopes, ok := patchEnvelopePaths(envelope)
+	if !ok || envelopes != 1 || len(paths) == 0 {
+		return "", false
+	}
+	for _, target := range paths {
+		protected, resolved := actionWindowsProtected(target, cwd, home, false)
+		if protected || !resolved {
+			return "dynamic-argument", true
+		}
+	}
+	return "", true
+}
+
 func actionWindowsStatement(words []string, cwd, home string, depth int) string {
 	if depth >= 8 {
 		return "dynamic-command"
 	}
 	program := strings.ToLower(strings.TrimSuffix(path.Base(strings.ReplaceAll(words[0], `\`, "/")), ".exe"))
+	if isApplyPatchToolName(program) {
+		if reason, judged := actionWindowsPatchDecision(words, cwd, home); judged {
+			return reason
+		}
+	}
 	for i := 1; i < len(words); i++ {
 		if words[i] != ">" && words[i] != ">>" && words[i] != "<" && words[i] != "<<" {
 			continue

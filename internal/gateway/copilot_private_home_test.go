@@ -79,7 +79,7 @@ func TestNativeCopilotPatchInPrivateManagedHome(t *testing.T) {
 			Input   struct {
 				CWD       string `json:"cwd"`
 				ToolCalls []struct {
-					Args string `json:"args"`
+					Args json.RawMessage `json:"args"`
 				} `json:"toolCalls"`
 			} `json:"input"`
 		}
@@ -92,9 +92,13 @@ func TestNativeCopilotPatchInPrivateManagedHome(t *testing.T) {
 		if len(item.Input.ToolCalls) != 1 || item.Input.CWD == "" {
 			t.Fatalf("corpus %s is not one native patch call", item.ID)
 		}
+		var patch string
+		if err := json.Unmarshal(item.Input.ToolCalls[0].Args, &patch); err != nil {
+			t.Fatalf("corpus %s patch is not a native patch string: %v", item.ID, err)
+		}
 		replayed++
 		cases = append(cases, testCase{name: "corpus " + item.ID, want: "allow", managed: true,
-			patch: strings.ReplaceAll(item.Input.ToolCalls[0].Args, item.Input.CWD, project)})
+			patch: strings.ReplaceAll(patch, item.Input.CWD, project)})
 	}
 	if err := lines.Err(); err != nil {
 		t.Fatal(err)
