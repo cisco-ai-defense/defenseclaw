@@ -683,7 +683,10 @@ fi
 wait "$fake_server_pid"
 fake_server_pid=''
 [ ! -s "$hook_stdout" ] || fail "allow response unexpectedly wrote agent output"
-[ ! -s "$hook_stderr" ] || fail "allow response unexpectedly wrote an error"
+if [ -s "$hook_stderr" ]; then
+    cat "$hook_stderr" >&2
+    fail "allow response unexpectedly wrote an error"
+fi
 
 python3 - "$server_result" <<'PY'
 import json
