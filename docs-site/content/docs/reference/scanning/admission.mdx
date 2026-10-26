@@ -726,7 +726,7 @@ delete_file  block    connector  destructive                               2026-
 read_file    allow    global     vetted                                    2026-10-06 18:19
 ```
 
-- Without `--connector`, a block or allow covers every connector. With
+- Without `--connector`, a block or allow covers every connector: `tool allow` names each guarded connector it covers (`covers connector=claudecode, connector=codex, ...`), and `tool list` prints one table per connector, where `UPDATED` shows `-` for an entry until it is changed. The sample above is from a host that guards only Claude Code. With
   `--connector`, it covers that one. `skill allow` and `plugin allow` on an
   installed copy write a rule scoped to the connector that has the copy and
   pinned to its path. `skill allow` on a quarantined copy pins the rule to the
