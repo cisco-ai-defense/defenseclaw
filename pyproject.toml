@@ -3,7 +3,7 @@ name = "defenseclaw"
 version = "1.0.0"
 description = "Enterprise governance layer for OpenClaw — secures agentic AI deployments"
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.11,<3.14"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt"]
 dependencies = [
@@ -33,12 +33,9 @@ dependencies = [
     "fastapi>=0.137.1,<0.138",
     # CVE-2026-112906/112907/112913/112914/112937/112940 are fixed in 4.2.1
     # (filelock comes in through litellm -> tokenizers -> huggingface-hub).
-    # Every fixed release requires Python >=3.11, so the floor is marked.
-    # Python 3.10 has no fixed filelock: keep it below 4.1, which added
-    # CVE-2026-112906/112914/112937, and see the wheel contract in ci.yml for
-    # why the other three do not reach DefenseClaw. Installers use >=3.11.
-    "filelock>=4.2.1; python_version >= '3.11'",
-    "filelock<4.1; python_version < '3.11'",
+    # Every fixed release requires Python >=3.11, so 1.0.5 dropped Python
+    # 3.10 instead of shipping it a vulnerable filelock (GAP-1715).
+    "filelock>=4.2.1",
     # The scanner/TUI runtime is one dependency set. DefenseClaw uses the
     # Textual 8.2 ANSI-theme and Tabs APIs, and Textual 8 requires Rich >=14.2.
     # Keep the tested 8.x bounds in wheel metadata so managed installs do not
@@ -107,10 +104,6 @@ dependencies = [
     # MB and kept as an opt-in extra (see ``[vertex]``) — flip there
     # if usage analytics ever justify the disk cost.
     "boto3>=1.34",
-    # ``tomllib`` only entered the stdlib in 3.11; on 3.10 (allowed by
-    # ``requires-python = ">=3.10,<3.14"``) the code falls back to ``tomli``,
-    # so it must be installed there to parse TOML.
-    "tomli>=2.0.1; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
