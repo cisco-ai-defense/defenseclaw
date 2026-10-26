@@ -142,6 +142,15 @@ func TestDatabaseDestructionProtectionProfileBoundaries(t *testing.T) {
 		{"delete in string", `psql -c "SELECT 'DELETE FROM customers';"`, "impact.sql_unbounded_delete", false},
 		{"delete in comment", "mysql -e '-- DELETE FROM customers\\nSELECT 1'", "impact.sql_unbounded_delete", false},
 		{"explain without analyze", "psql -c 'EXPLAIN DELETE FROM customers;'", "impact.sql_unbounded_delete", false},
+		// GAP-1029: a comment does not hide the statement; a comment-free form that
+		// does not block still does not.
+		{"delete with block comment", "psql -c 'DELETE /* note */ FROM r25sa_records;'", "impact.sql_unbounded_delete", true},
+		{"delete with trailing comment", "psql -c 'DELETE FROM r25sa_records; -- note'", "impact.sql_unbounded_delete", true},
+		{"delete with commented-out where", "psql -c 'DELETE FROM r25sa_records /* WHERE id=7 */;'", "impact.sql_unbounded_delete", true},
+		{"mysql truncate with comment", "mysql -e 'TRUNCATE TABLE r25sa_records; -- note'", "impact.sql_schema_destroy", true},
+		{"bounded delete with comment", "psql -c 'DELETE FROM customers /* nightly */ WHERE id = 7;'", "impact.sql_unbounded_delete", false},
+		{"delete only inside a comment", "psql -c 'SELECT 1 /* DELETE FROM customers */'", "impact.sql_unbounded_delete", false},
+		{"mysql executable where comment", "mysql -e 'DELETE FROM customers /*! WHERE id = 7 */'", "impact.sql_unbounded_delete", false},
 		{"postgres explain analyze executes delete", "psql -c 'EXPLAIN ANALYZE DELETE FROM customers;'", "impact.sql_unbounded_delete", true},
 		{"rolled back postgres explain analyze abstains", "psql -c 'BEGIN; EXPLAIN ANALYZE DELETE FROM customers; ROLLBACK;'", "impact.sql_unbounded_delete", false},
 		{"mysql explain analyze remains unsupported", "mysql -e 'EXPLAIN ANALYZE DELETE FROM customers;'", "impact.sql_unbounded_delete", false},

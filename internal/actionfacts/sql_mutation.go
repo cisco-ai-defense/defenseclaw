@@ -443,8 +443,20 @@ func exactSQLCLIOption(engine, argument string) (key, value string, consumesNext
 
 func exactSQLMutation(engine, query string) (SQLMutationOperation, SQLMutationScope, string, bool) {
 	if query == "" || len(query) > maxCommandBytes || unresolvedSQLMutationValue(query) ||
-		strings.ContainsAny(query, "'\"`[]#") || strings.Contains(query, "--") ||
-		strings.Contains(query, "/*") || strings.Contains(query, "*/") {
+		strings.ContainsAny(query, "'\"`[]#") {
+		return "", "", "", false
+	}
+	if engine != "sqlite" {
+		// A comment is not what the statement does: the destructive grammar
+		// matches the SQL the database runs, after its comments are removed
+		// (GAP-1029). The SQLite chain keeps its exact canonical form.
+		stripped, ok := withoutSQLComments(engine, query)
+		if !ok {
+			return "", "", "", false
+		}
+		query = stripped
+	}
+	if strings.Contains(query, "--") || strings.Contains(query, "/*") || strings.Contains(query, "*/") {
 		return "", "", "", false
 	}
 	statements := make([][]string, 0, 3)
@@ -493,6 +505,51 @@ func exactSQLMutation(engine, query string) (SQLMutationOperation, SQLMutationSc
 		return "", "", "", false
 	}
 	return exactSQLMutationTokens(engine, statements[0])
+}
+
+// withoutSQLComments removes the SQL comments of query, each replaced by a
+// space as the database reads it. The caller has refused every quote
+// character, so no comment marker can sit inside a string literal or quoted
+// identifier. A form whose meaning differs between engines or that a database
+// may execute stays indeterminate (false): an unterminated or nested block
+// comment, a stray "*/", a MySQL or MariaDB executable comment ("/*!",
+// "/*M!"), and in MySQL (and the engine-neutral db.execute) a "--" that is not
+// followed by whitespace, which MySQL does not read as a comment.
+func withoutSQLComments(engine, query string) (string, bool) {
+	var out strings.Builder
+	for index := 0; index < len(query); {
+		rest := query[index:]
+		switch {
+		case strings.HasPrefix(rest, "--") || engine == "snowflake" && strings.HasPrefix(rest, "//"):
+			if strings.HasPrefix(rest, "--") && (engine == "mysql" || engine == "generic") &&
+				len(rest) > 2 && !strings.ContainsRune(" \t\r\n", rune(rest[2])) {
+				return "", false
+			}
+			end := strings.IndexByte(rest, '\n')
+			if end < 0 {
+				end = len(rest)
+			}
+			out.WriteByte(' ')
+			index += end
+		case strings.HasPrefix(rest, "/*"):
+			end := strings.Index(rest[2:], "*/")
+			if end < 0 {
+				return "", false
+			}
+			body := rest[2 : 2+end]
+			if strings.Contains(body, "/*") || strings.HasPrefix(body, "!") || strings.HasPrefix(body, "M!") {
+				return "", false
+			}
+			out.WriteByte(' ')
+			index += 2 + end + 2
+		case strings.HasPrefix(rest, "*/"):
+			return "", false
+		default:
+			out.WriteByte(query[index])
+			index++
+		}
+	}
+	return out.String(), true
 }
 
 func exactSQLMutationTokens(engine string, tokens []string) (SQLMutationOperation, SQLMutationScope, string, bool) {
