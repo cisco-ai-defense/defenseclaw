@@ -1545,7 +1545,7 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 	if len(words) == 0 || depth == 0 && actionKnownReadOnlyWindows(words) {
 		return false
 	}
-	skip := actionWindowsTextWords(scan, depth)
+	skip := actionWindowsTextWords(scan, depth, strings.ContainsAny(command, "\r\n"))
 	for i := 0; i+1 < len(words); i++ {
 		if !strings.EqualFold(words[i], "-encodedcommand") && !strings.EqualFold(words[i], "-enc") {
 			continue
@@ -1624,13 +1624,27 @@ func actionWindowsInvokedTextMention(words []string, cwd, home string, depth int
 // statement is judged on its own targets (GAP-1799); a location change (cd,
 // Push-Location ...) still counts, since it places the writes after it.
 // It also rewrites the ~ of a quoted word (no $( subexpression) that is
-// printed (Write-Output, echo, Write-Host ...) or given to git: PowerShell
-// passes that text as written, and only a cmdlet path parameter or a
-// redirect reads its ~ as the home (GAP-1473). An absolute or $HOME path in
-// the same word still counts.
-func actionWindowsTextWords(scan actionWindowsScanResult, depth int) []bool {
+// printed (Write-Output, echo, Write-Host ...) or given to git, in a
+// command with no writer statement: PowerShell passes that text as written,
+// and only a cmdlet path parameter or a redirect reads its ~ as the home
+// (GAP-1473). An absolute or $HOME path in the same word still counts.
+func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline bool) []bool {
 	words := scan.words
 	skip := make([]bool, len(words))
+	// The printed ~ is text only in a command whose statements all print,
+	// read or run git: a writer elsewhere keeps the TGT-0194 mention rule.
+	// The scanner does not split statements at a line end, so a command of
+	// several lines is not text only.
+	textOnly := !multiline
+	for start, i := 0, 0; i <= len(words); i++ {
+		if i < len(words) && words[i] != ";" && words[i] != "|" && words[i] != "||" && words[i] != "&" && words[i] != "&&" {
+			continue
+		}
+		if i > start && !actionWindowsTextProgram(words[start]) && !actionKnownReadOnlyWindowsStatement(words[start:i]) {
+			textOnly = false
+		}
+		start = i + 1
+	}
 	start := 0
 	for i := 0; i <= len(words); i++ {
 		if i < len(words) && words[i] != ";" && words[i] != "&" && words[i] != "&&" && words[i] != "||" {
@@ -1653,7 +1667,7 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int) []bool {
 				if !scan.quoted[j] || strings.Contains(words[j], "$(") || actionWindowsRedirectOperator(words[j-1]) != "" {
 					continue
 				}
-				if actionWindowsTextProgram(words[start]) {
+				if actionWindowsTextProgram(words[start]) && textOnly {
 					words[j] = strings.ReplaceAll(words[j], "~", "tilde-text")
 				}
 				// A quoted pattern given to a native program or printed is
