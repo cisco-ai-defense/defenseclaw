@@ -1083,6 +1083,17 @@ func (d overlayDisk) filling() bool {
 	return d.known && (d.full() || d.percent() >= overlayDiskWarnPercent)
 }
 
+// fillsWithin reports whether d, at the rate its free space fell since the
+// look before (prev, elapsed ago), runs out of room within horizon.
+func (d overlayDisk) fillsWithin(prev overlayDisk, elapsed, horizon time.Duration) bool {
+	if !d.known || !prev.known || prev.size != d.size || elapsed <= 0 || d.avail >= prev.avail {
+		return false
+	}
+	perSecond := float64(prev.avail-d.avail) / elapsed.Seconds()
+	left := float64(d.avail - lowDiskBytes)
+	return left <= 0 || left/perSecond <= horizon.Seconds()
+}
+
 // overlayDiskOf looks at the own disk of the running MicroVM name with
 // `df -Pk /` in it, within overlayDiskLook.
 func (a *App) overlayDiskOf(ctx context.Context, cli openshell.CLI, name string) overlayDisk {
