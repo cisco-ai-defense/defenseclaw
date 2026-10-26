@@ -229,7 +229,10 @@ def test_sandboxes_off_with_no_sandbox_left_uninstalls(
     """GAP-0765: after `sandbox teardown` (sandboxes off, none left) the
     documented `uninstall --all --binaries --yes` goes on: off is no
     sandbox running when the off-state teardown finds none to delete."""
-    (install.home / ".local" / "state" / "openshell").mkdir(parents=True)
+    # A kept record: the uninstall plans the sandbox teardown and asks the list.
+    manager = install.data_dir / "sandboxes" / "manager"
+    manager.mkdir(parents=True)
+    (manager / "kept.json").write_text("{}", encoding="utf-8")
     if plan == "none":
         monkeypatch.setenv("DC_TEST_TEARDOWN_SANDBOXES", "none")
     else:
