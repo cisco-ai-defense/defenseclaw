@@ -247,5 +247,100 @@ class UpgradeGuideTests(unittest.TestCase):
         self.assertIn("`~/.defenseclaw-removed-connector-backups/<connector>`", section)
 
 
+class InstallerNoticeTests(_Host):
+    """GAP-1892: the installers print the one notice after an upgrade of an older OpenHands/OmniGent setup."""
+
+    def setUp(self):
+        super().setUp()
+        home = patch.dict(os.environ, {"HOME": self.home, "USERPROFILE": self.home})
+        home.start()
+        self.addCleanup(home.stop)
+
+    def test_an_older_setup_is_found_before_the_upgrade(self):
+        self.assertFalse(removed_connectors.found(self.data))
+        _write(os.path.join(self.data, "config.yaml"), "guardrail:\n  connectors:\n    openhands: {}\n    codex: {}\n")
+        self.assertTrue(removed_connectors.found(self.data))
+        _write(os.path.join(self.data, "config.yaml"), "guardrail:\n  connectors:\n    codex: {}\n")
+        self.assertFalse(removed_connectors.found(self.data))
+        _write(os.path.join(self.hooks, "openhands-hook.sh"), _OPENHANDS_103, 0o700)
+        self.assertTrue(removed_connectors.found(self.data))
+
+    def test_the_notice_is_printed_once_after_the_teardown_removed_everything(self):
+        self.assertEqual(removed_connectors.installer_lines(self.data, False), [])
+        self.assertEqual(removed_connectors.installer_lines(self.data, True), [_NOTICE])
+
+    def test_the_notice_is_printed_once_above_every_leftover(self):
+        _write(os.path.join(self.hooks, "openhands-hook.sh"), _OPENHANDS_103, 0o700)
+        _write(os.path.join(self.hooks, "defenseclaw_omnigent_policy.py"), "# defenseclaw-managed-policy v3\n")
+        lines = removed_connectors.installer_lines(self.data, False)
+        self.assertEqual(lines.count(_NOTICE), 1)
+        self.assertEqual(lines[0], _NOTICE)
+        self.assertEqual(len(lines), 3, lines)
+
+    def test_the_installers_ask_before_the_migration_and_print_after(self):
+        with open(os.path.join(_REPO, "scripts", "install.sh"), encoding="utf-8") as fh:
+            sh = fh.read()
+        migrate = sh.index('info "Migrating config and data"')
+        self.assertLess(sh.index("note_retired_connectors\n", migrate), sh.index('"${args[@]}" || return 1', migrate))
+        self.assertIn("installer_lines(sys.argv[1], sys.argv[2] == \"1\")", sh)
+        with open(os.path.join(_REPO, "scripts", "install.ps1"), encoding="utf-8") as fh:
+            ps1 = fh.read()
+        migrate = ps1.index('Write-Info "Migrating config and data"')
+        self.assertLess(ps1.index("Find-RetiredConnectors\n", migrate), ps1.index("$migrateArgs = @(", migrate))
+        self.assertIn("installer_lines(sys.argv[1], sys.argv[2] == '1')", ps1)
+
+
+class MigrationLineTests(unittest.TestCase):
+    """GAP-1892: the migration line never says DefenseClaw left a removed connector's agent config unchanged."""
+
+    def _changes(self, names: list[str]) -> list[str]:
+        from defenseclaw import migrations
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            path = os.path.join(data_dir, "config.yaml")
+            entries = "".join(f"    {name}: {{}}\n" for name in names)
+            _write(path, f"guardrail:\n  connector: {names[0]}\n  connectors:\n{entries}    codex: {{}}\n")
+            ctx = migrations.MigrationContext(openclaw_home=data_dir, data_dir=data_dir, config_path=path)
+            migrations._migrate_unshipped_connectors(ctx)
+            return list(ctx.changes)
+
+    def test_a_removed_connector_says_defenseclaw_removes_only_its_own_entries(self):
+        for name in removed_connectors.NAMES:
+            with self.subTest(name=name):
+                [change] = self._changes([name])
+                self.assertIn("removes only the entries it wrote", change)
+                self.assertNotIn("did not change", change)
+
+    def test_another_unshipped_name_keeps_its_agent_config_line(self):
+        [change] = self._changes(["retired-example"])
+        self.assertIn("did not change those agents' config files", change)
+
+
+class SetupRemoveTests(unittest.TestCase):
+    """GAP-1892 class: setup remove of a removed connector never tells the user to clean its config by hand."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def test_setup_remove_openhands_prints_the_notice(self):
+        from defenseclaw.commands.cmd_setup import setup as setup_group
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        gc = self.app.cfg.guardrail
+        gc.connectors = {"codex": PerConnectorGuardrailConfig(), "openhands": PerConnectorGuardrailConfig()}
+        gc.connector = "codex"
+        self.app.cfg.claw.mode = "codex"
+        with patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True):
+            result = CliRunner().invoke(
+                setup_group, ["remove", "openhands", "--yes", "--no-restart"], obj=self.app, catch_exceptions=False
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn(_NOTICE, result.output)
+        self.assertNotIn("by hand", result.output)
+
+
 if __name__ == "__main__":
     unittest.main()

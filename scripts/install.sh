@@ -2130,6 +2130,7 @@ swap_in() {
     fi
     if [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]]; then
         info "Migrating config and data"
+        note_retired_connectors
         local args=(migrate)
         [[ -n "${PREV_VERSION}" ]] && args+=(--from-version "${PREV_VERSION}")
         DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" || return 1
@@ -2522,17 +2523,31 @@ reconcile_stopped_connectors() {
     return 1
 }
 
-# until 1.1: what the OpenHands/OmniGent teardown could not remove, under the
-# one removal notice; the gateway's daemon log is not the installer's output.
+# until 1.1: whether an older setup of OpenHands or OmniGent is here, asked
+# before the migration and the new gateway's first start remove it, so the
+# one removal notice is printed after the upgrade (GAP-1892).
+RETIRED_CONNECTORS_FOUND=0
+note_retired_connectors() {
+    [[ -n "${PREV_VERSION:-}" ]] || return 0
+    if "${VENV}/bin/python" -I -c 'import sys
+from defenseclaw.removed_connectors import found
+sys.exit(0 if found(sys.argv[1]) else 1)' "${DEFENSECLAW_HOME}" 2>>"${LOG}"; then
+        RETIRED_CONNECTORS_FOUND=1
+    fi
+    return 0
+}
+
+# until 1.1: the one removal notice when an older setup of OpenHands or
+# OmniGent was here, then what their teardown could not remove; the
+# gateway's daemon log is not the installer's output.
 report_retired_connector_leftovers() {
     local notes
-    if ! notes="$("${VENV}/bin/python" -I - "${DEFENSECLAW_HOME}" <<'PY'
+    if ! notes="$("${VENV}/bin/python" -I - "${DEFENSECLAW_HOME}" "${RETIRED_CONNECTORS_FOUND:-0}" <<'PY'
 import sys
-from defenseclaw.removed_connectors import leftovers
+from defenseclaw.removed_connectors import installer_lines
 
-for left in leftovers(sys.argv[1]):
-    for line in left.lines():
-        print(line)
+for line in installer_lines(sys.argv[1], sys.argv[2] == "1"):
+    print(line)
 PY
 )"; then
         warn "Could not check removed connector leftovers; run 'defenseclaw status' for manual cleanup steps"

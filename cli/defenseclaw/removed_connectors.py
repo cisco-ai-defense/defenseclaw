@@ -457,3 +457,40 @@ def leftovers(data_dir: str, *, home: str | None = None, workspace: str = "") ->
         if items:
             out.append(RemovedConnectorLeftovers(c.name, c.label, tuple(items)))
     return out
+
+
+def configured(config_path: str) -> bool:
+    """Whether ``config.yaml`` still names OpenHands or OmniGent as a connector (before the upgrade migrates it)."""
+    try:
+        with open(config_path, encoding="utf-8") as handle:
+            raw = yaml.safe_load(handle.read(_READ_LIMIT))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    guardrail = raw.get("guardrail") if isinstance(raw.get("guardrail"), dict) else {}
+    claw = raw.get("claw") if isinstance(raw.get("claw"), dict) else {}
+    connectors = guardrail.get("connectors")
+    names = [*(connectors if isinstance(connectors, dict) else {}), guardrail.get("connector"), claw.get("mode")]
+    return any(is_removed(str(name)) for name in names if name)
+
+
+def found(data_dir: str) -> bool:
+    """Whether an older setup of OpenHands or OmniGent is on this host: something it left, or the config names it.
+
+    The installers ask before the upgrade (the new gateway's first start
+    removes what it can), so they can print :data:`NOTICE` once after it.
+    """
+    return bool(leftovers(data_dir)) or configured(os.path.join(data_dir or "", "config.yaml"))
+
+
+def installer_lines(data_dir: str, found_before: bool) -> list[str]:
+    """The installers' lines after an upgrade: :data:`NOTICE` once, then what is left.
+
+    Nothing when no older setup was found before the upgrade and nothing is
+    left now.
+    """
+    left = leftovers(data_dir)
+    if not left and not found_before:
+        return []
+    return [NOTICE] + [line for item in left for line in item.lines()[1:]]

@@ -103,6 +103,49 @@ func TestRemovedConnectorBootRemovesWhatDefenseClawWrote(t *testing.T) {
 	h.requireRemoved(t)
 }
 
+// The lock-only path: a 1.0.4 host kept the OpenHands and OmniGent lock
+// entries (and the deny stubs and registrations) after it dropped them from
+// the roster. A 1.0.5 boot runs their teardown there too and drops the
+// entries, so the next boot finds no orphan (GAP-1843).
+func TestRemovedConnectorLockOnlyBootRemovesWhatDefenseClawWrote(t *testing.T) {
+	h := stageRemovedBootHost(t)
+	restore, err := connector.BindUserHomeDir(h.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restore)
+	lock := `{"version":2,"updated_at":"2026-10-01T00:00:00Z","connectors":{` +
+		`"codex":{"connector":"codex","contract_id":"codex-hooks-v1","defenseclaw_version":"1.0.4","hook_fail_mode":"open","updated_at":"2026-10-01T00:00:00Z"},` +
+		`"openhands":{"connector":"openhands","contract_id":"openhands-hooks-v1","defenseclaw_version":"1.0.3","hook_fail_mode":"open","updated_at":"2026-10-01T00:00:00Z"},` +
+		`"omnigent":{"connector":"omnigent","contract_id":"omnigent-policy-v1","defenseclaw_version":"1.0.3","hook_fail_mode":"open","updated_at":"2026-10-01T00:00:00Z"}}}` + "\n"
+	if err := os.WriteFile(filepath.Join(h.dataDir, "hook_contract_lock.json"), []byte(lock), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := connector.SaveActiveConnectors(h.dataDir, []string{"codex"}); err != nil {
+		t.Fatal(err)
+	}
+	ops := orphanConnectorReconcileOps{
+		resolveOpts: func(connector.Connector) (connector.SetupOpts, error) {
+			return connector.SetupOpts{DataDir: h.dataDir}, nil
+		},
+		clearLock: connector.ClearHookContractLockEntry,
+	}
+	for boot := 1; boot <= 2; boot++ {
+		if err := reconcileOrphanedConnectorRegistrations(context.Background(), connector.NewDefaultRegistry(), h.dataDir, []string{"codex"}, ops); err != nil {
+			t.Fatalf("boot %d: reconcile = %v, want no failure", boot, err)
+		}
+		h.requireRemoved(t)
+		for _, name := range []string{"openhands", "omnigent"} {
+			if got := connector.LoadHookContractLockEntry(h.dataDir, name); got.Connector != "" {
+				t.Errorf("boot %d: the %s lock entry is still there", boot, name)
+			}
+		}
+	}
+	if got := connector.LoadHookContractLockEntry(h.dataDir, "codex"); got.Connector != "codex" {
+		t.Errorf("the codex lock entry went: %+v", got)
+	}
+}
+
 // A removal that cannot finish (the hooks folder is read-only) never fails a
 // boot path and never keeps the name: nothing of it blocks, and doctor lists
 // what is left as information.

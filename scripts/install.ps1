@@ -3172,6 +3172,7 @@ function Install-New {
     Write-HookState
     if ((Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG) {
         Write-Info "Migrating config and data"
+        Find-RetiredConnectors
         if ($PrevVersion -and [version]$PrevVersion -lt [version]"1.0.0") { Repair-DataOwner }
         $migrateArgs = @("migrate")
         if ($PrevVersion) { $migrateArgs += @("--from-version", $PrevVersion) }
@@ -4056,12 +4057,26 @@ function Get-OtherBuildInstalled([string]$StagedGateway) {
     return @{ Installed = (& $name $installed); Staged = (& $name $staged) }
 }
 
+# until 1.1: whether an older setup of OpenHands or OmniGent is here, asked
+# before the migration and the new gateway's first start remove it, so the
+# one removal notice is printed after the upgrade (GAP-1892).
+$script:RetiredConnectorsFound = $false
+function Find-RetiredConnectors {
+    if (-not $PrevVersion) { return }
+    $python = Join-Path $Venv "Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { return }
+    $ErrorActionPreference = "Continue"
+    $probe = "import sys`nfrom defenseclaw.removed_connectors import found`nsys.exit(0 if found(sys.argv[1]) else 1)"
+    $script:RetiredConnectorsFound = ((Invoke-Native $python @("-I", "-c", $probe, $DataDir) -Quiet) -eq 0)
+}
+
 # until 1.1: the gateway removes what an older setup wrote for OpenHands and
 # OmniGent when it starts, but an upgrade of a stopped gateway does not start
-# it. When something of theirs is still here, run that teardown now and print
-# the one removal notice with what it could not remove. It never fails and
-# blocks nothing: DefenseClaw no longer guards them. Without a config nothing
-# was set up.
+# it. When something of theirs is still here, run that teardown now. Then
+# print the one removal notice, when an older setup was found before the
+# upgrade or something is left, with what the teardown could not remove. It
+# never fails and blocks nothing: DefenseClaw no longer guards them. Without
+# a config nothing was set up.
 function Complete-RetiredConnectorCleanup {
     if (-not (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -and -not $env:DEFENSECLAW_CONFIG) { return }
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
@@ -4069,12 +4084,14 @@ function Complete-RetiredConnectorCleanup {
     if (-not (Test-Path -LiteralPath $gateway -PathType Leaf) -or -not (Test-Path -LiteralPath $python -PathType Leaf)) { return }
     $ErrorActionPreference = "Continue"
     $probe = "import sys`nfrom defenseclaw.removed_connectors import leftovers`nsys.exit(0 if leftovers(sys.argv[1]) else 1)"
-    if ((Invoke-Native $python @("-I", "-c", $probe, $DataDir) -Quiet) -ne 0) { return }
-    foreach ($name in @("openhands", "omnigent")) {
-        [void](Invoke-Native $gateway @("connector", "teardown", "--connector", $name, "--data-dir", $DataDir) -Quiet)
+    if ((Invoke-Native $python @("-I", "-c", $probe, $DataDir) -Quiet) -eq 0) {
+        foreach ($name in @("openhands", "omnigent")) {
+            [void](Invoke-Native $gateway @("connector", "teardown", "--connector", $name, "--data-dir", $DataDir) -Quiet)
+        }
     }
-    $report = "import sys`nfrom defenseclaw.removed_connectors import leftovers`nfor left in leftovers(sys.argv[1]):`n    print('\n'.join(left.lines()))"
-    try { $notes = @(& $python -I -c $report $DataDir 2>$null) } catch { $notes = @() }
+    $found = if (Get-Variable -Name RetiredConnectorsFound -Scope Script -ValueOnly -ErrorAction SilentlyContinue) { "1" } else { "0" }
+    $report = "import sys`nfrom defenseclaw.removed_connectors import installer_lines`nfor line in installer_lines(sys.argv[1], sys.argv[2] == '1'):`n    print(line)"
+    try { $notes = @(& $python -I -c $report $DataDir $found 2>$null) } catch { $notes = @() }
     if ($notes) { Write-Host ""; $notes | ForEach-Object { Write-Host $_ } }
 }
 

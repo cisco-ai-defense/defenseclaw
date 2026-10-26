@@ -7484,17 +7484,6 @@ func logRemovedConnectorLeftovers(name string, opts connector.SetupOpts) {
 	}
 }
 
-// removedConnectorAlreadyTornDown reports whether name is a removed connector
-// (until 1.1) whose teardown has nothing left to do; opts is
-// retiredConnectorOpts.
-func removedConnectorAlreadyTornDown(opts connector.SetupOpts, name string) bool {
-	if !connector.IsRemovedConnector(name) {
-		return false
-	}
-	retired, ok := connector.RetiredConnector(name)
-	return ok && retired.VerifyClean(opts) == nil
-}
-
 // retiredConnectorOpts are the options a retired connector's teardown and
 // verification get: the data directory and the configured connector
 // workspace (claw.workspace_dir), where a workspace-pinned 1.0.x OpenHands
@@ -7607,12 +7596,10 @@ func reconcileOrphanedConnectorRegistrations(
 			if !connectorDroppable(registry, name) {
 				return fmt.Errorf("protected lock-only connector %q is not registered and a plugin may still provide it (check plugin discovery); %s", name, removedConnectorDocHint)
 			}
+			// until 1.1: an OpenHands/OmniGent lock entry runs its teardown
+			// too; it removes what DefenseClaw wrote and the entry, so the
+			// next boot finds no orphan (GAP-1843).
 			retiredOpts := retiredConnectorOpts(dataDir, ops.workspaceDir)
-			if removedConnectorAlreadyTornDown(retiredOpts, name) {
-				// until 1.1: a removed connector's lock entry stays after
-				// its teardown, so only a teardown still due runs.
-				continue
-			}
 			if err := retireOrDropUnregisteredConnector(ctx, registry, retiredOpts, name, "lock-only", ops.clearLock); err != nil {
 				return err
 			}

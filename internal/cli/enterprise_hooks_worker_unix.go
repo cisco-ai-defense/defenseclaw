@@ -561,6 +561,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 	// still loads, or could not be checked. The purge deletes the backups and
 	// receipts a later cleanup needs to restore those files (GAP-0632).
 	purgeBlocked := ""
+	removeRetiredConnectorsForAccount(ctx, request)
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
 		outcome := enterpriseHookWorkerTargetResult{Index: target.Index}
