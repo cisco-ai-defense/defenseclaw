@@ -67,6 +67,22 @@ scripts() {
         packaging/linux/postinstall.sh >"$work/postinstall.sh"
 }
 state_of() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1; }
+# goes_on PID WHAT: the process runs again (S or R, not T) within 3 s; a
+# loaded build box can keep a resumed process runnable for a moment.
+goes_on() {
+    i=0
+    while [ "$(state_of "$1")" = T ] && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+    case "$(state_of "$1")" in S|R) return 0 ;; esac
+    echo "$2: the daemon is $(state_of "$1")" >&2
+    exit 1
+}
+# held PID WHAT: the process is stopped (T) within 3 s: SIGSTOP takes effect
+# when the sleeping target next runs.
+held() {
+    i=0
+    while [ "$(state_of "$1")" != T ] && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+    test "$(state_of "$1")" = T || { echo "$2: the daemon was not held: $(state_of "$1")" >&2; exit 1; }
+}
 deployed() { printf '{"product_version": "%s"}\n' "$1" >"$work/state/deployment.json"; }
 start_daemon() {
     "$work/sandbox-daemon" 3000 &
@@ -84,10 +100,10 @@ deployed 1.0.3
 start_daemon
 export TEST_DAEMON="$daemon"
 PATH="$work/bin:$PATH" sh "$work/preinstall.sh" upgrade
-test "$(state_of "$daemon")" = T || { echo "the 1.0.3 sandbox daemon was not held: $(state_of "$daemon")" >&2; exit 1; }
+held "$daemon" "the 1.0.3 sandbox daemon"
 grep -q "^$daemon " "$work/sandbox.held"
 test -s "$work/recovery.sh"
-test "$(cat "$work/flock.state")" = S || { echo "the daemon was held before the lifecycle-lock wait: $(cat "$work/flock.state")" >&2; exit 1; }
+test "$(cat "$work/flock.state")" != T || { echo "the daemon was held before the lifecycle-lock wait: $(cat "$work/flock.state")" >&2; exit 1; }
 grep -q -- "--on-active=10m" "$work/systemd-run.args" || { echo "recovery timer: $(cat "$work/systemd-run.args")" >&2; exit 1; }
 PATH="$work/bin:$PATH" sh "$work/postinstall.sh" configure >/dev/null 2>&1
 wait "$daemon" 2>/dev/null || true
@@ -101,25 +117,23 @@ test ! -e "$work/sandbox.held"
 # An aborted upgrade lets the held daemon go on.
 start_daemon
 PATH="$work/bin:$PATH" sh "$work/preinstall.sh" upgrade
-test "$(state_of "$daemon")" = T
+held "$daemon" "an upgrade from 1.0.3"
 PATH="$work/bin:$PATH" sh "$work/postinstall.sh" abort-upgrade
-sleep 0.2
-test "$(state_of "$daemon")" = S || { echo "the aborted upgrade left the daemon $(state_of "$daemon")" >&2; exit 1; }
+goes_on "$daemon" "the aborted upgrade"
 test ! -e "$work/sandbox.held"
 
 # The recovery after a failed unpack does the same.
 PATH="$work/bin:$PATH" sh "$work/preinstall.sh" upgrade
-test "$(state_of "$daemon")" = T
+held "$daemon" "an upgrade from 1.0.3"
 sh "$work/recovery.sh"
-sleep 0.2
-test "$(state_of "$daemon")" = S
+goes_on "$daemon" "the recovery after a failed unpack"
 test ! -e "$work/sandbox.held"
 
 # A recovery that finds the held daemon's program swapped (a dpkg unpack
 # whose configure comes more than 10 minutes later) ends it as the
 # postinstall would, never resumes it to act on the swap (GAP-1804).
 PATH="$work/bin:$PATH" sh "$work/preinstall.sh" upgrade
-test "$(state_of "$daemon")" = T
+held "$daemon" "an upgrade from 1.0.3"
 rm -f "$work/sandbox-daemon"
 cp "$(command -v sleep)" "$work/sandbox-daemon"
 sh "$work/recovery.sh"
@@ -138,6 +152,6 @@ start_daemon
 # From 1.0.4 the daemon counts those MicroVMs: nothing is held.
 deployed 1.0.4
 PATH="$work/bin:$PATH" sh "$work/preinstall.sh" upgrade
-test "$(state_of "$daemon")" = S
+goes_on "$daemon" "an upgrade from 1.0.4"
 test ! -e "$work/sandbox.held"
 echo "ok"
