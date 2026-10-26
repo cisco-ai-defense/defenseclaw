@@ -280,9 +280,19 @@ func actionUncalledFunctions(file *syntax.File, command string) map[*syntax.Func
 	if len(decls) == 0 {
 		return nil
 	}
+	staticNames, static := actionStaticCallWords(file)
+	if !static {
+		// A program word the hook cannot spell (an expansion, a command
+		// substitution, an indirect name), eval, source or a quoted handler
+		// can call any function: every body is scanned (classifier RV3-2).
+		return nil
+	}
 	uncalled := make(map[*syntax.FuncDecl]bool)
 	for _, decl := range decls {
 		name := decl.Name.Value
+		if staticNames[name] {
+			continue // called through another spelling, such as f\oo or fo""o
+		}
 		switch {
 		case name == "" || strings.HasPrefix(name, "TRAP") || strings.HasPrefix(name, "command_not_found_handl"):
 			continue
@@ -302,6 +312,72 @@ func actionUncalledFunctions(file *syntax.File, command string) map[*syntax.Func
 		}
 	}
 	return uncalled
+}
+
+// actionStaticCallWords lists the static values of the words of every call
+// and declaration in file. It reports false when a function could run under
+// a name the command does not spell: a program word that is not static, an
+// eval, source or . call, or a trap, alias, bind or complete argument that is
+// not static or carries shell quoting, escapes or expansions.
+func actionStaticCallWords(file *syntax.File) (map[string]bool, bool) {
+	names := make(map[string]bool)
+	static := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if !static {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 {
+				return true
+			}
+			program, fixed := StaticWord(node.Args[0], "")
+			if !fixed {
+				static = false
+				return false
+			}
+			switch programBase(program) {
+			case "eval", "source", ".":
+				static = false
+				return false
+			}
+			names[program] = true
+			code := false
+			switch programBase(program) {
+			case "trap", "alias", "bind", "complete", "compgen":
+				code = true
+			}
+			for _, arg := range node.Args[1:] {
+				value, fixed := StaticWord(arg, "")
+				if code && (!fixed || strings.ContainsAny(value, "'\"\\$`")) {
+					static = false
+					return false
+				}
+				if fixed {
+					names[value] = true
+				}
+			}
+		case *syntax.DeclClause:
+			for _, assign := range node.Args {
+				if assign.Name != nil {
+					names[assign.Name.Value] = true
+				}
+				if assign.Value == nil {
+					continue
+				}
+				value, fixed := StaticWord(assign.Value, "")
+				if !fixed && assign.Name == nil {
+					static = false // export -f "$name" exports any function
+					return false
+				}
+				if fixed {
+					names[value] = true
+				}
+			}
+		}
+		return true
+	})
+	return names, static
 }
 
 // actionBlankFunctions blanks the uncalled function definitions in command,
