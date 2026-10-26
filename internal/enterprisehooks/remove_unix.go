@@ -91,8 +91,18 @@ func removeUserHooksAs(ctx context.Context, conn connector.Connector, setupOpts 
 	if err := conn.Teardown(ctx, setupOpts); err != nil {
 		return fmt.Errorf("enterprise hooks: connector %s teardown failed: %w", conn.Name(), err)
 	}
+	// A hooks folder this account cannot search (a root-owned
+	// ~/.defenseclaw/hooks made by sudo with HOME kept) holds nothing the
+	// account's agents can read or run, and nothing this worker can remove
+	// or lock (the contract lock is taken in that folder): with the
+	// registration gone, its files are not a failure (GAP-1978, same class
+	// as GAP-1904). The purge then reports the per-user state it keeps.
+	hooksDir := filepath.Join(dataDir, "hooks")
+	if hookFolderUnsearchable(hooksDir) {
+		return nil
+	}
 	// The connector's hook credential goes with its registration.
-	if tokenPath, err := connector.HookTokenFilePath(filepath.Join(dataDir, "hooks"), conn.Name()); err == nil {
+	if tokenPath, err := connector.HookTokenFilePath(hooksDir, conn.Name()); err == nil {
 		if err := os.Remove(tokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("enterprise hooks: remove %s hook credential: %w", conn.Name(), err)
 		}
@@ -111,6 +121,13 @@ func removeUserHooksAs(ctx context.Context, conn connector.Connector, setupOpts 
 		return fmt.Errorf("enterprise hooks: remove the unused shared hook runtime: %w", err)
 	}
 	return nil
+}
+
+// hookFolderUnsearchable reports a hooks folder the running account cannot
+// search: no file in it can be looked up, read or run by that account.
+func hookFolderUnsearchable(hooksDir string) bool {
+	_, err := os.Lstat(filepath.Join(hooksDir, ".defenseclaw-search-probe"))
+	return errors.Is(err, os.ErrPermission)
 }
 
 // PurgeSummary is what PurgeUserState found and removed, so the uninstall
