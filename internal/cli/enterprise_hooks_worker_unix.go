@@ -155,6 +155,10 @@ type enterpriseHookWorkerRequest struct {
 	// user's own home before an apply, so an enrolled user cannot stop
 	// repair of their hooks by loosening their home's mode.
 	TightenHome bool `json:"tighten_home,omitempty"`
+	// RecheckMillis keeps the verify_or_repair targets that verified under
+	// check for this long, all at the same time
+	// (recheckEnterpriseHookTargetsOverWindow).
+	RecheckMillis int `json:"recheck_ms,omitempty"`
 	// StaticDiscovery restricts the discover operation to package metadata
 	// and the presence of the agent CLIs, executing nothing: the parent
 	// asks for it in a home other users may have written to.
@@ -561,11 +565,15 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 	// still loads, or could not be checked. The purge deletes the backups and
 	// receipts a later cleanup needs to restore those files (GAP-0632).
 	purgeBlocked := ""
+	recheckWindow := time.Duration(request.RecheckMillis) * time.Millisecond
+	var rechecks []enterpriseHookWorkerRecheck
+	var recheckedAt []time.Time
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
 		outcome := enterpriseHookWorkerTargetResult{Index: target.Index}
 		var result enterprisehooks.InstallResult
 		var err error
+		recheck := false
 		switch target.Mode {
 		case enterpriseHookWorkerModeInstall:
 			result, err = enterpriseHookWorkerInstaller(ctx, opts)
@@ -577,6 +585,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				break
 			}
 			result, err = enterpriseHookWorkerVerifier(ctx, opts)
+			recheck = err == nil && recheckWindow > 0
 			if err != nil {
 				result, err = enterpriseHookWorkerInstaller(ctx, opts)
 				outcome.Repaired = err == nil
@@ -679,8 +688,40 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 		}
 		results = append(results, outcome)
+		if recheck {
+			rechecks = append(rechecks, enterpriseHookWorkerRecheck{result: len(results) - 1, opts: opts})
+			recheckedAt = append(recheckedAt, time.Now())
+		}
 	}
+	recheckEnterpriseHookTargetsOverWindow(ctx, recheckWindow, recheckedAt,
+		func(index int) error {
+			_, err := enterpriseHookWorkerVerifier(ctx, rechecks[index].opts)
+			return err
+		},
+		func(index int, _ error) {
+			outcome := &results[rechecks[index].result]
+			result, err := enterpriseHookWorkerInstaller(ctx, rechecks[index].opts)
+			if err != nil {
+				outcome.OK, outcome.Result, outcome.AgentConfig = false, nil, ""
+				outcome.Pending = enterprisehooks.PendingTargetError(err) &&
+					enterprisehooks.CheckUnixTargetHome(request.Home, request.UID).State == enterprisehooks.HomePending
+				if !outcome.Pending {
+					outcome.Error = err.Error()
+				}
+				return
+			}
+			outcome.Repaired = true
+			outcome.Result = &result
+			outcome.AgentConfig = result.AgentConfig
+		})
 	return enterpriseHookWorkerResponse{Targets: results}
+}
+
+// enterpriseHookWorkerRecheck is a verify_or_repair target that verified and
+// is checked again over the request's recheck window.
+type enterpriseHookWorkerRecheck struct {
+	result int
+	opts   enterprisehooks.InstallOptions
 }
 
 // repairManagedCodexUserFeature runs with the target user's uid. The machine
@@ -1251,12 +1292,18 @@ func runEnterpriseHookWorker(
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = 2 * time.Second
+	if enterpriseHookWorkersStuck.has(account.UID) {
+		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w: its previous worker was killed but has not exited yet (a file system call in the account's home may be stuck)", account.UID, context.DeadlineExceeded)
+	}
 	stopFence, err := attachEnterpriseHookWorkerFence(ctx, cmd, request)
 	if err != nil {
 		return enterpriseHookWorkerResponse{}, err
 	}
-	runErr := cmd.Run()
+	abandoned, runErr := runEnterpriseHookWorkerProcess(ctx, cmd, account.UID)
 	stopFence()
+	if abandoned {
+		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w: it was killed but did not exit (a file system call in the account's home may be stuck)", account.UID, ctx.Err())
+	}
 	forwardEnterpriseHookWorkerStderr(account, stderr)
 	if ctx.Err() != nil {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w", account.UID, ctx.Err())
@@ -1283,6 +1330,88 @@ func runEnterpriseHookWorker(
 		return response, fmt.Errorf("worker for uid %d failed: %w", account.UID, runErr)
 	}
 	return response, nil
+}
+
+// enterpriseHookWorkerWait waits for a started worker. Tests replace it to
+// stand for a worker the kernel cannot reap.
+var enterpriseHookWorkerWait = (*exec.Cmd).Wait
+
+// enterpriseHookWorkerAbandonGrace is how long a worker whose context ended
+// may take to exit after it is killed (and its output pipes are closed,
+// cmd.WaitDelay) before the caller stops waiting for it.
+var enterpriseHookWorkerAbandonGrace = 3 * time.Second
+
+// enterpriseHookWorkersStuck holds the uids whose last worker was killed but
+// has not exited. A worker blocked in an uninterruptible file system call
+// (a stalled FUSE or NFS mount in the home) cannot be reaped, and waiting
+// for it held the enumerator's cycle for good (GAP-1468, GAP-1470). The
+// caller stops waiting, the account is reported not inspected, and no new
+// worker starts for it until the stuck one exits.
+var enterpriseHookWorkersStuck = stuckEnterpriseHookWorkers{uids: map[int]bool{}}
+
+type stuckEnterpriseHookWorkers struct {
+	mu   sync.Mutex
+	uids map[int]bool
+}
+
+func (s *stuckEnterpriseHookWorkers) has(uid int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.uids[uid]
+}
+
+func (s *stuckEnterpriseHookWorkers) set(uid int, stuck bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if stuck {
+		s.uids[uid] = true
+	} else {
+		delete(s.uids, uid)
+	}
+}
+
+// runEnterpriseHookWorkerProcess runs cmd and waits for it. Once ctx ends
+// (cmd.Cancel kills the worker's group) it waits at most
+// enterpriseHookWorkerAbandonGrace more; abandoned is true when the worker
+// still has not exited, and uid stays stuck until it does.
+func runEnterpriseHookWorkerProcess(ctx context.Context, cmd *exec.Cmd, uid int) (abandoned bool, err error) {
+	if err := cmd.Start(); err != nil {
+		return false, err
+	}
+	done := make(chan error, 1)
+	var settled sync.Mutex
+	gaveUp := false
+	go func() {
+		err := enterpriseHookWorkerWait(cmd)
+		settled.Lock()
+		if gaveUp {
+			enterpriseHookWorkersStuck.set(uid, false)
+		}
+		settled.Unlock()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return false, err
+	case <-ctx.Done():
+	}
+	grace := time.NewTimer(enterpriseHookWorkerAbandonGrace)
+	defer grace.Stop()
+	select {
+	case err := <-done:
+		return false, err
+	case <-grace.C:
+	}
+	settled.Lock()
+	defer settled.Unlock()
+	select {
+	case err := <-done:
+		return false, err
+	default:
+	}
+	gaveUp = true
+	enterpriseHookWorkersStuck.set(uid, true)
+	return true, nil
 }
 
 // enterpriseHookWorkerGroupIDs resolves the account's primary and

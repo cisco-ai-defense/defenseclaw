@@ -280,6 +280,10 @@ func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWa
 	return prefixes, complete
 }
 
+// privateInstallWalkReadDir lists one batch of an opened folder. Tests
+// replace it to stall a listing.
+var privateInstallWalkReadDir = (*os.File).ReadDir
+
 // list reads dir's entries in batches, charging each to the walk's bound.
 func (w *privateInstallWalk) list(f *os.File, dir string) []fs.DirEntry {
 	if w.stopped() {
@@ -290,7 +294,7 @@ func (w *privateInstallWalk) list(f *os.File, dir string) []fs.DirEntry {
 		if w.stopped() {
 			return out
 		}
-		batch, err := f.ReadDir(256)
+		batch, err := privateInstallWalkReadDir(f, 256)
 		if !w.charge(len(batch)) {
 			return nil
 		}

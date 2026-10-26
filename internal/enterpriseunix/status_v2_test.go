@@ -158,8 +158,15 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 				if got := r.Connectors["hermes"].HooksInstalled; got != enterprisestatus.HooksInstalledUnknown {
 					t.Fatalf("%s certified Hermes hooks from a persistent-home receipt: %q", action, got)
 				}
-				if r.CoverageComplete || r.SecurityComplete {
-					t.Fatalf("%s certified universal Hermes coverage: coverage=%t security=%t", action, r.CoverageComplete, r.SecurityComplete)
+				// The enabled hooks are installed, so coverage_complete is
+				// true; the documented limit keeps security_complete false
+				// and its warning, and the result names it (GAP-1861).
+				if !r.CoverageComplete || r.SecurityComplete {
+					t.Fatalf("%s: coverage=%t security=%t; want coverage true (hooks installed) and security false (session-only home)", action, r.CoverageComplete, r.SecurityComplete)
+				}
+				if why := messagesOf(r.Warnings, enterprisestatus.CodeSecurityIncomplete); !strings.Contains(why, "security_complete is false because of: ") ||
+					!strings.Contains(why, enterprisestatus.CodeStatusDetailUnavailable) || !strings.Contains(why, "coverage_complete is true") {
+					t.Fatalf("%s did not name why security_complete is false: %q", action, why)
 				}
 				messages := messagesOf(r.Warnings, enterprisestatus.CodeStatusDetailUnavailable) +
 					messagesOf(r.Errors, enterprisestatus.CodeStatusDetailUnavailable)
@@ -178,9 +185,12 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 			// A no-op ensure describes the same managed deployment without
 			// status-v2 blocks. It must not certify coverage that verify rejects.
 			ensure := h.run(Options{Action: ActionEnsure})
-			if ensure.CoverageComplete || ensure.SecurityComplete || ensure.Connectors != nil {
+			if ensure.SecurityComplete || ensure.Connectors != nil {
 				t.Fatalf("ensure certified Hermes or changed its result shape: coverage=%t security=%t connectors=%+v",
 					ensure.CoverageComplete, ensure.SecurityComplete, ensure.Connectors)
+			}
+			if why := messagesOf(ensure.Warnings, enterprisestatus.CodeSecurityIncomplete); !strings.Contains(why, enterprisestatus.CodeStatusDetailUnavailable) {
+				t.Fatalf("the ensure result did not name why security_complete is false: %q", why)
 			}
 			if message := messagesOf(ensure.Warnings, enterprisestatus.CodeStatusDetailUnavailable); !strings.Contains(message, "session-only HERMES_HOME") {
 				t.Fatalf("ensure did not name the unobservable home: %q", message)

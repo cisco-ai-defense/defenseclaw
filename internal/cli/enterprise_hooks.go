@@ -60,8 +60,114 @@ var enterpriseHookWatchSessionSettle = 5 * time.Second
 // postpone the pass they armed. Every event re-armed the debounce with no
 // limit, so writes faster than the debounce held the pass back until the
 // interval pass, long enough to start an agent without hooks and put the
-// file back unseen (GAP-0532).
-var enterpriseHookWatchDebounceMaxWait = 3 * time.Second
+// file back unseen (GAP-0532). It leaves the pass, its recheck window and
+// its repair audit (about 0.9 s on macOS) inside the 3 s repair bound of a
+// rewrite burst (r103 GAP-0045, GAP-1825).
+var enterpriseHookWatchDebounceMaxWait = 1 * time.Second
+
+// enterpriseHookWatchRecheckWindow is how long a pass armed by a filesystem
+// event keeps each protected target under check after it verified. One read
+// per pass judged a file that a writer rewrites between its hooks and none
+// every 200 ms by whichever phase the read met: the hooks were back at the
+// read of most passes, so the first repair came 5-15 s into the burst
+// (GAP-1825). Checking for longer than one phase meets the damaged one. The
+// windows of a pass's targets run at the same time, after every target was
+// checked once, so a pass takes one window longer, not one per target.
+var enterpriseHookWatchRecheckWindow = 300 * time.Millisecond
+
+// enterpriseHookRecheckStep is the pause between two checks of a window.
+var enterpriseHookRecheckStep = 40 * time.Millisecond
+
+// enterpriseHookReconcileRecheckWindow is the recheck window of the pass
+// that runs now: the watch loop sets it for a pass a filesystem event armed.
+var enterpriseHookReconcileRecheckWindow time.Duration
+
+// enterpriseHookReconcileRecheckPaths are the paths of the filesystem events
+// that armed the pass that runs now; enterpriseHookReconcileRecheckAll is set
+// when events were dropped (an overflow) or more paths changed than the watch
+// loop keeps. The standalone Unix pass gives the recheck window only to the
+// accounts those paths are in: one window per account, run in waves of
+// workers, made every pass about 0.3 s longer per wave of four accounts, so a
+// change in one home delayed the repair of a home in a later wave
+// (GAP-1825 review R4-2).
+var (
+	enterpriseHookReconcileRecheckPaths []string //nolint:unused // read by the standalone Unix pass (enterprise_hooks_standalone_unix.go)
+	enterpriseHookReconcileRecheckAll   bool     //nolint:unused // read by the standalone Unix pass (enterprise_hooks_standalone_unix.go)
+)
+
+// enterpriseHookWatchMaxTriggerPaths bounds the paths one pass remembers.
+const enterpriseHookWatchMaxTriggerPaths = 64
+
+// enterpriseHookWatchAddTriggerPath adds the cleaned path of an event to the
+// pass's trigger paths, once; all is true once more paths changed than the
+// bound.
+func enterpriseHookWatchAddTriggerPath(paths []string, all bool, name string) ([]string, bool) {
+	if all {
+		return paths, true
+	}
+	cleaned := filepath.Clean(name)
+	for _, path := range paths {
+		if path == cleaned {
+			return paths, false
+		}
+	}
+	if len(paths) >= enterpriseHookWatchMaxTriggerPaths {
+		return nil, true
+	}
+	return append(paths, cleaned), false
+}
+
+// enterpriseHookWatchRecheckFor is the recheck window of a pass run for reason.
+func enterpriseHookWatchRecheckFor(reason string) time.Duration {
+	if reason == "fsnotify" {
+		return enterpriseHookWatchRecheckWindow
+	}
+	return 0
+}
+
+// recheckEnterpriseHookTargetsOverWindow checks again, round-robin every
+// enterpriseHookRecheckStep, the targets of a pass that verified, each until
+// window after its first check (checkedAt), and calls failed with the first
+// failure of a target, which repairs it; that target is then not checked
+// again. All windows of a pass run together (GAP-1825: one window per target
+// in turn made each pass 300 ms longer per target and repaired a target late
+// in the order seconds later).
+func recheckEnterpriseHookTargetsOverWindow(
+	ctx context.Context,
+	window time.Duration,
+	checkedAt []time.Time,
+	verify func(int) error,
+	failed func(int, error),
+) {
+	if window <= 0 {
+		return
+	}
+	open := make([]int, 0, len(checkedAt))
+	for index := range checkedAt {
+		open = append(open, index)
+	}
+	for len(open) > 0 {
+		timer := time.NewTimer(enterpriseHookRecheckStep)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		next := open[:0]
+		for _, index := range open {
+			if !time.Now().Before(checkedAt[index].Add(window)) {
+				continue
+			}
+			if err := verify(index); err != nil {
+				failed(index, err)
+				continue
+			}
+			next = append(next, index)
+		}
+		open = next
+	}
+}
 
 // enterpriseHookWatchDebounceDelay is the delay to arm the debounce with at
 // now for a burst whose first event armed it at first: the debounce, cut to
@@ -706,6 +812,14 @@ func enterpriseHookAwaitingSignInCause(guardianErr string) string {
 // DefenseClaw never protected.
 var errEnterpriseHookProtectionRetired = errors.New("enterprise hooks: protected target was retired by an uninstall")
 
+// enterpriseHookReconcileRecheck is a target of the in-process reconcile
+// that verified and is checked again over the pass's recheck window.
+type enterpriseHookReconcileRecheck struct {
+	row    int
+	target enterprisehooks.ManifestTarget
+	opts   enterprisehooks.InstallOptions
+}
+
 // enterpriseHookVerifyOrRepairTarget keeps repair classification adjacent to
 // the operation that proves it. A target is repaired only when it was already
 // protected, verification failed, its authenticated session was available
@@ -725,6 +839,18 @@ func enterpriseHookVerifyOrRepairTarget(
 	if verifyErr == nil {
 		return result, false, nil
 	}
+	return enterpriseHookRepairAfterVerifyFailure(ctx, target, opts, verifyErr)
+}
+
+// enterpriseHookRepairAfterVerifyFailure repairs a previously protected
+// target whose verification failed with verifyErr, under the session rules
+// of enterpriseHookVerifyOrRepairTarget.
+func enterpriseHookRepairAfterVerifyFailure(
+	ctx context.Context,
+	target enterprisehooks.ManifestTarget,
+	opts enterprisehooks.InstallOptions,
+	verifyErr error,
+) (enterprisehooks.InstallResult, bool, error) {
 	available, err := enterpriseHookReconcileSessionAvailable(target)
 	if err != nil {
 		return enterprisehooks.InstallResult{}, false, err
@@ -786,7 +912,7 @@ func enterpriseHookVerifyOrRepairTarget(
 			verifyErr,
 		)
 	}
-	result, err = enterpriseHookReconcileInstaller(ctx, opts)
+	result, err := enterpriseHookReconcileInstaller(ctx, opts)
 	return result, err == nil, err
 }
 
@@ -2621,11 +2747,18 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
 	claudeMachineContract := enterpriseHookMachinePolicyContract(manifest)
+	// The targets that verified in a pass a filesystem event armed, checked
+	// again over one shared window after the loop (GAP-1825).
+	recheckWindow := enterpriseHookReconcileRecheckWindow
+	var rechecks []enterpriseHookReconcileRecheck
+	var recheckedAt []time.Time
 	for index, target := range manifest.Targets {
 		enterpriseHookStartup.target(os.Stderr, index, len(manifest.Targets))
 		if !target.IsEnabled() {
 			continue
 		}
+		recheck := false
+		var recheckOpts enterprisehooks.InstallOptions
 		row := enterpriseHookReconcileRow{
 			User:      strings.TrimSpace(target.User),
 			UserHome:  strings.TrimSpace(target.UserHome),
@@ -2741,6 +2874,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 						// (GAP-0588).
 						notices = append(notices, enterpriseHookGuardianNotice{User: firstNonEmptyString(row.User, row.SID), Connector: row.Connector, AgentConfig: result.AgentConfig})
 					}
+					recheck = recheckWindow > 0 && previousProtection.PreviouslyProtected && !repaired
+					recheckOpts = opts
 					reconcileEnterpriseForeignHooks(opts)
 				}
 			}
@@ -2771,7 +2906,54 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			row.Error = err.Error()
 		}
 		rows = append(rows, row)
+		if recheck {
+			rechecks = append(rechecks, enterpriseHookReconcileRecheck{row: len(rows) - 1, target: target, opts: recheckOpts})
+			recheckedAt = append(recheckedAt, time.Now())
+		}
 	}
+	recheckEnterpriseHookTargetsOverWindow(ctx, recheckWindow, recheckedAt,
+		func(index int) error {
+			_, err := enterpriseHookReconcileVerifier(ctx, rechecks[index].opts)
+			return err
+		},
+		func(index int, verifyErr error) {
+			recheck := rechecks[index]
+			row := &rows[recheck.row]
+			result, repaired, err := enterpriseHookRepairAfterVerifyFailure(ctx, recheck.target, recheck.opts, verifyErr)
+			if err == nil {
+				if repaired {
+					repairs++
+					restored = append(restored, enterpriseHookGuardianRestore{
+						SID:        row.SID,
+						Connector:  row.Connector,
+						RestoredAt: time.Now().UTC().Format(time.RFC3339Nano),
+					})
+				}
+				row.UserHome = result.UserHome
+				row.Connector = result.Connector
+				row.Result = &result
+				if result.AgentConfig != "" {
+					notices = append(notices, enterpriseHookGuardianNotice{User: firstNonEmptyString(row.User, row.SID), Connector: row.Connector, AgentConfig: result.AgentConfig})
+				}
+				return
+			}
+			row.OK = false
+			row.Result = nil
+			retired := errors.Is(err, errEnterpriseHookProtectionRetired)
+			deferredPending, err := enterpriseHookDeferredPendingAfterSessionError(recheck.target, !retired, err)
+			if deferredPending {
+				row.Pending = true
+				row.RevokeProtection = retired
+				pending++
+				pendingTargets = append(pendingTargets, recheck.target)
+				return
+			}
+			failures++
+			if errors.Is(err, errEnterpriseHookAwaitingSignIn) {
+				awaitingSignIn++
+			}
+			row.Error = err.Error()
+		})
 	enterpriseHookStartup.target(os.Stderr, len(manifest.Targets), len(manifest.Targets))
 	// A restore that is not recorded is not named by status, so the pass
 	// reports it and retries instead of waiting for the interval (GAP-0626).
@@ -3044,6 +3226,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	}
 	debouncePending := false
 	debounceReason := ""
+	// debouncePaths are the paths of the filesystem events of the pending
+	// pass; debounceAllPaths says events were dropped or too many changed.
+	var debouncePaths []string
+	debounceAllPaths := false
 	// debounceArmedAt is when the pending debounce was first armed.
 	var debounceArmedAt time.Time
 	repairRetry := time.NewTimer(time.Hour)
@@ -3088,6 +3274,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		}
 		debouncePending = false
 		debounceReason = ""
+		debouncePaths, debounceAllPaths = nil, false
 	}
 	scheduleRepairRetry()
 	// Windows standalone: restore the managed OpenCode plugin as soon as its
@@ -3164,6 +3351,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// Record which specific event armed the debounce so the
 			// resulting reconcile log line names the culprit path.
 			lastTriggerPath, lastTriggerOp = enterpriseHookWatchNoteTrigger(lastTriggerPath, lastTriggerOp, event)
+			debouncePaths, debounceAllPaths = enterpriseHookWatchAddTriggerPath(debouncePaths, debounceAllPaths, event.Name)
 			if !debouncePending {
 				debounceArmedAt = time.Now()
 			}
@@ -3186,6 +3374,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			}
 			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounceDelay(time.Now(), debounceArmedAt, enterpriseHookWatchDebounce, enterpriseHookWatchDebounceMaxWait))
 			debouncePending = true
+			debounceAllPaths = true
 			if debounceReason == "" {
 				debounceReason = "fsnotify"
 			}
@@ -3197,7 +3386,13 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				if reason == "" {
 					reason = "fsnotify"
 				}
-				if _, err := reconcile(reason); err != nil {
+				enterpriseHookReconcileRecheckWindow = enterpriseHookWatchRecheckFor(reason)
+				enterpriseHookReconcileRecheckPaths, enterpriseHookReconcileRecheckAll = debouncePaths, debounceAllPaths
+				debouncePaths, debounceAllPaths = nil, false
+				_, err := reconcile(reason)
+				enterpriseHookReconcileRecheckWindow = 0
+				enterpriseHookReconcileRecheckPaths, enterpriseHookReconcileRecheckAll = nil, false
+				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after %s failed: %s\n", reason, err)
 				}
 				if repairRetryNeeded {

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 var privateUnixNPMPackages = map[string]string{
@@ -56,6 +57,12 @@ func UnixPrivateInstallConnectors(names []string) []string {
 // installer's versions and the Homebrew casks. Every unsupported or unversioned copy is listed with its path; a
 // part of the scan that could not finish is listed as incomplete with the
 // reason.
+//
+// A directory open, listing or lookup that blocks (a stalled network mount,
+// a cloud-storage or privacy-managed folder) cannot be interrupted, so the
+// scan answers at most privateInstallScanGrace after ctx ends: every wanted
+// connector is then reported incomplete, and the worker still writes its
+// answer before its own deadline.
 func DiscoverUnixPrivateAgentInstalls(ctx context.Context, home string, connectors []string) []PrivateAgentInstall {
 	if ctx == nil {
 		ctx = context.Background()
@@ -64,7 +71,30 @@ func DiscoverUnixPrivateAgentInstalls(ctx context.Context, home string, connecto
 	if len(wanted) == 0 {
 		return nil
 	}
-	home = filepath.Clean(home)
+	done := make(chan []PrivateAgentInstall, 1)
+	go func() { done <- discoverUnixPrivateAgentInstalls(ctx, filepath.Clean(home), wanted) }()
+	select {
+	case found := <-done:
+		return found
+	case <-ctx.Done():
+	}
+	grace := time.NewTimer(privateInstallScanGrace)
+	defer grace.Stop()
+	select {
+	case found := <-done:
+		return found
+	case <-grace.C:
+		scan := newPrivateInstallScan()
+		scan.skipAll(wanted, PrivateInstallSkippedHome)
+		return scan.result()
+	}
+}
+
+// privateInstallScanGrace is how long DiscoverUnixPrivateAgentInstalls waits
+// after its context ends for the scan to finish on its own.
+const privateInstallScanGrace = time.Second
+
+func discoverUnixPrivateAgentInstalls(ctx context.Context, home string, wanted []string) []PrivateAgentInstall {
 	scan := newPrivateInstallScan()
 	roots := []string{home}
 	if connectorListed(wanted, "claudecode") {
