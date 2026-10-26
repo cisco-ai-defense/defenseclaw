@@ -45,7 +45,8 @@ func TestR104Loop3SearchPathCDLinkDecisions(t *testing.T) {
 		{"pushd", `pushd sub && ln -s ../a b && echo marker > out.txt`, true},
 		{"explicit cd", `cd ./sub && ln -s ../a b && echo marker > out.txt`, false},
 		{"explicit nested cd", `cd ./sub/deeper && ln -s ../../a b && echo marker > out.txt`, false},
-		{"absolute cd", `cd ` + filepath.Join(cwd, "sub") + ` && ln -s ../a b && echo marker > out.txt`, false},
+		// Forward slashes: backslashes of a native Windows path are shell escapes.
+		{"absolute cd", `cd ` + filepath.ToSlash(filepath.Join(cwd, "sub")) + ` && ln -s ../a b && echo marker > out.txt`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for i, got := range r104ReviewProtectedWrite(t, tc.command, cwd, home) {

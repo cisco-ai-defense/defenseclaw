@@ -100,6 +100,18 @@ def _run(app, args):
     return CliRunner().invoke(cmd_guardrail.guardrail, args, obj=app, catch_exceptions=False)
 
 
+def _json_strings(value):
+    """Every string in a decoded JSON document, as a reader sees it."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _json_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _json_strings(item)
+
+
 def _persist(app) -> None:
     """Save the in-memory config as config.yaml: --repin reads its pins from the file."""
     path = config_mod.config_path_for_data_dir(app.cfg.data_dir)
@@ -203,7 +215,9 @@ def test_stale_pin_is_replaced_only_by_a_confirmed_repin(env, monkeypatch, by_na
         refused = _run(app, ["use-pack", pack, *args])
         assert refused.exit_code == 1 and writes == [], refused.output
         assert "sha256:" + "b" * 64 in refused.output and "sha256:" + "a" * 64 in refused.output
-        assert f"use-pack {pack} --repin" in refused.output
+        # JSON escapes the backslashes of a Windows path: read its values.
+        text = " ".join(_json_strings(json.loads(refused.output))) if args else refused.output
+        assert f"use-pack {pack} --repin" in text
 
     _persist(app)
     unattended = _run(app, ["use-pack", pack, "--repin", "--json"])

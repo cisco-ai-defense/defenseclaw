@@ -796,8 +796,25 @@ jobs:
           PY
           )
           "$tmp/venv/bin/python" -c 'from defenseclaw.envvars import load_registry; assert load_registry().entries'
+          # Python 3.10 has no fixed filelock: 4.2.1 fixes its six 2026
+          # CVEs but needs Python >=3.11, so pyproject.toml keeps 3.10 below
+          # 4.1, whose 3.30.2/4.0.x carry the three ignored here. None reaches
+          # DefenseClaw. filelock comes in only through litellm -> tokenizers
+          # -> huggingface-hub, which locks its own cache in the user's
+          # profile with FileLock/SoftFileLock. CVE-2026-112913 and
+          # CVE-2026-112940 are in the SQLite-backed ReadWriteLock, which
+          # nothing in the runtime graph uses. CVE-2026-112907 is a Windows
+          # oplock that stalls a soft lock on a marker another process holds
+          # open, and no installer uses 3.10 (install.sh and install.ps1 pick
+          # >=3.11, the Windows Setup runtime is CPython 3.13). Remove with
+          # Python 3.10 support.
+          py310_known=()
+          if [ "${{ matrix.python-version }}" = "3.10" ]; then
+            py310_known=(--ignore-vuln CVE-2026-112907 --ignore-vuln CVE-2026-112913 --ignore-vuln CVE-2026-112940)
+          fi
           uvx --from pip-audit pip-audit \
             --vulnerability-service osv \
+            "${py310_known[@]}" \
             --path "$tmp/venv/lib/python${{ matrix.python-version }}/site-packages"
 
   install-smoke-assets:
@@ -975,7 +992,9 @@ jobs:
     # here on its own OS, and the systemd units get a static systemd-analyze
     # check on Linux.
     # On macOS the two Go test steps took ~7 minutes each back to back, so
-    # they run on two runners ("darwin paths" is the second one).
+    # they run on separate runners ("darwin paths"), and the connector package
+    # alone, about 24 minutes of tests on macOS in 1.0.4, is split into three
+    # time-balanced parts ("darwin connector", scripts/test-timings/go-darwin.json).
     name: Unix Standalone Lifecycle (${{ matrix.label }})
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
@@ -994,6 +1013,18 @@ jobs:
           - os: macos-latest
             label: macos-latest darwin paths
             part: darwin
+          - os: macos-latest
+            label: macos-latest darwin connector 1 of 3
+            part: darwin-connector
+            shard: 0
+          - os: macos-latest
+            label: macos-latest darwin connector 2 of 3
+            part: darwin-connector
+            shard: 1
+          - os: macos-latest
+            label: macos-latest darwin connector 3 of 3
+            part: darwin-connector
+            shard: 2
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -1035,7 +1066,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/go-tmp"
           TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
           export TMPDIR
-          go test -count=1 -timeout 20m ./internal/agentprocess/... ./internal/agentidentity/... ./internal/gateway/connector/...
+          # The connector package itself runs in the darwin-connector parts.
+          go test -count=1 -timeout 20m ./internal/agentprocess/... ./internal/agentidentity/... \
+            $(go list ./internal/gateway/connector/... | grep -v '/internal/gateway/connector$')
           unix_tests() { # unix_tests <test files...>: a -run pattern for their Test functions
             local file names=()
             for file in "$@"; do
@@ -1055,6 +1088,25 @@ jobs:
             echo "$pkg: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') unix and darwin tests"
             go test -count=1 -timeout 20m -run "$pattern" "./$pkg"
           done
+      - name: Go tests of the darwin connector package, part ${{ matrix.shard }}
+        # One of three time-balanced parts of the connector package's tests
+        # (go_test_shards.py covers every test exactly once).
+        if: runner.os == 'macOS' && matrix.part == 'darwin-connector'
+        shell: bash
+        env:
+          GO_TEST_SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          # A link-free TMPDIR, as in the darwin paths step.
+          mkdir -p "$RUNNER_TEMP/go-tmp"
+          TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
+          export TMPDIR
+          test_regex="$(python3 scripts/go_test_shards.py \
+            --package-dir internal/gateway/connector \
+            --timings scripts/test-timings/go-darwin.json \
+            --shard-count 3 \
+            --shard-index "$GO_TEST_SHARD")"
+          go test -count=1 -timeout 25m -run "$test_regex" ./internal/gateway/connector
       - name: The shipped binaries start without stderr output
         # A dependency's start-up warning (for example sonic's Go-version
         # notice) would reach admin and MDM output and agent hook errors.
@@ -1857,6 +1909,14 @@ jobs:
           go-version-file: go.mod
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: make dev-pycli
+      - name: Build the gateway that verifies the Grafana peer
+        # The CLI sends the Grafana admin credential only after the account's
+        # gateway has verified the connected peer (GAP-1171); an installed
+        # host has that gateway, this checkout only the dev CLI.
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          go build -o "$RUNNER_TEMP/bin/defenseclaw-gateway" ./cmd/defenseclaw
+          echo "DEFENSECLAW_GATEWAY_BIN=$RUNNER_TEMP/bin/defenseclaw-gateway" >> "$GITHUB_ENV"
       - name: Start the local observability stack
         run: bundles/local_observability_stack/bin/openclaw-observability-bridge up --timeout 180
       - name: Emit and verify native v8 telemetry

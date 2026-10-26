@@ -4321,6 +4321,7 @@ func TestIsDefenseClawCodexProxyRedirect(t *testing.T) {
 // bearer so Codex never receives the master API bearer and the credential
 // never appears in an endpoint URL.
 func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
+	skipManagedWindowsCodexHostSetup(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(configPath, []byte(`model = "gpt-5"
@@ -4444,6 +4445,7 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 }
 
 func TestCodex_Setup_SourceCaptureEnablesPromptLoggingAndTeardownRestores(t *testing.T) {
+	skipManagedWindowsCodexHostSetup(t)
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -6029,6 +6031,7 @@ func TestCodexSurgicalRestorePreservesEditedTelemetryEnvironment(t *testing.T) {
 }
 
 func TestCodex_TeardownKeepsScopedOTLPTokenWhenConfigCleanupFails(t *testing.T) {
+	skipManagedWindowsCodexHostSetup(t)
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(configPath, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
@@ -12356,5 +12359,16 @@ func TestCodexOtelBlockLooksManaged_AcceptsLegacyExporterOnlyBlock(t *testing.T)
 		if codexOtelBlockLooksManaged(candidate, opts) {
 			t.Errorf("operator-owned/nonmatching endpoint %q classified as managed", name)
 		}
+	}
+}
+
+// skipManagedWindowsCodexHostSetup skips a test of managed Codex host Setup
+// on Windows: there the managed hooks are machine policy that the
+// administrator-owned requirements installer writes, and host Setup refuses
+// them by design.
+func skipManagedWindowsCodexHostSetup(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("managed Windows Codex hooks are machine policy that the requirements installer writes; host Setup refuses them")
 	}
 }

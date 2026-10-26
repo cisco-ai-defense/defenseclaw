@@ -136,6 +136,7 @@ def _render_bridge_publication(
     hook_socket: str = "",
     listener_proof: str = "",
     windows_powershell: str | None = None,
+    gateway_binary: str = "",
     managed: bool = False,
 ) -> bytes:
     template_name = {
@@ -172,6 +173,7 @@ def _render_bridge_publication(
                 else windows_powershell
             )[1:-1],
         )
+        .replace("{{.GatewayBinaryJS}}", json.dumps(gateway_binary)[1:-1])
     )
     assert "{{." not in rendered
     return rendered.encode()
@@ -561,6 +563,47 @@ def test_bridge_rendered_with_an_install_marker_stays_first_party(
         ("amp", Path(".config/amp/plugins/defenseclaw.ts")),
     ],
 )
+def test_bridge_rendered_with_a_setup_gateway_stays_first_party(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    connector: str,
+    relative_path: Path,
+) -> None:
+    """Native Windows Setup renders a per-user bridge with the gateway in its
+    install root's bin folder (GAP-1847); that bridge is still the published
+    connector bridge, while a gateway path that is relative or names another
+    binary is not."""
+
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    target = home / relative_path
+    repository_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    name = "defenseclaw-gateway.exe" if os.name == "nt" else "defenseclaw-gateway"
+    setup_bin = tmp_path / "Programs" / "DefenseClaw" / "bin"
+    for gateway, expected in (
+        (str(setup_bin / name), "installed DefenseClaw connector bridge"),
+        (os.path.join("DefenseClaw", "bin", name), None),
+        (str(setup_bin / "other.exe"), None),
+    ):
+        published = _render_bridge_publication(
+            repository_root,
+            data_dir,
+            connector=connector,
+            gateway_binary=gateway,
+        )
+        _write_bridge_publication(data_dir, target, connector=connector, payload=published)
+        assert first_party_self_reason(target) == expected, gateway
+
+
+@pytest.mark.parametrize(
+    ("connector", "relative_path"),
+    [
+        ("opencode", Path(".config/opencode/plugins/defenseclaw.js")),
+        ("amp", Path(".config/amp/plugins/defenseclaw.ts")),
+    ],
+)
 def test_bridge_rendered_with_the_listener_proof_stays_first_party(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -716,8 +759,10 @@ def test_secure_client_bridge_fingerprint_includes_native_verifier(
     rendered = template
     for field, value in {
         "APIAddr": "127.0.0.1:18970",
-        "TokenFileJS": str(token),
-        "NativePostBinaryJS": str(binary),
+        # The renderer writes *JS fields as JSON string contents, so a
+        # Windows path keeps its backslashes escaped.
+        "TokenFileJS": json.dumps(str(token))[1:-1],
+        "NativePostBinaryJS": json.dumps(str(binary))[1:-1],
         "FailMode": "closed",
         "HookSocketJS": "",
         "ServiceUID": "0",

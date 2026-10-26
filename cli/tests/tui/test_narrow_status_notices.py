@@ -37,8 +37,12 @@ async def test_config_editor_and_palette_status_labels_fit_at_80_columns(tmp_pat
         assert all(name in status for name in ("Gateway", "Watchdog", "Guardrail")), status
 
 
-async def test_doctor_failure_notice_keeps_the_remediation_command(tmp_path):
+async def test_doctor_failure_notice_keeps_the_remediation_command(tmp_path, monkeypatch):
     app = snapshot_app(tmp_path)
+    # The fixture has no sidecar API port, so a health poll that lands during
+    # the test (the Windows runner is slow enough) puts the gateway-health
+    # notice in the one notice row; this test is about the Doctor notice.
+    monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         app.action_switch_panel("policies")

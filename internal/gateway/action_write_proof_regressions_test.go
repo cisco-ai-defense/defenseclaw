@@ -61,6 +61,7 @@ func r104ReviewHome(t *testing.T) (home, cwd string) {
 }
 
 func TestR104ReviewFixDecisions(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home, cwd := r104ReviewHome(t)
 	for _, dir := range []string{filepath.Join(cwd, "sub"), filepath.Join(home, ".ssh", "sub")} {
 		if err := os.Mkdir(dir, 0o700); err != nil {

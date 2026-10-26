@@ -38,6 +38,19 @@ TOKEN = "__DEFENSECLAW_VERSION__"
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("pwsh")
 
 
+@pytest.fixture(autouse=True)
+def _engine_module_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A PowerShell 7 step (the Windows CI shell) puts its own module folders
+    # first in PSModulePath. Windows PowerShell 5.1 started from Python
+    # inherits them, cannot load Microsoft.PowerShell.Utility from there, and
+    # then has no Get-FileHash, so Get-Sha256 says it "could not read" every
+    # file. pwsh starting powershell.exe drops those folders, and so do the
+    # installer's -File entry and `defenseclaw upgrade` (upgrade_shim); the
+    # extracted functions these tests run have no entry, so every engine here
+    # starts with the module path it builds itself.
+    monkeypatch.delenv("PSModulePath", raising=False)
+
+
 def _text() -> str:
     return INSTALL_PS1.read_text(encoding="utf-8")
 
@@ -1618,27 +1631,25 @@ _TXN_PRELUDE = (
 
 
 def _run_powershell(script: str) -> subprocess.CompletedProcess[str]:
-    # GAP-1143: a script past Windows' 32767-character command-line limit
-    # (WinError 206 on the dcw-preflight hosts) is read from a file by a short
-    # -Command and run as -Command would run it: dot-sourced, with no script
-    # path of its own ($PSCommandPath), as the installer's next-step texts expect.
-    if len(script) < 30000:
+    # A script of extracted installer functions can pass Windows' 32,767
+    # character command-line limit (WinError 206), so the text goes through a
+    # file kept outside the test's data folders. It still runs as a -Command
+    # script, dot-sourced from a script block: it has no script path, as the
+    # installer has none when run from `irm | iex`, so Get-LifecycleNextStep
+    # names the release's installer. ReadAllText reads the BOM'd UTF-8.
+    with tempfile.TemporaryDirectory(prefix="dc-ps1-test-") as case:
+        path = Path(case) / "case.ps1"
+        path.write_text(script, encoding="utf-8-sig")
+        command = f". ([scriptblock]::Create([IO.File]::ReadAllText('{path}')))"
         return subprocess.run(
-            [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
+            [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            check=False,
         )
-    folder = tempfile.mkdtemp(prefix="dc-ps1-")
-    path = os.path.join(folder, "case.ps1")
-    try:
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(script)
-        loader = f". ([scriptblock]::Create([IO.File]::ReadAllText('{path}', [Text.Encoding]::UTF8)))"
-        return subprocess.run(
-            [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", loader],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
-        )
-    finally:
-        shutil.rmtree(folder, ignore_errors=True)
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -3481,6 +3492,33 @@ def test_a_failed_stop_whose_old_gateway_still_runs_owes_the_next_run_no_start()
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_an_external_config_is_saved_beside_its_copy_and_put_back(tmp_path: Path) -> None:
+    # A snapshot keeps an external DEFENSECLAW_CONFIG in config\ and its path
+    # in a marker. NTFS names are case-insensitive: a CONFIG marker could not
+    # be written next to the config folder, so on Windows every snapshot of
+    # such an install failed and the upgrade was refused.
+    data, slot, external = tmp_path / "data", tmp_path / "data" / "previous.new", tmp_path / "external.yaml"
+    slot.mkdir(parents=True)
+    external.write_text("saved external config", encoding="ascii")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$env:DEFENSECLAW_CONFIG = '{external}'
+function Copy-Kept([string]$Source, [string]$DestinationDir) {{ Copy-Item -LiteralPath $Source -Destination $DestinationDir -Force }}
+{"".join(_ps1_function(name) for name in ("Read-Text", "Get-Sha256", "Get-ExternalConfig", "Save-ExternalConfig", "Restore-ExternalConfig"))}
+Save-ExternalConfig '{slot}'
+[IO.File]::WriteAllText('{external}', 'migrated external config')
+Restore-ExternalConfig '{slot}'
+Write-Output 'RESTORED'
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0 and "RESTORED" in out, out
+    assert external.read_text(encoding="ascii") == "saved external config"
+    assert (slot / "config" / external.name).read_text(encoding="ascii") == "saved external config"
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 @pytest.mark.parametrize("failure", ["live-data", "saved-venv", "external-config", "after-data", "unproven-data"])
 def test_snapshot_restore_preserves_failed_moves_and_can_resume(tmp_path: Path, failure: str) -> None:
     # GAP-0450: required moves and external-config restoration must all
@@ -3497,7 +3535,7 @@ def test_snapshot_restore_preserves_failed_moves_and_can_resume(tmp_path: Path, 
         slot / "data" / ".defenseclaw-cas-intent": "old receipt",
         external: "new external config",
         slot / "config" / external.name: "old external config",
-        slot / "CONFIG": str(external),
+        slot / "CONFIG_PATH": str(external),
         slot / "COMPLETE": "",
     }.items():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3722,6 +3760,8 @@ def _run_audit_store_case(shell: str, tmp_path: Path, call: str, fail: str = "",
         "function Write-Ok([string]$m) { Write-Host \"ok: $m\" }\n"
         "function Write-Err([string]$m) { Write-Host \"err: $m\" }\n"
         "function Stop-Gateway { return $true }\nfunction Switch-WithPrevious { return 0 }\nfunction Start-Gateway { return 0 }\n"
+        # The rollback's lifecycle proof has its own tests; here it passes.
+        "function Assert-LifecycleRestored { param($Manifest, [switch]$KeepStopped) }\n"
         + _ps1_function("Move-AuditStore")
         + _ps1_function("Move-DamagedAuditStore")
         + _ps1_function("Undo-Rollback")
@@ -3964,6 +4004,55 @@ if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $priorSHA -or
 'OK'
 """
     ).replace("__PRIOR__", prior_version)
+    result = _txn_harness(tmp_path, body)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_windows_undo_of_a_refused_hook_first_swap_leaves_the_install_unchanged(tmp_path: Path) -> None:
+    # Install-HookFirst records HOOK_FIRST and HOOK_GUARD, then a running hook
+    # keeps the old image mapped and the publish is refused (the Windows
+    # files-in-use lane). The prior hook never left its path, so the undo must
+    # not try to publish the checked hook (the same running hook refuses it
+    # again): it finishes, consumes the slot and records no hook transition,
+    # so the unchanged install is neither locked nor left with a record.
+    body = (
+        _ps1_function("Read-Text")
+        + _ps1_function("Undo-HookFirst")
+        + _ps1_function("Undo-Snapshot")
+        + "\n".join(_ps1_function(name) for name in ("Get-LifecycleHookTransition", "Save-LifecycleHookTransition"))
+        + r"""
+$Slot = Join-Path $DataDir '.repair'
+New-Item -ItemType Directory -Path (Join-Path $Slot 'bin'), (Join-Path $Slot 'closer') -Force | Out-Null
+$live = Join-Path $BinDir 'defenseclaw-hook.exe'
+function Install-File {
+    param($Source, $Destination)
+    if ((Test-Path -LiteralPath $Destination) -and (Get-Sha256 $Source) -eq (Get-Sha256 $Destination)) { return }
+    if ($Destination -eq $live) { throw "Could not replace $live in place (Access is denied); it was left as it was" }
+    Copy-Item -LiteralPath $Source -Destination $Destination -Force
+}
+function Remove-Tree { param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+[IO.File]::WriteAllText((Join-Path $Slot 'bin\defenseclaw-hook.exe'), 'old hook')
+[IO.File]::WriteAllText((Join-Path $Slot 'closer\defenseclaw-hook.exe'), 'checked new hook')
+[IO.File]::WriteAllText($live, 'old hook')
+$priorSHA = Get-Sha256 (Join-Path $Slot 'bin\defenseclaw-hook.exe')
+$guardSHA = Get-Sha256 (Join-Path $Slot 'closer\defenseclaw-hook.exe')
+[IO.File]::WriteAllText((Join-Path $Slot 'HOOK_FIRST'), $priorSHA)
+[IO.File]::WriteAllText((Join-Path $Slot 'HOOK_GUARD'), $guardSHA)
+$state = [ordered]@{ Schema = 1; Operation = 'repair'; From = '1.0.4'; To = '1.0.4'; Slot = $Slot
+    Bins = [ordered]@{ 'defenseclaw-hook.exe' = $priorSHA }; GatewayWasRunning = $true; Connectors = @(); Config = ''
+    ExternalConfig = ''; ExternalConfigSha256 = ''; HookFailModes = ''; BinDirProtected = $false; SetupRoot = ''; Committed = $false }
+Write-DurableText $LifecycleManifest ($state | ConvertTo-Json -Depth 4)
+Undo-Snapshot $Slot
+if (Test-Path -LiteralPath $Slot) { throw 'the undo kept the slot of an unchanged install' }
+if ((Get-Sha256 $live) -ne $priorSHA) { throw 'the undo changed the prior hook' }
+$record = Read-LifecycleManifest
+if ($record -and (Get-Field $record 'TransitionHookSHA256')) { throw 'the undo recorded a hook transition that never happened' }
+'OK'
+"""
+    )
     result = _txn_harness(tmp_path, body)
     assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
 
@@ -4388,6 +4477,7 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
             "Invoke-Quietly", "Start-SwapHookFailModes", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
             "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
             "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote", "Resume-InterruptedRun",
+            "Start-AcceptedReplacement", "Finish-EarlySnapshotRestore",
         )
     )
     script = tmp_path / "case.ps1"
@@ -4537,6 +4627,7 @@ def test_a_step_that_throws_after_the_hook_swap_restores_the_old_install(
             "Invoke-Quietly", "Start-SwapHookFailModes", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
             "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
             "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote",
+            "Start-AcceptedReplacement", "Finish-EarlySnapshotRestore",
         )
     )
     script = tmp_path / "case.ps1"

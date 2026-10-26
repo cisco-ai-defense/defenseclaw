@@ -896,7 +896,7 @@ func stopWatchdogAt(dataDir string, out io.Writer, reportNotRunning bool) error 
 		removeWatchdogPIDIfOwned(pidPath, info)
 		return nil
 	}
-	defer proc.Release() //nolint:errcheck -- closes the retained Windows handle.
+	defer proc.Release() //nolint:errcheck // closes the retained Windows handle.
 
 	fmt.Fprintf(out, "Stopping watchdog (PID %d)... ", info.PID)
 	if err := watchdogRequestTerminate(info, proc); err != nil {
