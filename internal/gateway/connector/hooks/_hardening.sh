@@ -3277,6 +3277,23 @@ defenseclaw_gateway_post() {
 }
 
 # _dc_gateway_post_once makes one defenseclaw_gateway_post attempt.
+# _dc_json_escape_shell VALUE sets _DC_JSON_ESCAPED to VALUE as the inside
+# of a JSON string, with the shell's own substitutions (backslash, quote,
+# newline, carriage return, tab); a value with any other control character
+# goes through defenseclaw_json_escape.
+_dc_json_escape_shell() {
+  local LC_ALL=C v="${1:-}"
+  v="${v//\\/\\\\}"
+  v="${v//\"/\\\"}"
+  v="${v//$'\n'/\\n}"
+  v="${v//$'\r'/\\r}"
+  v="${v//$'\t'/\\t}"
+  case "$v" in
+    *[[:cntrl:]]*) v="$(defenseclaw_json_escape "${1:-}")" ;;
+  esac
+  _DC_JSON_ESCAPED="$v"
+}
+
 _dc_gateway_post_once() {
   local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
   local _dc_post_auth="" _dc_post_arg
@@ -3424,13 +3441,20 @@ _dc_gateway_post_once() {
       if [ "$_dc_legacy_post" -eq 1 ]; then
         # A hook can run during an upgrade before the small helper exists.
         # The existing gateway CLI accepts the original JSON envelope.
+        # The shell encodes the envelope itself: a program per field made
+        # the process count grow with the headers (GAP-1755).
         _dc_post_headers="" _dc_post_sep=""
         for ((_dc_field_index=0; _dc_field_index<${#_dc_post_fields[@]}; _dc_field_index+=2)); do
-          _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"$(defenseclaw_json_escape "${_dc_post_fields[_dc_field_index]}")\":\"$(defenseclaw_json_escape "${_dc_post_fields[_dc_field_index+1]}")\""
+          _dc_json_escape_shell "${_dc_post_fields[_dc_field_index]}"
+          _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"${_DC_JSON_ESCAPED}\":"
+          _dc_json_escape_shell "${_dc_post_fields[_dc_field_index+1]}"
+          _dc_post_headers="${_dc_post_headers}\"${_DC_JSON_ESCAPED}\""
           _dc_post_sep=,
         done
-        printf '{"path":"%s","headers":{%s},"body":"%s"}' \
-          "$(defenseclaw_json_escape "$_dc_post_path")" "$_dc_post_headers" "$(defenseclaw_json_escape "$_dc_post_body")"
+        _dc_json_escape_shell "$_dc_post_path"
+        printf '{"path":"%s","headers":{%s},' "$_DC_JSON_ESCAPED" "$_dc_post_headers"
+        _dc_json_escape_shell "$_dc_post_body"
+        printf '"body":"%s"}' "$_DC_JSON_ESCAPED"
       else
         printf '%s\0' 'DCPOST1' "$_dc_post_path" "$_dc_post_body" "${_dc_post_fields[@]+"${_dc_post_fields[@]}"}"
       fi |
