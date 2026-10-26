@@ -1378,6 +1378,25 @@ const maxConcurrentHookJudges = 16
 // still leaves 2s for the regex/AID phases plus response rendering.
 const defaultHookJudgeTimeout = 8 * time.Second
 
+// hookJudgeTimeout is guardrail.judge.hook_timeout, else
+// defaultHookJudgeTimeout.
+func hookJudgeTimeout(cfg *config.Config) time.Duration {
+	if cfg != nil && cfg.Guardrail.Judge.HookTimeout > 0 {
+		return time.Duration(cfg.Guardrail.Judge.HookTimeout * float64(time.Second))
+	}
+	return defaultHookJudgeTimeout
+}
+
+type hookJudgeBudgetKey struct{}
+
+// withHookJudgeBudget gives every hook judge call under ctx one shared end:
+// the calls of one hook (a parallel Copilot toolCalls envelope) answer in
+// the one round trip the hook client waits for, so their judge calls cannot
+// add up past it (GAP-1835).
+func withHookJudgeBudget(ctx context.Context, end time.Time) context.Context {
+	return context.WithValue(ctx, hookJudgeBudgetKey{}, end)
+}
+
 // hookJudgeInspect runs the LLM judge on hook-lane message content for
 // connectors gated on via guardrail.judge.hook_connectors. It maps the
 // request direction to the proxy lane's judge vocabulary and delegates
@@ -1462,11 +1481,7 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 			// The hook client has one round-trip budget even when several
 			// profiles judge. Start every member under that same deadline so
 			// a slow observer cannot spend an action member's entire budget.
-			timeout := defaultHookJudgeTimeout
-			if cfg := a.decisionConfig(ctx); cfg != nil && cfg.Guardrail.Judge.HookTimeout > 0 {
-				timeout = time.Duration(cfg.Guardrail.Judge.HookTimeout * float64(time.Second))
-			}
-			judgeCtx, cancel := context.WithTimeout(ctx, timeout)
+			judgeCtx, cancel := context.WithTimeout(ctx, hookJudgeTimeout(a.decisionConfig(ctx)))
 			defer cancel()
 			results := make([]*ScanVerdict, len(meet.members))
 			var judges sync.WaitGroup
@@ -1591,6 +1606,19 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		return nil
 	}
 
+	timeout := hookJudgeTimeout(cfg)
+	if end, ok := ctx.Value(hookJudgeBudgetKey{}).(time.Time); ok {
+		// The hook's earlier calls spent the shared judge budget: keep the
+		// regex/AID verdict, as for any judge that cannot answer in time.
+		left := time.Until(end)
+		if left < time.Second {
+			fmt.Fprintf(os.Stderr, "[inspect] hook judge skipped (hook judge budget spent) connector=%s direction=%s; keeping regex/AID verdict\n",
+				connector, strategyDirection)
+			return nil
+		}
+		timeout = min(timeout, left)
+	}
+
 	a.hookJudgeSemOnce.Do(func() { a.hookJudgeSem = make(chan struct{}, maxConcurrentHookJudges) })
 	select {
 	case a.hookJudgeSem <- struct{}{}:
@@ -1601,10 +1629,6 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	}
 	defer func() { <-a.hookJudgeSem }()
 
-	timeout := defaultHookJudgeTimeout
-	if jcfg.HookTimeout > 0 {
-		timeout = time.Duration(jcfg.HookTimeout * float64(time.Second))
-	}
 	jctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	jctx = withJudgeSuppressionPack(jctx, a.connectorRulePack(ctx, connector))

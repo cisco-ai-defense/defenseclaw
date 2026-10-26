@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 )
@@ -42,7 +43,11 @@ func copilotCallsUnproven(req agentHookRequest, calls []copilotargs.NativeCall, 
 
 // safeEvaluateHookCalls is safeEvaluateHook for the request's call, or for
 // each call of a parallel envelope: the most restrictive verdict answers and
-// its call names the request in the audit row. A panic answers at once.
+// its call names the request in the audit row. The findings, rule IDs and
+// highest severity of every other call that did not simply allow join that
+// answer, so the audit row keeps each call's finding (GAP-1834); the action
+// stays the decided one. The calls share one hook judge deadline, the one
+// round trip the hook client waits for (GAP-1835). A panic answers at once.
 func (a *APIServer) safeEvaluateHookCalls(
 	ctx context.Context,
 	connectorName string,
@@ -56,7 +61,9 @@ func (a *APIServer) safeEvaluateHookCalls(
 		resp, panicked := a.safeEvaluateHook(ctx, connectorName, req, rawBody, payload, runtime)
 		return resp, panicked, req
 	}
-	var decided agentHookResponse
+	ctx = withHookJudgeBudget(ctx, time.Now().Add(hookJudgeTimeout(a.decisionConfig(ctx))))
+	responses := make([]agentHookResponse, 0, len(calls))
+	decided := 0
 	decidedReq := req
 	for i, call := range calls {
 		one := req
@@ -65,11 +72,23 @@ func (a *APIServer) safeEvaluateHookCalls(
 		if panicked {
 			return resp, true, one
 		}
-		if i == 0 || hookVerdictRank(resp) > hookVerdictRank(decided) {
-			decided, decidedReq = resp, one
+		responses = append(responses, resp)
+		if i == 0 || hookVerdictRank(resp) > hookVerdictRank(responses[decided]) {
+			decided, decidedReq = i, one
 		}
 	}
-	return decided, false, decidedReq
+	out := responses[decided]
+	for i, resp := range responses {
+		if i == decided || hookVerdictRank(resp) == 0 && len(resp.Findings) == 0 {
+			continue
+		}
+		out.Findings = appendUniqueStrings(out.Findings, resp.Findings...)
+		out.RuleIDs = appendUniqueStrings(out.RuleIDs, resp.RuleIDs...)
+		if guardrailSeverityRank(resp.Severity) > guardrailSeverityRank(out.Severity) {
+			out.Severity = resp.Severity
+		}
+	}
+	return out, false, decidedReq
 }
 
 // hookVerdictRank orders verdicts by restriction: the effective action
