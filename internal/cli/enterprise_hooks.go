@@ -91,8 +91,8 @@ var enterpriseHookReconcileRecheckWindow time.Duration
 // change in one home delayed the repair of a home in a later wave
 // (GAP-1825 review R4-2).
 var (
-	enterpriseHookReconcileRecheckPaths []string
-	enterpriseHookReconcileRecheckAll   bool
+	enterpriseHookReconcileRecheckPaths []string //nolint:unused // read by the standalone Unix pass (enterprise_hooks_standalone_unix.go)
+	enterpriseHookReconcileRecheckAll   bool     //nolint:unused // read by the standalone Unix pass (enterprise_hooks_standalone_unix.go)
 )
 
 // enterpriseHookWatchMaxTriggerPaths bounds the paths one pass remembers.
