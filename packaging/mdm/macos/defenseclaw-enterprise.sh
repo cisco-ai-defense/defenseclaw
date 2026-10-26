@@ -161,6 +161,7 @@ DC_SECRET_ROTATED=0    # 1 while a credential stored with --bundle waits for tha
 DC_SECRET_PREVIOUS_SET=0 # 1 when a value was stored before it, 0 when none was
 DC_SECRET_GATEWAY=""   # the gateway that stored it, which puts the old value back
 DC_SECRET_CONFIRMED="" # manifest SHA-256 of the bundle confirmed before the rotation, or none
+DC_GATEWAY_BEFORE=0    # 1 when a gateway was installed before this run delivered anything
 DC_JOURNAL_DIR=""      # root-only credential rotation journal (dc_layout)
 DC_INSTALLED_CONFIG="" # the deployment's installed config.yaml (dc_layout)
 
@@ -1851,8 +1852,12 @@ dc_settle_rotation() {
 # before 1.0.5 cannot remove a credential its installed config references
 # (--undo-config), so a package delivered with the ensure settles what it
 # could not. Nothing installed (no root-owned gateway) has nothing to put
-# back. An entry that cannot be settled stops this ensure before it can
-# install a config that adopts the unsettled credential.
+# back: an entry is retired only when no gateway was installed before this
+# run delivered one (the deployment and its credentials were removed). An
+# installed gateway that is not root-owned keeps the journal, which holds
+# the only copy of the earlier credential, and stops the ensure
+# (GAP-1614). An entry that cannot be settled stops this ensure before it
+# can install a config that adopts the unsettled credential.
 dc_resume_rotation() {
     [ -e "$DC_JOURNAL_DIR" ] || [ -L "$DC_JOURNAL_DIR" ] || return 0
     dc_journal_ready ||
@@ -1863,11 +1868,13 @@ dc_resume_rotation() {
         case "$dc_name" in "" | *[!a-z0-9-]*)
             dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "the credential journal entry $dc_left is not one this wrapper writes; nothing was changed" ;;
         esac
-        if ! dc_trusted_path "$DC_GATEWAY"; then
-            dc_log "retired the credential journal entry of $dc_name: no deployment is installed to put it back into"
+        if [ "$DC_GATEWAY_BEFORE" != 1 ]; then
+            dc_log "retired the credential journal entry of $dc_name: no deployment was installed to put it back into"
             dc_retire_rotation "$dc_name"
             continue
         fi
+        dc_trusted_path "$DC_GATEWAY" ||
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "$DC_GATEWAY is not root-owned$DC_TRUST_ACL, so the earlier credential rotation of $dc_name was not settled and its journal entry was kept; nothing was changed"
         dc_settle_rotation "${DC_PAYLOAD_GATEWAY:-$DC_GATEWAY}" "$dc_name" ||
             dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "an earlier credential rotation of $dc_name is not settled (the wrapper log says why); no credential was stored and no config applied: resolve it and run ensure again. A gateway before 1.0.5 cannot put back a credential its installed config references: deliver the package with --source and the gateway it installs settles it"
     done
@@ -2004,6 +2011,8 @@ dc_main() {
 
     DC_CHANNEL_FLAG=""
     DC_PAYLOAD_GATEWAY=""
+    # Whether a deployment existed before this run, for dc_resume_rotation.
+    if [ -e "$DC_GATEWAY" ] || [ -L "$DC_GATEWAY" ]; then DC_GATEWAY_BEFORE=1; fi
     if [ -n "$DC_SOURCE$DC_SOURCE_URL" ]; then
         dc_stage_source
         dc_install_package

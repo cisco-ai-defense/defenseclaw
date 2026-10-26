@@ -3887,3 +3887,81 @@ dc_remove_stage_parent
         assert "left " in result.stdout and "not a root-owned folder" in result.stdout, result.stdout
         assert (target / "ai-key.value").read_text(encoding="utf-8") == "old-secret-value\n"
         assert os.path.lexists(journal)
+
+
+def _resume_harness(tmp_path: Path, os_dir: str, *, installed: bool, trusted: bool, source: bool, before=None):
+    """Run dc_main as an ensure with one journal entry: a rotation that replaced old-key with new-key."""
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh").rstrip()
+    entry = '\ndc_main "$@"'
+    assert text.endswith(entry)
+    fake, secrets, journal, stage_parent, bindir = (tmp_path / name for name in ("fake", "secrets", "journal", "stage", "bin"))
+    for folder in (fake, secrets, journal, stage_parent, bindir):
+        folder.mkdir(exist_ok=True)
+    (fake / "installed").write_text("installed", encoding="utf-8")
+    script = _OLD_GATEWAY.replace('"$(basename "$(dirname "$0")")"', '"$(cat "$FAKE/installed")"')
+    package = tmp_path / "pkg-gateway"
+    package.write_text(script, encoding="utf-8")
+    package.chmod(0o755)
+    gateway = bindir / "defenseclaw-gateway"
+    if installed:
+        shutil.copy(package, gateway)
+    (secrets / "ai-key").write_text("new-key", encoding="utf-8")
+    (journal / "ai-key.entry").write_text(
+        f"confirmed=none\nrotated={hashlib.sha256(b'new-key').hexdigest()}\nprevious=set\nconfig={'c' * 64}\n", encoding="utf-8")
+    (journal / "ai-key.value").write_text("old-key", encoding="utf-8")
+    trust = '[ -x "$1" ]' if trusted else '[ "$1" != "$DC_GATEWAY" ] && [ -x "$1" ]'
+    overrides = f"""
+dc_layout() {{
+    DC_GATEWAY='{gateway}'
+    DC_SECRETS_DIR='{secrets}' DC_JOURNAL_DIR='{journal}' DC_INSTALLED_CONFIG='{tmp_path / 'config.yaml'}'
+    DC_ANCHORS='{tmp_path / 'anchors.json'}' DC_PACKAGE_RESULT='{tmp_path / 'package-result.json'}'
+    DC_OS_GROUP=linux DC_LOG='{tmp_path / 'kit.log'}'
+}}
+dc_parse_args() {{ DC_SOURCE='{tmp_path / 'source' if source else ''}'; }}
+dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
+dc_validate_args() {{ :; }}
+id() {{ echo 0; }}
+dc_stage_parent() {{ DC_STAGE_PARENT='{stage_parent}'; }}
+dc_sweep_stages() {{ :; }}
+dc_stat_uid() {{ echo 0; }}
+dc_stage_source() {{ :; }}
+dc_install_package() {{ cp '{package}' '{gateway}'; DC_CHANNEL_FLAG=--from-package; }}
+dc_trusted_path() {{ {trust}; }}
+dc_journal_ready() {{ [ -d "$DC_JOURNAL_DIR" ]; }}
+dc_binaries_damaged() {{ return 1; }}
+dc_run_lifecycle_retry() {{ printf 'lifecycle %s\\n' "$*" >>"$FAKE/calls"; return 0; }}
+dc_annotate_package_step() {{ :; }}
+dc_emit_result() {{ echo emitted; }}
+dc_main
+"""
+    if before is not None:
+        before()
+    env = {"PATH": "/usr/bin:/bin", "FAKE": str(fake), "SECRETS": str(secrets)}
+    result = subprocess.run(["sh", "-c", text[: -len(entry)] + "\n" + overrides], env=env, capture_output=True, text=True, timeout=60)
+    calls = (fake / "calls").read_text(encoding="utf-8").splitlines() if (fake / "calls").exists() else []
+    return result.stdout + result.stderr, result.returncode, calls, journal, secrets
+
+
+# GAP-1614: an installed gateway that dc_trusted_path refuses keeps the
+# journal entry and its earlier value (the only copy) and stops the ensure.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_wrapper_keeps_the_journal_for_an_untrusted_installed_gateway(tmp_path: Path, os_dir: str) -> None:
+    out, code, calls, journal, secrets = _resume_harness(tmp_path, os_dir, installed=True, trusted=False, source=False)
+    assert code == 1 and "mdm_not_installed" in out and "journal entry was kept" in out, out
+    assert (journal / "ai-key.entry").exists() and (journal / "ai-key.value").read_text(encoding="utf-8") == "old-key"
+    assert (secrets / "ai-key").read_text(encoding="utf-8") == "new-key"
+    assert not any(" enterprise secret " in f" {call} " or call.startswith("lifecycle ") for call in calls), calls
+
+
+# GAP-1614: only a run that found no gateway installed before it delivered
+# one (the deployment was removed outside the wrapper) retires the entry;
+# it never settles a stale entry against the fresh install.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_wrapper_retires_the_journal_of_a_removed_deployment(tmp_path: Path, os_dir: str) -> None:
+    out, code, calls, journal, _ = _resume_harness(tmp_path, os_dir, installed=False, trusted=True, source=True)
+    assert code == 0 and "emitted" in out, (out, calls)
+    assert not (journal / "ai-key.entry").exists() and not (journal / "ai-key.value").exists(), out
+    assert "no deployment was installed to put it back into" in (tmp_path / "kit.log").read_text(encoding="utf-8")
+    assert not any(" enterprise secret " in f" {call} " for call in calls), calls
