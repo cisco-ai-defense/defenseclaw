@@ -260,6 +260,28 @@ func TestSandboxDaemonGatewayForKeptSandboxes(t *testing.T) {
 	}
 }
 
+// GAP-1421: with sandboxes off a managed list or get of a kept sandbox
+// answers at once from its record, never starting (and waiting for) the
+// account's OpenShell gateway, which cannot start without the managed setup.
+func TestManagedReadsWithSandboxesOffStartNoGateway(t *testing.T) {
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		seedSandboxRecord(t, o.StateDir, "kept", map[string]any{})
+		o.Settings.Enabled = false
+	})
+	f.run(t)
+	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	list, err := ctl.List(t.Context())
+	if err != nil || len(list) != 1 || list[0].Name != "kept" {
+		t.Fatalf("list with sandboxes off = %+v, %v", list, err)
+	}
+	if _, err := ctl.Get(t.Context(), "kept"); err != nil {
+		t.Fatalf("get with sandboxes off: %v", err)
+	}
+	if n := f.os.prepared.Load(); n != 0 {
+		t.Fatalf("readied the account's gateway %d times for a read with sandboxes off", n)
+	}
+}
+
 // A deleted sandbox with only a retained snapshot needs no gateway. A
 // different account can hold the shared port while its record is removed.
 func TestSandboxDaemonDeleteRetainedWhileOtherAccountHoldsGateway(t *testing.T) {

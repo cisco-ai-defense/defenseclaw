@@ -2207,7 +2207,7 @@ func (d *SandboxDaemon) stoppedAfterFailedStop(ctx context.Context, name string,
 func (c *managedSandboxController) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	c.d.confirmIfClosed(ctx)
 	list, err := c.Manager.List(ctx)
-	if err == nil && slices.ContainsFunc(list, unconfirmedSandbox) && c.d.openShellForKept(ctx, false) == nil {
+	if err == nil && slices.ContainsFunc(list, unconfirmedSandbox) && c.mayReadyForRead() && c.d.openShellForKept(ctx, false) == nil {
 		list, err = c.Manager.List(ctx)
 	}
 	for i := range list {
@@ -2222,7 +2222,7 @@ func (c *managedSandboxController) List(ctx context.Context) ([]sandboxapi.Sandb
 func (c *managedSandboxController) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
 	c.d.confirmIfClosed(ctx)
 	sb, err := c.Manager.Get(ctx, name)
-	if err == nil && sb != nil && unconfirmedSandbox(*sb) && c.d.openShellForKept(ctx, false) == nil {
+	if err == nil && sb != nil && unconfirmedSandbox(*sb) && c.mayReadyForRead() && c.d.openShellForKept(ctx, false) == nil {
 		sb, err = c.Manager.Get(ctx, name)
 	}
 	if err == nil && sb != nil && sandboxPolicyConfirmAsked(ctx) && sandboxMayRun(sb.Phase) && c.d.confirmRunningView(ctx, name) {
@@ -2233,6 +2233,16 @@ func (c *managedSandboxController) Get(ctx context.Context, name string) (*sandb
 		c.registrationView(sb)
 	}
 	return sb, err
+}
+
+// mayReadyForRead reports whether a read (List, Get) may start the account's
+// OpenShell gateway to confirm a phase: not while the organization has
+// sandboxes off, where the gateway cannot start without the managed setup
+// and a kept sandbox's list waited out its start (GAP-1421, the GAP-0720
+// class: a read-only view never waits for an unavailable gateway). The
+// record's phase is the answer then.
+func (c *managedSandboxController) mayReadyForRead() bool {
+	return c.d.currentSettings().Enabled
 }
 
 // unconfirmedSandbox is a sandbox whose phase the gateway could not say.
