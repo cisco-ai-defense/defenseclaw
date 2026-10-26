@@ -115,7 +115,8 @@ func windowsClaudeUserSettingsMigrationError(target enterprisehooks.TargetCreden
 			"under the home and Cursor block their tool calls on it", settings, err)
 	case present:
 		return fmt.Errorf("%s still holds DefenseClaw's older per-user Claude Code hooks; the guardian removes them "+
-			"on its next pass, and until then Copilot CLI in a project under the home and Cursor block their tool calls on them", settings)
+			"on its next pass, and until then Copilot CLI in a project under the home and Cursor block their tool calls on them; "+
+			"if this stays, DefenseClaw cannot write the file (read-only or locked, see the guardian log): remove the hooks by hand", settings)
 	}
 	return nil
 }
@@ -450,8 +451,10 @@ func enterpriseHookWindowsEligibleProfilesFor(ctx context.Context, current *conf
 // as on a foreign hook (GAP-0587). A read-only probe runs first, so a file
 // without such a hook is never rewritten or re-protected; the hooks that
 // still name DefenseClaw are reported, after the removal or, when nothing
-// was removable, from the probe. Passes run once per cleanup interval, so
-// the report repeats at most that often.
+// was removable, from the probe. The guardian's prepare step runs it on
+// every reconcile (the interval and each debounced file change) and logs
+// only removals; its finish step reports what is left once per cleanup
+// interval, so the report repeats at most that often.
 //
 // It runs for every user, also one with a Claude Code manifest row: that row
 // is the machine policy registration and its verify does not touch the user's
