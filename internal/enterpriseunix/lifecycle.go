@@ -3384,6 +3384,13 @@ func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 // KeepState keeps the other machine state for a reinstall to resume with.
 func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
+	// An uninstall resolves no service account (only install, ensure and
+	// repair do), so a refused uninstall that started the services again
+	// waited for a gateway served by uid 0 and timed out after 90 s, while
+	// the restored gateway runs as the deployment's account (GAP-0184).
+	if record != nil {
+		l.serviceUID = record.ServiceUID
+	}
 	units := env.Services.Units()
 	if record == nil && !l.opts.Purge {
 		failure := env.lastPackageInstallFailure()

@@ -861,6 +861,26 @@ func TestRefusedUninstallLoadsASpawnScheduledJobAgain(t *testing.T) {
 	}
 }
 
+// GAP-0184: a refused macOS uninstall starts the services it stopped again
+// and waits for the gateway it restored as the deployment's service account,
+// not uid 0: it returns without the 90 s readiness timeout.
+func TestRefusedMacUninstallChecksRestoredGatewayAsServiceAccount(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	record, err := h.env.loadDeployment()
+	if err != nil || record.ServiceUID <= 0 {
+		t.Fatalf("service uid: %+v %v", record, err)
+	}
+	fail := true
+	h.env.MachinePolicy = failingRemovePolicy{MachinePolicyManager: h.env.MachinePolicy, fail: &fail}
+	refused := h.run(Options{Action: ActionUninstall})
+	requireError(t, refused, codeUninstallIncomplete)
+	if got := messagesOf(refused.Errors, codeUninstall); strings.Contains(got, "served by uid") ||
+		strings.Contains(got, "did not become ready") {
+		t.Fatalf("restored gateway was checked against the wrong service uid: %s", got)
+	}
+}
+
 // GAP-1140: a remove-all failure that names no registration (an unreadable
 // eligible-accounts file) was only a warning, so the uninstall removed the
 // binaries the registrations it could not check may still call. It keeps
