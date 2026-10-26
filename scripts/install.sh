@@ -1738,7 +1738,9 @@ outage_open_notice() {
     # permissive tiers (owner decision 2026-10-23), which those releases
     # blocked. Said once, after the upgrade (GAP-1885).
     [[ -x "${VENV}/bin/python" ]] || return 0
-    DEFENSECLAW_HOME="${DEFENSECLAW_HOME}" "${VENV}/bin/python" -I - <<'PY' 2>/dev/null || true
+    # DEFENSECLAW_HOME is readonly and already exported: a prefix assignment
+    # of it is an error (GAP-0016).
+    "${VENV}/bin/python" -I - <<'PY' 2>/dev/null || true
 # GAP-1885: "notice" when this config saves no hook fail mode (global or for
 # an active connector) and a per-user connector now lets a gateway outage
 # run (the default and permissive tiers); 1.0.2 and 1.0.3 closed it.

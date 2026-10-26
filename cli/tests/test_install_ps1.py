@@ -7405,6 +7405,42 @@ def _outage_notice_python() -> tuple[str, str]:
 
 
 @pytest.mark.allow_subprocess
+def test_the_outage_notice_runs_under_the_installers_readonly_home(tmp_path: Path) -> None:
+    # GAP-0016: install.sh declares DEFENSECLAW_HOME readonly (and exports
+    # it); outage_open_notice assigned it again as a command prefix, so every
+    # upgrade from 1.0.2/1.0.3 printed "DEFENSECLAW_HOME: readonly variable"
+    # (and bash versions that skip the command never printed the notice).
+    # Run the real function under the installer's own declarations.
+    sh = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    start = sh.index("outage_open_notice() {")
+    func = sh[start : sh.index("\nPY\n}\n", start) + len("\nPY\n}\n")]
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    stub = venv / "bin" / "python"
+    stub.write_text('#!/bin/sh\ncat >/dev/null\necho "notice home=$DEFENSECLAW_HOME"\n', encoding="utf-8")
+    stub.chmod(0o755)
+    home = tmp_path / "home"
+    script = (
+        "set -euo pipefail\n"
+        f"readonly DEFENSECLAW_HOME={str(home)!r}\nexport DEFENSECLAW_HOME\n"
+        f"readonly VENV={str(venv)!r}\n" + func + 'echo "got=[$(outage_open_notice)]"\n'
+    )
+    env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_HOME"}
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "readonly" not in result.stderr, result.stderr
+    assert result.stdout.strip() == f"got=[notice home={home}]", result.stdout + result.stderr
+    # No other assignment to a readonly installer variable (the class; the
+    # sed that reads a stamped installer quotes the declaration itself).
+    names = re.findall(r"^readonly ([A-Z_][A-Z0-9_]*)=", sh, flags=re.M)
+    for name in names:
+        decl = sh.index(f"readonly {name}=")
+        later = sh[decl + len(f"readonly {name}=") :]
+        hits = [m.group(0) for m in re.finditer(rf"(?m)(?:^|[\s;(&|])(?<!readonly ){name}=", later)]
+        assert not hits, (name, hits)
+
+
+@pytest.mark.allow_subprocess
 @pytest.mark.parametrize(
     ("guardrail", "notice"),
     [
