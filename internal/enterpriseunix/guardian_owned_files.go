@@ -64,10 +64,7 @@ func (l *lifecycle) describeChangedGuardianFiles() {
 					if filepath.Base(file.Path) != "hermes-hook.sh" {
 						continue
 					}
-					info, err := os.Lstat(env.P(file.Path))
-					// Hermes runs the script through its shell, which must
-					// read it: owner execute alone (0100) runs nothing (GAP-1484).
-					if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o500 != 0o500 {
+					if !hermesHookRunnable(env.P(file.Path)) {
 						change.nonExecutable = file.Path
 						break
 					}
@@ -103,4 +100,31 @@ func (l *lifecycle) describeChangedGuardianFiles() {
 	if len(changes) > 0 {
 		r.SecurityComplete = false
 	}
+}
+
+
+// hermesHookLstat is replaceable in tests, which do not run as root: root
+// reads a hook below a folder its owner cannot search.
+var hermesHookLstat = os.Lstat
+
+// hermesHookRunnable reports whether the owner of a registered Hermes hook
+// can run it. Hermes runs the script through its shell, which must read it:
+// owner execute alone (0100) runs nothing (GAP-1484). The owner must also
+// be able to reach it: an unsearchable hooks folder or data folder
+// (~/.defenseclaw/hooks, ~/.defenseclaw) hides a hook whose own mode is
+// intact (GAP-1628).
+func hermesHookRunnable(path string) bool {
+	info, err := hermesHookLstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o500 != 0o500 {
+		return false
+	}
+	dir := path
+	for range 2 {
+		dir = filepath.Dir(dir)
+		info, err := hermesHookLstat(dir)
+		if err != nil || !info.IsDir() || info.Mode().Perm()&0o100 == 0 {
+			return false
+		}
+	}
+	return true
 }
