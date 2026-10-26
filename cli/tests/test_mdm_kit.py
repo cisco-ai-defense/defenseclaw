@@ -4010,3 +4010,29 @@ def test_windows_uninstall_removes_the_rotation_journal() -> None:
     tail = text.split(SHARED_END, 1)[1]
     run = tail.index("$code = $run.ExitCode")
     assert run < tail.index("if (@(0, 3010) -contains $code) {") < tail.index("Remove-DefenseClawRotationJournal }", run)
+
+
+# GAP-1733: a purge removes the staging folder a killed wrapper run left
+# (its recorded run is gone) and then the empty state folder; a staging
+# folder whose run still runs stays, and so does the state folder.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("alive", [False, True])
+def test_unix_uninstall_purge_sweeps_stale_kit_stages(tmp_path: Path, os_dir: str, alive: bool) -> None:
+    text = _text(MDM / os_dir / "uninstall.sh")
+    function = _shell_function(text, "dc_remove_stage_parent")
+    state = tmp_path / "defenseclaw-mdm"
+    stage = state / "defenseclaw-mdm.Ab12Cd"
+    stage.mkdir(parents=True)
+    pid = os.getpid() if alive else 2147483646
+    (stage / "pid").write_text(f"{pid}\n", encoding="utf-8")
+    script = f"""set -eu
+DC_PURGE=1 DC_KIT_STATE='{state}' DC_LOG='{tmp_path / "log"}'
+dc_log() {{ printf '%s\\n' "$1" >>"$DC_LOG"; }}
+dc_stat_uid() {{ echo 0; }}
+{function}
+dc_remove_stage_parent
+"""
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert stage.exists() == alive and state.exists() == alive

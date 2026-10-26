@@ -230,6 +230,24 @@ dc_remove_stage_parent() {
     [ "$DC_PURGE" = 1 ] || return 0
     [ -d "$DC_KIT_STATE" ] && [ ! -L "$DC_KIT_STATE" ] || return 0
     [ "$(dc_stat_uid "$DC_KIT_STATE")" = 0 ] || return 0
+    # The staging folders of wrapper runs that were killed before their
+    # cleanup ran (root-owned, their recorded run gone, or a day old without
+    # one) kept the folder (GAP-1733), as the wrapper's dc_sweep_stages
+    # removes them.
+    for stale in "$DC_KIT_STATE"/defenseclaw-mdm.*; do
+        if [ ! -d "$stale" ] || [ -L "$stale" ]; then continue; fi
+        [ "$(dc_stat_uid "$stale")" = 0 ] || continue
+        owner=$(head -c 32 "$stale/pid" 2>/dev/null || true)
+        case "$owner" in
+            "" | *[!0-9]*)
+                [ -n "$(find "$stale" -maxdepth 0 -mmin +1440 2>/dev/null)" ] || continue
+                ;;
+            *)
+                ! kill -0 "$owner" 2>/dev/null || continue
+                ;;
+        esac
+        rm -rf "${stale:?}"
+    done
     if rmdir "$DC_KIT_STATE" 2>/dev/null; then
         dc_log "removed the empty folder $DC_KIT_STATE"
     fi
