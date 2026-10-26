@@ -504,7 +504,7 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	if err := secretTransactionArguments(opts); err != nil {
 		return nil, false, nil, lifecycleFlagError(cmd, err)
 	}
-	var mutate func(context.Context) error
+	var mutate, undo func(context.Context) error
 	existed := false
 	switch action {
 	case "set":
@@ -543,7 +543,21 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 			if err := checkSecretBinding(ctx, opts.name, value, opts.bundle, replacing); err != nil {
 				return err
 			}
-			return env.WriteSecret(ctx, opts.name, value)
+			if err := env.WriteSecret(ctx, opts.name, value); err != nil {
+				return err
+			}
+			// A config the run then refuses applies nothing: the credential
+			// store goes back to what it held (GAP-1734).
+			undo = func(ctx context.Context) error {
+				switch {
+				case readErr == nil:
+					return env.WriteSecret(ctx, opts.name, stored)
+				case errors.Is(readErr, fs.ErrNotExist):
+					return env.RemoveRotatedSecret(opts.name)
+				}
+				return fmt.Errorf("credential %s was stored, and the one it replaced could not be read before (%v), so it is not put back", opts.name, readErr)
+			}
+			return nil
 		}
 	case "remove":
 		mutate = func(context.Context) error {
@@ -563,7 +577,13 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	}
 	// Write and apply under one lifecycle lock. The apply watcher the write
 	// wakes then finds the change already applied instead of racing it.
-	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret", Mutate: mutate})
+	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret", Mutate: mutate,
+		MutateUndo: func(ctx context.Context) error {
+			if undo == nil {
+				return nil
+			}
+			return undo(ctx)
+		}})
 	return result, existed, reservation, nil
 }
 
