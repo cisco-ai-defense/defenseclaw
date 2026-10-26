@@ -19,10 +19,15 @@ import (
 )
 
 // kitStateDir is the root-only state folder of the MDM wrapper
-// (packaging/mdm/<os>/defenseclaw-enterprise.sh DC_KIT_STATE).
+// (packaging/mdm/<os>/defenseclaw-enterprise.sh DC_KIT_STATE). On macOS
+// the wrapper's /var/db/defenseclaw-mdm is reached through the /var link to
+// /private/var, which the administrator-folder check refuses (no link in the
+// path), so a direct purge left the journal and its plaintext copy of an
+// earlier credential "as it is" (GAP-1615, GAP-1848). The folder's real path
+// has no link.
 func (e *Env) kitStateDir() string {
 	if e.GOOS == "darwin" {
-		return "/var/db/defenseclaw-mdm"
+		return "/private/var/db/defenseclaw-mdm"
 	}
 	return "/var/lib/defenseclaw-mdm"
 }
