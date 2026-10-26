@@ -115,6 +115,26 @@ sleep 0.2
 test "$(state_of "$daemon")" = S
 test ! -e "$work/sandbox.held"
 
+# A recovery that finds the held daemon's program swapped (a dpkg unpack
+# whose configure comes more than 10 minutes later) ends it as the
+# postinstall would, never resumes it to act on the swap (GAP-1804).
+PATH="$work/bin:$PATH" sh "$work/preinstall.sh" upgrade
+test "$(state_of "$daemon")" = T
+rm -f "$work/sandbox-daemon"
+cp "$(command -v sleep)" "$work/sandbox-daemon"
+sh "$work/recovery.sh"
+i=0
+while [ -e "/proc/$daemon" ] && [ "$(state_of "$daemon")" != Z ] && [ "$i" -lt 30 ]; do
+    sleep 0.1
+    i=$((i + 1))
+done
+if [ -e "/proc/$daemon" ] && [ "$(state_of "$daemon")" != Z ]; then
+    echo "the recovery resumed a held daemon whose program was swapped: $(state_of "$daemon")" >&2
+    exit 1
+fi
+test ! -e "$work/sandbox.held"
+start_daemon
+
 # From 1.0.4 the daemon counts those MicroVMs: nothing is held.
 deployed 1.0.4
 PATH="$work/bin:$PATH" sh "$work/preinstall.sh" upgrade

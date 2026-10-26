@@ -303,7 +303,11 @@ fi
 # sandboxes' hooks wait meanwhile, so they are held last, after the wait for
 # the lifecycle lock (GAP-1553). If the transaction never reaches the
 # postinstall (an unpack that fails, where dpkg runs the old postinst), a
-# timer lets them go on after 10 minutes.
+# timer lets them go on after 10 minutes. A held daemon whose program was
+# swapped by then (a dpkg unpack whose configure comes later) would act on
+# the swap as GAP-0868 says, so the timer ends it as the postinstall would
+# (same start time, its program deleted) and systemd starts the installed
+# one (GAP-1804).
 sandbox_held=/run/defenseclaw-sandbox-daemons.held
 sandbox_recovery=defenseclaw-sandbox-daemons-recovery
 sandbox_daemon_cmd="/opt/defenseclaw/bin/defenseclaw-gateway sandbox-daemon"
@@ -333,7 +337,7 @@ if deployed_before_1_0_4; then
         # shellcheck disable=SC2016
         if printf '%s\n' "$s_list" >"$sandbox_held" 2>/dev/null &&
             systemd-run --quiet --unit="$sandbox_recovery" --on-active=10m /bin/sh -c \
-                'f='"$sandbox_held"'; [ -e "$f" ] || exit 0; while read -r p s; do kill -CONT "$p" 2>/dev/null; done <"$f"; rm -f "$f"' \
+                'f='"$sandbox_held"'; [ -e "$f" ] || exit 0; while read -r p s; do x=$(readlink "/proc/$p/exe" 2>/dev/null); n=$(sed "s/^.*) //" "/proc/$p/stat" 2>/dev/null | cut -d" " -f20); case "$x" in *" (deleted)") if [ "$n" = "$s" ]; then kill -KILL "$p" 2>/dev/null; continue; fi ;; esac; kill -CONT "$p" 2>/dev/null; done <"$f"; rm -f "$f"' \
                 >/dev/null 2>&1; then
             printf '%s\n' "$s_list" | while read -r s_pid s_start; do
                 kill -STOP "$s_pid" 2>/dev/null || true
