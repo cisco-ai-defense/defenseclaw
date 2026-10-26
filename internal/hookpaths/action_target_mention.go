@@ -1391,7 +1391,13 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 		}
 	}
 	words, _, ok := actionWindowsWords(normalized.String())
-	if !ok || len(words) == 0 || depth == 0 && actionKnownReadOnlyWindows(words) {
+	if !ok {
+		// A command the scanner cannot read may still be read differently by
+		// the shell that runs it (GAP-1500). Keep the class rule there, as the
+		// POSIX text scan does: any protected-named word in it counts.
+		return actionWindowsWordMentionsTarget(normalized.String(), cwd, home, stateOnly)
+	}
+	if len(words) == 0 || depth == 0 && actionKnownReadOnlyWindows(words) {
 		return false
 	}
 	for i := 0; i+1 < len(words); i++ {
