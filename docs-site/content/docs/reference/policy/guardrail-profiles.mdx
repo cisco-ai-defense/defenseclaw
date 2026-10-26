@@ -38,7 +38,7 @@ guardrail:
       mode: action
       block_at: MEDIUM
       alert_at: LOW
-      hilt: {enabled: true, min_severity: HIGH}
+      hilt: {enabled: true, min_severity: LOW}   # asks below block_at; at or above it the call blocks
       rule_pack: strict
       connectors:
         codex: {mode: observe}   # but Codex only observes for this profile
