@@ -5,7 +5,8 @@
 # residue beside the installed files (a guardian's <hook>.restore-<hex>
 # temporary, replacement backups) before the exact-scope purge, whose
 # descriptor check refused it as foreign; a refusal there still restores what
-# the preparation changed.
+# the preparation changed. A staging copy a killed upgrade left
+# (<file>.new.<32 hex>) is residue too.
 
 #Requires -Version 5.1
 
@@ -49,6 +50,30 @@ $failures = & $module {
     }
     if (-not $threw -or ($script:TestCalls -join ',') -cne 'prepare,receipt,residue,restore') {
         $failures.Add("held residue: threw=$threw calls '$($script:TestCalls -join ',')', want the refusal named and the preparation restored")
+    }
+
+    # GAP-1902 (sibling residue): an upgrade killed between its staging copy
+    # and the swap leaves <file>.new.<32 hex> beside the installed file; the
+    # residue removal takes it with the backups and restore temporaries, and
+    # keeps a name DefenseClaw does not write.
+    $script:DefenseClawEnterpriseProfile = 'Standalone'
+    $directory = Microsoft.PowerShell.Management\Join-Path ([IO.Path]::GetTempPath()) ('dc-gap1902-' + [Guid]::NewGuid().ToString('N'))
+    [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $directory)
+    try {
+        $installed = Microsoft.PowerShell.Management\Join-Path $directory 'defenseclaw-acp.exe'
+        $staged = $installed + '.new.' + [Guid]::NewGuid().ToString('N')
+        $foreign = $installed + '.new.keep'
+        foreach ($path in @($installed, $staged, $foreign)) { [IO.File]::WriteAllText($path, 'x') }
+        $left = @(Remove-DefenseClawStaleReplacementBackups -Destination $installed)
+        if ($left.Count -ne 0 -or [IO.File]::Exists($staged)) {
+            $failures.Add("staging copy kept: exists=$([IO.File]::Exists($staged)) left='$($left -join ',')'")
+        }
+        if (-not [IO.File]::Exists($installed) -or -not [IO.File]::Exists($foreign)) {
+            $failures.Add('residue removal took the installed file or a name DefenseClaw does not write')
+        }
+    }
+    finally {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction SilentlyContinue
     }
     return , $failures
 }

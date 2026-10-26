@@ -6600,6 +6600,21 @@ function Test-DefenseClawReplacementBackupName {
     return ($Name.Substring($prefix.Length) -cmatch '^[0-9a-f]{32}$')
 }
 
+function Test-DefenseClawReplacementStagingName {
+    # Install-DefenseClawFileAtomic copies the new file to
+    # <leaf>.new.<32 hex> before it swaps it in; a run killed between the
+    # copy and the swap leaves that copy (GAP-1902).
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Leaf
+    )
+    $prefix = $Leaf + '.new.'
+    if (-not $Name.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    return ($Name.Substring($prefix.Length) -cmatch '^[0-9a-f]{32}$')
+}
+
 function Remove-DefenseClawReplacementBackup {
     # Returns $true once the backup is gone and $false when a running
     # program still uses it; Windows then deletes it at the next restart.
@@ -6645,9 +6660,9 @@ function Test-DefenseClawGuardianRestoreTemporaryName {
 }
 
 function Remove-DefenseClawStaleReplacementBackups {
-    # Standalone: removes the replacement backups and guardian restore
-    # temporaries of Destination that an earlier run left, and writes each
-    # one a running program still uses.
+    # Standalone: removes the replacement backups, staging copies and
+    # guardian restore temporaries of Destination that an earlier run left,
+    # and writes each one a running program still uses.
     param([Parameter(Mandatory)][string]$Destination)
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return
@@ -6663,6 +6678,19 @@ function Remove-DefenseClawStaleReplacementBackups {
             -File `
             -Filter ($leaf + '.backup.*'))) {
         if (-not (Test-DefenseClawReplacementBackupName -Name ([string]$item.Name) -Leaf $leaf) -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            continue
+        }
+        if (-not (Remove-DefenseClawReplacementBackup -Path ([string]$item.FullName))) {
+            [string]$item.FullName
+        }
+    }
+    foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem `
+            -LiteralPath $directory `
+            -Force `
+            -File `
+            -Filter ($leaf + '.new.*'))) {
+        if (-not (Test-DefenseClawReplacementStagingName -Name ([string]$item.Name) -Leaf $leaf) -or
             ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             continue
         }
