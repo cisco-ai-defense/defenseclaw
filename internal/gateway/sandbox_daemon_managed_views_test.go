@@ -291,7 +291,7 @@ func TestManagedStatusIdleReleaseKeepsGatewayAvailable(t *testing.T) {
 		Gateway: &sandboxapi.Gateway{Healthy: true, Driver: "docker"}, Managed: &sandboxapi.ManagedStatus{},
 		IngressAddr: f.d.api.SandboxIngressAddr(), EgressAddr: f.d.rt.egressAddr}
 	f.d.statusListenerAddresses(st)
-	if !st.Available || st.Reason != "" || st.IngressAddr != "" || st.EgressAddr != "" {
+	if !st.Available || st.Reason != "" || st.IngressAddr != "" || st.EgressAddr != "" || !st.ListenersProven {
 		t.Fatalf("healthy idle managed status = %+v", st)
 	}
 	active := 1

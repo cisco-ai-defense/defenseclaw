@@ -114,9 +114,15 @@ type Status struct {
 	// OpenShell does not stop and whose VM may still run, until OpenShell
 	// reports it stopped or deleted (openshell.HoldsGateway). Unset by a
 	// daemon before DefenseClaw 1.0.4 (Busy).
-	Live             *int      `json:"live,omitempty"`
-	PendingApprovals int       `json:"pending_approvals"`
-	LastReconcile    time.Time `json:"last_reconcile,omitzero"`
+	Live             *int `json:"live,omitempty"`
+	PendingApprovals int  `json:"pending_approvals"`
+	// ListenersProven says IngressAddr and EgressAddr name only the sandbox
+	// ports this daemon holds now (the gateway's statusListenerAddresses),
+	// so the doctor takes a named port for the daemon's own also while
+	// sandboxes are unavailable. Unset by a daemon before DefenseClaw 1.0.5,
+	// whose addresses could be the configured ones (GAP-1875).
+	ListenersProven bool      `json:"listeners_proven,omitempty"`
+	LastReconcile   time.Time `json:"last_reconcile,omitzero"`
 	// StartedAt is when the daemon's sandbox subsystem started. Nothing
 	// keeps the sandboxes' counters (HookCoverage, EgressStats) across a
 	// restart: they count from then, so a session that began earlier knows

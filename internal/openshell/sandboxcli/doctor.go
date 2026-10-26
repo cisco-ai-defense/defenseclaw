@@ -263,7 +263,10 @@ func managedRenderedDoctorDriver(paths *openshell.RenderedPaths) (openshell.Comp
 type statusProbe struct {
 	// A configured port is not proof the daemon holds it.
 	ingressListening, egressListening bool
-	unavailable                       bool
+	// listenersProven: the daemon's status names only the ports it holds
+	// (sandboxapi.Status.ListenersProven).
+	listenersProven bool
+	unavailable     bool
 	// available is set when the daemon serves sandboxes; ingress is its
 	// hook ingress address.
 	available bool
@@ -547,6 +550,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			p.managed = st.Managed
 			p.ingressListening = st.IngressAddr != ""
 			p.egressListening = st.EgressAddr != ""
+			p.listenersProven = st.ListenersProven
 		}
 		managed = managed || (serr == nil && st.Managed != nil)
 		switch {
@@ -582,7 +586,14 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			}
 			c.Status, c.Detail = openshell.StatusPass, "running; "+a.managedFirstRunText(st.Managed)
 		case !st.Available:
-			p.ingressListening, p.egressListening, p.unavailable = false, false, true
+			// A daemon that names only the ports it holds (ListenersProven)
+			// still serves the one it names: its egress listener while
+			// another account holds its ingress port is no other process
+			// (GAP-1875). An older daemon's addresses prove nothing here.
+			if !p.listenersProven {
+				p.ingressListening, p.egressListening = false, false
+			}
+			p.unavailable = true
 			c.Status, c.Detail = openshell.StatusFail, "running, but sandboxes are unavailable: "+sandboxapi.DisplayText(firstNonEmpty(st.Reason, "not connected to OpenShell"))
 			switch {
 			case st.Managed != nil && st.GatewayElsewhere != "":
