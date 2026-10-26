@@ -35,6 +35,12 @@ type IdentitySpoolAccount struct {
 	// exempt, out of the manifest): it is not resolved, and its record
 	// goes at once.
 	Left bool
+	// Peer marks an account listed only because the gateway served it (a
+	// machine-policy host, GAP-0422). Its record does not write the first
+	// migration map: the account that holds the uid at the upgrade to this
+	// release may not be the one 1.0.3 saw (GAP-1865). It may still join an
+	// existing map under the rollback rule.
+	Peer bool
 }
 
 // checkMacOSRecordUID refuses the Open Directory record dscl returned for an
@@ -201,7 +207,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 				}
 			}
 			err = writeIdentitySpoolFile(dir, name, record, setOwnership)
-			if err == nil && record.LegacyOwnerToken != "" {
+			if err == nil && record.LegacyOwnerToken != "" && (!account.Peer || LegacyAgentOwnersRecorded(dir)) {
 				owners[account.UID] = LegacyAgentOwner{User: record.User, Token: record.LegacyOwnerToken}
 			}
 			if err == nil && identitySpoolDirectoryRecord(record) {

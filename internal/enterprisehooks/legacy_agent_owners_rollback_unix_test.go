@@ -114,3 +114,26 @@ func rollbackTestPass(t *testing.T, dir string, accounts ...IdentitySpoolAccount
 	}
 	return owners
 }
+
+// GAP-1865: on a machine-policy host 1.0.4 wrote no records and so no
+// migration map. The account listed only because the gateway served it (a
+// peer) may have been created again while the host ran 1.0.4, so it does
+// not write the first map at the upgrade to this release and is not bound
+// to the uid's 1.0.3 agent identities. An enrolled account still writes it,
+// and a peer then joins it only under the rollback rule.
+func TestPeerOnlyAccountDoesNotWriteTheFirstMigrationMap(t *testing.T) {
+	dir := t.TempDir()
+	homes := map[int]string{52100: t.TempDir(), 501: t.TempDir()}
+	stubIdentitySpoolAccounts(t, homes, "files", nil)
+	peer := IdentitySpoolAccount{UID: 52100, User: "fcuid1", Peer: true}
+	for pass := 0; pass < legacyAgentOwnersPassLimit+1; pass++ {
+		_ = WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{peer}, nil, nil, nil)
+		if LegacyAgentOwnersRecorded(dir) {
+			t.Fatalf("pass %d: a peer-only account wrote the first migration map", pass+1)
+		}
+	}
+	owners := rollbackTestPass(t, dir, peer, IdentitySpoolAccount{UID: 501, User: "alice"})
+	if _, bound := owners[52100]; bound || owners[501].User != "alice" {
+		t.Fatalf("first map %+v; want the enrolled account only", owners)
+	}
+}

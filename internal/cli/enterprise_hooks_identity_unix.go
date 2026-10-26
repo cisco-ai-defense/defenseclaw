@@ -286,6 +286,7 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 		for _, peer := range enterpriseHookGatewayPeerAccounts(enterpriseHookIdentityDataDir()) {
 			if !seen[peer.UID] && !left[peer.UID] {
 				list(peer.UID, peer.User, peer.HomeInode)
+				accounts[len(accounts)-1].Peer = true
 			}
 		}
 		for _, uid := range enterpriseHookRecordedCallerUIDs(dir) {
