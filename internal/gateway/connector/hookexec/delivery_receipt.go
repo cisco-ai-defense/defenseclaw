@@ -18,8 +18,18 @@ import (
 // The managed hook and gateway use the same HTTP request for the verdict and
 // its delivery receipt. An old gateway does not send 103 Early Hints, so the
 // body ends with HookDeliveryReleased after this compatibility wait. A 1.0.4
-// gateway whose 103 comes later reads the same marker in place of a receipt.
-const hookDeliveryCapabilityWait = 250 * time.Millisecond
+// gateway whose 103 comes later reads the same marker in place of a receipt,
+// and audits the call unconfirmed, because nothing proves what the hook did.
+//
+// The wait covers a gateway that is still starting when the call arrives: a
+// socket-activated systemd unit or a launchd job accepts the connection at
+// once, and its gateway reads the request about 800 ms later. With a 250 ms
+// wait the first call after every cold start ended released and was audited
+// unconfirmed, though the hook enforced the gateway's allow (GAP-0683). A
+// running gateway sends its 103 when it admits the request, so the wait
+// costs nothing there; only a published 1.0.2 or 1.0.3 gateway, during a
+// package upgrade, answers after it.
+const hookDeliveryCapabilityWait = 1500 * time.Millisecond
 
 // The agent has its answer before this wait starts. Limit a missing HTTP
 // confirmation independently of the answer deadline so the hook process
@@ -93,7 +103,8 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 func hookDeliveryWait(opts Options) time.Duration {
 	wait := hookDeliveryCapabilityWait
 	if deadline := gatewayRestartDeadline(opts, opts.StartedAt); !deadline.IsZero() {
-		remaining := time.Until(deadline) / 4
+		// An older gateway keeps half the restart budget to answer.
+		remaining := time.Until(deadline) / 2
 		if remaining < wait {
 			wait = max(remaining, 0)
 		}
