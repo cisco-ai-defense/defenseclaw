@@ -163,8 +163,14 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) (harness.
 	name, harnessName, driver := b.rec.Name, b.rec.Harness, b.rec.Driver
 	// stop has just fetched b.sb from OpenShell. A raw OpenShell client can
 	// start or stop the guest without updating the manager's cached phase.
-	ready := b.sb != nil && auditPhase(b.sb.Status.Phase) == audit.SandboxPhaseReady && !b.creating && !b.deleted && !b.retained
-	unsettled := !ready && !b.creating && !b.deleted && !b.retained && !workloadEnded(b.phase) && holdsCompute(b.phase, driver, b.rec.PhaseReason)
+	// One phase decides both: the one OpenShell reported to this stop when
+	// it has, else the recorded one (GAP-1148, GAP-0902).
+	phase := b.phase
+	if b.sb != nil {
+		phase = auditPhase(b.sb.Status.Phase)
+	}
+	ready := b.sb != nil && phase == audit.SandboxPhaseReady && !b.creating && !b.deleted && !b.retained
+	unsettled := !ready && !b.creating && !b.deleted && !b.retained && !workloadEnded(phase) && holdsCompute(phase, driver, b.rec.PhaseReason)
 	tamper := b.tamperStop
 	m.mu.Unlock()
 	flush := stopLosesWrites(driver)

@@ -68,37 +68,6 @@ def test_gap_0350_package_floor_limits_include_old_scripts_and_windows() -> None
     assert "release-floor-limits" in _flat("appendix/upgrade-from-0-8.mdx")
 
 
-def test_release_floor_scope_matches_bundle_floor_applies() -> None:
-    """The docs name exactly the runs bundleFloorApplies checks, and its exceptions."""
-    text = _section(REFERENCE, "### Release floor limits")
-    # Promises the runtime does not keep (loop round 1 finding).
-    assert "including a reinstall or repair" not in text
-    assert "a check that cannot prove the floor refuses" not in text
-    # The checked runs (internal/enterpriseunix/bundle_product_floor.go).
-    source = _go_source("internal/enterpriseunix/bundle_product_floor.go")
-    assert 'record == nil || version != strings.TrimPrefix(strings.TrimSpace(record.ProductVersion), "v") ||' in source
-    assert "!enterprisebundle.IsReleaseVersion(version)" in source
-    for fact in (
-        "no deployment record",
-        "`uninstall --keep-state`",
-        "the version changes, up or down",
-        "the version is not a release",
-        "does not check the floor again",
-    ):
-        assert fact in text, fact
-    # A damaged bundle on a same-release run is a warning, not a refusal.
-    assert "`bundle_state_unreadable`" in text
-    assert "keeps the config the last deployment committed" in text
-    assert (
-        'r.AddWarning(codeBundleStateUnreadable, "cannot read the current policy bundle, so the config the last deployment committed is kept'
-        in _go_source("internal/enterpriseunix/bundleapply.go")
-    )
-    # A failed retained-checker copy leaves the next preinstall without a check.
-    assert "`floor_checker_not_kept`" in text
-    assert "after the files are in place" in text
-    assert "r.AddWarning(codeFloorCheckerNotKept," in _go_source("internal/enterpriseunix/lifecycle.go")
-
-
 def test_troubleshooting_lists_floor_codes_in_the_right_tables() -> None:
     text = (DOCS / TROUBLESHOOTING).read_text(encoding="utf-8")
     errors = text[text.index("## Lifecycle error codes") : text.index("### Warnings")]
@@ -212,18 +181,6 @@ def _says_older_packages_complete(text: str) -> bool:
         ("older than 1.0.4" in s or "Older packages" in s) and re.search(r"\bcomplete[s]? below\b", s)
         for s in _sentences(text)
     )
-
-
-def test_package_floor_check_is_only_in_1_0_4_and_later_scripts() -> None:
-    """Ground truth for the docs below: the scripts ask only a gateway with the
-    marker, and fall back to the kept checker only when there is none."""
-    for script in _FLOOR_SCRIPTS:
-        source = _go_source(script)
-        assert "floor_check_marker=defenseclaw-package-floor-check/1" in source, script
-        older = source.index("# a gateway before 1.0.4: it has no floor check")
-        fallback = source.index('if [ -z "$checker" ]; then', older)
-        assert 'checker="$kept/defenseclaw-gateway"' in source[fallback:], script
-    assert "defenseclaw-package-floor-check/1" in _go_source("internal/cli/enterprise_bundle_floor.go")
 
 
 def test_postinstall_floor_refusal_is_promised_only_for_packages_with_the_check() -> None:

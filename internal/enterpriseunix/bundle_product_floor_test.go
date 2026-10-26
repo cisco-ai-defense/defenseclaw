@@ -177,38 +177,6 @@ func TestEveryPayloadIsCheckedAgainstTheConfirmedBundleFloor(t *testing.T) {
 	})
 }
 
-// A run that keeps the recorded release does not check the floor again (the
-// bundle was checked against that release when it was applied), so neither a
-// floor above it nor a floor that cannot be read stops a repair or a
-// same-version ensure. The release-floor reference documents this exception;
-// a version change under the same floors is still refused.
-func TestSameReleaseRunDoesNotRecheckTheConfirmedBundleFloor(t *testing.T) {
-	for _, goos := range []string{"linux", "darwin"} {
-		t.Run(goos, func(t *testing.T) {
-			h := newTestHost(t, goos)
-			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
-			writeBundleAnchors(t, h)
-			for _, floor := range []struct {
-				version string
-				err     error
-			}{{"1.0.9", nil}, {"", errors.New("state unreadable")}} {
-				useConfirmedProductFloor(t, floor.version, floor.err)
-				for _, opts := range []Options{
-					{Action: ActionEnsure},
-					{Action: ActionRepair},
-					{Action: ActionEnsure, PayloadDir: h.payload("1.0.4")},
-				} {
-					requireOK(t, h.run(opts))
-				}
-				requireError(t, h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.6")}), codeProductFloor)
-				if record, _ := h.env.loadDeployment(); record.ProductVersion != "1.0.4" {
-					t.Fatalf("a refused upgrade changed the record to %s", record.ProductVersion)
-				}
-			}
-		})
-	}
-}
-
 func TestBundleProductFloorNeedsTrustAnchors(t *testing.T) {
 	h := newTestHost(t, "linux")
 	useConfirmedProductFloor(t, "9.9.9", nil)

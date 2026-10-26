@@ -2749,7 +2749,7 @@ function Start-HookFailModeHold([string]$Gateway, [int]$GatewayId, [switch]$Clos
     # that open while it is down. True once the first refresh is written and
     # the lock held; Complete-HookFailModeHold waits for the rest.
     if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container)) { return $true }
-    if (-not $Closed -and -not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) { return $true }
+    if (-not $Closed -and -not (Test-InstalledHookRuntime)) { return $true }
     switch (Test-HookFailModeRefresh $Gateway) {
         0 { }
         1 { if ($Closed) { return $false }; return $true }

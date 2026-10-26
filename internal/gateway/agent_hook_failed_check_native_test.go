@@ -248,8 +248,12 @@ func TestFinalizeDeliveredAnswerKeepsItsVerdict(t *testing.T) {
 	if delivered.AuditFailedClosed || delivered.Response.Action != "allow" || delivered.Enforced || delivered.AuditPersisted {
 		t.Fatalf("delivered allow with a failed audit write: %+v", delivered)
 	}
-	undelivered := fixture.api.finalizeAgentHookAnswer(t.Context(), "claudecode", req, allow, nil, preToolUseBody(t, "toolu-undelivered"), time.Millisecond, false, nil, false)
-	if !undelivered.AuditFailedClosed || undelivered.Response.Action != "block" {
-		t.Fatalf("undelivered allow with a failed audit write: %+v, want the fail-closed block", undelivered)
+	// An undelivered allow still gets the audit-failure answer of the base
+	// rule (hookAuditFailureResponse; fix/r104-oss-outage-open owns it).
+	body := preToolUseBody(t, "toolu-undelivered")
+	want, denied := fixture.api.hookAuditFailureResponse(t.Context(), "claudecode", req, body, allow)
+	undelivered := fixture.api.finalizeAgentHookAnswer(t.Context(), "claudecode", req, allow, nil, body, time.Millisecond, false, nil, false)
+	if undelivered.AuditFailedClosed != denied || undelivered.Response.Action != want.Action || undelivered.Response.RawAction != want.RawAction {
+		t.Fatalf("undelivered allow with a failed audit write: %+v, want the audit-failure answer %+v (denied %v)", undelivered, want, denied)
 	}
 }

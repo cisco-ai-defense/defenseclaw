@@ -874,7 +874,7 @@ trailing whitespace.
 ### Remove the key
 
 Removal refuses a key that enabled AI Defense inspection still references
-(`enterprise.inspection.ai_defense.credential`). A reference under disabled inspection does not prevent removal.
+(`enterprise.inspection.ai_defense.credential`). A disabled AI Defense reference does not prevent removal.
 Disable inspection and remove its reference before deleting the stored key:
 
 1. In the config you deploy, set `enabled: false` under

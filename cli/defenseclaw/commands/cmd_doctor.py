@@ -8475,7 +8475,10 @@ def _check_hermes_hooks(
     from defenseclaw.doctor_hooks import unix_hermes_hook_problem
 
     script = os.path.join(getattr(cfg, "data_dir", "") or "", "hooks", "hermes-hook.sh")
-    state, problem = unix_hermes_hook_problem(selected_config, script)
+    # A missing registration and the approvals are _check_hook_health's
+    # (hook_integrity names each unapproved event); this checks the event
+    # matrix, matchers, timeouts and command of one that is there (GAP-0339).
+    state, problem = unix_hermes_hook_problem(selected_config, script) if os.path.isfile(selected_config) else ("", "")
     if state:
         _emit(
             "fail", _HERMES_HOOKS_LABEL,

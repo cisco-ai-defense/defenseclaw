@@ -2643,7 +2643,9 @@ _UNIX_REGISTRATION_LIMIT = 2 * 1024 * 1024
 
 
 def unix_hermes_hook_problem(config_path: str, script_path: str) -> tuple[str, str]:
-    """Validate the Unix Hermes event matrix and the exact agent approval."""
+    """Validate the Unix Hermes event matrix: one DefenseClaw handler per event,
+    its matcher, its 30 s timeout and the command. The approvals are checked
+    with the other hook files (hook_integrity)."""
     try:
         document = _read_config(config_path, "hermes")
         hooks = document.get("hooks")
@@ -2694,7 +2696,6 @@ def unix_hermes_hook_problem(config_path: str, script_path: str) -> tuple[str, s
                 continue
             if any(_handler_targets_defenseclaw(entry, "hermes") for entry in entries):
                 raise _InspectionError("stale", f"unexpected Hermes event {event} contains a DefenseClaw handler")
-        _validate_hermes_allowlist(config_path, next(iter(commands)))
     except _InspectionError as exc:
         return exc.state, exc.detail
     return "", ""

@@ -31,11 +31,10 @@ const (
 var (
 	getExtendedTCPTableProc = windows.NewLazySystemDLL("iphlpapi.dll").NewProc("GetExtendedTcpTable")
 
-	managedEnterpriseQueryServicePID          = queryManagedGatewayServicePID
-	managedEnterpriseConnectedPID             = connectedManagedGatewayPID
-	managedEnterpriseConnectedPIDForEndpoints = connectedManagedGatewayPIDForEndpoints
-	managedEnterpriseListening                = managedGatewayPortListening
-	managedEnterpriseDialContext              = (&net.Dialer{Timeout: 2 * time.Second}).DialContext
+	managedEnterpriseQueryServicePID = queryManagedGatewayServicePID
+	managedEnterpriseConnectedPID    = connectedManagedGatewayPID
+	managedEnterpriseListening       = managedGatewayPortListening
+	managedEnterpriseDialContext     = (&net.Dialer{Timeout: 2 * time.Second}).DialContext
 )
 
 type mibTCPRowOwnerPID struct {

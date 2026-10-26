@@ -212,7 +212,10 @@ func TestAStopOfAMicroVMThatIsNotReadySyncsItFirst(t *testing.T) {
 			stops := e.fake.Calls(openshelltest.MethodStopSandbox)
 			syncs := 0
 			e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
-				if len(call.Command) > 0 && call.Command[0] == "/bin/sync" {
+				// A sync is the bare /bin/sync, or the flush the harness end
+				// script runs for a MicroVM OpenShell reports ready.
+				if len(call.Command) > 0 && (call.Command[0] == "/bin/sync" ||
+					len(call.Command) > 2 && strings.Contains(call.Command[2], "sync")) {
 					syncs++
 					return openshelltest.ExecResponse{Err: context.DeadlineExceeded}
 				}
