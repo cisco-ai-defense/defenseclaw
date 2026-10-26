@@ -215,7 +215,7 @@ dc_remove_rotation_journal() {
         size=$(wc -c <"$value" | tr -d ' ')
         dd if=/dev/zero of="$value" bs=1 count="$size" conv=notrunc 2>/dev/null || true
     done
-    rm -f "${journal:?}"/*.value "${journal:?}"/*.entry "${journal:?}"/*.entry.partial
+    rm -f "${journal:?}"/*.value "${journal:?}"/*.entry "${journal:?}"/*.entry.partial "${journal:?}"/.lock
     if rmdir "$journal" 2>/dev/null; then
         dc_log "removed the credential rotation journal $journal"
     else

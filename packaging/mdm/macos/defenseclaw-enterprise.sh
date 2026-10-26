@@ -162,6 +162,7 @@ DC_SECRET_PREVIOUS_SET=0 # 1 when a value was stored before it, 0 when none was
 DC_SECRET_GATEWAY=""   # the gateway that stored it, which puts the old value back
 DC_SECRET_CONFIRMED="" # manifest SHA-256 of the bundle confirmed before the rotation, or none
 DC_GATEWAY_BEFORE=0    # 1 when a gateway was installed before this run delivered anything
+DC_ROTATION_LOCK_PID="" # the process that holds the rotation journal lock for this run
 DC_JOURNAL_DIR=""      # root-only credential rotation journal (dc_layout)
 DC_INSTALLED_CONFIG="" # the deployment's installed config.yaml (dc_layout)
 
@@ -220,6 +221,7 @@ dc_cleanup() {
     # the gateway that stored it, before the stage (which may hold that
     # gateway) goes.
     dc_restore_secret || true
+    dc_rotation_unlock
     [ -z "$DC_ANCHORS_SOURCE" ] || rm -f "$DC_ANCHORS_SOURCE"
     # A failed or interrupted apply must leave the as-found trust anchors.
     if ! dc_restore_anchors; then
@@ -1704,6 +1706,41 @@ dc_journal_ready() {
     return 1
 }
 
+# dc_rotation_lock: hold the rotation journal lock ($DC_JOURNAL_DIR/.lock)
+# until this run ends, as the Windows wrapper holds rotation.lock: a second
+# run's settle must not put back the credential a running one just rotated,
+# before that run's bundle apply (GAP-1575). macOS has no flock command, so
+# a perl process takes flock(2) and keeps it while this shell runs; it waits
+# up to 10 minutes for a run that holds it.
+dc_rotation_lock() {
+    [ -z "${DC_ROTATION_LOCK_PID:-}" ] || return 0
+    dc_lock_out="$DC_STAGE/rotation-lock"
+    : >"$dc_lock_out"
+    perl -e 'use Fcntl qw(:flock O_RDWR O_CREAT O_NOFOLLOW);
+        sysopen(my $fh, $ARGV[0], O_RDWR | O_CREAT | O_NOFOLLOW, 0600) or exit 2;
+        flock($fh, LOCK_EX) or exit 3;
+        open(my $out, ">", $ARGV[2]) or exit 4; print $out "locked\n"; close $out;
+        sleep 1 while kill(0, $ARGV[1]);' "$DC_JOURNAL_DIR/.lock" "$$" "$dc_lock_out" </dev/null >/dev/null 2>&1 &
+    DC_ROTATION_LOCK_PID=$!
+    dc_waited=0
+    while ! grep -q locked "$dc_lock_out" 2>/dev/null; do
+        if ! kill -0 "$DC_ROTATION_LOCK_PID" 2>/dev/null || [ "$dc_waited" -ge 600 ]; then
+            dc_rotation_unlock
+            dc_fail_result "$DC_EXIT_BUSY" mdm_secret_failed "another wrapper run holds the credential rotation journal lock $DC_JOURNAL_DIR/.lock; nothing was rotated or put back: run ensure again"
+        fi
+        sleep 1
+        dc_waited=$((dc_waited + 1))
+    done
+}
+
+# dc_rotation_unlock: release the rotation journal lock this run holds.
+dc_rotation_unlock() {
+    [ -n "${DC_ROTATION_LOCK_PID:-}" ] || return 0
+    kill "$DC_ROTATION_LOCK_PID" 2>/dev/null || true
+    wait "$DC_ROTATION_LOCK_PID" 2>/dev/null || true
+    DC_ROTATION_LOCK_PID=""
+}
+
 # dc_confirmed_bundle <gateway>: print the manifest SHA-256 of the
 # confirmed policy bundle (bundle status --json), or none when no bundle is
 # confirmed or the device is not managed yet; return 1 with the reason
@@ -1742,6 +1779,7 @@ dc_confirmed_bundle() {
 dc_journal_rotation() {
     dc_journal_ready ||
         dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "the credential journal $DC_JOURNAL_DIR is not a folder only root can change, so nothing was rotated and the config was not applied"
+    dc_rotation_lock
     for dc_left in "$DC_JOURNAL_DIR"/*.entry; do
         [ -e "$dc_left" ] || [ -L "$dc_left" ] || continue
         dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "an earlier credential rotation is not settled ($dc_left): each ensure tries to settle it first and logs why it could not; no credential is rotated until it is"
@@ -1862,6 +1900,7 @@ dc_resume_rotation() {
     [ -e "$DC_JOURNAL_DIR" ] || [ -L "$DC_JOURNAL_DIR" ] || return 0
     dc_journal_ready ||
         dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "the credential journal $DC_JOURNAL_DIR is not a folder only root can change; nothing in it was used and nothing was changed"
+    dc_rotation_lock
     for dc_left in "$DC_JOURNAL_DIR"/*.entry; do
         [ -e "$dc_left" ] || [ -L "$dc_left" ] || continue
         dc_name=$(basename "$dc_left" .entry)
@@ -2011,7 +2050,8 @@ dc_main() {
 
     DC_CHANNEL_FLAG=""
     DC_PAYLOAD_GATEWAY=""
-    # Whether a deployment existed before this run, for dc_resume_rotation.
+    # Whether a deployment existed before this run delivered one (the
+    # journal settle below retires entries only without one).
     if [ -e "$DC_GATEWAY" ] || [ -L "$DC_GATEWAY" ]; then DC_GATEWAY_BEFORE=1; fi
     if [ -n "$DC_SOURCE$DC_SOURCE_URL" ]; then
         dc_stage_source

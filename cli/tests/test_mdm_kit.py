@@ -1191,7 +1191,7 @@ _SECRET_ROTATION_FUNCTIONS = ("dc_sha256", "dc_secret_json_error", "dc_secret_se
                               "dc_save_secret_previous", "dc_restore_secret", "dc_store_secret",
                               "dc_restore_anchors", "dc_cleanup", "dc_confirmed_bundle", "dc_journal_rotation",
                               "dc_retire_rotation", "dc_journal_field", "dc_secret_json_code", "dc_settle_rotation",
-                              "dc_resume_rotation")
+                              "dc_resume_rotation", "dc_rotation_lock", "dc_rotation_unlock")
 
 # The journal folder of a test run is not root's: only its location is real.
 _TEST_JOURNAL_READY = 'dc_journal_ready() { mkdir -p "$DC_JOURNAL_DIR"; }\n'
@@ -1253,6 +1253,7 @@ DC_ACTION=ensure DC_STAGE="{stage}" DC_LOG="{tmp_path / 'kit.log'}" DC_EXIT_FAIL
 DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"} DC_SECRETS_DIR="{secrets}" DC_SECRET_NAME=ai-key DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS="" DC_SECRET_PREVIOUS_SET=0
 DC_SECRET_GATEWAY="" DC_CHILD="" DC_ANCHORS_SOURCE="" DC_ANCHORS_CHANGED=0
 DC_JOURNAL_DIR="{journal}" DC_INSTALLED_CONFIG="{tmp_path / 'config.yaml'}" DC_SECRET_CONFIRMED=""
+DC_ROTATION_LOCK_PID="" DC_GATEWAY_BEFORE=1 DC_EXIT_BUSY=75
 dc_log() {{ printf '%s\\n' "$1" >>"$DC_LOG"; }}
 dc_fail_result() {{ echo "fail $1 $2 $3"; exit "$1"; }}
 {functions}
@@ -1319,6 +1320,7 @@ DC_ACTION=ensure DC_LOG="{tmp_path / 'kit.log'}" DC_EXIT_FAILURE=1 DC_MAX_SECRET
 DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"} DC_SECRETS_DIR="{secrets}" DC_SECRET_NAME=ai-key DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS="" DC_SECRET_PREVIOUS_SET=0
 DC_SECRET_GATEWAY="" DC_CHILD="" DC_ANCHORS_SOURCE="" DC_ANCHORS_CHANGED=0 DC_GATEWAY="{gateway}"
 DC_JOURNAL_DIR="{journal}" DC_INSTALLED_CONFIG="{tmp_path / 'config.yaml'}" DC_SECRET_CONFIRMED=""
+DC_ROTATION_LOCK_PID="" DC_GATEWAY_BEFORE=1 DC_EXIT_BUSY=75
 dc_log() {{ printf '%s\\n' "$1" >>"$DC_LOG"; }}
 dc_fail_result() {{ echo "fail $1 $2 $3"; exit "$1"; }}
 {functions}
@@ -3965,3 +3967,32 @@ def test_unix_wrapper_retires_the_journal_of_a_removed_deployment(tmp_path: Path
     assert not (journal / "ai-key.entry").exists() and not (journal / "ai-key.value").exists(), out
     assert "no deployment was installed to put it back into" in (tmp_path / "kit.log").read_text(encoding="utf-8")
     assert not any(" enterprise secret " in f" {call} " for call in calls), calls
+
+
+# GAP-1575: the settle of an earlier rotation runs only under the rotation
+# journal lock, as on Windows (rotation.lock): while another run holds it,
+# nothing is put back.
+@pytest.mark.skipif(os.name != "posix" or shutil.which("perl") is None, reason="POSIX shell scripts and perl")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_wrapper_settles_only_under_the_rotation_lock(tmp_path: Path, os_dir: str) -> None:
+    (tmp_path / "journal").mkdir()
+    (tmp_path / "fake").mkdir()
+    holders = []
+
+    def hold() -> None:
+        holder = subprocess.Popen(["perl", "-e",
+            'use Fcntl qw(:flock O_RDWR O_CREAT); sysopen(my $fh, $ARGV[0], O_RDWR|O_CREAT, 0600) or die; flock($fh, LOCK_EX) or die;'
+            ' $| = 1; print "held\\n"; sleep 3; open(my $o, ">>", $ARGV[1]) or die; print $o "released\\n"; close $o; flock($fh, LOCK_UN);',
+            str(tmp_path / "journal" / ".lock"), str(tmp_path / "fake" / "calls")], stdout=subprocess.PIPE, text=True)
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
+        holders.append(holder)
+
+    try:
+        out, code, calls, journal, secrets = _resume_harness(tmp_path, os_dir, installed=True, trusted=True, source=False, before=hold)
+    finally:
+        for holder in holders:
+            holder.wait(timeout=30)
+    assert code == 0 and "emitted" in out, (out, calls)
+    settle = [i for i, call in enumerate(calls) if " enterprise secret set " in f" {call} "]
+    assert "released" in calls and settle and settle[0] > calls.index("released"), calls
+    assert not (journal / "ai-key.entry").exists(), out
