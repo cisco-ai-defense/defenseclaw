@@ -886,7 +886,7 @@ func (l *lifecycle) finishBundle(ctx context.Context) {
 			err = l.markBundleApplied(digest, generation, record.ConfigSHA256, false)
 		}
 		if err != nil {
-			l.failBundle(ctx, run, record, bundleConfirmationCode(err), err.Error())
+			l.failBundle(ctx, run, record, bundleConfirmationCode(err), err.Error()+stateWriteAction(err))
 			return
 		}
 		checked = true
@@ -1072,9 +1072,16 @@ func displayID(rc *enterprisebundle.Receipt) string {
 	return rc.ReceiptID
 }
 
+// bundleConfirmationCode is the code of a confirmation step that failed: a
+// receipt or state write that ran out of space is disk_full, as every other
+// bundle-state write is (GAP-0609); it read not_confirmed although the
+// gateway was never asked (GAP-1339).
 func bundleConfirmationCode(err error) enterprisebundle.Code {
-	if enterprisebundle.CodeOf(err) == enterprisebundle.CodeDigestMismatch {
+	switch {
+	case enterprisebundle.CodeOf(err) == enterprisebundle.CodeDigestMismatch:
 		return enterprisebundle.CodeDigestMismatch
+	case enterprisebundle.CodeOf(err) == enterprisebundle.CodeDiskFull || noSpace(err):
+		return enterprisebundle.CodeDiskFull
 	}
 	return enterprisebundle.CodeNotConfirmed
 }
