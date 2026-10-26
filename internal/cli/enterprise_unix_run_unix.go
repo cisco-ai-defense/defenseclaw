@@ -504,11 +504,8 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	if err := secretTransactionArguments(opts); err != nil {
 		return nil, false, nil, lifecycleFlagError(cmd, err)
 	}
-	var mutate, undo func(context.Context) error
-	existed := false
-	switch action {
-	case "set":
-		var value []byte
+	var value []byte
+	if action == "set" {
 		if opts.fromFile != "" {
 			if err := enterpriseunix.TrustedSecretSource(opts.fromFile); err != nil {
 				return nil, false, nil, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
@@ -524,48 +521,8 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 		} else if value, err = readUnixSecretStdin(cmd.InOrStdin(), caller); err != nil {
 			return nil, false, nil, err
 		}
-		mutate = func(ctx context.Context) error {
-			if err := secretCallerGone(caller, secretCallerPID()); err != nil {
-				return err
-			}
-			// An identical value is not rewritten, so the output can say
-			// the credential already holds it (GAP-2373).
-			stored, readErr := os.ReadFile(filepath.Join(env.P(env.Layout.SecretsDir), opts.name))
-			if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
-				return err
-			}
-			if existed = readErr == nil && subtle.ConstantTimeCompare(stored, value) == 1; existed {
-				return nil
-			}
-			// A value the signed bundle does not bind is not stored. A
-			// credential that cannot be read counts as stored.
-			replacing := readErr == nil || !errors.Is(readErr, fs.ErrNotExist)
-			if err := checkSecretBinding(ctx, opts.name, value, opts.bundle, replacing); err != nil {
-				return err
-			}
-			if err := env.WriteSecret(ctx, opts.name, value); err != nil {
-				return err
-			}
-			// A config the run then refuses applies nothing: the credential
-			// store goes back to what it held (GAP-1734).
-			undo = func(ctx context.Context) error {
-				switch {
-				case readErr == nil:
-					return env.WriteSecret(ctx, opts.name, stored)
-				case errors.Is(readErr, fs.ErrNotExist):
-					return env.RemoveRotatedSecret(opts.name)
-				}
-				return fmt.Errorf("credential %s was stored, and the one it replaced could not be read before (%v), so it is not put back", opts.name, readErr)
-			}
-			return nil
-		}
-	case "remove":
-		mutate = func(context.Context) error {
-			_, statErr := os.Lstat(filepath.Join(env.P(env.Layout.SecretsDir), opts.name))
-			existed = statErr == nil
-			return removeUnixSecret(env, opts)
-		}
 	}
+	change := &unixSecretChange{env: env, action: action, opts: opts, value: value, caller: caller}
 	// A change this device could not audit is not made: the spool must hold
 	// room for its change event before the credential is written or
 	// removed, until the event is written. A concurrent command cannot take
@@ -577,14 +534,86 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	}
 	// Write and apply under one lifecycle lock. The apply watcher the write
 	// wakes then finds the change already applied instead of racing it.
-	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret", Mutate: mutate,
-		MutateUndo: func(ctx context.Context) error {
-			if undo == nil {
-				return nil
+	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret",
+		Mutate: change.mutate, MutateUndo: change.putBack})
+	return result, change.existed, reservation, nil
+}
+
+// unixSecretChange is the credential write or removal of secret set or
+// secret remove, made under the lifecycle lock (mutate), and its put-back
+// when the ensure then refuses the config (putBack): a refused change leaves
+// the credential store as it was, for set and remove alike (GAP-1734,
+// GAP-1888).
+type unixSecretChange struct {
+	env    *enterpriseunix.Env
+	action string
+	opts   *enterpriseSecretOptions
+	value  []byte
+	caller int
+	// existed: set found the same value stored, remove found a credential.
+	existed bool
+	undo    func(context.Context) error
+}
+
+func (c *unixSecretChange) mutate(ctx context.Context) error {
+	env, opts, path := c.env, c.opts, filepath.Join(c.env.P(c.env.Layout.SecretsDir), c.opts.name)
+	stored, readErr := os.ReadFile(path)
+	switch c.action {
+	case "set":
+		if err := secretCallerGone(c.caller, secretCallerPID()); err != nil {
+			return err
+		}
+		// An identical value is not rewritten, so the output can say
+		// the credential already holds it (GAP-2373).
+		if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
+			return err
+		}
+		if c.existed = readErr == nil && subtle.ConstantTimeCompare(stored, c.value) == 1; c.existed {
+			return nil
+		}
+		// A value the signed bundle does not bind is not stored. A
+		// credential that cannot be read counts as stored.
+		replacing := readErr == nil || !errors.Is(readErr, fs.ErrNotExist)
+		if err := checkSecretBinding(ctx, opts.name, c.value, opts.bundle, replacing); err != nil {
+			return err
+		}
+		if err := env.WriteSecret(ctx, opts.name, c.value); err != nil {
+			return err
+		}
+		c.undo = func(ctx context.Context) error {
+			switch {
+			case readErr == nil:
+				return env.WriteSecret(ctx, opts.name, stored)
+			case errors.Is(readErr, fs.ErrNotExist):
+				return env.RemoveRotatedSecret(opts.name)
 			}
-			return undo(ctx)
-		}})
-	return result, existed, reservation, nil
+			return fmt.Errorf("credential %s was stored, and the one it replaced could not be read before (%v), so it is not put back", opts.name, readErr)
+		}
+	case "remove":
+		_, statErr := os.Lstat(path)
+		c.existed = statErr == nil
+		if err := removeUnixSecret(env, opts); err != nil {
+			return err
+		}
+		if c.existed {
+			c.undo = func(ctx context.Context) error {
+				if readErr != nil {
+					return fmt.Errorf("credential %s was removed, and it could not be read before (%v), so it is not put back", opts.name, readErr)
+				}
+				return env.WriteSecret(ctx, opts.name, stored)
+			}
+		}
+	}
+	return nil
+}
+
+// putBack is the change's MutateUndo: it runs only when the run refused
+// the config after the change.
+func (c *unixSecretChange) putBack(ctx context.Context) error {
+	if c.undo == nil {
+		return nil
+	}
+	return c.undo(ctx)
 }
 
 // removeUnixSecret is the change of secret remove, under the lifecycle lock.
