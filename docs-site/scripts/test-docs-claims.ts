@@ -1248,9 +1248,17 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
     });
   }
 
+  it('keeps the page title free of a release number', () => {
+    const raw = readFileSync(join(docs, 'troubleshooting/known-limits.mdx'), 'utf8');
+    assert.match(raw, /^title: Known limits$/m);
+    for (const name of ['troubleshooting/index.mdx', 'connectors/codex.mdx', 'connectors/copilot.mdx']) {
+      assert.ok(!page(name).includes('Known limits in 1.0'), `${name} names an old release in the known-limits link`);
+    }
+  });
+
   it('lists every section in the troubleshooting index summary', () => {
     const index = page('troubleshooting/index.mdx');
-    const line = index.split('[Known limits in 1.0.4](/docs/troubleshooting/known-limits):')[1]?.split(' - [')[0] ?? '';
+    const line = index.split('[Known limits](/docs/troubleshooting/known-limits):')[1]?.split(' - [')[0] ?? '';
     for (const words of ['Codex', 'Copilot CLI', 'Antigravity', 'Linux sign-out']) {
       assert.ok(line.includes(words), `troubleshooting index summary omits ${words}`);
     }
