@@ -15,13 +15,13 @@ Reference for the [ACP guard](/docs/features/acp-guard). Tasks are in [Guard an 
 | Command | What it does |
 | --- | --- |
 | `defenseclaw acp catalog` | Prints the compiled client and agent catalog as JSON. |
-| `defenseclaw acp setup --client C --agent A` | Writes the guarded entry, token and contract lock. Flags: `--profile`, `--activate`, `--guard-binary`, `--agent-binary`, `--json`. |
+| `defenseclaw acp setup --client C --agent A` | Writes the guarded entry, token and contract lock. Flags: `--profile`, `--activate`, `--guard-binary`, `--agent-binary`, `--json`. `--profile NAME` uses that profile, or creates it when config.yaml does not define it; the last line then ends with `new profile NAME`. |
 | `defenseclaw acp status` | Guard state and each binding's health, profile and mode. `--json` adds where each profile came from. |
 | `defenseclaw acp verify` | Checks the contract lock against what is configured. |
 | `defenseclaw acp detect` | Lists guarded, unguarded and foreign agent entries in each editor. |
 | `defenseclaw acp adopt` (also `defenseclaw setup acp`) | Points existing unguarded entries at the guard. Flags: `--client`, `--activate`. |
 | `defenseclaw acp refresh --from-sha256 DIGEST` | Re-pins a new guard in locks that pinned the old one. The installer runs it on upgrade. |
-| `defenseclaw acp remove --client C --agent A` | Removes the entry and reclaims the contract lock. |
+| `defenseclaw acp remove --client C --agent A` | Removes the entry, reclaims the contract lock and takes out the profiles setup wrote for that pair. |
 
 ## What is guarded
 

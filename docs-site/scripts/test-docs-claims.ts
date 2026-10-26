@@ -1511,6 +1511,21 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1542", page: "enterprise/operate/lifecycle.mdx", has: ["`--purge` removes everything DefenseClaw installed", "`eDSPermissionError`"] },
   { gap: "GAP-0722", page: "reference/edge-connector/configuration.mdx", lacks: ["the message names the missing file instead"] },
   { gap: "GAP-0286", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["the old gateway's audit row can still say allow", "the gateway records such a call as unconfirmed"] },
+  { gap: "GAP-1563", page: "troubleshooting/known-limits.mdx", section: "Codex", has: ["shows `Config check: not run` because the sandbox hides who owns your folders"] },
+  { gap: "GAP-1600, GAP-1748", page: "how-to/observability/send-to-splunk.mdx", has: ["setup stops with exit 1 and saves nothing", "run `defenseclaw observability destination test <name>`"] },
+  { gap: "GAP-1398, GAP-1750", page: "how-to/observability/send-to-splunk.mdx", has: ["In Splunk Free mode Splunk Web opens as admin with no login"] },
+  { gap: "GAP-1663", page: "how-to/scanning/find-ai-on-this-machine.mdx", has: ["The selected planes are kept for the next `enable`."] },
+  { gap: "GAP-1589", page: "reference/apis/acp-guard.mdx", has: ["the last line then ends with `new profile NAME`", "takes out the profiles setup wrote for that pair"] },
+  { gap: "GAP-1677", page: "troubleshooting/doctor.mdx", has: ["says there is nothing to acknowledge and exits 0"] },
+  { gap: "GAP-1366", page: "reference/commands/cli.mdx", has: ["one warning says the change was saved"] },
+  { gap: "GAP-1274", page: "reference/commands/tui.mdx", has: ["WATCHING means every selected plane is running"] },
+  { gap: "GAP-1539", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["`user_registrations_failed`"] },
+  { gap: "GAP-1703", page: "reference/connectors/hermes.mdx", section: "Managed verification", has: ["`connector hermes cannot be verified: session-only HERMES_HOME cannot be observed by the managed service`"] },
+  { gap: "GAP-1603, GAP-1627", page: "enterprise/operate/operations.mdx", has: ["the bounded scan of this account's private agent installs was incomplete", "`audit_write_failed` stays for 16 minutes"] },
+  { gap: "GAP-1753", page: "troubleshooting/known-limits.mdx", section: "Managed macOS private agent scan", has: ["On macOS 15.8 the managed scan also skips these folders"] },
+  { gap: "GAP-1714", page: "troubleshooting/enterprise/hooks.mdx", section: "An account on a stalled network or FUSE mount", has: ["`fusermount -uz`"] },
+  { gap: "GAP-1503", page: "reference/policy/detection.mdx", has: ["instruction-file writes are HIGH, so they are reported, not blocked"] },
+  { gap: "GAP-1254", page: "reference/connectors/copilot.mdx", has: ["removes the `enabledPlugins` entry `defenseclaw@defenseclaw`"] },
   // r105-rows-end
 ];
 

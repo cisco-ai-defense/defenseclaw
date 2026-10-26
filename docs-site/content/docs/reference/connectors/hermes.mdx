@@ -101,6 +101,8 @@ DefenseClaw builds a Hermes overlay image. Nothing on your host changes. `defens
 
 `enterprise <os> status --json` and `verify --json` report `connectors.hermes.hooks_installed` and `targets`. On Linux and macOS the target rows come from the guardian's last reconcile and do not prove what a running Hermes host has loaded. Managed Hermes hook coverage is reported as unknown when Hermes is present or discovery is unknown.
 
+On a managed host, `enterprise hooks verify` always exits 1 for Hermes rows: each row says `connector hermes cannot be verified: session-only HERMES_HOME cannot be observed by the managed service`. That is the session-only limit, not tampering. `enterprise linux verify` and `enterprise macos verify` report the same limit as a NOT COVERED warning and exit 0.
+
 To check the current hook files on Linux, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks verify --json`. On macOS use `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise hooks verify --json`. Missing or changed owned commands fail this check. Managed Hermes also reports that it cannot certify a session-only `HERMES_HOME`; file integrity alone does not prove launch coverage. Reload every Hermes host after repair.
 
 `enterprise policy verify` checks machine-policy connectors; Hermes uses per-user hooks, so that command can succeed while its hooks are missing.

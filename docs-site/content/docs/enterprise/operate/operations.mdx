@@ -22,6 +22,8 @@ up the code in [Troubleshooting](/docs/troubleshooting/enterprise). Terms such a
 
 Two lifecycle actions report on a deployment. Neither changes the host.
 
+When an account's private agent installs cannot be scanned completely, the warning reads "<connector> for user <user> is not protected: the bounded scan of this account's private agent installs was incomplete (<reason>)". On macOS the scan does not open the folders macOS privacy protection holds for a background service (Desktop, Documents, Downloads, Movies, Music, the Photos library, and the Mail, Messages, Safari and other personal-data folders under ~/Library); an agent copy kept there is not found. After later records are written, `audit_write_failed` stays for 16 minutes after the last failed write, then clears without a gateway restart.
+
 | Action | What it does | Use it for |
 | --- | --- | --- |
 | `status` | Reports the recorded state: installed version, services, readiness, machine policy and enrollment counts. On Linux and macOS it also runs the basic checks (files, services, gateway health); each problem is an error and the command exits non-zero | Inventory and dashboards |

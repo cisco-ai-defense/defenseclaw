@@ -934,7 +934,7 @@ a connector on purpose use `defenseclaw guardrail disable --connector
 
 | Exit code | `config set` / `config unset` |
 | --- | --- |
-| `0` | Written, already had that value, or (unset) already at its default |
+| `0` | Written, already had that value, or (unset) already at its default. A change that was saved exits 0: if the gateway did not confirm the audit event (for example it is stopped or restarting on a new port), one warning says the change was saved |
 | `1` | Refused: invalid value or reference, a stale `--expect-sha256`, or another process holds the config lock |
 | `2` | Malformed `KEY` or `--json` value |
 | `3` | The device is managed; see below |

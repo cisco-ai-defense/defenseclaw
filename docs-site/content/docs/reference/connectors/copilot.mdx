@@ -55,6 +55,8 @@ Teardown restores the exact pre-Setup hook document when its managed copy is unc
 | Hook program, Linux and macOS | `~/.defenseclaw/hooks/copilot-hook.sh` |
 | Hook runtime, Windows | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
+A per-user Copilot setup removes the `enabledPlugins` entry `defenseclaw@defenseclaw` that an earlier managed install left in Copilot's machine `managed-settings.json`. If the account cannot write that file, setup names it; an administrator can delete that entry.
+
 ### Inventory
 
 DefenseClaw reads agents, skills, MCP servers and plugins without changing them ([AI Discovery](/docs/features/ai-discovery)).

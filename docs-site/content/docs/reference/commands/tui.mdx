@@ -84,7 +84,7 @@ sandbox. `defenseclaw agent usage --sandbox NAME` lists one sandbox's.
 
 ![DefenseClaw TUI AI Discovery panel with a row for Claude Code on the host and a separate row, Claude Code (sandbox myapp-claude), for what the scan found inside the sandbox](/images/sandboxes/screens/tui-ai-discovery-sandbox.png)
 
-The Runtime panel reads the same gateway as `agent discovery runtime status`.
+The Runtime panel reads the same gateway as `agent discovery runtime status`. WATCHING means every selected plane is running, with a coverage note (for example, without elevation shadow egress sees only your own connections). DEGRADED means a selected plane is unavailable or not running.
 It has no Tetragon lines. Only a managed Linux gateway reports Tetragon, and
 the managed Linux packages ship no TUI, and their `defenseclaw` runs only `sandbox` commands. On managed Linux,
 `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`

@@ -79,7 +79,7 @@ defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize
 | Policy | FAIL | The last change was rejected (fix what the reason names; the gateway applies it once it builds), or the gateway applies a different digest than the files compute to (run `defenseclaw-gateway restart`). |
 | Policy | WARN | `config.yaml` was edited outside the DefenseClaw writer. On a per-user install the gateway records the hand edit itself and the row clears. Make later changes with `defenseclaw config set`. |
 | Config validation | FAIL | `config.yaml` is invalid; the line names the field. A running gateway keeps the config it started with. |
-| Config migration | PASS or WARN | Shows until you run `defenseclaw config migrate --ack`. WARN when the migration recorded conflicts. |
+| Config migration | PASS or WARN | Shows until you run `defenseclaw config migrate --ack`. WARN when the migration recorded conflicts. With no migration record, `defenseclaw config migrate --ack` says there is nothing to acknowledge and exits 0. |
 | Hook runtime files | FAIL | A generated hook script was edited or replaced. `defenseclaw doctor --fix` re-renders it. |
 | Claude Code hooks freshness, Codex hooks freshness | WARN | A hook script is from an older build, or bakes a different fail mode. The line names the command that regenerates it. |
 | Orphaned hook entries | FAIL or WARN | Entries remain for a connector that is no longer configured. Run `defenseclaw setup remove CONNECTOR`. |
