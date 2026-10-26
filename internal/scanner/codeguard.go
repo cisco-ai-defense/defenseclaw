@@ -122,7 +122,7 @@ func (s *CodeGuardScanner) ScanContentWithProvenance(filename, content string) C
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
 				continue
 			}
-			if r.pattern.MatchString(line) {
+			if r.matches(line) {
 				ln := lineNum + 1
 				findings = append(findings, Finding{
 					ID:                  r.id,
@@ -276,6 +276,36 @@ type rule struct {
 	remediation string
 	extensions  []string
 	provenance  codeGuardFindingProvenance
+	// view, when set, is the part of a line the pattern reads: a built-in
+	// rule drops text that only mentions what it looks for (GAP-1226,
+	// GAP-1227).
+	view func(line string) string
+}
+
+// matches reports whether the rule fires on line.
+func (r rule) matches(line string) bool {
+	if r.view != nil {
+		line = r.view(line)
+	}
+	return r.pattern.MatchString(line)
+}
+
+// pathTraversalModuleSpecifier is the quoted module path of an import,
+// require or include statement. The author wrote that path into the
+// program; it is not a path built from input, so it is not a traversal.
+var pathTraversalModuleSpecifier = regexp.MustCompile(`^\s*(?:import|export)\b[^"'` + "`" + `]*\bfrom\s*(?:"[^"$]*"|'[^']*')|^\s*import\s*(?:"[^"$]*"|'[^']*')|\bimport\s*\(\s*(?:"[^"$]*"|'[^']*')|\b(?:require|require_relative|require_once|include|include_once)\s*\(?\s*(?:"[^"$]*"|'[^']*')|^\s*#\s*include\s*(?:"[^"$]*"|'[^']*')|@import\s+(?:url\(\s*)?(?:"[^"$]*"|'[^']*')`)
+
+// pathTraversalProse is "..." prose and a ".." that ends at a string escape
+// ("Loading...\n", JSON text such as Claude's own onboarding template): no
+// path component follows it.
+var pathTraversalProse = regexp.MustCompile(`\.{3,}|\.\.\\[nrt"']`)
+
+// pathTraversalView is the part of a line CG-PATH-001 reads: what the code
+// does with a path, not an import of a sibling module or prose (GAP-1226,
+// GAP-1227).
+func pathTraversalView(line string) string {
+	line = pathTraversalModuleSpecifier.ReplaceAllString(line, " ")
+	return pathTraversalProse.ReplaceAllString(line, " ")
 }
 
 var builtinRules = codeOwnedBuiltinRules([]rule{
@@ -354,6 +384,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		title:       "Potential path traversal",
 		pattern:     regexp.MustCompile(`(?i)(\.\.\/|\.\.\\|path\.join\(.*\.\.|os\.path\.join\(.*\.\.|filepath\.Join\(.*\.\.)`),
 		remediation: "Canonicalize paths and validate against an allowed root directory",
+		view:        pathTraversalView,
 	},
 })
 
@@ -399,7 +430,7 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
 				continue
 			}
-			if r.pattern.MatchString(line) {
+			if r.matches(line) {
 				ln := lineNum
 				findings = append(findings, Finding{
 					ID:                  r.id,
