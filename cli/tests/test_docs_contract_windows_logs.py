@@ -81,7 +81,7 @@ def test_event_log_readers_claims_name_only_readable_logs():
 
 
 def test_operations_page_says_who_reads_the_service_logs():
-    text = " ".join((DOCS / "enterprise/operate/operations.mdx").read_text(encoding="utf-8").split())
+    text = " ".join((DOCS / "enterprise/operations.mdx").read_text(encoding="utf-8").split())
     assert (
         "The gateway, guardian and sensor helper logs under `C:\\ProgramData\\Cisco\\DefenseClaw\\logs` are for "
         "SYSTEM and Administrators only"

@@ -29,7 +29,7 @@ import (
 
 var (
 	docsCodeSpanRE      = regexp.MustCompile("`([^`]+)`")
-	docsConnectorLinkRE = regexp.MustCompile(`\(/docs/reference/connectors/([a-z0-9-]+)#`)
+	docsConnectorLinkRE = regexp.MustCompile(`\(/docs/connectors/([a-z0-9-]+)#`)
 	// retiredHarnesses are still registered but have no public pages (#1182);
 	// the connectors overview leaves them out.
 	retiredHarnesses = map[string]bool{"openhands": true, "omnigent": true}
@@ -69,7 +69,7 @@ func TestDocsListEveryHarness(t *testing.T) {
 
 	// The CLI reference: "named by the command you type (`a`, `b`, ...)",
 	// and a sentence naming the unverified harnesses by display name.
-	bullet = docsBullet(t, docsFile(t, "docs-site", "content", "docs", "reference", "sandboxes", "cli.mdx"), "- **Harness names.**")
+	bullet = docsBullet(t, docsFile(t, "docs-site", "content", "docs", "reference", "sandbox-cli.mdx"), "- **Harness names.**")
 	_, afterOpen, ok := strings.Cut(bullet, "the command you type (")
 	typed, _, ok2 := strings.Cut(afterOpen, ")")
 	if !ok || !ok2 {

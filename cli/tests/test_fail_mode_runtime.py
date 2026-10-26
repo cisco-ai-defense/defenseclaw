@@ -1213,7 +1213,7 @@ def test_fail_mode_help_and_docs_describe_registration_refresh() -> None:
     assert result.exit_code == 0, result.output
     help_text = " ".join(result.output.split())
     docs = " ".join(
-        (Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/configuration/fail-modes.mdx")
+        (Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/fail-modes.mdx")
         .read_text(encoding="utf-8").split()
     )
     persisted = docs.split("## Persisted fail mode", 1)[1].split("## ", 1)[0]

@@ -1,9 +1,0 @@
-{
-  "title": "Contracts and APIs",
-  "pages": [
-    "capability-matrix",
-    "hook-contracts",
-    "gateway-api",
-    "acp-guard"
-  ]
-}

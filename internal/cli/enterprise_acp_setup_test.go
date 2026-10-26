@@ -412,7 +412,7 @@ func TestManagedACPPageNamesWhatRevokeLeaves(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
-	data, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "apis", "acp-guard.mdx"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "acp-guard.mdx"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +434,7 @@ func TestManagedACPPageNamesWhatRevokeLeaves(t *testing.T) {
 		"but not the editor entry or the contract lock", "`defenseclaw acp remove` is a per-user command and is refused on a managed computer")
 	for _, w := range want {
 		if !strings.Contains(page, w) {
-			t.Errorf("reference/apis/acp-guard.mdx does not name %s", w)
+			t.Errorf("acp-guard.mdx does not name %s", w)
 		}
 	}
 }

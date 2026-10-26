@@ -9,7 +9,7 @@
 
 [Unit]
 Description=DefenseClaw sandbox daemon socket
-Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/runtime/sandboxes/
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/sandboxes/
 
 [Socket]
 ListenStream=%t/defenseclaw/sandbox.sock

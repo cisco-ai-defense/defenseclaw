@@ -30,7 +30,7 @@ machine-policy entries are intact.
 
 The marker records the installed version, not the config. An MDM that detects
 by version does not re-run the deployment for a config-only change; see the
-Intune guide (<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune/windows/>) for a detection script that also
+Intune guide (<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune-windows/>) for a detection script that also
 checks the installed config's SHA-256.
 
 ## Linux

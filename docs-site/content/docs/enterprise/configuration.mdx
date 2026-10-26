@@ -1,0 +1,515 @@
+---
+title: Configure a standalone deployment
+description: Where the standalone enterprise config lives on Windows, Linux and macOS, the keys every config needs, how to choose the AI agents to protect, every enterprise setting with its default, and how the network proxy works.
+keywords:
+  - DefenseClaw enterprise config
+  - config.yaml managed_enterprise
+  - enterprise.profile standalone
+  - guardrail.connectors
+  - enterprise settings reference
+  - HTTPS proxy
+---
+
+A standalone deployment reads one administrator-owned `config.yaml` per host. The keys are the same on every OS. The lifecycle validates the whole file before it changes anything: an invalid config is refused and the host keeps the config it has. Every `enterprise` key is in the [Settings reference](#settings-reference). Terms are in [Concepts](/docs/enterprise/concepts).
+
+## Where the config lives
+
+| OS | Path | How a change takes effect |
+| --- | --- | --- |
+| Linux | `/etc/defenseclaw/config.yaml` (`0640`, root, group `defenseclaw`) | `defenseclaw-enterprise-apply.path` watches the file and runs `ensure --reason path`. |
+| macOS | `/opt/cisco/defenseclaw/etc/config.yaml` (`0640`, root, group `_defenseclaw`) | The `com.cisco.defenseclaw.apply` LaunchDaemon watches the file and runs `ensure --reason path`. |
+| Windows | `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` (Administrators only) | Nothing watches it. Run ensure again with the new file, as in [Change the config](/docs/enterprise/lifecycle#change-the-config). |
+
+- In bundle mode (bundle trust anchors installed), the config comes only from signed bundles: a plain config is refused with `bundle_required` and an edit of the file on Linux and macOS is reverted.
+- The package ships no config. Write it as root and keep it unwritable by other users. The MDM wrapper refuses a config file a non-administrator can write (`mdm_untrusted_input`); see [Deliver the config](/docs/enterprise/mdm#deliver-the-config).
+- Linux and macOS take the config from `--config`, else the file already at the path, else a built-in default that observes and protects nothing.
+- On Windows, supply the file to ensure (`--config`, Setup's `CONFIG=` or the wrapper's `-ConfigPath`). Do not edit the installed copy: ensure only compares the file you supply.
+- The file is limited to 4 MiB and 65,536 YAML nodes.
+
+## Files next to the config
+
+The config is the only file you write. The lifecycle keeps these records next to it as evidence of what was applied. Nothing reads them back as policy.
+
+| File | What it holds |
+| --- | --- |
+| `config.generation.json` | The config generation: `generation`, `config_sha256`, `actor` (`lifecycle`, `migration`, or a user), `reason` and `written_at`. |
+| `config.yaml.lock` | The lock every config writer takes. |
+| `config.yaml.v8.bak` | The `config_version: 8` file the first migration replaced (root-only), if the host needed that migration. |
+| `migration-v9.json` | What the migration moved, what conflicted and what it left out. `defenseclaw-gateway config migrate --config /etc/defenseclaw/config.yaml --ack` marks it read on Linux; on macOS use `--config /opt/cisco/defenseclaw/etc/config.yaml`. |
+
+On Linux and macOS the lifecycle directory (`/var/lib/defenseclaw-enterprise` on Linux, root-only; `/opt/cisco/defenseclaw/lifecycle` on macOS) is not the config folder. It holds `committed-config.yaml` (a copy of the last applied config), `rejected-config.yaml` (an in-place edit that was reverted) and `policy-state.json` (the last applied effective policy digest). See [What `ensure` does with the config](/docs/enterprise/lifecycle#what-ensure-does-with-the-config) and [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation).
+
+## Required keys
+
+Set these in every standalone config. On Linux and macOS the lifecycle fills in `deployment_mode` and `enterprise.profile` when they are missing and refuses conflicting values.
+
+| Key | Value |
+| --- | --- |
+| `config_version` | `9` (a `8` file is migrated) |
+| `deployment_mode` | `managed_enterprise` |
+| `enterprise.profile` | `standalone` |
+| `data_dir` | Linux: exactly `/var/lib/defenseclaw` or unset. macOS: exactly `/opt/cisco/defenseclaw/runtime` or unset. Windows: leave unset. |
+| `gateway.api_bind`, `gateway.api_port` | `127.0.0.1` and `18970`, or unset. Every OS refuses another bind address; Linux and macOS also refuse another port. |
+| `guardrail.rule_pack` | Unset, a preset (`default`, `strict`, `permissive`) or a [custom pack](#custom-rule-packs) |
+
+Always set `enterprise.profile`. When it is unset, Windows and macOS resolve to the Secure Client profile and the `enterprise policy` commands refuse to run. The profile cannot change without a reinstall. For `policy_dir` and the rule-pack lookup rules, see [Custom rule packs](#custom-rule-packs).
+
+## Choose the agents to protect
+
+List each agent under `guardrail.connectors`. The key is the connector name; an empty value (`{}`) enables it with the defaults, and only `enabled: false` turns a listed agent off. A config without this map protects nothing, and `verify` fails on it (`no_connectors_enabled`).
+
+```yaml title="config.yaml (excerpt)"
+guardrail:
+  enabled: true
+  mode: observe          # observe | action (default observe)
+  connectors:
+    codex: {}            # machine policy
+    claudecode: {}       # machine policy
+    cursor: {}           # machine policy
+    copilot: {}          # machine policy
+    devin: {}            # per user
+    opencode:
+      mode: action       # this agent blocks; the others only observe
+```
+
+`observe` logs the verdict without blocking; `action` blocks what policy denies. A connector's own `mode` overrides the global value. `block_message` may contain at most 4096 characters.
+
+| Route | Connectors | What DefenseClaw changes |
+| --- | --- | --- |
+| Machine policy | `codex`, `claudecode`, `cursor`, `copilot`, and `opencode` through its managed plugin | The agent's machine-wide policy file, which standard users cannot edit |
+| Per user | `devin`, `antigravity`, `hermes`, `amp`, `kiro` | Each enrolled user's own agent config, which the guardian repairs |
+
+`openclaw` and `zeptoclaw` need the guardrail proxy, which a managed host does not run, so they are not managed. Per-user enrollment also depends on the [enrollment settings](/docs/enterprise/enrollment) and on a supported agent version. The full route table is in [Machine policy](/docs/enterprise/machine-policy#routes-by-connector).
+
+<Callout type="warn" title="Removing a connector removes its protection">
+`guardrail.connectors.<name>.enabled: false` disables the connector and removes its machine policy and hooks. An empty entry (`{}`) enables it. Removing a connector from both `guardrail.connectors` and `enterprise.machine_policy.connectors` also removes its protection, so stop agent use before making either change. On Linux and macOS, `ownership: "off"` leaves machine-policy agents without DefenseClaw hooks. On Windows, `ownership: "off"` does not disable configured Claude Code, Codex and Cursor machine hooks; `enterprise policy verify` checks them even with zero enrolled users. After a configuration change, run `defenseclaw-gateway enterprise policy show --json` and the OS-specific coverage check: `enterprise linux verify --json`, `enterprise macos verify --json` or `enterprise windows verify --json`, using the installed gateway as administrator.
+</Callout>
+
+## Apply and check
+
+Write the file, then apply it (Linux and macOS apply it for you when it changes):
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --config /etc/defenseclaw/config.yaml
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify
+```
+
+`verify` must pass with no `no_connectors_enabled`. On macOS and Windows use `enterprise macos` or `enterprise windows` with the binary paths in [Lifecycle](/docs/enterprise/lifecycle).
+
+## Policy in the config
+
+The config also holds the policy the gateway enforces. On a managed host these are the only places to change it: the local config tools refuse, and the lifecycle validates the whole file before it applies it. Every key here is a standard DefenseClaw key.
+
+| What | Keys | Details |
+| --- | --- | --- |
+| Severity thresholds | `guardrail.block_at` and `alert_at`, and the same keys under `guardrail.connectors.<name>`, `guardrail.profiles.<name>` and `guardrail.profiles.<name>.connectors.<name>` | The only threshold source. [Thresholds](/docs/policies/thresholds) |
+| Rules and rule packs | `guardrail.rules`, `guardrail.rule_pack`, `guardrail.custom_packs` | [Rules](/docs/policies/rules) and [Custom rule packs](#custom-rule-packs) |
+| Block and allow lists | `asset_policy.skill`, `.mcp`, `.plugin` and `.tool`, with `denied` and `allowed` rules | The only block and allow list. [Admission](/docs/policies/admission) |
+| Admission of skills, MCP servers and plugins | `admission.skill`, `.mcp`, `.plugin` and `.defaults` | Scan on install and the action per severity. [Admission](/docs/policies/admission) |
+| Policy per user or group | `guardrail.profiles`, `guardrail.profile_assignments` and `guardrail.default_profile` | [Guardrail profiles at scale](/docs/guardrail/user-and-group-policies) |
+| Release source | `update.source` (an `https://` URL), `update.check`, `update.channel` | Changes where bytes are fetched, never who must have signed them. [Where releases come from](/docs/enterprise/rollout#where-releases-come-from) |
+
+For example, to block a skill and raise the blocking level of one agent:
+
+```yaml title="config.yaml (excerpt)"
+guardrail:
+  block_at: HIGH
+  alert_at: MEDIUM
+  connectors:
+    codex:
+      block_at: CRITICAL
+asset_policy:
+  skill:
+    denied:
+      - name: acme-unapproved-skill
+        reason: not approved
+```
+
+A threshold comes from the most specific place that sets it: profile connector, profile, `guardrail.connectors`, application protection, global, then the rule pack's default. The file is checked against the closed config schema: a key that does not exist, or that a version 9 file no longer accepts (for example `skill_actions`, `mcp_actions`, `plugin_actions` or `guardrail.rule_pack_dir`), fails validation and the host keeps its current config.
+
+On managed standalone hosts the default is `closed`. An administrator can select `guardrail.hook_fail_mode: open` to let supported hooks allow a call while the hook proves the gateway service is stopped (an outage: no gateway took the call), with an inspection-bypassed warning. DefenseClaw honors that choice also under the strict policy tier. A gateway that took the call and gives no answer in time still blocks. Runtime integrity, peer identity and credential refusals stay fail-closed. An unusable gateway answer also blocks on standalone hosts. On Windows, a user who is signed out or disconnected when `ensure` selects `open` keeps fail-closed hooks until their next sign-in, when the guardian re-renders them. Going back to `closed` re-renders a disconnected or signed-out user's hooks right away, under their session or a Windows S4U logon. If Windows refuses the S4U logon, as it does for a Microsoft Entra ID account, that user's hooks stay `open` until their next sign-in, when the guardian closes them; `enterprise hooks status` names them. The change still applies to every other user, and `ensure` does not roll back. See [Fail modes](/docs/reference/fail-modes#refusals-that-ignore-the-fail-mode) for the exact boundary.
+
+## Settings reference
+
+Reference for the keys under `enterprise` in the standalone `config.yaml`. An unset key takes the default shown. A bold OS name at the start of a description means the key acts only there; a key without one applies on every OS.
+
+### Profile and Cisco AI Defense
+
+| Key | Values and default | What it does |
+| --- | --- | --- |
+| `profile` | `standalone`, `secure_client`. Default: Linux `standalone`; Windows and macOS `secure_client` | Selects the profile. Must match the profile the services were installed with. Set `standalone`. |
+| `inspection.ai_defense.enabled` | `true`, `false`. Default: `false` | Adds Cisco AI Defense to the local engine. See [AI Defense key](/docs/enterprise/ai-defense-key). |
+| `inspection.ai_defense.credential` | A credential name: lowercase letters, digits and dashes, starting with a letter or digit, up to 63 characters. No default | Names the stored key. Required when `enabled` is `true`. |
+| `inspection.llm.credential` | A credential name, as above. No default | **Standalone.** Names the stored API key of the top-level `llm:` block. The LLM judge and the skill, MCP and plugin scanners take their key from it, never from `llm.api_key_env` or a `.env` file; a missing credential leaves them without a key. Store the key with `enterprise secret set`. The Secure Client profile refuses the key. See [Windows: add the LLM judge](/docs/enterprise/windows#5-add-the-llm-judge). |
+
+### Enrollment
+
+Under `enterprise.enrollment`. See [Enrollment](/docs/enterprise/enrollment).
+
+| Key | Values and default | What it does |
+| --- | --- | --- |
+| `mode` | `auto`, `manifest`. Default: `auto` | `manifest` stops the enumerator; you write the target manifest yourself. On Windows the first install then needs `--manifest` (Setup: `MANIFEST=`). |
+| `include_users` | List of user names. Default: empty | Linux and macOS: also enroll these accounts. Windows: accepted, but every profile is already a candidate, so it changes nothing. |
+| `exclude_users` | List of user names (Linux and macOS: or numeric uids). Default: empty | Never enroll these accounts. Wins over every include. |
+| `include_groups` | Linux and macOS: group names or numeric IDs. Windows: group names or SIDs. Default: empty | When not empty, enroll only members of these groups. Windows covers local and Active Directory groups, and the Microsoft Entra ID groups a built-in local group lists; see [Enrollment](/docs/enterprise/enrollment#group-filters-on-windows). |
+| `exclude_groups` | As `include_groups`. Default: empty | Never enroll members. Wins over `include_groups`. |
+| `exempt_users` | List of user names (Linux and macOS: or numeric uids). Default: empty | Linux and macOS: not enrolled and never refused for enrollment or by a sandbox `required_for`, but their calls are still inspected under their guardrail profile, which blocks as for anyone, and logged. Windows: the machine-policy agents keep their rows, so the user is inspected; per-user agents get no new rows. |
+| `unenrolled_users` | `inspect`, `deny`. Default: `inspect` | **Linux and macOS.** How the gateway treats a user without an enrollment who calls a machine-policy agent's hook. |
+| `unverified_versions` | `report`, `refuse`. Default: `report` | How a desktop app or editor extension whose hook delivery DefenseClaw has not live-verified is treated; see [Desktop apps and editor extensions](/docs/enterprise/enrollment#desktop-apps-and-editor-extensions). |
+| `unverified_versions_by_connector` | Map of connector to `report` or `refuse`. Default: empty | Per-connector override of `unverified_versions`. |
+| `root` | `inspect`, `deny`, `exempt`. Default: `inspect` | **Linux and macOS.** How the gateway treats calls from uid 0. `exempt` is accepted and behaves like `inspect`. |
+| `uid_min` | Integer, 0 or more. Default: `0` | **Linux and macOS.** Lowest uid the enumerator considers. `0` means Linux reads `UID_MIN` from `/etc/login.defs` (1000 if absent) and macOS uses 501. |
+| `uid_max` | Integer, 0 or more, not below `uid_min`. Default: `0` | **Linux and macOS.** Highest uid enrolled, for local and directory accounts. `0` means login.defs `UID_MAX` bounds only local accounts in `/etc/passwd`, so directory accounts above it are still enrolled. |
+| `home_roots` | List of absolute directories. Default: empty | **Linux and macOS.** Extra parents of home directories, beyond `/home` and `/var/home` (Linux) or `/Users` (macOS). |
+| `agent_prefixes` | List of absolute directories outside homes and temporary directories. Default: empty | **Linux and macOS.** Extra administrator install prefixes (for example an npm `--prefix`) where the enumerator and guardian look for agent CLIs. |
+
+### Machine policy
+
+Under `enterprise.machine_policy`. See [Machine policy](/docs/enterprise/machine-policy).
+
+| Key | Values and default | What it does |
+| --- | --- | --- |
+| `default.ownership` | `merge`, `verify_only`, `off`. Default: `merge` | **Linux and macOS; Copilot, OpenCode and the Claude Code version floor on Windows.** Whether DefenseClaw writes its entries, only checks them, or leaves the agent's machine policy alone. |
+| `default.managed_hooks_only` | `enforce`, `preserve`. Default: `enforce` | **Codex and Claude Code.** Sets the vendor lock that stops user and project hooks. See [`managed_hooks_only` on Windows](#managed_hooks_only-on-windows). |
+| `default.foreign_hooks` | `remove`, `report`, `allow`. Default: `remove` | What the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) does with unapproved hooks. |
+| `default.higher_precedence_sources` | `fail`, `warn`. Default: `fail` | **macOS (Codex, Claude Code); Windows (Claude Code, in `policy show` and `verify` only).** Whether a policy source that outranks DefenseClaw's file counts as a coverage failure or only a warning. |
+| `default.allowed_hooks` | List of SHA-256 digests, 64 hex characters, with or without `sha256:`. Default: empty | Hooks the foreign-hook guard approves. |
+| `connectors.<name>.*` | The same five keys. Default: inherited | Overrides for one connector. Each key falls back to `default`, then to the built-in value. `allowed_hooks` lists are merged. |
+| `connectors.claudecode.version_floor` | `enforce`, `report`, `off`. Default: `enforce` | Whether DefenseClaw sets Claude Code's `requiredMinimumVersion` to its lowest verified hook contract while no other source sets it. Only `connectors.claudecode` takes this key; it does not inherit from `default`. See [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor). |
+
+#### Agent sessions in WSL (Windows)
+
+Under `enterprise.machine_policy.windows_wsl`. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl).
+
+| Key | Values and default | What it does |
+| --- | --- | --- |
+| `agent_sessions` | `block`, `allow`. Default: `block` | **Windows.** `block` keeps Claude Desktop WSL sessions off through `HKLM\SOFTWARE\Policies\Claude\disableWslSessions` and makes `policy verify` fail on each WSL gap that is known to let a session escape (an administrator value that turns WSL sessions on, `wslInheritsWindowsSettings`, the Codex extension's WSL mode, or a Claude Desktop policy key a standard account can change). An unset gate on an empty key is reported as pending, not a failure. `allow` accepts agent sessions in WSL running without DefenseClaw. |
+| `platform` | `leave`, `disable`. Default: `leave` | **Windows.** `disable` sets `HKLM\SOFTWARE\Policies\WSL\AllowWSL=0`, which turns WSL off for every account, including other WSL tooling such as Docker Desktop's WSL backend. |
+| `editor_settings` | `repair`, `report`, `allow`. Default: `repair` | **Windows.** What the guardian does with `chatgpt.runCodexInWindowsSubsystemForLinux: true` in enrolled users' VS Code, VS Code Insiders and Cursor settings: reset it to `false`, only report it, or ignore it. |
+| `claude_desktop_key` | `merge`, `create`. Default: `merge` | **Windows.** `merge` adds `disableWslSessions` only where `HKLM\SOFTWARE\Policies\Claude` already holds machine policy. `create` also writes it to an empty key, which makes Claude Desktop ignore every account's HKCU policy and local third-party configuration. |
+
+#### Linux kernel settings
+
+DefenseClaw has no setting that writes host-wide kernel values. `status` and
+`verify` report the observed user namespace and ptrace settings. An
+administrator may harden the host with their own tools; see
+[User namespaces](/docs/enterprise/linux#user-namespaces).
+
+#### `managed_hooks_only` on Windows
+
+Codex always gets its lock on Windows, whatever the key says. Claude Code's Windows drop-in follows the key as on Linux and macOS: `enforce` (the default) sets `allowManagedHooksOnly: true`, and `preserve` leaves the lock out. The key also decides whether the foreign-hook guard covers Codex and Claude Code on every OS. See [Machine policy](/docs/enterprise/machine-policy#windows-differences).
+
+### Tetragon (Linux)
+
+Under `enterprise.tetragon`. See [Tetragon on a Linux fleet](/docs/enterprise/tetragon) and the [Tetragon reference](/docs/enterprise/tetragon). The block applies to the standalone profile on Linux. Windows and macOS accept it and ignore it (macOS `status` reports `tetragon_not_applicable`). The Secure Client profile refuses a config that carries it.
+
+| Key | Values and default | What it does |
+| --- | --- | --- |
+| `mode` | `off`, `consume`, `observe`, `enforce`. Default: `consume` | **Linux.** `off` keeps `cn_proc` and `fanotify`. `consume` reads the Tetragon the computer already runs as Plane C's process source. `observe` also loads DefenseClaw's read-only policies and the two kernel controls in monitor mode. `enforce` lets the controls deny, once `enforce_ack` matches. With Plane C off (`ai_discovery.runtime.enable_host_plane`), the effective mode is `off`. |
+| `burn_in` | `0`, or whole hours from `24h` to `2160h`. Default: `168h` | **Linux.** Covered agent time each enrolled user must accumulate, with no would-block hit, before that user is enforced. `0` skips the wait and status warns `kernel_burn_in_skipped`. It counts hours of agent use, not calendar time: `168h` is about five to six working weeks for a full-time agent user, so a pilot ring uses a shorter value such as `40h`. |
+| `enforce_ack` | One `sha256:` and 12 lowercase hex digits, a list of up to 4 of them, or empty. Default: empty | **Linux.** The `kernel_policy` digest you approved, as `enterprise linux tetragon verify --ready-for enforce` prints it. Push a list of the old and the new digest while a ring upgrades. A one-item list equals the string. Only `mode: enforce` reads it; with another mode it is kept and ignored. Without a matching value the controls stay in monitor mode. |
+| `customer_events` | `agent`, `off`. Default: `agent` | **Linux.** Report the events of your own Tetragon policies (kprobe and LSM) when they hit an AI agent, tagged with the policy name and tied to the agent, the user and the hook decision. `off` forwards nothing and keeps the counts. DefenseClaw never manages, changes or deletes your policies. Works in `consume`, `observe` and `enforce`. |
+
+An absent block and `mode: consume` with the default `burn_in` are the same policy and produce the same effective digest. There are no socket, path, filter or per-control keys: the helper finds Tetragon from `/var/run/tetragon/tetragon-info.json`, and the controls ship in the binary. A condition that stops enforcement, such as a stale ack, never rejects the config; it keeps the controls in monitor mode and status says why.
+
+```yaml title="config.yaml (excerpt)"
+enterprise:
+  profile: standalone
+  tetragon:
+    mode: observe
+```
+
+### Trust, coexistence and network
+
+| Key | Values and default | What it does |
+| --- | --- | --- |
+| `trust.mode` | `authenticode`, `hash_pinned`. No default | **Windows.** `authenticode` refuses any hash-pinned (unsigned) payload. `hash_pinned`, `""` or unset admits both. See [Payload trust](#payload-trust). |
+| `trust.allowed_signers` | List of SHA-256 certificate thumbprints. Default: empty | **Windows.** Accept only payloads signed by these certificates, like `--allowed-signer`. |
+| `coexistence.per_user_install` | `migrate`, `block`, `ignore`. No default | Reserved: accepted and validated, no effect. |
+| `coexistence.disable_self_update` | `true`, `false`. Default: `true` | **Windows.** Sets the Windows `DisableSelfUpdate` policy value. See [`disable_self_update`](#disable_self_update). |
+| `network.https_proxy` | `http://host[:port]` or `https://host[:port]`. Default: empty | Proxy for outbound HTTPS. See [Network proxy](/docs/enterprise/configuration#network-proxy). |
+| `network.no_proxy` | Comma-separated hosts, domains, IP addresses or CIDR ranges. Default: empty | Destinations that bypass the proxy. |
+
+#### Payload trust
+
+How the lifecycle verifies the payload is chosen at the entry point:
+
+| Entry point | Trust mode | Allowed signers |
+| --- | --- | --- |
+| Windows CLI (`enterprise windows`) | `--trust-mode authenticode` (default) or `hash_pinned`, with `--payload-manifest` for `hash_pinned` | `--allowed-signer <thumbprint>`, repeatable |
+| Standalone Setup | A signed build uses Authenticode. An unsigned build uses `hash_pinned` against the pins Setup writes from its embedded manifest. | `ALLOWEDSIGNERS=` (comma-separated) |
+| Windows MDM wrapper | `-TrustMode HashPinned` (default) or `Authenticode` | `-AllowedSigners` |
+| Linux and macOS MDM wrapper | `--trust-mode hash_pinned` (default, with `--sha256`) or `signed` | macOS, `.pkg` only: `--allowed-team-id`. Linux: `--gpg-keyring` with `--signature` or `--signature-url`. |
+
+On Windows, `enterprise.trust` in the config then narrows what the standalone lifecycle accepts. It is read from the config you supply, or, for an install, upgrade, repair or `ensure` without one, from the installed config.
+
+- **`mode: authenticode`** admits only Authenticode-signed payloads. The lifecycle refuses with `1639`, before any change, a hash-pinned run (such as the unsigned `DefenseClawSetup-Enterprise-Standalone-x64.exe`, which passes `--trust-mode hash_pinned`), and any install, upgrade, repair or `ensure` over a deployment that was installed hash-pinned. Such a deployment keeps admitting its installed payload by the SHA-256 pins it recorded. To move it to `authenticode`, remove it with `uninstall --purge` and install a signed Setup.
+- **`mode: hash_pinned`**, like an unset or empty mode, is the minimum: it admits the unsigned payload by its pins, and a signed payload is still verified by its signature.
+- **`allowed_signers`** restricts signed payloads to the listed signer certificates, like `--allowed-signer`. When both are given they must list the same thumbprints, or the run stops with `1639`.
+
+Linux and macOS accept and validate `enterprise.trust` but do not use it; their MDM wrapper checks the package.
+
+#### `disable_self_update`
+
+`enterprise.coexistence.disable_self_update` controls only the Windows `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate` policy value. When the key is `true` and the value is absent, the lifecycle sets it to `1` and records that it did. It removes the value later only if it set it, so an existing Group Policy value is never changed. The value also stops the per-user `install.ps1` on that computer.
+
+Setting the key to `false` does not bring back update notices or `defenseclaw upgrade` on any OS. On every host with a managed deployment the update notice stays off, and the per-user installer, the per-user upgrade and rollback commands and a per-user gateway refuse to run, whatever this key says. See [Per-user installs](/docs/enterprise/linux#per-user-installs).
+
+## Custom rule packs
+
+Pattern-only custom rules alert on tool-call matches but can block matching prompts and content. To block a tool call, add a CEL expression over complete action facts, for example `tool_call_only: true` with `expression: f.commands.exists(c, c.argv_complete && c.program == 'pg_dump')`. `tool_call_only` alone does not make a regex match enforceable. The text `rulepack validate` output names each enabled `tool_call_only` rule you added that has no expression. See [CEL rule authoring](/docs/policies/cel/authoring).
+
+The gateway ships three rule packs, `default`, `strict` and `permissive`, under `/opt/defenseclaw/share/policies/guardrail` on Linux and `/opt/cisco/defenseclaw/share/policies/guardrail` on macOS. To use your own rules on Linux and macOS:
+
+1. **Create the pack in the administrator policy folder**, as root: `/etc/defenseclaw/policies/guardrail/<name>` on Linux, `/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` on macOS. Packages do not create the `policies/guardrail` directory. Copy a shipped pack under `umask 022` so the gateway can read it. Replace `my-pack` with your pack name in every command below.
+
+   ```bash title="macOS"
+   sudo sh -c 'umask 022 && mkdir -p /opt/cisco/defenseclaw/etc/policies/guardrail && cp -R /opt/cisco/defenseclaw/share/policies/guardrail/default /opt/cisco/defenseclaw/etc/policies/guardrail/my-pack'
+   ```
+
+   ```bash title="Linux"
+   sudo sh -c 'umask 022 && mkdir -p /etc/defenseclaw/policies/guardrail && cp -R /opt/defenseclaw/share/policies/guardrail/default /etc/defenseclaw/policies/guardrail/my-pack'
+   ```
+
+   For a first install, put the pack in place before the package (with your MDM, for example), or install with the built-in packs first and switch `rule_pack` afterwards.
+
+   The lifecycle refuses a pack inside `data_dir`. Before it changes anything it also refuses a pack whose folder, a folder above it, or any folder or file inside it is a symlink, is writable by group or others, has an ACL entry that grants write, or belongs to an account other than root (a pack copied with `cp -a` keeps its owner). It names the path and the reason. `status` and `verify` report a pack in use that no longer passes these checks. To repair modes, change only the `guardrail` folder and the pack (for example `sudo chmod 0755 <policies>/guardrail` and `sudo chmod -R u=rwX,go=rX <policies>/guardrail/my-pack`), and leave `policies` itself to the lifecycle, which keeps it at `0750`.
+2. **Choose the levels.** The pack's posture (its manifest's posture, else its folder name) sets the default levels: `strict` blocks findings of MEDIUM severity and above and alerts on LOW ones, `permissive` blocks only CRITICAL findings and alerts on HIGH ones, and any other pack blocks CRITICAL findings and alerts on MEDIUM and above. `guardrail.block_at` and `alert_at` (or a connector's own) override them; see [Thresholds](/docs/policies/thresholds). The manifest is part of the pack's pin, so validate the pack again after you change it.
+3. **Validate the pack** you just created, `my-pack` here (use your own folder name), with the gateway's own loader. On macOS the binary is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` and the folder is `/opt/cisco/defenseclaw/etc/policies/guardrail/my-pack`.
+
+   ```bash
+   sudo /opt/defenseclaw/bin/defenseclaw-gateway rulepack validate --dir /etc/defenseclaw/policies/guardrail/my-pack
+   ```
+
+   `--json` prints a versioned result. The `defenseclaw` command of the enterprise packages runs only `sandbox` commands, so `defenseclaw guardrail validate-pack` and `defenseclaw setup guardrail` from the [per-user workflow](/docs/policies/rulepack-validation) are not available.
+4. **Point the config at it.** Add the pack under `guardrail.custom_packs` with its path and the `custom_packs pin` value `rulepack validate` prints (`sha256:` and the digest of the pack's own files), select it with `guardrail.rule_pack` (or `guardrail.connectors.<name>.rule_pack` for one agent), and apply the config with `ensure --config` or through your MDM.
+
+   ```yaml
+   guardrail:
+     rule_pack: my-pack
+     custom_packs:
+       my-pack: {path: /etc/defenseclaw/policies/guardrail/my-pack, digest: "sha256:<digest>"}
+   ```
+
+   The lifecycle refuses a pack that does not exist or whose digest does not match. On a normal `ensure` run (without `--no-start`), a custom pack switch can apply in an already running gateway without a restart when it changes only hot config values, the existing gateway is healthy, and that gateway confirms the new policy digest. If the gateway was running but those conditions are not met, `ensure` restarts it to load the valid change, including when a hot reload cannot be confirmed. If the gateway was stopped, `ensure` starts it. With `--no-start`, `ensure` does not start or restart the gateway. If the gateway cannot load the pack, `ensure` fails and the previous config stays in force.
+
+To change a pack that is in use, create the edited copy in a new folder (for example `my-pack-v2`), validate it, and switch `rule_pack` and `custom_packs` to it, so `ensure` applies it with rollback. A pack edited in place no longer matches its pinned digest, so the gateway refuses it until you pin the new digest.
+
+On Windows, give the pack its own folder (not `data_dir` or the staging folder), quote its path with single quotes, and pin the digest that Setup prints when it refuses a placeholder, or that `defenseclaw-gateway.exe rulepack validate --dir <pack>` prints once DefenseClaw is installed. See [Write the config](/docs/enterprise/windows#2-write-the-config).
+
+## Network proxy
+
+`enterprise.network` sets an outbound proxy for the gateway.
+
+```yaml title="config.yaml (excerpt)"
+enterprise:
+  network:
+    https_proxy: http://proxy.corp.example.com:3128
+    no_proxy: .corp.example.com,10.0.0.0/8
+```
+
+With `https_proxy` set, the gateway reaches Cisco AI Defense, LLM providers (the judge and the guardrail proxy), the LLM passthrough, webhooks, the remote model router and the telemetry exporters (OTLP over HTTP and gRPC, Splunk HEC, HTTP JSONL) through the proxy. It opens an HTTP `CONNECT` tunnel to the destination host name, so the proxy's host rules apply and TLS stays end to end. The gateway's other HTTPS clients take the proxy from `HTTPS_PROXY`, `https_proxy`, `NO_PROXY` and `no_proxy`:
+
+| OS | Where those variables are set |
+| --- | --- |
+| Linux | The gateway unit (drop-in `70-defenseclaw-network.conf`) |
+| macOS | The gateway LaunchDaemon's environment |
+| Windows | The gateway sets them in its own process when it starts |
+
+- `https_proxy` must be `http://` or `https://` with a host and optional port. A user name, password, path or query is refused.
+- LLM provider calls need an `http://` proxy URL. With an `https://` URL the gateway refuses those calls rather than connecting directly; the other destinations work with either.
+- `no_proxy` lists hosts, domains and CIDR ranges that connect directly. Loopback destinations always connect directly.
+- Webhook, passthrough and telemetry destinations still pass the gateway's address check first, so their host names must resolve on the device.
+- The gateway reads `enterprise.network` only when it starts. A config reload that changes it is reported as restart-required. On Linux and macOS, a lifecycle run that changes it restarts the gateway.
+- When `https_proxy` is empty, the AI Defense client and the telemetry exporters use the process environment's proxy variables, if any.
+- Whenever a proxy variable is set, the CLI and the gateway add the instance-metadata endpoints (`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`) to `NO_PROXY`, so a Bedrock `instance_role` credential lookup never goes through the proxy.
+- The MDM wrapper's `--https-proxy` (Linux and macOS) is used only to download the package. It does not configure the gateway.
+
+## Observability credentials
+
+A telemetry destination under `observability.destinations` often needs a credential, such as a Galileo API key or a Splunk HEC token. In the standalone profile, store it as a protected credential, like the [AI Defense key](/docs/enterprise/ai-defense-key), and reference it by name. The gateway service does not get the variables of an administrator's shell, so `{env: NAME}`, `token_env` and `bearer_env` do not work in this profile.
+
+| Destination field | Credential reference | Replaces |
+| --- | --- | --- |
+| `headers.<name>` (`otlp`, `http_jsonl`) | `{credential: NAME}` | `{env: NAME}` |
+| `token_credential` (`splunk_hec`) | `NAME` | `token_env` |
+| `bearer_credential` (`http_jsonl`) | `NAME` | `bearer_env` |
+
+`NAME` is 1 to 63 lowercase letters, digits or dashes, starting with a letter or digit. A destination sets either the credential field or the environment field, not both.
+
+1. **Store the credential**, the same way as the AI Defense key (see [Store the key](/docs/enterprise/ai-defense-key#store-the-key) for macOS, Windows and `--from-file`). On Linux:
+
+   ```bash
+   read -rs GALILEO_API_KEY
+   printf '%s' "$GALILEO_API_KEY" | sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name galileo-api-key --from-stdin
+   unset GALILEO_API_KEY
+   ```
+
+   `enterprise secret set` needs an installed deployment. On a new host, install with a config that does not reference the credential yet, or with the destination set to `enabled: false`, which resolves no credentials. The value is never printed. With `--json`, a refused source file, empty or oversized value, or invalid name returns `ok: false` and an `errors` entry.
+2. **Reference it in the config** and apply the config as usual:
+
+   ```yaml title="config.yaml (excerpt)"
+   observability:
+     destinations:
+       - name: galileo
+         kind: otlp
+         preset: galileo
+         protocol: http/protobuf
+         endpoint: https://api.galileo.ai/otel/traces
+         headers:
+           Galileo-API-Key: {credential: galileo-api-key}
+           project: defenseclaw
+           logstream: production
+   ```
+
+The gateway reads the credential the same way as the AI Defense key. The value never appears in the config, the effective configuration, status output or logs. Before it applies a config, the lifecycle checks that every credential an enabled destination references is stored and passes the file checks in [Where the key is stored](/docs/enterprise/ai-defense-key#where-the-key-is-stored). Otherwise it refuses the config, names the credential and the destination field, and keeps the running config.
+
+`enterprise secret remove` refuses when it cannot read the installed config, when an enabled destination still references the credential, or when `enterprise.inspection.llm.credential` (or an enabled `enterprise.inspection.ai_defense.credential`) names it. Remove the reference and apply the config first. To rotate a credential, run `enterprise secret set` again with the same name. On a device that applies signed policy bundles, the confirmed bundle signs each credential's value (from 1.0.4): `secret set` takes a new value only with `--bundle <new>.dcbundle`, a newer bundle that signs it, and the apply refuses a stored value the bundle does not sign (`secret_ref_mismatch`). See [Rotate the key](/docs/enterprise/ai-defense-key#rotate-the-key). On Windows, status and verify report `credential_missing` while the config names a credential that is not stored. Outside the standalone profile a credential reference never resolves, so a config with an enabled destination that uses one is refused.
+
+## Sandbox policy pushdown
+
+A managed config also accepts the `openshell.admin` block (organization-wide limits for agents that run in NVIDIA OpenShell sandboxes), the `sandbox` section of each guardrail profile, and the `enterprise.openshell` block that says how OpenShell is provided. A standalone install runs sandboxes for its standard users under the policy their directory group selects. [Sandboxes on managed computers](/docs/enterprise/sandboxes) covers the install modes, requiring sandboxes and what users see; the [sandbox reference](/docs/enterprise/sandboxes) has the keys. The Secure Client profile does not run sandboxes and refuses every `sandbox` section and every `openshell.admin` key added for managed sandboxes. The trust rules for a custom required pack on a managed host, and two complete examples, are in [Sandbox policy packs and admin controls](/docs/sandboxes/policy-packs/).
+
+## Sample configs
+
+Each sample is an observe-mode starter: it inspects Codex, Claude Code, Cursor, Copilot and OpenCode, logs every verdict and does not block. Change `guardrail.mode` to `action` when you are ready to block. Each sample also turns on AI Discovery (`ai_discovery.enabled: true`), which is off when the key is not set.
+
+<Tabs items={['Linux', 'macOS', 'Windows']}>
+  <Tab value="Linux">
+
+```yaml title="/etc/defenseclaw/config.yaml"
+config_version: 9
+deployment_mode: managed_enterprise
+data_dir: /var/lib/defenseclaw          # must be exactly this path
+policy_dir: /etc/defenseclaw/policies
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe                         # observe logs verdicts; action blocks
+  connectors:                           # the agents to protect
+    codex: {}
+    claudecode: {}
+    cursor: {}
+    copilot: {}
+    opencode: {}
+ai_discovery:
+  enabled: true                         # AI Discovery is off without it
+enterprise:
+  profile: standalone
+  inspection:
+    ai_defense:
+      enabled: false                    # true after you store the key
+      credential: ai-defense-api-key
+  enrollment:
+    mode: auto
+    exclude_users: []
+    unenrolled_users: inspect
+    root: inspect
+  machine_policy:
+    default:
+      ownership: merge
+      managed_hooks_only: enforce
+      foreign_hooks: remove
+      higher_precedence_sources: fail
+  coexistence:
+    disable_self_update: true
+  network:
+    https_proxy: ""
+    no_proxy: ""
+```
+
+  </Tab>
+  <Tab value="macOS">
+
+```yaml title="/opt/cisco/defenseclaw/etc/config.yaml"
+config_version: 9
+deployment_mode: managed_enterprise
+data_dir: /opt/cisco/defenseclaw/runtime    # must be exactly this path
+policy_dir: /opt/cisco/defenseclaw/etc/policies
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe                             # observe logs verdicts; action blocks
+  connectors:                               # the agents to protect
+    codex: {}
+    claudecode: {}
+    cursor: {}
+    copilot: {}
+    opencode: {}
+ai_discovery:
+  enabled: true                             # AI Discovery is off without it
+enterprise:
+  profile: standalone                       # macOS otherwise means Secure Client
+  inspection:
+    ai_defense:
+      enabled: false                        # true after you store the key
+      credential: ai-defense-api-key
+  enrollment:
+    mode: auto
+    exclude_users: []
+    unenrolled_users: inspect
+    root: inspect
+  machine_policy:
+    default:
+      ownership: merge
+      managed_hooks_only: enforce
+      foreign_hooks: remove
+      higher_precedence_sources: fail
+  coexistence:
+    disable_self_update: true
+  network:
+    https_proxy: ""
+    no_proxy: ""
+```
+
+  </Tab>
+  <Tab value="Windows">
+
+```yaml title="config.yaml (Windows: the file you pass to ensure)"
+config_version: 9
+deployment_mode: managed_enterprise
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe                         # observe logs verdicts; action blocks
+  connectors:                           # the agents to protect
+    codex: {}
+    claudecode: {}
+    cursor: {}
+    copilot: {}
+    opencode: {}
+ai_discovery:
+  enabled: true                         # AI Discovery is off without it
+enterprise:
+  profile: standalone                   # Windows otherwise means Secure Client
+  inspection:
+    ai_defense:
+      enabled: false                    # true after you store the key
+      credential: ai-defense-api-key
+  enrollment:
+    include_users: []                   # empty: every eligible profile
+    exclude_users: []
+  machine_policy:
+    default:
+      foreign_hooks: remove
+  coexistence:
+    disable_self_update: true
+```
+
+  </Tab>
+</Tabs>
+
+On Windows, keep the file as your input to ensure, not as a hand-edited copy under `C:\ProgramData`. Deliver it as shown in [Deliver the config](/docs/enterprise/mdm#deliver-the-config).
+
+## Next steps
+
+<Cards>
+  <Card title="Enrollment" href="/docs/enterprise/enrollment" description="Choose which users are protected, per OS." />
+  <Card title="Machine policy" href="/docs/enterprise/machine-policy" description="What DefenseClaw writes into each agent's machine-wide policy." />
+</Cards>

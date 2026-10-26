@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_complete_config_example_declares_its_secret_inputs():
-    page = (ROOT / "docs-site/content/docs/reference/configuration/index.mdx").read_text()
+    page = (ROOT / "docs-site/content/docs/reference/configuration.mdx").read_text()
     intro, body = page.split("```yaml\nconfig_version: 9", 1)
     prerequisites = intro.split("## config.yaml schema", 1)[1]
     example = yaml.safe_load("config_version: 9" + body.split("\n```", 1)[0])

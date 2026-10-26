@@ -260,10 +260,10 @@ def test_standalone_setup_uninstall_docs_say_it_removes_the_machine_state() -> N
     # The Secure Client page keeps its own wording (state kept unless
     # PURGE=1) and says how the standalone profile differs.
     standalone = {
-        "windows": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "install" / "windows.mdx",
-        "cli": ROOT / "docs-site" / "content" / "docs" / "reference" / "commands" / "cli.mdx",
+        "windows": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "windows.mdx",
+        "cli": ROOT / "docs-site" / "content" / "docs" / "reference" / "cli.mdx",
         "setup-design": ROOT / "docs" / "WINDOWS-ENTERPRISE-SETUP.md",
-        "intune": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "mdm" / "intune" / "windows.mdx",
+        "intune": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "mdm" / "intune-windows.mdx",
     }
     for name, page in standalone.items():
         text = " ".join(_text(page).split())
@@ -275,7 +275,7 @@ def test_standalone_setup_uninstall_docs_say_it_removes_the_machine_state() -> N
     docs = ROOT / "docs-site" / "content" / "docs"
     secure_client_page = next(
         page
-        for page in (docs / "enterprise" / "install" / "secure-client.mdx", docs / "setup" / "enterprise-deployment.mdx")
+        for page in (docs / "enterprise" / "secure-client.mdx", docs / "setup" / "enterprise-deployment.mdx")
         if page.exists()
     )
     secure_client = " ".join(_text(secure_client_page).split())

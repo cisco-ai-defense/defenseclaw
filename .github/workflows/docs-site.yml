@@ -146,6 +146,13 @@ jobs:
       - name: Validate documentation links
         run: npm run validate-links
 
+      - name: Validate documentation media and pages
+        # Every video, image, demo and terminal replay a page showed stays on
+        # its page (or is retired with a reason in data/media-ledger.json),
+        # every media file is used, and every published page or its
+        # redirect still exists.
+        run: npm run validate-media
+
       - name: Build static export
         env:
           # Project-pages subpath. Override in repo Settings → Pages

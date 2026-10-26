@@ -4074,7 +4074,7 @@ def _scanner_repair_hint() -> str:
     if os.name == "nt":
         return (
             "repair the install by running the install command again "
-            f"({_DOCS_URL}/get-started/windows/#upgrade-and-roll-back)"
+            f"({_DOCS_URL}/get-started/windows/install-lifecycle/#repair)"
         )
     return (
         "repair the launcher with the release upgrade resolver, `bash defenseclaw-upgrade.sh --yes` "

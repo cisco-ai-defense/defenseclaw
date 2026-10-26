@@ -11,6 +11,7 @@
     "start": "next start",
     "lint": "eslint .",
     "validate-links": "tsx ./scripts/validate-links.ts",
+    "validate-media": "tsx ./scripts/validate-media.ts",
     "validate-seo": "tsx ./scripts/validate-seo-output.ts",
     "validate-snippets": "tsx ./scripts/validate-shell-snippets.ts",
     "check-diagram-widths": "tsx ./scripts/check-diagram-widths.ts",

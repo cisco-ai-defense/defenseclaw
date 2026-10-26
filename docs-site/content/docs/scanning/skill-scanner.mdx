@@ -1,0 +1,551 @@
+---
+title: Skill scanner
+description: Scan connector skills on demand and whenever one is installed or changed. DefenseClaw wraps cisco-ai-skill-scanner with the recommended quiet policy and an LLM judge, and writes its verdicts into the same admission policy as the watcher.
+keywords:
+  - DefenseClaw skill scanner
+  - cisco-ai-skill-scanner
+  - skill admission
+  - Claude skills security
+  - OpenClaw skills
+  - admission policy
+  - install watcher
+  - quiet policy
+  - LLM judge
+  - review queue
+---
+
+Scan a skill before you trust it, and bring back one the scanner quarantined.
+
+Every scanner setting lives in `config.yaml` under `scanners.skill_scanner`. DefenseClaw builds each scan from those keys and nothing else. What a severity does is set under `admission:` (see [Admission](/docs/policies/admission)). The MCP scanner has its own page: [MCP scanner](/docs/scanning/mcp-scanner).
+
+## What it scans
+
+The wrapper at [`cli/defenseclaw/scanner/skill.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/scanner/skill.py) accepts four target shapes — all **positional** except `--path`. URL fetches in particular take the URL itself as the positional target (no `--remote` involved). The `--remote` flag does exist, but for a different scenario: it forwards the scan request to a sidecar API for a skill installed on a remote host.
+
+- **Local skill name** (`my-skill`) — resolves through configured connector skill directories. On a multi-connector install, a bare name checks matching connector copies; pass `--connector <name>` to force one connector's skill source.
+- **`--path <dir>`** — scan a directory you specify, useful inside a skill repo's pre-commit hook.
+- **`https://...`** — fetch a remote skill bundle into a temp dir, scan, then clean up. The downloaded bytes never touch your skill directory.
+- **`clawhub://skill`** — same fetch-to-temp flow. DefenseClaw downloads the latest `openclaw` package from the public npm registry and scans `skills/<skill>/` from it. It does not use your configured registry sources. An `@version` suffix is refused before the download because this source cannot select that revision. The name is a single segment: a slash, as in `clawhub://author/skill`, is refused with `invalid clawhub URI` before anything is fetched. The scanner inspects the package with bounded work and extracts only the requested skill under the usual member, file and byte limits. To scan a particular revision or configured registry source, obtain that exact skill from the intended source and run `defenseclaw skill scan --path <reviewed-skill-directory>`.
+
+For each skill it runs:
+
+1. Static checks — prompt injection in `SKILL.md`, malicious shell and Python invocations, untrusted bundled binaries and policy violations (the `Scanner coverage (skill)` row of `defenseclaw doctor` lists them).
+2. The **LLM judge**, which reads the skill the way an agent would and confirms or discards what the rules flagged. It uses DefenseClaw's top-level `llm:` settings. The upstream scanner routes by the LiteLLM-shaped `provider/model` string, so Anthropic, OpenAI, Bedrock, Gemini, Vertex AI, Azure, Groq, Mistral, DeepSeek, OpenRouter, Ollama, vLLM, and other LiteLLM-supported providers work without special-casing.
+3. A consolidated `ScanResult` with severity and findings. DefenseClaw then applies the gate (below) to turn the top severity into a verdict.
+
+## Recommended setup
+
+These are the defaults. Your one job is to give the scanner a judge (`defenseclaw setup llm`).
+
+| Setting | Recommended | Key |
+| --- | --- | --- |
+| Scan policy | `quiet` | `scanners.skill_scanner.policy` |
+| Judge | on, using the top-level `llm:` block | `use_llm: true`, `judge_source: inherit` |
+| Judge model | `anthropic/claude-sonnet-5-5` | `llm.provider: anthropic`, `llm.model: claude-sonnet-5-5` |
+| Gate: blocking findings | HIGH and above | `fail_on_severity: HIGH` |
+| Review queue | MEDIUM up to the gate | `review_queue_min: MEDIUM` |
+| Meta-analyzer | off (it costs recall) | `enable_meta: false` |
+| VirusTotal, AI Defense, OSV | off | `analyzers.*.enabled: false` |
+
+The `quiet` preset is the one with the fewest false positives, and it is measured with the judge. The scanner's own [recommended settings page](https://cisco-ai-defense.github.io/docs/skill-scanner/recommended-settings) has the benchmark numbers behind these choices.
+
+## One-shot scan
+
+### Before you start
+
+These `defenseclaw skill` steps are for a per-user installation. On managed Linux and macOS, the standard user's `defenseclaw` launcher offers only `sandbox` commands, and the managed packages include no skill scanner (see [Known limits](/docs/support-matrix#managed-linux-and-macos-scans)). There an administrator checks a skill's files with the CodeGuard rules, `sudo /opt/defenseclaw/bin/defenseclaw-gateway scan code /path/to/skill` on Linux or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan code /path/to/skill` on macOS, and sets any allow rule in the admin config. On managed Windows, use the administrator's `defenseclaw.exe scan skill` command for a folder outside user profiles.
+
+- A judge makes the scan accurate: `defenseclaw setup llm` and `defenseclaw keys set DEFENSECLAW_LLM_KEY`. Without one the scan runs the static rules only and `defenseclaw doctor` warns.
+- Python 3.11 or newer. See [Versions, platforms and availability](#versions-platforms-and-availability).
+
+### Steps
+
+1. Scan a skill folder. Use `--path` for a folder, a skill name for an installed skill, or an archive URL.
+
+   ```bash
+   defenseclaw skill scan --path ~/code/risky-skill
+   ```
+
+   ```text
+     Source: ~/code/risky-skill
+       [WARN] risky-skill (5 findings) — max severity: CRITICAL
+           policy: rejected - the policy refuses this skill at install; the copy already on disk stays loaded until you act.
+             Block it: defenseclaw skill block risky-skill --connector openclaw
+     Skill:    risky-skill
+     Scanner:  policy quiet, judge off
+     Verdict:  CRITICAL (2 critical, 1 high, 1 low, 1 info)
+       [CRITICAL] PROMPT INJECTION detected by YARA
+         Location: SKILL.md:5
+         Generic prompt injection patterns: Ignore all previous instructions
+     …
+   ```
+
+   `judge off` shows because this run used `--no-use-llm`. With a judge, the line reads `judge on`. `defenseclaw skill scan --all` scans every skill of every configured connector.
+
+2. Read the verdict.
+
+   | Verdict | Meaning |
+   | --- | --- |
+   | `clean` or `allowed` | Nothing to act on. |
+   | `warning` | Installed and queued for review. See `defenseclaw alerts`. |
+   | `rejected` | The policy refuses it. The watcher quarantines the files. |
+
+3. Check the install watcher. It runs inside the gateway, is on by default, and scans new or changed skills in watched folders. A skill stays in place while it is scanned and moves to quarantine on a block-list match, a failed scan or a blocking verdict.
+
+   ```bash
+   defenseclaw skill list
+   ```
+
+   A skill shows `pending` or `scanning` until its verdict. To record verdicts without acting on them, set `gateway.watcher.skill.take_action` to `false`. Denied names and scanner failures are still blocked.
+
+## Configure the scanner
+
+You can set every scanner key three ways: `defenseclaw config set` (one key, validated and applied at once), the `defenseclaw setup skill-scanner` wizard, or an edit to `config.yaml`. They all go through the same validator, and a change that does not validate is refused without touching the file.
+
+```bash
+defenseclaw config set scanners.skill_scanner.policy quiet
+defenseclaw config set scanners.skill_scanner.use_llm true
+defenseclaw config set scanners.skill_scanner.fail_on_severity HIGH
+defenseclaw config set scanners.skill_scanner.review_queue_min MEDIUM
+defenseclaw config set scanners.skill_scanner.enable_meta false
+defenseclaw config set scanners.skill_scanner.timeouts.scan_s 300
+```
+
+```text
+Set scanners.skill_scanner.fail_on_severity (config generation 7, sha256 aa620e6b21d1).
+Effective policy digest: sha256:bdc6c32f73f85668d5bcbaa3886f33fd6fb60e0906813bf2765a415a2ddcf3d2
+```
+
+The same settings, written out (every value shown is the default):
+
+```yaml title="~/.defenseclaw/config.yaml (excerpt)"
+scanners:
+  skill_scanner:
+    policy: quiet
+    use_llm: true
+    judge_source: inherit
+    fail_on_severity: HIGH
+    review_queue_min: MEDIUM
+    enable_meta: false
+    use_behavioral: false
+    use_trigger: false
+    llm_consensus_runs: 0
+    lenient: true
+    analyzers:
+      virustotal:
+        enabled: false
+        api_key_env: VIRUSTOTAL_API_KEY
+        upload_files: false
+      aidefense:
+        enabled: false
+      osv:
+        enabled: false
+    timeouts:
+      scan_s: 300
+```
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `policy` | `quiet` | The scan policy: `strict`, `balanced`, `permissive`, `low-noise`, `quiet` or `custom` (see [Custom policy](#custom-policy-by-digest)). |
+| `policy_file` | unset | `path` and `digest` of the custom policy. Only valid with `policy: custom`. |
+| `use_llm` | `true` | Run the LLM judge in scans the gateway starts. It only runs when a model and its key resolve. |
+| `judge_source` | `inherit` | `inherit` uses the top-level `llm:` block. `override` uses `scanners.skill_scanner.llm`. |
+| `llm` | empty | The scanner's own judge settings. It must be empty with `inherit` and needs a `model` with `override`. |
+| `fail_on_severity` | `HIGH` | Severities at or above this are blocking findings (the gate). |
+| `review_queue_min` | `MEDIUM` | Severities from here up to the gate are review findings. It cannot be above `fail_on_severity`. |
+| `enable_meta` | `false` | Second LLM pass that drops likely false positives. It costs recall. It runs only when a judge is usable; otherwise the static findings stand. |
+| `use_behavioral` | `false` | Behavioral (dataflow) analyzer. |
+| `use_trigger` | `false` | Trigger analyzer that flags vague skill descriptions. |
+| `llm_consensus_runs` | `0` | Run the judge this many times and combine the answers (`0` is off). |
+| `lenient` | `true` | Tolerate malformed skills instead of failing them. |
+| `analyzers.virustotal`, `.aidefense`, `.osv` | off | Optional analyzers (see below). |
+| `timeouts.scan_s` | `300` | Seconds one scan the gateway starts may run: the install watcher and its rescans, the REST scan endpoint and the scans an agent hook starts (`0` means the default). Raise it for large skills scanned with the judge. `defenseclaw skill scan` has no time limit. |
+
+`defenseclaw config get scanners.skill_scanner.policy --effective` prints the value in force. For a key you have not set it prints the default and says so; the gate keys print nothing when unset, so read the resolved gate with `defenseclaw config get admission.skill.actions --effective` (see [Gate and review queue](#gate-and-review-queue)).
+
+### The setup wizard
+
+`defenseclaw setup skill-scanner` walks through the same choices. Run it bare, or pass flags with `--non-interactive`:
+
+```bash
+defenseclaw setup skill-scanner                    # interactive
+
+defenseclaw setup skill-scanner \
+  --non-interactive \
+  --use-llm --llm-provider anthropic --llm-model claude-sonnet-5-5 \
+  --policy quiet --fail-on-severity high --review-queue-min medium
+```
+
+| Flag | What it sets |
+| --- | --- |
+| `--use-llm` / `--no-use-llm` | The LLM judge. |
+| `--use-behavioral` / `--no-use-behavioral` | Behavioral (dataflow) analyzer. |
+| `--enable-meta` / `--no-enable-meta` | Meta-analyzer. |
+| `--use-trigger` / `--no-use-trigger` | Trigger analyzer. |
+| `--use-virustotal` / `--no-use-virustotal` | `analyzers.virustotal.enabled`. The key is read from `VIRUSTOTAL_API_KEY`. |
+| `--use-aidefense` / `--no-use-aidefense` | `analyzers.aidefense.enabled`. |
+| `--use-osv` / `--no-use-osv` | `analyzers.osv.enabled`. |
+| `--llm-provider <name>` | Judge provider: any provider `defenseclaw setup llm` knows (`anthropic`, `openai`, `bedrock`, `vertex_ai`, `azure`, `gemini`, `ollama`, `vllm`, `lm_studio` and more), or `openai-compatible` with `--llm-base-url`. |
+| `--llm-model <id>`, `--llm-base-url <url>` | Judge model and, for `vllm` and `openai-compatible`, the server URL. |
+| `--llm-consensus-runs <n>` | `llm_consensus_runs`. |
+| `--policy <preset>` | `strict`, `balanced`, `permissive`, `low-noise` or `quiet`. A custom policy is set with `config set`. |
+| `--fail-on-severity <level>`, `--review-queue-min <level>` | The gate and the review floor (`info` to `critical`). A review floor above the gate is refused. |
+| `--lenient` / `--no-lenient` | `lenient`. |
+| `--verify` / `--no-verify` | Run the doctor scanner checks after saving (default on). |
+
+With `--non-interactive`, a flag changes only what it names; everything else stays as it is. The LLM flags write the **top-level** `llm:` block, which the guardrail judge and the MCP and plugin scanners share. To give the skill scanner its own judge, use `judge_source: override` (below). The TUI Setup panel offers the same fields.
+
+## The judge
+
+With `judge_source: inherit` (the default) the judge is DefenseClaw's `llm:` block: provider, model, key and base URL. Set it once with `defenseclaw setup llm` and every scanner and the guardrail judge use it. The recommended model is `anthropic/claude-sonnet-5-5`. See [Unified LLM key](/docs/guardrail/unified-llm-key) for the key resolution order.
+
+```bash
+defenseclaw keys set DEFENSECLAW_LLM_KEY
+```
+
+To give the skill scanner its own judge, fill the scanner's `llm` block and switch the source. `judge_source` and `llm` are checked together, so unset `judge_source` first when it is set to `inherit`:
+
+```bash
+defenseclaw config unset scanners.skill_scanner.judge_source
+defenseclaw config set scanners.skill_scanner.llm.provider anthropic
+defenseclaw config set scanners.skill_scanner.llm.model claude-sonnet-5-5
+defenseclaw config set scanners.skill_scanner.llm.api_key_env ACME_SKILL_JUDGE_KEY
+defenseclaw config set scanners.skill_scanner.judge_source override
+```
+
+```yaml title="~/.defenseclaw/config.yaml (excerpt)"
+scanners:
+  skill_scanner:
+    judge_source: override
+    llm:
+      provider: anthropic
+      model: claude-sonnet-5-5
+      api_key_env: ACME_SKILL_JUDGE_KEY
+```
+
+Fields you leave empty in the scanner's `llm` block fall back to the top-level block. To go back to the shared judge, unset both keys, in this order:
+
+```bash
+defenseclaw config unset scanners.skill_scanner.judge_source
+defenseclaw config unset scanners.skill_scanner.llm
+```
+
+The rules, which the validator enforces: `inherit` with a filled `llm` block is refused, and `override` without `llm.model` is refused.
+
+<Callout type="info" title="A refused change names the rule">
+When one of these cross-key rules fails, `config set` names the key and the rule and leaves the file as it was, for example `config.yaml was not changed: scanners.skill_scanner.llm.model: judge_source: override needs a model. Correct the value, then run again.` The `inherit` case names `scanners.skill_scanner.llm` instead. Follow the order above and it goes through.
+</Callout>
+
+## No LLM configured
+
+Start with a judge. Run `defenseclaw setup llm` and pick a provider, or serve a local model and point DefenseClaw at it.
+
+```bash
+defenseclaw setup llm
+defenseclaw keys set DEFENSECLAW_LLM_KEY
+```
+
+For a local judge, serve an OpenAI-compatible model with vLLM and use the `vllm` provider with its base URL. The server flag matters: the judge answers in JSON, and without `disable_any_whitespace` vLLM can pad the answer with whitespace until it hits the token limit and the analysis is lost.
+
+```bash
+vllm serve /models/acme-judge-8b --served-model-name acme-judge-8b \
+  --structured-outputs-config '{"backend": "xgrammar", "disable_any_whitespace": true}'
+
+defenseclaw setup skill-scanner --non-interactive \
+  --llm-provider vllm --llm-model acme-judge-8b --llm-base-url http://127.0.0.1:8000/v1
+```
+
+When the provider is `vllm`, the wizard prints the serve line for you:
+
+```text
+  vLLM: serve the judge model with
+    vllm serve <weights> --served-model-name <name> --structured-outputs-config '{"backend": "xgrammar", "disable_any_whitespace": true}'
+```
+
+Until a judge works, the scanner still runs its static rules with the same `quiet` policy, so a skill is not left unscanned. Treat that as a gap to close, not a setup: `quiet` is measured with the judge, and the rules alone miss most malicious skills. `defenseclaw doctor` and the wizard say so:
+
+```text
+  [WARN] Scanner settings  —  the LLM judge is off; Add an LLM judge ('defenseclaw setup llm') or the local vLLM option
+```
+
+## Optional analyzers
+
+Three extra analyzers are off by default. Each one sends data to a service outside the machine, so turn on only the ones you have approved.
+
+```bash
+# VirusTotal: hash lookups for bundled binaries. The key stays in .env, never in config.yaml.
+defenseclaw keys set VIRUSTOTAL_API_KEY
+defenseclaw config set scanners.skill_scanner.analyzers.virustotal.enabled true
+defenseclaw config set scanners.skill_scanner.analyzers.virustotal.upload_files false   # true also uploads unknown files
+
+# Cisco AI Defense: endpoint and key come from cisco_ai_defense
+defenseclaw keys set CISCO_AI_DEFENSE_API_KEY
+defenseclaw config set scanners.skill_scanner.analyzers.aidefense.enabled true
+
+# OSV.dev: dependency vulnerability lookups (no key, needs network)
+defenseclaw config set scanners.skill_scanner.analyzers.osv.enabled true
+```
+
+`defenseclaw doctor` shows a `VirusTotal API` row that warns when the analyzer is on and `VIRUSTOTAL_API_KEY` (or the name in `analyzers.virustotal.api_key_env`) is not set.
+
+`enable_meta` stays off in the recommended setup. It adds a second LLM pass that drops likely false positives, and the scanner's own measurements show it costs more recall than it saves in noise. It also needs a working judge. With `enable_meta: true` and no usable judge, the meta pass is skipped and the scan finishes with the static findings; the scan does not fail. Nothing is hidden, since the meta pass only removes false positives. A judge that is configured but cannot start still exits 2, and that scan fails closed.
+
+## Custom policy by digest
+
+A custom policy file is used only when its SHA-256 matches the digest in `config.yaml`. Generate a starting point from a preset with the scanner's own `generate-policy`, edit it, then pin it:
+
+```bash
+skill-scanner generate-policy --preset quiet -o /etc/acme/defenseclaw/skill-policy.yaml
+sha256sum /etc/acme/defenseclaw/skill-policy.yaml
+```
+
+`policy` and `policy_file` are validated together, so set them in one write. `config set` on the whole `scanners.skill_scanner` block replaces the block, so include every key you want to keep:
+
+```bash
+defenseclaw config set scanners.skill_scanner --json '{
+  "policy": "custom",
+  "policy_file": {"path": "/etc/acme/defenseclaw/skill-policy.yaml", "digest": "sha256:<digest from sha256sum>"},
+  "fail_on_severity": "HIGH",
+  "review_queue_min": "MEDIUM"
+}'
+```
+
+```yaml title="~/.defenseclaw/config.yaml (excerpt)"
+scanners:
+  skill_scanner:
+    policy: custom
+    policy_file:
+      path: /etc/acme/defenseclaw/skill-policy.yaml
+      digest: sha256:4262f674604ba09d7d2f7459a70084a8ae42bf98a231475d25ef1b374cd5ac3f
+    fail_on_severity: HIGH
+    review_queue_min: MEDIUM
+```
+
+The digest is checked on every scan, not when you save. If the file has changed, the scan fails closed with a `scan_error` instead of running with some other policy:
+
+```text
+error: scan failed: /etc/acme/defenseclaw/skill-policy.yaml: digest mismatch (file is sha256:1910c0c4984a0aaf6eb2ff4e867f79a05a32b4e010a55bac480efcd38b9fd19c)
+```
+
+The install watcher treats the same failure as a failed scan and blocks the skill (`scanner failure (fail-closed): ... custom policy refused ... digest mismatch`). To accept an edit, run `sha256sum` again and write the new digest. A policy path in the `policy` key is migration input only; see [Upgrading from v8](#upgrading-from-v8).
+
+## Gate and review queue
+
+DefenseClaw, not the scanner, decides what a severity means. The gate turns the top severity of a scan into one of three outcomes:
+
+| Severity | Outcome | With the defaults |
+| --- | --- | --- |
+| At or above `fail_on_severity` | `quarantine`: the skill is rejected | CRITICAL, HIGH |
+| From `review_queue_min` up to the gate | `warn`: installed and queued for review | MEDIUM |
+| Below `review_queue_min` | `allow` | LOW, INFO |
+
+These become the skill's action map whenever `admission.skill.actions` is not set. The resolved map and where it comes from are one command away:
+
+```bash
+defenseclaw config set scanners.skill_scanner.review_queue_min LOW
+defenseclaw config get admission.skill.actions --effective
+```
+
+```text
+(source: derived:scanners.skill_scanner)
+critical: quarantine
+high: quarantine
+info: allow
+low: warn
+medium: warn
+```
+
+The review queue is the `warn` verdict, with no store of its own. A skill that lands there stays installed and runs; its findings are recorded and raise alerts for an operator to look at. `defenseclaw skill scan` prints the verdict:
+
+```text
+    [WARN] net-skill (2 findings) — max severity: MEDIUM
+        policy: warning — allowed with findings.
+          Block it: defenseclaw skill block net-skill --connector openclaw
+```
+
+Find the queue in these places:
+
+- `defenseclaw alerts` (and the Alerts panel of `defenseclaw tui`) lists scan findings of LOW and above as `scan-finding` rows, so the review findings are there; `alerts acknowledge` or `alerts dismiss` clears one once it is reviewed. INFO findings are never alerts.
+- `defenseclaw audit findings --scanner skill-scanner` reports the distinct current findings, INFO included.
+- `defenseclaw skill list`, `skill info` and `skill scan` show the `warning` verdict.
+
+```text title="defenseclaw alerts -n 3"
+                              Security Alerts (last 3)
+┏━━━┳━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ # ┃ Severity ┃ Time  ┃ Action       ┃ Target    ┃ Details [--show #]              ┃
+┡━━━╇━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ 1 │ MEDIUM   │ 18:18 │ scan-finding │ net-skill │ connector=openclaw rule=DATA_E… │
+│ 2 │ MEDIUM   │ 18:18 │ scan-finding │ net-skill │ connector=openclaw rule=TOOL_A… │
+│ 3 │ MEDIUM   │ 18:18 │ scan-finding │ net-skill │ rule=DATA_EXFIL_NETWORK_REQUES… │
+└───┴──────────┴───────┴──────────────┴───────────┴─────────────────────────────────┘
+```
+
+<Callout type="warn" title="An explicit action map replaces the gate">
+`admission.skill.actions` wins over `fail_on_severity` and `review_queue_min`. `defenseclaw policy activate <name>` writes an explicit map for every asset type, so after you activate a named policy, the gate keys no longer change what happens to a skill. To return to the gate, remove the map:
+
+```bash
+defenseclaw config unset admission.skill.actions
+```
+</Callout>
+
+## Continuous protection: the install watcher
+
+Running a one-shot scan is a starting point. The **install watcher** runs
+inside the gateway, is on by default, and watches skill folders it can read
+for configured connectors and active projects
+([project skill folders](/docs/policies/admission#where-a-denied-skill-is-refused)).
+On managed Windows, the LocalSystem gateway skips enrolled users' profile
+roots, so skills there receive no watcher scan. Administrators can
+[scan a copy outside profiles](/docs/enterprise/windows#scan-skills-mcp-servers-and-plugins)
+and keep shared skills outside profiles. On managed Linux and macOS, connector
+skill folders are not watched; eligible project folders and explicit watcher
+folders can still be watched. For watched folders:
+
+The order is **check the lists → scan in place → act on the verdict**. The skill is not hidden while the scan runs (a scan is cut off after `timeouts.scan_s`), so an agent session that is already open can see it in that window; `defenseclaw skill list` and the TUI show it as `pending` or `scanning` until the verdict. The watcher scans up to three new skills at once, and the skills that arrived while the gateway was stopped have two more slots of their own, so a bulk copy of skills is not admitted one after another. A scan that fails counts as a block. A scan cut off because the gateway stops, or because a config change restarts the watcher, decides nothing: the skill is not blocked, and the watcher admits it at its next start. Watcher implementation lives in [`internal/watcher/watcher.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/watcher/watcher.go).
+
+A `SKILL.md` saved as UTF-16 (Notepad's "Unicode", PowerShell 5.1 redirection) or as UTF-8 with a byte order mark is read as text: the watcher and `defenseclaw skill scan` scan a copy re-encoded as UTF-8 (the skill's own file is not changed), and `skill list` shows its front matter description. A skill too large to copy (64 MiB, 2,000 files) or holding links is refused with that reason instead.
+
+On top of the skill scanner, the install watcher and `defenseclaw skill scan` both apply the connector's guardrail rule pack to the skill's text files, and they agree on what it finds: Python files are matched as raw source, comments and docstrings included, so an example key in a docstring is a finding in both. That false positive is accepted to keep install admission and `skill scan` on one verdict; move the example out of the skill or accept the skill with `skill allow` after review. Only the rules for writes to a path (such as `MEMORY.md`) skip Python comments and docstrings, because they need a write call that uses the path.
+
+Two cases do not end in quarantine storage, and both say so in `defenseclaw alerts`, `defenseclaw skill list` and `defenseclaw skill info`:
+
+- **A skill folder that is a link** (a symlink, or a junction on Windows) is not copied: the watcher removes the link from a watched skills folder and never changes the folder it points to. The verdict reads `link removed` and the reason names the target. Recreate the link once you trust the skill (`defenseclaw skill allow` first). A link is scanned through its target only when the target is in a watched skills folder of the same account. For a per-user install, a link outside that account's watched skill folders is not read: the watcher removes the link and the `install-rejected` row says `reason=link-outside-own-folders user=this account target="<path>"`, with the target path quoted, whatever it holds. Managed computers do not watch users' connector skill folders: managed Windows skips profile roots, while managed Linux and macOS run no connector skill-folder watcher.
+- **A quarantine that fails before publishing a copy** (for example, the quarantine folder is not writable or the disk is full) leaves the source in place. The verdict reads `quarantine failed` with the error, and the install block and runtime disable stay.
+
+A quarantine can also fail after publishing its copy if source cleanup fails. In that case, inspect both the source and the quarantine copy: the source may be partially removed. The install block and runtime disable still apply.
+
+You don't have to wire any of that yourself. To record the severity verdicts without acting on them, set `gateway.watcher.skill.take_action` to `false`; block-list matches and failed scans are still quarantined.
+
+```bash
+defenseclaw config set gateway.watcher.skill.take_action false
+```
+
+An edit inside an installed skill (its `SKILL.md`, or a file in it up to three folders down, saved in place or by an editor's rename) is admitted again within seconds, as a new install is: a change that makes the skill HIGH or CRITICAL quarantines it. Hidden files, editor swap and backup files and `node_modules` trees are left to the rescan below.
+
+The watcher also rescans the skills it already knows. When it starts, and then every `watch.rescan_interval_min` minutes (60 by default), it rescans a skill whose content or scanner fingerprint changed. The fingerprint covers the scanner version, the policy, the judge model, the enabled analyzers and the connector's rule pack; other keys (`watch.rescan_interval_min`, `admission` actions) and a gateway restart do not rescan unchanged skills. Every config reload restarts the watcher in place with the new settings, so a changed scanner setting reaches skills that were installed under the old one at once. The gateway log shows `restarting watcher after config reload` and then `[rescan] scanning skill <name> (scanner-fingerprint-changed)`; `defenseclaw audit logs --grep rescan` finds them.
+
+## Configure the action mapping
+
+The skill action map and the shorthand table are in [Admission](/docs/policies/admission#actions). A skill resolves each severity from `admission.skill.actions`, then the scanner gate, then `admission.defaults.actions`. A named policy (`defenseclaw policy activate strict|default|permissive`) writes an explicit map for every asset type, which replaces the gate.
+
+## How the settings reach the scanner
+
+Everything the scanner does comes from `config.yaml`. Your shell environment and the files of the skill being scanned do not change which settings a scan uses.
+
+- **The environment is built from config.** The gateway starts `skill-scanner` with a short allowlist of process variables (`PATH`, home and temp directories, locale, proxy and CA settings, and the AWS, Azure and Google credential chains that keyless Bedrock, Azure and Vertex judges sign with) plus the `SKILL_SCANNER_LLM_*` values derived from the judge, and `VIRUSTOTAL_API_KEY` or `AI_DEFENSE_*` only when those analyzers are on. `defenseclaw skill scan` runs the scanner in-process and removes any inherited `SKILL_SCANNER_*`, `ENABLE_*_ANALYZER`, `AI_DEFENSE_*`, `MCP_SCANNER_*` and `VIRUSTOTAL_*` variable for the duration of the scan. A value you export in your shell no longer leaks in, and where config and the shell both set a value, config wins.
+- **`.skill_scannerrc` is not read.** The upstream scanner reads that file only in its own pre-commit hook. DefenseClaw never generates it or reads it, so an rc file in a skill directory changes nothing.
+- **DefenseClaw never passes `--fail-on-severity`.** It applies the gate itself from the scanner's JSON findings (the scanner's own exit code for that option would turn findings into a failure).
+- **Exit codes fail closed.** The scanner exits 2 when the judge, behavioral or meta analyzer cannot start (a missing key, an unreachable model, a bad option). Any non-zero exit makes the scan a `scan_error`, and the message carries the scanner's stderr. The watcher blocks a skill whose scan errors; the CLI exits non-zero.
+- **A judge that does not answer fails the scan too.** When the judge starts but its calls fail (an outage, blocked egress, a model error), the scanner finishes with the static rules and reports an INFO `LLM_ANALYSIS_FAILED` finding. DefenseClaw treats that scan as failed: the watcher blocks the skill (`scanner failure (fail-closed): ... the LLM judge did not run`), `defenseclaw alerts` lists it, `defenseclaw skill info` shows the reason, `defenseclaw doctor` warns about the outage for a day, and `defenseclaw skill scan` exits non-zero. Once the judge answers again, `defenseclaw skill restore <name>` brings the skill back and it is scanned again. Pass `--no-use-llm` to `skill scan` to scan with the static rules alone on purpose.
+
+### Changes apply without a restart
+
+Scanner settings are part of the effective policy digest. When `defenseclaw config set` returns, the gateway builds a new policy generation in the background and swaps it in, and it restarts only its install watcher, in place, so the next scan and the rescan of installed skills use the new settings. None of the `scanners.skill_scanner` keys needs a gateway restart, and `config set` prints a restart hint only for the keys that do. A bad change is refused before it is written, or, if a hand edit slips through, the old generation keeps running and `defenseclaw doctor` reports the failed reload. The digest also covers the custom policy file's pinned digest.
+
+### Scanner processes are supervised
+
+The gateway starts every external scanner under a process-tree supervisor: a child-subreaper custodian on Linux, a supervisor that follows each process with kqueue on macOS, and a kill-on-close Job Object on Windows. Scanners may start the helpers they need (skill-scanner starts its CEL helper on every scan; a local stdio MCP server or a subprocess-based judge also runs). When the supervisor stays alive, it ends the scanner and its descendants when the scan ends, is canceled, or the gateway exits or is killed, including a child that started a session of its own. If it cannot establish cleanup, the scan fails closed with a scan error.
+
+On Linux, if a scanner SIGKILLs its child-subreaper custodian, a detached child can keep running even though the scan fails closed. After such a failure, inspect and stop any leftover scanner processes. macOS has one known limit: a child that forks, starts a new session and exits between two reads of the process table (about 100 ms apart) can hand its own child to launchd before the gateway sees it. If that child keeps a descriptor it inherited, the scan fails closed; if it closes every descriptor, it is not found and keeps running. Processes a scanner asks launchd or a system service to start (for example with `open` or `launchctl` on macOS) are not its descendants. Direct CLI scans run in the CLI process, not under the gateway.
+
+## Versions, platforms and availability
+
+DefenseClaw pins the scanner versions below. `defenseclaw doctor` compares the installed package with the pin and warns on a mismatch, with the repair command.
+
+| Package | Pinned | Needs |
+| --- | --- | --- |
+| `cisco-ai-skill-scanner` | 2.2.1 | Python 3.11 to 3.13 |
+| `cisco-ai-mcp-scanner` | 4.3.0 | Python 3.11 or newer; see [MCP scanner](/docs/scanning/mcp-scanner#pinned-version) |
+
+`cisco-ai-skill-scanner` 2.2.1 ships platform wheels only, each bundling a native helper, so there is no pure-Python wheel. DefenseClaw pins the wheel for macOS 13 or newer (Apple silicon and Intel), Linux with glibc (x86_64 and aarch64) and Windows x64. There is no wheel for Windows on ARM or for musl-based Linux, and DefenseClaw does not ship for either.
+
+DefenseClaw itself still runs on Python 3.10, but skill scanning does not: on a 3.10 runtime the scanner is not installed, and `defenseclaw doctor` reports `skill and MCP scanning need Python 3.11+; this runtime is Python 3.10`. The installers ship Python 3.12 or 3.13.
+
+The scanner is a hard runtime dependency, and supported release-managed runtimes include it. If it is absent from a packaged runtime, treat the installation as damaged; do not patch its managed virtual environment with `pip`. Use the [supported install or repair path](/docs/get-started/download). Source contributors should synchronize the checkout's locked environment with `uv sync`. If the SDK is missing when you run a scan, DefenseClaw prints a concise dependency error and exits cleanly; it does not crash the gateway.
+
+## Upgrading from v8
+
+`defenseclaw config migrate` (and `defenseclaw upgrade`, which runs it) moves the v8 scanner keys to the ones above. The gateway reads a v8 file in memory until you migrate it; a v9 file rejects the old keys. Full record: [Migrating to v9](/docs/reference/migrate-v9).
+
+| v8 key | v9 |
+| --- | --- |
+| `policy` empty or missing | `policy: quiet` |
+| `policy` a preset name | kept as it is |
+| `policy` a file path | `policy: custom` with `policy_file` (`path` and the file's `digest`) |
+| `use_virustotal` | `analyzers.virustotal.enabled` |
+| `virustotal_api_key_env` | `analyzers.virustotal.api_key_env` |
+| `virustotal_api_key` (inline) | moved to `.env` as `VIRUSTOTAL_API_KEY`, and blanked in the config |
+| `use_aidefense` | `analyzers.aidefense.enabled` |
+| a filled `llm` block | `judge_source: override` |
+| `binary` | removed; DefenseClaw runs the scanner it ships |
+
+## Manage individual skills
+
+The watcher's verdict is the default. Manual commands:
+
+```bash
+defenseclaw skill list                              # on-disk skills + state, across ALL active connectors
+defenseclaw skill list --connector codex            # one connector
+defenseclaw skill scan my-skill --connector codex   # scan Codex's matching copy
+defenseclaw skill block my-skill --reason "untrusted publisher"
+defenseclaw skill block my-skill --connector codex --reason "Codex-only override"
+defenseclaw skill quarantine my-skill --reason "review pending"
+defenseclaw skill restore my-skill                    # un-quarantine
+defenseclaw skill allow my-skill --reason "vetted"
+defenseclaw skill unblock my-skill                    # clear block, file and runtime state
+defenseclaw skill disable my-skill                    # runtime off, file untouched
+defenseclaw skill enable my-skill
+defenseclaw skill info my-skill                       # detailed view
+```
+
+`skill block`, `skill allow` and `skill unblock` write the skill's entry in `asset_policy.skill` (`denied` or `allowed`) in `config.yaml`, and the gateway applies it at once; on a managed device they are refused, and the entry goes in the administrator's config. [Admission](/docs/policies/admission) covers `asset_policy`. `quarantine`, `restore`, `disable` and `enable` are runtime state, recorded in the audit database rather than in `config.yaml`.
+
+To install a skill through the scanner, use `defenseclaw skill install <name>`. It installs a copy into each configured connector's skill directory and scans each copy. By default it only reports findings; pass `--action` to apply the admission actions. Pass `--force` to overwrite an existing skill and `--connector` to install for one connector. `defenseclaw skill search <query>` searches the ClawHub registry with a locally installed or npx-cached `clawhub` client. Add `--allow-remote-fetch` only if you accept that npx downloads and runs the `clawhub` package from the npm registry.
+
+Without `--connector`, policy and runtime commands apply to matching configured connector copies where present or the unscoped fallback policy where that command uses one. Pass `--connector <name>` when the same skill exists under more than one connector and you want only that connector's copy.
+
+`skill list`, `skill info`, `skill scan` and the AIBOM inventory report the same policy verdict: `blocked`, `quarantined` or `allowed` from an explicit action, otherwise `rejected`, `warning` or `clean` from the latest scan and the admission actions. The list's Status column only says whether the skill is loaded (`ready`), removed from disk (`removed`) or missing. A `rejected` verdict means the policy refuses the skill at install time. A copy that is already on disk stays loaded until you run `skill block`, `skill disable` or `skill quarantine`, or accept it with `skill allow`.
+
+Every action is audited (`skill-block`, `skill-quarantine`, etc.) so the trail is intact even when the manual override contradicts the watcher.
+
+### A skill you trust that the scanner quarantines
+
+Some published skills run helper code the scanner's rules flag, for example `os.system` with string formatting, `subprocess` calls, `shell=True` or a long-running loop (several skills in `anthropics/skills` do). Those findings come from cisco-ai-skill-scanner itself. Once you have reviewed the skill, allow that copy and bring it back:
+
+```bash
+defenseclaw skill allow docx --connector claudecode --reason "reviewed: helper scripts are expected"
+defenseclaw skill restore docx --connector claudecode
+defenseclaw config get asset_policy.skill.allowed      # the entry and the path it is pinned to
+```
+
+The allow entry is pinned to the path of that copy (`source_path_contains`), so a skill with the same name in another folder is still scanned and blocked. Do not lower `admission.skill.actions` or turn the scanner off to get one skill through.
+
+### Release a quarantined skill
+
+After you have read the findings and decided the skill is fine, allow that copy and restore it:
+
+```bash
+defenseclaw skill allow risky-skill --connector claudecode --reason "reviewed"
+defenseclaw skill restore risky-skill --connector claudecode
+```
+
+`skill allow` pins the rule to the path of that copy, so another folder with the same name is still scanned. Do not lower `admission.skill.actions` to get one skill through. On a managed device these commands are refused; put the rule in the admin config.
+
+### Check it worked
+
+```bash
+defenseclaw config get asset_policy.skill.allowed
+defenseclaw skill info risky-skill
+```
+
+`skill info` shows `Policy: allowed`.
+
+## See also
+
+- [MCP scanner](/docs/scanning/mcp-scanner): the sibling scanner for MCP servers, with the same admission pattern through `admission.mcp`
+- [Unified LLM key](/docs/guardrail/unified-llm-key): the `llm:` block the judge inherits and how its key resolves
+- [Admission](/docs/policies/admission): the `admission:` block and `asset_policy`, the only block and allow list
+- [Defaults](/docs/policies/defaults): the admission actions of each shipped policy
+- [Policies](/docs/policies): how the policy layers fit together
+- [Migrating to v9](/docs/reference/migrate-v9): the v8 to v9 key moves
+- [CLI reference](/docs/reference/cli): every `defenseclaw skill` subcommand

@@ -19,7 +19,7 @@
 import unittest
 from pathlib import Path
 
-DOC = Path(__file__).resolve().parents[1] / "content/docs/enterprise/operate/operations.mdx"
+DOC = Path(__file__).resolve().parents[1] / "content/docs/enterprise/operations.mdx"
 
 
 class PolicyAlertDocsTest(unittest.TestCase):

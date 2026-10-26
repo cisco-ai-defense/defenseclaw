@@ -4,12 +4,12 @@ from pathlib import Path
 import unittest
 
 
-GUIDES = Path(__file__).resolve().parents[1] / "content/docs/how-to/scanning"
+GUIDES = Path(__file__).resolve().parents[1] / "content/docs/scanning"
 
 
 class ManagedScanGuideTest(unittest.TestCase):
     def test_skill_guide_gives_managed_route_before_per_user_steps(self):
-        before_steps = (GUIDES / "scan-a-skill.mdx").read_text().split("## Steps", 1)[0]
+        before_steps = (GUIDES / "skill-scanner.mdx").read_text().split("## Steps", 1)[0]
         self.assertIn("managed Linux and macOS", before_steps)
         # GAP-1234: managed Linux and macOS have no skill scanner; the guide
         # gives the exact scan that runs there and never the one that cannot.
@@ -19,7 +19,7 @@ class ManagedScanGuideTest(unittest.TestCase):
         self.assertIn("known-limits#managed-linux-and-macos-scans", before_steps)
 
     def test_mcp_guide_gives_managed_route_before_per_user_steps(self):
-        before_steps = (GUIDES / "scan-an-mcp-server.mdx").read_text().split("## Steps", 1)[0]
+        before_steps = (GUIDES / "mcp-scanner.mdx").read_text().split("## Steps", 1)[0]
         self.assertIn("managed Linux and macOS", before_steps)
         self.assertNotIn("defenseclaw-gateway scan mcp", before_steps)
         self.assertNotIn("install watcher scans it", before_steps)
@@ -33,7 +33,7 @@ class ManagedScanGuideTest(unittest.TestCase):
         self.assertIn("scan code PATH", section)
 
     def test_managed_windows_reference_distinguishes_unfinished_mcp_scan(self):
-        reference = (GUIDES.parents[1] / "enterprise/install/reference/windows.mdx").read_text()
+        reference = (GUIDES.parent / "enterprise/windows.mdx").read_text()
         failed_scans = reference.split("- **Failed scans.**", 1)[1].split("- **`take_action: false`.**", 1)[0]
         self.assertIn("unverified_server: warn", failed_scans)
         self.assertIn("unverified_server: block", failed_scans)

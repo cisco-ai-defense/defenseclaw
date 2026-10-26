@@ -116,7 +116,7 @@ git show X.Y.Z:policies/kernel/testdata/digest.golden
 
 When it changed, say so in the CHANGELOG too, and tell administrators to push
 the old and the new digest together as `enforce_ack` while their rings
-upgrade. See [Tetragon on a Linux fleet](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/runtime/tetragon#upgrades).
+upgrade. See [Tetragon on a Linux fleet](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/tetragon/#upgrades).
 
 ## The enterprise upgrade gate
 

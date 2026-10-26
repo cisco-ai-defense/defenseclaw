@@ -38,7 +38,7 @@ test('Kiro IDE floor and unknown Kiro versions read the same on every page', () 
   const kiro = connectorById('kiro');
   assert.ok(kiro);
   const connectorPage = readFileSync(new URL('../content/docs/connectors/kiro.mdx', import.meta.url), 'utf8');
-  const contractsPage = readFileSync(new URL('../content/docs/reference/apis/hook-contracts.mdx', import.meta.url), 'utf8');
+  const contractsPage = readFileSync(new URL('../content/docs/connectors/compatibility.mdx', import.meta.url), 'utf8');
 
   for (const source of [kiro.versionNote ?? '', connectorPage, contractsPage]) {
     assert.match(source, /refuse[^.]*older IDE/i);

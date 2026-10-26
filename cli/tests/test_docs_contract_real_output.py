@@ -75,7 +75,7 @@ def test_hermes_page_quotes_the_doctor_row(tmp_path, running, tag):
     # Setup prints a restart hint, not a pending_reload state, and doctor
     # has no such row.
     hint = f"! ({cmd_setup._pending_reload_hint('hermes')})"
-    reference = _flat(_page("reference/connectors/hermes.mdx"))
+    reference = _flat(_page("connectors/hermes.mdx"))
     assert hint in page and hint in reference
     assert re.findall(r"`[^`]*pending_reload[^`]*`", page) == ['`"status": "pending_reload"`'], page
     assert re.findall(r"`[^`]*pending_reload[^`]*`", reference) == ['`"status": "pending_reload"`'], reference
@@ -83,11 +83,11 @@ def test_hermes_page_quotes_the_doctor_row(tmp_path, running, tag):
 
 def test_hermes_reload_state_is_scoped_to_windows():
     connector = _page("connectors/hermes.mdx")
-    setup = connector.split("## Set up\n", 1)[1].split("\n## Check it", 1)[0]
-    check = connector.split("## Check it\n", 1)[1].split("\n## What it can", 1)[0]
-    reference = _page("reference/connectors/hermes.mdx")
-    reference_setup = reference.split("### What setup does\n", 1)[1].split("\n### Files", 1)[0]
-    reference_files = reference.split("### Files\n", 1)[1].split("\n### Inventory", 1)[0]
+    setup = connector.split("## Setup\n", 1)[1].split("\n### Check it", 1)[0]
+    check = connector.split("### Check it\n", 1)[1].split("\n### What setup hermes actually does", 1)[0]
+    reference = _page("connectors/hermes.mdx")
+    reference_setup = reference.split("### What setup hermes actually does\n", 1)[1].split("\n## Files", 1)[0]
+    reference_files = reference.split("## Files DefenseClaw will modify\n", 1)[1].split("\n### Inventory", 1)[0]
     state_file = "hermes-direct-native-state.json"
 
     # The native writer is called only inside the Windows branch. Unix uses
@@ -136,7 +136,7 @@ _ROSTER = (
 # the unset example so its mixed default/strict rows are meaningful.
 @pytest.mark.parametrize(("unicode_output", "term"), [(True, "xterm-256color"), (False, "xterm-256color"), (True, "dumb")])
 def test_fail_mode_page_quotes_the_real_output(tmp_path, unicode_output, term):
-    blocks = _text_blocks(_page("reference/configuration/fail-modes.mdx"))
+    blocks = _text_blocks(_page("reference/fail-modes.mdx"))
     with (
         mock.patch.object(ux, "_configured_unicode_output", unicode_output),
         mock.patch.dict(os.environ, {"TERM": term}),
