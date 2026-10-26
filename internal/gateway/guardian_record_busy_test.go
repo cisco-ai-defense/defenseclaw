@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
@@ -85,4 +86,65 @@ func TestGuardianAuthorizationLedgerReadRetriesABusyRecord(t *testing.T) {
 			t.Fatalf("the account's hook credential must authenticate through a busy ledger read: %q %v", identity, ok)
 		}
 	})
+}
+
+// GAP-1711 review RR3-1/RR3-2: a ledger read that stays busy past its
+// retries (the guardian still replacing it) keeps the index of the last good
+// read for userScopedCredentialBusyGrace, so one slow replace does not refuse
+// every account's per-user credential. After the grace, or on any other
+// error (an untrusted ledger), the index is dropped at once, and dropping a
+// built index writes one log line with the cause.
+func TestUserScopedCredentialIndexSurvivesAStillBusyLedgerBriefly(t *testing.T) {
+	const sid = "S-1-5-21-1000-2000-3000-1017"
+	key := strings.Repeat("cd", 32)
+	token, err := connector.UserScopedHookAPIToken(key, "opencode", sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousBusy, previousLog := guardianRecordReadBusy, userScopedCredentialDropLog
+	t.Cleanup(func() { guardianRecordReadBusy, userScopedCredentialDropLog = previousBusy, previousLog })
+	guardianRecordReadBusy = func(err error) bool { return errors.Is(err, errTestGuardianRecordBusy) }
+	var drops []string
+	userScopedCredentialDropLog = func(cause string, err error) { drops = append(drops, cause+": "+err.Error()) }
+	for _, tc := range []struct {
+		name    string
+		failure error
+		after   time.Duration
+		ok      bool
+	}{
+		{"still busy within the grace", errTestGuardianRecordBusy, userScopedCredentialRefreshInterval, true},
+		{"still busy past the grace", errTestGuardianRecordBusy, userScopedCredentialBusyGrace + userScopedCredentialRefreshInterval, false},
+		{"untrusted ledger", errors.New("owner is not SYSTEM"), userScopedCredentialRefreshInterval, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			drops = nil
+			clock := time.Unix(1_800_000_000, 0)
+			var ledgerErr error
+			generation := uint64(1)
+			dir := t.TempDir()
+			store := newUserScopedCredentialStore(func() string { return dir })
+			store.now = func() time.Time { return clock }
+			store.loadKey = func(string) (string, error) { return key, nil }
+			store.newLedger = func(string) func() (managedHookLedger, uint64, error) {
+				return func() (managedHookLedger, uint64, error) {
+					if ledgerErr != nil {
+						return managedHookLedger{}, generation, fmt.Errorf("authorization.json: %w", ledgerErr)
+					}
+					return managedHookLedger{Targets: []managedHookLedgerTarget{{SID: sid, Connector: "opencode", OK: true}}}, generation, nil
+				}
+			}
+			if identity, ok := store.lookup(connector.UserScopedHookCredential, "opencode", token); !ok || identity != sid {
+				t.Fatalf("baseline lookup: %q %v", identity, ok)
+			}
+			ledgerErr = tc.failure
+			clock = clock.Add(tc.after)
+			_, ok := store.lookup(connector.UserScopedHookCredential, "opencode", token)
+			if ok != tc.ok {
+				t.Fatalf("lookup after %v of %v: ok=%v, want %v (drops %q)", tc.after, tc.failure, ok, tc.ok, drops)
+			}
+			if tc.ok && len(drops) != 0 || !tc.ok && (len(drops) != 1 || !strings.HasPrefix(drops[0], "authorization ledger unreadable: ")) {
+				t.Fatalf("drop log lines: %q", drops)
+			}
+		})
+	}
 }
