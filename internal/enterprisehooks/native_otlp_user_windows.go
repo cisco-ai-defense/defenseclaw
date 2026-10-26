@@ -157,28 +157,46 @@ func windowsManagedUserNativeOTLPPaths(connectorName, home, dataDir string) []st
 // itself, as the report and the status warning say.
 func removeWindowsManagedUserNativeOTLPAsTarget(connectorName, dataDir string) error {
 	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
+	// A config behind a link that does not resolve (the share's server is
+	// unreachable) reads as absent, but it cannot be read: keep the take-back
+	// pending, never clear it (GAP-2095). Only an account with an earlier
+	// per-user install to take back (a marker or its credential) gets one.
+	if link := connector.UserNativeOTLPConfigUnreachable(connectorName); link != "" {
+		if connector.NativeOTLPTakeBackPending(dataDir, connectorName) ||
+			windowsManagedUserNativeOTLPCredential(connectorName, dataDir) != "" {
+			keepWindowsManagedNativeOTLPTakeBackPending(connectorName, dataDir,
+				fmt.Errorf("its config folder %s is a link whose target cannot be reached", link))
+		}
+		return nil
+	}
 	if residue, err := connector.UserNativeOTLPResidue(connectorName, opts); err == nil && len(residue) == 0 {
 		clearWindowsManagedNativeOTLPTakeBackPending(connectorName, dataDir)
 		return nil
 	}
 	if _, err := connector.RemoveUserNativeOTLP(connectorName, opts); err != nil {
-		// The marker keeps the credential's digest, so it is written first.
-		pending := "status and verify report it until repair or the next install removes it"
-		if markErr := connector.RecordNativeOTLPTakeBackPending(dataDir, connectorName); markErr != nil {
-			pending = fmt.Sprintf("could not record it for status and verify (%v)", markErr)
-		}
-		revoked := "revoked its scoped credential"
-		if scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName); ok {
-			if revokeErr := connector.RemoveOTLPPathToken(dataDir, scope); revokeErr != nil {
-				revoked = fmt.Sprintf("could not revoke its scoped credential either (%v)", revokeErr)
-			}
-		}
-		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise hooks: could not remove the %s native OTLP exporter an earlier per-user install left (%v); %s; %s; %s\n",
-			connectorName, err, revoked, pending, windowsManagedUserNativeOTLPManualStep(connectorName))
+		keepWindowsManagedNativeOTLPTakeBackPending(connectorName, dataDir, err)
 		return nil
 	}
 	clearWindowsManagedNativeOTLPTakeBackPending(connectorName, dataDir)
 	return nil
+}
+
+// keepWindowsManagedNativeOTLPTakeBackPending records the take-back-pending
+// marker, revokes the scoped credential and reports why the exporter stays.
+func keepWindowsManagedNativeOTLPTakeBackPending(connectorName, dataDir string, cause error) {
+	// The marker keeps the credential's digest, so it is written first.
+	pending := "status and verify report it until repair or the next install removes it"
+	if markErr := connector.RecordNativeOTLPTakeBackPending(dataDir, connectorName); markErr != nil {
+		pending = fmt.Sprintf("could not record it for status and verify (%v)", markErr)
+	}
+	revoked := "revoked its scoped credential"
+	if scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName); ok {
+		if revokeErr := connector.RemoveOTLPPathToken(dataDir, scope); revokeErr != nil {
+			revoked = fmt.Sprintf("could not revoke its scoped credential either (%v)", revokeErr)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "defenseclaw: enterprise hooks: could not remove the %s native OTLP exporter an earlier per-user install left (%v); %s; %s; %s\n",
+		connectorName, cause, revoked, pending, windowsManagedUserNativeOTLPManualStep(connectorName))
 }
 
 func clearWindowsManagedNativeOTLPTakeBackPending(connectorName, dataDir string) {

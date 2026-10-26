@@ -707,6 +707,56 @@ func NativeOTLPTakeBackPending(dataDir, connectorName string) bool {
 	return ok
 }
 
+// UserNativeOTLPConfigUnreachable names the link on the path to the current
+// account's Codex or Claude Code config whose target cannot be reached (a
+// symlink to a share whose server is off the network or whose name does not
+// resolve, a junction to a removed folder), else "". Go reports such a config
+// as os.ErrNotExist (Windows maps ERROR_BAD_NETPATH to it), the same as an
+// account with no config, so the residue check alone would read "no
+// exporter". A take-back must treat it as a config it cannot read, never as
+// a clean one (GAP-2095).
+func UserNativeOTLPConfigUnreachable(connectorName string) string {
+	var path string
+	switch connectorName {
+	case "codex":
+		path = codexConfigPath()
+	case "claudecode":
+		path = claudeCodeSettingsPath()
+	default:
+		return ""
+	}
+	return unresolvedLinkOnPath(path)
+}
+
+// unresolvedLinkOnPath returns the nearest existing ancestor of a missing
+// path when that ancestor is a link (symlink or other reparse point) that
+// does not resolve, else "".
+func unresolvedLinkOnPath(path string) string {
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	for dir := filepath.Dir(path); ; {
+		info, err := os.Lstat(dir)
+		if err == nil {
+			if info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+				return ""
+			}
+			if _, err := os.Stat(dir); err != nil {
+				return dir
+			}
+			return ""
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return ""
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
 // withNativeOTLPTakeBackCredential gives opts the revoked credential that a
 // pending marker's digest finds in raw (the account's agent config), so the
 // take-back can still prove the exporter is DefenseClaw's.
