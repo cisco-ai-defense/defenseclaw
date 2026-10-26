@@ -1480,6 +1480,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1635", page: "reference/scanning/admission.mdx", has: ["`tool list` prints one table per connector", "`UPDATED` shows `-` for an entry until it is changed"] },
   { gap: "GAP-1659", page: "reference/policy/guardrail-profiles.mdx", section: "A complete example", has: ["hilt: {enabled: true, min_severity: LOW}"], lacks: ["hilt: {enabled: true, min_severity: HIGH}"] },
   { gap: "GAP-0595", page: "how-to/scanning/find-ai-on-this-machine.mdx", has: ["It asks `Proceed? [Y/n]` first; add `--yes` in scripts.", "It asks `Proceed? [Y/n]`; `--yes` skips the question."] },
+  { gap: "GAP-0633", page: "reference/configuration/env-vars.mdx", has: ["where the profile is standalone, the Linux default; on Windows and macOS", "the writers keep writing"] },
   // r105-rows-end
 ];
 

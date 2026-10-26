@@ -54,7 +54,9 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
   turn a managed host into an unmanaged one. Both pins are refused from
   `.env`. The reverse is no escalation either: exporting
   `DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise` in a shell only makes that
-  process's writers refuse changes (exit code `3`, `This device is managed`).
+  process's writers refuse changes (exit code `3`, `This device is managed`)
+  where the profile is standalone, the Linux default; on Windows and macOS,
+  where an unset profile is Secure Client, the writers keep writing.
   It does not enrol the device or apply an administrator's policy.
 - **Settings have a config key where one exists.** `DEFENSECLAW_REPO` is the deprecated alias of `update.source`, `DEFENSECLAW_NO_UPDATE_CHECK` has `update.check: false`, and `guardrail.judge.trace` replaces `DEFENSECLAW_JUDGE_TRACE` (which is read only on the Secure Client integration). `DEFENSECLAW_CUSTOM_PROVIDERS_PATH` names the derived `custom-providers.json`, not an input. See [Source of truth](/docs/reference/configuration/source-of-truth#environment-variables-and-env).
 
