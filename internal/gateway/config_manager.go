@@ -1543,6 +1543,10 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 					}
 				}
 				m.noteAppliedGeneration(source.raw)
+				// These bytes are applied now, as in the unchanged-diff
+				// branch: a second reload of them attributed the same write
+				// again (GAP-1895).
+				m.appliedRaw = source.raw
 			}
 		}
 		// The startup reconcile of the boot bytes applies nothing new: they

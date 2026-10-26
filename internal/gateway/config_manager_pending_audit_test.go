@@ -225,3 +225,65 @@ func TestConfigManagerStoppedSetThenHandEditThenStartAttributesTheNextWrite(t *t
 		t.Fatalf("the first write after the start is not attributed to its writer: %s", last)
 	}
 }
+
+// A writer's comment-only change to a running per-user gateway's config is
+// applied by the asset reconcile (errGenerationUnchanged); a second reload
+// of the same bytes must not attribute that write again (GAP-1895).
+func TestConfigManagerUnchangedAssetReloadAttributesAWriteOnce(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := []byte("config_version: 9\ndata_dir: " + filepath.ToSlash(dir) + "\ngateway:\n  api_port: 19080\nobservability: {}\n")
+	write := func(actor string, data []byte) {
+		t.Helper()
+		if _, err := configwrite.Locked(t.Context(), path, configwrite.Options{Actor: actor, Reason: "defenseclaw config set"},
+			func() (bool, error) { return true, os.WriteFile(path, data, 0o600) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("cli:operator", raw)
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, logger := newNativeSkillRuntimeTestStore(t)
+	capture := &captureJudgeRuntimeV8Emitter{}
+	logger.SetRuntimeV8Emitter(capture)
+	mgr := newConfigManagerWithSnapshot(path, initial, logger, nil, "",
+		func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
+			if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets {
+				return errGenerationUnchanged
+			}
+			return nil
+		})
+	compiled, err := config.ParseCompileObservabilityV8(path, raw,
+		config.ObservabilityV8CompileOptions{DefaultDataDir: initial.DataDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.bindInitialObservabilityV8Plan(compiled.Plan)
+	mgr.setStartupSource(path, raw)
+	if err := mgr.ReloadAssets(t.Context(), "startup_reconcile"); err != nil {
+		t.Fatal(err)
+	}
+	write("cli:comment", append([]byte("# a comment\n"), raw...))
+	for i := 0; i < 3; i++ {
+		if err := mgr.ReloadAssets(t.Context(), "asset_watch"); err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.Reload(t.Context(), "fsnotify"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := 0
+	for _, record := range capture.snapshot() {
+		wire, _ := json.Marshal(record)
+		if bytes.Contains(wire, []byte("cli:comment")) {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("the comment write was attributed %d times, want 1", count)
+	}
+}
