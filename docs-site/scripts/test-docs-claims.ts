@@ -1468,6 +1468,13 @@ describe('first-run report sample matches cmd_init (GAP-1605)', () => {
   });
 });
 
+describe('scanner settings warning (GAP-1648)', () => {
+  it('quotes the text scanner/settings.py returns', () => {
+    assert.ok(source('cli/defenseclaw/scanner/settings.py').includes('return f"the skill-scanner LLM judge is off; {ADD_JUDGE_HINT}"'));
+    assert.ok(page('reference/scanning/scanners.mdx').includes('[WARN] Scanner settings — the skill-scanner LLM judge is off;'));
+  });
+});
+
 describe('1.0.5 docs rows', () => {
   for (const row of r105Rows) {
     it(`${row.gap}: ${row.page}${row.section ? ` "${row.section}"` : ''}`, () => {
