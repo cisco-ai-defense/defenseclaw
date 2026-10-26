@@ -4280,7 +4280,7 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
 			if sfs != "same-origin" && sfs != "none" {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "sec_fetch_site_rejected")
-				http.Error(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
@@ -4300,12 +4300,12 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 			//      application/x-www-form-urlencoded.
 			if origin := r.Header.Get("Origin"); origin != "" && !isLocalhostOrigin(origin) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthOriginBlocked, "origin_blocked")
-				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
 				return
 			}
 			if !isOTLPContentType(r.Header.Get("Content-Type")) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
-				http.Error(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
+				writeJSONRefusal(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -4319,7 +4319,7 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		if r.Method == http.MethodOptions {
 			if r.Header.Get("X-DefenseClaw-Client") == "" {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch_options")
-				http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -4328,7 +4328,7 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 
 		if r.Header.Get("X-DefenseClaw-Client") == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch")
-			http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+			writeJSONRefusal(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 			return
 		}
 
@@ -4336,19 +4336,19 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		if isOTLPEndpointPath(r.URL.Path) || isSandboxRelayOTLPPath(r.URL.Path) {
 			if !isOTLPContentType(ct) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
-				http.Error(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
+				writeJSONRefusal(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
 				return
 			}
 		} else if !strings.Contains(ct, "application/json") {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
-			http.Error(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
+			writeJSONRefusal(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
 			return
 		}
 
 		if origin := r.Header.Get("Origin"); origin != "" {
 			if !isLocalhostOrigin(origin) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthOriginBlocked, "origin_blocked")
-				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
@@ -4409,31 +4409,41 @@ func csrfProtect(next http.Handler) http.Handler {
 
 		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
 			if sfs != "same-origin" && sfs != "none" {
-				http.Error(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
 
 		if r.Header.Get("X-DefenseClaw-Client") == "" {
-			http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+			writeJSONRefusal(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 			return
 		}
 
 		ct := r.Header.Get("Content-Type")
 		if !strings.Contains(ct, "application/json") {
-			http.Error(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
+			writeJSONRefusal(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
 			return
 		}
 
 		if origin := r.Header.Get("Origin"); origin != "" {
 			if !isLocalhostOrigin(origin) {
-				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// writeJSONRefusal writes a CSRF gate refusal: its body is JSON, so it is
+// served as application/json like every other API error (GAP-0569), not as
+// http.Error's text/plain. Bodies and status codes are unchanged.
+func writeJSONRefusal(w http.ResponseWriter, body string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, body+"\n")
 }
 
 func isLocalhostOrigin(origin string) bool {
