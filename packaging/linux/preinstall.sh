@@ -283,6 +283,13 @@ if systemctl is-active --quiet "$apply_path" >/dev/null 2>&1 || [ -e "$held" ]; 
     fi
 fi
 
+# A running lifecycle run (the apply unit, an MDM ensure) holds the lock for
+# its whole transaction; wait for it, as the postinstall ensure would.
+if [ -f "$state/lifecycle.lock" ] && command -v flock >/dev/null 2>&1; then
+    if ! flock -w 480 "$state/lifecycle.lock" true >/dev/null 2>&1; then
+        echo "defenseclaw-enterprise: another DefenseClaw lifecycle run held the lock for 8 minutes; the upgrade continues, and the postinstall waits for that run before it applies the package." >&2
+    fi
+fi
 # A sandbox daemon of DefenseClaw before 1.0.4 exits by itself once the
 # package replaced its program, as soon as it counts no running sandbox,
 # and its exit stops the account's OpenShell gateway: also under a MicroVM
@@ -293,8 +300,10 @@ fi
 # ensure. Hold each one (SIGSTOP) before any file is replaced; the
 # postinstall ends the held ones with SIGKILL, which runs nothing on their
 # way out, before its ensure, and systemd starts the installed daemon. Their
-# sandboxes' hooks wait meanwhile. If the transaction never reaches the
-# postinstall, a timer lets them go on after 30 minutes.
+# sandboxes' hooks wait meanwhile, so they are held last, after the wait for
+# the lifecycle lock (GAP-1553). If the transaction never reaches the
+# postinstall (an unpack that fails, where dpkg runs the old postinst), a
+# timer lets them go on after 10 minutes.
 sandbox_held=/run/defenseclaw-sandbox-daemons.held
 sandbox_recovery=defenseclaw-sandbox-daemons-recovery
 sandbox_daemon_cmd="/opt/defenseclaw/bin/defenseclaw-gateway sandbox-daemon"
@@ -323,7 +332,7 @@ if deployed_before_1_0_4; then
         # The recovery expands its own variables.
         # shellcheck disable=SC2016
         if printf '%s\n' "$s_list" >"$sandbox_held" 2>/dev/null &&
-            systemd-run --quiet --unit="$sandbox_recovery" --on-active=30m /bin/sh -c \
+            systemd-run --quiet --unit="$sandbox_recovery" --on-active=10m /bin/sh -c \
                 'f='"$sandbox_held"'; [ -e "$f" ] || exit 0; while read -r p s; do kill -CONT "$p" 2>/dev/null; done <"$f"; rm -f "$f"' \
                 >/dev/null 2>&1; then
             printf '%s\n' "$s_list" | while read -r s_pid s_start; do
@@ -336,11 +345,4 @@ if deployed_before_1_0_4; then
     fi
 fi
 
-# A running lifecycle run (the apply unit, an MDM ensure) holds the lock for
-# its whole transaction; wait for it, as the postinstall ensure would.
-if [ -f "$state/lifecycle.lock" ] && command -v flock >/dev/null 2>&1; then
-    if ! flock -w 480 "$state/lifecycle.lock" true >/dev/null 2>&1; then
-        echo "defenseclaw-enterprise: another DefenseClaw lifecycle run held the lock for 8 minutes; the upgrade continues, and the postinstall waits for that run before it applies the package." >&2
-    fi
-fi
 exit 0

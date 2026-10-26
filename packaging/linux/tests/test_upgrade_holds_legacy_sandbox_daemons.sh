@@ -17,6 +17,7 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p "$work/bin" "$work/systemd" "$work/state"
+: >"$work/state/lifecycle.lock"
 export TEST_WORK="$work"
 cat >"$work/bin/systemctl" <<'MOCK'
 #!/bin/sh
@@ -25,8 +26,16 @@ printf '%s %s\n' "$1" "${2:-}" >>"$TEST_WORK/systemctl.log"
 MOCK
 cat >"$work/bin/systemd-run" <<'MOCK'
 #!/bin/sh
+printf '%s\n' "$*" >"$TEST_WORK/systemd-run.args"
 for argument do command=$argument; done
 printf '%s\n' "$command" >"$TEST_WORK/recovery.sh"
+MOCK
+# The lifecycle-lock wait records whether the daemon was held already: it
+# must not be, so a long wait freezes no sandbox (GAP-1553).
+cat >"$work/bin/flock" <<'MOCK'
+#!/bin/sh
+sed 's/^.*) //' "/proc/$TEST_DAEMON/stat" 2>/dev/null | cut -d' ' -f1 >>"$TEST_WORK/flock.state"
+exit 0
 MOCK
 cat >"$work/bin/defenseclaw-gateway" <<'MOCK'
 #!/bin/sh
@@ -73,10 +82,13 @@ scripts
 # From 1.0.3: held before the file swap, killed before the ensure.
 deployed 1.0.3
 start_daemon
+export TEST_DAEMON="$daemon"
 PATH="$work/bin:$PATH" sh "$work/preinstall.sh" upgrade
 test "$(state_of "$daemon")" = T || { echo "the 1.0.3 sandbox daemon was not held: $(state_of "$daemon")" >&2; exit 1; }
 grep -q "^$daemon " "$work/sandbox.held"
 test -s "$work/recovery.sh"
+test "$(cat "$work/flock.state")" = S || { echo "the daemon was held before the lifecycle-lock wait: $(cat "$work/flock.state")" >&2; exit 1; }
+grep -q -- "--on-active=10m" "$work/systemd-run.args" || { echo "recovery timer: $(cat "$work/systemd-run.args")" >&2; exit 1; }
 PATH="$work/bin:$PATH" sh "$work/postinstall.sh" configure >/dev/null 2>&1
 wait "$daemon" 2>/dev/null || true
 if [ -e "/proc/$daemon" ] && [ "$(state_of "$daemon")" != Z ]; then
