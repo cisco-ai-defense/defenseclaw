@@ -478,6 +478,9 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 fail_unreachable() {
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
   _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because it could not reach its gateway ($1). Run defenseclaw-gateway status to check it."
+  if _dc_answer="$(defenseclaw_gateway_error_answer "$1")"; then
+    _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because its gateway answered with an error (${_dc_answer}). Run defenseclaw doctor to see what to fix."
+  fi
 {{end}}  # A blocked Stop only keeps Codex running the turn (#1140).
   if defenseclaw_should_fail_closed_on_unreachable; then
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "$1" transport

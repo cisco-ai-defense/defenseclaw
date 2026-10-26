@@ -2241,6 +2241,27 @@ defenseclaw_response_failure_reason() {
   esac
 }
 
+# defenseclaw_gateway_error_answer REASON prints, for a block of a call the
+# gateway answered with a server error (REASON "gateway returned HTTP 5xx"),
+# what it said: "HTTP 503: <its error>". The gateway is up, so the block
+# must not read as an outage (GAP-1744: a Codex start refused for its runtime
+# registration). It prints nothing for any other reason.
+defenseclaw_gateway_error_answer() {
+  local code="" detail=""
+  case "${1:-}" in
+    "gateway returned HTTP 5"[0-9][0-9]) code="${1#gateway returned }" ;;
+    *) return 1 ;;
+  esac
+  detail="$(defenseclaw_json_string_field "${RESULT:-}" error 2>/dev/null)" || detail=""
+  detail="${detail//[[:cntrl:]]/ }"
+  detail="${detail:0:200}"
+  if [ -n "$detail" ]; then
+    printf '%s: %s' "$code" "$detail"
+  else
+    printf '%s' "$code"
+  fi
+}
+
 # defenseclaw_should_fail_closed_on_unreachable returns 0 (true) when the
 # connector's effective fail mode is closed or when strict availability is
 # enabled. A guardian-installed managed hook's FAIL_MODE is the one the
