@@ -502,13 +502,16 @@ func emailIsPathSegment(text string, start, end int) bool {
 // word (after whitespace or a quote) is read first: a URL to another host
 // ("://" with a scheme other than file, or a leading "//") is remote, also
 // when a query value in it starts with "/" (GAP-2037). Only then is the
-// word cut at "=" for the local-shape test.
+// word cut at "=" and at the shell operators < > ( | & ; , so a path after
+// a redirect, an open paren or an option value is read on its own, and a
+// glued short option ("-C/home/...") or a leading $NAME/, ${NAME}/ or
+// $NAME: (a PATH list) is dropped before the shape test (GAP-2011).
 func tokenIsLocalPath(before string) bool {
 	word := before[strings.LastIndexAny(before, " \t\r\n\"'`")+1:]
 	if strings.HasPrefix(word, "//") || wordHoldsRemoteURL(word) {
 		return false
 	}
-	token := word[strings.LastIndexByte(word, '=')+1:]
+	token := trimShellPathPrefix(word[strings.LastIndexAny(word, "=<>(|&;,")+1:])
 	switch {
 	case strings.HasPrefix(token, "//"):
 		return false
@@ -522,6 +525,55 @@ func tokenIsLocalPath(before string) bool {
 	}
 	scheme, rest, isURL := strings.Cut(token, "://")
 	return isURL && strings.EqualFold(scheme, "file") && strings.HasPrefix(rest, "/")
+}
+
+// trimShellPathPrefix drops what the shell puts before a local path in one
+// word: a glued short option ("-C/home/x" -> "/home/x") and shell variables
+// that expand to a folder or a PATH list ("$HOME/../x", "${HOME}/x",
+// "$PATH:/home/x" -> "/../x", "/x", "/home/x").
+func trimShellPathPrefix(token string) string {
+	if len(token) > 2 && token[0] == '-' && (token[1]|0x20 >= 'a' && token[1]|0x20 <= 'z') &&
+		strings.IndexByte("/~.", token[2]) >= 0 {
+		token = token[2:]
+	}
+	for strings.HasPrefix(token, "$") {
+		rest := token[1:]
+		if strings.HasPrefix(rest, "{") {
+			closing := strings.IndexByte(rest, '}')
+			if closing < 2 || !shellVariableName(rest[1:closing]) {
+				return token
+			}
+			rest = rest[closing+1:]
+		} else {
+			n := 0
+			for n < len(rest) && (rest[n] == '_' || rest[n]|0x20 >= 'a' && rest[n]|0x20 <= 'z' || n > 0 && rest[n] >= '0' && rest[n] <= '9') {
+				n++
+			}
+			if n == 0 {
+				return token
+			}
+			rest = rest[n:]
+		}
+		switch {
+		case strings.HasPrefix(rest, "/"):
+			return rest
+		case strings.HasPrefix(rest, ":"):
+			token = rest[1:]
+		default:
+			return token
+		}
+	}
+	return token
+}
+
+func shellVariableName(name string) bool {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if !(c == '_' || c|0x20 >= 'a' && c|0x20 <= 'z' || i > 0 && c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return name != ""
 }
 
 // wordHoldsRemoteURL reports a word that holds a URL with a scheme other than

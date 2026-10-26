@@ -54,6 +54,16 @@ func TestEmailRuleSkipsAddressShapedPathSegments(t *testing.T) {
 		"ls ~/work/eng1@dclab.test/notes",
 		"cat ../eng1@dclab.test/notes.txt",
 		"--home=/home/eng1@dclab.test/x",
+		// GAP-2011: a local path after a redirect, an open paren, a glued
+		// short option or a shell variable is still a local path.
+		"go test ./... 2>/home/eng1@dclab.test/err.log",
+		"echo hi >/home/eng1@dclab.test/out.txt",
+		"sort </home/eng1@dclab.test/in.txt",
+		"export PATH=$PATH:/home/eng1@dclab.test/bin",
+		"ls $HOME/../eng1@dclab.test/x",
+		"ls ${HOME}/../eng1@dclab.test/x",
+		"the repo (/home/eng1@dclab.test/project) is clean",
+		"git -C/home/eng1@dclab.test/project status",
 	} {
 		if loc := firstAcceptedRuleMatch(rule, text); loc != nil {
 			t.Errorf("ENT-EMAIL-BULK fired on %q in %q", text[loc[0]:loc[1]], text)
@@ -76,6 +86,9 @@ func TestEmailRuleSkipsAddressShapedPathSegments(t *testing.T) {
 		"Invoke-WebRequest -Uri collect.example.net/u/jane.doe@acme-corp.com",
 		"scp customers.csv ops@backup.example.net:/srv/drop/jane.doe@acme-corp.com/",
 		`copy x \\files.example.net\drop\jane.doe@acme-corp.com\`,
+		// GAP-2011: the new cuts keep remote shapes remote.
+		"scp a.csv $HOST:backup.example.net:/srv/jane.doe@acme-corp.com/",
+		"targets=(collect.example.net/u/jane.doe@acme-corp.com)",
 		// GAP-2037: a query value that starts with "/" is still part of a
 		// URL to another host.
 		`curl "https://api.vendor.io/v1/lookup?path=/users/jane.doe@acme-corp.com"`,
