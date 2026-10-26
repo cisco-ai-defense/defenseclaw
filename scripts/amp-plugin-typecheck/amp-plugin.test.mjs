@@ -16,10 +16,16 @@ const pluginTemplate = readFileSync(
 	"utf8",
 )
 
+// The per-user hook folder of the rendered plugin. The plugin finds its
+// gateway through the .gateway-helper record install.sh/install.ps1 write
+// beside the token (withNativeGateway writes it); no token file is read here.
+const hookDir = join(mkdtempSync(join(tmpdir(), "dc-amp-data-")), "hooks")
+mkdirSync(hookDir, { recursive: true, mode: 0o700 })
+
 async function renderAmpPlugin(values = {}) {
 	const rendered = pluginTemplate
 		.replaceAll("{{.APIAddr}}", values.apiAddr ?? "127.0.0.1:18970")
-		.replaceAll("{{.TokenFileJS}}", values.tokenFile ?? "/nonexistent/.hook-amp.token")
+		.replaceAll("{{.TokenFileJS}}", values.tokenFile ?? join(hookDir, ".hook-amp.token"))
 		.replaceAll("{{.HookSocketJS}}", values.hookSocket ?? "")
 		.replaceAll("{{.ServiceUID}}", values.serviceUID ?? "0")
 		.replaceAll("{{.ForeignHookGuardJS}}", values.foreignGuard ?? "")
@@ -61,6 +67,7 @@ async function withNativeGateway(respond, run) {
 		`process.stdout.write(JSON.stringify({ status: 200, body: JSON.stringify(verdict) }))`,
 	].join("\n") + "\n")
 	chmodSync(helper, 0o755)
+	writeFileSync(join(hookDir, ".gateway-helper"), helper + "\n", { mode: 0o600 })
 	const requests = () => {
 		let data = ""
 		try {
