@@ -144,7 +144,7 @@ Cursor gets machine policy instead of `~/.cursor/hooks.json`. DefenseClaw merges
 | macOS | `/Library/Application Support/Cursor/hooks.json` |
 | Windows | `%ProgramData%\Cursor\hooks.json`, with the `defenseclaw-hook.ps1` adapter beside it |
 
-Each entry runs the administrator's hook binary with `hook --connector cursor --enterprise-managed` and sets `failClosed: true`, so a hook process that never answers blocks the call. What the running hook does on a gateway outage, with and without the foreign-hook guard, is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage). Cursor still runs Team, Project and User hooks and a deny from any wins, so they cannot allow what DefenseClaw denies, but a foreign `preToolUse` hook can still rewrite tool input. Cursor applies the Enterprise file only on plans that support enterprise hooks, so confirm in a real session that DefenseClaw records its events. The macOS route is a preview and is not verified live.
+Each entry runs the administrator's hook binary with `hook --connector cursor --enterprise-managed` and sets `failClosed: true`, so a hook process that never answers blocks the call. The administrator's resolved fail mode decides what the running hook does on a gateway outage: managed `open` covers eligible gateway outages only; a foreign-hook guard can still block the call. Cursor still runs Team, Project and User hooks and a deny from any wins, so they cannot allow what DefenseClaw denies, but a foreign `preToolUse` hook can still rewrite tool input. Cursor applies the Enterprise file only on plans that support enterprise hooks, so confirm in a real session that DefenseClaw records its events. The macOS route is a preview and is not verified live.
 
 ## In an OpenShell sandbox
 
