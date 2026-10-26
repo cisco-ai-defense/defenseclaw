@@ -497,11 +497,18 @@ func emailIsPathSegment(text string, start, end int) bool {
 	return tokenIsLocalPath(text[:start])
 }
 
-// tokenIsLocalPath reports a path whose token (after whitespace, a quote or
-// "=") starts like a local path: "/" (not "//"), "~/", "./", "../", a drive
-// "X:\" or "X:/", or "file:///".
+// tokenIsLocalPath reports a path whose token starts like a local path: "/"
+// (not "//"), "~/", "./", "../", a drive "X:\" or "X:/", or "file:///". The
+// word (after whitespace or a quote) is read first: a URL to another host
+// ("://" with a scheme other than file, or a leading "//") is remote, also
+// when a query value in it starts with "/" (GAP-2037). Only then is the
+// word cut at "=" for the local-shape test.
 func tokenIsLocalPath(before string) bool {
-	token := before[strings.LastIndexAny(before, " \t\r\n\"'`=")+1:]
+	word := before[strings.LastIndexAny(before, " \t\r\n\"'`")+1:]
+	if strings.HasPrefix(word, "//") || wordHoldsRemoteURL(word) {
+		return false
+	}
+	token := word[strings.LastIndexByte(word, '=')+1:]
 	switch {
 	case strings.HasPrefix(token, "//"):
 		return false
@@ -515,6 +522,25 @@ func tokenIsLocalPath(before string) bool {
 	}
 	scheme, rest, isURL := strings.Cut(token, "://")
 	return isURL && strings.EqualFold(scheme, "file") && strings.HasPrefix(rest, "/")
+}
+
+// wordHoldsRemoteURL reports a word that holds a URL with a scheme other than
+// file ("https://host/...", "--url=https://host/..."): it goes to another host.
+func wordHoldsRemoteURL(word string) bool {
+	at := strings.Index(word, "://")
+	if at <= 0 {
+		return false
+	}
+	start := at
+	for start > 0 {
+		c := word[start-1]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '+' || c == '.' || c == '-') {
+			break
+		}
+		start--
+	}
+	scheme := word[start:at]
+	return scheme != "" && !strings.EqualFold(scheme, "file")
 }
 
 // isoDatePlus is "+YYYY-MM-DD": a date after a plus sign (a diff's added
