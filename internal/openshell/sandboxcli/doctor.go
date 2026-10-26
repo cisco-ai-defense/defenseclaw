@@ -68,6 +68,9 @@ func (a *App) defaultDoctor() *openshell.Doctor {
 			a.warnErr("could not record the gateway change for teardown: " + err.Error())
 		}
 	}}
+	// A fix's restart gives a MicroVM gateway's service the stop sync
+	// first, or syncs its running MicroVMs (GAP-1927, GAP-1928).
+	d.StopSync, d.StopSyncOut = a.stopSyncSpec(), a.IO.Err
 	if onManagedHost() {
 		// The account's gateway runs on the administrator's rendered
 		// configuration, not on files of the account's own (GAP-0254).

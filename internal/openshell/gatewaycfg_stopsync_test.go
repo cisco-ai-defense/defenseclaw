@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -49,106 +50,168 @@ func (f *gatewayFixture) serviceCalls() []string {
 	return order
 }
 
+// onDriver gives the fixture the stop sync and a gateway that runs name;
+// it counts the syncs before a restart and the stop syncs a restart wrote.
+func (f *gatewayFixture) onDriver(t *testing.T, name string) (synced *int, written *[]*openshell.GatewayApplyResult) {
+	t.Helper()
+	d, ok := openshell.LookupDriver(name)
+	if !ok {
+		t.Fatalf("no driver %s", name)
+	}
+	f.runner.On("systemctl --user daemon-reload", "", nil)
+	f.cfg.StopSync = stopSync
+	f.cfg.RunningDriver = func(context.Context) (openshell.Driver, error) { return d, nil }
+	synced, written = new(int), new([]*openshell.GatewayApplyResult)
+	f.cfg.SyncSandboxes = func(context.Context, io.Writer) error { *synced++; return nil }
+	f.cfg.StopSyncWritten = func(res *openshell.GatewayApplyResult) { *written = append(*written, res) }
+	return synced, written
+}
+
+func (f *gatewayFixture) hasStopSync(t *testing.T) bool {
+	t.Helper()
+	data, err := os.ReadFile(f.stopSyncDropIn())
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil || !strings.HasSuffix(string(data), "[Service]\n"+wantExecStop) {
+		t.Fatalf("drop-in = %q, %v", data, err)
+	}
+	return true
+}
+
 // GAP-0380: a raw `openshell sandbox start` that lands after a restart's
 // final check was ended by the restart with what its guest had not synced.
 // The gateway service gets an ExecStop that syncs every ready MicroVM
 // first, whoever started it and whoever stops the gateway. A daemon-reload
-// applies it: on its own it restarts nothing.
+// applies it: it restarts and checks nothing.
 func TestGatewayServiceSyncsItsMicroVMsBeforeItStops(t *testing.T) {
 	ctx := context.Background()
 	f := newGatewayFixture(t)
-	f.runner.On("systemctl --user daemon-reload", "", nil)
-	plan, err := f.cfg.Plan(ctx, openshell.GatewayChanges{StopSync: stopSync})
-	if err != nil || len(plan.Files) != 1 || plan.Files[0].Path != f.stopSyncDropIn() || !plan.ReloadOnly() {
-		t.Fatalf("plan = %+v, %v", plan, err)
-	}
-	if s := plan.String(); !strings.Contains(s, "no restart: running sandboxes keep running") || strings.Contains(s, "then restart the gateway") {
-		t.Fatalf("plan renders as:\n%s", s)
-	}
+	f.onDriver(t, "vm")
 	checks := f.flushes
-	res, err := f.cfg.Apply(ctx, plan)
-	if err != nil || res.Restarted || len(res.Files) != 1 {
-		t.Fatalf("apply = %+v, %v", res, err)
+	res, err := f.cfg.EnsureStopSync(ctx)
+	if err != nil || res == nil || len(res.Files) != 1 || res.Files[0].Path != f.stopSyncDropIn() || res.Files[0].Backup != "" {
+		t.Fatalf("EnsureStopSync = %+v, %v", res, err)
 	}
 	if got := f.serviceCalls(); !slices.Equal(got, []string{"daemon-reload"}) || f.flushes != checks {
-		t.Fatalf("service calls %v, %d stopped checks: a reload-only change restarted or checked", got, f.flushes-checks)
+		t.Fatalf("service calls %v, %d stopped checks: the stop sync restarted or checked", got, f.flushes-checks)
 	}
-	data, err := os.ReadFile(f.stopSyncDropIn())
-	if err != nil || !strings.HasSuffix(string(data), "[Service]\n"+wantExecStop) {
-		t.Fatalf("drop-in = %q, %v", data, err)
+	if !f.hasStopSync(t) {
+		t.Fatal("no drop-in")
 	}
-	if again, err := f.cfg.Plan(ctx, openshell.GatewayChanges{StopSync: stopSync}); err != nil || !again.Empty() {
-		t.Fatalf("a second plan = %+v, %v", again, err)
+	if again, err := f.cfg.EnsureStopSync(ctx); err != nil || again != nil {
+		t.Fatalf("a second EnsureStopSync = %+v, %v", again, err)
 	}
 	for _, bad := range []openshell.StopSync{{Binary: "defenseclaw-gateway"}, {Binary: "/opt/my dir/defenseclaw-gateway"}, {Binary: "/x/%h"}, {Binary: "/x/g", Gateway: "a b"}} {
-		if _, err := f.cfg.Plan(ctx, openshell.GatewayChanges{StopSync: &bad}); err == nil {
-			t.Errorf("%+v planned", bad)
+		f.cfg.StopSync = &bad
+		if _, err := f.cfg.EnsureStopSync(ctx); err == nil {
+			t.Errorf("%+v written", bad)
+		}
+	}
+	// Homebrew's launchd service has no stop hook, and a managed host's
+	// units are the administrator's.
+	for _, edit := range []func(*openshell.GatewayConfigurator){
+		func(c *openshell.GatewayConfigurator) { c.GOOS = "darwin" },
+		func(c *openshell.GatewayConfigurator) { c.Managed = true },
+	} {
+		g := newGatewayFixture(t)
+		g.onDriver(t, "vm")
+		edit(g.cfg)
+		if res, err := g.cfg.EnsureStopSync(ctx); err != nil || res != nil || g.hasStopSync(t) {
+			t.Fatalf("EnsureStopSync = %+v, %v", res, err)
 		}
 	}
 }
 
-// The restarts that follow, Apply's own and the rollback's after a failed
-// restart (the gap's "final rollback check"), have the stop sync in place:
-// it is written and read first, and a rollback of the rest of the plan
-// keeps it. Teardown's Rollback removes it only after its restart.
-func TestTheStopSyncCoversEveryRestartThatFollows(t *testing.T) {
+// GAP-1927: a gateway set up before the stop sync existed (an upgrade does
+// not run setup again) had no ExecStop on DefenseClaw's other restarts:
+// `doctor --fix`, the restart onto a new OpenShell release and teardown's
+// rollback. Every restart now gives a MicroVM gateway's service the stop
+// sync first, with a daemon-reload before the restart, and says so for the
+// setup receipt; a docker gateway gets none.
+func TestEveryRestartGivesAMicroVMGatewayTheStopSyncFirst(t *testing.T) {
 	ctx := context.Background()
 	f := newGatewayFixture(t)
-	f.runner.On("systemctl --user daemon-reload", "", nil)
-	f.write(t, "gateway.toml", operatorTOML)
-	ch := bindMounts
-	ch.StopSync = stopSync
-	plan := f.plan(t, ch)
-	res, err := f.apply(plan)
-	if err != nil || !res.Restarted || len(res.Files) != 2 {
-		t.Fatalf("apply = %+v, %v", res, err)
-	}
-	if got := f.serviceCalls(); !slices.Equal(got[:2], []string{"daemon-reload", "restart openshell-gateway"}) {
-		t.Fatalf("service calls = %v: the stop sync was not read before the restart", got)
-	}
-
-	// The restart onto the new files fails: the rollback restores them and
-	// restarts again, with the stop sync kept.
-	g := newGatewayFixture(t)
-	g.runner.On("systemctl --user daemon-reload", "", nil)
-	g.runner.On("systemctl --user restart openshell-gateway", "", errors.New("exit status 1"))
-	g.write(t, "gateway.toml", operatorTOML)
-	if _, err := g.apply(g.plan(t, ch)); err == nil {
-		t.Fatal("apply succeeded with a restart that failed")
-	}
-	if g.read(t, "gateway.toml") != operatorTOML {
-		t.Fatal("the rollback did not restore gateway.toml")
-	}
-	if data, err := os.ReadFile(g.stopSyncDropIn()); err != nil || !strings.HasSuffix(string(data), wantExecStop) {
-		t.Fatalf("the rollback removed the stop sync: %q, %v", data, err)
-	}
-
-	// Teardown: the restart onto the restored files comes first, then the
-	// stop sync goes, read by the manager.
-	before := len(f.serviceCalls())
-	if err := f.cfg.Rollback(ctx, res); err != nil {
-		t.Fatalf("Rollback = %v", err)
-	}
-	if got := f.serviceCalls()[before:]; !slices.Equal(got, []string{"restart openshell-gateway", "daemon-reload"}) {
-		t.Fatalf("teardown service calls = %v, want the restart, then the reload without the stop sync", got)
-	}
-	if _, err := os.Stat(f.stopSyncDropIn()); !os.IsNotExist(err) || f.read(t, "gateway.toml") != operatorTOML {
-		t.Fatalf("after the teardown: stop sync %v, gateway.toml %q", err, f.read(t, "gateway.toml"))
-	}
-
-	// A stop sync recorded alone is undone by a reload, with no restart.
-	h := newGatewayFixture(t)
-	h.runner.On("systemctl --user daemon-reload", "", nil)
-	only, err := h.apply(h.plan(t, openshell.GatewayChanges{StopSync: stopSync}))
-	if err != nil {
+	synced, written := f.onDriver(t, "vm")
+	if err := f.cfg.Restart(ctx); err != nil {
 		t.Fatal(err)
 	}
-	restarts := h.restarts()
-	if err := h.cfg.Rollback(ctx, only); err != nil || h.restarts() != restarts {
-		t.Fatalf("Rollback = %v, %d restarts", err, h.restarts()-restarts)
+	if got := f.serviceCalls(); !slices.Equal(got, []string{"daemon-reload", "restart openshell-gateway"}) || !f.hasStopSync(t) {
+		t.Fatalf("service calls %v: the stop sync was not in place before the restart", got)
 	}
-	if _, err := os.Stat(h.stopSyncDropIn()); !os.IsNotExist(err) {
-		t.Fatalf("the stop sync stayed: %v", err)
+	if len(*written) != 1 || len((*written)[0].Files) != 1 || (*written)[0].Files[0].Path != f.stopSyncDropIn() || *synced != 0 {
+		t.Fatalf("written %+v, %d syncs before the restart (the ExecStop syncs)", *written, *synced)
+	}
+	if err := f.cfg.Restart(ctx); err != nil || len(*written) != 1 || len(f.serviceCalls()) != 3 {
+		t.Fatalf("a second restart: %v, written %d, calls %v", err, len(*written), f.serviceCalls())
+	}
+
+	// The restart of a failed Apply (the rollback's) has it too.
+	g := newGatewayFixture(t)
+	g.onDriver(t, "vm")
+	g.runner.On("systemctl --user restart openshell-gateway", "", errors.New("exit status 1"))
+	g.write(t, "gateway.toml", operatorTOML)
+	if _, err := g.apply(g.plan(t, bindMounts)); err == nil {
+		t.Fatal("apply succeeded with a restart that failed")
+	}
+	if g.read(t, "gateway.toml") != operatorTOML || !g.hasStopSync(t) {
+		t.Fatal("the rollback did not restore gateway.toml, or dropped the stop sync")
+	}
+
+	// Teardown: its restart onto the restored files gets the stop sync,
+	// which goes only after it, with what setup recorded.
+	h := newGatewayFixture(t)
+	h.runner.On("systemctl --user daemon-reload", "", nil)
+	h.write(t, "gateway.toml", operatorTOML)
+	res, err := h.apply(h.plan(t, bindMounts))
+	if err != nil || !res.Restarted || h.hasStopSync(t) {
+		t.Fatalf("apply before the stop sync = %+v, %v", res, err)
+	}
+	h.onDriver(t, "vm")
+	before := len(h.serviceCalls())
+	if err := h.cfg.Rollback(ctx, res); err != nil {
+		t.Fatalf("Rollback = %v", err)
+	}
+	if got := h.serviceCalls()[before:]; !slices.Equal(got, []string{"daemon-reload", "restart openshell-gateway", "daemon-reload"}) {
+		t.Fatalf("teardown service calls = %v, want the stop sync, the restart, then the reload without it", got)
+	}
+	if h.hasStopSync(t) || h.read(t, "gateway.toml") != operatorTOML {
+		t.Fatalf("after the teardown: stop sync kept, or gateway.toml %q", h.read(t, "gateway.toml"))
+	}
+
+	// A docker gateway's stop keeps what a workload wrote: no drop-in.
+	d := newGatewayFixture(t)
+	d.onDriver(t, "docker")
+	if err := d.cfg.Restart(ctx); err != nil || d.hasStopSync(t) || !slices.Equal(d.serviceCalls(), []string{"restart openshell-gateway"}) {
+		t.Fatalf("docker restart: %v, calls %v", err, d.serviceCalls())
+	}
+}
+
+// GAP-1928: Homebrew's launchd service has no stop hook, so a restart of a
+// macOS MicroVM gateway syncs each running MicroVM right before the restart
+// command; a sync that fails does not refuse the restart (its check passed).
+func TestAMacOSRestartSyncsTheRunningMicroVMsFirst(t *testing.T) {
+	f := newGatewayFixture(t)
+	f.onDriver(t, "vm")
+	f.cfg.GOOS = "darwin"
+	f.cfg.BrewFormulaInstalled = func() bool { return true }
+	var order []string
+	f.cfg.SyncSandboxes = func(_ context.Context, out io.Writer) error {
+		order = append(order, "sync")
+		_, _ = io.WriteString(out, "could not sync the disk of sandbox raw\n")
+		return errors.New("raw: the supervisor does not answer")
+	}
+	var out bytes.Buffer
+	f.cfg.Out = &out
+	f.runner.OnFunc("brew services restart "+openshell.GatewayFormula, func(context.Context, openshell.Command) ([]byte, error) {
+		order = append(order, "restart")
+		return nil, nil
+	})
+	if err := f.cfg.Restart(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(order, []string{"sync", "restart"}) || f.hasStopSync(t) || !strings.Contains(out.String(), "could not sync the disk of sandbox raw") {
+		t.Fatalf("order %v, out %q", order, out.String())
 	}
 }
 

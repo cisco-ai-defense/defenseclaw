@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"net"
@@ -242,6 +243,23 @@ type GatewayConfigurator struct {
 	// which overrides the rendered file, so Read reports it in place of the
 	// file's (GAP-0254).
 	AccountVM *VMIdentity
+	// StopSync is the ExecStop of the systemd gateway service that syncs
+	// each running MicroVM before the gateway stops (EnsureStopSync): setup
+	// gives it, and every restart makes sure the service has it first, so a
+	// gateway set up before it existed gets it too (GAP-1927). nil: none.
+	StopSync *StopSync
+	// StopSyncWritten hears of a stop sync a restart wrote, which teardown
+	// removes (the setup receipt).
+	StopSyncWritten func(*GatewayApplyResult)
+	// SyncSandboxes syncs each running MicroVM right before a restart of a
+	// service without the stop sync, the Homebrew launchd service's for one
+	// (GAP-1928; default SyncGatewaySandboxes on Discover).
+	SyncSandboxes func(context.Context, io.Writer) error
+	// Out hears which MicroVMs a sync before a restart synced or could not
+	// (default: nowhere).
+	Out io.Writer
+	// restartStopSync is the stop sync the last restart wrote.
+	restartStopSync *GatewayApplyResult
 }
 
 // managedHost reports whether the gateway belongs to a managed host.
@@ -771,10 +789,6 @@ type GatewayChanges struct {
 	// The gateway lists only its namespace's sandboxes, so it is set only
 	// on a gateway without sandboxes in the namespace it leaves.
 	DockerNamespace string
-	// StopSync gives the gateway's systemd user unit an ExecStop that syncs
-	// each running MicroVM's disk before the gateway stops (a drop-in a
-	// daemon-reload applies; systemd only; GAP-0380).
-	StopSync *StopSync
 }
 
 // tomlSettings are the gateway.toml assignments the changes make. Where
@@ -850,10 +864,6 @@ type FileChange struct {
 	// that it has not changed since (SeedBefore).
 	SeededFrom string `json:"seeded_from,omitempty"`
 	SeedBefore []byte `json:"-"`
-	// ReloadOnly marks a unit drop-in a daemon-reload applies with no
-	// restart (the stop sync): Apply writes it first, on its own, and a
-	// rollback of the rest of the plan keeps it.
-	ReloadOnly bool `json:"reload_only,omitempty"`
 }
 
 // GatewayPlan is exactly what Apply will write. Files that would not
@@ -933,8 +943,6 @@ func (p *GatewayPlan) String() string {
 		flushFirst = ": " + manualRestartFlushFirst
 	}
 	switch {
-	case p.ReloadOnly():
-		b.WriteString("  then the systemd user manager reads the unit again (no restart: running sandboxes keep running)\n")
 	case p.Manual && p.switchesDriver():
 		fmt.Fprintf(&b, "  then you restart the gateway, the way you started it, on the %s compute driver (DefenseClaw cannot restart it), which stops every sandbox on it%s; "+
 			"sandboxes made on the %s driver cannot start again (one gateway runs one driver), and OpenShell drops them a few minutes later with any work not brought back\n", p.ComputeDriver, flushFirst, p.FromDriver)
@@ -980,7 +988,7 @@ func (g *GatewayConfigurator) Plan(ctx context.Context, ch GatewayChanges) (*Gat
 	if err != nil {
 		return nil, err
 	}
-	if len(settings) == 0 && len(ch.Env) == 0 && len(ch.UnsetEnv) == 0 && ch.ServiceUMask == "" && ch.StopSync == nil {
+	if len(settings) == 0 && len(ch.Env) == 0 && len(ch.UnsetEnv) == 0 && ch.ServiceUMask == "" {
 		return plan, nil
 	}
 	env, err := g.serviceEnvironment(ctx)
@@ -1062,15 +1070,6 @@ func (g *GatewayConfigurator) Plan(ctx context.Context, ch GatewayChanges) (*Gat
 		if fc != nil {
 			plan.Files = append(plan.Files, fc)
 			plan.ServiceUMask = ch.ServiceUMask
-		}
-	}
-	if ch.StopSync != nil {
-		fc, err := g.planUnitStopSync(ctx, ch.StopSync)
-		if err != nil {
-			return nil, err
-		}
-		if fc != nil {
-			plan.Files = append(plan.Files, fc)
 		}
 	}
 	if plan.Empty() {
@@ -1264,30 +1263,6 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 	if g.Rendered != nil {
 		return nil, ErrRenderedGateway
 	}
-	if plan.Empty() {
-		return &GatewayApplyResult{}, nil
-	}
-	// The stop sync goes in first, on its own, and stays when the rest of
-	// the plan is rolled back: the restarts that follow (Apply's, and a
-	// rollback's) sync a MicroVM a raw client started after the final
-	// check before they end it (GAP-0380).
-	units, rest := plan.splitReloadOnly()
-	res := &GatewayApplyResult{}
-	if !units.Empty() {
-		if err := g.applyReloadOnly(ctx, res, units); err != nil {
-			return res, err
-		}
-	}
-	more, err := g.apply(ctx, rest)
-	if more != nil {
-		res.Files = append(res.Files, more.Files...)
-		res.Restarted = more.Restarted
-	}
-	return res, err
-}
-
-// apply is Apply of a plan without reload-only files.
-func (g *GatewayConfigurator) apply(ctx context.Context, plan *GatewayPlan) (*GatewayApplyResult, error) {
 	res := &GatewayApplyResult{}
 	if plan.Empty() {
 		return res, nil
@@ -1681,8 +1656,9 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 	}
 	defer unlock()
 	// The stop sync is removed last, after the restart onto the restored
-	// files, which it syncs the MicroVMs of; alone, a daemon-reload undoes
-	// it with no restart (GAP-0380).
+	// files, which it syncs the MicroVMs of (with one that restart gave the
+	// service: restartStopSync); alone, a daemon-reload undoes it with no
+	// restart (GAP-0380).
 	all := res
 	res, stopSync := splitStopSync(all)
 	if len(res.Files) == 0 {
@@ -1752,6 +1728,9 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 	}
 	if err := g.restart(ctx); err != nil {
 		return err
+	}
+	if g.restartStopSync != nil {
+		stopSync.Files = append(stopSync.Files, g.restartStopSync.Files...)
 	}
 	return g.restore(ctx, stopSync)
 }
@@ -2007,8 +1986,10 @@ func (g *GatewayConfigurator) Restart(ctx context.Context) error {
 	return g.restart(ctx)
 }
 
-// restart restarts the gateway service and waits until it is healthy.
+// restart restarts the gateway service and waits until it is healthy,
+// with each running MicroVM's disk synced before it ends (syncBeforeRestart).
 func (g *GatewayConfigurator) restart(ctx context.Context) error {
+	g.syncBeforeRestart(ctx)
 	c := g.restartCommand()
 	if out, err := g.Runner.Output(ctx, Command{Name: c.name, Args: c.args, Timeout: 2 * time.Minute}); err != nil {
 		return fmt.Errorf("%w: %v: %s", errRestartCommand, err, strings.TrimSpace(string(out)))

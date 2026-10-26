@@ -1000,9 +1000,16 @@ type fakeGateway struct {
 	// upToDate has Plan find nothing to change, as it does for a gateway
 	// whose configuration already says what a change would write.
 	upToDate bool
-	// planFiles, when set, are the files of every plan (a reload-only one,
-	// for one).
-	planFiles []*openshell.FileChange
+	// stopSyncs counts StopSync calls; stopSyncRes and stopSyncErr are
+	// their answer.
+	stopSyncs   int
+	stopSyncRes *openshell.GatewayApplyResult
+	stopSyncErr error
+}
+
+func (f *fakeGateway) StopSync(context.Context) (*openshell.GatewayApplyResult, error) {
+	f.stopSyncs++
+	return f.stopSyncRes, f.stopSyncErr
 }
 
 func (f *fakeGateway) Restart(context.Context) error { f.restarts++; return nil }
@@ -1019,9 +1026,6 @@ func (f *fakeGateway) Plan(_ context.Context, ch openshell.GatewayChanges) (*ope
 	f.planned = append(f.planned, ch)
 	if f.upToDate {
 		return &openshell.GatewayPlan{}, nil
-	}
-	if f.planFiles != nil {
-		return &openshell.GatewayPlan{Files: f.planFiles, Restart: "systemctl --user restart openshell-gateway"}, nil
 	}
 	return &openshell.GatewayPlan{Files: []*openshell.FileChange{{Path: "/cfg/gateway.toml", Summary: []string{"enable_bind_mounts = true"}}}, Restart: "systemctl --user restart openshell-gateway"}, nil
 }

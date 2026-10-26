@@ -389,9 +389,6 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		// A MicroVM mounts no host folders: nothing to ask.
 		changes = microVMChanges(rep, state, a.Geteuid())
 		copyOnly = true
-		if a.GOOS == "linux" && !unmanaged {
-			changes.StopSync = a.stopSync()
-		}
 	} else if !o.NoMounts && !state.BindMounts.Enabled() {
 		yes, err := a.ask("Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; "+
 			"DefenseClaw mounts only the launch folder and the read-only settings "+strings.Join(mountedSettingsHarnesses(harness.Names()), " and ")+
@@ -473,24 +470,13 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	switching := microVM && rep.Driver != openshell.DriverVM
 	switched := false
 	if changes.EnableBindMounts || changes.ComputeDriver != "" || changes.ServiceUMask != "" || len(changes.Env) > 0 || len(changes.UnsetEnv) > 0 ||
-		changes.DockerNamespace != "" || changes.StopSync != nil {
+		changes.DockerNamespace != "" {
 		plan, err := a.Gateway.Plan(ctx, changes)
 		if err != nil {
 			return fmt.Errorf("plan the gateway change: %w", err)
 		}
 		plan.Manual = unmanaged
 		switch {
-		case plan.ReloadOnly() && !unmanaged:
-			// Only the stop sync: the user manager reads it, nothing
-			// restarts and no sandbox stops (GAP-0380).
-			res, err := a.Gateway.Apply(ctx, plan)
-			if rerr := a.recordGatewayApply(res); rerr != nil {
-				a.warn("could not record the gateway change for teardown: " + rerr.Error())
-			}
-			if err != nil {
-				return fmt.Errorf("change the gateway service: %w", err)
-			}
-			a.ok("the " + openshell.GatewayService + " service now syncs each running MicroVM's disk before it stops (a systemd drop-in; no restart)")
 		case !plan.Empty():
 			for _, l := range strings.Split(strings.TrimRight(plan.String(), "\n"), "\n") {
 				a.note(l)
@@ -566,6 +552,9 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 			switched = true
 			a.ok("gateway restarted: it runs sandboxes in OpenShell MicroVMs")
 		}
+	}
+	if microVM && !unmanaged {
+		a.giveStopSync(ctx)
 	}
 	onMicroVMs := microVM && (!switching || switched)
 	// On a Docker VM without Landlock (Docker Desktop's) no sandbox starts
@@ -1847,13 +1836,15 @@ var stopSyncBinary = func() (string, error) {
 	return self, nil
 }
 
-// stopSync is the ExecStop setup gives the gateway service of a MicroVM
-// gateway (openshell.StopSync); nil, with a note, when this binary cannot
-// be named.
-func (a *App) stopSync() *openshell.StopSync {
+// stopSyncSpec is the ExecStop the gateway service of a MicroVM gateway
+// gets (openshell.StopSync): nil on a managed host, whose administrator's
+// lifecycle owns the units, or when this binary cannot be named.
+func (a *App) stopSyncSpec() *openshell.StopSync {
+	if onManagedHost() {
+		return nil
+	}
 	bin, err := stopSyncBinary()
 	if err != nil {
-		a.note("the OpenShell gateway service gets no stop sync of its MicroVMs: DefenseClaw's gateway binary cannot be found (" + err.Error() + ")")
 		return nil
 	}
 	s := &openshell.StopSync{Binary: bin}
@@ -1861,4 +1852,23 @@ func (a *App) stopSync() *openshell.StopSync {
 		s.Gateway = a.Cfg.OpenShell.Gateway.Name
 	}
 	return s
+}
+
+// giveStopSync gives the gateway service of a MicroVM gateway the stop
+// sync now, with no restart (GAP-0380), when no restart above gave it
+// already. It is best effort: without it each DefenseClaw restart syncs
+// the running MicroVMs first, and setup goes on.
+func (a *App) giveStopSync(ctx context.Context) {
+	res, err := a.Gateway.StopSync(ctx)
+	if rerr := a.recordGatewayApply(res); rerr != nil {
+		a.warn("could not record the gateway change for teardown: " + rerr.Error())
+	}
+	if err != nil {
+		a.note("the " + openshell.GatewayService + " service gets no stop sync of its MicroVMs (" + err.Error() +
+			"); each restart DefenseClaw makes syncs them first instead")
+		return
+	}
+	if res != nil && len(res.Files) > 0 {
+		a.ok(openshell.StopSyncSummary)
+	}
 }

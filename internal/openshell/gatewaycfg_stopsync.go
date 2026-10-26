@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -34,9 +35,13 @@ import (
 // lock: one that lands after the final check, while the restart command
 // runs, was ended with what its guest had written since its last sync
 // (GAP-0380). The stop sync closes that interval where it can be closed,
-// inside the service manager's stop: the gateway service's ExecStop syncs
-// the disk of every MicroVM OpenShell lists ready, whoever started it and
-// whoever stops the gateway, before the gateway goes down.
+// inside the service manager's stop: the systemd gateway service's
+// ExecStop syncs the disk of every MicroVM OpenShell lists ready, whoever
+// started it and whoever stops the gateway, before the gateway goes down.
+// Every DefenseClaw restart makes sure the service has it first
+// (GAP-1927); a service that cannot have it, the Homebrew launchd one, has
+// each running MicroVM synced right before the restart command instead
+// (GAP-1928).
 
 // stopSyncDropIn is the systemd drop-in that gives the gateway's user unit
 // that ExecStop. It sits next to the umask drop-in (vmUnitDropIn).
@@ -47,14 +52,15 @@ const stopSyncDropIn = "zz-defenseclaw-stop-sync.conf"
 var StopSyncArgs = []string{"sandbox-daemon", "sync-sandboxes"}
 
 // StopSyncTimeout bounds the ExecStop's work, under systemd's default
-// TimeoutStopSec (90 s); stopSyncWait bounds the sync of one MicroVM.
+// TimeoutStopSec (90 s), and the sync before a restart; stopSyncWait
+// bounds the sync of one MicroVM.
 const (
 	StopSyncTimeout = 75 * time.Second
 	stopSyncWait    = 45 * time.Second
 )
 
 // StopSync is the ExecStop DefenseClaw gives a gateway service that runs
-// MicroVMs (GatewayChanges.StopSync).
+// MicroVMs (GatewayConfigurator.StopSync).
 type StopSync struct {
 	// Binary is the absolute path of DefenseClaw's gateway binary.
 	Binary string
@@ -93,15 +99,23 @@ func isStopSyncDropIn(path string) bool {
 	return filepath.Base(path) == stopSyncDropIn && strings.HasSuffix(filepath.Base(filepath.Dir(path)), unitDropInSuffix)
 }
 
-// planUnitStopSync plans the stop sync drop-in; nil when the unit already
-// has it, off Linux (launchd gives a Homebrew service no stop hook), or
-// when no service exists to give it to. A daemon-reload applies it, so it
-// needs no restart (FileChange.ReloadOnly).
-func (g *GatewayConfigurator) planUnitStopSync(ctx context.Context, s *StopSync) (*FileChange, error) {
-	if g.GOOS != "linux" || g.NoService(ctx) {
+// StopSyncSummary is what a stop sync drop-in DefenseClaw wrote does.
+const StopSyncSummary = "the " + GatewayService + " service now syncs each running MicroVM's disk before it stops (a systemd drop-in; no restart)"
+
+// EnsureStopSync gives the gateway's systemd user unit the stop sync
+// (StopSync) when it lacks it, and has the user manager read it: no
+// restart, no sandbox stops. It returns the files it wrote; nothing when
+// StopSync is unset, off Linux (launchd gives a Homebrew service no stop
+// hook), on a managed host, with no gateway service, or when the unit
+// already has it. A failure puts the previous files back.
+func (g *GatewayConfigurator) EnsureStopSync(ctx context.Context) (*GatewayApplyResult, error) {
+	if err := g.defaults(); err != nil {
+		return nil, err
+	}
+	if g.StopSync == nil || g.GOOS != "linux" || g.managedHost() || g.NoService(ctx) {
 		return nil, nil
 	}
-	cmd, err := s.execStop()
+	cmd, err := g.StopSync.execStop()
 	if err != nil {
 		return nil, err
 	}
@@ -110,66 +124,91 @@ func (g *GatewayConfigurator) planUnitStopSync(ctx context.Context, s *StopSync)
 	if err != nil {
 		return nil, err
 	}
-	if info == nil {
-		before = nil
-	}
 	after := []byte("# Written by DefenseClaw. A stop or restart of the gateway ends every MicroVM on it, and a VM's disk\n" +
 		"# keeps only what its guest synced: sync each running MicroVM first, whoever started it or stops the gateway.\n" +
 		"[Service]\nExecStop=" + cmd + "\n")
 	if info != nil && string(before) == string(after) {
 		return nil, nil
 	}
-	return &FileChange{Path: path, Before: before, After: after, ReloadOnly: true,
-		Summary: []string{"ExecStop=" + strings.TrimPrefix(cmd, "-") + " for the " + GatewayService +
-			" service: it syncs each running MicroVM's disk before the gateway stops (a systemd drop-in; no restart)"}}, nil
-}
-
-// splitReloadOnly splits a plan into the files only a daemon-reload
-// applies and the rest, which keeps the plan's other fields.
-func (p *GatewayPlan) splitReloadOnly() (units, rest *GatewayPlan) {
-	units, rest = &GatewayPlan{Restart: p.Restart}, new(GatewayPlan)
-	*rest = *p
-	rest.Files = nil
-	for _, f := range p.Files {
-		if f.ReloadOnly {
-			units.Files = append(units.Files, f)
-		} else {
-			rest.Files = append(rest.Files, f)
-		}
+	if info == nil {
+		before = nil
 	}
-	return units, rest
-}
-
-// ReloadOnly reports whether every file of a non-empty plan is one a
-// daemon-reload applies: Apply then restarts nothing.
-func (p *GatewayPlan) ReloadOnly() bool {
-	if p.Empty() {
-		return false
-	}
-	for _, f := range p.Files {
-		if !f.ReloadOnly {
-			return false
-		}
-	}
-	return true
-}
-
-// applyReloadOnly writes the plan's unit drop-ins and has the manager read
-// them, with no restart; a failure puts them back.
-func (g *GatewayConfigurator) applyReloadOnly(ctx context.Context, res *GatewayApplyResult, plan *GatewayPlan) error {
-	done := &GatewayApplyResult{}
-	err := g.writeFiles(done, plan)
+	plan := &GatewayPlan{Files: []*FileChange{{Path: path, Before: before, After: after,
+		Summary: []string{"ExecStop=" + strings.TrimPrefix(cmd, "-") + " for the " + GatewayService + " service"}}}}
+	res := &GatewayApplyResult{}
+	err = g.writeFiles(res, plan)
 	if err == nil {
-		err = g.reloadUnits(ctx, done.Files)
+		err = g.reloadUnits(ctx, res.Files)
 	}
 	if err != nil {
-		if rerr := g.restore(ctx, done); rerr != nil {
-			return fmt.Errorf("%w; restoring the previous unit files also failed: %v", err, rerr)
+		if rerr := g.restore(ctx, res); rerr != nil {
+			return nil, fmt.Errorf("%w; restoring the previous unit files also failed: %v", err, rerr)
 		}
-		return fmt.Errorf("%w (the previous unit files were restored)", err)
+		return nil, fmt.Errorf("%w (the previous unit files were restored)", err)
 	}
-	res.Files = append(res.Files, done.Files...)
-	return nil
+	return res, nil
+}
+
+// syncBeforeRestart readies a restart, which ends every MicroVM on the
+// gateway, for one a raw client started after the restart's final check:
+// a systemd service on the MicroVM driver gets the stop sync first
+// (EnsureStopSync), whose ExecStop syncs it inside the stop; a service
+// without it has each running MicroVM synced now (SyncSandboxes). Neither
+// refuses the restart (the check before it already passed): a sync that
+// fails is named on Out.
+func (g *GatewayConfigurator) syncBeforeRestart(ctx context.Context) {
+	g.restartStopSync = nil
+	if g.StopSync != nil && g.GOOS == "linux" && g.runsMicroVMs(ctx) {
+		res, err := g.EnsureStopSync(ctx)
+		switch {
+		case err != nil:
+			fmt.Fprintf(g.out(), "the %s service could not get the stop sync of its MicroVMs (%v): syncing them before the restart instead\n", GatewayService, err)
+		case res != nil:
+			g.restartStopSync = res
+			if g.StopSyncWritten != nil {
+				g.StopSyncWritten(res)
+			}
+		}
+	}
+	if g.hasStopSync() {
+		return
+	}
+	syncAll := g.SyncSandboxes
+	if syncAll == nil {
+		syncAll = func(ctx context.Context, out io.Writer) error { return SyncGatewaySandboxes(ctx, g.Discover, out) }
+	}
+	ctx, cancel := context.WithTimeout(ctx, StopSyncTimeout)
+	defer cancel()
+	// SyncRunningSandboxes names each sandbox it could not sync; a gateway
+	// that cannot be reached or listed has nothing it could sync.
+	_ = syncAll(ctx, g.out())
+}
+
+// runsMicroVMs reports whether the gateway runs, or is configured to run,
+// a compute driver whose stop keeps only what a workload synced.
+func (g *GatewayConfigurator) runsMicroVMs(ctx context.Context) bool {
+	if d, err := g.RunningDriver(ctx); err == nil {
+		return !d.StopFlushes
+	}
+	st, err := g.Read()
+	return err == nil && st.ComputeDriver == DriverVM
+}
+
+// hasStopSync reports whether the systemd gateway service has the stop
+// sync drop-in.
+func (g *GatewayConfigurator) hasStopSync() bool {
+	if g.GOOS != "linux" {
+		return false
+	}
+	info, err := os.Lstat(g.stopSyncDropInPath())
+	return err == nil && info.Mode().IsRegular()
+}
+
+func (g *GatewayConfigurator) out() io.Writer {
+	if g.Out != nil {
+		return g.Out
+	}
+	return io.Discard
 }
 
 // splitStopSync splits applied files into the stop sync drop-in and the
