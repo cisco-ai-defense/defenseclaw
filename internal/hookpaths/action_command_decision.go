@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -165,6 +166,10 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 		words := make([]string, len(call.Args))
 		for i, arg := range call.Args {
 			value, known := StaticWord(arg, home)
+			if !known && actionWordHasUnquotedGlob(arg, command) {
+				// The shell expands the pattern before the reader runs.
+				value, known = actionWordValueWithGlob(arg, actionValues{"HOME": home, "PWD": cwd}, cwd, home, true)
+			}
 			if known {
 				words[i] = value
 			}
@@ -288,6 +293,9 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, windows bool, d
 		return false
 	}
 	readPath := func(value string) bool {
+		if actionPrivateKeyGlob(value, cwd, home, windows) {
+			return true
+		}
 		if windows {
 			protected, _ := actionWindowsProtected(value, cwd, home, true)
 			return protected
@@ -638,12 +646,54 @@ func actionStmtMayWrite(stmt *syntax.Stmt, home string) bool {
 	return !known || actionProgramMayWrite(programBase(program))
 }
 
+var actionPrivateKeyNames = []string{"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
+
+// A pathname pattern read operand reads a private key when it can select one
+// (GAP-0974, the GAP-1481 glob class): head -c N ~/.ssh/id_* in Git Bash or
+// sh expands to the key before head runs.
+func actionPrivateKeyGlob(value, cwd, home string, windows bool) bool {
+	if !strings.ContainsAny(value, "*?[") {
+		return false
+	}
+	if windows {
+		pattern := strings.ReplaceAll(value, `\`, "/")
+		lower := strings.ToLower(pattern)
+		for _, prefix := range []string{"%userprofile%", "%homedrive%%homepath%", "$env:userprofile", "${env:userprofile}", "$home", "${home}", "~"} {
+			if lower == prefix || strings.HasPrefix(lower, prefix+"/") {
+				pattern = strings.ReplaceAll(home, `\`, "/") + pattern[len(prefix):]
+				break
+			}
+		}
+		if !actionWindowsHome(pattern) {
+			pattern = strings.TrimRight(strings.ReplaceAll(cwd, `\`, "/"), "/") + "/" + pattern
+		}
+		pattern = strings.ToLower(path.Clean(pattern))
+		root := strings.ToLower(path.Clean(strings.ReplaceAll(home, `\`, "/")))
+		for _, name := range actionPrivateKeyNames {
+			if matched, _ := path.Match(pattern, root+"/.ssh/"+name); matched {
+				return true
+			}
+		}
+		return false
+	}
+	if strings.HasPrefix(value, "~/") {
+		value = filepath.Join(home, value[2:])
+	}
+	pattern := OperandPath(value, cwd)
+	for _, name := range actionPrivateKeyNames {
+		if matched, _ := filepath.Match(pattern, filepath.Join(home, ".ssh", name)); matched {
+			return true
+		}
+	}
+	return false
+}
+
 func actionPrivateReadPath(value, cwd, home string) bool {
 	resolved, ok := ResolveWriteTarget(OperandPath(value, cwd))
 	if !ok {
 		return false
 	}
-	for _, name := range []string{"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"} {
+	for _, name := range actionPrivateKeyNames {
 		key := filepath.Join(home, ".ssh", name)
 		if samePathName(resolved, key) {
 			return true
