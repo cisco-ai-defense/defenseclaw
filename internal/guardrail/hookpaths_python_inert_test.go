@@ -17,6 +17,7 @@ import (
 // beside it, or a PYTHONPATH the command sets), and a real write call with a
 // computed argument stays unproven.
 func TestUnprovenWriteIgnoresInertPythonText(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	t.Setenv("PYTHONPATH", "")
 	t.Setenv("PYTHONHOME", "")
 	clean, shadow := t.TempDir(), t.TempDir()

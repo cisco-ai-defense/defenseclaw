@@ -34204,9 +34204,12 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             # runtime, bundle and credential ACL drift before any helper or
             # strict config check reads those paths; the final stamp below
             # also covers files Repair writes later in this transaction.
+            # The Codex machine policy is stamped only after its ACL
+            # preimage is captured (Initialize-DefenseClawCodexRequirementsAclBackup).
             Set-DefenseClawManagedAcls `
                 -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName
+                -GatewayServiceName $GatewayServiceName `
+                -SkipCodexMachineState
             Set-DefenseClawStandaloneSecretsAcls `
                 -Layout $Layout `
                 -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)

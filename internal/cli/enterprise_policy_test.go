@@ -59,6 +59,11 @@ func withEnterprisePolicyTree(t *testing.T) enterprisePolicyContext {
 	previous := standaloneEnterprisePolicyOptions
 	standaloneEnterprisePolicyOptions = func() (enterprisePolicyContext, error) { return ctx, nil }
 	t.Cleanup(func() { standaloneEnterprisePolicyOptions = previous })
+	// The tree is a Linux host's, which has no Windows enumerator record of
+	// unprotected agent installs.
+	previousUnprotected := enterprisePolicyUnprotectedAgents
+	enterprisePolicyUnprotectedAgents = func(string) ([]enterprisehooks.UnprotectedAgent, error) { return nil, nil }
+	t.Cleanup(func() { enterprisePolicyUnprotectedAgents = previousUnprotected })
 	resetEnterprisePolicyFlags(t)
 	return ctx
 }

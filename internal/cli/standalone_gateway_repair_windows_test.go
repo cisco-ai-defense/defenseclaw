@@ -123,10 +123,16 @@ func TestWindowsRepairRollbackPreflightClassifiesDrift(t *testing.T) {
 					t.Fatalf("icacls %v: %v: %s", args, err, out)
 				}
 			}
-			icacls(root, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX", "/T", "/C")
+			// Grant on the root only: its children inherit the grants. With /T
+			// each file keeps an empty protected DACL (GAP-1112), which a
+			// GitHub runner, whose token has SeBackupPrivilege disabled,
+			// cannot open.
+			icacls(root, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX")
 			icacls(root, "/setowner", "*S-1-5-32-544", "/T", "/C")
 			if tc.selected == "credential" || tc.selected == "credential_empty" {
-				icacls(secretsDir, "/inheritance:r", "/remove:g", "*S-1-5-32-545", "/T", "/C")
+				// Copy the inherited grants before removing Users, so each
+				// credential keeps its SYSTEM and Administrators access.
+				icacls(secretsDir, "/inheritance:d", "/remove:g", "*S-1-5-32-545", "/T", "/C")
 			}
 			driftPath := map[string]string{
 				"config": configPath, "runtime": dataDir, "bundle": packDir,
