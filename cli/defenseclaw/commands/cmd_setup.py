@@ -11314,7 +11314,7 @@ def _print_observability_summary(
         enforcement_label = (
             "enabled (user-hook native deny; failClosed=true; no native ask)"
             if mode == "action"
-            else "disabled (observe-only; failClosed=false)"
+            else "disabled (observe-only; failClosed=true: a gateway outage follows the hook fail mode)"
         )
     else:
         enforcement_label = "enabled (hook-driven)" if mode == "action" else "disabled (observe-only)"
