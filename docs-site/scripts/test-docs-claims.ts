@@ -1453,6 +1453,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1698", page: "enterprise/operate/operations.mdx", has: ["`/var/lib/defenseclaw-enterprise/last-package-result.json` (the package"], lacks: ["and `last-package-result.log` beside it"] },
   { gap: "GAP-1517", page: "appendix/benchmarks.mdx", has: ["title=\"Eleven YARA signatures\""], lacks: ["Ten YARA signatures"] },
   { gap: "GAP-1404", page: "reference/configuration/index.mdx", has: ["`%LOCALAPPDATA%\\hermes\\config.yaml` on native Windows"] },
+  { gap: "GAP-1307", page: "reference/observability/redaction.mdx", has: ["move needs at least two routes on the destination;"] },
   // r105-rows-end
 ];
 
