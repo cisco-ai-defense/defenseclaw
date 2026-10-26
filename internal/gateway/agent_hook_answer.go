@@ -16,9 +16,17 @@ import (
 // hookAnswerBody encodes the finalized verdict before any response byte is
 // sent (GAP-1097). A connector output that cannot be encoded is replaced by
 // the same action's callback-free native control, so the hook applies the
-// verdict the audit row records.
+// verdict the audit row records. A recovered encoding panic counts once in
+// the panic counter (GAP-1114).
 func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookProfile, connectorName string, req agentHookRequest, resp agentHookResponse, receiptID string) []byte {
-	onPanic := func(any) {}
+	counted := false
+	onPanic := func(recovered any) {
+		defer func() { _ = recover() }()
+		if !counted {
+			counted = true
+			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("hook answer encoding panic: %v", recovered))
+		}
+	}
 	body, err := encodeHookAnswer(profile, resp, receiptID, onPanic)
 	if err == nil {
 		return body
