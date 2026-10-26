@@ -1970,6 +1970,21 @@ func (g *GuardrailConfig) HasConnector(connector string) bool {
 	return ok
 }
 
+// NamesConnector reports whether guardrail.connector selects the named
+// connector. It folds case and the aliases (claude-code, claude_code ->
+// claudecode) the same way activeConnector does when it installs the
+// connector's hooks, so a primary written as an alias is evaluated by the
+// hook gates instead of answered allow without a scan (GAP-1971, GAP-1972).
+// The CLI roster prune (cmd_guardrail.roster_entry_is_redundant) reads the
+// same fold through connector_paths.normalize.
+func (g *GuardrailConfig) NamesConnector(connector string) bool {
+	if g == nil {
+		return false
+	}
+	primary := normalizeConnectorKey(g.Connector)
+	return primary != "" && primary == normalizeConnectorKey(connector)
+}
+
 // EffectiveMode returns the guardrail mode for the named connector:
 // per-connector override (when non-empty) > global Mode > "observe".
 // Pure lookup — never errors, never mutates, never touches I/O.

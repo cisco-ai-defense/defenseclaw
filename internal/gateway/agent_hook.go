@@ -3434,7 +3434,7 @@ func (a *APIServer) agentHookEnabled(ctx context.Context, name string) bool {
 	if cfg.Guardrail.HasConnector(name) {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), name)
+	return cfg.Guardrail.NamesConnector(name)
 }
 
 // hookEnablementConfig is the configuration agentHookEnabled reads: the

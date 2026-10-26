@@ -545,7 +545,7 @@ func (a *APIServer) codexEnabled() bool {
 	if cfg.Guardrail.HasConnector("codex") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "codex")
+	return cfg.Guardrail.NamesConnector("codex")
 }
 
 func (a *APIServer) codexMode(ctx context.Context) string {
