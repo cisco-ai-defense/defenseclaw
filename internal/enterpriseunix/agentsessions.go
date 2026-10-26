@@ -449,7 +449,7 @@ func (l *lifecycle) warnUnknownAgentSessions(sessions []agentSession) {
 	l.warnAgentSessions(sessions, func(labels string) string {
 		return fmt.Sprintf("restart status unknown: the arguments of %s could not be read, so DefenseClaw cannot tell whether these are agents that started before hooks were installed, enabled or put back and run without DefenseClaw; ask that these sessions be restarted", labels)
 	})
-	l.result.SecurityComplete = false
+	l.result.MarkSecurityIncomplete(codeAgentSessionsRestart)
 }
 
 // warnAgentSessions adds one agent_sessions_restart_required warning per

@@ -56,7 +56,7 @@ func (l *lifecycle) describeChangedGuardianFiles() {
 	if err != nil {
 		r.AddWarning(codeGuardianRepairPending, "the hook guardian's record of the hook files it verified cannot be read ("+boundedGuardianReason(err.Error())+
 			"), so changes to them since its last pass are not checked; the guardian writes it again on its next pass")
-		r.SecurityComplete = false
+		r.MarkSecurityIncomplete(codeGuardianRepairPending)
 		return
 	}
 	done := make(chan []changedGuardianTarget, 1)
@@ -99,16 +99,18 @@ func (l *lifecycle) describeChangedGuardianFiles() {
 		r.AddWarning(codeGuardianRepairPending, fmt.Sprintf(
 			"the DefenseClaw hook files of the enrolled accounts could not all be read within %s, so changes to them since the hook guardian's last pass are not confirmed",
 			guardianOwnedFilesCheckBudget))
-		r.SecurityComplete = false
+		r.MarkSecurityIncomplete(codeGuardianRepairPending)
 		return
 	}
 	for _, change := range changes {
 		if change.unanswered != "" {
+			r.MarkSecurityIncomplete(codeGuardianRepairPending)
 			r.AddWarning(codeGuardianRepairPending, fmt.Sprintf(
 				"the DefenseClaw hook files of user %s for %s are not confirmed: their folder %s did not answer a lookup within %s (a stalled home mount?), so changes to them since the hook guardian's last pass are not checked",
 				boundedGuardianReason(change.user), change.connector, boundedGuardianReason(change.unanswered), enterprisestatus.LaunchPathLookupTimeout()))
 		}
 		if change.count > 0 {
+			r.MarkSecurityIncomplete(codeGuardianRepairPending)
 			r.AddWarning(codeGuardianRepairPending, fmt.Sprintf(
 				"%d DefenseClaw hook file(s) of user %s for %s changed since the hook guardian last verified them (%s); that agent's hook calls may not be inspected until the guardian puts them back on its next pass. Run `%s` again in a minute",
 				change.count, boundedGuardianReason(change.user), change.connector, boundedGuardianReason(change.first), env.lifecycleCommand("status")))

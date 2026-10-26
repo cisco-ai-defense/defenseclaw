@@ -186,11 +186,13 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	for _, message := range failed {
 		r.AddWarning(codeGuardianTargetFailed, message)
 	}
-	r.SecurityComplete = false
+	if len(failed) > 0 {
+		r.MarkSecurityIncomplete(codeGuardianTargetFailed)
+	}
 	if len(unverified) > 0 {
 		// An enrolled agent with no hook contract has no DefenseClaw hook at
 		// all, so the deployment does not cover it (GAP-0151).
-		r.CoverageComplete = false
+		r.MarkCoverageIncomplete(codeHookContractUnverified)
 	}
 }
 
@@ -220,7 +222,7 @@ func (l *lifecycle) requireProtectedTargets(code int) int {
 			l.env.lifecycleCommand(ActionReconcile)+"` (the guardian also retries every minute) and `"+l.env.lifecycleCommand(ActionVerify)+"`")
 	}
 	if len(failed) > 0 {
-		r.SecurityComplete = false
+		r.MarkSecurityIncomplete(codeGuardianTargetFailed)
 	}
 	return code
 }
@@ -404,7 +406,7 @@ func (l *lifecycle) reportInstallScanPending(age string) {
 		remedy = "sudo launchctl kickstart -k system/" + labelEnumerator
 	}
 	l.result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, enterprisehooks.UnprotectedAgentsScanPending(age, remedy))
-	l.result.CoverageComplete, l.result.SecurityComplete = false, false
+	l.result.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 }
 
 // describeUnprotectedAgents reports the agents the enumerator found
@@ -428,7 +430,7 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		} else {
 			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
-		r.CoverageComplete, r.SecurityComplete = false, false
+		r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 		return
 	}
 	agents, err := enterprisehooks.ParseUnprotectedAgents(data)
@@ -439,7 +441,7 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		} else {
 			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
-		r.CoverageComplete, r.SecurityComplete = false, false
+		r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 		return
 	}
 	info, err := os.Stat(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)))
@@ -450,7 +452,7 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		} else {
 			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
-		r.CoverageComplete, r.SecurityComplete = false, false
+		r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 	} else if now := time.Now(); enterprisehooks.UnprotectedAgentsRecordStale(info.ModTime(), now) {
 		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordAge(info.ModTime(), now))
 	} else if written := enterprisehooks.UnprotectedAgentsRecordGeneration(data); written != enterprisehooks.UnprotectedAgentsGeneration() {
@@ -466,7 +468,7 @@ func (l *lifecycle) describeUnprotectedAgents() {
 			// No contract, an incomplete install scan, a headless CLI path
 			// without hooks, or an IDE that cannot read global hooks: the
 			// deployment does not cover it (GAP-0151).
-			r.CoverageComplete = false
+			r.MarkCoverageIncomplete(agent.Code)
 		}
 		if l.opts.Action == ActionVerify && (agent.Refusal == enterprisehooks.RefusalMissing ||
 			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
@@ -488,8 +490,8 @@ func (l *lifecycle) describeUnprotectedAgents() {
 			}
 		}
 	}
-	if len(agents) > 0 {
-		r.SecurityComplete = false
+	for _, agent := range agents {
+		r.MarkSecurityIncomplete(agent.Code)
 	}
 }
 

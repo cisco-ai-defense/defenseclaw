@@ -186,7 +186,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		}
 	}
 	if machinePolicyIncomplete(r) {
-		r.SecurityComplete = false
+		r.MarkSecurityIncomplete(codeMachinePolicyIncomplete)
 	}
 	// This is the observed host setting. The hook proves its managed policy
 	// view separately on each invocation.
@@ -1124,7 +1124,15 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		// record, and ensure must stay a no-op until config.yaml changes.
 		r.AddWarning(codeConfigRejected, problem)
 	}
-	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
+	r.ResetCompleteness()
+	for _, service := range []struct {
+		ready bool
+		name  string
+	}{{r.Readiness.Gateway, "the gateway"}, {r.Readiness.Guardian, "the hook guardian"}, {r.Readiness.Enumerator, "the hook enumerator"}} {
+		if !service.ready {
+			r.MarkCoverageIncomplete(service.name + " is not ready")
+		}
+	}
 	if record != nil {
 		drift, unpinnable := l.policyViewPinProblems(record.MachinePolicyConnectors)
 		for _, problem := range drift {
@@ -1134,9 +1142,24 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 			r.AddWarning(codeMachinePolicyIncomplete, problem)
 		}
 	}
-	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 &&
-		!machinePolicyIncomplete(r) && !l.gatewayAuditFailure && reloadError == "" &&
-		r.Policy != nil && r.Policy.Applied
+	if !r.Readiness.SensorHelper {
+		r.MarkSecurityIncomplete("the sensor helper is not ready")
+	}
+	if len(r.Errors) > 0 {
+		r.SecurityComplete = false
+	}
+	if machinePolicyIncomplete(r) {
+		r.MarkSecurityIncomplete(codeMachinePolicyIncomplete)
+	}
+	if l.gatewayAuditFailure {
+		r.MarkSecurityIncomplete(codeAuditWriteFailed)
+	}
+	if reloadError != "" {
+		r.MarkSecurityIncomplete(codePolicyReloadRejected)
+	}
+	if r.Policy == nil || !r.Policy.Applied {
+		r.MarkSecurityIncomplete("the gateway does not report the installed policy as applied")
+	}
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeChangedGuardianFiles()

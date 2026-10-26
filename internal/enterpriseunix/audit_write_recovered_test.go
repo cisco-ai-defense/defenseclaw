@@ -23,7 +23,9 @@ func TestStatusAndVerifyStopReportingALongRecoveredAuditWriteFailure(t *testing.
 		failureAt func(now time.Time) string
 		reported  bool
 	}{
-		{"recovered long ago", func(now time.Time) string { return now.Add(-auditWriteFailureWindow - time.Minute).UTC().Format(time.RFC3339Nano) }, false},
+		{"recovered long ago", func(now time.Time) string {
+			return now.Add(-auditWriteFailureWindow - time.Minute).UTC().Format(time.RFC3339Nano)
+		}, false},
 		{"recent", func(now time.Time) string { return now.Add(-time.Minute).UTC().Format(time.RFC3339Nano) }, true},
 		{"no time", func(time.Time) string { return "" }, true},
 	} {

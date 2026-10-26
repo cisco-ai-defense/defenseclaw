@@ -447,7 +447,7 @@ func (l *lifecycle) describeMacOSAgents(ctx context.Context) {
 				}
 				message := fmt.Sprintf("LaunchAgent %s of %s (uid %d) in %s failed: %s; %s", job.label, a.Name, a.UID, job.domain, why, next)
 				l.result.Services = append(l.result.Services, enterprisestatus.Service{Name: "sandbox " + a.Name + " " + job.domain + "/" + job.label, Kind: sandboxRowKind, State: "failed: " + why})
-				l.result.SecurityComplete = false
+				l.result.MarkSecurityIncomplete(codeSandboxUserState)
 				if l.opts.Action == ActionEnsure && l.opts.FromPackage {
 					l.result.AddWarning(codeSandboxUserState, message)
 				} else {
