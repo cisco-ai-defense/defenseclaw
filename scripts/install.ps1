@@ -3337,11 +3337,14 @@ function Save-ExternalConfig([string]$Slot) {
     if (-not $config) { return }
     New-Item -ItemType Directory -Path (Join-Path $Slot "config") -Force | Out-Null
     Copy-Kept $config (Join-Path $Slot "config")
-    Set-Content -LiteralPath (Join-Path $Slot "CONFIG") -Value $config -Encoding UTF8
+    # The path goes in CONFIG_PATH: NTFS names are case-insensitive, so a
+    # CONFIG file cannot sit next to the config folder, and writing one
+    # failed every snapshot of an install with an external config.
+    Set-Content -LiteralPath (Join-Path $Slot "CONFIG_PATH") -Value $config -Encoding UTF8
 }
 
 function Restore-ExternalConfig([string]$Slot) {
-    $config = Read-Text (Join-Path $Slot "CONFIG")
+    $config = Read-Text (Join-Path $Slot "CONFIG_PATH")
     if ($config) {
         $saved = Join-Path $Slot "config\$(Split-Path -Leaf $config)"
         Copy-Kept $saved (Split-Path -Parent $config)
