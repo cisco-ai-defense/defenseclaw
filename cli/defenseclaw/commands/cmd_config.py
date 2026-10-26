@@ -805,7 +805,7 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
         # The change is saved; only the gateway's audit ack is missing, so
         # the command succeeded and says so, as guardrail use-pack does
         # (GAP-1366).
-        click.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
+        ux.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
     return True
 
 
