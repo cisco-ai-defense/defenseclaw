@@ -1313,7 +1313,11 @@ def _probe_candidate_destination(candidate_path: str, data_dir: str, name: str, 
         )
     except DestinationTestError as exc:
         if exc.failure_class == "audit_unavailable":
-            click.echo(f"    warning: the live probe did not run: {exc.message}")
+            # The change is saved untested (GAP-1748): say so and how to test it.
+            click.echo(
+                f"    warning: the live probe did not run: {exc.message}. The destination is saved untested; "
+                f"start the gateway, then run: defenseclaw observability destination test {name}"
+            )
             return
         raise DestinationProbeFailed(_destination_test_failure(exc, effective, name)) from exc
     click.echo(f"    {result.destination}: {result.mode} succeeded")

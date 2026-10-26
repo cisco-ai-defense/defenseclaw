@@ -161,3 +161,17 @@ def test_a_failed_probe_of_the_candidate_saves_nothing(monkeypatch, tmp_path: Pa
     obs = _probe(monkeypatch, tmp_path, DestinationTestError("dns_failed", "the destination hostname could not be resolved"))
     with pytest.raises(obs.DestinationProbeFailed, match="dns_failed"):
         obs._probe_candidate_destination(str(tmp_path / "candidate.yaml"), str(tmp_path), "splunk-enterprise", 1.0)
+
+
+def test_a_probe_that_cannot_run_says_the_destination_is_saved_untested(monkeypatch, tmp_path: Path, capsys) -> None:
+    # GAP-1748 / GAP-1749: the stopped-gateway branch goes on and says so.
+    from defenseclaw.observability.destination_test import DestinationTestError
+
+    obs = _probe(monkeypatch, tmp_path, DestinationTestError("audit_unavailable", "the gateway is not running"))
+    obs._probe_candidate_destination(str(tmp_path / "candidate.yaml"), str(tmp_path), "splunk-enterprise", 1.0)
+    out = capsys.readouterr().out
+    assert "the live probe did not run: the gateway is not running" in out
+    assert "saved untested" in out
+    assert "defenseclaw observability destination test splunk-enterprise" in out
+
+
