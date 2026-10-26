@@ -34,7 +34,8 @@ const hookAnswerQueueBudget = 3500 * time.Millisecond
 // GAP-1790 overload shape of the GAP-1489/1211/1243 rows). At the 1.0.5 base
 // every audit append committed alone on the store's one connection and the
 // answers queued behind them: p95 11.4-13.6 s. Concurrent appends now share
-// a transaction (group commit): p95 under 1 s.
+// a transaction (group commit): p95 under 1 s. Every answer must be inside
+// the budget, the slowest included.
 func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	if testing.Short() || hookAnswerRaceBuild {
 		t.Skip("load measurement: not under -short or the race detector")
@@ -129,7 +130,10 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	p95 := latencies[len(latencies)*95/100]
 	t.Logf("%d calls at 10/s on 2 CPUs with 6 busy goroutines: p50 %v p95 %v max %v",
 		len(latencies), latencies[len(latencies)/2], p95, latencies[len(latencies)-1])
-	if p95 > hookAnswerQueueBudget {
-		t.Fatalf("answer p95 %v is over the %v answer budget", p95, hookAnswerQueueBudget)
+	// Every answer, not a percentile: a call over the budget is a benign call
+	// refused as a gateway no-answer (GAP-1981).
+	if worst := latencies[len(latencies)-1]; worst > hookAnswerQueueBudget {
+		over := len(latencies) - sort.Search(len(latencies), func(i int) bool { return latencies[i] > hookAnswerQueueBudget })
+		t.Fatalf("%d of %d answers over the %v answer budget (max %v, p95 %v)", over, len(latencies), hookAnswerQueueBudget, worst, p95)
 	}
 }
