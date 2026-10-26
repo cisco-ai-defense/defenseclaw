@@ -1820,7 +1820,38 @@ func settledWindowsManagedRuntimeGenerationRoots(dataDir string, target *windows
 	for windowsManagedRuntimeRootsSetupRelaxed(dataDir, target) && time.Now().Before(deadline) {
 		time.Sleep(windowsManagedRuntimeSetupRelaxPoll)
 	}
-	return validateWindowsManagedRuntimeGenerationRoots(dataDir, target)
+	err = validateWindowsManagedRuntimeGenerationRoots(dataDir, target)
+	if err != nil && windowsManagedRuntimeRootsSetupRelaxedByLiveGuardian(dataDir, target) {
+		// A Hermes repair of the running guardian can hold that shape past
+		// the wait (GAP-1528). It is the guardian's own shape on folders the
+		// account owns, and the bundle the selector names is still checked
+		// against its protected digest, so the other enrolled routes are not
+		// refused for it. A relax no running guardian made stays refused
+		// until a lifecycle restores it (GAP-1765), as does any other DACL.
+		return nil
+	}
+	return err
+}
+
+// windowsManagedRuntimeRootsSetupRelaxedByLiveGuardian reports whether every
+// relaxed root (<data dir>, <data dir>\hooks) is in the guardian's exact setup
+// shape and was relaxed by the guardian that runs now.
+func windowsManagedRuntimeRootsSetupRelaxedByLiveGuardian(dataDir string, target *windows.SID) bool {
+	relaxed := false
+	for _, path := range []string{dataDir, filepath.Join(dataDir, "hooks")} {
+		if windowsManagedRuntimeDirSetupRelaxed(path, target) {
+			if !windowsSetupRelaxByLiveGuardian(path) {
+				return false
+			}
+			relaxed = true
+			continue
+		}
+		// Every root not in the setup shape must be canonical.
+		if validateWindowsUserPathElement(path, target, true, true, true) != nil {
+			return false
+		}
+	}
+	return relaxed
 }
 
 // recoverStaleWindowsSetupRelaxedDataDir reports whether dataDir validates
@@ -1871,9 +1902,36 @@ var windowsSetupRelaxIsStale = func(path string) bool {
 	return ok && changed.Before(started)
 }
 
+// windowsSetupRelaxByLiveGuardian reports, only on positive proof, that the
+// setup relax on path was made by the guardian that runs now: its process is
+// running and the folder's security changed after it started. Anything that
+// cannot be read is no proof. A seam for tests.
+var windowsSetupRelaxByLiveGuardian = func(path string) bool {
+	started, running, known := windowsHookGuardianProcessStart()
+	if !running {
+		return false
+	}
+	changed, ok := windowsDirectoryChangeTime(path)
+	if !ok {
+		return false
+	}
+	if known {
+		return !changed.Before(started)
+	}
+	// A standard account's hook may not read the guardian process's start
+	// time: a relax younger than one guardian setup, while the guardian
+	// runs, is that setup.
+	return time.Since(changed) < windowsGuardianSetupRelaxBound
+}
+
+// windowsGuardianSetupRelaxBound bounds one guardian connector setup that
+// holds a relax (a Hermes repair, GAP-1528).
+const windowsGuardianSetupRelaxBound = 10 * time.Minute
+
 // windowsHookGuardianProcessStart returns the creation time of the running
 // guardian service process; running is false when the service is not
-// running (or not installed), ok false when that cannot be read.
+// running (or not installed), ok false when the start time cannot be read
+// (running then says whether the service runs).
 func windowsHookGuardianProcessStart() (started time.Time, running, ok bool) {
 	manager, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
 	if err != nil {
@@ -1907,12 +1965,13 @@ func windowsHookGuardianProcessStart() (started time.Time, running, ok bool) {
 	}
 	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, status.ProcessId)
 	if err != nil {
-		return time.Time{}, false, false
+		// Running, start time unknown.
+		return time.Time{}, true, false
 	}
 	defer func() { _ = windows.CloseHandle(process) }()
 	var created, exited, kernel, user windows.Filetime
 	if err := windows.GetProcessTimes(process, &created, &exited, &kernel, &user); err != nil {
-		return time.Time{}, false, false
+		return time.Time{}, true, false
 	}
 	return time.Unix(0, created.Nanoseconds()), true, true
 }

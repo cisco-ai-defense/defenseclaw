@@ -866,6 +866,28 @@ func TestWindowsManagedRuntimeGenerationGCRecoversSetupRelaxedHooks(t *testing.T
 	}
 }
 
+// GAP-1528: a Hermes repair of the running guardian can hold its setup shape
+// past the hook-side wait; the other routes of that account resolve while the
+// running guardian made the relax, and a relax no running guardian made stays
+// refused.
+func TestWindowsManagedRuntimeResolverAcceptsTheRunningGuardiansLongSetupRelax(t *testing.T) {
+	previousWait, previousLive := windowsManagedRuntimeSetupRelaxWait, windowsSetupRelaxByLiveGuardian
+	windowsManagedRuntimeSetupRelaxWait = 50 * time.Millisecond
+	t.Cleanup(func() {
+		windowsManagedRuntimeSetupRelaxWait, windowsSetupRelaxByLiveGuardian = previousWait, previousLive
+	})
+	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+	createWindowsManagedRuntimeTestHooksWithDACL(t, filepath.Join(fixture.options.DataDir, "hooks"), fixture.target, windowsSetupRelaxedDirectorySDDL)
+	windowsSetupRelaxByLiveGuardian = func(string) bool { return false }
+	if err := settledWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
+		t.Fatalf("a relax no running guardian made: err=%v, want untrusted", err)
+	}
+	windowsSetupRelaxByLiveGuardian = func(string) bool { return true }
+	if err := settledWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err != nil {
+		t.Fatalf("the running guardian's long setup relax refused the route: %v", err)
+	}
+}
+
 // GAP-1334: a guardian stopped between relaxing the user's .defenseclaw
 // folder for a Hermes setup and hardening it again left LocalSystem and
 // OWNER RIGHTS full control (OI|CI). The retire refused the folder as
