@@ -108,3 +108,40 @@ func TestRemovePersonalClaudeHookBlockerRemovesOnlyTheExactBlocker(t *testing.T)
 		t.Fatalf("missing script: %t, %v", removed, err)
 	}
 }
+
+// GAP-1904/GAP-1905: a ~/.defenseclaw/hooks folder (or script) the account
+// cannot read, for example made by root with sudo, holds no blocker the
+// account wrote: the unblock is not a failure, so a managed uninstall
+// completes and the guardian's cleanup pass stays clean. The folder stays.
+func TestRemovePersonalClaudeHookBlockerSkipsWhatTheAccountCannotRead(t *testing.T) {
+	skipIfRoot(t)
+	for _, tc := range []struct {
+		name  string
+		chmod func(hooks, script string) string
+	}{
+		{"unreadable hooks folder", func(hooks, _ string) string { return hooks }},
+		{"unreadable blocker script", func(_, script string) string { return script }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := filepath.Join(newTestHome(t), ".defenseclaw")
+			hooks := filepath.Join(dataDir, "hooks")
+			script := filepath.Join(hooks, "claude-code-hook.sh")
+			writePurgeTestFile(t, script, PersonalClaudeHookBlocker)
+			locked := tc.chmod(hooks, script)
+			if err := os.Chmod(locked, 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+			removed, err := RemovePersonalClaudeHookBlocker(dataDir)
+			if err != nil || removed {
+				t.Fatalf("RemovePersonalClaudeHookBlocker = %t, %v; want false, nil", removed, err)
+			}
+			if err := os.Chmod(locked, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(script); err != nil {
+				t.Fatalf("the unreadable blocker was changed: %v", err)
+			}
+		})
+	}
+}

@@ -274,11 +274,14 @@ const PersonalClaudeHookBlocker = "#!/bin/sh\n# defenseclaw-managed-hook v0\nech
 // RB1-1): left in place, the blocker blocks every Claude Code tool call of a
 // personal registration on a computer that is no longer managed. A missing
 // script is a non-blocking hook error for Claude Code, as it was when the
-// purge deleted ~/.defenseclaw; any other script stays as it is.
+// purge deleted ~/.defenseclaw; any other script stays as it is. It runs as
+// the account, which wrote the blocker as itself: a folder or script that
+// account cannot read holds no blocker of its own, so it is not a failure
+// (GAP-1904, GAP-1905; a root-owned ~/.defenseclaw made by sudo).
 func RemovePersonalClaudeHookBlocker(dataDir string) (bool, error) {
 	path := filepath.Join(dataDir, "hooks", "claude-code-hook.sh")
 	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, os.ErrPermission) {
 		return false, nil
 	}
 	if err != nil {
@@ -288,6 +291,9 @@ func RemovePersonalClaudeHookBlocker(dataDir string) (bool, error) {
 		return false, nil
 	}
 	body, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrPermission) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("read %s: %w", path, err)
 	}
