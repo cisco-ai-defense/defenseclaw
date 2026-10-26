@@ -19482,7 +19482,9 @@ def _bootstrap_bridge(
             click.echo("  Splunk Web: no login in Free mode (it opens as admin)")
         else:
             # Any other license asks for the admin login (GAP-1750).
-            click.echo("  Splunk Web: log in as admin; show the password with: defenseclaw setup splunk --show-credentials")
+            click.echo(
+                "  Splunk Web: log in as admin; show the password with: defenseclaw setup splunk --show-credentials"
+            )
         env_file = os.path.join(data_dir, "splunk-bridge", "env", ".env")
         click.echo(f"    Runtime secret: stored in {env_file}")
         return contract
