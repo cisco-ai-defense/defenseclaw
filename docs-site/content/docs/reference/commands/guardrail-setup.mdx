@@ -343,6 +343,98 @@ Use `--judge-provider vertex_ai` with the `--judge-vertex-*` flags, or `--judge-
 
 </Tabs>
 
+<TerminalAnimation
+  cwd="~/code/your-agent-repo"
+  height={620}
+  ariaLabel="Animated terminal replay of defenseclaw setup and defenseclaw setup guardrail on DefenseClaw 1.0.4: Claude Code is picked in the connector picker, observe mode is kept, the guardrail wizard asks for the enforcement mode and the scanner engine, skips the judge in observe mode, and prints the configuration summary."
+  caption="Recorded on DefenseClaw 1.0.4 with --no-restart, so it ends by asking you to restart the gateway; without that flag, setup restarts it for you. Defaults are in [brackets]; Enter accepts them. The orange characters are the operator's replies. In 1.0.4 the connector is chosen in `defenseclaw setup` (a checkbox picker), and there is no hook fail mode question: an OSS per-user install fails open and the policy tier decides."
+  frames={[
+    { type: "cmd", text: "defenseclaw setup --no-restart", pauseMs: 700 },
+    { type: "spacer" },
+    { type: "out", text: "Select active connectors" },
+    { type: "dim", text: "────────────────────────" },
+    { type: "dim", text: "Active connectors are pre-selected. Detected inactive connectors remain unchecked." },
+    { type: "dim", text: "Unchecked connectors will not remain active after this setup run." },
+    { type: "dim", text: "Use Space to choose active connectors." },
+    { type: "dim", text: "  Up/Down or j/k moves, Space toggles, a all, n none, Enter continues." },
+    { type: "dim", text: "  [ ] Amp  (detected)" },
+    { type: "dim", text: "  [ ] Antigravity" },
+    { type: "dim", text: "  [x] Claude Code  (detected)" },
+    { type: "dim", text: "> [ ] Codex  (detected, configured)" },
+    { type: "dim", text: "  [ ] GitHub Copilot CLI  (detected)" },
+    { type: "dim", text: "  [ ] Cursor  (detected)" },
+    { type: "dim", text: "  [ ] Devin" },
+    { type: "dim", text: "  [ ] Hermes" },
+    { type: "dim", text: "  [ ] Kiro" },
+    { type: "dim", text: "  [ ] OpenCode  (detected)" },
+    { type: "spacer", pauseMs: 900 },
+    { type: "out", text: "Action enforcement" },
+    { type: "dim", text: "──────────────────" },
+    { type: "dim", text: "Rule/regex scanning applies to every selected connector." },
+    { type: "dim", text: "Checked connectors run in action mode and can block." },
+    { type: "dim", text: "Unchecked connectors stay in observe mode and only report findings." },
+    { type: "dim", text: "Select connector(s) for action enforcement." },
+    { type: "dim", text: "> [ ] Claude Code" },
+    { type: "dim", text: "LLM judge: skipped because no selected connector is in action mode." },
+    { type: "ok", text: "✓ Claude Code: version 2.1.286 (Claude Code) is supported by claudecode-hooks-v2." },
+    { type: "out", text: "Inactive connectors removed from this setup: codex" },
+    { type: "spacer" },
+    { type: "out", text: "Configuring 1 connector(s): claudecode" },
+    { type: "ok", text: "✓ Config saved to ~/.defenseclaw/config.yaml" },
+    { type: "ok", text: "✓ 1 connector(s) set up:" },
+    { type: "dim", text: "    - claudecode: observe" },
+    { type: "ok", text: "✓ Scope: global user config (no workspace pinned)" },
+    { type: "dim", text: "ℹ Saved. It takes effect once the gateway starts and confirms the connectors (defenseclaw-gateway start)." },
+    { type: "spacer", pauseMs: 600 },
+    { type: "cmd", text: "defenseclaw setup guardrail --no-restart", pauseMs: 700 },
+    { type: "spacer" },
+    { type: "out", text: "LLM Guardrail Setup" },
+    { type: "dim", text: "───────────────────" },
+    { type: "out", text: "Scans every LLM prompt and response for:" },
+    { type: "dim", text: "  • Prompt injection and jailbreak attempts" },
+    { type: "dim", text: "  • Secrets, API keys, and credentials" },
+    { type: "dim", text: "  • PII leakage (names, emails, SSNs, credit cards)" },
+    { type: "dim", text: "  • Data exfiltration: credential-file reads (/etc/passwd, ~/.ssh, ~/.aws), out-of-band channels" },
+    { type: "spacer" },
+    { type: "out", text: "Editing global guardrail policy for 1 configured connector(s): claudecode." },
+    { type: "dim", text: "API port:      19010 (hook endpoint — PreToolUse deny is the enforcement surface; no LLM proxy binding)" },
+    { type: "prompt", text: "Enable guardrail? [Y/n]: ", reply: "", pauseMs: 800 },
+    { type: "spacer" },
+    { type: "out", text: "Enforcement mode" },
+    { type: "dim", text: "Rule/regex scanning applies in both modes." },
+    { type: "out", text: "[1] observe — scan and report findings, never block (recommended to start)" },
+    { type: "out", text: "[2] action  — scan and block/confirm when policy requires" },
+    { type: "prompt", text: "Select mode (1, 2) [1]: ", reply: "", pauseMs: 800 },
+    { type: "spacer" },
+    { type: "out", text: "Scanner engine" },
+    { type: "out", text: "[1] local   — built-in pattern matching, no network calls (fastest)" },
+    { type: "out", text: "[2] remote  — Cisco AI Defense cloud API (higher accuracy, requires API key)" },
+    { type: "prompt", text: "Select engine (1, 2) [1]: ", reply: "", pauseMs: 800 },
+    { type: "spacer" },
+    { type: "out", text: "Optional LLM judge" },
+    { type: "dim", text: "LLM judge: skipped because no selected connector is in action mode." },
+    { type: "prompt", text: "Configure advanced options? [y/N]: ", reply: "", pauseMs: 800 },
+    { type: "ok", text: "✓ Claude Code: version 2.1.286 (Claude Code) is supported by claudecode-hooks-v2." },
+    { type: "ok", text: "✓ Connector: Claude Code (claudecode)" },
+    { type: "ok", text: "✓ Tool inspection: pre-execution + response-scan" },
+    { type: "ok", text: "✓ Subprocess policy: none" },
+    { type: "ok", text: "✓ Connector setup will run automatically when the gateway starts" },
+    { type: "ok", text: "✓ Scope: global user config (no workspace pinned)" },
+    { type: "ok", text: "✓ Config saved to ~/.defenseclaw/config.yaml" },
+    { type: "spacer" },
+    { type: "dim", text: "  guardrail.connector:           Claude Code (claudecode)" },
+    { type: "dim", text: "  guardrail.mode:                observe" },
+    { type: "dim", text: "  guardrail.port:                4040" },
+    { type: "dim", text: "  guardrail.detection_strategy:  regex_judge" },
+    { type: "dim", text: "  guardrail.rule_pack:           default" },
+    { type: "dim", text: "  guardrail.hilt.enabled:        false" },
+    { type: "spacer" },
+    { type: "out", text: "Next steps:" },
+    { type: "out", text: "  Restart the defenseclaw sidecar for changes to take effect:" },
+    { type: "out", text: "     defenseclaw-gateway restart" },
+  ]}
+/>
+
 ## Aliases
 
 Each connector has a setup alias that runs `setup guardrail --connector <id>` with a smaller, connector-oriented flag set. The hook aliases start in observe mode and never proxy model traffic. OpenClaw and ZeptoClaw run the guardrail proxy regardless of mode.
@@ -515,7 +607,6 @@ The fields you can override per connector mirror the global guardrail knobs:
 | `rules` | Rule customisation layered over this connector's pack: `protections`, `enable`, `disable`, `severity_overrides`, `suppressions`, `sensitive_tools`. See [Rules and custom packs](/docs/reference/policy/rules). | the global `guardrail.rules` only |
 | `block_at` | Lowest severity that blocks: `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. | global `guardrail.block_at`, then the rule pack's level |
 | `alert_at` | Lowest severity that alerts, same values; never above the block level. | global `guardrail.alert_at`, then the rule pack's level |
-
 
 `claw.mode` and `guardrail.connector` name the active connector on a single-connector install. With several connectors they keep naming one primary connector: the existing one when you add a connector, otherwise the first name in sorted order. Read the full roster from `guardrail.connectors`, `defenseclaw status` or `defenseclaw guardrail status`. While more than one connector is active, the gateway leaves out the process-level `defenseclaw.claw.mode` resource attribute; use the per-event `connector` metric label or the `defenseclaw.connector.source` span attribute.
 

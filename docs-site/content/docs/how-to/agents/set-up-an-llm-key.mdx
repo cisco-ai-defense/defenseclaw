@@ -96,6 +96,39 @@ defenseclaw keys check
 
 `keys check` exits 0 when every required key is set, so you can use it as a CI gate. `defenseclaw keys list` shows each key, whether the current config needs it, and where it was found (`env`, `dotenv` or `unset`). `defenseclaw setup llm --show` prints the resolved settings with the key masked to its last four characters. Add `--ping` to `setup llm` to send a one-token test call.
 
+<TerminalAnimation
+  cwd="~/project"
+  height={480}
+  ariaLabel="Animated terminal replay of defenseclaw keys list, keys set and keys check: the judge key is missing, is saved with a hidden prompt, and the check passes."
+  caption="Recorded on DefenseClaw 1.0.4 on a host where the LLM judge is on for Claude Code. keys list shows what the current config needs, keys set writes to ~/.defenseclaw/.env (the value is never echoed), and keys check is the CI gate (exit 0). The running gateway keeps the key it loaded at start, so restart it after keys set."
+  frames={[
+    { type: "cmd", text: "defenseclaw keys list", pauseMs: 700 },
+    { type: "spacer" },
+    { type: "dim", text: "ENV NAME                  FEATURE                   REQUIREMENT  SOURCE  STATUS" },
+    { type: "dim", text: "─  ────────────────────────  ────────────────────────  ───────────  ──────  ───────" },
+    { type: "out", text: "●  DEFENSECLAW_LLM_KEY       llm.default               REQUIRED     unset   MISSING" },
+    { type: "out", text: "·  OPENCLAW_GATEWAY_TOKEN    gateway                   NOT_USED     unset   n/a" },
+    { type: "out", text: "·  CISCO_AI_DEFENSE_API_KEY  guardrail.remote          NOT_USED     unset   n/a" },
+    { type: "out", text: "·  VIRUSTOTAL_API_KEY        skill-scanner.virustotal  NOT_USED     unset   n/a" },
+    { type: "out", text: "·  SPLUNK_ACCESS_TOKEN       observability.splunk      NOT_USED     unset   n/a" },
+    { type: "out", text: "·  GALILEO_API_KEY           observability.galileo     NOT_USED     unset   n/a" },
+    { type: "spacer" },
+    { type: "dim", text: "Legend:  ● required   ○ optional   · not used by current config" },
+    { type: "dim", text: "         Source: 'env' = process environment, 'dotenv' = ~/.defenseclaw/.env, 'unset' = missing" },
+    { type: "dim", text: "Managed by DefenseClaw (gateway auth token, do not remove): DEFENSECLAW_GATEWAY_TOKEN" },
+    { type: "spacer", pauseMs: 600 },
+    { type: "cmd", text: "defenseclaw keys set DEFENSECLAW_LLM_KEY", pauseMs: 700 },
+    { type: "dim", text: "llm.default: Canonical LLM API key used by the guardrail upstream, LLM judge, MCP/skill/plugin scanners. Override per-component with a component-specific llm.api_key_env." },
+    { type: "prompt", text: "DEFENSECLAW_LLM_KEY: ", reply: "", pauseMs: 800 },
+    { type: "ok", text: "✓ Saved DEFENSECLAW_LLM_KEY to ~/.defenseclaw/.env (value hidden)" },
+    { type: "dim", text: "  The running gateway keeps the DEFENSECLAW_LLM_KEY it loaded at start; apply the change with: defenseclaw-gateway restart" },
+    { type: "spacer", pauseMs: 500 },
+    { type: "cmd", text: "defenseclaw keys check", pauseMs: 700 },
+    { type: "out", text: "1/1 required credentials set." },
+    { type: "ok", text: "✓ all required credentials present" },
+  ]}
+/>
+
 ## Other providers
 
 | Provider | Extra settings | Details |

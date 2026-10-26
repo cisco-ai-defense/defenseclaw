@@ -93,6 +93,32 @@ defenseclaw sandbox pull myapp-1c2d --apply
 
 On a copy, `defenseclaw sandbox undo NAME` reverts the last `pull --apply`.
 
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.4}
+  height={340}
+  ariaLabel="Animated terminal replay of bringing a copy's work back and undoing it: pull --apply lists the two changed files and applies them, keeping the previous working tree, then sandbox undo shows what it will revert, asks, and reverts the apply."
+  caption="Recorded on DefenseClaw 1.0.4 from a real Claude Code sandbox on a Mac. `undo` prints the preview and asks before it reverts (`--yes` skips the question)."
+  frames={[
+    { type: "cmd", text: "defenseclaw sandbox pull myapp-19f3 --apply", pauseMs: 700 },
+    { type: "out", text: "  Pulling myapp-19f3's work…" },
+    { type: "out", text: "  myapp-19f3: 2 files changed (+2 −0)" },
+    { type: "out", text: "    M README.md" },
+    { type: "out", text: "    A notes.md" },
+    { type: "ok", text: "  ✓ applied 2 changes to ~/code/myapp" },
+    { type: "out", text: "  your previous working tree is kept at refs/defenseclaw/copy/myapp-19f3/pre-apply; `defenseclaw sandbox undo myapp-19f3` reverts the apply" },
+    { type: "spacer" },
+    { type: "cmd", text: "defenseclaw sandbox undo myapp-19f3", pauseMs: 700 },
+    { type: "out", text: "  Undo will revert the last `pull --apply` of myapp-19f3 in ~/code/myapp (2 paths):" },
+    { type: "out", text: "    revert  README.md" },
+    { type: "out", text: "    remove  notes.md" },
+    { type: "out", text: "  edits you made since the apply stay" },
+    { type: "prompt", text: "Revert the apply in ~/code/myapp? [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "ok", text: "  ✓ reverted the last apply: 2 paths in ~/code/myapp" },
+    { type: "out", text: "  bring the work back with `defenseclaw sandbox pull myapp-19f3 --apply`" },
+  ]}
+/>
+
 ## Resume, stop or delete
 
 `defenseclaw sandbox list` shows every sandbox and its phase.

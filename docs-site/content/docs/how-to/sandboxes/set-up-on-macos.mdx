@@ -52,6 +52,77 @@ Setup installs OpenShell and `e2fsprogs`, switches the gateway to MicroVMs (a ba
 
 You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenShell)**) or the macOS app (**Setup**, **Sandbox**). The app never installs OpenShell: run `defenseclaw sandbox setup --install-openshell` in a terminal first.
 
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.6}
+  height={620}
+  ariaLabel="Animated terminal replay of defenseclaw sandbox setup on an Apple-silicon Mac whose shared Homebrew belongs to another account: setup stops and names the owner, then a Homebrew of the user's own installs OpenShell 0.1.5, setup switches the gateway to MicroVMs, and the Claude Code image is built."
+  caption="Bonus replay, recorded on DefenseClaw 1.0.4 on a Mac (Docker Desktop running in the account's session). First run: the shared Homebrew at /opt/homebrew belongs to another account, so setup stops before installing. Second run, after installing Homebrew into `~/homebrew` and putting it first on `PATH`: the install plan, then the gateway changes, the harnesses and the image build (Homebrew output trimmed)."
+  frames={[
+    { type: "cmd", text: "defenseclaw sandbox setup", pauseMs: 700 },
+    { type: "out", text: "DefenseClaw sandbox setup" },
+    { type: "out", text: "  Checking this machine…  ✓ darwin/arm64  ⚠ Landlock not checked  ✓ Docker 29.8.2  ✗ OpenShell and its MicroVM driver not installed" },
+    { type: "prompt", text: "Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Install OpenShell 0.1.5 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "out", text: "✗ install OpenShell: this account cannot write to /opt/homebrew/Library/Taps, which ec2-user owns, so Homebrew at /opt/homebrew cannot install the nvidia/openshell formula as this account" },
+    { type: "out", text: "→ Homebrew installs formulas only as the account that owns its prefix (ec2-user): install OpenShell from that account (`defenseclaw sandbox setup --install-openshell` there), or have it give this account the prefix, then run `defenseclaw sandbox setup` here" },
+    { type: "spacer", pauseMs: 900 },
+    { type: "dim", text: "# install a Homebrew of your own, put it first on PATH, run setup again" },
+    { type: "cmd", text: "mkdir -p ~/homebrew && curl -fsSL https://github.com/Homebrew/brew/tarball/main | tar xz --strip-components 1 -C ~/homebrew && eval \"$(~/homebrew/bin/brew shellenv)\"", pauseMs: 700 },
+    { type: "cmd", text: "defenseclaw sandbox setup", pauseMs: 700 },
+    { type: "out", text: "DefenseClaw sandbox setup" },
+    { type: "out", text: "  Checking this machine…  ✓ darwin/arm64  ⚠ Landlock not checked  ✓ Docker 29.8.2  ✗ OpenShell and its MicroVM driver not installed" },
+    { type: "prompt", text: "Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Install OpenShell 0.1.5 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "out", text: "OpenShell install plan" },
+    { type: "out", text: "  Release     v0.1.5 (NVIDIA OpenShell upstream installer)" },
+    { type: "out", text: "  Script      https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.5/install.sh" },
+    { type: "out", text: "  SHA-256     7bf6706741b8b59c1b61e0c47030f0a34fefba6cee3c74cd52638cbf7cdc3655 (verified)" },
+    { type: "out", text: "  Privileges  none: the script runs Homebrew as you, without sudo" },
+    { type: "out", text: "  Changes     Homebrew may update itself and its taps first (its auto-update, when due; HOMEBREW_NO_AUTO_UPDATE=1 skips it)" },
+    { type: "out", text: "              the release's openshell.rb replaces Formula/openshell.rb in the nvidia/openshell tap (created if missing)" },
+    { type: "out", text: "              the script installs the nvidia/openshell/openshell formula and starts the gateway with brew services" },
+    { type: "out", text: "              it registers that gateway as \"openshell\" in ~/.config/openshell, replacing a registration of that name" },
+    { type: "warn", text: "! Homebrew is at ~/homebrew, not at /opt/homebrew or /usr/local: OPENSHELL_LOCAL_TLS_DIR tells the OpenShell CLI where the gateway's client certificates are" },
+    { type: "warn", text: "! Homebrew has no prebuilt packages for that prefix, so it may build dependencies from source, which can take many minutes (it prints its progress)" },
+    { type: "prompt", text: "Run this plan? [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "dim", text: "... (Homebrew output trimmed) ..." },
+    { type: "dim", text: "🍺  ~/homebrew/Cellar/openshell/0.1.5: 10 files, 169.9MB, built in 4 seconds" },
+    { type: "dim", text: "openshell: openshell status reports connected" },
+    { type: "ok", text: "  ✓ OpenShell 0.1.5 installed, gateway running" },
+    { type: "prompt", text: "Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env, which the Homebrew service reads, and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "out", text: "  OpenShell gateway configuration changes" },
+    { type: "out", text: "    edit ~/homebrew/var/openshell/gateway.toml (a timestamped backup is kept)" },
+    { type: "out", text: "      set [openshell.gateway] compute_driver = \"vm\"" },
+    { type: "out", text: "      set [openshell.drivers.vm] sandbox_uid = 509" },
+    { type: "out", text: "      set [openshell.drivers.vm] sandbox_gid = 20" },
+    { type: "out", text: "      set [openshell.drivers.vm] vcpus = 4" },
+    { type: "out", text: "      set [openshell.drivers.vm] mem_mib = 4096" },
+    { type: "out", text: "      set [openshell.drivers.vm] overlay_disk_mib = 16384" },
+    { type: "out", text: "    create ~/.config/openshell/gateway.env" },
+    { type: "out", text: "      set OPENSHELL_TELEMETRY_ENABLED=false" },
+    { type: "out", text: "    then restart the gateway (brew services restart nvidia/openshell/openshell) on the vm compute driver; running sandboxes stop, and sandboxes made on the docker driver cannot start again (one gateway runs one driver)" },
+    { type: "out", text: "  sandbox_uid and sandbox_gid are gateway-wide: every MicroVM sandbox on this gateway, including ones made outside DefenseClaw with `openshell sandbox create`, then runs as 509:20" },
+    { type: "ok", text: "  ✓ gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs" },
+    { type: "out", text: "  every run works on a copy (the MicroVM driver mounts no host folders); `defenseclaw sandbox pull` brings the changes back" },
+    { type: "out", text: "  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):" },
+    { type: "out", text: "    Claude Code (claude)  model credential AWS_BEARER_TOKEN_BEDROCK ✓" },
+    { type: "out", text: "    Codex (codex)         model credential AWS_BEARER_TOKEN_BEDROCK ✓" },
+    { type: "out", text: "  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, opencode" },
+    { type: "ok", text: "  ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml" },
+    { type: "prompt", text: "Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "out", text: "  Building the Claude Code image (the first build downloads about 3 GB)…" },
+    { type: "ok", text: "  ✓ Claude Code 2.1.156: defenseclaw/sandbox:claudecode-2d7c00d21fdd8f50-u509, hooks verified (built in 59s)" },
+    { type: "prompt", text: "Build the Codex image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run codex` builds it) [Y/n] ", reply: "n", pauseMs: 800 },
+    { type: "dim", text: "  the first run of each image uses about 11 GiB while preparing its MicroVM disk (about a minute; OpenShell keeps the prepared disk)" },
+    { type: "ok", text: "  ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:19072, egress proxy 127.0.0.1:19073)" },
+    { type: "out", text: "  skipped: the Codex image (the first `defenseclaw sandbox run codex` builds it, or `defenseclaw sandbox image build codex`)" },
+    { type: "spacer" },
+    { type: "ok", text: "  ✓ Done →  cd <project> && defenseclaw sandbox run claude" },
+  ]}
+/>
+
 </Step>
 
 <Step>

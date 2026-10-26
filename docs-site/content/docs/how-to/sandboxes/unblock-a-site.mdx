@@ -87,6 +87,23 @@ defenseclaw sandbox approve myapp-ask ap_d52b76c279798ac7
 
 An approval applies at the sandbox's next quiet moment, because every OpenShell policy change closes its open connections. On a managed computer with `allow_unblock: false`, approvals last for the session only and `approve --always` is refused.
 
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.4}
+  height={260}
+  ariaLabel="Animated terminal replay of an ask: defenseclaw sandbox approvals lists one ask, the sandbox asking to reach port 8765 on your machine, then defenseclaw sandbox approve answers it and says it applies at the next quiet moment of the sandbox."
+  caption="Recorded on DefenseClaw 1.0.4 from a real Mac sandbox started with `--host-port 8765`. The ask names the program that connected (`/usr/bin/curl`) and the port on your machine."
+  frames={[
+    { type: "cmd", text: "defenseclaw sandbox approvals", pauseMs: 700 },
+    { type: "out", text: "ID                   SANDBOX     KIND       DESTINATION                   BINARY         RISK   REASON" },
+    { type: "out", text: "ap_9d93e548e5332e92  myapp-19f3  host_port  host.openshell.internal:8765  /usr/bin/curl  risky  the sandbox asks to reach port 8765 on your machine (--host-port 8765)" },
+    { type: "dim", text: "  approve: defenseclaw sandbox approve <sandbox> <id> [--always]   reject: defenseclaw sandbox reject <sandbox> <id>" },
+    { type: "spacer" },
+    { type: "cmd", text: "defenseclaw sandbox approve myapp-19f3 ap_9d93e548e5332e92", pauseMs: 700 },
+    { type: "ok", text: "  ✓ approved ap_9d93e548e5332e92 (host.openshell.internal); it applies at the next quiet moment of the sandbox (usually within a minute), then retry the connection that asked" },
+  ]}
+/>
+
 ## Check it worked
 
 ```bash

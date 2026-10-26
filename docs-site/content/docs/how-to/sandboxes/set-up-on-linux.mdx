@@ -51,6 +51,80 @@ Install OpenShell … with NVIDIA's installer? (sudo; sha256 verified) [y/N] y
 
 Setup is safe to run again. Say no to mounts, or pass `--no-mounts`, and no Claude Code or Codex sandbox can start. Flags and the full list of steps are in the [sandbox CLI reference](/docs/reference/sandboxes/cli#sandbox-setup). The TUI runs the same setup: `defenseclaw tui`, `0`, **Sandboxes (OpenShell)**.
 
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.6}
+  height={600}
+  ariaLabel="Animated terminal replay of defenseclaw sandbox setup on Linux with an older OpenShell 0.1.1 installed: the machine checks, the gateway service fix, the NVIDIA installer plan that upgrades OpenShell to 0.1.5, the questions about project mounts, OpenShell telemetry and the compute driver, the gateway changes it lists, the harnesses and their model credentials, and the Claude Code image build."
+  caption="Recorded on DefenseClaw 1.0.4 on RHEL 9 with Docker 29.8.1 and OpenShell 0.1.1 installed, so setup offers the in-place upgrade to the pinned OpenShell 0.1.5 (the package manager output is trimmed). Every question shows its default answer (Enter); the plan is approved with `y` and the Codex image was skipped with `n`. The shell wrapper question was left at its default, no. On a host with no OpenShell, the same question reads 'Install OpenShell'."
+  frames={[
+    { type: "cmd", text: "defenseclaw sandbox setup", pauseMs: 700 },
+    { type: "out", text: "DefenseClaw sandbox setup" },
+    { type: "out", text: "  Checking this machine…  ✓ linux/amd64  ✓ Landlock  ✓ Docker 29.8.1  ⚠ OpenShell 0.1.1 (0.1.5 available)" },
+    { type: "out", text: "  ✗ Gateway service: openshell-gateway is inactive (dead)" },
+    { type: "prompt", text: "Fix \"Gateway service\" now: start the gateway and enable it at login, then register it (openshell gateway add https://127.0.0.1:17670 --local --name openshell)? [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "out", text: "  fixing \"Gateway service\"…" },
+    { type: "ok", text: "  ✓ fixed \"Gateway service\"" },
+    { type: "prompt", text: "Upgrade OpenShell 0.1.1 to 0.1.5 in place with NVIDIA's installer? (OpenShell 0.1.1 runs no DefenseClaw sandbox; sudo; sha256 verified; pulls OpenShell's 0.1.5 supervisor images from ghcr.io; restarts the gateway: no sandbox runs on it now) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "out", text: "OpenShell install plan" },
+    { type: "out", text: "  Release     v0.1.5 (NVIDIA OpenShell upstream installer)" },
+    { type: "out", text: "  Script      https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.5/install.sh" },
+    { type: "out", text: "  SHA-256     7bf6706741b8b59c1b61e0c47030f0a34fefba6cee3c74cd52638cbf7cdc3655 (verified)" },
+    { type: "out", text: "  Privileges  the script uses sudo to install the openshell package, then enables and" },
+    { type: "out", text: "              starts the openshell-gateway user service (systemd --user)" },
+    { type: "out", text: "  Existing    openshell 0.1.1 at /bin/openshell" },
+    { type: "warn", text: "! upgrades the installed openshell 0.1.1 to v0.1.5 in place" },
+    { type: "warn", text: "! the script restarts the OpenShell gateway once the release is installed, which drops the connections of every sandbox on it" },
+    { type: "prompt", text: "Run this plan? [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "dim", text: "openshell: downloading v0.1.5 release checksums..." },
+    { type: "dim", text: "openshell: verifying checksum for openshell-0.1.5-1.fc44.x86_64.rpm..." },
+    { type: "dim", text: "... (package manager output trimmed) ..." },
+    { type: "dim", text: "openshell: installed openshell RPM packages from v0.1.5" },
+    { type: "dim", text: "openshell: restarting openshell-gateway user service..." },
+    { type: "dim", text: "openshell: openshell status reports connected" },
+    { type: "ok", text: "  ✓ OpenShell upgraded to 0.1.5, gateway running" },
+    { type: "prompt", text: "Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw mounts only the launch folder and the read-only settings Claude Code and Codex sandboxes need) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Switch your local OpenShell gateway to the docker compute driver? (its configuration selects the \"podman\" compute driver, which DefenseClaw does not drive; sandboxes made on the current driver cannot start after the switch) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "out", text: "  OpenShell gateway configuration changes" },
+    { type: "out", text: "    edit ~/.config/openshell/gateway.toml (a timestamped backup is kept)" },
+    { type: "out", text: "      set [openshell.drivers.docker] allow_driver_config = true" },
+    { type: "out", text: "      set [openshell.drivers.docker] enable_bind_mounts = true" },
+    { type: "out", text: "      set [openshell.drivers.docker.resource_admission] enabled = false" },
+    { type: "out", text: "      set [openshell.gateway] compute_driver = \"docker\"" },
+    { type: "out", text: "      set [openshell.drivers.docker] sandbox_label = \"defenseclaw-u1009\"" },
+    { type: "out", text: "        - compute_driver = \"podman\"" },
+    { type: "out", text: "        + compute_driver = \"docker\"" },
+    { type: "out", text: "        +" },
+    { type: "out", text: "        + [openshell.drivers.docker]" },
+    { type: "out", text: "        + allow_driver_config = true" },
+    { type: "out", text: "        + enable_bind_mounts = true" },
+    { type: "out", text: "        + sandbox_label = \"defenseclaw-u1009\"" },
+    { type: "out", text: "        +" },
+    { type: "out", text: "        + [openshell.drivers.docker.resource_admission]" },
+    { type: "out", text: "        + enabled = false" },
+    { type: "out", text: "    create ~/.config/openshell/gateway.env" },
+    { type: "out", text: "      set OPENSHELL_TELEMETRY_ENABLED=false" },
+    { type: "out", text: "    then restart the gateway (systemctl --user restart openshell-gateway) on the docker compute driver; running sandboxes stop, and sandboxes made on the podman driver cannot start again (one gateway runs one driver), and OpenShell drops them a few minutes later with any work not brought back" },
+    { type: "ok", text: "  ✓ gateway configured and restarted" },
+    { type: "out", text: "  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):" },
+    { type: "out", text: "    Claude Code (claude)  model credential AWS_BEARER_TOKEN_BEDROCK ✓" },
+    { type: "out", text: "    Codex (codex)         model credential AWS_BEARER_TOKEN_BEDROCK ✓" },
+    { type: "out", text: "  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, opencode" },
+    { type: "ok", text: "  ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml" },
+    { type: "out", text: "  openshell.binary is /bin/openshell: the daemon runs the OpenShell CLI from there, as that folder may not be on the PATH it started with" },
+    { type: "prompt", text: "Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "out", text: "  Building the Claude Code image (the first build downloads about 3 GB)…" },
+    { type: "ok", text: "  ✓ Claude Code 2.1.156: defenseclaw/sandbox:claudecode-0c61e3e41504692d-u1009, hooks verified (built in 50s)" },
+    { type: "prompt", text: "Build the Codex image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run codex` builds it) [Y/n] ", reply: "n", pauseMs: 800 },
+    { type: "ok", text: "  ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:19011, egress proxy 127.0.0.1:19012)" },
+    { type: "out", text: "  skipped: the Codex image (the first `defenseclaw sandbox run codex` builds it, or `defenseclaw sandbox image build codex`)" },
+    { type: "spacer" },
+    { type: "ok", text: "  ✓ Done →  cd <project> && defenseclaw sandbox run claude" },
+  ]}
+/>
+
 </Step>
 
 <Step>

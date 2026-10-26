@@ -124,6 +124,47 @@ Each line is a pass (`✓`), a warning (`!`), a failure (`✗`) or information (
 
 ![tetragon verify --ready-for consume on a RHEL 9 computer that passes: Tetragon installed and running, its API a root-owned unix socket, version 1.7.1 supported, the sensor helper reading events, loopback metrics and health listeners, Plane C on and recorded by the gateway, no policy left without a helper, four of your policies loaded and read only, and the closing line Ready: this host runs consume as its config asks](/images/tetragon/terminal-tetragon-verify-consume.png)
 
+<TerminalAnimation
+  cwd="~"
+  speed={1.5}
+  height={440}
+  ariaLabel="Animated terminal replay of tetragon verify --ready-for consume followed by tetragon status on a computer that runs consume: every check passes, and status lists the four Tetragon policies of the administrator with their event counts and the next step."
+  caption="Recorded on DefenseClaw 1.0.4 on a RHEL 9.8 lab computer in `consume` with Tetragon 1.7.1 and four policies of the administrator loaded. The event counts keep growing as the administrator's policies fire. Run `verify` a minute after `ensure`: right after the sensor helper restarts, the Plane C line can warn that the gateway's state is not known yet, and it turns into a pass."
+  frames={[
+    { type: "cmd", text: "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for consume", pauseMs: 700 },
+    { type: "out", text: "Tetragon readiness for consume" },
+    { type: "ok", text: "  ✓ Tetragon is installed (/var/run/tetragon/tetragon-info.json)" },
+    { type: "ok", text: "  ✓ Tetragon is running (pid 56271)" },
+    { type: "ok", text: "  ✓ API: unix socket /var/run/tetragon/tetragon.sock" },
+    { type: "ok", text: "  ✓ The info file, socket and their directories pass the helper's trust check" },
+    { type: "ok", text: "  ✓ Tetragon v1.7.1 is supported for consume" },
+    { type: "ok", text: "  ✓ The sensor helper reads Tetragon's events" },
+    { type: "ok", text: "  ✓ Tetragon's metrics endpoint listens on loopback (127.0.0.1:2112)" },
+    { type: "ok", text: "  ✓ Tetragon's health endpoint listens on loopback (127.0.0.1:6789)" },
+    { type: "ok", text: "  ✓ AI Discovery Plane C is on and the gateway records it" },
+    { type: "ok", text: "  ✓ No DefenseClaw policy is left without a sensor helper" },
+    { type: "out", text: "  i 4 of your Tetragon policies are loaded (0 enforcing); DefenseClaw reads" },
+    { type: "out", text: "    their events and never changes them" },
+    { type: "out", text: "Ready: this host runs consume as its config asks." },
+    { type: "spacer", pauseMs: 150 },
+    { type: "cmd", text: "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status", pauseMs: 700 },
+    { type: "out", text: "Tetragon (managed Linux)" },
+    { type: "out", text: "  Tetragon:        v1.7.1, pid 56271, reachable" },
+    { type: "out", text: "  API socket:      trusted (root-owned unix socket) at unix:///var/run/tetragon/tetragon.sock" },
+    { type: "out", text: "  Sensor helper:   running, state updated 2026-10-26T14:34:06Z" },
+    { type: "out", text: "  Mode:            consume, burn-in 168h" },
+    { type: "out", text: "  Kernel controls: not loaded (mode consume)" },
+    { type: "out", text: "  Your Tetragon policies (DefenseClaw reads their events and never changes them):" },
+    { type: "out", text: "    NAME                    MODE          STATE    EVENTS  FORWARDED  BLOCKED  LAST" },
+    { type: "out", text: "    dc-tg2-dns-getaddrinfo  monitor_only  enabled  0       0          0        -" },
+    { type: "out", text: "    dc-tg2-file-denied      monitor_only  enabled  0       0          0        -" },
+    { type: "out", text: "    dc-tg2-file-sensitive   monitor_only  enabled  195     99         0        2026-10-26T14:34:03Z" },
+    { type: "out", text: "    dc-tg2-net-connect      monitor_only  enabled  5       4          0        2026-10-26T14:33:49Z" },
+    { type: "out", text: "Next: this host is ready for observe. Check with:" },
+    { type: "out", text: "  sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for observe" },
+  ]}
+/>
+
 ## Step 2: See your own policies' events
 
 If you already run Tetragon policies on kprobe or LSM hooks, for example one that watches opens of `~/.aws/credentials` or `tcp_connect`, DefenseClaw reports their events when they hit an AI agent. It does this in `consume`, `observe` and `enforce`, and it never manages, changes or deletes your policies.
@@ -181,6 +222,71 @@ What changes for developers: nothing for the normal shell, IDE terminals, other 
 Once a ring enforces, `status` shows each user's state: enforcing, in monitor mode because another user's native agent holds the one deny anchor, or no agent installed. A lab ring with `burn_in: 0` warns `kernel_burn_in_skipped`; a real ring keeps a measured burn-in.
 
 ![tetragon verify --ready-for enforce on the computer that enforces: every check passes, the burn-in table for burn_in 0 with the hits of two users, and the closing line that one of three users is enforced, two stay in monitor without a deny anchor, alice (uid 1001) holds the deny anchor as the lowest uid with a native agent install, and enrollment.exclude_users moves it](/images/tetragon/terminal-tetragon-verify-enforce-holder.png)
+
+<TerminalAnimation
+  cwd="~"
+  speed={1.5}
+  height={560}
+  ariaLabel="Animated terminal replay of tetragon verify --ready-for enforce on a computer that runs observe: the checks, the burn-in table where two users were reset by a hit and one has not run an agent, and the block to approve."
+  caption="Recorded on DefenseClaw 1.0.4 on a RHEL 9.8 lab computer in `observe` after a working session; account names are shortened to alice, bob and carol and the lab's other enrolled accounts (each at 0.0h, measuring) are left out of the table (the real run lists all 13). `alice` and `bob` each opened the SSH key decoy and wrote `~/.bashrc` where a control would have denied it, so their windows restarted; `carol` has not run an agent. Nothing is ready yet; the output still prints the block to approve for when a user finishes. The approval value is the same as in 1.0.3."
+  frames={[
+    { type: "cmd", text: "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce", pauseMs: 700 },
+    { type: "out", text: "Tetragon readiness for enforce (this host runs observe)" },
+    { type: "ok", text: "  ✓ Tetragon is installed (/var/run/tetragon/tetragon-info.json)" },
+    { type: "ok", text: "  ✓ Tetragon is running (pid 56271)" },
+    { type: "ok", text: "  ✓ API: unix socket /var/run/tetragon/tetragon.sock" },
+    { type: "ok", text: "  ✓ The info file, socket and their directories pass the helper's trust check" },
+    { type: "ok", text: "  ✓ Tetragon v1.7.1 is supported for enforce" },
+    { type: "ok", text: "  ✓ The sensor helper reads Tetragon's events" },
+    { type: "ok", text: "  ✓ Tetragon does not keep sensors on exit" },
+    { type: "ok", text: "  ✓ BPF LSM is enabled" },
+    { type: "ok", text: "  ✓ Tetragon's metrics endpoint listens on loopback (127.0.0.1:2112)" },
+    { type: "ok", text: "  ✓ Tetragon's health endpoint listens on loopback (127.0.0.1:6789)" },
+    { type: "ok", text: "  ✓ AI Discovery Plane C is on and the gateway records it" },
+    { type: "ok", text: "  ✓ 2 enrolled users have an agent (alice, bob); none seen yet for" },
+    { type: "out", text: "    carol" },
+    { type: "ok", text: "  ✓ Every enrolled command-line connector is in action mode (claudecode, codex)" },
+    { type: "out", text: "  i This build's kernel controls are not approved yet; approve them (below)" },
+    { type: "out", text: "  i 0 of 13 enrolled users finished burn-in on this host" },
+    { type: "out", text: "  Burn-in (40h of agent use, no would-block hit, per user on this host):" },
+    { type: "out", text: "    USER             PROGRESS              ETA       HITS" },
+    { type: "out", text: "    alice (94404135)    0.0h/40h   reset   -         2" },
+    { type: "out", text: "      persistence_write: ~/.bashrc by /bin/bash" },
+    { type: "out", text: "        last 2026-10-26T14:41:35Z. Stays in monitor until 40h pass with no hit." },
+    { type: "out", text: "        If the tool is expected, this user cannot be enforced for this control" },
+    { type: "out", text: "        in this release; other users are not affected." },
+    { type: "out", text: "      ssh_private_key_read: ~/.ssh/id_ed25519 by /bin/wc" },
+    { type: "out", text: "        last 2026-10-26T14:41:10Z. Stays in monitor until 40h pass with no hit." },
+    { type: "out", text: "        If the tool is expected, this user cannot be enforced for this control" },
+    { type: "out", text: "        in this release; other users are not affected." },
+    { type: "out", text: "    bob (94404136)      0.0h/40h   reset   -         2" },
+    { type: "out", text: "      persistence_write: ~/.bashrc by /bin/bash" },
+    { type: "out", text: "        last 2026-10-26T14:44:21Z. Stays in monitor until 40h pass with no hit." },
+    { type: "out", text: "        If the tool is expected, this user cannot be enforced for this control" },
+    { type: "out", text: "        in this release; other users are not affected." },
+    { type: "out", text: "      ssh_private_key_read: ~/.ssh/id_ed25519 by /bin/wc" },
+    { type: "out", text: "        last 2026-10-26T14:43:49Z. Stays in monitor until 40h pass with no hit." },
+    { type: "out", text: "        If the tool is expected, this user cannot be enforced for this control" },
+    { type: "out", text: "        in this release; other users are not affected." },
+    { type: "out", text: "    carol (94404137)    0.0h/40h     0%    measuring 0" },
+    { type: "dim", text: "    ... (10 more accounts, all measuring 0)" },
+    { type: "ok", text: "  ✓ Kernel enforcement is not paused" },
+    { type: "ok", text: "  ✓ No operator override" },
+    { type: "ok", text: "  ✓ DefenseClaw's 3 policies are loaded in Tetragon" },
+    { type: "ok", text: "  ✓ No DefenseClaw policy is left without a sensor helper" },
+    { type: "out", text: "  i 4 of your Tetragon policies are loaded (0 enforcing); DefenseClaw reads" },
+    { type: "out", text: "    their events and never changes them" },
+    { type: "out", text: "  Approve this build's kernel controls (same value on every host of it):" },
+    { type: "out", text: "    enterprise:" },
+    { type: "out", text: "      tetragon:" },
+    { type: "out", text: "        mode: enforce" },
+    { type: "out", text: "        enforce_ack: sha256:08b71155b713" },
+    { type: "out", text: "Ready for enforce: 0 of 13 users would be enforced now; 13 stay in monitor until" },
+    { type: "out", text: "their burn-in completes." },
+    { type: "out", text: "Set the approve block above in your admin config and apply it with your config" },
+    { type: "out", text: "management." },
+  ]}
+/>
 
 ## Check the fleet
 
@@ -243,6 +349,23 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon resume
 **Fleet emergency pause.** Run the same command on every computer, for example `ansible defenseclaw_linux -b -m ansible.builtin.command -a '/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon pause --for 4h --reason TICKET-123'`. A play with a required reason is in the [reference](/docs/enterprise/runtime/tetragon-reference#emergency-pause-play).
 
 Stopping Tetragon is not a kill switch: with `keep-sensors-on-exit` on, its programs would keep enforcing.
+
+<TerminalAnimation
+  cwd="~"
+  speed={1.5}
+  height={300}
+  ariaLabel="Animated terminal replay of tetragon pause and tetragon resume: each prints one line that says what changed and the command that checks the computer."
+  caption="Recorded on DefenseClaw 1.0.4 on the lab computer with `--for 1h`. Each command prints only its own change; the sensor helper moves the controls to monitor mode within seconds, and applies the configured intent on its next pass after `resume`. The output is the same as in 1.0.3."
+  frames={[
+    { type: "cmd", text: "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon pause --for 1h --reason TICKET-R3", pauseMs: 700 },
+    { type: "ok", text: "✓ paused kernel enforcement for every user on this host until 2026-10-26T15:45:29Z; the sensor helper moves enforcing controls to monitor mode within seconds and keeps them visible" },
+    { type: "out", text: "  check the host with: sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status" },
+    { type: "spacer", pauseMs: 150 },
+    { type: "cmd", text: "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon resume", pauseMs: 700 },
+    { type: "ok", text: "✓ resumed kernel enforcement for every user on this host; the sensor helper re-applies enterprise.tetragon on its next pass" },
+    { type: "out", text: "  check the host with: sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status" },
+  ]}
+/>
 
 ## Upgrades
 
