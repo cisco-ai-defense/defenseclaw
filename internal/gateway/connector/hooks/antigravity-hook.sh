@@ -310,7 +310,7 @@ command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
 # (mktemp in defenseclaw_harden_env) or helper call. The registered event
 # is taken from argv again afterwards: an inherited HOOK_EVENT export would
 # otherwise have been dropped with the rest of the environment.
-. "${HOOK_DIR}/_sandbox.sh"
+command . "${HOOK_DIR}/_sandbox.sh" || exit 2
 HOOK_EVENT="${1:-}"
 {{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
@@ -420,7 +420,7 @@ API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"{{else}}if [ "{{if .ScopedToken}}1{{else
   fi
 elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   # shellcheck source=/dev/null
-  . "${HOOK_DIR}/{{.TokenFile}}"
+  command . "${HOOK_DIR}/{{.TokenFile}}" || DEFENSECLAW_GATEWAY_TOKEN=
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 # Only the private copy is used from here on: no child process (curl, jq, the

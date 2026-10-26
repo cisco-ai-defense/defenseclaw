@@ -360,7 +360,7 @@ if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
   fi
 elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   # shellcheck source=/dev/null
-  . "${HOOK_DIR}/{{.TokenFile}}"
+  command . "${HOOK_DIR}/{{.TokenFile}}" || DEFENSECLAW_GATEWAY_TOKEN=
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 # Only the private copy is used from here on: no child process (curl, jq, the

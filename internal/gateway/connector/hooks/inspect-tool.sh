@@ -253,7 +253,7 @@ command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
 {{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call.
-. "${HOOK_DIR}/_sandbox.sh"
+command . "${HOOK_DIR}/_sandbox.sh" || exit 2
 {{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
 
@@ -298,7 +298,7 @@ if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "$TOKEN_FILE" ]; then
     DEFENSECLAW_GATEWAY_TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
   else
     # shellcheck source=/dev/null
-    . "$TOKEN_FILE"
+    command . "$TOKEN_FILE" || DEFENSECLAW_GATEWAY_TOKEN=
   fi
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
