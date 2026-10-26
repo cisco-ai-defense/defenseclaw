@@ -118,10 +118,18 @@ that runs only `defenseclaw sandbox` commands. Every other command, readers
 included, prints this and exits `2`:
 
 ```text
-This computer is managed; only `defenseclaw sandbox` commands are available here.
+This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator.
 ```
 
-Windows has no launcher: `defenseclaw.exe` there is the administrator command.
+Windows has no launcher: `defenseclaw.exe` there is the administrator command. It refuses the per-user writers itself:
+
+| Attempt on managed Windows | Result |
+| --- | --- |
+| `config set`, `config unset` | Exit `3`: `This device is managed: change config.yaml in the admin config (MDM or management plane); config set did not change it` |
+| `skill`, `mcp`, `plugin` or `tool` with `block`, `allow` or `unblock` | Exit `3`, naming the `asset_policy` key in the admin config and saying the command did not change it |
+| `init`, `quickstart`, `guardrail`, `policy activate` | Exit `2`: not a command of the administrator's `defenseclaw.exe` |
+
+The table below is for a per-user CLI left from an earlier install on Linux and macOS.
 
 ### Local writers refuse
 

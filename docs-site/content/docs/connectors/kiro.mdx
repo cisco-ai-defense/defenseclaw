@@ -108,7 +108,7 @@ Fail closed while the hook runs: yes. On a per-user install a gateway that is no
 
 <HookEventsList connector="kiro" />
 
-No entry in `hook_contracts.json`: per-user installs are not version-gated.
+Kiro has no entry in `hook_contracts.json`. Per-user setup checks kiro-cli instead: it needs 2.27.1 or later (`KiroCLIHookFloor`), because before 2.27.1 a non-interactive `kiro-cli chat --v3` run loads no hooks. Setup refuses an older kiro-cli in observe and action mode, before it changes anything, when no supported Kiro IDE is installed ([Kiro](/docs/connectors/kiro)).
 
 ## Native Windows
 

@@ -95,7 +95,7 @@ The machine-wide drop-in carries one hook contract for every account, not the ve
 
 ### On a managed computer
 
-The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup claudecode` and `setup remove`, and has no `guardrail` group.
+The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup claudecode` and `setup remove`, and has no `guardrail` group.
 
 The administrator manages Claude Code in the managed `config.yaml`. `guardrail.connectors.claudecode: {}` adds it, the connector's `mode` and `hook_fail_mode` tune it, and `guardrail.connectors.claudecode.enabled: false` removes it. Apply the change as in [Change the config](/docs/enterprise/lifecycle), then check it with `enterprise policy verify` ([Machine policy](/docs/enterprise/machine-policy)).
 
@@ -127,7 +127,7 @@ The administrator manages Claude Code in the managed `config.yaml`. `guardrail.c
 - In action mode `PreToolUse` can deny a tool call or ask you first. The question appears inside Claude Code in Manual mode, its default; in any other permission mode the call is blocked with a note to switch to Manual mode and ask again.
 - The prompt, permission, task, stop, compaction, config and elicitation events can also block.
 - Events that carry a tool's result (`PostToolUse`, `PostToolUseFailure`, `PermissionDenied`) are advisory. DefenseClaw scans them and records findings, but the tool has already run.
-- Observe mode records policy findings without blocking on those findings. When the gateway is not running, the default and permissive policies let the call run with one warning and strict blocks it; every other hook failure blocks ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Settings and limits are in [Fail modes](/docs/reference/fail-modes).
+- Observe mode records policy findings without blocking on those findings. On a per-user install, when the gateway is not running, the default and permissive policies let the call run with one warning; strict and managed installs block it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). A running hook blocks every other failure it detects; a killed or timed-out hook lets the call run ([Vendor limits](/docs/enterprise/machine-policy#vendor-limits)). Settings and limits are in [Fail modes](/docs/reference/fail-modes).
 
 ### Verdict mapping
 
@@ -210,7 +210,7 @@ On every host install, setup sets Claude Code telemetry and all OTLP exporters o
 - `PostToolUse`, `PostToolUseFailure` and `PermissionDenied` are advisory: they cannot undo a finished tool.
 - `ConfigChange` is blockable, except when `source=policy_settings`, where Claude Code ignores blocking decisions.
 - `Setup` and `WorktreeCreate` are not registered.
-- Keep the gateway running while Claude Code runs. Give each account on a shared computer its own gateway port. Per-user hooks verify the connected gateway account before sending an event. During an outage the default and permissive policies let the call run with a warning, strict blocks it.
+- Keep the gateway running while Claude Code runs. Give each account on a shared computer its own gateway port. Per-user hooks verify the connected gateway account before sending an event. What an outage does is in [What it can block or ask](#what-it-can-block-or-ask).
 - Per-user hooks live in a file you own. The [enterprise standalone profile](/docs/enterprise/machine-policy) puts them in machine policy instead.
 
 ## Disable
@@ -221,6 +221,6 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-With the default restart, disabling removes DefenseClaw hooks and OpenTelemetry settings from Claude Code's settings file. It preserves your other Claude Code settings. `defenseclaw guardrail enable` restores DefenseClaw hooks and telemetry settings. For a whole-guardrail disable with `--no-restart`, removal takes effect when you restart the gateway. With `--connector claudecode` and `--no-restart`, a running gateway removes the connector's entries at once. To remove the connector from DefenseClaw's configuration, run `defenseclaw setup remove claudecode --yes` (add `--force` if it is the last one).
+With the default restart, disabling removes DefenseClaw hooks and OpenTelemetry settings from Claude Code's settings file. It preserves your other Claude Code settings. `defenseclaw guardrail enable` restores DefenseClaw hooks and telemetry settings. It asks `Proceed? [Y/n]`; add `--yes` in scripts or when stdin is not a terminal. For a whole-guardrail disable with `--no-restart`, removal takes effect when you restart the gateway. With `--connector claudecode` and `--no-restart`, a running gateway removes the connector's entries at once. To remove the connector from DefenseClaw's configuration, run `defenseclaw setup remove claudecode --yes` (add `--force` if it is the last one).
 
 On a multi-connector install, add `--connector claudecode` to `guardrail disable` and `guardrail enable` to change only this agent.

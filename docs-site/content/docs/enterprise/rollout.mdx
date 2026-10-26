@@ -162,8 +162,11 @@ On Linux computers that run Tetragon, kernel controls follow the same rings
 
 Two Windows cases keep `security_complete` at `false` on a healthy install: no Codex,
 Claude Code or Cursor turned on, and Claude Code on without the administrator's
-[attestation](/docs/enterprise/windows#verify-the-install). Every other
-`false` needs a look.
+[attestation](/docs/enterprise/windows#verify-the-install). On Linux and macOS a
+healthy install keeps it at `false` with only `hook_process_fail_open` (for an enabled
+Codex, Claude Code or other agent whose hook can let a call run) and, on Linux,
+`unprivileged_user_namespaces` and `unprivileged_ptrace` while the kernel allows them.
+Every other `false` needs a look.
 
 ## Step 6: Plan upgrades and rollback
 

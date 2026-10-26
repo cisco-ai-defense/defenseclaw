@@ -50,6 +50,7 @@ enterprise:
 ```
 
 - `exclude_users` always wins. `exempt_users` skips enrollment but not inspection: the account's guardrail profile still applies.
+- Excluding an enrolled account also removes its guardian identity record at the next guardian pass, unless the gateway still inspects that account's hook calls (a machine-policy connector that inspects every account, or `exempt_users`). Then the record stays, so the account's own guardrail profile keeps applying.
 - `unenrolled_users` (Linux and macOS) decides what happens to a machine-policy agent for a user with no enrollment: `inspect` (default) still inspects, `deny` refuses. On managed Windows, Claude Code, Codex and Cursor must refuse an unenrolled user's calls even with zero enrolled users for that agent. Keep each enabled agent's machine policy in force; treat a missing policy as a protection failure and stop agent use until it is repaired.
 - With `mode: manifest` you publish the target list yourself. The format is under [Publish the target list yourself](#publish-the-target-list-yourself).
 - Linux and macOS also take `root`, `uid_min`, `uid_max`, `home_roots` and `agent_prefixes`. Windows does not apply them.
@@ -118,6 +119,8 @@ Some agents also ship as a desktop app or editor extension that reads the same h
 | Cursor | Cursor desktop | The app version |
 | Devin | Devin Desktop | The Devin CLI it bundles, read from that CLI's man page; nothing is run. See [Devin](/docs/connectors/devin/). |
 | Antigravity | Antigravity IDE | None: the IDE shares the CLI's hook file but is never enrolled on its own |
+
+On Linux and macOS a machine-policy agent (Claude Code, Codex, Cursor) needs no per-user target: under `unenrolled_users: inspect` (the default) an extension-only user of it gets no target row and the machine policy inspects their calls; with `deny` the user becomes a target.
 
 The editor folders searched are `.vscode`, `.vscode-insiders`, `.vscode-server` (Linux and macOS), `.vscode-oss`, `.cursor`, Devin Desktop's pre-rename folder ([Renamed and removed connectors](/docs/get-started/upgrade#renamed-and-removed-connectors)), `.kiro` and `.antigravity` under the home, each with `extensions`. On Windows the folder the user's persistent `VSCODE_EXTENSIONS` variable names is searched too. Other relocated folders and JetBrains plugins are not found by discovery, but the hook still names their calls by the surface. A host version (the editor's or the app's own version) never selects a hook contract.
 
@@ -317,7 +320,8 @@ Per-agent pages and the [compatibility table](/docs/connectors/compatibility) gi
 On Linux and macOS, `enterprise hooks status` shows each row, including deferred, pending and failed installs:
 
 ```bash
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks status
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks status          # Linux
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise hooks status    # macOS
 ```
 
 On Windows, run from an elevated prompt and read `enrollment.accounts`, which lists each account and connector as enrolled, pending or failed:

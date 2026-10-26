@@ -8,6 +8,11 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.5
+- **A managed purge keeps an account's own DefenseClaw install.** If an enrolled account had its own install before the enrollment, `--purge` leaves its `~/.defenseclaw` and binaries as they are and names the account; no `~/.defenseclaw-backup-*` folder is made.
+- **The Linux and macOS MDM uninstall removes the wrapper's credential rotation journal**, and `--purge` removes the wrapper's empty state folder on both systems (a rotation had brought back #1298 on Linux).
+- **Docs: known limits and troubleshooting cover every 1.0.5 finding.** New entries for agent messages that are not from DefenseClaw, scanners on macOS, long SSH user names without logind, the shared Codex daemon key, Windows upgrade and rollback exit codes and sandbox rejections; outage text on every page follows the per-user policy tier; the Policy creator's Live Test scores scenarios per preset.
+
 ## [Unreleased] — 1.0.4
 - **Raw OpenShell MicroVM stop advice now names the gateway version that flushes the guest.** OpenShell 0.1.5 and later request a guest flush before a planned stop; on an older gateway, save the work first. A failed flush may still lose changes after the last successful disk sync.
 - **Agent identity rows show only a current UPN.** Each hook replaces the row's `upn` with the UPN that the latest directory answer or guardian pass verified, or leaves it out. Profile matching is unchanged: during a directory outage it still uses the last good UPN that the Windows AD UPN cache and the guardian keep, and rows leave out that kept UPN. A later hook records the UPN again once a lookup verifies it. An unavailable lookup and an account with no verified UPN remain distinct in storage.

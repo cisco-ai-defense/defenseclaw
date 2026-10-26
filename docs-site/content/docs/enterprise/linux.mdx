@@ -519,9 +519,7 @@ removing any file ([Remove the policies, or downgrade](/docs/enterprise/tetragon
 The result's `kept:` line names accounts that still have `~/.defenseclaw` or
 per-user binaries. With `--purge` it also stops each enrolled user's per-user
 gateway and removes `~/.defenseclaw`, the empty agent folders DefenseClaw created,
-the per-user binaries in `~/.local/bin` and DefenseClaw's wheels in `~/.cache/uv`;
-a user's own DefenseClaw install from before enrollment is first moved to
-`~/.defenseclaw-backup-<UTC time>`. Use `--purge` instead of a plain uninstall to
+the per-user binaries in `~/.local/bin` and DefenseClaw's wheels in `~/.cache/uv`. If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db` or `previous/`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. Accounts the deployment never enrolled keep their DefenseClaw files (an earlier per-user install, or hooks a former enrollment left). The purge result lists each such account on a `kept:` warning; delete those files with the account's owner. Use `--purge` instead of a plain uninstall to
 delete user data: the plain uninstall removes the enrollment record a later
 `--purge` needs, and a purge after it warns `per_user_state_remaining`. To clean up
 afterward, run `ensure --from-package --config <file>` and then `uninstall --purge`,

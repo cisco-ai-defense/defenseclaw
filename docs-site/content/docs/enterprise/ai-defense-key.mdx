@@ -83,7 +83,12 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-de
 The command stores the key, then runs `ensure` with reason `secret`, which
 restarts the gateway so it reads the key. The apply path unit would also
 pick up the change. The output starts with `✓ secret set: done` and
-`- stored credential ai-defense-api-key`, followed by the apply steps.
+`- stored credential ai-defense-api-key`, followed by the apply steps. On most
+Linux hosts it starts with `! secret set: done with N warnings` and the
+warning lines instead (for example `hook_process_fail_open`,
+`unprivileged_user_namespaces`, `unprivileged_ptrace`), then
+`- stored credential ai-defense-api-key`. The warnings are the host's normal
+status, not a failed store.
 
   </Tab>
   <Tab value="macOS">
@@ -250,6 +255,8 @@ with `the installed config still references credential ai-defense-api-key`, and
 nothing is removed. On Linux and macOS a successful removal prints
 `- removed credential ai-defense-api-key`, or
 `- credential ai-defense-api-key was not stored; nothing to remove`.
+When the host has status warnings it first prints `! secret remove: done with N warnings`
+(or `! secret remove: nothing to do (up_to_date), N warnings`) and the warning lines.
 On Windows, removal reads the installed config to check for references.
 If it cannot read that config, it refuses and leaves the credential in place;
 restore config access, then run the command again.

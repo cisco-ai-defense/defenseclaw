@@ -357,6 +357,8 @@ the companion managed endpoint inventory. No restart needed.
 defenseclaw agent discovery disable
 ```
 
+It asks `Proceed? [Y/n]`; `--yes` skips the question. `defenseclaw agent discovery disable` turns off AI discovery and the runtime planes that `enable` turned on. The selected planes are kept for the next `enable`.
+
 Sets `ai_discovery.enabled` to `false` and stops the scanner. Your other `ai_discovery.*` settings stay in the file, so `enable` brings the same configuration back. Existing audit events are preserved.
   </Tab>
 </Tabs>

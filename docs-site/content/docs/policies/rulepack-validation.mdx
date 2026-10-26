@@ -74,6 +74,8 @@ A non-empty pack directory is an overlay on the compiled baseline. Missing `supp
 ```bash
 defenseclaw doctor
 ```
+The pack also sets what a gateway outage does when you saved no fail mode: with `strict` a call is blocked while the gateway is not running, and `default` lets it run with a warning again ([Fail modes](/docs/reference/fail-modes)).
+
 
 ```text
   [PASS] Rule pack [codex]  -  configured rule pack "default" "/home/alice/.defenseclaw/policies/guardrail/default": 239/243 rules enabled; digest=e379755d…
@@ -139,6 +141,7 @@ defenseclaw policy activate strict
 ```bash
 defenseclaw guardrail use-pack default
 defenseclaw guardrail use-pack --clear --connector codex
+defenseclaw policy activate default   # admission back to the default preset; also undoes the plugin edit
 ```
 
 Next: [tune the judge](/docs/policies/suppression-cookbook), [what happens when an edit fails](/docs/policies/rules#when-something-is-wrong), [change the levels](/docs/policies/thresholds), [what each pack ships](/docs/policies/defaults).

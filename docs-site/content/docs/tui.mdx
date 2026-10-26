@@ -74,7 +74,7 @@ to filter.
 | `6` | Inventory | Combined inventory view, with sub-tabs for skills, plugins, MCPs, agents (including agent identities), tools, models, memory and [IDE plugins](#ide-plugins) |
 | `7` | Sandboxes | OpenShell sandboxes, their live activity feed, and the rare asks ([below](#sandboxes-panel)) |
 | `8` | Logs | Live gateway logs with filter presets. The view opens on the newest line and follows new lines until you move the cursor |
-| `9` | Audit | Audit trail. `3` (Blocks) lists the calls DefenseClaw blocked, hook and guardrail blocks included, from the whole trail; the other views load the newest 500 events (the header says since when; use `defenseclaw audit export` for older ones). A row's detail names the connector, decision, mode and rule. `e` writes the rows of the current view to a new `defenseclaw-audit-export-<date>-<time>.json` in the data directory; an earlier export is never replaced |
+| `9` | Audit | Audit trail. The **Blocks** filter chip (move between chips with `h` and `l`; `3` still opens Skills) lists the calls DefenseClaw blocked, hook and guardrail blocks included, from the whole trail; the other views load the newest 500 events (the header says since when; use `defenseclaw audit export` for older ones). A row's detail names the connector, decision, mode and rule. `e` writes the rows of the current view to a new `defenseclaw-audit-export-<date>-<time>.json` in the data directory; an earlier export is never replaced |
 | `A` | Activity | Live output from commands you run; `l` (Mutations; `h` goes back to Commands) lists config and policy changes with what changed (for example `/.env/NAME: unset -> set`) |
 | `V` | AI Discovery | Discovered AI agents, components, and local models, including model status and format |
 | `N` | Runtime | What actually ran: the [runtime planes](/docs/ai-discovery) and their findings |
@@ -100,7 +100,7 @@ sandbox. `defenseclaw agent usage --sandbox NAME` lists one sandbox's.
 
 ![DefenseClaw TUI AI Discovery panel with a row for Claude Code on the host and a separate row, Claude Code (sandbox myapp-claude), for what the scan found inside the sandbox](/images/sandboxes/screens/tui-ai-discovery-sandbox.png)
 
-The Runtime panel reads the same gateway as `agent discovery runtime status`.
+The Runtime panel reads the same gateway as `agent discovery runtime status`. WATCHING means every selected plane is running, with a coverage note (for example, without elevation shadow egress sees only your own connections). DEGRADED means a selected plane is unavailable or not running.
 It has no Tetragon lines. Only a managed Linux gateway reports Tetragon, and
 the managed Linux packages ship no TUI, and their `defenseclaw` runs only `sandbox` commands. On managed Linux,
 `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`
@@ -436,7 +436,7 @@ the details window takes the keys of its view, and `Esc` closes it.
 | `a` / `A` / `x` | Approve the selected ask once, always approve it (asks again; every future sandbox may reach it too, and a toast confirms what was saved), or reject it. An approval applies when the agent is idle. `A` is not offered for a port on this machine, a private or IP-literal address, or a proposal with allowed IPs: those open for one sandbox only. Outside Asks, `a` switches to Asks when one waits |
 | `c` | Connect: start the sandbox if it is stopped and attach its harness |
 | `n` | New run: open the [launch dialog](#start-a-run-from-the-tui) |
-| `s` | Save or sync accessible work first, then stop the sandbox (asks first); it is kept, so `c` resumes it. `defenseclaw sandbox stop <name>` runs in this terminal and asks again while a detached run is still going; DefenseClaw marks that run interrupted and keeps its log for `defenseclaw sandbox logs <name>` |
+| `s` | Save or sync accessible work first, then stop the sandbox (asks first; if a MicroVM's stop is held because its disk could not be synced, the TUI asks whether to stop it anyway; that keeps what reached its disk, and what was not synced may be lost, the same as `defenseclaw sandbox stop NAME --yes`); it is kept, so `c` resumes it. `defenseclaw sandbox stop <name>` runs in this terminal and asks again while a detached run is still going; DefenseClaw marks that run interrupted and keeps its log for `defenseclaw sandbox logs <name>` |
 | `d` | Delete the sandbox (asks first) with its providers, credentials and snapshot. Undo is no longer possible; your project folder keeps its current contents |
 | `U` | Save work you want to keep first, then undo: preview the changes, ask, stop a running sandbox, and put the project folder back to its pre-session snapshot. For a sandbox that works on a copy, `U` reverts its last `pull --apply` instead: `defenseclaw sandbox undo <name>` previews the revert in this terminal and asks, and edits you made since stay |
 | `R` | Review the changed files that can run code on your machine (a sandbox that mounts its folder) |

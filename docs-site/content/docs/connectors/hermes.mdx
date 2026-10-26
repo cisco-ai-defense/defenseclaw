@@ -91,6 +91,7 @@ On Linux the probe runs in a PID namespace of its own, inside a user namespace u
 | Hook program, macOS and Linux | `~/.defenseclaw/hooks/hermes-hook.sh` |
 | Reload state, Windows only | `hooks/hermes-direct-native-state.json` under the DefenseClaw data directory |
 | Hook program, Windows | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
+| Hook program, managed Windows | `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`, written by the guardian into each enrolled account's `%LOCALAPPDATA%\hermes\config.yaml` |
 
 Disable removes only DefenseClaw's entries and approvals. Settings and comments outside the `hooks` mapping are kept; whitespace can change. On Linux and macOS `hermes-hook.sh` stays as an inert stub, because a running Hermes keeps calling it until it restarts.
 
@@ -186,13 +187,15 @@ To reduce this, prefer agents governed through machine policy, use application c
 
 ### On a managed computer
 
-The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup hermes` and `setup remove`, and has no `guardrail` group. Hermes is protected per user: the guardian writes the hooks and exact approvals into each enrolled account's Hermes config.
+The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup hermes` and `setup remove`, and has no `guardrail` group. Hermes is protected per user: the guardian writes the hooks and exact approvals into each enrolled account's Hermes config.
 
 The administrator manages Hermes in the managed `config.yaml`. `guardrail.connectors.hermes: {}` adds it for the accounts that [enrollment](/docs/enterprise/enrollment) selects, the connector's `mode` and `hook_fail_mode` tune it, and `guardrail.connectors.hermes.enabled: false` removes it. Apply the change as in [Change the config](/docs/enterprise/lifecycle), then check it with `enterprise <os> verify --json` (on Windows add `--profile standalone`; see [Operations](/docs/enterprise/operations)). On Windows, machine ensure and upgrade can complete while an enrolled Hermes account reports `NOT COVERED`: a session-only `HERMES_HOME` may select a home the guardian cannot see or hook. Ensure, status, verify and the managed `doctor` answer name this limit; the lifecycle records a managed coverage alert. Managed verification reports session-home coverage as unknown because a shell can select an unhooked `HERMES_HOME` after the guardian checks. On Linux and macOS, `enterprise hooks verify --json` as root also checks the current hook files and reports this limit. `enterprise policy verify` checks machine-policy connectors only. See [Managed verification](#managed-verification).
 
 ### Managed verification
 
 `enterprise <os> status --json` and `verify --json` report `connectors.hermes.hooks_installed` and `targets`. On Linux and macOS the target rows come from the guardian's last reconcile and do not prove what a running Hermes host has loaded. Managed Hermes hook coverage is reported as unknown when Hermes is present or discovery is unknown.
+
+On a managed host, `enterprise hooks verify` always exits 1 for Hermes rows: each row says `connector hermes cannot be verified: session-only HERMES_HOME cannot be observed by the managed service`. That is the session-only limit, not tampering. `enterprise linux verify` and `enterprise macos verify` report the same limit as a NOT COVERED warning and exit 0.
 
 To check the current hook files on Linux, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks verify --json`. On macOS use `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise hooks verify --json`. Missing or changed owned commands fail this check. Managed Hermes also reports that it cannot certify a session-only `HERMES_HOME`; file integrity alone does not prove launch coverage. Reload every Hermes host after repair.
 
@@ -222,9 +225,11 @@ When the configured home changes, for example after an upgrade from 1.0.3 on Win
 - Hermes runs every hook registered for an event, in order. A hook added after DefenseClaw's can change a command DefenseClaw already checked. Hermes cannot lock or order hooks, so a foreign `pre_tool_call` hook can rewrite tool input.
 - `hermes --safe-mode`, or a `HERMES_HOME` without the `hooks` block, runs with no DefenseClaw hook. Managed ensure, status and verify mark session-home coverage unknown; status and verify also report a running bypass as incomplete.
 - Hermes registers shell callbacks per process. A host that is not reloaded keeps its old state, also after you turn the connector off.
-- Hermes MCP startup can fail before any hook when `pm-runtime` cannot read the shared `install-stamp.json` or the tools installer cannot create `$HERMES_HOME/tools/.install.lock`. Inspect the resolved path, owner, and permissions for the affected account. No DefenseClaw verdict was recorded for these failures.
+- Hermes MCP startup can fail before any hook when `pm-runtime` cannot read the shared `install-stamp.json` or the tools installer cannot create `$HERMES_HOME/tools/.install.lock`. Inspect the resolved path, owner, and permissions for the affected account. No DefenseClaw verdict was recorded for these failures ([Agent messages that are not from DefenseClaw](/docs/support-matrix#agent-messages-that-are-not-from-defenseclaw)).
 
 ## Disable
+
+On a managed computer, the administrator sets `guardrail.connectors.hermes.enabled: false` in the managed `config.yaml` and runs `ensure` ([On a managed computer](#on-a-managed-computer)); the commands below are refused there.
 
 For a per-user, single-connector install:
 

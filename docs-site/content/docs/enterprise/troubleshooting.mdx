@@ -115,6 +115,9 @@ Warnings do not fail an action. They appear in `warnings[]`.
 | `security_incomplete` | Windows | `security_complete` is `false` and nothing else in the result says why. The message lists the reasons. "The claudecode machine policy is not verified in force" usually means the Claude Code attestation is missing or stale after an upgrade: confirm that an enrolled user's Claude Code runs DefenseClaw's hooks, then run Setup `/repair ATTESTCLAUDEEFFECTIVEPOLICY=1` (see [Verify the install](/docs/enterprise/windows#verify-the-install)). "No account is enrolled for Codex, Claude Code or Cursor" means the target manifest has no enabled row for any of them: enable at least one under `guardrail.connectors`, check the enrollment lists (see [Enrollment](/docs/enterprise/enrollment#windows)), and apply the config with Setup `/ensure CONFIG=<path>` |
 | `config_version_8` | Linux, macOS | The config the run read (`--config`, or the installed `config.yaml`) is still `config_version: 8`. DefenseClaw applied its version 9 migration; the message lists the values that conflicted and how the migration resolved them. Deliver a `config_version: 9` file instead, for example the migrated `config.yaml` |
 | `machine_policy_incomplete` | Linux, macOS | DefenseClaw's hooks are not in place in a vendor policy file for the named connectors, or they are in place but do not take effect (a higher-precedence source such as a `com.anthropic.claudecode` managed-preferences profile outranks them, or the file carries a conflicting value such as `allow_managed_hooks_only = false`). `security_complete` is `false`, and `verify` fails with `verify_failed`. When entries the last transaction placed are gone from their file, `status` fails too and `repair` puts them back; under `ownership: verify_only` the message names the export to deploy instead |
+| `hook_process_fail_open` | Linux, macOS, Windows | An enabled agent runs a tool when its pre-tool hook is stopped, killed or times out (Codex, Claude Code, Copilot CLI, Antigravity and others; the message names the agent). `security_complete` is `false` while it is enabled. It is an agent limit: protect the hook process with application control or EDR. See [Known limits](/docs/support-matrix#codex) |
+| `status_detail_unavailable` | Linux, macOS, Windows | Status could not read one of its inputs for a connector block, so that block leaves out what the input feeds; on Windows it comes with Hermes `NOT COVERED` when a session-only `HERMES_HOME` cannot be observed |
+| `claude_state_unreadable` | Linux, macOS, Windows | The guardian could not read an enrolled user's `~/.claude.json`, so the gateway refuses that user's Claude Code MCP servers until it can. The message names the account |
 | `scanner_judge_missing` | Windows | With `scanners.skill_scanner.use_llm: false`, `Scanners:` shows `judge none`; scans use static analyzers without an LLM judge. The warning also appears when no judge model is configured. Set `scanners.skill_scanner.use_llm: true`, configure `llm.model` and store its key with `enterprise secret set` to enable the judge |
 | `claude_version_floor_missing` | Linux, macOS | DefenseClaw's Claude Code version floor drop-in (`00-defenseclaw-version-floor.json`) is missing. The hooks are still in place and `verify` still passes. The next `ensure`, `repair` or `reconcile` writes it back. See [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor) for the builds it applies to |
 | `not_started` | Linux, macOS, Windows | Installed with `--no-start` (Setup `NOSTART=1` on Windows). `ensure` reports it as a warning (on Windows also `install`, `upgrade` and `repair`, which exit `0`); `status` and `verify` fail until the services run, because no agent is protected. Run `repair` or `ensure` (on Windows without `NOSTART=1`) to start them |
@@ -497,19 +500,27 @@ An antivirus or EDR quarantined `C:\Program Files\Cisco\DefenseClaw\bin\defensec
 
 #### `security_complete` is `false` on Windows
 
-Claude Code is enabled and its attestation is not recorded, no Codex, Claude Code or Cursor row is enabled in the target manifest, or Codex or Claude Code is enabled (`hook_process_fail_open`).
+Claude Code is enabled and its attestation is not recorded (`machine_policy.claudecode` without `effective_lock: enforce`; run Setup `/repair ATTESTCLAUDEEFFECTIVEPOLICY=1`, again after each upgrade), no Codex, Claude Code or Cursor row is enabled in the target manifest, an enabled agent's hook can let a call run (`hook_process_fail_open`), an account's Hermes coverage cannot be confirmed (`status_detail_unavailable`, Hermes `NOT COVERED`), an account is still pending enrollment, or an enrolled user's Claude Code state cannot be read (`claude_state_unreadable`).
 
-**Fix.** Run `verify` and read the warning `security_incomplete`. See [Health fields](/docs/enterprise/operations#health-fields). `hook_process_fail_open` is a known agent limit: protect the hook process with application control or EDR.
+**Fix.** Run `verify` and read every warning: the codes above say why, and on 1.0.3 or a host without Claude Code or Codex the warning `security_incomplete` lists the reasons. See [Health fields](/docs/enterprise/operations#health-fields). `hook_process_fail_open` is a known agent limit: protect the hook process with application control or EDR.
 
 **Check.** `security_complete` is `true`, or `false` with `hook_process_fail_open` as its only warning.
 
 #### `security_complete` is `false` on Linux or macOS
 
-The sensor helper is not running, the run had errors, an agent is `agent_unprotected` or `hook_contract_unverified`, a user target is `guardian_target_failed`, the config enables no agent (`no_connectors_enabled`), or Codex, Claude Code, Copilot, Devin, Hermes, Kiro or Antigravity is enabled (`hook_process_fail_open`).
+The sensor helper is not running, the run had errors, an agent is `agent_unprotected` or `hook_contract_unverified`, a user target is `guardian_target_failed`, the config enables no agent (`no_connectors_enabled`), Codex, Claude Code, Copilot, Devin, Hermes, Kiro or Antigravity is enabled (`hook_process_fail_open`), or on Linux the kernel allows unprivileged user namespaces or process tracing (`unprivileged_user_namespaces`, `unprivileged_ptrace`, see [Known limits](/docs/support-matrix#upgrade-and-policy-limits)).
 
 **Fix.** Run `verify` and read the errors and warnings. `hook_process_fail_open` is a known agent limit: protect the hook process with application control or EDR.
 
-**Check.** `security_complete` is `true`, or `false` with `hook_process_fail_open` as its only warning.
+**Check.** `security_complete` is `true`, or `false` with only `hook_process_fail_open`, `unprivileged_user_namespaces` and `unprivileged_ptrace` warnings.
+
+### An account on a stalled network or FUSE mount
+
+When an agent's home or `HERMES_HOME` is on a network or FUSE mount that has stopped answering, `enterprise linux status`/`verify` (and `macos`) still answer within a few seconds and report that account as not confirmed. Each run leaves one `stat` process waiting on that mount until the mount answers or is unmounted.
+
+**Fix.** Fix or unmount the mount (for example `umount -l` or `fusermount -uz`) to clear them.
+
+**Check.** The account is confirmed again and no `stat` process waits on the mount.
 
 #### `verify` fails because of one user (`guardian_target_failed`)
 
@@ -543,9 +554,9 @@ The policy commands read the managed config, which only administrators can read.
 
 **Check.** The command runs.
 
-#### `This computer is managed; only defenseclaw sandbox commands are available here`
+#### This computer is managed (`defenseclaw` exits 2)
 
-The command exits `2`. On a managed Linux or macOS computer the packaged `defenseclaw` runs only `defenseclaw sandbox` commands; everything else, readers included, belongs to the administrator.
+You see: "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." The command exits `2`. On a managed Linux or macOS computer the packaged `defenseclaw` runs only `defenseclaw sandbox` commands; everything else, readers included, belongs to the administrator.
 
 **Fix.** Use `defenseclaw sandbox ...` as a user. An administrator runs `defenseclaw-gateway enterprise linux status` (`enterprise macos status` on macOS) as root, by its packaged path. Policy changes go in the admin config.
 
@@ -553,11 +564,11 @@ The command exits `2`. On a managed Linux or macOS computer the packaged `defens
 
 #### A command exits `3` with `This device is managed`
 
-This is a per-user CLI left from an earlier install. It covers `config set`, `config unset`, `skill`, `mcp`, `plugin` and `tool block`, `allow`, `unblock`. The gateway answers `403` `managed_device` on `/enforce/block` and `/enforce/allow`. The host is a managed standalone deployment: its policy comes from the admin config only, so every local writer refuses, even for root. Each attempt is audited as `outcome=refused reason=managed_device`.
+This is a per-user CLI left from an earlier install. It covers `config set`, `config unset`, `skill`, `mcp`, `plugin` and `tool block`, `allow`, `unblock`. The gateway answers `403` `managed_device` on `/enforce/block` and `/enforce/allow`. The host is a managed standalone deployment: its policy comes from the admin config only, so every local writer refuses, even for root. On Linux and macOS each attempt is audited as `outcome=refused reason=managed_device`. On managed Windows `defenseclaw.exe` exits `3` and writes no audit row, so check the exit code there.
 
 **Fix.** Make the change in the admin config: `asset_policy` for block and allow lists, `guardrail.block_at` for thresholds. See [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host).
 
-**Check.** The audit log shows no new `managed_device` refusal.
+**Check.** The change applies from the admin config; on Linux and macOS the audit log shows no new `managed_device` refusal.
 
 #### A `DEFENSECLAW_*` variable or `.env` entry has no effect
 

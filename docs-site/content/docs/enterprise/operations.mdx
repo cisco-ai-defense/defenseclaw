@@ -23,6 +23,8 @@ up the code in [Troubleshooting](/docs/enterprise/troubleshooting). Terms such a
 
 Two lifecycle actions report on a deployment. Neither changes the host.
 
+When an account's private agent installs cannot be scanned completely, the warning reads `<connector> for user <user> is not protected: the bounded scan of this account's private agent installs was incomplete (<reason>)`. On macOS the scan does not open the folders macOS privacy protection holds for a background service (Desktop, Documents, Downloads, Movies, Music, the Photos library, and the Mail, Messages, Safari and other personal-data folders under ~/Library); an agent copy kept there is not found. After later records are written, `audit_write_failed` stays for 16 minutes after the last failed write, then clears without a gateway restart.
+
 | Action | What it does | Use it for |
 | --- | --- | --- |
 | `status` | Reports the recorded state: installed version, services, readiness, machine policy and enrollment counts. On Linux and macOS it also runs the basic checks (files, services, gateway health); each problem is an error and the command exits non-zero | Inventory and dashboards |
@@ -702,7 +704,7 @@ event log.
 | Config changes applied | `journalctl -u defenseclaw-enterprise-apply.service` |
 | Daily verify | `journalctl -u defenseclaw-enterprise-verify.service` |
 | `/var/log/defenseclaw` | Empty by default: the services write to the journal. The gateway may write only there and in `/var/lib/defenseclaw`, so it is the place for a `jsonl` file destination (see [Audit records and SIEM forwarding](#audit-records-and-siem-forwarding)) |
-| Package install result | `/var/lib/defenseclaw-enterprise/last-package-result.json`, and `last-package-result.log` beside it |
+| Package install result | `/var/lib/defenseclaw-enterprise/last-package-result.json` (the package's postinstall moves its log away, so no `.log` stays beside it after an upgrade) |
 | MDM wrapper log | `/var/log/defenseclaw-enterprise-mdm.log` |
 | Kernel sensor records | With Tetragon and Plane C, the sensor helper's records reach your destinations as `ai.runtime.plane_health`, `ai.runtime.kernel_policy`, `ai.runtime.kernel_event` and `enforcement.block.applied` with the initiator `kernel`. See [Tetragon on a Linux fleet](/docs/enterprise/tetragon) |
 

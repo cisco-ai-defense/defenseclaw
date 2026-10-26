@@ -51,7 +51,11 @@ agent's hook or plugin can block.
 ## Local audit is always on
 
 The gateway always writes its audit log to
-`%USERPROFILE%\.defenseclaw\audit.db` (SQLite). It keeps writing when no
+`%USERPROFILE%\.defenseclaw\audit.db` (SQLite). On a managed computer the
+audit database is `C:\ProgramData\Cisco\DefenseClaw\runtime\audit.db`, and an
+administrator checks the deployment from an elevated prompt with
+`defenseclaw.exe enterprise windows status --profile standalone` and
+`enterprise windows verify --profile standalone`. It keeps writing when no
 remote destination is configured, and when a remote destination is
 unreachable.
 
@@ -171,8 +175,10 @@ tests proves code and lifecycle behavior, not release provenance. See
 
 The per-user package runs as the current user and changes only what it
 created or recorded. Its installer state, credentials, audit database, and
-process records are owned by the current user and readable only by that
-user, Administrators, and SYSTEM. The same applies to OpenCode's managed
+process records are owned by the current user. `audit.db` and `.env` grant
+access only to the user (`OWNER RIGHTS` or the account) and SYSTEM, so an
+administrator can read them only after taking ownership. The other files are
+readable by the user, Administrators, and SYSTEM, and so is OpenCode's managed
 plugin. That keeps other standard users out, but it does not protect against
 the user themself or an administrator; `defenseclaw doctor` detects a changed
 plugin and setup puts it back. Files that agents own keep their own

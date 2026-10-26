@@ -35,7 +35,7 @@ defenseclaw setup codex --mode action  # block on policy hits
 
 A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Quit and reopen Codex afterwards. After upgrading from an earlier release, quit all running Codex processes and reopen them so they stop using any old exporter configuration.
 
-Host setup removes earlier DefenseClaw native exporter blocks and revokes their scoped tokens because Codex cannot verify the account behind the loopback listener. An existing Codex process can retain the old configuration. The isolated OpenShell exporter still uses the gateway's `/v1/{logs,metrics,traces}` endpoints. Do not print or copy old exporter headers.
+Host setup removes earlier DefenseClaw native exporter blocks (only exporters that carry a DefenseClaw credential; your own exporters stay) and revokes their scoped tokens because Codex cannot verify the account behind the loopback listener. An existing Codex process can retain the old configuration. The isolated OpenShell exporter still uses the gateway's `/v1/{logs,metrics,traces}` endpoints. Do not print or copy old exporter headers.
 
 Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/observability/redaction). The alias options are in the [quick-alias reference](/docs/guardrail/aliases).
 
@@ -56,13 +56,15 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 | Hooks; removal of older native telemetry | `$CODEX_HOME/config.toml` (default `~/.codex`) | `%CODEX_HOME%\config.toml` |
 | Hook program | `~/.defenseclaw/hooks/codex-hook.sh` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 | Connector credentials | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
+
+On a managed computer these per-user files are not used. The hooks are in Codex's machine requirements file and run the administrator's hook program: `/etc/codex/requirements.toml` with `/opt/defenseclaw/bin/defenseclaw-hook` on Linux, `/etc/codex/requirements.toml` with `/opt/cisco/defenseclaw/bin/defenseclaw-hook` on macOS, and `C:\ProgramData\OpenAI\Codex\requirements.toml` with `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe` on Windows.
 | Proxy bypass for cloud credentials | `$CODEX_HOME/.env` (managed, marked block) | not written |
 
 See the [Windows path reference](/docs/get-started/windows/paths-troubleshooting). Teardown restores the backup, or removes only DefenseClaw's entries.
 
 ### On a managed computer
 
-The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup codex` and `setup remove`, and has no `guardrail` group. Protected requirements pin `[features] hooks = true`, so `codex features disable hooks` writes the user's config but hooks stay on. On standalone Linux and macOS, the guardian also removes that conflicting user preference during reconciliation; while it remains, Codex can reject an unrelated project trust write.
+The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup codex` and `setup remove`, and has no `guardrail` group. Protected requirements pin `[features] hooks = true`, so `codex features disable hooks` writes the user's config but hooks stay on. On standalone Linux and macOS, the guardian also removes that conflicting user preference when it reconciles an enrolled account (one the enumerator lists as a guardian target, see [Enrollment](/docs/enterprise/enrollment)); for an account that is not enrolled the preference stays. While it remains, Codex can reject an unrelated project trust write.
 
 The per-user files in [Files DefenseClaw will modify](#files-defenseclaw-will-modify) are not used there. The hooks are in Codex's machine requirements file and run the administrator's hook program:
 
@@ -112,7 +114,7 @@ The administrator manages Codex in the managed `config.yaml` under `guardrail.co
 | Hook script | `codex-hook.sh` |
 | Hook config paths | `~/.codex/config.toml`, `~/.codex/managed_config.toml` |
 | Response field | `codex_output` |
-| Native OTLP | isolated OpenShell only; host upgrades remove old exporters |
+| Native OTLP | isolated OpenShell only; host setup removes only exporters that carry a DefenseClaw credential |
 | W3C traceparent | yes |
 | Fail closed | yes |
 

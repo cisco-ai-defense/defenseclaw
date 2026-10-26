@@ -72,7 +72,7 @@ The trees below describe the per-user shell installers, including native Windows
   </Folder>
 </Files>
 
-`config.yaml`, `config.generation.json`, `audit.db` and `device.key` are created by `defenseclaw init` or `quickstart`, and the hook scripts by setting up an agent. Only `config.yaml` is policy; the hook scripts are derived from it. `installer/` is the installer that performed the current install (`defenseclaw rollback` uses it); its `binaries.sha256` lists the SHA-256 of each installed binary as it runs (`cd ~/.local/bin && shasum -a 256 -c ~/.defenseclaw/installer/binaries.sha256`). On macOS these differ from the binaries in the release archive, which the installer checks against `checksums.txt` and then signs ad hoc for this Mac. `previous/` is the install the last upgrade replaced. On Linux, `~/.local/bin` also holds `defenseclaw-sensor-helper` for the opt-in sandbox kernel feed. When the installer installs `uv` for you, `uv` and `uvx` are in `~/.local/bin` too.
+`config.yaml`, `config.generation.json`, `audit.db` and `device.key` are created by `defenseclaw init` or `quickstart`, and the hook scripts by setting up an agent. Only `config.yaml` is policy; the hook scripts are derived from it. `installer/` is the installer that performed the current install (`defenseclaw rollback` uses it); on macOS and Linux its `binaries.sha256` lists the SHA-256 of each installed binary as it runs (`cd ~/.local/bin && shasum -a 256 -c ~/.defenseclaw/installer/binaries.sha256`); on Windows `installer\` holds only `install.ps1`. On macOS these differ from the binaries in the release archive, which the installer checks against `checksums.txt` and then signs ad hoc for this Mac. `previous/` is the install the last upgrade replaced. On Linux, `~/.local/bin` also holds `defenseclaw-sensor-helper` for the opt-in sandbox kernel feed. When the installer installs `uv` for you, `uv` and `uvx` are in `~/.local/bin` too.
 
 On macOS and Linux the installer does not change `PATH`. If `~/.local/bin` is not on it, the installer prints the line to add to your shell profile.
 
@@ -1018,7 +1018,7 @@ There is no `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR` or `DEFENSECLAW_L
 | Devin (Devin CLI and Devin Desktop's Devin Local) | `~/.config/devin/config.json` or `<workspace>/.devin/hooks.v1.json` |
 | GitHub Copilot CLI | `~/.copilot/hooks/defenseclaw.json` by default; `<workspace>/.github/hooks/defenseclaw.json` with `--workspace` |
 | Antigravity | `~/.gemini/config/hooks.json`; Google documents no configuration-home environment override, and DefenseClaw owns only this global registration. Antigravity also discovers `<workspace>/.agents/hooks.json`, which DefenseClaw does not patch to avoid duplicate ownership. |
-| Hermes | `~/.hermes/config.yaml` |
+| Hermes | `~/.hermes/config.yaml` on macOS/Linux or `%LOCALAPPDATA%\hermes\config.yaml` on native Windows (`$HERMES_HOME/config.yaml` when `HERMES_HOME` is set) |
 | Kiro | `~/.kiro/hooks/defenseclaw.json` (Kiro IDE and `kiro-cli --v3`), `~/.kiro/agents/defenseclaw.json` (Kiro CLI 2.x) and `~/.kiro/settings/cli.json`; a workspace copy under `<workspace>/.kiro/hooks/` with `--workspace` |
 | OpenCode | `~/.config/opencode/plugins/defenseclaw.js` (managed bridge plugin — written whole, not patched; removed on teardown) |
 | Amp | `~/.config/amp/plugins/defenseclaw.ts` on macOS/Linux or `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` on native Windows (managed system policy plugin) |

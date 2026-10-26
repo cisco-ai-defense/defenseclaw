@@ -24,8 +24,12 @@ DefenseClaw keeps programs, data and each agent's own configuration in separate 
 | `defenseclaw-gateway.exe` | The gateway and its lifecycle commands. |
 | `defenseclaw-hook.exe` | The hook runner agents call. It opens no console window. |
 | `defenseclaw-acp.exe` | The [ACP guard](/docs/acp-guard). |
+| `skill-scanner.cmd`, `mcp-scanner.cmd` | Launchers for the bundled skill and MCP scanners. |
+| `defenseclaw-hook-state.json` | State the hook runner keeps; not configuration. |
 
 Do not replace or wrap these. Run the install command again to repair them. The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`.
+
+On a managed Windows computer none of these per-user paths are used: the programs are in `C:\Program Files\Cisco\DefenseClaw\bin`, the administrator's config is `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`, the audit database is `C:\ProgramData\Cisco\DefenseClaw\runtime\audit.db`, and the logs are in `C:\ProgramData\Cisco\DefenseClaw\logs` and `%WINDIR%\Logs\DefenseClaw`. The full list is in [Windows installation reference](/docs/enterprise/windows).
 
 ### Data
 
@@ -231,6 +235,12 @@ Disabling stops only what the agent loads by that exact name (Codex `$skill` sel
 
 **Check.** The doctor authentication row is `[PASS]`.
 
+## Codex refuses every command in its first session
+
+**Fix.** The first Codex session after Codex sets up its sandbox (`Sandbox ready`) can refuse every shell command with `approval required by policy, but AskForApproval::Granular.sandbox_approval is false`. This is Codex, with or without DefenseClaw. Quit Codex and start it again once. See [Known limits](/docs/support-matrix#codex).
+
+**Check.** Commands run in the new session.
+
 </Accordion>
 
 <Accordion title="The TUI renders poorly or cannot redraw">
@@ -262,7 +272,7 @@ Use harmless prompts only: no real secrets or customer data.
 - `defenseclaw version`: the CLI and the gateway report the same release.
 - `defenseclaw migrate --check` and `defenseclaw config validate` pass (after an upgrade).
 - `defenseclaw-gateway status` and `defenseclaw doctor` pass.
-- `defenseclaw guardrail status` lists each agent you set up with the mode, fail mode and enabled state you chose (the same as before an upgrade). Hermes follows the same gateway outage rule as the other agents ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Every other failure blocks. On a managed host, the administrator may choose open for a gateway outage; unusable answers still block. Under Secure Client, open is the default.
+- `defenseclaw guardrail status` lists each agent you set up with the mode, fail mode and enabled state you chose (the same as before an upgrade). Hermes follows the same gateway outage rule as the other agents ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). A running DefenseClaw hook blocks every other failure; for a timed-out or killed hook see [Hermes fail mode](/docs/connectors/hermes#fail-mode). On a managed host, the administrator may choose open for a gateway outage; unusable answers still block. Under Secure Client, open is the default.
 - Restart each agent where its connector page says to, send a harmless prompt in each one, and look for the event in `defenseclaw tui` or `defenseclaw-gateway audit export --output -`. A harmless prompt creates an audit event, not an alert.
 - Leave the `previous` and `backups` folders alone until the gateway and every agent work.
 

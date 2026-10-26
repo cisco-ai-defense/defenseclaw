@@ -95,7 +95,9 @@ Plugin-contributed, built-in, organization and remote agents, skills and runtime
 | Global hooks | `~/.copilot/hooks/defenseclaw.json` (or under `$COPILOT_HOME`) |
 | Workspace hooks (only with `--workspace`) | `<workspace>/.github/hooks/defenseclaw.json` |
 | Hook program, macOS and Linux | `~/.defenseclaw/hooks/copilot-hook.sh` |
-| Hook program, Windows | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
+| Hook program, Windows | The registration runs `%USERPROFILE%\.defenseclaw\hooks\copilot-hook.ps1`, which calls `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
+
+A per-user Copilot setup removes the `enabledPlugins` entry `defenseclaw@defenseclaw` that an earlier managed install left in Copilot's machine `managed-settings.json`. If the account cannot write that file, setup names it; an administrator can delete that entry.
 
 Teardown restores the exact earlier file when DefenseClaw's copy is unchanged. Otherwise it removes only its own handlers.
 
@@ -219,6 +221,10 @@ Not covered yet:
 - The VS Code Local harness reads its own hook format. The enterprise profile covers it; see [GitHub Copilot in VS Code](#github-copilot-in-vs-code).
 - Plugin-contributed, built-in, organization and remote agents, skills and runtime MCP servers need a live official-client inspection. The effective agent load order is unverified.
 - Copilot CLI can fail to deliver a tool's permission request after a long model turn, and the turn stops. Copilot CLI also runs a tool when its `preToolUse` hook times out or cannot start, even in fail mode `closed`. Both are Copilot CLI limits. See [Known limits](/docs/support-matrix#copilot-cli).
+
+## On a managed computer
+
+Set up, Check it and Turn it off on this page are per-user commands. On a computer with a standalone enterprise install they are refused: on Linux and macOS `defenseclaw` prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2; on native Windows `defenseclaw` is the administrator's command and refuses `setup copilot`. The administrator manages Copilot CLI in the managed `config.yaml` (`guardrail.connectors.copilot`) and applies it as in [Change the config](/docs/enterprise/lifecycle#change-the-config).
 
 ## Disable
 

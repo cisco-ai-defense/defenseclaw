@@ -129,14 +129,7 @@ names the qualified group the host knows. An answer with a group that is only a
 number (a directory that did not answer for it) is kept 2 minutes instead of
 15, and the next request after that waits for a fresh lookup.
 
-On a qualified-name SSSD Active Directory host with one joined domain, a bare
-`users` entry keeps matching that domain's account after an upgrade from
-1.0.3. With more than one joined Active Directory domain or a configured
-trusted child, the same entry can refer to several accounts. DefenseClaw
-refuses a request when that ambiguity could change its profile. Profile
-explain, status, verify and doctor name the qualified principal to write for
-accounts the guardian has resolved. Use that principal or the uid to select
-one account. Managed macOS hooks ask Open Directory for current group membership on every
+On a qualified-name SSSD Active Directory host with one joined domain, a bare `users` entry keeps matching that domain's account after an upgrade from 1.0.3. With more than one joined Active Directory domain or a configured trusted child, the same entry selects the account of that name in each of those domains. In the default and permissive policy tiers it still matches, and profile explain, status, verify and doctor warn and name every account it selects. The strict policy tier refuses a request when that ambiguity could change its profile. To select one account, write the qualified principal the warning shows, or the uid. Managed macOS hooks ask Open Directory for current group membership on every
 call; a failed lookup cannot reuse an earlier secondary group to select a
 more relaxed profile.
 

@@ -74,7 +74,7 @@ The local Splunk bridge works only with an x86_64 Docker engine. On an ARM64 Doc
 
    Setup exits nonzero if Docker is missing, its daemon is stopped, a required port is busy, or the image registry cannot resolve the pinned tag. Fix the reported prerequisite and run the command again.
 
-   Setup starts Splunk in Free mode, installs the **DefenseClaw Local Mode** app, and adds a `splunk_hec` destination for index `defenseclaw_local`. Open [http://localhost:8000](http://localhost:8000). The HEC token stays hidden unless you pass `--show-credentials`.
+   Setup starts Splunk in Free mode, installs the **DefenseClaw Local Mode** app, and adds a `splunk_hec` destination for index `defenseclaw_local`. Open [http://localhost:8000](http://localhost:8000). In Splunk Free mode Splunk Web opens as admin with no login. With any other license, log in as admin; `defenseclaw setup splunk --show-credentials` shows the password, the HEC token and the container's runtime secret. They stay hidden otherwise.
 
    Setup reports ready only after the installed app, Web UI and HEC are available. If startup fails, repair the reported local stack problem and run the setup command again.
 
@@ -158,7 +158,7 @@ index=defenseclaw_local sourcetype=defenseclaw:json bucket="enforcement.action" 
        Redaction:   unredacted (none)
    ```
 
-   The sample is from a run with `--skip-test`. Without it, setup sends one probe event and stops if HEC does not return 200. Use `--skip-test` behind a VPN.
+   The sample is from a run with `--skip-test`. Without `--skip-test`, setup sends one probe to HEC before it saves anything. If the host name does not resolve, the connection or TLS handshake fails, or HEC does not answer 200, setup stops with exit 1 and saves nothing. `--skip-test` saves the destination without the probe. If the gateway is not running, setup cannot record the probe, so it saves the destination untested and says so; start the gateway, then run `defenseclaw observability destination test <name>`. Use `--skip-test` behind a VPN.
 
 2. Use sourcetype `_json`, or `defenseclaw:json` if you also install a `props.conf` stanza with `KV_MODE = json` and `SHOULD_LINEMERGE = false`. Do not add `| spath` to searches on these sourcetypes; it doubles multivalue fields.
 

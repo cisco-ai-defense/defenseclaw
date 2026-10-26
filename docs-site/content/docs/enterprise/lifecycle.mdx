@@ -605,7 +605,7 @@ Uninstall does the following on every OS:
 
 Restart agents after an uninstall: a session that started earlier keeps the hook it read at its start, and once the hook binary is gone it runs that hook as a missing command, so its tool calls run without DefenseClaw. To go back to an older release without that window, use [Roll back](#roll-back).
 
-A standalone uninstall also removes the config, credentials, most machine state and logs. Each user's `~/.defenseclaw` and per-user binaries stay; `--purge` removes everything, and `--keep-state` keeps machine state for a reinstall.
+A standalone uninstall also removes the config, credentials, most machine state and logs. Each user's `~/.defenseclaw` and per-user binaries stay; `--purge` removes everything DefenseClaw installed (on macOS, removing the `_defenseclaw` account can be refused from a remote shell (`eDSPermissionError`); the uninstall then completes with a `service_account` warning that gives the two `dscl` commands to delete it), and `--keep-state` keeps machine state for a reinstall.
 
 | Install channel | Remove the deployment and keep each user's data (Linux/macOS may keep sandbox state) | Remove everything |
 | --- | --- | --- |
@@ -715,15 +715,7 @@ the binaries, so stage the payload again and run its `ensure --payload <dir> --c
   hook removal that failed, a gateway that could not be stopped). Fix the cause and run the same
   uninstall again. Back up `~/.defenseclaw/foreign-hooks-backup` first if a user wants their own
   moved-aside hooks back.
-- **A user's own install from before the enrollment (Linux and macOS).** When a user's
-  `~/.defenseclaw` holds a personal install from before the managed deployment enrolled them (it has
-  a `config.yaml`, `.env`, `audit.db` or `previous`), the purge first moves that install's data, as
-  the user, to a new `~/.defenseclaw-backup-<UTC time>` folder (mode `0700`) with a
-  `DEFENSECLAW-BACKUP.txt` that says how to restore it: the config, secrets, audit history,
-  policies, logs, upgrade copies and `foreign-hooks-backup`. Hook scripts, hook credentials,
-  connector backups and caches are not kept. The move is a rename on the same filesystem. If it
-  fails, the purge keeps that user's state and names the user. Delete the backup folder when the
-  user does not need it.
+- **A user's own install from before the enrollment (Linux and macOS).** If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db` or `previous/`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. No `~/.defenseclaw-backup-*` folder is made.
 - **A user whose home is gone (Linux and macOS).** When an enrolled user's home folder no longer
   exists, the hooks and `~/.defenseclaw` went with it. The uninstall warns
   (`per_user_hooks_remaining`) with the home and goes on. A home that does not answer, or whose

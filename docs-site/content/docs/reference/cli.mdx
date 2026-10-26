@@ -108,7 +108,7 @@ DefenseClaw Doctor
   …
   -- Scanners --
   [PASS] Scanner: skill-scanner  -  ~/.local/bin/skill-scanner (skill-scanner 2.2.1); cisco-ai-skill-scanner 2.2.1
-  [WARN] Scanner settings  -  the LLM judge is off; Add an LLM judge ('defenseclaw setup llm') or the local vLLM option
+  [WARN] Scanner settings  -  the skill-scanner LLM judge is off; Add an LLM judge ('defenseclaw setup llm') or the local vLLM option
   …
   -- Services --
   [FAIL] Gateway authentication  -  no gateway token is configured - run 'defenseclaw doctor --fix' to generate and persist one
@@ -195,7 +195,7 @@ Config generation: 42
 | Policy | WARN | `config.yaml was edited outside the DefenseClaw writer`: the edit is not yet in `config.generation.json`. On a per-user install the running gateway records the hand edit itself (actor `hand-edit:<user>`) and the row clears. Make later changes with `defenseclaw config set`, the TUI or `defenseclaw setup`. |
 | Config validation | FAIL | `config.yaml` is invalid; the line names the field. A running gateway keeps the config it started with. |
 | Retired policy data | WARN | A leftover `policies/rego/data.json` (or `policies/data.json`) is ignored since `config_version` 9, because admission and thresholds live in `config.yaml`. Review `defenseclaw config get admission`, then remove the file. |
-| Config migration | PASS or WARN | `migrated to 9 on <date>: N value(s) moved, N conflict(s); details in .../migration-v9.json`. Shows until you run `defenseclaw-gateway config migrate --ack`. WARN when the migration recorded conflicts. |
+| Config migration | PASS or WARN | `migrated to 9 on <date>: N value(s) moved, N conflict(s); details in .../migration-v9.json`. Shows until you run `defenseclaw-gateway config migrate --ack`. WARN when the migration recorded conflicts. With no migration record, `defenseclaw config migrate --ack` says there is nothing to acknowledge and exits 0. |
 | Custom-provider overlay | FAIL | `custom-providers.json` was edited by hand or no longer matches `llm_providers`. The gateway ignores those edits. `defenseclaw doctor --fix` rewrites it. |
 | Hook runtime files | FAIL | A generated hook script was edited or replaced. `defenseclaw doctor --fix` re-renders it. |
 | Orphaned hook entries `[<connector>]` | FAIL or WARN | Entries remain for a connector that is no longer configured. A missing script or credential fails the check; an existing target warns. Run `defenseclaw setup remove CONNECTOR`. |
@@ -226,6 +226,16 @@ After a migration that moved values:
 ```text
   [PASS] Config migration  -  migrated to 9 on 2026-10-06: 21 value(s) moved, 0 conflict(s); details in /home/alice/.defenseclaw/migration-v9.json
 ```
+
+## Observability rows
+
+| Row | Status | What to do |
+| --- | --- | --- |
+| Codex OTel environment | PASS or FAIL | Codex's `otel.environment` in `config.toml` must match DefenseClaw's `environment`. FAIL names the mismatch, or a `config.toml` it cannot find or read. |
+| Codex OTel ownership | WARN | A `config.toml` value is nested too deeply to check for a DefenseClaw credential, so DefenseClaw kept it. Remove it if it is a DefenseClaw token. |
+| Codex OTel runtime | PASS or SKIP | Compares with the gateway's authenticated telemetry status; SKIP while that status is not available (gateway stopped or no token). |
+| Connector OTLP: CONNECTOR | PASS, WARN or FAIL | OTLP a connector exports to the gateway; `not configured` when none does. |
+| Native OTLP credentials | WARN | The gateway refused native OTLP attempts that carried an old credential, usually a Codex daemon after an upgrade. Run `codex app-server daemon restart`; the row clears 24 hours after the last refused attempt. |
 
 `defenseclaw status` prints the config generation the gateway applied (the number `config set` prints, from `config.generation.json`) and the policy digest. Compare it with what the files compute to: `defenseclaw-gateway policy digest`.
 
@@ -481,7 +491,7 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | `defenseclaw guardrail block-at LEVEL [--connector X] [--json]` | Set the lowest severity the guardrail blocks at: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` (any case) or `inherit` to clear. Writes `guardrail.block_at`, or with `--connector X` only `guardrail.connectors.X.block_at`. A connector's own level wins over the global one, which wins over the rule pack's (strict blocks MEDIUM+, default and permissive CRITICAL). It applies in action mode to prompts, completions, tool calls and tool responses, on hooks and through the proxy; `policy edit guardrail --block-threshold` sets the same key. See [Tool-call levels](#tool-call-levels). Refused on a managed standalone device ([exit 3](#managed-devices-and-exit-code-3)). |
 | `defenseclaw guardrail alert-at LEVEL [--connector X] [--json]` | The same for the lowest severity that raises an alert (`guardrail.alert_at`, pack levels: strict LOW+, default MEDIUM+, permissive HIGH+). Anything that blocks also alerts, so an alert level above the block level alerts from the block level. |
 | `defenseclaw guardrail disable [--connector X]` | Kill switch. Global disables everything; `--connector X` drops only that connector from the active set and removes its hooks. |
-| `defenseclaw guardrail fail-mode [--connector X]` | Show each active connector's gateway-outage mode. On a per-user install it follows the policy tier (default and permissive run the call with a warning, strict blocks it; select strict with `guardrail use-pack strict`), so a value is refused with exit 1. An administrator sets an outage-only `open` in managed config. See [Fail modes](/docs/reference/fail-modes#per-user-installs). |
+| `defenseclaw guardrail fail-mode [--connector X]` | Show each active connector's gateway-outage mode. On a per-user install `open` or `closed` saves your choice, which wins over the policy tier; with no saved value the tier decides (default and permissive run the call with a warning, strict blocks it; select strict with `guardrail use-pack strict`). An administrator sets an outage-only `open` in managed config. See [Fail modes](/docs/reference/fail-modes#per-user-installs). |
 | `defenseclaw guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X]` | Show/set human-in-the-loop approval policy. Run bare it prints the global value **plus a per-connector breakdown**. The running gateway applies a change without a restart; on a Secure Client computer the command restarts it (`--no-restart` to skip). |
 | `defenseclaw guardrail block-message ["<text>"] [--clear] [--connector X]` | Show/set the message the agent sees when an action is blocked. Run bare it prints the global value **plus a per-connector breakdown**. `--clear --connector X` removes that connector's override so it inherits the global message, or the built-in default when the global value is empty. Unscoped `--clear` also clears active connector overrides, returning the active roster to the built-in default. Do not pass text and `--clear` together. |
 | `defenseclaw guardrail list-packs [--json]` | Read-only. Lists the built-in rule-pack presets, custom packs found under `~/.defenseclaw/policies/guardrail/` or configured anywhere, and the pack each active connector enforces (per-connector override > global pack > built-in default). `--json` prints `{"version": 1, "global": {...}, "connectors": [...], "packs": [...]}`. |
@@ -840,17 +850,13 @@ defenseclaw config get asset_policy.skill.denied --format json
 ```json
 [
   {
-    "args_prefix": [],
-    "command": "",
-    "connector": "",
     "name": "evil-skill",
-    "reason": "supply-chain advisory",
-    "source_path_contains": [],
-    "transport": "",
-    "url": ""
+    "reason": "supply-chain advisory"
   }
 ]
 ```
+
+Fields that are not set (`connector`, `command`, `url` and the others) are left out.
 
 Lifting it is the same command family, and the entry leaves `config.yaml`:
 
@@ -1070,7 +1076,7 @@ a connector on purpose use `defenseclaw guardrail disable --connector
 
 | Exit code | `config set` / `config unset` |
 | --- | --- |
-| `0` | Written, already had that value, or (unset) already at its default |
+| `0` | Written, already had that value, or (unset) already at its default. A change that was saved exits 0: if the gateway did not confirm the audit event (for example it is stopped or restarting on a new port), one warning says the change was saved |
 | `1` | Refused: invalid value or reference, a stale `--expect-sha256`, or another process holds the config lock |
 | `2` | Malformed `KEY` or `--json` value |
 | `3` | The device is managed; see below |
@@ -1141,8 +1147,7 @@ work.
 A standard user on a Linux or macOS computer with the standalone enterprise
 package does not get the Python CLI. The `defenseclaw` command there offers
 only `sandbox` commands, `help` and `--version`. Every other command, readers
-included (`status`, `doctor`, `config get`, `skill list`), prints "This
-computer is managed; only `defenseclaw sandbox` commands are available here."
+included (`status`, `doctor`, `config get`, `skill list`), prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
 and exits `2`, not `3`. `defenseclaw-gateway` is not on that user's `PATH`.
 The administrator runs it by its packaged path, as root
 (`/opt/defenseclaw/bin` on Linux, `/opt/cisco/defenseclaw/bin` on macOS).
@@ -1300,7 +1305,7 @@ Every mutating action is a transaction that rolls back on failure. See
 | `--for <duration>` | tetragon pause | How long the pause lasts. Default `4h`, at most `7d` |
 | `--until-reboot` | tetragon pause | Keep the pause in `/run`, so a reboot ends it. Not with `--for` |
 | `--lock-wait <duration>` | install, upgrade, repair, reconcile, rotate-credentials, ensure, uninstall | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
-| `--purge` | uninstall | Also remove each enrolled account's `~/.defenseclaw`, the empty agent folders DefenseClaw created, its per-user binaries and launcher links in `~/.local/bin`, and its uv cache entries, after stopping its per-user gateway and watchdog. An account's own earlier install (its `~/.defenseclaw` has a `config.yaml`, `.env`, `audit.db` or `previous`) is moved to `~/.defenseclaw-backup-<UTC time>` first. It also removes the sandbox registration store, key and setup record. Run it in the first removal: it needs the deployment's binaries. The result names each account it cleaned and each it left alone, with the reason. Without `--purge`, `sandbox` registrations and `redaction-correlation.key` may stay when an account keeps sandboxes. |
+| `--purge` | uninstall | Also remove each enrolled account's `~/.defenseclaw`, the empty agent folders DefenseClaw created, its per-user binaries and launcher links in `~/.local/bin`, and its uv cache entries, after stopping its per-user gateway and watchdog. An account's own earlier install (its `~/.defenseclaw` has a `config.yaml`, `.env`, `audit.db` or `previous`) is left exactly as it is, with its binaries, and the result names the account (`per_user_state_remaining`). It also removes the sandbox registration store, key and setup record. Run it in the first removal: it needs the deployment's binaries. The result names each account it cleaned and each it left alone, with the reason. Without `--purge`, `sandbox` registrations and `redaction-correlation.key` may stay when an account keeps sandboxes. |
 | `--keep-state` | uninstall | Keep the config, credentials, gateway and guardian state (the sandbox registrations and key included), logs and the service account, so a reinstall resumes with them. The deployment record goes either way. Cannot combine with `--purge` |
 | `--keep-service-account` | uninstall | Keep the gateway service account, which uninstall deletes otherwise |
 | `--ready-for <mode>` | tetragon verify | The mode to check readiness for: `consume`, `observe` or `enforce` |
@@ -1373,7 +1378,7 @@ its transaction on PowerShell 7, which must be installed.
 | `--json` | Print the result as JSON |
 
 Exit codes: standalone `0`, `1603` failure, `1618` busy, `1639` invalid
-arguments, and `3010` (reserved). Secure Client: `0` and `1603`.
+arguments, `5` when run from a standard account (`status` and `verify` need an elevated prompt; the JSON error code is `elevation_required`), and `3010` (reserved). Secure Client: `0` and `1603`.
 
 ```powershell
 $DefenseClaw = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
@@ -1440,7 +1445,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --c
 | --- | --- |
 | `defenseclaw-gateway enterprise secret set --name N` | Store a credential. Pass exactly one of `--from-stdin` or `--from-file F`. The value is never printed. On Linux and macOS, `--lock-wait D` (set and remove) waits up to D (at most 15m) for another lifecycle run instead of exiting 75 |
 | `defenseclaw-gateway enterprise secret status` | List stored credentials with a digest prefix and modification time, never the value |
-| `defenseclaw-gateway enterprise secret remove --name N` | Remove a credential |
+| `defenseclaw-gateway enterprise secret remove --name N` | Remove a credential. The MDM wrapper's put-back of a rotated credential (`--undo-rotation` with `--undo-config SHA`) works on Linux and macOS as well as Windows |
 
 Names use lowercase letters, digits, and dashes. Every action takes `--json`.
 

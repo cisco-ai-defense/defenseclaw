@@ -65,6 +65,12 @@ Look at the rule.
 grep -n -A10 'id: CMD-RM-RF' ~/.defenseclaw/policies/guardrail/default/rules/commands.yaml
 ```
 
+In PowerShell:
+
+```powershell
+Select-String -Path "$HOME\.defenseclaw\policies\guardrail\default\rules\commands.yaml" -Pattern 'id: CMD-RM-RF' -Context 0,10
+```
+
 ```text
 114:  - id: CMD-RM-RF
 …
@@ -110,6 +116,15 @@ defenseclaw-gateway audit export --connector claudecode --since 30m \
   | jq -c 'select(.action == "connector-hook") | {timestamp, action: .structured.action, rule_ids: .structured.rule_ids}'
 ```
 
+In PowerShell:
+
+```powershell
+defenseclaw-gateway audit export --connector claudecode --since 30m |
+  ForEach-Object { $_ | ConvertFrom-Json } |
+  Where-Object { $_.action -eq 'connector-hook' } |
+  ForEach-Object { [pscustomobject]@{ timestamp = $_.timestamp; action = $_.structured.action; rule_ids = $_.structured.rule_ids } }
+```
+
 ```text
 {"timestamp":"2026-10-21T06:59:40.323651948Z","action":"block","rule_ids":["CMD-RM-RF"]}
 ```
@@ -147,7 +162,7 @@ Each hook call writes one `connector-hook` row. `action` is the answer Claude Co
 
 <Accordion title="What if the gateway is unreachable when the hook fires?">
 
-If this account's gateway is not running, the default and permissive policies let the call run with one warning, and the strict policy blocks it. Every other failure blocks. Check it with `defenseclaw guardrail status` and read [fail modes](/docs/reference/fail-modes).
+If this account's gateway is not running, the default and permissive policies let the call run with one warning, and the strict policy or a saved `closed` blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Every other failure blocks. Check it with `defenseclaw guardrail status` and read [fail modes](/docs/reference/fail-modes).
 
 </Accordion>
 

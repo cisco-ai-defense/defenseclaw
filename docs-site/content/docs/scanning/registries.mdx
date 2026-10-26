@@ -25,7 +25,7 @@ Guided example with synthetic data. In the demo, an on-demand sync checks the so
   type={{
     'clawhub': {
       type: 'kind',
-      description: 'OpenClaw plugin catalog. Reads the openclaw npm package metadata from registry.npmjs.org and lists its bundled plugins; no URL needed.',
+      description: 'OpenClaw plugin catalog. Reads the openclaw npm package metadata from registry.npmjs.org and lists its bundled plugins; no URL needed. Fails while the upstream package has no plugins map (see Common gotchas).',
     },
     'smithery': {
       type: 'kind',
@@ -49,7 +49,7 @@ Guided example with synthetic data. In the demo, an on-demand sync checks the so
     },
     'skills_sh': {
       type: 'kind',
-      description: 'Curated skills.sh view. URL optional; --content typically skill.',
+      description: 'Curated skills.sh view. URL optional; --content typically skill. Needs a skills.sh API key (--auth-env); without one the fetch fails with 401.',
     },
   }}
 />
@@ -326,6 +326,12 @@ The catalog publisher needs to compute and include the SHA-256 in their manifest
 <Accordion title="Removing a source removes its rules too">
 
 `remove` strips every `asset_policy.{skill,mcp}.registry` rule whose `Reason="registry:<id>"`. The intent is "the registry is the source of truth for these rules; deleting the registry deletes the rules". Use `--keep-cache` if you want to preserve the on-disk manifest for a future re-add.
+
+</Accordion>
+
+<Accordion title="`clawhub` or `skills_sh` sync fails">
+
+`clawhub` fails with `openclaw package metadata is missing the plugins map` while the upstream openclaw npm package has no plugins map. `skills_sh` needs a skills.sh API key: without one the fetch fails with `401 Client Error: Unauthorized`; pass the name of a variable that holds the key with `--auth-env`. Both are upstream changes, not DefenseClaw errors. Use another kind, or an `http_yaml` or `http_json` registry with your own catalog.
 
 </Accordion>
 
