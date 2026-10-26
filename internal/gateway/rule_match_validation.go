@@ -546,7 +546,7 @@ func trimShellPathPrefix(token string) string {
 			rest = rest[closing+1:]
 		} else {
 			n := 0
-			for n < len(rest) && (rest[n] == '_' || rest[n]|0x20 >= 'a' && rest[n]|0x20 <= 'z' || n > 0 && rest[n] >= '0' && rest[n] <= '9') {
+			for n < len(rest) && shellNameByte(rest[n], n == 0) {
 				n++
 			}
 			if n == 0 {
@@ -568,12 +568,22 @@ func trimShellPathPrefix(token string) string {
 
 func shellVariableName(name string) bool {
 	for i := 0; i < len(name); i++ {
-		c := name[i]
-		if !(c == '_' || c|0x20 >= 'a' && c|0x20 <= 'z' || i > 0 && c >= '0' && c <= '9') {
+		if !shellNameByte(name[i], i == 0) {
 			return false
 		}
 	}
 	return name != ""
+}
+
+// shellNameByte reports a byte of a shell variable name (a digit only after
+// the first byte).
+func shellNameByte(c byte, first bool) bool {
+	return c == '_' || c|0x20 >= 'a' && c|0x20 <= 'z' || !first && c >= '0' && c <= '9'
+}
+
+// urlSchemeByte reports a byte of a URL scheme (RFC 3986: ALPHA DIGIT + - .).
+func urlSchemeByte(c byte) bool {
+	return c|0x20 >= 'a' && c|0x20 <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '.' || c == '-'
 }
 
 // wordHoldsRemoteURL reports a word that holds a URL with a scheme other than
@@ -585,8 +595,7 @@ func wordHoldsRemoteURL(word string) bool {
 	}
 	start := at
 	for start > 0 {
-		c := word[start-1]
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '+' || c == '.' || c == '-') {
+		if !urlSchemeByte(word[start-1]) {
 			break
 		}
 		start--
