@@ -88,8 +88,9 @@ func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 		{name: "no pid", held: true},
 		{name: "pid not a number", pid: "abc", held: true},
 		{name: "pid out of range", pid: "99999999999", held: true},
-		{name: "interrupted install kept previous.new", pid: dead, record: "previous.new", held: true},
-		{name: "interrupted install, an earlier build's deadline", pid: dead, record: "previous.new", deadline: "1", held: true},
+		// GAP-1024: the record does not hold a lock whose installer is gone.
+		{name: "interrupted install kept previous.new", pid: dead, record: "previous.new", held: false},
+		{name: "interrupted install, an earlier build's deadline", pid: dead, record: "previous.new", deadline: "1", held: false},
 	} {
 		for _, step := range []time.Duration{0, -7 * 24 * time.Hour, 7 * 24 * time.Hour} {
 			t.Run(tc.name+"/times "+step.String(), func(t *testing.T) {

@@ -56,11 +56,13 @@ func TestInstallLockHeldIgnoresOnlyALockWhoseOwnerIsGone(t *testing.T) {
 		{"empty pid", owner{pid: " "}, true},
 		{"pid not a number", owner{pid: "abc"}, true},
 		{"pid out of range", owner{pid: "99999999999"}, true},
-		{"interrupted install kept previous.new", owner{pid: dead, record: "previous.new"}, true},
-		{"interrupted install kept .repair", owner{pid: dead, record: ".repair"}, true},
-		{"interrupted install kept .rollback-hold", owner{pid: dead, record: ".rollback-hold"}, true},
-		{"interrupted Windows install kept its record", owner{pid: dead, record: ".lifecycle-txn.json"}, true},
-		{"interrupted install, an earlier build's deadline", owner{pid: dead, record: "previous.new", deadline: "1"}, true},
+		// GAP-1024: an interrupted-install record does not hold the lock
+		// once its installer is gone.
+		{"interrupted install kept previous.new", owner{pid: dead, record: "previous.new"}, false},
+		{"interrupted install kept .repair", owner{pid: dead, record: ".repair"}, false},
+		{"interrupted install kept .rollback-hold", owner{pid: dead, record: ".rollback-hold"}, false},
+		{"interrupted Windows install kept its record", owner{pid: dead, record: ".lifecycle-txn.json"}, false},
+		{"interrupted install, an earlier build's deadline", owner{pid: dead, record: "previous.new", deadline: "1"}, false},
 	} {
 		for _, step := range []time.Duration{0, -7 * 24 * time.Hour, 7 * 24 * time.Hour} {
 			t.Run(tc.name+"/times "+step.String(), func(t *testing.T) {

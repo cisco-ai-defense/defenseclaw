@@ -22,16 +22,11 @@ import (
 // and no clock step changes the answer.
 const InstallLockIdentityName = "proc-start"
 
-// InstallLockRecoveryRecords are the interrupted-install records install.sh
-// and install.ps1 keep the lock for, on purpose, after the installer exits:
-// the next run takes the lock over and finishes or undoes that install.
-var InstallLockRecoveryRecords = []string{"previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"}
-
 // installLockStale is the one stale-lock rule of every per-user hook (this
 // package, hook-outage-mode, the shell hooks, the OpenCode and Amp plugins)
 // and of `defenseclaw doctor`. It reads only the owner's identity, never a
-// clock: a lock folder in home is no lock only when no interrupted-install
-// record sits beside it and its owner is proven gone: its pid names no
+// clock: a lock folder in home is no lock only when its owner is proven
+// gone: its pid names no
 // process, or this reader's own process (no reader writes a lock), or a
 // process whose identity is not the one its InstallLockIdentityName record
 // holds (a reused pid). Everything else holds, for as long as it lasts: a
@@ -39,15 +34,14 @@ var InstallLockRecoveryRecords = []string{"previous.new", ".repair", ".rollback-
 // that has not written it yet), a lock without an identity record whose pid
 // names a live process (1.0.2, 1.0.3), a record or identity that cannot be
 // read, a lock that is not a folder. A deadline file an earlier 1.0.4
-// build wrote is not read.
+// build wrote is not read. An interrupted-install record beside the lock
+// (previous.new, .repair, .rollback-hold, .lifecycle-txn.json) does not hold
+// it once its installer is gone: a failed upgrade waiting for the next
+// installer run no longer closes every hook until then; doctor names the
+// recovery step (GAP-1024).
 func installLockStale(lstat func(string) (fs.FileInfo, error), home string, info fs.FileInfo) bool {
 	if info == nil || !info.IsDir() {
 		return false
-	}
-	for _, name := range InstallLockRecoveryRecords {
-		if _, err := lstat(filepath.Join(home, name)); err == nil || !errors.Is(err, fs.ErrNotExist) {
-			return false
-		}
 	}
 	lock := filepath.Join(home, ".install.lock")
 	pid, state := installLockPID(lstat, filepath.Join(lock, "pid"))

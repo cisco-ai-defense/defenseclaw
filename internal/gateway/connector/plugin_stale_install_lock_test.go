@@ -125,10 +125,12 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 		// pid names a process, whenever the pid was written.
 		{name: "1.0.2/1.0.3 PID-only lock, pid written a week before", lock: makeAgedLock(live, 7*24*time.Hour, 7*24*time.Hour)},
 		{name: "1.0.2/1.0.3 PID-only lock, pid written a week ahead", lock: makeAgedLock(live, -7*24*time.Hour, -7*24*time.Hour)},
-		{name: "installer exited, interrupted install kept previous.new", lock: withRecord("previous.new", true)},
-		{name: "installer exited, interrupted install kept .repair", lock: withRecord(".repair", true)},
-		{name: "installer exited, interrupted install kept .rollback-hold", lock: withRecord(".rollback-hold", true)},
-		{name: "installer exited, interrupted Windows install kept its record", lock: withRecord(".lifecycle-txn.json", false)},
+		// GAP-1024: an interrupted-install record does not hold the lock once
+		// its installer is gone.
+		{name: "installer exited, interrupted install kept previous.new", lock: withRecord("previous.new", true), runs: true},
+		{name: "installer exited, interrupted install kept .repair", lock: withRecord(".repair", true), runs: true},
+		{name: "installer exited, interrupted install kept .rollback-hold", lock: withRecord(".rollback-hold", true), runs: true},
+		{name: "installer exited, interrupted Windows install kept its record", lock: withRecord(".lifecycle-txn.json", false), runs: true},
 		{name: "lock is a file", lock: func(t *testing.T, lock string) {
 			if err := os.WriteFile(lock, []byte(dead), 0o600); err != nil {
 				t.Fatal(err)

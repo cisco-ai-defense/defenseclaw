@@ -54,22 +54,17 @@ defenseclaw_install_lock_held() {
   return 1
 }
 # defenseclaw_install_lock_stale DATA returns 0 (true) when DATA/.install.lock
-# is a folder whose installer is proven gone and no interrupted-install
-# record sits beside it: its pid names no process, or this hook's own (no
+# is a folder whose installer is proven gone (an interrupted-install record
+# beside it does not hold it, GAP-1024): its pid names no process, or this hook's own (no
 # hook writes a lock), or another process than its proc-start record names
 # (a reused pid). It reads no clock (hookexec installLockStale, the one
 # rule): a live owner keeps the lock for as long as it runs, and so do a
 # lock without a valid pid, a lock without a proc-start record whose pid
 # names a process (1.0.2, 1.0.3) and an owner whose identity cannot be read.
 defenseclaw_install_lock_stale() {
-  local data="${1:-}" lock rc pid name recorded current
+  local data="${1:-}" lock rc pid recorded current
   lock="${data}/.install.lock"
   [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
-  for name in previous.new .repair .rollback-hold .lifecycle-txn.json; do
-    if [ -e "${data}/${name}" ] || [ -L "${data}/${name}" ]; then
-      return 1
-    fi
-  done
   rc=0
   pid="$(defenseclaw_install_lock_number "${lock}/pid")" || rc=$?
   [ "$rc" = 0 ] || return 1

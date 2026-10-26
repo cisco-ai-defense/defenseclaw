@@ -947,11 +947,6 @@ function defenseclawInstallLockDirs() {
   return [dirname(dirname(DC_TOKEN_FILE)), String(process.env.DEFENSECLAW_HOME || "") || join(homedir(), ".defenseclaw")];
 }
 
-// An interrupted install keeps its lock on purpose, next to one of these,
-// until the installer runs again and finishes or undoes it
-// (hookexec.InstallLockRecoveryRecords).
-const DC_INSTALL_RECOVERY_RECORDS = ["previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"];
-
 // defenseclawInstallLockNumber reads the lock's pid file: "absent" (missing,
 // empty or not a positive number), "valid", or "unreadable" (not a small
 // regular file, or a read error but its absence).
@@ -1070,14 +1065,6 @@ async function defenseclawInstallLockState(dir) {
     return "none";
   }
   if (!info.isDirectory()) return "held";
-  for (const name of DC_INSTALL_RECOVERY_RECORDS) {
-    try {
-      await lstat(join(dir, name));
-      return "held";
-    } catch (err) {
-      if (!missing(err)) return "held";
-    }
-  }
   const owner = await defenseclawInstallLockNumber(join(lock, "pid"));
   if (owner.state !== "valid" || owner.value > 2147483647) return "held";
   // A live installer's pid names no other process: this one is reused.
