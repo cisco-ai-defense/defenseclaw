@@ -1203,7 +1203,7 @@ const knownLimitEntries = [
   {
     gaps: 'GAP-1164',
     section: 'Linux sign-out',
-    phrases: ['Without linger, signing out of your last session stops the gateway and its MicroVMs', '/docs/troubleshooting/sandboxes/setup-and-gateway#a-linux-sign-out-ends-a-running-microvm'],
+    phrases: ['Without linger, signing out of your last session stops the gateway and its MicroVMs', 'This is how systemd works', '`sudo loginctl enable-linger USER`', '/docs/troubleshooting/sandboxes/setup-and-gateway#a-linux-sign-out-ends-a-running-microvm'],
     from: [],
   },
   { gaps: 'GAP-1194', section: 'Claude Code shell', phrases: ['shell mode', 'on every OS, to per-user and managed installs, in observe and action mode', 'It is a Claude Code limit'], from: ['connectors/claudecode.mdx'] },

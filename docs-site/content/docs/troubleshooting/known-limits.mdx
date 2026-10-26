@@ -36,7 +36,7 @@ The managed Linux and macOS packages include no skill, MCP or plugin scanner; on
 
 ## Linux sign-out
 
-On Linux, the OpenShell gateway runs in your systemd user manager. Without linger, signing out of your last session stops the gateway and its MicroVMs, even when a disk sync failed, so unsynced work in the guest is lost. Save your work and stop the sandbox before you sign out, or ask an administrator to enable linger for your account. See [A Linux sign-out ends a running MicroVM](/docs/troubleshooting/sandboxes/setup-and-gateway#a-linux-sign-out-ends-a-running-microvm).
+On Linux, the OpenShell gateway runs in your systemd user manager. Without linger, signing out of your last session stops the gateway and its MicroVMs, even when a disk sync failed, so unsynced work in the guest is lost. This is how systemd works: without linger it ends a user's services when their last session ends. Save your work and stop the sandbox before you sign out, or ask an administrator to enable linger for your account with `sudo loginctl enable-linger USER`. See [A Linux sign-out ends a running MicroVM](/docs/troubleshooting/sandboxes/setup-and-gateway#a-linux-sign-out-ends-a-running-microvm).
 
 ## Upgrade and policy limits
 
