@@ -189,29 +189,75 @@ func (g *GatewayConfigurator) syncBeforeRestart(ctx context.Context) {
 	_ = syncAll(ctx, g.out())
 }
 
-// brewServiceLabel is the launchd job label of Homebrew's GatewayFormula
-// service (Homebrew's homebrew.mxcl.<formula name>).
-var brewServiceLabel = "homebrew.mxcl." + pathpkg.Base(GatewayFormula)
+// brewServiceLabels are the launchd job labels Homebrew gives the service
+// of GatewayFormula: sh.brew.<formula name> (Homebrew 7) or the older
+// homebrew.mxcl.<formula name>. Homebrew accepts both (GAP-2066).
+var brewServiceLabels = []string{"sh.brew." + pathpkg.Base(GatewayFormula), "homebrew.mxcl." + pathpkg.Base(GatewayFormula)}
+
+// launchdJob is the Homebrew launchd job of the gateway that a restart
+// stopped: the launchd domain it ran in and the plist `brew services
+// start` put in the account's LaunchAgents folder.
+type launchdJob struct{ domain, plist string }
+
+// launchAgentsDir is the account's LaunchAgents folder, where `brew
+// services start` puts the plist of the service it loads.
+func (g *GatewayConfigurator) launchAgentsDir() string {
+	if g.LaunchAgentsDir != "" {
+		return g.LaunchAgentsDir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || !filepath.IsAbs(home) {
+		return ""
+	}
+	return filepath.Join(home, "Library", "LaunchAgents")
+}
 
 // stopLaunchdGateway stops the gateway that launchd runs as Homebrew's
 // service, at once and before any brew run (`brew services restart` first
 // spends seconds in Homebrew before its stop, in which a raw-started
 // MicroVM gets ready and writes what the sync before it never saw:
-// GAP-2003). It reports whether launchd stopped it, which leaves the start
-// to `brew services start`; false (off macOS, a managed host, no such job
-// loaded in the account's graphical or background session) leaves the
-// whole restart to the restart command.
-func (g *GatewayConfigurator) stopLaunchdGateway(ctx context.Context) bool {
+// GAP-2003). It returns the job it stopped, which leaves the start to
+// `brew services start`; nil (off macOS, a managed host, no Homebrew
+// plist in the account's LaunchAgents folder, which a `brew services run`
+// gateway has not, or no such job loaded in the account's graphical or
+// background session) leaves the whole restart to the restart command.
+func (g *GatewayConfigurator) stopLaunchdGateway(ctx context.Context) *launchdJob {
 	if g.GOOS != "darwin" || g.managedHost() {
-		return false
+		return nil
+	}
+	dir := g.launchAgentsDir()
+	if dir == "" {
+		return nil
 	}
 	uid := strconv.Itoa(os.Getuid())
-	for _, domain := range []string{"gui/" + uid, "user/" + uid} {
-		if _, err := g.Runner.Output(ctx, Command{Name: "launchctl", Args: []string{"bootout", domain + "/" + brewServiceLabel}, Timeout: time.Minute}); err == nil {
-			return true
+	for _, label := range brewServiceLabels {
+		plist := filepath.Join(dir, label+".plist")
+		if info, err := os.Stat(plist); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		for _, domain := range []string{"gui/" + uid, "user/" + uid} {
+			if _, err := g.Runner.Output(ctx, Command{Name: "launchctl", Args: []string{"bootout", domain + "/" + label}, Timeout: time.Minute}); err == nil {
+				return &launchdJob{domain: domain, plist: plist}
+			}
 		}
 	}
-	return false
+	return nil
+}
+
+// startLaunchdGatewayAgain has launchd start the gateway job a restart
+// stopped from its own plist, when Homebrew refused to start it (its tmux
+// check, an account with no graphical session): a refused start never
+// leaves the gateway down (GAP-2060). It reports whether the gateway
+// answers after.
+func (g *GatewayConfigurator) startLaunchdGatewayAgain(ctx context.Context, job *launchdJob) error {
+	_, berr := g.Runner.Output(ctx, Command{Name: "launchctl", Args: []string{"bootstrap", job.domain, job.plist}, Timeout: time.Minute})
+	if err := g.VerifyGateway(ctx); err != nil {
+		if berr != nil {
+			return fmt.Errorf("launchctl bootstrap %s %s: %v", job.domain, job.plist, berr)
+		}
+		return err
+	}
+	return nil
 }
 
 // runsMicroVMs reports whether the gateway runs, or is configured to run,

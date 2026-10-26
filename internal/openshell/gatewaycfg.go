@@ -256,6 +256,10 @@ type GatewayConfigurator struct {
 	// which launchd then stops at once (GAP-1928, GAP-2003; default
 	// SyncGatewaySandboxes on Discover).
 	SyncSandboxes func(context.Context, io.Writer) error
+	// LaunchAgentsDir is the account's LaunchAgents folder, where `brew
+	// services start` puts the gateway service's plist (default
+	// ~/Library/LaunchAgents; macOS only).
+	LaunchAgentsDir string
 	// Out hears which MicroVMs a sync before a restart synced or could not
 	// (default: nowhere).
 	Out io.Writer
@@ -2007,11 +2011,19 @@ func (g *GatewayConfigurator) Restart(ctx context.Context) error {
 func (g *GatewayConfigurator) restart(ctx context.Context) error {
 	g.syncBeforeRestart(ctx)
 	c := g.restartCommand()
-	if g.stopLaunchdGateway(ctx) {
+	job := g.stopLaunchdGateway(ctx)
+	if job != nil {
 		c = serviceCommand{g.BrewCommand(), []string{"services", "start", GatewayFormula}}
 	}
 	if out, err := g.Runner.Output(ctx, Command{Name: c.name, Args: c.args, Timeout: 2 * time.Minute}); err != nil {
-		return fmt.Errorf("%w: %v: %s", errRestartCommand, err, strings.TrimSpace(string(out)))
+		if job == nil {
+			return fmt.Errorf("%w: %v: %s", errRestartCommand, err, strings.TrimSpace(string(out)))
+		}
+		if aerr := g.startLaunchdGatewayAgain(ctx, job); aerr != nil {
+			return fmt.Errorf("%w: %v: %s; launchd did not start the gateway again either (%v): run `brew services start %s` in a terminal of this account's login session",
+				errRestartCommand, err, strings.TrimSpace(string(out)), aerr, GatewayFormula)
+		}
+		fmt.Fprintf(g.out(), "`brew services start %s` failed (%v); launchd started the gateway again from %s\n", GatewayFormula, err, job.plist)
 	}
 	if err := g.VerifyGateway(ctx); err != nil {
 		missing := g.ServiceDockerGroupMissing

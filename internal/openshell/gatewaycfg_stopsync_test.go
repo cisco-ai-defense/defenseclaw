@@ -222,25 +222,46 @@ func TestEveryRestartGivesAMicroVMGatewayTheStopSyncFirst(t *testing.T) {
 // refuse the restart (its check passed).
 func TestAMacOSRestartStopsTheGatewayRightAfterTheSync(t *testing.T) {
 	uid := strconv.Itoa(os.Getuid())
-	label := "homebrew.mxcl." + filepath.Base(openshell.GatewayFormula)
+	formula := filepath.Base(openshell.GatewayFormula)
 	for _, tc := range []struct {
-		name, loadedIn string
-		want           []string
+		name, label, loadedIn string
+		startFails            bool
+		want                  []string
 	}{
-		{"graphical session", "gui", []string{"sync", "bootout gui", "start"}},
-		{"background session", "user", []string{"sync", "bootout gui", "bootout user", "start"}},
-		{"no launchd job", "", []string{"sync", "bootout gui", "bootout user", "restart"}},
+		// Homebrew 7 names the job sh.brew.<formula> (GAP-2066).
+		{"graphical session", "sh.brew." + formula, "gui", false, []string{"sync", "bootout gui", "start"}},
+		{"background session", "sh.brew." + formula, "user", false, []string{"sync", "bootout gui", "bootout user", "start"}},
+		{"older Homebrew label", "homebrew.mxcl." + formula, "gui", false, []string{"sync", "bootout gui", "start"}},
+		{"no launchd job", "sh.brew." + formula, "", false, []string{"sync", "bootout gui", "bootout user", "restart"}},
+		// `brew services run` puts no plist in LaunchAgents: Homebrew restarts it.
+		{"no plist", "", "", false, []string{"sync", "restart"}},
+		// Homebrew refuses the start (its tmux check, no graphical
+		// session): launchd starts the job again (GAP-2060).
+		{"start refused", "sh.brew." + formula, "user", true, []string{"sync", "bootout gui", "bootout user", "start", "bootstrap user"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newGatewayFixture(t)
 			f.onDriver(t, "vm")
 			f.cfg.GOOS = "darwin"
 			f.cfg.BrewFormulaInstalled = func() bool { return true }
+			f.cfg.LaunchAgentsDir = t.TempDir()
+			plist := filepath.Join(f.cfg.LaunchAgentsDir, tc.label+".plist")
+			if tc.label != "" {
+				if err := os.WriteFile(plist, []byte("<plist/>"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			var order []string
 			running, unsynced, lost := true, false, false
 			stop := func() {
 				lost = lost || unsynced
 				running, unsynced = false, false
+			}
+			f.cfg.VerifyGateway = func(context.Context) error {
+				if !running {
+					return errors.New("the gateway does not answer")
+				}
+				return nil
 			}
 			f.cfg.SyncSandboxes = func(_ context.Context, out io.Writer) error {
 				order = append(order, "sync")
@@ -250,19 +271,29 @@ func TestAMacOSRestartStopsTheGatewayRightAfterTheSync(t *testing.T) {
 			}
 			var out bytes.Buffer
 			f.cfg.Out = &out
-			for _, domain := range []string{"gui", "user"} {
-				f.runner.OnFunc("launchctl bootout "+domain+"/"+uid+"/"+label, func(context.Context, openshell.Command) ([]byte, error) {
-					order = append(order, "bootout "+domain)
-					if domain != tc.loadedIn {
-						return []byte("Boot-out failed: 3: No such process"), errors.New("exit status 3")
-					}
-					stop()
+			for _, label := range []string{"sh.brew." + formula, "homebrew.mxcl." + formula} {
+				for _, domain := range []string{"gui", "user"} {
+					f.runner.OnFunc("launchctl bootout "+domain+"/"+uid+"/"+label, func(context.Context, openshell.Command) ([]byte, error) {
+						order = append(order, "bootout "+domain)
+						if domain != tc.loadedIn || label != tc.label {
+							return []byte("Boot-out failed: 3: No such process"), errors.New("exit status 3")
+						}
+						stop()
+						return nil, nil
+					})
+				}
+				f.runner.OnFunc("launchctl bootstrap user/"+uid+" "+filepath.Join(f.cfg.LaunchAgentsDir, label+".plist"), func(context.Context, openshell.Command) ([]byte, error) {
+					order = append(order, "bootstrap user")
+					running = true
 					return nil, nil
 				})
 			}
 			for _, verb := range []string{"restart", "start"} {
 				f.runner.OnFunc("brew services "+verb+" "+openshell.GatewayFormula, func(context.Context, openshell.Command) ([]byte, error) {
 					order = append(order, verb)
+					if verb == "start" && tc.startFails {
+						return []byte("Error: `brew services` cannot run under tmux!"), errors.New("exit status 1")
+					}
 					if running {
 						// Homebrew's seconds before its stop.
 						unsynced = true
@@ -278,8 +309,14 @@ func TestAMacOSRestartStopsTheGatewayRightAfterTheSync(t *testing.T) {
 			if !slices.Equal(order, tc.want) || f.hasStopSync(t) || !strings.Contains(out.String(), "could not sync the disk of sandbox raw") {
 				t.Fatalf("order %v, want %v; out %q", order, tc.want, out.String())
 			}
+			if !running {
+				t.Fatal("the restart left the gateway down")
+			}
 			if tc.loadedIn != "" && lost {
 				t.Fatal("the restart stopped the gateway with work a raw-started MicroVM wrote after the sync")
+			}
+			if tc.startFails && !strings.Contains(out.String(), "launchd started the gateway again from "+plist) {
+				t.Fatalf("the put-back is not named: %q", out.String())
 			}
 		})
 	}
