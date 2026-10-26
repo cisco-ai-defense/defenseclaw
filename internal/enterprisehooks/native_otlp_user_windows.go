@@ -133,8 +133,11 @@ func windowsManagedUserNativeOTLPPaths(connectorName, home, dataDir string) []st
 // token of a signed-out user cannot read), it still revokes the scoped
 // credential, which the managed gateway never serves, so no live credential
 // is kept and Verify does not fail the install on a config it cannot read
-// (GAP-1170). The report names the account's own step; Verify keeps reporting
-// an exporter it can read, and the next repair retries.
+// (GAP-1170). The report names the account's own step. A config the install
+// cannot read (a share a signed-out account's S4U token has no network
+// credentials for, or a path through a reparse point) is a documented limit:
+// nothing retries it, the account removes the exporter itself (GAP-1839,
+// GAP-1840).
 func removeWindowsManagedUserNativeOTLPAsTarget(connectorName, dataDir string) error {
 	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
 	if residue, err := connector.UserNativeOTLPResidue(connectorName, opts); err == nil && len(residue) == 0 {
@@ -147,7 +150,7 @@ func removeWindowsManagedUserNativeOTLPAsTarget(connectorName, dataDir string) e
 				revoked = fmt.Sprintf("could not revoke its scoped credential either (%v)", revokeErr)
 			}
 		}
-		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise hooks: could not remove the %s native OTLP exporter an earlier per-user install left (%v); %s; %s; verify reports what it can read and repair retries\n",
+		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise hooks: could not remove the %s native OTLP exporter an earlier per-user install left (%v); %s; %s (DefenseClaw cannot read an agent config on a network share while the account is signed out, so this step is the account's)\n",
 			connectorName, err, revoked, windowsManagedUserNativeOTLPManualStep(connectorName))
 	}
 	return nil

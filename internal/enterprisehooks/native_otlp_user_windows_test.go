@@ -450,7 +450,10 @@ func TestWindowsManagedNativeOTLPTakeBackRevokesCredentialWhenLinkedConfigUnread
 			if _, err := os.Lstat(tokenPath); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("take-back kept the scoped credential beside an unreadable linked config: %v", err)
 			}
-			if !strings.Contains(report, "revoked its scoped credential") || !strings.Contains(report, "as that user") {
+			// GAP-1839: nothing retries a config the install cannot read, so the
+			// report does not promise a retry.
+			if !strings.Contains(report, "revoked its scoped credential") || !strings.Contains(report, "as that user") ||
+				strings.Contains(report, "retries") {
 				t.Fatalf("take-back report does not name the step: %q", report)
 			}
 			if strings.Contains(report, "e7e7") || strings.Contains(report, "19010") {
