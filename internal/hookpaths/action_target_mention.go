@@ -1462,6 +1462,7 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 	if depth >= 8 || len(command) > MaxPayloadBytes {
 		return false
 	}
+	command = actionWindowsBlankPatchText(command)
 	// The argument to PowerShell -Command is parsed again by the child shell.
 	// Quotes that are literal in the outer command do not stop expansion there.
 	raw := actionWindowsScan(command, grammar)
@@ -1617,11 +1618,19 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int) []bool {
 		if i < len(words) && words[i] != ";" && words[i] != "|" && words[i] != "||" && words[i] != "&" && words[i] != "&&" {
 			continue
 		}
-		if i > start && actionWindowsTextProgram(words[start]) {
+		if i > start && (actionWindowsTextProgram(words[start]) || actionWindowsNativeProgram(words[start])) {
 			for j := start + 1; j < i; j++ {
-				if scan.quoted[j] && !strings.Contains(words[j], "$(") && actionWindowsRedirectOperator(words[j-1]) == "" {
+				if !scan.quoted[j] || strings.Contains(words[j], "$(") || actionWindowsRedirectOperator(words[j-1]) != "" {
+					continue
+				}
+				if actionWindowsTextProgram(words[start]) {
 					words[j] = strings.ReplaceAll(words[j], "~", "tilde-text")
 				}
+				// A quoted pattern given to a native program or printed is
+				// the program's text: neither PowerShell nor Git Bash
+				// expands it (GAP-1717: echo "*" and grep -rn "*** Begin
+				// Patch" . from the home folder).
+				words[j] = actionWindowsLiteralPattern.Replace(words[j])
 			}
 		}
 		start = i + 1
@@ -1635,6 +1644,70 @@ func actionWindowsLocationProgram(word string) bool {
 		return true
 	}
 	return false
+}
+
+// actionWindowsBlankPatchText blanks, for the Windows target scan, the
+// envelope text that apply_patch calls read (the POSIX scan does the same,
+// actionBlankPatchBodies): content lines, the Begin and End markers and the
+// "*** ... File:" directive words, whose *** is no path pattern. The
+// directive paths stay and are scanned (GAP-1717: a Git Bash apply_patch
+// heredoc from the home folder read *** as a glob that selects .ssh).
+func actionWindowsBlankPatchText(command string) string {
+	if !strings.Contains(command, patchBeginMarker) ||
+		strings.Count(command, "\r") != strings.Count(command, "\r\n") {
+		// PowerShell also ends a line at a lone CR, where the line-based
+		// feed reading does not (GAP-1500): keep the text.
+		return command
+	}
+	fed := patchFedLines(command)
+	lines := strings.Split(command, "\n")
+	if fed == nil || len(fed) != len(lines) {
+		return command
+	}
+	for i, line := range lines {
+		if fed[i] {
+			trimmed := strings.TrimSpace(line)
+			blanked := false
+			for _, directive := range patchTargetDirectives {
+				if strings.HasPrefix(trimmed, directive) {
+					lines[i] = strings.Repeat(" ", len(line)-len(trimmed)+len(directive)) + trimmed[len(directive):]
+					blanked = true
+					break
+				}
+			}
+			if !blanked {
+				lines[i] = strings.Repeat(" ", len(line))
+			}
+			continue
+		}
+		for _, marker := range []string{patchBeginMarker, patchEndMarker} {
+			lines[i] = strings.ReplaceAll(lines[i], marker, strings.Repeat(" ", len(marker)))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+var actionWindowsLiteralPattern = strings.NewReplacer("*", "_", "?", "_", "[", "_", "]", "_")
+
+// actionWindowsNativeProgram reports a program PowerShell runs as a native
+// executable that is neither a shell nor an alias of a cmdlet: it receives a
+// quoted word as text (grep, rg, git, python ...). Cmdlets and their aliases
+// (cp, rm, ls, cat ...) expand a wildcard path themselves.
+func actionWindowsNativeProgram(word string) bool {
+	program := strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(word, `\`, "/"))), ".exe")
+	if program == "" || strings.Contains(program, "-") || strings.ContainsAny(program, "$%&.@({") {
+		return false
+	}
+	switch program {
+	case "cp", "copy", "cpi", "mv", "move", "mi", "rm", "del", "erase", "ri", "rd", "rmdir", "ni", "mkdir", "md",
+		"sc", "ac", "tee", "cat", "gc", "type", "ls", "dir", "gci", "cd", "sl", "chdir", "pushd", "popd", "ren", "rni",
+		"iex", "icm", "start", "saps", "sajb", "select", "where", "foreach", "%", "?", "echo", "write", "set", "sv",
+		"ft", "fl", "out", "sort", "measure", "compare", "diff", "curl", "wget", "iwr", "irm", "ii", "clc", "cli", "cpp", "gp", "sp",
+		"bash", "sh", "zsh", "dash", "ksh", "wsl", "pwsh", "powershell", "cmd", "busybox", "env", "sudo", "xargs",
+		"find", "nohup", "nice", "time", "timeout", "watch", "parallel", "apply_patch", "applypatch":
+		return false
+	}
+	return true
 }
 
 func actionWindowsTextProgram(word string) bool {
