@@ -1454,6 +1454,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		return links
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
+	linkDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds := false, false
 	var copyScopes []string
@@ -1498,6 +1499,9 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			links.unknown(false)
 		case slices.Contains(linkPrograms, program):
 			workingDirectory := cwd
+			if dir, placed := linkDirs[call]; placed {
+				workingDirectory = dir
+			}
 			if call == linkCall {
 				workingDirectory = linkCWD
 			}
@@ -1584,7 +1588,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			links.unknownCopyIn(scope)
 		}
 	}
-	if len(links.aliases) > 0 && (renames || cds && links.relative && linkCall == nil) {
+	if len(links.aliases) > 0 && (renames || cds && links.relative && linkCall == nil && !linkDirsKnown) {
 		links.unknown(true)
 	}
 	// Scopes are read against the starting directory; after a directory
@@ -1593,6 +1597,76 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		links.globalOpaque = true
 	}
 	return links
+}
+
+// topLevelLinkDirectories places the link calls of a command whose
+// directory changes are all static top-level cd statements in a ; / && / ||
+// list (cd build && ln ../a.txt b1): each link call runs in the directory the
+// cd statements before it name, read lexically from cwd (GAP-1742). known is
+// false when any cd, pushd or popd is elsewhere or dynamic, so the link scope
+// keeps its conservative reading.
+func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syntax.CallExpr]string, known bool) {
+	var statements []*syntax.Stmt
+	var flatten func(*syntax.Stmt)
+	flatten = func(stmt *syntax.Stmt) {
+		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated &&
+			(pair.Op == syntax.AndStmt || pair.Op == syntax.OrStmt) {
+			flatten(pair.X)
+			flatten(pair.Y)
+			return
+		}
+		statements = append(statements, stmt)
+	}
+	for _, stmt := range file.Stmts {
+		flatten(stmt)
+	}
+	topLevel := make(map[*syntax.CallExpr]bool)
+	for _, stmt := range statements {
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && !stmt.Background {
+			topLevel[call] = true
+		}
+	}
+	known = true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 || topLevel[call] {
+			return true
+		}
+		if program, static := StaticWord(call.Args[0], home); !static || slices.Contains(cdPrograms, programBase(program)) {
+			known = known && static && !slices.Contains(cdPrograms, programBase(program))
+		}
+		return true
+	})
+	if !known {
+		return nil, false
+	}
+	dirs = make(map[*syntax.CallExpr]string)
+	dir := cwd
+	for _, stmt := range statements {
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			continue
+		}
+		program, static := StaticWord(call.Args[0], home)
+		if !static {
+			return nil, false
+		}
+		if slices.Contains(cdPrograms, programBase(program)) {
+			if programBase(program) != "cd" || len(call.Args) != 2 || len(call.Assigns) != 0 {
+				return nil, false
+			}
+			target, static := StaticWord(call.Args[1], home)
+			if !static || target == "" || strings.HasPrefix(target, "-") || !filepath.IsAbs(dir) {
+				return nil, false
+			}
+			dir = OperandPath(target, dir)
+			continue
+		}
+		if slices.Contains(linkPrograms, programBase(program)) {
+			dirs[call] = dir
+		}
+	}
+	return dirs, true
 }
 
 // staticChangedDirectoryLink handles one ordered cd/link/write chain. The
