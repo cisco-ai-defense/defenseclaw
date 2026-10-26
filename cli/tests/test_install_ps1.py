@@ -4813,7 +4813,7 @@ def test_an_upgrade_replaces_an_installed_binary_in_place() -> None:
     # new file's rename, by the native helper, after the atomic retries.
     assert "Invoke-AsideReplace $New $Destination" in switch
     aside = _ps_functions("Invoke-AsideReplace")
-    assert "[DefenseClawInstall.Rename]::Aside($New, $Destination, $aside)" in aside
+    assert "[DefenseClawInstall.RenameAside]::Aside($New, $Destination, $aside)" in aside
     assert '"$Destination.old-"' in aside
     assert "FileRenameInfoEx" in _ps_functions("Invoke-AtomicReplace")
     assert "FILE_RENAME_FLAG_POSIX_SEMANTICS" in _ps_functions("Invoke-AtomicReplace")
@@ -5251,8 +5251,8 @@ def test_a_restore_under_steady_hook_traffic_finishes_in_one_run(tmp_path: Path)
     assert not slot.exists()
     for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
         assert (bin_dir / name).read_text(encoding="ascii") == "old " + name
-    # The image the running calls still map stays aside until it is free.
-    assert (bin_dir / "defenseclaw-hook.exe.old-1").read_text(encoding="ascii") == "new defenseclaw-hook.exe"
+    # The image renamed aside goes once nothing maps it; here nothing does (GAP-1760).
+    assert not (bin_dir / "defenseclaw-hook.exe.old-1").exists()
     assert (data / "config.yaml").read_text(encoding="ascii") == "old data"
 
 

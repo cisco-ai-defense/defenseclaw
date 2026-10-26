@@ -1863,7 +1863,7 @@ function Invoke-AsideReplace([string]$New, [string]$Destination) {
     # by the next install otherwise) and the new file renamed in its place.
     [void](Invoke-AtomicReplace -Compile)
     $aside = "$Destination.old-" + (Get-Date -Format "yyyyMMddTHHmmssfff")
-    [DefenseClawInstall.Rename]::Aside($New, $Destination, $aside)
+    [DefenseClawInstall.RenameAside]::Aside($New, $Destination, $aside)
     Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
 }
 
@@ -1965,6 +1965,10 @@ function Restore-BinDir([string]$From, [string]$GuardSHA256 = "") {
                 Remove-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
             }
         }
+        # Programs renamed aside while they ran (.old-*), once nothing runs them (GAP-1760).
+        foreach ($name in $ManagedFiles) {
+            Get-ChildItem -LiteralPath $BinDir -Filter "$name.old-*" -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
         Assert-BinDirRestored $From
         return
     }
@@ -1996,6 +2000,10 @@ function Restore-BinDir([string]$From, [string]$GuardSHA256 = "") {
         } catch { $refused += $_.Exception.Message }
     }
     if ($refused.Count) { throw "Could not put back every program in ${BinDir}: $($refused -join '; ')" }
+    # Programs renamed aside while they ran (.old-*), once nothing runs them (GAP-1760).
+    foreach ($name in $ManagedFiles) {
+        Get-ChildItem -LiteralPath $BinDir -Filter "$name.old-*" -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
     Assert-BinDirRestored $From $GuardSHA256
 }
 
@@ -2911,6 +2919,8 @@ function Install-HookFirst([string]$Slot) {
     Write-DurableText (Join-Path $Slot "HOOK_GUARD") (Get-Sha256 $staged)
     Install-File $staged $live
     Wait-PreviousHookExit ([DateTime]::UtcNow)
+    # The calls that ran the previous hook are done: its aside copy is free (GAP-1760).
+    Get-ChildItem -LiteralPath $BinDir -Filter "defenseclaw-hook.exe.old-*" -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
 function Wait-PreviousHookExit([DateTime]$PublishedAt) {

@@ -1692,12 +1692,16 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
 
 # install_publish renames a running binary aside to this name when `make all`
 # replaces it; a copy still mapped then stays until a later rebuild prunes it.
-_RETIRED_COPY_RE = re.compile(r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+", re.IGNORECASE)
+# install.ps1 renames a running one aside to <name>.old-<yyyyMMddTHHmmssfff>
+# when an upgrade or its restore replaces it under hook traffic (GAP-1760).
+_RETIRED_COPY_RE = re.compile(
+    r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+|(?P<aside>.+)\.old-[0-9]{8}T[0-9]{9}", re.IGNORECASE
+)
 
 
 def _is_retired_source_install_copy(name: str, owned: tuple[str, ...] | set[str]) -> bool:
     match = _RETIRED_COPY_RE.fullmatch(name)
-    return bool(match) and match.group("name").lower() in {item.lower() for item in owned}
+    return bool(match) and (match.group("name") or match.group("aside")).lower() in {item.lower() for item in owned}
 
 
 def _retired_source_install_copies(install_root: str, names: tuple[str, ...]) -> tuple[str, ...]:
