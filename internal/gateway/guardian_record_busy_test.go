@@ -110,11 +110,15 @@ func TestUserScopedCredentialIndexSurvivesAStillBusyLedgerBriefly(t *testing.T) 
 		name    string
 		failure error
 		after   time.Duration
+		rotate  bool
 		ok      bool
 	}{
-		{"still busy within the grace", errTestGuardianRecordBusy, userScopedCredentialRefreshInterval, true},
-		{"still busy past the grace", errTestGuardianRecordBusy, userScopedCredentialBusyGrace + userScopedCredentialRefreshInterval, false},
-		{"untrusted ledger", errors.New("owner is not SYSTEM"), userScopedCredentialRefreshInterval, false},
+		{"still busy within the grace", errTestGuardianRecordBusy, userScopedCredentialRefreshInterval, false, true},
+		{"still busy past the grace", errTestGuardianRecordBusy, userScopedCredentialBusyGrace + userScopedCredentialRefreshInterval, false, false},
+		{"untrusted ledger", errors.New("owner is not SYSTEM"), userScopedCredentialRefreshInterval, false, false},
+		// GAP-2091: the committed key changes while the ledger read is busy;
+		// the retired key's credential must not keep authenticating.
+		{"key changed while still busy within the grace", errTestGuardianRecordBusy, userScopedCredentialRefreshInterval, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			drops = nil
@@ -124,7 +128,8 @@ func TestUserScopedCredentialIndexSurvivesAStillBusyLedgerBriefly(t *testing.T) 
 			dir := t.TempDir()
 			store := newUserScopedCredentialStore(func() string { return dir })
 			store.now = func() time.Time { return clock }
-			store.loadKey = func(string) (string, error) { return key, nil }
+			currentKey := key
+			store.loadKey = func(string) (string, error) { return currentKey, nil }
 			store.newLedger = func(string) func() (managedHookLedger, uint64, error) {
 				return func() (managedHookLedger, uint64, error) {
 					if ledgerErr != nil {
@@ -137,6 +142,9 @@ func TestUserScopedCredentialIndexSurvivesAStillBusyLedgerBriefly(t *testing.T) 
 				t.Fatalf("baseline lookup: %q %v", identity, ok)
 			}
 			ledgerErr = tc.failure
+			if tc.rotate {
+				currentKey = strings.Repeat("ef", 32)
+			}
 			clock = clock.Add(tc.after)
 			_, ok := store.lookup(connector.UserScopedHookCredential, "opencode", token)
 			if ok != tc.ok {
@@ -144,6 +152,13 @@ func TestUserScopedCredentialIndexSurvivesAStillBusyLedgerBriefly(t *testing.T) 
 			}
 			if tc.ok && len(drops) != 0 || !tc.ok && (len(drops) != 1 || !strings.HasPrefix(drops[0], "authorization ledger unreadable: ")) {
 				t.Fatalf("drop log lines: %q", drops)
+			}
+			if tc.rotate {
+				for _, fingerprint := range store.keyFingerprints() {
+					if fingerprint == connector.UserScopedTokenKeyFingerprint(key) {
+						t.Fatalf("keyFingerprints still names the retired key after a rotation during a busy read")
+					}
+				}
 			}
 		})
 	}

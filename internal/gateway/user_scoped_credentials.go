@@ -234,9 +234,11 @@ func (s *userScopedCredentialStore) refreshLocked() {
 	}
 	ledger, generation, err := s.ledger()
 	if err != nil {
-		// A read that stayed busy keeps the last good index for a moment;
-		// every other error drops it at once.
-		if s.built && guardianRecordReadBusy(err) && now.Sub(s.ledgerReadAt) <= userScopedCredentialBusyGrace {
+		// A read that stayed busy keeps the last good index for a moment,
+		// but only for the same keys: a key change drops it at once, so a
+		// retired key never outlives its rotation (GAP-2091). Every other
+		// error drops it at once.
+		if s.built && guardianRecordReadBusy(err) && slices.Equal(keys, s.keys) && now.Sub(s.ledgerReadAt) <= userScopedCredentialBusyGrace {
 			return
 		}
 		fail("authorization ledger unreadable", err)
