@@ -7697,7 +7697,10 @@ def setup_guardrail(
             )
         rows.append(("guardrail.port", str(gc.port)))
         rows += _legacy_guardrail_llm_rows(gc)
-        rows.append(("guardrail.detection_strategy", gc.detection_strategy))
+        # The strategy that runs, as guardrail status shows it: regex_only
+        # while the judge is off (GAP-1647).
+        for c in _actives:
+            rows.append((f"  [{c}] detection_strategy", _effective_detection_strategy(gc, c)))
         if gc.api_base:
             rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
     else:
@@ -7707,7 +7710,7 @@ def setup_guardrail(
             ("guardrail.mode", gc.mode),
             ("guardrail.port", str(gc.port)),
             *_legacy_guardrail_llm_rows(gc),
-            ("guardrail.detection_strategy", gc.detection_strategy),
+            ("guardrail.detection_strategy", _effective_detection_strategy(gc, gc.connector)),
             ("guardrail.rule_pack", gc.effective_rule_pack() or "default"),
         ]
         if gc.api_base:
@@ -14722,6 +14725,18 @@ def execute_guardrail_setup(
             warnings.append("Config not saved — settings will be lost on next run")
 
     return True, warnings
+
+
+def _effective_detection_strategy(gc, connector: str) -> str:
+    """The detection strategy that runs for *connector*, as guardrail status shows it.
+
+    A judge strategy runs as regex_only while the judge is off (or not
+    selected for the connector); the summary printed the configured
+    regex_judge instead (GAP-1647).
+    """
+    from defenseclaw.commands.cmd_guardrail import _scan_value
+
+    return _scan_value(gc, connector)
 
 
 def _prompt_hook_fail_mode(gc) -> None:
