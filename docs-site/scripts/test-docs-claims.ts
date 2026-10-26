@@ -1451,6 +1451,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1666", page: "troubleshooting/gateway-and-keys.mdx", has: ["(on Windows the row is `Config file`)", "`Gateway token env`, `Gateway token drift` and `Gateway PID identity`"] },
   { gap: "GAP-1691", page: "reference/configuration/fail-modes.mdx", has: ["accept only `open` or `closed`, in lower case"], lacks: ["Any value other than `open` (in any case) is `closed`."] },
   { gap: "GAP-1698", page: "enterprise/operate/operations.mdx", has: ["`/var/lib/defenseclaw-enterprise/last-package-result.json` (the package"], lacks: ["and `last-package-result.log` beside it"] },
+  { gap: "GAP-1517", page: "appendix/benchmarks.mdx", has: ["title=\"Eleven YARA signatures\""], lacks: ["Ten YARA signatures"] },
   // r105-rows-end
 ];
 
