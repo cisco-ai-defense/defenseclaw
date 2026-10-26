@@ -112,11 +112,20 @@ func firstAcceptedRegexMatchAt(pattern *regexp.Regexp, text string, accept func(
 	if pattern == nil || text == "" {
 		return nil
 	}
+	// The first candidate is usually decisive: accept it without enumerating
+	// every later candidate of a large document.
+	first := pattern.FindStringIndex(text)
+	if first == nil {
+		return nil
+	}
+	if accept(text[first[0]:first[1]], first[0], first[1]) {
+		return first
+	}
 	// Enumerate against the complete input once. Restarting a regex on
 	// text[offset:] changes the meaning of ^ and word-boundary assertions after
 	// a rejected candidate, allowing a non-match in the original text to become
 	// a match solely because the validation cursor moved.
-	for _, loc := range pattern.FindAllStringIndex(text, -1) {
+	for _, loc := range pattern.FindAllStringIndex(text, -1)[1:] {
 		start, end := loc[0], loc[1]
 		if accept(text[start:end], start, end) {
 			return []int{start, end}
@@ -211,6 +220,10 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 	case "ENT-EMAIL-BULK":
 		return func(text, match string, start, end int) bool {
 			return credibleEmailContext(text, match, start, end)
+		}
+	case "ENT-PHONE-E164":
+		return func(text, match string, start, _ int) bool {
+			return credibleE164Context(text, match, start)
 		}
 	case "ENT-BULK-CSV-PII":
 		return func(text, _ string, start, end int) bool {
@@ -419,6 +432,9 @@ func credibleEmailContext(text, match string, start, end int) bool {
 		emailDomainLooksLikeNumericHost(matchLower) {
 		return false
 	}
+	if emailIsPathSegment(text, start, end) {
+		return false
+	}
 	if start >= 0 && end >= start && end <= len(text) {
 		if gitUserEmailPlaceholder(text[:start], matchLower) {
 			return false
@@ -463,6 +479,42 @@ func gitUserEmailPlaceholder(before, email string) bool {
 		return true
 	}
 	return strings.HasSuffix(domain, ".example")
+}
+
+// emailIsPathSegment reports an address-shaped match that is one folder or
+// file name of a path, such as the home folder of a directory account
+// (/home/user@corp.example/project): a path, not someone's address
+// (GAP-1286).
+func emailIsPathSegment(text string, start, end int) bool {
+	if start <= 0 || start > len(text) || end > len(text) || (text[start-1] != '/' && text[start-1] != '\\') {
+		return false
+	}
+	return end == len(text) || strings.IndexByte("/\\ \t\r\n\"'`:;,)", text[end]) >= 0
+}
+
+// isoDatePlus is "+YYYY-MM-DD": a date after a plus sign (a diff's added
+// line, a UTC offset), not a country code.
+var isoDatePlus = regexp.MustCompile(`^\+\d{4}-\d{2}-\d{2}`)
+
+// credibleE164Context rejects the two plus signs that are not a phone
+// number's (GAP-1284): a date right after the plus, and the "+" that starts
+// an added line of a unified diff ("+1761377703126", "+2026-10-02 07:35").
+func credibleE164Context(text, match string, start int) bool {
+	plus := strings.IndexByte(match, '+')
+	if plus < 0 {
+		return true
+	}
+	if isoDatePlus.MatchString(match[plus:]) {
+		return false
+	}
+	at := start + plus
+	lineStart := at == 0 || (at > 0 && at <= len(text) && text[at-1] == '\n')
+	return !lineStart || !looksLikeUnifiedDiff(text)
+}
+
+// looksLikeUnifiedDiff reports text that holds a unified diff hunk header.
+func looksLikeUnifiedDiff(text string) bool {
+	return strings.HasPrefix(text, "@@ -") || strings.Contains(text, "\n@@ -")
 }
 
 func emailDomainLooksLikeNumericHost(email string) bool {

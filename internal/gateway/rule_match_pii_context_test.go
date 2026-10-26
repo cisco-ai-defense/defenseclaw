@@ -1,0 +1,66 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"regexp"
+	"testing"
+)
+
+func shippedPIIRule(t *testing.T, id, pattern string) PatternRule {
+	t.Helper()
+	return PatternRule{ID: id, Pattern: regexp.MustCompile(pattern)}
+}
+
+// GAP-1284: a git diff of a project log alerted ENT-PHONE-E164 on the "+" of
+// its added lines ("+2026-10-02 07:35:03 ..." and "+1761377703126"). The plus
+// that starts a unified diff line and a date after a plus sign are not a
+// country code. A phone number in the diff still alerts.
+func TestE164PhoneRuleSkipsDiffMarkersAndDates(t *testing.T) {
+	rule := shippedPIIRule(t, "ENT-PHONE-E164", `(?:^|[\s:(])\+\d{1,3}(?:[\s.-]?\d){7,14}\b`)
+	diff := "diff --git a/app.log b/app.log\nindex 3f2a9c1..8b7d0e4 100644\n--- a/app.log\n+++ b/app.log\n@@ -12,7 +12,9 @@ startup\n" +
+		" 2026-10-01 09:00:00 boot\n+2026-10-02 07:35:03 request ok\n+1761377703126,ok\n"
+	for _, text := range []string{
+		diff,
+		"deadline: +2026-10-02 07:35 UTC",
+	} {
+		if loc := firstAcceptedRuleMatch(rule, text); loc != nil {
+			t.Errorf("ENT-PHONE-E164 fired on %q in %q", text[loc[0]:loc[1]], text)
+		}
+	}
+	for _, text := range []string{
+		diff + "+  support: +1 415 555 0100\n",
+		"Call +44 20 7946 0958 for help",
+		"+14155550100 is the on-call line",
+	} {
+		if firstAcceptedRuleMatch(rule, text) == nil {
+			t.Errorf("ENT-PHONE-E164 did not fire on %q", text)
+		}
+	}
+}
+
+// GAP-1286: a directory account's home folder holds an "@"
+// (/home/dcad-r103-eng1@dclab.test), so every path in a tool call or output
+// of that user read as an e-mail address. A path segment is not an address;
+// an address in prose or a record still alerts.
+func TestEmailRuleSkipsAddressShapedPathSegments(t *testing.T) {
+	rule := shippedPIIRule(t, "ENT-EMAIL-BULK", `(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b`)
+	for _, text := range []string{
+		"printf '== skill-creator ==\\n' && find /home/dcad-r103-eng1@dclab.test/.codex/skills/skill-creator -maxdepth 3 -type f -print | sort && python3 /home/dcad-r103-eng1@dclab.test/.codex/skills/skill-creator/scripts/quick_validate.py --help",
+		`C:\Users\dana.reyes@contoso.com\project\README.md`,
+		"cd /home/eng1@dclab.test",
+	} {
+		if loc := firstAcceptedRuleMatch(rule, text); loc != nil {
+			t.Errorf("ENT-EMAIL-BULK fired on %q in %q", text[loc[0]:loc[1]], text)
+		}
+	}
+	for _, text := range []string{
+		"send the quarterly report to dana.reyes@contoso-mail.net today",
+		"owner dana.reyes@contoso-mail.net, folder /home/x@dclab.test/p",
+	} {
+		if firstAcceptedRuleMatch(rule, text) == nil {
+			t.Errorf("ENT-EMAIL-BULK did not fire on %q", text)
+		}
+	}
+}
