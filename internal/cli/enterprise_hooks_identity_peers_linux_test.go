@@ -190,7 +190,7 @@ func TestGatewayPeerListingIsCachedAndKeepsTheLastInode(t *testing.T) {
 // could write the first migration map, the pre-upgrade agents entries of its
 // local accounts were refused for good. The homes file shows whether a 1.0.4
 // gateway served the uids: 1.0.3 writes no format entry, 1.0.4 writes format
-// 1, and this release keeps pre_token_file on a file it took over from 1.0.3.
+// 1, and this release keeps pre_token_holder on each uid it took over from 1.0.3.
 // Only the 1.0.4 shape keeps the account from writing the first map.
 func TestServedAccountWritesTheFirstMigrationMapWithoutA104Window(t *testing.T) {
 	me, err := user.Current()
@@ -214,7 +214,7 @@ func TestServedAccountWritesTheFirstMigrationMapWithoutA104Window(t *testing.T) 
 	}{
 		{"1.0.3 homes file", `{` + entry + `}`, false},
 		{"1.0.4 homes file", `{"format":{"format":1},` + entry + `}`, true},
-		{"homes file this release took over from 1.0.3", `{"format":{"format":1,"pre_token_file":true},` + entry + `}`, false},
+		{"homes file this release marked for the uid", `{"format":{"format":1},` + strings.TrimSuffix(entry, "}") + `,"pre_token_holder":true}}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			enterpriseHookPeerListing.reset()

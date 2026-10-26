@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -132,13 +133,43 @@ var enterpriseHookResolveGatewayPeers = func(path string, last map[int]enterpris
 	if json.Unmarshal(data, &stored) != nil {
 		return last
 	}
-	preTokenFile := true
+	legacyFile := true
 	if raw, ok := stored["format"]; ok {
 		var format struct {
-			Format       int  `json:"format"`
-			PreTokenFile bool `json:"pre_token_file"`
+			Format int `json:"format"`
 		}
-		preTokenFile = json.Unmarshal(raw, &format) == nil && (format.Format < 1 || format.PreTokenFile)
+		legacyFile = json.Unmarshal(raw, &format) == nil && format.Format < 1
+	}
+	var savedAt int64
+	if info, statErr := os.Stat(path); statErr == nil {
+		savedAt = info.ModTime().UnixNano()
+	}
+	// preToken reports whether the account that holds uid now, whose home
+	// is home, is the one a build before 1.0.4 saw hold it, with no 1.0.4
+	// gateway serving the uid since then (enterpriseHookPeerAccount.PreToken).
+	preToken := func(uid int, home string) bool {
+		var entry struct {
+			BaseIncarnation string `json:"base_incarnation"`
+			LegacyHolder    bool   `json:"legacy_holder"`
+			PreTokenHolder  bool   `json:"pre_token_holder"`
+			FirstSeen       int64  `json:"first_seen"`
+		}
+		if json.Unmarshal(stored[strconv.Itoa(uid)], &entry) != nil {
+			return false
+		}
+		if !(entry.PreTokenHolder || (legacyFile || entry.LegacyHolder) && strings.TrimSpace(entry.BaseIncarnation) == "") {
+			return false
+		}
+		// A home created after the gateway last saw the uid's holder
+		// belongs to an account created after it, which held no 1.0.3
+		// agent identity (GAP-1977). The 2 s slack is the gateway's
+		// (homeProofCreatedSlack).
+		seen := entry.FirstSeen
+		if seen <= 0 {
+			seen = savedAt
+		}
+		birth, known := enterprisehooks.HomeBirth(home)
+		return !known || seen <= 0 || birth <= seen+int64(2*time.Second)
 	}
 	uids := make([]int, 0, len(stored))
 	for key := range stored {
@@ -153,7 +184,7 @@ var enterpriseHookResolveGatewayPeers = func(path string, last map[int]enterpris
 	resolved := make(map[int]enterpriseHookCachedPeer, len(uids))
 	keep := func(uid int) {
 		if peer, ok := last[uid]; ok {
-			peer.PreTokenFile = preTokenFile
+			peer.PreToken = peer.PreToken && preToken(uid, peer.home)
 			resolved[uid] = peer
 		}
 	}
@@ -182,7 +213,7 @@ var enterpriseHookResolveGatewayPeers = func(path string, last map[int]enterpris
 			continue
 		}
 		peer := enterpriseHookCachedPeer{enterpriseHookPeerAccount{UID: uid, User: account.Name, HomeInode: enterpriseHookHomeInode(account.Home),
-			PreTokenFile: preTokenFile}, account.Home}
+			PreToken: preToken(uid, account.Home)}, account.Home}
 		if previous, ok := last[uid]; ok && peer.HomeInode == 0 && previous.User == peer.User {
 			peer.HomeInode = previous.HomeInode
 		}

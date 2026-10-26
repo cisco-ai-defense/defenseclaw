@@ -126,6 +126,10 @@ func LegacyAgentOwnerToken(incarnation, home string) string {
 	return token
 }
 
+// HomeBirth is the creation time of the directory home, Unix nanoseconds,
+// as LegacyAgentOwnerToken names it; false where the file system keeps none.
+func HomeBirth(home string) (int64, bool) { return homeBirth(home) }
+
 // LegacyAgentOwnersRecorded reports whether dir holds the migration map.
 func LegacyAgentOwnersRecorded(dir string) bool {
 	if dir == "" {

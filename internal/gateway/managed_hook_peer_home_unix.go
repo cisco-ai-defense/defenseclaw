@@ -165,12 +165,16 @@ type managedHookPeerHomeCache struct {
 	// of its holder (holderToken, Unix nanoseconds), persisted with the
 	// homes: a home created after it is another account's (GAP-0422).
 	firstSeen map[int]int64
-	// preTokenFile marks a homes file that a build before 1.0.4 (no
-	// format entry) wrote last when this gateway took it over. It is kept
-	// on the format entry, which 1.0.4 drops when it writes the file, so
-	// it tells the guardian that no 1.0.4 gateway served the file's uids
-	// since then (GAP-1865).
-	preTokenFile bool
+	// preToken marks, per uid, an entry a build before 1.0.4 saw hold an
+	// account for which no 1.0.4 gateway adopted an account token: the file
+	// had no format entry (1.0.3 and older wrote it), or 1.0.4 kept it as a
+	// legacy holder with no base token (it never served the uid). It is
+	// persisted (pre_token_holder) and kept after this gateway adopts a
+	// token, so the guardian can tell that no 1.0.4 gateway served that
+	// uid (GAP-1865, GAP-1976). A uid this gateway sees first gets none,
+	// so an account created after the takeover never counts as a 1.0.3
+	// holder (GAP-1977).
+	preToken map[int]bool
 	// homesFile persists homes and names in the gateway's data directory,
 	// so a gateway that starts while the directory is away still has the
 	// last home and name of each uid and keeps its agent identity
@@ -273,11 +277,11 @@ type managedHookPeerLast struct {
 	// (managedHookPeerHomeCache.firstSeen), Unix nanoseconds. Other builds
 	// ignore it.
 	FirstSeen int64 `json:"first_seen,omitempty"`
-	// Format and PreTokenFile are set on the managedHookPeerHomesFormatKey
-	// entry only. PreTokenFile is managedHookPeerHomeCache.preTokenFile;
-	// other builds ignore it.
-	Format       int  `json:"format,omitempty"`
-	PreTokenFile bool `json:"pre_token_file,omitempty"`
+	// PreTokenHolder is managedHookPeerHomeCache.preToken; other builds
+	// ignore it.
+	PreTokenHolder bool `json:"pre_token_holder,omitempty"`
+	// Format is set on the managedHookPeerHomesFormatKey entry only.
+	Format int `json:"format,omitempty"`
 }
 
 // loadHomesLocked merges the persisted homes and names under the ones this
@@ -296,7 +300,6 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 		return
 	}
 	legacyFile := stored[managedHookPeerHomesFormatKey].Format < 1
-	c.preTokenFile = legacyFile || stored[managedHookPeerHomesFormatKey].PreTokenFile
 	// A uid an earlier build served and persisted keeps no first_seen (1.0.4
 	// writes none): that gateway saw it by the time it last wrote the file,
 	// so a home created after then is another account's (the upgrade
@@ -316,6 +319,13 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 				c.legacy = make(map[int]bool)
 			}
 			c.legacy[uid] = true
+		}
+		if ((legacyFile || last.LegacyHolder) && !validAccountToken(last.BaseIncarnation) || last.PreTokenHolder) &&
+			len(c.preToken) < managedHookPeerHomesMax {
+			if c.preToken == nil {
+				c.preToken = make(map[int]bool)
+			}
+			c.preToken[uid] = true
 		}
 		if _, known := c.homes[uid]; !known && last.Home != "" &&
 			normalizeManagedHookPeerHome(last.Home) == last.Home && len(c.homes) < managedHookPeerHomesMax {
@@ -393,7 +403,13 @@ func (c *managedHookPeerHomeCache) saveHomesLocked() {
 		last.FirstSeen = at
 		stored[strconv.Itoa(uid)] = last
 	}
-	stored[managedHookPeerHomesFormatKey] = managedHookPeerLast{Format: 1, PreTokenFile: c.preTokenFile}
+	for uid := range c.preToken {
+		if last, ok := stored[strconv.Itoa(uid)]; ok {
+			last.PreTokenHolder = true
+			stored[strconv.Itoa(uid)] = last
+		}
+	}
+	stored[managedHookPeerHomesFormatKey] = managedHookPeerLast{Format: 1}
 	data, err := json.Marshal(stored)
 	if err != nil {
 		return
@@ -1203,11 +1219,21 @@ func (c *managedHookPeerHomeCache) holderToken(uid int, name, incarnation string
 			c.saveHomesLocked()
 		}
 		if earlier {
+			// Another account than the one the older build saw holds the
+			// uid: it is no 1.0.3 holder (GAP-1977).
+			if c.preToken[uid] {
+				delete(c.preToken, uid)
+				c.saveHomesLocked()
+			}
 			return incarnation + "|" + proof
 		}
 		return incarnation
 	case sameHomeProof(proof, first):
 		return incarnation
+	}
+	if c.preToken[uid] {
+		delete(c.preToken, uid)
+		c.saveHomesLocked()
 	}
 	return incarnation + "|" + proof
 }
