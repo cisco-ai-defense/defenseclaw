@@ -37,10 +37,9 @@ const (
 //     call in hook-failures.jsonl.
 //
 // Only an outage can open: an answer the gateway gave (an error status, a
-// malformed, partial or oversized answer), a refusal, a missing credential
-// and the install window stay closed in every tier. A listener on the port
-// that is not proven to be this account's gets nothing sent; this account's
-// gateway is not reachable there, so it is an outage. A configured per-user guardrail.hook_fail_mode does not change
+// malformed, partial or oversized answer), a refusal, a missing credential,
+// another program on the gateway port and the install window stay closed in
+// every tier. A configured per-user guardrail.hook_fail_mode does not change
 // the per-user answer: tier selects it.
 func HookOutageFailMode(managedInstall bool, managedMode, tier string) string {
 	if managedInstall {

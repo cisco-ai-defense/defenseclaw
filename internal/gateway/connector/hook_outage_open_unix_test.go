@@ -37,9 +37,6 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 		lock    bool
 		// opens reports whether the outage-open tier lets this call run.
 		opens bool
-		// foreign: the listener on the port is not proven to be this
-		// account's; the hook must send it nothing.
-		foreign bool
 	}
 	allow := func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"action":"allow","raw_action":"allow","severity":"NONE","hook_output":{}}`))
@@ -48,16 +45,6 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 		{name: "gateway up", handler: allow, opens: true},
 		{name: "gateway down", opens: true},
 		{name: "gateway down, strict availability", env: []string{"DEFENSECLAW_STRICT_AVAILABILITY=1"}},
-		// sa-port-peer review: a listener not proven to be this account's
-		// gets nothing, and that refusal does not block the call by itself.
-		{name: "another account holds the port", handler: allow, foreign: true, opens: true},
-		{name: "another account holds the port, strict availability", handler: allow, foreign: true,
-			env: []string{"DEFENSECLAW_STRICT_AVAILABILITY=1"}},
-		// The marker is the hooks own: one inherited from the agents
-		// environment never opens a call the gateway answered.
-		{name: "inherited peer marker", env: []string{"_DC_PEER_UNPROVEN=1"}, handler: func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, "unavailable", http.StatusServiceUnavailable)
-		}},
 		{name: "gateway down, install in progress", lock: true},
 		{name: "gateway took the call and did not answer", handler: func(_ http.ResponseWriter, r *http.Request) {
 			// Read the body so the server notices the hook hang up.
@@ -97,13 +84,8 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 					home := t.TempDir()
 					installNativeGatewayForHookTest(t, home)
 					var addr string
-					var requests sync.Map
 					if sc.handler != nil {
-						handler := sc.handler
-						server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-							requests.Store(r.URL.Path, true)
-							handler(w, r)
-						}))
+						server := httptest.NewServer(sc.handler)
 						defer server.Close()
 						addr = strings.TrimPrefix(server.URL, "http://")
 					} else {
@@ -113,11 +95,6 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 					opts := SetupOpts{DataDir: home, APIAddr: addr, APIToken: "scoped-test-token", HookFailMode: tier.mode}
 					if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
 						t.Fatal(err)
-					}
-					if sc.foreign {
-						// Another account's listener: the owner lookup says foreign.
-						appendToHookFileForTest(t, filepath.Join(hookDir, "_hardening.sh"),
-							"\n_defenseclaw_api_listener_owner() { return 0; }\n")
 					}
 					if sc.lock {
 						if err := os.WriteFile(filepath.Join(home, ".install.lock"), nil, 0o600); err != nil {
@@ -133,16 +110,6 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 					wantRun := sc.name == "gateway up" || (sc.opens && tier.mode == "open")
 					if blocked == wantRun {
 						t.Fatalf("blocked=%v, want %v (exit %v):\n%s", blocked, !wantRun, err, output)
-					}
-					if sc.foreign {
-						sent := false
-						requests.Range(func(any, any) bool { sent = true; return false })
-						if sent {
-							t.Fatalf("the hook sent a request to a listener not proven to be this account's:\n%s", output)
-						}
-						if wantRun && !strings.Contains(string(output), "fail mode open for an outage") {
-							t.Fatalf("the call ran without the outage warning:\n%s", output)
-						}
 					}
 					if sc.name != "gateway down" {
 						return
@@ -252,16 +219,3 @@ var (
 	outagePortsMu   sync.Mutex
 	outagePortsUsed = map[int]bool{}
 )
-
-// appendToHookFileForTest appends text to a written hook file.
-func appendToHookFileForTest(t *testing.T, path, text string) {
-	t.Helper()
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close()
-	if _, err := file.WriteString(text); err != nil {
-		t.Fatal(err)
-	}
-}

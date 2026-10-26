@@ -75,15 +75,8 @@ func TestPerUserPluginPostDoesNotContactAForeignListener(t *testing.T) {
 			map[string]string{"Authorization": "Bearer secret"}, []byte(`{"private":"event"}`))
 		return err
 	}
-	err := post()
-	if err == nil || received.Load() != 0 {
+	if err := post(); err == nil || received.Load() != 0 {
 		t.Fatalf("foreign listener received %d requests; error = %v", received.Load(), err)
-	}
-	// hook-post exits with the outage status for it, so the Amp and
-	// OpenCode plugins take the outage decision instead of a block of their
-	// own (sa-port-peer review: peer checks never block the user's call).
-	if !PerUserPostOutage(err) {
-		t.Fatalf("PerUserPostOutage(%v) = false, want the outage status for an unproven listener", err)
 	}
 	perUserConnectedPeer = func(_, _ *net.TCPAddr) error {
 		return nil

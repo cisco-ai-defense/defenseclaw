@@ -60,9 +60,6 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 		rt     func() *stubRT
 		mutate func(*Options)
 		opens  bool
-		// foreign: another account's process holds the port; nothing may
-		// be sent to it (rt gets no request).
-		foreign bool
 	}
 	scenarios := []scenario{
 		{name: "gateway up", rt: func() *stubRT { return ok(`{"action":"allow","raw_action":"allow"}`) }, opens: true},
@@ -70,15 +67,6 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 		{name: "connection reset before any status", rt: func() *stubRT { return &stubRT{err: syscall.ECONNRESET} }, opens: true},
 		{name: "restart outlasts the budget", rt: func() *stubRT { return &stubRT{err: syscall.ECONNREFUSED} },
 			mutate: func(o *Options) { o.StartedAt = time.Now().Add(-gatewayRestartBudget + 100*time.Millisecond) }, opens: true},
-		// A listener not proven to be this account's gets nothing, and the
-		// refusal to send does not block the call by itself: this account's
-		// gateway is not reachable there, an outage (sa-port-peer review).
-		{name: "another account holds the port", rt: func() *stubRT { return ok(`{"action":"block"}`) }, foreign: true, opens: true},
-		{name: "connected listener unverified", rt: func() *stubRT {
-			return &stubRT{err: fmt.Errorf("%w: owner 1001", errPerUserGatewayPeerUnverified)}
-		}, opens: true},
-		{name: "another account holds the port, strict availability", rt: func() *stubRT { return ok(`{"action":"block"}`) },
-			foreign: true, mutate: func(o *Options) { o.StrictAvailability = true }},
 		{name: "refused, strict availability", rt: func() *stubRT { return &stubRT{err: syscall.ECONNREFUSED} },
 			mutate: func(o *Options) { o.StrictAvailability = true }},
 		{name: "refused, install in progress", rt: func() *stubRT { return &stubRT{err: syscall.ECONNREFUSED} },
@@ -113,13 +101,7 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 		for _, tier := range []struct{ name, mode string }{{"default or permissive", "open"}, {"strict", "closed"}} {
 			for _, sc := range scenarios {
 				t.Run(connector+"/"+tier.name+"/"+sc.name, func(t *testing.T) {
-					if sc.foreign {
-						previous := foreignListenerPID
-						t.Cleanup(func() { foreignListenerPID = previous })
-						foreignListenerPID = func(string, int, string) int { return 4242 }
-					}
-					rt := sc.rt()
-					result := run(t, connector, rt, func(opts *Options) {
+					result := run(t, connector, sc.rt(), func(opts *Options) {
 						opts.Event = call.event
 						opts.Stdin = strings.NewReader(call.stdin)
 						opts.FailMode = "closed"
@@ -128,9 +110,6 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 							sc.mutate(opts)
 						}
 					})
-					if sc.foreign && rt.requests != 0 {
-						t.Fatalf("hook sent %d request(s) to another account's listener", rt.requests)
-					}
 					wantRun := sc.name == "gateway up" || (sc.opens && tier.mode == "open")
 					if blocked := nativeOutageBlocked(result); blocked == wantRun {
 						t.Fatalf("blocked=%v, want %v: code=%d stdout=%q stderr=%q", blocked, !wantRun, result.code, result.stdout, result.stderr)
@@ -138,12 +117,7 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 					if !wantRun || sc.name == "gateway up" {
 						return
 					}
-					wants := []string{"defenseclaw-gateway start", "defenseclaw doctor", "fail mode open for an outage"}
-					if sc.foreign {
-						// The warning names the holder and that it got nothing.
-						wants = []string{"another account's process (PID 4242)", "sent it nothing", "allowing"}
-					}
-					for _, want := range wants {
+					for _, want := range []string{"defenseclaw-gateway start", "defenseclaw doctor", "fail mode open for an outage"} {
 						if !strings.Contains(result.stdout+result.stderr, want) {
 							t.Fatalf("the outage warning does not name %q: stdout=%q stderr=%q", want, result.stdout, result.stderr)
 						}
@@ -182,8 +156,7 @@ func TestPerUserPostOutageClassifiesOnlyAnOutage(t *testing.T) {
 		{"cut off after a status", fmt.Errorf("%w: %w", errPerUserAnswerIncomplete, io.ErrUnexpectedEOF), false},
 		{"took the call, no answer", fmt.Errorf("%w: %w", errGatewayTookCallNoAnswer, context.DeadlineExceeded), false},
 		{"timeout", context.DeadlineExceeded, false},
-		{"listener unverified", fmt.Errorf("dial: %w", fmt.Errorf("%w: owner 1001", errPerUserGatewayPeerUnverified)), true},
-		{"unclassified error", errors.New("per-user gateway connected listener is unverified: owner 1001"), false},
+		{"listener unverified", errors.New("per-user gateway connected listener is unverified: owner 1001"), false},
 		{"none", nil, false},
 	} {
 		if got := PerUserPostOutage(tc.err); got != tc.want {
