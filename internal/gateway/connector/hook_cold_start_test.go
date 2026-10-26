@@ -62,6 +62,7 @@ if [ "$1" = hook-post ]; then
   if [ -f "$DC_COLD_CAP/count" ]; then IFS= read -r n < "$DC_COLD_CAP/count" || true; fi
   n=$((n + 1))
   printf '%s\n' "$n" > "$DC_COLD_CAP/count"
+  : > "$DC_COLD_CAP/try.$n"
   ts=$(date +%s%N 2>/dev/null)
   case "$ts" in ""|*[!0-9]*) ts=$(perl -MTime::HiRes=time -e 'printf("%.0f", time()*1e9)' 2>/dev/null) ;; esac
   [ -z "$ts" ] || echo "$ts" >> "$DC_COLD_CAP/tries"
@@ -179,7 +180,22 @@ func runHookForColdStartWithManaged(t *testing.T, c Connector, script string, ar
 				}
 				_ = listener.Close()
 				_ = os.WriteFile(filepath.Join(capDir, "dropped."+strconv.Itoa(n)), nil, 0o600)
-				time.Sleep(50 * time.Millisecond)
+				// The gateway is back for the next try, not at a fixed delay: the
+				// hook reads the socket table after a refused try (lsof on macOS
+				// takes longer than a short delay on a hosted runner), and a
+				// listener back before that read is no longer a restart.
+				next := filepath.Join(capDir, "try."+strconv.Itoa(n+1))
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					if _, err := os.Stat(next); err == nil {
+						break
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
 				for {
 					select {
 					case <-stop:
