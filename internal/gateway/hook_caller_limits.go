@@ -231,13 +231,33 @@ func hookCallerBudgetKey(identity, path string) string {
 	return identity
 }
 
+// hookCallerSandboxRead is the budget of an account's read-only sandbox
+// requests (GET under the sandbox policy class: status, sandboxes, packs,
+// current policy). They are an operator's CLI and TUI reads, not policy
+// writes or hook traffic: in the sandbox policy class's 20-request burst
+// about nine back-to-back "defenseclaw sandbox pack list" calls were refused
+// for 20 s (GAP-1693). Reads take the ordinary caller limits under their own
+// key, so they neither wait on nor use up the policy writes' or the host
+// hooks' budgets.
+const hookCallerSandboxRead = "|sandbox-read"
+
+// hookCallerAdmissionKey is hookCallerBudgetKey with the method: a read of
+// the sandbox policy class gets the read budget.
+func hookCallerAdmissionKey(identity, method, path string) string {
+	key := hookCallerBudgetKey(identity, path)
+	if method == http.MethodGet && strings.HasSuffix(key, "|"+sandboxBudgetPolicy) {
+		return identity + hookCallerSandboxRead
+	}
+	return key
+}
+
 // admitHookCaller applies the per-caller limits to one request for path and
 // waits for one of the caller's run slots. It returns the request to serve,
 // which carries the slot, and the release function to defer; the release
 // function is nil after answering 429 or when the client went away while it
 // waited.
 func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, identity, route string) (*http.Request, func()) {
-	release, run, refusal, logNow := a.hookCallerLimits.acquire(hookCallerBudgetKey(identity, r.URL.Path))
+	release, run, refusal, logNow := a.hookCallerLimits.acquire(hookCallerAdmissionKey(identity, r.Method, r.URL.Path))
 	if refusal == "" {
 		if r.Context().Err() != nil {
 			// The client left before it had a slot: nothing to serve.

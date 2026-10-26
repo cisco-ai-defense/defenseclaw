@@ -407,3 +407,32 @@ func TestHookCallerLimiterAdmitsTenCallsASecondOfOneAccount(t *testing.T) {
 		t.Fatal("10 calls a second taking 1 s each were all admitted; the in-flight bound did not apply")
 	}
 }
+
+// GAP-1693: a burst of an operator's read-only sandbox CLI reads is not
+// refused; the sandbox policy writes keep their own small budget.
+func TestSandboxCLIReadBurstIsNotThrottled(t *testing.T) {
+	api := &APIServer{}
+	for i := range 40 {
+		rec := httptest.NewRecorder()
+		_, release := api.admitHookCaller(rec,
+			httptest.NewRequest(http.MethodGet, "/api/v1/sandbox/policy/packs", nil), "1001", "/api/v1/sandbox/policy/packs")
+		if release == nil {
+			t.Fatalf("read %d of a sandbox CLI burst refused: %d %s", i, rec.Code, rec.Body.String())
+		}
+		release()
+	}
+	refused := false
+	for range 40 {
+		rec := httptest.NewRecorder()
+		_, release := api.admitHookCaller(rec,
+			httptest.NewRequest(http.MethodPost, "/api/v1/sandbox/policy/test", nil), "1001", "/api/v1/sandbox/policy/test")
+		if release == nil {
+			refused = true
+			break
+		}
+		release()
+	}
+	if !refused {
+		t.Fatal("sandbox policy writes lost their budget")
+	}
+}
