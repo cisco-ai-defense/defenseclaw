@@ -538,19 +538,30 @@ func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubjec
 // profileExplainCommand names the installed administrator command for the
 // verified ID. A missing agent ownership fact includes the current verified
 // agent ID so explain checks the same assignment as the refused hook.
+// Without a verified ID a managed host still gets its own explain command,
+// with a placeholder for the account: the per-user `defenseclaw guardrail`
+// commands do not run there (GAP-1692).
 func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, connectorName, agent string, agentNeeded bool) string {
-	if subject == nil || subject.UserID != strings.TrimSpace(subject.UserID) || useridentity.KindForID(subject.UserID) == "" {
-		return "defenseclaw guardrail profile list"
+	user := ""
+	if subject != nil && subject.UserID == strings.TrimSpace(subject.UserID) && useridentity.KindForID(subject.UserID) != "" {
+		user = subject.UserID
 	}
-	command := "defenseclaw guardrail profile explain --user " + subject.UserID
-	if set.base != nil && set.base.StandaloneEnterprise() {
+	managed := set.base != nil && set.base.StandaloneEnterprise()
+	if user == "" {
+		if !managed {
+			return "defenseclaw guardrail profile list"
+		}
+		user = "<user>"
+	}
+	command := "defenseclaw guardrail profile explain --user " + user
+	if managed {
 		switch runtime.GOOS {
 		case "linux":
-			command = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user " + subject.UserID
+			command = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user " + user
 		case "darwin":
-			command = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user " + subject.UserID
+			command = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user " + user
 		case "windows":
-			command = `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user ` + subject.UserID
+			command = `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user ` + user
 		}
 	}
 	if profileCommandToken(connectorName) {
