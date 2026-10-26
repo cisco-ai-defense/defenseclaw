@@ -2704,6 +2704,18 @@ class GuardrailConfig:
             return "closed" if standalone else "open"
         return "closed" if self.hook_policy_tier(connector) == "strict" else "open"
 
+    def effective_hook_outage_fail_mode(self, connector: str = "") -> str:
+        """What ``connector``'s hooks do while the gateway is down.
+
+        Mirrors Go ``Config.EffectiveHookOutageFailModeForConnector``: the
+        mode the current hooks, the OpenCode/Amp plugins and the shell helper
+        decide at call time, and the one Doctor, Status and the fail-mode
+        setter's runtime check read for them (GAP-1354, GAP-1730).
+        :meth:`effective_hook_fail_mode` already resolves it (a managed mode,
+        an explicit saved mode, else the connector's policy tier).
+        """
+        return self.effective_hook_fail_mode(connector)
+
     def hook_policy_tier(self, connector: str = "") -> str:
         """The connector's policy tier: its rule pack's posture (strict, default or permissive).
 

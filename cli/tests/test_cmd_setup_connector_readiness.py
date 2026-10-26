@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import click
 import pytest
+from defenseclaw import config as dcconfig
 from defenseclaw import agent_selection, fail_mode, hook_integrity
 from defenseclaw.commands import cmd_doctor, cmd_setup
 from defenseclaw.connector_contracts import (
@@ -966,7 +967,9 @@ def test_readiness_requires_the_rendered_windows_mode_to_match_the_lock(
 
 def test_opencode_recovery_setup_uses_call_time_mode_without_rendered_mode(monkeypatch, tmp_path: Path) -> None:
     cfg = _config(tmp_path)
-    cfg.guardrail.effective_hook_outage_fail_mode = lambda _name: "open"
+    # The real GuardrailConfig: a stub with the method hid that the class had
+    # none, so the exemption never applied (GAP-1354).
+    cfg.guardrail = dcconfig.GuardrailConfig()
     entry = _entry("opencode", tmp_path)
     (tmp_path / "hook_contract_lock.json").write_text(
         json.dumps({"version": 2, "connectors": {"opencode": entry}}), encoding="utf-8"

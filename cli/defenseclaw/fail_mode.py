@@ -777,9 +777,7 @@ def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]
         # call time; older scripts still read their runtime record.
         helper = _read_small_file(hook_dir / "_hardening.sh")
         if helper and "defenseclaw-call-time-outage-v1" in helper:
-            resolver = getattr(cfg.guardrail, "effective_hook_outage_fail_mode", None)
-            if callable(resolver):
-                return "hook-script", normalize_fail_mode(resolver(connector))
+            return "hook-script", normalize_fail_mode(cfg.guardrail.effective_hook_outage_fail_mode(connector))
         return "hook-script", _read_flat_hook_record_mode(hook_dir, connector)
     return ("hook-script-env" if reads_env else "hook-script"), mode
 
@@ -1155,8 +1153,7 @@ def _read_opencode_plugin_mode(cfg: Any) -> str | None:
         if plugin is None:
             continue
         if "defenseclaw-call-time-outage-v1" in plugin:
-            resolver = getattr(cfg.guardrail, "effective_hook_outage_fail_mode", None)
-            return normalize_fail_mode(resolver("opencode")) if callable(resolver) else None
+            return normalize_fail_mode(cfg.guardrail.effective_hook_outage_fail_mode("opencode"))
         match = _OPENCODE_OUTAGE_PATTERN.search(plugin) or _OPENCODE_FAIL_MODE_PATTERN.search(plugin)
         if match:
             return match.group(1)
@@ -1168,8 +1165,7 @@ def _read_amp_plugin_mode(path: Path, cfg: Any) -> str | None:
     if data is None:
         return None
     if "defenseclaw-call-time-outage-v1" in data:
-        resolver = getattr(cfg.guardrail, "effective_hook_outage_fail_mode", None)
-        return normalize_fail_mode(resolver("amp")) if callable(resolver) else None
+        return normalize_fail_mode(cfg.guardrail.effective_hook_outage_fail_mode("amp"))
     match = _AMP_OUTAGE_PATTERN.search(data) or _AMP_FAIL_MODE_PATTERN.search(data)
     return match.group(1) if match else None
 
