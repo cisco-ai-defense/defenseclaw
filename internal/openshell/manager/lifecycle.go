@@ -521,7 +521,7 @@ func (m *Manager) stop(ctx context.Context, b *box, hold bool) error {
 // synced, so DefenseClaw keeps it running with its work (GAP-1163).
 func unsyncedStopHeld(name string, err error) error {
 	return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
-		Message: "sandbox " + name + " keeps running: DefenseClaw could not sync its MicroVM's disk before the stop (" + err.Error() +
+		Message: "sandbox " + name + " keeps running: DefenseClaw " + sandboxapi.UnsyncedStopHeldText + " (" + err.Error() +
 			"), and the stop of a MicroVM loses what was not synced",
 		Detail: "save the work you need first (`defenseclaw sandbox pull " + name + "` brings a copy's changes back), then run `defenseclaw sandbox stop " +
 			name + "` again, which syncs again first; if the sync keeps failing, `defenseclaw sandbox stop " + name +

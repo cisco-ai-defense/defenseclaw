@@ -44,6 +44,16 @@ type fakeSandboxStopper struct {
 	listErr error
 	stopped []string
 	fail    string
+	// held is a sandbox whose plain stop the daemon holds (a failed sync);
+	// accepted are the stops made accepting the loss.
+	held     string
+	accepted []string
+}
+
+func (f *fakeSandboxStopper) StopAcceptingUnsynced(_ context.Context, name string) (*sandboxapi.Sandbox, error) {
+	f.accepted = append(f.accepted, name)
+	f.stopped = append(f.stopped, name)
+	return &sandboxapi.Sandbox{Name: name}, nil
 }
 
 func (f *fakeSandboxStopper) List(context.Context) ([]sandboxapi.Sandbox, error) {
@@ -53,6 +63,10 @@ func (f *fakeSandboxStopper) List(context.Context) ([]sandboxapi.Sandbox, error)
 func (f *fakeSandboxStopper) Stop(_ context.Context, name string) (*sandboxapi.Sandbox, error) {
 	if name == f.fail {
 		return nil, errors.New("gateway gone")
+	}
+	if name == f.held {
+		return nil, &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+			Message: "sandbox " + name + " keeps running: DefenseClaw " + sandboxapi.UnsyncedStopHeldText + " (sync: exit 1)"}
 	}
 	f.stopped = append(f.stopped, name)
 	return &sandboxapi.Sandbox{Name: name}, nil
@@ -75,6 +89,13 @@ func TestStopManagedSandboxes(t *testing.T) {
 	f = &fakeSandboxStopper{list: []sandboxapi.Sandbox{{Name: "a", Phase: "ready"}, {Name: "b", Phase: "ready"}}, fail: "a"}
 	if err := stopManagedSandboxes(context.Background(), f, &out); err == nil || !slices.Equal(f.stopped, []string{"b"}) {
 		t.Fatalf("a failed stop: %v, stopped %v", err, f.stopped)
+	}
+	// GAP-1550: the unit's stop ends the VM anyway, so a held stop is made
+	// accepting the loss (it keeps what reached the disk and says the rest).
+	f = &fakeSandboxStopper{list: []sandboxapi.Sandbox{{Name: "a", Phase: "ready"}, {Name: "b", Phase: "ready"}}, held: "a"}
+	if err := stopManagedSandboxes(context.Background(), f, &out); err != nil || !slices.Equal(f.accepted, []string{"a"}) ||
+		!slices.Equal(f.stopped, []string{"a", "b"}) {
+		t.Fatalf("a held stop at ExecStop: %v, accepted %v, stopped %v", err, f.accepted, f.stopped)
 	}
 	f = &fakeSandboxStopper{listErr: &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: "not reachable"}}
 	if err := stopManagedSandboxes(context.Background(), f, &out); err != nil {

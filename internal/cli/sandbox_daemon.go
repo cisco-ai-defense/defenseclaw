@@ -402,10 +402,17 @@ func sandboxDaemonRestarting(ctx context.Context) bool {
 type managedSandboxStopper interface {
 	List(ctx context.Context) ([]sandboxapi.Sandbox, error)
 	Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
+	StopAcceptingUnsynced(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
 }
 
 // stopManagedSandboxes stops every sandbox of the account that may be
-// running. A daemon that is not running has nothing to stop.
+// running. A daemon that is not running has nothing to stop. It is the
+// gateway unit's ExecStop (a sign-out without linger, a lifecycle stop,
+// sandboxes turned off), after which systemd ends the gateway and with it
+// every MicroVM: a stop held because a guest's disk sync failed is made
+// again accepting the loss, so it keeps what reached the disk and the feed
+// says what may be lost (stop_unflushed), where the VM died unsynced with
+// no word (GAP-1550).
 func stopManagedSandboxes(ctx context.Context, c managedSandboxStopper, out io.Writer) error {
 	list, err := c.List(ctx)
 	if err != nil {
@@ -421,7 +428,11 @@ func stopManagedSandboxes(ctx context.Context, c managedSandboxStopper, out io.W
 		default:
 			continue
 		}
-		if _, err := c.Stop(ctx, sb.Name); err != nil {
+		_, err := c.Stop(ctx, sb.Name)
+		if sandboxapi.IsUnsyncedStopHeld(err) {
+			_, err = c.StopAcceptingUnsynced(ctx, sb.Name)
+		}
+		if err != nil {
 			failed = append(failed, fmt.Errorf("stop %s: %w", sb.Name, err))
 			continue
 		}
