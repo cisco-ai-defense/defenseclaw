@@ -88,7 +88,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
 ## Good to know
 
 - Set a strict `default_profile` for accounts no assignment selects. While a directory lookup fails, a request whose assignment needs the missing fact is refused (`default_lookup_failed`) and names that fact.
-- On a per-user install the user owns `config.yaml` and can change their own profile. On a managed host the profile lives in the machine config.
+- On a per-user install the user owns `config.yaml` and can change their own profile. On a managed host the profile lives in the machine config: the administrator checks the file with `defenseclaw-gateway config validate FILE`, applies it with `defenseclaw-gateway enterprise linux ensure --config FILE` (`enterprise macos ensure --config FILE` on macOS), and checks one account with `defenseclaw-gateway enterprise linux profile-explain --user USER --connector CONNECTOR` (`enterprise macos profile-explain` on macOS), as root by the packaged path.
 
 ## Undo
 
