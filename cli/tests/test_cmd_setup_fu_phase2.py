@@ -3779,6 +3779,21 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertIn("The change was saved", result.output)
         self.assertNotIsInstance(result.exception, CanonicalObservabilityError)
 
+    def test_out_of_range_gateway_ports_are_refused_with_the_range(self):
+        # GAP-1650: --api-port 99999 reached the free-port probe and printed an
+        # OverflowError traceback; every port flag now names the range.
+        self.app.logger = MagicMock()
+        before = open(self.cfg_path, encoding="utf-8").read() if os.path.isfile(self.cfg_path) else None
+        for flag, value in (("--api-port", "99999"), ("--api-port", "0"), ("--port", "70000"), ("--api-port", "x")):
+            result = _invoke(["gateway", flag, value, "--non-interactive"], self.app)
+            self.assertEqual(result.exit_code, 2, result.output)
+            self.assertIn("use a number between 1 and 65535", result.output)
+            self.assertNotIn("Traceback", result.output)
+            self.assertNotIsInstance(result.exception, OverflowError)
+        after = open(self.cfg_path, encoding="utf-8").read() if os.path.isfile(self.cfg_path) else None
+        self.assertEqual(after, before)
+        self.app.logger.log_action.assert_not_called()
+
     def test_new_api_port_held_by_another_listener_is_refused_before_saving(self):
         # GAP-1345: --api-port saved a port another account's gateway held.
         import socket

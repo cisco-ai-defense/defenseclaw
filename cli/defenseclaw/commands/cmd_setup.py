@@ -4937,11 +4937,36 @@ def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
+class _PortNumber(click.ParamType):
+    """A TCP port, 1-65535, refused at parse time like a config.yaml port.
+
+    An out-of-range --api-port reached the free-port probe, whose bind raised
+    OverflowError as a traceback (GAP-1650).
+    """
+
+    name = "port"
+
+    def convert(self, value, param, ctx):
+        if isinstance(value, int) and not isinstance(value, bool):
+            number = value
+        else:
+            try:
+                number = int(str(value).strip(), 10)
+            except ValueError:
+                self.fail("use a number between 1 and 65535", param, ctx)
+        if not 1 <= number <= 65535:
+            self.fail("use a number between 1 and 65535", param, ctx)
+        return number
+
+
+_PORT_NUMBER = _PortNumber()
+
+
 @setup.command("gateway")
 @click.option("--remote", is_flag=True, help="Configure for a remote OpenClaw gateway (requires auth token)")
 @click.option("--host", default=None, help="Gateway host")
-@click.option("--port", type=int, default=None, help="Gateway WebSocket port")
-@click.option("--api-port", type=int, default=None, help="Sidecar REST API port")
+@click.option("--port", type=_PORT_NUMBER, default=None, help="Gateway WebSocket port")
+@click.option("--api-port", type=_PORT_NUMBER, default=None, help="Sidecar REST API port")
 @click.option(
     "--token",
     default=None,
@@ -5142,8 +5167,8 @@ def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str, *, 
     click.echo()
 
     gw.host = click.prompt("  Gateway host", default=gw.host)
-    gw.port = click.prompt("  Gateway port", default=gw.port, type=int)
-    gw.api_port = click.prompt("  Sidecar API port", default=gw.api_port, type=int)
+    gw.port = click.prompt("  Gateway port", default=gw.port, type=_PORT_NUMBER)
+    gw.api_port = click.prompt("  Sidecar API port", default=gw.api_port, type=_PORT_NUMBER)
     gw.token = ""
     detected = _detect_openclaw_gateway_token(openclaw_config_file)
     if detected:
@@ -5165,8 +5190,8 @@ def _interactive_gateway_remote(gw, data_dir: str) -> None:
     click.echo()
 
     gw.host = click.prompt("  Gateway host", default=gw.host)
-    gw.port = click.prompt("  Gateway port", default=gw.port, type=int)
-    gw.api_port = click.prompt("  Sidecar API port", default=gw.api_port, type=int)
+    gw.port = click.prompt("  Gateway port", default=gw.port, type=_PORT_NUMBER)
+    gw.api_port = click.prompt("  Sidecar API port", default=gw.api_port, type=_PORT_NUMBER)
 
     click.echo()
     use_ssm = click.confirm("  Fetch token from AWS SSM Parameter Store?", default=True)
