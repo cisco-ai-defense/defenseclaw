@@ -1073,6 +1073,12 @@ describe('1.0.4 operator routes and limits', () => {
     assert.doesNotMatch(agent360, /Omnigent policy bridge/i);
   });
 
+  it('states the kiro-cli setup floor from the connector (GAP-1402)', () => {
+    assert.ok(source('internal/gateway/connector/kiro.go').includes('const KiroCLIHookFloor = "2.27.1"'));
+    assert.ok(page('reference/connectors/kiro.mdx').includes('it needs 2.27.1 or later (`KiroCLIHookFloor`)'));
+    assert.ok(!page('reference/connectors/kiro.mdx').includes('per-user installs are not version-gated'));
+  });
+
   it('pins the workspace route for older Kiro IDEs', () => {
     const kiro = page('connectors/kiro.mdx');
     assert.match(kiro, /before 1\.0\.182.*setup kiro --workspace/i);
@@ -1405,6 +1411,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1675", page: "connectors/opencode.mdx", section: "On a managed computer", has: ["`C:\\ProgramData\\opencode\\opencode.json`", "`C:\\Program Files\\Cisco\\DefenseClaw\\share\\opencode\\defenseclaw.js`", "on Windows too", "`guardrail.connectors.opencode.enabled: false`"] },
   { gap: "GAP-1701", page: "connectors/hermes.mdx", has: ["| Hook program, managed Windows | `C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook.exe`", "the administrator sets `guardrail.connectors.hermes.enabled: false` in the managed `config.yaml` and runs `ensure`"] },
   { gap: "GAP-1598", page: "reference/connectors/antigravity.mdx", has: ["`antigravity-hook.sh PreToolUse`", "a per-user install in the default or permissive policy lets `PreToolUse` run with one warning"], lacks: ["With the default fail mode closed", "binds each registration to a trusted `--event` argument"] },
+  { gap: "GAP-1637", page: "reference/connectors/kiro.mdx", section: "Fail mode", has: ["the default and permissive policies let the call run with one warning, and the strict policy blocks it"] },
   // r105-rows-end
 ];
 
