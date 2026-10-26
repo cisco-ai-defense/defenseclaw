@@ -33,13 +33,18 @@ func TestNativeCopilotShellPatchHereString(t *testing.T) {
 		// A literal @'...'@ body expands nothing (T12b round c, loop round 1).
 		{"powershell here-string with a literal dollar and backtick", "powershell", "apply_patch @'\n*** Begin Patch\n*** Add File: " + filepath.Join(project, "run.ps1") + "\n+$name = \"x\"\n+Write-Output \"`t$name $(Get-Date)\"\n*** End Patch\n'@"},
 		{"powershell piped here-string with a literal dollar and an apostrophe", "powershell", piped("*** Add File: src\\greet.js\n+const greet = (n) => `It's ${n}`;\n")},
+		// No protected-named word: a file-fed patch and an expanding @"..."@ body
+		// to a project file are not the SSH rule (TGT-0194; GAP-1919, GAP-1872,
+		// classifier round 2). A protected target in either still blocks below.
+		{"powershell piped project patch then a file-fed patch", "powershell", piped("*** Add File: notes.txt\n+a\n") + "; Get-Content " + filepath.Join(project, "next.patch") + " | apply_patch"},
+		{"powershell expanding here-string literal project patch", "powershell", "apply_patch @\"\n*** Begin Patch\n*** Add File: notes.txt\n+$keys\n*** End Patch\n\"@"},
 		{"bash heredoc absolute", "bash", "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: " + filepath.Join(project, "notes-cp2.txt") + "\n+edit\n*** End Patch\nEOF"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.tool == "bash" && runtime.GOOS == "windows" {
 				t.Skip("Copilot CLI on Windows runs PowerShell; the Windows grammar does not read POSIX heredocs")
 			}
-			if (strings.Contains(tc.name, "piped") || strings.Contains(tc.name, "apostrophe") || strings.Contains(tc.name, "literal")) && runtime.GOOS != "windows" {
+			if (strings.Contains(tc.name, "piped") || strings.Contains(tc.name, "apostrophe") || strings.Contains(tc.name, "literal") || strings.Contains(tc.name, "expanding")) && runtime.GOOS != "windows" {
 				t.Skip("Copilot CLI runs bash on Linux and macOS; a PowerShell pipeline is not a POSIX command")
 			}
 			body, err := json.Marshal(map[string]any{"sessionId": "native-shell-patch", "cwd": project,
@@ -66,13 +71,11 @@ func TestNativeCopilotShellPatchHereString(t *testing.T) {
 		{"piped protected target behind a project file", piped("*** Add File: notes.txt\n+a\n*** Delete File: " + keys + "\n")},
 		{"piped protected target with an apostrophe", piped("*** Add File: " + keys + "\n+it's mine\n")},
 		{"piped project patch then a protected write", piped("*** Add File: notes.txt\n+a\n") + "; Set-Content -Path " + keys + " -Value k"},
-		{"piped project patch then a file-fed patch", piped("*** Add File: notes.txt\n+a\n") + "; Get-Content " + filepath.Join(project, "next.patch") + " | apply_patch"},
 		{"protected target with an apostrophe", "apply_patch @'\n*** Begin Patch\n*** Add File: notes.txt\n+It's\n*** Add File: " + keys + "\n+k\n*** End Patch\n'@"},
 		{"protected target beside a literal dollar", "apply_patch @'\n*** Begin Patch\n*** Add File: a.ps1\n+$x = 1\n*** Add File: " + keys + "\n+k\n*** End Patch\n'@"},
 		{"piped protected target beside a literal dollar", piped("*** Add File: a.ps1\n+$x\n*** Delete File: " + keys + "\n")},
 		{"early Unicode closer then a protected write", "apply_patch @'\n*** Begin Patch\n*** Add File: notes.txt\n+x\n’@; Set-Content " + keys + " evil; @'\n*** End Patch\n'@"},
 		{"lone CR closer then a protected write", "apply_patch @'\n*** Begin Patch\n*** Add File: notes.txt\n+x\r'@; Set-Content " + keys + " evil; @'\n*** End Patch\n'@"},
-		{"expanding here-string", "apply_patch @\"\n*** Begin Patch\n*** Add File: notes.txt\n+$keys\n*** End Patch\n\"@"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if (strings.HasPrefix(tc.name, "early Unicode") || strings.HasPrefix(tc.name, "lone CR")) && runtime.GOOS != "windows" {
@@ -84,7 +87,7 @@ func TestNativeCopilotShellPatchHereString(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if (tc.name == "piped project patch then a protected write" || tc.name == "piped project patch then a file-fed patch") && runtime.GOOS != "windows" {
+			if tc.name == "piped project patch then a protected write" && runtime.GOOS != "windows" {
 				t.Skip("Set-Content is a PowerShell cmdlet; bash on Linux and macOS has no such writer")
 			}
 			action, response := postHookDecision(t, "copilot", "", string(body))
