@@ -377,14 +377,15 @@ const legacyAgentOwnersPassLimit = 3
 // release's without the map (every record it wrote lacks the account
 // incarnation and owner token this pass found): the accounts that release
 // served are added to the map as the first upgrade recorded its own
-// (GAP-0709, GAP-1787). A map an
+// (GAP-0709, GAP-1787), also at the passes after it until one collects every
+// account (legacyAgentOwnersRollbackPass, GAP-1788). A map an
 // older release removed is written anew, as at the first upgrade.
 func writeLegacyAgentOwnersOnce(dir string, owners map[int]LegacyAgentOwner, complete, rolledBack bool, setOwnership func(string) error) error {
 	if len(owners) == 0 {
 		return nil
 	}
 	if LegacyAgentOwnersRecorded(dir) {
-		if !rolledBack {
+		if !legacyAgentOwnersRollbackPass(dir, rolledBack, complete) {
 			return nil
 		}
 		if _, err := AddLegacyAgentOwners(dir, owners, time.Now(), setOwnership); err != nil {
@@ -403,6 +404,37 @@ func writeLegacyAgentOwnersOnce(dir string, owners map[int]LegacyAgentOwner, com
 		return fmt.Errorf("record the agent identity migration map: %w", err)
 	}
 	return nil
+}
+
+// legacyAgentOwnersRollbackPending counts, per spool directory, the passes
+// since the first pass after an upgrade back from a rollback window that did
+// not collect every account (GAP-1788). An account whose lookup failed at
+// that pass kept the record the release without the map wrote, and the next
+// pass no longer finds the rollback (the other records carry the map's
+// facts again), so the accounts later passes collect are still added, up to
+// the first complete pass or legacyAgentOwnersPassLimit passes, as the first
+// map waits for them.
+var legacyAgentOwnersRollbackPending = struct {
+	sync.Mutex
+	byDir map[string]int
+}{byDir: map[string]int{}}
+
+// legacyAgentOwnersRollbackPass reports whether this pass adds the accounts
+// it collected to dir's existing migration map: a pass that finds the
+// rollback window, or one of the passes after it while accounts failed.
+func legacyAgentOwnersRollbackPass(dir string, rolledBack, complete bool) bool {
+	legacyAgentOwnersRollbackPending.Lock()
+	defer legacyAgentOwnersRollbackPending.Unlock()
+	passes, pending := legacyAgentOwnersRollbackPending.byDir[dir]
+	if !rolledBack && !pending {
+		return false
+	}
+	if passes++; complete || passes >= legacyAgentOwnersPassLimit {
+		delete(legacyAgentOwnersRollbackPending.byDir, dir)
+	} else {
+		legacyAgentOwnersRollbackPending.byDir[dir] = passes
+	}
+	return true
 }
 
 // identitySpoolCollect is collectIdentitySpoolRecord; tests replace it.

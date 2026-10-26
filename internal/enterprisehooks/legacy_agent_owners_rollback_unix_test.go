@@ -49,6 +49,36 @@ func TestRollbackWindowAccountJoinsTheMigrationMap(t *testing.T) {
 	}
 }
 
+// TestRollbackWindowAccountWhoseLookupFailsJoinsLater is GAP-1788: dave was
+// added in the rollback window, and his lookup fails at the first pass
+// after the upgrade back, which finds the window. The next pass no longer
+// finds it (alice and bob carry the map's facts again), but it still adds
+// dave once his lookup answers. After a complete pass a later account is
+// not added (GAP-0503).
+func TestRollbackWindowAccountWhoseLookupFailsJoinsLater(t *testing.T) {
+	dir := t.TempDir()
+	homes := map[int]string{501: t.TempDir(), 1006: t.TempDir(), 1008: t.TempDir(), 1009: t.TempDir()}
+	failing := map[int]bool{}
+	stubIdentitySpoolAccounts(t, homes, "files", failing)
+	alice, bob := IdentitySpoolAccount{UID: 501, User: "alice"}, IdentitySpoolAccount{UID: 1006, User: "bob"}
+	dave, erin := IdentitySpoolAccount{UID: 1008, User: "dave"}, IdentitySpoolAccount{UID: 1009, User: "erin"}
+	rollbackTestPass(t, dir, alice)
+	writePreMapRecords(t, dir, alice, bob, dave)
+	failing[1008] = true
+	if owners := rollbackTestPass(t, dir, alice, bob, dave); owners[1006].User != "bob" {
+		t.Fatalf("map after the upgrade back %+v; want bob added", owners)
+	} else if _, added := owners[1008]; added {
+		t.Fatalf("map after the upgrade back %+v; dave's lookup failed", owners)
+	}
+	failing[1008] = false
+	if owners := rollbackTestPass(t, dir, alice, bob, dave); owners[1008].User != "dave" {
+		t.Fatalf("map after the pass that collected dave %+v; want dave added", owners)
+	}
+	if owners := rollbackTestPass(t, dir, alice, bob, dave, erin); len(owners) != 3 {
+		t.Fatalf("map after a complete pass %+v; want no later account", owners)
+	}
+}
+
 func stubIdentitySpoolAccounts(t *testing.T, homes map[int]string, incarnation string, failing map[int]bool) {
 	t.Helper()
 	previousCollect, previousHome := identitySpoolCollect, identitySpoolAccountHome
