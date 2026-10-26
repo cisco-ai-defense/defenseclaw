@@ -1464,6 +1464,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1630", page: "how-to/policies/use-a-different-rule-pack.mdx", section: "Undo", has: ["defenseclaw policy activate default", "with `strict` a call is blocked while the gateway is not running, and `default` lets it run with a warning again"] },
   { gap: "GAP-1653", page: "reference/configuration/llm-providers.mdx", has: ["'remove <ENV_NAME>': {"] },
   { gap: "GAP-1623", page: "how-to/guardrail/block-a-destructive-command.mdx", has: ["Select-String -Path", "ConvertFrom-Json"], lacks: ["`closed` (the default) blocks"] },
+  { gap: "GAP-1624", page: "appendix/windows-security-model.mdx", has: ["`audit.db` and `.env` grant access only to the user (`OWNER RIGHTS` or the account) and SYSTEM", "only after taking ownership"], lacks: ["readable only by that user, Administrators, and SYSTEM"] },
+  { gap: "GAP-1712", page: "appendix/windows-security-model.mdx", has: ["`C:\\ProgramData\\Cisco\\DefenseClaw\\runtime\\audit.db`", "`enterprise windows verify --profile standalone`"] },
   // r105-rows-end
 ];
 
