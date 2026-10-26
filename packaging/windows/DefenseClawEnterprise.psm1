@@ -39101,7 +39101,17 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout
         }
         if ($leftNothing) {
-            Remove-DefenseClawMdmRotationJournal -Purge:$Purge
+            # LEAD STEER (GAP-1913): a purge removes the kit's journal; a
+            # plain uninstall keeps it and says so.
+            if ($Purge) {
+                Remove-DefenseClawMdmRotationJournal -Purge
+            }
+            elseif ([IO.Directory]::Exists([IO.Path]::Combine($script:ProgramData, 'Cisco\DefenseClaw-MDM\rotation'))) {
+                Microsoft.PowerShell.Utility\Write-Warning -Message (
+                    'kept the MDM kit credential rotation journal ' +
+                    [IO.Path]::Combine($script:ProgramData, 'Cisco\DefenseClaw-MDM\rotation') +
+                    ' (it can hold a copy of an earlier credential); run the uninstall with PURGE=1 to remove it')
+            }
         }
     }
 }
