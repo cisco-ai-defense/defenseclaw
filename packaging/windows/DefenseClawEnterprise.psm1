@@ -28014,9 +28014,29 @@ function Remove-DefenseClawManagedTree {
         # window only after Restart Manager proves a real holder; a deny ACE
         # or an unqueryable root keeps the ordinary refusal. The protected
         # rollback intent remains until the root is actually absent.
-        $holders = @(Get-DefenseClawInstallRootHolders `
-            -InstallRoot $safe `
-            -FailOnQueryError)
+        # Restart Manager can lag a fresh handle (a CI runner did not list a
+        # holder that still blocked the delete, GAP-1844): ask it a few times
+        # before the delete counts as not held.
+        $holders = @()
+        for ($query = 1; $query -le 4 -and $holders.Count -eq 0; $query++) {
+            if ($query -gt 1) {
+                Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 750
+                try {
+                    Microsoft.PowerShell.Management\Remove-Item `
+                        -LiteralPath $target `
+                        -Recurse `
+                        -Force `
+                        -ErrorAction Stop
+                    return
+                }
+                catch {
+                    $lastError = $_
+                }
+            }
+            $holders = @(Get-DefenseClawInstallRootHolders `
+                -InstallRoot $safe `
+                -FailOnQueryError)
+        }
         if ($holders.Count -gt 0) {
             $clock = [Diagnostics.Stopwatch]::StartNew()
             while ($clock.ElapsedMilliseconds -lt $RetryHeldFileMilliseconds) {
