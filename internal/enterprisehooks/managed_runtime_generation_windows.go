@@ -1045,6 +1045,26 @@ func discardWindowsManagedRuntimeGenerationPublicationPlatform(
 func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 	opts WindowsManagedRuntimeGenerationGCOptions,
 ) (int, error) {
+	return collectWindowsManagedRuntimeGenerations(opts, false)
+}
+
+// ClassifyWindowsManagedRuntimeGenerations applies to every bundle of the
+// target the classification GC applies before it deletes, and changes
+// nothing: no bundle is deleted and no folder permission is repaired. A
+// folder GC would first have to repair, or cannot trust, is reported as
+// ErrWindowsManagedRuntimeGenerationDirectoryUntrusted and left to the retire
+// that collects. Setup runs it with the replacement gateway before an upgrade
+// or repair opens its transaction, so a bundle the new release refuses stops
+// the lifecycle with nothing changed (GAP-0822).
+func ClassifyWindowsManagedRuntimeGenerations(opts WindowsManagedRuntimeGenerationGCOptions) error {
+	_, err := collectWindowsManagedRuntimeGenerations(opts, true)
+	return err
+}
+
+func collectWindowsManagedRuntimeGenerations(
+	opts WindowsManagedRuntimeGenerationGCOptions,
+	classifyOnly bool,
+) (int, error) {
 	removed := 0
 	snapshotOpts := WindowsManagedRuntimeSelectorSnapshotOptions{
 		Connector:      opts.Connector,
@@ -1088,7 +1108,7 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 		switch {
 		case windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target):
 			accountCreated = true
-		case recoverStaleWindowsSetupRelaxedDataDir(validated.DataDir, target):
+		case !classifyOnly && recoverStaleWindowsSetupRelaxedDataDir(validated.DataDir, target):
 		default:
 			return 0, fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
 		}
@@ -1141,6 +1161,9 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 			return err
 		}
 		if err := validateWindowsManagedRuntimeGenerationRoots(validated.DataDir, target); err != nil {
+			if classifyOnly {
+				return fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
+			}
 			// A guardian stopped between relaxing the hooks directory for a
 			// connector setup and hardening it again leaves the relaxed
 			// owner-private DACL behind. Restore the canonical DACL instead
@@ -1196,6 +1219,9 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 				continue
 			}
 			collect = append(collect, collectable{entry: entry, data: data})
+		}
+		if classifyOnly {
+			return nil
 		}
 		for _, bundle := range collect {
 			if err := deleteWindowsManagedRuntimeBundle(bundle.entry, target, bundle.data); err != nil {

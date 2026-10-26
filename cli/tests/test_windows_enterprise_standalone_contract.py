@@ -322,6 +322,17 @@ def test_lifecycles_retire_a_stale_committed_journal_through_the_fallback() -> N
         assert "Invoke-DefenseClawCommittedManagedHooksLifecycleRetire" in _function_body(module, name)
 
 
+def test_lifecycles_classify_runtime_bundles_before_the_transaction() -> None:
+    # GAP-0822 (refix round 1): with no committed journal, an upgrade or
+    # repair classifies the per-user runtime bundles with the replacement
+    # gateway before New-DefenseClawTransaction; only a classification refusal
+    # stops it (behaviour in
+    # enterprise-standalone-pretransaction-bundle-classification-smoke.ps1).
+    body = _function_body(_text(MODULE), "Invoke-DefenseClawInstallLikeLifecycle")
+    check = body.index("Assert-DefenseClawStagedRuntimeBundleClassification")
+    assert check < body.index("New-DefenseClawTransaction")
+
+
 def test_standalone_purge_keeps_the_launching_cli_powershell_temp() -> None:
     """GAP-1853: install-enterprise.ps1 moves TEMP into its bootstrap folder,
     so the stale-temp sweep learns the launching CLI's protected folder from
@@ -439,6 +450,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-machine-leftovers-purge-smoke.ps1",
     "enterprise-standalone-manifest-adoption-smoke.ps1",
     "enterprise-standalone-native-otlp-rollback-smoke.ps1",
+    "enterprise-standalone-pretransaction-bundle-classification-smoke.ps1",
     "enterprise-standalone-recorded-trust-smoke.ps1",
     "enterprise-standalone-recovery-activation-deferral-smoke.ps1",
     "enterprise-standalone-recovery-gateway-smoke.ps1",

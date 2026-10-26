@@ -822,6 +822,14 @@ func TestWindowsManagedRuntimeGenerationGCRecoversSetupRelaxedHooks(t *testing.T
 		t.Fatalf("publish protected selector without target SID: %v", err)
 	}
 
+	// The classification before a transaction changes nothing: it leaves
+	// the relaxed folder to this retire, reported as untrusted.
+	if err := ClassifyWindowsManagedRuntimeGenerations(fixture.options); !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
+		t.Fatalf("classify with a relaxed hooks directory: err=%v, want untrusted", err)
+	}
+	if err := validateWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err == nil {
+		t.Fatal("classify repaired the relaxed hooks directory")
+	}
 	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
 	if err != nil || removed != 0 {
 		t.Fatalf("collect with a relaxed hooks directory: removed=%d err=%v", removed, err)
@@ -1157,6 +1165,31 @@ func TestWindowsManagedRuntimeGenerationGCClassifiesPriorInstallState(t *testing
 						t.Fatal(err)
 					}
 				}
+			}
+			// GAP-0822: the classification Setup runs before the transaction
+			// refuses exactly what this GC refuses, for the same reason, and
+			// deletes nothing.
+			listHooks := func() []string {
+				entries, readErr := os.ReadDir(filepath.Join(fixture.options.DataDir, "hooks"))
+				if readErr != nil && !os.IsNotExist(readErr) {
+					t.Fatal(readErr)
+				}
+				names := make([]string, 0, len(entries))
+				for _, entry := range entries {
+					names = append(names, entry.Name())
+				}
+				return names
+			}
+			before := listHooks()
+			classifyErr := ClassifyWindowsManagedRuntimeGenerations(fixture.options)
+			if tc.invalid != (classifyErr != nil) {
+				t.Fatalf("classify: err=%v, want refused=%v", classifyErr, tc.invalid)
+			}
+			if tc.reason != "" && !strings.Contains(classifyErr.Error(), tc.reason) {
+				t.Fatalf("classify lost reason %q: %v", tc.reason, classifyErr)
+			}
+			if after := listHooks(); strings.Join(after, "|") != strings.Join(before, "|") {
+				t.Fatalf("classify changed the hooks folder: before=%v after=%v", before, after)
 			}
 			removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
 			if tc.invalid {

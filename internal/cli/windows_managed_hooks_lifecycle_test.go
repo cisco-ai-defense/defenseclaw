@@ -683,14 +683,23 @@ func TestWindowsManagedHooksLifecycleCollectOutsideATransaction(t *testing.T) {
 }
 
 // GAP-0822: an upgrade with no committed journal ran the replacement
-// gateway's generation collection only after its commit, so a selected
-// bundle it refuses (malformed JSON) failed the upgrade after it committed,
-// with a journal left and 1603. The staged retire Setup now runs before the
-// transaction classifies the current targets the same way and fails there;
-// the installed gateway's retire with no journal still does nothing.
+// gateway's generation classification only after its commit, so a bundle it
+// refuses (malformed JSON) failed the upgrade after it committed, with a
+// journal left and 1603. The staged retire Setup now runs before the
+// transaction classifies the current targets the same way and fails there,
+// with nothing deleted. It changes nothing, so it neither collects nor asks
+// for LocalSystem: an elevated administrator's Setup /ensure or /repair runs
+// it too (refix round 1). A folder the retire would first repair is left to
+// that retire. The installed gateway's retire with no journal does nothing.
 func TestWindowsManagedHooksStagedRetireWithNoJournalClassifiesBeforeTheTransaction(t *testing.T) {
 	originalGC := windowsManagedHooksLifecycleGenerationGC
-	t.Cleanup(func() { windowsManagedHooksLifecycleGenerationGC = originalGC })
+	originalClassify := windowsManagedHooksLifecycleGenerationClassify
+	originalIdentity := windowsStagedRetireMutationIdentityPreflight
+	t.Cleanup(func() {
+		windowsManagedHooksLifecycleGenerationGC = originalGC
+		windowsManagedHooksLifecycleGenerationClassify = originalClassify
+		windowsStagedRetireMutationIdentityPreflight = originalIdentity
+	})
 
 	const sid = "S-1-5-21-111-222-333-1017"
 	ctx := windowsManagedHooksLifecycleContext{
@@ -700,28 +709,51 @@ func TestWindowsManagedHooksStagedRetireWithNoJournalClassifiesBeforeTheTransact
 		},
 	}
 	ctx.opts.HookBinary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
-	calls := 0
+	gcCalls, identityCalls := 0, 0
 	windowsManagedHooksLifecycleGenerationGC = func(
 		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
 	) (int, error) {
-		calls++
-		return 0, errors.New("enterprise hooks: decode managed runtime bundle: unexpected EOF")
+		gcCalls++
+		return 1, nil
 	}
-	if _, _, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, false); err != nil || calls != 0 {
-		t.Fatalf("installed retire with no journal: err=%v gc calls=%d, want nothing done", err, calls)
+	windowsStagedRetireMutationIdentityPreflight = func() error {
+		identityCalls++
+		return errors.New("managed enterprise hook mutations require the LocalSystem guardian on native Windows")
+	}
+	classifyErr := errors.New("enterprise hooks: decode managed runtime bundle: unexpected EOF")
+	var classified []enterprisehooks.WindowsManagedRuntimeGenerationGCOptions
+	windowsManagedHooksLifecycleGenerationClassify = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) error {
+		classified = append(classified, opts)
+		return classifyErr
+	}
+	if _, _, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, false); err != nil || len(classified) != 0 {
+		t.Fatalf("installed retire with no journal: err=%v classify calls=%d, want nothing done", err, len(classified))
 	}
 	_, _, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true)
-	if err == nil || calls != 1 || !strings.Contains(err.Error(), "retire opencode managed runtime generations for SID "+sid) ||
+	if err == nil || len(classified) != 1 ||
+		!strings.HasPrefix(err.Error(), "classify opencode managed runtime generations for SID "+sid) ||
 		!strings.Contains(err.Error(), "decode managed runtime bundle") {
-		t.Fatalf("staged retire with no journal: err=%v gc calls=%d, want the bundle refusal before the transaction", err, calls)
+		t.Fatalf("staged retire with no journal: err=%v classify calls=%d, want the bundle refusal before the transaction", err, len(classified))
 	}
-	windowsManagedHooksLifecycleGenerationGC = func(
-		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
-	) (int, error) {
-		return 2, nil
+	if got := classified[0]; got.Connector != "opencode" || got.TargetSID != sid ||
+		got.DataDir != ctx.targets[0].DataDir || got.HookExecutable != ctx.opts.HookBinary {
+		t.Fatalf("classified options = %+v", got)
 	}
-	if _, collected, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true); err != nil || collected != 2 {
-		t.Fatalf("staged retire over healthy bundles: collected=%d err=%v", collected, err)
+
+	classifyErr = fmt.Errorf("%w: access denied", enterprisehooks.ErrWindowsManagedRuntimeGenerationDirectoryUntrusted)
+	skipped, collected, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true)
+	if err != nil || collected != 0 || len(skipped) != 1 || !strings.Contains(skipped[0], sid) {
+		t.Fatalf("staged retire over a folder the retire repairs: skipped=%v collected=%d err=%v, want it left to that retire", skipped, collected, err)
+	}
+
+	classifyErr = nil
+	if skipped, collected, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true); err != nil || collected != 0 || len(skipped) != 0 {
+		t.Fatalf("staged retire over healthy bundles: skipped=%v collected=%d err=%v", skipped, collected, err)
+	}
+	if gcCalls != 0 || identityCalls != 0 {
+		t.Fatalf("staged retire with no journal deleted (gc calls=%d) or asked for LocalSystem (identity calls=%d)", gcCalls, identityCalls)
 	}
 }
 

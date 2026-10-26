@@ -22600,6 +22600,55 @@ function Invoke-DefenseClawManagedHooksLifecycleRecoveryStep {
     return $report
 }
 
+function Assert-DefenseClawStagedRuntimeBundleClassification {
+    <#
+        With no committed journal the replacement gateway first classified
+        the per-user runtime bundles after the commit: a bundle it refuses
+        (malformed JSON, unsupported schema) failed an upgrade that had
+        already committed, with its journal left and 1603 (GAP-0822). Its
+        staged retire with no journal runs that classification before the
+        transaction opens and changes nothing, as LocalSystem or as an
+        elevated administrator. Only a bundle it refuses stops the lifecycle.
+        Any other failure of this early check leaves the classification to
+        the retire after the commit, as before, so it never refuses a
+        lifecycle that ran before it existed.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][hashtable]$GatewaySource,
+        [Parameter(Mandatory)][string]$Action
+    )
+    try {
+        [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GatewaySource $GatewaySource `
+            -Action retire)
+        return
+    }
+    catch {
+        $failure = $_
+    }
+    $data = $failure.Exception.Data
+    $reportError = ''
+    if ($null -ne $data -and $data.Contains('DefenseClawLifecycleReportError')) {
+        $reportError = [string]$data['DefenseClawLifecycleReportError']
+    }
+    if ($reportError -cmatch '^classify [a-z0-9_-]+ managed runtime generations for SID S-1-[0-9]+(-[0-9]+)+( \([^\r\n]+?\))?: ') {
+        throw (
+            "$Action stopped before it changed anything: the new release refuses a per-user managed " +
+            'runtime bundle that its upgrade would retire. The error names the connector and the account; ' +
+            'have an administrator remove that account''s damaged bundle from its .defenseclaw\hooks folder, ' +
+            "then run Setup /ensure again. $($failure.Exception.Message)"
+        )
+    }
+    Microsoft.PowerShell.Utility\Write-Warning -Message (
+        'the replacement gateway could not classify the per-user managed runtime bundles before the ' +
+        "transaction; the retire after the commit classifies them: $($failure.Exception.Message)"
+    )
+}
+
 function Invoke-DefenseClawCommittedManagedHooksLifecycleRetire {
     <#
         Retires the managed-hook lifecycle journal an earlier, committed
@@ -34206,28 +34255,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     elseif ($priorDeploymentActive -and
         (Test-DefenseClawStandaloneProfile) -and
         $Sources.ContainsKey('gateway')) {
-        # With no committed journal the replacement gateway first classified
-        # the per-user runtime bundles after the commit: a selected bundle it
-        # refuses (malformed JSON, unsupported schema) failed an upgrade that
-        # had already committed, with its journal left and 1603 (GAP-0822).
-        # Its staged retire runs the same classification and collection now,
-        # before the transaction opens, so such a bundle stops the lifecycle
-        # with nothing changed.
-        try {
-            [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName `
-                -GatewaySource $Sources['gateway'] `
-                -Action retire)
-        }
-        catch {
-            throw (
-                "$Action stopped before it changed anything: the new release refuses a per-user managed " +
-                'runtime bundle that its upgrade would retire. The error names the connector and the account; ' +
-                'have an administrator remove that account''s damaged bundle from its .defenseclaw\hooks folder, ' +
-                "then run Setup /ensure again. $($_.Exception.Message)"
-            )
-        }
+        Assert-DefenseClawStagedRuntimeBundleClassification `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GatewaySource $Sources['gateway'] `
+            -Action $Action
     }
     $earlyHookSource = $null
     if ($Sources.ContainsKey('hook')) {
