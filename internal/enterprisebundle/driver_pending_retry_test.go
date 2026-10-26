@@ -169,11 +169,11 @@ func TestDriverRetryOfAPendingBundleKeepsItsCommittedConfig(t *testing.T) {
 	}
 }
 
-// Another signed bundle can render the bytes a pending receipt committed (a
-// version bump that changed no setting). The generation record already names
-// the pending bundle, so its attribution stays; with no record the delivery
-// this process installs owns the bytes, and without one the overlap is
-// refused.
+// Another signed bundle C can render the bytes a pending receipt B committed
+// (a version bump that changed no setting). The delivery being installed
+// owns those bytes, also in the installer child process, which does not
+// know it (no CurrentReceiptID) and also while the generation record names
+// the pending B: C can take over during the outage (GAP-1187).
 func TestDriverGenerationOwnerOfBytesTwoBundlesRender(t *testing.T) {
 	r := newPendingRun(t, enterprisebundle.StateStaged)
 	bump := r.f.variant(t, settingsOnly(t, "action"), func(in *enterprisebundle.ComposeInput) { in.Version, in.ChangeSummary = 7, "bump" })
@@ -182,14 +182,14 @@ func TestDriverGenerationOwnerOfBytesTwoBundlesRender(t *testing.T) {
 		t.Fatalf("setup: %+v, %v", c, err)
 	}
 	opt, ok, err := r.d.ConfigGenerationOptions(c.Config)
-	if err != nil || !ok || opt.Bundle.Version != r.b.Receipt.Version {
-		t.Fatalf("attribution with the pending commit recorded = %+v, %v, %v", opt, ok, err)
+	if err != nil || !ok || opt.Bundle.Version != c.Receipt.Version {
+		t.Fatalf("attribution in the installer child with the pending commit recorded = %+v, %v, %v", opt, ok, err)
 	}
 	if err := os.Remove(configwrite.GenerationPath(r.d.ConfigPath)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.d.ConfigGenerationOptions(c.Config); err == nil {
-		t.Fatal("an ambiguous attribution with no record and no delivery was accepted")
+	if opt, ok, err := r.d.ConfigGenerationOptions(c.Config); err != nil || !ok || opt.Bundle.Version != c.Receipt.Version {
+		t.Fatalf("attribution with no record = %+v, %v, %v", opt, ok, err)
 	}
 	r.d.CurrentReceiptID = c.Receipt.ReceiptID
 	if opt, ok, err := r.d.ConfigGenerationOptions(c.Config); err != nil || !ok || opt.Bundle.Version != c.Receipt.Version {
