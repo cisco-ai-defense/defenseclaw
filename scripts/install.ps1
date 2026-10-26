@@ -2025,9 +2025,9 @@ function Assert-BinDirRestored([string]$From, [string]$GuardSHA256 = "") {
 function New-Venv([string]$Path, [string]$Where) {
     $python = Join-Path $Path "Scripts\python.exe"
     New-InstallDirectory $Path
-    if ((Invoke-Native $Uv @("venv", $Path, "--quiet", "--python", "3.12") -Quiet) -ne 0) {
+    if ((Invoke-Uv @("venv", $Path, "--quiet", "--python", "3.12") -Quiet) -ne 0) {
         New-InstallDirectory $Path
-        if ((Invoke-Native $Uv @("venv", $Path, "--quiet", "--python", ">=3.11,<3.14")) -ne 0) { return $false }
+        if ((Invoke-Uv @("venv", $Path, "--quiet", "--python", ">=3.11,<3.14")) -ne 0) { return $false }
     }
     # The requirements file is the complete hashed lock, so nothing resolves.
     # Compile the bytecode now: uv skips it by default, and the first start of
@@ -2041,8 +2041,20 @@ function New-Venv([string]$Path, [string]$Where) {
     return (Invoke-UvPipInstall @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel)))
 }
 
+function Invoke-Uv([string[]]$UvArgs, [switch]$Quiet) {
+    # uv builds and byte-compiles the Python environment on every core. It
+    # runs below normal priority (its workers inherit it), so the agents'
+    # hook calls during the install still answer within 5 s (GAP-1150). The
+    # installer goes back to its own priority before it starts anything else.
+    $self = [Diagnostics.Process]::GetCurrentProcess()
+    $before = $self.PriorityClass
+    try { $self.PriorityClass = [Diagnostics.ProcessPriorityClass]::BelowNormal } catch { }
+    try { return (Invoke-Native $Uv $UvArgs -Quiet:$Quiet) }
+    finally { try { $self.PriorityClass = $before } catch { } }
+}
+
 function Invoke-UvPipInstall([string[]]$UvArgs) {
-    if ((Invoke-Native $Uv $UvArgs) -eq 0) { return $true }
+    if ((Invoke-Uv $UvArgs) -eq 0) { return $true }
     # A scanner holding a file uv just wrote fails its cache rename with
     # os error 32 or 5 (GAP-1315). On a busy host that hits the next package
     # too (GAP-1941), so back off a few times; what reached the cache stays
@@ -2053,7 +2065,7 @@ function Invoke-UvPipInstall([string[]]$UvArgs) {
         if (Test-DiskFull) { return $false }
         Write-Warn ("Retrying the Python package install in {0} s (attempt {1} of {2}; a busy host can hold uv's cache files)" -f $waits[$i], ($i + 2), ($waits.Count + 1))
         Start-Sleep -Seconds $waits[$i]
-        if ((Invoke-Native $Uv $UvArgs) -eq 0) { return $true }
+        if ((Invoke-Uv $UvArgs) -eq 0) { return $true }
     }
     Write-Warn "uv kept failing; if it reported a file in use or access denied (os error 32 or 5), another program held the file: run the same command again"
     return $false

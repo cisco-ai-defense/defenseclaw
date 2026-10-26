@@ -4946,6 +4946,41 @@ def test_native_running_hook_is_renamed_aside_and_replaced(tmp_path: Path) -> No
         running.wait(timeout=30)
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_uv_runs_below_normal_priority_so_hook_calls_keep_their_budget(tmp_path: Path) -> None:
+    # GAP-1150: while uv built and byte-compiled the environment on every
+    # core, registered Codex calls answered after 5-6 s. uv (and the workers
+    # it starts, which inherit it) runs below normal priority; the installer
+    # takes its own priority back before anything else starts.
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$Uv = 'uv.exe'
+$script:seen = @()
+function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Quiet) {{
+    $script:seen += [string][Diagnostics.Process]::GetCurrentProcess().PriorityClass
+    return 0
+}}
+function Test-DiskFull {{ return $false }}
+function Write-Warn([string]$m) {{ }}
+{_ps_functions("Invoke-Uv", "Invoke-UvPipInstall")}
+$before = [string][Diagnostics.Process]::GetCurrentProcess().PriorityClass
+if (-not (Invoke-UvPipInstall @('pip', 'install'))) {{ throw 'install failed' }}
+[void](Invoke-Uv @('venv', 'x') -Quiet)
+"SEEN=$($script:seen -join ',')"
+"AFTER=$([Diagnostics.Process]::GetCurrentProcess().PriorityClass) BEFORE=$before"
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "SEEN=BelowNormal,BelowNormal" in out, out
+    if os.name == "nt":
+        # Only Windows lets a process raise its priority back unprivileged.
+        before = re.search(r"BEFORE=(\w+)", out).group(1)
+        assert f"AFTER={before}" in out, out
+    new_venv = _ps1_function("New-Venv")
+    assert "Invoke-Native $Uv" not in new_venv and "Invoke-Native $Uv" not in _ps1_function("Invoke-UvPipInstall")
+
+
 def test_the_fail_mode_hold_outlasts_the_installers_own_steps() -> None:
     # GAP-0311: the hold took the 2 minute default from its start, before the
     # rollback copy, the hook swap and the drain of old calls; on a busy host
