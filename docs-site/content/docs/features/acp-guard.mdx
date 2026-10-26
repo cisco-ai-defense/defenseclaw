@@ -41,7 +41,7 @@ The ACP guard sits between an editor that speaks the Agent Client Protocol (ACP)
 
 ## Supported agents
 
-`defenseclaw acp catalog` prints the list. Only agents with their own ACP mode are guarded. Other connectors are guarded through their [hooks](/docs/connectors).
+On a per-user install `defenseclaw acp catalog` prints the list. On a managed computer it is refused (exit 2); the administrator's `defenseclaw-gateway enterprise acp` commands are in [Managed computers](#managed-computers). Only agents with their own ACP mode are guarded. Other connectors are guarded through their [hooks](/docs/connectors).
 
 | Agent | Entry point | Status |
 | --- | --- | --- |

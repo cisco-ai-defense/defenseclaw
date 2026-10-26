@@ -1454,6 +1454,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1517", page: "appendix/benchmarks.mdx", has: ["title=\"Eleven YARA signatures\""], lacks: ["Ten YARA signatures"] },
   { gap: "GAP-1404", page: "reference/configuration/index.mdx", has: ["`%LOCALAPPDATA%\\hermes\\config.yaml` on native Windows"] },
   { gap: "GAP-1307", page: "reference/observability/redaction.mdx", has: ["move needs at least two routes on the destination;"] },
+  { gap: "GAP-1382", page: "features/acp-guard.mdx", has: ["On a per-user install `defenseclaw acp catalog` prints the list. On a managed computer it is refused (exit 2)"] },
   // r105-rows-end
 ];
 
