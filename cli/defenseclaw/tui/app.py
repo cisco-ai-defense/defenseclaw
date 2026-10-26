@@ -5328,6 +5328,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "off": TOKENS.text_muted,
             "waiting": TOKENS.accent_blue,
             "degraded": TOKENS.accent_amber,
+            "partial": TOKENS.accent_cyan,
             "healthy": TOKENS.accent_green,
         }[state]
         badge_color = {
@@ -5900,7 +5901,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         enabled = bool(model.snapshot.enabled)
         self._set_button_visible("#runtime-enable", model.needs_enable())
         self._set_button_visible("#runtime-scan", enabled)
-        self._set_button_visible("#runtime-permissions", model.health_state() == "degraded")
+        self._set_button_visible("#runtime-permissions", model.health_state() in ("degraded", "partial"))
         refresh.disabled = False
         detail.disabled = model.selected() is None
 
