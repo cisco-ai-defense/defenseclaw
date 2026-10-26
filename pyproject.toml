@@ -28,6 +28,14 @@ dependencies = [
     "pyjwt>=2.15.1",
     # PYSEC-2026-4320 is fixed in certifi 2026.10.19.
     "certifi>=2026.10.19",
+    # CVE-2026-112906/112907/112913/112914/112937/112940 are fixed in
+    # filelock 4.2.1, which requires Python >= 3.11; 3.10 has no fixed
+    # release (see the Python 3.10 wheel audit in ci.yml). It is a LiteLLM ->
+    # tokenizers -> huggingface-hub transitive, so this floor is marked and
+    # sits outside the unmarked wheel security contract. Keep it out of
+    # [tool.uv] overrides: an override replaces huggingface-hub's own filelock
+    # requirement and would drop filelock on Python 3.10.
+    "filelock>=4.2.1; python_version >= '3.11'",
     "starlette>=1.3.1,<1.4",
     "fastapi>=0.137.1,<0.138",
     # The scanner/TUI runtime is one dependency set. DefenseClaw uses the
@@ -197,15 +205,6 @@ defenseclaw = [
 
 [tool.uv]
 default-groups = ["dev"]
-# CVE-2026-112906/112907/112913/112914/112937/112940 are fixed in filelock
-# 4.2.1, which requires Python >= 3.11; 3.10 has no fixed release (see the
-# Python 3.10 wheel audit in ci.yml). filelock is a LiteLLM -> tokenizers ->
-# huggingface-hub transitive, so keep it out of wheel metadata and only hold
-# the lock at the fixed line where one exists. A constraint, unlike an
-# override, leaves huggingface-hub's own filelock requirement in place.
-constraint-dependencies = [
-    "filelock>=4.2.1; python_version >= '3.11'",
-]
 override-dependencies = [
     "rich>=14.2,<15",
     # CVE-2026-39892 fixed in 46.0.7; GHSA-537c-gmf6-5ccf fixed in 48.0.1;

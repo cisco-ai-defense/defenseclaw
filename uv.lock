@@ -10,7 +10,6 @@ resolution-markers = [
 ]
 
 [manifest]
-constraints = [{ name = "filelock", marker = "python_full_version >= '3.11'", specifier = ">=4.2.1" }]
 overrides = [
     { name = "aiohttp", specifier = ">=3.14.4,<4" },
     { name = "certifi", specifier = ">=2026.10.19" },
@@ -667,6 +666,7 @@ dependencies = [
     { name = "click" },
     { name = "cryptography" },
     { name = "fastapi" },
+    { name = "filelock", version = "4.2.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "idna" },
     { name = "importlib-metadata" },
     { name = "jsonschema" },
@@ -719,6 +719,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.3.3,<9" },
     { name = "cryptography", specifier = ">=50.0.0,<51" },
     { name = "fastapi", specifier = ">=0.137.1,<0.138" },
+    { name = "filelock", marker = "python_full_version >= '3.11'", specifier = ">=4.2.1" },
     { name = "google-auth", marker = "extra == 'vertex'", specifier = ">=2.30" },
     { name = "google-cloud-aiplatform", marker = "extra == 'vertex'", specifier = ">=1.60" },
     { name = "idna", specifier = ">=3.15" },
