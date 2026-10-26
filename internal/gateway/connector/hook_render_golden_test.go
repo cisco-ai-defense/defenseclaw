@@ -324,12 +324,20 @@ func renderBridgeHostTemplate(asset string, managed bool) ([]byte, error) {
 	if err := tmpl.Execute(&out, data); err != nil {
 		return nil, err
 	}
-	// Managed OpenCode renders the administrator's mode directly; it is
-	// already in the scanner's canonical placeholder form.
-	if managed && strings.Count(out.String(), `DC_FAIL_MODE = "{{.FailMode}}"`) != 1 {
+	if !managed {
+		return out.Bytes(), nil
+	}
+	// The scanner normalizes this rendered field before hashing. Keep its
+	// canonical placeholder in both host template variants.
+	line := `DC_FAIL_MODE = "closed"`
+	if asset == "amp-plugin.ts" {
+		line = `DC_FAIL_MODE: string = "closed"`
+	}
+	canonical := strings.Replace(line, `"closed"`, `"{{.FailMode}}"`, 1)
+	if strings.Count(out.String(), line) != 1 {
 		return nil, fmt.Errorf("managed bridge %s has no unique fail mode", asset)
 	}
-	return out.Bytes(), nil
+	return []byte(strings.Replace(out.String(), line, canonical, 1)), nil
 }
 
 func TestBridgeHostTemplatesGolden(t *testing.T) {

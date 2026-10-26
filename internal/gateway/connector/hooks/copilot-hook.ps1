@@ -41,11 +41,7 @@ if ($reviewedEvents -cnotcontains $Event) {
 {{end}}$ErrorActionPreference = 'Stop'
 $hook = '{{.HookBinaryPS}}'
 $timeoutMS = {{.CopilotHookTimeoutMS}}
-$failClosed = '{{if .SecureClientDelivery}}false{{else}}{{if eq .FailMode "open"}}false{{else}}true{{end}}{{end}}' -eq 'true'
-{{if not .SecureClientDelivery}}if ($env:DEFENSECLAW_STRICT_AVAILABILITY -in @('1', 'true', 'TRUE', 'yes', 'YES')) {
-    $failClosed = $true
-}
-{{end}}
+
 $process = $null
 $started = $false
 $stdinClosed = $false

@@ -63,7 +63,7 @@ func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 			"`DEFENSECLAW_FAIL_MODE` is not read",
 		}},
 		{filepath.Join("..", "..", "envvars", "registry.json"), []string{
-			"every other hook uses the guardrail.hook_fail_mode installed with it",
+			"Not read by 1.0.4 hooks",
 		}},
 	} {
 		data, err := os.ReadFile(doc.path)
