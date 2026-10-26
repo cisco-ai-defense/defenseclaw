@@ -831,6 +831,66 @@ func TestWindowsManagedRuntimeGenerationGCRecoversSetupRelaxedHooks(t *testing.T
 	}
 }
 
+// GAP-1334: a guardian stopped between relaxing the user's .defenseclaw
+// folder for a Hermes setup and hardening it again left LocalSystem and
+// OWNER RIGHTS full control (OI|CI). The retire refused the folder as
+// untrusted ("unexpected or duplicate ACE for principal SYSTEM"), and Setup
+// /repair failed 1603. The retire waits that exact shape out and then
+// restores the canonical DACL; another shape stays refused.
+func TestWindowsManagedRuntimeGenerationGCRecoversASetupRelaxedDataDirectory(t *testing.T) {
+	previousWait := windowsManagedRuntimeSetupRelaxWait
+	windowsManagedRuntimeSetupRelaxWait = 100 * time.Millisecond
+	t.Cleanup(func() { windowsManagedRuntimeSetupRelaxWait = previousWait })
+	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+	if err := publishWindowsManagedRuntimeSelector(windowsManagedRuntimeSelector{
+		SchemaVersion: windowsManagedRuntimeGenerationSchema,
+		Connector:     fixture.options.Connector,
+		Targets:       []windowsManagedRuntimeSelectorTarget{},
+	}); err != nil {
+		t.Fatalf("publish protected selector without target SID: %v", err)
+	}
+	setDACL := func(t *testing.T, sddl string) {
+		t.Helper()
+		sd, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(fixture.options.DataDir, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, dacl, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	validate := func() error {
+		return validateWindowsUserPathElement(fixture.options.DataDir, fixture.target, true, true, true)
+	}
+
+	setDACL(t, windowsSetupRelaxedDirectorySDDL)
+	if err := validate(); err == nil {
+		t.Fatal("relaxed data directory validated as canonical")
+	}
+	if removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options); err != nil || removed != 0 {
+		t.Fatalf("collect with a relaxed data directory: removed=%d err=%v", removed, err)
+	}
+	if err := validate(); err != nil {
+		t.Fatalf("data directory was not restored to the canonical DACL: %v", err)
+	}
+
+	// Another owner-private shape (OWNER RIGHTS read only) is not the setup
+	// relax: it stays refused and unchanged.
+	setDACL(t, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	if _, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options); !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
+		t.Fatalf("collect with a foreign data directory DACL: err=%v, want untrusted", err)
+	}
+	if err := validate(); err == nil {
+		t.Fatal("a foreign data directory DACL was rewritten to the canonical one")
+	}
+}
+
 func createWindowsManagedRuntimeTestHooksWithDACL(t *testing.T, hookDir string, target *windows.SID, sddl string) {
 	t.Helper()
 	if err := os.Mkdir(hookDir, 0o700); err != nil {

@@ -1085,10 +1085,13 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 		true,
 		true,
 	); err != nil {
-		if !windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target) {
+		switch {
+		case windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target):
+			accountCreated = true
+		case recoverStaleWindowsSetupRelaxedDataDir(validated.DataDir, target):
+		default:
 			return 0, fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
 		}
-		accountCreated = true
 	}
 	err = withWindowsManagedRuntimeSelectorTransaction(validated.Connector, func() error {
 		selector, _, exists, err := readWindowsManagedRuntimeSelector(validated.Connector, true)
@@ -1749,6 +1752,27 @@ func settledWindowsManagedRuntimeGenerationRoots(dataDir string, target *windows
 		time.Sleep(windowsManagedRuntimeSetupRelaxPoll)
 	}
 	return validateWindowsManagedRuntimeGenerationRoots(dataDir, target)
+}
+
+// recoverStaleWindowsSetupRelaxedDataDir reports whether dataDir validates
+// after a guardian setup relax of it ended. The exact target-owned setup
+// shape is waited out as the hook side does (GAP-1502); one that stays is a
+// guardian stopped before it hardened the folder again, and LocalSystem
+// restores the canonical DACL (GAP-1334). Any other DACL stays refused.
+func recoverStaleWindowsSetupRelaxedDataDir(dataDir string, target *windows.SID) bool {
+	if !windowsManagedRuntimeDirSetupRelaxed(dataDir, target) {
+		return false
+	}
+	deadline := time.Now().Add(windowsManagedRuntimeSetupRelaxWait)
+	for windowsManagedRuntimeDirSetupRelaxed(dataDir, target) && time.Now().Before(deadline) {
+		time.Sleep(windowsManagedRuntimeSetupRelaxPoll)
+	}
+	if windowsManagedRuntimeDirSetupRelaxed(dataDir, target) {
+		if _, err := windowsRecoverSetupRelaxedDataDirectory(dataDir, target); err != nil {
+			return false
+		}
+	}
+	return validateWindowsUserPathElement(dataDir, target, true, true, true) == nil
 }
 
 // windowsManagedRuntimeRootsSetupRelaxed reports whether <data dir> or its
