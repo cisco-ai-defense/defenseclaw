@@ -175,6 +175,7 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	} else {
 		addEnterpriseHookCopilotVSCodeRemovals(jobs, vscodeAccounts, vscode, copilotVSCodeCreatedDirs(recorded))
 	}
+	addEnterpriseHookPersonalClaudeUnblocks(jobs, vscodeAccounts)
 	purgeSkip := runEnterpriseHookPendingCleanups(cmd, &report, jobs, enterpriseHookRehomedRowCleanups(rows)...)
 	if enterpriseHooksRemoveAllPurge {
 		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, rows, purgeSkip)...)
@@ -238,6 +239,8 @@ func addEnterpriseHookRemoveRuns(report *enterpriseHooksRemoveAllReport, runs []
 				report.Failed = append(report.Failed, label+": "+boundedWorkerError(result.Error))
 			case target.Mode == enterpriseHookWorkerModeRemoveLeftover && !result.Removed:
 				// Nothing of DefenseClaw's was registered there.
+			case target.Mode == enterpriseHookWorkerModeUnblockPersonalClaude && !result.Removed:
+				// The enrollment wrote no Claude Code blocker there.
 			case target.Mode == enterpriseHookWorkerModeRemove && result.Remaining != "":
 				// The teardown ran, but the agent still loads a DefenseClaw
 				// entry (a copied home's plugin, say): not removed (GAP-0632).
@@ -489,6 +492,42 @@ func addEnterpriseHookLeftoverRemovals(jobs map[int]*enterpriseHookWorkerJob, ma
 			})
 			index++
 		}
+	}
+}
+
+// addEnterpriseHookPersonalClaudeUnblocks asks the worker of every account
+// in jobs, and of every eligible account with an available home, to remove
+// the Claude Code blocker the enrollment wrote over the account's own hook
+// script (rel-1-0-4 RB1-1). It runs after the account's removals and before
+// its purge, whatever the manifest names: the blocker is written for every
+// eligible account while the machine policy covers Claude Code.
+func addEnterpriseHookPersonalClaudeUnblocks(jobs map[int]*enterpriseHookWorkerJob, accounts []enterprisehooks.UnixEligibleAccount) {
+	for _, account := range accounts {
+		home := filepath.Clean(account.Home)
+		if jobs[account.UID] != nil || account.UID <= 0 || enterpriseHookCheckHome(home, account.UID).State != enterprisehooks.HomeAvailable {
+			continue
+		}
+		jobs[account.UID] = newEnterpriseHookRemoveJob(enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.User, Home: home})
+	}
+	index := 0
+	for _, job := range jobs {
+		for _, target := range job.Request.Targets {
+			index = max(index, target.Index+1)
+		}
+	}
+	for _, job := range jobs {
+		job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{
+			Index: index,
+			Mode:  enterpriseHookWorkerModeUnblockPersonalClaude,
+			Options: enterpriseHookWorkerOptions{
+				ConnectorName: "claudecode",
+				UserHome:      job.Account.Home,
+				OwnerUID:      job.Account.UID,
+				OwnerGID:      job.Account.GID,
+				DataDir:       filepath.Join(job.Account.Home, ".defenseclaw"),
+			},
+		})
+		index++
 	}
 }
 

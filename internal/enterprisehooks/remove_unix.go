@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -152,7 +153,9 @@ func purgeUserFiles(home, dataDir string, uid int, summary *PurgeSummary) error 
 // install from before the managed deployment enrolled it (its config,
 // secrets, audit history, policies or upgrade backups), the folder and the
 // install's binaries stay as they are and the summary says so (Kept): a
-// machine uninstall never deletes or moves an account's own data. Otherwise
+// machine uninstall never deletes or moves an account's own data. Only the
+// Claude Code blocker the enrollment wrote over the install's hook script
+// goes in both cases (RemovePersonalClaudeHookBlocker). Otherwise
 // all of ~/.defenseclaw goes, including the hook scripts and the account's own
 // hooks the foreign-hook policy moved aside (see connector.PurgeUserState),
 // and so do the binaries and launcher links the per-user install put in
@@ -235,6 +238,9 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) (PurgeSummary, err
 			if err := keptManagedBackupsError(dataDir); err != nil {
 				return err
 			}
+			if _, err := RemovePersonalClaudeHookBlocker(dataDir); err != nil {
+				return fmt.Errorf("enterprise hooks: kept the per-user state, because the managed Claude Code blocker could not be removed: %w", err)
+			}
 			own, err := holdsPerUserInstall(dataDir)
 			if err != nil {
 				return fmt.Errorf("enterprise hooks: kept the per-user state, because it could not be read: %w", err)
@@ -252,6 +258,46 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) (PurgeSummary, err
 		})
 	})
 	return summary, err
+}
+
+// PersonalClaudeHookBlocker is the script a managed enrollment writes over
+// the account's own DefenseClaw Claude Code hook script
+// (~/.defenseclaw/hooks/claude-code-hook.sh) while the machine policy covers
+// Claude Code: the account's ~/.claude/settings.json can still run that
+// script, and it must deny instead of allowing on a stopped personal
+// gateway. It is right only while the computer is managed.
+const PersonalClaudeHookBlocker = "#!/bin/sh\n# defenseclaw-managed-hook v0\necho 'defenseclaw: this computer is managed; the personal Claude Code hook cannot approve this call' >&2\nexit 2\n"
+
+// RemovePersonalClaudeHookBlocker removes dataDir/hooks/claude-code-hook.sh
+// when its bytes are exactly PersonalClaudeHookBlocker and reports whether it
+// did. Every uninstall runs it as each account, purge or not (rel-1-0-4
+// RB1-1): left in place, the blocker blocks every Claude Code tool call of a
+// personal registration on a computer that is no longer managed. A missing
+// script is a non-blocking hook error for Claude Code, as it was when the
+// purge deleted ~/.defenseclaw; any other script stays as it is.
+func RemovePersonalClaudeHookBlocker(dataDir string) (bool, error) {
+	path := filepath.Join(dataDir, "hooks", "claude-code-hook.sh")
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() != int64(len(PersonalClaudeHookBlocker)) {
+		return false, nil
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	if string(body) != PersonalClaudeHookBlocker {
+		return false, nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("remove %s: %w", path, err)
+	}
+	return true, nil
 }
 
 // perUserInstallMarkers are entries that only a per-user DefenseClaw

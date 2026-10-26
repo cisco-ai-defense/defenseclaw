@@ -79,8 +79,12 @@ const (
 	// ownership: "off" before it kept Claude Code off every route). It
 	// changes nothing unless the user's hook contract lock records such a
 	// registration.
-	enterpriseHookWorkerModeRemoveLeftover            = "remove_leftover"
-	enterpriseHookWorkerModeBlockPersonalClaude       = "block_personal_claude"
+	enterpriseHookWorkerModeRemoveLeftover      = "remove_leftover"
+	enterpriseHookWorkerModeBlockPersonalClaude = "block_personal_claude"
+	// enterpriseHookWorkerModeUnblockPersonalClaude removes the
+	// enrollment's Claude Code blocker (standalone uninstall, every
+	// account; enterprisehooks.RemovePersonalClaudeHookBlocker).
+	enterpriseHookWorkerModeUnblockPersonalClaude     = "unblock_personal_claude"
 	enterpriseHookWorkerModeRepairManagedCodexFeature = "repair_managed_codex_feature"
 	// enterpriseHookWorkerModePurge removes the user's DefenseClaw per-user
 	// state (standalone uninstall --purge). It runs after the request's
@@ -637,6 +641,12 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		case enterpriseHookWorkerModeBlockPersonalClaude:
 			err = blockPersonalClaudeHook(opts)
 			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
+		case enterpriseHookWorkerModeUnblockPersonalClaude:
+			dataDir := strings.TrimSpace(opts.DataDir)
+			if dataDir == "" {
+				dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+			}
+			outcome.Removed, err = enterprisehooks.RemovePersonalClaudeHookBlocker(dataDir)
 		case enterpriseHookWorkerModeRepairManagedCodexFeature:
 			if !request.Standalone {
 				err = errors.New("managed Codex feature repair requires the standalone guardian")
@@ -673,7 +683,8 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 		} else {
 			outcome.OK = true
-			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModePurge {
+			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover &&
+				target.Mode != enterpriseHookWorkerModePurge && target.Mode != enterpriseHookWorkerModeUnblockPersonalClaude {
 				outcome.Result = &result
 				outcome.AgentConfig = result.AgentConfig
 			}
@@ -772,11 +783,10 @@ func blockPersonalClaudeHook(opts enterprisehooks.InstallOptions) error {
 	if !bytes.Contains(body[:min(len(body), 160)], []byte("# defenseclaw-managed-hook v")) {
 		return fmt.Errorf("personal Claude Code hook %s is not DefenseClaw-owned", path)
 	}
-	const blocked = "#!/bin/sh\n# defenseclaw-managed-hook v0\necho 'defenseclaw: this computer is managed; the personal Claude Code hook cannot approve this call' >&2\nexit 2\n"
-	if string(body) == blocked {
+	if string(body) == enterprisehooks.PersonalClaudeHookBlocker {
 		return nil
 	}
-	return configwrite.WriteFileDurable(path, []byte(blocked), 0o700)
+	return configwrite.WriteFileDurable(path, []byte(enterprisehooks.PersonalClaudeHookBlocker), 0o700)
 }
 
 // enterpriseHookWorkerRemoveSetup resolves the same SetupOpts as
