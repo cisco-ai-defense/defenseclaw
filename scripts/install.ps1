@@ -2711,6 +2711,16 @@ function Test-HookFailModeRefresh([string]$Gateway) {
     return 2
 }
 
+function Test-InstalledHookRuntime {
+    # Released adapters and flat records remain authoritative during a swap
+    # even if the optional JSON sidecar is absent. A fresh install has none.
+    $hookDir = Join-Path $DataDir "hooks"
+    if (-not (Test-Path -LiteralPath $hookDir -PathType Container)) { return $false }
+    return $null -ne (Get-ChildItem -LiteralPath $hookDir -Force -ErrorAction Stop |
+        Where-Object { $_.Name -like '.hookcfg*' -or $_.Name -like '*-hook.*' -or $_.Name -like 'inspect-*.sh' } |
+        Select-Object -First 1)
+}
+
 function Update-HookFailModes([string]$Gateway) {
     # Set the hooks' outage fail modes (hooks\.hookcfg and the adapters) from
     # the config with this release's gateway before the new hook goes in: an
@@ -2720,7 +2730,7 @@ function Update-HookFailModes([string]$Gateway) {
     # stays open, from a DEFENSECLAW_CONFIG outside the data folder too.
     # False when the hooks could not be made safe. Used when no gateway runs;
     # a running one gets Start-HookFailModeHold.
-    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) { return $true }
+    if (-not (Test-InstalledHookRuntime)) { return $true }
     switch (Test-HookFailModeRefresh $Gateway) {
         0 { return ((Invoke-Native $Gateway @("connector", "refresh-fail-modes", "--data-dir", $DataDir)) -eq 0) }
         1 { return $true }

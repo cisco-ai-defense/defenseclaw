@@ -125,9 +125,13 @@ type Finding struct {
 
 // GuardRequest describes one scan.
 type GuardRequest struct {
-	Connector string
-	GOOS      string
-	Home      string
+	// RetireLegacyClaudeUserHooks is set only by managed cleanup after it
+	// verifies the replacement Claude machine policy. The guard never uses it
+	// to permit a user-owned executable.
+	RetireLegacyClaudeUserHooks bool
+	Connector                   string
+	GOOS                        string
+	Home                        string
 	// Homes are further homes the agent may read user config from (the
 	// home its environment names when that differs from the account's).
 	Homes      []string

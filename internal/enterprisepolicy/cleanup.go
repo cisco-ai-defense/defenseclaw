@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // CleanupResult reports what the guardian removed from one user's config.
@@ -64,6 +65,15 @@ func CleanUserForeignHooksWithRedirects(req GuardRequest, redirects []EnvRedirec
 	}
 	backupDir := filepath.Join(req.Home, ".defenseclaw", "foreign-hooks-backup", req.Connector, now.UTC().Format("20060102T150405Z"))
 	var errs []error
+	if req.Connector == ConnectorCopilot && req.goos() == "windows" && req.RetireLegacyClaudeUserHooks {
+		// Copilot can reach this user file through its project walk. Retire
+		// only the exact old product registration; ordinary Claude user hooks
+		// remain the user's, and project files are still never rewritten.
+		source := hookSource{scope: ScopeUser, path: filepath.Join(req.Home, ".claude", "settings.json"), format: formatGrouped, home: req.Home, base: req.Home}
+		errs = append(errs, cleanJSONSourceMatching(newGuardScan(req), source, backupDir, &result, func(finding Finding) bool {
+			return connector.IsLegacyClaudeCodeUserHookCommand(finding.Command, req.Home)
+		}))
+	}
 	passes := []GuardRequest{req}
 	for _, redirect := range redirects {
 		passes = append(passes, redirect.request(req))
@@ -192,6 +202,10 @@ func cleanUserSources(req GuardRequest, backupDir string, first func(hookSource)
 
 // cleanJSONSource rewrites one user JSON file without its foreign entries.
 func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, result *CleanupResult) error {
+	return cleanJSONSourceMatching(scan, source, backupDir, result, nil)
+}
+
+func cleanJSONSourceMatching(scan *guardScan, source hookSource, backupDir string, result *CleanupResult, matches func(Finding) bool) error {
 	req := scan.req
 	data, exists, err := scan.readSource(source)
 	if err != nil {
@@ -211,6 +225,9 @@ func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, resul
 	remove := map[string]bool{}
 	var removed []Finding
 	for _, finding := range findings {
+		if matches != nil && !matches(finding) {
+			continue
+		}
 		if finding.Allowed {
 			continue
 		}

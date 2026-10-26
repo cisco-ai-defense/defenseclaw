@@ -191,13 +191,14 @@ $installGuard = $false
 
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
-    # The native hook answers a tool boundary on stdout with exit 0, a failed
-    # check too; a launcher that exits non-zero without an answer crashed.
-    if ($stdout.Length -eq 0 -and $process.ExitCode -ne 0) {
+    # A successful native hook answers with exit 0, including a denial.
+    # A failed child may have written a partial or even complete answer before
+    # failing. None of that output proves that the check completed.
+    if ($process.ExitCode -ne 0) {
         if ($stderr.Length -gt 0) {
             [Console]::Error.Write($stderr)
         }
-        throw "DefenseClaw hook launcher exited $($process.ExitCode) without an answer"
+        throw "DefenseClaw hook launcher exited $($process.ExitCode)"
     }
     if ($stdout.Length -gt 0) {
         [Console]::Out.Write($stdout)

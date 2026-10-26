@@ -882,7 +882,7 @@ func newActivityRuntimeV8GeneratedMetrics(
 	}{
 		action:     optionalAuditMetricDimension(action),
 		targetType: optionalAuditMetricDimension(targetType),
-		actor:      optionalAuditMetricDimension(actor),
+		actor:      observability.Present(activityMetricActor(actor)),
 	}
 	build := func(
 		family observability.EventName,
@@ -940,6 +940,33 @@ func newActivityRuntimeV8GeneratedMetrics(
 		build(observability.EventName(observability.TelemetryInstrumentDefenseClawActivityTotal), 1),
 		build(observability.EventName(observability.TelemetryInstrumentDefenseClawActivityDiffEntries), int64(diffEntries)),
 	}, nil
+}
+
+// Activity actors are audit evidence, never metric dimensions. Keep the
+// metric vocabulary closed even when an API caller supplies a stable token
+// containing an account name, or a bundle receipt names an OS identity.
+func activityMetricActor(actor string) string {
+	switch actor {
+	case "system", "defenseclaw", "defenseclaw-gateway", "gateway", "watcher":
+		return "system"
+	case "cli", "tui", configChangeMetricActor:
+		// configChangeMetricActor is the fixed label a trust anchor or
+		// credential change already counts under.
+		return actor
+	}
+	if strings.HasPrefix(actor, "cli:") {
+		return "cli"
+	}
+	if strings.HasPrefix(actor, "tui:") {
+		return "tui"
+	}
+	if strings.HasPrefix(actor, "os:") || strings.HasPrefix(actor, "operator:") {
+		return "operator"
+	}
+	if strings.HasPrefix(actor, "control-plane:") {
+		return "control_plane"
+	}
+	return "other"
 }
 
 func (l *Logger) recordAuditEventMetricV8(

@@ -4150,12 +4150,12 @@ def test_hook_fail_modes_are_held_from_before_the_gateway_stops_until_it_exits()
     assert after.index("Clear-StagedRelease") < after.index("Restart-Old") < after.index("$(Get-RestoredNote)"), after
     start = _ps1_function("Start-HookFailModeHold")
     assert '--hold-until-exit $GatewayId' in start and 'Contains("Holding the hook fail modes")' in start, start
-    assert 'Join-Path $DataDir "hooks\\.hookcfg"' in start, start
+    assert "Test-InstalledHookRuntime" in start, start
     assert "Stop-HookFailModeHold" in start and start.rstrip().endswith("return $false\n}"), start
     assert "$hold.Process.ExitCode -eq 0" in _ps1_function("Complete-HookFailModeHold")
     update = _ps1_function("Update-HookFailModes")
     assert '@("connector", "refresh-fail-modes", "--data-dir", $DataDir)) -eq 0' in update, update
-    assert 'Join-Path $DataDir "hooks\\.hookcfg"' in update, update
+    assert "Test-InstalledHookRuntime" in update, update
     # A downgrade's older gateway prints the connector help instead; any other
     # probe answer refuses the swap.
     probe = _ps1_function("Test-HookFailModeRefresh")
@@ -4332,7 +4332,7 @@ def test_hook_fail_mode_refresh_refuses_a_probe_that_fails(tmp_path: Path) -> No
             "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
             f"$DataDir = '{data_dir}'\nfunction Write-Warn([string]$m) {{ [Console]::Error.WriteLine('warn: ' + $m) }}\n"
             f"{_ps1_function('Invoke-Native')}\n{_ps1_function('Get-NativeProbe')}\n"
-            f"{_ps1_function('Test-HookFailModeRefresh')}\n{_ps1_function('Update-HookFailModes')}\n"
+            f"{_ps1_function('Test-HookFailModeRefresh')}\n{_ps1_function('Test-InstalledHookRuntime')}\n{_ps1_function('Update-HookFailModes')}\n"
             f"if (Update-HookFailModes '{gateway}') {{ 'refresh=true' }} else {{ 'refresh=false' }}\n"
         )
         completed = _run_powershell(script)
@@ -4340,6 +4340,28 @@ def test_hook_fail_mode_refresh_refuses_a_probe_that_fails(tmp_path: Path) -> No
         assert f"refresh={str(want).lower()}" in completed.stdout, (name, completed.stdout, completed.stderr)
     ran = [line for line in calls.read_text(encoding="utf-8").splitlines() if "--data-dir" in line]
     assert ran == [f"newer connector refresh-fail-modes --data-dir {data_dir}"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_hook_fail_mode_refresh_runs_without_json_sidecar(tmp_path: Path) -> None:
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    helper = _ps1_function("Test-InstalledHookRuntime") if "function Test-InstalledHookRuntime " in _text() else ""
+    for name in ("cursor-hook.ps1", ".hookcfg.cursor"):
+        installed = hooks / name
+        installed.write_text("retained open adapter or record", encoding="utf-8")
+        script = (
+            "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+            f"$DataDir = '{tmp_path}'\n$script:refreshes = 0\n"
+            "function Test-HookFailModeRefresh([string]$g) { return 0 }\n"
+            "function Invoke-Native($g, $a) { $script:refreshes++; return 0 }\n"
+            + helper + "\n" + _ps1_function("Update-HookFailModes")
+            + "\nif (-not (Update-HookFailModes 'staged-gateway')) { throw 'refresh refused' }\n"
+            + "if ($script:refreshes -ne 1) { throw 'installed hooks were not refreshed' }\n"
+        )
+        completed = _run_powershell(script)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        installed.unlink()
 
 
 @pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")

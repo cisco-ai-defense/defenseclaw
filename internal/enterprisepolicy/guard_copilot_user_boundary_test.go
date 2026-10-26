@@ -4,6 +4,7 @@
 package enterprisepolicy
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,5 +83,76 @@ func TestCopilotProjectWalkCanReachClaudeSettingsInHome(t *testing.T) {
 	result, err := CleanUserForeignHooks(req, time.Now())
 	if err != nil || len(result.Removed) != 0 || result.BackupDir != "" {
 		t.Fatalf("project source was rewritten: %+v, %v", result, err)
+	}
+}
+
+// A retained personal Claude registration can also be reached by Copilot's
+// project walk. Retire the exact product command during managed cleanup;
+// the guard must keep refusing it until that write succeeds.
+func TestCopilotCleanupRetiresLegacyClaudeUserHook(t *testing.T) {
+	req := guardRequest(t, ConnectorCopilot, config.ForeignHooksRemove)
+	req.GOOS = "windows"
+	req.WorkingDir = filepath.Join(req.Home, "project")
+	if err := os.MkdirAll(req.WorkingDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(req.Home, ".claude", "settings.json")
+	legacy := `"` + filepath.Join(req.Home, ".local", "bin", "defenseclaw-hook.exe") + `" hook --connector claudecode`
+	encode := func(command string) string {
+		data, err := json.Marshal(map[string]any{"theme": "dark", "hooks": map[string]any{"PreToolUse": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": command}}}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	writeFile(t, path, encode(legacy))
+	if got := EvaluateForeignHooks(req); !got.Deny {
+		t.Fatal("retained user binary was trusted before retirement")
+	}
+	result, err := CleanUserForeignHooks(req, time.Now())
+	if err != nil || len(result.Removed) != 0 {
+		t.Fatalf("unproven replacement changed the user hook: %+v, %v", result, err)
+	}
+	if got := EvaluateForeignHooks(req); !got.Deny {
+		t.Fatal("unproven replacement opened the call")
+	}
+	req.RetireLegacyClaudeUserHooks = true
+	result, err = CleanUserForeignHooks(req, time.Now())
+	if err != nil || len(result.Removed) != 1 {
+		t.Fatalf("cleanup=%+v, %v", result, err)
+	}
+	if got := EvaluateForeignHooks(req); got.Deny {
+		t.Fatalf("retired legacy command still blocks: %+v", got)
+	}
+	data, err := os.ReadFile(path)
+	var document map[string]any
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &document); err != nil || document["theme"] != "dark" {
+		t.Fatalf("vendor setting lost: %v", err)
+	}
+	for _, command := range []string{"prettier --write", legacy + " --other"} {
+		original := encode(command)
+		writeFile(t, path, original)
+		result, err := CleanUserForeignHooks(req, time.Now())
+		if err != nil || len(result.Removed) != 0 {
+			t.Fatalf("unproven registration changed: %+v, %v", result, err)
+		}
+		if after, err := os.ReadFile(path); err != nil || string(after) != original {
+			t.Fatalf("foreign hook changed: %v", err)
+		}
+		if got := EvaluateForeignHooks(req); !got.Deny {
+			t.Fatal("unproven hook became allowed")
+		}
+	}
+	// Earlier installs used the gateway itself as the native hook runner.
+	writeFile(t, path, encode(strings.Replace(legacy, "defenseclaw-hook.exe", "defenseclaw-gateway.exe", 1)))
+	result, err = CleanUserForeignHooks(req, time.Now().Add(time.Minute))
+	if err != nil || len(result.Removed) != 1 {
+		t.Fatalf("legacy gateway registration was not retired: %+v, %v", result, err)
+	}
+	if got := EvaluateForeignHooks(req); got.Deny {
+		t.Fatalf("retired legacy gateway still blocks: %+v", got)
 	}
 }
