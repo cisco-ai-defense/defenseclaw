@@ -49,7 +49,7 @@ The trees below describe the per-user shell installers, including native Windows
   </Folder>
 </Files>
 
-`config.yaml`, `config.generation.json`, `audit.db` and `device.key` are created by `defenseclaw init` or `quickstart`, and the hook scripts by setting up an agent. Only `config.yaml` is policy; the hook scripts are derived from it. `installer/` is the installer that performed the current install (`defenseclaw rollback` uses it); its `binaries.sha256` lists the SHA-256 of each installed binary as it runs (`cd ~/.local/bin && shasum -a 256 -c ~/.defenseclaw/installer/binaries.sha256`). On macOS these differ from the binaries in the release archive, which the installer checks against `checksums.txt` and then signs ad hoc for this Mac. `previous/` is the install the last upgrade replaced. On Linux, `~/.local/bin` also holds `defenseclaw-sensor-helper` for the opt-in sandbox kernel feed. When the installer installs `uv` for you, `uv` and `uvx` are in `~/.local/bin` too.
+`config.yaml`, `config.generation.json`, `audit.db` and `device.key` are created by `defenseclaw init` or `quickstart`, and the hook scripts by setting up an agent. Only `config.yaml` is policy; the hook scripts are derived from it. `installer/` is the installer that performed the current install (`defenseclaw rollback` uses it); on macOS and Linux its `binaries.sha256` lists the SHA-256 of each installed binary as it runs (`cd ~/.local/bin && shasum -a 256 -c ~/.defenseclaw/installer/binaries.sha256`); on Windows `installer\` holds only `install.ps1`. On macOS these differ from the binaries in the release archive, which the installer checks against `checksums.txt` and then signs ad hoc for this Mac. `previous/` is the install the last upgrade replaced. On Linux, `~/.local/bin` also holds `defenseclaw-sensor-helper` for the opt-in sandbox kernel feed. When the installer installs `uv` for you, `uv` and `uvx` are in `~/.local/bin` too.
 
 On macOS and Linux the installer does not change `PATH`. If `~/.local/bin` is not on it, the installer prints the line to add to your shell profile.
 
@@ -63,8 +63,12 @@ On macOS and Linux the installer does not change `PATH`. If `~/.local/bin` is no
 | `defenseclaw-gateway.exe` | The gateway and its lifecycle commands. |
 | `defenseclaw-hook.exe` | The hook runner agents call. It opens no console window. |
 | `defenseclaw-acp.exe` | The [ACP guard](/docs/features/acp-guard). |
+| `skill-scanner.cmd`, `mcp-scanner.cmd` | Launchers for the bundled skill and MCP scanners. |
+| `defenseclaw-hook-state.json` | State the hook runner keeps; not configuration. |
 
 Do not replace or wrap these. Run the install command again to repair them. The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`.
+
+On a managed Windows computer none of these per-user paths are used: the programs are in `C:\Program Files\Cisco\DefenseClaw\bin`, the administrator's config is `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`, the audit database is `C:\ProgramData\Cisco\DefenseClaw\runtime\audit.db`, and the logs are in `C:\ProgramData\Cisco\DefenseClaw\logs` and `%WINDIR%\Logs\DefenseClaw`. The full list is in [Windows installation reference](/docs/enterprise/install/reference/windows).
 
 ## Data
 
