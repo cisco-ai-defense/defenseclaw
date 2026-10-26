@@ -26,6 +26,8 @@ func TestR105PatchLookupWithoutEnvelopeIsNotSSHPersistence(t *testing.T) {
 		{"copilot", "powershell", "Get-Command apply_patch -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source", false},
 		{"codex", "exec_command", "apply_patch (Get-Content patch.txt -Raw)", false},
 		{"codex", "exec_command", "bash -lc \"apply_patch <<'PATCH'\n*** Begin Patch\n*** Update File: calc.py\n@@\n def divide(first, second):\n     return first / second\n+\n+def power(base, exponent):\n+    return base ** exponent\n*** End Patch\nPATCH\"", false},
+		// GAP-1919: an @"..."@ envelope with $ and a backtick to a project file.
+		{"copilot", "powershell", "apply_patch @\"\n*** Begin Patch\n*** Add File: C:\\Users\\u\\proj\\notes.txt\n+$x = 1\n+`done\n*** End Patch\n\"@", false},
 		{"codex", "exec_command", "Set-Content ~\\.ssh\\authorized_keys k; apply_patch --help", true},
 	}
 	for _, tc := range cases {
