@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -43,11 +44,39 @@ func assignNativeOTLPFixtureOwnerOrSkip(t *testing.T, path string, owner *window
 		err = RunWithWindowsOwnerRestorePrivilege(set)
 	}
 	if errors.Is(err, windows.ERROR_INVALID_OWNER) {
-		t.Skipf("this token cannot assign another account as the owner of a fixture file (SeRestorePrivilege): %v", err)
+		// Outside LocalSystem the helper above runs set unchanged, so an
+		// interactive administrator (the dcw-preflight account) enables its
+		// own SeRestorePrivilege on this thread (GAP-1943).
+		var held bool
+		err, held = runWithFixtureRestorePrivilege(set)
+		if !held {
+			t.Skipf("this token does not hold SeRestorePrivilege, which assigning another account as the owner of a fixture file needs: %v", err)
+		}
 	}
 	if err != nil {
 		t.Fatalf("assign test owner on %s: %v", path, err)
 	}
+}
+
+// runWithFixtureRestorePrivilege runs fn on a locked thread impersonating
+// this process with SeRestorePrivilege enabled; held is false when the token
+// does not hold the privilege.
+func runWithFixtureRestorePrivilege(fn func() error) (err error, held bool) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := windows.ImpersonateSelf(windows.SecurityImpersonation); err != nil {
+		return err, false
+	}
+	defer func() { _ = windows.RevertToSelf() }()
+	var token windows.Token
+	if err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, false, &token); err != nil {
+		return err, false
+	}
+	defer token.Close()
+	if err := enableWindowsThreadPrivilege(token, "SeRestorePrivilege"); err != nil {
+		return err, false
+	}
+	return fn(), true
 }
 
 // A managed profile directory gives the target write access but reserves
