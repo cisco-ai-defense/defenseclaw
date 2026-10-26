@@ -546,11 +546,13 @@ func stickySessionDecision(decision GuardDecision, connector string, record Sess
 		cause = fmt.Sprintf("When this agent session started, the %s file %s %s (digest sha256:%s). %s",
 			scope, record.Path, what, record.Digest, foreignHookAdvice(connector, record.Reason))
 		if !decision.Deny && !decision.Incomplete && !hasBlockableFindings(decision) {
-			// This call's scan is clean: the hook is gone (the guardian
-			// migrated or removed it, or the user did), and only the agent
-			// process that loaded it is left. Restarting is the one fix
-			// (GAP-1540, LEAD DECISION 03:34).
-			cause = fmt.Sprintf("When this agent session started, the %s file %s %s (digest sha256:%s). It is not there any more, but this agent loaded it.",
+			// This call's scan is clean: the hook was removed (by the
+			// guardian's migration, the user or an administrator) or
+			// approved since, and only the agent process that loaded it
+			// is left. Restarting is the one fix (GAP-1540, LEAD DECISION
+			// 03:34). The scan cannot tell removed from approved, so the
+			// message names both (review RV-2).
+			cause = fmt.Sprintf("When this agent session started, the %s file %s %s (digest sha256:%s). This call's check no longer finds it (it was removed or approved), but this agent loaded it.",
 				scope, record.Path, what, record.Digest)
 			note = sessionHookGoneNote
 		}

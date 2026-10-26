@@ -156,7 +156,7 @@ func TestSessionStateKeepsDenyingASessionAfterTheHookIsRemoved(t *testing.T) {
 	// may get this message: it says when. Once the hook is gone from the
 	// file (the scan is clean), restarting the agent is the one fix, so the
 	// message says that and nothing else to do (GAP-1540).
-	for _, want := range []string{"When this agent session started, the", hookFile, "sha256:aa11", "It is not there any more", "tool calls until you restart the agent"} {
+	for _, want := range []string{"When this agent session started, the", hookFile, "sha256:aa11", "no longer finds it (it was removed or approved)", "tool calls until you restart the agent"} {
 		if !strings.Contains(later.Reason, want) {
 			t.Fatalf("the session denial must say %q: %s", want, later.Reason)
 		}
