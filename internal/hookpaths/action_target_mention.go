@@ -1864,7 +1864,7 @@ func actionWindowsWordNamesTarget(word, cwd, home string, stateOnly, sshDirector
 			return sshDirectory
 		}
 		protected, _ := actionWindowsProtected(candidate, cwd, home, false)
-		return protected
+		return protected || actionWindowsLinkReachesKeyFile(resolved, home)
 	}
 	if check(word) {
 		return true
@@ -1876,6 +1876,27 @@ func actionWindowsWordNamesTarget(word, cwd, home string, stateOnly, sshDirector
 			return true
 		}
 		if colon := strings.IndexByte(field, ':'); colon > 1 && field[0] == '-' && check(field[colon+1:]) {
+			return true
+		}
+	}
+	return false
+}
+
+// actionWindowsLinkReachesKeyFile follows, on a native Windows host, the
+// symbolic links and junctions of a resolved word (an alias in the cwd of
+// authorized_keys, or a junction to ~\.ssh): the write lands in the file the
+// links name (GAP-1515). Elsewhere the Windows file system is not there to
+// read.
+func actionWindowsLinkReachesKeyFile(resolved, home string) bool {
+	if runtime.GOOS != "windows" || resolved == "" {
+		return false
+	}
+	physical, ok := ResolveWriteTarget(filepath.FromSlash(resolved))
+	if !ok || samePathName(physical, filepath.FromSlash(resolved)) {
+		return false
+	}
+	for _, key := range ProtectedAuthorizedKeysPaths(home) {
+		if samePathName(physical, key) {
 			return true
 		}
 	}
