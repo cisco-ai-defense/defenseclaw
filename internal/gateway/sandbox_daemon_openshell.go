@@ -278,14 +278,21 @@ func (o *accountOpenShell) Drift(s sandboxrelay.DaemonSettings) ([]openshell.Set
 	compare := e.Install != config.EnterpriseOpenShellInstallSetup && e.GatewayConfigPath != ""
 	var want openshell.RenderedGateway
 	var renderedDrift []openshell.SettingDrift
-	if compare {
+	if e.GatewayConfigPath != "" {
+		// Both install modes run the administrator's rendered file (the
+		// managed unit's exec shim), so a hand edit of it is drift in setup
+		// mode too: reported, as status reports it, never a pause
+		// (blockingOpenShellDrift). Setup mode, whose gateway may also run
+		// the account's own install, does not fail on a render it cannot
+		// read (GAP-0730).
 		envPath := filepath.Join(filepath.Dir(e.GatewayConfigPath), openshell.GatewayEnvFile)
 		var digest string
 		var err error
-		if want, digest, err = o.readRendered(e.GatewayConfigPath, envPath); err != nil {
+		want, digest, err = o.readRendered(e.GatewayConfigPath, envPath)
+		switch {
+		case err != nil && compare:
 			return nil, err
-		}
-		if e.GatewayConfigDigest != "" && digest != e.GatewayConfigDigest {
+		case err == nil && e.GatewayConfigDigest != "" && digest != e.GatewayConfigDigest:
 			renderedDrift = []openshell.SettingDrift{{Field: renderedGatewayDriftField, Want: "installed render", Have: "changed"}}
 		}
 	}
