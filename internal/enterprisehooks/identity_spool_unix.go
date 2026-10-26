@@ -121,6 +121,10 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	}
 	keep, left := map[string]bool{}, map[string]bool{}
 	owners := map[int]LegacyAgentOwner{}
+	// Records this pass rewrites with an account incarnation, and those of
+	// them the previous pass wrote without one: a release without the
+	// migration map (1.0.3) wrote that previous pass (legacyAgentOwnersRollback).
+	incarnationRecords, preMapRecords := 0, 0
 	var passErr error
 	answeredDirectories := map[string]bool{}
 	for _, account := range accounts {
@@ -152,6 +156,12 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		cancel()
 		if err == nil {
 			if previous, readErr := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); readErr == nil {
+				if record.AccountIncarnation != "" {
+					incarnationRecords++
+					if previous.AccountIncarnation == "" {
+						preMapRecords++
+					}
+				}
 				binding := UPNBindingUnknown
 				bind := func(upn string) UPNBinding {
 					// Without a SID on the record it would be checked against,
@@ -220,7 +230,8 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			}
 		}
 	}
-	if err := writeLegacyAgentOwnersOnce(dir, owners, passErr == nil, setOwnership); err != nil {
+	rolledBack := incarnationRecords > 0 && preMapRecords == incarnationRecords
+	if err := writeLegacyAgentOwnersOnce(dir, owners, passErr == nil, rolledBack, setOwnership); err != nil {
 		passErr = errors.Join(passErr, err)
 	}
 	entries, err := os.ReadDir(dir)
@@ -356,9 +367,22 @@ const legacyAgentOwnersPassLimit = 3
 // writeLegacyAgentOwnersOnce records the migration map of the upgrade at
 // the guardian's first pass that collected every account (complete), or at
 // the legacyAgentOwnersPassLimit-th pass with what it collected, and never
-// again (LegacyAgentOwnersFile).
-func writeLegacyAgentOwnersOnce(dir string, owners map[int]LegacyAgentOwner, complete bool, setOwnership func(string) error) error {
-	if LegacyAgentOwnersRecorded(dir) || len(owners) == 0 {
+// again (LegacyAgentOwnersFile). rolledBack says the previous pass was a
+// release's without the map (every record it wrote lacks the account
+// incarnation this pass found): the accounts that release served are added
+// to the map as the first upgrade recorded its own (GAP-0709). A map an
+// older release removed is written anew, as at the first upgrade.
+func writeLegacyAgentOwnersOnce(dir string, owners map[int]LegacyAgentOwner, complete, rolledBack bool, setOwnership func(string) error) error {
+	if len(owners) == 0 {
+		return nil
+	}
+	if LegacyAgentOwnersRecorded(dir) {
+		if !rolledBack {
+			return nil
+		}
+		if _, err := AddLegacyAgentOwners(dir, owners, time.Now(), setOwnership); err != nil {
+			return fmt.Errorf("add the accounts of the rollback to the agent identity migration map: %w", err)
+		}
 		return nil
 	}
 	legacyAgentOwnersPasses.Lock()

@@ -37,11 +37,15 @@ import (
 // upgrade, while the 1.0.x identities are still the ones in use, the root
 // guardian records the account that holds each uid it enrolls: its name as
 // the host gives it, and a token of the incarnation (LegacyAgentOwnerToken).
-// The file is written once, never changed, owned by the guardian
-// authorization and read by the gateway only after that trust check. A
-// legacy entry then keeps applying to the account the map records, and to
-// no other; a request of an account the map does not record is refused,
-// naming the unproven agent ownership (the gateway's selectProfile).
+// The file is written once, owned by the guardian authorization and read by
+// the gateway only after that trust check. A legacy entry then keeps
+// applying to the account the map records, and to no other; a request of an
+// account the map does not record is refused, naming the unproven agent
+// ownership (the gateway's selectProfile). It changes only after a rollback
+// to a release without the map: the accounts that release served, which
+// the map does not record yet, are added at the first pass after the
+// upgrade back, as the first upgrade recorded its accounts
+// (AddLegacyAgentOwners, GAP-0709). Entries already recorded never change.
 // Windows needs no map: 1.0.x keyed its identities on the SID, which is
 // what they are keyed on now. Remove with agentidentity.LegacyAgentID.
 
@@ -154,6 +158,46 @@ func WriteLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, now tim
 		doc.Owners[strconv.Itoa(uid)] = owner
 	}
 	if len(doc.Owners) == 0 {
+		return false, nil
+	}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return false, err
+	}
+	if err := writeSpoolBytes(dir, LegacyAgentOwnersFile, ".legacy-agents-*", data, setOwnership); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// AddLegacyAgentOwners adds to dir's migration map the owners (by uid) of
+// uids it does not record yet, and reports whether it added any. Recorded
+// uids keep their entries. The guardian calls it only at the first pass
+// after an upgrade from a release that kept no map (a rollback window): a
+// 1.0.3 guardian rewrote every identity record without the account
+// incarnation, so a 1.0.3 agent identity of an account added then was
+// derived for the account that holds its uid now, as at the first upgrade.
+func AddLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, now time.Time, setOwnership func(string) error) (bool, error) {
+	if dir == "" {
+		return false, nil
+	}
+	recorded, ok, err := readLegacyAgentOwnersFile(filepath.Join(dir, LegacyAgentOwnersFile), nil)
+	if err != nil || !ok {
+		return false, err
+	}
+	doc := legacyAgentOwnersDoc{Version: legacyAgentOwnersVersion, WrittenAt: now.UTC(), Owners: make(map[string]LegacyAgentOwner, len(recorded))}
+	for uid, owner := range recorded {
+		doc.Owners[strconv.Itoa(uid)] = owner
+	}
+	added := false
+	for uid, owner := range owners {
+		key := strconv.Itoa(uid)
+		if _, known := doc.Owners[key]; known || uid < 0 || !validLegacyAgentOwner(owner) || len(doc.Owners) >= maxLegacyAgentOwners {
+			continue
+		}
+		doc.Owners[key], added = owner, true
+	}
+	if !added {
 		return false, nil
 	}
 	data, err := json.Marshal(doc)

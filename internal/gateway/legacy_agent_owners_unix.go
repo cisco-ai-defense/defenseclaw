@@ -13,6 +13,8 @@
 package gateway
 
 import (
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,9 +79,12 @@ var legacyAgentOwnerTokenNow = func(uid int, account string) string {
 	return enterprisehooks.LegacyAgentOwnerToken(incarnation, managedHookPeerHome(uid))
 }
 
-// legacyAgentOwners is the migration map the gateway read. The map never
-// changes once written, so it is read until it is found, at most every
-// legacyAgentOwnersRetry, and then kept.
+// legacyAgentOwners is the migration map the gateway read. It is read until
+// it is found, at most every legacyAgentOwnersRetry, and read again when the
+// file changes (checked as often): the guardian adds the accounts a
+// rollback window served at its first pass after the upgrade back, and a
+// running gateway that kept the first map refused them until a restart
+// (GAP-0709).
 var legacyAgentOwners = &legacyAgentOwnerCache{}
 
 const legacyAgentOwnersRetry = 30 * time.Second
@@ -90,6 +95,23 @@ type legacyAgentOwnerCache struct {
 	owners  map[int]enterprisehooks.LegacyAgentOwner
 	loaded  bool
 	nextTry time.Time
+	// stamp is the size and modification time of the map that was read.
+	stamp legacyAgentOwnersStamp
+}
+
+type legacyAgentOwnersStamp struct {
+	size    int64
+	modTime time.Time
+}
+
+// legacyAgentOwnersFileStamp is the stamp of dir's map, false when it cannot
+// be read. Tests replace it.
+var legacyAgentOwnersFileStamp = func(dir string) (legacyAgentOwnersStamp, bool) {
+	info, err := os.Lstat(filepath.Join(dir, enterprisehooks.LegacyAgentOwnersFile))
+	if err != nil {
+		return legacyAgentOwnersStamp{}, false
+	}
+	return legacyAgentOwnersStamp{size: info.Size(), modTime: info.ModTime()}, true
 }
 
 func (c *legacyAgentOwnerCache) get(uid int) (enterprisehooks.LegacyAgentOwner, bool) {
@@ -102,11 +124,14 @@ func (c *legacyAgentOwnerCache) get(uid int) (enterprisehooks.LegacyAgentOwner, 
 	if dir != c.dir {
 		c.dir, c.owners, c.loaded, c.nextTry = dir, nil, false, time.Time{}
 	}
-	if !c.loaded && !time.Now().Before(c.nextTry) {
-		if owners, ok := enterprisehooks.ReadLegacyAgentOwners(dir, validateManagedGuardianAuthorization); ok {
-			c.owners, c.loaded = owners, true
-		} else {
-			c.nextTry = time.Now().Add(legacyAgentOwnersRetry)
+	if !time.Now().Before(c.nextTry) {
+		c.nextTry = time.Now().Add(legacyAgentOwnersRetry)
+		stamp, stamped := legacyAgentOwnersFileStamp(dir)
+		if !c.loaded || stamped && stamp != c.stamp {
+			// A map that cannot be read now keeps the one read before.
+			if owners, ok := enterprisehooks.ReadLegacyAgentOwners(dir, validateManagedGuardianAuthorization); ok {
+				c.owners, c.loaded, c.stamp = owners, true, stamp
+			}
 		}
 	}
 	owner, ok := c.owners[uid]
