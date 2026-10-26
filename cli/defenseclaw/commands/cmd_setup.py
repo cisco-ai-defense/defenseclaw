@@ -17857,7 +17857,11 @@ def _native_windows_local_splunk() -> bool:
 @click.option(
     "--accept-splunk-license", is_flag=True, help="Acknowledge the Splunk General Terms for local Splunk enablement"
 )
-@click.option("--skip-test", is_flag=True, help="Skip the live HEC probe after remote Splunk Enterprise setup")
+@click.option(
+    "--skip-test",
+    is_flag=True,
+    help="Save remote Splunk Enterprise setup without the live HEC probe that otherwise runs first",
+)
 @click.option(
     "--show-credentials",
     is_flag=True,
@@ -17919,7 +17923,8 @@ def setup_splunk(
       --enterprise
                Remote Splunk Enterprise HEC endpoint + token.
                No Docker, local bridge, or Splunk-side automation.
-               Sends one best-effort HEC probe unless --skip-test is set.
+               Probes the HEC endpoint before saving; a failed probe
+               saves nothing (exit 1). --skip-test saves without it.
 
     Both can run simultaneously. Without flags, runs an interactive wizard.
     """

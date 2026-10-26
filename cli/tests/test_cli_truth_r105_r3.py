@@ -128,3 +128,14 @@ def test_doctor_fix_names_the_check_that_did_not_run(tmp_path: Path) -> None:
     assert decision.state == "blocked"
     assert "did not run" in decision.detail and "normal terminal" in decision.detail
     assert "configuration check failed" not in decision.detail
+
+
+def test_setup_splunk_help_says_the_probe_runs_before_saving() -> None:
+    # GAP-1747: the probe is no longer best-effort or after setup.
+    from defenseclaw.commands.cmd_setup import setup
+
+    result = CliRunner().invoke(setup, ["splunk", "--help"], terminal_width=200)
+    assert result.exit_code == 0, result.output
+    assert "best-effort" not in result.output
+    assert "saves nothing" in result.output
+    assert "without the live HEC probe that otherwise runs first" in result.output
