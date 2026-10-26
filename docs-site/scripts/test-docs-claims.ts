@@ -1449,6 +1449,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1649", page: "troubleshooting/gateway-and-keys.mdx", has: ["`DefenseClaw blocked this because its gateway is stopped`", "`defenseclaw: gateway unreachable, blocking <agent> tool (fail mode closed)`"] },
   { gap: "GAP-1667", page: "troubleshooting/gateway-and-keys.mdx", has: ["Under the default and permissive policies a per-user call runs with one warning instead"], lacks: ["the hook is fail-closed. This holds in observe mode too."] },
   { gap: "GAP-1666", page: "troubleshooting/gateway-and-keys.mdx", has: ["(on Windows the row is `Config file`)", "`Gateway token env`, `Gateway token drift` and `Gateway PID identity`"] },
+  { gap: "GAP-1691", page: "reference/configuration/fail-modes.mdx", has: ["accept only `open` or `closed`, in lower case"], lacks: ["Any value other than `open` (in any case) is `closed`."] },
   // r105-rows-end
 ];
 
