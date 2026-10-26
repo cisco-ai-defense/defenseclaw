@@ -1456,6 +1456,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1307", page: "reference/observability/redaction.mdx", has: ["move needs at least two routes on the destination;"] },
   { gap: "GAP-1382", page: "features/acp-guard.mdx", has: ["On a per-user install `defenseclaw acp catalog` prints the list. On a managed computer it is refused (exit 2)"] },
   { gap: "GAP-1631", page: "how-to/agents/add-or-remove-an-agent.mdx", has: ["`Fail` is `open` under the default policy"], lacks: ["enabled observe closed default"] },
+  { gap: "GAP-1673", page: "troubleshooting/enterprise/index.mdx", section: "Common errors", has: ["| `hook_process_fail_open` | Linux, macOS, Windows |", "| `status_detail_unavailable` |", "| `claude_state_unreadable` |"] },
   // r105-rows-end
 ];
 
