@@ -644,3 +644,8 @@
 {"id":"gap1409-diagnostic-log","rule_id":"tamper.detector_state_write","command":"printf changed >> /home/alice/.defenseclaw/logs/gateway.log","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"gap1409-cli-config","rule_id":"tamper.detector_state_write","command":"defenseclaw config set guardrail.mode observe","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"gap1409-case-different-lookalike","rule_id":"tamper.detector_state_write","command":"printf changed >> /home/alice/.DefenseClaw/config.yaml","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap1099-installer-append","rule_id":"tamper.detector_state_write","command":"printf changed >> /home/alice/.defenseclaw/installer/install.sh","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"gap1099-previous-installer-write","rule_id":"tamper.detector_state_write","command":"printf changed > /home/alice/.defenseclaw/previous/installer/install.sh","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"gap1099-installer-delete","rule_id":"tamper.detector_state_write","command":"rm -f /home/alice/.defenseclaw/installer/install.sh","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"gap1099-installer-read","rule_id":"tamper.detector_state_write","command":"cat /home/alice/.defenseclaw/installer/install.sh","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap1099-project-installer-lookalike","rule_id":"tamper.detector_state_write","command":"printf changed >> /repo/.defenseclaw/installer/install.sh","is_attack":false,"expect_route":"none","no_other_finding":true}

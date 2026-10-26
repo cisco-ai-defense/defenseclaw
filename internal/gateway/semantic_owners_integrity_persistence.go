@@ -2516,10 +2516,15 @@ func matchesActiveDefenseClawState(
 		"judge_bodies.db", "judge_bodies.db-wal", "judge_bodies.db-shm":
 		return true
 	}
+	// installer/ and previous/installer/ hold the saved installer the
+	// upgrade and rollback paths run (GAP-1099); its digest record is
+	// receipts/installer.sha256.
 	for _, prefix := range []string{
 		"cache/",
 		"hooks/",
+		"installer/",
 		"policies/",
+		"previous/installer/",
 		"quarantine/",
 		"receipts/",
 		"registries/",
