@@ -97,7 +97,10 @@ func actionWindowsProtected(value, cwd, home string, readOnly bool) (bool, bool)
 
 // actionWindowsWords treats a quoted command body as one word and emits each
 // redirection separately, preserving an attached file descriptor. An unclosed
-// quote leaves the command unproved. A PowerShell here-string (@' or @" at
+// quote leaves the command unproved. Quotes and comments follow PowerShell:
+// ‘ ’ ‚ ‛ are single quotes and “ ” „ double quotes, like ' and "; a # that
+// starts a token comments out the rest of its line, and <# ... #> is a block
+// comment (GAP-1500 refix: an apostrophe in a comment is not a quote). A PowerShell here-string (@' or @" at
 // the end of its line) is one word, "@" + body + "@", and runs to the line
 // that starts with its closing '@ or "@: a quote inside the body (It's, "x")
 // does not end it. literal[i] reports a word that is exactly one @'...'@
@@ -107,6 +110,7 @@ func actionWindowsWords(command string) (words []string, literal []bool, ok bool
 	var word strings.Builder
 	var quote byte
 	hereLen := -1
+	quoted := false // the current word has a quote, possibly an empty one
 	emit := func(value string, isLiteral bool) {
 		words = append(words, value)
 		literal = append(literal, isLiteral)
@@ -117,34 +121,58 @@ func actionWindowsWords(command string) (words []string, literal []bool, ok bool
 			word.Reset()
 		}
 		hereLen = -1
+		quoted = false
 	}
 	for i := 0; i < len(command); i++ {
 		c := command[i]
+		kind, size := actionWindowsQuote(command, i)
 		if quote != 0 {
-			if c == quote {
+			if kind == quote {
 				quote = 0
+				i += size - 1
 			} else {
 				word.WriteByte(c)
 			}
 			continue
 		}
-		switch c {
-		case '\'', '"':
+		if word.Len() == 0 && !quoted && (i == 0 || strings.IndexByte(" \t\r\n;|&", command[i-1]) >= 0) {
+			if c == '#' {
+				end := strings.IndexAny(command[i:], "\r\n")
+				if end < 0 {
+					break
+				}
+				i += end - 1
+				continue
+			}
+			if c == '<' && i+1 < len(command) && command[i+1] == '#' {
+				end := strings.Index(command[i+2:], "#>")
+				if end < 0 {
+					return words, literal, false
+				}
+				i += end + 3
+				continue
+			}
+		}
+		if kind != 0 {
 			if word.String() == "@" {
 				if bodyEnd, after, here, ok := actionWindowsHereStringEnd(command, i); here {
 					if !ok {
 						return words, literal, false
 					}
-					word.WriteString(command[i+1 : bodyEnd])
+					word.WriteString(command[i+size : bodyEnd])
 					word.WriteByte('@')
-					if c == '\'' {
+					if kind == '\'' {
 						hereLen = word.Len()
 					}
 					i = after - 1
 					continue
 				}
 			}
-			quote = c
+			quote, quoted = kind, true
+			i += size - 1
+			continue
+		}
+		switch c {
 		case ' ', '\t', '\r', '\n':
 			flush()
 		case '>', '<', ';', '|', '&':
@@ -187,12 +215,12 @@ func actionWindowsWords(command string) (words []string, literal []bool, ok bool
 // is the byte after it. PowerShell also accepts lone CR line ends and smart
 // quote closing markers. An indented closer or no closer is unproved.
 func actionWindowsHereStringEnd(command string, open int) (bodyEnd, after int, here, ok bool) {
-	quote := command[open]
-	newline := strings.IndexAny(command[open+1:], "\r\n")
-	if newline < 0 || strings.Trim(command[open+1:open+1+newline], " \t") != "" {
+	quote, size := actionWindowsQuote(command, open)
+	newline := strings.IndexAny(command[open+size:], "\r\n")
+	if quote == 0 || newline < 0 || strings.Trim(command[open+size:open+size+newline], " \t") != "" {
 		return 0, 0, false, false
 	}
-	firstEnd := open + 1 + newline
+	firstEnd := open + size + newline
 	start := firstEnd + 1
 	if command[firstEnd] == '\r' && start < len(command) && command[start] == '\n' {
 		start++
@@ -218,6 +246,23 @@ func actionWindowsHereStringEnd(command string, open int) (bodyEnd, after int, h
 		}
 	}
 	return 0, 0, true, false
+}
+
+// actionWindowsQuote reports the quote that starts at command[i] and its
+// length: PowerShell reads ‘ ’ ‚ ‛ as ' and “ ” „ as ".
+func actionWindowsQuote(command string, i int) (kind byte, size int) {
+	if c := command[i]; c == '\'' || c == '"' {
+		return c, 1
+	}
+	if command[i] == 0xE2 && i+2 < len(command) && command[i+1] == 0x80 {
+		switch command[i+2] {
+		case 0x98, 0x99, 0x9A, 0x9B:
+			return '\'', 3
+		case 0x9C, 0x9D, 0x9E:
+			return '"', 3
+		}
+	}
+	return 0, 0
 }
 
 func actionWindowsHereStringCloserLen(line string, quote byte) int {

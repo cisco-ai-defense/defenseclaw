@@ -1394,8 +1394,8 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 	if !ok {
 		// A command the scanner cannot read may still be read differently by
 		// the shell that runs it (GAP-1500). Keep the class rule there, as the
-		// POSIX text scan does: any protected-named word in it counts.
-		return actionWindowsWordMentionsTarget(normalized.String(), cwd, home, stateOnly)
+		// POSIX text scan does.
+		return actionWindowsUnreadTargetMention(normalized.String(), cwd, home, stateOnly)
 	}
 	if len(words) == 0 || depth == 0 && actionKnownReadOnlyWindows(words) {
 		return false
@@ -1430,6 +1430,36 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 		if actionWindowsWordMentionsTarget(word, cwd, home, stateOnly) {
 			return true
 		}
+	}
+	return false
+}
+
+// actionWindowsUnreadTargetMention is the text scan of a command the Windows
+// scanner cannot read. The text is cut at every separator character, quoted
+// or not, so a statement that a misread quote hides is still checked. A
+// protected-named word counts only in a piece that is not a plain read
+// (a known read-only program with no redirect, as on the parsed path), and
+// the bare .ssh directory alone does not count: reads and cd/ls/Test-Path of
+// ~/.ssh stay allowed (GAP-1500 refix).
+func actionWindowsUnreadTargetMention(command, cwd, home string, stateOnly bool) bool {
+	effectiveCWD := cwd
+	var directoryStack []string
+	for _, piece := range strings.FieldsFunc(command, func(r rune) bool {
+		return strings.ContainsRune(";|&\r\n", r)
+	}) {
+		fields := strings.Fields(piece)
+		if len(fields) == 0 {
+			continue
+		}
+		if strings.ContainsAny(piece, "<>") || !actionKnownReadOnlyWindowsStatement(fields) {
+			for _, field := range fields {
+				if actionWindowsWordNamesTarget(field, effectiveCWD, home, stateOnly, false) ||
+					actionWindowsWordNamesTarget(field, cwd, home, stateOnly, false) {
+					return true
+				}
+			}
+		}
+		actionWindowsAdvanceDirectory(fields, home, &effectiveCWD, &directoryStack)
 	}
 	return false
 }
@@ -1486,6 +1516,12 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 }
 
 func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) bool {
+	return actionWindowsWordNamesTarget(word, cwd, home, stateOnly, true)
+}
+
+// actionWindowsWordNamesTarget reports a protected-named word; sshDirectory
+// also counts the bare .ssh directory.
+func actionWindowsWordNamesTarget(word, cwd, home string, stateOnly, sshDirectory bool) bool {
 	check := func(candidate string) bool {
 		candidate = strings.ReplaceAll(candidate, "`", "")
 		if strings.ContainsAny(candidate, "*?[]") {
@@ -1516,7 +1552,7 @@ func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) boo
 			return false
 		}
 		if resolved == root+"/.ssh" {
-			return true
+			return sshDirectory
 		}
 		protected, _ := actionWindowsProtected(candidate, cwd, home, false)
 		return protected
