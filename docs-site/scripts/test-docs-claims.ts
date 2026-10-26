@@ -1222,6 +1222,7 @@ const knownLimitEntries = [
   },
   { gaps: 'GAP-1110', section: 'Local Splunk', phrases: ['works only with an x86_64 Docker engine', 'published for x86_64 (amd64) only', 'This is a Splunk image limit.', '/docs/how-to/observability/send-to-splunk#before-you-start'], from: [] },
   { gaps: 'GAP-1565', section: 'Upgrade and policy limits', phrases: ['**Restored hook records on managed macOS:**', '`hook_contract_lock.json`', 'the guardian and gateway rewrite them at the next check', 'compare the hook commands, not the file bytes'], from: [] },
+  { gaps: 'GAP-0999', section: 'Sandboxes', phrases: ['**Raw OpenShell during a gateway restart:**', 'OpenShell has no admission barrier that raw clients honor', 'one started after the last check is ended by the restart', 'This is an OpenShell limit.', '/docs/troubleshooting/sandboxes/setup-and-gateway#a-raw-openshell-sandbox-stops-a-restart-or-rollback'], from: [] },
 ] as const;
 
 function knownLimitSection(heading: string): string {
@@ -1272,7 +1273,7 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
   it('lists every section in the troubleshooting index summary', () => {
     const index = page('troubleshooting/index.mdx');
     const line = index.split('[Known limits](/docs/troubleshooting/known-limits):')[1]?.split(' - [')[0] ?? '';
-    for (const words of ['Codex', 'Copilot CLI', 'Antigravity', 'Linux sign-out']) {
+    for (const words of ['Codex', 'Copilot CLI', 'Antigravity', 'Linux sign-out', 'sandboxes']) {
       assert.ok(line.includes(words), `troubleshooting index summary omits ${words}`);
     }
   });
