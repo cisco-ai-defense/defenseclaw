@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -75,19 +76,17 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 	}
 
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(2))
-	stop := make(chan struct{})
+	var stopped atomic.Bool
 	var hogs sync.WaitGroup
 	for range 6 {
 		hogs.Add(1)
 		go func() {
 			defer hogs.Done()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
+			spins := 0
+			for !stopped.Load() {
+				spins++
 			}
+			_ = spins
 		}()
 	}
 	const sessions = 10
@@ -121,7 +120,7 @@ func TestHookAnswersStayInsideTheBudgetUnderCPULoad(t *testing.T) {
 		}()
 	}
 	calls.Wait()
-	close(stop)
+	stopped.Store(true)
 	hogs.Wait()
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 	if len(latencies) < sessions*int(duration/time.Second)/2 {
