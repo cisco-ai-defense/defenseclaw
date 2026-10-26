@@ -75,6 +75,9 @@ defenseclaw policy edit scanner --type plugin --severity medium \
 ```bash
 defenseclaw guardrail use-pack default
 defenseclaw guardrail use-pack --clear --connector codex
+defenseclaw policy activate default   # admission back to the default preset; also undoes the plugin edit
 ```
+
+The pack also sets what a gateway outage does when you saved no fail mode: with `strict` a call is blocked while the gateway is not running, and `default` lets it run with a warning again ([Fail modes](/docs/reference/configuration/fail-modes)).
 
 Next: [change the levels](/docs/how-to/policies/change-block-and-alert-levels), [what each pack ships](/docs/reference/policy/defaults).

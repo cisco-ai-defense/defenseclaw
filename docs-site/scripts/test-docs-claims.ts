@@ -1461,6 +1461,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1700", page: "troubleshooting/enterprise/hooks.mdx", section: "`security_complete` is `false` on Linux or macOS", has: ["`unprivileged_user_namespaces`", "with only `hook_process_fail_open`, `unprivileged_user_namespaces` and `unprivileged_ptrace` warnings"] },
   { gap: "GAP-1697", page: "troubleshooting/enterprise/hooks.mdx", has: ["On managed Windows `defenseclaw.exe` exits `3` and writes no audit row"] },
   { gap: "GAP-1707", page: "enterprise/plan/rollout.mdx", has: ["On Linux and macOS a healthy install keeps it at `false` with only `hook_process_fail_open`", "`unprivileged_ptrace` while the kernel allows them"] },
+  { gap: "GAP-1630", page: "how-to/policies/use-a-different-rule-pack.mdx", section: "Undo", has: ["defenseclaw policy activate default", "with `strict` a call is blocked while the gateway is not running, and `default` lets it run with a warning again"] },
   // r105-rows-end
 ];
 
