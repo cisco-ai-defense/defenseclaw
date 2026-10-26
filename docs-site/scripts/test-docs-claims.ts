@@ -471,7 +471,9 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
       // oss-outage-open: a per-user outage follows the policy tier; every other failure denies.
       assert.match(text, /On a per-user install a gateway that is not running follows the policy tier/i, name);
       assert.match(text, /the strict policy denies it/i, name);
-      assert.match(text, /Every other failure DefenseClaw sees \(an unusable answer, a missing token, oversized input\) is denied/i, name);
+      assert.match(text, /Every other failure DefenseClaw sees \(an unusable answer, a missing token\) is denied/i, name);
+      // Oversized input is not an outage: default and permissive judge a bounded review (fail-modes.mdx).
+      assert.match(text, /Oversized input is denied on a managed host and in the strict policy/i, name);
     }
     for (const name of ['reference/connectors/antigravity.mdx']) {
       const text = page(name);
@@ -499,6 +501,37 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('A per-user 1.0.4 hook reads `config.yaml` next to its own hooks on each call'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('A per-user (OSS) install honors a saved connector or global'));
+  });
+});
+
+describe('per-user outage wording on connector pages (rel-1-0-4 GAP-1301, GAP-1317, GAP-1324)', () => {
+  it('says the default and permissive policies let an outage call run on Antigravity, Copilot and Devin', () => {
+    for (const name of ['connectors/antigravity.mdx', 'reference/connectors/antigravity.mdx', 'reference/connectors/copilot.mdx', 'reference/connectors/devin.mdx']) {
+      assert.match(page(name), /default (?:and|or) permissive polic(?:y|ies) lets? (?:the call|`PreToolUse`) run with one warning/i, name);
+    }
+  });
+
+  it('never opens a Fail mode section with an unqualified closed claim', () => {
+    for (const entry of readdirSync(join(docs, 'reference/connectors'))) {
+      if (!entry.endsWith('.mdx')) continue;
+      const name = `reference/connectors/${entry}`;
+      const text = page(name);
+      assert.ok(!text.includes('Fail closed: yes'), `${name} still opens with Fail closed: yes`);
+      assert.ok(!/closed by default/i.test(text.split('## Fail mode')[1]?.split(' ## ')[0] ?? ''), `${name} Fail mode promises a closed default`);
+    }
+  });
+});
+
+describe('admission presets table (rel-1-0-4 GAP-1655)', () => {
+  it('gives the shipped default MCP overrides', () => {
+    const preset = source('policies/default.yaml').split('scanner_overrides:')[1]?.split('\n  plugin:')[0] ?? '';
+    for (const level of ['HIGH', 'MEDIUM', 'LOW']) {
+      assert.match(preset, new RegExp(`${level}:\\s*runtime: allow\\s*file: none\\s*install: none`), `default.yaml mcp ${level}`);
+    }
+    const row = page('reference/policy/defaults.mdx').split('| `scanner_overrides.mcp` |')[1]?.split(' | `scanner_overrides.plugin`')[0] ?? '';
+    const cells = row.split('|').map((cell) => cell.trim());
+    assert.equal(cells[1], 'HIGH, MEDIUM and LOW install and run (CRITICAL follows `skill_actions.critical`)');
+    assert.equal(cells[2], 'MEDIUM blocks and quarantines; LOW disables at runtime');
   });
 });
 
@@ -655,7 +688,12 @@ describe('Windows Hermes failure guidance', () => {
     assert.match(failMode, /opts\.StrictAvailability \|\| !strings\.EqualFold\(strings\.TrimSpace\(opts\.FailMode\), "open"\)/);
     const windows = page('troubleshooting/windows.mdx');
     assert.doesNotMatch(windows, /Hermes.*(?:fail-open setting|always shows failures as open)/i);
-    assert.match(windows, /Hermes.*closed by default.*explicitly.*open/i);
+    // rel-1-0-4 GAP-0746: a per-user outage follows the policy tier (perUserOutageMode), as for every agent.
+    assert.match(source('internal/gateway/connector/hookexec/hookexec.go'), /func perUserOutageMode\(opts \*Options, failMode string\) string \{/);
+    assert.doesNotMatch(windows, /Hermes[^.]*closed by default/i);
+    // r105 docs refix 1: outage behaviour is stated only in the capability matrix (Go TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix).
+    assert.match(windows, /Hermes follows the same gateway outage rule as the other agents \(\[gateway outage table\]\(\/docs\/reference\/apis\/capability-matrix#gateway-outage\)\)\. Every other failure blocks\./);
+    assert.doesNotMatch(windows, /stopped gateway lets a Hermes call run/i);
     assert.match(windows, /managed host.*administrator.*open.*gateway outage/i);
     assert.match(windows, /Secure Client.*open.*default/i);
   });
@@ -1201,12 +1239,27 @@ const knownLimitEntries = [
   {
     gaps: 'GAP-1164',
     section: 'Linux sign-out',
-    phrases: ['Without linger, signing out of your last session stops the gateway and its MicroVMs', '/docs/troubleshooting/sandboxes/setup-and-gateway#a-linux-sign-out-ends-a-running-microvm'],
+    phrases: ['Without linger, signing out of your last session stops the gateway and its MicroVMs', 'This is how systemd works', '`sudo loginctl enable-linger USER`', '/docs/troubleshooting/sandboxes/setup-and-gateway#a-linux-sign-out-ends-a-running-microvm'],
     from: [],
   },
-  { gaps: 'GAP-1194', section: 'Claude Code shell', phrases: ['shell mode'], from: ['connectors/claudecode.mdx'] },
+  { gaps: 'GAP-1194', section: 'Claude Code shell', phrases: ['shell mode', 'on every OS, to per-user and managed installs, in observe and action mode', 'It is a Claude Code limit'], from: ['connectors/claudecode.mdx'] },
   { gaps: 'GAP-1163', section: 'Upgrade and policy limits', phrases: ['**Legacy MicroVM guests:**'], from: [] },
-  { gaps: 'GAP-0716, GAP-0716-MAC', section: 'Upgrade and policy limits', phrases: ['**Managed policy before launch:**'], from: [] },
+  {
+    gaps: 'GAP-0716, GAP-0716-MAC, GAP-0716-WIN',
+    section: 'Upgrade and policy limits',
+    phrases: ['**Managed policy before launch:**', 'on managed Linux, macOS and Windows', 'a process device map on Windows', 'This is an operating system limit', '`unprivileged_user_namespaces`', '`user.max_user_namespaces=0`', '/docs/enterprise/install/reference/linux#user-namespaces', '/docs/enterprise/install/reference/macos#machine-policy', '/docs/enterprise/install/reference/windows#inspect-machine-policy'],
+    from: [],
+  },
+  {
+    gaps: 'GAP-0565',
+    section: 'Codex',
+    phrases: ['the `Sandbox ready` step', '`approval required by policy, but AskForApproval::Granular.sandbox_approval is false`', 'Codex does this with or without DefenseClaw', 'It is a Codex limit.', 'Quit Codex and start it again once'],
+    from: ['connectors/codex.mdx', 'reference/connectors/codex.mdx'],
+  },
+  { gaps: 'GAP-1110', section: 'Local Splunk', phrases: ['works only with an x86_64 Docker engine', 'published for x86_64 (amd64) only', 'This is a Splunk image limit.', '/docs/how-to/observability/send-to-splunk#before-you-start'], from: [] },
+  { gaps: 'GAP-1565', section: 'Upgrade and policy limits', phrases: ['**Restored hook records on managed macOS:**', '`hook_contract_lock.json`', 'the guardian and gateway rewrite them at the next check', 'compare the hook commands, not the file bytes'], from: [] },
+  { gaps: 'GAP-0999', section: 'Sandboxes', phrases: ['**Raw OpenShell during a gateway restart:**', 'OpenShell has no admission barrier that raw clients honor', 'one started after the last check is ended by the restart', 'This is an OpenShell limit.', '/docs/troubleshooting/sandboxes/setup-and-gateway#a-raw-openshell-sandbox-stops-a-restart-or-rollback'], from: [] },
+  { gaps: 'GAP-1177', section: 'Sandboxes', phrases: ['**No network cutoff for a contained MicroVM:**', 'the VM stays reported as unprotected and new DefenseClaw runs are refused', 'OpenShell has no VM pause or network-off operation', 'This is an OpenShell and platform limit.', '/docs/troubleshooting/sandboxes/setup-and-gateway#a-contained-vm-has-no-confirmed-network-withdrawal'], from: [] },
   // Known issues moved to 1.0.5 by the owner decision of 2026-10-25 10:40 (KNOWN-ISSUES-1.0.4.md).
   { gaps: 'GAP-0933, GAP-1599', section: 'Known issues', phrases: ['**Changing the fail mode with Setup `/ensure`:**', 'Keep the fail mode you installed with.', 'an administrator can remove the closure marker', 'hot-config-undo-closed'], from: [] },
   { gaps: 'GAP-1687', section: 'Known issues', phrases: ['`Setup-Enterprise-Standalone-x64.exe /repair JSON=1`, then `/ensure` again'], from: [] },
@@ -1254,18 +1307,30 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
     });
   }
 
+  it('keeps the page title free of a release number', () => {
+    const raw = readFileSync(join(docs, 'troubleshooting/known-limits.mdx'), 'utf8');
+    assert.match(raw, /^title: Known limits$/m);
+    for (const name of ['troubleshooting/index.mdx', 'connectors/codex.mdx', 'connectors/copilot.mdx']) {
+      assert.ok(!page(name).includes('Known limits in 1.0'), `${name} names an old release in the known-limits link`);
+    }
+  });
+
   it('lists every section in the troubleshooting index summary', () => {
     const index = page('troubleshooting/index.mdx');
-    const line = index.split('[Known limits in 1.0.4](/docs/troubleshooting/known-limits):')[1]?.split(' - [')[0] ?? '';
-    for (const words of ['Codex', 'Copilot CLI', 'Antigravity', 'Linux sign-out']) {
+    const line = index.split('[Known limits](/docs/troubleshooting/known-limits):')[1]?.split(' - [')[0] ?? '';
+    for (const words of ['Codex', 'Copilot CLI', 'Antigravity', 'Linux sign-out', 'sandboxes']) {
       assert.ok(line.includes(words), `troubleshooting index summary omits ${words}`);
     }
   });
 
   it('keeps the vendor refusal text out of DefenseClaw source', () => {
-    for (const text of ['style commands are not permitted', 'did not acknowledge permission.requested']) {
+    for (const text of ['style commands are not permitted', 'did not acknowledge permission.requested', 'Granular.sandbox_approval is false']) {
       assert.deepEqual(trackedProductHits(text), [], `DefenseClaw source emits "${text}"; it is not a vendor limit`);
     }
+  });
+
+  it('names the Linux namespace warning the product emits (GAP-0716)', () => {
+    assert.ok(source('internal/enterpriseunix/userns.go').includes('codeUserNamespaces               = "unprivileged_user_namespaces"'));
   });
 
   it('matches the managed hook_process_fail_open warning for Codex, Copilot and Antigravity', () => {

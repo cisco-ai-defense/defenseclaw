@@ -115,7 +115,7 @@ DefenseClaw does not enable Cursor native approval. Confirm verdicts stay attrib
 
 ## Fail mode
 
-Fail closed: yes. A per-user Cursor hook uses an explicit saved outage mode; when unset, its policy tier decides in observe and action mode: the default and permissive policies let the call run with a warning, strict blocks it ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)). Outside Secure Client, action and observe both register `failClosed: true`, so a stopped, killed or timed-out hook cannot silently let a tool run. Managed Cursor's running hook follows the administrator's resolved fail mode. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+Can fail closed: yes. A per-user Cursor hook uses an explicit saved outage mode; when unset, its policy tier decides in observe and action mode: the default and permissive policies let the call run with a warning, strict blocks it ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)). Outside Secure Client, action and observe both register `failClosed: true`, so a stopped, killed or timed-out hook cannot silently let a tool run. Managed Cursor's running hook follows the administrator's resolved fail mode. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 
