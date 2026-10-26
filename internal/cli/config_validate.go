@@ -70,8 +70,13 @@ var configValidateCmd = &cobra.Command{
 			// (pack digests included) at load and on every reload.
 			_, derivationErr = loaded.runtime.DeriveGuardrailProfiles()
 		}
+		var packErr error
+		if err == nil && derivationErr == nil {
+			// The required sandbox packs, as ensure loads them (GAP-0546).
+			packErr = configValidateRequiredSandboxPacks(loaded.runtime)
+		}
 		out := cmd.OutOrStdout()
-		if err != nil || derivationErr != nil {
+		if err != nil || derivationErr != nil || packErr != nil {
 			failure := configV8ValidationFailure(err)
 			if derivationErr != nil {
 				failure.Path = "$.guardrail.profiles"
@@ -79,9 +84,18 @@ var configValidateCmd = &cobra.Command{
 					configV8SettingRule(derivationErr.Error()), "", "")
 				failure.ConfigVersion = loaded.runtime.ConfigVersion
 			}
+			if packErr != nil {
+				failure.Path = "$.openshell.admin.required_pack"
+				failure.Reason = configV8DiagnosticReason("config_semantic_invalid",
+					configV8SettingRule(packErr.Error()), "", "")
+				failure.ConfigVersion = loaded.runtime.ConfigVersion
+			}
 			refusal := err
 			if derivationErr != nil {
 				refusal = derivationErr
+			}
+			if packErr != nil {
+				refusal = packErr
 			}
 			plain, worded := configValidatePlainRefusal(refusal, failure, configValidateShownPath(path), path)
 			var readError *configV8ReadError
