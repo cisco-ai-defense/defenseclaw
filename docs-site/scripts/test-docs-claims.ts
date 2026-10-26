@@ -1322,6 +1322,9 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 
   it('names the Linux namespace warning the product emits (GAP-0716)', () => {
     assert.ok(source('internal/enterpriseunix/userns.go').includes('codeUserNamespaces               = "unprivileged_user_namespaces"'));
+    // GAP-1763: the ptrace variant of the same class.
+    assert.ok(source('internal/enterpriseunix/userns.go').includes('codeUnprivilegedPtrace           = "unprivileged_ptrace"'));
+    assert.ok(source('internal/enterpriseunix/userns.go').includes('kernel.yama.ptrace_scope=2'));
   });
 
   it('matches the managed hook_process_fail_open warning for Codex, Copilot and Antigravity', () => {
@@ -1364,6 +1367,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1795", page: "enterprise/runtime/sandboxes.mdx", has: ["its `--end-vm` start fails with Conflict"], lacks: ["is started with `defenseclaw sandbox start <name> --end-vm`"] },
   { gap: "GAP-1795", page: "reference/sandboxes/cli.mdx", has: ["OpenShell 0.1.5 refuses this start with Conflict."] },
   { gap: "GAP-1762", page: "troubleshooting/known-limits.mdx", section: "Claude Code shell", has: ["no hook decision and no hook audit row", "the Tetragon runtime layer can still record it (`hook_seen=false`)"], lacks: ["the audit log has no row for it"] },
+  { gap: "GAP-1763", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["a process tracer such as PRoot on Linux", "`unprivileged_ptrace`", "`kernel.yama.ptrace_scope=2`"] },
   // r105-rows-end
 ];
 
