@@ -86,6 +86,11 @@ type enterpriseHooksRemoveAllReport struct {
 	// PurgedDetail is what the purge found and removed for each user in
 	// Purged, so the uninstall names only that.
 	PurgedDetail map[string]enterpriseHookPurgeDetail `json:"purged_detail,omitempty"`
+	// ClaudeHookUnblocked names the users whose Claude Code blocker (the
+	// enrollment wrote it over the account's own hook script) was removed:
+	// their own Claude Code hook needs `defenseclaw setup claude-code`
+	// again (GAP-1828).
+	ClaudeHookUnblocked []string `json:"claude_hook_unblocked,omitempty"`
 }
 
 const (
@@ -115,6 +120,9 @@ func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
 		}
 		for _, entry := range report.StateFailed {
 			fmt.Fprintf(cmd.OutOrStdout(), "not purged %s\n", entry)
+		}
+		for _, user := range report.ClaudeHookUnblocked {
+			fmt.Fprintf(cmd.OutOrStdout(), "unblocked %s: %s\n", user, enterpriseHookClaudeUnblockedNote)
 		}
 	}
 	if err != nil {
@@ -186,6 +194,7 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	sort.Strings(report.Failed)
 	sort.Strings(report.Purged)
 	sort.Strings(report.StateFailed)
+	sort.Strings(report.ClaudeHookUnblocked)
 	report.OK = len(report.Failed) == 0
 	if report.OK && len(report.Pending) == 0 && recordErr == nil {
 		if err := removeEnterpriseHookCopilotVSCodeAccounts(vscodeRecordPath, manifestPath); err != nil {
@@ -241,6 +250,9 @@ func addEnterpriseHookRemoveRuns(report *enterpriseHooksRemoveAllReport, runs []
 				// Nothing of DefenseClaw's was registered there.
 			case target.Mode == enterpriseHookWorkerModeUnblockPersonalClaude && !result.Removed:
 				// The enrollment wrote no Claude Code blocker there.
+			case target.Mode == enterpriseHookWorkerModeUnblockPersonalClaude:
+				report.Removed++
+				report.ClaudeHookUnblocked = append(report.ClaudeHookUnblocked, run.Job.Account.User)
 			case target.Mode == enterpriseHookWorkerModeRemove && result.Remaining != "":
 				// The teardown ran, but the agent still loads a DefenseClaw
 				// entry (a copied home's plugin, say): not removed (GAP-0632).

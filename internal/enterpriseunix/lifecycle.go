@@ -4216,6 +4216,9 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		Purged       []string                    `json:"purged"`
 		Removed      int                         `json:"removed"`
 		PurgedDetail map[string]purgedUserDetail `json:"purged_detail"`
+		// ClaudeHookUnblocked: the accounts whose Claude Code blocker the
+		// uninstall removed (GAP-1828).
+		ClaudeHookUnblocked []string `json:"claude_hook_unblocked"`
 	}
 	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil && err == nil {
 		return false
@@ -4263,6 +4266,12 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	// account, instead of a bare "done".
 	for _, user := range report.Purged {
 		r.Changes = append(r.Changes, purgedUserChange(user, report.PurgedDetail[user]))
+	}
+	// The enrollment had replaced the account's own Claude Code hook script
+	// with a blocker; the uninstall removed it, and the account's own hook
+	// does not guard Claude Code until its owner sets it up again.
+	for _, user := range report.ClaudeHookUnblocked {
+		r.Changes = append(r.Changes, fmt.Sprintf("removed the Claude Code blocker the enrollment had written over the own DefenseClaw hook script of user %s (~/.defenseclaw/hooks/claude-code-hook.sh); that account's own Claude Code hook now reports a missing script and does not guard Claude Code until `defenseclaw setup claude-code` runs as that user", user))
 	}
 	return left
 }

@@ -106,3 +106,24 @@ func TestUninstallKeepStateKeepsTheKitRotationJournal(t *testing.T) {
 		})
 	}
 }
+
+// GAP-1828: the lifecycle result names each account whose Claude Code
+// blocker the per-user removal took away, with the remedy.
+func TestUninstallNamesTheUnblockedClaudeHook(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true,"removed":1,"claude_hook_unblocked":["alice"]}`)}, nil
+	}}
+	r := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, r)
+	found := false
+	for _, change := range r.Changes {
+		if strings.Contains(change, "user alice") && strings.Contains(change, "defenseclaw setup claude-code") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the uninstall did not name the unblocked Claude Code hook: %v", r.Changes)
+	}
+}
