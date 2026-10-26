@@ -83,5 +83,7 @@ async def test_long_hints_keep_health_at_80_columns(tmp_path):
             app._set_status(hint)
             await pilot.pause()
             status = screen_text(app).splitlines()[-1]
-            assert hint.split()[0] in status, status
+            # A later word of each hint: the first ("Guardrail") is also a
+            # health label, so it proved nothing (GAP-1548).
+            assert hint.split()[1] in status, status
             _assert_essential_health(status)
