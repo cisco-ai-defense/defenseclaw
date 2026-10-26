@@ -817,10 +817,12 @@ func windowsHotConfigHookFailModeChanges(previous, next []byte) windowsHotConfig
 	before, beforeOK := windowsHotConfigHookFailModes(previous)
 	after, afterOK := windowsHotConfigHookFailModes(next)
 	change := windowsHotConfigFailModeChange{before: before, after: after}
-	if beforeCfg, err := config.LoadRuntimeV8InspectionCandidateFromBytes("config.yaml", previous); err == nil {
-		if afterCfg, err := config.LoadRuntimeV8InspectionCandidateFromBytes("config.yaml", next); err == nil {
-			change.beforeCfg, change.afterCfg = beforeCfg, afterCfg
-		}
+	// Decoded as plain settings: the resolver reads only the fail mode,
+	// connector and application protection keys, and the full loader also
+	// checks paths that only hold at the installed location.
+	beforeCfg, afterCfg := &config.Config{}, &config.Config{}
+	if yaml.Unmarshal(previous, beforeCfg) == nil && yaml.Unmarshal(next, afterCfg) == nil {
+		change.beforeCfg, change.afterCfg = beforeCfg, afterCfg
 	}
 	if !beforeOK || !afterOK || windowsHotConfigAppProtectionEnabled(previous) != windowsHotConfigAppProtectionEnabled(next) {
 		change.all = true
