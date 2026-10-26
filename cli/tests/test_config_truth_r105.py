@@ -70,6 +70,22 @@ def test_unset_of_the_last_child_restores_the_exact_bytes(tmp_path: Path, monkey
     assert path.read_bytes() == before, path.read_text()
 
 
+@pytest.mark.parametrize("verb", ["set", "unset"])
+def test_a_saved_change_without_the_audit_ack_exits_0_with_a_warning(tmp_path: Path, monkeypatch, verb) -> None:
+    # GAP-1366: the change is on disk; only the gateway's audit ack is missing.
+    from defenseclaw.logger import CanonicalObservabilityError, Logger
+
+    path = _config(tmp_path, monkeypatch, "gateway:\n  api_port: 18970\n")
+    reason = "the gateway did not acknowledge it; gateway.log has the cause. Try again in a minute"
+    args = ("set", "gateway.api_port", "19180") if verb == "set" else ("unset", "gateway.api_port")
+    with patch.object(Logger, "log_config_change", side_effect=CanonicalObservabilityError(reason)):
+        result = _run(*args)
+    assert result.exit_code == 0, result.output
+    assert ("19180" in path.read_text()) == (verb == "set")
+    assert "Change saved, but the gateway did not confirm the audit event" in result.output, result.output
+    assert reason in result.output
+
+
 def test_unset_keeps_a_connector_entry_that_says_it_is_guarded(tmp_path: Path, monkeypatch) -> None:
     # guardrail.connectors.<C>: {} means "guarded with the defaults"; only the
     # maps under that entry are pruned.

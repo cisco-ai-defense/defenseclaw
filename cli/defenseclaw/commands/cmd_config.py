@@ -793,9 +793,17 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
         ))
     else:
         audit = saved_change_audit(logger)
-    audit.log_config_change(
-        f"config-{verb}", f"{key}=" + ("(unset)" if verb == "unset" else "(set)")
-    )
+    from defenseclaw.logger import CanonicalObservabilityError
+
+    try:
+        audit.log_config_change(
+            f"config-{verb}", f"{key}=" + ("(unset)" if verb == "unset" else "(set)")
+        )
+    except CanonicalObservabilityError as exc:
+        # The change is saved; only the gateway's audit ack is missing, so
+        # the command succeeded and says so, as guardrail use-pack does
+        # (GAP-1366).
+        click.echo(f"  ⚠ Change saved, but the gateway did not confirm the audit event ({exc}).", err=True)
     return True
 
 
