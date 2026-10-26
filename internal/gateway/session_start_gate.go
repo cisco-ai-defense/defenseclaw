@@ -5,6 +5,9 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,9 +25,21 @@ import (
 // judging therefore waits for that verdict, and is refused when it does not
 // come in time. A start the gateway blocked keeps refusing the session's
 // calls until the agent starts the session again.
+//
+// A call can also reach the gateway before its session's start does (the
+// agent does not wait for its start hook, GAP-0973). A call of a session
+// whose start this process has not seen waits a short while for one to
+// arrive (await's arrival), where a start verdict can block. A start that
+// does not arrive in that time is not an allowed start (GAP-1448): the call
+// judges the session's start in its place, and that verdict holds the
+// session until a start of the session replaces it.
 type sessionStartGate struct {
 	mu      sync.Mutex
 	entries map[string]*sessionStartEntry
+	// started are the sessions whose start this process has seen or judged
+	// in its place; arrivals wake calls waiting for a start.
+	started  map[string]time.Time
+	arrivals map[string]chan struct{}
 }
 
 type sessionStartEntry struct {
@@ -60,6 +75,11 @@ const (
 // start verdict (a variable for tests).
 var sessionStartGateMaxWait = 10 * time.Second
 
+// sessionStartArrivalWait is how long a call of a session whose start this
+// process has not seen waits for that start to arrive. The gateway tests
+// set it to zero (TestMain); the gate's own tests set it.
+var sessionStartArrivalWait = time.Second
+
 // sessionStartGateKey names a session for the gate: the connector, the
 // verified caller and the session ID (scoped to a sandbox binding). "" when
 // the call names no session.
@@ -68,13 +88,21 @@ func sessionStartGateKey(ctx context.Context, connectorName, sessionID string) s
 	if session == "" {
 		return ""
 	}
-	caller := ""
+	return strings.ToLower(strings.TrimSpace(connectorName)) + "\x00" + verifiedSessionCaller(ctx) + "\x00" + session
+}
+
+// verifiedSessionCaller names the verified caller a session's state is
+// scoped to: the kernel-verified uid of a managed hook-socket caller, else
+// the verified user-scoped identity (a managed Windows caller's), else ""
+// (a per-user gateway has one user).
+func verifiedSessionCaller(ctx context.Context) string {
 	if peer, ok := managedHookPeerFromContext(ctx); ok {
-		caller = "uid:" + strconv.Itoa(peer.UID)
-	} else if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
-		caller = "user:" + identity
+		return "uid:" + strconv.Itoa(peer.UID)
 	}
-	return strings.ToLower(strings.TrimSpace(connectorName)) + "\x00" + caller + "\x00" + session
+	if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
+		return "user:" + identity
+	}
+	return ""
 }
 
 // sessionStartGateEvent reports a call the gate holds back: a prompt or a
@@ -104,8 +132,13 @@ func (g *sessionStartGate) begin(key string) *sessionStartTicket {
 	if g == nil || key == "" {
 		return nil
 	}
-	entry := &sessionStartEntry{done: make(chan struct{}), at: time.Now()}
 	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.beginLocked(key)
+}
+
+func (g *sessionStartGate) beginLocked(key string) *sessionStartTicket {
+	entry := &sessionStartEntry{done: make(chan struct{}), at: time.Now()}
 	if g.entries == nil {
 		g.entries = make(map[string]*sessionStartEntry)
 	}
@@ -113,7 +146,7 @@ func (g *sessionStartGate) begin(key string) *sessionStartTicket {
 		g.evictLocked(time.Now())
 	}
 	g.entries[key] = entry
-	g.mu.Unlock()
+	g.seenLocked(key, entry.at)
 	return &sessionStartTicket{gate: g, key: key, entry: entry}
 }
 
@@ -141,6 +174,28 @@ func (g *sessionStartGate) evictLocked(now time.Time) {
 	}
 }
 
+// seenLocked records that key's start was seen or judged, and wakes the calls waiting for it. It keeps at most
+// sessionStartGateLimit sessions, dropping the oldest.
+func (g *sessionStartGate) seenLocked(key string, at time.Time) {
+	if g.started == nil {
+		g.started = make(map[string]time.Time)
+	}
+	if _, known := g.started[key]; !known && len(g.started) >= sessionStartGateLimit {
+		oldestKey, oldest := "", time.Time{}
+		for seen, seenAt := range g.started {
+			if oldestKey == "" || seenAt.Before(oldest) {
+				oldestKey, oldest = seen, seenAt
+			}
+		}
+		delete(g.started, oldestKey)
+	}
+	g.started[key] = at
+	if arrival := g.arrivals[key]; arrival != nil {
+		close(arrival)
+		delete(g.arrivals, key)
+	}
+}
+
 // finish records the start's verdict and releases the calls waiting for it.
 // Only the first call counts. An allowed start leaves nothing behind.
 func (t *sessionStartTicket) finish(blocked bool, reason string) {
@@ -160,8 +215,14 @@ func (t *sessionStartTicket) finish(blocked bool, reason string) {
 }
 
 // await returns the reason to refuse a call of the session: its start was
-// blocked, or is still being judged after wait (or when ctx ends).
-func (g *sessionStartGate) await(ctx context.Context, key string, wait time.Duration) (string, bool) {
+// blocked, or is still being judged after wait (or when ctx ends). A call of
+// a session whose start this process has not seen first waits up to arrival
+// for it (zero: not at all, where no start verdict can block). When no start
+// comes in that time the call does not run on a timer (GAP-1448): it judges
+// the session's start with startCheck, as that start would be judged, and
+// the verdict is the session's start verdict for this call and the later
+// ones, until a start of the session replaces it.
+func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival time.Duration, startCheck func(context.Context) (bool, string)) (string, bool) {
 	if g == nil || key == "" {
 		return "", false
 	}
@@ -170,10 +231,35 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait time.Dura
 	for {
 		g.mu.Lock()
 		entry := g.entries[key]
-		g.mu.Unlock()
 		if entry == nil {
-			return "", false
+			_, seen := g.started[key]
+			if seen || arrival <= 0 {
+				g.mu.Unlock()
+				return "", false
+			}
+			if g.arrivals == nil {
+				g.arrivals = make(map[string]chan struct{})
+			}
+			arrived := g.arrivals[key]
+			if arrived == nil {
+				arrived = make(chan struct{})
+				g.arrivals[key] = arrived
+			}
+			g.mu.Unlock()
+			window := time.NewTimer(min(arrival, wait))
+			select {
+			case <-arrived:
+			case <-window.C:
+				g.judgeMissingStart(ctx, key, startCheck)
+			case <-ctx.Done():
+				window.Stop()
+				return sessionStartPendingReason, true
+			}
+			window.Stop()
+			arrival = 0
+			continue
 		}
+		g.mu.Unlock()
 		select {
 		case <-entry.done:
 			if entry.blocked {
@@ -198,6 +284,74 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait time.Dura
 		case <-ctx.Done():
 			return sessionStartPendingReason, true
 		}
+	}
+}
+
+// judgeMissingStart judges the start of a session whose start did not
+// arrive, unless one arrived meanwhile, and records the verdict as that
+// start's. A check that is missing or does not finish blocks, as a start
+// without a verdict does.
+func (g *sessionStartGate) judgeMissingStart(ctx context.Context, key string, startCheck func(context.Context) (bool, string)) {
+	g.mu.Lock()
+	if _, seen := g.started[key]; seen || g.entries[key] != nil {
+		g.mu.Unlock()
+		return
+	}
+	ticket := g.beginLocked(key)
+	g.mu.Unlock()
+	blocked, reason := true, sessionStartUnfinishedReason
+	defer func() {
+		_ = recover()
+		ticket.finish(blocked, reason)
+	}()
+	if startCheck != nil {
+		blocked, reason = startCheck(ctx)
+	}
+}
+
+// sessionStartArrival is how long a call of a session whose start the gate
+// has not seen waits for it: only where a start verdict can block, in action
+// mode (sessionStartVerdictBlocks), for a connector that sends a start.
+func (a *APIServer) sessionStartArrival(ctx context.Context, profile connector.HookProfile, connectorName string) time.Duration {
+	if sandboxHookMode(ctx, connectorName, a.agentHookMode(ctx, connectorName)) != "action" ||
+		!slices.ContainsFunc(profile.SupportedEvents, func(event string) bool {
+			return canonicalHookLifecycleEvent(event) == "session_start"
+		}) {
+		return 0
+	}
+	return sessionStartArrivalWait
+}
+
+// codexStartRegistrationUnavailable is the start verdict of a Codex session
+// whose managed runtime registration could not be repaired.
+const codexStartRegistrationUnavailable = "Codex runtime registration is unavailable"
+
+// codexStartRegistrationRefusal repairs a missing managed runtime
+// registration for a Codex session start and returns the refusal when it
+// cannot ("" otherwise, and for every other connector and a sandboxed
+// Codex).
+func (a *APIServer) codexStartRegistrationRefusal(ctx context.Context, connectorName string) string {
+	if connectorName != "codex" || isSandboxHookRequest(ctx) {
+		return ""
+	}
+	if err := a.ensureHookRegistration(ctx, connectorName); err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration recovery failed: %v\n", err)
+		return codexStartRegistrationUnavailable
+	}
+	return ""
+}
+
+// sessionStartCheck judges, for a call, the start of its session that did
+// not reach this gateway (GAP-1448), with the checks a start runs and a call
+// does not: a Codex session's registration repair. The call itself still
+// runs the profile refusal, the require-sandbox gate and its own evaluation.
+// It cannot judge a start payload it never received.
+func (a *APIServer) sessionStartCheck(connectorName string) func(context.Context) (bool, string) {
+	return func(ctx context.Context) (bool, string) {
+		if refusal := a.codexStartRegistrationRefusal(ctx, connectorName); refusal != "" {
+			return true, refusal
+		}
+		return false, ""
 	}
 }
 

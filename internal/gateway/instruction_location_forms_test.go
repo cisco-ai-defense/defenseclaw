@@ -66,9 +66,9 @@ func TestInstructionProtectionUnloadedNameEveryWriteForm(t *testing.T) {
 					}{{action, "unloaded"}, {action, "loaded"}, {observe, "unloaded"}} {
 						// Claude Code reads only CLAUDE.md at every start; the
 						// project's other instruction names are its files only
-						// once the session loads them. InstructionsLoaded names
-						// markdown memory files, never openclaw.json.
-						loaded := run.session == "loaded" && name != "openclaw.json"
+						// once the session loads them, openclaw.json included
+						// (GAP-1126).
+						loaded := run.session == "loaded"
 						switch {
 						case target.label == "project file" && !loaded && name != "CLAUDE.md",
 							target.label == "unloaded project file" && (loaded || name == "CLAUDE.md"):
@@ -99,8 +99,8 @@ func TestInstructionProtectionUnloadedNameEveryWriteForm(t *testing.T) {
 		{filepath.Join(root, "fixtures", "AGENTS.md"), ""},
 		{filepath.Join(project, "AGENTS.md"), "COG-AGENTS-MD"},
 	} {
-		response := codex.evaluateCodexHook(t.Context(), codexHookRequest{
-			HookEventName: "PreToolUse", ToolName: "Bash", CWD: project,
+		response := codex.evaluateCodexHook(withAuthenticatedHookConnector(t.Context(), "codex"), codexHookRequest{
+			HookEventName: "PreToolUse", SessionID: "forms-codex", ToolName: "Bash", CWD: project,
 			ToolInput: map[string]interface{}{"command": "printf x >> '" + target.path + "'"},
 		})
 		if target.rule == "" && cogBlocked(response.Action, response.WouldBlock, response.Findings) ||

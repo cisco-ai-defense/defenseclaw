@@ -554,16 +554,16 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// SessionStart is the last authoritative recovery signal before a
 		// Codex session proceeds; synchronously upsert a missing managed runtime
 		// registration through the Sidecar-owned guard. No other connector/event
-		// may mutate registration from hook input. A sandboxed Codex has no host
-		// registration to repair: its hooks are baked into the sandbox image.
-		if connectorName == "codex" && req.HookEventName == "SessionStart" && !isSandboxHookRequest(r.Context()) {
-			if err := a.ensureHookRegistration(r.Context(), connectorName); err != nil {
-				fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration recovery failed: %v\n", err)
+		// may mutate registration from hook input; a call of a session whose
+		// start never reached this gateway runs the same repair in that start's
+		// place (sessionStartCheck, GAP-1448), from nothing in the call. A
+		// sandboxed Codex has no host registration to repair: its hooks are
+		// baked into the sandbox image.
+		if req.HookEventName == "SessionStart" {
+			if refusal := a.codexStartRegistrationRefusal(r.Context(), connectorName); refusal != "" {
 				a.recordConnectorHookRejection(r.Context(), connectorName, req.HookEventName, "registration_recovery", int64(len(b)))
-				startVerdictReason = "Codex runtime registration is unavailable"
-				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-					"error": "Codex runtime registration is unavailable",
-				})
+				startVerdictReason = refusal
+				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": refusal})
 				return
 			}
 		}
@@ -789,7 +789,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			}
 		}
 		if !gated && !hookSideRefusal(ctx) && sessionStartGateEvent(req.HookEventName) {
-			if reason, refuse := a.sessionStartGate.await(ctx, startGateKey, sessionStartGateWait(connectorName, req.HookEventName)); refuse {
+			if reason, refuse := a.sessionStartGate.await(ctx, startGateKey, sessionStartGateWait(connectorName, req.HookEventName),
+				a.sessionStartArrival(ctx, profile, connectorName), a.sessionStartCheck(connectorName)); refuse {
 				resp, gated = a.sessionStartGateRefusal(ctx, profile, connectorName, req, payload, reason), true
 			}
 		}
@@ -2811,6 +2812,8 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	if hookEvaluatorPanicHook != nil {
 		hookEvaluatorPanicHook()
 	}
+	startup := a.applyInstructionStartup(ctx, req.ConnectorName, req.SessionID, req.HookEventName, "", req.CWD)
+	ctx = a.withInstructionStartup(ctx, req.ConnectorName, req.SessionID, startup)
 	// A hook authenticated through a sandbox binding is always evaluated and
 	// enforced: DefenseClaw launched that harness itself, usually with its
 	// own permission prompts off, and the host's connector selection and

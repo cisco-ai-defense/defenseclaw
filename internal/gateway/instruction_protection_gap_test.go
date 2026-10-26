@@ -108,7 +108,7 @@ func TestInstructionProtectionCodexNativeTools(t *testing.T) {
 		{"exec patch heredoc", "exec_command", map[string]interface{}{"cmd": "apply_patch <<'PATCH'\n*** Begin Patch\n*** Update File: AGENTS.md\n@@\n test instructions\n+changed\n*** End Patch\nPATCH"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := instructionResolvedWriteContext(t, root, tc.tool, tc.input)
+			ctx := withAuthenticatedHookConnector(instructionResolvedWriteContext(t, root, tc.tool, tc.input), "codex")
 			response := api.evaluateCodexHook(ctx, codexHookRequest{
 				HookEventName: "PreToolUse", SessionID: "codex-live", CWD: root,
 				ToolName: tc.tool, ToolInput: tc.input,
@@ -136,7 +136,7 @@ func TestInstructionProtectionUsesClientResolvedAlias(t *testing.T) {
 	if !ok || targets[alias] != agentFile {
 		t.Fatalf("client resolved writes = %v, ok=%t", targets, ok)
 	}
-	ctx := context.WithValue(t.Context(), resolvedWritesContextKey{}, targets)
+	ctx := withAuthenticatedHookConnector(context.WithValue(t.Context(), resolvedWritesContextKey{}, targets), "codex")
 	response := api.evaluateCodexHook(ctx, codexHookRequest{
 		HookEventName: "PreToolUse", SessionID: "alias-session", CWD: root,
 		ToolName: "exec_command", ToolInput: map[string]interface{}{"cmd": "printf changed > active-link"},
@@ -321,7 +321,7 @@ func TestInstructionProtectionCannotBeSkippedByToolAllow(t *testing.T) {
 	api := instructionProtectionTestAPI(t, "codex", "action", "HIGH")
 	allowTool(api.scannerCfg, "Bash", "codex", "ordinary shell work")
 	input := map[string]interface{}{"command": "printf changed > AGENTS.md"}
-	ctx := instructionResolvedWriteContext(t, root, "Bash", input)
+	ctx := withAuthenticatedHookConnector(instructionResolvedWriteContext(t, root, "Bash", input), "codex")
 	response := api.evaluateCodexHook(ctx, codexHookRequest{
 		HookEventName: "PreToolUse", SessionID: "allowed-shell", CWD: root,
 		ToolName: "Bash", ToolInput: input,

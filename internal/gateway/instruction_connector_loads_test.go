@@ -112,7 +112,7 @@ func TestInstructionProtectionOnlyTheAgentsLoadedFiles(t *testing.T) {
 				}
 				action.ResolvedWriteTargets = syntheticExistingInstructionEvidence(t, action.Input, tc.rule)
 				if tc.loadedIdentity != "" {
-					action.ActiveAgentFileIdentities = map[string]string{"1:2": tc.loadedIdentity}
+					action.ActiveAgentFileIdentities = map[string]string{tc.loadedIdentity: "1:2"}
 				}
 				verdict := (&APIServer{scannerCfg: cfg}).inspectTrustedToolPolicyCtx(t.Context(), request, action)
 				if tc.rule == "" {

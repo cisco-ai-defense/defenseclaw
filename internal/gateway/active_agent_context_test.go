@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
@@ -671,12 +672,13 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 			SessionID:     sessionID,
 			FilePath:      filePath,
 		})
-		// The symlinked name is kept as well, so the file it reaches is
-		// protected by identity (GAP-0971); the session stays uncertain.
+		// The symlinked name is kept with the identity of the file it
+		// reaches, so that file is protected by identity (GAP-0971). That
+		// proves the load: the session stays certain (review loop round 2).
 		wantFiles = append(wantFiles, filePath)
-		if got := api.activeAgentContext.snapshot("claudecode", sessionID); !slices.Equal(got.files, wantFiles) || !got.uncertain ||
-			got.caseInsensitiveUncertain {
-			t.Fatalf("unprovable load context = %#v", got)
+		if got := api.activeAgentContext.snapshot("claudecode", sessionID); !slices.Equal(got.files, wantFiles) || got.uncertain ||
+			got.caseInsensitiveUncertain || got.identities[filePath] != hookpaths.FileIdentity(filePath) {
+			t.Fatalf("symlinked load context = %#v", got)
 		}
 		mutation := evaluateClaudeCodeToolFacts(
 			t,
@@ -719,7 +721,7 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 		}
 	})
 
-	t.Run("direct symlink marks fresh session uncertain", func(t *testing.T) {
+	t.Run("direct symlink is kept by identity", func(t *testing.T) {
 		link := filepath.Join(root, "link", "MEMORY.md")
 		if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 			t.Fatal(err)
@@ -730,7 +732,7 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 		assertIdentityFailureFailsClosed(t, link, "COG-MEMORY", false)
 	})
 
-	t.Run("parent symlink preserves exact entry and marks uncertainty", func(t *testing.T) {
+	t.Run("parent symlink preserves exact entry and is kept by identity", func(t *testing.T) {
 		realDir := filepath.Join(root, "real-parent")
 		memory := writeActiveAgentTestFile(t, realDir, "MEMORY.md")
 		linkDir := filepath.Join(root, "linked-parent")

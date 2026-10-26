@@ -599,6 +599,56 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	if json.Unmarshal(payload, &envelope) != nil {
 		return ""
 	}
+	startEvent := event
+	if startEvent == "" {
+		_ = json.Unmarshal(envelope["hook_event_name"], &startEvent)
+	}
+	if IsSessionStartEvent(startEvent) {
+		var cwd string
+		_ = json.Unmarshal(envelope["cwd"], &cwd)
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		files := StartupInstructionFiles(cwd, home)
+		if files == nil {
+			return ""
+		}
+		listed, err := json.Marshal(files)
+		if err != nil || len(listed) > maxEncodedTargets {
+			return ""
+		}
+		facts := map[string]string{StartupFilesKey: string(listed)}
+		// The directory the snapshot was read in, as the user: a managed
+		// gateway behind ProtectHome cannot resolve it itself (GAP-1462).
+		if filepath.IsAbs(cwd) && len(cwd) <= MaxWriteTargetPathBytes {
+			facts[CWDKey] = cwd
+		}
+		// The start directories' identities, so the gateway knows another
+		// spelling of one later (ReachedInstructionsKey).
+		if reached := reachedEvidence(InstructionDirectories(cwd, home)); reached != "" {
+			facts[ReachedInstructionsKey] = reached
+		}
+		encoded, err := json.Marshal(facts)
+		if err == nil && len(encoded) > maxEncodedTargets {
+			// A deep start directory's sighting does not fit: its own
+			// identity still does, so a file the session creates there
+			// stays its own under another spelling of it.
+			delete(facts, ReachedInstructionsKey)
+			if compact := reachedEvidence([]string{cwd}); compact != "" {
+				facts[ReachedInstructionsKey] = compact
+			}
+			encoded, err = json.Marshal(facts)
+		}
+		if err == nil && len(encoded) > maxEncodedTargets {
+			delete(facts, ReachedInstructionsKey)
+			encoded, err = json.Marshal(facts)
+		}
+		if err != nil || len(encoded) > maxEncodedTargets {
+			return ""
+		}
+		return base64.RawURLEncoding.EncodeToString(encoded)
+	}
 	copilot := strings.EqualFold(strings.TrimSpace(connector), "copilot")
 	if !copilot {
 		if evidence := instructionLoadEvidence(envelope); evidence != "" {
@@ -718,14 +768,27 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// every existing instruction file a write target names.
 	// fileIdentities are the write targets' own identities (FileIdentitiesKey).
 	var identities, fileIdentities []string
+	writeIdentities := make(map[string]string)
 	instructions := NewInstructionFiles(cwd, home, nil)
 	noteIdentity := func(resolved string) {
-		if instruction := instructions.Identity(resolved); filepath.IsAbs(instruction) &&
-			len(instruction) <= MaxWriteTargetPathBytes && !slices.Contains(identities, instruction) {
-			identities = append(identities, instruction)
+		// Every instruction name of the target's file (GAP-1127).
+		named := instructions.Identities(resolved)
+		for _, instruction := range named {
+			if filepath.IsAbs(instruction) &&
+				len(instruction) <= MaxWriteTargetPathBytes && !slices.Contains(identities, instruction) {
+				identities = append(identities, instruction)
+			}
 		}
-		if identity := FileIdentity(resolved); identity != "" && !slices.Contains(fileIdentities, identity) {
-			fileIdentities = append(fileIdentities, identity)
+		if identity := FileIdentity(resolved); identity != "" {
+			if !slices.Contains(fileIdentities, identity) {
+				fileIdentities = append(fileIdentities, identity)
+			}
+			if len(named) > 0 {
+				writeIdentities[resolved] = identity
+				for _, instruction := range named {
+					writeIdentities[instruction] = identity
+				}
+			}
 		}
 	}
 	if toolArgs != nil {
@@ -936,6 +999,55 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			size += entry
 		}
 	}
+	for _, file := range slices.Sorted(maps.Keys(writeIdentities)) {
+		key := WriteIdentityPrefix + file
+		entry := len(jsonString(key)) + 1 + len(jsonString(writeIdentities[file])) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= 2*MaxWriteTargets+5 {
+			truncated = true
+			break
+		}
+		targets[key] = writeIdentities[file]
+		size += entry
+	}
+	// The first sighting of every directory the call works in or writes to
+	// (ReachedInstructionsKey), with the parents and home folders while they
+	// fit, else without them (a deep working directory). One that does not
+	// fit is omitted: the gateway keeps the call-time proof for those
+	// directories.
+	reached := []string{cwd}
+	for _, target := range slices.Sorted(maps.Keys(targets)) {
+		if strings.HasPrefix(target, "\x00") || !filepath.IsAbs(target) {
+			continue
+		}
+		reached = append(reached, filepath.Dir(target))
+		if resolved := targets[target]; filepath.IsAbs(resolved) {
+			reached = append(reached, filepath.Dir(resolved))
+		}
+	}
+	// A directory the call moves or removes is sighted before it goes, so
+	// a directory the session created keeps its identity under the name a
+	// mv gives it, also when no call reached it before (GAP-1432).
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessDelete || !filepath.IsAbs(candidate.Resolved) {
+			continue
+		}
+		if info, err := os.Lstat(candidate.Resolved); err == nil && info.IsDir() &&
+			info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+			reached = append(reached, filepath.Clean(candidate.Resolved))
+		}
+	}
+	for _, directories := range [][]string{append(slices.Clone(reached), InstructionDirectories(cwd, home)...), reached} {
+		value := reachedEvidence(directories)
+		if value == "" {
+			continue
+		}
+		entry := len(jsonString(ReachedInstructionsKey)) + 1 + len(jsonString(value)) + 1
+		if size+entry <= maxEncodedTargets && len(targets) < 2*MaxWriteTargets+5 {
+			targets[ReachedInstructionsKey] = value
+			size += entry
+			break
+		}
+	}
 	if truncated {
 		targets[TruncatedKey] = "1"
 	}
@@ -1100,7 +1212,7 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	var targets map[string]string
-	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+5 ||
+	if json.Unmarshal(data, &targets) != nil || len(targets) > 2*MaxWriteTargets+6 ||
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
 		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
@@ -1120,7 +1232,22 @@ func Decode(value string) (map[string]string, bool) {
 			}
 		}
 	}
+	if _, present := targets[StartupFilesKey]; present {
+		if _, ok := StartupFiles(targets); !ok {
+			return nil, false
+		}
+	}
+	if _, present := targets[ReachedInstructionsKey]; present {
+		if _, _, ok := ReachedInstructions(targets); !ok {
+			return nil, false
+		}
+	}
 	for key, value := range targets {
+		if strings.HasPrefix(key, WriteIdentityPrefix) &&
+			(!filepath.IsAbs(strings.TrimPrefix(key, WriteIdentityPrefix)) ||
+				len(key) > MaxWriteTargetPathBytes+len(WriteIdentityPrefix) || !validFileIdentity(value)) {
+			return nil, false
+		}
 		if strings.HasPrefix(key, LoadedIdentityPrefix) &&
 			(!filepath.IsAbs(strings.TrimPrefix(key, LoadedIdentityPrefix)) || !validFileIdentity(value)) {
 			return nil, false
