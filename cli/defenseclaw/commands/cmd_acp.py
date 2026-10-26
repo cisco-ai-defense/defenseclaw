@@ -27,6 +27,7 @@ from defenseclaw.acp_catalog import ACP_AGENT_ENTRY_POINTS, ACP_CLIENT_IDS, ACP_
 from defenseclaw.config import ACPBinding, ACPProfile
 from defenseclaw.connector_paths import _normalize_jsonc
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.enforce.asset_lists import is_secure_client
 from defenseclaw.file_permissions import (
     atomic_write_private_bytes,
     atomic_write_text_secure,
@@ -241,13 +242,27 @@ def _write_contract_lock(
     agent_executable: str,
     client_path: Path,
     managed: bool,
+    pin_entry: bool = False,
 ) -> Path:
+    """Write the pair's contract lock.
+
+    pin_entry: pin the pair's guarded entry (acp.EntryDigestPrefix) instead
+    of the whole editor file, so a theme or agent-panel edit elsewhere in the
+    file keeps the guard starting (GAP-0504). The guard finds that entry only
+    under its reserved name, so setup asks for it only when the pair's one
+    entry has that name; an adopted or numbered entry keeps the file pin.
+    """
     path = _contract_lock_path(data_dir, client, agent)
+    client_pin = _sha256_file(str(client_path))
+    if pin_entry:
+        entry_digest = _guard_entry_sha256(_read_json_object(client_path).get("agent_servers"), client, agent)
+        if entry_digest:
+            client_pin = _ENTRY_DIGEST_PREFIX + entry_digest
     document: dict[str, Any] = {
         "version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "protocol": {"schema_version": _SCHEMA_VERSION, "schema_sha256": _SCHEMA_SHA256},
-        "client": {"id": client, "config_path": str(client_path), "config_sha256": _sha256_file(str(client_path))},
+        "client": {"id": client, "config_path": str(client_path), "config_sha256": client_pin},
         "agent": {
             "id": agent,
             "path": agent_executable,
@@ -329,6 +344,11 @@ def _refresh_client_contract_digests(data_dir: str, client: str, client_path: Pa
             or lock_agent.get("id") != pair_agent
         ):
             raise click.ClickException(f"managed ACP contract lock identity does not match: {path}")
+        pinned = lock_client.get("config_sha256")
+        if isinstance(pinned, str) and pinned.startswith(_ENTRY_DIGEST_PREFIX) and _lock_binds_editor(document, client):
+            # It pins only its own entry, which this change did not write:
+            # re-pinning it here would seal another binding's edit (GAP-0513).
+            continue
         lock_client["config_path"] = str(client_path.resolve())
         lock_client["config_sha256"] = digest
         atomic_write_private_bytes(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
@@ -841,6 +861,65 @@ def _managed_guard_custody_is_trusted(path_value: str) -> bool:
         return False
 
 
+# The contract lock as the guard decodes it (acp.RuntimeContractLock, with
+# DisallowUnknownFields): each section's keys and the type each value must have.
+_LOCK_SCHEMA: dict[str, Any] = {
+    "version": int, "generated_at": str, "profile": str, "mode": str,
+    "protocol": {"schema_version": str, "schema_sha256": str},
+    "client": {"id": str, "config_path": str, "config_sha256": str},
+    "agent": {"id": str, "path": str, "sha256": str, "version": str},
+    "guard": {"path": str, "sha256": str, "managed_custody": bool},
+}
+
+
+def _lock_shape_problem(value: Any, schema: dict[str, Any], where: str) -> str:
+    """The first key or type the guard's decoder refuses, or ""."""
+    if not isinstance(value, dict):
+        return f"{where or 'the lock'} is not an object"
+    for key, item in value.items():
+        expected = schema.get(key)
+        name = f"{where}.{key}" if where else key
+        if expected is None:
+            return f"unknown key {name!r}"
+        if isinstance(expected, dict):
+            problem = _lock_shape_problem(item, expected, name)
+            if problem:
+                return problem
+        elif item is not None and (type(item) is not expected):
+            return f"{name!r} is not a {expected.__name__}"
+    return ""
+
+
+def _lock_file_problems(lock: dict[str, Any], info: os.stat_result) -> list[str]:
+    """What the guard refuses in the lock file itself before it checks any pin (GAP-2071).
+
+    The guard starts only a private lock (no group or other access on POSIX)
+    of at most 64 KiB that decodes into its lock type with no unknown key and
+    no value of another type, and it compares the running guard's resolved
+    path with the pinned one, so a pinned guard path that is a link never
+    starts. A user who copied ~/.defenseclaw with cp -r under umask 022 got
+    "Verified" while the editor could not start the agent.
+    """
+    problems: list[str] = []
+    if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+        problems.append("contract lock permissions are too broad (the guard starts only a private lock)")
+    if info.st_size > 64 << 10:
+        problems.append("contract lock is larger than the guard reads")
+    shape = _lock_shape_problem(lock, _LOCK_SCHEMA, "")
+    if shape:
+        problems.append(f"contract lock is malformed for the guard: {shape}")
+    guard = lock.get("guard")
+    guard_path = guard.get("path") if isinstance(guard, dict) else None
+    if (
+        os.name != "nt"
+        and isinstance(guard_path, str)
+        and guard.get("managed_custody") is not True
+        and os.path.realpath(guard_path) != os.path.abspath(guard_path)
+    ):
+        problems.append("guard executable path is a link; the guard starts only from the path setup pinned")
+    return problems
+
+
 def _verify_binding(
     data_dir: str,
     client: str,
@@ -896,6 +975,7 @@ def _verify_binding(
         problems.append("contract lock is missing or unsafe")
         return problems
     try:
+        lock_info = lock_path.stat()
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         problems.append("contract lock is unreadable")
@@ -903,6 +983,7 @@ def _verify_binding(
     if not isinstance(lock, dict):
         problems.append("contract lock is not an object")
         return problems
+    problems.extend(_lock_file_problems(lock, lock_info))
     lock_client = lock.get("client")
     lock_agent = lock.get("agent")
     lock_guard = lock.get("guard")
@@ -1218,6 +1299,7 @@ def setup_cmd(
             agent_executable=agent_executable,
             client_path=path,
             managed=managed,
+            pin_entry=list(written) == [_managed_name(agent)] and not is_secure_client(app.cfg),
         )
         _refresh_client_contract_digests(data_dir, client, path)
         # Record what was written, so this runtime can later prove these

@@ -1,6 +1,8 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
-"""`acp verify` reports healthy only what the guard starts (GAP-0879, GAP-0911, GAP-0912).
+"""`acp verify` reports healthy only what the guard starts (GAP-0879, GAP-0911, GAP-0912, GAP-2071).
+
+Per-user setup pins the guarded entry, not the whole editor file (GAP-0504).
 
 Also pins two rows met by the per-entry record design: a bypassed adopted
 entry stays red after setup (GAP-0496, see test_cmd_acp
@@ -164,5 +166,124 @@ def test_setup_of_one_pair_does_not_repin_another_pairs_drifted_entry(tmp_path, 
         assert json.loads(kiro_lock.read_text())["client"]["config_sha256"] == pinned_before
         assert pinned_before != hashlib.sha256(settings.read_bytes()).hexdigest()
         assert _verify(app).exit_code != 0
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def _entry_pin(settings: Path, agent: str = "kiro") -> str:
+    return "entry-sha256:" + _guard_entry_sha256(json.loads(settings.read_text())["agent_servers"], "zed", agent)
+
+
+def test_setup_pins_the_guarded_entry_so_unrelated_edits_stay_verified(tmp_path, monkeypatch):
+    """GAP-0504: a theme, an agent-panel default or Zed's own entry keys do not stop the guard."""
+    app, data_dir, db_path, settings, _guard, _agent, lock_path = _setup(tmp_path, monkeypatch)
+    try:
+        assert json.loads(lock_path.read_text())["client"]["config_sha256"] == _entry_pin(settings)
+        document = json.loads(settings.read_text())
+        document["theme"] = "One Dark"
+        document.setdefault("agent", {})["default_mode"] = "ask"
+        document["agent_servers"]["DefenseClaw · Kiro"]["default_mode"] = "accept_edits"
+        settings.write_text(json.dumps(document, indent=2))
+        result = _verify(app)
+        assert result.exit_code == 0, result.output
+
+        # A launch field of the guarded entry is still pinned.
+        kept = settings.read_text()
+        document["agent_servers"]["DefenseClaw · Kiro"]["env"] = {"LD_PRELOAD": "/tmp/x.so"}
+        settings.write_text(json.dumps(document))
+        result = _verify(app)
+        assert result.exit_code != 0, result.output
+        assert "entry changed after setup" in result.output, result.output
+        settings.write_text(kept)
+        assert _verify(app).exit_code == 0
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_numbered_entry_keeps_the_whole_file_pin(tmp_path, monkeypatch):
+    """GAP-0504: the guard looks the entry up by its reserved name, so a numbered entry pins the file."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    settings = (
+        tmp_path / "AppData" / "Roaming" / "Zed" / "settings.json"
+        if os.name == "nt"
+        else tmp_path / ".config" / "zed" / "settings.json"
+    )
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"agent_servers": {"DefenseClaw · Kiro": {"command": "/usr/bin/true", "args": []}}}))
+    app, data_dir, db_path, settings, _guard, _agent, lock_path = _setup(tmp_path, monkeypatch)
+    try:
+        assert "DefenseClaw · Kiro (2)" in json.loads(settings.read_text())["agent_servers"]
+        pin = json.loads(lock_path.read_text())["client"]["config_sha256"]
+        assert pin == hashlib.sha256(settings.read_bytes()).hexdigest()
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_another_pairs_setup_and_removal_leave_an_entry_pin(tmp_path, monkeypatch):
+    """GAP-0504/GAP-0513: an entry pin covers only its own entry; other pairs' changes do not re-pin it."""
+    app, data_dir, db_path, settings, guard, _agent, kiro_lock = _setup(tmp_path, monkeypatch)
+    try:
+        before = kiro_lock.read_bytes()
+        opencode = _binary(tmp_path / "opencode")
+        runner = CliRunner()
+        other = runner.invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "opencode", "--guard-binary", guard, "--agent-binary", opencode],
+            obj=app,
+        )
+        assert other.exit_code == 0, other.output
+        assert kiro_lock.read_bytes() == before
+        assert _verify(app).exit_code == 0
+        assert _verify(app, "opencode").exit_code == 0
+        removed = runner.invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "opencode"], obj=app)
+        assert removed.exit_code == 0, removed.output
+        assert kiro_lock.read_bytes() == before
+        assert _verify(app).exit_code == 0
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def _broad_mode(lock_path: Path, _guard: str) -> None:
+    if os.name == "nt":
+        pytest.skip("POSIX permission bits")
+    lock_path.chmod(0o644)
+
+
+def _extra_key(lock_path: Path, _guard: str) -> None:
+    _edit_lock(lock_path, lambda lock: lock.__setitem__("extra", 1))
+
+
+def _int_agent_version(lock_path: Path, _guard: str) -> None:
+    _edit_lock(lock_path, lambda lock: lock["agent"].__setitem__("version", 5))
+
+
+def _linked_guard(_lock_path: Path, guard: str) -> None:
+    if os.name == "nt":
+        pytest.skip("the guard resolves links on POSIX")
+    target = Path(guard + ".real")
+    Path(guard).rename(target)
+    Path(guard).symlink_to(target)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (_broad_mode, "permissions are too broad"),
+        (_extra_key, "unknown key 'extra'"),
+        (_int_agent_version, "'agent.version' is not a str"),
+        (_linked_guard, "guard executable path is a link"),
+    ],
+    ids=["mode-0644", "extra-key", "int-agent-version", "linked-guard"],
+)
+def test_verify_refuses_a_lock_file_the_guard_cannot_start(tmp_path, monkeypatch, change, message):
+    """GAP-2071: the lock file checks the guard runs before any pin."""
+    app, data_dir, db_path, _settings, guard, _agent, lock_path = _setup(tmp_path, monkeypatch)
+    try:
+        assert _verify(app).exit_code == 0
+        change(lock_path, guard)
+        result = _verify(app)
+        assert result.exit_code != 0, result.output
+        assert message in result.output, result.output
     finally:
         cleanup_app(app, db_path, data_dir)
