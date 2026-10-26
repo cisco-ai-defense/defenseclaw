@@ -343,7 +343,7 @@ func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts S
 	if helper, present := settings[claudeCodeOTLPHeadersHelperKey]; present {
 		helperOwned = claudeCodeOTLPHeadersHelperOwned(helper, backup.ManagedOTLPHeadersHelper)
 	}
-	known := claudeCodeKnownProductTokens(backup.ManagedEnv, opts)
+	known := claudeCodeKnownProductTokens(backup, opts)
 	proof := helperOwned
 	for key, value := range env {
 		got, _ := value.(string)
@@ -540,11 +540,15 @@ func claudeCodeEffectiveEndpointHeaders(env map[string]interface{}, endpointKey 
 }
 
 // claudeCodeKnownProductTokens returns the credentials this install can name:
-// otlpKnownProductTokens for the Claude Code scope and every bearer its backup
-// recorded under an OTLP header key.
-func claudeCodeKnownProductTokens(recordedHeaders map[string]string, opts SetupOpts) []string {
+// otlpKnownProductTokens for the Claude Code scope, every bearer its backup
+// recorded under an OTLP header key, and every credential an earlier Setup
+// retired. A retired credential's sidecar is revoked and the hook-only
+// ManagedEnv no longer names it, so without the retired list a restored
+// pre-upgrade exporter would pass cleanup and Verify (GAP-1511).
+func claudeCodeKnownProductTokens(backup claudeCodeBackup, opts SetupOpts) []string {
 	known := otlpKnownProductTokens(opts, OTLPScopeClaude)
-	for key, value := range recordedHeaders {
+	known = append(known, backup.RetiredOTLPCredentials...)
+	for key, value := range backup.ManagedEnv {
 		if !claudeCodeOTLPHeadersKey(key) {
 			continue
 		}

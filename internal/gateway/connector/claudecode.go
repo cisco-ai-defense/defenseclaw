@@ -800,6 +800,12 @@ type claudeCodeBackup struct {
 	// restores their pristine values only while they remain absent; an operator
 	// value added after Setup takes ownership and is preserved.
 	ManagedAbsentEnv []string `json:"managed_absent_env,omitempty"`
+	// RetiredOTLPCredentials records each known DefenseClaw credential host
+	// Setup found in an OTLP env value (as found or in OriginalEnv). Setup
+	// removes those values and revokes the scoped token, so Teardown names
+	// them from here and never restores a snapshot value that carries one
+	// (GAP-1511).
+	RetiredOTLPCredentials []string `json:"retired_otlp_credentials,omitempty"`
 
 	// The otelHeadersHelper Setup writes on a per-user Linux or macOS
 	// install (GAP-1421): the operator's earlier value, captured once, and
@@ -1992,8 +1998,10 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 			// pass below can drop an unchanged product header before the
 			// route it authenticated is inspected.
 			productRoutes := map[string]bool{}
-			known := claudeCodeKnownProductTokens(previousManaged, opts)
+			known := claudeCodeKnownProductTokens(baseBackup, opts)
 			if !opts.sandboxNativeOTLP {
+				backup.RetiredOTLPCredentials = claudeCodeRetiredOTLPCredentials(
+					baseBackup.RetiredOTLPCredentials, known, existing, backup.OriginalEnv)
 				operatorSettings = claudeCodeOperatorOtelSettings(existing, previousManaged, known)
 				for key := range operatorSettings {
 					delete(managedEnv, key)
@@ -2132,8 +2140,9 @@ func claudeCodeOtelValueIsManaged(value interface{}, managed string) bool {
 
 // claudeCodeOtelValueLooksManaged is the conservative fallback used when the
 // exact backup is unavailable. Generic OpenTelemetry values such as "otlp" or
-// "http/json" are not ownership proof; only DefenseClaw-scoped endpoints and
-// explicit DefenseClaw markers can be classified without restore metadata.
+// "http/json" are not ownership proof; only DefenseClaw-scoped endpoints on
+// the gateway address and the exact values DefenseClaw wrote can be
+// classified without restore metadata.
 func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed string) bool {
 	got, _ := value.(string)
 	if got == "" {
@@ -2179,8 +2188,12 @@ func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed stri
 		"OTEL_EXPORTER_OTLP_METRICS_HEADERS",
 		"OTEL_EXPORTER_OTLP_LOGS_HEADERS",
 		"OTEL_EXPORTER_OTLP_TRACES_HEADERS":
-		return (managed != "" && got == managed) ||
-			claudeCodeOtelHeadersAreDefenseClawOnly(got)
+		// Markers and the token shape are no proof (GAP-1511): an operator
+		// collector can keep stale x-defenseclaw-* headers beside its own
+		// bearer. A header list is the product's here only as the exact
+		// value DefenseClaw recorded writing; one that carries a credential
+		// this install can name is removed by otlpCarriesProductCredential.
+		return managed != "" && got == managed
 	case "OTEL_RESOURCE_ATTRIBUTES":
 		return (managed != "" && got == managed) ||
 			got == "defenseclaw.connector=claudecode,service.name=claudecode"
@@ -2347,47 +2360,37 @@ func claudeCodeOtelValueWrittenByDefenseClaw(key string, value interface{}, writ
 	return got == written || claudeCodeEarlierReleaseEnv[key] == got
 }
 
-func claudeCodeOtelHeadersAreDefenseClawOnly(value string) bool {
-	parts := strings.Split(value, ",")
-	if len(parts) == 0 {
+// claudeCodeRetiredOTLPCredentials returns retired plus each known credential
+// that an OTLP value of env or of the original env snapshot carries.
+func claudeCodeRetiredOTLPCredentials(retired, known []string, env map[string]interface{}, original json.RawMessage) []string {
+	snapshot := map[string]interface{}{}
+	if len(original) > 0 {
+		_ = json.Unmarshal(original, &snapshot)
+	}
+	out := append([]string(nil), retired...)
+	carries := func(values map[string]interface{}, token string) bool {
+		for key, value := range values {
+			if claudeCodeOTLPEnvKey(key) && otlpCarriesProductCredential(value, []string{token}) {
+				return true
+			}
+		}
 		return false
 	}
-	seenSource := false
-	for _, part := range parts {
-		name, headerValue, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if !ok || strings.TrimSpace(headerValue) == "" {
-			return false
+next:
+	for _, token := range known {
+		if len(token) < otlpMinKnownTokenLen {
+			continue
 		}
-		switch strings.ToLower(strings.TrimSpace(name)) {
-		case "x-defenseclaw-source":
-			decoded, err := url.PathUnescape(strings.TrimSpace(headerValue))
-			if err != nil || decoded != "claudecode" {
-				return false
+		for _, have := range out {
+			if have == token {
+				continue next
 			}
-			seenSource = true
-		case "x-defenseclaw-client":
-			decoded, err := url.PathUnescape(strings.TrimSpace(headerValue))
-			if err != nil || !strings.HasPrefix(decoded, "claudecode-otel/") {
-				return false
-			}
-		case "x-defenseclaw-token":
-			decoded, err := url.PathUnescape(strings.TrimSpace(headerValue))
-			if err != nil || !otlpTokenHexRE.MatchString(decoded) {
-				return false
-			}
-		case "authorization":
-			decoded, err := url.PathUnescape(strings.TrimSpace(headerValue))
-			if err != nil || !strings.HasPrefix(decoded, "Bearer ") ||
-				!otlpTokenHexRE.MatchString(strings.TrimPrefix(decoded, "Bearer ")) {
-				return false
-			}
-		default:
-			// A mixed block belongs to the operator even when it also contains
-			// DefenseClaw headers; teardown must not discard the other headers.
-			return false
+		}
+		if carries(env, token) || carries(snapshot, token) {
+			out = append(out, token)
 		}
 	}
-	return seenSource
+	return out
 }
 
 // restoreClaudeCodeHooks restores the original hooks from the backup file.
@@ -2488,6 +2491,12 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				}
 				managedEnv := backup.ManagedEnv
 				legacyNativeEnv := claudeCodeNativeOtelReferenceEnv(opts)
+				// Markers and the token shape are no proof (GAP-1511). A value
+				// carrying a credential host Setup removed is the product's: it
+				// is removed, and never restored from a snapshot.
+				credential := func(key string, value interface{}) bool {
+					return claudeCodeOTLPEnvKey(key) && otlpCarriesProductCredential(value, backup.RetiredOTLPCredentials)
+				}
 				exactManagedEnv := len(managedEnv) > 0
 				if !exactManagedEnv {
 					// Compatibility for backups created before exact managed values
@@ -2518,7 +2527,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 						exactSnapshotEnv = candidate
 					}
 				}
-				for _, key := range claudeCodeOtelEnvKeys {
+				for _, key := range claudeCodeOTLPEnvKeys(envMap) {
 					written, managed := managedEnv[key]
 					current, present := envMap[key]
 					if key == "DEFENSECLAW_FAIL_MODE" {
@@ -2550,7 +2559,8 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					if !present {
 						continue
 					}
-					owned := (managed && claudeCodeOtelValueIsManaged(current, written)) ||
+					owned := credential(key, current) ||
+						(managed && claudeCodeOtelValueIsManaged(current, written)) ||
 						claudeCodeOtelValueLooksManaged(key, current, written) ||
 						claudeCodeOtelValueLooksManaged(key, current, legacyNativeEnv[key])
 					if !owned && (predecessorSnapshot || exactSnapshotEnv != nil) {
@@ -2564,7 +2574,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					if !owned {
 						continue
 					}
-					if original, existed := originalEnv[key]; existed && !orphanBlock &&
+					if original, existed := originalEnv[key]; existed && !orphanBlock && !credential(key, original) &&
 						!claudeCodeOtelValueLooksManaged(key, original, written) &&
 						!claudeCodeOtelValueLooksManaged(key, original, legacyNativeEnv[key]) &&
 						(!predecessorSnapshot || (!claudeCodeOtelValueWrittenByDefenseClaw(key, original, written) &&
@@ -2583,7 +2593,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					if _, operatorSupplied := envMap[key]; operatorSupplied {
 						continue
 					}
-					if original, existed := originalEnv[key]; existed && !orphanBlock {
+					if original, existed := originalEnv[key]; existed && !orphanBlock && !credential(key, original) {
 						if predecessorSnapshot && (claudeCodeOtelValueLooksManaged(key, original, legacyNativeEnv[key]) ||
 							claudeCodeOtelValueWrittenByDefenseClaw(key, original, legacyNativeEnv[key])) {
 							continue

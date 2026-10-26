@@ -8444,27 +8444,6 @@ func TestApplyClaudeCodeManagedOtelEnvMigratesPercentEncodedNativeOTLPBearer(t *
 	}
 }
 
-func TestClaudeCodeOtelHeadersAreDefenseClawOnlyRecognizesScopedBearers(t *testing.T) {
-	scopedToken := strings.Repeat("a", 64)
-	for _, headers := range []string{
-		"authorization=Bearer " + scopedToken + ",x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
-		"authorization=Bearer%20" + scopedToken + ",x-defenseclaw-client=claudecode-otel%2F1.0,x-defenseclaw-source=claudecode",
-	} {
-		if !claudeCodeOtelHeadersAreDefenseClawOnly(headers) {
-			t.Errorf("DefenseClaw-only Claude headers were not recognized")
-		}
-	}
-	for _, headers := range []string{
-		"authorization=Bearer operator-token,x-defenseclaw-source=claudecode",
-		"authorization=Bearer " + scopedToken + ",x-operator-trace=keep,x-defenseclaw-source=claudecode",
-		"authorization=Bearer " + scopedToken + ",x-defenseclaw-client=claudecode-otel/1.0",
-	} {
-		if claudeCodeOtelHeadersAreDefenseClawOnly(headers) {
-			t.Errorf("operator or incomplete Claude headers were claimed as DefenseClaw-only")
-		}
-	}
-}
-
 func TestClaudeCode_Setup_ContentCaptureDefaultsOffAndTeardownRestores(t *testing.T) {
 
 	dir := t.TempDir()
@@ -8617,8 +8596,15 @@ func TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv(t *
 		sandboxNativeOTLP: true,
 	}
 	oldManaged := buildClaudeCodeOtelEnv(oldOpts)
+	// The older registration's scoped token is still in its sidecar, so the
+	// install can name the stale header's credential. Markers and the token
+	// shape alone are no proof (GAP-1511).
+	oldSidecarToken, err := EnsureOTLPPathToken(dir, OTLPScopeClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
 	oldDefenseClawHeaders := "x-defenseclaw-client=claudecode-otel%2F0.9," +
-		"x-defenseclaw-source=claudecode,x-defenseclaw-token=" + strings.Repeat("c", 64)
+		"x-defenseclaw-source=claudecode,x-defenseclaw-token=" + oldSidecarToken
 	operatorMixedHeaders := "x-defenseclaw-source=claudecode,x-operator-trace=keep"
 	pristine := map[string]interface{}{
 		"autoUpdatesChannel": "latest",
