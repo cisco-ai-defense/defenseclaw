@@ -1622,9 +1622,22 @@ var bakedAdapterFailModeOpens = strings.NewReplacer(
 	"$exitCode = 0\r\n", "$exitCode = 2\r\n",
 	"$exitCode = 0\n", "$exitCode = 2\n",
 	copilotAdapterOpenFailure, copilotAdapterClosedFailure,
+	copilotAdapterReleasedRead+"\r\n"+copilotAdapterReleasedWrite, copilotAdapterReleasedRead+copilotAdapterCrashCheck+"\r\n"+copilotAdapterReleasedWrite,
+	copilotAdapterReleasedRead+"\n"+copilotAdapterReleasedWrite, copilotAdapterReleasedRead+copilotAdapterCrashCheck+"\n"+copilotAdapterReleasedWrite,
 )
 
 const (
+	// copilotAdapterReleasedRead and copilotAdapterReleasedWrite are the two
+	// lines of a 1.0.0 to 1.0.3 copilot-hook.ps1 between which the launcher's
+	// answer is passed on. A launcher that crashed (non-zero exit, no answer)
+	// threw nothing there, so Copilot got no answer and ran the tool; the
+	// catch rewrite alone never ran (GAP-0343). The refresh adds the current
+	// template's check on the read line, so the closed catch answers it. The
+	// match spans the line end, so a refreshed adapter is not changed again.
+	copilotAdapterReleasedRead  = `    $stderr = $stderrTask.GetAwaiter().GetResult()`
+	copilotAdapterReleasedWrite = `    if ($stdout.Length -gt 0) {`
+	copilotAdapterCrashCheck    = `; if ($stdout.Length -eq 0 -and $process.ExitCode -ne 0) { if ($stderr.Length -gt 0) { [Console]::Error.Write($stderr) }; ` +
+		`throw "DefenseClaw hook launcher exited $($process.ExitCode) without an answer" }`
 	// cursorAdapterClosedResponse is Cursor's denial in cursor-hook.ps1.
 	cursorAdapterClosedResponse = `{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}`
 	// copilotAdapterOpenFailure is the catch block of copilot-hook.ps1 for
