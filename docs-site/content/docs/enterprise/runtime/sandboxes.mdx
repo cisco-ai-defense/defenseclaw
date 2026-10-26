@@ -187,6 +187,12 @@ Your sandbox policy on this computer
 
 `defenseclaw sandbox doctor` checks the person's own account and `defenseclaw sandbox policy test` judges their own policy. Each person sees only their own policy. Details, the privacy rules and the residuals the OS leaves are in the [sandbox reference](/docs/enterprise/runtime/sandbox-reference#what-users-see-more).
 
+![defenseclaw sandbox activity for a contractor: github.com allowed, example.org blocked as not on the organization's allowed list, with the text Blocked by your organization's DefenseClaw policy, example.org is not on your profile's allowed hosts (profile contractors, rule egress_allow_only), You can't approve this, and the Request access line with the quote](/images/sandboxes/managed/access-refused.png)
+
+![defenseclaw sandbox approvals: one ask waiting for sandbox sr5-bob, kind network_rule, destination example.org:443, reason example.org is not on the allowlist, with the approve and reject commands](/images/sandboxes/managed/ask-waiting.png)
+
+![The end of a sandbox session on Linux: Session ended with 8 tool calls, 1 blocked by a rule, 1 new site contacted, 2 sites blocked, 0 files changed; two DefenseClaw blocked lines for sites not on the organization's allowed list; the sandbox changed nothing; the sandbox is kept stopped with its connect and delete commands, and the note that the claude --resume line works only inside the sandbox](/images/sandboxes/managed/session-end.png)
+
 ## Check as an admin
 
 Run these as root:
@@ -202,6 +208,8 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux sandbox pack-dige
 On macOS use `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos` instead.
 
 `sandbox list` shows registrations (filter with `--state`), `sandbox explain --registration` shows one the way the person sees it, `policy verify --user` adds the sandbox rows, and `sandbox pack-digest` prints the digest that `required_pack_digest` pins. `ensure` and `verify` print warnings, never failures, for configurations that work but probably are not what you meant. Details: [Sandbox reference](/docs/enterprise/runtime/sandbox-reference#check-as-an-admin-more).
+
+![The help of enterprise windows sandbox from an elevated prompt: explain, list and pack-digest, read-only, with the note that a user sees only their own policy through defenseclaw sandbox policy explain](/images/sandboxes/managed/windows-admin-sandbox-help.png)
 
 ## Related
 

@@ -10,6 +10,10 @@ keywords:
 
 Subscribe to a catalog of skills or MCP servers. DefenseClaw fetches it, scans each entry and promotes clean entries into `asset_policy`. A registry is the approved catalog. It does not replace your block and allow lists.
 
+<DefenseClawDemo scenario="registry-promote-require" variant="clean" />
+
+Guided example with synthetic data. In the demo, an on-demand sync checks the source, scans an entry and promotes it because it is clean. A warning entry would be held for review, and with `registry_required` on an unknown asset is refused. Saved sync settings do not start a background poller.
+
 ## Before you start
 
 - A catalog URL, or an absolute path to a manifest file. Kinds: `clawhub`, `smithery`, `skills_sh`, `http_yaml`, `http_json`, `git`, `file`. See [Registries reference](/docs/reference/scanning/registries).

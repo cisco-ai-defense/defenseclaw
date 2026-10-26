@@ -180,6 +180,8 @@ What changes for developers: nothing for the normal shell, IDE terminals, other 
 
 Once a ring enforces, `status` shows each user's state: enforcing, in monitor mode because another user's native agent holds the one deny anchor, or no agent installed. A lab ring with `burn_in: 0` warns `kernel_burn_in_skipped`; a real ring keeps a measured burn-in.
 
+![tetragon verify --ready-for enforce on the computer that enforces: every check passes, the burn-in table for burn_in 0 with the hits of two users, and the closing line that one of three users is enforced, two stay in monitor without a deny anchor, alice (uid 1001) holds the deny anchor as the lowest uid with a native agent install, and enrollment.exclude_users moves it](/images/tetragon/terminal-tetragon-verify-enforce-holder.png)
+
 ## Check the fleet
 
 Three views come from what each computer already reports; no new server is needed.

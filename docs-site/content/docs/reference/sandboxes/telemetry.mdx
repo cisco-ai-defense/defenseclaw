@@ -137,6 +137,8 @@ A finding's category is `sandbox.<kind>`:
 | `nested_repo` | A repository or a gitlink appeared inside a live-mounted project during a session. | HIGH, CRITICAL when the quarantine failed |
 | `ocsf_finding` | A finding OpenShell raised. Its repeats within 10 minutes of a session are one record. | as OpenShell reports |
 
+![Grafana Sandboxes board, Findings and shadow AI row: Findings by kind counts 2 sandbox.shadow_ai findings, the Shadow-AI destinations table lists api.openai.com and api.mistral.ai as LOW with one finding each, and Recent sandbox findings names the sandbox and the host](/images/grafana/sandboxes-findings.png)
+
 ## Health
 
 Health records use the subsystem `openshell`. A degraded record carries a stable

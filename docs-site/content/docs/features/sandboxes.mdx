@@ -36,6 +36,18 @@ The sandbox is a locked room that holds only your project folder. Two layers bui
 
 The sandbox reaches your machine only at `host.openshell.internal`, through a hook ingress port and the egress proxy port. The main API is never reachable. [Agent segmentation](/docs/appendix/coverage-by-layer) shows which layer enforces what.
 
+<Video
+  src="openshell-isolation"
+  aspect="16/10"
+  caption="OpenShell isolation: a .env secret that reads as empty inside the sandbox, an environment with only a placeholder model key, and host files the agent cannot see. Recorded on an earlier build, so the launch banner differs slightly from 1.0.4."
+/>
+
+<Video
+  src="openshell-defenseclaw"
+  aspect="16/10"
+  caption="DefenseClaw inside OpenShell: a malicious prompt is blocked, a tool call to the cloud metadata endpoint is blocked, and the egress proxy allows github.com but refuses a request-inspection site. The block messages in this recording use older wording; 1.0.4 says “DefenseClaw policy blocked this action (rule ID: title). Do not retry it in another form.”"
+/>
+
 ## The session lifecycle
 
 <Flow direction="TB" caption="A sandbox's life, one stage per list item below, with review and keep shared in step 4. Setup is once per machine. Every run after it repeats steps 2 to 5.">

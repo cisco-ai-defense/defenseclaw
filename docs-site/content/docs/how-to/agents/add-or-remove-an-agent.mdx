@@ -10,6 +10,11 @@ keywords:
 
 One gateway guards several agents at once, each with its own mode. Adding, replacing or removing an agent never deletes audit history: each audit row keeps the connector that produced it.
 
+<Video
+  src="multi-connector"
+  caption="One gateway guards Claude Code and Antigravity at once on a Mac, each with its own mode. A harmless echo runs in both. The same chmod 777 (rule CMD-CHMOD-WORLD, HIGH) makes Antigravity ask for confirmation, while Claude Code only records an alert. Reading /etc/shadow is blocked (CRITICAL). Deleting Antigravity's hook file is detected and repaired (connector-hook-tampered, then connector-hook-repaired). Splunk shows every verdict per connector."
+/>
+
 ## Before you start
 
 - DefenseClaw is set up for one agent.

@@ -220,6 +220,10 @@ Process names, paths and command lines are what the workload claims; each destin
 
 ![Grafana Sandboxes board with the Environment, Host, Connector and Sandbox boxes, Sandbox fleet and Lifecycle rows: tiles for active sandboxes (all names), sandboxes seen, egress allowed, egress blocked, shadow-AI findings and health degraded split into sandboxes and gateway-wide, the active sandboxes by connector (all names) and phase transitions charts, and the recent lifecycle changes of the selected sandbox](/images/grafana/sandboxes-overview.png)
 
+![Grafana Sandboxes board, Egress decisions and Traffic volume rows: egress by source and decision as logs and as a metric (all names), the top blocked host (webhook.site) and the top allowed hosts, and bytes up and down by destination and over time](/images/grafana/sandboxes-egress.png)
+
+![Grafana Sandboxes board, Process starts row: process starts over time and the top started programs, filled because the sandbox ran with the process tree on](/images/grafana/sandboxes-processes.png)
+
 ## Kernel controls and your Tetragon policies
 
 On Linux with Tetragon and DefenseClaw's sensor helper, **AI Discovery Runtime Planes** and **Blocked Events & Analysis** show kernel-layer activity. They read the plane C `plane_health` records, `ai.runtime.kernel_policy`, `ai.runtime.kernel_event` and `enforcement.block.applied` records with initiator `kernel`. See [Tetragon on a Linux fleet](/docs/enterprise/runtime/tetragon).
@@ -242,6 +246,10 @@ The **Hosts with enforcing controls** tile counts each computer once, using its 
 | `DefenseClawKernelPausedLong` | Kernel enforcement is paused for 8 hours. |
 | `DefenseClawTetragonFallback` | Tetragon is installed but the helper runs on `cn_proc` and `fanotify`, for 15 minutes. |
 | `DefenseClawCustomerPolicyBlocksAgents` | One of your Tetragon policies denied an AI agent (informational). |
+
+![Grafana AI Discovery Runtime Planes, first row Fleet: kernel controls per host. Tiles for hosts reporting kernel controls, hosts with a stale approval, hosts on fallback, paused hosts, kernel denials and would-blocks, and a table of approval, backend, controls digest, host, mode, paused, Tetragon version, enrolled users, enforcing and in burn-in](/images/tetragon/grafana-kernel-fleet.png)
+
+![Grafana Blocked Events and Analysis, row Kernel denials (Linux): 4 kernel denials, 1 block by an administrator's Tetragon policy, and a table of denials by connector, control, process, user and count: three reads of the SSH key by wc and one write of a shell profile by bash](/images/tetragon/grafana-blocked-events-kernel.png)
 
 ## Splunk
 

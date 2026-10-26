@@ -64,17 +64,3 @@ Each harness image is NVIDIA's OpenShell community base image (Ubuntu 24.04, pin
 ## What to trust
 
 Some of what DefenseClaw reports about a sandbox it measures itself, and some is what OpenShell or the sandboxed program says about itself. [Sandbox telemetry](/docs/reference/sandboxes/telemetry#what-to-trust) says which is which, signal by signal.
-
-## Videos
-
-<Video
-  src="openshell-isolation"
-  aspect="16/10"
-  caption="OpenShell isolation: a .env secret that reads as empty inside the sandbox, an environment with only a placeholder model key, and host files the agent cannot see."
-/>
-
-<Video
-  src="openshell-defenseclaw"
-  aspect="16/10"
-  caption="DefenseClaw inside OpenShell: a malicious prompt is blocked, a tool call to the cloud metadata endpoint is blocked, and the egress proxy allows github.com but refuses a request-inspection site."
-/>

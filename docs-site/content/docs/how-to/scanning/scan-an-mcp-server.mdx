@@ -10,6 +10,10 @@ keywords:
 
 Scan an MCP server before an agent calls it.
 
+<DefenseClawDemo scenario="mcp-shadow-capability" />
+
+Guided example with synthetic data. The balanced default adds a server with a HIGH finding with a warning; this example uses a stricter `admission.mcp.actions.high` mapping that disables the runtime and blocks the install. In the demo, a local stdio server started with `npx` advertises a read-only-looking tool whose description and schema imply file and network side effects. DefenseClaw holds admission, starts the server in a short-lived scan process to read its tool list, applies that HIGH action and blocks the install. A remote URL scan does not add the server to a connector.
+
 ## Before you start
 
 These `defenseclaw mcp` steps are for a per-user installation. On managed Linux and macOS, the standard user's `defenseclaw` launcher offers only `sandbox` commands. Add the server through the connector's MCP configuration so the gateway's install watcher scans it; an administrator can inspect a remote URL first with `defenseclaw-gateway scan mcp https://mcp.example.com/mcp` from a privileged prompt. Local stdio servers are scanned after their connector configuration is installed. On managed Windows, use the administrator's `defenseclaw.exe scan mcp` command for a remote URL.

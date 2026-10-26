@@ -94,6 +94,8 @@ defenseclaw sandbox run claude --pack myapp
 
 To keep it locked in CI, run `defenseclaw sandbox policy test --pack FILE --fixture egress-expectations.yaml`. It exits 1 when a decision does not match. A project can also ask for a stricter sandbox with a [`.defenseclaw/sandbox.yaml`](/docs/reference/sandboxes/policy#repository-policy).
 
+![defenseclaw sandbox policy suggest --pack-out: the pack it wrote, extending balanced and allowing one host with the program that reached it, then comments listing the hosts balanced already covers, the host that was only ever refused, the shadow AI host and the sandbox's model provider](/images/sandboxes/screens/terminal-policy-recorded-pack.png)
+
 ## Check it worked
 
 ```bash
@@ -101,6 +103,8 @@ defenseclaw sandbox policy explain
 ```
 
 The Pack row names your pack, and each setting shows the layer that set it.
+
+![defenseclaw sandbox policy test --sandbox myapp-claude --host pastebin.com:443: the destination is blocked by a blocklist feed entry, with the rule, the source and the reason](/images/sandboxes/screens/terminal-policy-test.png)
 
 ## Undo
 

@@ -66,6 +66,10 @@ defenseclaw setup galileo status
 
 If the API key is missing, `defenseclaw setup galileo status` and `defenseclaw status` exit 1 and name the missing key. `defenseclaw status` then prints `Sidecar: not checked` until you fix the config; `defenseclaw-gateway status` still shows the running gateway.
 
+![Galileo Agent graph for a Codex session: the root agent delegates to Researcher and explore subagents, with chat, MCP, apply_patch, and Read nodes, and edge analytics for the selected codex to Researcher edge](/images/galileo/agent-graph.png)
+
+![Galileo session Messages view: invoke_agent codex lifecycle rows on the left and the session_start input and output records on the right](/images/galileo/session-lifecycle.png)
+
 ## Keep local Grafana and Galileo together
 
 Run `defenseclaw setup local-observability up` and the Galileo setup. They are separate destinations, each with its own queue. A Galileo outage does not stop Grafana, and the reverse.

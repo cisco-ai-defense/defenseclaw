@@ -273,7 +273,11 @@ describe('feature demo catalog', () => {
     assert.ok(mcp!.boundaries.didNot.some((item) => /remote URL/i.test(item)));
 
     const registry = featureDemos.find((scenario) => scenario.id === 'registry-promote-require');
-    assert.match(registry!.tabs.map((tab) => tab.source).join('\n'), /sync: on_demand/);
+    // Registry sources have no sync field: sync is on demand because there is no poller,
+    // and registry_required lives under asset_policy.<type> (cli/defenseclaw/config.py).
+    const registrySource = registry!.tabs.map((tab) => tab.source).join('\n');
+    assert.doesNotMatch(registrySource, /^sync:|allow_private_network/m);
+    assert.match(registrySource, /asset_policy:\n  skill:\n    registry_required: true/);
     assert.match(registry!.summary + registry!.syntheticDataNotice, /on-demand|on demand/i);
   });
 
