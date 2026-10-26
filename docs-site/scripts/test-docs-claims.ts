@@ -691,8 +691,9 @@ describe('Windows Hermes failure guidance', () => {
     // rel-1-0-4 GAP-0746: a per-user outage follows the policy tier (perUserOutageMode), as for every agent.
     assert.match(source('internal/gateway/connector/hookexec/hookexec.go'), /func perUserOutageMode\(opts \*Options, failMode string\) string \{/);
     assert.doesNotMatch(windows, /Hermes[^.]*closed by default/i);
-    assert.match(windows, /per-user install a stopped gateway lets a Hermes call run with one warning under the default and permissive policies/i);
-    assert.match(windows, /the strict policy or a saved `closed` blocks it\. Every other failure blocks\./);
+    // r105 docs refix 1: outage behaviour is stated only in the capability matrix (Go TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix).
+    assert.match(windows, /Hermes follows the same gateway outage rule as the other agents \(\[gateway outage table\]\(\/docs\/reference\/apis\/capability-matrix#gateway-outage\)\)\. Every other failure blocks\./);
+    assert.doesNotMatch(windows, /stopped gateway lets a Hermes call run/i);
     assert.match(windows, /managed host.*administrator.*open.*gateway outage/i);
     assert.match(windows, /Secure Client.*open.*default/i);
   });
