@@ -30,7 +30,7 @@ func shippedRulePatterns(t *testing.T, contentOnly bool) map[string]*regexp.Rege
 		}
 		for _, category := range compiled.categories {
 			for _, rule := range category.Rules {
-				if rule.Pattern != nil && !(contentOnly && rule.ToolCallOnly) {
+				if rule.Pattern != nil && (!contentOnly || !rule.ToolCallOnly) {
 					patterns[profile+"/"+rule.ID] = rule.Pattern
 				}
 			}
