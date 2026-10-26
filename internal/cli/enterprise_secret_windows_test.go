@@ -401,6 +401,131 @@ func TestWindowsSecretRemoveRefusesUnprovenInstalledConfig(t *testing.T) {
 	}
 }
 
+// GAP-0750 (TST-30694): a config whose DACL denies the caller read is
+// refused even when the caller's token has SeBackupPrivilege enabled, which
+// let os.ReadFile read past the deny; the credential stays and the gateway is
+// not restarted.
+func TestWindowsSecretRemoveRefusesAConfigItsDACLDeniesEvenWithBackupPrivilege(t *testing.T) {
+	restore, ok := enableWindowsTestProcessPrivilege(t, "SeBackupPrivilege")
+	if !ok {
+		t.Skip("the test token cannot enable SeBackupPrivilege (not elevated)")
+	}
+	defer restore()
+	dir := windowsSecretTestHarness(t)
+	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true}, "saved-value\n"); err != nil {
+		t.Fatal(err)
+	}
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sid := range []string{user.User.Sid.String(), "S-1-5-32-544"} {
+		if out, err := exec.Command("icacls", layout.ConfigPath, "/deny", "*"+sid+":(R)").CombinedOutput(); err != nil {
+			t.Fatalf("icacls deny: %v: %s", err, out)
+		}
+	}
+	t.Cleanup(func() { _ = exec.Command("icacls", layout.ConfigPath, "/reset").Run() })
+	restarted := false
+	windowsSecretRestartGateway = func(func() error) (bool, error) { restarted = true; return true, nil }
+	out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: "ai-defense-api-key", json: true}, "")
+	windowsSecretFailureDoc(t, out, err, "remove", "state_invalid")
+	if !windowsSecretStored(dir, "ai-defense-api-key") || restarted {
+		t.Fatalf("a config the caller cannot read changed the credential or the gateway: stored=%t restarted=%t", windowsSecretStored(dir, "ai-defense-api-key"), restarted)
+	}
+}
+
+// GAP-0712, GAP-1690: an identical set and the removal of an absent
+// credential restart the gateway only when it may hold another value: when
+// it started before that credential last changed. Otherwise they are no-ops
+// with no restart, and an absent removal says so.
+func TestWindowsSecretUnchangedCredentialRestartsOnlyAGatewayThatMayHoldAnotherValue(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		action       string
+		startedAfter bool
+		wantRestart  bool
+		wantText     string
+	}{
+		{name: "identical set, gateway loaded it", action: "set", startedAfter: true, wantText: "already holds this value; gateway restart not needed"},
+		{name: "identical set, older gateway", action: "set", wantRestart: true},
+		{name: "absent remove, gateway loaded the store", action: "remove", startedAfter: true, wantText: "was not stored; nothing to remove"},
+		{name: "absent remove, older gateway", action: "remove", wantRestart: true, wantText: "was not stored; nothing to remove; gateway restarted: true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			windowsSecretTestHarness(t)
+			name := "absent-key"
+			if tc.action == "set" {
+				name = "ai-defense-api-key"
+				if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true}, "same-value\n"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			saved := windowsSecretGatewayStartedAfter
+			t.Cleanup(func() { windowsSecretGatewayStartedAfter = saved })
+			var changedAt time.Time
+			windowsSecretGatewayStartedAfter = func(at time.Time) bool { changedAt = at; return tc.startedAfter }
+			restarted := false
+			windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
+				if err := beforeStop(); err != nil {
+					return false, err
+				}
+				restarted = true
+				return true, nil
+			}
+			stdin := ""
+			opts := enterpriseSecretOptions{name: name}
+			if tc.action == "set" {
+				opts.fromStdin, stdin = true, "same-value\n"
+			}
+			out, err := runWindowsSecretCommand(t, tc.action, opts, stdin)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.action, err)
+			}
+			if changedAt.IsZero() {
+				t.Fatal("the last change of the credential was not read")
+			}
+			if restarted != tc.wantRestart || (tc.wantText != "" && !strings.Contains(out, tc.wantText)) {
+				t.Fatalf("restarted=%t (want %t) output=%q (want %q)", restarted, tc.wantRestart, out, tc.wantText)
+			}
+		})
+	}
+}
+
+// enableWindowsTestProcessPrivilege enables privilege on the test process
+// token and returns the restore; false when the token does not hold it.
+func enableWindowsTestProcessPrivilege(t *testing.T, privilege string) (func(), bool) {
+	t.Helper()
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token); err != nil {
+		return nil, false
+	}
+	name, err := windows.UTF16PtrFromString(privilege)
+	var luid windows.LUID
+	if err == nil {
+		err = windows.LookupPrivilegeValue(nil, name, &luid)
+	}
+	if err != nil {
+		token.Close()
+		return nil, false
+	}
+	state := windows.Tokenprivileges{PrivilegeCount: 1, Privileges: [1]windows.LUIDAndAttributes{{Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED}}}
+	var previous windows.Tokenprivileges
+	var size uint32
+	if err := windows.AdjustTokenPrivileges(token, false, &state, uint32(unsafe.Sizeof(previous)), &previous, &size); err != nil ||
+		errors.Is(windows.GetLastError(), windows.ERROR_NOT_ALL_ASSIGNED) {
+		token.Close()
+		return nil, false
+	}
+	return func() {
+		_ = windows.AdjustTokenPrivileges(token, false, &previous, 0, nil, nil)
+		token.Close()
+	}, true
+}
+
 func runWindowsSecretCommand(t *testing.T, action string, opts enterpriseSecretOptions, stdin string) (string, error) {
 	t.Helper()
 	var out bytes.Buffer
