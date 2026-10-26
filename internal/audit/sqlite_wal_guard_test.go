@@ -559,9 +559,10 @@ func TestCheckpointWALIfLargeAtProductionTriggerUsesOrdinaryHold(t *testing.T) {
 	t.Cleanup(func() { walCopyPhaseHook = originalCopy })
 	entered := make(chan struct{}, 1)
 	originalWriter := walWriterPhaseHook
+	outrun := outrunTheHold(t, store)
 	walWriterPhaseHook = func(ctx context.Context) {
 		entered <- struct{}{}
-		<-ctx.Done()
+		outrun(ctx)
 	}
 	t.Cleanup(func() { walWriterPhaseHook = originalWriter })
 	finished := make(chan struct {
@@ -599,6 +600,27 @@ func TestCheckpointWALIfLargeAtProductionTriggerUsesOrdinaryHold(t *testing.T) {
 	}
 }
 
+// outrunTheHold stands in for a copy under the writer that is still running
+// when the catch-up's hold ends (the hook gets the hold's context). It returns
+// only once the pass gave the writer connection back. Returning when the hold
+// ends raced the pass's cap timer, which fires at the same instant: the copy
+// that followed could finish first and count as a completed catch-up (seen on
+// the Windows runner, whose timers fire in coarser steps).
+func outrunTheHold(t *testing.T, store *Store) func(context.Context) {
+	t.Helper()
+	return func(hold context.Context) {
+		<-hold.Done()
+		wait, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		conn, err := store.db.Conn(wait)
+		if err != nil {
+			t.Errorf("the writer connection did not come back after the hold: %v", err)
+			return
+		}
+		_ = conn.Close()
+	}
+}
+
 // overrideWALDuration sets one of the guard's timing variables for a test.
 func overrideWALDuration(t *testing.T, variable *time.Duration, value time.Duration) {
 	t.Helper()
@@ -616,7 +638,7 @@ func TestCheckpointWALIfLargeBoundedCatchUpKeepsTheHoldShortAfterEachMiss(t *tes
 	writeDuringEveryCopy(t, store)
 	overrideWALDuration(t, &walCatchUpCap, 40*time.Millisecond)
 	original := walWriterPhaseHook
-	walWriterPhaseHook = func(ctx context.Context) { <-ctx.Done() }
+	walWriterPhaseHook = outrunTheHold(t, store)
 	t.Cleanup(func() { walWriterPhaseHook = original })
 	for miss := range 3 {
 		pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
@@ -985,7 +1007,7 @@ func TestCheckpointWALIfLargeRepeatedOverLimitPassesNeverSettleBeforeTheWriter(t
 	writeDuringEveryCopy(t, store)
 	overrideWALDuration(t, &walCatchUpCap, 40*time.Millisecond)
 	originalWriter, originalSync := walWriterPhaseHook, walSyncPhaseHook
-	walWriterPhaseHook = func(ctx context.Context) { <-ctx.Done() }
+	walWriterPhaseHook = outrunTheHold(t, store)
 	var syncs atomic.Int64
 	walSyncPhaseHook = func(context.Context) { syncs.Add(1) }
 	t.Cleanup(func() { walWriterPhaseHook, walSyncPhaseHook = originalWriter, originalSync })

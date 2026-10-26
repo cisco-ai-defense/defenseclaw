@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { describe, it } from 'node:test';
@@ -1101,5 +1102,141 @@ describe('Hermes tool-call state (rel-1-0-4 GAP-0599)', () => {
     const state = page('reference/policy/cel/tool-call-state.mdx');
     assert.ok(state.includes('Hermes `on_session_end` (which Hermes sends at the end of every turn'));
     assert.ok(/\| \[Hermes\][^\n]*\| `paired-outcomes` \|/.test(readFileSync(join(site, 'content/docs/reference/policy/cel/tool-call-state.mdx'), 'utf8')));
+  });
+});
+
+// Lead and owner decisions in plans/r104/P1-RECONCILE.md turned these gaps
+// into known limits. Each must keep its own entry on the known-limits page,
+// and each connector page must link to it. The source checks pin the claim
+// that the refusal text is the vendor's, not DefenseClaw's.
+const knownLimitEntries = [
+  {
+    gaps: 'GAP-1196, GAP-1240',
+    section: 'Codex',
+    phrases: ['`rm -f style commands are not permitted. Use a safer approach`', 'It is a Codex limit, not a DefenseClaw block', 'Run the cleanup yourself in a terminal.'],
+    from: ['connectors/codex.mdx'],
+  },
+  {
+    gaps: 'GAP-0794, GAP-1006',
+    section: 'Codex',
+    phrases: ['Codex runs the tool when its `PreToolUse` hook is stopped, killed or times out.', 'If the hook stopped before it reached the gateway', 'If it reached the gateway first, the gateway can still record the call', 'It does not prevent a timeout', '`hook_process_fail_open`', '/docs/enterprise/configure/reference#vendor-limits'],
+    from: ['connectors/codex.mdx'],
+  },
+  {
+    gaps: 'GAP-1222',
+    section: 'Copilot CLI',
+    phrases: ['`Session host did not acknowledge permission.requested delivery within 5 seconds`', 'It is a Copilot CLI limit.', 'quit Copilot and start a new session'],
+    from: ['connectors/copilot.mdx'],
+  },
+  {
+    gaps: 'the approved Copilot CLI hook-timeout limit',
+    section: 'Copilot CLI',
+    phrases: ["Copilot CLI runs the tool when its `preToolUse` hook times out or cannot start, even when DefenseClaw's fail mode is `closed`.", 'per-user and managed installs on every OS', 'If it reached the gateway first, the gateway can still record the call', '`hook_process_fail_open`', '/docs/enterprise/configure/reference#vendor-limits'],
+    from: ['connectors/copilot.mdx'],
+  },
+  {
+    gaps: 'the approved Antigravity hook-timeout limit',
+    section: 'Antigravity',
+    phrases: ["Antigravity can run a tool when its `PreToolUse` hook times out or cannot start, even when DefenseClaw's fail mode is `closed`.", 'every install on every OS', 'If it reached the gateway first, the gateway can still record the call', '`hook_process_fail_open`'],
+    from: ['connectors/antigravity.mdx'],
+  },
+  {
+    gaps: 'GAP-1164',
+    section: 'Linux sign-out',
+    phrases: ['Without linger, signing out of your last session stops the gateway and its MicroVMs', '/docs/troubleshooting/sandboxes/setup-and-gateway#a-linux-sign-out-ends-a-running-microvm'],
+    from: [],
+  },
+  { gaps: 'GAP-1194', section: 'Claude Code shell', phrases: ['shell mode'], from: ['connectors/claudecode.mdx'] },
+  { gaps: 'GAP-1163', section: 'Upgrade and policy limits', phrases: ['**Legacy MicroVM guests:**'], from: [] },
+  { gaps: 'GAP-0716, GAP-0716-MAC', section: 'Upgrade and policy limits', phrases: ['**Managed policy before launch:**'], from: [] },
+  // Known issues moved to 1.0.5 by the owner decision of 2026-10-25 10:40 (KNOWN-ISSUES-1.0.4.md).
+  { gaps: 'GAP-0933, GAP-1599', section: 'Known issues', phrases: ['**Changing the fail mode with Setup `/ensure`:**', 'Keep the fail mode you installed with.', 'an administrator can remove the closure marker', 'hot-config-undo-closed'], from: [] },
+  { gaps: 'GAP-1687', section: 'Known issues', phrases: ['`Setup-Enterprise-Standalone-x64.exe /repair JSON=1`, then `/ensure` again'], from: [] },
+  { gaps: 'GAP-1564, GAP-1533, GAP-1593', section: 'Known issues', phrases: ['until the user signs in or reconnects'], from: [] },
+  { gaps: 'GAP-1422', section: 'Known issues', phrases: ['Run `defenseclaw setup claude-code` after the upgrade'], from: [] },
+  { gaps: 'GAP-1522', section: 'Known issues', phrases: ['`log_user_prompt = true`', 'add your keys back after'], from: [] },
+  { gaps: 'GAP-1330, GAP-1680, GAP-1023', section: 'Known issues', phrases: ['`defenseclaw guardrail use-pack strict`'], from: [] },
+  { gaps: 'GAP-1565', section: 'Known issues', phrases: ['**macOS restored hook records:**'], from: [] },
+] as const;
+
+function knownLimitSection(heading: string): string {
+  const raw = readFileSync(join(docs, 'troubleshooting/known-limits.mdx'), 'utf8');
+  const parts = raw.split(/^## /m);
+  const body = parts.find((part) => part.split('\n')[0].trim() === heading);
+  assert.ok(body, `known-limits.mdx has no "## ${heading}" section`);
+  return body.split(/\s+/).join(' ');
+}
+
+function anchor(heading: string): string {
+  return heading.toLowerCase().replace(/[^a-z0-9 -]/g, '').trim().replace(/ +/g, '-');
+}
+
+function trackedProductHits(text: string): string[] {
+  try {
+    return execFileSync('git', ['grep', '-l', '-F', text, '--', '.', ':!docs-site', ':!docs'], { cwd: repo, encoding: 'utf8' })
+      .split('\n').filter(Boolean);
+  } catch (error) {
+    if ((error as { status?: number }).status === 1) return [];
+    throw error;
+  }
+}
+
+describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
+  for (const entry of knownLimitEntries) {
+    it(`documents ${entry.gaps} under "${entry.section}" and links it from the connector page`, () => {
+      const text = knownLimitSection(entry.section);
+      for (const phrase of entry.phrases) {
+        assert.ok(text.includes(phrase), `known-limits "${entry.section}" lacks: ${phrase}`);
+      }
+      const target = `/docs/troubleshooting/known-limits#${anchor(entry.section)}`;
+      for (const name of entry.from) {
+        const limits = page(name).split('## Limits')[1]?.split(' ## ')[0] ?? '';
+        assert.ok(limits.includes(target), `${name} Limits does not link ${target}`);
+      }
+    });
+  }
+
+  it('lists every section in the troubleshooting index summary', () => {
+    const index = page('troubleshooting/index.mdx');
+    const line = index.split('[Known limits in 1.0.4](/docs/troubleshooting/known-limits):')[1]?.split(' - [')[0] ?? '';
+    for (const words of ['Codex', 'Copilot CLI', 'Antigravity', 'Linux sign-out']) {
+      assert.ok(line.includes(words), `troubleshooting index summary omits ${words}`);
+    }
+  });
+
+  it('keeps the vendor refusal text out of DefenseClaw source', () => {
+    for (const text of ['style commands are not permitted', 'did not acknowledge permission.requested']) {
+      assert.deepEqual(trackedProductHits(text), [], `DefenseClaw source emits "${text}"; it is not a vendor limit`);
+    }
+  });
+
+  it('matches the managed hook_process_fail_open warning for Codex, Copilot and Antigravity', () => {
+    const status = source('internal/enterprisestatus/hook_process_failure.go');
+    assert.ok(status.includes('CodeHookProcessFailOpen = "hook_process_fail_open"'));
+    assert.match(status, /case "claudecode", "codex":\s*behavior = "a killed PreToolUse hook or PreToolUse timeout is non-blocking"/);
+    assert.match(status, /case "copilot":\s*behavior = "a timed-out preToolUse hook is non-blocking; a later permission hook may still deny"/);
+    assert.match(status, /case "antigravity":\s*behavior = "a command hook that cannot start or reaches its timeout has no vendor-guaranteed deny"/);
+    assert.match(status, /r\.SecurityComplete = false/);
+  });
+
+  // A hook that times out may already have reached the gateway, which can then
+  // record the call. Every timeout entry must keep the "no audit row" claim to
+  // hooks that never reached it, and must not offer signal protection as a cure
+  // for timeouts.
+  it('scopes every hook-timeout entry on the page', () => {
+    const raw = readFileSync(join(docs, 'troubleshooting/known-limits.mdx'), 'utf8');
+    const entries = raw.split(/\n(?=- |\n)/).map((part) => part.split(/\s+/).join(' '))
+      .filter((part) => /\btimes? out\b|\btimed-out\b/.test(part) && /hook/.test(part));
+    assert.ok(entries.length >= 3, `expected the Codex, Copilot CLI and Antigravity timeout entries, found ${entries.length}`);
+    for (const entry of entries) {
+      assert.ok(!/never reaches the gateway/.test(entry), `unscoped no-request claim: ${entry.slice(0, 120)}`);
+      if (/no pre-tool audit row/.test(entry)) {
+        assert.match(entry, /If the hook (never reached|stopped before it reached) the gateway/, `no-audit claim is not scoped: ${entry.slice(0, 120)}`);
+        assert.ok(entry.includes('If it reached the gateway first, the gateway can still record the call'), `reached-gateway case missing: ${entry.slice(0, 120)}`);
+      }
+      if (/signall?ing hook processes/.test(entry)) {
+        assert.ok(entry.includes('It does not prevent a timeout'), `signal protection offered as a timeout fix: ${entry.slice(0, 120)}`);
+      }
+    }
   });
 });

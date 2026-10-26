@@ -2316,6 +2316,13 @@ function Save-LifecycleHookTransition([string]$Slot) {
     if ($expected.Contains("defenseclaw-hook.exe") -and $expected["defenseclaw-hook.exe"] -ne $priorSHA256) {
         throw "The rollback hook copy differs from the recorded prior install"
     }
+    $live = Join-Path $BinDir "defenseclaw-hook.exe"
+    # Install-HookFirst records both digests before it publishes the checked
+    # hook. When a running hook kept the old image mapped, that publish was
+    # refused and the prior hook is still in place: there is no transition to
+    # hold, and publishing the guard now would only meet the same running hook
+    # and leave an unchanged install locked with a lifecycle record.
+    if ((Test-Path -LiteralPath $live -PathType Leaf) -and (Get-Sha256 $live) -eq $priorSHA256) { return "" }
     New-Item -ItemType Directory -Path $LifecycleCloser -Force -ErrorAction Stop | Out-Null
     Install-File $sourceGuard (Join-Path $LifecycleCloser "defenseclaw-hook.exe")
     Install-File $sourcePrior (Join-Path $LifecycleCloser "prior-defenseclaw-hook.exe")
@@ -2325,7 +2332,6 @@ function Save-LifecycleHookTransition([string]$Slot) {
     $copy["TransitionPriorHookSHA256"] = $priorSHA256
     Write-DurableText $LifecycleManifest ($copy | ConvertTo-Json -Depth 4)
     $transition = Get-LifecycleHookTransition (Read-LifecycleManifest)
-    $live = Join-Path $BinDir "defenseclaw-hook.exe"
     if (-not (Test-Path -LiteralPath $live -PathType Leaf) -or (Get-Sha256 $live) -ne $guardSHA256) {
         Install-File $transition.Guard $live
     }
@@ -3337,11 +3343,14 @@ function Save-ExternalConfig([string]$Slot) {
     if (-not $config) { return }
     New-Item -ItemType Directory -Path (Join-Path $Slot "config") -Force | Out-Null
     Copy-Kept $config (Join-Path $Slot "config")
-    Set-Content -LiteralPath (Join-Path $Slot "CONFIG") -Value $config -Encoding UTF8
+    # The path goes in CONFIG_PATH: NTFS names are case-insensitive, so a
+    # CONFIG file cannot sit next to the config folder, and writing one
+    # failed every snapshot of an install with an external config.
+    Set-Content -LiteralPath (Join-Path $Slot "CONFIG_PATH") -Value $config -Encoding UTF8
 }
 
 function Restore-ExternalConfig([string]$Slot) {
-    $config = Read-Text (Join-Path $Slot "CONFIG")
+    $config = Read-Text (Join-Path $Slot "CONFIG_PATH")
     if ($config) {
         $saved = Join-Path $Slot "config\$(Split-Path -Leaf $config)"
         Copy-Kept $saved (Split-Path -Parent $config)

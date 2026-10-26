@@ -836,7 +836,19 @@ function Test-SetupImport {
         Remove-TreeLong (Join-Path $DcHome ".venv")
         Remove-TreeLong (Join-Path $DcHome "installer")
         Set-Content -LiteralPath (Join-Path $cache "DefenseClawSetup-x64.exe") -Value "setup" -Encoding Ascii
-        Set-Content -LiteralPath (Join-Path $hookRuntime "hook-runtime-state.json") -Value '{"schema_version":2,"status":"active"}' -Encoding Ascii
+        # Setup 0.8.10's state (internal/hookruntime State): its stable
+        # launcher is a trampoline to the hook in Setup's tree, so the upgrade
+        # can point it at this release's hook (GAP-1000, GAP-1071).
+        $launcherPath = Join-Path $hookRuntime "defenseclaw-hook.exe"
+        [ordered]@{
+            schema_version = 2; status = "active"; runtime_root = $hookRuntime
+            launcher_path = $launcherPath; launcher_sha256 = (Get-Sha256 $launcherPath).ToLowerInvariant(); launcher_kind = "trampoline"
+            hook_path = (Join-Path $setupRoot "bin\defenseclaw-hook.exe")
+            hook_sha256 = (Get-Sha256 (Join-Path $setupRoot "bin\defenseclaw-hook.exe")).ToLowerInvariant()
+            data_root = $DcHome; gateway_path = (Join-Path $setupRoot "bin\defenseclaw-gateway.exe")
+            gateway_sha256 = (Get-Sha256 (Join-Path $setupRoot "bin\defenseclaw-gateway.exe")).ToLowerInvariant()
+            transaction_id = [guid]::NewGuid().ToString("N")
+        } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $hookRuntime "hook-runtime-state.json") -Encoding Ascii
         [ordered]@{
             schema_version = 1; version = "0.8.10"; distribution_flavor = "oss"; install_kind = "native-windows-exe"
             install_scope = "user"; install_root = $setupRoot; command_dir = (Join-Path $setupRoot "bin"); data_root = $DcHome
@@ -873,6 +885,14 @@ function Test-SetupImport {
         Check (Test-Path -LiteralPath (Join-Path $DcHome "previous\legacy-setup\hook-runtime-state.json")) "the Setup hook runtime was not disabled"
         Check ((Get-Content -LiteralPath (Join-Path $DcHome "previous\VERSION")) -eq "0.8.10") "previous\VERSION is not 0.8.10"
         Check (Test-Path -LiteralPath (Join-Path $hookRuntime "defenseclaw-hook.exe")) "HookRuntime must be left in place"
+        # Agent sessions started before the upgrade keep the cached launcher:
+        # it now delegates to a copy of this release's hook and gateway.
+        $delegation = Get-Content -Raw -LiteralPath (Join-Path $hookRuntime "hook-runtime-state.json") | ConvertFrom-Json
+        Check ($delegation.status -eq "active" -and $delegation.launcher_kind -eq "trampoline" -and
+            $delegation.hook_sha256 -eq (Get-Sha256 (Join-Path $Bin "defenseclaw-hook.exe")).ToLowerInvariant() -and
+            (Test-Path -LiteralPath $delegation.hook_path -PathType Leaf) -and
+            [IO.Path]::GetFullPath($delegation.gateway_path) -eq [IO.Path]::GetFullPath((Join-Path $Bin "defenseclaw-gateway.exe"))) `
+            "Setup's cached hook launcher does not delegate to this release's hook"
         Check (-not (Test-Path -LiteralPath $cache)) "InstallerCache was not removed"
         Check (-not (Test-Path -LiteralPath $uninstallKey)) "the Uninstall key was not removed"
         $run = Get-ItemProperty -LiteralPath $runKey

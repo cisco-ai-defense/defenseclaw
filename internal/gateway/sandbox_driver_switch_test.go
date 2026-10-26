@@ -8,6 +8,7 @@ package gateway
 import (
 	"encoding/json"
 	"net/http"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -27,6 +28,14 @@ func TestSandboxResolveDriverMismatchIsTemporary(t *testing.T) {
 			var out sandboxrelay.ResolveResponse
 			if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 				t.Fatal(err)
+			}
+			if runtime.GOOS == "darwin" && tc.before == "vm" {
+				// macOS runs only the MicroVM driver whatever is configured
+				// (sandboxDriverClaim), so a MicroVM daemon changed nothing.
+				if rec.Code != http.StatusOK || out.Refusal != nil {
+					t.Fatalf("macOS MicroVM daemon under %q: %d %s, want it resolved", tc.after, rec.Code, rec.Body.String())
+				}
+				return
 			}
 			if rec.Code != http.StatusServiceUnavailable || out.Refusal == nil || out.Refusal.Reason != sandboxrelay.DetailSetupChanging ||
 				!strings.Contains(out.Refusal.Message, "defenseclaw sandbox stop NAME") || out.Registration.ID != "" {

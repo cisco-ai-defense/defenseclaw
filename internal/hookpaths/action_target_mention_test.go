@@ -11,6 +11,7 @@ import (
 )
 
 func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {

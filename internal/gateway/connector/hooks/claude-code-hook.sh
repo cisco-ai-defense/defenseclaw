@@ -139,7 +139,8 @@ fi
 # downstream code controls (HOME, PATH, locale, GIT_*); none of the
 # subsequent token-resolution logic depends on the operator's
 # original PATH or HOME.
-. "${HOOK_DIR}/_hardening.sh"
+# command: bash 3.2 (macOS /bin/bash) exits 0 when a sourced helper is missing or unreadable.
+command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
 {{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call.
@@ -355,9 +356,10 @@ fi
 
 # W3C trace propagation: forward validated traceparent / tracestate.
 TRACE_HEADER_ARGS=()
-if command -v mapfile >/dev/null 2>&1; then
-  mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
-fi
+# A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
+while IFS= read -r trace_header_arg; do
+  TRACE_HEADER_ARGS+=("$trace_header_arg")
+done < <(defenseclaw_extract_trace_context)
 
 # Per-user attribution: the gateway cannot read the real user's identity from
 # its own service-account process, so the hook reports it.
@@ -383,7 +385,17 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/claude-code/hook" "$PAYLOAD" \
   fail_unreachable "$(defenseclaw_sandbox_unreachable_reason "$RESPONSE")"
 }{{else}}{{if and .Managed (not .SecureClient)}}# Resolve write operands as the hook user; the managed gateway cannot
 # inspect this home under ProtectHome. Keep the payload off argv.
-_DC_RESOLVED_WRITES="$(/opt/defenseclaw/bin/defenseclaw-gateway hook resolve-writes < <(printf '%s' "${PAYLOAD}"))" || _DC_RESOLVED_WRITES=
+# The standalone gateway of this OS (managed.StandaloneLayoutFor): a macOS
+# hook ran the Linux path, which is not there, and wrote its shell error to
+# the agent on every call.
+case "${OSTYPE:-}" in
+  darwin*) _DC_MANAGED_GATEWAY=/opt/cisco/defenseclaw/bin/defenseclaw-gateway ;;
+  *) _DC_MANAGED_GATEWAY=/opt/defenseclaw/bin/defenseclaw-gateway ;;
+esac
+_DC_RESOLVED_WRITES=
+if [ -x "$_DC_MANAGED_GATEWAY" ]; then
+  _DC_RESOLVED_WRITES="$("$_DC_MANAGED_GATEWAY" hook resolve-writes < <(printf '%s' "${PAYLOAD}"))" || _DC_RESOLVED_WRITES=
+fi
 RESOLVED_HEADER_ARGS=()
 if [ -n "${_DC_RESOLVED_WRITES}" ]; then
   RESOLVED_HEADER_ARGS=(-H "X-DefenseClaw-Resolved-Writes: ${_DC_RESOLVED_WRITES}")

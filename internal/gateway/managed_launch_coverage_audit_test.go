@@ -6,6 +6,7 @@ package gateway
 import (
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -87,7 +88,8 @@ func TestManagedInstallCoverageAuditNamesTheUnprotectedCopy(t *testing.T) {
 		handler.ServeHTTP(response, request)
 		return response.Code
 	}
-	valid := `{"connector":"claudecode","reason":"unsupported_installed_version","uid":94404135,"install_path":"/home/eng1/sa104r8-old/node_modules/@anthropic-ai/claude-code","version":"2.0.77"}`
+	installPath := coverageAuditInstallPath("/home/eng1/sa104r8-old/node_modules/@anthropic-ai/claude-code")
+	valid := `{"connector":"claudecode","reason":"unsupported_installed_version","uid":94404135,"install_path":"` + installPath + `","version":"2.0.77"}`
 	if got := send(94404135, valid); got != http.StatusForbidden {
 		t.Fatalf("user submitted install audit: HTTP %d", got)
 	}
@@ -114,7 +116,7 @@ func TestManagedInstallCoverageAuditNamesTheUnprotectedCopy(t *testing.T) {
 		found = true
 		if event.Structured["defenseclaw.health.subsystem"] != "managed-install-coverage" ||
 			!strings.Contains(event.Details, `"agent_version":"2.0.77"`) ||
-			!strings.Contains(event.Details, `"agent_install_path":"/home/eng1/sa104r8-old/node_modules/@anthropic-ai/claude-code"`) {
+			!strings.Contains(event.Details, `"agent_install_path":"`+installPath+`"`) {
 			t.Fatalf("install audit lost copy identity: %+v", event)
 		}
 	}
@@ -138,7 +140,8 @@ func TestManagedInstallCoverageAuditAcceptsAnUnenrolledHermes(t *testing.T) {
 		handler.ServeHTTP(response, request)
 		return response.Code
 	}
-	valid := `{"connector":"hermes","reason":"unsupported_installed_version","uid":1001,"install_path":"/home/alice/.local/bin/hermes","version":"0.18.0"}`
+	hermesPath := coverageAuditInstallPath("/home/alice/.local/bin/hermes")
+	valid := `{"connector":"hermes","reason":"unsupported_installed_version","uid":1001,"install_path":"` + hermesPath + `","version":"0.18.0"}`
 	if got := send(1001, valid); got != http.StatusForbidden {
 		t.Fatalf("user submitted a Hermes install audit: HTTP %d", got)
 	}
@@ -148,7 +151,7 @@ func TestManagedInstallCoverageAuditAcceptsAnUnenrolledHermes(t *testing.T) {
 	if got := send(0, valid); got != http.StatusNoContent {
 		t.Fatalf("root Hermes install audit: HTTP %d", got)
 	}
-	if got := send(0, `{"connector":"hermes","reason":"installed_version_unverified","uid":1001,"install_path":"/home/alice/.local/bin/hermes"}`); got != http.StatusNoContent {
+	if got := send(0, `{"connector":"hermes","reason":"installed_version_unverified","uid":1001,"install_path":"`+hermesPath+`"}`); got != http.StatusNoContent {
 		t.Fatalf("root Hermes unknown-version install audit: HTTP %d", got)
 	}
 	events, err := fixture.store.ListEvents(100)
@@ -207,4 +210,14 @@ func TestManagedHermesSessionHomeLimitAudit(t *testing.T) {
 		}
 	}
 	t.Fatal("no Hermes session-home coverage alert")
+}
+
+// coverageAuditInstallPath is an absolute install path on the host: the
+// gateway refuses a relative one, and a "/home" path is not absolute on
+// Windows. It keeps forward slashes so the JSON needs no escaping.
+func coverageAuditInstallPath(posix string) string {
+	if runtime.GOOS == "windows" {
+		return "C:/Users" + strings.TrimPrefix(posix, "/home")
+	}
+	return posix
 }

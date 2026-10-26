@@ -63,6 +63,14 @@ WHEEL_SECURITY_FLOOR_CONTRACT = {
 
 TOMLI_COMPATIBILITY_CONTRACT = (">=2.0.1", 'python_version < "3.11"')
 
+# CVE-2026-112906/112907/112913/112914/112937/112940 are fixed in filelock
+# 4.2.1, and every fixed release requires Python >=3.11. Python 3.10 stays
+# below 4.1, which added three of them (see the wheel contract in ci.yml).
+FILELOCK_SECURITY_CONTRACT = {
+    'python_version >= "3.11"': ">=4.2.1",
+    'python_version < "3.11"': "<4.1",
+}
+
 SKILL_SCANNER_VERSION = "2.2.1"
 # 2.2.1 ships only platform wheels (each bundles a CEL helper): no
 # py3-none-any, Windows arm64 or musl wheel, and Python >=3.11.
@@ -181,6 +189,30 @@ def test_python_310_toml_parser_dependency_is_source_and_lock_metadata() -> None
     assert not marker.evaluate(
         {"python_version": "3.11", "python_full_version": "3.11.0"}
     )
+
+
+def test_filelock_floor_is_marked_per_python_line_in_source_and_lock() -> None:
+    document = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    direct = {
+        str(requirement.marker): str(requirement.specifier)
+        for requirement in map(Requirement, document["project"]["dependencies"])
+        if requirement.name == "filelock"
+    }
+    assert direct == FILELOCK_SECURITY_CONTRACT
+
+    lock = tomllib.loads(UV_LOCK.read_text(encoding="utf-8"))
+    project = next(package for package in lock["package"] if package["name"] == "defenseclaw")
+    python_310 = {"python_version": "3.10", "python_full_version": "3.10.14"}
+    python_311 = {"python_version": "3.11", "python_full_version": "3.11.0"}
+    locked = {}
+    for dependency in project["dependencies"]:
+        if dependency["name"] == "filelock":
+            marker = Marker(dependency["marker"])
+            line = "3.10" if marker.evaluate(python_310) else "3.11+"
+            assert marker.evaluate(python_311) == (line == "3.11+")
+            locked[line] = Version(dependency["version"])
+    assert locked["3.10"] < Version("4.1")
+    assert locked["3.11+"] >= Version("4.2.1")
 
 
 def test_dev_graph_does_not_force_incompatible_snapshot_metadata() -> None:
