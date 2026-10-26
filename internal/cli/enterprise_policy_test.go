@@ -59,11 +59,6 @@ func withEnterprisePolicyTree(t *testing.T) enterprisePolicyContext {
 	previous := standaloneEnterprisePolicyOptions
 	standaloneEnterprisePolicyOptions = func() (enterprisePolicyContext, error) { return ctx, nil }
 	t.Cleanup(func() { standaloneEnterprisePolicyOptions = previous })
-	// The tree is a Linux host's, which has no Windows enumerator record of
-	// unprotected agent installs.
-	previousUnprotected := enterprisePolicyUnprotectedAgents
-	enterprisePolicyUnprotectedAgents = func(string) ([]enterprisehooks.UnprotectedAgent, error) { return nil, nil }
-	t.Cleanup(func() { enterprisePolicyUnprotectedAgents = previousUnprotected })
 	resetEnterprisePolicyFlags(t)
 	return ctx
 }
@@ -238,6 +233,12 @@ func TestForeignHookCleanupIsInertOutsideStandalone(t *testing.T) {
 
 func TestEnterprisePolicyShowsTheClaudeVersionFloor(t *testing.T) {
 	ctx := withEnterprisePolicyTree(t)
+	// The tree is a Linux host's, which has no Windows enumerator record of
+	// unprotected agent installs; on Windows its absence makes verify
+	// incomplete, which is not what this test checks.
+	previousUnprotected := enterprisePolicyUnprotectedAgents
+	enterprisePolicyUnprotectedAgents = func(string) ([]enterprisehooks.UnprotectedAgent, error) { return nil, nil }
+	t.Cleanup(func() { enterprisePolicyUnprotectedAgents = previousUnprotected })
 	// Publish writes the summary under the host path; create its parent so
 	// the linux-rooted tree also works on a Windows host.
 	if err := os.MkdirAll(filepath.Dir(ctx.opts.PublicPolicyPath), 0o755); err != nil {
