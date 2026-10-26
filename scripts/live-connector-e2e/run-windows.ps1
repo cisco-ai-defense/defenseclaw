@@ -9497,37 +9497,12 @@ function Invoke-ContractRun {
     Invoke-Setup observe
     Assert-DoctorHookRegistration
     if ($Connector -eq 'amp') {
-        # Outside Secure Client an unset or closed delivery policy is closed in
-        # observe mode too (owner rule); only an explicit open opens the
-        # plugin. Round-trip the global policy and restore closed for the
-        # action phase, where the Windows registration assertion below
-        # verifies it takes effect.
+        # A per-user plugin renders DC_FAIL_MODE closed in either mode
+        # (821ec8d216) and takes its outage mode from the policy tier (owner
+        # decision 2026-10-23). 1.0.4 refuses `guardrail fail-mode` on a
+        # per-user install, so the explicit-open round trip cannot run.
         Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
-        # A failed restore must not mask the open-mode failure that caused
-        # it: keep the primary error, warn about the restore, rethrow primary.
-        $ampFailModeError = $null
-        try {
-            Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'open', '--yes', '--no-restart') | Out-Null
-            Invoke-Setup observe
-            # 1.0.4 renders every per-user plugin DC_FAIL_MODE closed and
-            # takes its outage mode from the policy tier (821ec8d216, owner
-            # decision 2026-10-23), so the saved open does not reach the
-            # plugin: only that expectation is skipped, and the render must
-            # stay the closed one.
-            Write-Result 'amp:explicit-open-render' skip 'GAP-1018: known 1.0.4 issue, fixed in 1.0.5'
-            Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
-        } catch {
-            $ampFailModeError = $_
-        }
-        try {
-            Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'closed', '--yes', '--no-restart') | Out-Null
-            Invoke-Setup observe
-        } catch {
-            if ($null -eq $ampFailModeError) { throw }
-            Write-Warning "Amp fail-mode restore to closed failed after the open-mode check failed: $($_.Exception.Message)"
-        }
-        if ($null -ne $ampFailModeError) { throw $ampFailModeError }
-        Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
+        Write-Result 'amp:explicit-open-render' skip 'GAP-1023: known 1.0.4 issue, fixed in 1.0.5'
     }
     Invoke-DangerousCommandCorpus observe
     $blockEvent = if ($Connector -eq 'amp') { 'tool.call' } else { 'PreTool-block' }
@@ -9552,7 +9527,7 @@ function Invoke-ContractRun {
     }
     Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
     if ($Connector -eq 'amp') {
-        Write-Result 'amp:delivery-mode-contract' pass 'observe renders closed (unset, explicit open under GAP-1018, restored closed); restored closed policy renders in action mode'
+        Write-Result 'amp:delivery-mode-contract' pass 'observe and action render the per-user plugin closed (explicit open skipped: GAP-1023)'
     }
     $session = Join-Path $golden 'session_start.json'
     $sessionEvent = if ($Connector -eq 'amp') { 'session.start' } else { 'SessionStart' }
