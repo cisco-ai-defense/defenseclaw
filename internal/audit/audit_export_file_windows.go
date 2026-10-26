@@ -23,7 +23,11 @@ func CreateExportFileExclusive(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	owner, err := auditExportWindowsTokenOwner()
+	tokenOwner, err := auditExportWindowsTokenOwner()
+	if err != nil {
+		return nil, err
+	}
+	owner, err := auditExportWindowsOwner(tokenOwner)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +99,35 @@ func CreateExportFileExclusive(path string) (*os.File, error) {
 	return file, nil
 }
 
-func auditExportWindowsTokenOwner() (*windows.SID, error) {
+// auditExportWindowsOwner picks the owner of a new export. A managed store's
+// canonical file owner is BUILTIN\Administrators or the gateway service SID;
+// a LocalSystem token's owner is S-1-5-18, which that check refuses, so a
+// SYSTEM export of a managed store (GAP-1399) is owned by Administrators.
+// LocalSystem may assign it: its token holds Administrators as an
+// owner-capable group. The DACL stays SY/BA/gateway and protected.
+func auditExportWindowsOwner(tokenOwner *windows.SID) (*windows.SID, error) {
+	if tokenOwner == nil || !tokenOwner.IsWellKnown(windows.WinLocalSystemSid) {
+		return tokenOwner, nil
+	}
+	gatewaySID, err := auditDBWindowsPinnedGatewayServiceSID()
+	if err != nil {
+		return nil, err
+	}
+	if gatewaySID == nil {
+		return tokenOwner, nil
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return nil, fmt.Errorf("audit: resolve Windows Administrators SID: %w", err)
+	}
+	return administrators, nil
+}
+
+// auditExportWindowsTokenOwner is a seam: tests run the owner choice as
+// LocalSystem without a SYSTEM token.
+var auditExportWindowsTokenOwner = auditExportWindowsProcessTokenOwner
+
+func auditExportWindowsProcessTokenOwner() (*windows.SID, error) {
 	token := windows.GetCurrentProcessToken()
 	var size uint32
 	if err := windows.GetTokenInformation(token, windows.TokenOwner, nil, 0, &size); err != windows.ERROR_INSUFFICIENT_BUFFER {
