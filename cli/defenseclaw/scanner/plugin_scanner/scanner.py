@@ -350,12 +350,17 @@ def _plugin_has_executable_files(target: str, ctx: ScanContext) -> bool:
         for name in dirs:
             if os.path.islink(os.path.join(root, name)):
                 return True
+        git_parts = _git_dir_parts(os.path.relpath(root, target))
+        git_objects = git_parts is not None and "objects" in git_parts
         for name in files:
-            seen += 1
+            # git's object store is data git writes read-only; it is still
+            # read below, but it does not use up the walk limit (GAP-2100).
+            if not git_objects:
+                seen += 1
             if seen > _EXECUTABLE_WALK_LIMIT:
                 return True
             path = os.path.join(root, name)
-            if _is_git_hook_sample(root, name):
+            if _is_git_hook_sample(root, git_parts, name):
                 continue
             suffix = os.path.splitext(name)[1].casefold()
             folded = name.casefold()
@@ -374,14 +379,27 @@ def _plugin_has_executable_files(target: str, ctx: ScanContext) -> bool:
     return bool(walk_errors)
 
 
-def _is_git_hook_sample(root: str, name: str) -> bool:
-    """git's own ``*.sample`` hook templates directly under ``.git/hooks``:
-    git never runs them and the agent does not load them. Every other file
-    under a ``.git`` folder is read with the same rule as the rest of the
-    plugin, because a local, zip or tarball plugin controls ``.git`` too
-    (GAP-2036)."""
-    parent, hooks = os.path.split(root)
-    return name.endswith(".sample") and hooks == "hooks" and os.path.basename(parent) == ".git"
+def _git_dir_parts(rel_root: str) -> list[str] | None:
+    """The path parts of a folder below the first ``.git`` folder of the
+    plugin (``[]`` for ``.git`` itself), or None outside any ``.git``."""
+    parts = [] if rel_root in ("", os.curdir) else rel_root.split(os.sep)
+    if ".git" not in parts:
+        return None
+    return parts[parts.index(".git") + 1:]
+
+
+def _is_git_hook_sample(root: str, git_parts: list[str] | None, name: str) -> bool:
+    """git's own ``*.sample`` hook templates in the ``hooks`` folder of a git
+    dir: ``.git/hooks`` and a submodule's ``.git/modules/<name>/hooks``
+    (GAP-2100). git never runs them and the agent does not load them. Every
+    other file under a ``.git`` folder is read with the same rule as the rest
+    of the plugin, because a local, zip or tarball plugin controls ``.git``
+    too (GAP-2036)."""
+    if git_parts is None or not name.endswith(".sample") or os.path.basename(root) != "hooks":
+        return False
+    git_dir = git_parts[:-1]
+    # .git itself, or .git/modules/<name>[/modules/<name>...] for submodules.
+    return len(git_dir) % 2 == 0 and all(part == "modules" for part in git_dir[::2])
 
 
 def _starts_with_executable_magic(path: str) -> bool:
