@@ -2771,7 +2771,7 @@ function Start-HookFailModeHold([string]$Gateway, [int]$GatewayId, [switch]$Clos
     }
     $info = New-Object System.Diagnostics.ProcessStartInfo
     $info.FileName = $Gateway
-    $info.Arguments = "connector refresh-fail-modes --data-dir `"$($DataDir.TrimEnd([char]92))`" --hold-until-exit $GatewayId$(if ($Closed) { ' --closed' })"
+    $info.Arguments = "connector refresh-fail-modes --data-dir `"$($DataDir.TrimEnd([char]92))`" --hold-until-exit $GatewayId --hold-timeout 10m$(if ($Closed) { ' --closed' })"
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true

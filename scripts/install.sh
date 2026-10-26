@@ -1080,7 +1080,7 @@ hold_hook_fail_modes() {
     HOLD_LOG="${STAGING}/refresh-fail-modes.log"
     : >"${HOLD_LOG}"
     "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes \
-        --hold-until-exit "$1" >"${HOLD_LOG}" 2>&1 &
+        --hold-until-exit "$1" --hold-timeout 10m >"${HOLD_LOG}" 2>&1 &
     HOLD_PID=$!
     while ! grep -q "Holding the hook fail modes" "${HOLD_LOG}" 2>/dev/null; do
         if ! kill -0 "${HOLD_PID}" 2>/dev/null; then

@@ -4946,6 +4946,18 @@ def test_native_running_hook_is_renamed_aside_and_replaced(tmp_path: Path) -> No
         running.wait(timeout=30)
 
 
+def test_the_fail_mode_hold_outlasts_the_installers_own_steps() -> None:
+    # GAP-0311: the hold took the 2 minute default from its start, before the
+    # rollback copy, the hook swap and the drain of old calls; on a busy host
+    # it had run out by the time the gateway stopped ("the gateway was still
+    # running after 2m0s") and the upgrade was undone. The installers end or
+    # stop the hold themselves, so it is given their own bound.
+    hold = _ps1_function("Start-HookFailModeHold")
+    assert "--hold-until-exit $GatewayId --hold-timeout 10m" in hold
+    sh = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    assert '--hold-until-exit "$1" --hold-timeout 10m' in sh
+
+
 # ── 1.0.4 (W4b loop round 1) ────────────────────────────────────────────────
 
 
