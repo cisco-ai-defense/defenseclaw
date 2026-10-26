@@ -699,8 +699,46 @@ func runWindowsEnterpriseStandaloneAction(
 	if (action == "status" || action == "verify") && report.Installed {
 		appendWindowsEnterpriseStatusAdvisories(ctx, result, report)
 	}
+	if action == "status" || action == "verify" || action == "repair" {
+		settleWindowsEnterpriseHotConfigClosure(ctx, result, action)
+	}
 	addWindowsEnterpriseNothingInstalledError(result, report, action)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// settleWindowsEnterpriseHotConfigClosure handles the closure a config change
+// whose undo was not proven leaves: every standalone hook answers "the
+// DefenseClaw gateway is not available" until it is released. A clean
+// elevated repair or verify releases it once the gateway proves the installed
+// config's policy, as ensure does. Otherwise status warns and verify fails,
+// so no result reads healthy while every enrolled user is locked out
+// (GAP-1599).
+func settleWindowsEnterpriseHotConfigClosure(ctx context.Context, result *enterprisestatus.Result, action string) {
+	if !result.Installed {
+		return
+	}
+	if held, err := windowsEnterpriseHotConfigHooksHeld(); err != nil || !held {
+		return
+	}
+	reason := ""
+	if action != "status" && windowsEnterpriseIsElevated() && len(result.Errors) == 0 {
+		err := windowsEnterpriseReleaseHotConfigClosureIfProven(ctx, result, 0)
+		if held, heldErr := windowsEnterpriseHotConfigHooksHeld(); err == nil && heldErr == nil && !held {
+			result.Changes = append(result.Changes, "released the standalone hook closure a failed config undo left; the gateway proves the installed config's policy")
+			return
+		}
+		if err != nil {
+			reason = " (" + windowsEnterpriseBoundedDiagnostic(err.Error()) + ")"
+		}
+	}
+	message := "every standalone hook is forced closed since a config change could not prove its undo, so agents are told the DefenseClaw gateway is not available" + reason +
+		". Next step: from an elevated PowerShell prompt run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1; it releases the closure once the gateway proves the installed config"
+	if action == "status" {
+		result.SecurityComplete = false
+		result.AddWarning("hook_closure_held", message)
+		return
+	}
+	result.AddError("hook_closure_held", message)
 }
 
 // appendWindowsEnterpriseStatusAdvisories adds the advisories status and
@@ -3897,7 +3935,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 }
 
 func windowsEnterpriseReleaseHotConfigClosureIfProven(ctx context.Context, result *enterprisestatus.Result, code int) error {
-	if code != 0 || !result.OK || !result.Installed {
+	// Finish sets result.OK only after this runs, so the error list is the
+	// verdict: gating on OK kept every closure for good (GAP-1599).
+	if code != 0 || len(result.Errors) != 0 || !result.Installed {
 		return nil
 	}
 	// A failed hot-config undo left this administrator-owned closure across

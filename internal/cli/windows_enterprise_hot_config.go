@@ -538,6 +538,18 @@ func windowsEnterpriseHotConfigApply(
 			if holdErr != nil {
 				closure = "the hooks could not be held closed (" + windowsEnterpriseBoundedDiagnostic(holdErr.Error()) + ")"
 			}
+			if !bundleChange && !payloadlessRollback {
+				// A plain config change goes on to the upgrade transaction,
+				// which installs it and restarts the guardian, so an error
+				// here said "the previous config is back" over a 1603 while
+				// the transaction had installed the change (GAP-0933). The
+				// transaction's own result decides; the closure is released
+				// once the run ends clean and the gateway proves the
+				// installed config (GAP-1599).
+				result.AddWarning("hook_fail_mode_restore_unproven", "the change could not be applied in the running gateway and the hook guardian did not prove the previous hook fail mode for every enrolled target ("+
+					windowsEnterpriseBoundedDiagnostic(renderErr.Error())+"); "+closure+"; the upgrade transaction applies the change")
+				return
+			}
 			result.AddError("hook_fail_mode_restore_unproven", "the previous config is back and the gateway enforces it, but the hook guardian did not put the previous hook fail mode back for every enrolled target: "+
 				windowsEnterpriseBoundedDiagnostic(renderErr.Error())+"; "+closure+". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify"))
 			return
