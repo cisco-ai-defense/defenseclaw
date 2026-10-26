@@ -78,37 +78,37 @@ func TestSharedHookSidecarRefusalLetsARestartRepairANullFailModesMap(t *testing.
 			t.Fatal(err)
 		}
 	}
+	t.Run("corroborating flat records", func(t *testing.T) {
+		dataDir := t.TempDir()
+		path := writeSidecarFixture(t, dataDir, nullMap)
+		writeFlat(t, dataDir, "codex", "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\nFAIL_MODE_SOURCE=config\n")
+		writeFlat(t, dataDir, "claudecode", "DEFENSECLAW_CONNECTOR=claudecode\nDEFENSECLAW_FAIL_MODE=closed\n")
+		err := SharedHookSidecarRefusal(SetupOpts{DataDir: dataDir})
+		if !errors.Is(err, ErrSharedHookSidecarRestartRepairs) || !errors.Is(err, ErrAgentConfigRefusal) ||
+			!strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "without --no-restart") {
+			t.Fatalf("SharedHookSidecarRefusal = %v; want the restart-repairs refusal naming %s", err, path)
+		}
+		if after, _ := os.ReadFile(path); string(after) != nullMap {
+			t.Fatalf("the check changed the sidecar: %q", after)
+		}
+	})
 	for name, body := range map[string]string{
+		// fail_mode_sources names codex, but its flat record is gone.
+		"named flat record gone": nullMap,
+		// The T10-L5 shape: no flat record proves a fail mode, so the
+		// writer refuses it too.
 		"T10-L5 shape, no flat records": `{"version":2,"fail_modes":null,"legacy_fail_mode":"open"}`,
-		"corroborating flat records":    nullMap,
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run("flat records cannot rebuild it: "+name, func(t *testing.T) {
 			dataDir := t.TempDir()
 			path := writeSidecarFixture(t, dataDir, body)
-			if body == nullMap {
-				writeFlat(t, dataDir, "codex", "DEFENSECLAW_FAIL_MODE=open\nFAIL_MODE_SOURCE=config\n")
-				writeFlat(t, dataDir, "claudecode", "DEFENSECLAW_FAIL_MODE=closed\n")
-			}
 			err := SharedHookSidecarRefusal(SetupOpts{DataDir: dataDir})
-			if !errors.Is(err, ErrSharedHookSidecarRestartRepairs) || !errors.Is(err, ErrAgentConfigRefusal) ||
-				!strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "without --no-restart") {
-				t.Fatalf("SharedHookSidecarRefusal = %v; want the restart-repairs refusal naming %s", err, path)
-			}
-			if after, _ := os.ReadFile(path); string(after) != body {
-				t.Fatalf("the check changed the sidecar: %q", after)
+			if errors.Is(err, ErrSharedHookSidecarRestartRepairs) || !errors.Is(err, ErrAgentConfigRefusal) ||
+				!strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "flat records cannot rebuild it") {
+				t.Fatalf("SharedHookSidecarRefusal = %v; want a plain refusal naming %s", err, path)
 			}
 		})
 	}
-	t.Run("flat records cannot rebuild it", func(t *testing.T) {
-		dataDir := t.TempDir()
-		path := writeSidecarFixture(t, dataDir, nullMap)
-		// fail_mode_sources names codex, but its flat record is gone.
-		err := SharedHookSidecarRefusal(SetupOpts{DataDir: dataDir})
-		if errors.Is(err, ErrSharedHookSidecarRestartRepairs) || !errors.Is(err, ErrAgentConfigRefusal) ||
-			!strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "flat records cannot rebuild it") {
-			t.Fatalf("SharedHookSidecarRefusal = %v; want a plain refusal naming %s", err, path)
-		}
-	})
 }
 
 func writeSidecarFixture(t *testing.T, dataDir, body string) string {
