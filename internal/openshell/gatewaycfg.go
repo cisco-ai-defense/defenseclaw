@@ -771,6 +771,10 @@ type GatewayChanges struct {
 	// The gateway lists only its namespace's sandboxes, so it is set only
 	// on a gateway without sandboxes in the namespace it leaves.
 	DockerNamespace string
+	// StopSync gives the gateway's systemd user unit an ExecStop that syncs
+	// each running MicroVM's disk before the gateway stops (a drop-in a
+	// daemon-reload applies; systemd only; GAP-0380).
+	StopSync *StopSync
 }
 
 // tomlSettings are the gateway.toml assignments the changes make. Where
@@ -846,6 +850,10 @@ type FileChange struct {
 	// that it has not changed since (SeedBefore).
 	SeededFrom string `json:"seeded_from,omitempty"`
 	SeedBefore []byte `json:"-"`
+	// ReloadOnly marks a unit drop-in a daemon-reload applies with no
+	// restart (the stop sync): Apply writes it first, on its own, and a
+	// rollback of the rest of the plan keeps it.
+	ReloadOnly bool `json:"reload_only,omitempty"`
 }
 
 // GatewayPlan is exactly what Apply will write. Files that would not
@@ -925,6 +933,8 @@ func (p *GatewayPlan) String() string {
 		flushFirst = ": " + manualRestartFlushFirst
 	}
 	switch {
+	case p.ReloadOnly():
+		b.WriteString("  then the systemd user manager reads the unit again (no restart: running sandboxes keep running)\n")
 	case p.Manual && p.switchesDriver():
 		fmt.Fprintf(&b, "  then you restart the gateway, the way you started it, on the %s compute driver (DefenseClaw cannot restart it), which stops every sandbox on it%s; "+
 			"sandboxes made on the %s driver cannot start again (one gateway runs one driver), and OpenShell drops them a few minutes later with any work not brought back\n", p.ComputeDriver, flushFirst, p.FromDriver)
@@ -970,7 +980,7 @@ func (g *GatewayConfigurator) Plan(ctx context.Context, ch GatewayChanges) (*Gat
 	if err != nil {
 		return nil, err
 	}
-	if len(settings) == 0 && len(ch.Env) == 0 && len(ch.UnsetEnv) == 0 && ch.ServiceUMask == "" {
+	if len(settings) == 0 && len(ch.Env) == 0 && len(ch.UnsetEnv) == 0 && ch.ServiceUMask == "" && ch.StopSync == nil {
 		return plan, nil
 	}
 	env, err := g.serviceEnvironment(ctx)
@@ -1052,6 +1062,15 @@ func (g *GatewayConfigurator) Plan(ctx context.Context, ch GatewayChanges) (*Gat
 		if fc != nil {
 			plan.Files = append(plan.Files, fc)
 			plan.ServiceUMask = ch.ServiceUMask
+		}
+	}
+	if ch.StopSync != nil {
+		fc, err := g.planUnitStopSync(ctx, ch.StopSync)
+		if err != nil {
+			return nil, err
+		}
+		if fc != nil {
+			plan.Files = append(plan.Files, fc)
 		}
 	}
 	if plan.Empty() {
@@ -1245,6 +1264,30 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 	if g.Rendered != nil {
 		return nil, ErrRenderedGateway
 	}
+	if plan.Empty() {
+		return &GatewayApplyResult{}, nil
+	}
+	// The stop sync goes in first, on its own, and stays when the rest of
+	// the plan is rolled back: the restarts that follow (Apply's, and a
+	// rollback's) sync a MicroVM a raw client started after the final
+	// check before they end it (GAP-0380).
+	units, rest := plan.splitReloadOnly()
+	res := &GatewayApplyResult{}
+	if !units.Empty() {
+		if err := g.applyReloadOnly(ctx, res, units); err != nil {
+			return res, err
+		}
+	}
+	more, err := g.apply(ctx, rest)
+	if more != nil {
+		res.Files = append(res.Files, more.Files...)
+		res.Restarted = more.Restarted
+	}
+	return res, err
+}
+
+// apply is Apply of a plan without reload-only files.
+func (g *GatewayConfigurator) apply(ctx context.Context, plan *GatewayPlan) (*GatewayApplyResult, error) {
 	res := &GatewayApplyResult{}
 	if plan.Empty() {
 		return res, nil
@@ -1637,8 +1680,16 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 		return err
 	}
 	defer unlock()
+	// The stop sync is removed last, after the restart onto the restored
+	// files, which it syncs the MicroVMs of; alone, a daemon-reload undoes
+	// it with no restart (GAP-0380).
+	all := res
+	res, stopSync := splitStopSync(all)
+	if len(res.Files) == 0 {
+		return g.restore(ctx, stopSync)
+	}
 	if g.NoService(ctx) {
-		if err := g.restore(ctx, res); err != nil {
+		if err := g.restore(ctx, all); err != nil {
 			return err
 		}
 		return ErrNoGatewayService
@@ -1649,7 +1700,7 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 		svc, err := g.ServiceState(ctx)
 		switch {
 		case err == nil && svc.Installed && !svc.Active:
-			if err := g.restore(ctx, res); err != nil {
+			if err := g.restore(ctx, all); err != nil {
 				return err
 			}
 			g.clearRestartPending()
@@ -1661,7 +1712,7 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 			// failed and stopped the per-user uninstall half done
 			// (GAP-0369). The files go back; the service loads them when it
 			// next starts.
-			if err := g.restore(ctx, res); err != nil {
+			if err := g.restore(ctx, all); err != nil {
 				return err
 			}
 			g.clearRestartPending()
@@ -1699,7 +1750,10 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 		pending.putBack(g)
 		return fmt.Errorf("%w (the rollback was aborted: the active gateway files were kept and the gateway was not restarted)", err)
 	}
-	return g.restart(ctx)
+	if err := g.restart(ctx); err != nil {
+		return err
+	}
+	return g.restore(ctx, stopSync)
 }
 
 // restartMark is the pending-restart mark as it was before a rollback

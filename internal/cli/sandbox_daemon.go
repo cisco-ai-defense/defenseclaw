@@ -100,6 +100,28 @@ var sandboxDaemonStopCmd = &cobra.Command{
 	},
 }
 
+// sandboxDaemonSyncGateway is sync-sandboxes' --gateway.
+var sandboxDaemonSyncGateway string
+
+// sandboxDaemonSyncCmd is the ExecStop DefenseClaw gives the OpenShell
+// gateway service of a per-user gateway on the MicroVM driver (a systemd
+// drop-in setup writes, openshell.StopSync): a stop or restart of the
+// gateway ends every MicroVM on it, so it first syncs the disk of each one
+// OpenShell lists ready, whoever started it and whoever stops the gateway
+// (GAP-0380). It runs as the account, under the user manager.
+var sandboxDaemonSyncCmd = &cobra.Command{
+	Use:          "sync-sandboxes",
+	Short:        "Sync each running MicroVM's disk before the OpenShell gateway stops (the gateway service's ExecStop)",
+	Hidden:       true,
+	Args:         cobra.NoArgs,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		ctx, cancel := context.WithTimeout(cmd.Context(), openshell.StopSyncTimeout)
+		defer cancel()
+		return openshell.SyncGatewaySandboxes(ctx, openshell.DiscoverOptions{Gateway: sandboxDaemonSyncGateway}, cmd.OutOrStdout())
+	},
+}
+
 // sandboxDaemonDrainCmd is what the managed lifecycle runs as the account
 // right before it stops the account's sandbox daemon and OpenShell gateway
 // for a waiting change (a switch of its OpenShell setup, a stop, a
@@ -183,6 +205,8 @@ func drainAccountGateway(ctx context.Context, in io.Reader, out io.Writer, d san
 
 func init() {
 	sandboxDaemonCmd.AddCommand(sandboxDaemonStopCmd)
+	sandboxDaemonSyncCmd.Flags().StringVar(&sandboxDaemonSyncGateway, "gateway", "", "the OpenShell gateway registration (default: the openshell CLI's active one)")
+	sandboxDaemonCmd.AddCommand(sandboxDaemonSyncCmd)
 	sandboxDaemonCmd.AddCommand(sandboxDaemonDrainCmd)
 	rootCmd.AddCommand(sandboxDaemonCmd)
 }

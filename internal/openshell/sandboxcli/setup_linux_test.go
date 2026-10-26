@@ -25,6 +25,30 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
+const testStopSyncBinary = "/home/dev/.local/bin/defenseclaw-gateway"
+
+func init() { stopSyncBinary = func() (string, error) { return testStopSyncBinary, nil } }
+
+// GAP-0380: on a gateway already on MicroVMs whose only change is the stop
+// sync, setup writes it with no restart question and no restart: the user
+// manager reads it, and no sandbox stops.
+func TestSetupGivesTheGatewayServiceTheStopSyncWithoutARestart(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	ta.GOOS = "linux"
+	ta.IO.TTY = false
+	ta.HostDoctor = linuxKVMReport(openshell.DriverVM, nil)
+	ta.gateway.planFiles = []*openshell.FileChange{{Path: "/home/dev/.config/systemd/user/openshell-gateway.service.d/zz-defenseclaw-stop-sync.conf",
+		ReloadOnly: true, Summary: []string{"ExecStop=..."}}}
+	ta.gateway.applyRes = &openshell.GatewayApplyResult{}
+	_, _ = useGateway(ta)
+	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	if p := ta.gateway.planned; len(p) != 1 || p[0].StopSync == nil || p[0].StopSync.Binary != testStopSyncBinary || ta.gateway.applied != 1 || ta.gateway.restarts != 0 {
+		t.Fatalf("plans %+v, applied %d, restarts %d", p, ta.gateway.applied, ta.gateway.restarts)
+	}
+	has(t, ta.output(), "✓ the openshell-gateway service now syncs each running MicroVM's disk before it stops (a systemd drop-in; no restart)")
+	lacks(t, ta.output(), "gateway configured and restarted")
+}
+
 // linuxKVMReport is a doctor report of a Linux host with KVM, e2fsprogs
 // and the MicroVM driver, whose gateway runs driver; edit adjusts it.
 func linuxKVMReport(driver openshell.ComputeDriver, edit func(*openshell.DoctorReport)) func(context.Context, *openshell.Doctor) *openshell.DoctorReport {
@@ -102,6 +126,10 @@ func TestSetupOffersMicroVMsOnALinuxHostWithKVM(t *testing.T) {
 			if len(p) != 1 || p[0].ComputeDriver != openshell.DriverVM || p[0].EnableBindMounts || p[0].ServiceUMask != wantUMask ||
 				p[0].VMIdentity == nil || *p[0].VMIdentity != (openshell.VMIdentity{UID: 1000, GID: 1000}) || ta.gateway.applied != 1 {
 				t.Fatalf("gateway plans = %+v, applied %d", p, ta.gateway.applied)
+			}
+			// GAP-0380: the same plan gives the service the stop sync.
+			if s := p[0].StopSync; s == nil || s.Binary != testStopSyncBinary {
+				t.Fatalf("stop sync = %+v", s)
 			}
 			has(t, ta.output(), "✓ gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs",
 				"every run works on a copy (the MicroVM driver mounts no host folders)")
