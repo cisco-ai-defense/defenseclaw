@@ -200,3 +200,6 @@ def test_doctor_does_not_say_config_validate_passes_when_it_did_not_run():
     ).items()
     assert any(f"not run: {_HIDDEN}" in item["detail"] for item in checks)
     assert not any("config validate passes" in item["detail"] for item in checks)
+    # GAP-1562: the final row keeps the loader's reason.
+    load = next(item for item in checks if item["label"] == "Config load")
+    assert "gateway must be a mapping" in load["detail"], load

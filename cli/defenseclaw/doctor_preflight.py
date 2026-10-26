@@ -136,8 +136,10 @@ def inspect_doctor_config_load_failure(load_error: BaseException) -> DoctorStart
             )
         )
         return DoctorStartupDiagnostics(tuple(checks), "Fix the config problem above, then rerun 'defenseclaw doctor'.")
+    # The loader's own reason: in an agent sandbox the config check did not
+    # run, so it is the only one that says why config.yaml failed (GAP-1562).
     detail = (
-        "config.yaml could not be loaded, so doctor stopped at the config "
+        f"config.yaml could not be loaded ({loader_detail}), so doctor stopped at the config "
         f"checks; nothing was changed or repaired. {remediation}"
     )
     checks.append(DoctorStartupCheck("fail", "Config load", detail))
