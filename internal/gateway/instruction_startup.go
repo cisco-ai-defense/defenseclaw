@@ -283,7 +283,8 @@ func instructionStartupFiles(ctx context.Context, connector, cwd string) (map[st
 		}
 		identities, reachedFiles, _ := hookpaths.ReachedInstructions(facts)
 		dirs := hookpaths.InstructionDirectories(cwd, home)
-		if client := startupClientCWD(ctx, cwd, facts, identities); client != cwd {
+		if client := startupClientCWD(cwd, facts); client != cwd {
+			identities = withLocalDirectoryIdentities(identities, hookpaths.InstructionDirectories(client, home))
 			dirs, files = startupClientSighting(client, home, dirs, files, identities, reachedFiles)
 		}
 		return instructionSnapshot(connector, files, dirs, identities)
@@ -300,35 +301,44 @@ func instructionStartupFiles(ctx context.Context, connector, cwd string) (map[st
 }
 
 // startupClientCWD is the directory the hook client read a startup snapshot
-// in (hookpaths.CWDKey) when it is another spelling of cwd, the directory
+// in (hookpaths.CWDKey) when it spells another directory than cwd, the one
 // the gateway placed the session in: the agent started in a symlinked (or
 // junction, case or short-name) spelling of its project, which the gateway
-// resolved to the physical directory (sanitizeHookCWD). Both name one
-// directory by file system identity, from the client's sighting as the user
-// or, for a gateway that reads the caller's files, from its own. Otherwise
-// it is cwd.
-func startupClientCWD(ctx context.Context, cwd string, facts, identities map[string]string) string {
+// resolved to the physical directory (sanitizeHookCWD). The client's files
+// are keyed by its spelling, so the snapshot is taken in that spelling
+// (startupClientSighting). It is not first matched to cwd by identity:
+// when the identities did not fit the hook header (GAP-1508), or the client
+// named an unrelated directory, keying the client's files by cwd dropped
+// every one of them and recorded cwd as holding none, so a write to the
+// AGENTS.md the session started with looked like one to a file it created.
+// Otherwise it is cwd.
+func startupClientCWD(cwd string, facts map[string]string) string {
 	client := facts[hookpaths.CWDKey]
 	if !filepath.IsAbs(client) || strings.ContainsRune(client, 0) {
 		return cwd
 	}
-	client = filepath.Clean(client)
-	if client == cwd {
-		return cwd
+	return filepath.Clean(client)
+}
+
+// withLocalDirectoryIdentities adds to the client's directory identities
+// the gateway's own identity of each of dirs the client sent none for (its
+// sighting did not fit the header): a gateway that can stat them carries
+// the session's first record across spellings by identity
+// (extendStartupKey); one that cannot (ProtectHome) adds nothing.
+func withLocalDirectoryIdentities(identities map[string]string, dirs []string) map[string]string {
+	out := maps.Clone(identities)
+	if out == nil {
+		out = make(map[string]string)
 	}
-	clientID, cwdID := identities[client], identities[cwd]
-	if instructionGatewayReadsFiles(ctx) {
-		if clientID == "" {
-			clientID = hookpaths.DirectoryIdentity(client)
+	for _, dir := range dirs {
+		if _, sent := out[dir]; sent {
+			continue
 		}
-		if cwdID == "" {
-			cwdID = hookpaths.DirectoryIdentity(cwd)
+		if identity := hookpaths.DirectoryIdentity(dir); identity != "" {
+			out[dir] = identity
 		}
 	}
-	if clientID == "" || clientID != cwdID {
-		return cwd
-	}
-	return client
+	return out
 }
 
 // startupClientSighting is the startup snapshot's directories and files
