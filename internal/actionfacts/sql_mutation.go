@@ -533,7 +533,14 @@ func withoutSQLComments(engine, query string) (string, bool) {
 				len(rest) > 2 && !strings.ContainsRune(" \t\r\n", rune(rest[2])) {
 				return "", false
 			}
-			end := strings.IndexByte(rest, '\n')
+			// A line comment ends at the end of the line. PostgreSQL, SQL
+			// Server and Snowflake end a line at a carriage return as well
+			// as a line feed, so a bare CR must not hide the statement after
+			// it (GAP-1769). MySQL and MariaDB read to the line feed only.
+			end := strings.IndexAny(rest, "\r\n")
+			if engine == "mysql" {
+				end = strings.IndexByte(rest, '\n')
+			}
 			if end < 0 {
 				end = len(rest)
 			}

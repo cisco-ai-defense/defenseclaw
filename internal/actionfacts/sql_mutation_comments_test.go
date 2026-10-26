@@ -26,6 +26,9 @@ func TestSQLCommentsDoNotHideDestructiveSQL(t *testing.T) {
 		{"mysql comment between keywords", "mysql -e 'DELETE/**/FROM audit_log' app", "mysql", SQLMutationDeleteUnbounded},
 		{"sql server drop database with comment", `sqlcmd -Q "DROP DATABASE production -- note"`, "sqlserver", SQLMutationDropDatabase},
 		{"literal stdin with comments", "psql -d production <<'SQL'\n-- cleanup\nTRUNCATE TABLE scratch.events; -- done\nSQL", "postgresql", SQLMutationTruncate},
+		// GAP-1769: PostgreSQL ends a -- comment at a bare carriage return.
+		{"bare CR ends a postgres line comment", "psql -d production <<'SQL'\n-- cleanup\rTRUNCATE TABLE scratch.events;\nSQL", "postgresql", SQLMutationTruncate},
+		{"bare CR ends a sql server line comment", "sqlcmd -d production <<'SQL'\n-- cleanup\rDROP DATABASE production\nSQL", "sqlserver", SQLMutationDropDatabase},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := Analyze(Input{Tool: "shell", Command: tc.command})
