@@ -1254,10 +1254,12 @@ def _refused_scoped_hook_credentials(cfg, health: dict | None) -> set[str]:
 
 
 def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bool = False) -> str:
-    """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)."""
+    """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)
+    or the agent's own settings turn its hooks off (GAP-1634)."""
     try:
         from defenseclaw.hook_integrity import (
             HookProblem,
+            agent_hook_switch_problems,
             hook_registration_problems,
             hook_runtime_problems,
             repair_command,
@@ -1270,7 +1272,12 @@ def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bo
                 blocking=True,
             )]
             if credential_refused
-            else hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
+            # An agent setting that turns every hook off (Claude Code or
+            # Copilot disableAllHooks, Codex [features] hooks = false) is
+            # DEGRADED here as in the alert and doctor (GAP-1634).
+            else hook_runtime_problems(cfg, connector)
+            or hook_registration_problems(cfg, connector)
+            or agent_hook_switch_problems(cfg, connector)
         )
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         return ""
