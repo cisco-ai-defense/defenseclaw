@@ -304,7 +304,14 @@ _EXECUTABLE_SUFFIXES = frozenset({
     ".lua", ".go", ".rs", ".java", ".jar", ".class", ".ps1", ".psm1", ".vbs", ".bash", ".zsh", ".fish",
     ".exe", ".so", ".dylib", ".wasm", ".dll", ".node", ".sh", ".bat", ".cmd",
     ".com", ".scr", ".msi", ".cpl", ".hta", ".wsf", ".vbe", ".jse", ".psd1", ".pyw",
+    # Other interpreters and compiled sources an agent can run or build, and
+    # archives, which can carry any of the above (GAP-2039).
+    ".applescript", ".scpt", ".swift", ".r", ".jl", ".tcl", ".groovy", ".kts", ".ex", ".exs",
+    ".c", ".cc", ".cpp", ".cs",
+    ".zip", ".tar", ".tgz", ".gz", ".whl", ".deb", ".rpm", ".pkg", ".dmg", ".7z",
 })
+# Build files a single command runs (make, just) whatever their suffix (GAP-2039).
+_EXECUTABLE_NAMES = frozenset({"makefile", "gnumakefile", "justfile"})
 # First bytes of a file the OS can run whatever its name: a #! script, an
 # ELF, Mach-O (thin and fat, both byte orders) or Windows PE (MZ) binary.
 _EXECUTABLE_MAGIC = (
@@ -351,7 +358,8 @@ def _plugin_has_executable_files(target: str, ctx: ScanContext) -> bool:
             if _is_git_hook_sample(root, name):
                 continue
             suffix = os.path.splitext(name)[1].casefold()
-            if suffix in _EXECUTABLE_SUFFIXES or name.casefold() in _EXECUTABLE_CONFIG_NAMES:
+            folded = name.casefold()
+            if suffix in _EXECUTABLE_SUFFIXES or folded in _EXECUTABLE_CONFIG_NAMES or folded in _EXECUTABLE_NAMES:
                 return True
             try:
                 st = os.lstat(path)
