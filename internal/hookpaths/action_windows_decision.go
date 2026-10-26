@@ -237,6 +237,132 @@ func actionWindowsHereStringCloserLen(line string, quote byte) int {
 	return 0
 }
 
+// actionPowerShellCode keeps quoted text and line boundaries while removing
+// comments. Call it only for an explicit PowerShell dialect: cmd treats # as
+// ordinary data, and an absent hint does not identify the shell.
+func actionPowerShellCode(command string) string {
+	code := []byte(command)
+	var quote byte
+	blockComment := false
+	lineComment := false
+	for i := 0; i < len(code); i++ {
+		c := command[i]
+		if lineComment {
+			if c == '\n' || c == '\r' {
+				lineComment = false
+			} else {
+				code[i] = ' '
+			}
+			continue
+		}
+		if blockComment {
+			if i+1 < len(code) && c == '#' && command[i+1] == '>' {
+				blockComment = false
+				code[i], code[i+1] = ' ', ' '
+				i++
+				continue
+			}
+			if c != '\n' && c != '\r' {
+				code[i] = ' '
+			}
+			continue
+		}
+		if quote == '\'' {
+			if c == '\'' {
+				if i+1 < len(code) && command[i+1] == '\'' {
+					i++ // doubled quote is part of the literal
+				} else {
+					quote = 0
+				}
+			}
+			continue
+		}
+		if c == '`' && i+1 < len(code) {
+			i++ // PowerShell escape, including a literal # or quote
+			continue
+		}
+		if quote == '"' {
+			if c == '"' {
+				quote = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quote = c
+			continue
+		}
+		commentStart := i == 0 || strings.ContainsRune(" \t\r\n,=;|&(){}[]", rune(command[i-1]))
+		if commentStart && i+1 < len(code) && c == '<' && command[i+1] == '#' {
+			blockComment = true
+			code[i], code[i+1] = ' ', ' '
+			i++
+			continue
+		}
+		if c == '#' && commentStart {
+			lineComment = true
+			code[i] = ' '
+		}
+	}
+	return string(code)
+}
+
+func actionWindowsLiteralDollars(command string, dialect string) string {
+	var normalized strings.Builder
+	normalized.Grow(len(command))
+	if dialect != "powershell" {
+		// Keep the pre-dialect Windows scan byte-for-byte for cmd and an
+		// absent hint. A backtick has no escape meaning in cmd.
+		singleQuoted := false
+		for i := 0; i < len(command); i++ {
+			if command[i] == '\'' {
+				singleQuoted = !singleQuoted
+			}
+			if singleQuoted && command[i] == '$' {
+				normalized.WriteByte('@')
+			} else {
+				normalized.WriteByte(command[i])
+			}
+		}
+		return normalized.String()
+	}
+	var quote byte
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if c == '`' && quote != '\'' && i+1 < len(command) {
+			if command[i+1] == '$' {
+				normalized.WriteByte('@')
+				i++
+				continue
+			}
+			normalized.WriteByte(c)
+			normalized.WriteByte(command[i+1])
+			i++
+			continue
+		}
+		if c == '\'' && quote == 0 {
+			quote = '\''
+		} else if c == '\'' && quote == '\'' {
+			if i+1 < len(command) && command[i+1] == '\'' {
+				normalized.WriteByte(c)
+				normalized.WriteByte(c)
+				i++
+				continue
+			}
+			quote = 0
+		} else if c == '"' && quote == 0 {
+			quote = '"'
+		} else if c == '"' && quote == '"' {
+			quote = 0
+		}
+		if c == '$' && quote == '\'' {
+			normalized.WriteByte('@')
+		} else {
+			normalized.WriteByte(c)
+		}
+	}
+	return normalized.String()
+}
+
 func actionWindowsRedirectOperator(word string) string {
 	switch word {
 	case ">", ">>", "<", "<<":

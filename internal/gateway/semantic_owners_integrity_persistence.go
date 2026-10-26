@@ -1516,7 +1516,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 // client's evidence (clientGlobFacts), nil for any other caller.
 func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, globFacts map[string]string) bool {
 	if input.Command != "" &&
-		hookpaths.ActionCommandDecisionWithGlobFacts(input.Command, input.CWD, facts.ActiveHome, globFacts) == "protected-target" {
+		hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) == "protected-target" {
 		return true
 	}
 	enforcementFacts := facts.EnforcementProjection()
