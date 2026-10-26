@@ -7385,4 +7385,3 @@ try {{ Wait-VenvFree; "FREE sleeps=$script:sleeps" }} catch {{ "$($_.Exception.M
     stop = _ps1_function("Stop-Gateway")
     assert stop.index("$scans = @(Get-GatewayDescendants)") < stop.index('@("stop")')
     assert stop.index("Stop-Watchdog\n    foreach ($scan in $scans)") > stop.index('@("stop")')
-
