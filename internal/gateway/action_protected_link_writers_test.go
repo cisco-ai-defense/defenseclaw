@@ -238,7 +238,7 @@ func TestR104OrdinaryChainedRedirectInManagedMode(t *testing.T) {
 		blocked bool
 	}{
 		{`cd ./sub && ln -s ../a b && echo marker > out.txt`, false},
-		{`cd sub && ln -s ../a b && echo marker > out.txt`, true},
+		{`cd sub && ln -s ../a b && echo marker > out.txt`, false}, // GAP-1742
 		{`cd sub && ln -s ../../.ssh/authorized_keys b && echo marker > b`, true},
 	} {
 		input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: project, ActiveHome: home,

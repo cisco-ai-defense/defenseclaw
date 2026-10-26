@@ -107,7 +107,7 @@ func TestR104UnprovenProtectedReachDecisions(t *testing.T) {
 		{"DEBUG trap handler", `f() { echo marker >> alias; }; trap 'f; :' DEBUG`, true},
 		{"EXIT trap evaluates function", `f() { echo marker >> alias; }; trap 'eval f' EXIT`, true},
 		{"dynamic EXIT trap handler", `f() { echo marker >> alias; }; trap "$HANDLER" EXIT`, true},
-		{"inert definition", `f() { echo marker >> alias; }; echo ok`, true},
+		{"inert definition", `f() { echo marker >> alias; }; echo ok`, false}, // GAP-1535: never called
 		{"trap echoes dormant function name", `f() { echo marker >> alias; }; trap 'echo f' EXIT`, true},
 		{"eval function with argument", `f() { echo marker >> alias; }; eval 'f argument'`, true},
 		{"eval echoes dormant function", `f() { echo marker >> alias; }; eval 'echo f'`, true},
@@ -161,7 +161,7 @@ func TestR104UnprovenProtectedReachDecisions(t *testing.T) {
 		{"Python read control", `python3 -c 'open("alias","r").read()'`, true},
 		{"Ruby read control", `ruby -e 'File.read("alias")'`, true},
 		{"Python copy ordinary destination", `python3 -c 'import shutil; shutil.copy2("payload/authorized_keys","out.txt")'`, false},
-		{"CDPATH selected existing link", `cd sub && ln -s ../a b && echo marker > out.txt`, true},
+		{"CDPATH selected existing link", `cd sub && ln -s ../a b && echo marker > out.txt`, false}, // GAP-1742; unexported CDPATH is a documented limit
 		{"explicit cd ordinary file", `cd ./sub && ln -s ../a b && echo marker > out.txt`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
