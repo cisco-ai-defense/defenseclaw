@@ -1619,6 +1619,8 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
             ux.subhead(f"A blocked call {signal}", indent="    ")
     elif outage_only:
         ux.subhead(_outage_open_note(app, f"{label} calls"), indent="  ")
+        if normalize_connector(key) == "amp":
+            ux.subhead(_AMP_OUTAGE_RECORD_NOTE, indent="  ")
     elif mode == "closed" and upstream_fail_open(app.cfg, key):
         ux.warn(
             f"{label} will remain fail-open; this value is stored only as requested policy provenance.",
@@ -1638,12 +1640,7 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         )
     else:
         if normalize_connector(key) == "amp":
-            ux.subhead(
-                "An eligible per-user Amp outage-open call writes "
-                "~/.defenseclaw/logs/hook-failures.jsonl; the gateway records a "
-                "guardrail-degraded alert when it resumes. Managed and sandbox Amp plugins write no such row.",
-                indent="  ",
-            )
+            ux.subhead(_AMP_OUTAGE_RECORD_NOTE, indent="  ")
         else:
             ux.subhead(
                 f"Invalid or unavailable gateway responses will now ALLOW {label} and log the failure to "
@@ -1852,6 +1849,21 @@ def _secure_client_fail_mode(app: AppContext) -> bool:
         return False
     outside = getattr(app.cfg, "managed_outside_secure_client", None)
     return callable(outside) and not outside()
+
+
+# Where an Amp call an outage lets run is recorded (GAP-1017). The outage
+# preview (_outage_open_note) is followed by it whenever Amp is affected.
+_AMP_OUTAGE_RECORD_NOTE = (
+    "An eligible per-user Amp outage-open call writes "
+    "~/.defenseclaw/logs/hook-failures.jsonl; the gateway records a "
+    "guardrail-degraded alert when it resumes. Managed and sandbox Amp plugins write no such row."
+)
+_AMP_OUTAGE_RECORDS_NOTE = (
+    "On a per-user install, eligible Amp outage-open calls write "
+    "~/.defenseclaw/logs/hook-failures.jsonl; the gateway records a "
+    "guardrail-degraded alert when it resumes. Other hook connectors also log eligible "
+    "fail-open calls. Managed and sandbox Amp plugins write no such row."
+)
 
 
 def _outage_open_note(app: AppContext, calls: str) -> str:
@@ -2230,6 +2242,8 @@ def fail_mode_cmd(
         ux.warn("A gateway outage will now BLOCK supported calls. Other failures remain closed.", indent="  ")
     elif outage_only:
         ux.subhead(_outage_open_note(app, "supported calls"), indent="  ")
+        if "amp" in active_names:
+            ux.subhead(_AMP_OUTAGE_RECORDS_NOTE, indent="  ")
     elif mode == "closed" and upstream_open and len(upstream_open) == len(active_names):
         ux.warn(
             f"{upstream_labels} will remain fail-open; closed is stored only as requested policy provenance.",
@@ -2264,13 +2278,7 @@ def fail_mode_cmd(
         )
         ux.subhead("open is saved for hook connectors you set up later.", indent="    ")
     elif "amp" in active_names:
-        ux.subhead(
-            "On a per-user install, eligible Amp outage-open calls write "
-            "~/.defenseclaw/logs/hook-failures.jsonl; the gateway records a "
-            "guardrail-degraded alert when it resumes. Other hook connectors also log eligible "
-            "fail-open calls. Managed and sandbox Amp plugins write no such row.",
-            indent="  ",
-        )
+        ux.subhead(_AMP_OUTAGE_RECORDS_NOTE, indent="  ")
     else:
         ux.subhead(
             ("Once the guardrail is enabled, invalid or unavailable gateway responses will ALLOW"
