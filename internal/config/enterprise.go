@@ -1109,6 +1109,16 @@ func standaloneRulePackDefaultWithExists(cfg *Config, dataDir, goos string, exis
 		// for the lifecycle to refuse (it is inside data_dir).
 		return
 	}
+	if strings.TrimSpace(cfg.Guardrail.RulePack) != "" {
+		// guardrail.rule_pack names the pack, so the implicit rule_pack_dir
+		// loads nothing, but it is part of the config and guardrail policy
+		// digests. A standard account cannot stat the root-only policy_dir
+		// pack, kept it, and computed another digest than root for the same
+		// signed bundle (GAP-1003). It no longer depends on what the caller
+		// may read.
+		cfg.Guardrail.RulePackDir = path.Join(layout.VendorPolicyDir, "guardrail", "default")
+		return
+	}
 	if policyPack != "" {
 		// Only a folder known to be absent falls back: any other stat
 		// error keeps the policy_dir pack, which the trust checks report.

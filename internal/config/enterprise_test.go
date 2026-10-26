@@ -588,6 +588,39 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 	}
 }
 
+// GAP-1003: with guardrail.rule_pack naming the pack, the implicit
+// rule_pack_dir loads nothing, so it must not depend on whether the account
+// can stat the root-only policy_dir pack: root (absent) and a standard user
+// (permission denied) resolve the same value, and so the same digest.
+func TestStandaloneRulePackDefaultIgnoresAccountAccessWhenAPackIsNamed(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		layout, err := managed.StandaloneLayoutFor(goos)
+		if err != nil {
+			t.Fatal(err)
+		}
+		vendor := layout.VendorPolicyDir + "/guardrail/default"
+		got := map[string]string{}
+		for name, probe := range map[string]error{"root": fs.ErrNotExist, "standard user": fs.ErrPermission, "present": nil} {
+			cfg := Config{
+				DeploymentMode: "managed_enterprise",
+				ConfigFilePath: layout.ConfigPath,
+				DataDir:        layout.DataDir,
+				PolicyDir:      layout.PolicyDir,
+				Enterprise:     EnterpriseConfig{Profile: managed.ProfileStandalone},
+			}
+			cfg.Guardrail.RulePack = "custom"
+			cfg.Guardrail.RulePackDir = layout.DataDir + "/policies/guardrail/default"
+			standaloneRulePackDefaultWithExists(&cfg, layout.DataDir, goos, func(string) (bool, error) { return probe == nil, probe })
+			got[name] = cfg.Guardrail.RulePackDir
+		}
+		for name, dir := range got {
+			if dir != vendor {
+				t.Fatalf("%s %s: rule_pack_dir = %q, want %q for every caller (all: %v)", goos, name, dir, vendor, got)
+			}
+		}
+	}
+}
+
 // agent_prefixes applies to Linux and macOS, but one standalone config may
 // be shared with Windows hosts, so every OS validates it the same way (Unix
 // path semantics) whatever OS runs the check.
