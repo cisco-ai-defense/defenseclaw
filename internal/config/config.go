@@ -1926,6 +1926,23 @@ func normalizeConnectorKey(name string) string {
 	}
 }
 
+// canonicalizeConnectorSelection folds guardrail.connector and claw.mode
+// to their registry names (trim, lowercase, claude-code/claude_code ->
+// claudecode) once, right after load. activeConnector, the hook gates and
+// the CLI already read the folded name; this makes every other reader of the
+// loaded config read it too: the single-connector boot
+// (configuredConnectorName -> resolveActiveConnector), the API connector
+// label, the watcher and the enterprise enumerators. Before, a primary that
+// `config set` accepts as claude-code failed the boot with "not found in
+// registry" and its hooks failed open (GAP-2007, GAP-1971, GAP-1972).
+func canonicalizeConnectorSelection(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.Guardrail.Connector = normalizeConnectorKey(cfg.Guardrail.Connector)
+	cfg.Claw.Mode = ClawMode(normalizeConnectorKey(string(cfg.Claw.Mode)))
+}
+
 // connectorOverride returns the per-connector override block for the
 // named connector, if one is configured. It is the single internal
 // lookup point shared by every Effective*(connector) resolver: an empty
@@ -2952,6 +2969,7 @@ func loadConfigSourceCheckedWithLayout(
 	// key is normalized or checked for duplicates.
 	migrateLegacyConnectorIDs(&cfg)
 	dropRetiredConnectorSettings(&cfg)
+	canonicalizeConnectorSelection(&cfg)
 
 	if err := checkRuntimeConfigVersion(cfg.ConfigVersion, resolvesToSecureClient(&cfg, pinnedDeploymentMode)); err != nil {
 		return nil, err
