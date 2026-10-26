@@ -2361,6 +2361,15 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	}
 	showWarning := true
 	if opts.perUserOutage {
+		// Claude Code and Codex show nothing a hook prints on an exit-0
+		// allow except a systemMessage, which only some events carry
+		// (perUserGatewayDownNotice). An event that cannot show the warning
+		// leaves the once-per-session marker for the next one that can, so
+		// a running session's first prompt does not spend it silently
+		// (GAP-1352).
+		if outageWarningNoticeOnly(sp.connector) && perUserGatewayDownNotice(opts, sp, reason) == "" {
+			return emitFailOpenAllow(opts, sp, reason)
+		}
 		showWarning = firstOutageWarning(opts)
 	}
 	if text := perUserOutageOpenText(opts, reason); text != "" && opts.perUserOutage {
@@ -2456,6 +2465,12 @@ func coldStartFailureReason(err error) string {
 // (defenseclaw_unreachable_notice_json) on the same events. A missing answer
 // never fails open outside Secure Client (noAnswerFailMode), so only the
 // outage reasons have a notice.
+// outageWarningNoticeOnly reports a connector whose agent shows a per-user
+// outage warning only as a systemMessage (perUserGatewayDownNotice).
+func outageWarningNoticeOnly(connector string) bool {
+	return connector == "claudecode" || connector == "codex"
+}
+
 func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return ""
