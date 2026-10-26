@@ -1070,7 +1070,7 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 			return nil, ""
 		}
 		failed := profileSubject{UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, LookupFailed: identityLookupBlocking.Load()}
-		live := set.match(&failed, profileSubjectLookup, connectorName, agent)
+		live := set.explainLiveDecision(&failed, connectorName, agent)
 		differs := live.Name != decision.Name || live.Match != decision.Match || live.Refused != decision.Refused
 		view = map[string]any{
 			"failing_since": since.UTC().Format(time.RFC3339),
@@ -1098,7 +1098,7 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 	cached := profileSubjectFromVerified(VerifiedSubject{
 		UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, Directory: facts,
 	}, identityLookupBlocking.Load())
-	live := set.match(&cached, profileSubjectLookup, connectorName, agent)
+	live := set.explainLiveDecision(&cached, connectorName, agent)
 	differs := live.Name != decision.Name || live.Match != decision.Match || live.MatchedGroup != decision.MatchedGroup ||
 		live.Refused != decision.Refused
 	view = map[string]any{

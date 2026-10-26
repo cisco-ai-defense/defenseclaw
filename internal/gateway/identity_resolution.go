@@ -535,6 +535,46 @@ func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubjec
 		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "` to inspect the identity decision"
 }
 
+// explainOnRequestPaths is explain's decision for connectorName's requests:
+// decide on any path, and, when that refuses, on the hook and inspect paths
+// a connector's requests are decided on. A request decides on its own path,
+// where an unproven assignment whose profile enforces there as the proven
+// one does changes nothing (selectProfile), so the pathless answer refused
+// accounts whose hook calls were allowed (GAP-1685). No path refusing gives
+// the hook path's decision; one path refusing keeps the refusal and names
+// that path. Without a connector explain keeps the pathless answer.
+func (set *guardrailProfileSet) explainOnRequestPaths(connectorName string, decide func(profilePath) profileDecision) (profileDecision, []string) {
+	decision := decide(profilePathAny)
+	if decision.Refused == "" || connectorName == "" {
+		return decision, nil
+	}
+	hook, inspect := decide(profilePathHook), decide(profilePathInspect)
+	var refusedOn []string
+	if hook.Refused != "" {
+		refusedOn = append(refusedOn, "hook")
+	}
+	if inspect.Refused != "" {
+		refusedOn = append(refusedOn, "inspect")
+	}
+	switch len(refusedOn) {
+	case 0:
+		return hook, nil
+	case 1:
+		return decision, refusedOn
+	}
+	return decision, nil
+}
+
+// explainLiveDecision is what subject's requests on connectorName get from
+// the facts the gateway cached for it, decided as explain decides
+// (explainOnRequestPaths).
+func (set *guardrailProfileSet) explainLiveDecision(subject *profileSubject, connectorName, agent string) profileDecision {
+	live, _ := set.explainOnRequestPaths(connectorName, func(path profilePath) profileDecision {
+		return set.matchResolved(subject, resolveIdentity(subject, nil), profileSubjectLookup, connectorName, nil, path, agent)
+	})
+	return live
+}
+
 // profileExplainCommand names the installed administrator command for the
 // verified ID. A missing agent ownership fact includes the current verified
 // agent ID so explain checks the same assignment as the refused hook.
