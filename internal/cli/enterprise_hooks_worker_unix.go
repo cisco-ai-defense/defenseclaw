@@ -436,6 +436,8 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		}
 		if len(request.Targets) > 0 {
 			response.Targets = runEnterpriseHookWorkerApply(ctx, request).Targets
+		} else {
+			removeRetiredConnectorsForAccount(ctx, request)
 		}
 		blocks, dropped, err := enterprisepolicy.CollectForeignHookBlocks(filepath.Clean(request.Home), now)
 		response.Blocks, response.BlocksDropped = blocks, dropped
@@ -565,6 +567,17 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
 		outcome := enterpriseHookWorkerTargetResult{Index: target.Index}
+		if request.Standalone && connector.IsRemovedConnector(opts.ConnectorName) &&
+			(target.Mode == enterpriseHookWorkerModeRemove || target.Mode == enterpriseHookWorkerModeRemoveLeftover) {
+			// until 1.1: removeRetiredConnectorsForAccount above already ran
+			// this connector's teardown for the account, and the registry no
+			// longer resolves it, so its removal is done here and never keeps
+			// the purge back (GAP-1915).
+			outcome.OK = true
+			outcome.PathsReported = target.Mode == enterpriseHookWorkerModeRemove
+			results = append(results, outcome)
+			continue
+		}
 		var result enterprisehooks.InstallResult
 		var err error
 		switch target.Mode {

@@ -329,7 +329,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			request.cleanupFence = newEnterpriseForeignHookFenceSession(request.ForeignCleanup, stderr, strconv.Itoa(account.UID), account.Home)
 		}
 		names := leftovers(account.User)
-		if len(cleanups) == 0 && len(names) == 0 && vscode == nil {
+		if len(cleanups) == 0 && len(names) == 0 && vscode == nil && !accountHasRemovedConnectorFiles(account.Home) {
 			continue
 		}
 		for index, name := range names {

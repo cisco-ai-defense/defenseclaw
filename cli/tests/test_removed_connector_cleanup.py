@@ -265,6 +265,15 @@ class InstallerNoticeTests(_Host):
         _write(os.path.join(self.hooks, "openhands-hook.sh"), _OPENHANDS_103, 0o700)
         self.assertTrue(removed_connectors.found(self.data))
 
+    def test_a_config_outside_the_data_folder_is_read_too(self):
+        """GAP-1918: the installers migrate $DEFENSECLAW_CONFIG when it is set; the probe reads that file."""
+        outside = _write(os.path.join(self.home, "etc", "dc.yaml"), "guardrail:\n  connector: omnigent\n")
+        _write(os.path.join(self.data, "config.yaml"), "guardrail:\n  connectors:\n    codex: {}\n")
+        with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": outside}):
+            self.assertTrue(removed_connectors.found(self.data))
+        with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": ""}):
+            self.assertFalse(removed_connectors.found(self.data))
+
     def test_the_notice_is_printed_once_after_the_teardown_removed_everything(self):
         self.assertEqual(removed_connectors.installer_lines(self.data, False), [])
         self.assertEqual(removed_connectors.installer_lines(self.data, True), [_NOTICE])

@@ -480,8 +480,10 @@ def found(data_dir: str) -> bool:
 
     The installers ask before the upgrade (the new gateway's first start
     removes what it can), so they can print :data:`NOTICE` once after it.
+    The config is $DEFENSECLAW_CONFIG when it is set, the file the installers migrate.
     """
-    return bool(leftovers(data_dir)) or configured(os.path.join(data_dir or "", "config.yaml"))
+    config_path = os.environ.get("DEFENSECLAW_CONFIG") or os.path.join(data_dir or "", "config.yaml")
+    return bool(leftovers(data_dir)) or configured(config_path)
 
 
 def installer_lines(data_dir: str, found_before: bool) -> list[str]:

@@ -57,6 +57,31 @@ func removeRetiredConnectorsForAccount(ctx context.Context, request enterpriseHo
 			ManagedEnterprise: true,
 		})
 	}
+	if len(seen) == 0 && filepath.IsAbs(request.Home) {
+		// An account with no target (the foreign-cleanup job of an account
+		// whose row is gone) has its data in the default place (GAP-1916).
+		removeRetiredConnectorsIn(ctx, request.Home, connector.SetupOpts{
+			DataDir:           filepath.Join(filepath.Clean(request.Home), ".defenseclaw"),
+			ManagedEnterprise: true,
+		})
+	}
+}
+
+// accountHasRemovedConnectorFiles reports whether the account's default data
+// folder still holds an OpenHands hook script or OmniGent policy module (the
+// 1.0.4 deny stubs), so the guardian starts a job for an account it has no
+// other work for (GAP-1916). Existence only: the job reads them as the account.
+func accountHasRemovedConnectorFiles(home string) bool {
+	if !filepath.IsAbs(home) {
+		return false
+	}
+	hooks := filepath.Join(filepath.Clean(home), ".defenseclaw", "hooks")
+	for _, name := range []string{"openhands-hook.sh", "defenseclaw_omnigent_policy.py"} {
+		if _, err := os.Lstat(filepath.Join(hooks, name)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func removeRetiredConnectorsIn(ctx context.Context, home string, opts connector.SetupOpts) {
@@ -74,11 +99,16 @@ func removeRetiredConnectorsIn(ctx context.Context, home string, opts connector.
 		if retired, ok := connector.RetiredConnector(name); ok {
 			_ = retired.Teardown(ctx, opts)
 		}
+		left, _ := connector.RemovedConnectorLeftovers(name, opts)
+		if len(left) >= len(before) {
+			// Nothing changed since the run that logged these (a copy 1.0.4
+			// saved stays by design): log nothing again (GAP-1917).
+			continue
+		}
 		if !noticed {
 			fmt.Fprintf(enterpriseHookWorkerRemovedLog, "[enterprise-hooks] %s\n", connector.RemovedConnectorNotice)
 			noticed = true
 		}
-		left, _ := connector.RemovedConnectorLeftovers(name, opts)
 		for _, item := range left {
 			fmt.Fprintf(enterpriseHookWorkerRemovedLog, "[enterprise-hooks] removed connector %s left %s: %s; to remove it: %s\n", name, item.Path, item.What, item.Step)
 		}

@@ -32,6 +32,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -171,5 +172,53 @@ func TestRemovedConnectorBootNeverFailsOnALeftover(t *testing.T) {
 	}
 	if _, err := os.Lstat(h.script); err != nil {
 		t.Fatalf("read-only hooks folder: %v", err)
+	}
+}
+
+// The single-connector boot: a 1.0.4 host guarded only Claude Code and kept
+// the OpenHands and OmniGent lock entries, deny stubs and registrations. That
+// boot path has no orphan reconcile; a 1.0.5 boot still removes what
+// DefenseClaw wrote for them and drops both lock entries, keeps Claude
+// Code's, and prints the notice once. The next boot finds nothing to do
+// (GAP-1843, GAP-1926).
+func TestRemovedConnectorSingleConnectorBootRemovesLockOnlyLeftovers(t *testing.T) {
+	h := stageRemovedBootHost(t)
+	restore, err := connector.BindUserHomeDir(h.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restore)
+	lock := `{"version":2,"updated_at":"2026-10-01T00:00:00Z","connectors":{` +
+		`"claudecode":{"connector":"claudecode","contract_id":"claudecode-hooks-v1","defenseclaw_version":"1.0.4","hook_fail_mode":"open","updated_at":"2026-10-01T00:00:00Z"},` +
+		`"openhands":{"connector":"openhands","contract_id":"openhands-hooks-v1","defenseclaw_version":"1.0.3","hook_fail_mode":"open","updated_at":"2026-10-01T00:00:00Z"},` +
+		`"omnigent":{"connector":"omnigent","contract_id":"omnigent-policy-v1","defenseclaw_version":"1.0.3","hook_fail_mode":"open","updated_at":"2026-10-01T00:00:00Z"}}}` + "\n"
+	if err := os.WriteFile(filepath.Join(h.dataDir, "hook_contract_lock.json"), []byte(lock), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := connector.SaveActiveConnectors(h.dataDir, []string{"claudecode"}); err != nil {
+		t.Fatal(err)
+	}
+	removedConnectorNoticeLogged.Store(false)
+	t.Cleanup(func() { removedConnectorNoticeLogged.Store(false) })
+	s := &Sidecar{cfg: &config.Config{DataDir: h.dataDir}}
+	registry := connector.NewDefaultRegistry()
+	for boot := 1; boot <= 2; boot++ {
+		stderr := captureStderr(t, func() { s.removeRemovedConnectorLeftovers(context.Background(), registry) })
+		h.requireRemoved(t)
+		for _, name := range []string{"openhands", "omnigent"} {
+			if got := connector.LoadHookContractLockEntry(h.dataDir, name); got.Connector != "" {
+				t.Errorf("boot %d: the %s lock entry is still there", boot, name)
+			}
+		}
+		if got := connector.LoadHookContractLockEntry(h.dataDir, "claudecode"); got.Connector != "claudecode" {
+			t.Errorf("boot %d: the claudecode lock entry went: %+v", boot, got)
+		}
+		want := 0
+		if boot == 1 {
+			want = 1
+		}
+		if got := strings.Count(stderr, connector.RemovedConnectorNotice); got != want {
+			t.Errorf("boot %d: the notice was logged %d times, want %d:\n%s", boot, got, want, stderr)
+		}
 	}
 }
