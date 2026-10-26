@@ -1355,3 +1355,27 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
     }
   });
 });
+// 1.0.5 docs rows (r105 docs group): one row per gap. `section` is a "## "
+// heading of the page; the row reads only that section and its subsections.
+type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
+const r105Rows: DocRow[] = [
+  // r105-rows-end
+];
+
+function pageSection(name: string, heading?: string): string {
+  const text = page(name);
+  if (!heading) return text;
+  const body = text.split(`## ${heading} `)[1];
+  assert.ok(body !== undefined, `${name} has no "## ${heading}" section`);
+  return body.split(' ## ')[0];
+}
+
+describe('1.0.5 docs rows', () => {
+  for (const row of r105Rows) {
+    it(`${row.gap}: ${row.page}${row.section ? ` "${row.section}"` : ''}`, () => {
+      const text = pageSection(row.page, row.section);
+      for (const phrase of row.has ?? []) assert.ok(text.includes(phrase), `${row.page} lacks: ${phrase}`);
+      for (const phrase of row.lacks ?? []) assert.ok(!text.includes(phrase), `${row.page} still says: ${phrase}`);
+    });
+  }
+});
