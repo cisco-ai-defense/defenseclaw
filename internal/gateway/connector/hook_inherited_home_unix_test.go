@@ -97,8 +97,8 @@ func TestPerUserHookWithoutHomeUsesItsInstalledFolder(t *testing.T) {
 				if err := WriteHookScriptsForConnectorObject(hookDir, addr, "dccert-fake-token-"+conn.Name(), conn); err != nil {
 					t.Fatalf("write hooks: %v", err)
 				}
-				installNativeGatewayForHookTest(t, data, hookDir)
 				user := filepath.Join(root, "user")
+				installNativeGatewayForHookTest(t, user, hookDir)
 				other := filepath.Join(user, ".defenseclaw")
 				if err := os.MkdirAll(other, 0o700); err != nil {
 					t.Fatal(err)
