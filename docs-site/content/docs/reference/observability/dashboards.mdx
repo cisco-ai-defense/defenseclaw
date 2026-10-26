@@ -1,6 +1,6 @@
 ---
 title: Dashboards
-description: The 19 bundled Grafana dashboards, how they link, how to read empty panels, Agent360, and the Splunk dashboards.
+description: The 18 bundled Grafana dashboards, how they link, how to read empty panels, Agent360, and the Splunk dashboards.
 keywords:
   - DefenseClaw Grafana dashboards
   - Agent360
@@ -8,11 +8,11 @@ keywords:
   - Prometheus Loki Tempo
 ---
 
-DefenseClaw provisions 19 Grafana dashboards into a **DefenseClaw** folder. Start the stack with [Run Grafana locally](/docs/how-to/observability/run-grafana-locally); the links on this page assume `localhost:3000`.
+DefenseClaw provisions 18 Grafana dashboards into a **DefenseClaw** folder, or 19 from a source checkout (editable install), which also seeds the optional Fleet dashboard. Start the stack with [Run Grafana locally](/docs/how-to/observability/run-grafana-locally); the links on this page assume `localhost:3000`.
 
 Dashboards add no redaction, masking or field hiding. They show every field that reaches Loki, Tempo or Prometheus, including content when the producer supplied it. Set a [redaction profile](/docs/reference/observability/redaction) on the `local-observability` destination to reduce what they receive.
 
-## The 19 dashboards
+## The 18 dashboards
 
 | Dashboard (UID) | Question it answers | Backends |
 | --- | --- | --- |
@@ -34,9 +34,10 @@ Dashboards add no redaction, masking or field hiding. They show every field that
 | **DefenseClaw — Proxy & LLM Guard** (`defenseclaw-traffic`) | What happens on proxy and router deployments? Empty unless proxy mode is active. | Prometheus, Loki, Tempo |
 | **DefenseClaw — Sandboxes** (`defenseclaw-sandboxes`) | What are OpenShell sandboxes doing, reaching and being refused? See [Sandboxes board](#sandboxes-board). | Prometheus, Loki |
 | **DefenseClaw — Runtime & Reliability** (`defenseclaw-runtime`) | Is the process, database, exporter or destination delivery unhealthy? | Prometheus, Loki |
-| **DefenseClaw IoT Fleet** (`defenseclaw-fleet`) | Which edge devices are online and receiving verdicts? Empty until the [authenticated Fleet scrape](/docs/how-to/install-the-edge-connector/) is set up. | Prometheus |
 
-The local stack ships these JSON files in `bundles/local_observability_stack/grafana/dashboards/`. `up` refreshes them on every start; pass `--no-refresh-config` to keep your edits. Edits made in the Grafana UI are not written back to disk, so copy a changed board out with **Dashboard → JSON Model**.
+The optional **DefenseClaw IoT Fleet** (`defenseclaw-fleet`) dashboard ships in the separate `defenseclaw-fleet-assets.tar.gz` release asset, alongside the authenticated Fleet scrape templates. See [Install the Edge Connector](/docs/how-to/install-the-edge-connector/) for Fleet setup. The core wheel excludes these optional Fleet assets. A source checkout (editable install) seeds the Fleet dashboard from `bundles/` along with the other 18.
+
+The dashboard sources live in `bundles/local_observability_stack/grafana/dashboards/`. `up` refreshes the installed dashboards on every start; pass `--no-refresh-config` to keep your edits. Edits made in the Grafana UI are not written back to disk, so copy a changed board out with **Dashboard → JSON Model**.
 
 ## How the drill-down works
 

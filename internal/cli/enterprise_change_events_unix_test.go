@@ -70,6 +70,101 @@ func spoolEvents(t *testing.T, root string, layout managed.StandaloneLayout) ([]
 	return out, raw.String()
 }
 
+// Cobra rejects syntax before RunE. Those refusals must still reach the
+// installed host's change spool without reading a value or recording raw input.
+func TestUnixChangeSyntaxRefusalsAreAudited(t *testing.T) {
+	root, layout := stubSecretChangeEnv(t)
+	savedManaged, savedSecure := bundleManagedDevice, bundleSecureClient
+	installed, secure, euid := true, false, 0
+	bundleManagedDevice = func() bool { return installed }
+	bundleSecureClient = func() bool { return secure }
+	previousEnv := newUnixLifecycleEnv
+	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
+		env, err := previousEnv(goos)
+		if env != nil {
+			env.Geteuid = func() int { return euid }
+		}
+		return env, err
+	}
+	t.Cleanup(func() {
+		bundleManagedDevice, bundleSecureClient = savedManaged, savedSecure
+		newUnixLifecycleEnv = previousEnv
+	})
+	for _, tc := range []struct {
+		action string
+		args   []string
+	}{
+		{"set", []string{"--name", "BAD_NAME", "--unknown"}},
+		{"set", []string{"--name"}},
+		{"set", []string{"--from-stdin"}},
+		{"remove", []string{"--name", "qa-token", "extra"}},
+		{"remove", []string{"--lock-wait=invalid"}},
+		{"anchors", []string{"--file", "unread-input.json", "--unknown"}},
+		{"anchors", []string{"--file"}},
+		{"anchors", []string{"--lock-wait=invalid"}},
+		{"anchors", []string{"extra"}},
+		{"anchors", nil},
+	} {
+		t.Run(tc.action+"/"+strings.Join(tc.args, " "), func(t *testing.T) {
+			before, _ := spoolEvents(t, root, layout)
+			cmd := newEnterpriseSecretCommand(tc.action, "")
+			kind, action := enterprisestatus.ChangeKindSecret, tc.action
+			if tc.action == "anchors" {
+				cmd = newEnterpriseBundleAnchorsCommand()
+				cmd.SetArgs(append([]string{"install"}, tc.args...))
+				kind, action = enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall
+			} else {
+				cmd.SetArgs(tc.args)
+			}
+			input := strings.NewReader("credential-value-marker\n")
+			cmd.SetIn(input)
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			if err := cmd.Execute(); commandExitCode(err) != enterprisestatus.UnixExitInvalidArgs {
+				t.Fatalf("syntax error = %v", err)
+			}
+			if input.Len() != len("credential-value-marker\n") {
+				t.Fatal("a syntax refusal read the credential")
+			}
+			events, raw := spoolEvents(t, root, layout)
+			if len(events) != len(before)+1 {
+				t.Fatalf("got %d change events, want %d", len(events), len(before)+1)
+			}
+			ev := events[len(events)-1]
+			if ev.Kind != kind || ev.Action != action || ev.Outcome != enterprisestatus.ChangeRefused ||
+				ev.ReasonCode != "invalid_arguments" || ev.Actor == "" || ev.Validate() != nil {
+				t.Fatalf("syntax refusal = %+v", ev)
+			}
+			for _, private := range []string{"BAD_NAME", "credential-value-marker", "unread-input.json"} {
+				if strings.Contains(raw, private) {
+					t.Fatalf("the change spool contains %q", private)
+				}
+			}
+		})
+	}
+	before, _ := spoolEvents(t, root, layout)
+	for _, mode := range []string{"per-user", "standard-account", "secure-client", "status"} {
+		installed, secure, euid = mode != "per-user", mode == "secure-client", 0
+		if mode == "standard-account" {
+			euid = 1000
+		}
+		action := "set"
+		if mode == "status" {
+			action = "status"
+		}
+		cmd := newEnterpriseSecretCommand(action, "")
+		cmd.SetArgs([]string{"--unknown"})
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		if err := cmd.Execute(); commandExitCode(err) != enterprisestatus.UnixExitInvalidArgs {
+			t.Fatalf("%s syntax error = %v", mode, err)
+		}
+	}
+	if after, _ := spoolEvents(t, root, layout); len(after) != len(before) {
+		t.Fatal("a per-user, unprivileged, Secure Client or read-only syntax error wrote a managed event")
+	}
+}
+
 // Every Linux and macOS secret set or remove that changed a credential,
 // failed or was refused leaves one change event; a run that changed
 // nothing leaves none, and no event carries the value.

@@ -352,7 +352,26 @@ func init() {
 	// With --json every Linux and macOS secret verb prints one JSON
 	// document on stdout, a flag error too (mgmt-agent-api GAP-0031).
 	enterpriseSecretArgumentRefusal = func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error {
+		if ev, ok := secretChangeEvent(action, opts.name, false, "invalid_arguments", err, false); ok {
+			recordUnixChangeRefusal(cmd, ev)
+		}
 		return reportUnixSecretFailure(cmd, action, opts, err, opts.json || secretArgsRequestJSON(secretRawArgs()))
+	}
+}
+
+// recordUnixChangeRefusal audits a refusal before the lifecycle runs. Only
+// an installed standalone host and a root caller may create the spool.
+func recordUnixChangeRefusal(cmd *cobra.Command, ev enterprisestatus.ChangeEvent) {
+	if bundleSecureClient() || !bundleManagedDevice() {
+		return
+	}
+	env, err := newUnixLifecycleEnv(enterpriseunix.CurrentGOOS())
+	if err == nil && env.Geteuid() == 0 {
+		err = env.RecordChange(ev)
+	}
+	if err != nil {
+		warning := changeUnrecordedWarning(err)
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: %s\n", warning.Code, warning.Message)
 	}
 }
 

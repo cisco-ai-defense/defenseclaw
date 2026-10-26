@@ -122,6 +122,7 @@ for current behavior.
 - **Disconnected closed hooks retain a truthful denial audit.** A client that disconnects before finalization gets the fail-mode decision in its audit row; stop events and Secure Client retain their existing behavior. A gateway decision still does not prove that the agent received it.
 - **Sandbox companion shells show the remembered model.** `sandbox connect --shell` now shows the run's model in its banner, as a resumed harness session does. The shell still starts without model or harness arguments.
 
+- **The local Grafana guide matches core installs.** It lists the 18 dashboards bundled in the wheel, says a source checkout (editable install) seeds 19 because it also seeds the optional Fleet dashboard, and identifies the separate Fleet release asset.
 - **MicroVM disks of OpenShell 0.1.4 and later are found again.** From 0.1.4 OpenShell names each prepared MicroVM disk by a hash of the image ID (NVIDIA/OpenShell#4342), and `sandbox image rm`, `image prune`, teardown and the first-start disk check did not recognize those names, so the disks (about 5 GB each) stayed behind. Both naming forms are recognized now.
 
 ### Removed
