@@ -31,6 +31,7 @@ import stat
 import uuid
 from typing import Any, BinaryIO
 
+from defenseclaw.enforce.plugin_enforcer import move_into_place_no_replace
 from defenseclaw.file_permissions import make_private_directory
 
 # Bundled-skill container name. Mirrors internal/enforce/bundled_skill.go
@@ -379,7 +380,9 @@ class SkillEnforcer:
             self._copy_path(source, stage)
             if self.content_hash(stage) != source_hash:
                 raise OSError("quarantine copy hash mismatch")
-            os.rename(stage, dest)
+            # Never replace a quarantine another process made at ``dest``
+            # since the check above, not even an empty directory.
+            move_into_place_no_replace(stage, dest)
             if self.content_hash(dest) != source_hash:
                 raise OSError("quarantine destination hash mismatch")
             if self.content_hash(source) != source_hash:

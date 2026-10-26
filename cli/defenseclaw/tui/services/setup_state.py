@@ -1428,6 +1428,11 @@ def _apply_admission_action_field(cfg: object | dict[str, Any], key: str, value:
         actions.pop(severity, None)
     elif choice in {"block", "quarantine", "warn", "allow"}:
         actions[severity] = choice
+    else:
+        return
+    decide = getattr(cfg, "decide", None)
+    if callable(decide):
+        decide(key)
 
 
 def _coerce_per_connector_asset_policy_value(field_name: str, value: str) -> Any:

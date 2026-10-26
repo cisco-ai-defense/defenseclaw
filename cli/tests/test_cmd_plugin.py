@@ -45,6 +45,15 @@ from defenseclaw.inventory.plugin_directories import discover_plugin_directories
 from tests.helpers import cleanup_app, make_app_context
 
 
+def _installed_path(path):
+    """The install path of a copy an install staged in its own
+    ``.dclaw-stage-*`` directory (scanners see the staged copy)."""
+    parent = os.path.dirname(path)
+    if os.path.basename(parent).startswith(".dclaw-stage-"):
+        return os.path.join(os.path.dirname(parent), os.path.basename(path))
+    return path
+
+
 def _seed_scan(store, result) -> None:
     """Seed a forensic read-model fixture without a telemetry runtime."""
     store.insert_scan_result(
@@ -2323,7 +2332,8 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(os.path.isdir(installed))
         self.assertTrue(os.path.isfile(os.path.join(installed, "plugin.json")))
-        mock_scan.assert_called_once_with(installed)
+        mock_scan.assert_called_once()
+        self.assertEqual(_installed_path(mock_scan.call_args.args[0]), installed)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_install_antigravity_requires_root_plugin_manifest(self, mock_scan):
@@ -3643,6 +3653,419 @@ class TestPluginBareUnblockConfigScopes(PluginCommandTestBase):
         self.assertFalse(
             asset_lists.has_entry(self.app.cfg, self.app.store, "plugin", "loaded-three", "claudecode", "block")
         )
+
+
+class TestPluginInstallQuarantineNeverWarns(PluginCommandTestBase):
+    """GAP-1442/GAP-1457: once admission decides a quarantine or block, the
+    plugin install refuses it (rolled back, exit 1, install-rejected row),
+    with or without --action, at any severity, and also when the quarantine
+    move or the gateway disable fails. It is never an install-warning."""
+
+    FILE_ONLY = {"install": "none", "file": "quarantine", "runtime": "enable"}
+    RUNTIME_ONLY = {"install": "none", "file": "none", "runtime": "disable"}
+
+    def _install(self, name, args, action):
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.models import Finding, ScanResult
+
+        self.seen_at_scan: list = []
+        self.app.cfg.admission.plugin.actions["medium"] = action
+        src = self._create_plugin_dir(name)
+        scanned: list[str] = []
+
+        def scan(_self, path, *a, **kw):
+            scanned.append(_installed_path(path))
+            self.seen_at_scan.append(self._content(_installed_path(path)) if os.path.isdir(_installed_path(path)) else None)
+            return ScanResult(
+                scanner="plugin-scanner", target=path, timestamp=datetime.now(timezone.utc),
+                findings=[Finding(id="m1", severity="MEDIUM", title="broad permissions",
+                                  description="d", scanner="plugin-scanner")],
+                duration=timedelta(seconds=0.1),
+            )
+
+        with patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan", new=scan), \
+                patch("defenseclaw.registry.fetch_npm_package", return_value=src):
+            result = self.runner.invoke(plugin, ["install", *args, name], obj=self.app, catch_exceptions=True)
+        return result, scanned
+
+    def _assert_refused(self, result, scanned, reason):
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("refusing to install", result.output)
+        self.assertTrue(scanned)
+        for path in scanned:
+            self.assertFalse(os.path.exists(path), f"refused plugin left installed at {path}")
+        events = self.app.store.list_events(50)
+        self.assertFalse([e for e in events if e.action == "install-warning"], "a refusal logged install-warning")
+        rejected = [e for e in events if e.action == "install-rejected"]
+        self.assertTrue(rejected and reason in rejected[0].details, [e.details for e in rejected])
+
+    def test_no_action_refuses_a_medium_file_only_quarantine(self):
+        result, scanned = self._install("fq-pkg", [], self.FILE_ONLY)
+        self._assert_refused(result, scanned, "reason=rejected-without-action")
+
+    def test_no_action_refuses_a_medium_runtime_only_disable(self):
+        result, scanned = self._install("rd-pkg", [], self.RUNTIME_ONLY)
+        self._assert_refused(result, scanned, "reason=rejected-without-action")
+
+    def test_action_refuses_when_the_quarantine_move_fails(self):
+        with patch.object(PluginEnforcer, "quarantine", return_value=None):
+            result, scanned = self._install("qfail-pkg", ["--action"], self.FILE_ONLY)
+        self._assert_refused(result, scanned, "reason=enforcement-failed failed=quarantine")
+
+    def test_action_refuses_when_the_gateway_disable_fails(self):
+        with patch("defenseclaw.gateway.OrchestratorClient.disable_plugin", side_effect=RuntimeError("down")):
+            result, scanned = self._install("dfail-pkg", ["--action"], self.RUNTIME_ONLY)
+        self._assert_refused(result, scanned, "reason=enforcement-failed failed=runtime-disable")
+
+    def test_action_file_only_quarantine_moves_it(self):
+        result, scanned = self._install("fq-moved-pkg", ["--action"], self.FILE_ONLY)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("quarantined to", result.output)
+        self.assertFalse(os.path.exists(scanned[0]))
+
+    def test_a_medium_warn_still_installs_with_a_warning(self):
+        result, scanned = self._install("warn-pkg", [], {"install": "none", "file": "none", "runtime": "enable"})
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(os.path.isdir(scanned[0]))
+
+    def _two_connectors(self, order):
+        roots = {c: os.path.join(self.tmp_dir, f"{c}-plugins") for c in order}
+        for path in roots.values():
+            os.makedirs(path, exist_ok=True)
+        self.app.cfg.active_connectors = lambda: list(order)  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [roots[connector or order[0]]]  # type: ignore[method-assign]
+        return {c: os.path.join(root, "two-pkg") for c, root in roots.items()}
+
+    def _seed_old_copies(self, dests):
+        result, _ = self._install("two-pkg", [], {"install": "none", "file": "none", "runtime": "enable"})
+        self.assertEqual(result.exit_code, 0, result.output)
+        for dest in dests.values():
+            with open(os.path.join(dest, "plugin.py"), "w") as f:
+                f.write("# old copy\n")
+
+    def _content(self, dest):
+        with open(os.path.join(dest, "plugin.py")) as f:
+            return f.read()
+
+    def _assert_no_backup_left(self, dests):
+        for dest in dests.values():
+            parent = os.path.dirname(dest)
+            self.assertEqual([e for e in os.listdir(parent) if e.startswith(".dclaw-")], [], parent)
+
+    def test_a_later_connector_failure_keeps_an_earlier_quarantine(self):
+        """The first connector's quarantine of the staged copy stands with
+        its record; no connector's installed copy is touched."""
+        dests = self._two_connectors(["openclaw", "hermes"])
+        self._seed_old_copies(dests)
+        real = PluginEnforcer.quarantine
+        calls: list[str] = []
+
+        def quarantine(enforcer, name, path, connector=""):
+            calls.append(connector)
+            return real(enforcer, name, path, connector=connector) if len(calls) == 1 else None
+
+        with patch.object(PluginEnforcer, "quarantine", new=quarantine):
+            result, _ = self._install("two-pkg", ["--force", "--action"], self.FILE_ONLY)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(calls, ["openclaw", "hermes"])
+        self.assertEqual(self._content(dests["openclaw"]), "# old copy\n")
+        quarantine = PluginEnforcer(self.app.cfg.quarantine_dir).quarantine_path("two-pkg", "openclaw")
+        self.assertEqual(self._content(quarantine), "# plugin code\n")
+        self.assertTrue(self.app.store.has_action("plugin", "two-pkg", "file", "quarantine", "openclaw"))
+        self.assertEqual(self._content(dests["hermes"]), "# old copy\n")
+        self.assertFalse(self.app.store.has_action("plugin", "two-pkg", "file", "quarantine", "hermes"))
+        self._assert_no_backup_left(dests)
+
+    def test_a_later_connector_failure_keeps_an_earlier_disable(self):
+        """A runtime disable recorded for the first connector stands; the
+        refused new copy is never swapped in for either connector."""
+        dests = self._two_connectors(["hermes", "openclaw"])
+        self._seed_old_copies(dests)
+        with patch("defenseclaw.gateway.OrchestratorClient.disable_plugin", side_effect=RuntimeError("down")):
+            result, _ = self._install("two-pkg", ["--force", "--action"], self.RUNTIME_ONLY)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("failed=runtime-disable", "\n".join(e.details for e in self.app.store.list_events(50)))
+        self.assertEqual(self._content(dests["hermes"]), "# old copy\n")
+        self.assertTrue(self.app.store.has_action("plugin", "two-pkg", "runtime", "disable", "hermes"))
+        self.assertEqual(self._content(dests["openclaw"]), "# old copy\n")
+        self._assert_no_backup_left(dests)
+
+    BLOCK_ONLY = {"install": "block", "file": "none", "runtime": "enable"}
+
+    def test_a_thrown_enforcement_error_refuses_and_keeps_the_old_plugin(self):
+        """GAP-1483: an exception while the quarantine moves the copy, while
+        a disable or install block is recorded, or anywhere else in the
+        decision is a refused install: the rejected copy is gone, no partial
+        quarantine copy or record is left, and the replaced plugin is back
+        byte for byte."""
+
+        def partial_move(_src, dst, *a, **kw):
+            os.makedirs(dst)
+            with open(os.path.join(dst, "plugin.py"), "w") as f:
+                f.write("# partial\n")
+            raise OSError("no space left on device")
+
+        cases = {
+            "quarantine-move-raises": (self.FILE_ONLY, patch(
+                "defenseclaw.enforce.plugin_enforcer.shutil.move", side_effect=partial_move,
+            ), "failed=quarantine"),
+            "disable-record-raises": (self.RUNTIME_ONLY, patch.object(
+                PolicyEngine, "disable_for_connector", side_effect=RuntimeError("database is locked"),
+            ), "failed=runtime-disable"),
+            "block-record-raises": (self.BLOCK_ONLY, patch.object(
+                PolicyEngine, "record_scan_block", side_effect=RuntimeError("database is locked"),
+            ), "failed=install-block"),
+            "other-error": (self.FILE_ONLY, patch.object(
+                PolicyEngine, "set_source_path", side_effect=RuntimeError("database is locked"),
+            ), "failed=error"),
+        }
+        for label, (action, ctx, reason) in cases.items():
+            with self.subTest(label):
+                name = f"thrown-{label}"
+                dests = {"openclaw": os.path.join(self.app.cfg.plugin_dirs("openclaw")[0], name)}
+                self._seed_old_copies_named(name, dests)
+                with patch("defenseclaw.commands.cmd_plugin._normalize_runtime_connector", return_value="hermes"), ctx:
+                    result, _ = self._install(name, ["--force", "--action"], action)
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn("refusing to install", result.output)
+                self.assertEqual(self._content(dests["openclaw"]), "# old copy\n")
+                self._assert_no_backup_left(dests)
+                details = [e.details for e in self.app.store.list_events(50) if e.action == "install-rejected"]
+                self.assertTrue([d for d in details if reason in d], details)
+                quarantine = PluginEnforcer(self.app.cfg.quarantine_dir).quarantine_path(name, "openclaw")
+                self.assertFalse(os.path.lexists(quarantine), "a partial quarantine copy was left")
+                self.assertFalse(self.app.store.has_action("plugin", name, "file", "quarantine", "openclaw"))
+
+    def _seed_old_copies_named(self, name, dests):
+        result, _ = self._install(name, [], {"install": "none", "file": "none", "runtime": "enable"})
+        self.assertEqual(result.exit_code, 0, result.output)
+        for dest in dests.values():
+            with open(os.path.join(dest, "plugin.py"), "w") as f:
+                f.write("# old copy\n")
+
+    def test_an_error_after_the_quarantine_keeps_it_and_the_installed_plugin(self):
+        """Once the quarantine moved the staged copy out, a later error (here
+        the source-path record) fails the install; the quarantine stands and
+        the installed plugin was never touched."""
+        real = PolicyEngine.set_source_path
+        actions = {
+            "file-only": self.FILE_ONLY,
+            "file-and-disable": {"install": "none", "file": "quarantine", "runtime": "disable"},
+        }
+        for label, action in actions.items():
+            with self.subTest(label):
+                name = f"after-q-{label}"
+                dests = {"openclaw": os.path.join(self.app.cfg.plugin_dirs("openclaw")[0], name)}
+                self._seed_old_copies_named(name, dests)
+                calls: list[tuple] = []
+
+                def source_path(pe_self, *a, **kw):
+                    calls.append(a)
+                    if len(calls) > 1:
+                        raise RuntimeError("database is locked")
+                    return real(pe_self, *a, **kw)
+
+                with patch("defenseclaw.commands.cmd_plugin._normalize_runtime_connector", return_value="hermes"), \
+                        patch.object(PolicyEngine, "set_source_path", new=source_path):
+                    result, _ = self._install(name, ["--force", "--action"], action)
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertGreater(len(calls), 1, "the error after the quarantine never happened")
+                self.assertEqual(self._content(dests["openclaw"]), "# old copy\n")
+                self._assert_no_backup_left(dests)
+                quarantine = PluginEnforcer(self.app.cfg.quarantine_dir).quarantine_path(name, "openclaw")
+                self.assertTrue(os.path.isdir(quarantine), "the quarantined copy is gone")
+
+    def test_a_failed_quarantine_move_never_removes_a_quarantine_it_did_not_make(self):
+        """Another process makes the quarantine destination while this move
+        runs (before the move, or between staging and the final rename):
+        the failed move leaves that quarantine as it was, refuses, and puts
+        the replaced plugin back."""
+        real_mkdir = os.mkdir
+
+        def theirs(name):
+            dest = PluginEnforcer(self.app.cfg.quarantine_dir).quarantine_path(name, "openclaw")
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            if not os.path.isdir(dest):
+                real_mkdir(dest)
+            with open(os.path.join(dest, "theirs.txt"), "w") as f:
+                f.write("other process\n")
+            return dest
+
+        def move_fails(name):
+            def move(_src, _dst, *a, **kw):
+                theirs(name)
+                raise OSError("no space left on device")
+            return patch("defenseclaw.enforce.plugin_enforcer.shutil.move", side_effect=move)
+
+        def final_move_races(name, *, empty=False):
+            dest = PluginEnforcer(self.app.cfg.quarantine_dir).quarantine_path(name, "openclaw")
+
+            def mkdir(path, *a, **kw):
+                if os.path.abspath(path) == os.path.abspath(dest):
+                    if empty:
+                        real_mkdir(dest)
+                    else:
+                        theirs(name)
+                return real_mkdir(path, *a, **kw)
+            return patch("defenseclaw.enforce.plugin_enforcer.os.mkdir", side_effect=mkdir)
+
+        cases = {
+            "move-fails": move_fails,
+            "destination-appears-before-the-final-move": final_move_races,
+        }
+        for label, ctx_for in cases.items():
+            with self.subTest(label):
+                name = f"race-{label}"
+                dests = {"openclaw": os.path.join(self.app.cfg.plugin_dirs("openclaw")[0], name)}
+                self._seed_old_copies_named(name, dests)
+                with ctx_for(name):
+                    result, _ = self._install(name, ["--force", "--action"], self.FILE_ONLY)
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn("refusing to install", result.output)
+                quarantine = PluginEnforcer(self.app.cfg.quarantine_dir).quarantine_path(name, "openclaw")
+                with open(os.path.join(quarantine, "theirs.txt")) as f:
+                    self.assertEqual(f.read(), "other process\n", "another process's quarantine was removed")
+                self.assertEqual(sorted(os.listdir(quarantine)), ["theirs.txt"])
+                self.assertEqual(
+                    [e for e in os.listdir(os.path.dirname(quarantine)) if ".pending-" in e], [],
+                    "a staging path was left",
+                )
+                self.assertEqual(self._content(dests["openclaw"]), "# old copy\n")
+                self._assert_no_backup_left(dests)
+
+        # An empty directory another process just made at the destination
+        # is never replaced either: the move fails and leaves it as it was.
+        name = "race-empty-destination"
+        dests = {"openclaw": os.path.join(self.app.cfg.plugin_dirs("openclaw")[0], name)}
+        self._seed_old_copies_named(name, dests)
+        with final_move_races(name, empty=True):
+            result, _ = self._install(name, ["--force", "--action"], self.FILE_ONLY)
+        self.assertEqual(result.exit_code, 1, result.output)
+        quarantine = PluginEnforcer(self.app.cfg.quarantine_dir).quarantine_path(name, "openclaw")
+        self.assertEqual(os.listdir(quarantine), [], "another process's empty quarantine was replaced")
+        self.assertEqual(self._content(dests["openclaw"]), "# old copy\n")
+        self._assert_no_backup_left(dests)
+
+    def _assert_installed_copy_untouched(self, dests):
+        for dest in dests.values():
+            self.assertEqual(self._content(dest), "# old copy\n", f"{dest}: the installed plugin was touched")
+        self._assert_no_backup_left(dests)
+
+    def test_one_transaction_decides_the_staged_copy_before_any_swap(self):
+        """ONE TRANSACTION RULE (1)-(3): the scanner sees the staged new copy
+        while the installed one is still in place; a quarantine moves the
+        staged copy and the installed plugin stays as it was."""
+        name = "tx-quarantine"
+        dests = {"openclaw": os.path.join(self.app.cfg.plugin_dirs("openclaw")[0], name)}
+        self._seed_old_copies_named(name, dests)
+        result, _ = self._install(name, ["--force", "--action"], self.FILE_ONLY)
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(self.seen_at_scan, ["# old copy\n"], "the new copy was installed before it was decided")
+        self._assert_installed_copy_untouched(dests)
+        quarantine = PluginEnforcer(self.app.cfg.quarantine_dir).quarantine_path(name, "openclaw")
+        self.assertEqual(self._content(quarantine), "# plugin code\n")
+
+    def test_an_install_only_block_never_replaces_the_installed_plugin(self):
+        """GAP-1494 (plugin twin): an install block that applied refuses the
+        new copy; the installed plugin is untouched and no new copy is live."""
+        cases = {
+            "block-only": self.BLOCK_ONLY,
+            "block-and-disable": {"install": "block", "file": "none", "runtime": "disable"},
+            "runtime-only-disable": self.RUNTIME_ONLY,
+        }
+        for label, action in cases.items():
+            for connectors in (["openclaw"], ["openclaw", "hermes"]):
+                with self.subTest(label, connectors=len(connectors)):
+                    name = f"tx-{label}-{len(connectors)}"
+                    roots = {c: os.path.join(self.tmp_dir, f"{c}-plugins") for c in connectors}
+                    for root in roots.values():
+                        os.makedirs(root, exist_ok=True)
+                    self.app.cfg.active_connectors = lambda c=connectors: list(c)  # type: ignore[method-assign]
+                    self.app.cfg.plugin_dirs = (  # type: ignore[method-assign]
+                        lambda connector=None, r=roots, c=connectors: [r[connector or c[0]]]
+                    )
+                    dests = {c: os.path.join(root, name) for c, root in roots.items()}
+                    self._seed_old_copies_named(name, dests)
+                    with patch("defenseclaw.commands.cmd_plugin._normalize_runtime_connector", return_value="hermes"):
+                        result, _ = self._install(name, ["--force", "--action"], action)
+                    self.assertEqual(result.exit_code, 1, result.output)
+                    self._assert_installed_copy_untouched(dests)
+
+    def test_a_refused_fresh_install_leaves_nothing_installed(self):
+        for label, action in {"block-only": self.BLOCK_ONLY, "quarantine": self.FILE_ONLY}.items():
+            with self.subTest(label):
+                name = f"tx-fresh-{label}"
+                dest = os.path.join(self.app.cfg.plugin_dirs("openclaw")[0], name)
+                result, _ = self._install(name, ["--action"], action)
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertFalse(os.path.lexists(dest), "a refused new copy is live")
+                self._assert_no_backup_left({"openclaw": dest})
+
+    def test_staging_never_touches_paths_another_operation_made(self):
+        """ONE TRANSACTION RULE (1), (5): the staging and backup paths are
+        private to this operation; paths another install left in the root
+        (same names the old pid-based scheme used) are never reused,
+        replaced or removed, and the install still works."""
+        name = "tx-private"
+        root = self.app.cfg.plugin_dirs("openclaw")[0]
+        dests = {"openclaw": os.path.join(root, name)}
+        self._seed_old_copies_named(name, dests)
+        theirs = [os.path.join(root, f".dclaw-stage-{name}-{os.getpid()}"),
+                  os.path.join(root, f".dclaw-backup-{name}-{os.getpid()}-0")]
+        for path in theirs:
+            os.makedirs(path)
+            with open(os.path.join(path, "theirs.txt"), "w") as f:
+                f.write("other operation\n")
+        try:
+            result, _ = self._install(name, ["--force"], {"install": "none", "file": "none", "runtime": "enable"})
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(self._content(dests["openclaw"]), "# plugin code\n")
+            for path in theirs:
+                with open(os.path.join(path, "theirs.txt")) as f:
+                    self.assertEqual(f.read(), "other operation\n")
+            self.assertEqual(sorted(e for e in os.listdir(root) if e.startswith(".dclaw-")),
+                             sorted(os.path.basename(p) for p in theirs))
+        finally:
+            for path in theirs:
+                shutil.rmtree(path, ignore_errors=True)
+
+    def test_a_failed_swap_restores_only_the_copies_installed_before(self):
+        """ONE TRANSACTION RULE (4): when swapping the second connector's
+        copy fails, the first connector's swap is undone and both get back
+        exactly the copy that was installed before, never a staged one."""
+        dests = self._two_connectors(["openclaw", "hermes"])
+        self._seed_old_copies(dests)
+        real_replace = os.replace
+
+        def replace(src, dst, *a, **kw):
+            if os.path.abspath(dst) == os.path.abspath(dests["hermes"]) and os.path.basename(src) == "two-pkg":
+                raise OSError("disk full")
+            return real_replace(src, dst, *a, **kw)
+
+        with patch("defenseclaw.commands.cmd_plugin.os.replace", side_effect=replace):
+            result, _ = self._install("two-pkg", ["--force"], {"install": "none", "file": "none", "runtime": "enable"})
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("commit failed", result.output)
+        self._assert_installed_copy_untouched(dests)
+
+    def test_plugin_scan_reports_a_file_only_quarantine_as_rejected(self):
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.commands.cmd_plugin import _plugin_scan_findings_verdict
+        from defenseclaw.models import Finding, ScanResult
+
+        self.app.cfg.admission.plugin.actions["medium"] = self.FILE_ONLY
+        result = ScanResult(
+            scanner="plugin-scanner", target="x", timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="m1", severity="MEDIUM", title="t", description="d", scanner="plugin-scanner")],
+            duration=timedelta(seconds=0.1),
+        )
+        path = self._install_plugin("scan-fq")
+        _verdict, rejects = _plugin_scan_findings_verdict(
+            self.app, result, name="scan-fq", path=path, connector="openclaw",
+        )
+        self.assertTrue(rejects)
 
 
 

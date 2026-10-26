@@ -119,6 +119,9 @@ def test_activated_pre104_default_keeps_balanced_mcp_and_name(policy_dir: Path) 
     cfg = default_config()
     cfg.policy_dir = str(policy_dir)
     cfg.admission = _admission_from_policy(old_default)
+    # A 1.0.4 activation writes the HIGH that MCP inherits under MCP too
+    # (GAP-1488); 1.0.0-1.0.3 wrote the block without it.
+    assert cfg.admission.mcp.actions.pop("high") == cfg.admission.defaults.actions["high"]
     _apply_policy_guardrail(cfg, old_default)
     cfg.watch.rescan_enabled = old_default["watch"]["rescan_enabled"]
     cfg.watch.rescan_interval_min = old_default["watch"]["rescan_interval_min"]

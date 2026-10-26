@@ -4455,6 +4455,17 @@ class Config:
             return
         _existing_document_for_save(path, current)
 
+    def decide(self, *paths: str) -> None:
+        """Name config keys the next :meth:`save` writes as the caller's
+        decision, also when the value written equals the one on disk.
+
+        A save over the pre-1.0.4 default preset keeps its balanced MCP
+        compatibility only for the MCP severities no decided or changed key
+        covers (GAP-1488, ``config_writer._keep_chosen_admission``), so an
+        explicit quarantine is never compiled as a warning.
+        """
+        self.__dict__.setdefault("_decided_paths", []).extend(paths)
+
     def save(self, *, actor: str | None = None, reason: str = "") -> Any:
         """Persist this :class:`Config` through the single config writer.
 
@@ -4511,6 +4522,7 @@ class Config:
         from defenseclaw import config_writer
 
         dataclass_data = _config_to_dict(self)
+        decided = self.__dict__.pop("_decided_paths", [])
 
         def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
             merged = self._merged_document(path, dataclass_data, current)
@@ -4527,7 +4539,14 @@ class Config:
             reason or "config save",
             path=path,
             verify=verify,
+            decided=decided,
         )
+        # The admission pins the writer added (GAP-1488) go into this Config
+        # too, so it reads as the file it wrote.
+        for parts, value in result.pins.items():
+            self.admission.mcp.actions[parts[-1]] = value
+            written = dataclass_data.setdefault("admission", {}).setdefault("mcp", {}).setdefault("actions", {})
+            written[parts[-1]] = value
         if self._source_config_version == 0:
             self._source_config_version = CURRENT_CONFIG_VERSION
         self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
