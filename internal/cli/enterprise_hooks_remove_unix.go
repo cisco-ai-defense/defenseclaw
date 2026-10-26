@@ -93,6 +93,10 @@ type enterpriseHooksRemoveAllReport struct {
 	ClaudeHookUnblocked []string `json:"claude_hook_unblocked,omitempty"`
 }
 
+// enterpriseHookClaudeUnblockedNote is what the uninstall says about an
+// account whose Claude Code blocker it removed.
+const enterpriseHookClaudeUnblockedNote = "its Claude Code hook script (~/.defenseclaw/hooks/claude-code-hook.sh), which the enrollment had replaced, was removed, so its own Claude Code hook reports a missing script and does not guard Claude Code; run `defenseclaw setup claude-code` as that user to restore it"
+
 const (
 	enterpriseHookPurgeSkipFailed           = "its pending hook cleanup failed; the state stays for a retry"
 	enterpriseHookPurgeSkipKeptHome         = "its recorded home may still hold a hook registration; the state stays while cleanup is unresolved"
@@ -238,6 +242,10 @@ func addEnterpriseHookRemoveRuns(report *enterpriseHooksRemoveAllReport, runs []
 				continue
 			}
 			switch {
+			case !ok && run.Err != nil && target.Mode == enterpriseHookWorkerModeUnblockPersonalClaude && run.Job.Request.CopilotVSCode != nil:
+				// The worker of a job for the VS Code Local files ended
+				// without an answer: the copilot entry below names it, not
+				// claudecode (GAP-1830).
 			case !ok && run.Err != nil:
 				report.Failed = append(report.Failed, label+": "+boundedWorkerError(run.Err.Error()))
 			case !ok:
@@ -267,7 +275,7 @@ func addEnterpriseHookRemoveRuns(report *enterpriseHooksRemoveAllReport, runs []
 			if vscode.Error != "" {
 				report.Failed = append(report.Failed, run.Job.Account.User+"/copilot: "+boundedWorkerError(vscode.Error))
 			}
-		} else if run.Job.Request.CopilotVSCode != nil && run.Err != nil && len(run.Job.Request.Targets) == 0 {
+		} else if run.Job.Request.CopilotVSCode != nil && run.Err != nil {
 			report.Failed = append(report.Failed, run.Job.Account.User+"/copilot: "+boundedWorkerError(run.Err.Error()))
 		}
 	}
