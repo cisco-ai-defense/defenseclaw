@@ -6021,10 +6021,7 @@ function Assert-DoctorHookRegistration {
     } elseif ($Connector -eq 'copilot') {
         Assert-CopilotSynchronousWindowsHookConfig $registration 'setup-created Copilot registration'
     } elseif ($Connector -eq 'cursor') {
-        # Outside Secure Client 1.0.4 registers every Cursor hook with failClosed: true in
-        # observe and action mode, and the adapter denies its own failure in both
-        # (effectiveFailClosed; the same rule as the Setup wizard cell, d03b22c507).
-        $adapter = Assert-CursorSynchronousWindowsHookCommand $registration $true 'setup-created Cursor registration'
+        $adapter = Assert-CursorSynchronousWindowsHookCommand $registration ($script:LastSetupMode -eq 'action') 'setup-created Cursor registration'
         if (-not [string]::Equals($adapter, $expectedHookExecutable, [StringComparison]::OrdinalIgnoreCase)) {
             throw "setup-created Cursor registration uses unexpected adapter: $adapter"
         }
@@ -6911,10 +6908,7 @@ function Assert-DoctorWindowsHookRegistration {
         $devinCommand = [string]@($devinSettings.hooks.PreToolUse)[0].hooks[0].command
         $null = Get-DevinWindowsHookCommand $devinCommand 'Devin setup PreToolUse'
     } elseif ($Connector -eq 'cursor') {
-        # Outside Secure Client 1.0.4 registers every Cursor hook with failClosed: true in
-        # observe and action mode, and the adapter denies its own failure in both
-        # (effectiveFailClosed; the same rule as the Setup wizard cell, d03b22c507).
-        $cursorAdapter = Assert-CursorSynchronousWindowsHookCommand $config $true 'Cursor setup'
+        $cursorAdapter = Assert-CursorSynchronousWindowsHookCommand $config ($script:LastSetupMode -eq 'action') 'Cursor setup'
     } elseif ($Connector -eq 'antigravity') {
         Assert-AntigravityWindowsHookCommands $config
     } elseif ($Connector -eq 'hermes') {
