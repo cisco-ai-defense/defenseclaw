@@ -155,6 +155,9 @@ type enterpriseHookWorkerRequest struct {
 	// user's own home before an apply, so an enrolled user cannot stop
 	// repair of their hooks by loosening their home's mode.
 	TightenHome bool `json:"tighten_home,omitempty"`
+	// RecheckMillis keeps a verify_or_repair target under check for this
+	// long after it verified (verifyEnterpriseHookTargetOverWindow).
+	RecheckMillis int `json:"recheck_ms,omitempty"`
 	// StaticDiscovery restricts the discover operation to package metadata
 	// and the presence of the agent CLIs, executing nothing: the parent
 	// asks for it in a home other users may have written to.
@@ -576,7 +579,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				result, err = enterpriseHookWorkerInstaller(ctx, opts)
 				break
 			}
-			result, err = enterpriseHookWorkerVerifier(ctx, opts)
+			result, err = verifyEnterpriseHookTargetOverWindow(ctx, enterpriseHookWorkerVerifier, opts, time.Duration(request.RecheckMillis)*time.Millisecond)
 			if err != nil {
 				result, err = enterpriseHookWorkerInstaller(ctx, opts)
 				outcome.Repaired = err == nil

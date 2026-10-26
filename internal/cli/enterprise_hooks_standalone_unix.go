@@ -877,7 +877,10 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		slots[index] = slot
 		job, ok := jobs[account.UID]
 		if !ok {
-			job = &enterpriseHookWorkerJob{Account: account, Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true}}
+			job = &enterpriseHookWorkerJob{Account: account, Request: enterpriseHookWorkerRequest{
+				Operation: enterpriseHookWorkerOpApply, Standalone: true,
+				RecheckMillis: int(enterpriseHookReconcileRecheckWindow / time.Millisecond),
+			}}
 			jobs[account.UID] = job
 		}
 		job.Request.TightenHome = job.Request.TightenHome || tightenHome

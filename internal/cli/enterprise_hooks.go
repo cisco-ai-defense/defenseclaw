@@ -60,10 +60,64 @@ var enterpriseHookWatchSessionSettle = 5 * time.Second
 // postpone the pass they armed. Every event re-armed the debounce with no
 // limit, so writes faster than the debounce held the pass back until the
 // interval pass, long enough to start an agent without hooks and put the
-// file back unseen (GAP-0532). It leaves the pass and its repair audit
-// (about 0.9 s on macOS) inside the 3 s repair bound of a rewrite burst
-// (r103 GAP-0045; 3 s gave 3.9 s).
-var enterpriseHookWatchDebounceMaxWait = 1500 * time.Millisecond
+// file back unseen (GAP-0532). It leaves the pass, its recheck window and
+// its repair audit (about 0.9 s on macOS) inside the 3 s repair bound of a
+// rewrite burst (r103 GAP-0045, GAP-1825).
+var enterpriseHookWatchDebounceMaxWait = 1 * time.Second
+
+// enterpriseHookWatchRecheckWindow is how long a pass armed by a filesystem
+// event keeps each protected target under check after it verified. One read
+// per pass judged a file that a writer rewrites between its hooks and none
+// every 200 ms by whichever phase the read met: the hooks were back at the
+// read of most passes, so the first repair came 5-15 s into the burst
+// (GAP-1825). Checking for longer than one phase meets the damaged one.
+var enterpriseHookWatchRecheckWindow = 300 * time.Millisecond
+
+// enterpriseHookRecheckStep is the pause between two checks of a window.
+var enterpriseHookRecheckStep = 40 * time.Millisecond
+
+// enterpriseHookReconcileRecheckWindow is the recheck window of the pass
+// that runs now: the watch loop sets it for a pass a filesystem event armed.
+var enterpriseHookReconcileRecheckWindow time.Duration
+
+// enterpriseHookWatchRecheckFor is the recheck window of a pass run for reason.
+func enterpriseHookWatchRecheckFor(reason string) time.Duration {
+	if reason == "fsnotify" {
+		return enterpriseHookWatchRecheckWindow
+	}
+	return 0
+}
+
+// verifyEnterpriseHookTargetOverWindow verifies a target and, with a window,
+// verifies it again every enterpriseHookRecheckStep until the window ends.
+// It returns the first failure, which the caller repairs.
+func verifyEnterpriseHookTargetOverWindow(
+	ctx context.Context,
+	verify func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error),
+	opts enterprisehooks.InstallOptions,
+	window time.Duration,
+) (enterprisehooks.InstallResult, error) {
+	result, err := verify(ctx, opts)
+	if err != nil || window <= 0 {
+		return result, err
+	}
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		timer := time.NewTimer(enterpriseHookRecheckStep)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return result, nil
+		case <-timer.C:
+		}
+		next, err := verify(ctx, opts)
+		if err != nil {
+			return next, err
+		}
+		result = next
+	}
+	return result, nil
+}
 
 // enterpriseHookWatchDebounceDelay is the delay to arm the debounce with at
 // now for a burst whose first event armed it at first: the debounce, cut to
@@ -723,7 +777,7 @@ func enterpriseHookVerifyOrRepairTarget(
 		result, err := enterpriseHookReconcileInstaller(ctx, opts)
 		return result, false, err
 	}
-	result, verifyErr := enterpriseHookReconcileVerifier(ctx, opts)
+	result, verifyErr := verifyEnterpriseHookTargetOverWindow(ctx, enterpriseHookReconcileVerifier, opts, enterpriseHookReconcileRecheckWindow)
 	if verifyErr == nil {
 		return result, false, nil
 	}
@@ -3199,7 +3253,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				if reason == "" {
 					reason = "fsnotify"
 				}
-				if _, err := reconcile(reason); err != nil {
+				enterpriseHookReconcileRecheckWindow = enterpriseHookWatchRecheckFor(reason)
+				_, err := reconcile(reason)
+				enterpriseHookReconcileRecheckWindow = 0
+				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after %s failed: %s\n", reason, err)
 				}
 				if repairRetryNeeded {

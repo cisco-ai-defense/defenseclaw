@@ -24,7 +24,9 @@ func TestEnterpriseHookWatchRewriteBurstLeavesTimeForTheRepair(t *testing.T) {
 		}
 		fireAt = now.Add(enterpriseHookWatchDebounceDelay(now, first, debounce, enterpriseHookWatchDebounceMaxWait))
 	}
-	if pass := fireAt.Sub(first); pass > 2*time.Second {
-		t.Fatalf("a 200 ms rewrite burst starts its pass %s after the first write; the repair cannot land within 3 s", pass)
+	// The pass checks for its recheck window, then repairs and audits
+	// (about 0.9 s on macOS, plus the worker start).
+	if pass := fireAt.Sub(first) + enterpriseHookWatchRecheckFor("fsnotify"); pass > 1500*time.Millisecond {
+		t.Fatalf("a 200 ms rewrite burst ends its check %s after the first write; the repair cannot land within 3 s", pass)
 	}
 }
