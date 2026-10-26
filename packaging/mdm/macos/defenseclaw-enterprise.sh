@@ -276,7 +276,9 @@ dc_stage_parent() {
             return 0
         fi
         DC_STAGE_PARENT=/var/lib/defenseclaw-mdm
-        [ -d "$DC_STAGE_PARENT" ] || mkdir -m 0700 "$DC_STAGE_PARENT" 2>/dev/null ||
+        # A concurrent first run may create it first: the folder existing
+        # is what counts, and the trust check below decides (GAP-1850).
+        [ -d "$DC_STAGE_PARENT" ] || mkdir -m 0700 "$DC_STAGE_PARENT" 2>/dev/null || [ -d "$DC_STAGE_PARENT" ] ||
             dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "cannot create the staging folder $DC_STAGE_PARENT"
     fi
     case "$DC_STAGE_PARENT" in
@@ -1699,8 +1701,8 @@ dc_save_secret_previous() {
 # dc_journal_ready: the journal folder exists and only root can change it.
 dc_journal_ready() {
     dc_journal_parent=$(dirname "$DC_JOURNAL_DIR")
-    [ -d "$dc_journal_parent" ] || mkdir -m 0700 "$dc_journal_parent" 2>/dev/null || return 1
-    [ -d "$DC_JOURNAL_DIR" ] || mkdir -m 0700 "$DC_JOURNAL_DIR" 2>/dev/null || return 1
+    [ -d "$dc_journal_parent" ] || mkdir -m 0700 "$dc_journal_parent" 2>/dev/null || [ -d "$dc_journal_parent" ] || return 1
+    [ -d "$DC_JOURNAL_DIR" ] || mkdir -m 0700 "$DC_JOURNAL_DIR" 2>/dev/null || [ -d "$DC_JOURNAL_DIR" ] || return 1
     [ ! -L "$DC_JOURNAL_DIR" ] && dc_trusted_path "$DC_JOURNAL_DIR" || return 1
     case "$(dc_stat_mode "$DC_JOURNAL_DIR")" in *00) return 0 ;; esac
     return 1

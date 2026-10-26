@@ -4036,3 +4036,33 @@ dc_remove_stage_parent
     result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert stage.exists() == alive and state.exists() == alive
+
+
+# GAP-1850: two first kit runs at once race on creating the state folders.
+# The loser's mkdir fails because the winner made the folder; that is no
+# refusal: the folder exists and the trust check decides. A mkdir stub that
+# creates the folder and then fails models the lost race.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_wrapper_survives_a_lost_state_folder_mkdir_race(os_dir: str, tmp_path: Path) -> None:
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    state = tmp_path / "defenseclaw-mdm"
+    stage_parent = _shell_function(text, "dc_stage_parent").replace("/var/lib/defenseclaw-mdm", str(state))
+    journal_ready = _shell_function(text, "dc_journal_ready")
+    script = f"""set -u
+DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_SCRIPT_OS=linux DC_STAGING_DIR=""
+DC_JOURNAL_DIR='{state}/rotation'
+mkdir() {{ command mkdir "$@" 2>/dev/null; return 1; }}
+dc_trusted_path() {{ return 0; }}
+dc_stat_mode() {{ echo 700; }}
+dc_fail_result() {{ printf 'FAIL %s|%s|%s\\n' "$1" "$2" "$3"; exit 1; }}
+{stage_parent}
+{journal_ready}
+dc_stage_parent
+echo staged
+dc_journal_ready && echo journal
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout.split() == ["staged", "journal"], result.stdout
+    assert (state / "rotation").is_dir()
