@@ -2310,7 +2310,7 @@ const (
 // view the gateway did not answer fails the ready closed with its reason
 // (the earliest candidate's, so the daemon's own agent's first); else the
 // organization's refusal stands.
-func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []string) error {
+func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []string, pack string) error {
 	askCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type answer struct {
@@ -2332,7 +2332,7 @@ func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []str
 					answers <- answer{index: index, err: err}
 					continue
 				}
-				allowed, sandboxes, err := d.readyPolicyView(askCtx, candidates[index])
+				allowed, sandboxes, err := d.readyPolicyView(askCtx, candidates[index], pack)
 				answers <- answer{index: index, allowed: allowed, sandboxes: sandboxes, err: err}
 			}
 		}()
@@ -2375,10 +2375,10 @@ func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []str
 // that wait is over, and then goes by the view as the create would
 // (GAP-0820). A view whose run the organization's pack forbids
 // (managedPostureFatal) refuses the ready with that violation (GAP-0812).
-func (d *SandboxDaemon) readyPolicyView(ctx context.Context, name string) (allowed, sandboxes bool, err error) {
+func (d *SandboxDaemon) readyPolicyView(ctx context.Context, name, pack string) (allowed, sandboxes bool, err error) {
 	settled := time.Now().Add(sandboxrelay.ResolveIdentityWait)
 	for {
-		view, err := d.readyPolicyViewOnce(ctx, name)
+		view, err := d.readyPolicyViewOnce(ctx, name, pack)
 		if err != nil {
 			return false, false, err
 		}
@@ -2409,12 +2409,14 @@ var readyProvisionalPoll = 500 * time.Millisecond
 // within one view's bound (managedViewTimeout). A view the gateway's
 // admission limit refused (429) is asked again within that bound; when the
 // bound ends first, the 429 is the view's error.
-func (d *SandboxDaemon) readyPolicyViewOnce(ctx context.Context, name string) (sandboxapi.ManagedExplain, error) {
+func (d *SandboxDaemon) readyPolicyViewOnce(ctx context.Context, name, pack string) (sandboxapi.ManagedExplain, error) {
 	viewCtx, cancel := context.WithTimeout(ctx, managedViewTimeout)
 	defer cancel()
 	wait := readyViewRetryFirst
 	for {
-		view, _, viewErr := d.managedExplain(viewCtx, sandboxapi.ExplainRequest{Harness: name}, nil)
+		// The run's own pack: an organization pack the run names may allow
+		// an agent the default pack leaves out (GAP-1551).
+		view, _, viewErr := d.managedExplain(viewCtx, sandboxapi.ExplainRequest{Harness: name, Pack: pack}, nil)
 		if viewErr == nil {
 			return view, nil
 		}
@@ -2464,7 +2466,7 @@ func (c *managedSandboxController) Ready(ctx context.Context, req sandboxapi.Rea
 		// before setup mode installs anything for a run that cannot start.
 		if uid, held := d.openShell.PortHolder(s); held && uid != d.uid {
 			err = accountBusyError()
-		} else if err = d.readyPolicyRefusal(ctx, candidates); err == nil {
+		} else if err = d.readyPolicyRefusal(ctx, candidates, req.Pack); err == nil {
 			// Status reports unavailable until this process holds both
 			// listeners. Bind them before setup installs anything, so a
 			// busy port refuses Ready without changing the account.

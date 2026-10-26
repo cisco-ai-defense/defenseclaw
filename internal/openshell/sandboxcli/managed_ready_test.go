@@ -117,7 +117,7 @@ func TestRunReadiesTheRequestedManagedHarness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ta.preflight(bg, api, "codex", nil); err != nil {
+	if _, err := ta.preflight(bg, api, sandboxapi.ReadyRequest{Harness: "codex"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	ready := ta.daemon.callsTo("POST", sandboxapi.PathReady)

@@ -782,6 +782,33 @@ func TestSandboxDaemonReadyRefusesAPackForbiddenRunBeforeInstall(t *testing.T) {
 	}
 }
 
+// GAP-1551: the ready judges the agent under the run's own pack, as the
+// create does: an organization pack the run names (--pack) that allows the
+// agent readies, though the default pack leaves the agent out; a run with
+// no pack is judged under the default one.
+func TestSandboxDaemonReadyJudgesTheRunsPack(t *testing.T) {
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.Settings.Operational.Harnesses = []string{"codex"}
+	})
+	f.relay.explain = func(req sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		if req.Flags != nil && req.Flags.Pack == "codex-pack" {
+			return sandboxapi.ManagedExplain{Allowed: true, Posture: &sandboxapi.ManagedPosture{Pack: "codex-pack"}}, nil
+		}
+		return sandboxapi.ManagedExplain{Allowed: true, Posture: &sandboxapi.ManagedPosture{Pack: "team", Violations: []sandboxapi.Violation{
+			{Key: "harness", Fatal: true, Admin: true, Constraint: "harness.allowed", Message: "codex is not an allowed harness of pack team"}}}}, nil
+	}
+	f.run(t)
+	client := sandboxapi.NewUnixClient(f.socket)
+	if _, err := client.Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "codex"}); !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) ||
+		f.os.prepared.Load() != 0 {
+		t.Fatalf("ready under the default pack = %v (prepared %d)", err, f.os.prepared.Load())
+	}
+	if _, err := client.Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "codex", Pack: "codex-pack"}); err != nil ||
+		f.os.prepared.Load() != 1 {
+		t.Fatalf("ready under the run's pack that allows codex = %v (prepared %d)", err, f.os.prepared.Load())
+	}
+}
+
 // GAP-0820: with a cold directory cache the first views answer the
 // provisional default profile, which allows sandboxes; the settled view
 // denies the caller's group. The ready waits for the settled view, as the

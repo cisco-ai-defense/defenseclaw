@@ -151,7 +151,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	// A managed computer whose OpenShell is not ready yet installs or starts
 	// it for this run: the run's own policy decides first, so a pack, agent
 	// or group the organization forbids installs nothing (GAP-0812).
-	st, err := a.preflight(ctx, api, spec.Name, func(ctx context.Context, st *sandboxapi.Status) error {
+	st, err := a.preflight(ctx, api, sandboxapi.ReadyRequest{Harness: spec.Name, Pack: o.Pack}, func(ctx context.Context, st *sandboxapi.Status) error {
 		_, err := a.runPolicyRefusal(ctx, api, st, spec, project, o, true)
 		return err
 	})
@@ -713,15 +713,16 @@ func (a *App) runNative(spec *harness.Spec, args []string) error {
 
 // preflight checks that the daemon runs with sandboxes available, after it
 // readied a managed computer's OpenShell for the run (readyManaged).
-func (a *App) preflight(ctx context.Context, api API, harnessName string, beforeReady func(context.Context, *sandboxapi.Status) error) (*sandboxapi.Status, error) {
-	return a.checkSandboxes(ctx, api, true, harnessName, beforeReady)
+func (a *App) preflight(ctx context.Context, api API, run sandboxapi.ReadyRequest, beforeReady func(context.Context, *sandboxapi.Status) error) (*sandboxapi.Status, error) {
+	return a.checkSandboxes(ctx, api, true, run, beforeReady)
 }
 
 // checkSandboxes is preflight; without ready, a managed computer's OpenShell
 // that a run readies passes as it is (`sandbox wrap` installs nothing).
-// harnessName is the agent a ready is for; beforeReady (when set) refuses
-// the run before the ready installs or starts anything (readyManaged).
-func (a *App) checkSandboxes(ctx context.Context, api API, ready bool, harnessName string,
+// run names the agent a ready is for, and the run's pack; beforeReady (when
+// set) refuses the run before the ready installs or starts anything
+// (readyManaged).
+func (a *App) checkSandboxes(ctx context.Context, api API, ready bool, run sandboxapi.ReadyRequest,
 	beforeReady func(context.Context, *sandboxapi.Status) error) (*sandboxapi.Status, error) {
 	st, err := api.Status(ctx)
 	if err != nil {
@@ -734,14 +735,14 @@ func (a *App) checkSandboxes(ctx context.Context, api API, ready bool, harnessNa
 	if !ready && readiesAtRun(api, st) {
 		return st, nil
 	}
-	if st, err = a.readyManaged(ctx, api, st, harnessName, beforeReady); err != nil {
+	if st, err = a.readyManaged(ctx, api, st, run, beforeReady); err != nil {
 		return nil, err
 	}
 	if !st.Available && st.Managed != nil && st.GatewayElsewhere != "" {
 		// Another account runs sandboxes on this computer now: the daemon's
 		// one-account-at-a-time text and who to contact (GAP-0461).
 		if ready {
-			a.recordBusyRefusal(ctx, api, harnessName)
+			a.recordBusyRefusal(ctx, api, run.Harness)
 		}
 		return nil, errors.New(sandboxapi.DisplayText(firstNonEmpty(st.Reason, sandboxapi.AccountBusyMessage+".")) + " " +
 			"F" + strings.TrimPrefix(busyContact(st.Managed.RequestAccess), "f") + ".")
@@ -794,7 +795,7 @@ type readier interface {
 // (GAP-0437, GAP-0441). Any other status is st. beforeReady (when set)
 // refuses the run first: what the run's policy forbids installs nothing
 // (GAP-0812).
-func (a *App) readyManaged(ctx context.Context, api API, st *sandboxapi.Status, harnessName string,
+func (a *App) readyManaged(ctx context.Context, api API, st *sandboxapi.Status, run sandboxapi.ReadyRequest,
 	beforeReady func(context.Context, *sandboxapi.Status) error) (*sandboxapi.Status, error) {
 	if !readiesAtRun(api, st) {
 		return st, nil
@@ -809,7 +810,7 @@ func (a *App) readyManaged(ctx context.Context, api API, st *sandboxapi.Status, 
 	} else {
 		a.note("Starting your OpenShell gateway…")
 	}
-	ready, err := api.(readier).Ready(ctx, sandboxapi.ReadyRequest{Harness: harnessName})
+	ready, err := api.(readier).Ready(ctx, run)
 	if err != nil {
 		return nil, apiError(err)
 	}

@@ -56,6 +56,9 @@ const (
 // object) is judged for the agent the daemon's managed configuration runs.
 type ReadyRequest struct {
 	Harness string `json:"harness,omitempty"`
+	// Pack is the run's --pack, which the ready's policy view judges the
+	// agent under, as the create does (GAP-1551); empty is the default pack.
+	Pack string `json:"pack,omitempty"`
 }
 
 // PolicyDecisionRequest records one managed user's lasting host decision

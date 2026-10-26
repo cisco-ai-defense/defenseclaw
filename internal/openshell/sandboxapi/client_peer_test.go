@@ -5,6 +5,7 @@ package sandboxapi
 
 import (
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -100,6 +101,28 @@ func TestARefusedConnectionIsTriedAgainAndSaidPlainly(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// GAP-1551: a 1.0.4 daemon's strict decoder refuses the ready's new pack
+// field; the client asks it again with the agent alone.
+func TestReadyFallsBackForADaemonWithoutThePackField(t *testing.T) {
+	var bodies []string
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(string(body), `"pack"`) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"code":"invalid_request","error":"invalid JSON body: json: unknown field \"pack\""}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"enabled":true}`))
+	}))
+	defer daemon.Close()
+	st, err := NewClient(daemon.URL, "t").Ready(t.Context(), ReadyRequest{Harness: "codex", Pack: "codex-pack"})
+	if err != nil || st == nil || !st.Enabled || len(bodies) != 2 || strings.Contains(bodies[1], "pack") || !strings.Contains(bodies[1], "codex") {
+		t.Fatalf("ready = %+v, %v; bodies %q", st, err, bodies)
 	}
 }
 

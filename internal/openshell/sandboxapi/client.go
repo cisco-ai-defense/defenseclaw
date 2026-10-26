@@ -413,6 +413,13 @@ func (c *Client) Status(ctx context.Context) (*Status, error) {
 func (c *Client) Ready(ctx context.Context, req ReadyRequest) (*Status, error) {
 	var out Status
 	err := c.do(ctx, http.MethodPost, PathReady, nil, req, &out)
+	if err != nil && req.Pack != "" && unknownFieldRefused(err, "pack") {
+		// A daemon of DefenseClaw 1.0.4 judges no pack at a ready (its
+		// create does): it gets the agent alone.
+		out = Status{}
+		req.Pack = ""
+		err = c.do(ctx, http.MethodPost, PathReady, nil, req, &out)
+	}
 	if err != nil && req.Harness != "" && unknownFieldRefused(err, "harness") {
 		out = Status{}
 		err = c.do(ctx, http.MethodPost, PathReady, nil, struct{}{}, &out)
