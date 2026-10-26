@@ -36,9 +36,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 	"github.com/defenseclaw/defenseclaw/internal/systemd"
@@ -118,7 +120,16 @@ var sandboxDaemonSyncCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		ctx, cancel := context.WithTimeout(cmd.Context(), openshell.StopSyncTimeout)
 		defer cancel()
-		return openshell.SyncGatewaySandboxes(ctx, openshell.DiscoverOptions{Gateway: sandboxDaemonSyncGateway}, cmd.OutOrStdout())
+		err := openshell.SyncGatewaySandboxes(ctx, openshell.DiscoverOptions{Gateway: sandboxDaemonSyncGateway}, cmd.OutOrStdout())
+		// The gateway's stop ends each one it could not sync: the next
+		// sandbox daemon's feed says what may be lost (stop_unflushed),
+		// not only this unit's journal (GAP-2081).
+		if names := openshell.UnsyncedSandboxes(err); len(names) > 0 {
+			if rerr := manager.RecordUnsyncedStops(config.DefaultDataPath(), names, time.Now()); rerr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "could not record the unsynced stop for the sandbox feed: %v\n", rerr)
+			}
+		}
+		return err
 	},
 }
 

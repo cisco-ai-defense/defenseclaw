@@ -355,10 +355,43 @@ func SyncRunningSandboxes(ctx context.Context, c Client, out io.Writer) error {
 	for i, name := range ready {
 		if errs[i] != nil {
 			fmt.Fprintf(out, "could not sync the disk of sandbox %s before the OpenShell gateway stops (%v): files written since its last sync may come back empty\n", name, errs[i])
-			failed = append(failed, fmt.Errorf("%s: %w", name, errs[i]))
+			failed = append(failed, &UnsyncedSandboxError{Sandbox: name, Err: errs[i]})
 			continue
 		}
 		fmt.Fprintf(out, "synced the disk of sandbox %s before the OpenShell gateway stops\n", name)
 	}
 	return errors.Join(failed...)
+}
+
+// UnsyncedSandboxError is one sandbox whose disk SyncRunningSandboxes could
+// not sync.
+type UnsyncedSandboxError struct {
+	Sandbox string
+	Err     error
+}
+
+func (e *UnsyncedSandboxError) Error() string { return e.Sandbox + ": " + e.Err.Error() }
+func (e *UnsyncedSandboxError) Unwrap() error { return e.Err }
+
+// UnsyncedSandboxes names each sandbox err (from SyncRunningSandboxes) says
+// could not be synced.
+func UnsyncedSandboxes(err error) []string {
+	var names []string
+	var walk func(error)
+	walk = func(err error) {
+		var u *UnsyncedSandboxError
+		switch e := err.(type) {
+		case nil:
+		case interface{ Unwrap() []error }:
+			for _, inner := range e.Unwrap() {
+				walk(inner)
+			}
+		default:
+			if errors.As(err, &u) {
+				names = append(names, u.Sandbox)
+			}
+		}
+	}
+	walk(err)
+	return names
 }

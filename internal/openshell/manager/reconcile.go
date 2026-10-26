@@ -89,6 +89,9 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 func (m *Manager) reconcile(ctx context.Context, startup bool) (err error) {
 	m.reconcileMu.Lock()
 	defer m.reconcileMu.Unlock()
+	// A gateway restart while this daemon ran may have ended a MicroVM it
+	// could not sync (GAP-2081).
+	m.publishUnsyncedStops()
 	managedDaemon := m.authority() != nil
 	if managedDaemon {
 		defer func() {

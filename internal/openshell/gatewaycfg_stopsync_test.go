@@ -371,8 +371,15 @@ func TestSyncRunningSandboxesSyncsEachReadyMicroVM(t *testing.T) {
 		return nil
 	})
 	out.Reset()
-	if err := openshell.SyncRunningSandboxes(ctx, c, &out); err == nil ||
+	err := openshell.SyncRunningSandboxes(ctx, c, &out)
+	if err == nil ||
 		!strings.Contains(out.String(), "could not sync the disk of sandbox raw") || !strings.Contains(out.String(), "may come back empty") {
 		t.Fatalf("failing sync: %v, out %q", err, out.String())
+	}
+	// The ExecStop records each by name for the sandbox feed (GAP-2081).
+	names := openshell.UnsyncedSandboxes(err)
+	slices.Sort(names)
+	if !slices.Equal(names, []string{"dc-a", "raw"}) {
+		t.Fatalf("unsynced %v, want [dc-a raw] (%v)", names, err)
 	}
 }
