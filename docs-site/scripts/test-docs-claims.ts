@@ -1317,7 +1317,7 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
   it('lists every section in the troubleshooting index summary', () => {
     const index = page('troubleshooting/index.mdx');
     const line = index.split('[Known limits](/docs/troubleshooting/known-limits):')[1]?.split(' - [')[0] ?? '';
-    for (const words of ['Codex', 'Copilot CLI', 'Antigravity', 'Linux sign-out', 'sandboxes']) {
+    for (const words of ['Codex', 'Copilot CLI', 'Antigravity', 'Linux sign-out', 'sandboxes', 'scanners on macOS', 'identity', 'agent messages that are not from DefenseClaw']) {
       assert.ok(line.includes(words), `troubleshooting index summary omits ${words}`);
     }
   });
@@ -1383,6 +1383,7 @@ const r105Rows: DocRow[] = [
   { gap: "r103:GAP-0214", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["**Hermes config changed and put back quickly:**", "within about 3 seconds", "one Hermes session can start without the DefenseClaw hook", "records the change in the audit log"] },
   { gap: "GAP-1209", page: "troubleshooting/known-limits.mdx", section: "Sandboxes", has: ["**Rejected model key in a sandbox:**", "retries a rejected request for up to about three minutes", "cannot warn before the retries end"] },
   { gap: "GAP-1641", page: "reference/scanning/registries.mdx", has: ["`openclaw package metadata is missing the plugins map`", "without one the fetch fails with `401 Client Error: Unauthorized`", "Both are upstream changes"] },
+  { gap: "GAP-1191, GAP-1198, GAP-1199, GAP-1220, GAP-1223, GAP-1224, GAP-1242, GAP-1247, GAP-1248, GAP-1249, GAP-1250, GAP-1251, GAP-1252, GAP-1262, GAP-1265, GAP-1275, GAP-1276, GAP-1285, GAP-1290", page: "troubleshooting/known-limits.mdx", section: "Agent messages that are not from DefenseClaw", has: ["`Model metadata for <model> not found. Defaulting to fallback metadata`", "`api_key_model_discovery`", "`Workspace (granular)`", "`Auto-update failed: no write permission to npm prefix`", "`Unknown command: /NAME`", "`Contains brace with quote character (expansion obfuscation)`", "automatic update fails with `EACCES`", "lists command words such as `exit`, `test` or `run` as paths", "is not in the built-in catalog", "`Security scan — [HIGH] Pipe to interpreter`", "Hermes can then say DefenseClaw blocked the step", "`This foreground command appears to start a long-lived server/watch process`", "`node not available (Hermes-managed Node not installed)`", "`pygount: command not found`", "`pm-runtime: invalid package install stamp`", "`.install.lock`", "`npm warn install-scripts: postinstall ... is not covered by allowScripts`", "`codex exec --full-auto`", "its audit log has no block for it"] },
   // r105-rows-end
 ];
 
