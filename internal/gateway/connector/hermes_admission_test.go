@@ -71,7 +71,6 @@ func TestFirstHermesVersionLineRejectsEmptyOrNULOutput(t *testing.T) {
 func prepareHermesSetupAdmissionFixture(t *testing.T, opts SetupOpts) SetupOpts {
 	t.Helper()
 	if runtime.GOOS != "windows" {
-		hermesHookHomeForTest(t, opts.DataDir)
 		return opts
 	}
 	// Verify runs the registered command's execution probe. A per-user
@@ -165,17 +164,5 @@ func TestHermesBoundedCommandBufferHoldsThroughIOCopy(t *testing.T) {
 	}
 	if _, isReaderFrom := any(buffer).(io.ReaderFrom); isReaderFrom {
 		t.Fatal("bounded buffer exposes ReadFrom, which bypasses its Write bound")
-	}
-}
-
-// hermesHookHomeForTest points DEFENSECLAW_HOME at the test's data directory.
-// Verify runs the rendered per-user hook's execution probe in this process's
-// environment, as the account's agent runs it, and the hook finds its data
-// directory through DEFENSECLAW_HOME, else ~/.defenseclaw: a host with no
-// ~/.defenseclaw (a CI runner) answered "hook home unavailable".
-func hermesHookHomeForTest(t *testing.T, dataDir string) {
-	t.Helper()
-	if dataDir != "" {
-		t.Setenv("DEFENSECLAW_HOME", dataDir)
 	}
 }
