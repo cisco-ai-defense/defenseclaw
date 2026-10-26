@@ -1377,7 +1377,9 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
     assert.match(status, /case "claudecode", "codex":\s*behavior = "a killed PreToolUse hook or PreToolUse timeout is non-blocking"/);
     assert.match(status, /case "copilot":\s*behavior = "a timed-out preToolUse hook is non-blocking; a later permission hook may still deny"/);
     assert.match(status, /case "antigravity":\s*behavior = "a command hook that cannot start or reaches its timeout has no vendor-guaranteed deny"/);
-    assert.match(status, /r\.SecurityComplete = false/);
+    // coverage (GAP-1861) routes it through MarkSecurityIncomplete, which sets security_complete false.
+    assert.match(status, /r\.MarkSecurityIncomplete\(CodeHookProcessFailOpen\)/);
+    assert.match(source('internal/enterprisestatus/result.go'), /func \(r \*Result\) MarkSecurityIncomplete\(reason string\) \{\s*r\.SecurityComplete = false/);
   });
 
   // A hook that times out may already have reached the gateway, which can then

@@ -144,7 +144,6 @@ from defenseclaw.platform_support import (
     LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
     local_shell_stacks_supported,
 )
-from defenseclaw.removed_connectors import KEPT_HOOK_TOKEN_NAMES
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
 from defenseclaw.sandbox_images import verified_harness_contract
 from defenseclaw.scanner import settings as scanner_settings
@@ -4562,9 +4561,7 @@ def _rotate_token_transaction(
                 "Connector hook credential scope changed before rotation; no credentials were modified."
             )
         persisted_scopes = set(_rotate_token_persisted_hook_scopes(data_dir))
-        # Removed hooks that fail open without their credential still need the
-        # kept sidecar to reach the gateway's blocking retired route.
-        unconfigured_scopes = sorted(persisted_scopes - configured_scopes - KEPT_HOOK_TOKEN_NAMES)
+        unconfigured_scopes = sorted(persisted_scopes - configured_scopes)
         tracked_scopes = sorted(configured_scopes | persisted_scopes)
         for connector in tracked_scopes:
             hook_locks.enter_context(locked_file_update(_rotate_token_hook_path(data_dir, connector)))
@@ -13363,7 +13360,15 @@ def _remove_connector(
         return False
 
     ux.echo(f"  ✓ Removed connector {match!r}")
-    if unshipped:
+    if unshipped and removed_connectors.is_removed(match):
+        # until 1.1: the gateway teardown removes what DefenseClaw wrote for
+        # OpenHands/OmniGent in their configs (GAP-1892 class).
+        ux.echo(
+            f"  {removed_connectors.NOTICE} The gateway removes the entries DefenseClaw wrote in "
+            "that agent's config and keeps the rest.",
+            err=True,
+        )
+    elif unshipped:
         ux.echo(
             f"  ⚠ {match!r} is not a connector this DefenseClaw build ships, so DefenseClaw "
             "did not change that agent's config files. Remove any DefenseClaw hook entries "

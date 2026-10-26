@@ -17231,40 +17231,21 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
 
 
 def _check_removed_connector_cleanup(cfg, r: _DoctorResult) -> None:
-    """until 1.1: what the removed OpenHands or OmniGent teardown left for the user.
+    """until 1.1: one information row when OpenHands or OmniGent left something on this host.
 
-    The teardown only replaces DefenseClaw's hook script with a stub that
-    blocks every call and revokes the tokens (``defenseclaw.removed_connectors``).
-    Each thing left is listed with the step to remove it; a host with none
-    prints no row.
+    DefenseClaw no longer guards either agent, and the gateway teardown
+    removes what an older setup wrote for them (``defenseclaw.removed_connectors``).
+    What it could not remove is information, never a failure. A host with
+    nothing left prints no row.
     """
-    from defenseclaw.removed_connectors import SCRIPT_GONE_WHAT, STUB_UNUSABLE_WHAT, leftovers
+    from defenseclaw.removed_connectors import NOTICE, leftovers
 
     workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
-    for left in leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace):
-        steps = "; ".join(f"{item.path}: {item.what} (to remove: {item.step})" for item in left.items)
-        pending_publication = any("interrupted publication" in item.what for item in left.items)
-        remediation = f"do each step above; until then {left.label} is blocked by DefenseClaw's stub"
-        if pending_publication:
-            remediation = (
-                "rerun connector teardown to recover the interrupted publication; "
-                "preserve its receipt and saved copies if recovery fails"
-            )
-        # A registration whose script is gone, or a stub the agent may not
-        # run or load, does not block: an upgrade that left one is not
-        # finished (GAP-0833 class).
-        unblocked = any(item.what in (SCRIPT_GONE_WHAT, STUB_UNUSABLE_WHAT) for item in left.items)
-        if not pending_publication and unblocked:
-            remediation = (
-                f"run defenseclaw-gateway connector teardown --connector {left.connector}, then do each step above"
-            )
-        _emit(
-            "fail" if unblocked else "warn",
-            f"Removed connector [{left.label}]",
-            f"removed in DefenseClaw 1.0.4; left for you to remove by hand: {steps}",
-            r=r,
-            remediation=remediation,
-        )
+    found = leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace)
+    if not found:
+        return
+    steps = "; ".join(f"{item.path}: {item.what} (to remove: {item.step})" for left in found for item in left.items)
+    _emit("skip", "Removed connectors", f"{NOTICE} Left on this host: {steps}", r=r)
 
 
 def _check_orphaned_hook_entries(cfg, active: str, r: _DoctorResult) -> None:

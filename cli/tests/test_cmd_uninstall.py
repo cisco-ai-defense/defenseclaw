@@ -1544,7 +1544,7 @@ class RemovedConnectorLeftoversTests(unittest.TestCase):
                     if flags.get("remove_binaries"):
                         self.assertTrue(calls.get("binaries") or calls.get("deferred"))
                     text = "\n".join(calls.get("echo", []))
-                    self.assertIn("OpenHands support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:", text)
+                    self.assertIn("OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it.", text)
                     self.assertIn(f"  - {config}: ", text)
                     script_listed = os.path.join(data_dir, "hooks", "openhands-hook.sh") in text
                     self.assertEqual(script_listed, not flags.get("remove_data_dir"))
@@ -1580,7 +1580,7 @@ class RemovedConnectorLeftoversTests(unittest.TestCase):
             calls = self._run(plan)
             self.assertNotIn("error", calls)
             report = "\n".join(calls.get("echo", []))
-            self.assertIn("OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:", report)
+            self.assertIn("OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it.", report)
             for path in (config, module, pth, backup_dir):
                 self.assertIn(path, report)
             self.assertIn("remove defenseclaw_omnigent_policy from policy_modules", report)
@@ -1651,9 +1651,9 @@ class RemovedConnectorBackupsKeptTests(unittest.TestCase):
             backups = os.path.join(data_dir, "connector_backups", "omnigent")
             # What the gateway's removed-connector teardown prints (removed.go FormatRemovedLeftovers).
             teardown_stdout = (
-                "OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:\n"
-                f"  - {backups}: the copies of your files DefenseClaw saved before its setup changed them "
-                "(pristine_bytes, base64). To remove: copy back what you need, then delete this folder.\n"
+                "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it.\n"
+                f"  - {backups}: files DefenseClaw saved when it set up OmniGent. "
+                "To remove: copy back what you need, then delete this folder.\n"
             )
             plan = cmd_uninstall.UninstallPlan(
                 data_dir=data_dir, connectors=("omnigent",), stop_gateway=True, remove_data_dir=True, gateway_path="gw"
@@ -1667,17 +1667,13 @@ class RemovedConnectorBackupsKeptTests(unittest.TestCase):
                     self.assertEqual(fh.read(), body, rel)
             self.assertFalse(os.path.lexists(os.path.join(root, "codex")))
             text = "\n".join(echoed)
-            self.assertIn(f"  - {os.path.join(root, 'omnigent')}: the copies of your files", text)
-            self.assertIn(os.path.join(root, "omnigent", "defenseclaw_omnigent_policy.py.edited-0123"), text)
+            self.assertIn(f"  - {os.path.join(root, 'omnigent')}: files DefenseClaw saved", text)
             # The config only the moved record names is still listed.
             self.assertIn(os.path.join(home, "oc", "config.yaml"), text)
             # Every path the uninstall tells the user about is still there.
-            # defenseclaw_omnigent.pth (no pth record here) is a file name to look
-            # for in OmniGent's site-packages, not a path.
             named = re.findall(r"^\s*(?:·\s*)?- (\S.*?): ", text, flags=re.MULTILINE)
             self.assertTrue(named)
-            self.assertIn("defenseclaw_omnigent.pth", named)
-            for path in (p for p in named if p != "defenseclaw_omnigent.pth"):
+            for path in named:
                 self.assertTrue(os.path.lexists(path), f"the uninstall names {path}, which it removed:\n{text}")
 
     def test_a_backup_that_cannot_move_stops_the_uninstall_before_any_removal(self):
@@ -1876,10 +1872,9 @@ class MCPWriterBackupRemovalTests(unittest.TestCase):
 
 
 class GatewayTeardownOutputTests(unittest.TestCase):
-    def test_gateway_teardown_marks_the_uninstall_for_removed_connectors(self):
-        # Review fixes (uninstall lifecycle round b): the gateway removes a
-        # removed connector's agent-config entries, stub and import path only
-        # in an uninstall, so a removed DefenseClaw does not keep blocking.
+    def test_gateway_teardown_needs_no_uninstall_flag_for_removed_connectors(self):
+        # 1.0.5: every OpenHands/OmniGent teardown removes what DefenseClaw
+        # wrote, so the uninstall no longer marks it.
         completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         with (
             patch("shutil.which", return_value="defenseclaw-gateway"),
@@ -1889,7 +1884,7 @@ class GatewayTeardownOutputTests(unittest.TestCase):
             self.assertTrue(cmd_uninstall._run_gateway_connector_teardown("omnigent"))
         teardown = run_mock.call_args_list[0]
         self.assertIn("teardown", teardown.args[0])
-        self.assertEqual(teardown.kwargs["env"]["DEFENSECLAW_REMOVED_CONNECTOR_UNINSTALL"], "1")
+        self.assertNotIn("env", teardown.kwargs)
 
     def test_gateway_teardown_uses_utf8_and_preserves_checkmark(self):
         completed = type(

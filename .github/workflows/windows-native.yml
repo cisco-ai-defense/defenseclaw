@@ -183,8 +183,7 @@ jobs:
           # Windows does not use. Equivalent token validation, reparse-point,
           # private-DACL, and supported-connector coverage runs in this job.
           $windowsInapplicable = '^(' + (@(
-            'TestAtomicWriteFile_PreservesSymlinkedDotfile',
-            'TestOpenHandsHookScript_BlockExitsTwo'
+            'TestAtomicWriteFile_PreservesSymlinkedDotfile'
           ) -join '|') + ')$'
           # The gateway and connector packages are large enough that one native
           # Windows test binary can retain the full suite's resources until it

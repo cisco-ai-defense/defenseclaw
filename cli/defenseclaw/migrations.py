@@ -55,7 +55,7 @@ from typing import TYPE_CHECKING
 import click
 import yaml
 
-from defenseclaw import legacy_connector, ux
+from defenseclaw import legacy_connector, removed_connectors, ux
 from defenseclaw.file_lock import locked_file_update
 from defenseclaw.file_permissions import (
     copy_windows_dacl,
@@ -3376,7 +3376,26 @@ def _drop_unshipped_connectors(ctx: MigrationContext) -> None:
         return
     ctx.changes.append(
         f"removed connector {listed} (not shipped by this release) from config.yaml; primary connector is "
-        f"{new_primary!r}. DefenseClaw did not change those agents' config files; {_REMOVED_CONNECTORS_DOC}"
+        f"{new_primary!r}. {_unshipped_agent_config_note(names)}; {_REMOVED_CONNECTORS_DOC}"
+    )
+
+
+def _unshipped_agent_config_note(names: list[str]) -> str:
+    """What happens to the agents' own config files of the connectors dropped from config.yaml.
+
+    until 1.1: the teardown of OpenHands and OmniGent (removed in 1.0.5)
+    removes the entries DefenseClaw wrote in their configs and keeps the
+    rest; any other unshipped name keeps its agent config as it is.
+    """
+    removed = [n for n in names if removed_connectors.is_removed(n)]
+    others = [n for n in names if not removed_connectors.is_removed(n)]
+    if not others:
+        return "DefenseClaw removes only the entries it wrote in those agents' config files"
+    if not removed:
+        return "DefenseClaw did not change those agents' config files"
+    return (
+        f"DefenseClaw removes only the entries it wrote for {', '.join(repr(n) for n in removed)} and did not "
+        f"change the config files of {', '.join(repr(n) for n in others)}"
     )
 
 

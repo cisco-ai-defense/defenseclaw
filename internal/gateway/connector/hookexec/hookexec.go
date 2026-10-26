@@ -482,16 +482,13 @@ func runHook(ctx context.Context, opts Options) int {
 		sp = copilotVSCodeLocalSpec
 	}
 	if !ok {
-		if reason, removed := removedConnectorReason(opts.Connector); removed {
-			// until 1.1: a Windows hook an older release registered for a
-			// removed connector runs this launcher, not a script; it
-			// blocks the way the script's stub does.
-			if strings.EqualFold(strings.TrimSpace(opts.Connector), "openhands") {
-				body, _ := json.Marshal(map[string]string{"decision": "deny", "reason": reason})
-				fmt.Fprintln(opts.Stdout, string(body))
-			}
-			fmt.Fprintln(opts.Stderr, reason)
-			return blockExit
+		if removedConnector(opts.Connector) {
+			// until 1.1: a Windows hook an older release registered for
+			// OpenHands or OmniGent runs this launcher. DefenseClaw no
+			// longer guards them, so it lets the call run and says so; the
+			// gateway teardown removes the registration.
+			fmt.Fprintln(opts.Stderr, removedConnectorNotice)
+			return 0
 		}
 		// Unknown connector is a wiring bug, not a policy decision. Fail loud
 		// so it surfaces in tests / setup rather than silently disabling the
@@ -4120,18 +4117,18 @@ func compactField(m map[string]json.RawMessage, field string) string {
 	return buf.String()
 }
 
-// removedConnectorReason is the block reason of a hook for a connector 1.0.4
-// removed (until 1.1), or false.
-func removedConnectorReason(connector string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(connector)) {
-	case "openhands":
-		return "DefenseClaw blocked this call: OpenHands support was removed in DefenseClaw 1.0.4. " +
-			"To use OpenHands without DefenseClaw, remove every DefenseClaw hook from your OpenHands hooks.json, then restart OpenHands.", true
-	case "omnigent":
-		return "DefenseClaw blocked this call: OmniGent support was removed in DefenseClaw 1.0.4. " +
-			"To use OmniGent without DefenseClaw, remove DefenseClaw's policy from your OmniGent config.yaml, then restart OmniGent.", true
+// removedConnectorNotice is connector.RemovedConnectorNotice (this package
+// cannot import connector).
+const removedConnectorNotice = "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it."
+
+// removedConnector reports whether a hook names OpenHands or OmniGent, which
+// DefenseClaw no longer guards (until 1.1; connector.IsRemovedConnector).
+func removedConnector(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "openhands", "open-hands", "open_hands", "omnigent":
+		return true
 	}
-	return "", false
+	return false
 }
 
 // decodeDecision pulls the `decision` string from an already-compact JSON

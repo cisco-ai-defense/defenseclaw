@@ -3955,12 +3955,6 @@ func requestGatewayToken(r *http.Request) string {
 // and never reaches next.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// until 1.1: a removed connector's hook route blocks every call
-		// before any credential check (retired_connector_hook.go): with a
-		// valid token, a revoked one, none or a sandbox credential.
-		if serveRetiredConnectorHook(w, r) {
-			return
-		}
 		if r.URL.Path == "/health" && r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
 			return

@@ -390,7 +390,7 @@ A new `SetupOpts` field must also be carried through the Unix worker protocol (e
 |---|---|
 | Decoding real vendor payloads | `openhands_event_decode_test.go`, `antigravity_hook_profile_test.go` |
 | Decision goldens and the fail matrix | `TestDecisionGolden`, `TestResponseFailure`, `TestUnreachable`, `TestMissingToken`, `TestOversizedPayload` (`hookexec`) |
-| Shell script exits under bash | `TestOpenHandsHookScript_BlockExitsTwo`, `cursor_hook_failopen_test.go` |
+| Shell script exits under bash | `cursor_hook_failopen_test.go` |
 | Setup, teardown and VerifyClean round trip, including an absent config | `hook_teardown_absent_config_test.go` (its Copilot leftover row) |
 | Windows shell behavior | `kiro_windows_shell_test.go`, `cursor_hook_adapter_windows_test.go` |
 | CLI flag and exit | `internal/cli/hook_kiro_test.go` |
