@@ -1206,7 +1206,7 @@ const knownLimitEntries = [
     phrases: ['Without linger, signing out of your last session stops the gateway and its MicroVMs', '/docs/troubleshooting/sandboxes/setup-and-gateway#a-linux-sign-out-ends-a-running-microvm'],
     from: [],
   },
-  { gaps: 'GAP-1194', section: 'Claude Code shell', phrases: ['shell mode'], from: ['connectors/claudecode.mdx'] },
+  { gaps: 'GAP-1194', section: 'Claude Code shell', phrases: ['shell mode', 'on every OS, to per-user and managed installs, in observe and action mode', 'It is a Claude Code limit'], from: ['connectors/claudecode.mdx'] },
   { gaps: 'GAP-1163', section: 'Upgrade and policy limits', phrases: ['**Legacy MicroVM guests:**'], from: [] },
   {
     gaps: 'GAP-0716, GAP-0716-MAC, GAP-0716-WIN',
