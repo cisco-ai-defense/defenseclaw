@@ -111,7 +111,7 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 			for _, name := range []string{"inspect-request.sh", "inspect-tool.sh", "inspect-response.sh", "inspect-tool-response.sh"} {
 				t.Run(parser.name+"/"+verdict.name+"/"+name, func(t *testing.T) {
 					hookHome := t.TempDir()
-					installNativeGatewayForHookTest(t, hookHome)
+					installNativeGatewayForHookTest(t, hookHome, dir)
 					cmd := exec.Command("bash", filepath.Join(dir, name))
 					cmd.Env = append(os.Environ(), "PATH="+parser.path, "HOME="+hookHome, "DEFENSECLAW_HOME="+hookHome, "DEFENSECLAW_FAIL_MODE=closed")
 					cmd.Stdin = strings.NewReader(`{"tool":"Bash","input":"echo marker","content":"marker"}`)

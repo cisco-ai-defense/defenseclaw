@@ -261,6 +261,7 @@ func TestPerUserPluginsCheckPeerBeforeSending(t *testing.T) {
 				t.Fatal(err)
 			}
 			tokenPath := writePerUserPluginPeerTokenForTest(t, root, tc.connector, credential)
+			recordGatewayHelperForTest(t, filepath.Dir(tokenPath), binary)
 			recorder := &listenerProofRecorder{}
 			impostor := newImpostorListener(t, recorder)
 			addr := strings.TrimPrefix(impostor.URL, "http://")

@@ -10,7 +10,12 @@ import "testing"
 // Shell-hook tests skip on Windows, where the native hook executor is used.
 // Keep their shared fixture callable so cross-compiling the package tests
 // still checks those tests' Go source.
-func installNativeGatewayForHookTest(t *testing.T, _ string) {
+func installNativeGatewayForHookTest(t *testing.T, _ string, _ ...string) {
+	t.Helper()
+	t.Skip("POSIX shell-hook runtime is not used on Windows")
+}
+
+func linkGatewayBinaryToHookDirForTest(t *testing.T, _, _ string) {
 	t.Helper()
 	t.Skip("POSIX shell-hook runtime is not used on Windows")
 }

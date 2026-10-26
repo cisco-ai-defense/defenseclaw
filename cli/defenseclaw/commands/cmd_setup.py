@@ -10492,19 +10492,20 @@ def _write_connector_identity(
             and existing_single in _HOOK_ENFORCED_CONNECTORS
             and existing_single not in gc.connectors
         ):
-            # Pin the fail mode only for an action predecessor. An observe
-            # connector's "open" is derived from observe mode; pinning it made
-            # a later `setup <it> --mode action` stay fail-open under a closed
-            # global default (GAP-1109), so it inherits instead.
-            # A per-user effective_hook_fail_mode is the policy tier's outage
-            # mode, not the saved value. Managed installs retain their
-            # resolved mode, including Secure Client connector limits.
+            # An action predecessor keeps its fail mode: a managed install's
+            # resolved one, including Secure Client connector limits, and a
+            # per-user install's explicitly saved choice. A per-user
+            # predecessor without one saves none, so its policy tier keeps
+            # deciding (owner decision 2026-10-23: setup never writes a fail
+            # mode as a side effect, and never the in-memory "closed"
+            # placeholder of an unset value).
             seeded_mode = gc.effective_mode(existing_single)
             managed = cfg.managed_outside_secure_client() or gc.secure_client_hook_fail_modes()
+            saved = getattr(gc, "_hook_fail_mode_saved", False)
             pinned = (
                 gc.effective_hook_fail_mode(existing_single)
                 if managed
-                else (getattr(gc, "hook_fail_mode", "") or "").strip().lower()
+                else ((gc.hook_fail_mode or "").strip().lower() if saved else "")
             )
             gc.connectors[existing_single] = PerConnectorGuardrailConfig(
                 mode=seeded_mode,
@@ -10910,9 +10911,8 @@ def _apply_hook_connector_setup(
         else:
             gc.block_message = block_message
     if fail_mode is not None:
-        # Saved as given. The guardrail mode no longer pins Cursor's value:
-        # every hook's outage mode is the policy tier's on a per-user install
-        # (oss-outage-open) and the administrator's on a managed one.
+        # Saved as given. The guardrail mode no longer pins Cursor's value;
+        # an explicit choice wins over the per-user tier's outage default.
         normalized_fail = "closed" if str(fail_mode).strip().lower() == "closed" else "open"
         if per_connector:
             gc.connectors[connector].hook_fail_mode = normalized_fail
@@ -12693,9 +12693,10 @@ def _hook_guardrail_options(fn):
             type=click.Choice(["open", "closed"], case_sensitive=False),
             default=None,
             help=(
-                "Per-connector hook fail mode: how the hook behaves when the "
-                "gateway is unavailable or gives an unusable answer. "
-                "'closed' blocks (default and recommended); 'open' allows uninspected calls."
+                "Saves this connector's choice for a gateway outage ('open' or 'closed'), which "
+                "wins over the policy tier. Omitted, nothing is saved: default and permissive policy let "
+                "calls run with a warning while the gateway is down, strict blocks them. "
+                "Every other hook failure blocks."
             ),
         ),
     ]
@@ -14687,29 +14688,24 @@ def execute_guardrail_setup(
 
 
 def _prompt_hook_fail_mode(gc) -> None:
-    """Interactive prompt that sets ``gc.hook_fail_mode`` to "open" or
-    "closed" based on operator input.
+    """Ask for the gateway-outage choice and save only a typed answer.
 
     Centralized so every entry point (initial setup, mode change,
-    observability-only flow) emits the same wording and the same
-    default-selection rule. The current value drives the default so
-    operators who answer the prompt in past invocations don't have
-    their explicit choice silently rotated by a subsequent mode flip.
+    observability-only flow) emits the same wording. Typing 1 or 2 saves
+    ``gc.hook_fail_mode`` as the user's explicit choice; Enter keeps what is
+    there (a saved choice, or none, so the policy tier decides).
     """
     ux.section("Hook fail mode")
-    ux.subhead("How hooks behave when delivery/authentication fails or")
-    ux.subhead("the gateway returns 4xx, malformed JSON, or no action.")
+    ux.subhead("How hooks behave when the gateway is down before it answers.")
     click.echo()
-    ux.echo("    " + ux.bold("[1] open  ") + " — allow the tool/prompt and log the failure")
+    ux.echo("    " + ux.bold("[1] open  ") + " — allow the tool/prompt with a warning and audit entry")
     click.echo("                 " + ux.dim("A stopped gateway lets calls that policy blocks run."))
     ux.echo(
         "    "
         + ux.bold("[2] closed")
-        + " — block supported events when inspection is unavailable "
-        + ux.dim("(recommended)")
+        + " — block supported events while the gateway is down"
     )
-    click.echo("                 " + ux.dim("The default on a new install: action mode keeps"))
-    click.echo("                 " + ux.dim("blocking while the gateway is down."))
+    click.echo("                 " + ux.dim("Strict policy and managed installs default to closed."))
     click.echo()
     click.echo(
         "  "
@@ -14719,18 +14715,22 @@ def _prompt_hook_fail_mode(gc) -> None:
             "choice is open."
         )
     )
-    current_fail = (getattr(gc, "hook_fail_mode", "") or "closed").lower()
-    fail_default = "1" if current_fail == "open" else "2"
-    if fail_default == "1":
-        # The default keeps the saved value, which can differ from the
-        # recommended choice; say so instead of leaving [1] unexplained.
-        click.echo("  " + ux.dim("Current setting: open. Press Enter to keep it, or type 2 for closed."))
+    # Only a typed choice is saved (owner decision 2026-10-23). Enter keeps
+    # what is there: a saved choice, or none, so the policy tier keeps
+    # deciding and a later switch to strict still closes the outage.
+    saved = str(getattr(gc, "hook_fail_mode", "") or "").strip().lower()
+    if not getattr(gc, "_hook_fail_mode_saved", bool(saved)):
+        saved = ""
+    keep = f"keep {saved}" if saved else "keep the policy default"
     fail_choice = click.prompt(
-        "  Select hook fail mode",
-        type=click.Choice(["1", "2"]),
-        default=fail_default,
+        f"  Select hook fail mode (1, 2, or Enter to {keep})",
+        type=click.Choice(["", "1", "2"]),
+        default="",
+        show_choices=False,
+        show_default=False,
     )
-    gc.hook_fail_mode = "open" if fail_choice == "1" else "closed"
+    if fail_choice:
+        gc.hook_fail_mode = "open" if fail_choice == "1" else "closed"
 
 
 def _apply_judge_runtime_defaults(gc) -> None:

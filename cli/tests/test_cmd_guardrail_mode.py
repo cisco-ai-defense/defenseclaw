@@ -112,7 +112,7 @@ def test_global_switch_sets_only_guardrail_mode(app) -> None:
 
 def test_cursor_mode_switch_keeps_its_fail_mode(app, restarts, rerenders) -> None:
     # The guardrail mode no longer pins Cursor's fail mode: like every other
-    # connector its outage mode follows the policy tier (oss-outage-open), so
+    # connector it keeps the explicitly saved mode, so
     # a mode switch re-renders no hook and restarts nothing.
     app.cfg.claw.mode = "cursor"
     app.cfg.guardrail.connector = "cursor"
@@ -120,7 +120,7 @@ def test_cursor_mode_switch_keeps_its_fail_mode(app, restarts, rerenders) -> Non
     assert payload["gateway"] == "live" and restarts == [] and rerenders == []
     _run(app, "observe")
     assert restarts == [] and rerenders == []
-    assert app.cfg.guardrail.effective_hook_fail_mode("cursor") == "open"
+    assert app.cfg.guardrail.effective_hook_fail_mode("cursor") == "closed"
 
 
 def test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode(app, restarts, rerenders) -> None:
@@ -130,8 +130,8 @@ def test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode(app, restart
     assert payload["gateway"] == "live" and rerenders == [] and restarts == []
     _, payload = _run(app, "observe", "--json")
     assert rerenders == [] and restarts == []
-    # The default tier's outage mode (oss-outage-open).
-    assert app.cfg.guardrail.effective_hook_fail_mode("codex") == "open"
+    # The fixture has an explicit saved closed choice.
+    assert app.cfg.guardrail.effective_hook_fail_mode("codex") == "closed"
 
 
 def test_connector_override_created_on_a_single_install(app, restarts, rerenders) -> None:

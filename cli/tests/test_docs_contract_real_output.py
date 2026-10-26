@@ -124,7 +124,7 @@ _ROSTER = (
     "guardrail:\n"
     "  enabled: true\n"
     "  connector: claudecode\n"
-    "  hook_fail_mode: {global_mode}\n"
+    "{global_line}"
     "  connectors:\n"
     "    claudecode: {{}}\n"
     "    codex: {{rule_pack: strict}}\n"
@@ -132,8 +132,8 @@ _ROSTER = (
 
 
 # GAP-0576: each quoted block is the command's real output for its
-# configuration. A per-user view follows the policy tier, so the saved global
-# value does not change it (oss-outage-open).
+# configuration. An explicit saved value wins over the tier; the page shows
+# the unset example so its mixed default/strict rows are meaningful.
 @pytest.mark.parametrize(("unicode_output", "term"), [(True, "xterm-256color"), (False, "xterm-256color"), (True, "dumb")])
 def test_fail_mode_page_quotes_the_real_output(tmp_path, unicode_output, term):
     blocks = _text_blocks(_page("reference/configuration/fail-modes.mdx"))
@@ -143,7 +143,8 @@ def test_fail_mode_page_quotes_the_real_output(tmp_path, unicode_output, term):
     ):
         if not ux.unicode_output_enabled():
             blocks = [ux.ascii_presentation_text(block) for block in blocks]
-        open_view = _fail_mode_view(tmp_path, _ROSTER.format(global_mode="open"))
-        closed_view = _fail_mode_view(tmp_path, _ROSTER.format(global_mode="closed"))
-    assert open_view == closed_view
-    assert open_view.strip("\n") + "\n" in blocks, open_view
+        unset_view = _fail_mode_view(tmp_path, _ROSTER.format(global_line=""))
+        open_view = _fail_mode_view(tmp_path, _ROSTER.format(global_line="  hook_fail_mode: open\n"))
+        closed_view = _fail_mode_view(tmp_path, _ROSTER.format(global_line="  hook_fail_mode: closed\n"))
+    assert open_view != closed_view
+    assert unset_view.strip("\n") + "\n" in blocks, unset_view

@@ -74,17 +74,29 @@ type templateData struct {
 	// make the listener prove it is the gateway before sending its per-user
 	// credential (UserScopedListenerProof); empty skips the proof.
 	ListenerProofJS string
-	FailMode        string // Rendered non-outage mode; per-user hooks bake "closed" and ask the current config for a classified outage.
-	Managed         bool
-	SecureClient    bool // render-time profile marker for Unix shell identity headers
+	// WindowsPowerShellJS is the system Windows PowerShell (resolved with
+	// GetSystemDirectoryW) a per-user plugin runs to check the native
+	// helper's owner and DACL on Windows, escaped for a JavaScript
+	// double-quoted string.
+	WindowsPowerShellJS string
+	FailMode            string // Rendered non-outage mode; per-user hooks bake "closed" and ask the current config for a classified outage.
+	Managed             bool
+	SecureClient        bool // render-time profile marker for Unix shell identity headers
 	// SecureClientDelivery marks a Secure Client render on a verified install.
 	// Every shell hook uses the installed mode, never the agent environment.
 	SecureClientDelivery bool
 	TokenFile            string
-	ScopedToken          bool
-	ConnectorName        string
-	HookBinaryPS         string // absolute launcher path, escaped for a PowerShell single-quoted literal
-	HookTimeoutMS        int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
+	// HookHomeSH is the data directory a per-user host render is written
+	// into, quoted for a POSIX shell. The shell hooks look for the
+	// installer's lock there as well, so a hard link, a symlink or a copy of
+	// a hook run from any folder is held by that install's lock (oss-outage-
+	// open round k). Empty for managed and sandbox renders and for a folder
+	// that is not absolute.
+	HookHomeSH    string
+	ScopedToken   bool
+	ConnectorName string
+	HookBinaryPS  string // absolute launcher path, escaped for a PowerShell single-quoted literal
+	HookTimeoutMS int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
 	// Cursor's 30-second host contract must also cover the stable launcher's
 	// custody verification and the adapter's bounded child cleanup.
 	CursorHookTimeoutMS int
@@ -460,6 +472,11 @@ func writeHookHelpers(hookDir string) error {
 
 func writeHookHelpersForMode(hookDir string, managedEnterprise bool) error {
 	writeFile := hookRuntimeFileWriter(managedEnterprise)
+	if !managedEnterprise {
+		if err := writePerUserGatewayHelperRecord(hookDir); err != nil {
+			return err
+		}
+	}
 	for _, name := range hookHelperScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
 		if err != nil {
@@ -484,6 +501,40 @@ func writeHookHelpersForMode(hookDir string, managedEnterprise bool) error {
 		if err := writeFile(helperPath, content, 0o600); err != nil {
 			return fmt.Errorf("write hook helper %s: %w", name, err)
 		}
+	}
+	return nil
+}
+
+// The record is written at setup beside the installed hook files. Agent
+// environment never selects the executable that receives a bearer or reads
+// a call-time outage decision. Plugins use the same record as shell hooks.
+func writePerUserGatewayHelperRecord(hookDir string) error {
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		return err
+	}
+	home := userHomeDir()
+	dataDir := filepath.Dir(filepath.Clean(hookDir))
+	if filepath.Base(dataDir) == ".defenseclaw" {
+		home = filepath.Dir(dataDir)
+	}
+	if !filepath.IsAbs(home) {
+		return fmt.Errorf("hook helper account home is not absolute")
+	}
+	name := "defenseclaw-gateway"
+	if runtime.GOOS == "windows" {
+		name = windowsGatewayBinaryName
+	}
+	// A custom per-user data root can carry the gateway installation itself.
+	// Resolve that path once during setup, from the installed hook location;
+	// the hook never derives an executable from its caller's environment.
+	if dataDir != home && filepath.Base(dataDir) != ".defenseclaw" {
+		if info, err := os.Lstat(filepath.Join(dataDir, ".local", "bin", name)); err == nil && info.Mode().IsRegular() {
+			home = dataDir
+		}
+	}
+	binary := filepath.Join(home, ".local", "bin", name)
+	if err := hookRuntimeFileWriter(false)(filepath.Join(hookDir, ".gateway-helper"), []byte(binary+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write hook helper record: %w", err)
 	}
 	return nil
 }
@@ -592,7 +643,7 @@ func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, fail
 		return err
 	}
 
-	scripts, err := renderHookScripts(apiAddr, failMode, tokenFile, extras, managed, connectorName, scopedToken, socketTransport, foreignGuard, secureClient, secureClientDelivery, hermesNativeHook...)
+	scripts, err := renderHookScripts(apiAddr, failMode, tokenFile, extras, managed, connectorName, scopedToken, socketTransport, foreignGuard, secureClient, secureClientDelivery, filepath.Dir(filepath.Clean(hookDir)), hermesNativeHook...)
 	if err != nil {
 		return err
 	}
@@ -625,12 +676,17 @@ type renderedHookScript struct {
 // renderHookScripts renders, without writing anything, the shared inspect-*
 // scripts and the connector-owned lifecycle scripts named in extras, in the
 // order writeHookScriptsCommonWithTransport writes them. tokenFile is the
-// basename of the token file the connector scripts read.
-func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient, secureClientDelivery bool, hermesNativeHook ...string) ([]renderedHookScript, error) {
+// basename of the token file the connector scripts read; hookHome is the
+// data directory the hooks are written into (HookHomeSH).
+func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient, secureClientDelivery bool, hookHome string, hermesNativeHook ...string) ([]renderedHookScript, error) {
 	// A per-user script bakes closed for non-outage failures. Its current
 	// config decides a classified outage at call time.
+	homeSH := ""
 	if !managed {
 		failMode = "closed"
+		if filepath.IsAbs(hookHome) {
+			homeSH = shellSingleQuote(filepath.Clean(hookHome))
+		}
 	}
 	connectorData := templateData{
 		APIAddr:              apiAddr,
@@ -640,6 +696,7 @@ func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, man
 		SecureClient:         secureClient,
 		SecureClientDelivery: secureClient && secureClientDelivery,
 		TokenFile:            tokenFile,
+		HookHomeSH:           homeSH,
 		ScopedToken:          scopedToken,
 		ConnectorName:        strings.ToLower(strings.TrimSpace(connectorName)),
 		HookBinaryPS:         strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
@@ -660,7 +717,7 @@ func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, man
 	// identity and scoped credential selection happen at invocation time.  The
 	// connector-owned lifecycle scripts retain the selected connector data.
 	sharedData := templateData{APIAddr: apiAddr, Managed: managed, SecureClient: connectorData.SecureClient,
-		SecureClientDelivery: connectorData.SecureClientDelivery}
+		SecureClientDelivery: connectorData.SecureClientDelivery, HookHomeSH: homeSH}
 	// renderHookScriptSet is the one renderer the host and sandbox hook
 	// files share (hook_render.go).
 	set, err := renderHookScriptSet(connectorData, sharedData, extras)
@@ -762,7 +819,7 @@ func renderedHookRuntimeFiles(conn Connector, opts SetupOpts) ([]renderedHookRun
 	}
 	scripts, err := renderHookScripts(opts.APIAddr, render.failMode, tokenFile, render.extras, opts.ManagedEnterprise,
 		conn.Name(), render.scopedToken, render.socketTransport, render.foreignGuard, shellHookSecureClientProfile(opts),
-		shellHookSecureClientDelivery(opts), render.hermesNativeHook)
+		shellHookSecureClientDelivery(opts), opts.DataDir, render.hermesNativeHook)
 	if err != nil {
 		return nil, err
 	}

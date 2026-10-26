@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 import stat
 import sys
@@ -70,20 +71,20 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 # bridge_host), and the copy the Secure Client profile renders
 # (internal/gateway/connector/hooks/*-secure-client.*), which its release pins.
 _BRIDGE_STANDALONE_TEMPLATE_DIGESTS = {
-    "amp": "c2d705527b5c6b1482a645435998f048fdb48b47303f37ae21f3fb90749a6671",
-    "opencode": "4624e672100f3564814e6c92ae20e0217ec5561d766c038601f64a1dc31912eb",
+    "amp": "3042922fde1aad27fb9bc1beb3664f3ccb5f0b2e9fc9b6ebee5a393582d007ba",
+    "opencode": "c26d587c1d91ab9bcae5d8dd542f55bcc948296144dd254062902b96746e3f80",
 }
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "4b0292f2a6e16c44931649c836aa7263136c9d58a916c23c3a10256e711282c9",  # amp-plugin.ts
+            "cb906d45ec106858e158d754377d0bd83db8fab0ce098f8edd1358be3049ee6a",  # amp-plugin.ts
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["amp"],
             "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "9216239388d216ef5cc11ac9737408fc60d984907efb31b214ebbbcbb2e7204b",  # opencode-plugin.js
+            "e91e0d72f01c157c092a69327ed66ecb55eedc5c3b42ef00318e282b62732475",  # opencode-plugin.js
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["opencode"],
             "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
         }
@@ -163,6 +164,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"\n',
             "proof",
         ),
+        (
+            b'const DC_WINDOWS_POWERSHELL: string = "',
+            b'"\n',
+            b'const DC_WINDOWS_POWERSHELL: string = "{{.WindowsPowerShellJS}}"\n',
+            "powershell",
+        ),
     ),
     "opencode": (
         (
@@ -224,6 +231,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'";\n',
             b'const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";\n',
             "proof",
+        ),
+        (
+            b'const DC_WINDOWS_POWERSHELL = "',
+            b'";\n',
+            b'const DC_WINDOWS_POWERSHELL = "{{.WindowsPowerShellJS}}";\n',
+            "powershell",
         ),
     ),
 }
@@ -466,6 +479,24 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
     return info.st_uid == 0 and not info.st_mode & 0o022
 
 
+def _valid_bridge_powershell(value: bytes) -> bool:
+    """Setup renders the system Windows PowerShell it resolved with
+    GetSystemDirectoryW; a bridge naming any other executable is not ours."""
+
+    from defenseclaw.doctor_hooks import _windows_system_powershell_path
+
+    expected = _windows_system_powershell_path()
+    try:
+        rendered = json.loads('"' + value.decode("utf-8", errors="strict") + '"')
+    except (UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        bool(expected)
+        and isinstance(rendered, str)
+        and ntpath.normcase(rendered) == ntpath.normcase(expected)
+    )
+
+
 def _valid_bridge_dynamic_value(
     kind: str,
     value: bytes,
@@ -482,6 +513,8 @@ def _valid_bridge_dynamic_value(
         return value in {b"", b"1"}
     if kind == "mode":
         return value in {b"open", b"closed"}
+    if kind == "powershell":
+        return _valid_bridge_powershell(value)
     if kind in {"socket", "guard", "marker", "native", "lifecycle"}:
         return _valid_bridge_managed_path(kind, value)
     if kind != "token":
@@ -518,7 +551,7 @@ def _matches_immutable_bridge_template(
             for index, line in enumerate(lines)
             if line.startswith(prefix) and line.endswith(suffix)
         ]
-        if not matches and kind in {"native", "proof", "mode", "lifecycle"}:
+        if not matches and kind in {"native", "proof", "mode", "lifecycle", "powershell"}:
             # Current and Secure Client templates have distinct fields, each
             # still covered by its exact pinned digest.
             continue

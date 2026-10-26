@@ -9,6 +9,7 @@ keywords:
 
 Reference for the [Devin connector](/docs/connectors/devin). It wires into the native [Devin CLI lifecycle-hook surface](https://docs.devin.ai/cli/extensibility/hooks/overview). Devin contacts its model provider directly. Use `devin` for both Devin CLI and Devin Desktop. Upgrading from a release that protected Devin Desktop under its previous product name moves that configuration to `devin` and removes the old app's hook entries ([Upgrade](/docs/get-started/upgrade#renamed-and-removed-connectors)).
 
+On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
 ## Install surface
 
 ### Platform status

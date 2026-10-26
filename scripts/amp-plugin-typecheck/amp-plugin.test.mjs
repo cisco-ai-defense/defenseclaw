@@ -26,6 +26,7 @@ async function renderAmpPlugin(values = {}) {
 		.replaceAll("{{.ForeignHookGuardJS}}", values.foreignGuard ?? "")
 		.replaceAll("{{.InstallMarkerJS}}", values.installMarker ?? "")
 		.replaceAll("{{.ListenerProofJS}}", values.listenerProof ?? "")
+		.replaceAll("{{.WindowsPowerShellJS}}", values.windowsPowerShell ?? "C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe")
 	assert.ok(!rendered.includes("{{."), "rendered plugin retains a template placeholder")
 	const path = join(mkdtempSync(join(tmpdir(), "dc-amp-plugin-")), "amp-plugin.ts")
 	writeFileSync(path, rendered)

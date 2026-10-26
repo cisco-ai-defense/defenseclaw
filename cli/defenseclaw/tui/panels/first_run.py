@@ -47,7 +47,8 @@ def visible_connector_choices(os_name: str | None = None) -> tuple[str, ...]:
 
 PROFILE_CHOICES: tuple[str, ...] = ("observe", "action")
 SCANNER_MODE_CHOICES: tuple[str, ...] = ("local", "remote", "both")
-FAIL_MODE_CHOICES: tuple[str, ...] = ("open", "closed")
+# "policy" saves nothing: the policy tier decides a gateway outage.
+FAIL_MODE_CHOICES: tuple[str, ...] = ("policy", "open", "closed")
 HILT_SEVERITY_CHOICES: tuple[str, ...] = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 
 
@@ -119,7 +120,7 @@ class FirstRunPanelModel:
         # flags in observe so an observe connector keeps failing open and
         # the CLI preserves any existing setting.
         if self.value("Profile") == "action":
-            if fail_mode := self.value("Hook Fail Mode"):
+            if (fail_mode := self.value("Hook Fail Mode")) in ("open", "closed"):
                 args.extend(("--fail-mode", fail_mode))
             hitl_on = self.value("HITL") == "true"
             args.append("--human-approval" if hitl_on else "--no-human-approval")
@@ -200,9 +201,10 @@ def default_first_run_fields() -> tuple[FirstRunField, ...]:
         FirstRunField(
             "Hook Fail Mode",
             "choice",
-            "closed",
+            "policy",
             FAIL_MODE_CHOICES,
-            "Action profile only. If a check can't finish: closed = block where supported, open = allow and log.",
+            "Action profile only. While the gateway is down: policy = default and permissive allow with a "
+            "warning, strict blocks; open = allow with a warning; closed = block.",
         ),
         FirstRunField(
             "HITL",

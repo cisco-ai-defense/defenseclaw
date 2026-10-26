@@ -58,12 +58,15 @@ func RemoveUnusedSharedHookRuntime(dataDir string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read hook config sidecar: %w", err)
 	}
-	names := append(append([]string{hookConfigSidecarName}, genericHookScripts...), hookHelperScripts...)
+	names := append(append([]string{hookConfigSidecarName, ".gateway-helper"}, genericHookScripts...), hookHelperScripts...)
 	var errs []error
 	for _, name := range names {
 		if err := os.Remove(filepath.Join(hookDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}
+	}
+	if err := os.RemoveAll(filepath.Join(hookDir, ".outage-warnings")); err != nil {
+		errs = append(errs, err)
 	}
 	if len(errs) == 0 {
 		if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {

@@ -2561,7 +2561,9 @@ class GuardrailConfig:
     # ``DEFENSECLAW_STRICT_AVAILABILITY=1`` additionally forces transport and
     # missing-token failures closed. Mirrors ``GuardrailConfig.HookFailMode``
     # in internal/config/config.go.
-    hook_fail_mode: str = "closed"
+    # An empty constructor value means no operator choice. __post_init__ keeps
+    # the historical public value while recording whether a choice was made.
+    hook_fail_mode: str = ""
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
     # LLM be used only as a judge, or also as the agent's upstream?".
     # One of:
@@ -2651,6 +2653,18 @@ class GuardrailConfig:
             return pc.hilt
         return self.hilt
 
+    def __post_init__(self) -> None:
+        supplied = bool(self.hook_fail_mode.strip())
+        if not supplied:
+            object.__setattr__(self, "hook_fail_mode", "closed")
+        object.__setattr__(self, "_hook_fail_mode_saved", supplied)
+        object.__setattr__(self, "_hook_fail_mode_track", True)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        if name == "hook_fail_mode" and getattr(self, "_hook_fail_mode_track", False):
+            object.__setattr__(self, "_hook_fail_mode_saved", bool(str(value or "").strip()))
+
     def effective_hook_fail_mode(self, connector: str = "") -> str:
         """Resolve hook failure behavior for this deployment profile.
 
@@ -2663,11 +2677,10 @@ class GuardrailConfig:
           mode; an explicit value always wins (the administrator's config
           sets it), and an unset one is open under Secure Client (#1163) and
           closed on the standalone profile;
-        - a per-user host reports its gateway-outage mode, which follows the
-          connector's policy tier (Go ``config.HookOutageFailMode``, owner
-          decision 2026-10-23): ``closed`` for a strict rule pack, ``open``
-          for default (balanced) and permissive. A saved per-user
-          ``hook_fail_mode`` does not change it, and every failure that is
+        - a per-user host reports its gateway-outage mode: an explicitly saved
+          ``hook_fail_mode`` wins; otherwise the connector's policy tier
+          (Go ``config.HookOutageFailMode``, owner decision 2026-10-23) is
+          ``closed`` for strict and ``open`` for default and permissive. Every failure that is
           not an outage (an answer the gateway gave, a malformed or partial
           one, a missing token, the install window) blocks in every tier.
         """
@@ -2675,19 +2688,19 @@ class GuardrailConfig:
         cfg = owner() if callable(owner) else None
         owned = cfg is not None and getattr(cfg, "guardrail", None) is self
         standalone = owned and cfg.managed_outside_secure_client()
+        if owned:
+            application = cfg.application_protection
+            if application.enabled and connector_paths.normalize(connector) not in cfg.active_connectors():
+                override = application._connector_override(connector)
+                overlay = override.guardrail if override is not None else application.guardrail
+                if overlay.hook_fail_mode.strip():
+                    return _normalize_hook_fail_mode(overlay.hook_fail_mode)
+        pc = self._connector_override(connector)
+        if pc is not None and pc.hook_fail_mode.strip():
+            return _normalize_hook_fail_mode(pc.hook_fail_mode)
+        if getattr(self, "_hook_fail_mode_saved", False) and self.hook_fail_mode.strip():
+            return _normalize_hook_fail_mode(self.hook_fail_mode)
         if standalone or self.secure_client_hook_fail_modes():
-            if owned:
-                application = cfg.application_protection
-                if application.enabled and connector_paths.normalize(connector) not in cfg.active_connectors():
-                    override = application._connector_override(connector)
-                    overlay = override.guardrail if override is not None else application.guardrail
-                    if overlay.hook_fail_mode.strip():
-                        return _normalize_hook_fail_mode(overlay.hook_fail_mode)
-            pc = self._connector_override(connector)
-            if pc is not None and pc.hook_fail_mode.strip():
-                return _normalize_hook_fail_mode(pc.hook_fail_mode)
-            if self.hook_fail_mode.strip():
-                return _normalize_hook_fail_mode(self.hook_fail_mode)
             return "closed" if standalone else "open"
         return "closed" if self.hook_policy_tier(connector) == "strict" else "open"
 
@@ -4802,6 +4815,11 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         scanners.get("skill_scanner", {}).pop("virustotal_api_key", None)
     _strip_empty_llm(scanners, "plugin_llm")
     guardrail = d.get("guardrail") or {}
+    # The public in-memory default remains "closed" for existing callers,
+    # but an unset document must stay unset in the modeled save baseline.
+    # Otherwise choosing "closed" in setup looks unchanged and is omitted.
+    if isinstance(guardrail, dict) and not getattr(cfg.guardrail, "_hook_fail_mode_saved", False):
+        guardrail.pop("hook_fail_mode", None)
     if isinstance(guardrail, dict) and not guardrail.get("allow_private_upstreams"):
         guardrail.pop("allow_private_upstreams", None)
     _strip_unset_levels(guardrail)
@@ -6194,7 +6212,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         if isinstance(private_upstreams_raw, list | tuple)
         else []
     )
-    return GuardrailConfig(
+    merged = GuardrailConfig(
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
         scanner_mode=raw.get("scanner_mode", "both"),
@@ -6229,6 +6247,10 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         profile_assignments=_merge_guardrail_profile_assignments(raw.get("profile_assignments")),
         default_profile=str(raw.get("default_profile", "") or "").strip(),
     )
+    # The historical raw default is "closed"; keep presence for the OSS
+    # outage resolver without changing that public config value.
+    merged._hook_fail_mode_saved = bool(str(raw.get("hook_fail_mode", "") or "").strip())
+    return merged
 
 
 def _merge_guardrail_connectors(

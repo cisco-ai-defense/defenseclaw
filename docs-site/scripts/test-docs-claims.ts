@@ -91,8 +91,8 @@ describe('Cursor observe outage mode', () => {
   it('keeps the rendered hook closed unless the config explicitly opens it', () => {
     const hooks = source('internal/gateway/connector/subprocess.go');
     const outage = hooks.split('func OutageHookFailMode(')[1]?.split('\n}')[0] ?? '';
-    // oss-outage-open: a per-user render takes the policy tier's outage mode
-    // (opts.HookFailMode); a managed one resolves the administrator's.
+    // The per-user render carries the saved choice or tier fallback in
+    // opts.HookFailMode; a managed one resolves the administrator's.
     assert.match(outage, /if perUserOutageRender\(opts\) \{\s*return normalizeHookFailMode\(opts\.HookFailMode\)/);
     assert.match(outage, /return resolveHookFailMode\(opts, conn\)/);
     const resolve = hooks.split('func resolveHookFailMode(')[1]?.split('\n}')[0] ?? '';
@@ -104,13 +104,13 @@ describe('Cursor observe outage mode', () => {
     assert.match(perUser, /`default` \(balanced, the out-of-the-box policy\) or `permissive` \| The call runs/i);
     assert.match(perUser, /\| `strict` \(`defenseclaw guardrail use-pack strict`\) \| Block/i);
     assert.match(perUser, /The guardrail mode does not change the outage mode: observe and action mode fail the same way/i);
-    assert.match(cursor, /per-user Cursor hook makes the outage decision of its policy tier in observe and action mode/i);
+    assert.match(cursor, /per-user Cursor hook uses an explicit saved outage mode; when unset, its policy tier decides in observe and action mode/i);
     const coverage = page('appendix/coverage-by-layer.mdx');
-    assert.match(coverage, /On a per-user install the policy tier decides, in observe and action mode alike: default and permissive run the call with a warning/i);
+    assert.match(coverage, /On a per-user install an explicit saved mode wins; when unset, the policy tier decides in observe and action mode alike: default and permissive run the call with a warning/i);
     for (const stale of ['features/guardrail.mdx', 'reference/commands/installer.mdx', 'appendix/coverage-by-layer.mdx']) {
       assert.ok(!/Per-user Cursor (?:in )?observe (?:mode )?(?:still|also) blocks/i.test(page(stale)), stale);
     }
-    assert.match(failModes, /On a per-user install the outage behavior follows the policy tier.{0,600}Every other failure blocks in every tier/i);
+    assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}Every other failure blocks in every tier/i);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
     assert.match(managedRegistration, /"failClosed": true,/);
     assert.match(page('reference/connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call. The administrator's resolved fail mode decides/i);
@@ -490,12 +490,14 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     }
   });
 
-  it('says an upgrade gives per-user hooks the outage mode of their policy tier', () => {
-    assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks take the outage mode of their policy tier'));
-    assert.ok(page('get-started/upgrade.mdx').includes('whatever an earlier config or registration saved, and fail closed for every other failure'));
+  it('says an upgrade preserves saved choices, including a 1.0.x Cursor open', () => {
+    assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks honor an explicitly saved outage mode'));
+    assert.ok(page('get-started/upgrade.mdx').includes('The upgrade keeps that saved `open`, so strict does not close it'));
+    assert.ok(source('cli/defenseclaw/migrations.py').includes('defenseclaw config unset {path}'));
+    assert.ok(page('get-started/upgrade.mdx').includes('Every other failure blocks'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
-    assert.ok(page('reference/configuration/fail-modes.mdx').includes('The hooks follow the mode Setup recorded for the connector'));
-    assert.ok(page('reference/configuration/fail-modes.mdx').includes('A per-user install ignores a saved value'));
+    assert.ok(page('reference/configuration/fail-modes.mdx').includes('A per-user 1.0.4 hook reads `config.yaml` next to its own hooks on each call'));
+    assert.ok(page('reference/configuration/fail-modes.mdx').includes('A per-user (OSS) install honors a saved connector or global'));
   });
 });
 

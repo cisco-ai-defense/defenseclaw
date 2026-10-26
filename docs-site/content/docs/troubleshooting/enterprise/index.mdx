@@ -331,9 +331,10 @@ report `enterprise_managed_runtime_state_invalid` instead.
   still push it past that threshold. In Windows runner tests, the file peaked at 0.9 to 1.2 GB at
   10 calls a second; that is an observation, not a disk-space guarantee. A SQLite statement can run
   past the hold, so some hook answers can still wait
-  seconds or exceed their answer budget. Under the default `closed` mode those calls block; an
-  administrator's outage-only `open` applies only to a classified no-answer timeout, and calls of
-  guarded connectors (`foreign_hooks: remove`) still block, as in 1.0.3 (GAP-0352). If the gateway logs a persistent
+  seconds or exceed their answer budget. Those calls block under the default `closed` mode and under an
+  administrator's `open` too (`enterprise_managed_gateway_no_answer`): `open` allows a call only while
+  the hook proves the gateway service is stopped, never a call the gateway took and did not answer in time. Calls of guarded connectors (`foreign_hooks: remove`)
+  block during an outage too, as in 1.0.3 (GAP-0352). If the gateway logs a persistent
   `audit WAL` over-bound warning, check for a long-running reader and available disk space.
 - A tool call that DefenseClaw allowed while the gateway was running still runs if you approve it in
   the agent after the gateway stops. Every call checked while the gateway is down is blocked.

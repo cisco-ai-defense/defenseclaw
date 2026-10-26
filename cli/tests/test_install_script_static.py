@@ -1403,7 +1403,10 @@ def test_a_full_disk_is_checked_before_the_lock() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
     assert text.index("|| require_free_space") < text.index("# ── Lock and log")
     lock = text[text.index("# ── Lock and log") : text.index('LOG="${DEFENSECLAW_HOME}/logs/install-')]
-    assert 'die "Could not write the install lock ${LOCK_DIR}/pid: ${LOCK_HINT}"' in lock
+    # take_lock reports a write failure with the hint its caller gives; the
+    # home lock's is LOCK_HINT (free space, nothing changed).
+    assert 'die "Could not write the install lock ${lock}/pid: ${hint}"' in lock
+    assert '\ntake_lock "${LOCK_DIR}" "${LOCK_HINT}"\n' in lock
     assert "check the free space" in lock and "nothing was changed" in lock
     assert 'rm -rf "${STAGING}"' in text[text.index("if ! snapshot; then") :][:200]
 

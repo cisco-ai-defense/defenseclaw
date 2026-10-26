@@ -77,7 +77,7 @@ func TestHostHooksTreatAlertAsAdvisory(t *testing.T) {
 		for _, mode := range []string{"closed", "open"} {
 			t.Run(tc.script+"/"+mode, func(t *testing.T) {
 				dcHome := t.TempDir()
-				installNativeGatewayForHookTest(t, dcHome)
+				installNativeGatewayForHookTest(t, dcHome, dir)
 				cmd := exec.Command("bash", append([]string{filepath.Join(dir, tc.script)}, tc.args...)...)
 				cmd.Env = append(os.Environ(), "HOME="+dcHome, "DEFENSECLAW_HOME="+dcHome, "DEFENSECLAW_FAIL_MODE="+mode)
 				cmd.Stdin = strings.NewReader(tc.stdin)

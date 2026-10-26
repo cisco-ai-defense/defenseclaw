@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +51,8 @@ var hookFailOpenReportMu sync.Mutex
 type hookFailureLine struct {
 	TS        string `json:"ts"`
 	Connector string `json:"connector"`
+	SessionID string `json:"session_id"`
+	CallID    string `json:"call_id"`
 	Reason    string `json:"reason"`
 	Category  string `json:"category"`
 	FailMode  string `json:"fail_mode"`
@@ -89,6 +93,9 @@ type hookFailOpenSummary struct {
 // hookFailuresReported is the report's position in hook-failures.jsonl.
 type hookFailuresReported struct {
 	Offset int64 `json:"offset"`
+	// The summary alert and the per-call audit progress independently. A
+	// failed summary write must not duplicate already recorded call rows.
+	AuditOffset int64 `json:"audit_offset,omitempty"`
 	// Head fingerprints the file's first line at Offset: a file replaced by
 	// another one, even a longer one, is read again from its start instead
 	// of from the middle of a line (rel-1-0-2 GAP-0446). Empty in a state
@@ -124,6 +131,25 @@ func reportHookFailOpenCallsIn(logDir string, logger *audit.Logger, now time.Tim
 	if err != nil {
 		return err
 	}
+	for _, call := range read.calls {
+		if call.end <= read.start.AuditOffset {
+			continue
+		}
+		env := audit.CorrelationEnvelope{Connector: call.entry.Connector,
+			SessionID: call.entry.SessionID, RequestID: call.entry.CallID}
+		ctx := audit.ContextWithEnvelope(context.Background(), env)
+		reason := strings.TrimSpace(call.entry.Reason)
+		if len(reason) > 300 {
+			reason = reason[:300]
+		}
+		details := fmt.Sprintf("unchecked hook call during gateway outage: %s; see logs/%s", strconv.Quote(reason), hookFailuresFile)
+		if err := logger.LogActionCtxSeverity(ctx, string(audit.ActionGuardrailWarn), call.entry.Connector, details, "HIGH"); err != nil {
+			_ = writeHookFailuresReported(logDir, read.start)
+			return fmt.Errorf("record %s unchecked hook call: %w", call.entry.Connector, err)
+		}
+		read.start.AuditOffset = call.end
+	}
+	read.start.AuditOffset = read.next
 	for _, sum := range summaries {
 		if err := logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), sum.Connector,
 			describeHookFailOpenCalls(sum), "HIGH", sum.Connector); err != nil {
@@ -137,7 +163,8 @@ func reportHookFailOpenCallsIn(logDir string, logger *audit.Logger, now time.Tim
 		}
 		read.start.Done[sum.Connector] = read.next
 	}
-	return writeHookFailuresReported(logDir, hookFailuresReported{Offset: read.next, Head: read.start.Head})
+	return writeHookFailuresReported(logDir, hookFailuresReported{Offset: read.next, Head: read.start.Head,
+		AuditOffset: read.start.AuditOffset})
 }
 
 // hookFailOpenRead is where one report read: the state it started from
@@ -146,6 +173,12 @@ func reportHookFailOpenCallsIn(logDir string, logger *audit.Logger, now time.Tim
 type hookFailOpenRead struct {
 	start hookFailuresReported
 	next  int64
+	calls []hookFailOpenCall
+}
+
+type hookFailOpenCall struct {
+	entry hookFailureLine
+	end   int64
 }
 
 // readHookFailOpenCalls returns the fail-open calls after the reported
@@ -173,6 +206,7 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 	offset := state.Offset
 	if offset > info.Size() || offset < 0 || (state.Head != "" && state.Head != head) {
 		offset, state.Done = 0, nil
+		state.AuditOffset = 0
 	}
 	skipPartial := false
 	if info.Size()-offset > hookFailOpenReportMaxBytes {
@@ -192,7 +226,7 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 			next += int64(len(partial))
 		}
 	}
-	read.start = hookFailuresReported{Offset: next, Head: head, Done: state.Done}
+	read.start = hookFailuresReported{Offset: next, Head: head, Done: state.Done, AuditOffset: state.AuditOffset}
 	for {
 		line, _ := reader.ReadBytes('\n')
 		if len(line) == 0 || line[len(line)-1] != '\n' {
@@ -206,8 +240,12 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 		}
 		at, perr := time.Parse(time.RFC3339, strings.TrimSpace(entry.TS))
 		connectorName := strings.ToLower(strings.TrimSpace(entry.Connector))
-		if perr != nil || connectorName == "" || now.Sub(at) > hookFailOpenReportMaxAge ||
-			next <= state.Done[connectorName] {
+		if perr != nil || connectorName == "" || now.Sub(at) > hookFailOpenReportMaxAge {
+			continue
+		}
+		entry.Connector = connectorName
+		read.calls = append(read.calls, hookFailOpenCall{entry: entry, end: next})
+		if next <= state.Done[connectorName] {
 			continue
 		}
 		sum := byConnector[connectorName]

@@ -211,6 +211,42 @@ function Test-SamePath([string]$Entry, [string]$Path) {
     return $expanded -and $expanded -eq $Path.TrimEnd("\")
 }
 
+function Get-InstallLockLiveOwner([string]$Lock) {
+    # The pid of the live installer that owns the lock folder $Lock, or ""
+    # once it is gone: no process has its pid, this one has it, a process
+    # other than its proc-start record names has it (a reused pid; hookexec
+    # installLockStale), or no PowerShell has it. No clock is read; a lock
+    # without that record (1.0.2, 1.0.3), or a start that cannot be read,
+    # keeps its live pid.
+    $holder = "$(Get-Content -LiteralPath (Join-Path $Lock "pid") -ErrorAction SilentlyContinue | Select-Object -First 1)".Trim()
+    $process = if ($holder -match '^\d{1,9}$' -and [int]$holder -ne $PID) { Get-Process -Id ([int]$holder) -ErrorAction SilentlyContinue } else { $null }
+    # A process that has exited but whose process object a handle keeps runs nothing.
+    if ($process) { try { if ($process.HasExited) { $process = $null } } catch { } }
+    $recorded = "$(Get-Content -LiteralPath (Join-Path $Lock "proc-start") -ErrorAction SilentlyContinue | Select-Object -First 1)".Trim()
+    if ($process -and $recorded) {
+        try {
+            if ([string]$process.StartTime.ToFileTimeUtc() -ne $recorded) { $process = $null }
+        } catch { }
+    }
+    if ($process -and $process.ProcessName -match '^(powershell|pwsh)$') { return $holder }
+    return ""
+}
+
+function Test-InstallLockClaimLive([string]$Path) {
+    # The takeover claim $Path (an installer's or doctor's: its pid, then its
+    # process start) is of another run that still runs. One whose start
+    # cannot be read holds.
+    $lines = @(Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue)
+    $claimer = if ($lines.Count) { "$($lines[0])".Trim() } else { "" }
+    if ($claimer -notmatch '^[1-9]\d{0,8}$' -or [int]$claimer -eq $PID) { return $false }
+    $process = Get-Process -Id ([int]$claimer) -ErrorAction SilentlyContinue
+    if (-not $process) { return $false }
+    try { if ($process.HasExited) { return $false } } catch { }
+    $recorded = if ($lines.Count -gt 1) { "$($lines[1])".Trim() } else { "" }
+    if (-not $recorded) { return $true }
+    try { return [string]$process.StartTime.ToFileTimeUtc() -eq $recorded } catch { return $true }
+}
+
 function Remove-Tree([string]$Path) {
     # Antivirus and the search indexer hold freshly written files for a moment,
     # so a delete that fails is retried for up to 30 seconds. Windows PowerShell
@@ -4686,14 +4722,63 @@ function Invoke-Install {
         $acl.SetOwner($user)
         Set-DirectoryAcl $DataDir $acl
     }
-    try { New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null } catch {
-        $holder = [string](Get-Content -LiteralPath (Join-Path $LockDir "pid") -ErrorAction SilentlyContinue | Select-Object -First 1)
-        $process = if ($holder -match '^\d+$' -and [int]$holder -ne $PID) { Get-Process -Id ([int]$holder) -ErrorAction SilentlyContinue } else { $null }
-        if ($process -and $process.ProcessName -match '^(powershell|pwsh)$') { Die "Another DefenseClaw install is running (pid $holder)" }
-        Remove-Tree $LockDir
-        try { New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null } catch { Die "Could not take the install lock at $LockDir" }
+    # Take the install lock (install.sh take_lock). A lock whose installer is
+    # gone is taken over in place: the folder stays at its path, so no hook
+    # sees a running install without it, and only its owner files change.
+    # Takeovers are serialized: a taker first puts its claim in the folder
+    # (claim-<pid>-<n>: its pid and process start, put in place by one move)
+    # and goes on only while no other run's claim there is live; doctor
+    # --fix claims the same way before it removes a stale lock. A claim made
+    # before another taker's check is seen by it, so two takers never both
+    # go on; one that sees a live claim takes its own back and looks again.
+    # An installer removes no lock it did not take.
+    $identity = ""
+    try { $identity = [string](Get-Process -Id $PID -ErrorAction Stop).StartTime.ToFileTimeUtc() } catch { }
+    $claim = "claim-$PID-$([Diagnostics.Stopwatch]::GetTimestamp())"
+    $taken = $false
+    for ($try = 1; $try -le 10 -and -not $taken; $try++) {
+        if ($try -gt 1) { Start-Sleep -Seconds 1 }
+        try { New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null } catch {
+            if (-not (Test-Path -LiteralPath $LockDir -PathType Container)) { Die "Could not take the install lock at $LockDir" }
+            $holder = Get-InstallLockLiveOwner $LockDir
+            if ($holder) { Die "Another DefenseClaw install is running (pid $holder)" }
+        }
+        $part = Join-Path $LockDir ".$claim"
+        try {
+            [IO.File]::WriteAllText($part, "$PID`n$identity`n")
+            [IO.File]::Move($part, (Join-Path $LockDir $claim))
+        } catch {
+            Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
+            # The lock was given back meanwhile: make it again.
+            if (Test-Path -LiteralPath $LockDir -PathType Container) { Die "Could not take the install lock at $LockDir" }
+            continue
+        }
+        $busy = @(Get-ChildItem -LiteralPath $LockDir -Filter "claim-*" -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne $claim -and (Test-InstallLockClaimLive $_.FullName) }).Count -gt 0
+        if (-not $busy) {
+            $holder = Get-InstallLockLiveOwner $LockDir
+            if ($holder) {
+                Remove-Item -LiteralPath (Join-Path $LockDir $claim) -Force -ErrorAction SilentlyContinue
+                Die "Another DefenseClaw install is running (pid $holder)"
+            }
+            $taken = $true
+        } else {
+            Remove-Item -LiteralPath (Join-Path $LockDir $claim) -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if (-not $taken) {
+        Die "Another DefenseClaw install or doctor run is taking over the install lock at $LockDir; run the installer again once it is done"
     }
     $Run.Lock = $true
+    # The owner's identity (hookexec InstallLockIdentityName): its creation
+    # FILETIME, which no clock step moves and a later process with this pid
+    # does not share. It goes first and the pid last, so a lock taken over
+    # in place never names this pid beside the identity of the one before.
+    if ($identity) {
+        Set-Content -LiteralPath (Join-Path $LockDir "proc-start") -Value $identity -Encoding Ascii
+    } else {
+        Remove-Item -LiteralPath (Join-Path $LockDir "proc-start") -Force -ErrorAction SilentlyContinue
+    }
     Set-Content -LiteralPath (Join-Path $LockDir "pid") -Value $PID -Encoding Ascii
     $Run.Log = Join-Path $DataDir ("logs\install-" + (Get-Date -Format "yyyyMMddTHHmmss") + ".log")
     try { Start-Transcript -LiteralPath $Run.Log -Append | Out-Null; $Run.Transcript = $true } catch {

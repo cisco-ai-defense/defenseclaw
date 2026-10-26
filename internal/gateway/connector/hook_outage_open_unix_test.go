@@ -133,7 +133,7 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 						t.Fatalf("outage row = %+v, want a fail_open transport row with fail mode open", last)
 					}
 					text := string(output)
-					for _, want := range []string{"defenseclaw-gateway start", "defenseclaw doctor", "fail mode open for an outage"} {
+					for _, want := range []string{"defenseclaw-gateway start", "defenseclaw doctor", outageOpenWarningForTest(conn.Name())} {
 						if !strings.Contains(text, want) {
 							t.Fatalf("the warning does not name %q:\n%s", want, text)
 						}
@@ -246,12 +246,22 @@ func TestPerUserShellHookOutageFollowsTheConfigNow(t *testing.T) {
 				if last := records[len(records)-1]; last["outcome"] != want {
 					t.Fatalf("outage row = %+v, want %s", last, want)
 				}
-				if tc.opens && !strings.Contains(string(output), "fail mode open for an outage") {
+				if tc.opens && !strings.Contains(string(output), outageOpenWarningForTest(conn.Name())) {
 					t.Fatalf("open outage omitted its warning:\n%s", output)
 				}
 			})
 		}
 	}
+}
+
+// outageOpenWarningForTest is the one outage warning a connector's shell
+// hook shows: Claude Code and Codex show it as their user-visible
+// systemMessage, the others on stderr.
+func outageOpenWarningForTest(connector string) string {
+	if connector == "claudecode" || connector == "codex" {
+		return "DefenseClaw is not checking this session"
+	}
+	return "fail mode open for an outage"
 }
 
 // freeLoopbackAddrForOutageTest is a loopback address no process listens on.

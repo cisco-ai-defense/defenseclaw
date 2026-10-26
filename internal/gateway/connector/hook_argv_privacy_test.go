@@ -423,7 +423,7 @@ func TestShellHooksKeepTokenAndPayloadOffEveryCommandLine(t *testing.T) {
 				rec.reset(t)
 				gateway.take()
 				home := t.TempDir()
-				installNativeGatewayForHookTest(t, home)
+				installNativeGatewayForHookTest(t, home, hookDir)
 				curlrcEnv, trace := hookArgvCurlrcEnv(t)
 				code, stdout, stderr := runHookArgvCase(t, hookDir, tc, append([]string{"HOME=" + home, "DEFENSECLAW_HOME=" + home}, curlrcEnv...))
 				requireNoCurlTrace(t, trace)
@@ -457,7 +457,7 @@ func TestLegacySharedTokenHooksKeepTokenOffEveryCommandLine(t *testing.T) {
 	for _, tc := range append([]hookArgvCase{hookArgvConnectorCase(t, "claudecode")}, hookArgvInspectCases()[0]) {
 		rec.reset(t)
 		home := t.TempDir()
-		installNativeGatewayForHookTest(t, home)
+		installNativeGatewayForHookTest(t, home, hookDir)
 		code, stdout, stderr := runHookArgvCase(t, hookDir, tc, []string{"HOME=" + home, "DEFENSECLAW_HOME=" + home})
 		requests := gateway.take()
 		if code != 0 || len(requests) != 1 || requests[0].authorization != "Bearer "+token {
@@ -555,7 +555,8 @@ func TestShellHooksRefuseAMalformedToken(t *testing.T) {
 			for _, tc := range l.cases {
 				for _, mode := range []string{"open", "closed"} {
 					home := t.TempDir()
-					installNativeGatewayForHookTest(t, home)
+					// The reference run's hooks need their recorded helper too.
+					installNativeGatewayForHookTest(t, home, hookDir, rejectDir)
 					env := []string{"HOME=" + home, "DEFENSECLAW_HOME=" + home, "DEFENSECLAW_FAIL_MODE=" + mode}
 					rec.reset(t)
 					gateway.take()

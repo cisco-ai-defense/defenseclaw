@@ -7543,7 +7543,9 @@ func runHookAndCaptureNativeTransport(t *testing.T, scriptPath string, extraEnv 
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })
 
-	home := t.TempDir()
+	// The installed hook path, not an inherited HOME, selects the native
+	// helper. Put this fixture's helper beside the rendered hook data tree.
+	home := filepath.Dir(filepath.Dir(scriptPath))
 	installNativeGatewayForHookTest(t, home)
 	binary := filepath.Join(home, ".local", "bin", "defenseclaw-gateway")
 	realBinary := binary + ".real"
@@ -7556,6 +7558,7 @@ func runHookAndCaptureNativeTransport(t *testing.T, scriptPath string, extraEnv 
 	if err := os.WriteFile(binary, []byte(wrapper), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	linkGatewayBinaryToHookDirForTest(t, filepath.Dir(scriptPath), binary)
 	dataDir := filepath.Join(home, ".defenseclaw")
 	if err := os.Mkdir(dataDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -9043,8 +9046,8 @@ func TestClaudeCode_Setup_PreservesNonOtelEnvKeys(t *testing.T) {
 	if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "0" {
 		t.Errorf("OTel keys not merged in alongside operator keys (got CLAUDE_CODE_ENABLE_TELEMETRY=%v)", env["CLAUDE_CODE_ENABLE_TELEMETRY"])
 	}
-	if env["DEFENSECLAW_FAIL_MODE"] != "closed" {
-		t.Errorf("DEFENSECLAW_FAIL_MODE not merged: got %v", env["DEFENSECLAW_FAIL_MODE"])
+	if _, present := env["DEFENSECLAW_FAIL_MODE"]; present {
+		t.Errorf("per-user setup wrote DEFENSECLAW_FAIL_MODE, which no hook reads: %v", env["DEFENSECLAW_FAIL_MODE"])
 	}
 }
 
@@ -9957,7 +9960,7 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
 	}
 	dcHome := t.TempDir()
-	installNativeGatewayForHookTest(t, dcHome)
+	installNativeGatewayForHookTest(t, dcHome, dir)
 	// This account's gateway is running, so a 401 means its token drifted.
 	if err := os.WriteFile(filepath.Join(dcHome, "gateway.pid"), []byte(fmt.Sprintf(`{"pid":%d}`, os.Getpid())), 0o600); err != nil {
 		t.Fatal(err)
@@ -10022,7 +10025,7 @@ func TestHookScript_401WithoutOwnGateway_NamesAnotherListener(t *testing.T) {
 		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
 	}
 	dcHome := t.TempDir()
-	installNativeGatewayForHookTest(t, dcHome)
+	installNativeGatewayForHookTest(t, dcHome, dir)
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
 	cmd.Env = append(os.Environ(), "HOME="+dcHome, "DEFENSECLAW_HOME="+dcHome)
@@ -10405,7 +10408,7 @@ func TestCodexHookScriptBindsEventWithoutJQOrPython(t *testing.T) {
 	scriptPath := filepath.Join(dir, "codex-hook.sh")
 	bakeHookPathForTest(t, scriptPath, toolDir)
 	home := t.TempDir()
-	installNativeGatewayForHookTest(t, home)
+	installNativeGatewayForHookTest(t, home, dir)
 
 	runStdout := ""
 	run := func(input string) (int, string) {
@@ -10606,7 +10609,7 @@ func TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 	dcHome := t.TempDir()
-	installNativeGatewayForHookTest(t, dcHome)
+	installNativeGatewayForHookTest(t, dcHome, dir)
 
 	cmd := exec.Command(
 		"bash",
@@ -10678,7 +10681,7 @@ func TestClaudeCodeHookScript_SuppressesCursorCompatibilityImport(t *testing.T) 
 
 	dir := t.TempDir()
 	dcHome := t.TempDir()
-	installNativeGatewayForHookTest(t, dcHome)
+	installNativeGatewayForHookTest(t, dcHome, dir)
 	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, SetupOpts{APIAddr: addr, APIToken: "claude-token"}, &ClaudeCodeConnector{}); err != nil {
 		t.Fatalf("write Claude Code hook: %v", err)
 	}
@@ -10798,7 +10801,7 @@ func TestClaudeCodeHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 	dcHome := t.TempDir()
-	installNativeGatewayForHookTest(t, dcHome)
+	installNativeGatewayForHookTest(t, dcHome, dir)
 
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat /etc/shadow"}}`)
@@ -10860,7 +10863,7 @@ func TestClaudeCodeHookScript_NoStructuredOutput_FallsBackToExitTwo(t *testing.T
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 	dcHome := t.TempDir()
-	installNativeGatewayForHookTest(t, dcHome)
+	installNativeGatewayForHookTest(t, dcHome, dir)
 
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
@@ -10916,7 +10919,7 @@ func TestCodexHookScript_NoStructuredOutput_EmitsInlineBlockJSON(t *testing.T) {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 	dcHome := t.TempDir()
-	installNativeGatewayForHookTest(t, dcHome)
+	installNativeGatewayForHookTest(t, dcHome, dir)
 
 	cmd := exec.Command(
 		"bash",

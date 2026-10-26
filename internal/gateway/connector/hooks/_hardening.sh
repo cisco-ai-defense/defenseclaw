@@ -159,6 +159,7 @@ _DC_TRANSPORT_STATUS=""
 # The config's outage mode for this call (defenseclaw_config_outage_open);
 # never inherited.
 _DC_CONFIG_OUTAGE_MODE=""
+_DC_OUTAGE_WARNING_THIS_CALL=""
 
 # Resource limits — bound the hook so a stuck regex / hostile input
 # can't wedge the agent. Plan F16 ask: CPU 5s, virt mem 512MiB, fds 32.
@@ -1184,6 +1185,19 @@ defenseclaw_log_hook_failure() {
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date 2>/dev/null || printf unknown)"
   local safe_ts safe_connector safe_hook_name safe_reason safe_category safe_fail_mode
+	local correlation_payload="${PAYLOAD:-${CONTENT:-}}" session_id="" call_id=""
+	if [ -n "$correlation_payload" ]; then
+	  session_id="$(_dc_hook_event_field "$correlation_payload" session_id 2>/dev/null)" || session_id=""
+	  [ -n "$session_id" ] || session_id="$(_dc_hook_event_field "$correlation_payload" sessionID 2>/dev/null)" || session_id=""
+	  [ -n "$session_id" ] || session_id="$(_dc_hook_event_field "$correlation_payload" sessionId 2>/dev/null)" || session_id=""
+	  [ -n "$session_id" ] || session_id="$(_dc_hook_event_field "$correlation_payload" thread_id 2>/dev/null)" || session_id=""
+	  call_id="$(_dc_hook_event_field "$correlation_payload" source_event_id 2>/dev/null)" || call_id=""
+	  [ -n "$call_id" ] || call_id="$(_dc_hook_event_field "$correlation_payload" tool_call_id 2>/dev/null)" || call_id=""
+	  [ -n "$call_id" ] || call_id="$(_dc_hook_event_field "$correlation_payload" callID 2>/dev/null)" || call_id=""
+	fi
+	session_id="${session_id:0:256}"
+	call_id="${call_id:0:256}"
+	[ -n "$call_id" ] || call_id="$$-${RANDOM}${RANDOM}"
   safe_ts="$(defenseclaw_json_escape "$ts")"
   safe_connector="$(defenseclaw_json_escape "$connector")"
   safe_hook_name="$(defenseclaw_json_escape "$hook_name")"
@@ -1193,8 +1207,9 @@ defenseclaw_log_hook_failure() {
   # stderr is redirected before the append so a failed open of the log
   # (full disk, read-only home) cannot print a shell diagnostic naming this
   # script into the agent-visible block reason (GAP-1974).
-  printf '{"ts":"%s","connector":"%s","hook":"%s","reason":"%s","category":"%s","fail_mode":"%s","outcome":"%s"}\n' \
+  printf '{"ts":"%s","connector":"%s","hook":"%s","reason":"%s","category":"%s","fail_mode":"%s","outcome":"%s","session_id":"%s","call_id":"%s"}\n' \
     "$safe_ts" "$safe_connector" "$safe_hook_name" "$safe_reason" "$safe_category" "$safe_fail_mode" "$outcome" \
+    "$(defenseclaw_json_escape "$session_id")" "$(defenseclaw_json_escape "$call_id")" \
     2>/dev/null >> "$log_file" || true
   chmod 600 "$log_file" 2>/dev/null || true
   return 0
@@ -1205,7 +1220,9 @@ defenseclaw_log_hook_failure() {
 # payload reader fallbacks must not claim that inspection was bypassed.
 defenseclaw_log_hook_delivery_failure() {
   local outcome mode="$5"
-  outcome="$(defenseclaw_hook_delivery_outcome "$4" "$5")"
+  # Keep the call-time tier in this shell for logging, warning and verdict.
+  defenseclaw_resolve_hook_delivery_outcome "$4" "$5"
+  outcome="$_DC_HOOK_DELIVERY_OUTCOME"
   # A per-user outage the hook lets through records the open outage mode it
   # followed, so the gateway reports the unchecked call when it is back.
   [ "$outcome" != fail_open ] || mode=open
@@ -1244,33 +1261,6 @@ defenseclaw_per_user_outage_open() {
   defenseclaw_config_outage_open "$connector"
 }
 
-# Resolve the account home from the hook's data directory or the OS account
-# record. The agent's inherited HOME cannot choose the outage-mode binary.
-defenseclaw_outage_account_home() {
-  local data="$1" home=""
-  # These two layouts are derived from the hook's own data directory. The
-  # first also covers an explicitly selected data directory with its own
-  # per-user binary; the second is the normal ~/.defenseclaw layout.
-  if [ -x "${data}/.local/bin/defenseclaw-gateway" ]; then
-    printf '%s' "$data"
-    return 0
-  fi
-  if [ -x "${data}/../.local/bin/defenseclaw-gateway" ]; then
-    printf '%s' "${data}/.."
-    return 0
-  fi
-  # A custom data directory may be elsewhere. Resolve the account's home
-  # from the OS, with a clean environment; the agent's HOME cannot select
-  # the binary that answers this security decision.
-  home="$(env -i PATH=/usr/bin:/bin LC_ALL=C getent passwd "$UID" 2>/dev/null | cut -d: -f6 | head -n 1)" || true
-  if [ -z "$home" ]; then
-    home="$(env -i PATH=/usr/bin:/bin LC_ALL=C dscacheutil -q user -a uid "$UID" 2>/dev/null | sed -n 's/^dir: //p' | head -n 1)" || true
-  fi
-  case "$home" in
-    /*) [ -d "$home" ] && printf '%s' "$home" ;;
-  esac
-}
-
 # defenseclaw_config_outage_open CONNECTOR returns 0 only when this hook's
 # runtime config gives CONNECTOR the open outage mode now. The selected
 # gateway binary runs `hook-outage-mode`, which reads config.yaml next to the
@@ -1281,8 +1271,8 @@ defenseclaw_config_outage_open() {
   if [ -z "$_DC_CONFIG_OUTAGE_MODE" ]; then
     _DC_CONFIG_OUTAGE_MODE=closed
     if [ "${hook_dir#/}" != "$hook_dir" ] &&
-      home="$(defenseclaw_outage_account_home "${hook_dir}/..")" && [ -n "$home" ] &&
-      bin="$(defenseclaw_gateway_binary "${hook_dir}/.." "$home")"; then
+      bin="$(defenseclaw_gateway_binary)"; then
+      home="${bin%/.local/bin/defenseclaw-gateway}"
       # The Go runtime cannot start under the hook's address-space limit.
       _DC_CONFIG_OUTAGE_MODE="$(
         ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || true
@@ -1294,31 +1284,37 @@ defenseclaw_config_outage_open() {
 }
 
 defenseclaw_hook_delivery_outcome() {
-  local outcome=fail_closed
+  defenseclaw_resolve_hook_delivery_outcome "$1" "$2"
+  printf '%s' "$_DC_HOOK_DELIVERY_OUTCOME"
+}
+
+defenseclaw_resolve_hook_delivery_outcome() {
+  _DC_HOOK_DELIVERY_OUTCOME=fail_closed
   if [ "${1:-response}" = "transport" ] && defenseclaw_per_user_outage_open; then
-    printf fail_open
+    _DC_HOOK_DELIVERY_OUTCOME=fail_open
     return 0
   fi
   if [ "${2:-${FAIL_MODE:-closed}}" = "open" ] && ! defenseclaw_install_in_progress; then
-    outcome=fail_open
+    _DC_HOOK_DELIVERY_OUTCOME=fail_open
     if [ "${1:-response}" = "transport" ] && defenseclaw_should_fail_closed_on_unreachable; then
-      outcome=fail_closed
+      _DC_HOOK_DELIVERY_OUTCOME=fail_closed
     fi
   fi
-  printf '%s' "$outcome"
 }
 
 # defenseclaw_install_lock_held DATA returns 0 (true) while this account's
 # installer holds its data directory DATA: DATA/.install.lock exists as any
-# file type, or DATA exists but cannot be searched, so the lock cannot be
-# shown absent; no DATA to look in counts as held too. The native hook
-# (installLockHeld), the in-agent plugins and the Windows adapters apply the
-# same rule (GAP-0914). defenseclaw_install_held below, the one install check
-# of every shell hook, reads it.
+# file type and is not stale (defenseclaw_install_lock_stale), or DATA
+# exists but cannot be searched, so the lock cannot be shown absent; no DATA
+# to look in counts as held too. The native hook (installLockHeld), the
+# in-agent plugins and the Windows adapters apply the same rule (GAP-0914).
+# defenseclaw_install_held below, the one install check of every shell hook,
+# reads it.
 defenseclaw_install_lock_held() {
   local data="${1:-}"
   [ -n "$data" ] || return 0
   if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    defenseclaw_install_lock_stale "$data" && return 1
     return 0
   fi
   if [ -e "$data" ] || [ -L "$data" ]; then
@@ -1329,6 +1325,126 @@ defenseclaw_install_lock_held() {
   fi
   return 1
 }
+# defenseclaw_install_lock_stale DATA returns 0 (true) when DATA/.install.lock
+# is a folder whose installer is proven gone and no interrupted-install
+# record sits beside it: its pid names no process, or this hook's own (no
+# hook writes a lock), or another process than its proc-start record names
+# (a reused pid). It reads no clock (hookexec installLockStale, the one
+# rule): a live owner keeps the lock for as long as it runs, and so do a
+# lock without a valid pid, a lock without a proc-start record whose pid
+# names a process (1.0.2, 1.0.3) and an owner whose identity cannot be read.
+defenseclaw_install_lock_stale() {
+  local data="${1:-}" lock rc pid name recorded current
+  lock="${data}/.install.lock"
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  for name in previous.new .repair .rollback-hold .lifecycle-txn.json; do
+    if [ -e "${data}/${name}" ] || [ -L "${data}/${name}" ]; then
+      return 1
+    fi
+  done
+  rc=0
+  pid="$(defenseclaw_install_lock_number "${lock}/pid")" || rc=$?
+  [ "$rc" = 0 ] || return 1
+  [ "$pid" -le 2147483647 ] || return 1
+  # A live installer's pid names no other process: this one is reused.
+  [ "$pid" = "$$" ] && return 0
+  if ! kill -0 "$pid" 2>/dev/null; then
+    # A process of another account refuses the signal; only ps proves it gone.
+    command -v ps >/dev/null 2>&1 || return 1
+    ps -p "$pid" >/dev/null 2>&1 || return 0
+  fi
+  # An installer that exited but is not reaped (a zombie) keeps its pid and
+  # its start, but runs nothing.
+  defenseclaw_process_ended "$pid" && return 0
+  [ -e "${lock}/proc-start" ] || [ -L "${lock}/proc-start" ] || return 1
+  recorded="$(defenseclaw_install_lock_record "${lock}/proc-start")" || return 1
+  current="$(defenseclaw_process_identity "$pid")" || return 1
+  [ "$recorded" != "$current" ] && return 0
+  return 1
+}
+# defenseclaw_process_identity PID prints the identity of process PID as the
+# system keeps it from its creation, the record install.sh keeps of itself
+# in a lock (proc-start; hookexec procidentity): on Linux its boot id and
+# kernel start, "<boot_id> <starttime>" (field 22 of /proc/PID/stat); on
+# macOS its creation second as `LC_ALL=C TZ=UTC ps -o lstart=` prints it,
+# one space apart. No clock step moves either. It returns 1 when the system
+# does not say.
+defenseclaw_process_identity() {
+  local boot stat out IFS=' '
+  if [ -e /proc/self/stat ]; then
+    boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || return 1
+    stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
+    case "$stat" in *[\)]*) ;; *) return 1 ;; esac
+    stat="${stat##*[\)]}"
+    set -- $stat
+    [ "$#" -ge 20 ] || return 1
+    shift 19
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    case "$boot" in ''|*[!0-9a-f-]*) return 1 ;; esac
+    printf '%s %s' "$boot" "$1"
+    return 0
+  fi
+  [ "$(uname -s 2>/dev/null)" = Darwin ] && [ -x /bin/ps ] || return 1
+  out="$(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p "${1:-}" 2>/dev/null)" || return 1
+  set -- $out
+  [ "$#" -eq 5 ] || return 1
+  printf '%s %s %s %s %s' "$1" "$2" "$3" "$4" "$5"
+}
+# defenseclaw_process_ended PID returns 0 when process PID has exited but
+# keeps its pid: a zombie its parent has not reaped (hookexec
+# procidentity.Ended). It returns 1 while it runs or when the system does
+# not say.
+defenseclaw_process_ended() {
+  local stat IFS=' '
+  if [ -e /proc/self/stat ]; then
+    stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
+    case "$stat" in *[\)]*) ;; *) return 1 ;; esac
+    stat="${stat##*[\)]}"
+    set -- $stat
+    case "${1:-}" in Z|X|x) return 0 ;; esac
+    return 1
+  fi
+  [ -x /bin/ps ] || return 1
+  stat="$(LC_ALL=C /bin/ps -o stat= -p "${1:-}" 2>/dev/null)" || return 1
+  set -- $stat
+  case "${1:-}" in Z*) return 0 ;; esac
+  return 1
+}
+# defenseclaw_install_lock_record FILE prints the trimmed text of a small
+# owner record (proc-start); it returns 1 when FILE is not a small regular
+# file or is empty.
+defenseclaw_install_lock_record() {
+  local file="${1:-}" size text
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
+  size="$(wc -c < "$file" 2>/dev/null | tr -d ' ')" || return 1
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$size" -le 128 ] || return 1
+  text="$(cat "$file" 2>/dev/null)" || return 1
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  [ -n "$text" ] || return 1
+  printf '%s' "$text"
+}
+# defenseclaw_install_lock_number FILE prints the decimal number of the owner
+# record file (pid). It returns 1 when FILE is absent, empty or
+# not a positive number, and 2 when it cannot be read (not a small regular
+# file).
+defenseclaw_install_lock_number() {
+  local file="${1:-}" size text
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 1
+  fi
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 2
+  size="$(wc -c < "$file" 2>/dev/null | tr -d ' ')" || return 2
+  case "$size" in ''|*[!0-9]*) return 2 ;; esac
+  [ "$size" -le 64 ] || return 2
+  text="$(cat "$file" 2>/dev/null)" || return 2
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  case "$text" in ''|0*|*[!0-9]*) return 1 ;; esac
+  [ "${#text}" -le 12 ] || return 1
+  printf '%s' "$text"
+}
 # defenseclaw_install_held returns 0 (true) while an installer holds either
 # data directory of this account's hook: the one DEFENSECLAW_HOME names, else
 # ~/.defenseclaw, where install.sh and install.ps1 take the lock, and the one
@@ -1336,7 +1452,13 @@ defenseclaw_install_lock_held() {
 # folder), which the gateway rendered it into from its resolved data
 # directory. An agent that runs the hook without DEFENSECLAW_HOME, or a
 # data_dir apart from DEFENSECLAW_HOME, still finds the lock (GAP-0948).
+# A per-user render also checks the data directory the gateway rendered it
+# into (_DC_HOOK_HOME, written into the file), so a hard link, a symlink or a
+# copy of the hook, run from any folder, is held by that install's lock.
 defenseclaw_install_held() {
+  if [ -n "${_DC_HOOK_HOME:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_HOME}"; then
+    return 0
+  fi
   defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}" && return 0
   [ -n "${_DC_HOOK_DATA_DIR:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_DATA_DIR}"
 }
@@ -1457,35 +1579,38 @@ defenseclaw_native_output_agrees() {
   [ "$value" = "block" ]
 }
 
-# defenseclaw_gateway_binary DATA_DIR HOME prints the per-user gateway binary
-# a cold start runs: the one that last ran this data directory, then the
-# installer's ~/.local/bin, then the hardened PATH.
+# Read only the helper path setup recorded beside this installed hook. Every
+# path component from the account home down, the record and the binary must
+# be owned by this account and unwritable by other accounts. No PID record,
+# inherited HOME, PATH or XDG variable can choose an executable.
 defenseclaw_gateway_binary() {
-  local data="$1" home="$2" record="" candidate=""
-  if [ -f "${data}/gateway.pid" ]; then
-    IFS= read -r -n 4096 record < "${data}/gateway.pid" 2>/dev/null || true
-    if [[ "$record" =~ \"executable\"[[:space:]]*:[[:space:]]*\"(/[^\"]+)\" ]]; then
-      candidate="${BASH_REMATCH[1]}"
-      case "$candidate" in
-        */defenseclaw-gateway)
-          if [ -f "$candidate" ] && [ -x "$candidate" ]; then
-            printf '%s' "$candidate"
-            return 0
-          fi
-          ;;
-      esac
-    fi
-  fi
-  candidate="${home}/.local/bin/defenseclaw-gateway"
-  if [ -f "$candidate" ] && [ -x "$candidate" ]; then
-    printf '%s' "$candidate"
-    return 0
-  fi
-  candidate="$(command -v defenseclaw-gateway 2>/dev/null)" || return 1
+  local hook_dir="${HOOK_DIR:-}" record="" candidate="" home="" path=""
+  local modes="" mode="" count=0 extra=""
+  case "$hook_dir" in /*) ;; *) return 1 ;; esac
+  record="${hook_dir}/.gateway-helper"
+  [ -f "$record" ] && [ -O "$record" ] && [ ! -L "$record" ] || return 1
+  {
+    IFS= read -r -n 4096 candidate || return 1
+    if IFS= read -r -n 1 extra; then return 1; fi
+  } < "$record"
   case "$candidate" in
-    /*) [ -x "$candidate" ] && printf '%s' "$candidate" && return 0 ;;
+    /*/.local/bin/defenseclaw-gateway) home="${candidate%/.local/bin/defenseclaw-gateway}" ;;
+    *) return 1 ;;
   esac
-  return 1
+  case "$home" in *'/../'*|*'/./'*|*'/..'|*'/.'|'') return 1 ;; esac
+  [ -f "$candidate" ] && [ -x "$candidate" ] && [ -O "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  for path in "$hook_dir" "${hook_dir}/.." "$home" "$home/.local" "$home/.local/bin"; do
+    [ -d "$path" ] && [ -O "$path" ] && [ ! -L "$path" ] || return 1
+  done
+  modes="$(stat -c %a "$hook_dir" "${hook_dir}/.." "$record" "$home" "$home/.local" "$home/.local/bin" "$candidate" 2>/dev/null)" ||
+    modes="$(stat -f %Lp "$hook_dir" "${hook_dir}/.." "$record" "$home" "$home/.local" "$home/.local/bin" "$candidate" 2>/dev/null)" || return 1
+  while IFS= read -r mode; do
+    case "$mode" in ""|*[!0-7]*) return 1 ;; esac
+    [ $((8#${mode} & 8#022)) -eq 0 ] || return 1
+    count=$((count + 1))
+  done <<< "$modes"
+  [ "$count" -eq 7 ] || return 1
+  printf '%s' "$candidate"
 }
 
 # defenseclaw_retry_busy POST: a gateway that is taking all the hook calls it
@@ -1559,14 +1684,14 @@ defenseclaw_gateway_cold_start() {
     0|false|FALSE|no|NO|off|OFF) return 1 ;;
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
-  local home="${DEFENSECLAW_AGENT_HOME:-}" data="" bin="" detach="" lock="" token=""
-  [ -n "$home" ] && [ -d "$home" ] || return 1
-  data="${DEFENSECLAW_HOME:-${home}/.defenseclaw}"
+  local home="" data="" bin="" detach="" lock="" token=""
+  bin="$(defenseclaw_gateway_binary)" || return 1
+  home="${bin%/.local/bin/defenseclaw-gateway}"
+  data="${HOOK_DIR}/.."
   [ -d "$data" ] && [ -f "${data}/config.yaml" ] || return 1
   [ ! -e "${data}/gateway.stopped" ] || return 1
   [ ! -e "${data}/.install.lock" ] || return 1
   [ ! -e "${data}/.disabled" ] || return 1
-  bin="$(defenseclaw_gateway_binary "$data" "$home")" || return 1
   lock="${data}/.cold-start.lock"
   token="$$.${RANDOM}${RANDOM}"
   _dc_cold_start_lock "$lock" "$token" || return 0
@@ -1663,11 +1788,12 @@ _dc_hook_elapsed_ms() {
 # while this account's gateway restarts or starts (GAP-0094, GAP-0102,
 # GAP-0107). CURL_STATUS is the status of the first try; POST is a function
 # that sends the same call again and sets RESPONSE. A refused connection
-# (curl 7: nobody listens on the port yet), or one the gateway dropped
-# unanswered as it stopped (52, 55, 56), is sent again every 0.2 s until 3 s
-# after the hook started, so a restart that is over by then is answered by
-# the gateway that comes up, from its policy; the first refusal also starts
-# the gateway (defenseclaw_gateway_cold_start). Returns 0 when RESPONSE holds
+# (curl 7: nobody listens on the port yet) is sent again every 0.2 s until
+# 3 s after the hook started, so a restart that is over by then is answered
+# by the gateway that comes up, from its policy; the first refusal also starts
+# the gateway (defenseclaw_gateway_cold_start). A dropped or cut-off answer
+# may have processed the request, so it stays closed and is never retried
+# into a later outage status. Returns 0 when RESPONSE holds
 # an answer; otherwise the last curl status, and the caller fails as
 # unreachable within about 3 s instead of waiting for the restart to end:
 # blocked when the fail mode is closed, never allowed then. A timeout (28),
@@ -1690,7 +1816,7 @@ defenseclaw_await_gateway() {
     _DC_TRANSPORT_STATUS="$status"
     case "$status" in
       0) return 0 ;;
-      7|52|55|56) ;;
+      7) ;;
       *) return "$status" ;;
     esac
     # An operator stop is not a restart: the fail mode applies at once. An
@@ -2129,7 +2255,7 @@ defenseclaw_failed_stop_event() {
 _dc_hook_event_field() {
   local payload="${1:-}" field="${2:-}"
   case "$field" in
-    hook_event_name|event) ;;
+    hook_event_name|event|session_id|sessionID|sessionId|thread_id|source_event_id|tool_call_id|callID) ;;
     *) return 1 ;;
   esac
   if command -v jq >/dev/null 2>&1; then
@@ -2214,7 +2340,12 @@ defenseclaw_emit_unreachable_stderr() {
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: gateway unreachable, blocking ${subject} (fail mode closed): ${reason}" >&2
   elif defenseclaw_per_user_outage_open; then
-    echo "defenseclaw: gateway unreachable, allowing ${subject} unchecked (fail mode open for an outage): ${reason}. If it does not start, run \`defenseclaw doctor\`." >&2
+    if defenseclaw_first_outage_warning; then
+      case "${DEFENSECLAW_HOOK_CONNECTOR:-}" in
+        claudecode|codex) : ;; # Their systemMessage below is user-visible.
+        *) echo "defenseclaw: gateway unreachable, allowing ${subject} unchecked (fail mode open for an outage): ${reason}. If it does not start, run \`defenseclaw doctor\`." >&2 ;;
+      esac
+    fi
   else
     echo "defenseclaw: gateway unreachable, allowing ${subject}: ${reason}" >&2
   fi
@@ -2247,9 +2378,54 @@ defenseclaw_unreachable_notice_json() {
   fi
   # A per-user outage the hook lets through also names the repair command.
   if defenseclaw_per_user_outage_open; then
+    defenseclaw_first_outage_warning || return 0
     text="${text} If it does not start, run \`defenseclaw doctor\`."
   fi
   printf '{"systemMessage":"%s"}\n' "$(defenseclaw_json_escape "$text")"
+}
+
+# Reserve an advisory warning marker for this session. Missing session IDs or
+# unwritable marker storage leave the warning visible. The marker never picks
+# a helper, changes the mode, or changes the verdict.
+defenseclaw_first_outage_warning() {
+  case "$_DC_OUTAGE_WARNING_THIS_CALL" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  local session="" digest="" dir="${HOOK_DIR:-}/.outage-warnings"
+  session="$(_dc_hook_event_field "${PAYLOAD:-${CONTENT:-}}" session_id 2>/dev/null)" || session=""
+  [ -n "$session" ] || session="$(_dc_hook_event_field "${PAYLOAD:-${CONTENT:-}}" sessionID 2>/dev/null)" || session=""
+  [ -n "$session" ] || session="$(_dc_hook_event_field "${PAYLOAD:-${CONTENT:-}}" sessionId 2>/dev/null)" || session=""
+  [ -n "$session" ] || session="$(_dc_hook_event_field "${PAYLOAD:-${CONTENT:-}}" thread_id 2>/dev/null)" || session=""
+  if [ -z "$session" ]; then
+    _DC_OUTAGE_WARNING_THIS_CALL=1
+    return 0
+  fi
+  session="${session:0:256}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(printf '%s' "$session" | sha256sum)" || digest=""
+  elif command -v shasum >/dev/null 2>&1; then
+    digest="$(printf '%s' "$session" | shasum -a 256)" || digest=""
+  fi
+  digest="${digest%% *}"
+  case "$digest" in
+    ""|*[!a-fA-F0-9]*) _DC_OUTAGE_WARNING_THIS_CALL=1; return 0 ;;
+  esac
+  if ! mkdir -p -m 700 "$dir" 2>/dev/null; then
+    _DC_OUTAGE_WARNING_THIS_CALL=1
+    return 0
+  fi
+  if (set -C; : > "$dir/$digest") 2>/dev/null; then
+    # One in 256 new sessions prunes old advisory markers. Repeated calls
+    # never scan, and pruning cannot change the verdict.
+    case "$digest" in
+      00*) find "$dir" -type f -mtime +7 -delete >/dev/null 2>&1 || : ;;
+    esac
+    _DC_OUTAGE_WARNING_THIS_CALL=1
+    return 0
+  fi
+  _DC_OUTAGE_WARNING_THIS_CALL=0
+  return 1
 }
 
 # defenseclaw_unreachable_next_step prints the next step for a per-user
@@ -2804,7 +2980,7 @@ defenseclaw_session_facts_full() {
     darwin*) ;;
     *) [ -n "${KRB5CCNAME:-}" ] || [ -r /etc/krb5.conf ] || return 0 ;;
   esac
-  [ -n "$bin" ] || bin="$(defenseclaw_gateway_binary "${DEFENSECLAW_HOME:-${home}/.defenseclaw}" "$home")" || return 0
+  [ -n "$bin" ] || bin="$(defenseclaw_gateway_binary)" || return 0
   # The Go runtime cannot start under the hook's address-space limit.
   out="$(
     ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || true

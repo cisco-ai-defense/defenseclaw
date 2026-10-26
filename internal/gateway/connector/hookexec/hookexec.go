@@ -284,6 +284,9 @@ type Options struct {
 	// not be started. Only such a failure asks OutageFailModeNow; an answer the
 	// gateway gave, a stalled answer and every local failure stay closed.
 	perUserOutage bool
+	// The already bounded input is retained for failure-only audit correlation
+	// and session warning deduplication. It is never written to the audit log.
+	failurePayload []byte
 	// answerBy is the answer deadline of a tool call (answerDeadline);
 	// doRequest sets it, and the request then asks for progress reports.
 	answerBy time.Time
@@ -569,6 +572,7 @@ func runHook(ctx context.Context, opts Options) int {
 	}
 
 	payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody)
+	opts.failurePayload = payload
 	// The agent may take its time writing the payload: an install that
 	// started meanwhile closes this call.
 	failMode = closeDuringInstall(&opts, failMode)
@@ -2254,12 +2258,15 @@ func perUserOutageError(opts Options, err error) bool {
 // Strict availability and this account's install window close the outage
 // too (closeDuringInstall runs first).
 func perUserOutageMode(opts *Options, failMode string) string {
-	if !opts.perUserOutage || opts.StrictAvailability || perUserInstallWindow(*opts) ||
-		opts.OutageFailModeNow == nil || normalizeFailMode(opts.OutageFailModeNow()) != "open" {
+	if !opts.perUserOutage {
 		return failMode
 	}
-	opts.FailMode = "open"
-	return "open"
+	mode := "closed"
+	if !opts.StrictAvailability && !perUserInstallWindow(*opts) && opts.OutageFailModeNow != nil {
+		mode = normalizeFailMode(opts.OutageFailModeNow())
+	}
+	opts.FailMode = mode
+	return mode
 }
 
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
@@ -2309,12 +2316,20 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		}
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
-	if text := perUserOutageOpenText(opts, reason); text != "" && opts.perUserOutage {
-		fmt.Fprintf(opts.Stderr, "defenseclaw: %s\n", text)
-	} else {
-		fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
+	showWarning := true
+	if opts.perUserOutage {
+		showWarning = firstOutageWarning(opts)
 	}
-	if notice := perUserGatewayDownNotice(opts, sp, reason); notice != "" {
+	if text := perUserOutageOpenText(opts, reason); text != "" && opts.perUserOutage {
+		if showWarning && perUserGatewayDownNotice(opts, sp, reason) == "" {
+			fmt.Fprintf(opts.Stderr, "defenseclaw: %s\n", text)
+		}
+	} else {
+		if showWarning {
+			fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
+		}
+	}
+	if notice := perUserGatewayDownNotice(opts, sp, reason); notice != "" && showWarning {
 		fmt.Fprintln(opts.Stdout, notice)
 		return 0
 	}
@@ -2807,15 +2822,19 @@ var installLockLstat = os.Lstat
 // installLockHeld reports whether the installer holds the per-user data
 // directory home: its .install.lock exists, as any file type (a symlink
 // marker too, so changing its type cannot open a hook during install or
-// upgrade), or it cannot be read for any reason but its absence. A lock
-// whose state cannot be verified is held (GAP-0862).
+// upgrade), or it cannot be read for any reason but its absence, and it is
+// not stale (installLockStale: its installer is proven gone). A lock whose
+// state cannot be verified is held (GAP-0862).
 func installLockHeld(home string) bool {
 	return installLockHeldBy(installLockLstat, home)
 }
 
 func installLockHeldBy(lstat func(string) (fs.FileInfo, error), home string) bool {
-	_, err := lstat(filepath.Join(home, ".install.lock"))
-	return err == nil || !errors.Is(err, fs.ErrNotExist)
+	info, err := lstat(filepath.Join(home, ".install.lock"))
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	return !installLockStale(lstat, home, info)
 }
 
 // InstallLockHeld is installLockHeld for the hook command, which answers

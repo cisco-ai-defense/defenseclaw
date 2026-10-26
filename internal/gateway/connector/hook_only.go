@@ -1448,19 +1448,20 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 	failMode := setupHookFailMode(opts)
 	hookSocket, serviceUID := managedPluginHookSocket(opts)
 	rendered, err := renderTemplate(string(tmpl), templateData{
-		APIAddr:            opts.APIAddr,
-		TokenFileJS:        javaScriptStringContent(tokenPath),
-		NativePostBinaryJS: javaScriptStringContent(secureClientPluginNativePostBinary(opts)),
-		HookSocketJS:       javaScriptStringContent(hookSocket),
-		ServiceUID:         serviceUID,
-		ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts)),
-		InstallMarkerJS:    javaScriptStringContent(managedPluginInstallMarker(opts)),
-		LifecycleMarkerJS:  javaScriptStringContent(managedPluginLifecycleMarker(opts)),
-		ListenerProofJS:    managedPluginListenerProofJS(opts),
-		FailMode:           failMode,
-		Managed:            opts.ManagedEnterprise,
-		SecureClient:       shellHookSecureClientProfile(opts),
-		ConnectorName:      c.name,
+		APIAddr:             opts.APIAddr,
+		TokenFileJS:         javaScriptStringContent(tokenPath),
+		NativePostBinaryJS:  javaScriptStringContent(secureClientPluginNativePostBinary(opts)),
+		HookSocketJS:        javaScriptStringContent(hookSocket),
+		ServiceUID:          serviceUID,
+		ForeignHookGuardJS:  javaScriptStringContent(managedPluginForeignHookGuard(opts)),
+		InstallMarkerJS:     javaScriptStringContent(managedPluginInstallMarker(opts)),
+		LifecycleMarkerJS:   javaScriptStringContent(managedPluginLifecycleMarker(opts)),
+		ListenerProofJS:     managedPluginListenerProofJS(opts),
+		WindowsPowerShellJS: javaScriptStringContent(windowsSystemPowerShellExe()),
+		FailMode:            failMode,
+		Managed:             opts.ManagedEnterprise,
+		SecureClient:        shellHookSecureClientProfile(opts),
+		ConnectorName:       c.name,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%s render plugin template: %w", c.name, err)
@@ -1526,6 +1527,11 @@ func ManagedPluginArtifactDrift(conn Connector, opts SetupOpts) (string, error) 
 // sidecar. The managed-file backup lets Teardown restore a prior file only
 // when it is unchanged since Setup.
 func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
+	if !opts.ManagedEnterprise {
+		if err := writePerUserGatewayHelperRecord(filepath.Join(opts.DataDir, "hooks")); err != nil {
+			return fmt.Errorf("%s install helper record: %w", c.name, err)
+		}
+	}
 	renderedBody, err := c.renderPluginArtifact(opts)
 	if err != nil {
 		return err

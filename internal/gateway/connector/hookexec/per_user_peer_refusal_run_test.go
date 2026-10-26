@@ -169,7 +169,7 @@ func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing
 					opts.Event = call.event
 					opts.Stdin = strings.NewReader(call.stdin)
 					opts.FailMode = "closed"
-					opts.OutageFailMode = "open"
+					opts.OutageFailModeNow = func() string { return "open" }
 					opts.StartedAt = time.Now()
 					peer = sc.setup(t, opts)
 				})
@@ -204,7 +204,7 @@ func TestPerUserNativeHookOutageStillOpensForThisAccountsGateway(t *testing.T) {
 		opts.HTTPClient = verifiedTestClient(addr, func(net.Conn) error { return nil })
 		opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi"}}`)
 		opts.FailMode = "closed"
-		opts.OutageFailMode = "open"
+		opts.OutageFailModeNow = func() string { return "open" }
 		opts.StartedAt = time.Now()
 	})
 	if nativeOutageBlocked(result) || !strings.Contains(result.stdout+result.stderr, "fail mode open for an outage") {

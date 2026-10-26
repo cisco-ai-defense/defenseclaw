@@ -407,10 +407,12 @@ def resolve_connector_fail_mode(
     agent_env: str | None = None
     if name == "claudecode":
         claude_env, registered = _claude_registration_state(workspace)
-        # Setup still writes the mode into Claude Code's settings env, which
-        # hook renders from 1.0.3 and older read until the upgrade's connector
-        # refresh re-renders them: a stale value there is registration drift,
-        # and the runtime mode only of a render that reads it.
+        # Hook renders from 1.0.3 and older read the mode from Claude Code's
+        # settings env until the upgrade's connector refresh re-renders them.
+        # A per-user setup writes none there now (a managed one still does)
+        # and takes back the value an earlier setup or release wrote; a value
+        # the user set stays. It is a runtime input, and so drift when it
+        # disagrees, only for a render that reads it (hook-script-env below).
         sources.append(("claude-env", claude_env))
         agent_env = claude_env
         if not registered:
@@ -477,14 +479,22 @@ def resolve_connector_fail_mode(
         if unix_registration:
             drift.append(unix_registration)
 
+    # A 1.0.4 render (baked shell hook, Windows sidecar, managed runtime)
+    # reads no fail mode from Claude Code's settings env: a value the user
+    # kept there changes nothing the hook runs, so it is not drift (GAP-1422).
+    env_read = runtime_source[0] == "hook-script-env"
     for source, mode in sources:
         if source == "config":
             continue
+        if source == "claude-env" and not env_read:
+            continue
         if mode is None:
-            if source == "windows-managed-runtime":
+            # A per-user setup writes no fail mode into Claude Code's settings
+            # env (no 1.0.4 render reads one), so its absence is not drift; a
+            # render that reads it reports agent-env-unverified above.
+            if source in {"windows-managed-runtime", "claude-env"}:
                 continue
-            if source not in {"claude-env"} or name == "claudecode":
-                drift.append(f"{source}-missing")
+            drift.append(f"{source}-missing")
         elif mode != desired:
             drift.append(f"{source}-{mode}")
 
@@ -1444,11 +1454,14 @@ def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
         if _registration_hook_config_paths(cfg, connector) != (current,):
             return "registration-config-binding-stale"
         # The fail-mode status must not call a stale open command "closed".
-        # Doctor's Hermes validator reads the full event matrix, approvals,
-        # sealed target and bounded execution proof from the active config.
-        from defenseclaw.commands.cmd_doctor import _hermes_registered_execution_problem
+        # Doctor's Hermes validator reads the full event matrix, approvals and
+        # sealed target from the active config. The execution probe is
+        # Doctor's alone: a host that cannot run it (no unprivileged user
+        # namespaces) has a current registration all the same, and the hook's
+        # rendered mode is read as its own source (hook-script).
+        from defenseclaw.commands.cmd_doctor import _hermes_registration_problem
 
-        return "registration-command-stale" if _hermes_registered_execution_problem(cfg, current) else None
+        return "registration-command-stale" if _hermes_registration_problem(cfg, current) else None
 
     paths = connector_config_files(connector, workspace_dir=_connector_workspace(cfg))
     script_name = _UNIX_REGISTRATION_HOOK_SCRIPTS.get(connector)

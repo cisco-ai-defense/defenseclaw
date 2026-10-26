@@ -9,6 +9,7 @@ keywords:
 
 Reference for the [Hermes connector](/docs/connectors/hermes). DefenseClaw wires into the Hermes agent runtime through the effective default-profile `HERMES_HOME/config.yaml` (`%LOCALAPPDATA%\hermes\config.yaml` on native Windows when `HERMES_HOME` is unset) and exact approvals in `shell-hooks-allowlist.json`. There is no proxy path.
 
+On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
 ## Install surface
 
 ### Platform status
@@ -47,7 +48,9 @@ the live confirmation that the callback is loaded.
 On Linux the probe runs in a PID namespace of its own, inside a user namespace
 unless the checking process has `CAP_SYS_ADMIN`, so nothing the hook starts
 outlives the probe. Where user namespaces are disabled (for example
-`user.max_user_namespaces=0`), the check fails closed.
+`user.max_user_namespaces=0`), the check fails closed. A fail-mode change
+(`--fail-mode`) and the fail-mode status do not run the probe: they check the
+registration, its approvals and the sealed hook, so they work on such a host.
 
 ### Files
 

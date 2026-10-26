@@ -18,11 +18,11 @@
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
 import { execFile, execFileSync } from 'node:child_process'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { lstatSync } from 'node:fs'
+import { lstatSync, readFileSync } from 'node:fs'
 
 import { lstat, stat } from 'node:fs/promises'
 import { homedir, userInfo } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 
 const DC_API_ADDR = "{{.APIAddr}}"
 const DC_TOKEN_FILE = "{{.TokenFileJS}}"
@@ -63,6 +63,10 @@ const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"
 // Per-user plugins ask the native gateway binary to verify the connected
 // listener's account before each request. The proof above serves managed TCP.
 const DC_PER_USER_NATIVE_POST: string = ""
+// The Windows PowerShell that checks the helper's owner and DACL: setup
+// resolves the system directory with GetSystemDirectoryW, so a Windows
+// installed outside C:\Windows runs its own copy.
+const DC_WINDOWS_POWERSHELL: string = "{{.WindowsPowerShellJS}}"
 const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
@@ -381,32 +385,29 @@ async function provenTCPRequest(path: string, init: RequestInit, token: string):
 
 function perUserNativePostBinary(): string {
 	const account = userInfo()
-	const dataDir = dirname(dirname(DC_TOKEN_FILE))
-	const dataHome = dirname(dataDir)
-	// The token path is baked into this plugin at setup. A custom data
-	// directory uses the OS account home. Neither path follows the agent's HOME.
-	const homes = dataDir === join(dataHome, ".defenseclaw") ? [dataHome, account.homedir] : [account.homedir]
-	let lastError: unknown = new Error("per-user gateway helper path is missing")
-	for (const home of new Set(homes)) {
-		const directory = join(home, ".local", "bin")
-		const binary = join(directory, process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")
-		const paths = [home, join(home, ".local"), directory, binary]
-		try {
-			for (let index = 0; index < paths.length; index++) {
-				const info = lstatSync(paths[index])
-				if (info.isSymbolicLink() || (index === paths.length - 1 ? !info.isFile() : !info.isDirectory())) {
-					throw new Error("per-user gateway helper path is untrusted")
-				}
-				if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) {
-					throw new Error("per-user gateway helper path is writable by another account")
-				}
-			}
-			return binary
-		} catch (error) {
-			lastError = error
-		}
+	const hookDir = dirname(DC_TOKEN_FILE)
+	const record = join(hookDir, ".gateway-helper")
+	const recordInfo = lstatSync(record)
+	if (!recordInfo.isFile() || recordInfo.isSymbolicLink() || recordInfo.size > 4096) throw new Error("per-user gateway helper record is untrusted")
+	const content = readFileSync(record, "utf8")
+	if (!content.endsWith("\n") || /[\r\n\0]/.test(content.slice(0, -1))) throw new Error("per-user gateway helper record is malformed")
+	const binary = content.slice(0, -1)
+	const home = dirname(dirname(dirname(binary)))
+	if (!isAbsolute(binary) || binary !== join(home, ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")) throw new Error("per-user gateway helper path is untrusted")
+	const paths = [dirname(hookDir), hookDir, record, home, join(home, ".local"), join(home, ".local", "bin"), binary]
+	for (let index = 0; index < paths.length; index++) {
+		const info = lstatSync(paths[index])
+		if (info.isSymbolicLink() || ([2, 6].includes(index) ? !info.isFile() : !info.isDirectory())) throw new Error("per-user gateway helper path is untrusted")
+		if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) throw new Error("per-user gateway helper path is writable by another account")
 	}
-	throw lastError
+	if (process.platform === "win32") {
+		// A data directory nested deeper in the profile has its parents up to
+		// the profile checked too.
+		const root = home.toLowerCase() + "\\"
+		for (let dir = dirname(dirname(hookDir)); dir.toLowerCase().startsWith(root); dir = dirname(dir)) paths.push(dir)
+		checkWindowsHelperACL(paths)
+	}
+	return binary
 }
 
 // perUserHookPostBinary picks the small hook-post helper the POSIX installer
@@ -417,7 +418,7 @@ function perUserNativePostBinary(): string {
 // bypassed.
 function perUserHookPostBinary(): string {
 	const gateway = perUserNativePostBinary()
-	const helper = join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-hook-post.exe" : "defenseclaw-hook-post")
+	const helper = join(dirname(gateway), process.platform === "win32" ? "defenseclaw-hook-post.exe" : "defenseclaw-hook-post")
 	let info: ReturnType<typeof lstatSync>
 	try {
 		info = lstatSync(helper)
@@ -434,6 +435,73 @@ function perUserHookPostBinary(): string {
 	return helper
 }
 
+function checkWindowsHelperACL(paths: string[]): void {
+	// Windows stat mode bits do not represent the DACL. Check the owner and
+	// write grants before the bearer-bearing native helper is launched: the
+	// owner is this account, SYSTEM, Administrators (an elevated install) or
+	// TrustedInstaller, and no other principal may write the path. An
+	// inherit-only entry does not apply to the path itself; its children
+	// carry it. execFileSync opens the helper by this path, so every folder
+	// above a checked path, up to its volume root, must not let another
+	// principal rename or replace what it holds (a custom data root's
+	// parent, for one): a trusted owner and no delete-child, delete,
+	// change-permissions or take-ownership grant to anyone else. A volume
+	// root cannot be renamed, so delete is not checked there.
+	const checked = new Set(paths.map((path) => path.toLowerCase()))
+	const entries: [number, string][] = paths.map((p) => [0x500D0156, p])
+	for (const path of paths) {
+		for (let dir = dirname(path), top = false; !top; dir = dirname(dir)) {
+			top = dirname(dir) === dir
+			if (checked.has(dir.toLowerCase())) continue
+			checked.add(dir.toLowerCase())
+			entries.push([top ? 0x100C0040 : 0x100D0040, dir])
+		}
+	}
+	// PowerShell finds a cmdlet through PSModulePath, which the agent's
+	// environment sets: a module planted in a folder it names first could
+	// answer for ConvertFrom-Json or Get-Acl and pass every path. The script
+	// calls no cmdlet, only .NET methods and language statements, runs with
+	// PSModulePath set to the system PowerShell's own module folder (and no
+	// .NET profiler or COMPlus setting), and the check passes only when it
+	// reports every entry checked. Each path goes as base64 UTF-8, so a
+	// non-ASCII path is not mangled by the console code page.
+	const script = [
+		"$ErrorActionPreference='Stop'",
+		"$current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+		"$trusted=@($current,'S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')",
+		"$inheritOnly=[int][System.Security.AccessControl.PropagationFlags]::InheritOnly",
+		"$sid=[System.Security.Principal.SecurityIdentifier]",
+		"$count=0",
+		"foreach($line in [Console]::In.ReadToEnd().Split([char]10)) {",
+		"  $entry=$line.Split([char]32)",
+		"  if($entry.Length -ne 2) { throw 'entry' }",
+		"  $writeMask=[int64]$entry[0]",
+		"  $p=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($entry[1]))",
+		"  if([System.IO.Directory]::Exists($p)) { $acl=[System.IO.Directory]::GetAccessControl($p) } elseif([System.IO.File]::Exists($p)) { $acl=[System.IO.File]::GetAccessControl($p) } else { throw 'missing' }",
+		"  if($trusted -notcontains $acl.GetOwner($sid).Value) { throw 'owner' }",
+		"  foreach($ace in $acl.GetAccessRules($true,$true,$sid)) {",
+		"    if($ace.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and (([int]$ace.PropagationFlags -band $inheritOnly) -eq 0) -and $trusted -notcontains $ace.IdentityReference.Value -and (([int64]$ace.FileSystemRights -band $writeMask) -ne 0)) { throw 'writable' }",
+		"  }",
+		"  $count++",
+		"}",
+		"[Console]::Out.Write('checked ' + $count)",
+	].join("\n")
+	const env: Record<string, string> = {}
+	for (const [name, value] of Object.entries(process.env)) {
+		if (value !== undefined && !/^(psmodulepath|psmoduleanalysiscachepath|cor_|complus_)/i.test(name)) env[name] = value
+	}
+	env.PSModulePath = join(dirname(DC_WINDOWS_POWERSHELL), "Modules")
+	let output = ""
+	try {
+		output = execFileSync(DC_WINDOWS_POWERSHELL, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
+			input: entries.map(([mask, path]) => mask + " " + Buffer.from(path, "utf8").toString("base64")).join("\n"),
+			env, timeout: 5000, windowsHide: true, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+		})
+	} catch {
+		output = ""
+	}
+	if (output.trim() !== "checked " + entries.length) throw new Error("per-user gateway helper path has an untrusted Windows owner or DACL")
+}
 // gatewayFetch posts over the verified managed hook socket when one is
 // configured (Bun's unix fetch option). A per-user post goes through the
 // native helper, which verifies the same connected socket it sends on.
@@ -858,6 +926,24 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		}
 	}
 
+	const warnedUncheckedThreads = new Set<string>()
+	async function warnUncheckedThread(
+		threadID: string,
+		message: string,
+		ctx: { ui: { notify(message: string): Promise<void> } },
+	) {
+		if (!message || warnedUncheckedThreads.has(threadID)) return
+		warnedUncheckedThreads.add(threadID)
+		if (warnedUncheckedThreads.size > 1024) warnedUncheckedThreads.delete(warnedUncheckedThreads.values().next().value as string)
+		try {
+			// UI notifications reach the user without becoming a model turn.
+			await ctx.ui.notify(message)
+		} catch {
+			// Retry on the next call if the UI was temporarily unavailable.
+			warnedUncheckedThreads.delete(threadID)
+		}
+	}
+
 	amp.on("session.start", async (event, ctx) => {
 		const threadID = stringID(event.thread.id)
 		// SessionStartEvent reports only thread.id. Amp may emit it again when
@@ -954,7 +1040,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			await notifyIfForeground(threadID, verdict.additional_context || verdict.reason || "DefenseClaw flagged this tool call.")
 			return { action: "allow" }
 		default:
-			if (verdict.outage_notice) await notifyIfForeground(threadID, verdict.outage_notice)
+			if (verdict.outage_notice) await warnUncheckedThread(threadID, verdict.outage_notice, ctx)
 			return { action: "allow" }
 		}
 	})
@@ -1005,7 +1091,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			// A result kept because this account's gateway is down carries the
 			// same one warning as the call. Returning void preserves Amp's
 			// original status and output.
-			if (verdict.outage_notice) await notifyIfForeground(threadID, verdict.outage_notice)
+			if (verdict.outage_notice) await warnUncheckedThread(threadID, verdict.outage_notice, ctx)
 			return
 		}
 	})

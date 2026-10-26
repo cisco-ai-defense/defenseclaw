@@ -9,6 +9,7 @@ keywords:
 
 Reference for the [Cursor connector](/docs/connectors/cursor). DefenseClaw wires into Cursor's [user-scoped hooks.json](https://cursor.com/docs/hooks). Cursor talks to its upstream directly. There is no proxy path, and DefenseClaw claims no enterprise-wide authority or native human approval.
 
+On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
 ## Install surface
 
 ### Platform status
@@ -102,11 +103,11 @@ Cursor runs every matching hook and merges conflicts in **Enterprise > Team > Pr
 | Mode | Registration | Behavior |
 | --- | --- | --- |
 | Action | `failClosed: true` | Returns the documented native deny on supported pre-action events. `beforeSubmitPrompt` blocks with `continue: false`. The permission-gated events use `permission: "deny"`. Confirm verdicts stay attributed alerts. Native ask is not enabled. |
-| Observe | `failClosed: true` | Allows on policy findings and records `would_block` audit state; on a per-user install, a gateway outage follows the policy tier: default and permissive run the call with a warning, strict blocks it. If the hook process never answers, Cursor blocks the call. |
+| Observe | `failClosed: true` | Allows on policy findings and records `would_block` audit state; on a per-user install, a gateway outage follows an explicit saved mode or, when unset, the policy tier: default and permissive run the call with a warning, strict blocks it. If the hook process never answers, Cursor blocks the call. |
 
 Blocking events are `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead` and `beforeSubmitPrompt`. `sessionStart` and `sessionEnd` are not gates. `stop` and `subagentStop` accept only a follow-up message. Result inspection reads `tool_output`, `error_message`, shell `output`, MCP `result_json`, file `edits`, agent `text` and subagent `summary`. `beforeMCPExecution` keeps its exact `tool_input` and URL or command, and derives a stable digest identity without inventing a vendor name.
 
-A conflicting `--fail-mode` is ignored with a warning; outside Secure Client, observe and action registrations both stay `failClosed: true`. The running hook's outage mode is described below. Setup reports readiness only after the current 21-event `type: command`, 30-second, mode-matched registration, the managed runtime adapter, the contract lock and the complete active-connector roster agree. Adding or repairing another connector waits for that full roster.
+An explicit `--fail-mode` is saved as Cursor's outage choice; outside Secure Client, observe and action registrations both stay `failClosed: true`. The running hook's outage mode is described below. Setup reports readiness only after the current 21-event `type: command`, 30-second, mode-matched registration, the managed runtime adapter, the contract lock and the complete active-connector roster agree. Adding or repairing another connector waits for that full roster.
 
 ## Native ask
 
@@ -114,7 +115,7 @@ DefenseClaw does not enable Cursor native approval. Confirm verdicts stay attrib
 
 ## Fail mode
 
-Fail closed: yes. A per-user Cursor hook makes the outage decision of its policy tier in observe and action mode: the default and permissive policies let the call run with a warning, strict blocks it ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)). Outside Secure Client, action and observe both register `failClosed: true`, so a stopped, killed or timed-out hook cannot silently let a tool run; a conflicting `--fail-mode` during setup is ignored with a warning. Managed Cursor's running hook follows the administrator's resolved fail mode. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+Fail closed: yes. A per-user Cursor hook uses an explicit saved outage mode; when unset, its policy tier decides in observe and action mode: the default and permissive policies let the call run with a warning, strict blocks it ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)). Outside Secure Client, action and observe both register `failClosed: true`, so a stopped, killed or timed-out hook cannot silently let a tool run. Managed Cursor's running hook follows the administrator's resolved fail mode. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 

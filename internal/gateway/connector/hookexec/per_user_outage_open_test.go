@@ -4,7 +4,9 @@
 package hookexec
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +18,83 @@ import (
 	"testing"
 	"time"
 )
+
+func TestNativeOutageWarnsOncePerSessionAndAuditsEveryCall(t *testing.T) {
+	home := t.TempDir()
+	sp, ok := specFor("claudecode")
+	if !ok {
+		t.Fatal("Claude Code spec missing")
+	}
+	for i := 0; i < 2; i++ {
+		var stdout, stderr bytes.Buffer
+		opts := withPerUserOutage(Options{
+			Connector: "claudecode", Event: "PreToolUse", Home: home,
+			HookDir: filepath.Join(home, "hooks"), Stdout: &stdout, Stderr: &stderr,
+			Now:               time.Now,
+			OutageFailModeNow: func() string { return "open" },
+			failurePayload:    []byte(fmt.Sprintf(`{"session_id":"same-session","tool_call_id":"call-%d"}`, i)),
+		})
+		if code := failUnreachable(opts, sp, "closed", "gateway unreachable"); code != 0 {
+			t.Fatalf("call %d exit %d", i, code)
+		}
+		warning := strings.Contains(stdout.String()+stderr.String(), "DefenseClaw is not checking this session")
+		if warning != (i == 0) {
+			t.Fatalf("call %d warning=%v stdout=%q stderr=%q", i, warning, stdout.String(), stderr.String())
+		}
+	}
+	rows, err := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
+	if err != nil || strings.Count(string(rows), `"outcome":"fail_open"`) != 2 ||
+		!strings.Contains(string(rows), `"call_id":"call-0"`) || !strings.Contains(string(rows), `"call_id":"call-1"`) {
+		t.Fatalf("per-call outage audit: %s: %v", rows, err)
+	}
+}
+
+func TestNativeOutageWarningPrunesExpiredSessionMarkers(t *testing.T) {
+	hooks := filepath.Join(t.TempDir(), "hooks")
+	markers := filepath.Join(hooks, ".outage-warnings")
+	if err := os.MkdirAll(markers, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(markers, "old-session")
+	if err := os.WriteFile(old, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ago := time.Now().Add(-10 * 24 * time.Hour)
+	if err := os.Chtimes(old, ago, ago); err != nil {
+		t.Fatal(err)
+	}
+	// The marker hash selects a low-frequency prune pass, keeping this test
+	// deterministic without scanning the directory on every hook call.
+	session := ""
+	for i := 0; i < 10000; i++ {
+		candidate := fmt.Sprintf("session-%d", i)
+		if sha256.Sum256([]byte(candidate))[0] == 0 {
+			session = candidate
+			break
+		}
+	}
+	if session == "" {
+		t.Fatal("no pruning session found")
+	}
+	if !firstOutageWarning(Options{HookDir: hooks, failurePayload: []byte(`{"session_id":"` + session + `"}`)}) {
+		t.Fatal("new session suppressed its warning")
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("expired marker survived: %v", err)
+	}
+	if err := os.WriteFile(old, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(old, ago, ago); err != nil {
+		t.Fatal(err)
+	}
+	if firstOutageWarning(Options{HookDir: hooks, failurePayload: []byte(`{"session_id":"` + session + `"}`)}) {
+		t.Fatal("repeated session got another warning")
+	}
+	if _, err := os.Stat(old); err != nil {
+		t.Fatalf("repeated session scanned old markers: %v", err)
+	}
+}
 
 // failingBody returns its prefix and then err: a gateway that sent a status
 // line and part of its answer.

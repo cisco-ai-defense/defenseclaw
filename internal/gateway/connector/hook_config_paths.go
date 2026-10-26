@@ -345,6 +345,11 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 		markers = append(markers,
 			[]byte(`const DC_PER_USER_NATIVE_POST = "1";`),
 			[]byte(`execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR]`),
+			// A Windows owner/DACL check that hard-codes C:\Windows is repaired,
+			// and so is one that calls a cmdlet a planted PSModulePath module
+			// could answer for.
+			[]byte(`execFileSync(DC_WINDOWS_POWERSHELL, [`),
+			[]byte(windowsHelperACLCheckMarker),
 		)
 	}
 	for _, marker := range markers {

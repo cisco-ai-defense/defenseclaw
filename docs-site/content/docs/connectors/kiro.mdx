@@ -11,6 +11,7 @@ import { ConnectorSupport } from '@/components/support-matrix';
 
 DefenseClaw installs hooks for Kiro IDE and Kiro CLI under one Kiro connector. This is a hook connector: Kiro talks to its model provider directly and no proxy is involved.
 
+On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
 ## Platform support
 
 <ConnectorSupport id="kiro" />

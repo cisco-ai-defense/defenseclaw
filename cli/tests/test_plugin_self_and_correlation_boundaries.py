@@ -29,7 +29,7 @@ from types import SimpleNamespace
 import defenseclaw
 import pytest
 import yaml
-from defenseclaw import extension_fingerprint
+from defenseclaw import doctor_hooks, extension_fingerprint
 from defenseclaw.commands.cmd_plugin import _build_scan_options
 from defenseclaw.extension_fingerprint import canonical_reference_bytes, fingerprint_repository_runtime
 from defenseclaw.scanner.plugin import PluginScannerWrapper
@@ -135,6 +135,7 @@ def _render_bridge_publication(
     lifecycle_marker: str = "",
     hook_socket: str = "",
     listener_proof: str = "",
+    windows_powershell: str | None = None,
     managed: bool = False,
 ) -> bytes:
     template_name = {
@@ -163,6 +164,14 @@ def _render_bridge_publication(
         .replace("{{.InstallMarkerJS}}", json.dumps(install_marker)[1:-1])
         .replace("{{.LifecycleMarkerJS}}", json.dumps(lifecycle_marker)[1:-1])
         .replace("{{.ListenerProofJS}}", listener_proof)
+        .replace(
+            "{{.WindowsPowerShellJS}}",
+            json.dumps(
+                doctor_hooks._windows_system_powershell_path()
+                if windows_powershell is None
+                else windows_powershell
+            )[1:-1],
+        )
     )
     assert "{{." not in rendered
     return rendered.encode()
@@ -583,6 +592,49 @@ def test_bridge_rendered_with_the_listener_proof_stays_first_party(
         )
         _write_bridge_publication(data_dir, target, connector=connector, payload=published)
         assert first_party_self_reason(target) == expected, proof
+
+
+@pytest.mark.parametrize(
+    ("connector", "relative_path"),
+    [
+        ("opencode", Path(".config/opencode/plugins/defenseclaw.js")),
+        ("amp", Path(".config/amp/plugins/defenseclaw.ts")),
+    ],
+)
+def test_bridge_naming_the_resolved_system_powershell_stays_first_party(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    connector: str,
+    relative_path: Path,
+) -> None:
+    """Setup renders the system PowerShell it resolved with
+    GetSystemDirectoryW, which is not C:\\Windows on a Windows installed
+    elsewhere. That bridge is still the published connector bridge; one that
+    names any other PowerShell is not."""
+
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    target = home / relative_path
+    repository_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    system = r"D:\WINNT\System32\WindowsPowerShell\v1.0\powershell.exe"
+    monkeypatch.setattr(doctor_hooks, "_windows_system_powershell_path", lambda: system)
+    for powershell, expected in (
+        (system, "installed DefenseClaw connector bridge"),
+        (system.lower(), "installed DefenseClaw connector bridge"),
+        (r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", None),
+        (str(home / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"), None),
+        ("", None),
+    ):
+        published = _render_bridge_publication(
+            repository_root,
+            data_dir,
+            connector=connector,
+            windows_powershell=powershell,
+        )
+        _write_bridge_publication(data_dir, target, connector=connector, payload=published)
+        assert first_party_self_reason(target) == expected, powershell
 
 
 @pytest.mark.parametrize(

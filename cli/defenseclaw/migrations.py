@@ -30,6 +30,8 @@ code. Three kinds of steps exist:
   Desktop connector ID to ``devin`` and drops connectors this release does not
   ship. It has no ``config_version``: it runs whenever ``config.yaml`` still
   names such a connector.
+* Release-specific steps use the installer's ``--from-version`` when a prior
+  release wrote a value without recording whether an operator chose it.
 
 Every step is idempotent and writes through temp-file-and-rename.
 """
@@ -3805,6 +3807,7 @@ def migrate(
             raise MigrationError(f"{name} failed: {exc}") from exc
     for change in ctx.changes:
         ux.ok(change, indent="    ")
+    _report_legacy_cursor_open(config_path, from_version or "")
     try:
         reached = source_config_version(path=config_path)
     except ConfigVersionError as exc:
@@ -4198,6 +4201,57 @@ def _pending_migration_steps(
     if _connector_roster_pending(config_path, data_dir):
         steps.append(("update renamed and removed connectors", _migrate_connector_roster))
     return steps
+
+
+def _legacy_cursor_open_paths(config_path: str) -> list[str]:
+    """Find a saved ``open`` Cursor outage mode that 1.0.x setup may have written.
+
+    DefenseClaw 1.0.0-1.0.3 setup saved ``open`` for an observe-mode Cursor,
+    and ``guardrail fail-mode open`` or ``config set`` saved the same bytes;
+    those releases did not record which one did. The value is kept (a saved
+    mode wins, and 1.0.x Cursor in observe failed open in every tier) and the
+    upgrade names it, so the operator can let the policy tier decide.
+    """
+    source = _read_config_text(config_path)
+    if source is None or _guardrail_runtime_migration_is_managed(source):
+        return []
+    try:
+        root = yaml.safe_load(source) or {}
+    except yaml.YAMLError:
+        return []
+    guardrail = root.get("guardrail") if isinstance(root, dict) else None
+    if not isinstance(guardrail, dict):
+        return []
+    mode = str(guardrail.get("mode") or "observe").strip().lower()
+    paths: list[str] = []
+    connectors = guardrail.get("connectors")
+    cursor_entry = False
+    if isinstance(connectors, dict):
+        for name, entry in connectors.items():
+            if str(name).strip().lower() != "cursor" or not isinstance(entry, dict):
+                continue
+            cursor_entry = True
+            own_mode = str(entry.get("mode") or mode).strip().lower()
+            if own_mode != "action" and str(entry.get("hook_fail_mode") or "").strip().lower() == "open":
+                paths.append(f"guardrail.connectors.{name}.hook_fail_mode")
+    # Old setup wrote the global value only for a Cursor without its own entry.
+    if str(guardrail.get("connector") or "").strip().lower() == "cursor" and mode != "action" and not cursor_entry:
+        if str(guardrail.get("hook_fail_mode") or "").strip().lower() == "open":
+            paths.append("guardrail.hook_fail_mode")
+    return paths
+
+
+def _report_legacy_cursor_open(config_path: str, from_version: str) -> None:
+    """Name a kept 1.0.x Cursor ``open`` whose author is unknown (no write)."""
+    if not from_version or _version_before(from_version, (1, 0, 0)) or not _version_before(from_version, (1, 0, 4)):
+        return
+    for path in _legacy_cursor_open_paths(config_path):
+        ux.warn(
+            f"Cursor keeps its saved gateway-outage mode open ({path}). DefenseClaw {from_version} setup "
+            "also saved this value on its own in observe mode, so it may not be your choice. A saved mode "
+            "wins over the policy tier: strict does not close it. To let the policy tier decide, run: "
+            f"defenseclaw config unset {path}"
+        )
 
 
 def _config_version_step(

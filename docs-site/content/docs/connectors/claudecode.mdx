@@ -11,6 +11,7 @@ import { ConnectorSupport } from '@/components/support-matrix';
 
 DefenseClaw adds hooks to Claude Code's settings. Host setup disables native OpenTelemetry export and removes settings left by earlier releases: Claude Code cannot verify which local account holds a stopped gateway's TCP port. Isolated OpenShell images retain native telemetry. This is a hook connector: Claude Code talks to Anthropic directly and no proxy is involved.
 
+On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
 ## Platform support
 
 <ConnectorSupport id="claudecode" />

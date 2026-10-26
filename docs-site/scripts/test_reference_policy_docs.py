@@ -49,6 +49,52 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         self.assertIn("GitHub Copilot CLI, Cursor, Devin, OpenCode and Amp", guard)
         self.assertIn("Hermes on Linux and macOS", guard)
 
+    def test_managed_open_never_allows_an_accepted_call_without_an_answer(self):
+        # oss-outage-open review (round g, loop round 2): managed open applies
+        # only to a proven outage (no gateway took the call). A gateway that
+        # accepted the call and gave no answer in time blocks (noAnswerFailMode
+        # is closed for a managed hook); the docs said open could allow it.
+        text = (DOCS / "configuration/fail-modes.mdx").read_text()
+        paragraph = next(line for line in text.splitlines()
+                         if line.startswith("On a managed standalone host `open` applies only to"))
+        self.assertNotIn("or gives no answer in time.", paragraph)
+        self.assertIn("A gateway that accepted the call and gives no answer in time blocks in `open` too", paragraph)
+        behavior = text.split("## Effective behavior", 1)[1]
+        row = next(line for line in behavior.splitlines() if line.startswith("| Gateway service not running"))
+        managed = row.split("|")[3]
+        self.assertIn("A gateway that took the call and gave no answer in time", managed)
+        self.assertIn("blocks", managed)
+        coverage = (DOCS.parent / "appendix/coverage-by-layer.mdx").read_text()
+        self.assertNotIn("stopped, restarting or gives\nno answer in time", coverage)
+
+    def test_no_doc_lets_managed_open_cover_a_restart_or_an_unanswered_call(self):
+        # oss-outage-open round h (GAP-1434 class): managed open allows a call
+        # only while the hook proves the gateway service is stopped
+        # (hookexec.ManagedOutageFailsOpen). A restart it cannot prove stopped
+        # and an accepted call without an answer in time block. No sentence
+        # anywhere in the docs may say the administrator's open allows,
+        # applies to or covers either (docs-site pages and docs/*.md).
+        import re
+
+        content = DOCS.parent
+        allow = r"(?:allow|appl|cover|let)\w*"
+        window = r"(?:restart\w*|no[- ]answer|no answer|in time|timeout|unanswered)"
+        claim = re.compile(allow + r"\b[^.;]*?\b" + window, re.I)
+        negation = re.compile(r"\b(?:block|never|not|cannot|only while|proves?)\b", re.I)
+        offenders = []
+        repo_docs = DOCS.parents[3] / "docs"
+        for page in sorted(content.rglob("*.mdx")) + sorted(repo_docs.glob("*.md")):
+            flat = re.sub(r"\s+", " ", page.read_text())
+            for sentence in re.split(r"(?<=[.;])\s+", flat):
+                if not re.search(r"administrator|admin\b|managed", sentence, re.I):
+                    continue
+                if not re.search(r"`open`|hook_fail_mode: open|outage-only", sentence):
+                    continue
+                for match in claim.finditer(sentence):
+                    if not negation.search(match.group(0)):
+                        offenders.append(f"{page.name}: {sentence[:240]}")
+        self.assertEqual(offenders, [])
+
     def test_amp_per_user_outage_is_persisted_but_managed_and_sandbox_are_not(self):
         text = (DOCS / "configuration/fail-modes.mdx").read_text()
         reporting = text.split("## Reporting and diagnosis", 1)[1]

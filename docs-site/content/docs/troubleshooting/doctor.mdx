@@ -97,6 +97,7 @@ Doctor never edits `config.yaml` unless a repair says so.
 | `doctor.connector.hook-scripts.regenerate` | safe | Re-renders hook scripts that no longer match their sealed digest. |
 | `doctor.state.audit-db.reopen` | disruptive | Restarts the gateway when `audit.db` was replaced on disk while it ran. |
 | `doctor.state.private-files.protect` | safe | Makes `device.key`, its provenance files and `audit.db` readable by your account only. |
+| `doctor.install.stale-lock.clear` | safe | Removes an `.install.lock` an installer left when it was stopped before it finished (its process is gone, or its pid now names another process). Hooks already treat such a lock as no lock. A lock an interrupted install keeps is left for the installer: run it again. |
 | `doctor.connector.proxy-lock.refresh` | disruptive | Refreshes the OpenClaw or ZeptoClaw lock entry after an agent version change. |
 | `doctor.acp.guard.repin` | safe | Re-pins the upgraded ACP guard in the editor entries DefenseClaw wrote. |
 | `doctor.gateway.token-env.canonicalize` | safe | Saves the canonical gateway token provider in `config.yaml`. |
