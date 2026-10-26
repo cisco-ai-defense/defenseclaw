@@ -43,6 +43,10 @@ On macOS, the skill, MCP and plugin scanners DefenseClaw starts run as you, with
 
 On Linux, the OpenShell gateway runs in your systemd user manager. Without linger, signing out of your last session stops the gateway and its MicroVMs, even when a disk sync failed, so unsynced work in the guest is lost. This is how systemd works: without linger it ends a user's services when their last session ends. Save your work and stop the sandbox before you sign out, or ask an administrator to enable linger for your account with `sudo loginctl enable-linger USER`. See [A Linux sign-out ends a running MicroVM](/docs/troubleshooting/sandboxes/setup-and-gateway#a-linux-sign-out-ends-a-running-microvm).
 
+## Identity
+
+On Linux, the gateway confirms an SSH session through systemd-logind, or through `/run/utmp` when logind is not running. utmp keeps only the first 32 characters of a user name, so for a longer directory user name the session cannot be confirmed without logind: audit events then omit `defenseclaw.session.kind` and `client.address`. Tool calls still run and are audited with the user's identity. This is a Linux limit. Keep systemd-logind running on hosts where directory user names are longer than 32 characters. See [Identity sources](/docs/enterprise/identity/sources).
+
 ## Upgrade and policy limits
 
 - **Legacy MicroVM guests:** after upgrading, run `defenseclaw sandbox status NAME` to check the guest's state and why it stopped.

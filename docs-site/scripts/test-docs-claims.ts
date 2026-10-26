@@ -1379,6 +1379,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1764", page: "troubleshooting/windows.mdx", section: "Codex refuses every command in its first session", has: ["Granular.sandbox_approval is false", "Quit Codex and start it again once", "/docs/troubleshooting/known-limits#codex"] },
   { gap: "GAP-0552", page: "troubleshooting/known-limits.mdx", section: "Scanners on macOS", has: ["run as you, with a timeout", "can escape that tracking and keep running after the scan and after `defenseclaw-gateway stop`", "This is a macOS limit."] },
   { gap: "GAP-1158", page: "troubleshooting/known-limits.mdx", section: "Codex", has: ["**Shared daemon keeps its model key:**", "fail with `401` until the daemon restarts", "Run `codex app-server daemon restart` from a shell that has the new key."] },
+  { gap: "GAP-1203", page: "troubleshooting/known-limits.mdx", section: "Identity", has: ["utmp keeps only the first 32 characters of a user name", "omit `defenseclaw.session.kind` and `client.address`", "Keep systemd-logind running"] },
   // r105-rows-end
 ];
 
