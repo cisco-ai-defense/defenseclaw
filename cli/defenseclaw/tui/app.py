@@ -10726,11 +10726,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             width=width - 2 - _status_text_cells(text) - 5 if width > 0 else None,
         )
         rendered = f"{text}  [#444444]│[/]  {strip}" if strip else text
-        if not _is_command_result(text) and any(
+        if any(
             service.label not in strip
             for service in (status_model.gateway, status_model.watchdog, status_model.guardrail)
         ):
-            rendered = render_status_with_hint(status_model, text, max(0, width - 2))
+            # The 80-column footer keeps Gateway, Watchdog and Guardrail and
+            # lets the digest, then "gen N", give way. A command result
+            # ("Command cancelled.", "Done: ...") goes through it too while
+            # it stays whole; it kept gen and digest and dropped Watchdog
+            # and Guardrail (GAP-0524).
+            narrow = render_status_with_hint(status_model, text, max(0, width - 2))
+            if not _is_command_result(text) or _keeps_whole_text(narrow, text):
+                rendered = narrow
         if self._config_error:
             rendered = f"[bold {TOKENS.accent_red}]{rich_escape(self._config_error)}[/]"
         elif _is_command_result(text) and _status_text_fills_line(text, self.size.width):
@@ -17070,6 +17077,20 @@ _COMMAND_RESULT_FOLLOW_S = 15.0
 
 def _is_command_result(text: object) -> bool:
     return bool(_COMMAND_RESULT_RE.match(str(text or "")))
+
+
+def _keeps_whole_text(rendered: str, text: str) -> bool:
+    """Whether the footer ``rendered`` starts with all of ``text``."""
+    from rich.text import Text
+
+    try:
+        plain = Text.from_markup(text).plain
+    except Exception:  # noqa: BLE001 - malformed operator text stays literal
+        plain = text
+    try:
+        return Text.from_markup(rendered).plain.startswith(plain)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _service_reported(state: str) -> bool:

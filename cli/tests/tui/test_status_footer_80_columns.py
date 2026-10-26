@@ -87,3 +87,18 @@ async def test_long_hints_keep_health_at_80_columns(tmp_path):
             # health label, so it proved nothing (GAP-1548).
             assert hint.split()[1] in status, status
             _assert_essential_health(status)
+
+
+async def test_command_result_keeps_essential_health_at_80_columns(tmp_path):
+    # GAP-0524: after ':' > pick > cancel the footer read
+    # "Command cancelled. │ ● Gateway │ ● gen 7 · abab… │ …": Watchdog and
+    # Guardrail went while the gen and digest stayed.
+    app = _app_with_applied_policy(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        for text in ("Command cancelled.", "Done: scan plugin photon."):
+            app._set_status(text)  # noqa: SLF001
+            await pilot.pause()
+            status = screen_text(app).splitlines()[-1]
+            assert text in status, status
+            assert all(name in status for name in ("Gateway", "Watchdog", "Guardrail")), status
