@@ -18,8 +18,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // A native OTLP exporter sends to whatever process holds the port named in its
@@ -639,17 +637,26 @@ var nativeOTLPTakeBackPendingBeforeRead = func(string) {}
 // regular file the account (or a trusted principal) owns counts, and it is
 // read without following a link or blocking on a FIFO, at most
 // nativeOTLPTakeBackPendingMaxBytes, and only while it is still the file
-// that was checked. Anything else is no marker.
+// that was checked. Anything else is no marker. The type, size and owner are
+// read from the opened handle and the bytes from that same handle, so a file
+// swapped in after the check is never trusted (GAP-2065: on Windows the
+// owner was read by path and os.SameFile of two Lstat results reloads both
+// file IDs by path, so the swap check always passed there).
 func readNativeOTLPTakeBackPending(path string) (nativeOTLPTakeBackPendingRecord, bool) {
 	var record nativeOTLPTakeBackPendingRecord
-	info, err := os.Lstat(path)
+	file, err := openNativeOTLPTakeBackMarker(path)
+	if err != nil {
+		return record, false
+	}
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() > nativeOTLPTakeBackPendingMaxBytes ||
-		nativeOTLPTakeBackMarkerOwnerTrusted(path, info) != nil {
+		nativeOTLPTakeBackMarkerOwnerTrusted(path, file, info) != nil {
 		return record, false
 	}
 	nativeOTLPTakeBackPendingBeforeRead(path)
-	data, err := safefile.ReadRegularFileBounded(path, nativeOTLPTakeBackPendingMaxBytes)
-	if err != nil {
+	data, err := io.ReadAll(io.LimitReader(file, nativeOTLPTakeBackPendingMaxBytes+1))
+	if err != nil || int64(len(data)) > nativeOTLPTakeBackPendingMaxBytes {
 		return record, false
 	}
 	if after, err := os.Lstat(path); err != nil || !os.SameFile(info, after) {

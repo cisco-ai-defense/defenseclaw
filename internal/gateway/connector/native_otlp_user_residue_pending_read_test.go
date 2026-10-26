@@ -31,12 +31,15 @@ func TestNativeOTLPTakeBackPendingMarkerSwappedAfterTheCheckIsNotRead(t *testing
 	}
 	previous := nativeOTLPTakeBackPendingBeforeRead
 	t.Cleanup(func() { nativeOTLPTakeBackPendingBeforeRead = previous })
+	replaced := false
 	nativeOTLPTakeBackPendingBeforeRead = func(string) {
-		if err := os.Rename(large, path); err != nil {
-			t.Fatal(err)
-		}
+		replaced = swapNativeOTLPTakeBackMarkerForTest(t, large, path)
 	}
-	if NativeOTLPTakeBackPending(dataDir, "codex") {
+	pending := NativeOTLPTakeBackPending(dataDir, "codex")
+	if replaced && pending {
 		t.Fatal("a marker replaced after the check by a 1 MiB file was read as pending")
+	}
+	if !replaced && !pending {
+		t.Fatal("the checked marker, which could not be replaced, was not read")
 	}
 }
