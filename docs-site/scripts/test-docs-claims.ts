@@ -504,6 +504,24 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
   });
 });
 
+describe('per-user outage wording on connector pages (rel-1-0-4 GAP-1301, GAP-1317, GAP-1324)', () => {
+  it('says the default and permissive policies let an outage call run on Antigravity, Copilot and Devin', () => {
+    for (const name of ['connectors/antigravity.mdx', 'reference/connectors/antigravity.mdx', 'reference/connectors/copilot.mdx', 'reference/connectors/devin.mdx']) {
+      assert.match(page(name), /default (?:and|or) permissive polic(?:y|ies) lets? (?:the call|`PreToolUse`) run with one warning/i, name);
+    }
+  });
+
+  it('never opens a Fail mode section with an unqualified closed claim', () => {
+    for (const entry of readdirSync(join(docs, 'reference/connectors'))) {
+      if (!entry.endsWith('.mdx')) continue;
+      const name = `reference/connectors/${entry}`;
+      const text = page(name);
+      assert.ok(!text.includes('Fail closed: yes'), `${name} still opens with Fail closed: yes`);
+      assert.ok(!/closed by default/i.test(text.split('## Fail mode')[1]?.split(' ## ')[0] ?? ''), `${name} Fail mode promises a closed default`);
+    }
+  });
+});
+
 describe('Hook connector setup and teardown', () => {
   it('limits the observe default to first setup in every CLI row and connector page', () => {
     const setupCode = source('cli/defenseclaw/commands/cmd_setup.py');
