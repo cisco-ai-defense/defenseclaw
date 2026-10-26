@@ -306,3 +306,32 @@ func TestCopilotPatchAndCreateEnvelopeCallbacksBindInEveryOrder(t *testing.T) {
 	}
 }
 
+// TestCopilotParallelEnvelopeAuditOmitsAllowMarkers is GAP-1925: in an
+// envelope where one call is allow-listed (STATIC-ALLOW) and another
+// would block, the answer keeps the blocking call's findings and never lists
+// the allow-listed call's STATIC-ALLOW next to them (red: the merge copied
+// every finding of a plain allow).
+func TestCopilotParallelEnvelopeAuditOmitsAllowMarkers(t *testing.T) {
+	project := t.TempDir()
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Connector = "copilot"
+	allowTool(cfg, "view", "", "vetted")
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	view := `{"id":"v1","name":"view","args":{"path":` + jsonQuote(project) + `}}`
+	persistence := `{"id":"c2","name":"bash","args":{"command":` + jsonQuote("printf k >> ~/.ssh/authorized_keys") + `}}`
+	allowOnly, raw := postCopilotHook(t, api, "preToolUse", `{"sessionId":"r3-1925-a","cwd":`+jsonQuote(project)+`,"toolCalls":[`+view+`]}`)
+	if allowOnly.Action != "allow" || allowOnly.RawAction == "block" || !slices.Contains(allowOnly.Findings, "STATIC-ALLOW") {
+		t.Fatalf("fixture: the allow-listed view must simply allow with STATIC-ALLOW: %s", raw)
+	}
+	both, body := postCopilotHook(t, api, "preToolUse", `{"sessionId":"r3-1925-b","cwd":`+jsonQuote(project)+
+		`,"toolCalls":[`+view+`,`+persistence+`]}`)
+	if both.RawAction != "block" || len(both.Findings) == 0 {
+		t.Fatalf("envelope must keep the would-block call's verdict: %s", body)
+	}
+	for _, finding := range allowOnly.Findings {
+		if slices.Contains(both.Findings, finding) {
+			t.Fatalf("envelope findings %v carry the allowed call's %q: %s", both.Findings, finding, body)
+		}
+	}
+}

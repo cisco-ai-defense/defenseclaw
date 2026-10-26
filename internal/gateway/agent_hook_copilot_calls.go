@@ -79,7 +79,10 @@ func (a *APIServer) safeEvaluateHookCalls(
 	}
 	out := responses[decided]
 	for i, resp := range responses {
-		if i == decided || hookVerdictRank(resp) == 0 && len(resp.Findings) == 0 {
+		// A call that simply allowed adds nothing: its findings are allow
+		// markers such as STATIC-ALLOW, never a reason for this answer
+		// (GAP-1925).
+		if i == decided || hookVerdictRank(resp) == 0 {
 			continue
 		}
 		out.Findings = appendUniqueStrings(out.Findings, resp.Findings...)
