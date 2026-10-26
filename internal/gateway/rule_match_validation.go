@@ -484,12 +484,28 @@ func gitUserEmailPlaceholder(before, email string) bool {
 // emailIsPathSegment reports an address-shaped match that is one folder or
 // file name of a path, such as the home folder of a directory account
 // (/home/user@corp.example/project): a path, not someone's address
-// (GAP-1286).
+// (GAP-1286). A segment of a URL to another host is not a local path: the
+// address goes off the machine and still alerts (GAP-1934).
 func emailIsPathSegment(text string, start, end int) bool {
 	if start <= 0 || start > len(text) || end > len(text) || (text[start-1] != '/' && text[start-1] != '\\') {
 		return false
 	}
-	return end == len(text) || strings.IndexByte("/\\ \t\r\n\"'`:;,)", text[end]) >= 0
+	if end != len(text) && strings.IndexByte("/\\ \t\r\n\"'`:;,)", text[end]) < 0 {
+		return false
+	}
+	return !pathBeforeIsRemoteURL(text[:start])
+}
+
+// pathBeforeIsRemoteURL reports a path whose token (delimited by whitespace
+// or quotes) is a URL with a host: it holds "://" with a scheme other than
+// file, or starts with "//".
+func pathBeforeIsRemoteURL(before string) bool {
+	token := before[strings.LastIndexAny(before, " \t\r\n\"'`")+1:]
+	if strings.HasPrefix(token, "//") {
+		return true
+	}
+	scheme, _, isURL := strings.Cut(token, "://")
+	return isURL && !strings.EqualFold(scheme, "file")
 }
 
 // isoDatePlus is "+YYYY-MM-DD": a date after a plus sign (a diff's added

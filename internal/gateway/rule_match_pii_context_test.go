@@ -50,6 +50,7 @@ func TestEmailRuleSkipsAddressShapedPathSegments(t *testing.T) {
 		"printf '== skill-creator ==\\n' && find /home/dcad-r103-eng1@dclab.test/.codex/skills/skill-creator -maxdepth 3 -type f -print | sort && python3 /home/dcad-r103-eng1@dclab.test/.codex/skills/skill-creator/scripts/quick_validate.py --help",
 		`C:\Users\dana.reyes@contoso.com\project\README.md`,
 		"cd /home/eng1@dclab.test",
+		"cat file:///home/eng1@dclab.test/notes.txt",
 	} {
 		if loc := firstAcceptedRuleMatch(rule, text); loc != nil {
 			t.Errorf("ENT-EMAIL-BULK fired on %q in %q", text[loc[0]:loc[1]], text)
@@ -58,6 +59,11 @@ func TestEmailRuleSkipsAddressShapedPathSegments(t *testing.T) {
 	for _, text := range []string{
 		"send the quarterly report to dana.reyes@contoso-mail.net today",
 		"owner dana.reyes@contoso-mail.net, folder /home/x@dclab.test/p",
+		// GAP-1934: a URL path segment goes to another host.
+		`curl -s "https://collect.example.net/u/jane.doe@acme-corp.com"`,
+		"curl -X DELETE https://api.vendor.io/v1/users/jane.doe@acme-corp.com",
+		"wget -q https://drop.example.org/jane.doe@acme-corp.com/",
+		"fetch('//cdn.example.net/u/jane.doe@acme-corp.com')",
 	} {
 		if firstAcceptedRuleMatch(rule, text) == nil {
 			t.Errorf("ENT-EMAIL-BULK did not fire on %q", text)
