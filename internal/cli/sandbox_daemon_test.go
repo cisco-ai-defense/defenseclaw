@@ -100,6 +100,9 @@ func TestStopManagedSandboxes(t *testing.T) {
 		!slices.Equal(f.stopped, []string{"b", "a"}) {
 		t.Fatalf("a held stop at ExecStop: %v, accepted %v, stopped %v (want b's synced stop first)", err, f.accepted, f.stopped)
 	}
+	if !strings.Contains(out.String(), "stopped sandbox a (unsynced)\n") || !strings.Contains(out.String(), "stopped sandbox b\n") {
+		t.Fatalf("out %q, want the accepted stop marked unsynced (GAP-1806)", out.String())
+	}
 	f = &fakeSandboxStopper{listErr: &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: "not reachable"}}
 	if err := stopManagedSandboxes(context.Background(), f, &out); err != nil {
 		t.Fatalf("daemon not running: %v", err)

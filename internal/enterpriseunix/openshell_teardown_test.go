@@ -60,6 +60,22 @@ func TestSandboxPurgeTearsDownBeforeTheUnitsStop(t *testing.T) {
 	}
 }
 
+// GAP-1806: a non-purge uninstall whose ExecStop had to accept the loss of
+// a guest's unsynced files does not say that sandbox kept all its work.
+func TestSandboxUninstallSaysWhatAnUnsyncedStopMayMiss(t *testing.T) {
+	h := newOSHost(t, "linux")
+	requireOK(t, h.ensure(sandboxConfig(t, "linux", true, setupVMSettings)))
+	h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Running: 2}
+	h.ops.running = map[int][]string{h.alice.UID: {"sb-ok", "sb-stuck (unsynced)"}}
+	r := h.run(Options{Action: ActionUninstall})
+	requireOK(t, r)
+	if !containsLine(r.Changes, "stopped the running sandboxes of user alice (sb-ok); they are kept, with their work") ||
+		!containsLine(r.Changes, "stopped the running sandboxes of user alice whose MicroVM disk could not sync (sb-stuck); they are kept, "+
+			"but may miss the files written in them since their disks were last synced") {
+		t.Fatalf("changes = %v", r.Changes)
+	}
+}
+
 // GAP-0598: an uninstall without --purge ran `sandbox teardown --keep-images`
 // as each account, which deleted its sandboxes and the copy-mode work never
 // pulled back, while the result said each account kept its sandbox state.

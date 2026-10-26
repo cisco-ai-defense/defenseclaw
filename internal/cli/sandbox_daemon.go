@@ -447,7 +447,9 @@ func stopManagedSandboxes(ctx context.Context, c managedSandboxStopper, out io.W
 			failed = append(failed, fmt.Errorf("stop %s: %w", name, err))
 			continue
 		}
-		fmt.Fprintf(out, "stopped sandbox %s\n", name)
+		// What its guest had not synced may be gone: the lifecycle that runs
+		// this says so, not that the work is kept (GAP-1806).
+		fmt.Fprintf(out, "stopped sandbox %s%s\n", name, sandboxapi.UnsyncedStopSuffix)
 	}
 	return errors.Join(failed...)
 }

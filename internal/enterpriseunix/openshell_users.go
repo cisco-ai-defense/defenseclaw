@@ -1781,8 +1781,22 @@ func (l *lifecycle) keepAccountSandboxes(ctx context.Context, a SandboxAccount) 
 	// the sandboxes are stopped as if one did.
 	if st, err := ops.Status(ctx, a); err != nil || st.busy() > 0 {
 		stopped, err := ops.StopSandboxes(ctx, a)
-		if len(stopped) > 0 {
-			r.Changes = append(r.Changes, fmt.Sprintf("stopped the running sandboxes of user %s (%s); they are kept, with their work", a.Name, strings.Join(stopped, ", ")))
+		var synced, unsynced []string
+		for _, name := range stopped {
+			if name, ok := strings.CutSuffix(name, sandboxapi.UnsyncedStopSuffix); ok {
+				unsynced = append(unsynced, name)
+			} else {
+				synced = append(synced, name)
+			}
+		}
+		if len(synced) > 0 {
+			r.Changes = append(r.Changes, fmt.Sprintf("stopped the running sandboxes of user %s (%s); they are kept, with their work", a.Name, strings.Join(synced, ", ")))
+		}
+		if len(unsynced) > 0 {
+			// Their guests' disks could not sync, so the stop accepted that
+			// loss (GAP-1806).
+			r.Changes = append(r.Changes, fmt.Sprintf("stopped the running sandboxes of user %s whose MicroVM disk could not sync (%s); they are kept, "+
+				"but may miss the files written in them since their disks were last synced", a.Name, strings.Join(unsynced, ", ")))
 		}
 		if err != nil {
 			r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not stop every running sandbox of %s through its sandbox daemon: %v; its units stop next, and a MicroVM sandbox "+

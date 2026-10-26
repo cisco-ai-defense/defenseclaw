@@ -196,6 +196,12 @@ func AsError(err error) *Error {
 }
 
 // IsCode reports whether err is an *Error with code.
+// UnsyncedStopSuffix follows the name in the `stopped sandbox NAME` line of
+// `sandbox-daemon stop-sandboxes` for a stop made accepting the loss of what
+// its guest had not synced, so the lifecycle that ran it does not say the
+// sandbox kept all its work (GAP-1806).
+const UnsyncedStopSuffix = " (unsynced)"
+
 // UnsyncedStopHeldText is in the message of a MicroVM stop the daemon held
 // because the guest's disk sync failed (GAP-1163).
 const UnsyncedStopHeldText = "could not sync its MicroVM's disk before the stop"
