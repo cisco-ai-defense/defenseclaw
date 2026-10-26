@@ -972,6 +972,30 @@ async function installLockNumber(path: string): Promise<{ state: "absent" | "val
 // "<boot_id> <starttime>" (field 22 of /proc/<pid>/stat), on macOS its
 // creation second as `LC_ALL=C TZ=UTC ps -o lstart=` prints it, on Windows
 // its creation FILETIME; null when the system does not say.
+// processStartMs is when process pid started (ms since the epoch), from the
+// identity the system keeps (processIdentity), or null.
+function processStartMs(pid: number): number | null {
+	const identity = processIdentity(pid)
+	if (identity === null) return null
+	try {
+		if (process.platform === "linux") {
+			const line = String(readFileSync("/proc/stat", "utf8")).split("\n").find((entry) => entry.startsWith("btime "))
+			const boot = line ? Number(line.slice(6).trim()) : NaN
+			const ticks = Number(identity.split(" ")[1])
+			return Number.isFinite(boot) && Number.isFinite(ticks) ? boot * 1000 + ticks * 10 : null
+		}
+		if (process.platform === "darwin") {
+			const [, month, day, time, year] = identity.split(" ")
+			const started = Date.parse(month + " " + day + ", " + year + " " + time + " UTC")
+			return Number.isFinite(started) ? started : null
+		}
+		if (process.platform === "win32") return Number(BigInt(identity) / 10000n - 11644473600000n)
+	} catch {
+		// The system does not say.
+	}
+	return null
+}
+
 function processIdentity(pid: number): string | null {
 	try {
 		if (process.platform === "linux") {
@@ -1081,6 +1105,12 @@ async function installLockState(dir: string): Promise<"none" | "stale" | "held">
 	}
 	if (processEnded(owner.value)) return "stale"
 	const identity = await installLockRecord(join(lock, "proc-start"))
+	if (identity.state === "absent") {
+		// A 1.0.2/1.0.3 lock has no identity record: its pid names a later
+		// process when that process started after the lock (GAP-1465).
+		const started = processStartMs(owner.value)
+		return started !== null && started > info.mtimeMs + 2000 ? "stale" : "held"
+	}
 	if (identity.state !== "valid") return "held"
 	const current = processIdentity(owner.value)
 	return current !== null && current !== identity.value ? "stale" : "held"

@@ -77,14 +77,14 @@ _BRIDGE_STANDALONE_TEMPLATE_DIGESTS = {
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "0a03203c7363700c9dbc80d2306f7e0b731e4c20d9653b874949b201928308d6",  # amp-plugin.ts
+            "f67188db9e52f6920d6ac8b9e9cdd9cf7f593782ee69f06af8717a8b78533c7b",  # amp-plugin.ts
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["amp"],
             "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "9b241e1718517854635c14887d960f90abb92fd20dd910636a908de09f00ce40",  # opencode-plugin.js
+            "531da2f6f865818c2bc62b690b0e9b5d26f62c3e130bb9edd6a9596364d8729b",  # opencode-plugin.js
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["opencode"],
             "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
         }
