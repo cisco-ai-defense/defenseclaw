@@ -73,6 +73,10 @@ Teardown restores the exact earlier file when DefenseClaw's copy is unchanged. O
 - The VS Code Local harness reads its own hook format. The enterprise profile covers it; see the reference.
 - Copilot CLI can fail to deliver a tool's permission request after a long model turn, and the turn stops. Copilot CLI also runs a tool when its `preToolUse` hook times out or cannot start, even in fail mode `closed`. Both are Copilot CLI limits. See [Known limits](/docs/troubleshooting/known-limits#copilot-cli).
 
+## On a managed computer
+
+Set up, Check it and Turn it off on this page are per-user commands. On a computer with a standalone enterprise install they are refused: on Linux and macOS `defenseclaw` prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2; on native Windows `defenseclaw` is the administrator's command and refuses `setup copilot`. The administrator manages Copilot CLI in the managed `config.yaml` (`guardrail.connectors.copilot`) and applies it as in [Change the config](/docs/enterprise/operate/lifecycle#change-the-config).
+
 ## Turn it off
 
 For a per-user, single-connector install:
