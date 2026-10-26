@@ -239,6 +239,10 @@ unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 {{if not .Sandbox}}# The hook path is resolved: this is the data directory it was installed in.
 _DC_HOOK_DATA_DIR="${HOOK_DIR}/.."
+# An inherited DEFENSECLAW_HOME that names no folder does not retire the
+# hook installed here, and does not block it: the hook keeps the data
+# directory it was installed in and asks its gateway (GAP-1256).
+[ -d "${DEFENSECLAW_HOME}" ] || DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 {{end}}{{if not .Sandbox}}
 # A personal hook left on a managed computer must not fall back to its
 # personal gateway port. The managed hook is published separately by machine
