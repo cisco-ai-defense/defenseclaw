@@ -858,6 +858,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3
 	// A shell operand is already the literal path the shell opens; only a
 	// path fact can still carry unexpanded syntax.
+	var dotDotOperands []string
 	add := func(path string, literal, safeRedirect bool) {
 		if path == "" || !literal && (strings.ContainsAny(path, "*?[]$`") || strings.HasPrefix(path, "~")) {
 			return
@@ -945,6 +946,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		if raw, ok := RawDotDotOperand(candidate.Value, cwd); ok {
 			path = raw
 		}
+		if value := filepath.ToSlash(candidate.Value); value == ".." || strings.HasPrefix(value, "../") {
+			dotDotOperands = append(dotDotOperands, candidate.Value)
+		}
 		if slices.Contains(operands, path) && pathFactIsRedirect(candidate, facts.Commands) {
 			continue
 		}
@@ -959,6 +963,18 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		add(target, true, false)
 		if targets[OperandPath(target, cwd)] == "" {
 			patchListed = false
+		}
+	}
+	// The kernel resolves ".." against the physical directory, so from a
+	// linked cwd a relative "../x" write lands beside the link's target, not
+	// in the lexical parent (cd .. stays lexical). Describe that target too,
+	// with its identities, for a gateway that cannot stat the home
+	// (GAP-1501, instr-protect request).
+	if physicalCWD := sourceFacts[DirectoryFactPrefix+cwd]; filepath.IsAbs(physicalCWD) && physicalCWD != cwd {
+		for _, operand := range dotDotOperands {
+			if physical := filepath.Join(physicalCWD, operand); physical != OperandPath(operand, cwd) {
+				add(physical, true, false)
+			}
 		}
 	}
 	if isApplyPatchToolName(tool) && patchListed {
