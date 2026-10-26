@@ -208,9 +208,17 @@ func TestRemovedOpenHandsTeardownRemovesAnOldTombstoneFromAnEditedConfig(t *test
 	script := filepath.Join(dataDir, "hooks", removedOpenHandsHookScript)
 	removedTestWrite(t, script, removedTestTombstone, 0o700)
 	config := filepath.Join(home, ".openhands", "hooks.json")
-	body := `{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"` + script + `"}]},` +
-		`{"matcher":"terminal","hooks":[{"type":"command","command":"/opt/audit/hook"}]}],"note":"mine"}`
-	removedTestWrite(t, config, body, 0o600)
+	body, err := json.Marshal(map[string]any{
+		"PreToolUse": []any{
+			map[string]any{"matcher": "*", "hooks": []any{map[string]any{"type": "command", "command": script}}},
+			map[string]any{"matcher": "terminal", "hooks": []any{map[string]any{"type": "command", "command": "/opt/audit/hook"}}},
+		},
+		"note": "mine",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	removedTestWrite(t, config, string(body), 0o600)
 
 	removedTestTeardown(t, removedOpenHandsID, SetupOpts{DataDir: dataDir})
 

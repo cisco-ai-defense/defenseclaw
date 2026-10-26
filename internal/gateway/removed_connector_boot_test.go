@@ -28,6 +28,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -54,8 +55,8 @@ func stageRemovedBootHost(t *testing.T) removedBootHost {
 		// The 1.0.4 deny stub and the 1.0.3 policy module.
 		h.script: "#!/bin/sh -p\n# defenseclaw-managed-hook v0 (disabled tombstone)\n# OpenHands support was removed in DefenseClaw 1.0.4.\nexit 2\n",
 		h.module: "# defenseclaw-managed-policy v3\nPOLICY_REGISTRY = []\n",
-		h.hooksJSON: `{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"` + h.script +
-			`"},{"type":"command","command":"/opt/mine/hook"}]}]}`,
+		h.hooksJSON: `{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":` + strconv.Quote(h.script) +
+			`},{"type":"command","command":"/opt/mine/hook"}]}]}`,
 		h.omnigentConfig: "policy_modules:\n  - defenseclaw_omnigent_policy\npolicies:\n  defenseclaw_guardrail:\n" +
 			"    handler: defenseclaw_omnigent_policy.defenseclaw_policy\nmodel: m\n",
 	} {
