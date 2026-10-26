@@ -2014,12 +2014,14 @@ const smallOverlayBytes = 4 << 30
 // smallOverlayDiskEvery on a disk of up to smallOverlayBytes and every
 // overlayDiskEvery on a larger one, and warns before the 90% mark too when,
 // at the rate it filled since the last look, it would be full before the
-// look after next (GAP-1140). A look that does not answer is tried again
-// at the next tick.
+// look after next (GAP-1140). That early warning comes once and the watch
+// goes on, so a disk that really fills later is still named (GAP-1785). A
+// look that does not answer is tried again at the next tick.
 func (s *session) watchOverlayDisk(ctx context.Context) {
 	wait := smallOverlayDiskEvery
 	var last overlayDisk
 	var lastAt time.Time
+	rateWarned := false
 	for {
 		timer := time.NewTimer(wait)
 		select {
@@ -2036,10 +2038,15 @@ func (s *session) watchOverlayDisk(ctx context.Context) {
 				wait = smallOverlayDiskEvery
 			}
 		}
-		if disk.filling() || disk.fillsWithin(last, now.Sub(lastAt), 2*wait) {
+		if disk.filling() {
 			text := "⚠ " + overlayDiskFillingText(s.sb.Name, disk, true)
 			s.notice("overlay disk", text, text)
 			return
+		}
+		if !rateWarned && disk.fillsWithin(last, now.Sub(lastAt), 2*wait) {
+			rateWarned = true
+			text := "⚠ " + overlayDiskFillingText(s.sb.Name, disk, true)
+			s.notice("overlay disk filling fast", text, text)
 		}
 		if disk.known {
 			last, lastAt = disk, now

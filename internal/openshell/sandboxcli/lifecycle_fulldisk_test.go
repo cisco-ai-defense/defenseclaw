@@ -236,6 +236,9 @@ func TestSessionWarnsAboutAFastFillingSmallDisk(t *testing.T) {
 	}{
 		{"filling fast", []string{dfHalf, df70}, true},
 		{"steady", []string{dfHalf, dfHalf, dfHalf}, false},
+		// The early warning does not end the watch: the disk that then
+		// fills is named too (GAP-1785).
+		{"filling fast, then full", []string{dfHalf, df70, dfFull}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sb := vmCopySandbox("vmbox")
@@ -254,8 +257,11 @@ func TestSessionWarnsAboutAFastFillingSmallDisk(t *testing.T) {
 			defer cancel()
 			s.watchOverlayDisk(ctx)
 			warned := strings.Contains(ta.err.String(), "own disk is 69% full")
-			if warned != tc.warn || tc.warn && looks != 2 {
+			if warned != tc.warn || tc.warn && looks < 2 {
 				t.Fatalf("warned %v after %d looks:\n%s", warned, looks, ta.err.String())
+			}
+			if full := strings.Contains(ta.err.String(), "own disk is 100% full"); full != (tc.answers[len(tc.answers)-1] == dfFull) {
+				t.Fatalf("full disk named %v after %d looks:\n%s", full, looks, ta.err.String())
 			}
 		})
 	}
