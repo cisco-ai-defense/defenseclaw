@@ -306,6 +306,11 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
         # The resolved admission view writes an action as its shorthand; the
         # source may set one lifecycle field of it (GAP-0103).
         found, value = _lookup(written, parts)
+    if not found and written is None:
+        # The resolved observability plan folds observability.defaults into
+        # its destinations, so a key config.yaml sets there printed "not set"
+        # right after config set wrote it (GAP-1901): read it as written.
+        found, value = _lookup(_written_config() or {}, parts)
     if not found:
         found, value = _admission_lifecycle_field(view, parts)
     if not found:

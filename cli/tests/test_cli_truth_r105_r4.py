@@ -192,3 +192,15 @@ def test_profile_connector_leaf_unset_restores_the_exact_bytes(tmp_path: Path, m
     removed = _config_cmd("unset", key)
     assert removed.exit_code == 0, removed.output
     assert path.read_bytes() == before, path.read_text()
+
+
+def test_get_reads_an_observability_default_config_set_wrote(tmp_path: Path, monkeypatch) -> None:
+    # GAP-1901: config get said "not set and has no default" right after
+    # config set wrote observability.defaults.redaction_profile.
+    _config(tmp_path, monkeypatch, "observability:\n  defaults:\n    redaction_profile: content\n")
+    with patch.object(cmd_config, "_key_view", return_value={"observability": {"destinations": []}}):
+        result = CliRunner().invoke(
+            cmd_config.config_cmd, ["get", "observability.defaults.redaction_profile"], catch_exceptions=False
+        )
+    assert result.exit_code == 0, result.output
+    assert result.output.strip().splitlines()[-1] == "content", result.output
