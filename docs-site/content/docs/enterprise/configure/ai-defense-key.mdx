@@ -228,7 +228,7 @@ for recipes.
 
 ## Remove the key
 
-Remove the reference first (set `enabled: false` and delete `credential` under `enterprise.inspection.ai_defense`), apply the config with `ensure`, then run `enterprise secret remove --name ai-defense-api-key`. Removal refuses a key that enabled AI Defense inspection still references. A disabled AI Defense reference does not prevent removal. See [AI Defense key detail](/docs/enterprise/configure/reference#remove-the-key).
+Remove the reference first (set `enabled: false` and delete `credential` under `enterprise.inspection.ai_defense`), apply the config with `ensure`, then run `enterprise secret remove --name ai-defense-api-key`. Removal refuses a key that enabled AI Defense inspection still references. A reference under disabled inspection does not prevent removal: a disabled AI Defense reference alone never blocks it. See [AI Defense key detail](/docs/enterprise/configure/reference#remove-the-key).
 
 ## Exit codes
 
