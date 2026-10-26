@@ -73,9 +73,6 @@ func TestManagedScanGatewayEndpointRefusesAStandardAccountPlainly(t *testing.T) 
 // status and verify read /health on the gateway.api_port of the installed
 // config, as they read /status there (GAP-1351).
 func TestWindowsStandaloneGatewayHealthUsesInstalledAPIPort(t *testing.T) {
-	previousFactory := managedGatewayClientFactory
-	managedGatewayClientFactory = func(time.Duration, string, string) (*http.Client, error) { return &http.Client{}, nil }
-	t.Cleanup(func() { managedGatewayClientFactory = previousFactory })
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
 			_, _ = w.Write([]byte("configured-port"))
