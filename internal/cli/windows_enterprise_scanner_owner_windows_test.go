@@ -34,6 +34,33 @@ func TestWindowsScannerPrepareTimeoutIsRetryable(t *testing.T) {
 	}
 }
 
+// GAP-1709: a recovery that put an earlier release back reports that
+// release's scanner runtime, which this release's admission rule does not
+// prove, as a warning; a recovery of this release, and verify, still fail.
+func TestWindowsRecoveryToAnEarlierReleaseDoesNotFailOnItsScannerRuntime(t *testing.T) {
+	reader := windowsScannerRuntimeReader
+	t.Cleanup(func() { windowsScannerRuntimeReader = reader })
+	windowsScannerRuntimeReader = func() *enterprisestatus.ScannerRuntime {
+		return &enterprisestatus.ScannerRuntime{State: "untrusted"}
+	}
+	opts := &windowsEnterpriseLifecycleOptions{productVersion: "1.0.5"}
+	for _, tc := range []struct {
+		action, installed string
+		wantError         bool
+	}{
+		{action: "recover", installed: "1.0.2"},
+		{action: "recover", installed: "1.0.5", wantError: true},
+		{action: "verify", installed: "1.0.2", wantError: true},
+	} {
+		result := enterprisestatus.New(tc.action, "standalone", "windows", "1.0.5")
+		result.Installed, result.InstalledVersion = true, tc.installed
+		applyWindowsStandaloneScannerRuntime(result, opts)
+		if got := windowsEnterpriseResultHasError(result, "scanner_runtime_unavailable"); got != tc.wantError {
+			t.Errorf("%s over %s: error=%t, want %t (warnings %+v)", tc.action, tc.installed, got, tc.wantError, result.Warnings)
+		}
+	}
+}
+
 // GAP-1718: after the scanner runtime work adopts Administrators as the
 // default owner, a file this elevated process creates is owned by
 // Administrators even when the token belongs to the built-in Administrator

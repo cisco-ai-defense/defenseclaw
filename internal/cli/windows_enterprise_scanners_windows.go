@@ -343,7 +343,14 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 				message = windowsScannerRuntimeServiceProblem()
 			}
 			if message != "" {
-				if result.Action == "verify" || result.Action == "recover" {
+				// A recovery that put an earlier release back (1.0.2 after a
+				// TIMEOUTSECONDS stop) restored that release's scanner
+				// runtime, which this release's admission rule does not
+				// prove: that is not a failed recovery, and the next ensure
+				// installs and admits this release's runtime (GAP-1709).
+				restoredOlder := result.Action == "recover" && opts != nil &&
+					compareWindowsEnterpriseVersions(opts.productVersion, result.InstalledVersion) > 0
+				if (result.Action == "verify" || result.Action == "recover") && !restoredOlder {
 					result.AddError("scanner_runtime_unavailable", message)
 				} else {
 					result.AddWarning("scanner_runtime_unavailable", message)
