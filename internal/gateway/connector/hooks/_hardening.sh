@@ -2157,6 +2157,27 @@ defenseclaw_read_socket_table() {
   return 0
 }
 
+# defenseclaw_read_listen_rows FILE puts the LISTEN (0A) rows of FILE in
+# _DC_SOCKET_ROWS. grep reads the table once and keeps the few listening rows,
+# so a host with hundreds of thousands of TIME_WAIT rows is not walked row by
+# row in Bash, which missed the 3 s budget (GAP-1756). Without grep the
+# whole table is read (defenseclaw_read_socket_table).
+defenseclaw_read_listen_rows() {
+  local data="" IFS=$'\n' noglob=0
+  if ! command -v grep >/dev/null 2>&1; then
+    defenseclaw_read_socket_table "$1"
+    return
+  fi
+  _DC_SOCKET_ROWS=()
+  [ -r "$1" ] || return 1
+  data="$(LC_ALL=C grep -F ' 0A ' "$1" 2>/dev/null)" || [ -z "$data" ] || return 1
+  case "$-" in *f*) noglob=1 ;; esac
+  set -f
+  _DC_SOCKET_ROWS=($data)
+  [ "$noglob" = 1 ] || set +f
+  return 0
+}
+
 # defenseclaw_procfs_listener_status ADDR PORT NET UID classifies the
 # listeners that can serve one normalised loopback endpoint (127.0.0.0/8 or
 # ::1) in NET's tcp and tcp6 tables, with the return codes of
@@ -2180,7 +2201,7 @@ defenseclaw_procfs_listener_status() {
   esac
   for table in "${net}/tcp" "${net}/tcp6"; do
     [ -r "$table" ] || continue
-    defenseclaw_read_socket_table "$table" || continue
+    defenseclaw_read_listen_rows "$table" || continue
     for row in "${_DC_SOCKET_ROWS[@]}"; do
       # The state column is the only " 0A " (LISTEN) a row can hold; skip
       # the TIME_WAIT and connected rows before splitting. procfs rows have
