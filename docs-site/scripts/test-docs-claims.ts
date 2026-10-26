@@ -657,7 +657,11 @@ describe('Windows Hermes failure guidance', () => {
     assert.match(failMode, /opts\.StrictAvailability \|\| !strings\.EqualFold\(strings\.TrimSpace\(opts\.FailMode\), "open"\)/);
     const windows = page('troubleshooting/windows.mdx');
     assert.doesNotMatch(windows, /Hermes.*(?:fail-open setting|always shows failures as open)/i);
-    assert.match(windows, /Hermes.*closed by default.*explicitly.*open/i);
+    // rel-1-0-4 GAP-0746: a per-user outage follows the policy tier (perUserOutageMode), as for every agent.
+    assert.match(source('internal/gateway/connector/hookexec/hookexec.go'), /func perUserOutageMode\(opts \*Options, failMode string\) string \{/);
+    assert.doesNotMatch(windows, /Hermes[^.]*closed by default/i);
+    assert.match(windows, /per-user install a stopped gateway lets a Hermes call run with one warning under the default and permissive policies/i);
+    assert.match(windows, /the strict policy or a saved `closed` blocks it\. Every other failure blocks\./);
     assert.match(windows, /managed host.*administrator.*open.*gateway outage/i);
     assert.match(windows, /Secure Client.*open.*default/i);
   });

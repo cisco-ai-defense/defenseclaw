@@ -131,7 +131,7 @@ Use harmless prompts only: no real secrets or customer data.
 - `defenseclaw version`: the CLI and the gateway report the same release.
 - `defenseclaw migrate --check` and `defenseclaw config validate` pass (after an upgrade).
 - `defenseclaw-gateway status` and `defenseclaw doctor` pass.
-- `defenseclaw guardrail status` lists each agent you set up with the mode, fail mode and enabled state you chose (the same as before an upgrade). Hermes follows its effective fail mode on Windows: closed by default outside Secure Client, and open only when explicitly chosen. On a managed host, the administrator may choose open for a gateway outage; unusable answers still block. Under Secure Client, open is the default.
+- `defenseclaw guardrail status` lists each agent you set up with the mode, fail mode and enabled state you chose (the same as before an upgrade). Hermes follows the same outage rule as the other agents on Windows: on a per-user install a stopped gateway lets a Hermes call run with one warning under the default and permissive policies, and the strict policy or a saved `closed` blocks it. Every other failure blocks. On a managed host, the administrator may choose open for a gateway outage; unusable answers still block. Under Secure Client, open is the default.
 - Restart each agent where its connector page says to, send a harmless prompt in each one, and look for the event in `defenseclaw tui` or `defenseclaw-gateway audit export --output -`. A harmless prompt creates an audit event, not an alert.
 - Leave the `previous` and `backups` folders alone until the gateway and every agent work.
 
