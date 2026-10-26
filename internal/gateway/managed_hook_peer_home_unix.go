@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"math/bits"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -286,6 +287,14 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 		return
 	}
 	legacyFile := stored[managedHookPeerHomesFormatKey].Format < 1
+	// A uid an earlier build served and persisted keeps no first_seen (1.0.4
+	// writes none): that gateway saw it by the time it last wrote the file,
+	// so a home created after then is another account's (the upgrade
+	// variant of GAP-0422, GAP-1867).
+	var savedAt int64
+	if info, statErr := os.Stat(c.homesFile); statErr == nil {
+		savedAt = info.ModTime().UnixNano()
+	}
 	for key, last := range stored {
 		uid, err := strconv.Atoi(key)
 		if err != nil || uid < 0 {
@@ -326,11 +335,15 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 			}
 			c.homeProofs[uid] = last.HomeProof
 		}
-		if _, known := c.firstSeen[uid]; !known && last.FirstSeen > 0 && len(c.firstSeen) < managedHookPeerHomesMax {
+		firstSeen := last.FirstSeen
+		if firstSeen <= 0 && (last.Name != "" || last.Home != "" || last.BaseIncarnation != "") {
+			firstSeen = savedAt
+		}
+		if _, known := c.firstSeen[uid]; !known && firstSeen > 0 && len(c.firstSeen) < managedHookPeerHomesMax {
 			if c.firstSeen == nil {
 				c.firstSeen = make(map[int]int64)
 			}
-			c.firstSeen[uid] = last.FirstSeen
+			c.firstSeen[uid] = firstSeen
 		}
 	}
 }

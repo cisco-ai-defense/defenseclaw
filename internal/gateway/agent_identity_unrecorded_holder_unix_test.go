@@ -6,10 +6,14 @@
 package gateway
 
 import (
+	"context"
 	"errors"
+	"os"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
 // GAP-0422, reopened by FC-BLK-167-ER on a machine-policy host: the local
@@ -115,5 +119,47 @@ func TestRecreatedAccountFirstViewByUnresolvedNameAndByUID(t *testing.T) {
 	}
 	if _, listed := rows[old.ID]; listed {
 		t.Fatalf("uid view lists the earlier holder's row %s next to the new one", old.ID)
+	}
+}
+
+// GAP-1867, the upgrade variant of GAP-0422: a 1.0.4 gateway served the
+// local account A (its homes file keeps the uid with no first_seen and, on a
+// machine-policy host, no home proof). A is deleted and B created under the
+// same name, uid and home path before B's first hook on 1.0.5. The upgraded
+// gateway takes the homes file's last write as the time the uid was seen,
+// so B's newer home is another account's: root's first view lists none of
+// A's rows and B's first hook derives its own agent identity. A home older
+// than that write keeps the agent identity, and the view lists its row.
+func TestUpgradedGatewayTellsARecreatedAccountFromTheOneTheOldBuildServed(t *testing.T) {
+	for _, recreated := range []bool{true, false} {
+		f := newRecreatedAccountFixture(t)
+		const oldRow = "agt-00000000001867a1"
+		saved := time.Unix(3_000_000, 0)
+		body := `{"format":{"format":1},"` + f.id + `":{"home":"` + f.home + `","name":"alice","base_incarnation":"files","incarnation":"files"}}`
+		if err := os.WriteFile(f.store, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(f.store, saved, saved); err != nil {
+			t.Fatal(err)
+		}
+		f.start()
+		if err := f.inv.UpsertAgentIdentities(context.Background(), []inventory.AgentIdentityRecord{{AgentID: oldRow, UserID: f.id,
+			UserName: "alice", Connector: "codex", UserIncarnation: "files", FirstSeen: saved.Add(-time.Hour), LastSeen: saved}}); err != nil {
+			t.Fatal(err)
+		}
+		birth := saved.Add(-24 * time.Hour)
+		if recreated {
+			birth = saved.Add(time.Hour)
+		}
+		home := "home:2049:3000:" + strconv.FormatInt(birth.UnixNano(), 10)
+		rows := f.view(viewOf("alice", strconv.Itoa(f.uid)+":"+home))
+		if _, listed := rows[oldRow]; listed == recreated {
+			t.Fatalf("recreated=%v: first view lists=%v the row the 1.0.4 gateway recorded (%v)", recreated, listed, listedIDs(rows))
+		}
+		f.guardian(home)
+		facts := f.hook("s-1867")
+		if fresh := facts.UserIncarnation != "files"; fresh != recreated {
+			t.Fatalf("recreated=%v: first hook on the upgraded gateway has account token %q", recreated, facts.UserIncarnation)
+		}
 	}
 }
