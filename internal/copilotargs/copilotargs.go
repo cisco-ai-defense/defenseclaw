@@ -14,6 +14,28 @@ import (
 	"strings"
 )
 
+// NativeSingleCall reads the CLI's preToolUse toolCalls envelope. A hook
+// decision covers the whole array, so only one fully named call can be
+// projected onto the gateway's single-call evaluator. Multiple calls and
+// unknown fields remain unparsed instead of silently dropping a write.
+func NativeSingleCall(value any) (string, any, bool) {
+	calls, ok := value.([]any)
+	if !ok || len(calls) != 1 {
+		return "", nil, false
+	}
+	call, ok := calls[0].(map[string]any)
+	if !ok || !onlyKeys(call, "id", "name", "args") || len(call) != 3 {
+		return "", nil, false
+	}
+	id, idOK := call["id"].(string)
+	name, nameOK := call["name"].(string)
+	if !idOK || strings.TrimSpace(id) == "" || !nameOK || strings.TrimSpace(name) != name || name == "" {
+		return "", nil, false
+	}
+	args, present := call["args"]
+	return name, args, present
+}
+
 // CLIToolArgs returns the arguments the Copilot CLI dialect judges for the
 // toolArgs value of a call to toolName: the object, or a JSON string of one
 // (the official hook tutorial sends it so), or an apply_patch call's patch

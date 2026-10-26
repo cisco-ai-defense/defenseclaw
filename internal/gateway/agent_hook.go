@@ -134,8 +134,13 @@ type agentHookRequest struct {
 	// ToolCallUnparsed: the connector's decoder found no tool call it can
 	// read (connector.HookProfileRequest.ToolCallUnparsed).
 	ToolCallUnparsed bool
-	Content          string
-	Direction        string
+	// toolCallShapeUnparsed: ToolCallUnparsed for a reason other than the
+	// missing write evidence of an argumentless Copilot callback (a
+	// duplicate key, a decoy dialect field, both argument fields, a decoder
+	// refusal). Such a callback is never bound to an earlier call.
+	toolCallShapeUnparsed bool
+	Content               string
+	Direction             string
 	// HookSurface names the connector-owned hook config that invoked this
 	// request, for connectors that install more than one with differing veto
 	// contracts. Setup marks each config's command and the bridge forwards
@@ -479,8 +484,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			req.HookEventName == "PreToolUse" && !preToolFieldsValid(payload) {
 			req.ToolCallUnparsed = true
 		}
-		if toolRoute == connector.ToolEventRouteStructuredAction ||
-			profile.ToolCallLifecycle.Version == 0 && isGenericToolInspectionEvent(req.HookEventName) {
+		structuredToolRoute := toolRoute == connector.ToolEventRouteStructuredAction ||
+			profile.ToolCallLifecycle.Version == 0 && isGenericToolInspectionEvent(req.HookEventName)
+		if structuredToolRoute {
 			if !hookToolCallJSONUnambiguous(connectorName, rawBody) {
 				req.ToolCallUnparsed = true
 			}
@@ -502,9 +508,18 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					req.ToolCallUnparsed = true
 				}
 			}
-			if connectorName == "copilot" && copilotWriteCallUnproven(req.ToolName, req.ToolArgs, req.CWD, hookActiveHome(r.Context())) {
-				req.ToolCallUnparsed = true
-			}
+		}
+		// Every reason so far is a shape no earlier decision can vouch for.
+		// Only the write evidence below is what an argumentless permission
+		// callback lacks by design (copilotPermissionJoin.match).
+		req.toolCallShapeUnparsed = req.ToolCallUnparsed
+		// writeProofCWD is the directory the write proof places targets in;
+		// a permission callback bound to an earlier call (below) is proven
+		// again the same way.
+		writeProofCWD := req.CWD
+		if structuredToolRoute && connectorName == "copilot" &&
+			copilotWriteCallUnproven(req.ToolName, req.ToolArgs, writeProofCWD, hookActiveHome(r.Context()), copilotManagedPatchEvidence(r.Context())) {
+			req.ToolCallUnparsed = true
 		}
 		a.hermesTasks.fill(&req)
 		if req.HookEventName == "" {
@@ -544,10 +559,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// A second delivery of one Copilot tool call (see
 		// agent_hook_copilot_dedupe.go) gets the first delivery's verdict,
 		// rendered for its own profile, and is not evaluated or audited
-		// again.
-		earlier, deduped, dedupeTicket := a.copilotDedupe.begin(r.Context(), connectorName, req)
+		// again. The verdict was decided under the same generation and
+		// guardrail profile (the keys carry them); an allow is replayed only
+		// when the live profile and require-sandbox gates pass now, else the
+		// delivery is evaluated on its own.
+		earlier, deduped, dedupeTicket := a.copilotDedupe.begin(r.Context(), connectorName, req, a.copilotDedupePolicy(r.Context()))
 		defer dedupeTicket.release()
-		if deduped {
+		if deduped && a.copilotDedupeReplayable(r.Context(), connectorName, req, requireSandboxSurface(r.Context(), r.Header), earlier) {
 			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, copilotDedupedResponse(profile, req, earlier)))
 			return
 		}
@@ -616,6 +634,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					resp = pending.NoReceipt.response()
 				}
 				a.handleHookPanic(ctx, connectorName, req.HookEventName, recovered)
+				// A later empty permission callback must not reuse an older
+				// pre-tool allow after this call failed before its decision.
+				a.copilotPermission.record(ctx, req, false)
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
 				enrichAgentHookSpanPanic(ctx)
 				if !finalized {
@@ -723,14 +744,36 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// audit envelope without a second pass here.
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
+		// An argumentless Copilot permission callback is bound to the call of
+		// the one audited preToolUse allow it follows and decided again, now,
+		// like that call: its write targets are proven and resolved as they
+		// are now, under the live policy and sandbox floor. An earlier
+		// decision is never reused. Every callback consumes the candidate; one
+		// that cannot be bound, or whose bound call cannot be proven now (a
+		// private managed home the user-side hook did not prove for this
+		// callback), keeps its own unparsed decision.
+		if tool, args, bound := a.copilotPermission.match(ctx, req, rawBody); bound {
+			req.ToolName, req.ToolArgs, req.ToolArgsProjectionUncertain = tool, args, false
+			req.ToolCallUnparsed = copilotWriteCallUnproven(tool, args, writeProofCWD,
+				hookActiveHome(r.Context()), copilotManagedPatchEvidence(r.Context()))
+		}
 		// An uncertain identity refuses before any profile-specific gate can
 		// replace its missing-fact explanation.
 		resp, gated := a.refuseProfileHook(ctx, profile, connectorName, req, b, payload)
+		// An unparsed call is answered without evaluation. Its block stands
+		// at once; any other answer (the observe allow of an unreadable
+		// Copilot call) is given only after the live require-sandbox gate,
+		// which refuses a host run whatever the call.
+		var unparsedAnswer *agentHookResponse
 		if !gated && req.ToolCallUnparsed &&
 			toolRoute == connector.ToolEventRouteStructuredAction {
 			a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
-			resp = unparsedStructuredHookResponse(profile, req)
-			gated = true
+			answer := a.unparsedStructuredHookResponse(ctx, profile, req)
+			if answer.Action == "block" {
+				resp, gated = answer, true
+			} else {
+				unparsedAnswer = &answer
+			}
 		}
 		sandboxGate := requireSandboxOutcome{}
 		if !gated {
@@ -742,6 +785,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// The strict tier refuses a call while an install or upgrade of
 			// this account holds its data directory (GAP-1438).
 			resp, gated = a.strictInstallWindowGate(ctx, profile, connectorName, req)
+		}
+		if !gated && unparsedAnswer != nil {
+			resp, gated = *unparsedAnswer, true
 		}
 		panicked := false
 		if !gated {
@@ -899,6 +945,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// a degraded-audit alert or a closed answer. The agent and accounting
 		// must receive the same final verdict.
 		resp = finalization.Response
+		a.copilotPermission.record(persistCtx, req, finalization.AuditPersisted && !panicked && resp.Action == "allow")
 		if delivery == nil && !finalization.AuditPersisted {
 			wireResp = resp
 		}

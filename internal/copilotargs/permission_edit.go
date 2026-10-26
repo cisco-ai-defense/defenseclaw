@@ -62,7 +62,9 @@ func permissionEditDiff(path, diff string) (string, string, bool) {
 		return "", "", false
 	}
 	diff = strings.TrimLeft(diff, "\n")
-	diff = strings.TrimSuffix(diff, "\n")
+	// Native Copilot diffs may end with more than one bare separator newline;
+	// blank content lines still carry their '+' prefix and remain intact.
+	diff = strings.TrimRight(diff, "\n")
 	lines := strings.Split(diff, "\n")
 	if len(lines) < 5 {
 		return "", "", false
@@ -76,10 +78,23 @@ func permissionEditDiff(path, diff string) (string, string, bool) {
 		return "", "", false
 	}
 	i := 1
+	created := false
+	if lines[i] == "create file mode 100644" || lines[i] == "create file mode 100755" ||
+		lines[i] == "new file mode 100644" || lines[i] == "new file mode 100755" {
+		created = true
+		i++
+	}
+	if i >= len(lines) {
+		return "", "", false
+	}
 	if strings.HasPrefix(lines[i], "index ") {
 		i++
 	}
-	if i+2 >= len(lines) || lines[i] != "--- "+aPath || lines[i+1] != "+++ "+bPath {
+	oldPath := aPath
+	if created {
+		oldPath = "a/dev/null"
+	}
+	if i+2 >= len(lines) || lines[i] != "--- "+oldPath || lines[i+1] != "+++ "+bPath {
 		return "", "", false
 	}
 	i += 2
@@ -132,7 +147,8 @@ func permissionEditDiff(path, diff string) (string, string, bool) {
 			return "", "", false
 		}
 	}
-	if !seenHunk || !changed || oldSeen != oldExpected || newSeen != newExpected {
+	if !seenHunk || !changed || oldSeen != oldExpected || newSeen != newExpected ||
+		created && len(oldLines) != 0 {
 		return "", "", false
 	}
 	return strings.Join(oldLines, "\n"), strings.Join(newLines, "\n"), true

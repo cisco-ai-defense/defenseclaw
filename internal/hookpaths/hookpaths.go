@@ -603,7 +603,24 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	var toolRaw, args json.RawMessage
 	var toolConflict, argsConflict bool
 	if copilot {
-		toolRaw, args, toolConflict, argsConflict = copilotCall(envelope, surface, event)
+		if rawCalls, present := envelope["toolCalls"]; present && surface == "" && event == "preToolUse" {
+			var calls any
+			if json.Unmarshal(rawCalls, &calls) != nil ||
+				aliasSet(envelope["toolName"]) || aliasSet(envelope["toolArgs"]) || aliasSet(envelope["toolInput"]) {
+				return incompleteEvidence("")
+			}
+			name, value, ok := copilotargs.NativeSingleCall(calls)
+			if !ok {
+				return incompleteEvidence("")
+			}
+			toolRaw, _ = json.Marshal(name)
+			args = copilotargs.CLIToolArgs(name, value)
+			if len(args) == 0 {
+				return incompleteEvidence("")
+			}
+		} else {
+			toolRaw, args, toolConflict, argsConflict = copilotCall(envelope, surface, event)
+		}
 	} else {
 		toolRaw, _, toolConflict = firstAlias(envelope, []string{"tool_name", "toolName"})
 		args, _, argsConflict = firstAlias(envelope,

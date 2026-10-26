@@ -97,16 +97,26 @@ func actionWindowsProtected(value, cwd, home string, readOnly bool) (bool, bool)
 
 // actionWindowsWords treats a quoted command body as one word and emits each
 // redirection separately, preserving an attached file descriptor. An unclosed
-// quote leaves the command unproved.
-func actionWindowsWords(command string) ([]string, bool) {
-	var words []string
+// quote leaves the command unproved. A PowerShell here-string (@' or @" at
+// the end of its line) is one word, "@" + body + "@", and runs to the line
+// that starts with its closing '@ or "@: a quote inside the body (It's, "x")
+// does not end it. literal[i] reports a word that is exactly one @'...'@
+// here-string, whose body PowerShell does not expand ($ and the backtick are
+// characters there).
+func actionWindowsWords(command string) (words []string, literal []bool, ok bool) {
 	var word strings.Builder
 	var quote byte
+	hereLen := -1
+	emit := func(value string, isLiteral bool) {
+		words = append(words, value)
+		literal = append(literal, isLiteral)
+	}
 	flush := func() {
 		if word.Len() > 0 {
-			words = append(words, word.String())
+			emit(word.String(), word.Len() == hereLen)
 			word.Reset()
 		}
+		hereLen = -1
 	}
 	for i := 0; i < len(command); i++ {
 		c := command[i]
@@ -120,6 +130,20 @@ func actionWindowsWords(command string) ([]string, bool) {
 		}
 		switch c {
 		case '\'', '"':
+			if word.String() == "@" {
+				if bodyEnd, after, here, ok := actionWindowsHereStringEnd(command, i); here {
+					if !ok {
+						return words, literal, false
+					}
+					word.WriteString(command[i+1 : bodyEnd])
+					word.WriteByte('@')
+					if c == '\'' {
+						hereLen = word.Len()
+					}
+					i = after - 1
+					continue
+				}
+			}
 			quote = c
 		case ' ', '\t', '\r', '\n':
 			flush()
@@ -144,17 +168,73 @@ func actionWindowsWords(command string) ([]string, bool) {
 			}
 			flush()
 			if i+1 < len(command) && command[i+1] == c && (c == '>' || c == '<' || c == '&' || c == '|') {
-				words = append(words, command[i:i+2])
+				emit(command[i:i+2], false)
 				i++
 			} else {
-				words = append(words, command[i:i+1])
+				emit(command[i:i+1], false)
 			}
 		default:
 			word.WriteByte(c)
 		}
 	}
 	flush()
-	return words, quote == 0
+	return words, literal, quote == 0
+}
+
+// actionWindowsHereStringEnd reads the here-string whose opening quote is at
+// command[open] (after an @). A quote followed by nonblanks on its line is an
+// ordinary quote. bodyEnd is the first byte of the closing marker, and after
+// is the byte after it. PowerShell also accepts lone CR line ends and smart
+// quote closing markers. An indented closer or no closer is unproved.
+func actionWindowsHereStringEnd(command string, open int) (bodyEnd, after int, here, ok bool) {
+	quote := command[open]
+	newline := strings.IndexAny(command[open+1:], "\r\n")
+	if newline < 0 || strings.Trim(command[open+1:open+1+newline], " \t") != "" {
+		return 0, 0, false, false
+	}
+	firstEnd := open + 1 + newline
+	start := firstEnd + 1
+	if command[firstEnd] == '\r' && start < len(command) && command[start] == '\n' {
+		start++
+	}
+	for start <= len(command) {
+		lineEnd := len(command)
+		if next := strings.IndexAny(command[start:], "\r\n"); next >= 0 {
+			lineEnd = start + next
+		}
+		line := command[start:lineEnd]
+		if size := actionWindowsHereStringCloserLen(line, quote); size > 0 {
+			return start, start + size, true, true
+		}
+		if actionWindowsHereStringCloserLen(strings.TrimLeft(line, " \t"), quote) > 0 {
+			return 0, 0, true, false
+		}
+		if lineEnd == len(command) {
+			break
+		}
+		start = lineEnd + 1
+		if command[lineEnd] == '\r' && start < len(command) && command[start] == '\n' {
+			start++
+		}
+	}
+	return 0, 0, true, false
+}
+
+func actionWindowsHereStringCloserLen(line string, quote byte) int {
+	if quote == '\'' {
+		for _, closer := range [...]string{"'@", "‘@", "’@", "‚@", "‛@"} {
+			if strings.HasPrefix(line, closer) {
+				return len(closer)
+			}
+		}
+	} else {
+		for _, closer := range [...]string{"\"@", "“@", "”@", "„@"} {
+			if strings.HasPrefix(line, closer) {
+				return len(closer)
+			}
+		}
+	}
+	return 0
 }
 
 func actionWindowsRedirectOperator(word string) string {
@@ -179,11 +259,36 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 	if command == "" || depth >= 8 || len(command) > MaxPayloadBytes {
 		return "dynamic-command"
 	}
-	words, ok := actionWindowsWords(command)
+	words, literal, ok := actionWindowsWords(command)
 	if !ok || len(words) == 0 {
 		return "shell-parse"
 	}
-	for _, statement := range actionWindowsResolvedStatements(words, cwd, home) {
+	spans := actionWindowsResolvedSpans(words, cwd, home)
+	for i := 0; i < len(spans); i++ {
+		span := spans[i]
+		statement := span.words
+		// A here-string piped into apply_patch (@'...'@ | apply_patch)
+		// is the same envelope argument as apply_patch @'...'@.
+		if _, piped := actionWindowsPipedPatch(words, statement, span.end); piped &&
+			i+1 < len(spans) && spans[i+1].start == span.end+1 {
+			if reason, judged := actionWindowsPatchDecision([]string{words[span.end+1], statement[0]}, literal[span.start], cwd, home); judged {
+				if reason != "" {
+					return reason
+				}
+				i++ // the apply_patch statement was judged with its envelope
+				continue
+			}
+		}
+		// apply_patch @'...'@ reads a literal envelope ($ and ` included).
+		if len(statement) == 2 && literal[span.start+1] && isApplyPatchToolName(
+			strings.ToLower(strings.TrimSuffix(path.Base(strings.ReplaceAll(statement[0], `\`, "/")), ".exe"))) {
+			if reason, judged := actionWindowsPatchDecision(statement, true, cwd, home); judged {
+				if reason != "" {
+					return reason
+				}
+				continue
+			}
+		}
 		if reason := actionWindowsStatement(statement, cwd, home, depth); reason != "" {
 			return reason
 		}
@@ -191,11 +296,27 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 	return ""
 }
 
+// actionWindowsResolvedSpan is one statement after assignment resolution and
+// where it sits in the command words: words[start:end], end its separator.
+type actionWindowsResolvedSpan struct {
+	words      []string
+	start, end int
+}
+
 // Keep bounded assignment resolution common to audit and enforcement. Only
 // literal assignments and Join-Path children are substituted into commands.
 func actionWindowsResolvedStatements(words []string, cwd, home string) [][]string {
+	spans := actionWindowsResolvedSpans(words, cwd, home)
+	statements := make([][]string, 0, len(spans))
+	for _, span := range spans {
+		statements = append(statements, span.words)
+	}
+	return statements
+}
+
+func actionWindowsResolvedSpans(words []string, cwd, home string) []actionWindowsResolvedSpan {
 	values := make(map[string]string)
-	var statements [][]string
+	var spans []actionWindowsResolvedSpan
 	for start := 0; start < len(words); {
 		end := start
 		for end < len(words) && words[end] != ";" && words[end] != "|" && words[end] != "||" && words[end] != "&" && words[end] != "&&" {
@@ -232,11 +353,59 @@ func actionWindowsResolvedStatements(words []string, cwd, home string) [][]strin
 					statement[i] = value
 				}
 			}
-			statements = append(statements, statement)
+			spans = append(spans, actionWindowsResolvedSpan{words: statement, start: start, end: end})
 		}
 		start = end + 1
 	}
-	return statements
+	return spans
+}
+
+// actionWindowsPipedPatch reports a one-word statement piped into a bare
+// apply_patch statement, and the index after that statement.
+func actionWindowsPipedPatch(words, statement []string, end int) (int, bool) {
+	if len(statement) != 1 || end+1 >= len(words) || words[end] != "|" {
+		return 0, false
+	}
+	next := end + 2
+	if next < len(words) && words[next] != ";" && words[next] != "|" && words[next] != "||" &&
+		words[next] != "&" && words[next] != "&&" {
+		return 0, false
+	}
+	program := strings.ToLower(strings.TrimSuffix(path.Base(strings.ReplaceAll(words[end+1], `\`, "/")), ".exe"))
+	if !isApplyPatchToolName(program) {
+		return 0, false
+	}
+	return next + 1, true
+}
+
+// actionWindowsPatchDecision judges an apply_patch that reads one envelope as
+// its only argument, the way Copilot CLI on Windows sends a patch through its
+// PowerShell tool (apply_patch @'...'@). Each directive path gets the same
+// protected-file check as a redirect operand. The envelope word was read as a
+// path before, so every patch naming an absolute or nested project file was
+// denied as a dynamic argument. Any other form (more than one argument or
+// envelope, a body PowerShell could expand: $ or a backtick outside a
+// literal @'...'@ here-string, as in an @"..."@ one) is not judged here and
+// keeps the generic word check.
+func actionWindowsPatchDecision(words []string, literal bool, cwd, home string) (string, bool) {
+	if len(words) != 2 {
+		return "", false
+	}
+	envelope := strings.TrimSuffix(strings.TrimPrefix(words[1], "@"), "@")
+	if !literal && strings.ContainsAny(envelope, "$`") || !strings.HasPrefix(strings.TrimSpace(envelope), patchBeginMarker) {
+		return "", false
+	}
+	paths, envelopes, ok := patchEnvelopePaths(envelope)
+	if !ok || envelopes != 1 || len(paths) == 0 {
+		return "", false
+	}
+	for _, target := range paths {
+		protected, resolved := actionWindowsProtected(target, cwd, home, false)
+		if protected || !resolved {
+			return "dynamic-argument", true
+		}
+	}
+	return "", true
 }
 
 func actionWindowsStatement(words []string, cwd, home string, depth int) string {
@@ -244,6 +413,11 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 		return "dynamic-command"
 	}
 	program := strings.ToLower(strings.TrimSuffix(path.Base(strings.ReplaceAll(words[0], `\`, "/")), ".exe"))
+	if isApplyPatchToolName(program) {
+		if reason, judged := actionWindowsPatchDecision(words, false, cwd, home); judged {
+			return reason
+		}
+	}
 	for i := 1; i < len(words); i++ {
 		redirect := actionWindowsRedirectOperator(words[i])
 		if redirect == "" {

@@ -1208,7 +1208,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 	}
 	// The argument to PowerShell -Command is parsed again by the child shell.
 	// Quotes that are literal in the outer command do not stop expansion there.
-	rawWords, rawOK := actionWindowsWords(command)
+	rawWords, _, rawOK := actionWindowsWords(command)
 	if rawOK {
 		for i := 0; i+2 < len(rawWords); i++ {
 			program := strings.TrimSuffix(strings.ToLower(programBase(rawWords[i])), ".exe")
@@ -1255,7 +1255,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 			normalized.WriteByte(command[i])
 		}
 	}
-	words, ok := actionWindowsWords(normalized.String())
+	words, _, ok := actionWindowsWords(normalized.String())
 	if !ok || len(words) == 0 || depth == 0 && actionKnownReadOnlyWindows(words) {
 		return false
 	}

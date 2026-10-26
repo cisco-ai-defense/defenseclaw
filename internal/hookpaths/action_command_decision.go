@@ -136,7 +136,7 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 		return false
 	}
 	if actionWindowsHome(home) {
-		words, ok := actionWindowsWords(command)
+		words, _, ok := actionWindowsWords(command)
 		if !ok {
 			return false
 		}

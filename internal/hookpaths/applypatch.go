@@ -40,6 +40,74 @@ var patchTargetDirectives = []string{
 // caller must then treat the protected file as a possible target. There is
 // no bound on the number of targets.
 func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, home string) (targets []string, ok bool) {
+	return applyPatchTargets(tool, args, command, cwd, home, true)
+}
+
+// ApplyPatchLexicalTargets lists the same targets as ApplyPatchWriteTargets
+// for an apply_patch tool call, placed in cwd and home but not resolved on
+// this host's filesystem. A managed gateway that cannot traverse a user's
+// private home binds these names to the user-side hook's resolved evidence.
+// Absolute, home-form and relative directives are all listed.
+func ApplyPatchLexicalTargets(tool string, args json.RawMessage, cwd, home string) ([]string, bool) {
+	if !isApplyPatchToolName(tool) {
+		return nil, false
+	}
+	return applyPatchTargets(tool, args, "", cwd, home, false)
+}
+
+// ApplyPatchNamesProtectedTarget is the protected-target check of an
+// apply_patch call whose payload could not be proven (GAP-1461). It reads
+// every directive line without the envelope parse, places each path lexically
+// in cwd and home, and reports one that is a protected authorized-keys file of
+// home, by name or through the target the user-side hook resolved for it
+// (resolved, keyed like the hook evidence). It only adds a finding to an
+// unparsed call and never proves a call ordinary.
+func ApplyPatchNamesProtectedTarget(tool string, args json.RawMessage, cwd, home string, resolved map[string]string) bool {
+	if !isApplyPatchToolName(tool) || len(args) == 0 {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(args, &fields) != nil {
+		fields = map[string]json.RawMessage{"patch": args}
+	}
+	protectedPaths := ProtectedAuthorizedKeysPaths(home)
+	protected := func(path string) bool {
+		for _, candidate := range protectedPaths {
+			if path != "" && samePathName(filepath.Clean(path), candidate) {
+				return true
+			}
+		}
+		return false
+	}
+	names := func(path string) bool {
+		paths, _ := patchTargetPaths(path, cwd, home, false)
+		for _, target := range paths {
+			if protected(target) || protected(resolved[OperandPath(target, cwd)]) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, key := range []string{"command", "cmd", "patch", "patchText", "patch_text", "input"} {
+		for _, line := range strings.Split(patchTextField(fields[key]), "\n") {
+			line = strings.TrimSpace(line)
+			for _, directive := range patchTargetDirectives {
+				if strings.HasPrefix(line, directive) && names(strings.TrimSpace(line[len(directive):])) {
+					return true
+				}
+			}
+		}
+	}
+	for _, key := range []string{"path", "file_path", "filePath"} {
+		var path string
+		if json.Unmarshal(fields[key], &path) == nil && names(path) {
+			return true
+		}
+	}
+	return false
+}
+
+func applyPatchTargets(tool string, args json.RawMessage, command, cwd, home string, resolve bool) (targets []string, ok bool) {
 	var fields map[string]json.RawMessage
 	if len(args) != 0 {
 		_ = json.Unmarshal(args, &fields)
@@ -74,7 +142,7 @@ func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, hom
 		}
 		found = found || envelopes > 0
 		for _, path := range paths {
-			resolved, known := patchTargetPaths(path, cwd, home)
+			resolved, known := patchTargetPaths(path, cwd, home, resolve)
 			if !known {
 				return nil, false
 			}
@@ -87,7 +155,7 @@ func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, hom
 			if json.Unmarshal(fields[key], &path) != nil || path == "" {
 				continue
 			}
-			resolved, known := patchTargetPaths(path, cwd, home)
+			resolved, known := patchTargetPaths(path, cwd, home, resolve)
 			if !known {
 				return nil, false
 			}
@@ -526,7 +594,7 @@ func invokesApplyPatch(text string) bool {
 // patchTargetPaths makes a directive path absolute. apply_patch does not
 // expand ~ or variables, but a shell or PowerShell wrapper may, so a home
 // form yields both the home path and the literal path under cwd.
-func patchTargetPaths(path, cwd, home string) ([]string, bool) {
+func patchTargetPaths(path, cwd, home string, resolve bool) ([]string, bool) {
 	if len(path) >= 2 && (path[0] == '"' || path[0] == '\'') && path[len(path)-1] == path[0] {
 		path = path[1 : len(path)-1]
 	}
@@ -555,9 +623,11 @@ func patchTargetPaths(path, cwd, home string) ([]string, bool) {
 		}
 	}
 	paths = append(paths, filepath.Clean(literal))
-	for _, candidate := range paths {
-		if _, known := ResolvePatchWriteTarget(candidate); !known {
-			return nil, false
+	if resolve {
+		for _, candidate := range paths {
+			if _, known := ResolvePatchWriteTarget(candidate); !known {
+				return nil, false
+			}
 		}
 	}
 	return paths, true
