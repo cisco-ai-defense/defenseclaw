@@ -152,7 +152,14 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	// it for this run: the run's own policy decides first, so a pack, agent
 	// or group the organization forbids installs nothing (GAP-0812).
 	st, err := a.preflight(ctx, api, sandboxapi.ReadyRequest{Harness: spec.Name, Pack: o.Pack}, func(ctx context.Context, st *sandboxapi.Status) error {
-		_, err := a.runPolicyRefusal(ctx, api, st, spec, project, o, true)
+		ex, err := a.runPolicyRefusal(ctx, api, st, spec, project, o, true)
+		if err == nil && ex != nil && ex.Managed != nil && ex.Managed.Provisional {
+			// The ready waits for the directory before it installs or
+			// starts anything, as the create does (GAP-0820): say why the
+			// run pauses (GAP-1552).
+			a.note(fmt.Sprintf("your organization's directory did not answer, so DefenseClaw waits up to %s for your sandbox policy before it starts OpenShell…",
+				sandboxrelay.ResolveIdentityWait.Round(time.Second)))
+		}
 		return err
 	})
 	if err != nil {

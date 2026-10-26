@@ -126,6 +126,36 @@ func TestRunReadiesTheRequestedManagedHarness(t *testing.T) {
 	}
 }
 
+// GAP-1551: a run's ready names its --pack, which the daemon judges the
+// agent under.
+func TestRunReadiesWithTheRunsPack(t *testing.T) {
+	ta := newTestApp(t, "")
+	gw := ta.daemon.status.Gateway
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.onReady = func(st *sandboxapi.Status) { st.Available, st.Gateway = true, gw }
+	_ = ta.Run(bg, RunOptions{Harness: "codex", Pack: "codex-pack"})
+	ready := ta.daemon.callsTo("POST", sandboxapi.PathReady)
+	if len(ready) != 1 || string(ready[0].Body) != `{"harness":"codex","pack":"codex-pack"}` {
+		t.Fatalf("ready request = %+v", ready)
+	}
+}
+
+// GAP-1552: when the run's policy view is provisional (the directory did not
+// answer, off VPN), the ready waits for it before it starts anything; the
+// run says so instead of pausing without a word.
+func TestAProvisionalRunSaysItWaitsForTheDirectory(t *testing.T) {
+	ta := newTestApp(t, "")
+	gw := ta.daemon.status.Gateway
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.explain.Managed = managedExplainFixture()
+	ta.daemon.explain.Managed.Provisional = true
+	ta.daemon.onReady = func(st *sandboxapi.Status) { st.Available, st.Gateway = true, gw }
+	_ = ta.Run(bg, RunOptions{Harness: "codex"})
+	has(t, ta.output(), "your organization's directory did not answer, so DefenseClaw waits up to 10s for your sandbox policy")
+}
+
 // While another account's sandboxes hold the one gateway port, a run is
 // refused with the one-account-at-a-time text and the contact, readies
 // nothing, and status and doctor say the same, not certificates and CAs
