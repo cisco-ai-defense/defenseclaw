@@ -755,19 +755,34 @@ var windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
 // machine registration. An elevated lifecycle can inherit ProgramFiles from
 // a caller, so the path used for a subprocess must not use that environment.
 func windowsEnterpriseInstalledAdminCLI() (string, error) {
+	return windowsEnterpriseInstalledAdminImage("defenseclaw.exe", "CLI")
+}
+
+// windowsEnterpriseInstalledAdminGateway resolves the installed gateway
+// image the same way. enterprise hooks readiness proves the guardian's
+// protected authorization only when it runs from
+// <InstallRoot>\bin\defenseclaw-gateway.exe, as Setup runs it: run from
+// defenseclaw.exe it reported authorization_error, so every hook proof of a
+// hot config change, of its undo and of a held closure's release failed
+// closed whatever was enrolled (GAP-1719).
+func windowsEnterpriseInstalledAdminGateway() (string, error) {
+	return windowsEnterpriseInstalledAdminImage("defenseclaw-gateway.exe", "gateway")
+}
+
+func windowsEnterpriseInstalledAdminImage(image, label string) (string, error) {
 	programFiles, err := windowsEnterpriseProgramFilesResolver()
 	if err != nil {
-		return "", fmt.Errorf("resolve trusted Program Files for installed CLI: %w", err)
+		return "", fmt.Errorf("resolve trusted Program Files for installed %s: %w", label, err)
 	}
-	installedCLI := filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe")
+	installed := filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", image)
 	// An elevated lifecycle runs this image with the service pins. Check
 	// that only SYSTEM, Administrators and TrustedInstaller can replace it
 	// or any folder above it (Program Files\Cisco included), and that its
 	// folders are not links, before any process is created (GAP-1493).
-	if err := windowsEnterpriseInstalledCLICustody(installedCLI, "installed DefenseClaw CLI"); err != nil {
-		return "", fmt.Errorf("refuse to run the installed CLI: %w", err)
+	if err := windowsEnterpriseInstalledCLICustody(installed, "installed DefenseClaw "+label); err != nil {
+		return "", fmt.Errorf("refuse to run the installed %s: %w", label, err)
 	}
-	return installedCLI, nil
+	return installed, nil
 }
 
 // windowsEnterpriseInstalledCLICustody validates the installed CLI file and

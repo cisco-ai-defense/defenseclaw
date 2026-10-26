@@ -1084,18 +1084,18 @@ func windowsHotConfigTargetLabels(targets []enterprisehooks.ManifestTarget) []st
 }
 
 // windowsEnterpriseHotConfigTargetHooksProven waits, up to wait, until the
-// installed CLI's read-only live registration proof (enterprise hooks readiness)
+// installed gateway's read-only live registration proof (enterprise hooks readiness)
 // reports each of targets verified, or pending its own Windows session (its
 // hook is registered at that logon), under the service pins. It names the
 // targets still without a verified hook at the deadline. A seam for tests.
 var windowsEnterpriseHotConfigTargetHooksProven = func(ctx context.Context, layout managed.StandaloneLayout, targets []enterprisehooks.ManifestTarget, wait time.Duration) error {
-	installedCLI, err := windowsEnterpriseInstalledAdminCLI()
+	installedGateway, err := windowsEnterpriseInstalledAdminGateway()
 	if err != nil {
-		return fmt.Errorf("resolve the installed CLI for the hook proof: %w", err)
+		return fmt.Errorf("resolve the installed gateway for the hook proof: %w", err)
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		unproven, err := windowsEnterpriseHotConfigUnprovenTargetHooks(ctx, installedCLI, layout, targets)
+		unproven, err := windowsEnterpriseHotConfigUnprovenTargetHooks(ctx, installedGateway, layout, targets)
 		if err == nil && len(unproven) == 0 {
 			return nil
 		}
@@ -1116,10 +1116,10 @@ var windowsEnterpriseHotConfigTargetHooksProven = func(ctx context.Context, layo
 // --json for the installed Windows manifest. It returns targets whose row is
 // neither verified nor pending. Unrelated target failures may make the command
 // exit nonzero; protected authorization and the report scope must still hold.
-func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installedCLI string, layout managed.StandaloneLayout, targets []enterprisehooks.ManifestTarget) ([]enterprisehooks.ManifestTarget, error) {
+func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installedGateway string, layout managed.StandaloneLayout, targets []enterprisehooks.ManifestTarget) ([]enterprisehooks.ManifestTarget, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	out, runErr := windowsEnterpriseHotConfigReadinessCommand(ctx, installedCLI, layout).Output()
+	out, runErr := windowsEnterpriseHotConfigReadinessCommand(ctx, installedGateway, layout).Output()
 	var report struct {
 		OK                 *bool                        `json:"ok"`
 		Scope              string                       `json:"scope"`
@@ -1158,11 +1158,11 @@ func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installe
 // lifecycle's own readiness probe sets them. Without them readiness refused
 // before its report (the authorization directory resolved to a path that
 // does not exist), so no hook proof could pass (GAP-1418).
-func windowsEnterpriseHotConfigReadinessCommand(ctx context.Context, installedCLI string, layout managed.StandaloneLayout) *exec.Cmd {
+func windowsEnterpriseHotConfigReadinessCommand(ctx context.Context, installedGateway string, layout managed.StandaloneLayout) *exec.Cmd {
 	pins := windowsEnterpriseServicePins(layout)
 	pins[managed.HookGuardianAuthorizationDirEnv] = layout.GuardianAuthDir
 	pins[gwconnector.WindowsGatewayServiceNameEnv] = managed.StandaloneWindowsGatewaySvc
-	command := exec.CommandContext(ctx, installedCLI, "enterprise", "hooks", "readiness", "--manifest", layout.ManifestPath, "--json")
+	command := exec.CommandContext(ctx, installedGateway, "enterprise", "hooks", "readiness", "--manifest", layout.ManifestPath, "--json")
 	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), pins)
 	return command
 }

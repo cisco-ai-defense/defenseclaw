@@ -1649,6 +1649,28 @@ func TestWindowsHotBundleUndoHoldsHooksClosedUntilRestoredModeRenders(t *testing
 // GAP-1418: the hook proof's readiness run carries the guardian's
 // authorization directory and the gateway service name besides the service
 // pins; without them readiness refused before its report on every host.
+// GAP-1719: the hook proof runs enterprise hooks readiness from the
+// installed gateway image, the only one whose protected authorization check
+// passes; from defenseclaw.exe every proof failed closed.
+func TestWindowsHotConfigHookProofRunsTheInstalledGateway(t *testing.T) {
+	root := t.TempDir()
+	resolver, custody := windowsEnterpriseProgramFilesResolver, windowsEnterpriseInstalledCLICustody
+	t.Cleanup(func() { windowsEnterpriseProgramFilesResolver, windowsEnterpriseInstalledCLICustody = resolver, custody })
+	windowsEnterpriseProgramFilesResolver = func() (string, error) { return root, nil }
+	var checked []string
+	windowsEnterpriseInstalledCLICustody = func(path, _ string) error { checked = append(checked, path); return nil }
+	layout := managed.StandaloneLayout{ManifestPath: filepath.Join(root, "targets.yaml"), GuardianAuthDir: root}
+	err := windowsEnterpriseHotConfigTargetHooksProven(context.Background(), layout,
+		[]enterprisehooks.ManifestTarget{{SID: "S-1-5-21-1-2-3-1001", Connector: "codex"}}, 0)
+	gateway := filepath.Join(root, "Cisco", "DefenseClaw", "bin", "defenseclaw-gateway.exe")
+	if err == nil || !strings.Contains(err.Error(), "defenseclaw-gateway.exe") {
+		t.Fatalf("hook proof error = %v, want it to run %s", err, gateway)
+	}
+	if len(checked) != 1 || !strings.EqualFold(checked[0], gateway) {
+		t.Fatalf("custody checked %q, want only %s", checked, gateway)
+	}
+}
+
 func TestWindowsHotConfigReadinessCommandCarriesGuardianPins(t *testing.T) {
 	layout := managed.StandaloneLayout{
 		ConfigPath:      `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
