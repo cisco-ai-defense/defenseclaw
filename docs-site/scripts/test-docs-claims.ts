@@ -1472,6 +1472,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1678", page: "troubleshooting/doctor.mdx", section: "Observability rows", has: ["| Codex OTel environment |", "| Connector OTLP: CONNECTOR |", "| Native OTLP credentials |"] },
   { gap: "GAP-1689", page: "enterprise/configure/ai-defense-key.mdx", has: ["`! secret set: done with N warnings`", "The warnings are the host's normal status, not a failed store."] },
   { gap: "GAP-1568", page: "enterprise/configure/reference.mdx", has: ["`! secret remove: done with N warnings`", "`! secret remove: nothing to do (up_to_date), N warnings`"] },
+  { gap: "GAP-1573", page: "get-started/install.mdx", section: "Check it worked", has: ["`✓ All components in sync.`", "piped to another command, as above, they use text"] },
   // r105-rows-end
 ];
 
