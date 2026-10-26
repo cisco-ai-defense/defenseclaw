@@ -1874,6 +1874,14 @@ jobs:
           go-version-file: go.mod
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: make dev-pycli
+      - name: Build the gateway that verifies the Grafana peer
+        # The CLI sends the Grafana admin credential only after the account's
+        # gateway has verified the connected peer (GAP-1171); an installed
+        # host has that gateway, this checkout only the dev CLI.
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          go build -o "$RUNNER_TEMP/bin/defenseclaw-gateway" ./cmd/defenseclaw
+          echo "DEFENSECLAW_GATEWAY_BIN=$RUNNER_TEMP/bin/defenseclaw-gateway" >> "$GITHUB_ENV"
       - name: Start the local observability stack
         run: bundles/local_observability_stack/bin/openclaw-observability-bridge up --timeout 180
       - name: Emit and verify native v8 telemetry

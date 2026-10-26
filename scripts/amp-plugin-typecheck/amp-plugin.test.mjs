@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import test from "node:test"
@@ -24,9 +24,11 @@ async function renderAmpPlugin(values = {}) {
 		.replaceAll("{{.ServiceUID}}", values.serviceUID ?? "0")
 		.replaceAll("{{.ForeignHookGuardJS}}", values.foreignGuard ?? "")
 		.replaceAll("{{.InstallMarkerJS}}", values.installMarker ?? "")
-		.replaceAll("{{.ListenerProofJS}}", values.listenerProof ?? "")
 		.replaceAll("{{.LifecycleMarkerJS}}", values.lifecycleMarker ?? "")
-		.replaceAll("{{.OutageFailMode}}", values.outageFailMode ?? "closed")
+		.replaceAll("{{.ListenerProofJS}}", values.listenerProof ?? "")
+		// config.HookOutageFailMode: "open" for a per-user install in the
+		// default policy tier.
+		.replaceAll("{{.OutageFailMode}}", values.outageFailMode ?? "open")
 	assert.ok(!rendered.includes("{{."), "rendered plugin retains a template placeholder")
 	const path = join(mkdtempSync(join(tmpdir(), "dc-amp-plugin-")), "amp-plugin.ts")
 	writeFileSync(path, rendered)
@@ -35,39 +37,68 @@ async function renderAmpPlugin(values = {}) {
 
 const defenseclawAmpPlugin = await renderAmpPlugin()
 
-// fakePerUserGateway stands in for this account's per-user install under a
-// throwaway HOME. A per-user plugin posts each hook event through the native
-// hook-post helper in ~/.local/bin (not fetch), so the fake helper records
-// each request it reads and answers with respond(payload), given as source.
-// The plugin refuses a helper path another account can write, so the fake
-// keeps the installer's modes. The helper is a POSIX script, so the tests
-// that send through it skip Windows, like the foreign-guard tests.
-function fakePerUserGateway(respondSource = `() => ({ action: "allow" })`) {
+const allowEverything = `() => ({ action: "allow" })`
+
+// A per-user plugin posts through the native gateway helper in ~/.local/bin,
+// never through fetch (DC_PER_USER_NATIVE_POST). withNativeGateway points HOME
+// at a new account home whose defenseclaw-gateway is a Node stand-in: it
+// records each `hook-post` request it reads and answers it with respond, the
+// source of a function from the hook payload to the gateway's verdict.
+async function withNativeGateway(respond, run) {
 	const home = mkdtempSync(join(tmpdir(), "dc-amp-home-"))
 	const bin = join(home, ".local", "bin")
-	mkdirSync(bin, { recursive: true, mode: 0o755 })
-	const log = join(home, "hook-post-requests.jsonl")
-	writeFileSync(join(bin, "defenseclaw-gateway"), "#!/bin/sh\nexit 1\n", { mode: 0o755 })
-	writeFileSync(join(bin, "defenseclaw-hook-post"), [
+	mkdirSync(bin, { recursive: true, mode: 0o700 })
+	const log = join(home, "requests.jsonl")
+	const responder = join(home, "respond.cjs")
+	writeFileSync(responder, `module.exports = ${respond}\n`)
+	const helper = join(bin, process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")
+	writeFileSync(helper, [
 		`#!${process.execPath}`,
-		`const fs = require("node:fs")`,
-		`const request = JSON.parse(fs.readFileSync(0, "utf8"))`,
-		`fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(request) + "\\n")`,
-		`const respond = ${respondSource}`,
-		`process.stdout.write(JSON.stringify({ status: 200, body: JSON.stringify(respond(JSON.parse(request.body))) }))`,
-	].join("\n") + "\n", { mode: 0o755 })
+		`const { appendFileSync, readFileSync } = require("node:fs")`,
+		`const request = JSON.parse(readFileSync(0, "utf8"))`,
+		`appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args: process.argv.slice(2), ...request }) + "\\n")`,
+		`const verdict = require(${JSON.stringify(responder)})(JSON.parse(request.body))`,
+		`process.stdout.write(JSON.stringify({ status: 200, body: JSON.stringify(verdict) }))`,
+	].join("\n") + "\n")
+	chmodSync(helper, 0o755)
+	const requests = () => {
+		let data = ""
+		try {
+			data = readFileSync(log, "utf8")
+		} catch {
+			return []
+		}
+		return data.split("\n").filter(Boolean).map(line => JSON.parse(line))
+	}
 	const originalHome = process.env.HOME
 	process.env.HOME = home
-	return {
-		requests: () => existsSync(log)
-			? readFileSync(log, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line))
-			: [],
-		restore: () => {
-			if (originalHome === undefined) delete process.env.HOME
-			else process.env.HOME = originalHome
-		},
+	try {
+		return await run(requests)
+	} finally {
+		if (originalHome === undefined) delete process.env.HOME
+		else process.env.HOME = originalHome
 	}
 }
+
+test("posts through the native gateway helper beside the account's gateway", { skip: process.platform === "win32" }, async () => {
+	const { handlers, amp, ctx } = fakeAmp("T-native")
+	const originalBun = globalThis.Bun
+	globalThis.Bun = { file: () => ({ slice: () => ({ text: async () => `${"a".repeat(64)}\n` }) }) }
+	try {
+		await withNativeGateway(allowEverything, async requests => {
+			defenseclawAmpPlugin(amp)
+			const result = await handlers.get("tool.call")({ thread: { id: "T-native" }, toolUseID: "TU-n", tool: "Bash", input: {} }, ctx)
+			assert.equal(result.action, "allow")
+			const [request] = requests()
+			assert.deepEqual(request.args, ["hook-post", "--api-addr", "127.0.0.1:18970"])
+			assert.equal(request.path, "/api/v1/amp/hook")
+			assert.equal(JSON.parse(request.body).tool_call_id, "TU-n")
+		})
+	} finally {
+		if (originalBun === undefined) delete globalThis.Bun
+		else globalThis.Bun = originalBun
+	}
+})
 
 test("refreshes agent identity when a thread changes mode between turns", { skip: process.platform === "win32" }, async () => {
 	const handlers = new Map()
@@ -106,90 +137,91 @@ test("refreshes agent identity when a thread changes mode between turns", { skip
 		file: () => ({ slice: () => ({ text: async () => `${"a".repeat(64)}\n` }) }),
 	}
 	const notice = "DefenseClaw observed a HIGH amp hook finding: marker"
-	const gateway = fakePerUserGateway(`payload => payload.hook_event_name === "agent.start" && payload.turn_id === "M-turn-1"
+	const respond = `payload => payload.hook_event_name === "agent.start" && payload.turn_id === "M-turn-1"
 		? { action: "allow", additional_context: ${JSON.stringify(notice)} }
-		: { action: "allow" }`)
+		: { action: "allow" }`
 
 	try {
-		defenseclawAmpPlugin(amp)
+		await withNativeGateway(respond, async requests => {
+			defenseclawAmpPlugin(amp)
 
-		const firstResult = await handlers.get("agent.start")(
-			{ thread: { id: "T-identity" }, id: "M-turn-1", message: "first" },
-			ctx,
-		)
-		// The hidden notice follows the prompt in Amp; it must start on its own
-		// lines, apart from the prompt, so it never reads as part of a command.
-		assert.equal(firstResult.message.display, false)
-		assert.ok(firstResult.message.content.startsWith("\n\n"), firstResult.message.content)
-		assert.ok(firstResult.message.content.endsWith(`\n${notice}`), firstResult.message.content)
-		await handlers.get("tool.call")(
-			{
-				thread: { id: "T-identity" },
-				toolUseID: "TU-1",
-				tool: "Bash",
-				input: { command: "printf first" },
-			},
-			ctx,
-		)
-		await handlers.get("agent.end")(
-			{
-				thread: { id: "T-identity" },
-				id: "M-turn-1",
-				message: "first",
-				status: "done",
-				messages: [],
-			},
-			ctx,
-		)
+			const firstResult = await handlers.get("agent.start")(
+				{ thread: { id: "T-identity" }, id: "M-turn-1", message: "first" },
+				ctx,
+			)
+			// The hidden notice follows the prompt in Amp; it must start on its own
+			// lines, apart from the prompt, so it never reads as part of a command.
+			assert.equal(firstResult.message.display, false)
+			assert.ok(firstResult.message.content.startsWith("\n\n"), firstResult.message.content)
+			assert.ok(firstResult.message.content.endsWith(`\n${notice}`), firstResult.message.content)
+			await handlers.get("tool.call")(
+				{
+					thread: { id: "T-identity" },
+					toolUseID: "TU-1",
+					tool: "Bash",
+					input: { command: "printf first" },
+				},
+				ctx,
+			)
+			await handlers.get("agent.end")(
+				{
+					thread: { id: "T-identity" },
+					id: "M-turn-1",
+					message: "first",
+					status: "done",
+					messages: [],
+				},
+				ctx,
+			)
 
-		definition = {
-			kind: "agent-definition",
-			name: "security-reviewer",
-			model: "anthropic/claude-sonnet",
-			display: { label: "Security Reviewer" },
-		}
-		await handlers.get("agent.start")(
-			{ thread: { id: "T-identity" }, id: "M-turn-2", message: "second" },
-			ctx,
-		)
-		await handlers.get("tool.call")(
-			{
-				thread: { id: "T-identity" },
-				toolUseID: "TU-2",
-				tool: "Bash",
-				input: { command: "printf second" },
-			},
-			ctx,
-		)
+			definition = {
+				kind: "agent-definition",
+				name: "security-reviewer",
+				model: "anthropic/claude-sonnet",
+				display: { label: "Security Reviewer" },
+			}
+			await handlers.get("agent.start")(
+				{ thread: { id: "T-identity" }, id: "M-turn-2", message: "second" },
+				ctx,
+			)
+			await handlers.get("tool.call")(
+				{
+					thread: { id: "T-identity" },
+					toolUseID: "TU-2",
+					tool: "Bash",
+					input: { command: "printf second" },
+				},
+				ctx,
+			)
 
-		const posts = gateway.requests().map(request => JSON.parse(request.body))
-		const firstStart = posts.find(
-			payload => payload.hook_event_name === "agent.start" && payload.turn_id === "M-turn-1",
-		)
-		const firstTool = posts.find(payload => payload.tool_call_id === "TU-1")
-		const secondStart = posts.find(
-			payload => payload.hook_event_name === "agent.start" && payload.turn_id === "M-turn-2",
-		)
-		const secondTool = posts.find(payload => payload.tool_call_id === "TU-2")
+			const posts = requests().map(request => JSON.parse(request.body))
+			const firstStart = posts.find(
+				payload => payload.hook_event_name === "agent.start" && payload.turn_id === "M-turn-1",
+			)
+			const firstTool = posts.find(payload => payload.tool_call_id === "TU-1")
+			const secondStart = posts.find(
+				payload => payload.hook_event_name === "agent.start" && payload.turn_id === "M-turn-2",
+			)
+			const secondTool = posts.find(payload => payload.tool_call_id === "TU-2")
 
-		assert.equal(firstStart.agent_mode, "medium")
-		assert.equal(firstStart.agent_type, "amp", "traces are named after agent_type, which must stay amp")
-		assert.equal(secondStart.agent_type, "amp")
-		assert.equal(firstTool.agent_mode, "medium")
-		assert.equal(secondStart.agent_name, "security-reviewer")
-		assert.equal(secondStart.agent_display_name, "Security Reviewer")
-		assert.equal(secondStart.model, "anthropic/claude-sonnet")
-		assert.equal(secondTool.agent_name, "security-reviewer")
-		assert.equal(secondTool.model, "anthropic/claude-sonnet")
-		assert.equal(agentLookups, 2, "agent facts should refresh once per turn and remain cached within it")
+			assert.equal(firstStart.agent_mode, "medium")
+			assert.equal(firstStart.agent_type, "amp", "traces are named after agent_type, which must stay amp")
+			assert.equal(secondStart.agent_type, "amp")
+			assert.equal(firstTool.agent_mode, "medium")
+			assert.equal(secondStart.agent_name, "security-reviewer")
+			assert.equal(secondStart.agent_display_name, "Security Reviewer")
+			assert.equal(secondStart.model, "anthropic/claude-sonnet")
+			assert.equal(secondTool.agent_name, "security-reviewer")
+			assert.equal(secondTool.model, "anthropic/claude-sonnet")
+			assert.equal(agentLookups, 2, "agent facts should refresh once per turn and remain cached within it")
+		})
 	} finally {
-		gateway.restore()
 		if (originalBun === undefined) delete globalThis.Bun
 		else globalThis.Bun = originalBun
 	}
 })
 
-test("fails both actionable boundaries closed when the scoped credential cannot be loaded", async () => {
+test("fails both actionable boundaries closed when the scoped credential cannot be loaded", { skip: process.platform === "win32" }, async () => {
 	const handlers = new Map()
 	const amp = {
 		system: { workspaceRoot: undefined, executor: { kind: "local" }, user: {} },
@@ -211,41 +243,41 @@ test("fails both actionable boundaries closed when the scoped credential cannot 
 	const originalBun = globalThis.Bun
 	let credential = "malformed-token"
 	globalThis.Bun = { file: () => ({ slice: () => ({ text: async () => credential }) }) }
-	const gateway = fakePerUserGateway()
 
 	try {
-		defenseclawAmpPlugin(amp)
-		const callResult = await handlers.get("tool.call")(
-			{ thread: { id: "T-auth" }, toolUseID: "TU-auth", tool: "Bash", input: {} },
-			ctx,
-		)
-		assert.equal(callResult.action, "reject-and-continue")
-		assert.match(callResult.message, /credential is unavailable/)
+		await withNativeGateway(allowEverything, async requests => {
+			defenseclawAmpPlugin(amp)
+			const callResult = await handlers.get("tool.call")(
+				{ thread: { id: "T-auth" }, toolUseID: "TU-auth", tool: "Bash", input: {} },
+				ctx,
+			)
+			assert.equal(callResult.action, "reject-and-continue")
+			assert.match(callResult.message, /credential is unavailable/)
 
-		const resultResult = await handlers.get("tool.result")(
-			{
-				thread: { id: "T-auth" },
-				toolUseID: "TU-auth",
-				tool: "Bash",
-				input: {},
-				output: "result",
-				status: "success",
-			},
-			ctx,
-		)
-		assert.equal(resultResult.status, "error")
-		assert.match(resultResult.error, /credential is unavailable/)
+			const resultResult = await handlers.get("tool.result")(
+				{
+					thread: { id: "T-auth" },
+					toolUseID: "TU-auth",
+					tool: "Bash",
+					input: {},
+					output: "result",
+					status: "success",
+				},
+				ctx,
+			)
+			assert.equal(resultResult.status, "error")
+			assert.match(resultResult.error, /credential is unavailable/)
 
-		credential = "x".repeat(4097)
-		const oversizedResult = await handlers.get("tool.call")(
-			{ thread: { id: "T-auth" }, toolUseID: "TU-oversized", tool: "Bash", input: {} },
-			ctx,
-		)
-		assert.equal(oversizedResult.action, "reject-and-continue")
-		assert.match(oversizedResult.message, /credential is unavailable/)
-		assert.equal(gateway.requests().length, 0, "credential failures must not send an unauthenticated request")
+			credential = "x".repeat(4097)
+			const oversizedResult = await handlers.get("tool.call")(
+				{ thread: { id: "T-auth" }, toolUseID: "TU-oversized", tool: "Bash", input: {} },
+				ctx,
+			)
+			assert.equal(oversizedResult.action, "reject-and-continue")
+			assert.match(oversizedResult.message, /credential is unavailable/)
+			assert.equal(requests().length, 0, "credential failures must not send an unauthenticated request")
+		})
 	} finally {
-		gateway.restore()
 		if (originalBun === undefined) delete globalThis.Bun
 		else globalThis.Bun = originalBun
 	}
@@ -275,25 +307,25 @@ test("reloads the scoped credential for rotation and rollback in one plugin inst
 	let token = aToken
 	const originalBun = globalThis.Bun
 	globalThis.Bun = { file: () => ({ slice: () => ({ text: async () => `${token}\n` }) }) }
-	const gateway = fakePerUserGateway()
 
 	try {
-		defenseclawAmpPlugin(amp)
-		for (const [index, next] of [aToken, bToken, aToken].entries()) {
-			token = next
-			const result = await handlers.get("tool.call")(
-				{ thread: { id: "T-rotate" }, toolUseID: `TU-${index}`, tool: "Bash", input: {} },
-				ctx,
-			)
-			assert.equal(result.action, "allow")
-		}
-		assert.deepEqual(gateway.requests().map(request => request.headers.Authorization), [
-			`Bearer ${aToken}`,
-			`Bearer ${bToken}`,
-			`Bearer ${aToken}`,
-		])
+		await withNativeGateway(allowEverything, async requests => {
+			defenseclawAmpPlugin(amp)
+			for (const [index, next] of [aToken, bToken, aToken].entries()) {
+				token = next
+				const result = await handlers.get("tool.call")(
+					{ thread: { id: "T-rotate" }, toolUseID: `TU-${index}`, tool: "Bash", input: {} },
+					ctx,
+				)
+				assert.equal(result.action, "allow")
+			}
+			assert.deepEqual(requests().map(request => request.headers.Authorization), [
+				`Bearer ${aToken}`,
+				`Bearer ${bToken}`,
+				`Bearer ${aToken}`,
+			])
+		})
 	} finally {
-		gateway.restore()
 		if (originalBun === undefined) delete globalThis.Bun
 		else globalThis.Bun = originalBun
 	}
@@ -347,21 +379,21 @@ test("a foreign-hook guard denial at load blocks every tool call of the process"
 	const { handlers, amp, ctx } = fakeAmp("T-guard")
 	const originalBun = globalThis.Bun
 	globalThis.Bun = { file: () => ({ slice: () => ({ text: async () => `${"a".repeat(64)}\n` }) }) }
-	const gateway = fakePerUserGateway()
 	try {
-		plugin(amp)
-		for (const id of ["TU-1", "TU-2"]) {
-			const result = await handlers.get("tool.call")({ thread: { id: "T-guard" }, toolUseID: id, tool: "Bash", input: {} }, ctx)
-			assert.equal(result.action, "reject-and-continue")
-			assert.match(result.message, /\.amp\/plugins\/x\.ts/)
-		}
-		assert.equal(gateway.requests().length, 0, "a guard denial must not reach the gateway")
+		await withNativeGateway(allowEverything, async requests => {
+			plugin(amp)
+			for (const id of ["TU-1", "TU-2"]) {
+				const result = await handlers.get("tool.call")({ thread: { id: "T-guard" }, toolUseID: id, tool: "Bash", input: {} }, ctx)
+				assert.equal(result.action, "reject-and-continue")
+				assert.match(result.message, /\.amp\/plugins\/x\.ts/)
+			}
+			assert.equal(requests().length, 0, "a guard denial must not reach the gateway")
+		})
 		assert.match(readFileSync(join(dir, "args"), "utf8"), /hook --connector amp --foreign-hook-check/)
 		const loadRequest = JSON.parse(readFileSync(join(dir, "request-0"), "utf8"))
 		assert.equal(loadRequest.cwd, "/work/repo")
 		assert.equal(loadRequest.hook_event_name, "session.load")
 	} finally {
-		gateway.restore()
 		if (originalBun === undefined) delete globalThis.Bun
 		else globalThis.Bun = originalBun
 	}
@@ -371,22 +403,22 @@ test("an allowing guard lets the call through and a missing guard fails closed",
 	const { guard } = fakeGuard(['{"deny":false}'])
 	const originalBun = globalThis.Bun
 	globalThis.Bun = { file: () => ({ slice: () => ({ text: async () => `${"a".repeat(64)}\n` }) }) }
-	const gateway = fakePerUserGateway()
 	try {
-		const allowed = fakeAmp("T-allow")
-		;(await renderAmpPlugin({ foreignGuard: guard }))(allowed.amp)
-		const pass = await allowed.handlers.get("tool.call")({ thread: { id: "T-allow" }, toolUseID: "TU-a", tool: "Bash", input: {} }, allowed.ctx)
-		assert.equal(pass.action, "allow")
-		assert.equal(gateway.requests().length, 1)
+		await withNativeGateway(allowEverything, async requests => {
+			const allowed = fakeAmp("T-allow")
+			;(await renderAmpPlugin({ foreignGuard: guard }))(allowed.amp)
+			const pass = await allowed.handlers.get("tool.call")({ thread: { id: "T-allow" }, toolUseID: "TU-a", tool: "Bash", input: {} }, allowed.ctx)
+			assert.equal(pass.action, "allow")
+			assert.equal(requests().length, 1)
 
-		const missing = fakeAmp("T-missing")
-		;(await renderAmpPlugin({ foreignGuard: "/nonexistent/defenseclaw-hook" }))(missing.amp)
-		const blocked = await missing.handlers.get("tool.call")({ thread: { id: "T-missing" }, toolUseID: "TU-m", tool: "Bash", input: {} }, missing.ctx)
-		assert.equal(blocked.action, "reject-and-continue")
-		assert.match(blocked.message, /could not check for unapproved plugins/)
-		assert.equal(gateway.requests().length, 1)
+			const missing = fakeAmp("T-missing")
+			;(await renderAmpPlugin({ foreignGuard: "/nonexistent/defenseclaw-hook" }))(missing.amp)
+			const blocked = await missing.handlers.get("tool.call")({ thread: { id: "T-missing" }, toolUseID: "TU-m", tool: "Bash", input: {} }, missing.ctx)
+			assert.equal(blocked.action, "reject-and-continue")
+			assert.match(blocked.message, /could not check for unapproved plugins/)
+			assert.equal(requests().length, 1)
+		})
 	} finally {
-		gateway.restore()
 		if (originalBun === undefined) delete globalThis.Bun
 		else globalThis.Bun = originalBun
 	}

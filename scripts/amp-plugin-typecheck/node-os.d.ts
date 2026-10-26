@@ -21,8 +21,8 @@ declare module 'node:fs' {
   export function lstatSync(path: string): {
     uid: number
     mode: number
-    isDirectory(): boolean
     isFile(): boolean
+    isDirectory(): boolean
     isSymbolicLink(): boolean
   }
 }
@@ -35,51 +35,12 @@ declare module 'node:fs/promises' {
     isSocket(): boolean
   }>
   export function stat(path: string): Promise<{ mtimeMs: number }>
-  export function mkdir(
-    path: string,
-    options: { recursive?: boolean, mode?: number },
-  ): Promise<string | undefined>
-  export function open(path: string, flags: 'a', mode: number): Promise<{
+  export function mkdir(path: string, options: { recursive: true, mode: number }): Promise<string | undefined>
+  interface FileHandle {
     appendFile(data: string): Promise<void>
     close(): Promise<void>
-  }>
-}
-
-declare module 'node:net' {
-  export interface Socket {}
-}
-
-declare module 'node:http' {
-  import type { Socket } from 'node:net'
-  export class Agent {
-    constructor(options: { keepAlive?: boolean, maxSockets?: number, maxFreeSockets?: number })
-    destroy(): void
   }
-  export interface IncomingMessage {
-    statusCode?: number
-    headers: Record<string, string | string[] | undefined>
-    on(event: 'data', listener: (chunk: Buffer) => void): this
-    on(event: 'end', listener: () => void): this
-    on(event: 'error', listener: (error: Error) => void): this
-  }
-  export interface ClientRequest {
-    on(event: 'error', listener: (error: Error) => void): this
-    on(event: 'socket', listener: (socket: Socket) => void): this
-    destroy(error?: Error): this
-    end(chunk?: string): this
-  }
-  export function request(
-    options: {
-      hostname: string
-      port: string
-      path: string
-      method: string
-      headers: Record<string, string>
-      agent: Agent
-      signal?: AbortSignal
-    },
-    callback: (res: IncomingMessage) => void,
-  ): ClientRequest
+  export function open(path: string, flags: 'a', mode: number): Promise<FileHandle>
 }
 
 declare module 'node:path' {
@@ -88,26 +49,22 @@ declare module 'node:path' {
 }
 
 declare module 'node:child_process' {
+  interface ExecFileSyncOptions {
+    input?: string
+    timeout?: number
+    maxBuffer?: number
+    windowsHide?: boolean
+    stdio?: readonly ('ignore' | 'pipe' | 'inherit')[]
+  }
   export function execFileSync(
     file: string,
     args: readonly string[],
-    options: {
-      input: string
-      timeout?: number
-      maxBuffer?: number
-      windowsHide?: boolean
-      encoding: 'utf8'
-    },
+    options: ExecFileSyncOptions & { encoding: 'utf8' },
   ): string
   export function execFileSync(
     file: string,
     args: readonly string[],
-    options: {
-      timeout?: number
-      maxBuffer?: number
-      windowsHide?: boolean
-      stdio?: readonly ('ignore' | 'pipe' | 'inherit')[]
-    },
+    options: ExecFileSyncOptions,
   ): string | Uint8Array
   export function execFile(
     file: string,
@@ -133,15 +90,55 @@ declare module 'node:crypto' {
   export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean
 }
 
+declare module 'node:net' {
+  // Only compared by identity: the proven request must reuse this socket.
+  export class Socket {
+    readonly destroyed: boolean
+  }
+}
+
+declare module 'node:http' {
+  import type { Socket } from 'node:net'
+  export class Agent {
+    constructor(options: { keepAlive: boolean, maxSockets: number, maxFreeSockets: number })
+    destroy(): void
+  }
+  interface IncomingMessage {
+    statusCode?: number
+    headers: Record<string, string | string[] | undefined>
+    on(event: 'data', listener: (chunk: Buffer) => void): IncomingMessage
+    on(event: 'end', listener: () => void): IncomingMessage
+    on(event: 'error', listener: (error: Error) => void): IncomingMessage
+  }
+  interface ClientRequest {
+    on(event: 'error', listener: (error: Error) => void): ClientRequest
+    on(event: 'socket', listener: (socket: Socket) => void): ClientRequest
+    end(body?: string): ClientRequest
+    destroy(error?: Error): ClientRequest
+  }
+  export function request(
+    options: {
+      hostname: string
+      port: string
+      path: string
+      method: string
+      headers: Record<string, string>
+      agent: Agent
+      signal?: AbortSignal
+    },
+    callback: (res: IncomingMessage) => void,
+  ): ClientRequest
+}
+
 interface Buffer extends Uint8Array {
   toString(encoding?: 'utf8' | 'hex'): string
 }
 declare const Buffer: {
   from(value: string, encoding?: 'utf8' | 'hex'): Buffer
-  concat(list: readonly Uint8Array[]): Buffer
+  concat(chunks: readonly Uint8Array[]): Buffer
 }
 declare const process: {
   env: Record<string, string | undefined>
   platform: string
-  getuid?: () => number
+  getuid?(): number
 }
