@@ -318,8 +318,8 @@ def test_documented_dashboard_counts_match_both_install_paths(tmp_path: Path) ->
 
     docs = REPO_ROOT / "docs-site/content/docs"
     pages = {
-        "run-grafana-locally": (docs / "how-to/observability/run-grafana-locally.mdx").read_text(encoding="utf-8"),
-        "dashboards": (docs / "reference/observability/dashboards.mdx").read_text(encoding="utf-8"),
+        "run-grafana-locally": (docs / "observability/local-observability.mdx").read_text(encoding="utf-8"),
+        "dashboards": (docs / "observability/grafana-dashboards.mdx").read_text(encoding="utf-8"),
         "bundle README": (BUNDLE / "README.md").read_text(encoding="utf-8"),
     }
     for name, page in pages.items():
@@ -371,10 +371,10 @@ def test_wheel_resolves_complete_stack_outside_source_checkout(tmp_path: Path) -
             if name.startswith("grafana/dashboards/") and name.endswith(".json")
         }
         docs = REPO_ROOT / "docs-site/content/docs"
-        reference = (docs / "reference/observability/dashboards.mdx").read_text(encoding="utf-8")
+        reference = (docs / "observability/grafana-dashboards.mdx").read_text(encoding="utf-8")
         documented_uids = set(re.findall(r"^\| \*\*.+?\*\* \(`([^`]+)`\)", reference, re.MULTILINE))
         assert documented_uids == dashboard_uids
-        for page in (reference, (docs / "how-to/observability/run-grafana-locally.mdx").read_text(encoding="utf-8")):
+        for page in (reference, (docs / "observability/local-observability.mdx").read_text(encoding="utf-8")):
             counts = re.findall(r"\b(\d+) (?:bundled )?(?:Grafana |DefenseClaw )?dashboards\b", page)
             assert counts and all(int(count) == len(dashboard_uids) for count in counts)
         for relative_path in expected_assets:
