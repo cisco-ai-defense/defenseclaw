@@ -35,7 +35,7 @@ On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes prec
 
 ### Setup details
 
-Host setup removes earlier DefenseClaw native exporter blocks and revokes their scoped tokens because Codex cannot verify the account behind the loopback listener. An existing Codex process can retain the old configuration; quit and reopen Codex after an upgrade. The isolated OpenShell exporter still uses the gateway's `/v1/{logs,metrics,traces}` endpoints. Do not print or copy old exporter headers.
+Host setup removes earlier DefenseClaw native exporter blocks (only exporters that carry a DefenseClaw credential; your own exporters stay) and revokes their scoped tokens because Codex cannot verify the account behind the loopback listener. An existing Codex process can retain the old configuration; quit and reopen Codex after an upgrade. The isolated OpenShell exporter still uses the gateway's `/v1/{logs,metrics,traces}` endpoints. Do not print or copy old exporter headers.
 
 Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/reference/observability/redaction/). The alias options are in the [quick-alias reference](/docs/reference/commands/guardrail-setup#aliases).
 
@@ -104,7 +104,7 @@ Codex activates project `.codex/` layers only for trusted projects. Inventory re
 | Hook script | `codex-hook.sh` |
 | Hook config paths | `~/.codex/config.toml`, `~/.codex/managed_config.toml` |
 | Response field | `codex_output` |
-| Native OTLP | isolated OpenShell only; host upgrades remove old exporters |
+| Native OTLP | isolated OpenShell only; host setup removes only exporters that carry a DefenseClaw credential |
 | W3C traceparent | yes |
 | Fail closed | yes |
 

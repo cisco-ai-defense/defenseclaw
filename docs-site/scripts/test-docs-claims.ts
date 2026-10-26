@@ -1415,6 +1415,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1590", page: "reference/connectors/amp.mdx", section: "Fail mode", has: ["the default and permissive policies let the call run with one warning"], lacks: ["closed by default"] },
   { gap: "GAP-1670", page: "connectors/cursor.mdx", has: ["a gateway outage lets the call run with a warning in the default and permissive policies and blocks it in strict"], lacks: ["a gateway outage blocks supported events by default"] },
   { gap: "GAP-1670", page: "reference/connectors/cursor.mdx", section: "Fail mode", has: ["the default and permissive policies let the call run with a warning, strict blocks it"], lacks: ["still blocks supported events during a gateway outage by default"] },
+  { gap: "GAP-1683", page: "reference/connectors/codex.mdx", has: ["host setup removes only exporters that carry a DefenseClaw credential", "your own exporters stay"], lacks: ["host upgrades remove old exporters"] },
   // r105-rows-end
 ];
 
