@@ -1,7 +1,7 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows
+//go:build linux
 
 package gateway
 
@@ -20,7 +20,7 @@ import (
 // plain redirect from a working directory over 1 KiB left a managed
 // gateway behind ProtectHome with incomplete evidence, and the write was
 // denied as an SSH authorized keys mutation. Operands up to the Linux
-// PATH_MAX are now described.
+// PATH_MAX are now described. Linux only: macOS paths stop at 1024 bytes.
 func TestR105DeepWorkingDirectoryRedirectIsDescribed(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway walk")
