@@ -480,13 +480,18 @@ refresh_programs() {
 # (SIGSTOP), whose own exit would stop its account's OpenShell gateway also
 # under a completed or failed MicroVM that still runs (GAP-0868). End each
 # one that is still the same process with SIGKILL, which runs nothing on its
-# way out, before its program gets a new file.
+# way out, before its program gets a new file, and resume (SIGCONT) any other
+# so nothing stays stopped once the list is gone. Both sides compare lstart
+# with its runs of spaces folded, as the preinstall's awk wrote it: lstart
+# pads a day from 1 to 9 ("Fri Nov  6").
 sandbox_held="$state/sandbox-daemons.held"
 if [ -f "$sandbox_held" ]; then
     while IFS='|' read -r s_pid s_start; do
-        s_now=$(ps -o lstart= -p "$s_pid" 2>/dev/null | sed 's/^ *//; s/ *$//')
+        s_now=$(ps -o lstart= -p "$s_pid" 2>/dev/null | awk '{$1 = $1; print}')
         if [ -n "$s_now" ] && [ "$s_now" = "$s_start" ]; then
             kill -KILL "$s_pid" 2>/dev/null || true
+        else
+            kill -CONT "$s_pid" 2>/dev/null || true
         fi
     done <"$sandbox_held"
     rm -f "$sandbox_held"
