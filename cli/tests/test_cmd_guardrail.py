@@ -801,7 +801,8 @@ def test_per_user_amp_outage_open_template_records_an_actionable_call() -> None:
         'return { action: "allow"'
     )
     writer = source.split("async function logFailOpen(", 1)[1].split("async function perUserGatewayDownText", 1)[0]
-    for field in ('"hook-failures.jsonl"', 'connector: "amp"', 'fail_mode: "open"', 'outcome: "fail_open"'):
+    # A call the plugin blocks is recorded closed (GAP-1236); an outage call is open.
+    for field in ('"hook-failures.jsonl"', 'connector: "amp"', 'fail_mode: closed ? "closed" : "open"', 'outcome: closed ? "fail_closed" : "fail_open"'):
         assert field in writer
 
 

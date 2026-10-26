@@ -374,11 +374,12 @@ def test_the_repair_is_registered_and_documented():
     assert "doctor.install.stale-lock.clear" in ids
     for page in ("troubleshooting/doctor.mdx", "reference/commands/cli.mdx"):
         assert "doctor.install.stale-lock.clear" in (REPO / "docs-site/content/docs" / page).read_text()
-    # The plugins and doctor share the same records and bounds.
+    # Doctor names an interrupted install's recovery step; the plugins do not
+    # hold a lock for its records once the installer is gone (GAP-1024).
     for asset in ("amp-plugin.ts", "opencode-plugin.js"):
         body = (REPO / "internal/gateway/connector/hooks" / asset).read_text()
         for record in cmd_doctor._INSTALL_RECOVERY_RECORDS:
-            assert f'"{record}"' in body, (asset, record)
+            assert f'"{record}"' not in body, (asset, record)
         # One identity record, and no clock (round k).
         assert '"proc-start"' in body and "NO_PID_MS" not in body and "START_SLACK" not in body
 
