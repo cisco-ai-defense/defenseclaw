@@ -12,7 +12,7 @@ import (
 // program (ls f, or behind a prefix runner: nice ls f, time grep f x) was
 // read as a call of the function, so its body was exposed. Only a shell runs
 // an exported function by name: the program word itself, a runner that
-// hands its words to a shell (watch, parallel, su ...) or an interpreter
+// hands its words to a shell (watch, parallel ...) or an interpreter
 // whose code can start one keeps the body exposed.
 func TestSimpleCommandsRunnersCallOnlyWhatTheyExecute(t *testing.T) {
 	const body = "f() { rm -rf /; }; export -f f; "
@@ -28,7 +28,7 @@ func TestSimpleCommandsRunnersCallOnlyWhatTheyExecute(t *testing.T) {
 		{body + "watch f", true},
 		{body + "nice watch f", true},
 		{body + "parallel f ::: 1", true},
-		{body + "su -c f", true},
+		{body + "su -c f", false}, // su resets the environment
 		{body + "nice bash -c f", true},
 		{body + `perl -e "system('f')"`, true},
 	} {
