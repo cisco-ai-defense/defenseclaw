@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -60,17 +61,24 @@ func enterpriseHookAgentConfigNotice(result enterprisehooks.InstallResult) strin
 	return ""
 }
 
-// enterpriseHookRetryNativeOTLPTakeBack retries, once per guardian pass, the
-// native OTLP take-back of a verified target whose account keeps a
-// take-back-pending marker (GAP-1839, GAP-1840, GAP-1170). Verify passes on
-// the marker, as the managed gateway serves no revoked credential, so the
-// repair after a failed verify never reached the take-back, which only the
-// installer runs; the marker and its warning then stayed until the next
-// upgrade. The retry is the installer itself, run only when the account's
-// session is available, and it is best effort: a failure keeps the verified
-// result (its row stays OK and the warning stays) and is logged. Verify
-// itself never fails on the marker: the managed MSI verifies right after a
-// failed take-back and must not end in 1603.
+// enterpriseHookRetryNativeOTLPTakeBack retries the native OTLP take-back of
+// a verified target whose account keeps a take-back-pending marker
+// (GAP-1839, GAP-1840, GAP-1170). Verify passes on the marker, as the managed
+// gateway serves no revoked credential, so the repair after a failed verify
+// never reached the take-back, which only the installer runs; the marker and
+// its warning then stayed until the next upgrade. The retry is the installer
+// itself, run only when the account's session is available, and it is best
+// effort: a failure keeps the verified result (its row stays OK and the
+// warning stays) and is logged. Verify itself never fails on the marker: the
+// managed MSI verifies right after a failed take-back and must not end in
+// 1603.
+//
+// A config reached through a link is never rewritten by the take-back, so
+// its retry fails until the account removes the exporter itself. The retry
+// therefore runs at the first pass of a guardian process (the one repair and
+// ensure start) and at the account's sign-in, then at most once per
+// enterpriseHookTakeBackRetryInterval, not on every one-minute pass
+// (GAP-2064).
 func enterpriseHookRetryNativeOTLPTakeBack(
 	ctx context.Context,
 	target enterprisehooks.ManifestTarget,
@@ -78,11 +86,17 @@ func enterpriseHookRetryNativeOTLPTakeBack(
 	verified enterprisehooks.InstallResult,
 ) enterprisehooks.InstallResult {
 	name := firstNonEmptyString(verified.Connector, target.Connector)
+	key := strings.TrimSpace(verified.DataDir) + "\x00" + name
 	if !connector.NativeOTLPTakeBackPending(verified.DataDir, name) {
+		enterpriseHookTakeBackRetries.forget(key)
 		return verified
 	}
 	available, err := enterpriseHookReconcileSessionAvailable(target)
 	if err != nil || !available {
+		enterpriseHookTakeBackRetries.forget(key)
+		return verified
+	}
+	if !enterpriseHookTakeBackRetries.due(key) {
 		return verified
 	}
 	retried, err := enterpriseHookReconcileInstaller(ctx, opts)
@@ -91,6 +105,42 @@ func enterpriseHookRetryNativeOTLPTakeBack(
 		return verified
 	}
 	return retried
+}
+
+// enterpriseHookTakeBackRetryInterval spaces the take-back retries of one
+// account and connector within a guardian process.
+const enterpriseHookTakeBackRetryInterval = 15 * time.Minute
+
+// enterpriseHookTakeBackRetryNow is the retry clock. Tests replace it.
+var enterpriseHookTakeBackRetryNow = time.Now
+
+type enterpriseHookTakeBackRetryLog struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+var enterpriseHookTakeBackRetries = &enterpriseHookTakeBackRetryLog{}
+
+// due reports whether key's retry may run now and, if so, records it.
+func (l *enterpriseHookTakeBackRetryLog) due(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := enterpriseHookTakeBackRetryNow()
+	if last, ok := l.last[key]; ok && now.Sub(last) < enterpriseHookTakeBackRetryInterval {
+		return false
+	}
+	if l.last == nil {
+		l.last = map[string]time.Time{}
+	}
+	l.last[key] = now
+	return true
+}
+
+// forget makes key's next retry run at once (no marker, or signed out).
+func (l *enterpriseHookTakeBackRetryLog) forget(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.last, key)
 }
 
 // writeEnterpriseHookGuardianNotices replaces the record with this pass's

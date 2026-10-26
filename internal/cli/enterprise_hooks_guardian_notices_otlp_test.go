@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -79,6 +80,10 @@ func TestGuardianRetriesThePendingNativeOTLPTakeBackOncePerPass(t *testing.T) {
 	t.Cleanup(func() {
 		enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller, enterpriseHookReconcileSessionAvailable = previousVerifier, previousInstaller, previousSession
 	})
+	previousNow := enterpriseHookTakeBackRetryNow
+	clock := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
+	enterpriseHookTakeBackRetryNow = func() time.Time { return clock }
+	t.Cleanup(func() { enterpriseHookTakeBackRetryNow = previousNow })
 	userDataDir := t.TempDir()
 	verified := enterprisehooks.InstallResult{Connector: "codex", DataDir: userDataDir, UserHome: "verified"}
 	enterpriseHookReconcileVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
@@ -105,6 +110,7 @@ func TestGuardianRetriesThePendingNativeOTLPTakeBackOncePerPass(t *testing.T) {
 	opts := enterprisehooks.InstallOptions{ConnectorName: "codex"}
 	pass := func() enterprisehooks.InstallResult {
 		t.Helper()
+		clock = clock.Add(enterpriseHookTakeBackRetryInterval)
 		result, repaired, err := enterpriseHookVerifyOrRepairTarget(context.Background(), target, opts, true)
 		if err != nil || repaired {
 			t.Fatalf("verified target: repaired=%v err=%v, want ok and not a repair", repaired, err)
@@ -143,5 +149,64 @@ func TestGuardianRetriesThePendingNativeOTLPTakeBackOncePerPass(t *testing.T) {
 	}
 	if got := pass(); installs != 2 || got.UserHome != "verified" {
 		t.Fatalf("after the marker cleared: installs=%d, want no further install", installs)
+	}
+}
+
+// GAP-2064: a config reached through a link is never rewritten by the
+// take-back, so its retry fails until the account removes the exporter. The
+// guardian ran the whole installer for it on every one-minute pass. It now
+// retries at the first pass of its process and at the account's sign-in,
+// then at most once per enterpriseHookTakeBackRetryInterval.
+func TestGuardianSpacesThePendingNativeOTLPTakeBackRetries(t *testing.T) {
+	previousVerifier, previousInstaller, previousSession, previousNow := enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller, enterpriseHookReconcileSessionAvailable, enterpriseHookTakeBackRetryNow
+	t.Cleanup(func() {
+		enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller, enterpriseHookReconcileSessionAvailable, enterpriseHookTakeBackRetryNow = previousVerifier, previousInstaller, previousSession, previousNow
+	})
+	clock := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
+	enterpriseHookTakeBackRetryNow = func() time.Time { return clock }
+	userDataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(userDataDir, "native-otlp-take-back-pending-codex.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	verified := enterprisehooks.InstallResult{Connector: "codex", DataDir: userDataDir}
+	enterpriseHookReconcileVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		return verified, nil
+	}
+	signedIn := true
+	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) { return signedIn, nil }
+	installs := 0
+	// The take-back keeps failing (the marker stays), as for a linked config.
+	enterpriseHookReconcileInstaller = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		installs++
+		return verified, nil
+	}
+	target := enterprisehooks.ManifestTarget{Connector: "codex"}
+	pass := func(after time.Duration) {
+		t.Helper()
+		clock = clock.Add(after)
+		if _, _, err := enterpriseHookVerifyOrRepairTarget(context.Background(), target, enterprisehooks.InstallOptions{ConnectorName: "codex"}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pass(0)
+	if installs != 1 {
+		t.Fatalf("first pass: installs=%d, want 1", installs)
+	}
+	for i := 0; i < 14; i++ {
+		pass(time.Minute)
+	}
+	if installs != 1 {
+		t.Fatalf("14 one-minute passes after a failed retry: installs=%d, want no further retry", installs)
+	}
+	pass(time.Minute)
+	if installs != 2 {
+		t.Fatalf("15 minutes after the last retry: installs=%d, want 2", installs)
+	}
+	signedIn = false
+	pass(time.Minute)
+	signedIn = true
+	pass(time.Minute)
+	if installs != 3 {
+		t.Fatalf("sign-in after a sign-out: installs=%d, want the retry at once (3)", installs)
 	}
 }
