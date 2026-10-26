@@ -1731,6 +1731,43 @@ class TestSetupSplunkCommand(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
     @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
+    def test_setup_splunk_logs_ready_block_names_the_login_for_a_non_free_license(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        # GAP-1750: "no login in Free mode" only when the bridge reports Free.
+        from defenseclaw.commands.cmd_setup import setup
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Enterprise",
+                    "web_login_required": True,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
+            stderr="",
+        )
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("Splunk Web: no login in Free mode", result.output)
+        self.assertNotIn("License: Free", result.output)
+        self.assertIn("Splunk Web: log in as admin", result.output)
+        self.assertIn("defenseclaw setup splunk --show-credentials", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
     def test_setup_splunk_logs_bootstrap_bridge_s3_export_env(
         self, _mock_bridge_bin, mock_run, _mock_preflight,
     ):

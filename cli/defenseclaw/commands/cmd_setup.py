@@ -19473,11 +19473,16 @@ def _bootstrap_bridge(
         click.echo("  Local Splunk is ready")
         web_url = contract.get("splunk_web_url", "http://127.0.0.1:8000")
         click.echo(f"    Web UI: {web_url}")
-        if str(contract.get("license_group", "")).lower() == "free":
+        free = str(contract.get("license_group", "")).lower() == "free"
+        if free:
             click.echo("    License: Free")
         click.echo()
-        # Splunk Free has no Web login: the UI opens as admin (GAP-1398).
-        click.echo("  Splunk Web: no login in Free mode (it opens as admin)")
+        if free:
+            # Splunk Free has no Web login: the UI opens as admin (GAP-1398).
+            click.echo("  Splunk Web: no login in Free mode (it opens as admin)")
+        else:
+            # Any other license asks for the admin login (GAP-1750).
+            click.echo("  Splunk Web: log in as admin; show the password with: defenseclaw setup splunk --show-credentials")
         env_file = os.path.join(data_dir, "splunk-bridge", "env", ".env")
         click.echo(f"    Runtime secret: stored in {env_file}")
         return contract
