@@ -54,7 +54,7 @@ func TestPullsOfOneSandboxDoNotOverlap(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			local := sb
-			if _, err := ta.App.pull(bg, api, ta.cli("gw"), &local, false); err != nil {
+			if _, err := ta.pull(bg, api, ta.cli("gw"), &local, false); err != nil {
 				t.Error(err)
 			}
 		}()
