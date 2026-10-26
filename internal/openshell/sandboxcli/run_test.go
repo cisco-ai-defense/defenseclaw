@@ -1685,7 +1685,7 @@ func TestRunRefusals(t *testing.T) {
 			}
 		}, want: []string{"harness.yolo true\nthe repository policy .defenseclaw/sandbox.yaml would loosen the sandbox policy: egress.allow 2 entries"}},
 		{name: "daemon down", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x") },
-			want: []string{"daemon did not answer or could not be verified", "connection refused"}},
+			want: []string{"daemon did not answer or could not be verified", "nothing accepted the connection on its port"}},
 		{name: "windows", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.GOOS = "windows" }, want: []string{"Windows and WSL2 are not supported"}},
 		{name: "wsl2", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.WSL = func() bool { return true } }, want: []string{"Windows and WSL2 are not supported"}},
 		{name: "root", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.Geteuid = func() int { return 0 } },
