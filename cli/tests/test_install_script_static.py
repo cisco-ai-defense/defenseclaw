@@ -279,7 +279,7 @@ def test_windows_upgrade_says_it_is_cleaning_up_before_the_long_deletes() -> Non
     windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
     body = windows[windows.index("function Complete-Swap") :]
     body = body[: body.index("\n}\n")]
-    assert body.index('Write-Info "Cleaning up') < body.index("Remove-Tree $Previous")
+    assert body.index('Write-Info "Cleaning up') < body.index("Publish-PreviousSlot $Snap")
 
 
 def test_installer_never_uses_retired_asset_names() -> None:

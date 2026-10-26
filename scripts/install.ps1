@@ -3810,19 +3810,21 @@ function Resume-InterruptedRun {
     $hadRecoveryWork = (Test-Path -LiteralPath (Join-Path $DataDir "previous.new")) -or
         (Test-Path -LiteralPath (Join-Path $DataDir ".repair")) -or
         (Test-Path -LiteralPath (Join-Path $DataDir ".rollback-hold"))
-    if ($manifest -and (Get-Field $manifest "Committed")) {
-        # The new install was proven before the run stopped: finish moving
-        # the previous one aside (Complete-Swap) instead of undoing it.
+    $swapped = @(@((Join-Path $DataDir "previous.new"), (Join-Path $DataDir ".repair")) |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_ "SWAPPED") -PathType Leaf })
+    if (($manifest -and (Get-Field $manifest "Committed")) -or ($swapped.Count -and -not $manifest)) {
+        # The new install was proven before the run stopped, or it finished
+        # and only its cleanup failed (SWAPPED, Complete-Swap): finish moving
+        # the previous one aside instead of undoing it.
         foreach ($slot in @((Join-Path $DataDir "previous.new"), (Join-Path $DataDir ".repair"))) {
             if (-not (Test-Path -LiteralPath $slot)) { continue }
             Write-Warn "An earlier install finished but was interrupted while it cleaned up; finishing that"
-            foreach ($marker in @("COMPLETE", "HOOK_FIRST", "HOOK_GUARD", "GATEWAY_RESTART_UNPROVEN")) {
+            foreach ($marker in @("COMPLETE", "HOOK_FIRST", "HOOK_GUARD", "GATEWAY_RESTART_UNPROVEN", "SWAPPED")) {
                 Remove-Item -LiteralPath (Join-Path $slot $marker) -Force -ErrorAction SilentlyContinue
             }
             Invoke-Quietly { Remove-Tree (Join-Path $slot "closer") }
             if ($slot -eq (Join-Path $DataDir "previous.new") -and (Read-Text (Join-Path $slot "VERSION"))) {
-                Remove-Tree $Previous
-                Move-Path $slot $Previous
+                Publish-PreviousSlot $slot
             } else {
                 Remove-Tree $slot
             }
@@ -4203,8 +4205,31 @@ function Complete-StoppedConnectorReconcile {
     return $false
 }
 
+function Publish-PreviousSlot([string]$Slot, [switch]$KeepOld) {
+    # previous.new becomes previous\, the rollback copy. An older previous\
+    # this account cannot delete (an administrator's or SYSTEM's copy) must
+    # not leave previous.new behind: the next install took it for an
+    # unfinished one and stopped until -AcceptCurrentInstall (GAP-1860,
+    # GAP-1555). That copy is set aside whole instead, and so is one whose
+    # rolled-back data could not be kept (-KeepOld).
+    $why = "its rolled-back data could not be moved to backups"
+    if (-not $KeepOld) {
+        try { Remove-Tree $Previous; $why = "" } catch { $why = $_.Exception.Message }
+    }
+    if ($why -and (Test-Path -LiteralPath $Previous)) {
+        $aside = Join-Path $DataDir (".failed-previous-" + (Get-Date -Format "yyyyMMddTHHmmss"))
+        Move-Path $Previous $aside
+        Write-Warn "The older rollback copy could not be removed ($why); it was set aside in $aside"
+        Write-Info "It is not used again; remove it when you no longer need it (as its owner or an administrator): cmd /c rd /s /q `"$aside`""
+    }
+    Move-Path $Slot $Previous
+}
+
 function Complete-Swap {
-    # The new install is live: a run killed from here on must not restore the old one.
+    # The new install is live: a run killed from here on must not restore the
+    # old one. SWAPPED, first, tells the next run that a previous.new still
+    # here is this finished install's rollback copy (GAP-1860).
+    try { Write-DurableText (Join-Path $Snap "SWAPPED") "" } catch { Write-Warn $_.Exception.Message }
     Remove-Item -LiteralPath (Join-Path $Snap "COMPLETE") -Force
     Remove-Item -LiteralPath (Join-Path $Snap "HOOK_GUARD") -Force -ErrorAction SilentlyContinue
     # Deleting the old venv and staging copies takes a minute or two on Windows (GAP-1347).
@@ -4215,9 +4240,10 @@ function Complete-Swap {
     Invoke-Quietly { Remove-Tree (Join-Path $Snap "closer") }
     Invoke-Quietly {
         if ($Snap -eq (Join-Path $DataDir "previous.new") -and $PrevVersion) {
-            Save-RolledBackData
-            Remove-Tree $Previous
-            Move-Path $Snap $Previous
+            $kept = $true
+            try { Save-RolledBackData } catch { Write-Warn $_.Exception.Message; $kept = $false }
+            Publish-PreviousSlot $Snap -KeepOld:(-not $kept)
+            Remove-Item -LiteralPath (Join-Path $Previous "SWAPPED") -Force -ErrorAction SilentlyContinue
         } else {
             Remove-Tree $Snap
         }

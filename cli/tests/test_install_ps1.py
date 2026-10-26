@@ -764,7 +764,9 @@ def test_the_suggested_cleanup_removes_the_read_only_key_copy() -> None:
     # read-only redaction key copy refuses; rd /s /q deletes it through the folder.
     text = _text()
     assert "Remove-Item -Recurse -Force '" not in text
-    assert text.count('cmd /c rd /s /q `"') == 2
+    # Save-RolledBackData's kept data and Publish-PreviousSlot's set-aside
+    # copy (GAP-1860) are the user's to remove.
+    assert text.count('cmd /c rd /s /q `"') == 3
     # A failed install can own unresolved external connector transactions;
     # its troubleshooting copy must not be advertised as safe to delete.
     failed = _ps1_function("Restore-Snapshot")
@@ -889,7 +891,7 @@ def test_failed_readiness_preserves_hooks_without_restarting_the_old_setup(tmp_p
     startup = install[install.index("    $startRc = 0") : install.index("    Complete-Swap")]
     functions = "\n".join(_ps1_function(name) for name in (
         "Restore-Snapshot", "Restart-Old", "Restore-SetupInstall", "Get-RestoredNote",
-        "Resume-InterruptedRun", "Read-Text",
+        "Resume-InterruptedRun", "Publish-PreviousSlot", "Read-Text",
     ))
     script = tmp_path / "failed-start.ps1"
     script.write_text(
@@ -4476,7 +4478,7 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
         for name in (
             "Invoke-Quietly", "Start-SwapHookFailModes", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
             "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
-            "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote", "Resume-InterruptedRun",
+            "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote", "Resume-InterruptedRun", "Publish-PreviousSlot",
             "Start-AcceptedReplacement", "Finish-EarlySnapshotRestore",
         )
     )
@@ -5098,6 +5100,94 @@ if (-not (Invoke-UvPipInstall @('pip', 'install'))) {{ throw 'install failed' }}
     assert "Invoke-Native $Uv" not in new_venv and "Invoke-Native $Uv" not in _ps1_function("Invoke-UvPipInstall")
 
 
+def test_the_staged_release_checks_run_below_normal_priority() -> None:
+    # GAP-0008: one registered call waited 9.97 s while the previous gateway
+    # still ran, in the window after uv when the staged CLI first starts and
+    # runs its migrate check (a fresh venv: thousands of first imports, each
+    # scanned). Those checks only read the staged release, so they yield to
+    # the running gateway as uv does.
+    text = _text()
+    staging = text[text.index('$stagedCli = Join-Path $Staging "venv\\Scripts\\defenseclaw.exe"') :]
+    staging = staging[: staging.index('Write-Ok "DefenseClaw $Ver is staged and checked"')]
+    assert 'Invoke-BelowNormal { Get-NativeOutput $stagedCli @("--version") }' in staging
+    assert "Invoke-BelowNormal { Invoke-Native $stagedCli $checkArgs }" in staging
+    assert "Invoke-Native $stagedCli" not in staging.replace("Invoke-BelowNormal { Invoke-Native $stagedCli", "")
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_retried_package_install_reinstalls_what_a_failed_attempt_half_copied() -> None:
+    # GAP-1555: attempts 1-3 of the final environment failed on a held
+    # wheel (os error 5) after copying typing_extensions' dist-info but not
+    # typing_extensions.py; attempt 4 saw the package as installed, returned
+    # 0, and the install said Installed with a broken CLI. Every retry
+    # reinstalls the step's packages from the cache.
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$script:calls = @()
+function Invoke-Uv([string[]]$UvArgs, [switch]$Quiet) {{ $script:calls += ($UvArgs -join ' '); if ($script:calls.Count -lt 3) {{ return 2 }}; return 0 }}
+function Test-DiskFull {{ return $false }}
+function Write-Warn([string]$m) {{ }}
+function Start-Sleep {{ param([int]$Seconds) }}
+{_ps1_function("Invoke-UvPipInstall")}
+if (-not (Invoke-UvPipInstall @('pip', 'install', '-r', 'req.txt'))) {{ throw 'install failed' }}
+$script:calls | ForEach-Object {{ "CALL=$_" }}
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    calls = re.findall(r"CALL=(.*)", out)
+    assert calls == ["pip install -r req.txt", "pip install -r req.txt --reinstall", "pip install -r req.txt --reinstall"], out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("old", ["deletable", "undeletable"])
+def test_a_finished_install_never_leaves_previous_new_behind(tmp_path: Path, old: str) -> None:
+    # GAP-1860 (and the residue half of GAP-1555): Complete-Swap deleted the
+    # old previous\ and renamed previous.new into it in one quiet step. An
+    # old previous\ this account cannot delete (SYSTEM-owned after an
+    # administrator's restore) stopped it with "Access is denied", left
+    # previous.new, and the next install refused ("not proven back") until
+    # -AcceptCurrentInstall. The old copy is now set aside whole, and a
+    # previous.new that a finished install left (SWAPPED) is finished by the
+    # next run instead of undone.
+    data = tmp_path / "data"
+    (data / "previous" / "bin").mkdir(parents=True)
+    (data / "previous" / "VERSION").write_text("1.0.2", encoding="ascii")
+    (data / "previous.new" / "bin").mkdir(parents=True)
+    (data / "previous.new" / "VERSION").write_text("1.0.4", encoding="ascii")
+    remove = "throw 'Access is denied.'" if old == "undeletable" else "Remove-Item -LiteralPath $Path -Recurse -Force"
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$Previous = Join-Path $DataDir 'previous'
+function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ {remove} }} }}
+function Move-Path([string]$From, [string]$To) {{ Move-Item -LiteralPath $From -Destination $To }}
+function Write-Warn([string]$m) {{ "WARN $m" }}
+function Write-Info([string]$m) {{ "INFO $m" }}
+{_ps1_function("Publish-PreviousSlot")}
+Publish-PreviousSlot (Join-Path $DataDir 'previous.new')
+'OK'
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "OK" in out, out
+    assert not (data / "previous.new").exists()
+    assert (data / "previous" / "VERSION").read_text(encoding="ascii") == "1.0.4"
+    asides = sorted(path.name for path in data.glob(".failed-previous-*"))
+    if old == "undeletable":
+        assert len(asides) == 1 and (data / asides[0] / "VERSION").read_text(encoding="ascii") == "1.0.2", out
+        assert "Access is denied." in out and "cmd /c rd /s /q" in out, out
+    else:
+        assert asides == [] and "WARN" not in out, out
+    swap = _ps1_function("Complete-Swap")
+    assert swap.index('"SWAPPED"') < swap.index('Join-Path $Snap "COMPLETE"')
+    assert "Publish-PreviousSlot $Snap" in swap and "Remove-Tree $Previous" not in swap
+    resume = _text()[_text().index("$swapped = @(@((Join-Path $DataDir \"previous.new\")") :][:1500]
+    assert '-or ($swapped.Count -and -not $manifest)' in resume and "Publish-PreviousSlot $slot" in resume
+    # A .failed-* folder is not data, so no later snapshot carries it.
+    assert '".failed-*"' in _text()[: _text().index("$NotData") + 200]
+
+
 def test_the_fail_mode_hold_outlasts_the_installers_own_steps() -> None:
     # GAP-0311: the hold took the 2 minute default from its start, before the
     # rollback copy, the hook swap and the drain of old calls; on a busy host
@@ -5119,7 +5209,7 @@ def _restore_case_functions() -> str:
         "Assert-BinDirRestored", "Move-Path", "Get-DataEntries", "Test-ConnectorRecoveryArtifactName",
         "Restore-Slot", "Invoke-Quietly",
         "Read-Text", "Restore-ExternalConfig", "Undo-HookFirst", "Undo-Snapshot",
-        "Install-HookFirst", "Save-HookCloser", "Clear-StagedRelease", "Resume-InterruptedRun",
+        "Install-HookFirst", "Save-HookCloser", "Clear-StagedRelease", "Resume-InterruptedRun", "Publish-PreviousSlot",
         "Remove-Hold", "Restore-Live", "Restore-LiveTree", "Move-LiveTo", "Set-RecoveryPending",
     )
     return "\n".join(_ps1_function(name) for name in names)
@@ -5465,7 +5555,7 @@ def test_a_failed_run_closes_unfinished_hooks_while_it_still_holds_the_lock() ->
     assert "if ($name -eq $gatewayName -and $refused.Count) { continue }" in restore
     assert "Save-HookCloser" not in _ps1_function("Restore-Snapshot")
     swap = _ps1_function("Complete-Swap")
-    assert swap.index('Remove-Tree (Join-Path $Snap "closer")') < swap.index("Move-Path $Snap $Previous")
+    assert swap.index('Remove-Tree (Join-Path $Snap "closer")') < swap.index("Publish-PreviousSlot $Snap")
 
 
 @pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="requires Windows executable replacement")
@@ -5941,6 +6031,7 @@ function Die { param($Message) throw $Message }
 function Invoke-Quietly { param([scriptblock]$Action) try { & $Action } catch { } }
 function Remove-Tree { param($Path) if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force } }
 function Move-Path { param($From, $To, $Seconds) Move-Item -LiteralPath $From -Destination $To }
+function Publish-PreviousSlot { param([string]$Slot, [switch]$KeepOld) Remove-Tree $Previous; Move-Path $Slot $Previous }
 function Find-SetupInstall { return $null }
 function Clear-SetupDataDir { param($Failed) }
 function Remove-FailedInstall { param($Failed) }
