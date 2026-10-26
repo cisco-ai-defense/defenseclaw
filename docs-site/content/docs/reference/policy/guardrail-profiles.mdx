@@ -203,9 +203,11 @@ How the keys combine:
   instead. On a qualified-name SSSD Active Directory host with one joined
   domain, a bare entry keeps matching that account after a 1.0.3 upgrade.
   With multiple joined Active Directory domains or a configured trusted
-  child, the entry is ambiguous: affected requests are refused when that
-  assignment could change the profile. Write the qualified principal shown
-  by explain, status, verify or doctor, or the uid, to select one account.
+  child, the entry selects the account of that name in each domain: the
+  default and permissive policy tiers match it and explain, status, verify
+  and doctor warn and name every account; the strict policy tier refuses
+  affected requests when the assignment could change the profile. Write the
+  qualified principal the warning shows, or the uid, to select one account.
 - **`DOMAIN\user` names the verified account domain.** The domain part is the
   NetBIOS name (or DNS name) the directory confirms for the account: winbind,
   also with `use default domain = yes` where accounts have bare names; SSSD

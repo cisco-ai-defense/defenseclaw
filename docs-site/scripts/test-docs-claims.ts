@@ -1488,6 +1488,9 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1716", page: "get-started/windows.mdx", section: "Upgrade and roll back", has: ["exit code 0 means the installer started, not that it finished", "-Rollback -Yes`, which waits and sets the exit code"] },
   { gap: "GAP-1716", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["**Windows upgrade and rollback return before the installer finishes:**"] },
   { gap: "GAP-0922, GAP-0923", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["macOS has no setting that stops a user's sandbox profile", "DefenseClaw does not see or audit its tool calls"], lacks: ["unshare -Urm"] },
+  { gap: "GAP-0725", page: "enterprise/identity/sources.mdx", has: ["the same entry selects the account of that name in each of those domains", "The strict policy tier refuses a request when that ambiguity could change its profile."] },
+  { gap: "GAP-0725", page: "reference/policy/guardrail-profiles.mdx", has: ["the entry selects the account of that name in each domain"] },
+  { gap: "GAP-0755", page: "enterprise/configure/enrollment.mdx", has: ["Excluding an enrolled account also removes its guardian identity record at the next guardian pass"] },
   // r105-rows-end
 ];
 

@@ -50,6 +50,7 @@ enterprise:
 ```
 
 - `exclude_users` always wins. `exempt_users` skips enrollment but not inspection: the account's guardrail profile still applies.
+- Excluding an enrolled account also removes its guardian identity record at the next guardian pass, unless the gateway still inspects that account's hook calls (a machine-policy connector that inspects every account, or `exempt_users`). Then the record stays, so the account's own guardrail profile keeps applying.
 - `unenrolled_users` (Linux and macOS) decides what happens to a machine-policy agent for a user with no enrollment: `inspect` (default) still inspects, `deny` refuses. On managed Windows, Claude Code, Codex and Cursor must refuse an unenrolled user's calls even with zero enrolled users for that agent. Keep each enabled agent's machine policy in force; treat a missing policy as a protection failure and stop agent use until it is repaired.
 - With `mode: manifest` you publish the target list yourself. The format is in the [detail page](/docs/enterprise/configure/reference#publish-the-target-list-yourself).
 - Linux and macOS also take `root`, `uid_min`, `uid_max`, `home_roots` and `agent_prefixes`. Windows does not apply them.
