@@ -2352,7 +2352,7 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 			return failManagedStandaloneClosed(opts, sp, sp.unreachableStrict, "transport", reason)
 		} else {
 			fmt.Fprintf(opts.Stderr,
-				"defenseclaw: %s (fail mode closed): %s\n", unreachableLead(opts, sp, reason, "blocking"), unreachableDetail(opts, reason))
+				"defenseclaw: %s (%s): %s\n", unreachableLead(opts, sp, reason, "blocking"), unreachableModeNote(opts), unreachableDetail(opts, reason))
 			if text := perUserGatewayDownText(opts, reason); text != "" {
 				return emitPerUserGatewayDown(opts, sp, text)
 			}
@@ -2514,6 +2514,20 @@ const perUserGatewayStatusHint = " `defenseclaw-gateway status` shows its state.
 // the gateway port answers, so the gateway is not "unreachable" there; the
 // line names the blocked or allowed event instead, a prompt rather than a
 // tool for UserPromptSubmit (GAP-1706).
+// unreachableModeNote names why a per-user call the gateway did not decide
+// was blocked: "fail mode closed" for a gateway outage the mode closed (or
+// strict availability, or the install window), and that it blocks in every
+// fail mode for a failure that is not an outage (a call the gateway took and
+// did not answer, a listener DefenseClaw cannot verify). A saved open mode
+// then no longer reads as ignored (GAP-1735).
+func unreachableModeNote(opts Options) string {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || opts.perUserOutage ||
+		opts.StrictAvailability || perUserInstallWindow(opts) {
+		return "fail mode closed"
+	}
+	return "not a gateway outage, so it is blocked in every fail mode"
+}
+
 func unreachableLead(opts Options, sp spec, reason, verdict string) string {
 	if strings.HasPrefix(reason, foreignListenerReasonPrefix) {
 		return verdict + " this " + hookEventSubject(opts.Event)
@@ -2572,7 +2586,7 @@ func perUserGatewayDownText(opts Options, reason string) string {
 	}
 	if reason == perUserGatewayNoAnswerReason {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": this account's DefenseClaw gateway " +
-			"did not answer in time (fail mode closed); it may be restarting or busy. Try again in a moment; if " +
+			"did not answer in time (a call the gateway took and did not answer is blocked in every fail mode); it may be restarting or busy. Try again in a moment; if " +
 			"this continues, check it with `defenseclaw-gateway status`."
 	}
 	lead := "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": "

@@ -989,7 +989,7 @@ async function perUserGatewayDownText(error: unknown, status: number): Promise<s
 		text = "this account's DefenseClaw gateway is not running (fail mode closed). " +
 			"Start it with `defenseclaw-gateway start`, then try again."
 	} else if (failure?.name === "AbortError" || failure?.name === "TimeoutError") {
-		text = "this account's DefenseClaw gateway did not answer in time (fail mode closed); it may be restarting or busy. " +
+		text = "this account's DefenseClaw gateway did not answer in time (a call the gateway took and did not answer is blocked in every fail mode); it may be restarting or busy. " +
 			"Try again in a moment."
 	} else {
 		text = "the DefenseClaw gateway is not running or not answering (fail mode closed). " +
