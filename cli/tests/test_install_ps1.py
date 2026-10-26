@@ -5262,28 +5262,37 @@ $script:calls | ForEach-Object {{ "CALL=$_" }}
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-@pytest.mark.parametrize("old", ["deletable", "undeletable"])
+@pytest.mark.parametrize("old", ["deletable", "undeletable", "unmovable", "parked-data-stuck"])
 def test_a_finished_install_never_leaves_previous_new_behind(tmp_path: Path, old: str) -> None:
     # GAP-1860 (and the residue half of GAP-1555): Complete-Swap deleted the
     # old previous\ and renamed previous.new into it in one quiet step. An
     # old previous\ this account cannot delete (SYSTEM-owned after an
     # administrator's restore) stopped it with "Access is denied", left
     # previous.new, and the next install refused ("not proven back") until
-    # -AcceptCurrentInstall. The old copy is now set aside whole, and a
-    # previous.new that a finished install left (SWAPPED) is finished by the
-    # next run instead of undone.
+    # -AcceptCurrentInstall. The old copy is set aside whole; one this account
+    # can neither delete nor rename (SYSTEM owner, no entry for the user: the
+    # verify round's i62/i63) stays, and this install's copy is kept beside
+    # it, with no raw exception. A previous.new that a finished install left
+    # (SWAPPED) is finished by the next run instead of undone. A set-aside
+    # copy is .kept-previous-*, which no restore sweeps (R2-1).
     data = tmp_path / "data"
     (data / "previous" / "bin").mkdir(parents=True)
     (data / "previous" / "VERSION").write_text("1.0.2", encoding="ascii")
     (data / "previous.new" / "bin").mkdir(parents=True)
     (data / "previous.new" / "VERSION").write_text("1.0.4", encoding="ascii")
-    remove = "throw 'Access is denied.'" if old == "undeletable" else "Remove-Item -LiteralPath $Path -Recurse -Force"
+    (data / ".kept-previous-20261020T000000-new").mkdir()
+    remove = "Remove-Item -LiteralPath $Path -Recurse -Force"
+    if old != "deletable":
+        remove = "if ($Path -eq $Previous) { throw 'Access is denied.' }; " + remove
+    move_guard = "if ($From -eq $Previous) { throw 'Access to the path is denied.' }" if old == "unmovable" else ""
+    save = "throw 'data held'" if old == "parked-data-stuck" else ""
     script = f"""
 $ErrorActionPreference = 'Stop'
 $DataDir = '{data}'
 $Previous = Join-Path $DataDir 'previous'
 function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ {remove} }} }}
-function Move-Path([string]$From, [string]$To) {{ Move-Item -LiteralPath $From -Destination $To }}
+function Save-RolledBackData {{ {save} }}
+function Move-Path([string]$From, [string]$To, [int]$Seconds = 10) {{ {move_guard} Move-Item -LiteralPath $From -Destination $To }}
 function Write-Warn([string]$m) {{ "WARN $m" }}
 function Write-Info([string]$m) {{ "INFO $m" }}
 {_ps1_function("Publish-PreviousSlot")}
@@ -5294,20 +5303,32 @@ Publish-PreviousSlot (Join-Path $DataDir 'previous.new')
     out = result.stdout + result.stderr
     assert result.returncode == 0 and "OK" in out, out
     assert not (data / "previous.new").exists()
+    assert not list(data.glob(".failed-*")), out
+    asides = sorted(path.name for path in data.glob(".kept-previous-*") if not path.name.endswith("-new"))
+    if old == "unmovable":
+        assert (data / "previous" / "VERSION").read_text(encoding="ascii") == "1.0.2"
+        kept = sorted(path.name for path in data.glob(".kept-previous-*-new"))
+        assert len(kept) == 1 and kept[0] != ".kept-previous-20261020T000000-new", out
+        assert (data / kept[0] / "VERSION").read_text(encoding="ascii") == "1.0.4", out
+        assert asides == [] and "belongs to another account" in out and "Exception" not in out, out
+        return
     assert (data / "previous" / "VERSION").read_text(encoding="ascii") == "1.0.4"
-    asides = sorted(path.name for path in data.glob(".failed-previous-*"))
-    if old == "undeletable":
-        assert len(asides) == 1 and (data / asides[0] / "VERSION").read_text(encoding="ascii") == "1.0.2", out
-        assert "Access is denied." in out and "cmd /c rd /s /q" in out, out
-    else:
+    assert (data / ".kept-previous-20261020T000000-new").exists()
+    if old == "deletable":
         assert asides == [] and "WARN" not in out, out
+    else:
+        assert len(asides) == 1 and (data / asides[0] / "VERSION").read_text(encoding="ascii") == "1.0.2", out
+        assert ("Access is denied." if old == "undeletable" else "data held") in out and "cmd /c rd /s /q" in out, out
     swap = _ps1_function("Complete-Swap")
     assert swap.index('"SWAPPED"') < swap.index('Join-Path $Snap "COMPLETE"')
     assert "Publish-PreviousSlot $Snap" in swap and "Remove-Tree $Previous" not in swap
     resume = _text()[_text().index("$swapped = @(@((Join-Path $DataDir \"previous.new\")") :][:1500]
     assert '-or ($swapped.Count -and -not $manifest)' in resume and "Publish-PreviousSlot $slot" in resume
-    # A .failed-* folder is not data, so no later snapshot carries it.
-    assert '".failed-*"' in _text()[: _text().index("$NotData") + 200]
+    # Neither is data, so no later snapshot carries it, and the restore's
+    # sweep of .failed-* folders does not take a kept rollback copy.
+    head = _text()[: _text().index("$NotData") + 200]
+    assert '".failed-*"' in head and '".kept-previous-*"' in head
+    assert '-Filter ".failed-*"' in _ps1_function("Restore-Slot")
 
 
 def test_the_fail_mode_hold_outlasts_the_installers_own_steps() -> None:

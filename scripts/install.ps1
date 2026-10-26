@@ -129,7 +129,7 @@ $ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }
 $DeveloperFiles = @("litellm.exe", "skill-scanner.exe", "skill-scanner-api.exe",
     "skill-scanner-pre-commit.exe", "mcp-scanner.exe", "mcp-scanner-api.exe", ".defenseclaw-source-root")
 # Data-dir entries that are install machinery, not user data.
-$NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair", ".staging", ".failed-*",
+$NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair", ".staging", ".failed-*", ".kept-previous-*",
     "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done",
     ".lifecycle-txn.json", ".lifecycle-txn.json.new", ".lifecycle-closer")
 # Connectors supported on Windows (cli/defenseclaw/platform_support.py).
@@ -4238,22 +4238,40 @@ function Complete-StoppedConnectorReconcile {
     return $false
 }
 
-function Publish-PreviousSlot([string]$Slot, [switch]$KeepOld) {
-    # previous.new becomes previous\, the rollback copy. An older previous\
-    # this account cannot delete (an administrator's or SYSTEM's copy) must
-    # not leave previous.new behind: the next install took it for an
-    # unfinished one and stopped until -AcceptCurrentInstall (GAP-1860,
-    # GAP-1555). That copy is set aside whole instead, and so is one whose
-    # rolled-back data could not be kept (-KeepOld).
-    $why = "its rolled-back data could not be moved to backups"
-    if (-not $KeepOld) {
-        try { Remove-Tree $Previous; $why = "" } catch { $why = $_.Exception.Message }
+function Publish-PreviousSlot([string]$Slot) {
+    # previous.new becomes previous\, the rollback copy. The data a rollback
+    # parked in the older previous\ goes to backups\ first (Save-RolledBackData).
+    # An older previous\ this account cannot delete (an administrator's or
+    # SYSTEM's copy), or one whose parked data could not be moved, is set
+    # aside whole in .kept-previous-<time>, which no restore sweeps. One this
+    # account can neither delete nor rename (SYSTEM-owned with no entry for
+    # the user) stays, and this install's rollback copy is kept beside it
+    # instead. Either way no previous.new is left: the next install took it
+    # for an unfinished one and stopped until -AcceptCurrentInstall
+    # (GAP-1860, GAP-1555).
+    $why = ""
+    try { Save-RolledBackData } catch { $why = "its rolled-back data could not be moved to backups ($($_.Exception.Message))" }
+    if (-not $why) {
+        try { Remove-Tree $Previous } catch { $why = $_.Exception.Message }
     }
+    $stamp = Get-Date -Format "yyyyMMddTHHmmss"
     if ($why -and (Test-Path -LiteralPath $Previous)) {
-        $aside = Join-Path $DataDir (".failed-previous-" + (Get-Date -Format "yyyyMMddTHHmmss"))
-        Move-Path $Previous $aside
-        Write-Warn "The older rollback copy could not be removed ($why); it was set aside in $aside"
-        Write-Info "It is not used again; remove it when you no longer need it (as its owner or an administrator): cmd /c rd /s /q `"$aside`""
+        $aside = Join-Path $DataDir ".kept-previous-$stamp"
+        try {
+            Move-Path $Previous $aside 2
+            Write-Warn "The older rollback copy could not be removed ($why); it was set aside in $aside"
+            Write-Info "It is not used again; remove it when you no longer need it (as its owner or an administrator): cmd /c rd /s /q `"$aside`""
+        } catch {
+            $kept = Join-Path $DataDir ".kept-previous-$stamp-new"
+            # This account's own earlier copies of that kind are superseded.
+            foreach ($old in @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".kept-previous-*-new" -ErrorAction SilentlyContinue)) {
+                try { Remove-Tree $old.FullName } catch { }
+            }
+            Move-Path $Slot $kept
+            Write-Warn "The older rollback copy $Previous belongs to another account and could not be removed or set aside, so this install's rollback copy was kept in $kept"
+            Write-Info "To make it the rollback copy again, an administrator removes $Previous (cmd /c rd /s /q `"$Previous`") and you rename $kept to previous"
+            return
+        }
     }
     Move-Path $Slot $Previous
 }
@@ -4273,9 +4291,7 @@ function Complete-Swap {
     Invoke-Quietly { Remove-Tree (Join-Path $Snap "closer") }
     Invoke-Quietly {
         if ($Snap -eq (Join-Path $DataDir "previous.new") -and $PrevVersion) {
-            $kept = $true
-            try { Save-RolledBackData } catch { Write-Warn $_.Exception.Message; $kept = $false }
-            Publish-PreviousSlot $Snap -KeepOld:(-not $kept)
+            Publish-PreviousSlot $Snap
             Remove-Item -LiteralPath (Join-Path $Previous "SWAPPED") -Force -ErrorAction SilentlyContinue
         } else {
             Remove-Tree $Snap
