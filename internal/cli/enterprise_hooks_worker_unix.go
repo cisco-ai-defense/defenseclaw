@@ -79,8 +79,12 @@ const (
 	// ownership: "off" before it kept Claude Code off every route). It
 	// changes nothing unless the user's hook contract lock records such a
 	// registration.
-	enterpriseHookWorkerModeRemoveLeftover            = "remove_leftover"
-	enterpriseHookWorkerModeBlockPersonalClaude       = "block_personal_claude"
+	enterpriseHookWorkerModeRemoveLeftover      = "remove_leftover"
+	enterpriseHookWorkerModeBlockPersonalClaude = "block_personal_claude"
+	// enterpriseHookWorkerModeUnblockPersonalClaude removes the
+	// enrollment's Claude Code blocker (standalone uninstall, every
+	// account; enterprisehooks.RemovePersonalClaudeHookBlocker).
+	enterpriseHookWorkerModeUnblockPersonalClaude     = "unblock_personal_claude"
 	enterpriseHookWorkerModeRepairManagedCodexFeature = "repair_managed_codex_feature"
 	// enterpriseHookWorkerModePurge removes the user's DefenseClaw per-user
 	// state (standalone uninstall --purge). It runs after the request's
@@ -88,6 +92,17 @@ const (
 	// the backups a failed removal needs when it is retried.
 	enterpriseHookWorkerModePurge = "purge"
 )
+
+// enterpriseHookWorkerForeignCleanupModes are the target modes a
+// foreign_cleanup worker takes: every mode the guardian's foreign cleanup
+// gives an account's job (runEnterpriseHookStandaloneForeignCleanup). A mode
+// missing here refuses the whole job, its foreign-hook removals and VS Code
+// Local files included (R3-1).
+var enterpriseHookWorkerForeignCleanupModes = map[string]bool{
+	enterpriseHookWorkerModeRemoveLeftover:        true,
+	enterpriseHookWorkerModeBlockPersonalClaude:   true,
+	enterpriseHookWorkerModeUnblockPersonalClaude: true,
+}
 
 // enterpriseHookWorkerTimeout bounds one worker process.
 var enterpriseHookWorkerTimeout = 60 * time.Second
@@ -257,11 +272,11 @@ type enterpriseHookWorkerTargetResult struct {
 // enterpriseHookPurgeDetail is what uninstall --purge removed for one
 // account: its ~/.defenseclaw, its per-user binaries and launcher links in
 // ~/.local/bin, and whether it stopped a running per-user gateway first.
-// Backup says the data of the account's own per-user install was moved to a
-// ~/.defenseclaw-backup-<UTC time> folder before the purge.
+// Kept says ~/.defenseclaw holds the account's own per-user install, which
+// the purge left as it is (GAP-0727).
 type enterpriseHookPurgeDetail struct {
 	Data     bool `json:"data,omitempty"`
-	Backup   bool `json:"backup,omitempty"`
+	Kept     bool `json:"kept,omitempty"`
 	Binaries bool `json:"binaries,omitempty"`
 	Gateway  bool `json:"gateway,omitempty"`
 	UVCache  bool `json:"uv_cache,omitempty"`
@@ -421,7 +436,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		return respond(enterpriseHookWorkerDiscoverWithin(scanCtx, request), 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {
-			if target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModeBlockPersonalClaude {
+			if !enterpriseHookWorkerForeignCleanupModes[target.Mode] {
 				return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("the foreign cleanup does not take mode %q", target.Mode)}, 3)
 			}
 		}
@@ -646,6 +661,12 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		case enterpriseHookWorkerModeBlockPersonalClaude:
 			err = blockPersonalClaudeHook(opts)
 			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
+		case enterpriseHookWorkerModeUnblockPersonalClaude:
+			dataDir := strings.TrimSpace(opts.DataDir)
+			if dataDir == "" {
+				dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+			}
+			outcome.Removed, err = enterprisehooks.RemovePersonalClaudeHookBlocker(dataDir)
 		case enterpriseHookWorkerModeRepairManagedCodexFeature:
 			if !request.Standalone {
 				err = errors.New("managed Codex feature repair requires the standalone guardian")
@@ -664,7 +685,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 			var summary enterprisehooks.PurgeSummary
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
-				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Backup: summary.Backup, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache}
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache}
 			}
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)
@@ -682,7 +703,8 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 		} else {
 			outcome.OK = true
-			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModePurge {
+			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover &&
+				target.Mode != enterpriseHookWorkerModePurge && target.Mode != enterpriseHookWorkerModeUnblockPersonalClaude {
 				outcome.Result = &result
 				outcome.AgentConfig = result.AgentConfig
 			}
@@ -813,11 +835,10 @@ func blockPersonalClaudeHook(opts enterprisehooks.InstallOptions) error {
 	if !bytes.Contains(body[:min(len(body), 160)], []byte("# defenseclaw-managed-hook v")) {
 		return fmt.Errorf("personal Claude Code hook %s is not DefenseClaw-owned", path)
 	}
-	const blocked = "#!/bin/sh\n# defenseclaw-managed-hook v0\necho 'defenseclaw: this computer is managed; the personal Claude Code hook cannot approve this call' >&2\nexit 2\n"
-	if string(body) == blocked {
+	if string(body) == enterprisehooks.PersonalClaudeHookBlocker {
 		return nil
 	}
-	return configwrite.WriteFileDurable(path, []byte(blocked), 0o700)
+	return configwrite.WriteFileDurable(path, []byte(enterprisehooks.PersonalClaudeHookBlocker), 0o700)
 }
 
 // enterpriseHookWorkerRemoveSetup resolves the same SetupOpts as

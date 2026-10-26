@@ -1109,6 +1109,16 @@ func standaloneRulePackDefaultWithExists(cfg *Config, dataDir, goos string, exis
 		// for the lifecycle to refuse (it is inside data_dir).
 		return
 	}
+	if strings.TrimSpace(cfg.Guardrail.RulePack) != "" {
+		// guardrail.rule_pack names the pack, so the implicit rule_pack_dir
+		// loads nothing, but it is part of the config and guardrail policy
+		// digests. A standard account cannot stat the root-only policy_dir
+		// pack, kept it, and computed another digest than root for the same
+		// signed bundle (GAP-1003). It no longer depends on what the caller
+		// may read.
+		cfg.Guardrail.RulePackDir = path.Join(layout.VendorPolicyDir, "guardrail", "default")
+		return
+	}
 	if policyPack != "" {
 		// Only a folder known to be absent falls back: any other stat
 		// error keeps the policy_dir pack, which the trust checks report.
@@ -1755,20 +1765,133 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 		}
 		return nil
 	}
-	// The Rego modules in policy_dir are enforcement policy too, so the
-	// whole tree is checked, not only the folder (GAP-1499).
-	if err := check("policy_dir", cfg.PolicyDir, managed.ValidateTrustedServiceRuntimeTree); err != nil {
-		return err
-	}
 	// Every pack the gateway can load: the v9 rule_pack and custom_packs
 	// selections, profile packs and the v8 rule_pack_dir alike.
 	dirs := cfg.ReferencedRulePackDirs()
+	// The Rego modules in policy_dir are enforcement policy too, so the
+	// whole tree is checked, not only the folder (GAP-1499), except the
+	// rule pack folders under <policy_dir>/guardrail that no setting names:
+	// the gateway never loads them, and one a standard user could write
+	// failed every admin command and the gateway's reload (GAP-1694).
+	var referenced []string
+	for _, dir := range dirs {
+		if dir = strings.TrimSpace(dir); dir != "" {
+			referenced = append(referenced, filepath.Clean(dir))
+		}
+	}
+	policyTree := func(root, label, serviceAccount string) error {
+		return validatePolicyTree(root, label, serviceAccount, referenced, managedPolicyTreeChecks)
+	}
+	if err := check("policy_dir", cfg.PolicyDir, policyTree); err != nil {
+		return err
+	}
 	for _, label := range RulePackCheckOrder(dirs) {
 		if err := check(label, dirs[label], managed.ValidateTrustedServiceRuntimeDir); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// policyTreeChecks are the trust checks of validatePolicyTree: a folder
+// alone, a folder with everything below it, and a file.
+type policyTreeChecks struct {
+	dir, tree, file func(path, label, serviceAccount string) error
+}
+
+// managedPolicyTreeChecks are the checks of a managed standalone policy_dir
+// tree (a test replaces them: the real ones need root-owned folders).
+var managedPolicyTreeChecks = policyTreeChecks{
+	dir: managed.ValidateTrustedServiceRuntimeDir, tree: managed.ValidateTrustedServiceRuntimeTree, file: managed.ValidateTrustedServiceRuntimeFilePath,
+}
+
+// ValidateManagedPolicyDir is the trust check of a managed standalone
+// policy_dir: dir and everything below it, except the rule pack folders
+// under <dir>/guardrail that no setting of cfg names. The config validation
+// and the gateway's policy build both use it, so a folder the CLI accepts
+// is one the gateway loads: the gateway kept its own whole-tree check and
+// refused to start on an unreferenced 0777 folder the CLI accepted
+// (GAP-1694).
+func ValidateManagedPolicyDir(cfg *Config, dir, serviceAccount string) error {
+	var referenced []string
+	for _, pack := range cfg.ReferencedRulePackDirs() {
+		if pack = strings.TrimSpace(pack); pack != "" {
+			referenced = append(referenced, filepath.Clean(pack))
+		}
+	}
+	return validatePolicyTree(dir, "policy_dir", serviceAccount, referenced, managedPolicyTreeChecks)
+}
+
+// validatePolicyTree checks root and everything below it, except the
+// folders directly under <root>/guardrail that hold none of the referenced
+// rule pack directories.
+func validatePolicyTree(root, label, serviceAccount string, referenced []string, checks policyTreeChecks) error {
+	if err := checks.dir(root, label, serviceAccount); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		if !entry.IsDir() {
+			if err := checks.file(path, label, serviceAccount); err != nil {
+				return err
+			}
+			continue
+		}
+		if entry.Name() != "guardrail" {
+			if err := checks.tree(path, label, serviceAccount); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := checks.dir(path, label, serviceAccount); err != nil {
+			return err
+		}
+		packs, err := os.ReadDir(path)
+		if err != nil {
+			return err
+		}
+		for _, pack := range packs {
+			packPath := filepath.Join(path, pack.Name())
+			switch {
+			case !pack.IsDir():
+				err = checks.file(packPath, label, serviceAccount)
+			case PathHoldsAny(packPath, referenced):
+				err = checks.tree(packPath, label, serviceAccount)
+			}
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// PathHoldsAny reports whether dir is one of paths or a folder above one.
+// On macOS and Windows, whose volumes ignore case, a path spelled with
+// another case names the same folder: a referenced pack "guardrail/Strict"
+// is the folder "strict", which must keep its full check (GAP-1802).
+func PathHoldsAny(dir string, paths []string) bool {
+	return pathHoldsAny(runtime.GOOS, dir, paths)
+}
+
+func pathHoldsAny(goos, dir string, paths []string) bool {
+	fold := goos == "darwin" || goos == "windows"
+	if fold {
+		dir = strings.ToLower(dir)
+	}
+	for _, p := range paths {
+		if fold {
+			p = strings.ToLower(p)
+		}
+		if p == dir || strings.HasPrefix(p, dir+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 func oneOf(name, value string, allowed ...string) error {

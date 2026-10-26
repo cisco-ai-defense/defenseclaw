@@ -69,7 +69,7 @@ def test_macos_detection_documents_busy_and_unknown() -> None:
     mdm = page("enterprise/mdm/index.mdx")
     assert "`unknown` (not run as root) or `busy`" in mdm
     assert "`busy`" in page("enterprise/mdm/jamf.mdx")
-    assert "about 92 KB" in page("enterprise/mdm/intune-macos.mdx")
+    assert "about 109 KB" in page("enterprise/mdm/intune-macos.mdx")
 
 
 def test_configmgr_config_change_checks_the_config_hash() -> None:

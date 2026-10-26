@@ -20,7 +20,8 @@ import (
 // transaction fails and puts that unconfirmed predecessor back, the receipt
 // records no rollback (rolled_back means the last good bundle enforces
 // again), the predecessor stays applied and installed and is reported as
-// such, and a retry of it confirms it.
+// such, and the next plain ensure confirms it from the live gateway without
+// a redelivery (GAP-1186).
 func TestAFailedHigherDeliveryOverAPendingBundleIsNotARollback(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
@@ -62,14 +63,66 @@ func TestAFailedHigherDeliveryOverAPendingBundleIsNotARollback(t *testing.T) {
 			if !messagesContain(r.Warnings, bundleID(3)) {
 				t.Fatalf("the restored predecessor was not reported: %+v", r.Warnings)
 			}
-			// The rollback renumbered the config generation, so the pending
-			// receipt no longer proves its commit by itself; a retry of the
-			// same signed bundle goes ahead and confirms it.
+			// The rollback records the restored bytes under a new
+			// generation (the counter never goes back) and the pending
+			// receipt follows it, so it still proves its commit (GAP-1186).
 			b.env.bundleFault = nil
 			b.healthy = true
-			requireOK(t, b.apply(pathB))
-			if b.state().Current.BundleID != bundleID(3) || b.read(b.env.Layout.ConfigPath) != pendingConfig {
-				t.Fatalf("the retried pending bundle was not confirmed: state=%+v", b.state())
+			requireOK(t, b.run(Options{Action: ActionEnsure}))
+			if got := b.receipt(bundleID(3)); got.State != enterprisebundle.StateConfirmed || b.state().Current.BundleID != bundleID(3) ||
+				b.read(b.env.Layout.ConfigPath) != pendingConfig {
+				t.Fatalf("the pending bundle was not confirmed by the next ensure: receipt=%+v state=%+v", got, b.state())
+			}
+		})
+	}
+}
+
+// GAP-1803 (review RB1-4), the killed variant of GAP-1186: a higher
+// delivery killed after its config write over a committed, unconfirmed
+// bundle is rolled back by the next run's recovery to that bundle's bytes,
+// and that same plain ensure confirms the bundle without a redelivery. This
+// already holds without a rebind: the recovery puts the snapshot's
+// generation record back with the bytes, so the pending receipt's
+// generation still names them.
+func TestAKilledHigherDeliveryOverAPendingBundleKeepsItProvable(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			v1, v2, restart := bundleConfigs(b.testHost)
+			requireOK(t, b.apply(b.dir(1, v1)))
+			b.env.bundleFault = func(phase string) error {
+				if phase == enterprisebundle.StateApplied {
+					b.healthy = false
+				}
+				return nil
+			}
+			requireError(t, b.apply(b.dir(3, v2)), codeBundleNotConfirmed)
+			pendingConfig := b.read(b.env.Layout.ConfigPath)
+			if got := b.receipt(bundleID(3)); got.State != enterprisebundle.StateApplied {
+				t.Fatalf("setup: receipt = %+v", got)
+			}
+			b.healthy = true
+			b.env.bundleFault = func(phase string) error {
+				if phase == "transaction" {
+					panic("killed after the config write")
+				}
+				return nil
+			}
+			func() {
+				defer func() { _ = recover() }()
+				b.apply(b.dir(4, restart))
+			}()
+			b.env.bundleFault = nil
+			r := b.run(Options{Action: ActionEnsure})
+			requireOK(t, r)
+			if b.read(b.env.Layout.ConfigPath) != pendingConfig {
+				t.Fatal("the recovery did not put the pending bundle's config back")
+			}
+			if got := b.receipt(bundleID(3)); got.State != enterprisebundle.StateConfirmed || b.state().Current.BundleID != bundleID(3) {
+				t.Fatalf("the pending bundle was not confirmed after the recovery: receipt=%+v state=%+v warnings=%+v", got, b.state(), r.Warnings)
+			}
+			if got := b.receipt(bundleID(4)); got.State != enterprisebundle.StateFailed || got.RolledBack {
+				t.Fatalf("killed delivery = %+v, want failed without a rollback claim", got)
 			}
 		})
 	}

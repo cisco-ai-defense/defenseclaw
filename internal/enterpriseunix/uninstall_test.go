@@ -871,6 +871,9 @@ func TestRefusedUninstallLoadsASpawnScheduledJobAgain(t *testing.T) {
 	}
 }
 
+// GAP-0184: a refused macOS uninstall starts the services it stopped again
+// and waits for the gateway it restored as the deployment's service account,
+// not uid 0: it returns without the 90 s readiness timeout.
 func TestRefusedMacUninstallChecksRestoredGatewayAsServiceAccount(t *testing.T) {
 	h := newTestHost(t, "darwin")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))

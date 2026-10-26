@@ -55,11 +55,11 @@ type enterpriseSecretOptions struct {
 	// bundle is confirmed). undoRotation (set|remove --undo-rotation) puts
 	// back a credential a rotation changed, only while the bundle confirmed
 	// before that rotation still is and does not sign the value stored now
-	// (checkSecretTransaction). The Windows MDM wrapper journals the
-	// confirmed bundle before a rotation and passes it to both; a 1.0.4
+	// (checkSecretTransaction). The MDM wrappers journal the
+	// confirmed bundle before a rotation and pass it to both; a 1.0.4
 	// build reporting secret_set_bundle takes them. undoConfig (remove
 	// --undo-rotation --undo-config) is the SHA-256 of the installed config
-	// the wrapper journaled before the rotation: on Windows the put-back
+	// the wrapper journaled before the rotation: the put-back
 	// takes a credential the installed config references only while that
 	// very config is installed (undoRotationOnConfig).
 	ifConfirmed  string
@@ -263,7 +263,7 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		}
 		addLockWaitFlag(flags, &opts.lockWait)
 	case "uninstall":
-		flags.BoolVar(&opts.purge, "purge", false, "also remove each enrolled account's ~/.defenseclaw, the empty agent folders DefenseClaw created in its home, its per-user binaries in ~/.local/bin and DefenseClaw's entries in its uv cache ~/.cache/uv (after stopping its per-user gateway); an account's own DefenseClaw install from before the enrollment is moved to ~/.defenseclaw-backup-<UTC time> in its home first; the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled have no DefenseClaw per-user data and are not listed")
+		flags.BoolVar(&opts.purge, "purge", false, "also remove each enrolled account's ~/.defenseclaw, the empty agent folders DefenseClaw created in its home, its per-user binaries in ~/.local/bin and DefenseClaw's entries in its uv cache ~/.cache/uv (after stopping its per-user gateway); an account's own DefenseClaw install from before the enrollment is kept as it is (a machine uninstall never deletes or moves an account's own data); the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled keep their DefenseClaw files, and the result names each one that has any")
 		flags.BoolVar(&opts.keepState, "keep-state", false, unixKeepStateUsage(platform))
 		flags.BoolVar(&opts.keepServiceAccount, "keep-service-account", false, "keep the gateway service account, which uninstall deletes otherwise")
 		addLockWaitFlag(flags, &opts.lockWait)
@@ -340,7 +340,7 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 		cmd.Flags().StringVar(&opts.ifStored, "if-stored", "", usage)
 	}
 	if action == "remove" {
-		cmd.Flags().StringVar(&opts.undoConfig, "undo-config", "", "with --undo-rotation (Windows): the SHA-256 of the installed config before the rotation (none: no config); only while that config is still installed does remove take a credential it references, else credential_in_use and nothing is removed")
+		cmd.Flags().StringVar(&opts.undoConfig, "undo-config", "", "with --undo-rotation: the SHA-256 of the installed config before the rotation (none: no config); only while that config is still installed does remove take a credential it references, else credential_in_use and nothing is removed")
 	}
 	if action != "status" {
 		addLockWaitFlag(cmd.Flags(), &opts.lockWait)

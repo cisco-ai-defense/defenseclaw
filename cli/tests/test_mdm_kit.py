@@ -266,13 +266,16 @@ def test_unix_wrapper_stores_a_credential_with_the_bundle_it_delivers(tmp_path: 
         f'DC_ACTION=ensure DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"}\n'
         f'DC_STAGE="{tmp_path}" DC_LOG="" DC_FORMAT=json DC_EXIT_FAILURE=1\n'
         f"DC_SECRET_NAME=test-key secret_data=placeholder bundle='{bundle}'\n"
-        f'{functions}\ndc_store_secret "{gateway}"\n'
+        f'{functions}\n'
+        # The rotation journal (tested below) names the bundle confirmed now.
+        'dc_save_secret_previous() { DC_SECRET_CONFIRMED=none; }\n'
+        f'dc_store_secret "{gateway}"\n'
     )
     result = subprocess.run(["sh", "-c", script], env={"PATH": os.environ["PATH"]}, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
     want = "enterprise secret set --name test-key --from-stdin --lock-wait 10m --json"
     if bundle and binds:
-        want += f" --bundle {bundle}"
+        want += f" --bundle {bundle} --if-confirmed none"
     assert log.read_text(encoding="utf-8").splitlines() == [want]
 
 
@@ -1133,14 +1136,24 @@ def test_windows_wrapper_every_exit_after_the_rotation_settles_it() -> None:
 # GAP-1095: the Linux and macOS kit also stores a credential with the bundle
 # it came with (secret set --bundle) before ensure and bundle apply. A failed
 # or interrupted run left the new value with the still-confirmed bundle.
-# The kit now keeps the old value in memory and puts it back (secret set, or
-# secret remove when none was stored) on every exit but a successful bundle
-# apply; the gateway decides, as on Windows. The fake gateway has its rules.
+# The kit puts the old value back (secret set, or secret remove when none was
+# stored) on every exit but a successful bundle apply; the gateway decides,
+# as on Windows. GAP-1173, GAP-1188: what the rotation replaced is journaled
+# on disk, so a killed run is put back by the next ensure, and only the
+# refusal rotation_confirmed (the bundle confirmed since signs the stored
+# value) retires the entry; any other refusal keeps it. The fake gateway has
+# its rules.
 _FAKE_SECRET_GATEWAY = r"""#!/bin/sh
 printf '%s\n' "$*" >>"$FAKE/calls"
 if [ "$1" = --version-json ]; then echo '{"secret_set_bundle":true}'; exit 0; fi
+if [ "$2 $3" = "bundle status" ]; then echo '{"schema_version":1,"ok":true,"current":null,"errors":[]}'; exit 0; fi
 store="$SECRETS/$5"
 refuse() { printf '{"schema_version":2,"ok":false,"errors":[{"code":"%s","message":"%s refused"}]}\n' "$1" "$1"; exit 1; }
+case " $* " in
+*" --undo-rotation "*)
+    [ ! -f "$FAKE/refuse_undo" ] || refuse "$(cat "$FAKE/refuse_undo")"
+    if [ -f "$store" ] && [ -f "$FAKE/confirmed" ] && [ "$(cat "$store")" = "$(cat "$FAKE/confirmed")" ]; then refuse rotation_confirmed; fi ;;
+esac
 expect="" next=0
 for arg do
     if [ "$next" = 1 ]; then expect=$arg; break; fi
@@ -1176,7 +1189,12 @@ exit 2
 
 _SECRET_ROTATION_FUNCTIONS = ("dc_sha256", "dc_secret_json_error", "dc_secret_set_bundle", "dc_read_stored_secret",
                               "dc_save_secret_previous", "dc_restore_secret", "dc_store_secret",
-                              "dc_restore_anchors", "dc_cleanup")
+                              "dc_restore_anchors", "dc_cleanup", "dc_confirmed_bundle", "dc_journal_rotation",
+                              "dc_retire_rotation", "dc_journal_field", "dc_secret_json_code", "dc_settle_rotation",
+                              "dc_resume_rotation", "dc_rotation_lock", "dc_rotation_unlock")
+
+# The journal folder of a test run is not root's: only its location is real.
+_TEST_JOURNAL_READY = 'dc_journal_ready() { mkdir -p "$DC_JOURNAL_DIR"; }\n'
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
@@ -1190,8 +1208,13 @@ _SECRET_ROTATION_FUNCTIONS = ("dc_sha256", "dc_secret_json_error", "dc_secret_se
         ("cancelled", "old-key", "old-key", "new-key", False, "kill -TERM $$; sleep 5", "old-key", "set"),
         # The bundle apply succeeded: the new value stays, nothing is put back.
         ("applied", "old-key", "old-key", "new-key", False, "applied", "new-key", ""),
-        # The run failed after the new bundle was confirmed: the gateway refuses the old value.
+        # The run failed after the new bundle was confirmed: the gateway refuses the put-back
+        # (rotation_confirmed), the only proof that the rotation committed.
         ("confirmed", "old-key", "old-key", "new-key", False, "echo new-key >\"$FAKE/confirmed\"; exit 1", "new-key", "set"),
+        # GAP-1188: a put-back refused for any other reason (secret_ref_mismatch) proves
+        # nothing: the value stays as it is and so does the journal entry.
+        ("refused-put-back", "old-key", "old-key", "new-key", False,
+         'echo secret_ref_mismatch >"$FAKE/refuse_undo"; exit 1', "new-key", "set"),
         # An administrator's direct save after rotation must survive cleanup.
         ("admin-changed", "old-key", "old-key", "new-key", False,
          'printf "admin-new-key\\n" >"$DC_SECRETS_DIR/ai-key"; exit 1', "admin-new-key", "set"),
@@ -1222,14 +1245,19 @@ def test_unix_wrapper_puts_back_a_rotated_credential_unless_its_bundle_applies(
     (fake / "delivered").write_text(delivered, encoding="utf-8")
     if in_use:
         (fake / "in_use").write_text("", encoding="utf-8")
-    after = 'DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS=""; exit 0' if then == "applied" else then
+    after = ('dc_retire_rotation "$DC_SECRET_NAME"; DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS=""; exit 0'
+             if then == "applied" else then)
+    journal = tmp_path / "journal"
     script = f"""set -eu
 DC_ACTION=ensure DC_STAGE="{stage}" DC_LOG="{tmp_path / 'kit.log'}" DC_EXIT_FAILURE=1 DC_MAX_SECRET_BYTES=16384
 DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"} DC_SECRETS_DIR="{secrets}" DC_SECRET_NAME=ai-key DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS="" DC_SECRET_PREVIOUS_SET=0
 DC_SECRET_GATEWAY="" DC_CHILD="" DC_ANCHORS_SOURCE="" DC_ANCHORS_CHANGED=0
+DC_JOURNAL_DIR="{journal}" DC_INSTALLED_CONFIG="{tmp_path / 'config.yaml'}" DC_SECRET_CONFIRMED=""
+DC_ROTATION_LOCK_PID="" DC_GATEWAY_BEFORE=1 DC_EXIT_BUSY=75
 dc_log() {{ printf '%s\\n' "$1" >>"$DC_LOG"; }}
 dc_fail_result() {{ echo "fail $1 $2 $3"; exit "$1"; }}
 {functions}
+{_TEST_JOURNAL_READY}
 trap dc_cleanup EXIT
 trap 'dc_fail_result 1 mdm_cancelled cancelled' HUP INT TERM
 bundle="{tmp_path / 'policy.dcbundle'}" secret_data=new-key
@@ -1252,11 +1280,69 @@ echo "rotated=$(cat "$DC_SECRETS_DIR/ai-key")"
     secret = secrets / "ai-key"
     assert (secret.read_text(encoding="utf-8").strip() if secret.exists() else None) == stored, out
     assert not stage.exists(), "the stage is removed after the put-back"
-    if case in ("confirmed", "absent-in-use", "admin-changed"):
+    kept = case in ("absent-in-use", "admin-changed", "refused-put-back")
+    assert (journal / "ai-key.entry").exists() == kept, (case, out)
+    if case == "refused":
+        assert rotations[0].endswith("--if-confirmed none"), rotations
+    else:
+        assert all("--undo-rotation none" in call for call in calls if call.startswith("enterprise secret") and " --bundle " not in call)
+    if case == "confirmed":
+        assert "kept credential ai-key" in (tmp_path / "kit.log").read_text(encoding="utf-8")
+    if kept:
         log = (tmp_path / "kit.log").read_text(encoding="utf-8")
         assert "did not put back credential ai-key" in log and "stored value was left unchanged" in log
-        if case == "admin-changed":
-            assert "credential_changed" in log
+        assert "journal entry" in log and "stays for the next ensure" in log
+        code = {"admin-changed": "credential_changed", "absent-in-use": "credential_in_use", "refused-put-back": "secret_ref_mismatch"}[case]
+        assert code in log
+
+
+# GAP-1173: a run killed after the rotation (no EXIT trap runs) leaves the
+# journal entry; the next ensure puts the credential back before it changes
+# anything, with the value or absence the journal recorded.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("previous", ["old-key", None])
+def test_unix_wrapper_next_ensure_puts_back_a_killed_rotation(tmp_path: Path, os_dir: str, previous: str | None) -> None:
+    wrapper = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in _SECRET_ROTATION_FUNCTIONS)
+    fake, secrets, journal = tmp_path / "fake", tmp_path / "secrets", tmp_path / "journal"
+    for folder in (fake, secrets):
+        folder.mkdir()
+    gateway = tmp_path / "gateway"
+    gateway.write_text(_FAKE_SECRET_GATEWAY, encoding="utf-8")
+    gateway.chmod(0o755)
+    if previous is not None:
+        (secrets / "ai-key").write_text(previous + "\n", encoding="utf-8")
+        (fake / "confirmed").write_text(previous, encoding="utf-8")
+    (fake / "delivered").write_text("new-key", encoding="utf-8")
+    common = f"""set -eu
+DC_ACTION=ensure DC_LOG="{tmp_path / 'kit.log'}" DC_EXIT_FAILURE=1 DC_MAX_SECRET_BYTES=16384
+DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"} DC_SECRETS_DIR="{secrets}" DC_SECRET_NAME=ai-key DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS="" DC_SECRET_PREVIOUS_SET=0
+DC_SECRET_GATEWAY="" DC_CHILD="" DC_ANCHORS_SOURCE="" DC_ANCHORS_CHANGED=0 DC_GATEWAY="{gateway}"
+DC_JOURNAL_DIR="{journal}" DC_INSTALLED_CONFIG="{tmp_path / 'config.yaml'}" DC_SECRET_CONFIRMED=""
+DC_ROTATION_LOCK_PID="" DC_GATEWAY_BEFORE=1 DC_EXIT_BUSY=75
+dc_log() {{ printf '%s\\n' "$1" >>"$DC_LOG"; }}
+dc_fail_result() {{ echo "fail $1 $2 $3"; exit "$1"; }}
+{functions}
+{_TEST_JOURNAL_READY}
+dc_trusted_path() {{ [ -x "$1" ]; }}
+"""
+    env = {"PATH": os.environ["PATH"], "FAKE": str(fake), "SECRETS": str(secrets)}
+    stage1, stage2 = tmp_path / "stage1", tmp_path / "stage2"
+    stage1.mkdir()
+    killed = subprocess.run(["sh", "-c", common + f'DC_STAGE="{stage1}"\nbundle="{tmp_path / "policy.dcbundle"}" secret_data=new-key\n'
+                             f'dc_store_secret "{gateway}"\nkill -KILL $$\n'],
+                            env=env, capture_output=True, text=True, timeout=30)
+    assert killed.returncode != 0
+    assert (secrets / "ai-key").read_text(encoding="utf-8").strip() == "new-key"
+    assert (journal / "ai-key.entry").exists(), "the killed run left no journal entry"
+    stage2.mkdir()
+    resumed = subprocess.run(["sh", "-c", common + f'DC_STAGE="{stage2}"\ndc_resume_rotation\necho resumed\n'],
+                             env=env, capture_output=True, text=True, timeout=30)
+    assert "resumed" in resumed.stdout, resumed.stdout + resumed.stderr
+    secret = secrets / "ai-key"
+    assert (secret.read_text(encoding="utf-8").strip() if secret.exists() else None) == previous
+    assert not (journal / "ai-key.entry").exists() and not (journal / "ai-key.value").exists()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
@@ -1298,14 +1384,18 @@ def test_unix_wrapper_settles_the_rotated_credential_with_the_bundle_apply() -> 
         text = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
         main = _shell_function(text, "dc_main")
         apply = main.index('bundle apply --bundle "$bundle" --reason mdm --lock-wait 10m')
-        success = main.index('DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS=""', apply)
+        success = main.index("DC_SECRET_ROTATED=0", apply)
         failure = main.index("dc_restore_secret || true", success)
         assert main.index('if [ "$status" = 0 ]; then', apply) < success < main.index("else", success) < failure
         assert main.count("DC_SECRET_ROTATED=0") == 1
         cleanup = _shell_function(text, "dc_cleanup")
         assert cleanup.index("dc_restore_secret || true") < cleanup.index('rm -rf "$DC_STAGE"')
         store = _shell_function(text, "dc_store_secret")
-        assert store.index('set -- --bundle "$bundle"') < store.index('dc_save_secret_previous "$gateway"') < store.index("enterprise secret set")
+        assert store.index('dc_save_secret_previous "$gateway"') < store.index('set -- --bundle "$bundle" --if-confirmed "$DC_SECRET_CONFIRMED"') < store.index("enterprise secret set")
+        # A killed run's rotation is settled before the ensure stores a
+        # credential or applies a config, after the package it delivers.
+        assert main.index("dc_install_package") < main.index("dc_resume_rotation") < main.index('dc_store_secret "$gateway"')
+        assert main.count("dc_resume_rotation") == 1
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
@@ -3622,7 +3712,7 @@ def test_standalone_installer_binds_native_output_to_the_process_deadline() -> N
         ("1", "linux", "0", "", True),
         ("1", "linux", "0", "defenseclaw-mdm.abc123", False),
         ("0", "linux", "0", "", False),
-        ("1", "darwin", "0", "", False),
+        ("1", "darwin", "0", "", True),
         ("1", "linux", "501", "", False),
         ("1", "linux", "0", "symlink", False),
     ],
@@ -3641,7 +3731,7 @@ def test_unix_uninstall_purge_removes_the_empty_staging_folder(
             (parent / content).mkdir()
     script = f"""DC_PURGE={purge}
 DC_SCRIPT_OS={platform}
-DC_LINUX_STAGE_PARENT="{parent}"
+DC_KIT_STATE="{parent}"
 dc_log() {{ :; }}
 dc_stat_uid() {{ echo {owner}; }}
 {function}
@@ -3657,5 +3747,322 @@ dc_remove_stage_parent
 def test_unix_uninstall_removes_the_staging_folder_after_the_package_and_without_a_gateway() -> None:
     text = _text(MDM / "linux" / "uninstall.sh")
     assert text.count("\ndc_remove_stage_parent\n") + text.count("    dc_remove_stage_parent\n") == 2
-    assert 'DC_LINUX_STAGE_PARENT=/var/lib/defenseclaw-mdm' in text
+    # The journal goes first, so the purge finds the state folder empty.
+    assert text.count("dc_remove_rotation_journal\n    dc_remove_stage_parent\n") == 1
+    assert text.count("\ndc_remove_rotation_journal\ndc_remove_stage_parent\n") == 1
+    assert 'DC_KIT_STATE=/var/lib/defenseclaw-mdm' in text
+    assert "DC_KIT_STATE=/var/db/defenseclaw-mdm" in text
     assert "DC_STAGE_PARENT=/var/lib/defenseclaw-mdm" in _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+
+
+_OLD_GATEWAY = r"""#!/bin/sh
+printf '%s %s\n' "$(basename "$(dirname "$0")")" "$*" >>"$FAKE/calls"
+case "$*" in
+"enterprise secret remove"*)
+    if [ "$(basename "$(dirname "$0")")" = old ]; then
+        echo '{"schema_version":2,"ok":false,"errors":[{"code":"secret_change_failed","message":"the installed config still references credential ai-key"}]}'
+        exit 1
+    fi
+    rm -f "$SECRETS/ai-key"
+    echo '{"schema_version":2,"ok":true,"errors":[]}'
+    exit 0 ;;
+esac
+exit 0
+"""
+
+
+# R105 mgmt refix 1 (review R1-1): a 1.0.4 gateway ignores --undo-config on
+# Unix and refuses to remove a credential its installed config references,
+# so it cannot settle a rotation that added one. The ensure that delivers the
+# newer package or payload settles it with the gateway it brings, then goes
+# on; without a source the ensure stops and names that route.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("channel", ["package", "payload", "none"])
+def test_unix_wrapper_settles_a_rotation_with_the_gateway_it_delivers(tmp_path: Path, os_dir: str, channel: str) -> None:
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh").rstrip()
+    entry = '\ndc_main "$@"'
+    assert text.endswith(entry)
+    fake, secrets, journal, stage_parent = (tmp_path / name for name in ("fake", "secrets", "journal", "stage"))
+    for folder in (fake, secrets, journal, stage_parent):
+        folder.mkdir()
+    for name in ("old", "new"):
+        (tmp_path / name).mkdir()
+        gateway = tmp_path / name / "defenseclaw-gateway"
+        gateway.write_text(_OLD_GATEWAY, encoding="utf-8")
+        gateway.chmod(0o755)
+    installed = tmp_path / "bin"
+    installed.mkdir()
+    shutil.copy(tmp_path / "old" / "defenseclaw-gateway", installed / "defenseclaw-gateway")
+    # The installed gateway reports itself by folder name: "bin" is the 1.0.4 one until a package replaces it.
+    (installed / "defenseclaw-gateway").write_text(_OLD_GATEWAY.replace('"$(basename "$(dirname "$0")")"', '"$(cat "$FAKE/installed")"'), encoding="utf-8")
+    (fake / "installed").write_text("old", encoding="utf-8")
+    (secrets / "ai-key").write_text("new-key", encoding="utf-8")
+    rotated = hashlib.sha256(b"new-key").hexdigest()
+    (journal / "ai-key.entry").write_text(f"confirmed=none\nrotated={rotated}\nprevious=absent\nconfig={'c' * 64}\n", encoding="utf-8")
+    install = {
+        "package": 'printf new >"$FAKE/installed"; DC_CHANNEL_FLAG=--from-package',
+        "payload": f"DC_PAYLOAD_GATEWAY='{tmp_path / 'new' / 'defenseclaw-gateway'}'; DC_CHANNEL_FLAG=--payload='{tmp_path / 'new'}'",
+        "none": "echo unexpected; exit 9",
+    }[channel]
+    source = "" if channel == "none" else str(tmp_path / "source")
+    overrides = f"""
+dc_layout() {{
+    DC_GATEWAY='{installed / 'defenseclaw-gateway'}'
+    DC_SECRETS_DIR='{secrets}' DC_JOURNAL_DIR='{journal}' DC_INSTALLED_CONFIG='{tmp_path / 'config.yaml'}'
+    DC_ANCHORS='{tmp_path / 'anchors.json'}' DC_PACKAGE_RESULT='{tmp_path / 'package-result.json'}'
+    DC_OS_GROUP=linux DC_LOG='{tmp_path / 'kit.log'}'
+}}
+dc_parse_args() {{ DC_SOURCE='{source}'; }}
+dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
+dc_validate_args() {{ :; }}
+id() {{ echo 0; }}
+dc_stage_parent() {{ DC_STAGE_PARENT='{stage_parent}'; }}
+dc_sweep_stages() {{ :; }}
+dc_stat_uid() {{ echo 0; }}
+dc_stage_source() {{ :; }}
+dc_install_package() {{ {install}; }}
+dc_trusted_path() {{ [ -x "$1" ]; }}
+dc_journal_ready() {{ [ -d "$DC_JOURNAL_DIR" ]; }}
+dc_binaries_damaged() {{ return 1; }}
+dc_run_lifecycle_retry() {{ printf 'lifecycle %s\\n' "$*" >>"$FAKE/calls"; return 0; }}
+dc_annotate_package_step() {{ :; }}
+dc_emit_result() {{ echo emitted; }}
+dc_main
+"""
+    env = {"PATH": "/usr/bin:/bin", "FAKE": str(fake), "SECRETS": str(secrets)}
+    result = subprocess.run(["sh", "-c", text[: -len(entry)] + "\n" + overrides], env=env, capture_output=True, text=True, timeout=30)
+    out = result.stdout + result.stderr
+    calls = (fake / "calls").read_text(encoding="utf-8").splitlines() if (fake / "calls").exists() else []
+    removes = [call.split()[0] for call in calls if " enterprise secret remove " in f" {call} "]
+    if channel == "none":
+        assert result.returncode == 1 and "mdm_secret_failed" in out, out
+        assert "deliver the package with --source" in out, out
+        assert removes == ["old"], calls
+        assert (journal / "ai-key.entry").exists() and (secrets / "ai-key").exists()
+        assert not any(call.startswith("lifecycle ") for call in calls), calls
+        return
+    assert result.returncode == 0 and "emitted" in out, (out, calls)
+    assert removes == ["new"], calls
+    assert not (journal / "ai-key.entry").exists() and not (secrets / "ai-key").exists(), out
+    lifecycle = [call for call in calls if call.startswith("lifecycle ")]
+    assert len(lifecycle) == 1 and " ensure " in lifecycle[0], calls
+
+
+# R105 mgmt refix 1 (review R1-2): every completed uninstall removes the
+# wrapper's credential rotation journal, overwriting each earlier credential
+# value it holds before removing it, so a purge also finds the state folder
+# empty and removes it (#1298 kept). A journal that is a link or not root's
+# own folder is left as it is.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("case", ["journal", "link", "foreign"])
+def test_unix_uninstall_removes_the_rotation_journal(tmp_path: Path, os_dir: str, case: str) -> None:
+    text = _text(MDM / os_dir / "uninstall.sh")
+    functions = "\n".join(_shell_function(text, name) for name in ("dc_remove_rotation_journal", "dc_remove_stage_parent"))
+    state = tmp_path / "defenseclaw-mdm"
+    state.mkdir(mode=0o700)
+    journal = state / "rotation"
+    target = journal if case != "link" else tmp_path / "elsewhere"
+    target.mkdir(mode=0o700)
+    if case == "link":
+        journal.symlink_to(target)
+    (target / "ai-key.value").write_text("old-secret-value\n", encoding="utf-8")
+    (target / "ai-key.entry").write_text("confirmed=none\n", encoding="utf-8")
+    copy = tmp_path / "copy-of-value"
+    os.link(target / "ai-key.value", copy)
+    owner = "501" if case == "foreign" else "0"
+    script = f"""set -eu
+DC_PURGE=1 DC_KIT_STATE="{state}" DC_LOG=""
+dc_log() {{ printf '%s\\n' "$1"; }}
+dc_stat_uid() {{ echo {owner}; }}
+{functions}
+dc_remove_rotation_journal
+dc_remove_stage_parent
+"""
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    if case == "journal":
+        assert not os.path.lexists(state), result.stdout
+        assert copy.read_bytes() == b"\0" * len("old-secret-value\n"), "the earlier credential value was not overwritten"
+    else:
+        assert "left " in result.stdout and "not a root-owned folder" in result.stdout, result.stdout
+        assert (target / "ai-key.value").read_text(encoding="utf-8") == "old-secret-value\n"
+        assert os.path.lexists(journal)
+
+
+def _resume_harness(tmp_path: Path, os_dir: str, *, installed: bool, trusted: bool, source: bool, before=None):
+    """Run dc_main as an ensure with one journal entry: a rotation that replaced old-key with new-key."""
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh").rstrip()
+    entry = '\ndc_main "$@"'
+    assert text.endswith(entry)
+    fake, secrets, journal, stage_parent, bindir = (tmp_path / name for name in ("fake", "secrets", "journal", "stage", "bin"))
+    for folder in (fake, secrets, journal, stage_parent, bindir):
+        folder.mkdir(exist_ok=True)
+    (fake / "installed").write_text("installed", encoding="utf-8")
+    script = _OLD_GATEWAY.replace('"$(basename "$(dirname "$0")")"', '"$(cat "$FAKE/installed")"')
+    package = tmp_path / "pkg-gateway"
+    package.write_text(script, encoding="utf-8")
+    package.chmod(0o755)
+    gateway = bindir / "defenseclaw-gateway"
+    if installed:
+        shutil.copy(package, gateway)
+    (secrets / "ai-key").write_text("new-key", encoding="utf-8")
+    (journal / "ai-key.entry").write_text(
+        f"confirmed=none\nrotated={hashlib.sha256(b'new-key').hexdigest()}\nprevious=set\nconfig={'c' * 64}\n", encoding="utf-8")
+    (journal / "ai-key.value").write_text("old-key", encoding="utf-8")
+    trust = '[ -x "$1" ]' if trusted else '[ "$1" != "$DC_GATEWAY" ] && [ -x "$1" ]'
+    overrides = f"""
+dc_layout() {{
+    DC_GATEWAY='{gateway}'
+    DC_SECRETS_DIR='{secrets}' DC_JOURNAL_DIR='{journal}' DC_INSTALLED_CONFIG='{tmp_path / 'config.yaml'}'
+    DC_ANCHORS='{tmp_path / 'anchors.json'}' DC_PACKAGE_RESULT='{tmp_path / 'package-result.json'}'
+    DC_OS_GROUP=linux DC_LOG='{tmp_path / 'kit.log'}'
+}}
+dc_parse_args() {{ DC_SOURCE='{tmp_path / 'source' if source else ''}'; }}
+dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
+dc_validate_args() {{ :; }}
+id() {{ echo 0; }}
+dc_stage_parent() {{ DC_STAGE_PARENT='{stage_parent}'; }}
+dc_sweep_stages() {{ :; }}
+dc_stat_uid() {{ echo 0; }}
+dc_stage_source() {{ :; }}
+dc_install_package() {{ cp '{package}' '{gateway}'; DC_CHANNEL_FLAG=--from-package; }}
+dc_trusted_path() {{ {trust}; }}
+dc_journal_ready() {{ [ -d "$DC_JOURNAL_DIR" ]; }}
+dc_binaries_damaged() {{ return 1; }}
+dc_run_lifecycle_retry() {{ printf 'lifecycle %s\\n' "$*" >>"$FAKE/calls"; return 0; }}
+dc_annotate_package_step() {{ :; }}
+dc_emit_result() {{ echo emitted; }}
+dc_main
+"""
+    if before is not None:
+        before()
+    env = {"PATH": "/usr/bin:/bin", "FAKE": str(fake), "SECRETS": str(secrets)}
+    result = subprocess.run(["sh", "-c", text[: -len(entry)] + "\n" + overrides], env=env, capture_output=True, text=True, timeout=60)
+    calls = (fake / "calls").read_text(encoding="utf-8").splitlines() if (fake / "calls").exists() else []
+    return result.stdout + result.stderr, result.returncode, calls, journal, secrets
+
+
+# GAP-1614: an installed gateway that dc_trusted_path refuses keeps the
+# journal entry and its earlier value (the only copy) and stops the ensure.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_wrapper_keeps_the_journal_for_an_untrusted_installed_gateway(tmp_path: Path, os_dir: str) -> None:
+    out, code, calls, journal, secrets = _resume_harness(tmp_path, os_dir, installed=True, trusted=False, source=False)
+    assert code == 1 and "mdm_not_installed" in out and "journal entry was kept" in out, out
+    assert (journal / "ai-key.entry").exists() and (journal / "ai-key.value").read_text(encoding="utf-8") == "old-key"
+    assert (secrets / "ai-key").read_text(encoding="utf-8") == "new-key"
+    assert not any(" enterprise secret " in f" {call} " or call.startswith("lifecycle ") for call in calls), calls
+
+
+# GAP-1614: only a run that found no gateway installed before it delivered
+# one (the deployment was removed outside the wrapper) retires the entry;
+# it never settles a stale entry against the fresh install.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_wrapper_retires_the_journal_of_a_removed_deployment(tmp_path: Path, os_dir: str) -> None:
+    out, code, calls, journal, _ = _resume_harness(tmp_path, os_dir, installed=False, trusted=True, source=True)
+    assert code == 0 and "emitted" in out, (out, calls)
+    assert not (journal / "ai-key.entry").exists() and not (journal / "ai-key.value").exists(), out
+    assert "no deployment was installed to put it back into" in (tmp_path / "kit.log").read_text(encoding="utf-8")
+    assert not any(" enterprise secret " in f" {call} " for call in calls), calls
+
+
+# GAP-1575: the settle of an earlier rotation runs only under the rotation
+# journal lock, as on Windows (rotation.lock): while another run holds it,
+# nothing is put back.
+@pytest.mark.skipif(os.name != "posix" or shutil.which("perl") is None, reason="POSIX shell scripts and perl")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_wrapper_settles_only_under_the_rotation_lock(tmp_path: Path, os_dir: str) -> None:
+    (tmp_path / "journal").mkdir()
+    (tmp_path / "fake").mkdir()
+    holders = []
+
+    def hold() -> None:
+        holder = subprocess.Popen(["perl", "-e",
+            'use Fcntl qw(:flock O_RDWR O_CREAT); sysopen(my $fh, $ARGV[0], O_RDWR|O_CREAT, 0600) or die; flock($fh, LOCK_EX) or die;'
+            ' $| = 1; print "held\\n"; sleep 3; open(my $o, ">>", $ARGV[1]) or die; print $o "released\\n"; close $o; flock($fh, LOCK_UN);',
+            str(tmp_path / "journal" / ".lock"), str(tmp_path / "fake" / "calls")], stdout=subprocess.PIPE, text=True)
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
+        holders.append(holder)
+
+    try:
+        out, code, calls, journal, secrets = _resume_harness(tmp_path, os_dir, installed=True, trusted=True, source=False, before=hold)
+    finally:
+        for holder in holders:
+            holder.wait(timeout=30)
+    assert code == 0 and "emitted" in out, (out, calls)
+    settle = [i for i, call in enumerate(calls) if " enterprise secret set " in f" {call} "]
+    assert "released" in calls and settle and settle[0] > calls.index("released"), calls
+    assert not (journal / "ai-key.entry").exists(), out
+
+
+# GAP-1585: a completed Windows uninstall removes the wrapper's credential
+# rotation journal, overwriting each entry first, as uninstall.sh does on
+# Linux and macOS; -Purge also removes the empty state folder.
+def test_windows_uninstall_removes_the_rotation_journal() -> None:
+    text = _text(MDM / "windows" / "uninstall.ps1")
+    body = text.split("function Remove-DefenseClawRotationJournal {", 1)[1].split("\n}\n", 1)[0]
+    assert "'Cisco\\DefenseClaw-MDM'" in body and "Join-Path $state 'rotation'" in body
+    assert body.index("Test-DefenseClawAdminOnlyItem -Path $journal") < body.index("WriteAllBytes") < body.index("Remove-Item -LiteralPath $item.FullName")
+    assert "ReparsePoint" in body and "rotation.lock" in body and "if ($Purge" in body
+    tail = text.split(SHARED_END, 1)[1]
+    run = tail.index("$code = $run.ExitCode")
+    assert run < tail.index("if (@(0, 3010) -contains $code) {") < tail.index("Remove-DefenseClawRotationJournal }", run)
+
+
+# GAP-1733: a purge removes the staging folder a killed wrapper run left
+# (its recorded run is gone) and then the empty state folder; a staging
+# folder whose run still runs stays, and so does the state folder.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("alive", [False, True])
+def test_unix_uninstall_purge_sweeps_stale_kit_stages(tmp_path: Path, os_dir: str, alive: bool) -> None:
+    text = _text(MDM / os_dir / "uninstall.sh")
+    function = _shell_function(text, "dc_remove_stage_parent")
+    state = tmp_path / "defenseclaw-mdm"
+    stage = state / "defenseclaw-mdm.Ab12Cd"
+    stage.mkdir(parents=True)
+    pid = os.getpid() if alive else 2147483646
+    (stage / "pid").write_text(f"{pid}\n", encoding="utf-8")
+    script = f"""set -eu
+DC_PURGE=1 DC_KIT_STATE='{state}' DC_LOG='{tmp_path / "log"}'
+dc_log() {{ printf '%s\\n' "$1" >>"$DC_LOG"; }}
+dc_stat_uid() {{ echo 0; }}
+{function}
+dc_remove_stage_parent
+"""
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert stage.exists() == alive and state.exists() == alive
+
+
+# GAP-1850: two first kit runs at once race on creating the state folders.
+# The loser's mkdir fails because the winner made the folder; that is no
+# refusal: the folder exists and the trust check decides. A mkdir stub that
+# creates the folder and then fails models the lost race.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+def test_unix_wrapper_survives_a_lost_state_folder_mkdir_race(os_dir: str, tmp_path: Path) -> None:
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    state = tmp_path / "defenseclaw-mdm"
+    stage_parent = _shell_function(text, "dc_stage_parent").replace("/var/lib/defenseclaw-mdm", str(state))
+    journal_ready = _shell_function(text, "dc_journal_ready")
+    script = f"""set -u
+DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_SCRIPT_OS=linux DC_STAGING_DIR=""
+DC_JOURNAL_DIR='{state}/rotation'
+mkdir() {{ command mkdir "$@" 2>/dev/null; return 1; }}
+dc_trusted_path() {{ return 0; }}
+dc_stat_mode() {{ echo 700; }}
+dc_fail_result() {{ printf 'FAIL %s|%s|%s\\n' "$1" "$2" "$3"; exit 1; }}
+{stage_parent}
+{journal_ready}
+dc_stage_parent
+echo staged
+dc_journal_ready && echo journal
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout.split() == ["staged", "journal"], result.stdout
+    assert (state / "rotation").is_dir()

@@ -886,7 +886,7 @@ func (l *lifecycle) finishBundle(ctx context.Context) {
 			err = l.markBundleApplied(digest, generation, record.ConfigSHA256, false)
 		}
 		if err != nil {
-			l.failBundle(ctx, run, record, bundleConfirmationCode(err), err.Error())
+			l.failBundle(ctx, run, record, bundleConfirmationCode(err), err.Error()+stateWriteAction(err))
 			return
 		}
 		checked = true
@@ -1002,13 +1002,21 @@ func (l *lifecycle) committedBundleEnforced(ctx context.Context, record *Deploym
 
 // failBundle ends the receipt of run as failed(code), records whether the
 // transaction rolled back and what the gateway enforces now, and reports the
-// code in the result.
+// code in the result. A receipt states only what the gateway proved
+// (GAP-1205): rolled_back once the run restored the previous deployment
+// without a rollback error and the gateway reports the policy the restored
+// config computes to (a rejected reload of the candidate leaves that policy
+// enforcing, so it does not count against it). Restored files alone are not
+// a rollback: a gateway that kept the candidate, or that does not answer,
+// leaves rolled_back false and the result says so.
 func (l *lifecycle) failBundle(ctx context.Context, run *bundleRun, record *Deployment, code enterprisebundle.Code, message string) {
 	r := l.result
 	rc := run.receipt
-	rc.RolledBack = hasMessageCode(r.Warnings, codeRolledBack)
+	restored := hasMessageCode(r.Warnings, codeRolledBack) && !hasMessageCode(r.Errors, codeRollbackFailed)
+	rc.RolledBack = false
 	enforces := "the last good policy keeps enforcing"
-	if owner := installedPendingPredecessor(run.store, rc, record); owner != nil {
+	owner := installedPendingPredecessor(run.store, rc, record)
+	if owner != nil {
 		// The rollback put back a config another run committed and the
 		// gateway has not confirmed: that is not the last good bundle, so it
 		// is reported as itself, never as rolled_back.
@@ -1020,6 +1028,14 @@ func (l *lifecycle) failBundle(ctx context.Context, run *bundleRun, record *Depl
 	}
 	if record != nil {
 		rc.EnforcingDigest, _ = l.gatewayPolicyNow(ctx, record.ServiceUID)
+	}
+	if restored && owner == nil && record != nil {
+		if want, _, err := l.computePolicy(ctx); err == nil && rc.EnforcingDigest != "" && rc.EnforcingDigest == want {
+			rc.RolledBack = true
+		} else {
+			enforces = "the previous deployment's files are back, but the gateway has not proven that it enforces their policy again (it reports " +
+				shortDigest(rc.EnforcingDigest) + "); the next lifecycle run checks it again"
+		}
 	}
 	if err := run.store.Fail(rc, code, message); err != nil {
 		r.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), "could not record the failed policy bundle receipt: "+err.Error())
@@ -1056,9 +1072,16 @@ func displayID(rc *enterprisebundle.Receipt) string {
 	return rc.ReceiptID
 }
 
+// bundleConfirmationCode is the code of a confirmation step that failed: a
+// receipt or state write that ran out of space is disk_full, as every other
+// bundle-state write is (GAP-0609); it read not_confirmed although the
+// gateway was never asked (GAP-1339).
 func bundleConfirmationCode(err error) enterprisebundle.Code {
-	if enterprisebundle.CodeOf(err) == enterprisebundle.CodeDigestMismatch {
+	switch {
+	case enterprisebundle.CodeOf(err) == enterprisebundle.CodeDigestMismatch:
 		return enterprisebundle.CodeDigestMismatch
+	case enterprisebundle.CodeOf(err) == enterprisebundle.CodeDiskFull || noSpace(err):
+		return enterprisebundle.CodeDiskFull
 	}
 	return enterprisebundle.CodeNotConfirmed
 }
@@ -1107,6 +1130,51 @@ func (l *lifecycle) gatewayPolicyNow(ctx context.Context, serviceUID int) (diges
 	}
 	h := parseBundleHealth(body)
 	return h.digest, h.reloadError
+}
+
+// settleReplacedBundle fails an applied receipt whose config the deployment
+// no longer holds. The receipt states only what the gateway proved
+// (GAP-1166): the deployment back on the last good bundle (confirmed before
+// this one, so older) while the gateway reports the policy that config
+// computes to is a rollback (rolled_back, interrupted); any other config
+// replaced it (superseded), which put nothing back, so it is never
+// rolled_back.
+func (l *lifecycle) settleReplacedBundle(ctx context.Context, store *enterprisebundle.Store, record *Deployment, rc *enterprisebundle.Receipt) bool {
+	r := l.result
+	rc.RolledBack = false
+	if record != nil {
+		rc.EnforcingDigest, _ = l.gatewayPolicyNow(ctx, record.ServiceUID)
+	}
+	code, message := enterprisebundle.CodeSuperseded, "a later config replaced this bundle's config before the gateway confirmed it; nothing was rolled back, and the config the deployment holds enforces"
+	warning := fmt.Sprintf("policy bundle %s version %d was replaced by a later config before the gateway confirmed it (failed: superseded); nothing was rolled back", rc.BundleID, rc.Version)
+	raw, current, err := l.env.currentBundleConfig(store)
+	lastGood := err == nil && current != nil && record != nil && current.Version < rc.Version && sha256Bytes(raw) == record.ConfigSHA256
+	// A killed first bundle has no last good bundle: this run's recovery
+	// rolled back the config its transaction left, so nothing replaced it
+	// (GAP-1574).
+	recovered := l.interruptedConfigSHA != "" && l.interruptedConfigSHA == rc.ConfigSHA256 && record != nil
+	if lastGood || recovered {
+		code = enterprisebundle.CodeInterrupted
+		if lastGood {
+			message = "the run that applied this bundle was rolled back before it committed: the deployment holds the last good bundle again"
+			warning = fmt.Sprintf("policy bundle %s version %d was rolled back after an interrupted apply (failed: interrupted); the deployment holds the last good bundle %s version %d", rc.BundleID, rc.Version, current.BundleID, current.Version)
+		} else {
+			message = "the run that applied this bundle was rolled back before it committed: the deployment holds the config it had before this bundle again"
+			warning = fmt.Sprintf("policy bundle %s version %d was rolled back after an interrupted apply (failed: interrupted); the deployment holds the config it had before this bundle", rc.BundleID, rc.Version)
+		}
+		if want, _, err := l.computePolicy(ctx); err == nil && rc.EnforcingDigest != "" && rc.EnforcingDigest == want {
+			rc.RolledBack = true
+		} else {
+			message += ", but the gateway has not proven that it enforces that bundle's policy"
+			warning += ", but the gateway has not proven that it enforces its policy"
+		}
+	}
+	if err := store.Fail(rc, code, message); err != nil {
+		r.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), "could not settle the policy bundle store: "+err.Error()+stateWriteAction(err))
+		return true
+	}
+	r.AddWarning(codeBundleInterrupted, warning)
+	return false
 }
 
 // confirmRecoveredBundle checks the activated state after an interrupted
@@ -1277,16 +1345,7 @@ func (l *lifecycle) settleUnconfirmedBundle(ctx context.Context, store *enterpri
 	}
 	committed := record != nil && rc.ConfigSHA256 != "" && record.ConfigSHA256 == rc.ConfigSHA256
 	if !committed {
-		rc.RolledBack = true
-		if record != nil {
-			rc.EnforcingDigest, _ = l.gatewayPolicyNow(ctx, record.ServiceUID)
-		}
-		if err := store.Fail(rc, enterprisebundle.CodeInterrupted, "the deployment does not hold this bundle's config: the run that applied it was rolled back before it committed, or a later config replaced it; the config the deployment holds enforces"); err != nil {
-			r.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), "could not settle the policy bundle store: "+err.Error()+stateWriteAction(err))
-			return true
-		}
-		r.AddWarning(codeBundleInterrupted, fmt.Sprintf("policy bundle %s version %d is no longer the deployment's config (rolled back after an interrupted apply, or replaced by a later config); the config the deployment holds enforces", rc.BundleID, rc.Version))
-		return false
+		return l.settleReplacedBundle(ctx, store, record, rc)
 	}
 	configPath := l.env.P(l.env.Layout.ConfigPath)
 	installedSHA, err := sha256File(configPath)
