@@ -5066,6 +5066,96 @@ def test_native_running_hook_is_renamed_aside_and_replaced(tmp_path: Path) -> No
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_the_aside_helper_compiles_in_a_session_that_ran_the_1_0_4_installer() -> None:
+    # GAP-1758: the 1.0.4 installer loads DefenseClawInstall.Rename with
+    # Replace only. A later install in the same PowerShell session (`irm | iex`
+    # twice, or `& .\install.ps1` again) found that type, skipped Add-Type and
+    # every aside swap threw "method not found", so the upgrade under hook
+    # traffic was refused again. The helper the aside swap calls has Aside.
+    aside = _ps_functions("Invoke-AsideReplace")
+    type_name = re.search(r"\[(DefenseClawInstall\.\w+)\]::Aside\(", aside).group(1)
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        + "Add-Type -TypeDefinition 'namespace DefenseClawInstall { public static class Rename "
+        + "{ public static void Replace(string source, string destination) { } } }'\n"
+        + _ps1_function("Invoke-AtomicReplace")
+        + f"\nInvoke-AtomicReplace -Compile\nif (-not [{type_name}].GetMethod('Aside')) {{ throw 'no Aside' }}\n'OK'\n"
+    )
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_restore_and_the_hook_drain_take_the_aside_copies_away(tmp_path: Path) -> None:
+    # GAP-1760: an automatic restore under hook traffic renamed the running
+    # hook aside (defenseclaw-hook.exe.old-<time>) and left it in .local\\bin
+    # until a later install. The restore (both branches) and the drain after
+    # the hook swap remove every aside copy nothing runs any more.
+    restore = _ps_functions("Restore-BinDir")
+    sweep = 'Get-ChildItem -LiteralPath $BinDir -Filter "$name.old-*" -Force -ErrorAction SilentlyContinue | Remove-Item'
+    assert restore.count(sweep) == 2
+    assert restore.rindex(sweep) < restore.rindex("Assert-BinDirRestored $From $GuardSHA256")
+    assert re.search(
+        r"Wait-PreviousHookExit \(\[DateTime\]::UtcNow\)\n(?:\s*#.*\n)*\s*Get-ChildItem -LiteralPath \$BinDir "
+        r"-Filter \"defenseclaw-hook\.exe\.old-\*\"", _text())
+    bin_dir, saved = tmp_path / "bin", tmp_path / "saved"
+    bin_dir.mkdir()
+    saved.mkdir()
+    (saved / "defenseclaw-hook.exe").write_text("old", encoding="ascii")
+    for name in ("defenseclaw-hook.exe.old-20261026T103423123", "claude.exe.old-20261026T103423125"):
+        (bin_dir / name).write_text("x", encoding="ascii")
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        + f"$BinDir = '{bin_dir}'\n$ManagedFiles = @('defenseclaw-hook.exe')\n"
+        + "function Install-File([string]$Source, [string]$Destination) { Copy-Item -LiteralPath $Source -Destination $Destination -Force }\n"
+        + "function Remove-Aside([string]$Path) { Remove-Item -LiteralPath $Path -Force }\n"
+        + "function Get-Sha256([string]$Path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash }\n"
+        + _ps_functions("Restore-BinDir", "Assert-BinDirRestored")
+        + f"\nRestore-BinDir '{saved}'\n'OK'\n"
+    )
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+    assert sorted(path.name for path in bin_dir.iterdir()) == ["claude.exe.old-20261026T103423125", "defenseclaw-hook.exe"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_an_install_refused_before_its_data_copy_puts_the_hook_mode_files_back(tmp_path: Path) -> None:
+    # GAP-0009 (rel-1-0-5): the held-hook run was refused at the drain, before
+    # the rollback copy of the data folder. The fail-mode hold had rewritten
+    # .hookcfg and .hookcfg.claudecode, and they stayed rewritten under the
+    # restored 1.0.2. The installer keeps their bytes before the refresh and
+    # every refusal before the data copy puts them back.
+    hooks = tmp_path / "data" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / ".hookcfg").write_text("FAIL_MODE=open\n", encoding="ascii")
+    (hooks / ".hookcfg.claudecode").write_text("FAIL_MODE=open\n", encoding="ascii")
+    (hooks / ".hookcfg.lock").write_text("", encoding="ascii")
+    (hooks / ".hook-claudecode.token").write_text("secret", encoding="ascii")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        + f"$DataDir = '{tmp_path / 'data'}'\n$Staging = '{staging}'\n"
+        + "function Install-File([string]$Source, [string]$Destination) { Copy-Item -LiteralPath $Source -Destination $Destination -Force }\n"
+        + "function Write-Warn([string]$m) { \"WARN $m\" }\n"
+        + _ps_functions("Save-HookFiles", "Restore-HookFiles")
+        + f"\nSave-HookFiles\n[IO.File]::WriteAllText('{hooks / '.hookcfg'}', 'FAIL_MODE=closed')\n"
+        + f"[IO.File]::WriteAllText('{hooks / '.hookcfg.claudecode'}', 'FAIL_MODE=closed')\nRestore-HookFiles\n'OK'\n"
+    )
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout and "WARN" not in result.stdout, result.stdout + result.stderr
+    for name in (".hookcfg", ".hookcfg.claudecode"):
+        assert (hooks / name).read_text(encoding="ascii") == "FAIL_MODE=open\n"
+    assert sorted(path.name for path in (staging / "hooks-before").iterdir()) == [".hookcfg", ".hookcfg.claudecode"]
+    text = _text()
+    assert _ps1_function("Start-SwapHookFailModes").index("Save-HookFiles") < _ps1_function("Start-SwapHookFailModes").index("Update-HookFailModes")
+    for refusal in ("try { $Manifest = Write-LifecycleManifest", "try { Save-BinarySnapshot } catch {",
+                    "# A stop that was refused or threw leaves the hold waiting for a"):
+        block = text[text.index(refusal) :][:600]
+        assert block.index("Stop-HookFailModeHold") < block.index("Restore-HookFiles"), refusal
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_uv_runs_below_normal_priority_so_hook_calls_keep_their_budget(tmp_path: Path) -> None:
     # GAP-1150: while uv built and byte-compiled the environment on every
     # core, registered Codex calls answered after 5-6 s. uv (and the workers

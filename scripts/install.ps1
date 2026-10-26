@@ -2868,6 +2868,38 @@ function Stop-HookFailModeHold {
     $hold.Process.Dispose()
 }
 
+$script:HookFilesBefore = $null
+
+function Save-HookFiles {
+    # The refresh and the hold below rewrite the hooks' outage mode files
+    # (.hookcfg and its per-connector records) and the scripts that bake a
+    # mode. An install that stops before its rollback copy of the data folder
+    # puts these bytes back, so a refused install leaves the hooks exactly as
+    # they were (the held-hook refusal changed .hookcfg and .hookcfg.claudecode).
+    $script:HookFilesBefore = $null
+    $hooks = Join-Path $DataDir "hooks"
+    if (-not (Test-Path -LiteralPath $hooks -PathType Container)) { return }
+    $copy = Join-Path $Staging "hooks-before"
+    New-Item -ItemType Directory -Path $copy -Force | Out-Null
+    foreach ($file in @(Get-ChildItem -LiteralPath $hooks -File -Force | Where-Object { $_.Name -notlike "*.lock" -and $_.Name -notlike "*.token" })) {
+        Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $copy $file.Name) -Force
+    }
+    $script:HookFilesBefore = $copy
+}
+
+function Restore-HookFiles {
+    # Put back what Save-HookFiles kept; best effort, each file on its own.
+    $copy = $script:HookFilesBefore
+    $script:HookFilesBefore = $null
+    if (-not $copy -or -not (Test-Path -LiteralPath $copy -PathType Container)) { return }
+    $hooks = Join-Path $DataDir "hooks"
+    foreach ($file in @(Get-ChildItem -LiteralPath $copy -File -Force)) {
+        try { Install-File $file.FullName (Join-Path $hooks $file.Name) } catch {
+            Write-Warn "Could not put back $(Join-Path $hooks $file.Name): $($_.Exception.Message)"
+        }
+    }
+}
+
 function Start-SwapHookFailModes([string]$StagedGateway, $GatewayProcess) {
     # Set the hooks' fail modes from the config for the swap and, for a
     # running gateway, hold them until it exits; return the running gateway,
@@ -2880,6 +2912,7 @@ function Start-SwapHookFailModes([string]$StagedGateway, $GatewayProcess) {
     # running it is disabled right after the refresh; a gateway it started
     # before then is held and stopped like one that ran (GAP-0948 group).
     # Every refusal here leaves the launcher enabled.
+    Save-HookFiles
     if (-not $GatewayProcess) {
         if (-not (Update-HookFailModes $StagedGateway)) {
             Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
@@ -5083,6 +5116,7 @@ function Invoke-Install {
     try { $Manifest = Write-LifecycleManifest $operation $PrevVersion $Ver $Snap } catch {
         $reason = $_.Exception.Message
         Stop-HookFailModeHold
+        Restore-HookFiles
         if ($Setup) { Restore-SetupInstall }
         if ($Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement) {
             Die "Could not record the current install before changing it ($reason); the lifecycle record stays.$(Restore-AcceptedReplacement) Run: $(Get-LifecycleNextStep -Accept)"
@@ -5092,6 +5126,7 @@ function Invoke-Install {
     try { Save-BinarySnapshot } catch {
         $failure = $_
         Stop-HookFailModeHold
+        Restore-HookFiles
         Undo-EarlySnapshot $Snap
         Start-AcceptedReplacement
         # Nothing else changed yet: a proven baseline retires its record; a
@@ -5138,6 +5173,7 @@ function Invoke-Install {
         # A stop that was refused or threw leaves the hold waiting for a
         # gateway that still runs.
         Stop-HookFailModeHold
+        Restore-HookFiles
         Undo-EarlySnapshot $Snap
         Clear-StagedRelease
         if ($stopRefused) {
