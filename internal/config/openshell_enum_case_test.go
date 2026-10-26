@@ -16,7 +16,7 @@ import (
 func TestOpenShellEnumValuesTakeAnyCase(t *testing.T) {
 	doc := "config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n" +
 		"  openshell:\n    install: Prerequisite\n    driver: VM\n    driver_fallback: Docker\n" +
-		"openshell:\n  profile: Balanced\n  workdir: {mode: Copy, on_exit: Keep}\n" +
+		"openshell:\n" +
 		"  admin:\n    on_silence: Alert\n    foreign_sandboxes: Alert\n    min_profile: Strict\n" +
 		"guardrail:\n  profiles:\n    eng:\n      mode: action\n      sandbox:\n        foreign_sandboxes: Alert\n        when_unavailable: Refuse\n"
 	if err := ValidateV8SchemaBytes("admin.yaml", []byte(doc)); err != nil {
@@ -35,14 +35,14 @@ func TestOpenShellEnumValuesTakeAnyCase(t *testing.T) {
 		floor.UserApprovals != "session" || floor.DriverFallback != "none" || floor.MinProfile != "strict" {
 		t.Fatalf("loader kept the letter case: %+v", floor)
 	}
-	o := &OpenShellConfig{Profile: "Balanced", TokenDelivery: "Provider", LLM: "Bedrock"}
-	o.Workdir.Mode, o.Workdir.OnExit, o.Egress.Feed = "Copy", "Keep", "Builtin"
+	o := &OpenShellConfig{}
 	o.Admin.ForeignSandboxes = "Alert"
-	if err := o.Validate(); err != nil {
-		t.Fatalf("loader refused mixed-case openshell values: %v", err)
+	if err := o.Validate(); err != nil || o.Admin.ForeignSandboxes != "alert" {
+		t.Fatalf("loader: openshell.admin mixed case = %v, %q", err, o.Admin.ForeignSandboxes)
 	}
-	if o.Profile != "balanced" || o.TokenDelivery != "provider" || o.LLM != "bedrock" || o.Workdir.Mode != "copy" ||
-		o.Workdir.OnExit != "keep" || o.Egress.Feed != "builtin" || o.Admin.ForeignSandboxes != "alert" {
-		t.Fatalf("loader kept the letter case: %+v", o)
+	// The user's own settings keep their exact words (the shared
+	// config_validation_cases corpus refuses `llm: Bedrock`).
+	if err := (&OpenShellConfig{LLM: "Bedrock"}).Validate(); err == nil {
+		t.Fatal("llm: Bedrock was accepted")
 	}
 }

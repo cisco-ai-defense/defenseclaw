@@ -1047,7 +1047,6 @@ func (o *OpenShellConfig) Validate() error {
 	if o == nil {
 		return nil
 	}
-	o.foldEnumCase()
 	var errs []error
 	check := func(err error) {
 		if err != nil {
@@ -1183,14 +1182,17 @@ func validateOpenShellNonNegative(field string, value int) error {
 var openShellAdminEnumKeys = []string{"when_unavailable", "user_approvals", "on_silence", "foreign_sandboxes", "driver_fallback", "min_profile"}
 
 // foldOpenShellEnumCase lowercases, in a parsed config document, the string
-// values of the OpenShell settings whose values are lowercase words: a value
-// in any letter case means the same (#1226). The schema lists only the
+// values of the administrator's OpenShell settings whose values are
+// lowercase words (enterprise.openshell and the sandbox floors): a value in
+// any letter case means the same (#1226). The schema lists only the
 // lowercase words, so `install: Prerequisite`, `driver: VM` or
 // `foreign_sandboxes: Alert` were refused by config validate and ensure
 // while the loader folded the agent names next to them (GAP-0691). The
 // schema check, the typed decode and the plain projection read the folded
-// value; the loader folds the same settings (foldEnumCase), and the file
-// itself is not changed.
+// value; the loader folds the same floor settings (foldEnumCase), and the
+// file itself is not changed. The user's own openshell settings, which the
+// Python writer checks the same way (testdata/openshell
+// config_validation_cases.yaml), keep their exact words.
 func foldOpenShellEnumCase(root *yaml.Node) {
 	lower := func(mapping *yaml.Node, keys ...string) {
 		for _, key := range keys {
@@ -1200,11 +1202,7 @@ func foldOpenShellEnumCase(root *yaml.Node) {
 		}
 	}
 	lower(v8YAMLMapValue(v8YAMLMapValue(root, "enterprise"), "openshell"), "install", "driver", "driver_fallback")
-	openshell := v8YAMLMapValue(root, "openshell")
-	lower(openshell, "profile", "token_delivery", "llm")
-	lower(v8YAMLMapValue(openshell, "workdir"), "mode", "on_exit")
-	lower(v8YAMLMapValue(openshell, "egress"), "feed")
-	lower(v8YAMLMapValue(openshell, "admin"), openShellAdminEnumKeys...)
+	lower(v8YAMLMapValue(v8YAMLMapValue(root, "openshell"), "admin"), openShellAdminEnumKeys...)
 	if profiles := v8YAMLMapValue(v8YAMLMapValue(root, "guardrail"), "profiles"); profiles != nil && profiles.Kind == yaml.MappingNode {
 		for i := 1; i < len(profiles.Content); i += 2 {
 			lower(v8YAMLMapValue(profiles.Content[i], "sandbox"), openShellAdminEnumKeys...)
@@ -1212,17 +1210,9 @@ func foldOpenShellEnumCase(root *yaml.Node) {
 	}
 }
 
-// foldEnumCase lowercases the settings foldOpenShellEnumCase folds in the
-// document, for a configuration the loader decoded from the file itself.
-func (o *OpenShellConfig) foldEnumCase() {
-	for _, v := range []*string{&o.Profile, &o.TokenDelivery, &o.LLM, &o.Workdir.Mode, &o.Workdir.OnExit, &o.Egress.Feed} {
-		*v = strings.ToLower(*v)
-	}
-	o.Admin.foldEnumCase()
-}
-
 // foldEnumCase lowercases a floor's settings that openShellAdminEnumKeys
-// name.
+// name, for a configuration the loader decoded from the file itself
+// (foldOpenShellEnumCase folds the same in the document).
 func (a *OpenShellAdminConfig) foldEnumCase() {
 	for _, v := range []*string{&a.WhenUnavailable, &a.UserApprovals, &a.OnSilence, &a.ForeignSandboxes, &a.DriverFallback, &a.MinProfile} {
 		*v = strings.ToLower(*v)
