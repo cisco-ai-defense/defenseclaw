@@ -1079,6 +1079,14 @@ describe('1.0.4 operator routes and limits', () => {
     assert.ok(!page('reference/connectors/kiro.mdx').includes('per-user installs are not version-gated'));
   });
 
+  it('describes the per-user fail-mode setter the CLI accepts (GAP-1411, GAP-1601)', () => {
+    const cmd = source('cli/defenseclaw/commands/cmd_guardrail.py');
+    assert.ok(cmd.includes('"On a per-user install an explicit saved mode wins. When unset, the gateway-outage mode follows the "'));
+    const cli = page('reference/commands/cli.mdx');
+    assert.ok(!cli.includes('so a value is refused with exit 1'));
+    assert.ok(cli.includes('`open` or `closed` saves your choice, which wins over the policy tier'));
+  });
+
   it('pins the workspace route for older Kiro IDEs', () => {
     const kiro = page('connectors/kiro.mdx');
     assert.match(kiro, /before 1\.0\.182.*setup kiro --workspace/i);
