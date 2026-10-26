@@ -3446,6 +3446,12 @@ func ValidateManagedEnterpriseListenerBindings(cfg *Config) error {
 			apiBind,
 		)
 	}
+	if cfg.StandaloneEnterprise() && effectiveAPIPort(cfg.Gateway.APIPort) != DefaultGatewayAPIPort {
+		return fmt.Errorf(
+			"config: managed_enterprise standalone gateway.api_port must be %d: the service socket owns that listener",
+			DefaultGatewayAPIPort,
+		)
+	}
 
 	return ValidateManagedGuardrailProxyBind(cfg)
 }

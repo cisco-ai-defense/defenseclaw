@@ -89,7 +89,8 @@ func TestWindowsManagedNativeOTLPCleanupKeepsProtectedDataDir(t *testing.T) {
 	for _, name := range []string{"codex", "claudecode"} {
 		err := connector.WithUserHomeDir(home, func() error {
 			return runWindowsEnterpriseImpersonatedCallback(impersonation, sid, func() error {
-				return removeWindowsManagedUserNativeOTLPAsTarget(name, dataDir)
+				removeWindowsManagedUserNativeOTLPAsTarget(name, sid, home, dataDir)
+				return nil
 			})
 		})
 		if err != nil {
@@ -184,7 +185,8 @@ func TestWindowsManagedRowRefusesAndRemovesStalePerUserNativeOTLP(t *testing.T) 
 			t.Fatalf("%s: verify error carries a value: %v", name, err)
 		}
 		if err := connector.WithUserHomeDir(home, func() error {
-			return removeWindowsManagedUserNativeOTLPAsTarget(name, dataDir)
+			removeWindowsManagedUserNativeOTLPAsTarget(name, sid, home, dataDir)
+			return nil
 		}); err != nil {
 			t.Fatalf("%s: remove: %v", name, err)
 		}
@@ -269,7 +271,8 @@ func TestWindowsManagedNativeOTLPVerifyIgnoresOtherUserToken(t *testing.T) {
 	}
 	setWindowsTestPathExactOwner(t, tokenPath, viewer.User.Sid)
 	if err := connector.WithUserHomeDir(home, func() error {
-		return removeWindowsManagedUserNativeOTLPAsTarget("claudecode", dataDir)
+		removeWindowsManagedUserNativeOTLPAsTarget("claudecode", target, home, dataDir)
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -333,5 +336,62 @@ func TestWindowsClaudeManagedVerifyAndRepairStalePerUserNativeOTLP(t *testing.T)
 	}
 	if _, err := Verify(context.Background(), opts); err != nil {
 		t.Fatalf("Verify after repair: %v", err)
+	}
+}
+
+// A configuration the check cannot reach (AppData or CLAUDE_CONFIG_DIR on a
+// share that is down, a folder that cannot be resolved) never fails the row:
+// a failed row drops the account's protection and closes its hooks. Install
+// and Verify succeed with a warning, and repair revokes the credential of the
+// earlier per-user install, so an exporter left there sends no DefenseClaw
+// credential to the holder of its port.
+func TestWindowsManagedRowNeverFailsOnAnUnreachableAgentFolder(t *testing.T) {
+	for name, value := range map[string]string{
+		"unreachable share": `\\dc-unreachable.invalid\share\claude`,
+		"unresolvable":      `%DC_NOT_SET%\claude`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+			opts := windowsManagedInstallOptions(fixture)
+			if _, err := Install(context.Background(), opts); err != nil {
+				t.Fatal(err)
+			}
+			previousEnvironment, previousWarn := windowsUserEnvironment, windowsNativeOTLPWarn
+			windowsUserEnvironment = func(sid, variable string) string {
+				if variable == "CLAUDE_CONFIG_DIR" {
+					return value
+				}
+				return previousEnvironment(sid, variable)
+			}
+			var warnings []string
+			windowsNativeOTLPWarn = func(message string) { warnings = append(warnings, message) }
+			t.Cleanup(func() { windowsUserEnvironment, windowsNativeOTLPWarn = previousEnvironment, previousWarn })
+			token, err := connector.OTLPPathTokenFilePath(filepath.Join(fixture.home, ".defenseclaw"), connector.OTLPScopeClaude)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(token, []byte(strings.Repeat("d1", 32)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := Install(context.Background(), opts); err != nil {
+				t.Fatalf("repair failed the row on an agent folder it cannot reach: %v", err)
+			}
+			if _, err := os.Stat(token); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("repair kept the earlier per-user credential: %v", err)
+			}
+			warnings = nil
+			if _, err := Verify(context.Background(), opts); err != nil {
+				t.Fatalf("Verify failed the row on an agent folder it cannot reach: %v", err)
+			}
+			if len(warnings) == 0 || !strings.Contains(strings.Join(warnings, "\n"), "CLAUDE_CONFIG_DIR") {
+				t.Fatalf("Verify did not warn about the folder it could not check: %q", warnings)
+			}
+			for _, warning := range warnings {
+				if strings.Contains(warning, "dc-unreachable") || strings.Contains(warning, fixture.home) {
+					t.Fatalf("warning carries a path: %s", warning)
+				}
+			}
+		})
 	}
 }
