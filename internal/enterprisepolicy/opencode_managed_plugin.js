@@ -296,6 +296,12 @@ async function defenseclawSend(event, payload) {
     return { reason: "DefenseClaw hook failed closed (empty response)", mode: "" };
   }
   if (result.code !== 0) {
+    // A fail-closed hook names why in its deny body (a stopped gateway and
+    // what to do, GAP-0850, GAP-1080); keep that text, not only the status.
+    const denied = data && data.hook_output;
+    if (denied && (denied.decision === "deny" || denied.decision === "block") && typeof denied.reason === "string" && denied.reason.trim()) {
+      return { reason: denied.reason.trim(), mode: "" };
+    }
     return { reason: "DefenseClaw hook failed closed (exit " + result.code + ")", mode: "" };
   }
   if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {

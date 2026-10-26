@@ -117,6 +117,15 @@ for (const [stdout, exit, pattern] of [
   await assert.rejects(before(hooks), pattern);
 }
 
+// GAP-0850, GAP-1080: a closed outage keeps the hook's own sentence, which
+// names the stopped gateway and what to do, instead of only its exit status.
+{
+  const hooks = await load();
+  answer("event.json", JSON.stringify({ hook_output: { decision: "deny", reason: "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer (enterprise_managed_gateway_not_running)." } }), 2);
+  await assert.rejects(before(hooks), /gateway service is not running on this computer.*enterprise_managed_gateway_not_running/);
+}
+console.log("case ok: a closed outage names the stopped gateway");
+
 // A successful process exit is not evidence that the gateway inspected the
 // call. An incomplete or contradictory decision must fail closed on every
 // managed OpenCode route (Linux, macOS and Windows load this same plugin).
