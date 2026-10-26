@@ -1681,7 +1681,7 @@ func protectedReachFromText(command, cwd, home string) bool {
 			}
 			candidate := match[1]
 			if candidate == "~" || strings.HasPrefix(candidate, "~/") {
-				candidate = filepath.Join(home, strings.TrimPrefix(candidate, "~/"))
+				candidate = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(candidate, "~"), "/"))
 			}
 			if protectedReachTextPath(OperandPath(candidate, cwd), protected, ssh) {
 				return true
@@ -1704,7 +1704,8 @@ func protectedReachFromText(command, cwd, home string) bool {
 			continue
 		}
 		if token == "~" || strings.HasPrefix(token, "~/") {
-			token = filepath.Join(home, strings.TrimPrefix(token, "~/"))
+			// A bare ~ is the home itself (GAP-1093).
+			token = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(token, "~"), "/"))
 		}
 		if protectedReachTextPath(OperandPath(token, cwd), protected, ssh) {
 			return true
