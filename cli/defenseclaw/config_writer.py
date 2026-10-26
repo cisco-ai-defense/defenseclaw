@@ -40,6 +40,7 @@ actor is :data:`ACTOR_LIFECYCLE` or :data:`ACTOR_MIGRATION`
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -993,6 +994,22 @@ def _ordered_mutations(mutations: list[Any]) -> list[Any]:
     )
 
 
+def _set_in_document(document: Any, parts: tuple[str | int, ...], value: Any) -> None:
+    """Write ``value`` at ``parts`` of the parsed document, creating maps on
+    the way; a path through a list or a non-map value is left alone."""
+    if not isinstance(document, dict) or not parts or any(not isinstance(part, str) for part in parts):
+        return
+    node = document
+    for part in parts[:-1]:
+        child = node.get(part)
+        if child is None:
+            child = node[part] = {}
+        if not isinstance(child, dict):
+            return
+        node = child
+    node[parts[-1]] = copy.deepcopy(value)
+
+
 def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[bytes, list[str]]:
     from defenseclaw.observability.v8_yaml import V8YAMLMutation, prepare_v8_yaml_write
 
@@ -1026,6 +1043,11 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
                 continue
             _check_destination_index(document, change.path, parts)
             mutations.append(V8YAMLMutation.set(parts, change.value))
+            # A later unset of this batch prunes against the document as this
+            # set leaves it: 'guardrail rule enable R' sets rules.enable and
+            # unsets rules.disable, and pruning against the old document
+            # dropped the new enable with its parent (GAP-1893).
+            _set_in_document(document, parts, change.value)
         changed.append(change.path)
     if not mutations:
         return current, []
