@@ -3996,6 +3996,55 @@ if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $priorSHA -or
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_windows_undo_of_a_refused_hook_first_swap_leaves_the_install_unchanged(tmp_path: Path) -> None:
+    # Install-HookFirst records HOOK_FIRST and HOOK_GUARD, then a running hook
+    # keeps the old image mapped and the publish is refused (the Windows
+    # files-in-use lane). The prior hook never left its path, so the undo must
+    # not try to publish the checked hook (the same running hook refuses it
+    # again): it finishes, consumes the slot and records no hook transition,
+    # so the unchanged install is neither locked nor left with a record.
+    body = (
+        _ps1_function("Read-Text")
+        + _ps1_function("Undo-HookFirst")
+        + _ps1_function("Undo-Snapshot")
+        + "\n".join(_ps1_function(name) for name in ("Get-LifecycleHookTransition", "Save-LifecycleHookTransition"))
+        + r"""
+$Slot = Join-Path $DataDir '.repair'
+New-Item -ItemType Directory -Path (Join-Path $Slot 'bin'), (Join-Path $Slot 'closer') -Force | Out-Null
+$live = Join-Path $BinDir 'defenseclaw-hook.exe'
+function Install-File {
+    param($Source, $Destination)
+    if ((Test-Path -LiteralPath $Destination) -and (Get-Sha256 $Source) -eq (Get-Sha256 $Destination)) { return }
+    if ($Destination -eq $live) { throw "Could not replace $live in place (Access is denied); it was left as it was" }
+    Copy-Item -LiteralPath $Source -Destination $Destination -Force
+}
+function Remove-Tree { param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+[IO.File]::WriteAllText((Join-Path $Slot 'bin\defenseclaw-hook.exe'), 'old hook')
+[IO.File]::WriteAllText((Join-Path $Slot 'closer\defenseclaw-hook.exe'), 'checked new hook')
+[IO.File]::WriteAllText($live, 'old hook')
+$priorSHA = Get-Sha256 (Join-Path $Slot 'bin\defenseclaw-hook.exe')
+$guardSHA = Get-Sha256 (Join-Path $Slot 'closer\defenseclaw-hook.exe')
+[IO.File]::WriteAllText((Join-Path $Slot 'HOOK_FIRST'), $priorSHA)
+[IO.File]::WriteAllText((Join-Path $Slot 'HOOK_GUARD'), $guardSHA)
+$state = [ordered]@{ Schema = 1; Operation = 'repair'; From = '1.0.4'; To = '1.0.4'; Slot = $Slot
+    Bins = [ordered]@{ 'defenseclaw-hook.exe' = $priorSHA }; GatewayWasRunning = $true; Connectors = @(); Config = ''
+    ExternalConfig = ''; ExternalConfigSha256 = ''; HookFailModes = ''; BinDirProtected = $false; SetupRoot = ''; Committed = $false }
+Write-DurableText $LifecycleManifest ($state | ConvertTo-Json -Depth 4)
+Undo-Snapshot $Slot
+if (Test-Path -LiteralPath $Slot) { throw 'the undo kept the slot of an unchanged install' }
+if ((Get-Sha256 $live) -ne $priorSHA) { throw 'the undo changed the prior hook' }
+$record = Read-LifecycleManifest
+if ($record -and (Get-Field $record 'TransitionHookSHA256')) { throw 'the undo recorded a hook transition that never happened' }
+'OK'
+"""
+    )
+    result = _txn_harness(tmp_path, body)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 @pytest.mark.parametrize("prior_version", ["0.8.10", "1.0.0", "1.0.2", "1.0.3"])
 def test_windows_rollback_finishes_for_a_previously_stopped_gateway(tmp_path: Path, prior_version: str) -> None:
     # A stopped prior gateway has no readiness to prove. Its restored bytes
