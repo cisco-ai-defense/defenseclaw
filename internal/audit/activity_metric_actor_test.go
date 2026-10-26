@@ -35,9 +35,9 @@ func TestActivityMetricActorIsAKindAndTheAuditKeepsTheIdentity(t *testing.T) {
 			if len(records) != 1 {
 				t.Fatalf("records=%d", len(records))
 			}
-			// The canonical record keeps the actor; an address-shaped
-			// actor may be redacted there on some hosts, which is not
-			// what this test is about.
+			// The canonical record carries the actor when it matches the
+			// principal pattern (optionalControlPlaneV8Actor); an
+			// address-shaped actor is left out there on every OS.
 			if tc.actor != "" && !strings.Contains(tc.actor, "@") {
 				encoded, err := records[0].Bytes()
 				if err != nil || !strings.Contains(string(encoded), tc.actor) {
