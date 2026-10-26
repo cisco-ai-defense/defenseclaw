@@ -765,8 +765,9 @@ def test_the_suggested_cleanup_removes_the_read_only_key_copy() -> None:
     text = _text()
     assert "Remove-Item -Recurse -Force '" not in text
     # Save-RolledBackData's kept data and Publish-PreviousSlot's set-aside
-    # copy (GAP-1860) are the user's to remove.
-    assert text.count('cmd /c rd /s /q `"') == 3
+    # copy (GAP-1860) are the user's to remove, and an old previous\\ another
+    # account owns is an administrator's (GAP-1860 round 3).
+    assert text.count('cmd /c rd /s /q `"') == 4
     # A failed install can own unresolved external connector transactions;
     # its troubleshooting copy must not be advertised as safe to delete.
     failed = _ps1_function("Restore-Snapshot")
