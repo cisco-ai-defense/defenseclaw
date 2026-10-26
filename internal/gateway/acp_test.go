@@ -686,11 +686,14 @@ func TestACPEvaluationContextNamesTheSessionInstance(t *testing.T) {
 	if agent := resolveHookAgentIdentity(t.Context(), agentHookRequest{ConnectorName: "kiro"}).ID; agent != "" {
 		pending, _, _ := sharedAgentIdentities.snapshot()
 		before := pending[agent].SessionsSeen
-		instance(`{"sessionId":"acp-session-ledger"}`)
-		instance(`{"sessionId":"acp-session-ledger"}`)
+		// The ledger is process-wide: a session ID of its own per run, so a
+		// second -count iteration sees a new session too (GAP-1133).
+		session := fmt.Sprintf("acp-session-ledger-%d", time.Now().UnixNano())
+		instance(`{"sessionId":"` + session + `"}`)
+		instance(`{"sessionId":"` + session + `"}`)
 		pending, _, _ = sharedAgentIdentities.snapshot()
-		if got := pending[agent]; got.AgentID != agent || got.SessionsSeen != before+1 || got.LastSessionID != "acp-session-ledger" {
-			t.Fatalf("agent identity ledger row = %+v, want %s with one more session (acp-session-ledger)", got, agent)
+		if got := pending[agent]; got.AgentID != agent || got.SessionsSeen != before+1 || got.LastSessionID != session {
+			t.Fatalf("agent identity ledger row = %+v, want %s with one more session (%s)", got, agent, session)
 		}
 	}
 	restore := ManagedEnterpriseActive()
