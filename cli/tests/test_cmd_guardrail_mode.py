@@ -210,6 +210,36 @@ def test_action_switch_probes_versions_and_refuses_an_unverified_connector(
     assert calls == ["codex", "codex"]
 
 
+def test_kiro_below_its_floor_is_refused_in_observe_too_so_the_switch_can_be_undone(app, monkeypatch, restarts) -> None:
+    # GAP-1638: kiro-cli 2.26.1 enrolled in action; `guardrail mode observe
+    # --connector kiro` succeeded, then `guardrail mode action --connector kiro`
+    # was refused, so the CLI could not undo its own switch. Setup refuses that
+    # version in every mode, and so does the observe switch now.
+    app.cfg.guardrail.connectors = {"codex": None, "kiro": None}
+    app.cfg.guardrail.connector = "codex"
+    monkeypatch.setattr(app.cfg, "active_connectors", lambda: ["codex", "kiro"])
+    monkeypatch.setattr(app.cfg.guardrail, "effective_mode", lambda c="": "action")
+    seen: list[tuple[str, str]] = []
+
+    def check(connector, *, mode, _refusal_scope=None, **_k):
+        seen.append((connector, mode))
+        if connector == "kiro" and _refusal_scope is not None:
+            _refusal_scope["observe_admitted"] = False
+            return False
+        return True
+
+    monkeypatch.setattr(cmd_setup, "_check_connector_version_supported_for_setup", check)
+    result, payload = _run(app, "observe", "--connector", "kiro", "--json")
+    assert result.exit_code == 1 and payload["ok"] is False and payload["changed"] is False
+    assert "observe and action mode" in payload["message"]
+    assert seen == [("kiro", "observe")]
+    app.cfg.save.assert_not_called()
+    # Other connectors still switch to observe without a probe.
+    seen.clear()
+    result, payload = _run(app, "observe", "--connector", "codex", "--json")
+    assert result.exit_code == 0 and seen == []
+
+
 def test_copilot_mode_switch_keeps_its_fail_mode(app) -> None:
     # A mode switch changes no fail mode outside Cursor (owner rule), so it
     # names none.

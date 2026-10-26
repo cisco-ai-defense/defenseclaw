@@ -311,6 +311,12 @@ def _refuse_unverified_plugin_teardown(app: AppContext, connectors: list[str]) -
             raise SystemExit(1)
 
 
+# Connectors whose version floor setup applies in every mode (a kiro-cli below
+# 2.27.1 loads no hooks in a headless run, GAP-0828): guardrail mode applies it
+# to an observe switch too (GAP-1638).
+_EVERY_MODE_VERSION_FLOOR = frozenset({"kiro"})
+
+
 def _toggle_connector_guardrail(
     app: AppContext, requested: str, *, enable: bool, restart: bool, yes: bool
 ) -> None:
@@ -5579,6 +5585,39 @@ def mode_cmd(
                     "Fix what the check above reports (see: defenseclaw agent discover --refresh), "
                     f"then run: defenseclaw guardrail mode action{f' --connector {scope}' if connector_key else ''}"
                 ],
+            )
+    elif _EVERY_MODE_VERSION_FLOOR.intersection(affected):
+        # Setup refuses a kiro-cli below its hook floor in observe and action
+        # mode alike. The switch to observe skipped that check, so the
+        # switch back to action was refused and the CLI could not undo its
+        # own change (GAP-1638): the observe switch now applies it too.
+        from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
+
+        refused: list[str] = []
+        for c in sorted(_EVERY_MODE_VERSION_FLOOR.intersection(affected)):
+            scope_record: dict[str, object] = {}
+            if not _check_connector_version_supported_for_setup(
+                c,
+                mode="observe",
+                emit=not json_out,
+                data_dir=app.cfg.data_dir,
+                _allow_prompt=False,
+                _refusal_scope=scope_record,
+            ) and scope_record.get("observe_admitted") is False:
+                refused.append(c)
+        if refused:
+            names = ", ".join(_connector_label(c) for c in refused)
+            _finish(
+                ok=False,
+                exit_code=1,
+                new_mode=previous,
+                previous=previous,
+                message=(
+                    f"Nothing was changed: setup refuses {names} in observe and action mode at this version "
+                    "(see the check above), so this switch is refused the same way."
+                ),
+                notes=["Update it to a supported version, then run: defenseclaw guardrail mode "
+                       f"{mode}{f' --connector {scope}' if connector_key else ''}"],
             )
     _preflight_config_write(app)
     if connector_key is None:
