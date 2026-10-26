@@ -35254,6 +35254,14 @@ function Invoke-DefenseClawForcedUninstall {
         Move-DefenseClawForcedUninstallInstallReceipt `
             -Layout $Layout `
             -Preparation $preparation
+        # The exact-scope purge refuses any file in InstallRoot whose
+        # descriptor is not canonical, which DefenseClaw's own residue (a
+        # guardian's <hook>.restore-<hex> temporary, a replacement backup) is
+        # not: the printed FORCE=1 command then failed 1603 'foreign
+        # descriptor' and named no program (GAP-1902). Remove that residue
+        # first, as every normal uninstall does; one a program still runs is
+        # named with its fix.
+        Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $Layout
         $recovery = Invoke-DefenseClawPreLayoutRecovery `
             -Action Uninstall `
             -Layout $Layout `
