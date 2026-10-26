@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -67,6 +68,12 @@ func TestEmailRuleSkipsAddressShapedPathSegments(t *testing.T) {
 	} {
 		if loc := firstAcceptedRuleMatch(rule, text); loc != nil {
 			t.Errorf("ENT-EMAIL-BULK fired on %q in %q", text[loc[0]:loc[1]], text)
+		}
+		// The scan also reads the shell-obfuscation view, which removes
+		// $VAR references (GAP-2011 live: "PATH=$PATH:/home/..." became
+		// "PATH=:/home/..." and alerted in a real Claude Code prompt).
+		if normalized := normalizeShell(text); strings.Contains(text, "$") && firstAcceptedRuleMatch(rule, normalized) != nil {
+			t.Errorf("ENT-EMAIL-BULK fired on the shell-normalized view %q of %q", normalized, text)
 		}
 	}
 	for _, text := range []string{

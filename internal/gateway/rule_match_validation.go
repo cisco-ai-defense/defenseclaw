@@ -528,10 +528,17 @@ func tokenIsLocalPath(before string) bool {
 }
 
 // trimShellPathPrefix drops what the shell puts before a local path in one
-// word: a glued short option ("-C/home/x" -> "/home/x") and shell variables
+// word: a glued short option ("-C/home/x" -> "/home/x"), shell variables
 // that expand to a folder or a PATH list ("$HOME/../x", "${HOME}/x",
-// "$PATH:/home/x" -> "/../x", "/x", "/home/x").
+// "$PATH:/home/x" -> "/../x", "/x", "/home/x"), and the leading ":" of a PATH
+// list whose variable the shell-obfuscation view already removed
+// (normalizeShell turns "PATH=$PATH:/home/x" into "PATH=:/home/x"). A
+// host:/path keeps its host, so it stays remote.
 func trimShellPathPrefix(token string) string {
+	return strings.TrimLeft(trimShellVariables(token), ":")
+}
+
+func trimShellVariables(token string) string {
 	if len(token) > 2 && token[0] == '-' && (token[1]|0x20 >= 'a' && token[1]|0x20 <= 'z') &&
 		strings.IndexByte("/~.", token[2]) >= 0 {
 		token = token[2:]
