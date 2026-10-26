@@ -2292,6 +2292,17 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("ensure hook dir: %w", err)
 	}
+	target := filepath.Join(hookDir, scriptName)
+	// A teardown runs as the account. A hook folder that account cannot
+	// search (a root-owned ~/.defenseclaw/hooks made by sudo with HOME kept)
+	// holds no script its agents can run, so there is nothing to disable:
+	// that is not a failure (GAP-1978, same class as GAP-1904). The
+	// fail-closed rollback placeholder still reports the error.
+	if runtime.GOOS != "windows" && !opts.FailedSetupFailClosed {
+		if _, err := os.Lstat(target); errors.Is(err, os.ErrPermission) {
+			return nil
+		}
+	}
 	// A managed Windows hook folder holds only files with the managed runtime
 	// DACL; the generic private descriptor made a later rollback refuse to
 	// remove the tombstone, which left the deployment pending.
@@ -2308,8 +2319,7 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 	if opts.FailedSetupFailClosed && failedSetupPlaceholderBlocks[scriptName] {
 		body = failedSetupHookPlaceholder(vendorLabel)
 	}
-	return hookRuntimeFileWriter(opts.ManagedEnterprise)(
-		filepath.Join(hookDir, scriptName), []byte(body), 0o700)
+	return hookRuntimeFileWriter(opts.ManagedEnterprise)(target, []byte(body), 0o700)
 }
 
 // failedSetupPlaceholderBlocks lists the hook scripts whose agents treat
