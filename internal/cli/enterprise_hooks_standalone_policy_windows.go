@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -46,6 +47,11 @@ func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
 	if err != nil || !ok {
 		return err
 	}
+	if verify && !remove && !windowsGuardianWatching.Load() {
+		if err := windowsClaudeUserSettingsMigrated(home); err != nil {
+			return err
+		}
+	}
 	hookFile, plugin := enterprisepolicy.CopilotVSCodeUserWant(opts)
 	if remove {
 		hookFile, plugin = false, false
@@ -66,6 +72,52 @@ func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
 	}
 	if verify && len(result.Changed)+len(result.Removed) > 0 {
 		return fmt.Errorf("DefenseClaw's VS Code Local hooks under %s are not current: %s", home, strings.Join(append(result.Changed, result.Removed...), ", "))
+	}
+	return nil
+}
+
+// windowsGuardianWatching is set for the life of the guardian's watch loop
+// (enterpriseHookStandalonePlatformWatch). The guardian itself does not fail
+// a Copilot row on the user's Claude settings: its own pass migrates them
+// and a failing row would only reinstall the runtime every pass.
+var windowsGuardianWatching atomic.Bool
+
+// windowsClaudeUserSettingsMigrated is the verify check (Setup's readiness,
+// enterprise verify) that an account's Claude Code user settings, which
+// Copilot CLI in a project under the home and Cursor read, hold none of
+// DefenseClaw's older per-user hooks and can be read at all. Either one makes
+// the foreign-hook guard deny those agents' tool calls, so verify is not ok
+// and names the file and the reason instead of the calls failing with no
+// status error (GAP-1540, LEAD DECISION 03:34). Read-only; an account the
+// eligible profile list does not name is not checked. Tests replace it.
+var windowsClaudeUserSettingsMigrated = func(home string) error {
+	profiles, err := enterpriseHookWindowsEligibleProfiles(context.Background())
+	if err != nil {
+		return nil
+	}
+	for _, profile := range profiles {
+		if strings.TrimSpace(profile.SID) == "" || strings.TrimSpace(profile.UserHome) == "" ||
+			!strings.EqualFold(filepath.Clean(profile.UserHome), filepath.Clean(home)) {
+			continue
+		}
+		return windowsClaudeUserSettingsMigrationError(profile)
+	}
+	return nil
+}
+
+// windowsClaudeUserSettingsMigrationError is the verify error for one
+// account's Claude Code user settings, or nil.
+func windowsClaudeUserSettingsMigrationError(target enterprisehooks.TargetCredentials) error {
+	settings := filepath.Join(target.UserHome, ".claude", "settings.json")
+	present, _, err := windowsManagedClaudeRegistrationProbe(target.UserHome, target.SID)
+	switch {
+	case err != nil:
+		return fmt.Errorf("DefenseClaw cannot check %s for its older per-user hooks (%v); "+
+			"until the file is valid JSON (UTF-8 without a byte order mark) or removed, Copilot CLI in a project "+
+			"under the home and Cursor block their tool calls on it", settings, err)
+	case present:
+		return fmt.Errorf("%s still holds DefenseClaw's older per-user Claude Code hooks; the guardian removes them "+
+			"on its next pass, and until then Copilot CLI in a project under the home and Cursor block their tool calls on them", settings)
 	}
 	return nil
 }
@@ -160,6 +212,13 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
 		return
 	}
+	// Before the machine policy the hook-side guard enforces is published:
+	// an account this pass enrolls never meets DefenseClaw's own older
+	// per-user Claude Code hooks as foreign hooks (GAP-1540). The finish
+	// step reports what is left once per cleanup interval.
+	for _, profile := range windowsClaudeMigrationProfiles() {
+		migrateWindowsClaudeUserHooks(io.Discard, stderr, profile)
+	}
 	windowsStandaloneGoOwnedPolicyMu.Lock()
 	_, err = enterprisepolicy.PublishWindowsGoOwned(opts, connectors)
 	windowsStandaloneGoOwnedPolicyMu.Unlock()
@@ -192,6 +251,7 @@ var windowsStandaloneGoOwnedPolicyMu sync.Mutex
 // watch, which restores the plugin right after a standard account changes
 // its attributes instead of at the next pass.
 func enterpriseHookStandalonePlatformWatch(ctx context.Context, stderr io.Writer) {
+	windowsGuardianWatching.Store(true)
 	go watchWindowsStandaloneHookBinary(ctx, stderr)
 	opts, _, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone || err != nil || strings.TrimSpace(opts.OpenCodePluginPath) == "" {
@@ -402,7 +462,11 @@ func enterpriseHookWindowsEligibleProfilesFor(ctx context.Context, current *conf
 // user in place and Copilot blocked every tool call in a home project after
 // a 1.0.x per-user to managed upgrade and after a fresh managed install over
 // a retained profile (GAP-0587, T11 TST-28276, T12 TST-29537/29865/29921).
-func migrateWindowsClaudeUserHooks(stderr io.Writer, target enterprisehooks.TargetCredentials) {
+//
+// stderr gets the failures and the hooks left, removals the removal lines:
+// the pass before enforcement (enterpriseHookStandalonePlatformPrepare)
+// reports only removals, the finish step everything.
+func migrateWindowsClaudeUserHooks(stderr, removals io.Writer, target enterprisehooks.TargetCredentials) {
 	settings := filepath.Join(target.UserHome, ".claude", "settings.json")
 	present, left, err := windowsManagedClaudeRegistrationProbe(target.UserHome, target.SID)
 	removed := 0
@@ -414,12 +478,29 @@ func migrateWindowsClaudeUserHooks(stderr io.Writer, target enterprisehooks.Targ
 		return
 	}
 	if removed > 0 {
-		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: removed %d older DefenseClaw hook command(s) from %s\n", removed, settings)
+		fmt.Fprintf(removals, "defenseclaw: enterprise foreign-hook guard: removed %d older DefenseClaw hook command(s) from %s\n", removed, settings)
 	}
 	for _, hook := range left {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: %s still holds %s; remove it so other agents do not block on it\n",
 			settings, boundedEnterpriseHookUserCleanupText(hook))
 	}
+}
+
+// windowsClaudeMigrationProfiles is the profiles the pass before enforcement
+// migrates: every eligible profile with a SID and a home. The finish step
+// reports a profile list that cannot be read.
+func windowsClaudeMigrationProfiles() []enterprisehooks.TargetCredentials {
+	profiles, err := enterpriseHookWindowsEligibleProfiles(context.Background())
+	if err != nil {
+		return nil
+	}
+	out := profiles[:0:0]
+	for _, profile := range profiles {
+		if strings.TrimSpace(profile.SID) != "" && strings.TrimSpace(profile.UserHome) != "" {
+			out = append(out, profile)
+		}
+	}
+	return out
 }
 
 // enterpriseHookStandalonePlatformFinish removes unapproved foreign hooks
@@ -507,7 +588,7 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 			blocksError = blocksErr.Error()
 		}
 		logEnterpriseForeignHookBlocks(stderr, current.creds.UserHome, blocks, dropped, blocksError)
-		migrateWindowsClaudeUserHooks(stderr, current.creds)
+		migrateWindowsClaudeUserHooks(stderr, stderr, current.creds)
 		for _, name := range connectors {
 			if current.rows[name] {
 				continue

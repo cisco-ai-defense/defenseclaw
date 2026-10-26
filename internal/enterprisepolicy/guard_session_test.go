@@ -153,10 +153,24 @@ func TestSessionStateKeepsDenyingASessionAfterTheHookIsRemoved(t *testing.T) {
 		t.Fatalf("a clean scan later in the session must still deny: %+v", later)
 	}
 	// The block was recorded at session start, so the user's first prompt
-	// may get this message: it says when, and names the allowlist key.
-	for _, want := range []string{"When this agent session started, the", hookFile, "sha256:aa11", "connectors.claudecode.allowed_hooks", "restart the agent"} {
+	// may get this message: it says when. Once the hook is gone from the
+	// file (the scan is clean), restarting the agent is the one fix, so the
+	// message says that and nothing else to do (GAP-1540).
+	for _, want := range []string{"When this agent session started, the", hookFile, "sha256:aa11", "It is not there any more", "tool calls until you restart the agent"} {
 		if !strings.Contains(later.Reason, want) {
 			t.Fatalf("the session denial must say %q: %s", want, later.Reason)
+		}
+	}
+	for _, stale := range []string{"allowed_hooks", "after removing the hook", "Remove it"} {
+		if strings.Contains(later.Reason, stale) {
+			t.Fatalf("the hook is gone; the session denial still says %q: %s", stale, later.Reason)
+		}
+	}
+	// While the hook is still in the file, the denial keeps its advice.
+	still := h.apply("s-1", false, sessionDeny(hookFile, "aa11"))
+	for _, want := range []string{"connectors.claudecode.allowed_hooks", "after removing the hook, restart the agent"} {
+		if !still.Deny || !strings.Contains(still.Reason, want) {
+			t.Fatalf("the session denial with the hook still present must say %q: %s", want, still.Reason)
 		}
 	}
 	if len(later.Findings) == 0 || later.Findings[0].Allowed || later.Findings[0].Path != hookFile {

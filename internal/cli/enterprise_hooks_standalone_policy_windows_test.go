@@ -183,7 +183,7 @@ func TestWindowsClaudeMigrationReportsLeftoversWhenNothingIsRemovable(t *testing
 		return 0, nil, nil
 	}
 	var log bytes.Buffer
-	migrateWindowsClaudeUserHooks(&log, enterprisehooks.TargetCredentials{UserHome: home, UID: -1, GID: -1, SID: sid})
+	migrateWindowsClaudeUserHooks(&log, &log, enterprisehooks.TargetCredentials{UserHome: home, UID: -1, GID: -1, SID: sid})
 	settings := filepath.Join(home, ".claude", "settings.json")
 	for _, want := range []string{
 		settings + " still holds PreToolUse: a hook command naming defenseclaw-hook (arguments not shown)",
@@ -199,7 +199,7 @@ func TestWindowsClaudeMigrationReportsLeftoversWhenNothingIsRemovable(t *testing
 	// A file without a DefenseClaw hook stays silent.
 	raw = []byte(`{"hooks":{"Stop":[{"hooks":[{"command":"notify.exe"}]}]}}`)
 	log.Reset()
-	migrateWindowsClaudeUserHooks(&log, enterprisehooks.TargetCredentials{UserHome: home, UID: -1, GID: -1, SID: sid})
+	migrateWindowsClaudeUserHooks(&log, &log, enterprisehooks.TargetCredentials{UserHome: home, UID: -1, GID: -1, SID: sid})
 	if log.Len() != 0 {
 		t.Fatalf("clean settings were reported:\n%s", log.String())
 	}
@@ -226,11 +226,13 @@ func TestWindowsOpenCodeMachinePolicyCheckNamesTheManagedConfig(t *testing.T) {
 // when the Go-owned policy fails, and only in the standalone profile.
 func TestWindowsGuardianRechecksTheClaudeVersionFloor(t *testing.T) {
 	previousOptions, previousFloor, previousWSL := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsClaudeVersionFloor, enterpriseHookWindowsWSL
-	previousCursor := enterpriseHookWindowsCursorAdapterRefresh
+	previousCursor, previousProfiles := enterpriseHookWindowsCursorAdapterRefresh, enterpriseHookWindowsEligibleProfiles
 	t.Cleanup(func() {
 		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsClaudeVersionFloor, enterpriseHookWindowsWSL = previousOptions, previousFloor, previousWSL
-		enterpriseHookWindowsCursorAdapterRefresh = previousCursor
+		enterpriseHookWindowsCursorAdapterRefresh, enterpriseHookWindowsEligibleProfiles = previousCursor, previousProfiles
 	})
+	// The pass migrates the profiles this test names, never the host's own.
+	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) { return nil, nil }
 	// GAP-2467: every standalone pass also refreshes a stale Cursor adapter.
 	var cursorHooks []string
 	enterpriseHookWindowsCursorAdapterRefresh = func(hook string) (bool, error) {
@@ -423,5 +425,104 @@ func TestWindowsForeignCleanupHoldsNoLockWhileItCleans(t *testing.T) {
 	enterpriseHookStandalonePlatformFinish(context.Background(), &log, nil, time.Now())
 	if calls != 1 {
 		t.Fatalf("cleanup calls = %d\n%s", calls, log.String())
+	}
+}
+
+// GAP-1540 (LEAD DECISION 03:34): the guardian migrates DefenseClaw's own
+// older per-user Claude Code hooks out of every eligible account before it
+// publishes the machine policy the hook-side guard enforces, so an account
+// this pass enrolls never meets them as foreign hooks. The pass before
+// enforcement reports only what it removed; the finish step reports the rest.
+func TestWindowsClaudeMigrationRunsBeforeTheMachinePolicyIsPublished(t *testing.T) {
+	previousOptions, previousFloor, previousWSL := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsClaudeVersionFloor, enterpriseHookWindowsWSL
+	previousCursor, previousProfiles := enterpriseHookWindowsCursorAdapterRefresh, enterpriseHookWindowsEligibleProfiles
+	previousRemover, previousProbe := windowsManagedClaudeSettingsRemover, windowsManagedClaudeRegistrationProbe
+	t.Cleanup(func() {
+		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsClaudeVersionFloor, enterpriseHookWindowsWSL = previousOptions, previousFloor, previousWSL
+		enterpriseHookWindowsCursorAdapterRefresh, enterpriseHookWindowsEligibleProfiles = previousCursor, previousProfiles
+		windowsManagedClaudeSettingsRemover, windowsManagedClaudeRegistrationProbe = previousRemover, previousProbe
+	})
+	var order []string
+	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
+		return enterprisepolicy.Options{HookBinary: `C:\hook.exe`}, []string{"copilot"}, true, nil
+	}
+	enterpriseHookWindowsClaudeVersionFloor = func(enterprisepolicy.Options, []string) (enterprisepolicy.State, error) {
+		order = append(order, "policy")
+		return enterprisepolicy.State{}, nil
+	}
+	enterpriseHookWindowsWSL = func(enterprisepolicy.Options) (enterprisepolicy.State, error) { return enterprisepolicy.State{}, nil }
+	enterpriseHookWindowsCursorAdapterRefresh = func(string) (bool, error) { return false, nil }
+	const std1, std2 = "S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"
+	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) {
+		return []enterprisehooks.TargetCredentials{
+			{UserHome: `C:\Users\dcw-std1`, UID: -1, GID: -1, SID: std1},
+			{UserHome: `C:\Users\dcw-std2`, UID: -1, GID: -1, SID: std2},
+		}, nil
+	}
+	windowsManagedClaudeRegistrationProbe = func(home, sid string) (bool, []string, error) {
+		if sid == std2 {
+			return false, nil, errors.New("the Claude settings must be a JSON object")
+		}
+		return true, nil, nil
+	}
+	windowsManagedClaudeSettingsRemover = func(home, sid, _ string) (int, []string, error) {
+		order = append(order, "migrate "+sid)
+		return 29, nil, nil
+	}
+	var log bytes.Buffer
+	enterpriseHookStandalonePlatformPrepare(&log)
+	if strings.Join(order, ",") != "migrate "+std1+",policy" {
+		t.Fatalf("the older DefenseClaw Claude hooks must be migrated before the machine policy is published: %v\n%s", order, log.String())
+	}
+	if want := `removed 29 older DefenseClaw hook command(s) from C:\Users\dcw-std1\.claude\settings.json`; !strings.Contains(log.String(), want) {
+		t.Fatalf("the pass before enforcement must report what it removed (%q):\n%s", want, log.String())
+	}
+	if strings.Contains(log.String(), "dcw-std2") {
+		t.Fatalf("the pass before enforcement repeats a failure the finish step and verify report:\n%s", log.String())
+	}
+}
+
+// GAP-1540 (LEAD DECISION 03:34): a migration that cannot finish (a settings
+// file DefenseClaw cannot read, such as one saved with a byte order mark) or
+// has not run yet makes the Copilot row's verify (Setup readiness, enterprise
+// verify) fail with the file and the reason, instead of the guard silently
+// blocking every call. The guardian's own pass does not fail the row on it.
+func TestWindowsCopilotVerifyNamesClaudeSettingsTheMigrationCannotFinish(t *testing.T) {
+	previousOptions, previousProfiles, previousProbe := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles, windowsManagedClaudeRegistrationProbe
+	t.Cleanup(func() {
+		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles, windowsManagedClaudeRegistrationProbe = previousOptions, previousProfiles, previousProbe
+		windowsGuardianWatching.Store(false)
+	})
+	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
+		return enterprisepolicy.Options{HookBinary: `C:\Program Files\Cisco\DefenseClaw\defenseclaw-hook.exe`}, []string{"copilot"}, true, nil
+	}
+	home := t.TempDir()
+	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) {
+		return []enterprisehooks.TargetCredentials{{UserHome: strings.ToUpper(home), UID: -1, GID: -1, SID: "S-1-5-21-1-2-3-1001"}}, nil
+	}
+	settings := filepath.Join(strings.ToUpper(home), ".claude", "settings.json")
+	for _, tc := range []struct {
+		name    string
+		present bool
+		err     error
+		want    string
+	}{
+		{"unreadable", false, errors.New("the Claude settings must be a JSON object: invalid character"), "cannot check " + settings + " for its older per-user hooks"},
+		{"not migrated yet", true, nil, settings + " still holds DefenseClaw's older per-user Claude Code hooks"},
+	} {
+		windowsManagedClaudeRegistrationProbe = func(string, string) (bool, []string, error) { return tc.present, nil, tc.err }
+		windowsGuardianWatching.Store(false)
+		if err := windowsCopilotVSCodeUser(home, true, false); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: verify must name the file and the reason: %v", tc.name, err)
+		}
+		windowsGuardianWatching.Store(true)
+		if err := windowsCopilotVSCodeUser(home, true, false); err != nil && strings.Contains(err.Error(), settings) {
+			t.Fatalf("%s: the guardian's own pass must not fail the row on the Claude settings: %v", tc.name, err)
+		}
+	}
+	windowsManagedClaudeRegistrationProbe = func(string, string) (bool, []string, error) { return false, nil, nil }
+	windowsGuardianWatching.Store(false)
+	if err := windowsCopilotVSCodeUser(home, true, false); err != nil && strings.Contains(err.Error(), settings) {
+		t.Fatalf("migrated settings must pass: %v", err)
 	}
 }

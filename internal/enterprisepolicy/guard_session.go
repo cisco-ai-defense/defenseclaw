@@ -485,6 +485,10 @@ func pendingRemovalDecision(decision GuardDecision, connector string) GuardDecis
 // sessionBlockNote ends every denial the session state applies to.
 const sessionBlockNote = "The agent can keep running a hook it loaded when the session started, even after the file changes, so DefenseClaw blocks tool calls for the rest of this session: after removing the hook, restart the agent."
 
+// sessionHookGoneNote ends a session denial once the hook that blocked the
+// session is gone from its file.
+const sessionHookGoneNote = "DefenseClaw blocks this session's tool calls until you restart the agent."
+
 // sessionIncompleteNote ends a denial for a session whose start scan stopped
 // on a budget.
 const sessionIncompleteNote = "The agent can keep running a hook it loaded from a file DefenseClaw did not check, so DefenseClaw blocks tool calls for the rest of this session: remove unneeded hook files, then restart the agent."
@@ -535,6 +539,15 @@ func stickySessionDecision(decision GuardDecision, connector string, record Sess
 		}
 		cause = fmt.Sprintf("When this agent session started, the %s file %s %s (digest sha256:%s). %s",
 			scope, record.Path, what, record.Digest, foreignHookAdvice(connector, record.Reason))
+		if !decision.Deny && !decision.Incomplete && !hasBlockableFindings(decision) {
+			// This call's scan is clean: the hook is gone (the guardian
+			// migrated or removed it, or the user did), and only the agent
+			// process that loaded it is left. Restarting is the one fix
+			// (GAP-1540, LEAD DECISION 03:34).
+			cause = fmt.Sprintf("When this agent session started, the %s file %s %s (digest sha256:%s). It is not there any more, but this agent loaded it.",
+				scope, record.Path, what, record.Digest)
+			note = sessionHookGoneNote
+		}
 	}
 	decision.Deny = true
 	decision.Reason = fmt.Sprintf(
