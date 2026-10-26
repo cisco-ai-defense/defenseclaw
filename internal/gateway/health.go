@@ -65,8 +65,9 @@ type observabilityV8EventHistorySnapshot struct {
 	activeCode         string
 	lastFailureClass   string
 	lastFailurePrimary uint8
-	// lastFailureAt is when the last write failure happened, so a reader
-	// can tell a recent one from one long recovered (GAP-1627).
+	// lastFailureAt is when the last write failure happened (the recovery
+	// time of a failure episode that has ended), so a reader can tell a
+	// recent one from one long recovered (GAP-1627, GAP-1752).
 	lastFailureAt time.Time
 }
 
@@ -1051,6 +1052,11 @@ func (h *SidecarHealth) observeObservabilityV8EventHistory(
 	if observation.active && transition.Code == audit.EventHistoryHealthWriteFailed {
 		observation.lastFailureClass = string(transition.SQLiteClass)
 		observation.lastFailurePrimary = transition.SQLitePrimaryCode
+		observation.lastFailureAt = transition.OccurredAt
+	} else if current.active && transition.Code == audit.EventHistoryHealthWriteFailed {
+		// The audit store reports one failed transition per episode, so the
+		// writes kept failing until this recovery: the last failed write was
+		// just before it, not at the start of the episode (GAP-1752).
 		observation.lastFailureAt = transition.OccurredAt
 	}
 	h.observabilityV8EventHistory[code] = observation

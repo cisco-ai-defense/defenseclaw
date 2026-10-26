@@ -22,7 +22,8 @@ func TestObservabilityV8EventHistoryKeepsTheLastFailureTime(t *testing.T) {
 	health.observeObservabilityV8EventHistory(failure)
 	health.observeObservabilityV8EventHistory(eventHistoryTransition(7, 2, audit.EventHistoryHealthRecovered, audit.EventHistoryHealthWriteFailed, "", 0))
 	details := health.Snapshot().Telemetry.Details
-	want := failure.OccurredAt.UTC().Format(time.RFC3339Nano)
+	// The episode lasted until the recovery (sequence 2), GAP-1752.
+	want := eventHistoryTransition(7, 2, audit.EventHistoryHealthRecovered, audit.EventHistoryHealthWriteFailed, "", 0).OccurredAt.UTC().Format(time.RFC3339Nano)
 	if details["event_history_last_failure_at"] != want || details["event_history_last_sqlite_class"] != "full" {
 		t.Fatalf("recovered details = %+v, want event_history_last_failure_at %s", details, want)
 	}
