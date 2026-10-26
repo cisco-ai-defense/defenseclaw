@@ -863,6 +863,27 @@ class PerConnectorToggleTests(unittest.TestCase):
         self.assertTrue(app.cfg.guardrail.effective_enabled("codex"))
         app.cfg.save.assert_called_once()
 
+    def test_enable_one_connector_refuses_a_malformed_shared_hook_sidecar(self):
+        """GAP-1816: enable saved the flag and returned 0 over a malformed
+        hooks/.hookcfg; it now runs setup's check first and changes nothing."""
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        refusal = "Codex: the shared hook config is malformed. Nothing was changed"
+        with (
+            patch("defenseclaw.commands.cmd_setup._agent_settings_refusal", return_value=refusal) as check,
+            patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+        ):
+            result = runner.invoke(
+                cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes", "--no-restart"], obj=app
+            )
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("malformed", result.output)
+        self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
+        app.cfg.save.assert_not_called()
+        restart.assert_not_called()
+        self.assertEqual(check.call_args.args[1], "codex")
+        self.assertFalse(check.call_args.kwargs["will_restart"])
+
     def test_enable_one_connector_verifies_its_agent_first_and_waits_for_the_gateway(self):
         """Windows refuses a connector it holds no verified agent executable for, and
         disable dropped that proof (GAP-0069): enable records it before saving, and

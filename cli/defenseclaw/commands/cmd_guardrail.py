@@ -415,6 +415,18 @@ def _toggle_connector_guardrail(
         # with --no-restart, so its agent proof must exist before the save.
         _verify_agents_before_enable(app, [key])
 
+    if enable:
+        # The checks setup runs before it saves: the agent's own settings and
+        # the shared hooks/.hookcfg every hook closes on. Enabling over a
+        # malformed one saved the flag and returned 0 (GAP-1816).
+        from defenseclaw.commands import cmd_setup
+
+        if refusal := cmd_setup._agent_settings_refusal(
+            app.cfg, key, will_restart=restart, changed="Nothing was changed", rerun="guardrail enable command"
+        ):
+            ux.err(refusal, indent="  ")
+            raise SystemExit(1)
+
     # Mutate the per-connector entry, preserving its other policy fields.
     from defenseclaw.config import PerConnectorGuardrailConfig
 
