@@ -142,9 +142,11 @@ try {
 // there, and the helper's own error for a bare request (no credential).
 function perUserPostDiagnostic(reason) {
   if (!/per-user gateway peer unverified/.test(reason || "")) return "";
-  const gateway = join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
-  const address = (/const DC_API_ADDR = "([^"]*)"/.exec(readFileSync(pluginPath, "utf8")) || [])[1] || "";
-  let detail = ` home=${homedir()} gateway=${existsSync(gateway)} api=${address}`;
+  const plugin = readFileSync(pluginPath, "utf8");
+  const rendered = (/const DC_GATEWAY_BINARY = "((?:[^"\\]|\\.)*)";/.exec(plugin) || [])[1] || "";
+  const gateway = rendered ? JSON.parse(`"${rendered}"`) : join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
+  const address = (/const DC_API_ADDR = "([^"]*)"/.exec(plugin) || [])[1] || "";
+  let detail = ` home=${homedir()} gateway=${gateway} exists=${existsSync(gateway)} api=${address}`;
   try {
     execFileSync(gateway, ["hook-post", "--api-addr", address], {
       input: JSON.stringify({ path: "/health", headers: {}, body: "" }),

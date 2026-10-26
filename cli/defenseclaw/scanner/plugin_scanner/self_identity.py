@@ -70,20 +70,20 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 # bridge_host), and the copy the Secure Client profile renders
 # (internal/gateway/connector/hooks/*-secure-client.*), which its release pins.
 _BRIDGE_STANDALONE_TEMPLATE_DIGESTS = {
-    "amp": "c2d705527b5c6b1482a645435998f048fdb48b47303f37ae21f3fb90749a6671",
-    "opencode": "4624e672100f3564814e6c92ae20e0217ec5561d766c038601f64a1dc31912eb",
+    "amp": "492c8ef226d7724c86b7b7d50e5b9605f405529a3c43c2f4844fc49864125eb5",
+    "opencode": "b42cf5c034eb76631acf5d33231e6087763405822d35feb6aa5e1b37f3c5f914",
 }
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "4b0292f2a6e16c44931649c836aa7263136c9d58a916c23c3a10256e711282c9",  # amp-plugin.ts
+            "c41c17ed0bdf9fb8dac02fb81ab11a089bea2aa56af58c8cfaff8d60a2102fe8",  # amp-plugin.ts
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["amp"],
             "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "9216239388d216ef5cc11ac9737408fc60d984907efb31b214ebbbcbb2e7204b",  # opencode-plugin.js
+            "af07c63dda6c4d67f8281d41dfd1a0927979b13c4ec2b605b8f93ac6164b0749",  # opencode-plugin.js
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["opencode"],
             "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
         }
@@ -163,6 +163,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"\n',
             "proof",
         ),
+        (
+            b'const DC_GATEWAY_BINARY: string = "',
+            b'"\n',
+            b'const DC_GATEWAY_BINARY: string = "{{.GatewayBinaryJS}}"\n',
+            "gateway",
+        ),
     ),
     "opencode": (
         (
@@ -224,6 +230,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'";\n',
             b'const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";\n',
             "proof",
+        ),
+        (
+            b'const DC_GATEWAY_BINARY = "',
+            b'";\n',
+            b'const DC_GATEWAY_BINARY = "{{.GatewayBinaryJS}}";\n',
+            "gateway",
         ),
     ),
 }
@@ -481,6 +493,29 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
     return info.st_uid == 0 and not info.st_mode & 0o022
 
 
+def _valid_bridge_gateway_binary(value: bytes) -> bool:
+    """Accept the gateway binary a per-user bridge runs (Go
+    perUserPluginGatewayBinary): unset (the ~/.local/bin gateway) or the
+    absolute path of a defenseclaw-gateway binary in a bin folder, as native
+    Windows Setup renders it. The account owns that install, as it owns
+    ~/.local/bin, so no ownership check applies.
+    """
+
+    if value == b"":
+        return True
+    try:
+        path = json.loads('"' + value.decode("utf-8", errors="strict") + '"')
+    except (UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(path, str) or not os.path.isabs(path) or any(ord(char) < 0x20 for char in path):
+        return False
+    name = "defenseclaw-gateway.exe" if os.name == "nt" else "defenseclaw-gateway"
+    return (
+        os.path.normcase(os.path.basename(path)) == os.path.normcase(name)
+        and os.path.normcase(os.path.basename(os.path.dirname(path))) == "bin"
+    )
+
+
 def _valid_bridge_dynamic_value(
     kind: str,
     value: bytes,
@@ -499,6 +534,8 @@ def _valid_bridge_dynamic_value(
         return value in {b"open", b"closed"}
     if kind in {"socket", "guard", "marker", "native", "lifecycle"}:
         return _valid_bridge_managed_path(kind, value)
+    if kind == "gateway":
+        return _valid_bridge_gateway_binary(value)
     if kind != "token":
         return False
     try:
@@ -533,7 +570,7 @@ def _matches_immutable_bridge_template(
             for index, line in enumerate(lines)
             if line.startswith(prefix) and line.endswith(suffix)
         ]
-        if not matches and kind in {"native", "proof", "mode", "lifecycle"}:
+        if not matches and kind in {"native", "proof", "mode", "lifecycle", "gateway"}:
             # Current and Secure Client templates have distinct fields, each
             # still covered by its exact pinned digest.
             continue
