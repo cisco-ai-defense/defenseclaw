@@ -956,14 +956,14 @@ func TestApplyRulePackOverrides_AddsNewCategoryKeepsDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, want := len(allRuleCategories), len(defaultRuleCategories)+1; got != want {
+	if got, want := len(allRuleCategories), len(defaultRuleCategories())+1; got != want {
 		t.Fatalf("expected %d categories (defaults + new), got %d", want, got)
 	}
 	names := map[string]bool{}
 	for _, c := range allRuleCategories {
 		names[c.Name] = true
 	}
-	for _, dc := range defaultRuleCategories {
+	for _, dc := range defaultRuleCategories() {
 		if !names[dc.Name] {
 			t.Errorf("default category %q dropped after override", dc.Name)
 		}
@@ -1003,7 +1003,7 @@ func TestApplyRulePackOverrides_ReplacesNamedCategoryOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, want := len(allRuleCategories), len(defaultRuleCategories); got != want {
+	if got, want := len(allRuleCategories), len(defaultRuleCategories()); got != want {
 		t.Fatalf("expected %d categories, got %d", want, got)
 	}
 
@@ -1038,8 +1038,8 @@ func TestApplyRulePackOverrides_NilRulePack(t *testing.T) {
 	if err := ApplyRulePackOverrides(nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(allRuleCategories) != len(defaultRuleCategories) {
-		t.Fatalf("nil rule pack did not restore generated defaults: got %d categories, want %d", len(allRuleCategories), len(defaultRuleCategories))
+	if len(allRuleCategories) != len(defaultRuleCategories()) {
+		t.Fatalf("nil rule pack did not restore generated defaults: got %d categories, want %d", len(allRuleCategories), len(defaultRuleCategories()))
 	}
 	if containsRuleID(findingIDs(ScanAllRules("stale_deadbeef", "exec")), "STALE") {
 		t.Fatal("nil rule pack retained the previous override")

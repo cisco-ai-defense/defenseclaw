@@ -34,7 +34,7 @@ func trustedActionDispositionCurlFacts(argv ...string) actionfacts.Facts {
 }
 
 func TestTrustedActionContentLiteralRequiresProvenRiskPair(t *testing.T) {
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	finding := trustedActionDispositionTestFinding(
 		t,
 		generation,
@@ -904,7 +904,7 @@ func TestTrustedActionContentLiteralRequiresProvenRiskPair(t *testing.T) {
 }
 
 func TestTrustedActionRequestMetadataRiskPairs(t *testing.T) {
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	finding := trustedActionDispositionTestFinding(t, generation, "SEC-OPENAI")
 	for _, test := range []struct {
 		name        string
@@ -2224,7 +2224,7 @@ func TestTrustedActionRequestMetadataRiskPairs(t *testing.T) {
 }
 
 func TestTrustedActionCurlCapabilityDependentSetupBoundary(t *testing.T) {
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	const sensitivePath = "/home/alice/.ssh/id_rsa"
 	for _, test := range []struct {
 		name   string
@@ -2384,7 +2384,7 @@ func TestTrustedActionCurlCapabilityDependentSetupBoundary(t *testing.T) {
 }
 
 func TestTrustedActionCurlCapabilityStateDoesNotCrossNextGroup(t *testing.T) {
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	finding := trustedActionDispositionTestFinding(t, generation, "SEC-OPENAI")
 	for _, flags := range [][]string{
 		{"--socks5-gssapi-nec", "--no-socks5-gssapi-nec"},
@@ -2412,7 +2412,7 @@ func TestTrustedActionCurlCapabilityStateDoesNotCrossNextGroup(t *testing.T) {
 }
 
 func TestTrustedActionWgetCustomMethodEgress(t *testing.T) {
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	finding := trustedActionDispositionTestFinding(t, generation, "SEC-AWS-KEY")
 	facts := actionfacts.Analyze(actionfacts.Input{
 		Tool: "exec",
@@ -2436,7 +2436,7 @@ func TestTrustedActionWgetCustomMethodEgress(t *testing.T) {
 func TestTrustedActionDestinationHostnameRequiresDirectShellExecution(t *testing.T) {
 	t.Parallel()
 
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	finding := trustedActionDispositionTestFinding(t, generation, "SEC-OPENAI")
 	for _, test := range []struct {
 		name    string
@@ -2481,7 +2481,7 @@ func TestTrustedActionCanonicalizedHostnameDoesNotInventCaseSensitiveSecret(t *t
 	t.Parallel()
 
 	const key = "AKIA" + "7Q2M9X4B6C8D3F5H"
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	finding := trustedActionDispositionTestFinding(t, generation, "SEC-AWS-KEY")
 	for _, test := range []struct {
 		name string
@@ -2540,7 +2540,7 @@ func TestTrustedActionStaticUploadMatchesEffectivePayloadOnly(t *testing.T) {
 	awsKey := "AKIA" + awsSuffix
 	escapedLookalike := `AKIA\` + awsSuffix
 
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	finding := trustedActionDispositionTestFinding(t, generation, "SEC-AWS-KEY")
 	for _, test := range []struct {
 		name        string
@@ -2632,7 +2632,7 @@ func TestTrustedActionStaticUploadMatchesEffectivePayloadOnly(t *testing.T) {
 }
 
 func TestTrustedActionTransformedCurlOperandProjection(t *testing.T) {
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	for _, test := range []struct {
 		name        string
 		ruleID      string
@@ -2731,7 +2731,7 @@ func TestTrustedActionTransformedCurlOperandProjection(t *testing.T) {
 }
 
 func TestTrustedActionSensitiveWriteIgnoresCredentialShapedPath(t *testing.T) {
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	finding := trustedActionDispositionTestFinding(t, generation, "SEC-AWS-KEY")
 	awsKey := "AKIA" + "7G4N2K9Q6M8R3T5V"
 	facts := actionfacts.Analyze(actionfacts.Input{
@@ -2769,7 +2769,7 @@ func TestTrustedActionDispositionDoesNotAffectUntrustedContentScanner(t *testing
 
 func TestTrustedActionPIILiteralUsesSameRiskPairBoundary(t *testing.T) {
 	const pii = "ssn=219-09-9999"
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	finding := trustedActionDispositionTestFinding(
 		t,
 		generation,
@@ -2810,7 +2810,7 @@ func TestTrustedActionPIILiteralUsesSameRiskPairBoundary(t *testing.T) {
 }
 
 func TestTrustedActionShippedGitRulesAreAdvisory(t *testing.T) {
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	for _, ruleID := range []string{
 		"integrity.git_hooks_bypass",
 		"source.git_remote_tamper",
@@ -2831,7 +2831,7 @@ func TestTrustedActionShippedGitRulesAreAdvisory(t *testing.T) {
 }
 
 func TestTrustedActionCustomGitRuleRetainsDisposition(t *testing.T) {
-	categories := cloneRuleCategories(defaultRuleCategories)
+	categories := cloneRuleCategories(defaultRuleCategories())
 	for categoryIndex := range categories {
 		for ruleIndex := range categories[categoryIndex].Rules {
 			rule := &categories[categoryIndex].Rules[ruleIndex]
@@ -2857,7 +2857,7 @@ func TestTrustedActionCustomGitRuleRetainsDisposition(t *testing.T) {
 }
 
 func TestTrustedActionContextDispositionNeverPromotesDetectionOnly(t *testing.T) {
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	finding := trustedActionDispositionTestFinding(t, generation, "SEC-OPENAI")
 	finding.enforcement = findingEnforcementDetectionOnly
 	facts := actionfacts.Analyze(actionfacts.Input{
@@ -2880,7 +2880,7 @@ func TestTrustedActionContextDispositionNeverPromotesDetectionOnly(t *testing.T)
 }
 
 func TestTrustedActionCredentialPathDispositions(t *testing.T) {
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	tests := []struct {
 		name         string
 		ruleID       string

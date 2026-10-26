@@ -26,7 +26,7 @@ func TestTrustedActionCurlProxyMetadataEgress(t *testing.T) {
 	t.Parallel()
 
 	const token = "AKIA7Q2M9X4B6C8D3F5H"
-	generation := mustCompileRulePackGeneration(defaultRuleCategories)
+	generation := mustCompileRulePackGeneration(defaultRuleCategories())
 	for _, test := range []struct {
 		name        string
 		command     string

@@ -201,7 +201,7 @@ func TestAgentVerdictReasonKeepsSecureClientWording(t *testing.T) {
 func TestAgentMatchedRulesNamesRulesByID(t *testing.T) {
 	var builtIn string
 	var builtInID, builtInTitle string
-	for _, category := range defaultRuleCategories {
+	for _, category := range defaultRuleCategories() {
 		for _, rule := range category.Rules {
 			if rule.ID != "" && rule.Title != "" && agentRuleIDPattern.MatchString(rule.ID) && !strings.Contains(rule.Title, ", ") {
 				builtInID, builtInTitle = rule.ID, rule.Title

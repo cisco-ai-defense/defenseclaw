@@ -247,10 +247,10 @@ func v8MetricDescriptorByName(name string) (V8MetricDescriptor, bool) {
 	return cloneV8MetricDescriptor(descriptor), ok
 }
 
-// The legacy SDK path is retained until producer cutover, but its global
-// compatibility vocabulary is derived from the generated canonical and local
-// projections instead of another handwritten label list.
-var v8MetricAllowedAttributeKeys = generatedV8MetricAttributeKeys()
+// The legacy SDK path is retained until producer cutover. Build its
+// compatibility vocabulary on first metric use; hooks import telemetry but
+// never construct a meter.
+var v8MetricAllowedAttributeKeys = sync.OnceValue(generatedV8MetricAttributeKeys)
 
 func generatedV8MetricAttributeKeys() map[attribute.Key]struct{} {
 	result := make(map[attribute.Key]struct{})
@@ -274,8 +274,9 @@ func generatedV8MetricAttributeKeys() map[attribute.Key]struct{} {
 // use this detached snapshot to fail closed without maintaining a second label
 // catalog.
 func V8MetricAllowedAttributeKeys() []string {
-	result := make([]string, 0, len(v8MetricAllowedAttributeKeys))
-	for key := range v8MetricAllowedAttributeKeys {
+	keys := v8MetricAllowedAttributeKeys()
+	result := make([]string, 0, len(keys))
+	for key := range keys {
 		result = append(result, string(key))
 	}
 	sort.Strings(result)
@@ -493,10 +494,11 @@ func (instrument v8Float64UpDownCounter) Add(ctx context.Context, value float64,
 
 func v8BoundMetricAttributes(source attribute.Set) attribute.Set {
 	values := make([]attribute.KeyValue, 0, min(source.Len(), v8MetricMaxAttributes))
+	allowedKeys := v8MetricAllowedAttributeKeys()
 	iterator := source.Iter()
 	for iterator.Next() && len(values) < v8MetricMaxAttributes {
 		item := iterator.Attribute()
-		if _, allowed := v8MetricAllowedAttributeKeys[item.Key]; !allowed {
+		if _, allowed := allowedKeys[item.Key]; !allowed {
 			continue
 		}
 		values = append(values, v8BoundMetricAttribute(item))
