@@ -152,7 +152,9 @@ def test_connector_override_created_on_a_single_install(app, restarts, rerenders
     assert payload["changed"] is False  # already there
     _, payload = _run(app, "--clear", "--connector", "codex", "--no-restart", "--json")
     assert (payload["mode"], payload["mode_source"], payload["gateway"]) == ("observe", "global", "live")
-    assert gc.connectors["codex"].mode == ""
+    # guardrail.connector already lists codex, so its emptied entry goes (GAP-1954).
+    assert "codex" not in gc.connectors
+    assert app.cfg.active_connectors() == ["codex"]
 
 
 def test_connector_scope_leaves_peers_alone_and_global_names_overrides(app) -> None:

@@ -4316,7 +4316,15 @@ def use_pack_cmd(
         stale, dropped = _stale_rule_changes(app.cfg, fallback.path, connector_key)
         result = _write_guardrail_config(
             app,
-            [config_writer.Change(f"{key}.rule_pack", unset=True), *pin_changes, *stale],
+            [
+                # The entry goes with its last override when guardrail.connector
+                # already puts the connector on the roster (GAP-1954, GAP-1894).
+                config_writer.Change(
+                    f"{key}.rule_pack", unset=True, prune_empty_to=_rule_prune_scope(connector_key, None, app.cfg)
+                ),
+                *pin_changes,
+                *stale,
+            ],
             f"guardrail use-pack --clear --connector {connector_key}",
             _fail,
         )
@@ -5512,7 +5520,16 @@ def mode_cmd(
     if connector_key is None:
         gc.mode = mode
     elif clear:
-        _connector_block_for_write(gc, connector_key).mode = ""
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        block = _connector_block_for_write(gc, connector_key)
+        block.mode = ""
+        if block == PerConnectorGuardrailConfig() and roster_entry_is_redundant(
+            app.cfg, connector_key, list(gc.connectors)
+        ):
+            # Nothing of its own is left and guardrail.connector already puts
+            # the connector on the roster: no 'connectors: codex: {}' (GAP-1954).
+            del gc.connectors[connector_key]
     else:
         _connector_block_for_write(gc, connector_key).mode = mode
     new_mode = _effective(connector_key)

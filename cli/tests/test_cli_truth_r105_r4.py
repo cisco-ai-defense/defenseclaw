@@ -138,6 +138,55 @@ def test_guardrail_undo_on_a_single_connector_config_restores_the_exact_bytes(gu
     assert path.read_bytes() == original, path.read_text()
 
 
+def test_use_pack_clear_on_a_single_connector_config_restores_the_exact_bytes(guardrail_app) -> None:
+    # GAP-1954: use-pack --clear left 'connectors: codex: {}' (the GAP-1894 class).
+    app, path = guardrail_app
+    original = b"config_version: 9\nguardrail:\n  enabled: true\n  connector: codex\n"
+    path.write_bytes(original)
+    app.cfg.guardrail.connectors = {}
+    result = _guardrail(app, "use-pack", "strict", "--connector", "codex")
+    assert result.exit_code == 0, result.output
+    assert yaml.safe_load(path.read_text())["guardrail"]["connectors"] == {"codex": {"rule_pack": "strict"}}
+    app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack="strict")}
+    result = _guardrail(app, "use-pack", "--clear", "--connector", "codex")
+    assert result.exit_code == 0, result.output
+    assert path.read_bytes() == original, path.read_text()
+
+
+def test_use_pack_clear_keeps_an_entry_that_puts_the_connector_on_the_roster(guardrail_app) -> None:
+    app, path = guardrail_app
+    path.write_bytes(
+        b"config_version: 9\nguardrail:\n  enabled: true\n  connector: codex\n"
+        b"  connectors:\n    codex:\n      rule_pack: strict\n    claudecode: {}\n"
+    )
+    app.cfg.guardrail.connectors = {
+        "codex": PerConnectorGuardrailConfig(rule_pack="strict"), "claudecode": PerConnectorGuardrailConfig()
+    }
+    result = _guardrail(app, "use-pack", "--clear", "--connector", "codex")
+    assert result.exit_code == 0, result.output
+    assert yaml.safe_load(path.read_text())["guardrail"]["connectors"] == {"codex": {}, "claudecode": {}}
+
+
+def test_mode_clear_drops_only_a_redundant_entry(guardrail_app) -> None:
+    # GAP-1954: mode --clear left 'connectors: codex: {mode: ""}' on a single-connector config.
+    app, _path = guardrail_app
+    app.cfg.guardrail.connectors = {}
+    result = _guardrail(app, "mode", "observe", "--connector", "codex")
+    assert result.exit_code == 0, result.output
+    assert app.cfg.guardrail.connectors["codex"].mode == "observe"
+    result = _guardrail(app, "mode", "--clear", "--connector", "codex")
+    assert result.exit_code == 0, result.output
+    assert app.cfg.guardrail.connectors == {}
+
+    # With another entry on the roster the codex entry is what lists codex: it stays.
+    app.cfg.guardrail.connectors = {
+        "codex": PerConnectorGuardrailConfig(mode="observe"), "claudecode": PerConnectorGuardrailConfig()
+    }
+    result = _guardrail(app, "mode", "--clear", "--connector", "codex")
+    assert result.exit_code == 0, result.output
+    assert app.cfg.guardrail.connectors["codex"] == PerConnectorGuardrailConfig()
+
+
 def test_guardrail_undo_on_a_claw_mode_only_config_keeps_the_codex_entry(guardrail_app) -> None:
     # GAP-1953: claw.mode codex, no guardrail.connector, connectors {codex: {}}.
     # Go hook enablement reads only guardrail.connector and the connectors map,
