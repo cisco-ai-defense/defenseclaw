@@ -19,8 +19,8 @@ keywords:
    Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/default"
      rules: 239/243 enabled across 7 files
      components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
-     digest: e379755daab8c40e3271b3def2950e34e3ef6de3fb76b8ef04399e7bf33f625e
-     files digest: 29d0cda1c0c62790915778e4e5383f88ad4244c52acc533ac5ba2f58cda8e60b (the guardrail.custom_packs pin)
+     digest: 1c91072997734b7df48015ffcd8c434958880ae6c6f1826b9cf462a2b139fab1
+     files digest: 67218d5871e5ec1b5c457f614c54cdb4274df13097f16f2a5a12fa21ea1e6da2 (the guardrail.custom_packs pin)
    ```
 
    `judges=4` counts the compiled-in exfil judge and the three judge files. The full digest includes compiled defaults and can change between builds even when the files digest stays the same. Use your own run's `files digest` to pin a custom pack. You can pass a pack name instead of a path.
@@ -32,7 +32,7 @@ keywords:
    ```
 
    ```json
-   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"e379755d…","enabled_rule_count":239,"files_digest":"29d0cda1…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":243,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
+   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"1c910729…","enabled_rule_count":239,"files_digest":"67218d58…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":243,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
    ```
 
 3. Read a failure. A file the loader does not recognize fails the whole pack and exits `1`:
@@ -65,7 +65,7 @@ defenseclaw doctor
 ```
 
 ```text
-  [PASS] Rule pack [codex]  -  configured rule pack "default" "/home/alice/.defenseclaw/policies/guardrail/default": 239/243 rules enabled; digest=e379755d…
+  [PASS] Rule pack [codex]  -  configured rule pack "default" "/home/alice/.defenseclaw/policies/guardrail/default": 239/243 rules enabled; digest=1c910729…
 ```
 
 Doctor validates the pack every connector uses. It shows `FAIL` for an invalid pack and `WARN` when the validator is missing.
