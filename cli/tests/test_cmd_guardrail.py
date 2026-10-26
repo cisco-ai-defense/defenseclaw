@@ -779,7 +779,8 @@ def test_amp_open_preview_and_help_scope_failure_rows_to_per_user_outages() -> N
     assert "guardrail-degraded" in reporting
     assert "managed and sandbox Amp plugins write no record" in reporting
     for prefix in (
-        "On a per-user install the outage behavior",
+        # fix/r104-oss-outage-open wording: an explicit saved mode wins, else the tier.
+        "On a per-user install, an explicit saved `guardrail.hook_fail_mode` selects the outage mode",
         "| `default` (balanced",
         "| Gateway service not running",
     ):
@@ -795,7 +796,8 @@ def test_per_user_amp_outage_open_template_records_an_actionable_call() -> None:
         encoding="utf-8"
     )
     branch = source.split("if (await perUserOutageOpen(error)) {", 1)[1].split("\n\t\t\t\t}", 1)[0]
-    assert branch.index('if (actionable) await logFailOpen("gateway unreachable")') < branch.index(
+    # logFailOpen takes the call's payload (session and call ids) (fix/r104-oss-outage-open signature).
+    assert branch.index('if (actionable) await logFailOpen("gateway unreachable", payload)') < branch.index(
         'return { action: "allow"'
     )
     writer = source.split("async function logFailOpen(", 1)[1].split("async function perUserGatewayDownText", 1)[0]

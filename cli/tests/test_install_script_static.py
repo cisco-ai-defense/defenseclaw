@@ -1996,7 +1996,8 @@ def test_a_refused_upgrade_leaves_no_staged_release(tmp_path: Path) -> None:
     # failed check, a cancel) now drops what it staged and the uv files it
     # added; from the swap on, its own undo does (drop_staging).
     source = INSTALL_SH.read_text(encoding="utf-8")
-    exit_trap = next(line for line in source.splitlines() if line.startswith("trap ") and line.endswith("' EXIT") and "LOCK_DIR" in line)
+    # The EXIT trap gives back the locks that are still this run's (release_locks).
+    exit_trap = next(line for line in source.splitlines() if line.startswith("trap ") and line.endswith("' EXIT") and "release_locks" in line)
     staged = source.index('mkdir -p "${STAGING}/bin"\nUNSWAPPED_STAGE=1\n')
     assert source.index(exit_trap) < staged
     assert staged < source.index("assert_no_loaded_plugin_agents\nWAS_RUNNING=false") < source.index('UNSWAPPED_STAGE=""\n')
@@ -2013,8 +2014,9 @@ def test_a_refused_upgrade_leaves_no_staged_release(tmp_path: Path) -> None:
             "set -euo pipefail\n"
             'err() { echo "x $*" >&2; }\ndie() { err "$@"; exit 1; }\n'
             f'DEFENSECLAW_HOME="{home}" STAGING="{home}/.staging" LOCK_DIR="{lock}" BIN_DIR="{tmp_path}/bin" SELF_TMP=""\n'
-            'UV_DIR_NEW=1 UV_INSTALLED=""\n'
-            + _install_sh_functions("drop_unswapped_stage")
+            'UV_DIR_NEW=1 UV_INSTALLED="" LOCK_STARTED=1 DATA_LOCK_DIRS=() MADE_DATA_DIRS=()\n'
+            'echo $$ > "${LOCK_DIR}/pid"; echo 1 > "${LOCK_DIR}/started"\n'
+            + _install_sh_functions("drop_unswapped_stage", "lock_is_ours", "release_locks")
             + exit_trap + "\nUNSWAPPED_STAGE=1\n"
             + ('UNSWAPPED_STAGE=""\n' if swapped else "")
             + 'die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: OpenCode (PID 1)"\n'

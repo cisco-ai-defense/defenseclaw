@@ -74,8 +74,11 @@ func TestPerUserPeerVerificationFailureIsNeverAnOutage(t *testing.T) {
 
 // The native per-user hook in the outage-open tier blocks a call whose
 // accepted connection fails its owner check, also when the check outlasts
-// the restart budget's connect deadline; a slow check that passes is
-// answered by the gateway, not by the outage mode.
+// the restart budget's connect deadline. A check still running at that
+// deadline is unfinished, so the call is blocked as unverified even when the
+// check would pass later (rc.11 a12647ceef errPerUserPeerCheckUnfinished,
+// kept by the carry over the fix/r104-oss-outage-open accepted-call mark);
+// never by the outage mode.
 func TestPerUserNativeHookBlocksAnUnverifiedListenerInTheOpenTier(t *testing.T) {
 	fastRestartRetries(t)
 	shortAnswerBudget(t, 10*time.Second)
@@ -116,13 +119,6 @@ func TestPerUserNativeHookBlocksAnUnverifiedListenerInTheOpenTier(t *testing.T) 
 			output := result.stdout + result.stderr
 			if strings.Contains(output, "fail mode open for an outage") {
 				t.Fatalf("the outage mode answered a call a listener accepted: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
-			}
-			if tc.err == nil {
-				if nativeOutageBlocked(result) || received.Load() != before+1 {
-					t.Fatalf("a verified listener did not answer the call (%d requests): code=%d stdout=%q stderr=%q",
-						received.Load()-before, result.code, result.stdout, result.stderr)
-				}
-				return
 			}
 			if !nativeOutageBlocked(result) {
 				t.Fatalf("an unverified listener let the call run: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
