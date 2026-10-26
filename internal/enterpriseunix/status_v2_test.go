@@ -654,3 +654,45 @@ func TestOpenShellCapabilityAsksTheDockerEngine(t *testing.T) {
 		t.Fatal("ensure carries the openshell block")
 	}
 }
+
+// GAP-1975: a Hermes target the guardian failed is reported like a failed
+// target of every other connector and like Windows: a guardian_target_failed
+// warning and security_complete false. It does not make coverage_complete
+// false on Linux and macOS only.
+func TestStatusReportsAGuardianFailedHermesTargetLikeEveryConnector(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			file, home := "linux-standalone.yaml", "/home/alice"
+			if goos == "darwin" {
+				file, home = "macos-standalone.yaml", "/Users/alice"
+			}
+			raw := strings.Replace(string(readSampleConfig(t, file)), "    claudecode: {}", "    claudecode: {}\n    hermes: {}", 1)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: writeTempConfig(t, []byte(raw))}))
+			writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n"+
+				"  - user: alice\n    uid: 1001\n    user_home: "+home+"\n    connector: hermes\n    agent_version: 0.21.0\n")
+			writeFreshLedger(t, h)
+			state, err := json.Marshal(map[string]any{"results": []map[string]any{{
+				"user": "alice", "user_home": home, "connector": "hermes", "ok": false, "error": "enterprise hooks: write hermes config: operation not permitted",
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			r := h.run(Options{Action: ActionStatus})
+			contracttest.Compile(t).ValidateValue(t, "lifecycle-result.schema.json", r)
+			if failed := messagesOf(r.Warnings, codeGuardianTargetFailed); !strings.Contains(failed, "hermes") {
+				t.Fatalf("status did not name the failed Hermes target: %q (warnings %+v)", failed, r.Warnings)
+			}
+			if !r.CoverageComplete || r.SecurityComplete {
+				t.Fatalf("coverage=%t security=%t; want coverage true and security false for a guardian-failed Hermes target, as for every connector and on Windows",
+					r.CoverageComplete, r.SecurityComplete)
+			}
+			if why := messagesOf(r.Warnings, enterprisestatus.CodeSecurityIncomplete); !strings.Contains(why, codeGuardianTargetFailed) || !strings.Contains(why, "coverage_complete is true") {
+				t.Fatalf("status did not name guardian_target_failed for security_complete: %q", why)
+			}
+		})
+	}
+}
