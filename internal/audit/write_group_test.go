@@ -5,6 +5,8 @@ package audit
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -171,5 +173,59 @@ func TestGroupedAppendFailureAndCancellationStayTheirOwn(t *testing.T) {
 	}
 	if sizes := batches(); len(sizes) != 2 || sizes[1] != 2 {
 		t.Fatalf("transactions = %v, want the good and the bad append in one", sizes)
+	}
+}
+
+// GAP-1980: when SQLite rolls back the whole shared transaction under one
+// write (SQLITE_FULL, SQLITE_IOERR, SQLITE_NOMEM do), its savepoint is gone
+// too. The batch must stop and fail every write, with nothing stored: a later
+// write must not run in autocommit and be stored while its caller is told it
+// failed.
+func TestGroupedWriteStopsWhenTheSharedTransactionIsLost(t *testing.T) {
+	store := newV8HistoryStore(t)
+	ctx := context.Background()
+	if _, err := store.db.ExecContext(ctx, `CREATE TABLE zz_grouped_write_probe (id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(id string) func(context.Context, *sql.Tx) error {
+		return func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `INSERT INTO zz_grouped_write_probe (id) VALUES (?)`, id)
+			return err
+		}
+	}
+	lost := func(ctx context.Context, tx *sql.Tx) error {
+		if err := insert("lost")(ctx, tx); err != nil {
+			return err
+		}
+		// What SQLite does on such an error: the whole transaction ends.
+		if _, err := tx.ExecContext(ctx, `ROLLBACK`); err != nil {
+			return err
+		}
+		return errors.New("database or disk is full")
+	}
+	ids := []string{"before", "lost", "after"}
+	batch := []*groupedWrite{
+		{ctx: ctx, run: insert("before")},
+		{ctx: ctx, run: lost},
+		{ctx: ctx, run: insert("after")},
+	}
+	_ = store.runGroupedTx(batch, groupedTxHooks{
+		op:    "zz_grouped_write_probe",
+		begin: func(err error) error { return err },
+		commit: func(ctx context.Context, tx *sql.Tx, _ []*groupedWrite) error {
+			return tx.Commit()
+		},
+	})
+	for index, item := range batch {
+		var stored int
+		if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM zz_grouped_write_probe WHERE id = ?`, ids[index]).Scan(&stored); err != nil {
+			t.Fatal(err)
+		}
+		if item.err == nil {
+			t.Errorf("%s: no error, but the shared transaction was rolled back", ids[index])
+		}
+		if stored != 0 {
+			t.Errorf("%s: %d rows stored while the caller got %v", ids[index], stored, item.err)
+		}
 	}
 }

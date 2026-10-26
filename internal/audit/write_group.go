@@ -6,6 +6,8 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -175,7 +177,7 @@ func (s *Store) runGroupedTx(batch []*groupedWrite, hooks groupedTxHooks) error 
 			}
 			item.err = nil
 			if runErr := s.runGroupedWrite(batchCtx, tx, item, single); runErr != nil {
-				if single || isSQLiteBusy(runErr) {
+				if single || isSQLiteBusy(runErr) || errors.Is(runErr, errGroupedTxLost) {
 					_ = tx.Rollback()
 					return runErr
 				}
@@ -216,12 +218,32 @@ func (s *Store) runGroupedWrite(batchCtx context.Context, tx *sql.Tx, item *grou
 		return err
 	}
 	if err := item.run(groupedWriteCtx{Context: batchCtx, values: item.ctx}, tx); err != nil {
-		_, _ = tx.ExecContext(batchCtx, `ROLLBACK TO grouped_write`)
-		_, _ = tx.ExecContext(batchCtx, `RELEASE grouped_write`)
+		if _, rollbackErr := tx.ExecContext(batchCtx, `ROLLBACK TO grouped_write`); rollbackErr != nil {
+			return groupedTxLost(errors.Join(err, rollbackErr))
+		}
+		if _, releaseErr := tx.ExecContext(batchCtx, `RELEASE grouped_write`); releaseErr != nil {
+			return groupedTxLost(errors.Join(err, releaseErr))
+		}
 		return err
 	}
-	_, err := tx.ExecContext(batchCtx, `RELEASE grouped_write`)
-	return err
+	if _, err := tx.ExecContext(batchCtx, `RELEASE grouped_write`); err != nil {
+		return groupedTxLost(err)
+	}
+	return nil
+}
+
+// errGroupedTxLost marks a shared transaction whose savepoint could not be
+// rolled back to or released. SQLite rolls back the whole transaction on some
+// errors of a statement (SQLITE_FULL, SQLITE_IOERR, SQLITE_NOMEM), and the
+// savepoint goes with it: the next write's SAVEPOINT would then start a
+// transaction of its own and its RELEASE commit it, so the batch's commit
+// failed while those rows were stored, and their callers saw an error for
+// rows on disk (a false local-write gap and a duplicate on replay, GAP-1980).
+// The batch stops and every write in it fails, with nothing committed.
+var errGroupedTxLost = errors.New("audit: the shared transaction was rolled back under its writes")
+
+func groupedTxLost(cause error) error {
+	return fmt.Errorf("%w: %w", errGroupedTxLost, cause)
 }
 
 // groupedWriteCtx carries one caller's context values (its sink policy and
