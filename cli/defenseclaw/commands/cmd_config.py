@@ -1176,12 +1176,13 @@ def _roster_entry_prune_scope(parts: list, written: object, app: AppContext) -> 
     """``guardrail`` when an unset may also remove the roster entry it empties.
 
     ``config set guardrail.connectors.<C>.<key>`` on a file whose roster
-    comes from the single-connector setting (``guardrail.connector`` or
-    ``claw.mode`` naming ``<C>``, no ``guardrail.connectors`` map) creates
-    the entry ``<C>``. The roster does not change, so undoing that set must
-    not leave ``connectors: {<C>: {}}`` behind (GAP-0967). The entry stays
-    whenever it is what puts ``<C>`` on the roster: the map has other
-    entries, or the single-connector setting names another connector or none.
+    comes from ``guardrail.connector`` naming ``<C>`` (no
+    ``guardrail.connectors`` map) creates the entry ``<C>``. The roster does
+    not change, so undoing that set must not leave ``connectors: {<C>: {}}``
+    behind (GAP-0967). The entry stays whenever it is what puts ``<C>`` on
+    the roster: the map has other entries, or ``guardrail.connector`` names
+    another connector or none (``claw.mode`` alone does not enable Go hook
+    scanning, GAP-1953).
     """
     if len(parts) < 4 or parts[:2] != ["guardrail", "connectors"] or not isinstance(parts[2], str):
         return ""

@@ -47,7 +47,7 @@ def _run(*args: str):
         return CliRunner().invoke(cmd_config.config_cmd, list(args))
 
 
-@pytest.mark.parametrize("single", ["guardrail:\n  enabled: true\n  connector: codex\n", "claw:\n  mode: codex\nguardrail:\n  enabled: true\n"])
+@pytest.mark.parametrize("single", ["guardrail:\n  enabled: true\n  connector: codex\n"])
 def test_unset_of_a_rule_the_set_added_drops_the_entry_it_created(tmp_path: Path, monkeypatch, single: str) -> None:
     # GAP-0967 / GAP-0004: on a config whose roster comes from the single
     # connector setting, set then unset of a connector rule override
@@ -63,10 +63,18 @@ def test_unset_of_a_rule_the_set_added_drops_the_entry_it_created(tmp_path: Path
     assert path.read_bytes() == before, path.read_text()
 
 
-def test_unset_keeps_an_entry_that_puts_the_connector_on_the_roster(tmp_path: Path, monkeypatch) -> None:
-    # The single-connector setting names another connector: codex is on the
+@pytest.mark.parametrize(
+    "single",
+    [
+        "guardrail:\n  enabled: true\n  connector: claudecode\n",
+        # GAP-1953: claw.mode alone does not enable Go hook scanning.
+        "claw:\n  mode: codex\nguardrail:\n  enabled: true\n",
+    ],
+)
+def test_unset_keeps_an_entry_that_puts_the_connector_on_the_roster(tmp_path: Path, monkeypatch, single: str) -> None:
+    # guardrail.connector names another connector or none: codex is on the
     # roster only through its entry, so the entry stays ({} = guarded).
-    path = _config(tmp_path, monkeypatch, "guardrail:\n  enabled: true\n  connector: claudecode\n")
+    path = _config(tmp_path, monkeypatch, single)
     key = "guardrail.connectors.codex.rules.enable"
     assert _run("set", "--json", key, '["TRUST-IGNORE-PREVIOUS"]').exit_code == 0
     removed = _run("unset", key)

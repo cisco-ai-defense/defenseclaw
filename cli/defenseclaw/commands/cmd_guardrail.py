@@ -3845,10 +3845,13 @@ def _rule_prune_scope(connector_key: str | None, profile: str | None, cfg=None) 
 def roster_entry_is_redundant(cfg, connector: str, listed: list) -> bool:
     """Whether the guardrail.connectors entry ``connector`` adds nothing to the roster.
 
-    True when it is the map's only entry and ``guardrail.connector`` (or
-    ``claw.mode``) names the same connector; the entry is what puts the
-    connector on the roster whenever the map has other entries or the
-    single-connector setting names another connector or none.
+    True when it is the map's only entry and ``guardrail.connector`` names
+    the same connector; the entry is what puts the connector on the roster
+    whenever the map has other entries or ``guardrail.connector`` names
+    another connector or none. ``claw.mode`` never counts: Go hook
+    enablement reads only ``guardrail.connector`` and ``guardrail.connectors``,
+    so on a claw.mode-only config the entry is what keeps hook calls scanned
+    (GAP-1953).
     """
     from defenseclaw import connector_paths
 
@@ -3856,7 +3859,7 @@ def roster_entry_is_redundant(cfg, connector: str, listed: list) -> bool:
         name = connector_paths.normalize(connector)
         if [connector_paths.normalize(str(key)) for key in listed] != [name]:
             return False
-        single = str(cfg.guardrail.connector or "").strip() or str(cfg.claw.mode or "").strip()
+        single = str(cfg.guardrail.connector or "").strip()
         single = connector_paths.normalize(single) if single else ""
     except Exception:  # noqa: BLE001 - keep the entry when the roster cannot be read
         return False

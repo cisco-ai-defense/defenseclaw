@@ -138,6 +138,23 @@ def test_guardrail_undo_on_a_single_connector_config_restores_the_exact_bytes(gu
     assert path.read_bytes() == original, path.read_text()
 
 
+def test_guardrail_undo_on_a_claw_mode_only_config_keeps_the_codex_entry(guardrail_app) -> None:
+    # GAP-1953: claw.mode codex, no guardrail.connector, connectors {codex: {}}.
+    # Go hook enablement reads only guardrail.connector and the connectors map,
+    # so pruning the entry would let Codex hook calls through unscanned.
+    app, path = guardrail_app
+    original = b"config_version: 9\nclaw:\n  mode: codex\nguardrail:\n  enabled: true\n  mode: action\n  connectors:\n    codex: {}\n"
+    path.write_bytes(original)
+    app.cfg.guardrail.connector = ""
+    app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig()}
+    for level in ("HIGH", "default"):
+        result = _guardrail(app, "rule", "severity", "SOME-RULE", level, "--connector", "codex")
+        assert result.exit_code == 0, result.output
+        _reload_connectors(app, path)
+    assert yaml.safe_load(path.read_text())["guardrail"]["connectors"] == {"codex": {}}, path.read_text()
+    assert cmd_guardrail.roster_entry_is_redundant(app.cfg, "codex", ["codex"]) is False
+
+
 def test_guardrail_undo_keeps_an_entry_that_puts_the_connector_on_the_roster() -> None:
     # The entry stays when it is what puts the connector on the roster.
     cfg = default_config()
