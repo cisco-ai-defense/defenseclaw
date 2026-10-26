@@ -404,6 +404,16 @@ func TestValidateCodexPolicyExecutableRejectsReplacement(t *testing.T) {
 	if _, err := validateCodexPolicyExecutable(opts); err == nil || !strings.Contains(err.Error(), "digest") {
 		t.Fatalf("replacement error = %v, want digest refusal", err)
 	}
+	// GAP-1884: a Codex self-update changes the sealed executable; the
+	// refusal names the step that admits the new one.
+	_, err = validateCodexPolicyExecutable(opts)
+	if !errors.Is(err, ErrCodexExecutableChanged) || !strings.Contains(err.Error(), "run: defenseclaw setup codex --yes") {
+		t.Fatalf("replacement error = %v, want ErrCodexExecutableChanged with the setup step", err)
+	}
+	opts.AgentVersion = "codex 0.164.0"
+	if _, err := validateCodexPolicyExecutable(opts); !errors.Is(err, ErrCodexExecutableChanged) {
+		t.Fatalf("version change error = %v, want ErrCodexExecutableChanged", err)
+	}
 }
 
 func TestInspectCodexPolicyPreservesRPCErrorDuringCleanup(t *testing.T) {

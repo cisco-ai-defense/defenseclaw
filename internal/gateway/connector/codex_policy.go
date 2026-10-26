@@ -262,7 +262,7 @@ func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
 		return "", fmt.Errorf("selected Codex executable does not match protected evidence: %s", executable)
 	}
 	if strings.TrimSpace(opts.AgentVersion) != strings.TrimSpace(expectedVersion) {
-		return "", errors.New("selected Codex executable evidence is bound to a different agent version")
+		return "", fmt.Errorf("selected Codex executable evidence is bound to a different agent version (%w)", ErrCodexExecutableChanged)
 	}
 
 	info, err := os.Lstat(executable)
@@ -283,10 +283,17 @@ func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
 		return "", fmt.Errorf("selected Codex executable changed during validation: %s", executable)
 	}
 	if digest != expectedDigest {
-		return "", fmt.Errorf("selected Codex executable digest does not match protected evidence: %s", executable)
+		return "", fmt.Errorf("selected Codex executable digest does not match protected evidence: %s (%w)", executable, ErrCodexExecutableChanged)
 	}
 	return executable, nil
 }
+
+// ErrCodexExecutableChanged marks Codex executable evidence that no longer
+// matches the executable setup sealed: Codex updated itself (or was
+// replaced) since setup. The gateway does not run an executable it did not
+// admit, so the next step is setup again, which admits the new version; the
+// error says so instead of only "run doctor" (GAP-1884).
+var ErrCodexExecutableChanged = errors.New("the Codex executable changed since setup (a Codex update does this); run: defenseclaw setup codex --yes")
 
 func sameCodexExecutablePath(left, right string) bool {
 	left = filepath.Clean(strings.TrimSpace(left))
