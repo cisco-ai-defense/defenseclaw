@@ -6,10 +6,13 @@
 package cli
 
 import (
+	"context"
+	"io"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -140,5 +143,80 @@ func TestIdentitySpoolPassRunsInsideTheIntervalOnlyWhenTheAccountDatabaseChanged
 	enterpriseHookIdentitySpoolPassDone(fingerprint, nil)
 	if _, due := enterpriseHookIdentitySpoolPassDue(dir, keys(), time.Now()); due {
 		t.Fatal("the pass for the new stamp did not record it")
+	}
+}
+
+// GAP-2026 (lead 19:08): the guardian's tick itself, not only its due
+// decision, runs a spool pass inside the interval when the local account
+// database changed (useradd, userdel) and none when nothing changed.
+// Without the stamp in the tick's fingerprint, records were rewritten only
+// every 15 minutes, and every bound account was refused for that long
+// after each account change.
+func TestIdentitySpoolTickRunsAPassInsideTheIntervalOnlyWhenTheAccountDatabaseChanged(t *testing.T) {
+	identityCallerTestConfig(t)
+	cfg.DataDir = t.TempDir()
+	previousStamp, previousWrite := enterpriseHookLocalAccountsStamp, enterpriseHookWriteIdentitySpool
+	previousOwner, previousTrust := enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck
+	state := &enterpriseHookIdentitySpoolState
+	state.Lock()
+	saved := struct {
+		running, failed bool
+		last            time.Time
+		fingerprint     string
+	}{state.running, state.failed, state.last, state.fingerprint}
+	state.running, state.failed, state.last, state.fingerprint = false, false, time.Time{}, ""
+	state.Unlock()
+	t.Cleanup(func() {
+		enterpriseHookLocalAccountsStamp, enterpriseHookWriteIdentitySpool = previousStamp, previousWrite
+		enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck = previousOwner, previousTrust
+		state.Lock()
+		state.running, state.failed, state.last, state.fingerprint = saved.running, saved.failed, saved.last, saved.fingerprint
+		state.Unlock()
+	})
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	enterpriseHookAuthorizationDirTrustCheck = func(string) error { return nil }
+	var stampMu sync.Mutex
+	stamp := "1/100/7"
+	enterpriseHookLocalAccountsStamp = func() string { stampMu.Lock(); defer stampMu.Unlock(); return stamp }
+	passes := make(chan struct{}, 4)
+	enterpriseHookWriteIdentitySpool = func(context.Context, string, []enterprisehooks.IdentitySpoolAccount, func(string) error,
+		func(string, ...any), enterprisehooks.IdentitySpoolWithdraw) error {
+		passes <- struct{}{}
+		return nil
+	}
+	tick := func() bool {
+		t.Helper()
+		startEnterpriseHookIdentitySpool(context.Background(), io.Discard, enterpriseHookReconcileRun{})
+		select {
+		case <-passes:
+		case <-time.After(2 * time.Second):
+			return false
+		}
+		// The pass records its fingerprint when it ends.
+		for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			state.Lock()
+			running := state.running
+			state.Unlock()
+			if !running {
+				return true
+			}
+		}
+		t.Fatal("the spool pass did not end")
+		return true
+	}
+	if !tick() {
+		t.Fatal("the first tick ran no spool pass")
+	}
+	if tick() {
+		t.Fatal("a tick inside the interval with nothing changed ran a spool pass")
+	}
+	stampMu.Lock()
+	stamp = "2/100/8"
+	stampMu.Unlock()
+	if !tick() {
+		t.Fatal("a tick inside the interval after the local account database changed ran no spool pass (GAP-2026)")
+	}
+	if tick() {
+		t.Fatal("the pass for the new account database did not record its stamp")
 	}
 }

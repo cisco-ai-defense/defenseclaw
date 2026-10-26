@@ -1061,6 +1061,10 @@ func enterpriseHookIdentitySpoolPassDone(fingerprint string, passErr error) {
 	state.failed = passErr != nil
 }
 
+// enterpriseHookWriteIdentitySpool is the identity spool pass; tests replace
+// it to count the passes a tick starts (GAP-2026).
+var enterpriseHookWriteIdentitySpool = enterprisehooks.WriteIdentitySpool
+
 func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return
@@ -1089,7 +1093,7 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 			return
 		}
 		logf := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
-		passErr = enterprisehooks.WriteIdentitySpool(ctx, dir, accounts, enterpriseHookAuthorizationOwnershipSetter, logf, withdraw)
+		passErr = enterpriseHookWriteIdentitySpool(ctx, dir, accounts, enterpriseHookAuthorizationOwnershipSetter, logf, withdraw)
 		if passErr != nil {
 			fmt.Fprintf(stderr, "[hook-guardian] identity spool: %v\n", passErr)
 		}
