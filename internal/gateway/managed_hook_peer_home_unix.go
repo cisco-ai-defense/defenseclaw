@@ -1520,8 +1520,16 @@ func (c *managedHookPeerHomeCache) agentIncarnation(uid int) string {
 // a mapped one, and an account that replaced the former holder kept its
 // agent IDs and match.agents profile (review of GAP-0947, loop 4). Any
 // other SID (an RFC 2307 uid, winbind, custom id-mapping ranges) or a
-// listed record (macOS) does not.
+// listed record (macOS) does not. Nor does a token that carries a home
+// proof (incarnation|proof, holderToken): the home is not the one the uid's
+// holder had when it was first seen, or was created after that sighting, so
+// another account holds the uid. Taking it for the older build's account
+// made it the base, no holder change was known, and root's view of a
+// recreated 1.0.3 account listed the earlier holder's rows (GAP-2086).
 func legacyContinuity(uid int, token string) bool {
+	if strings.Contains(token, "|") {
+		return false
+	}
 	sid, isSID := strings.CutPrefix(token, "sid:")
 	if !isSID {
 		return !strings.HasPrefix(token, "record:")
