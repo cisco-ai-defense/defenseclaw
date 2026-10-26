@@ -57,7 +57,8 @@ func TestKilledFirstBundleIsInterruptedNotSuperseded(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			b := newBundleHost(t, goos)
-			v1, _, _ := bundleConfigs(b.testHost)
+			// v2 differs from the installed config (v1 renders it).
+			_, v2, _ := bundleConfigs(b.testHost)
 			before := b.read(b.env.Layout.ConfigPath)
 			b.env.bundleFault = func(phase string) error {
 				if phase == enterprisebundle.StateApplied {
@@ -67,7 +68,7 @@ func TestKilledFirstBundleIsInterruptedNotSuperseded(t *testing.T) {
 			}
 			func() {
 				defer func() { _ = recover() }()
-				b.apply(b.dir(1, v1))
+				b.apply(b.dir(1, v2))
 			}()
 			b.env.bundleFault = nil
 			if got := b.receipt(bundleID(1)); got.State != enterprisebundle.StateApplied {
