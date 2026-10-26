@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -250,13 +251,20 @@ func WriteShimScripts(shimDir, apiAddr string) error {
 // persists a .token sidecar so each shim can authenticate inspection
 // calls. See F-2029 / F-3397 for the security rationale.
 func WriteShimScriptsWithToken(shimDir, apiAddr, token string) error {
-	return writeShimScriptsWithMode(shimDir, apiAddr, token, defaultHookFailMode)
+	return writeShimScriptsWithMode(shimDir, apiAddr, token, defaultHookFailMode, "openclaw")
 }
 
 // writeShimScriptsWithMode records the installed outage choice in the shim.
 // A reachable gateway's block or malformed answer is handled by the shim
-// itself and is never opened by this mode.
-func writeShimScriptsWithMode(shimDir, apiAddr, token, failMode string) error {
+// itself and is never opened by this mode. connectorName is the connector
+// that installs the shims: at call time a shim asks the outage mode the
+// config gives that connector (its per-connector choice, else the global
+// one), never a connector named "subprocess" (GAP-1989).
+func writeShimScriptsWithMode(shimDir, apiAddr, token, failMode, connectorName string) error {
+	connectorName = normalizeConnectorName(connectorName)
+	if !shimConnectorNameRE.MatchString(connectorName) {
+		return fmt.Errorf("shim scripts: connector name %q is not a plain connector name", connectorName)
+	}
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
 		return fmt.Errorf("create shim dir: %w", err)
 	}
@@ -274,7 +282,7 @@ func writeShimScriptsWithMode(shimDir, apiAddr, token, failMode string) error {
 		return fmt.Errorf("write shim token file: %w", err)
 	}
 
-	data := templateData{APIAddr: apiAddr, FailMode: normalizeHookFailMode(failMode), TokenFile: ".token"}
+	data := templateData{APIAddr: apiAddr, FailMode: normalizeHookFailMode(failMode), TokenFile: ".token", ConnectorName: connectorName}
 	peerHelper, err := shimFS.ReadFile("shims/peer.inc")
 	if err != nil {
 		return fmt.Errorf("read shim peer helper: %w", err)
@@ -2259,9 +2267,13 @@ func ResolveSubprocessPolicy(preferred SubprocessPolicy) SubprocessPolicy {
 	return preferred
 }
 
+// shimConnectorNameRE is a connector name a shim can carry unquoted.
+var shimConnectorNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+
 // SetupSubprocessEnforcement wires the appropriate subprocess enforcement
-// tier based on the resolved policy.
-func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
+// tier based on the resolved policy. connectorName is the installing
+// connector, whose outage mode the shims follow.
+func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts, connectorName string) error {
 	switch ResolveSubprocessPolicy(policy) {
 	case SubprocessShims:
 		shimDir := filepath.Join(opts.DataDir, "shims")
@@ -2269,7 +2281,7 @@ func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 		// the shim scripts so every inspection call carries an
 		// Authorization header. Pre-fix the shim had no auth token
 		// available and silently downgraded a 401 to "allow".
-		if err := writeShimScriptsWithMode(shimDir, opts.APIAddr, opts.APIToken, opts.HookFailMode); err != nil {
+		if err := writeShimScriptsWithMode(shimDir, opts.APIAddr, opts.APIToken, opts.HookFailMode, connectorName); err != nil {
 			return fmt.Errorf("shim scripts: %w", err)
 		}
 

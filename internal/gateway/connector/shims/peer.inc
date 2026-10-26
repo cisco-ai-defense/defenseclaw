@@ -52,7 +52,7 @@ _dc_shim_post() {
 # answer. A saved open outage choice runs the real tool and leaves a bounded,
 # argument-free failure record for the gateway's degraded-audit reporter.
 # _dc_shim_outage_mode_now prints the outage mode this install's config gives
-# the shims now (the gateway's hook-outage-mode, which reads the config.yaml
+# the connector that installed the shims ({{.ConnectorName}}) now (the gateway's hook-outage-mode, which reads the config.yaml
 # above the shims folder and closes on a managed host or an install), so
 # `guardrail use-pack strict` or a saved closed applies to the next call
 # without re-rendering the shims (GAP-1989). It returns 1 when the account's
@@ -64,7 +64,7 @@ _dc_shim_outage_mode_now() {
   _dc_shim_safe_native_path "$HOME/.local" dir || return 1
   _dc_shim_safe_native_path "$HOME/.local/bin" dir || return 1
   _dc_shim_safe_native_path "$binary" file || return 1
-  out=$("$binary" hook-outage-mode --connector subprocess --hook-dir "$_DC_SHIM_DIR" </dev/null 2>/dev/null) || return 1
+  out=$("$binary" hook-outage-mode --connector {{.ConnectorName}} --hook-dir "$_DC_SHIM_DIR" </dev/null 2>/dev/null) || return 1
   case "$out" in
     open|closed) printf '%s' "$out" ;;
     *) return 1 ;;

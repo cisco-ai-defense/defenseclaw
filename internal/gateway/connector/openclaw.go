@@ -183,7 +183,7 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 
 	// Surface 2: Plugin subprocess enforcement
 	policy := ResolveSubprocessPolicy(SubprocessShims)
-	if err := SetupSubprocessEnforcement(policy, opts); err != nil {
+	if err := SetupSubprocessEnforcement(policy, opts, c.Name()); err != nil {
 		return fmt.Errorf("openclaw subprocess enforcement: %w", err)
 	}
 

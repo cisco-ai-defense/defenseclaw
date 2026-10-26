@@ -2523,15 +2523,20 @@ defenseclaw_emit_unreachable_stderr() {
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: gateway unreachable, blocking ${subject} (fail mode closed): ${reason}" >&2
   elif defenseclaw_per_user_outage_open; then
-    if defenseclaw_first_outage_warning; then
-      # The Claude Code and Codex hooks show their systemMessage instead; the
-      # generic inspect hooks rendered for them print none, so they keep
-      # this line (GAP-1757).
-      case "${DEFENSECLAW_HOOK_CONNECTOR:-}|${subject}" in
-        "claudecode|claude-code "*|"codex|codex "*) : ;;
-        *) echo "defenseclaw: gateway unreachable, allowing ${subject} unchecked (fail mode open for an outage): ${reason}. If it does not start, run \`defenseclaw doctor\`." >&2 ;;
-      esac
-    fi
+    # The Claude Code and Codex hooks show their systemMessage instead; the
+    # generic inspect hooks rendered for them print none, so they keep this
+    # line (GAP-1757). The once-per-session marker is taken only by a call
+    # that shows the warning: a call that prints nothing here (a Codex
+    # prompt, a Claude Code PostToolUse or Stop) leaves it for the next call
+    # that does (GAP-1352).
+    case "${DEFENSECLAW_HOOK_CONNECTOR:-}|${subject}" in
+      "claudecode|claude-code "*|"codex|codex "*) : ;;
+      *)
+        if defenseclaw_first_outage_warning; then
+          echo "defenseclaw: gateway unreachable, allowing ${subject} unchecked (fail mode open for an outage): ${reason}. If it does not start, run \`defenseclaw doctor\`." >&2
+        fi
+        ;;
+    esac
   else
     echo "defenseclaw: gateway unreachable, allowing ${subject}: ${reason}" >&2
   fi
