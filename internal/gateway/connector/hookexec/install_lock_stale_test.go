@@ -96,7 +96,7 @@ func TestInstallLockHeldIgnoresOnlyALockWhoseOwnerIsGone(t *testing.T) {
 						}
 					}
 				}
-				held := tc.held && !(tc.legacy && step < 0)
+				held := tc.held && (!tc.legacy || step >= 0)
 				if got := InstallLockHeld(home); got != held {
 					t.Fatalf("InstallLockHeld = %v, want %v", got, held)
 				}

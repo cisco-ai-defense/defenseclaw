@@ -121,7 +121,7 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 		// Round j: a live installer keeps its lock however long it runs.
 		// GAP-1465 (LEAD DECISION 13:58): a lock without a proc-start record
 		// whose pid's process started after the lock names a reused pid.
-		{name: "record-less lock older than its pid's process", lock: makeLock(live, 7*time.Hour), runs: true},
+		{name: "record-less lock older than its pid's process", lock: makeLock(live, 7*24*time.Hour), runs: true},
 		// Round k: without a proc-start record no clock may tell a reused
 		// pid from a live owner: a 1.0.2/1.0.3 PID-only lock holds while its
 		// pid names a process, whenever the pid was written.

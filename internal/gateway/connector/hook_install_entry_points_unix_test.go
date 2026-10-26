@@ -190,7 +190,7 @@ func TestShellInstallLockExpiresWithItsOwnerNotItsAge(t *testing.T) {
 		{"old live installer", strconv.Itoa(os.Getpid()), 11 * time.Minute, true, true},
 		// GAP-1465: a lock without the record whose pid's process started
 		// after the lock names a reused pid.
-		{"record-less lock older than its pid's process", strconv.Itoa(os.Getpid()), 11 * time.Minute, false, false},
+		{"record-less lock older than its pid's process", strconv.Itoa(os.Getpid()), 7 * 24 * time.Hour, false, false},
 		{"old orphan marker", "", 11 * time.Minute, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

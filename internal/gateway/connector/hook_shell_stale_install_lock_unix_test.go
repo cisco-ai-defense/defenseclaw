@@ -125,7 +125,7 @@ func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 				if err != nil {
 					t.Fatalf("bash: %v: %s", err, out)
 				}
-				held := tc.held && !(tc.legacy && step < 0)
+				held := tc.held && (!tc.legacy || step >= 0)
 				if got := strings.TrimSpace(string(out)); got != map[bool]string{true: "held", false: "none"}[held] {
 					t.Fatalf("defenseclaw_install_lock_held = %q, want held %v", got, held)
 				}
