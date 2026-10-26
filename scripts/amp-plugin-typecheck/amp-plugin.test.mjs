@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import test from "node:test"
@@ -20,12 +20,13 @@ async function renderAmpPlugin(values = {}) {
 	const rendered = pluginTemplate
 		.replaceAll("{{.APIAddr}}", values.apiAddr ?? "127.0.0.1:18970")
 		.replaceAll("{{.TokenFileJS}}", values.tokenFile ?? "/nonexistent/.hook-amp.token")
-		.replaceAll("{{.FailMode}}", values.failMode ?? "open")
 		.replaceAll("{{.HookSocketJS}}", values.hookSocket ?? "")
 		.replaceAll("{{.ServiceUID}}", values.serviceUID ?? "0")
 		.replaceAll("{{.ForeignHookGuardJS}}", values.foreignGuard ?? "")
 		.replaceAll("{{.InstallMarkerJS}}", values.installMarker ?? "")
 		.replaceAll("{{.ListenerProofJS}}", values.listenerProof ?? "")
+		.replaceAll("{{.LifecycleMarkerJS}}", values.lifecycleMarker ?? "")
+		.replaceAll("{{.OutageFailMode}}", values.outageFailMode ?? "closed")
 	assert.ok(!rendered.includes("{{."), "rendered plugin retains a template placeholder")
 	const path = join(mkdtempSync(join(tmpdir(), "dc-amp-plugin-")), "amp-plugin.ts")
 	writeFileSync(path, rendered)
@@ -34,9 +35,42 @@ async function renderAmpPlugin(values = {}) {
 
 const defenseclawAmpPlugin = await renderAmpPlugin()
 
-test("refreshes agent identity when a thread changes mode between turns", async () => {
+// fakePerUserGateway stands in for this account's per-user install under a
+// throwaway HOME. A per-user plugin posts each hook event through the native
+// hook-post helper in ~/.local/bin (not fetch), so the fake helper records
+// each request it reads and answers with respond(payload), given as source.
+// The plugin refuses a helper path another account can write, so the fake
+// keeps the installer's modes. The helper is a POSIX script, so the tests
+// that send through it skip Windows, like the foreign-guard tests.
+function fakePerUserGateway(respondSource = `() => ({ action: "allow" })`) {
+	const home = mkdtempSync(join(tmpdir(), "dc-amp-home-"))
+	const bin = join(home, ".local", "bin")
+	mkdirSync(bin, { recursive: true, mode: 0o755 })
+	const log = join(home, "hook-post-requests.jsonl")
+	writeFileSync(join(bin, "defenseclaw-gateway"), "#!/bin/sh\nexit 1\n", { mode: 0o755 })
+	writeFileSync(join(bin, "defenseclaw-hook-post"), [
+		`#!${process.execPath}`,
+		`const fs = require("node:fs")`,
+		`const request = JSON.parse(fs.readFileSync(0, "utf8"))`,
+		`fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(request) + "\\n")`,
+		`const respond = ${respondSource}`,
+		`process.stdout.write(JSON.stringify({ status: 200, body: JSON.stringify(respond(JSON.parse(request.body))) }))`,
+	].join("\n") + "\n", { mode: 0o755 })
+	const originalHome = process.env.HOME
+	process.env.HOME = home
+	return {
+		requests: () => existsSync(log)
+			? readFileSync(log, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line))
+			: [],
+		restore: () => {
+			if (originalHome === undefined) delete process.env.HOME
+			else process.env.HOME = originalHome
+		},
+	}
+}
+
+test("refreshes agent identity when a thread changes mode between turns", { skip: process.platform === "win32" }, async () => {
 	const handlers = new Map()
-	const posts = []
 	let definition = { kind: "builtin-agent", mode: "medium" }
 	let agentLookups = 0
 
@@ -67,22 +101,14 @@ test("refreshes agent identity when a thread changes mode between turns", async 
 		ui: { confirm: async () => true },
 	}
 
-	const originalFetch = globalThis.fetch
 	const originalBun = globalThis.Bun
 	globalThis.Bun = {
 		file: () => ({ slice: () => ({ text: async () => `${"a".repeat(64)}\n` }) }),
 	}
 	const notice = "DefenseClaw observed a HIGH amp hook finding: marker"
-	globalThis.fetch = async (_url, init) => {
-		const payload = JSON.parse(init.body)
-		posts.push(payload)
-		return {
-			ok: true,
-			json: async () => payload.hook_event_name === "agent.start" && payload.turn_id === "M-turn-1"
-				? { action: "allow", additional_context: notice }
-				: { action: "allow" },
-		}
-	}
+	const gateway = fakePerUserGateway(`payload => payload.hook_event_name === "agent.start" && payload.turn_id === "M-turn-1"
+		? { action: "allow", additional_context: ${JSON.stringify(notice)} }
+		: { action: "allow" }`)
 
 	try {
 		defenseclawAmpPlugin(amp)
@@ -136,6 +162,7 @@ test("refreshes agent identity when a thread changes mode between turns", async 
 			ctx,
 		)
 
+		const posts = gateway.requests().map(request => JSON.parse(request.body))
 		const firstStart = posts.find(
 			payload => payload.hook_event_name === "agent.start" && payload.turn_id === "M-turn-1",
 		)
@@ -156,7 +183,7 @@ test("refreshes agent identity when a thread changes mode between turns", async 
 		assert.equal(secondTool.model, "anthropic/claude-sonnet")
 		assert.equal(agentLookups, 2, "agent facts should refresh once per turn and remain cached within it")
 	} finally {
-		globalThis.fetch = originalFetch
+		gateway.restore()
 		if (originalBun === undefined) delete globalThis.Bun
 		else globalThis.Bun = originalBun
 	}
@@ -182,14 +209,9 @@ test("fails both actionable boundaries closed when the scoped credential cannot 
 		ui: { confirm: async () => true },
 	}
 	const originalBun = globalThis.Bun
-	const originalFetch = globalThis.fetch
-	let fetches = 0
 	let credential = "malformed-token"
 	globalThis.Bun = { file: () => ({ slice: () => ({ text: async () => credential }) }) }
-	globalThis.fetch = async () => {
-		fetches++
-		return { ok: true, json: async () => ({ action: "allow" }) }
-	}
+	const gateway = fakePerUserGateway()
 
 	try {
 		defenseclawAmpPlugin(amp)
@@ -221,15 +243,15 @@ test("fails both actionable boundaries closed when the scoped credential cannot 
 		)
 		assert.equal(oversizedResult.action, "reject-and-continue")
 		assert.match(oversizedResult.message, /credential is unavailable/)
-		assert.equal(fetches, 0, "credential failures must not send an unauthenticated request")
+		assert.equal(gateway.requests().length, 0, "credential failures must not send an unauthenticated request")
 	} finally {
-		globalThis.fetch = originalFetch
+		gateway.restore()
 		if (originalBun === undefined) delete globalThis.Bun
 		else globalThis.Bun = originalBun
 	}
 })
 
-test("reloads the scoped credential for rotation and rollback in one plugin instance", async () => {
+test("reloads the scoped credential for rotation and rollback in one plugin instance", { skip: process.platform === "win32" }, async () => {
 	const handlers = new Map()
 	const amp = {
 		system: { workspaceRoot: undefined, executor: { kind: "local" }, user: {} },
@@ -251,32 +273,27 @@ test("reloads the scoped credential for rotation and rollback in one plugin inst
 	const aToken = "a".repeat(64)
 	const bToken = "b".repeat(64)
 	let token = aToken
-	const authorizations = []
 	const originalBun = globalThis.Bun
-	const originalFetch = globalThis.fetch
 	globalThis.Bun = { file: () => ({ slice: () => ({ text: async () => `${token}\n` }) }) }
-	globalThis.fetch = async (_url, init) => {
-		authorizations.push(init.headers.Authorization)
-		return { ok: true, json: async () => ({ action: "allow" }) }
-	}
+	const gateway = fakePerUserGateway()
 
 	try {
 		defenseclawAmpPlugin(amp)
-		for (const next of [aToken, bToken, aToken]) {
+		for (const [index, next] of [aToken, bToken, aToken].entries()) {
 			token = next
 			const result = await handlers.get("tool.call")(
-				{ thread: { id: "T-rotate" }, toolUseID: `TU-${authorizations.length}`, tool: "Bash", input: {} },
+				{ thread: { id: "T-rotate" }, toolUseID: `TU-${index}`, tool: "Bash", input: {} },
 				ctx,
 			)
 			assert.equal(result.action, "allow")
 		}
-		assert.deepEqual(authorizations, [
+		assert.deepEqual(gateway.requests().map(request => request.headers.Authorization), [
 			`Bearer ${aToken}`,
 			`Bearer ${bToken}`,
 			`Bearer ${aToken}`,
 		])
 	} finally {
-		globalThis.fetch = originalFetch
+		gateway.restore()
 		if (originalBun === undefined) delete globalThis.Bun
 		else globalThis.Bun = originalBun
 	}
@@ -329,13 +346,8 @@ test("a foreign-hook guard denial at load blocks every tool call of the process"
 	const plugin = await renderAmpPlugin({ foreignGuard: guard })
 	const { handlers, amp, ctx } = fakeAmp("T-guard")
 	const originalBun = globalThis.Bun
-	const originalFetch = globalThis.fetch
-	let fetches = 0
 	globalThis.Bun = { file: () => ({ slice: () => ({ text: async () => `${"a".repeat(64)}\n` }) }) }
-	globalThis.fetch = async () => {
-		fetches++
-		return { ok: true, json: async () => ({ action: "allow" }) }
-	}
+	const gateway = fakePerUserGateway()
 	try {
 		plugin(amp)
 		for (const id of ["TU-1", "TU-2"]) {
@@ -343,13 +355,13 @@ test("a foreign-hook guard denial at load blocks every tool call of the process"
 			assert.equal(result.action, "reject-and-continue")
 			assert.match(result.message, /\.amp\/plugins\/x\.ts/)
 		}
-		assert.equal(fetches, 0, "a guard denial must not reach the gateway")
+		assert.equal(gateway.requests().length, 0, "a guard denial must not reach the gateway")
 		assert.match(readFileSync(join(dir, "args"), "utf8"), /hook --connector amp --foreign-hook-check/)
 		const loadRequest = JSON.parse(readFileSync(join(dir, "request-0"), "utf8"))
 		assert.equal(loadRequest.cwd, "/work/repo")
 		assert.equal(loadRequest.hook_event_name, "session.load")
 	} finally {
-		globalThis.fetch = originalFetch
+		gateway.restore()
 		if (originalBun === undefined) delete globalThis.Bun
 		else globalThis.Bun = originalBun
 	}
@@ -358,28 +370,23 @@ test("a foreign-hook guard denial at load blocks every tool call of the process"
 test("an allowing guard lets the call through and a missing guard fails closed", { skip: process.platform === "win32" }, async () => {
 	const { guard } = fakeGuard(['{"deny":false}'])
 	const originalBun = globalThis.Bun
-	const originalFetch = globalThis.fetch
-	let fetches = 0
 	globalThis.Bun = { file: () => ({ slice: () => ({ text: async () => `${"a".repeat(64)}\n` }) }) }
-	globalThis.fetch = async () => {
-		fetches++
-		return { ok: true, json: async () => ({ action: "allow" }) }
-	}
+	const gateway = fakePerUserGateway()
 	try {
 		const allowed = fakeAmp("T-allow")
 		;(await renderAmpPlugin({ foreignGuard: guard }))(allowed.amp)
 		const pass = await allowed.handlers.get("tool.call")({ thread: { id: "T-allow" }, toolUseID: "TU-a", tool: "Bash", input: {} }, allowed.ctx)
 		assert.equal(pass.action, "allow")
-		assert.equal(fetches, 1)
+		assert.equal(gateway.requests().length, 1)
 
 		const missing = fakeAmp("T-missing")
 		;(await renderAmpPlugin({ foreignGuard: "/nonexistent/defenseclaw-hook" }))(missing.amp)
 		const blocked = await missing.handlers.get("tool.call")({ thread: { id: "T-missing" }, toolUseID: "TU-m", tool: "Bash", input: {} }, missing.ctx)
 		assert.equal(blocked.action, "reject-and-continue")
 		assert.match(blocked.message, /could not check for unapproved plugins/)
-		assert.equal(fetches, 1)
+		assert.equal(gateway.requests().length, 1)
 	} finally {
-		globalThis.fetch = originalFetch
+		gateway.restore()
 		if (originalBun === undefined) delete globalThis.Bun
 		else globalThis.Bun = originalBun
 	}
