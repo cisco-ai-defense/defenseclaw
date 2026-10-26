@@ -638,6 +638,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// finalizeAgentHook, doubling audit rows, hook-outcome metrics,
 		// and the connector telemetry log for a single request.
 		finalized := false
+		// wireResp is the answer the hook is given; once the decision is
+		// finalized, a later panic answers with it (GAP-1096).
+		var wireResp agentHookResponse
 		// pending is the journal row of a receipt-capable call
 		// (agent_hook_pending.go); its records carry its IDs.
 		var pending *pendingHookOccurrence
@@ -645,7 +648,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				elapsed := time.Since(t0)
-				resp := a.hookPanicResponse(ctx, connectorName, req, b, payload)
+				resp := wireResp
+				if !finalized || attemptedWrite {
+					resp = a.hookPanicResponse(ctx, connectorName, req, b, payload)
+				}
 				if pending != nil && attemptedWrite {
 					// The proposal may have reached the hook; nothing
 					// proves which answer the hook gave.
@@ -875,7 +881,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// A managed answer is only an evaluated proposal until the hook
 		// commits it to its agent: the audit row, hook_decision and
 		// dedupe get the decision the agent was given (GAP-0286).
-		wireResp := resp
+		wireResp = resp
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
 		auditExtra = mergeHookEnvelopeExtra(auditExtra, hookActionCommandAuditExtra(req, hookActiveHome(ctx)))
 		if payload["bounded_prefix_review"] == true {
@@ -990,8 +996,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			}
 		}
 		a.settlePendingHook(persistCtx, pending, finalization)
-		a.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
+		// The decision is persisted: a panic in the notifier must not
+		// finalize it again (GAP-1096).
 		finalized = true
+		a.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
 		a.recordManagedAIDFailOpenForSelectedNativeHookResult(
 			accountingCtx, managedAIDFailOpenGate, resp.Action, panicked,
 		)
