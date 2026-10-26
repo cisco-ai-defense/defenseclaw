@@ -1107,7 +1107,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     }
 
     #command-palette {
-        height: 14;
+        height: 14fr;
+        max-height: 14;
         margin: 0 1 1 1;
         border: round TOKEN_BORDER_ACTIVE;
         background: TOKEN_SURFACE_PANEL;
@@ -3758,7 +3759,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # Don't carry stale finish/rejection state into a fresh command
         # entry. Idle = strip is hidden, exactly what we want here.
         self._strip_clear()
-        self._set_status("Command palette. Type or pick.")
+        self._set_status("Command palette")
+        self._refresh_hint()
 
     def action_open_panel_jumper(self) -> None:
         """Open the Ctrl+P fuzzy panel jumper modal.
@@ -3983,11 +3985,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         palette.clear(columns=True)
         self._command_palette_values = []
         self.set_focus(None)
-        # Closing the palette by running a row left its open hint
-        # in the status bar (GAP-1213). Callers that report something else
-        # set their own status after this.
-        if self.status_text == "Command palette. Type or pick.":
-            self._set_status(self._status_text())
+        self._refresh_hint()
 
     def _handle_command_palette_key(self, event: events.Key) -> bool:
         palette = self.query_one("#command-palette", DataTable)
@@ -10943,6 +10941,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             not_configured=self.config is None,
             connector_filter=friendly_connector_name(connector_filter) if connector_filter else "",
             hidden_critical_alerts=hidden_critical,
+            palette_open=self.query_one("#command-input", Input).has_class("open"),
         )
         hint.refresh_hint(hint_state, self._hint_status_model())
         self.hint_text = str(getattr(hint, "content", ""))
@@ -13049,7 +13048,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     order = setup_catalog.section_order(self.setup_model.sections)
                     if order:
                         self.setup_model.select_section(order[0])
-                return SetupPanelAction(True, hint="Config editor. Esc/w: tasks.")
+                return SetupPanelAction(True, hint="Config editor")
             self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, delta)
             return SetupPanelAction(True)
         if key == "i":
@@ -13067,7 +13066,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if key in {"c", "`"}:
             self.setup_model.mode = "config"
             self.setup_model.active_line = self.setup_model.first_editable_line()
-            return SetupPanelAction(True, hint="Config editor. Esc/w: tasks.")
+            return SetupPanelAction(True, hint="Config editor")
         if key == "r":
             return SetupPanelAction(True, refresh_credentials=True, hint="Reloading API keys...")
         if self.setup_model.active_wizard == SetupWizard.CREDENTIALS and key in {"f", "s"}:
