@@ -12,6 +12,7 @@ import (
 )
 
 func TestR104Refix4VisibleWriteDecisions(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home, cwd := r104ReviewHome(t)
 	if err := os.Mkdir(filepath.Join(cwd, ".git"), 0o700); err != nil {
 		t.Fatal(err)
