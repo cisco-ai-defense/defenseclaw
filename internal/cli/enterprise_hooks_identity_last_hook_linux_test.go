@@ -98,3 +98,47 @@ func TestIdentitySpoolFingerprintFollowsTheAccountDatabase(t *testing.T) {
 		t.Fatalf("fingerprint %q did not change with the account database", after)
 	}
 }
+
+// GAP-2067 (RV6-1, GAP-2026): the tick decides a pass by the fingerprint
+// that carries the local account database's stamp. Inside the interval, a
+// useradd or userdel (a new stamp) runs a pass at the next tick; an
+// unchanged stamp does not.
+func TestIdentitySpoolPassRunsInsideTheIntervalOnlyWhenTheAccountDatabaseChanged(t *testing.T) {
+	previous := enterpriseHookLocalAccountsStamp
+	state := &enterpriseHookIdentitySpoolState
+	state.Lock()
+	saved := struct {
+		running, failed bool
+		last            time.Time
+		fingerprint     string
+	}{state.running, state.failed, state.last, state.fingerprint}
+	state.running, state.failed, state.last, state.fingerprint = false, false, time.Time{}, ""
+	state.Unlock()
+	t.Cleanup(func() {
+		enterpriseHookLocalAccountsStamp = previous
+		state.Lock()
+		state.running, state.failed, state.last, state.fingerprint = saved.running, saved.failed, saved.last, saved.fingerprint
+		state.Unlock()
+	})
+	stamp := "1/100/7"
+	enterpriseHookLocalAccountsStamp = func() string { return stamp }
+	dir := t.TempDir()
+	keys := func() []string { return []string{"1002:bob:13", "1001:alice:12"} }
+	fingerprint, due := enterpriseHookIdentitySpoolPassDue(dir, keys(), time.Now())
+	if !due {
+		t.Fatal("first tick ran no pass")
+	}
+	enterpriseHookIdentitySpoolPassDone(fingerprint, nil)
+	if _, due := enterpriseHookIdentitySpoolPassDue(dir, keys(), time.Now()); due {
+		t.Fatal("a tick inside the interval with nothing changed ran a pass")
+	}
+	stamp = "2/100/8"
+	fingerprint, due = enterpriseHookIdentitySpoolPassDue(dir, keys(), time.Now())
+	if !due {
+		t.Fatal("a tick after the account database changed ran no pass inside the interval")
+	}
+	enterpriseHookIdentitySpoolPassDone(fingerprint, nil)
+	if _, due := enterpriseHookIdentitySpoolPassDue(dir, keys(), time.Now()); due {
+		t.Fatal("the pass for the new stamp did not record it")
+	}
+}

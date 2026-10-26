@@ -171,3 +171,26 @@ func TestPreTokenHolderJoinsAnExistingMigrationMap(t *testing.T) {
 		t.Fatalf("map %+v; an account enrolled after the map joined it", owners)
 	}
 }
+
+// GAP-2067 (RV6-1, GAP-2025): a pass writes the local account database's
+// stamp, read before any account is collected, into the record of an
+// account whose home it proves, so the gateway compares stamps and not
+// wall-clock times.
+func TestIdentitySpoolPassWritesTheAccountsStampIntoTheRecord(t *testing.T) {
+	previous := LocalAccountsStamp
+	t.Cleanup(func() { LocalAccountsStamp = previous })
+	LocalAccountsStamp = func() string { return "4096/1793058007849330258/77" }
+	dir := t.TempDir()
+	homes := map[int]string{501: t.TempDir()}
+	stubIdentitySpoolAccounts(t, homes, "files", nil)
+	if err := WriteIdentitySpool(context.Background(), dir, []IdentitySpoolAccount{{UID: 501, User: "alice"}}, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	record, err := ReadIdentitySpoolRecord(dir, "501", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.LegacyOwnerToken == "" || record.AccountsStamp != "4096/1793058007849330258/77" {
+		t.Fatalf("record token %q stamp %q; want the pass's stamp", record.LegacyOwnerToken, record.AccountsStamp)
+	}
+}

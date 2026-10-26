@@ -1022,6 +1022,45 @@ func enterpriseHookIdentitySpoolFingerprint(keys []string) string {
 	return strings.Join(keys, ";") + "|" + enterpriseHookLocalAccountsStamp()
 }
 
+// enterpriseHookIdentitySpoolPassDue reports whether a pass of the identity
+// spool runs now for the account keys (sorted in place), and if so marks it
+// running; fingerprint is what the pass depends on
+// (enterpriseHookIdentitySpoolFingerprint). A pass runs when none is running
+// and the fingerprint changed (an account, its home, or the local account
+// database, GAP-2026), the interval passed, or the wall clock stepped.
+func enterpriseHookIdentitySpoolPassDue(dir string, keys []string, now time.Time) (fingerprint string, due bool) {
+	sort.Strings(keys)
+	fingerprint = enterpriseHookIdentitySpoolFingerprint(keys)
+	state := &enterpriseHookIdentitySpoolState
+	state.Lock()
+	defer state.Unlock()
+	interval := enterpriseHookIdentitySpoolInterval
+	if state.failed {
+		interval = enterpriseHookIdentitySpoolRetryInterval
+	}
+	// The interval runs on the monotonic clock, but the gateway trusts a
+	// record by its wall-clock age: after a clock step the records are
+	// rewritten at the next one-minute tick (GAP-0921).
+	_, _, stepped := enterprisehooks.IdentitySpoolStale(dir, now, enterpriseHookIdentitySpoolInterval+2*enterpriseHookIdentitySpoolRetryInterval)
+	due = !state.running && (fingerprint != state.fingerprint || now.Sub(state.last) >= interval || stepped)
+	if due {
+		state.running = true
+	}
+	return fingerprint, due
+}
+
+// enterpriseHookIdentitySpoolPassDone records the end of the pass
+// enterpriseHookIdentitySpoolPassDue started for fingerprint.
+func enterpriseHookIdentitySpoolPassDone(fingerprint string, passErr error) {
+	state := &enterpriseHookIdentitySpoolState
+	state.Lock()
+	defer state.Unlock()
+	state.running = false
+	state.last = time.Now()
+	state.fingerprint = fingerprint
+	state.failed = passErr != nil
+}
+
 func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return
@@ -1037,37 +1076,13 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	enrolled := slices.DeleteFunc(slices.Clone(accounts), func(a enterprisehooks.IdentitySpoolAccount) bool { return a.Left })
 	startEnterpriseHookDirectoryReturnWatch(ctx, stderr, dir, enrolled)
 	startEnterpriseHookDirectoryReachWatch(ctx, stderr, dir, enrolled)
-	sort.Strings(keys)
-	fingerprint := enterpriseHookIdentitySpoolFingerprint(keys)
-	now := time.Now()
-	state := &enterpriseHookIdentitySpoolState
-	state.Lock()
-	interval := enterpriseHookIdentitySpoolInterval
-	if state.failed {
-		interval = enterpriseHookIdentitySpoolRetryInterval
-	}
-	// The interval runs on the monotonic clock, but the gateway trusts a
-	// record by its wall-clock age: after a clock step the records are
-	// rewritten at the next one-minute tick (GAP-0921).
-	_, _, stepped := enterprisehooks.IdentitySpoolStale(dir, now, enterpriseHookIdentitySpoolInterval+2*enterpriseHookIdentitySpoolRetryInterval)
-	due := !state.running && (fingerprint != state.fingerprint || now.Sub(state.last) >= interval || stepped)
-	if due {
-		state.running = true
-	}
-	state.Unlock()
+	fingerprint, due := enterpriseHookIdentitySpoolPassDue(dir, keys, time.Now())
 	if !due {
 		return
 	}
 	go func() {
 		var passErr error
-		defer func() {
-			state.Lock()
-			state.running = false
-			state.last = time.Now()
-			state.fingerprint = fingerprint
-			state.failed = passErr != nil
-			state.Unlock()
-		}()
+		defer func() { enterpriseHookIdentitySpoolPassDone(fingerprint, passErr) }()
 		if err := ensureEnterpriseHookStandaloneAuthDir(managed.HookGuardianAuthorizationDir(cfg.DataDir)); err != nil {
 			passErr = err
 			fmt.Fprintf(stderr, "[hook-guardian] identity spool: %v\n", err)
