@@ -1740,7 +1740,9 @@ func TestWindowsHotBundleUndoHoldsHooksClosedUntilRestoredModeRenders(t *testing
 func TestWindowsHotConfigHookProofRunsTheInstalledGateway(t *testing.T) {
 	root := t.TempDir()
 	resolver, custody := windowsEnterpriseProgramFilesResolver, windowsEnterpriseInstalledCLICustody
-	t.Cleanup(func() { windowsEnterpriseProgramFilesResolver, windowsEnterpriseInstalledCLICustody = resolver, custody })
+	t.Cleanup(func() {
+		windowsEnterpriseProgramFilesResolver, windowsEnterpriseInstalledCLICustody = resolver, custody
+	})
 	windowsEnterpriseProgramFilesResolver = func() (string, error) { return root, nil }
 	var checked []string
 	windowsEnterpriseInstalledCLICustody = func(path, _ string) error { checked = append(checked, path); return nil }
