@@ -273,3 +273,41 @@ func TestFirstRunReadiesOnAnOlderManagedDaemon(t *testing.T) {
 		t.Fatalf("create calls %d after readying an older daemon", len(c))
 	}
 }
+
+// GAP-0534: a first run the organization does not allow (sandboxes not
+// allowed for the account, or an agent its profile leaves out) announces no
+// OpenShell install or start: the ready refuses it in the organization's
+// words and installs nothing.
+func TestAForbiddenAccountsFirstRunAnnouncesNoInstall(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*sandboxapi.ManagedExplain)
+	}{
+		{"sandboxes not allowed", func(me *sandboxapi.ManagedExplain) { me.Allowed = false }},
+		{"agent left out", func(me *sandboxapi.ManagedExplain) { me.AllowedHarnesses = []string{"claudecode"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+			ta.daemon.status.Managed = managedStatusFixture()
+			ta.daemon.explain.Managed = managedExplainFixture()
+			tc.edit(ta.daemon.explain.Managed)
+			_ = ta.Run(bg, RunOptions{Harness: "codex"})
+			if out := ta.output(); strings.Contains(out, "Installing OpenShell") || strings.Contains(out, "Starting your OpenShell gateway") {
+				t.Fatalf("a forbidden first run announced an install or start:\n%s", out)
+			}
+			if r := ta.daemon.callsTo("POST", sandboxapi.PathReady); len(r) != 1 {
+				t.Fatalf("ready calls = %d, want the one whose refusal the run prints", len(r))
+			}
+		})
+	}
+	// The allowed run still says what it does.
+	ta := newTestApp(t, "")
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.explain.Managed = managedExplainFixture()
+	_ = ta.Run(bg, RunOptions{Harness: "codex"})
+	if out := ta.output(); !strings.Contains(out, "Installing OpenShell") && !strings.Contains(out, "Starting your OpenShell gateway") {
+		t.Fatalf("an allowed first run did not say it readies OpenShell:\n%s", out)
+	}
+}
