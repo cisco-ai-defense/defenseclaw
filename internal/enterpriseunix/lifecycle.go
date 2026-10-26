@@ -3094,7 +3094,50 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return env.fixMetadata(statePath, mode.Perm(), fileOwner{UID: uid, GID: gid})
+	if err := env.fixMetadata(statePath, mode.Perm(), fileOwner{UID: uid, GID: gid}); err != nil {
+		return err
+	}
+	if before := l.generationBefore; before != nil {
+		l.rebindRestoredPendingBundle(before.state)
+	}
+	return nil
+}
+
+// rebindRestoredPendingBundle keeps provable the unconfirmed bundle whose
+// committed config a rollback put back. The counter only moves forward, so
+// the rollback records those bytes, with that bundle's signed attribution,
+// under a new generation; the receipt still named the old one, and every
+// later ensure kept the bundle pending until it was delivered again
+// (GAP-1186). Only the receipt whose committed generation is the one the
+// run found, for the same bytes and attribution, moves to the new number.
+func (l *lifecycle) rebindRestoredPendingBundle(before configwrite.GenerationState) {
+	env := l.env
+	if before.BundleID == "" || before.Generation == 0 || !env.bundleMode() {
+		return
+	}
+	state, err := configwrite.ReadGenerationState(env.P(env.Layout.ConfigPath))
+	if err != nil || state.Generation <= before.Generation || state.ConfigSHA256 != before.ConfigSHA256 ||
+		state.BundleID != before.BundleID || state.BundleVersion != before.BundleVersion ||
+		state.SignerKeyID != before.SignerKeyID || state.Actor != before.Actor {
+		return
+	}
+	store := env.bundleStore()
+	receipts, err := store.Unsettled()
+	if err != nil {
+		return
+	}
+	for _, rc := range receipts {
+		if rc.State != enterprisebundle.StateApplied || rc.ConfigGeneration != before.Generation ||
+			rc.ConfigSHA256 != state.ConfigSHA256 || rc.BundleID != state.BundleID || rc.Version != state.BundleVersion ||
+			rc.SignerKeyID != state.SignerKeyID || rc.Principal != state.Actor {
+			continue
+		}
+		if err := store.RebindGeneration(rc, state.Generation); err != nil {
+			l.result.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), fmt.Sprintf(
+				"policy bundle %s version %d is installed again, but its receipt could not record the restored config generation; deliver it again to confirm it: %v%s",
+				displayID(rc), rc.Version, err, stateWriteAction(err)))
+		}
+	}
 }
 
 // recoverInterrupted rolls back a transaction a previous run left pending,
