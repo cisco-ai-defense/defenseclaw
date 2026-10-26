@@ -4607,7 +4607,33 @@ def _skill_allow_pin(app: AppContext, skill_name: str, connector: str) -> str:
     for copy_connector, destination in _skill_quarantined_copies(app, skill_name):
         if copy_connector == connector:
             return destination
-    return ""
+    return _skill_scanned_copy(app, skill_name, connector)
+
+
+def _skill_scanned_copy(app: AppContext, skill_name: str, connector: str) -> str:
+    """The folder a skill known only from ``skill scan --path`` was scanned
+    at, when exactly one such folder is on record (GAP-1579): an allow is
+    pinned to that copy, so another folder with the same name is still
+    scanned. Several scanned folders stay ambiguous (name-only rule)."""
+    store = getattr(app, "store", None)
+    if store is None:
+        return ""
+    try:
+        latest = store.latest_scans_by_scanner("skill-scanner")
+    except Exception:  # noqa: BLE001 - no scan history means no pin
+        return ""
+    targets = {
+        os.path.realpath(str(ls.get("target") or ""))
+        for ls in latest
+        if ls.get("target") and os.path.basename(str(ls["target"]).rstrip("/\\")) == skill_name
+    }
+    if connector and len(targets) > 1:
+        scoped = {
+            target for target in targets
+            if _scan_entry_matches_connector(app, {"target": target}, connector)
+        }
+        targets = scoped or targets
+    return next(iter(targets)) if len(targets) == 1 else ""
 
 
 def _echo_skill_allow_scope(skill_name: str, connector: str, pin: str) -> None:

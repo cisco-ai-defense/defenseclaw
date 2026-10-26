@@ -261,6 +261,44 @@ class TestSkillAllow(SkillCommandTestBase):
         self.assertFalse(self.app.store.has_action("skill", "docx", "runtime", "disable"))
 
 
+class TestSkillAllowScannedCopy(SkillCommandTestBase):
+    def test_allow_of_a_skill_known_from_scan_path_pins_the_scanned_copy(self):
+        # GAP-1579: a skill scanned with "skill scan --path" and not installed
+        # got a name-only allow, so skill info kept "Policy: rejected" and any
+        # same-named skill skipped the scan. The allow now pins the scanned
+        # folder and skill info reads allowed.
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        scanned = os.path.realpath(os.path.join(self.tmp_dir, "code", "risky-skill"))
+        os.makedirs(scanned)
+        self.app.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", scanned,
+            datetime.now(timezone.utc), 100, 5, "CRITICAL", "{}",
+        )
+
+        result = self.invoke(["allow", "risky-skill", "--reason", "reviewed"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("matches the name only", result.output)
+        self.assertIn(f"covers the copy at {scanned} only", result.output)
+        rules = [r.source_path_contains for r in self.app.cfg.asset_policy.skill.allowed]
+        self.assertEqual(rules, [[scanned]])
+        info = self.invoke(["info", "risky-skill"])
+        self.assertIn("Policy: allowed", " ".join(info.output.split()), info.output)
+
+    def test_two_scanned_folders_keep_the_name_only_note(self):
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        for parent in ("a", "b"):
+            self.app.store.insert_scan_result(
+                str(uuid.uuid4()), "skill-scanner", os.path.join(self.tmp_dir, parent, "twin"),
+                datetime.now(timezone.utc), 100, 1, "HIGH", "{}",
+            )
+        result = self.invoke(["allow", "twin", "--reason", "reviewed"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("matches the name only", result.output)
+
+
 class TestSkillUnblock(SkillCommandTestBase):
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_unblock_reenables_runtime_disable_before_clearing_state(self, mock_cls):
