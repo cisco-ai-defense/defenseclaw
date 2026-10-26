@@ -1176,8 +1176,11 @@ func TestCodexNotifyManagedEnterpriseRejectsUnverifiedPeer(t *testing.T) {
 		t.Fatalf("managed notify reached unverified peer with authorization %q", req.Header.Get("Authorization"))
 	default:
 	}
-	if got := strings.TrimSpace(stderr.String()); got != managedGatewayPeerUnverifiedReason {
-		t.Fatalf("managed notify error = %q, want %q", got, managedGatewayPeerUnverifiedReason)
+	// Without a DefenseClawGateway service the peer is unverified; on a host
+	// where the service runs, the fake listener is another process on the
+	// port. Both refuse the peer before any bytes are sent.
+	if got := strings.TrimSpace(stderr.String()); got != managedGatewayPeerUnverifiedReason && got != managedGatewayPortHeldReason {
+		t.Fatalf("managed notify error = %q, want %q or %q", got, managedGatewayPeerUnverifiedReason, managedGatewayPortHeldReason)
 	}
 }
 
