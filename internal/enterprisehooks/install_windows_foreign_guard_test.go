@@ -15,6 +15,8 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
+	"golang.org/x/sys/windows"
 )
 
 // windowsGuardCaptureConnector stands in for the Amp and OpenCode plugin
@@ -47,6 +49,11 @@ func (c *windowsGuardCaptureConnector) AgentPaths(opts connector.SetupOpts) conn
 // connector.
 func TestWindowsGenericLifecyclePassesTheForeignHookGuardToPlugins(t *testing.T) {
 	fixture := newWindowsGenericCodexFixture(t)
+	// A per-user plugin install makes the vendor folder above the hook
+	// runtime readable by users. Point it at an Administrators-owned folder
+	// of this test, not the host's C:\ProgramData\Cisco: a fresh runner has
+	// none, and the test must not change a real install's ACL.
+	pinWindowsTestHookRuntimeAncestor(t)
 	// A name native Windows certifies: an uncertified plugin connector is
 	// refused before its render (ConnectorSupportOnOS fails closed).
 	const name = "amp"
@@ -124,3 +131,32 @@ func TestWindowsGenericLifecyclePassesTheForeignHookGuardToPlugins(t *testing.T)
 }
 
 var errTestUntrustedGuard = errors.New("test: untrusted guard binary")
+
+// pinWindowsTestHookRuntimeAncestor points the hook runtime vendor folder at
+// a new folder under ProgramData (stock trusted ancestors) that
+// Administrators own with an explicit DACL, as an installer leaves
+// C:\ProgramData\Cisco, and removes it after the test.
+func pinWindowsTestHookRuntimeAncestor(t *testing.T) {
+	t.Helper()
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("the hook runtime vendor folder is administrator-only; run elevated")
+	}
+	programData, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := os.MkdirTemp(programData, "dc-trust-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	testenv.SetSecurity(t, base, testenv.AdminOnlySDDL)
+	vendor := filepath.Join(base, "Cisco")
+	if err := os.Mkdir(vendor, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testenv.SetSecurity(t, vendor, testenv.AdminOnlySDDL)
+	previous := windowsStandaloneHookRuntimeAncestor
+	windowsStandaloneHookRuntimeAncestor = func() (string, error) { return vendor, nil }
+	t.Cleanup(func() { windowsStandaloneHookRuntimeAncestor = previous })
+}
