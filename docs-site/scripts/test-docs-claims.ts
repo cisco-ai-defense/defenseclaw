@@ -1401,6 +1401,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1543", page: "connectors/claudecode.mdx", has: ["strict and managed installs block it", "a killed or timed-out hook lets the call run"], lacks: ["every other hook failure blocks", "During an outage the default and permissive policies let the call run with a warning, strict blocks it."] },
   { gap: "GAP-1544", page: "connectors/claudecode.mdx", section: "Turn it off", has: ["It asks `Proceed? [Y/n]`; add `--yes` in scripts or when stdin is not a terminal."] },
   { gap: "GAP-1566", page: "connectors/copilot.mdx", section: "On a managed computer", has: ["are per-user commands", "/docs/enterprise/operate/lifecycle#change-the-config", "refuses `setup copilot`"] },
+  { gap: "GAP-1571", page: "connectors/copilot.mdx", section: "Files it changes", has: ["The registration runs `%USERPROFILE%\\.defenseclaw\\hooks\\copilot-hook.ps1`, which calls"] },
   // r105-rows-end
 ];
 

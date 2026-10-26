@@ -61,7 +61,7 @@ What a gateway outage does to a GitHub Copilot CLI call, per install and fail mo
 | Global hooks | `~/.copilot/hooks/defenseclaw.json` (or under `$COPILOT_HOME`) |
 | Workspace hooks (only with `--workspace`) | `<workspace>/.github/hooks/defenseclaw.json` |
 | Hook program, macOS and Linux | `~/.defenseclaw/hooks/copilot-hook.sh` |
-| Hook program, Windows | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
+| Hook program, Windows | The registration runs `%USERPROFILE%\.defenseclaw\hooks\copilot-hook.ps1`, which calls `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
 Teardown restores the exact earlier file when DefenseClaw's copy is unchanged. Otherwise it removes only its own handlers.
 
