@@ -4953,9 +4953,9 @@ def test_the_fail_mode_hold_outlasts_the_installers_own_steps() -> None:
     # running after 2m0s") and the upgrade was undone. The installers end or
     # stop the hold themselves, so it is given their own bound.
     hold = _ps1_function("Start-HookFailModeHold")
-    assert "--hold-until-exit $GatewayId --hold-timeout 10m" in hold
+    assert "--hold-timeout 10m --hold-until-exit $GatewayId" in hold
     sh = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
-    assert '--hold-until-exit "$1" --hold-timeout 10m' in sh
+    assert '--hold-timeout 10m --hold-until-exit "$1"' in sh
 
 
 # ── 1.0.4 (W4b loop round 1) ────────────────────────────────────────────────
