@@ -335,3 +335,58 @@ func TestWindowsClaudeManagedVerifyAndRepairStalePerUserNativeOTLP(t *testing.T)
 		t.Fatalf("Verify after repair: %v", err)
 	}
 }
+
+// GAP-1170: an earlier per-user exporter in a config behind a link (for
+// example a .codex folder redirected to a network share the account cannot
+// write) is never read by the read-only Verify, and repair keeps the scoped
+// credential while a config still references it. Verify passed all the same,
+// and the exporter kept sending prompt telemetry to the old port. Verify now
+// fails with the step while that credential is in the data directory, and
+// passes a linked config once repair revoked it.
+func TestWindowsManagedNativeOTLPVerifyFailsOnLinkedConfigWithCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name, dir, file, body string
+		scope                 connector.OTLPPathTokenScope
+	}{
+		{"codex", ".codex", "config.toml", "[otel.exporter.otlp-http]\r\nendpoint = 'http://127.0.0.1:19010/v1/logs'\r\n" +
+			"[otel.exporter.otlp-http.headers]\r\nauthorization = 'Bearer " + strings.Repeat("e7", 32) + "'\r\n", connector.OTLPScopeCodex},
+		{"claudecode", ".claude", "settings.json", `{"env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1","OTEL_EXPORTER_OTLP_ENDPOINT":"http://127.0.0.1:19010",` +
+			`"OTEL_EXPORTER_OTLP_HEADERS":"authorization=Bearer ` + strings.Repeat("e7", 32) + `"}}`, connector.OTLPScopeClaude},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			dataDir := filepath.Join(home, ".defenseclaw")
+			share := filepath.Join(t.TempDir(), "share")
+			if err := os.MkdirAll(share, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(share, tc.file), []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			makeTestJunction(t, filepath.Join(home, tc.dir), share)
+			tokenPath, err := connector.OTLPPathTokenFilePath(dataDir, tc.scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(tokenPath, []byte(strings.Repeat("e7", 32)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err = windowsManagedUserNativeOTLPAbsent(tc.name, home, dataDir, nil)
+			if err == nil || !strings.Contains(err.Error(), "hooks/"+filepath.Base(tokenPath)) || !strings.Contains(err.Error(), "as that user") {
+				t.Fatalf("verify passed a linked config while the earlier install's credential is kept: %v", err)
+			}
+			if strings.Contains(err.Error(), "e7e7") || strings.Contains(err.Error(), "19010") {
+				t.Fatalf("verify error carries a value: %v", err)
+			}
+			if err := os.Remove(tokenPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := windowsManagedUserNativeOTLPAbsent(tc.name, home, dataDir, nil); err != nil {
+				t.Fatalf("verify of a linked config without the credential: %v", err)
+			}
+		})
+	}
+}

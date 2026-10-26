@@ -29,13 +29,25 @@ import (
 // keeps a DefenseClaw native exporter. The error names fields, never values.
 // Verify is read-only and never impersonates, so it reads the account's files
 // only when no reparse point lies on their path; a linked config is checked by
-// the repair that runs as the target user.
+// the repair that runs as the target user. Repair revokes the earlier
+// install's scoped credential only once no configuration references it, so
+// while that credential is still in the data directory beside a linked
+// config, repair could not take the exporter back (for example a config on a
+// network share the account cannot write) and Verify fails with the step
+// instead of passing (GAP-1170).
 func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, _ *windows.SID) error {
 	for _, path := range windowsManagedUserNativeOTLPPaths(connectorName, home, dataDir) {
 		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err := rejectWindowsReparseChain(path); err != nil {
+			if credential := windowsManagedUserNativeOTLPCredential(connectorName, dataDir); credential != "" {
+				return fmt.Errorf(
+					"enterprise hooks: %s keeps the native OTLP credential of an earlier per-user install (%s) beside a linked agent config that repair could not clean; "+
+						"%s; then run repair, which revokes the credential",
+					connectorName, credential, windowsManagedUserNativeOTLPManualStep(connectorName),
+				)
+			}
 			return nil
 		}
 	}
@@ -54,12 +66,41 @@ func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, _ *
 	if len(residue) > 0 {
 		return fmt.Errorf(
 			"enterprise hooks: %s keeps a native OTLP exporter from an earlier per-user install (%s); "+
-				"the managed gateway does not serve it, so another account could receive its telemetry; repair removes it",
+				"the managed gateway does not serve it, so another account could receive its telemetry; repair removes it, "+
+				"and when repair cannot write the file: %s",
 			connectorName,
 			strings.Join(residue, ", "),
+			windowsManagedUserNativeOTLPManualStep(connectorName),
 		)
 	}
 	return nil
+}
+
+// windowsManagedUserNativeOTLPCredential names the earlier per-user install's
+// scoped OTLP credential file when it is still in dataDir and no reparse point
+// lies on its path, else "".
+func windowsManagedUserNativeOTLPCredential(connectorName, dataDir string) string {
+	scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName)
+	if !ok {
+		return ""
+	}
+	path, err := connector.OTLPPathTokenFilePath(dataDir, scope)
+	if err != nil {
+		return ""
+	}
+	if _, err := os.Lstat(path); err != nil || rejectWindowsReparseChain(path) != nil {
+		return ""
+	}
+	return "hooks/" + filepath.Base(path)
+}
+
+// windowsManagedUserNativeOTLPManualStep is the account's own step when repair
+// cannot write its agent config.
+func windowsManagedUserNativeOTLPManualStep(connectorName string) string {
+	if connectorName == "codex" {
+		return "as that user, remove the [otel] exporter tables an earlier DefenseClaw setup wrote (a 127.0.0.1 endpoint with a DefenseClaw bearer) from the account's .codex\\config.toml"
+	}
+	return "as that user, remove the OTEL_* entries an earlier DefenseClaw setup wrote (a 127.0.0.1 endpoint with a DefenseClaw bearer) and its CLAUDE_CODE_ENABLE_TELEMETRY from the env block of the account's .claude\\settings.json"
 }
 
 // windowsManagedUserNativeOTLPPaths are the files the residue check reads.
