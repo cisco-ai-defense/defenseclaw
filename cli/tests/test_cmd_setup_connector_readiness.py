@@ -1788,6 +1788,27 @@ def test_setup_continues_when_the_agent_settings_let_hooks_run(monkeypatch, tmp_
     calls = _gateway_check_agent_settings(monkeypatch, {})
     assert cmd_setup._agent_settings_refusal(_config(tmp_path), "codex") == ""
     assert cmd_setup._agent_settings_refusal(_config(tmp_path), "cursor") == ""
-    assert len(calls) == 1
+    # Every connector is asked: the shared hook config is checked for all (GAP-1325).
+    assert len(calls) == 2
     monkeypatch.setattr(cmd_setup, "_gateway_lifecycle_executable", lambda: "")
     assert cmd_setup._agent_settings_refusal(_config(tmp_path), "claudecode") == ""
+
+
+@pytest.mark.parametrize("connector", ("claudecode", "hermes", "cursor", "opencode"))
+def test_setup_refuses_a_malformed_shared_hook_sidecar_for_every_connector(
+    monkeypatch, tmp_path: Path, connector: str
+) -> None:
+    """GAP-1325: `setup claude-code --no-restart` saved its change and said it
+    succeeded while hooks/.hookcfg was malformed (fail_modes null), which every
+    hook of the data directory closes on. The gateway's check now refuses it
+    for every connector, and setup stops before it changes anything."""
+    reason = (
+        f"the shared hook config {tmp_path}/hooks/.hookcfg is malformed (parse hook config sidecar: fail_modes "
+        "is not an object), so every DefenseClaw hook of this data directory closes on it; move the file aside "
+        "and restart the gateway (defenseclaw-gateway restart), which writes it again from config.yaml"
+    )
+    calls = _gateway_check_agent_settings(
+        monkeypatch, {"connector": connector, "action": "check-agent-settings", "refused": True, "reason": reason}
+    )
+    assert "is malformed" in cmd_setup._agent_settings_refusal(_config(tmp_path), connector)
+    assert calls and calls[0][1:5] == ["connector", "check-agent-settings", "--connector", connector]

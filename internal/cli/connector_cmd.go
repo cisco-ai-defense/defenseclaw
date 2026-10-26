@@ -188,8 +188,9 @@ var connectorCheckAgentSettingsCmd = &cobra.Command{
 	Short: "Check that the agent's own settings let DefenseClaw hooks run (run by setup)",
 	Long: `Run the check the named connector's Setup starts with: the agent's own
 settings must not turn its hooks off or fail to parse (for example a Codex
-config.toml with a syntax error, or Claude Code disableAllHooks). It changes
-nothing. 'defenseclaw setup' runs it before it restarts the gateway, so such
+config.toml with a syntax error, or Claude Code disableAllHooks), and the
+data directory's shared hook config (hooks/.hookcfg) must be one the hooks
+read (GAP-1325). It changes nothing. 'defenseclaw setup' runs it before it restarts the gateway, so such
 settings stop setup with the reason while the running gateway keeps enforcing
 (GAP-0615).
 
@@ -583,7 +584,12 @@ func runConnectorCheckAgentSettings(cmd *cobra.Command, _ []string) error {
 	if cfg != nil {
 		opts.ManagedEnterprise = managed.IsManagedEnterprise(cfg.DeploymentMode)
 	}
-	refusal := connector.CheckAgentSettings(conn, opts)
+	// Every connector of the data directory shares hooks/.hookcfg, so a
+	// malformed one refuses the setup of any of them (GAP-1325).
+	refusal := connector.SharedHookSidecarRefusal(opts)
+	if refusal == nil {
+		refusal = connector.CheckAgentSettings(conn, opts)
+	}
 	if connectorFlagJSON {
 		payload := map[string]any{"connector": name, "action": "check-agent-settings", "refused": refusal != nil}
 		if refusal != nil {
