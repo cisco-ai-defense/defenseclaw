@@ -1469,6 +1469,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1665", page: "reference/configuration/paths.mdx", has: ["on Windows `installer\\` holds only `install.ps1`", "`skill-scanner.cmd`, `mcp-scanner.cmd`", "`defenseclaw-hook-state.json`"] },
   { gap: "GAP-1713", page: "reference/configuration/paths.mdx", has: ["On a managed Windows computer none of these per-user paths are used", "`C:\\ProgramData\\Cisco\\DefenseClaw\\etc\\config.yaml`"] },
   { gap: "GAP-1671", page: "enterprise/plan/managed-policy.mdx", has: ["| Attempt on managed Windows | Result |", "config set did not change it", "not a command of the administrator's `defenseclaw.exe`"] },
+  { gap: "GAP-1678", page: "troubleshooting/doctor.mdx", section: "Observability rows", has: ["| Codex OTel environment |", "| Connector OTLP: CONNECTOR |", "| Native OTLP credentials |"] },
   // r105-rows-end
 ];
 

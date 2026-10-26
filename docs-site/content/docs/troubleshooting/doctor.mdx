@@ -84,6 +84,16 @@ defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize
 | Claude Code hooks freshness, Codex hooks freshness | WARN | A hook script is from an older build, or bakes a different fail mode. The line names the command that regenerates it. |
 | Orphaned hook entries | FAIL or WARN | Entries remain for a connector that is no longer configured. Run `defenseclaw setup remove CONNECTOR`. |
 
+## Observability rows
+
+| Row | Status | What to do |
+| --- | --- | --- |
+| Codex OTel environment | PASS or FAIL | Codex's `otel.environment` in `config.toml` must match DefenseClaw's `environment`. FAIL names the mismatch, or a `config.toml` it cannot find or read. |
+| Codex OTel ownership | WARN | A `config.toml` value is nested too deeply to check for a DefenseClaw credential, so DefenseClaw kept it. Remove it if it is a DefenseClaw token. |
+| Codex OTel runtime | PASS or SKIP | Compares with the gateway's authenticated telemetry status; SKIP while that status is not available (gateway stopped or no token). |
+| Connector OTLP: CONNECTOR | PASS, WARN or FAIL | OTLP a connector exports to the gateway; `not configured` when none does. |
+| Native OTLP credentials | WARN | The gateway refused native OTLP attempts that carried an old credential, usually a Codex daemon after an upgrade. Run `codex app-server daemon restart`; the row clears 24 hours after the last refused attempt. |
+
 `defenseclaw status` prints the config generation the gateway applied (the number `config set` prints, from `config.generation.json`) and the policy digest. Compare it with what the files compute to: `defenseclaw-gateway policy digest`.
 
 ## What `--fix` repairs
