@@ -15,11 +15,13 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -48,17 +50,87 @@ const (
 // listed (FC-BLK-167-ER, GAP-0422). The file only names which uids the
 // guardian resolves; every fact comes from the account database and the
 // guardian's own stat of the home. Tests replace it.
+//
+// The account lookups run again only when the homes file changes or once
+// per enterpriseHookIdentitySpoolInterval; each tick only stats the homes,
+// so a recreated home still changes the key at the next tick. A uid the
+// lookup budget did not reach, or whose lookup or home stat failed this
+// time, keeps its last answer, so the spool fingerprint does not flap on a
+// host with many served accounts (GAP-1866).
 var enterpriseHookGatewayPeerAccounts = func(dataDir string) []enterpriseHookPeerAccount {
 	if strings.TrimSpace(dataDir) == "" {
 		return nil
 	}
-	data, err := safefile.ReadRegularFileBounded(filepath.Join(dataDir, "managed_peer_homes.json"), enterpriseHookPeerHomesFileMax)
+	path := filepath.Join(dataDir, "managed_peer_homes.json")
+	info, err := os.Stat(path)
 	if err != nil {
+		enterpriseHookPeerListing.reset()
 		return nil
+	}
+	l := &enterpriseHookPeerListing
+	l.Lock()
+	defer l.Unlock()
+	if l.path != path || l.size != info.Size() || !l.mtime.Equal(info.ModTime()) ||
+		time.Since(l.at) >= enterpriseHookIdentitySpoolInterval || time.Since(l.at) < 0 {
+		last := l.accounts
+		if l.path != path {
+			last = nil
+		}
+		l.accounts = enterpriseHookResolveGatewayPeers(path, last)
+		l.path, l.size, l.mtime, l.at = path, info.Size(), info.ModTime(), time.Now()
+	}
+	uids := make([]int, 0, len(l.accounts))
+	for uid := range l.accounts {
+		uids = append(uids, uid)
+	}
+	sort.Ints(uids)
+	peers := make([]enterpriseHookPeerAccount, 0, len(uids))
+	for _, uid := range uids {
+		peer := l.accounts[uid]
+		if inode := enterpriseHookHomeInode(peer.home); inode != 0 {
+			peer.HomeInode = inode
+			l.accounts[uid] = peer
+		}
+		peers = append(peers, peer.enterpriseHookPeerAccount)
+	}
+	return peers
+}
+
+// enterpriseHookPeerListing keeps the last answer of each served account
+// (enterpriseHookGatewayPeerAccounts).
+var enterpriseHookPeerListing enterpriseHookPeerCache
+
+type enterpriseHookPeerCache struct {
+	sync.Mutex
+	path     string
+	size     int64
+	mtime    time.Time
+	at       time.Time
+	accounts map[int]enterpriseHookCachedPeer
+}
+
+type enterpriseHookCachedPeer struct {
+	enterpriseHookPeerAccount
+	home string
+}
+
+func (l *enterpriseHookPeerCache) reset() {
+	l.Lock()
+	defer l.Unlock()
+	l.path, l.accounts = "", nil
+}
+
+// enterpriseHookResolveGatewayPeers resolves the uids of the homes file at
+// path. A uid the account database answers no account holds is dropped; one
+// it did not answer for keeps its entry in last. Tests replace it.
+var enterpriseHookResolveGatewayPeers = func(path string, last map[int]enterpriseHookCachedPeer) map[int]enterpriseHookCachedPeer {
+	data, err := safefile.ReadRegularFileBounded(path, enterpriseHookPeerHomesFileMax)
+	if err != nil {
+		return last
 	}
 	var stored map[string]json.RawMessage
 	if json.Unmarshal(data, &stored) != nil {
-		return nil
+		return last
 	}
 	uids := make([]int, 0, len(stored))
 	for key := range stored {
@@ -66,34 +138,47 @@ var enterpriseHookGatewayPeerAccounts = func(dataDir string) []enterpriseHookPee
 			uids = append(uids, uid)
 		}
 	}
-	if len(uids) == 0 {
-		return nil
-	}
 	sort.Ints(uids)
 	if len(uids) > enterpriseHookPeerAccountsMax {
 		uids = uids[:enterpriseHookPeerAccountsMax]
 	}
+	resolved := make(map[int]enterpriseHookCachedPeer, len(uids))
+	keep := func(uid int) {
+		if peer, ok := last[uid]; ok {
+			resolved[uid] = peer
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	resolver, err := unixidentity.NewNSSResolver(ctx)
-	if err != nil {
-		return nil
-	}
-	var peers []enterpriseHookPeerAccount
 	for _, uid := range uids {
-		if ctx.Err() != nil {
-			break
-		}
-		account, err := resolver.LookupUID(uid)
-		if err != nil || account.UID != uid || account.Name == "" {
+		if err != nil || ctx.Err() != nil {
+			keep(uid)
 			continue
 		}
-		if incarnation, known := resolver.AccountIncarnation(uid, account.Name); !known || strings.HasPrefix(incarnation, "sid:") {
+		account, lookupErr := resolver.LookupUID(uid)
+		switch {
+		case errors.Is(lookupErr, unixidentity.ErrNotFound):
+			continue
+		case lookupErr != nil || account.UID != uid || account.Name == "":
+			keep(uid)
 			continue
 		}
-		peers = append(peers, enterpriseHookPeerAccount{UID: uid, User: account.Name, HomeInode: enterpriseHookHomeInode(account.Home)})
+		incarnation, known := resolver.AccountIncarnation(uid, account.Name)
+		switch {
+		case !known:
+			keep(uid)
+			continue
+		case strings.HasPrefix(incarnation, "sid:"):
+			continue
+		}
+		peer := enterpriseHookCachedPeer{enterpriseHookPeerAccount{UID: uid, User: account.Name, HomeInode: enterpriseHookHomeInode(account.Home)}, account.Home}
+		if previous, ok := last[uid]; ok && peer.HomeInode == 0 && previous.User == peer.User {
+			peer.HomeInode = previous.HomeInode
+		}
+		resolved[uid] = peer
 	}
-	return peers
+	return resolved
 }
 
 // enterpriseHookHomeInode is the inode of home, 0 when it is not an

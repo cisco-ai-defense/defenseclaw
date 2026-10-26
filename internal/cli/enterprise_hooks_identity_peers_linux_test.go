@@ -144,3 +144,43 @@ func TestDeletedLocalAccountRecordIsNotRefreshed(t *testing.T) {
 		t.Fatalf("the deleted local account's record is still there after a pass (%v)", err)
 	}
 }
+
+// GAP-1866: the account lookups of the served accounts run again only when
+// the gateway's homes file changes (or after the spool interval), not at
+// every one-minute tick, and a home whose stat fails this tick keeps the
+// inode of its last answer, so the spool key does not flap.
+func TestGatewayPeerListingIsCachedAndKeepsTheLastInode(t *testing.T) {
+	previous := enterpriseHookResolveGatewayPeers
+	t.Cleanup(func() { enterpriseHookResolveGatewayPeers = previous; enterpriseHookPeerListing.reset() })
+	enterpriseHookPeerListing.reset()
+	home := t.TempDir()
+	resolves := 0
+	enterpriseHookResolveGatewayPeers = func(string, map[int]enterpriseHookCachedPeer) map[int]enterpriseHookCachedPeer {
+		resolves++
+		return map[int]enterpriseHookCachedPeer{52100: {enterpriseHookPeerAccount{UID: 52100, User: "fcuid1", HomeInode: enterpriseHookHomeInode(home)}, home}}
+	}
+	dataDir := t.TempDir()
+	homes := filepath.Join(dataDir, "managed_peer_homes.json")
+	if err := os.WriteFile(homes, []byte(`{"52100":{"name":"fcuid1"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := enterpriseHookGatewayPeerAccounts(dataDir)
+	if len(first) != 1 || first[0].HomeInode == 0 {
+		t.Fatalf("first listing %+v", first)
+	}
+	if err := os.Remove(home); err != nil {
+		t.Fatal(err)
+	}
+	again := enterpriseHookGatewayPeerAccounts(dataDir)
+	if resolves != 1 || len(again) != 1 || again[0].HomeInode != first[0].HomeInode {
+		t.Fatalf("second tick: %d lookups, listing %+v; want the cached account with its last inode %d", resolves, again, first[0].HomeInode)
+	}
+	later := time.Now().Add(time.Minute)
+	if err := os.Chtimes(homes, later, later); err != nil {
+		t.Fatal(err)
+	}
+	_ = enterpriseHookGatewayPeerAccounts(dataDir)
+	if resolves != 2 {
+		t.Fatalf("a changed homes file gave %d lookups; want the accounts resolved again", resolves)
+	}
+}
