@@ -295,6 +295,7 @@ type EventHistoryWriter struct {
 	generation         uint64
 	healthSequence     atomic.Uint64
 	appendCommitMu     sync.Mutex
+	group              writeGroup
 	healthMu           sync.Mutex
 	healthQueue        []EventHistoryHealthTransition
 	healthDraining     bool
@@ -386,8 +387,10 @@ func (writer *EventHistoryWriter) Append(
 
 // AppendContext validates that projection is the immutable local projection of
 // record, hashes and optionally signs its final serialization, then commits one
-// row atomically. It never falls back to record.Body or record.Bytes for stored
-// payload data.
+// row atomically. It never falls back to record.Body or record.Bytes for
+// stored payload data. Concurrent appends share one transaction (group
+// commit, writeGroup); each returns after its own row is
+// committed.
 func (writer *EventHistoryWriter) AppendContext(
 	ctx context.Context,
 	record observability.Record,
@@ -402,58 +405,7 @@ func (writer *EventHistoryWriter) AppendContext(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	release, err := writer.store.acquireReady()
-	if err != nil {
-		writer.reportHealthFailure(EventHistoryHealthWriteFailed, err, EventHistorySQLiteUnavailable)
-		return err
-	}
-	released := false
-	releaseReady := func() {
-		if !released {
-			release()
-			released = true
-		}
-	}
-	defer releaseReady()
-	err = retryBusyObserved(
-		ctx,
-		"v8_event_history_transaction",
-		writer.store.sqliteBusyObservabilityV8(),
-		func() error {
-			tx, beginErr := writer.store.db.BeginTx(ctx, nil)
-			if beginErr != nil {
-				return eventHistoryFailure(
-					EventHistoryHealthWriteFailed,
-					&eventHistoryWriteError{cause: beginErr},
-				)
-			}
-			outcome, appendErr := writer.appendContextTx(ctx, tx, record, projection)
-			if appendErr != nil {
-				_ = tx.Rollback()
-				return appendErr
-			}
-			if commitErr := writer.commitAppendTransactionContext(ctx, tx, outcome); commitErr != nil {
-				_ = tx.Rollback()
-				return eventHistoryFailure(
-					EventHistoryHealthWriteFailed,
-					&eventHistoryWriteError{cause: commitErr},
-				)
-			}
-			return nil
-		},
-	)
-	if err != nil {
-		// Health reporters may persist their own mandatory record through the
-		// same single-connection Store. Every failed attempt has ended before
-		// invoking external code so failure reporting cannot self-deadlock.
-		writer.stageAppendErrorClass(err, eventHistoryCallerGaveUpClass(ctx, err))
-		releaseReady()
-		writer.flushHealth()
-		return err
-	}
-	releaseReady()
-	writer.flushHealth()
-	return nil
+	return writer.appendGrouped(ctx, record, projection)
 }
 
 // AppendBatchContext commits records in one transaction, all or none, with
