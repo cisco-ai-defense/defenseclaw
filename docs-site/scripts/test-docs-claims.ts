@@ -1422,6 +1422,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1582", page: "reference/connectors/zeptoclaw.mdx", has: ["seven PATH shims", "`ncat` (a link to the `nc` shim)"] },
   { gap: "GAP-1644", page: "reference/connectors/zeptoclaw.mdx", has: ["`4000`, or the free port `init` chose when another account holds 4000"] },
   { gap: "GAP-1645", page: "reference/connectors/zeptoclaw.mdx", has: ["unless you pass `--replace`", "`no usable providers found`"] },
+  { gap: "GAP-0108, GAP-1524", page: "get-started/quickstart.mdx", has: ["its hook lets a call run with one warning while the gateway is not running", "a running hook blocks every other failure it detects"], lacks: ["With the default fail mode closed", "The hook fail mode is closed on a new install", "every other hook failure blocks"] },
   // r105-rows-end
 ];
 
@@ -1432,6 +1433,17 @@ function pageSection(name: string, heading?: string): string {
   assert.ok(body !== undefined, `${name} has no "## ${heading}" section`);
   return body.split(' ## ')[0];
 }
+
+describe('first-run report sample matches cmd_init (GAP-1605)', () => {
+  it('shows the outage line init prints and the default fail mode', () => {
+    const init = source('cli/defenseclaw/commands/cmd_init.py');
+    assert.ok(init.includes('"  While the gateway is not running, hooks let calls run with a warning"'));
+    assert.ok(init.includes('" (strict policy blocks them: defenseclaw guardrail use-pack strict)."'));
+    const sample = readFileSync(join(site, 'content/snippets/first-run-report.mdx'), 'utf8');
+    assert.ok(sample.includes('While the gateway is not running, hooks let calls run with a warning (strict policy blocks them: defenseclaw guardrail use-pack strict).'));
+    assert.ok(sample.includes('fail mode=open') && !sample.includes('fail mode=closed'));
+  });
+});
 
 describe('1.0.5 docs rows', () => {
   for (const row of r105Rows) {
