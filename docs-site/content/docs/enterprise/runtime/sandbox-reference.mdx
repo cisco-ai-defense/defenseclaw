@@ -316,6 +316,9 @@ In both modes `ensure` renders the OpenShell gateway settings into a root-owned 
 | Hardware | Any supported host | KVM. On EC2, a nested-virtualization type or a `.metal` size. | Apple silicon |
 | Group membership | The user is in `docker` | Read-write access to `/dev/kvm` through the `kvm` group or a named user ACL, and `docker` (agent images are built in Docker for each user) | None |
 | Also needed | Docker Engine 28 or newer with BuildKit, Landlock ABI 3 or newer (`sandbox doctor` reports the ABI of the running kernel) | `e2fsprogs` 1.43 or newer, a Docker socket for image builds | `e2fsprogs` (the pkg includes a fallback), and Docker Desktop running for the user |
+| Host Git | Git 2.29 or newer (RHEL: `sudo dnf install git`) | Git 2.29 or newer | Git 2.29 or newer (the Command Line Tools include it) |
+
+Every run copies the project into the sandbox, and keeps its pre-session snapshot, with the host's Git, so no run starts without it. `defenseclaw sandbox doctor` checks it for each user (**Host Git**).
 
 `ensure` never changes group membership or device ACLs; `ensure` and `verify` report accounts that lack it.
 

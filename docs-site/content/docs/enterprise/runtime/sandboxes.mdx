@@ -53,7 +53,7 @@ In both modes `ensure` renders the OpenShell gateway settings into a root-owned 
 
 ### Per-OS prerequisites
 
-Linux needs Docker Engine 28 or newer and the user in the `docker` group; the optional MicroVM driver needs KVM. macOS needs Apple silicon and Docker Desktop. The full table and the two install recipes are in the [sandbox reference](/docs/enterprise/runtime/sandbox-reference#per-os-prerequisites).
+Linux needs Docker Engine 28 or newer and the user in the `docker` group; the optional MicroVM driver needs KVM. macOS needs Apple silicon and Docker Desktop. Every OS also needs Git 2.29 or newer on the host: a run copies the project into the sandbox, and keeps its pre-session snapshot, with the host's Git, so no run starts without it. A minimal image may not include Git (RHEL: `sudo dnf install git`). `defenseclaw sandbox doctor` checks it for each user (**Host Git**). The full table and the two install recipes are in the [sandbox reference](/docs/enterprise/runtime/sandbox-reference#per-os-prerequisites).
 
 ## Turn it on
 
