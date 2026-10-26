@@ -1,0 +1,8 @@
+{
+  "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+  "OTEL_LOGS_EXPORTER": "otlp",
+  "OTEL_METRICS_EXPORTER": "otlp",
+  "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:19052",
+  "OTEL_EXPORTER_OTLP_HEADERS": "X-T11-Operator=preserve",
+  "OTEL_RESOURCE_ATTRIBUTES": "service.name=t11-operator-collector"
+}
