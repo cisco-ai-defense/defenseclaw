@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -39,6 +40,23 @@ type enterpriseHookGuardianNoticeRecord struct {
 	Version   int                            `json:"version"`
 	UpdatedAt string                         `json:"updated_at"`
 	Targets   []enterpriseHookGuardianNotice `json:"targets"`
+}
+
+// enterpriseHookAgentConfigNotice is the notice code the guardian records for
+// a target that verified: the result's own (a Hermes or Devin config put back
+// or recreated), else a Codex or Claude Code native OTLP exporter the managed
+// install could not take back, which the account's take-back-pending marker
+// records (connector.NativeOTLPTakeBackPending, GAP-1839, GAP-1840). The
+// exporter fails no verify: the managed gateway never serves its credential,
+// which the take-back revoked, and the next install or repair retries it.
+func enterpriseHookAgentConfigNotice(result enterprisehooks.InstallResult) string {
+	if result.AgentConfig != "" {
+		return result.AgentConfig
+	}
+	if connector.NativeOTLPTakeBackPending(result.DataDir, result.Connector) {
+		return connector.AgentConfigNativeOTLPTakeBackPending
+	}
+	return ""
 }
 
 // writeEnterpriseHookGuardianNotices replaces the record with this pass's

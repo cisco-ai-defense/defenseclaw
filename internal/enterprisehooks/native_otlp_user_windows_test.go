@@ -527,10 +527,92 @@ func TestWindowsManagedNativeOTLPTakeBackRevokesCredentialWhenLinkedConfigUnread
 	}
 }
 
+// GAP-1839, GAP-1840: a take-back that could not clean a linked config left
+// nothing that status, verify or a later install could act on. It now leaves
+// the take-back-pending marker (Verify still passes: the credential is
+// revoked), and the next take-back that can clean the config removes the
+// exporter and the marker.
+func TestWindowsManagedNativeOTLPTakeBackPendingUntilTheExporterIsGone(t *testing.T) {
+	t.Setenv("CODEX_HOME", "")
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	share := filepath.Join(t.TempDir(), "share")
+	if err := os.MkdirAll(share, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(share, "config.toml")
+	body := "model = 'o4'\r\n[otel.exporter.otlp-http]\r\nendpoint = 'http://127.0.0.1:19010/v1/logs'\r\n" +
+		"[otel.exporter.otlp-http.headers]\r\nauthorization = 'Bearer " + strings.Repeat("e7", 32) + "'\r\n"
+	if err := os.WriteFile(config, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	makeTestJunction(t, filepath.Join(home, ".codex"), share)
+	restore := denyWindowsTestPathReadForTest(t, config, user.User.Sid)
+	tokenPath, err := connector.OTLPPathTokenFilePath(dataDir, connector.OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("e7", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	takeBack := func() string {
+		return captureWindowsTestStderr(t, func() {
+			if err := connector.WithUserHomeDir(home, func() error {
+				return removeWindowsManagedUserNativeOTLPAsTarget("codex", dataDir)
+			}); err != nil {
+				t.Fatalf("take-back failed the install: %v", err)
+			}
+		})
+	}
+	marker := filepath.Join(dataDir, "native-otlp-take-back-pending-codex.json")
+	report := takeBack()
+	if _, err := os.Lstat(marker); err != nil {
+		t.Fatalf("take-back left no pending marker for a linked config it could not read: %v (report %q)", err, report)
+	}
+	if !strings.Contains(report, "status and verify report it") || strings.Contains(report, "network share while") {
+		t.Fatalf("take-back report = %q", report)
+	}
+	if err := windowsManagedUserNativeOTLPAbsent("codex", home, dataDir, user.User.Sid); err != nil {
+		t.Fatalf("verify fails the install on a pending take-back whose credential is revoked: %v", err)
+	}
+	// A credential back beside a pending take-back is live: Verify fails.
+	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("e7", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedUserNativeOTLPAbsent("codex", home, dataDir, user.User.Sid); err == nil || !strings.Contains(err.Error(), "as that user") {
+		t.Fatalf("verify passed a pending take-back with a live credential: %v", err)
+	}
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	// The account signs in (the config is readable again): the next take-back
+	// proves the exporter by the revoked credential's digest, removes it,
+	// keeps the operator's key and clears the marker.
+	restore()
+	report = takeBack()
+	if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("take-back kept the pending marker after it removed the exporter: %v (report %q)", err, report)
+	}
+	cleaned, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cleaned), "127.0.0.1:19010") || !strings.Contains(string(cleaned), "model = 'o4'") {
+		t.Fatalf("config after the retried take-back = %q", cleaned)
+	}
+}
+
 // denyWindowsTestPathReadForTest denies sid read access to path, as an S4U
 // token meets a share it has no credentials for, and puts the DACL back on
 // cleanup so the temporary directory can be removed.
-func denyWindowsTestPathReadForTest(t *testing.T, path string, sid *windows.SID) {
+func denyWindowsTestPathReadForTest(t *testing.T, path string, sid *windows.SID) func() {
 	t.Helper()
 	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -556,9 +638,11 @@ func denyWindowsTestPathReadForTest(t *testing.T, path string, sid *windows.SID)
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, denied, nil); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
+	restore := func() {
 		_ = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
-	})
+	}
+	t.Cleanup(restore)
+	return restore
 }
 
 // captureWindowsTestStderr returns what fn writes to os.Stderr.

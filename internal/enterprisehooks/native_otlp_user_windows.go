@@ -29,23 +29,28 @@ import (
 // keeps a DefenseClaw native exporter. The error names fields, never values.
 // Verify is read-only and never impersonates, so it reads the account's files
 // only when no reparse point lies on their path; a linked config is checked by
-// the repair that runs as the target user. Install and repair revoke the
-// earlier install's scoped credential even when they cannot clean a linked
-// config (removeWindowsManagedUserNativeOTLPAsTarget), so a credential still
-// in the data directory beside a linked config is one they could not revoke,
-// and Verify fails with the step instead of passing (GAP-1170).
+// the take-back that runs as the target user. A take-back that could not
+// clean the config revokes the earlier install's scoped credential and leaves
+// the take-back-pending marker (GAP-1839, GAP-1840): Verify then passes, as
+// the managed gateway serves no such credential, and the guardian reports the
+// account in status and verify until a later install or repair cleans it
+// (enterpriseHookAgentConfigNotice). A credential still in the data directory
+// beside a linked or pending config is one the take-back could not revoke,
+// and Verify fails with the step (GAP-1170).
 func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, _ *windows.SID) error {
+	if connector.NativeOTLPTakeBackPending(dataDir, connectorName) {
+		if credential := windowsManagedUserNativeOTLPCredential(connectorName, dataDir); credential != "" {
+			return windowsManagedUserNativeOTLPCredentialKept(connectorName, credential)
+		}
+		return nil
+	}
 	for _, path := range windowsManagedUserNativeOTLPPaths(connectorName, home, dataDir) {
 		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err := rejectWindowsReparseChain(path); err != nil {
 			if credential := windowsManagedUserNativeOTLPCredential(connectorName, dataDir); credential != "" {
-				return fmt.Errorf(
-					"enterprise hooks: %s keeps the native OTLP credential of an earlier per-user install (%s) beside a linked agent config that repair could not clean; "+
-						"%s; then run repair, which revokes the credential",
-					connectorName, credential, windowsManagedUserNativeOTLPManualStep(connectorName),
-				)
+				return windowsManagedUserNativeOTLPCredentialKept(connectorName, credential)
 			}
 			return nil
 		}
@@ -73,6 +78,17 @@ func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, _ *
 		)
 	}
 	return nil
+}
+
+// windowsManagedUserNativeOTLPCredentialKept is Verify's failure for a
+// credential the take-back could not revoke beside a config it could not
+// clean.
+func windowsManagedUserNativeOTLPCredentialKept(connectorName, credential string) error {
+	return fmt.Errorf(
+		"enterprise hooks: %s keeps the native OTLP credential of an earlier per-user install (%s) beside an agent config that repair could not clean; "+
+			"%s; then run repair, which revokes the credential",
+		connectorName, credential, windowsManagedUserNativeOTLPManualStep(connectorName),
+	)
 }
 
 // windowsManagedUserNativeOTLPCredential names the earlier per-user install's
@@ -132,26 +148,38 @@ func windowsManagedUserNativeOTLPPaths(connectorName, home, dataDir string) []st
 // account's config (for example a .codex on a network share that the S4U
 // token of a signed-out user cannot read), it still revokes the scoped
 // credential, which the managed gateway never serves, so no live credential
-// is kept and Verify does not fail the install on a config it cannot read
-// (GAP-1170). The report names the account's own step. A config the install
-// cannot read (a share a signed-out account's S4U token has no network
-// credentials for, or a path through a reparse point) is a documented limit:
-// nothing retries it, the account removes the exporter itself (GAP-1839,
-// GAP-1840).
+// is kept (GAP-1170), and it leaves the take-back-pending marker: status and
+// verify report the account, and every later install or repair takes the
+// exporter back again until it is gone and then clears the marker (GAP-1839,
+// GAP-1840). The report names the error and the account's own step.
 func removeWindowsManagedUserNativeOTLPAsTarget(connectorName, dataDir string) error {
 	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
 	if residue, err := connector.UserNativeOTLPResidue(connectorName, opts); err == nil && len(residue) == 0 {
+		clearWindowsManagedNativeOTLPTakeBackPending(connectorName, dataDir)
 		return nil
 	}
 	if _, err := connector.RemoveUserNativeOTLP(connectorName, opts); err != nil {
+		// The marker keeps the credential's digest, so it is written first.
+		pending := "status and verify report it until repair or the next install removes it"
+		if markErr := connector.RecordNativeOTLPTakeBackPending(dataDir, connectorName); markErr != nil {
+			pending = fmt.Sprintf("could not record it for status and verify (%v)", markErr)
+		}
 		revoked := "revoked its scoped credential"
 		if scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName); ok {
 			if revokeErr := connector.RemoveOTLPPathToken(dataDir, scope); revokeErr != nil {
 				revoked = fmt.Sprintf("could not revoke its scoped credential either (%v)", revokeErr)
 			}
 		}
-		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise hooks: could not remove the %s native OTLP exporter an earlier per-user install left (%v); %s; %s (DefenseClaw cannot read an agent config on a network share while the account is signed out, so this step is the account's)\n",
-			connectorName, err, revoked, windowsManagedUserNativeOTLPManualStep(connectorName))
+		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise hooks: could not remove the %s native OTLP exporter an earlier per-user install left (%v); %s; %s; %s\n",
+			connectorName, err, revoked, pending, windowsManagedUserNativeOTLPManualStep(connectorName))
+		return nil
 	}
+	clearWindowsManagedNativeOTLPTakeBackPending(connectorName, dataDir)
 	return nil
+}
+
+func clearWindowsManagedNativeOTLPTakeBackPending(connectorName, dataDir string) {
+	if err := connector.ClearNativeOTLPTakeBackPending(dataDir, connectorName); err != nil {
+		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise hooks: %s native OTLP exporter is gone, but its take-back-pending marker could not be removed (%v); status keeps reporting it until repair removes it\n", connectorName, err)
+	}
 }
