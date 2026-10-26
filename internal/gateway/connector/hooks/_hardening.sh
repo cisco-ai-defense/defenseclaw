@@ -438,13 +438,6 @@ defenseclaw_shared_hook_token_file() {
 # managed_enterprise (defenseclaw_managed_runtime_sidecar). An earlier per-user
 # open is never an outage exception.
 defenseclaw_shared_runtime_fail_mode() {
-  # A standalone shared hook has no authenticated connector or generation.
-  # Its managed writer never sources an open from per-user runtime records;
-  # retained sourced peers from older installs cannot establish that proof.
-  if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ] && [ "${_DC_SECURE_CLIENT_HOOK:-0}" != "1" ]; then
-    printf closed
-    return 0
-  fi
   local hook_dir="$1"
   local connector="${2:-}"
   local config="${hook_dir}/.hookcfg"

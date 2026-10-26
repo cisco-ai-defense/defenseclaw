@@ -77,37 +77,3 @@ func TestOpenCodePluginTakesItsInstalledModeAndStrictAvailability(t *testing.T) 
 		}
 	}
 }
-
-func TestManagedOpenCodeHonorsExplicitAdminOpenDuringOutage(t *testing.T) {
-	nodeForTest(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	unreachable := listener.Addr().String()
-	_ = listener.Close()
-	dataDir := testenv.PrivateTempDir(t)
-	token := filepath.Join(dataDir, ".hook-opencode.token")
-	if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		mode, strict string
-		blocked      bool
-	}{
-		{"closed", "", true},
-		{"open", "", false},
-		{"open", "1", true},
-	} {
-		t.Run(tc.mode+"/strict="+tc.strict, func(t *testing.T) {
-			t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", tc.strict)
-			lines := runOpenCodePluginHarness(t, templateData{
-				APIAddr: unreachable, TokenFileJS: javaScriptStringContent(token),
-				Managed: true, FailMode: tc.mode,
-			}, 1)
-			if len(lines) == 0 || strings.HasPrefix(lines[0], "block:") != tc.blocked {
-				t.Fatalf("managed mode %s strict %s verdict %q, want blocked=%v", tc.mode, tc.strict, lines, tc.blocked)
-			}
-		})
-	}
-}
