@@ -5,6 +5,8 @@ package gateway
 
 import (
 	"os"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -156,5 +158,39 @@ func TestR105GAP2046SessionCreatedLoadedClaudeMDStaysOwn(t *testing.T) {
 				t.Fatalf("Bash append to the loaded CLAUDE.md (there first %t): action=%q findings=%v", existed, bash.Action, bash.Findings)
 			}
 		})
+	}
+}
+
+// GAP-2049: the identity-proved raise to CRITICAL (GAP-1503) is for the
+// default and strict packs. The permissive pack keeps the rule's HIGH, so a
+// write to the loaded CLAUDE.md alerts in action mode there; default and
+// strict block it.
+func TestR105GAP2049PermissivePackKeepsTheInstructionWriteAnAlert(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell forms")
+	}
+	for _, tc := range []struct {
+		pack  string
+		block bool
+	}{{"permissive", false}, {"default", true}, {"strict", true}} {
+		root := t.TempDir()
+		file := writeActiveAgentTestFile(t, root, "CLAUDE.md")
+		installToolCallCorpusProfileConnector(t, "claudecode", tc.pack)
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = "action"
+		cfg.Guardrail.Connector = "claudecode"
+		cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), tc.pack)
+		api := &APIServer{scannerCfg: cfg}
+		api.evaluateClaudeCodeHook(authenticatedClaudeCodeTestContext(), claudeCodeHookRequest{
+			HookEventName: "InstructionsLoaded", SessionID: "p2049", FilePath: file,
+		})
+		input := map[string]interface{}{"command": "printf changed >> CLAUDE.md"}
+		ctx := withAuthenticatedHookConnector(instructionResolvedWriteContext(t, root, "Bash", input), "claudecode")
+		response := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+			HookEventName: "PreToolUse", SessionID: "p2049", CWD: root, ToolName: "Bash", ToolInput: input,
+		})
+		if got := response.Action == guardrailActionBlock; got != tc.block || !findingStringHasRuleID(response.Findings, "COG-CLAUDE-MD") {
+			t.Fatalf("%s pack, action: action=%q findings=%v, want block=%t with COG-CLAUDE-MD", tc.pack, response.Action, response.Findings, tc.block)
+		}
 	}
 }

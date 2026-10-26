@@ -249,10 +249,12 @@ func provedHighWriteFindings(
 				// A write to an instruction file the session loaded or found
 				// at its start, proved by the file's identity, is unambiguous
 				// and high impact: CRITICAL (SignalStrengthToSeverity). Action
-				// mode therefore blocks it under every pack's posture, the
-				// default one included; observe only records it (GAP-1503).
+				// mode therefore blocks it under the default and strict packs;
+				// observe only records it (GAP-1503). The permissive pack
+				// keeps the rule's severity, so it alerts there (GAP-2049).
 				severity := rule.Severity
-				if instructionRule && instructionProof == instructionIdentityProved && strings.EqualFold(severity, "HIGH") {
+				if instructionRule && instructionProof == instructionIdentityProved && !startupView.permissive &&
+					strings.EqualFold(severity, "HIGH") {
 					severity = "CRITICAL"
 				}
 				index := slices.IndexFunc(proved, func(finding RuleFinding) bool {

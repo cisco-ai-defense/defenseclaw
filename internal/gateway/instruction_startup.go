@@ -41,10 +41,13 @@ type instructionStartupContextKey struct{}
 // the call's rule pack posture: only there does an instruction file that
 // merely exists now, in a directory the snapshot does not record, block.
 type instructionStartupView struct {
-	present  bool
-	strict   bool
-	snapshot activeAgentContextSnapshot
-	extend   func(dirs []string) activeAgentContextSnapshot
+	present bool
+	strict  bool
+	// permissive: the call's rule pack has the permissive posture, which
+	// keeps an instruction-file write at the rule's own severity.
+	permissive bool
+	snapshot   activeAgentContextSnapshot
+	extend     func(dirs []string) activeAgentContextSnapshot
 	// lostIdentities: the session's first sighting is gone (pruned from
 	// the store, or evicted unsaved); these are the identities of the
 	// instruction files it had proved, so a file with one of them is still
@@ -60,7 +63,8 @@ func (view instructionStartupView) existenceBlocks() bool {
 }
 
 func (a *APIServer) withInstructionStartup(ctx context.Context, connector, sessionID string, snapshot activeAgentContextSnapshot) context.Context {
-	view := instructionStartupView{present: true, strict: a.instructionStrictTier(ctx, connector), snapshot: snapshot}
+	posture := a.instructionPackPosture(ctx, connector)
+	view := instructionStartupView{present: true, strict: posture == "strict", permissive: posture == "permissive", snapshot: snapshot}
 	if !snapshot.startupKnown {
 		if key, ok := instructionStartupKey(ctx, connector, sessionID); ok {
 			view.lostIdentities, _ = a.instructionFirstSightingLost(key)
@@ -78,15 +82,15 @@ func (a *APIServer) withInstructionStartup(ctx context.Context, connector, sessi
 	return context.WithValue(ctx, instructionStartupContextKey{}, view)
 }
 
-// instructionStrictTier reports whether connector's rule pack for the call
-// (its profile's, else the configuration's) has the strict posture.
-func (a *APIServer) instructionStrictTier(ctx context.Context, connector string) bool {
+// instructionPackPosture is the posture of connector's rule pack for the
+// call (its profile's, else the configuration's); "" without a config.
+func (a *APIServer) instructionPackPosture(ctx context.Context, connector string) string {
 	cfg := a.decisionConfig(ctx)
 	if cfg == nil {
-		return false
+		return ""
 	}
 	ref := cfg.EffectiveRulePackRefForConnector(connector)
-	return packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref)) == "strict"
+	return packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref))
 }
 
 func instructionStartupFromContext(ctx context.Context) instructionStartupView {
