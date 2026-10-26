@@ -521,7 +521,7 @@ func TestClaudeShellHookFailClosedDenyIsOnePlainSentence(t *testing.T) {
 	run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, stopped,
 		"DEFENSECLAW_FAIL_MODE=closed")
 	reason := failClosedDenyReason(t, run)
-	want := "DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection."
+	want := "DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection (defenseclaw-gateway status shows its state)."
 	if reason != want {
 		t.Fatalf("deny reason = %q\nwant %q", reason, want)
 	}
