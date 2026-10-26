@@ -341,9 +341,8 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (Comman
 		return CommandResult{Stdout: []byte(fmt.Sprintf(`{"effective_digest":%q,"config_generation":%d}`,
 			fakeAppliedPolicyDigest, state.Generation))}, nil
 	}
-	if len(args) > 0 && args[len(args)-1] == "--check" &&
-		strings.HasPrefix(strings.Join(args, " "), "enterprise hooks remove-all ") {
-		return CommandResult{Stdout: []byte(`{"ok":true}`)}, nil
+	if strings.HasPrefix(strings.Join(args, " "), "enterprise hooks remove-all ") {
+		return CommandResult{Stdout: []byte(`{"ok":true,"removed":0}`)}, nil
 	}
 	if len(args) == 1 && args[0] == "--version-json" {
 		version, ok := r.versions[name]
