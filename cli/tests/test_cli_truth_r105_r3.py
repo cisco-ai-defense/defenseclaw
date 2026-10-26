@@ -173,5 +173,3 @@ def test_a_probe_that_cannot_run_says_the_destination_is_saved_untested(monkeypa
     assert "the live probe did not run: the gateway is not running" in out
     assert "saved untested" in out
     assert "defenseclaw observability destination test splunk-enterprise" in out
-
-
