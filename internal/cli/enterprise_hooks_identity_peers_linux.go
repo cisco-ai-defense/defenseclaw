@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -144,6 +145,22 @@ var enterpriseHookResolveGatewayPeers = func(path string, last map[int]enterpris
 	if info, statErr := os.Stat(path); statErr == nil {
 		savedAt = info.ModTime().UnixNano()
 	}
+	// The file's mtime is the last time a gateway wrote it for any uid:
+	// 1.0.3 and 1.0.4 write no first_seen and save the file at another
+	// account's first hook, which can come after an account was deleted and
+	// created again. The uid's last hook in the agent ledger bounds the
+	// sighting too, as the gateway bounds it (loadHomesLocked, GAP-1947): an
+	// account created after that hook did not make it, so it is no 1.0.3
+	// holder and the first map does not bind it (GAP-2024). Read once, and
+	// only when an entry needs it.
+	var lastHooks map[int]int64
+	lastHooksRead := false
+	lastHook := func(uid int) int64 {
+		if !lastHooksRead {
+			lastHooks, lastHooksRead = enterpriseHookAgentLastHooks(filepath.Dir(path)), true
+		}
+		return lastHooks[uid]
+	}
 	// preToken reports whether the account that holds uid now, whose home
 	// is home, is the one a build before 1.0.4 saw hold it, with no 1.0.4
 	// gateway serving the uid since then (enterpriseHookPeerAccount.PreToken).
@@ -168,6 +185,9 @@ var enterpriseHookResolveGatewayPeers = func(path string, last map[int]enterpris
 		seen := entry.FirstSeen
 		if seen <= 0 {
 			seen = savedAt
+			if at := lastHook(uid); at > 0 && (seen <= 0 || at < seen) {
+				seen = at
+			}
 		}
 		birth, known := enterprisehooks.HomeBirth(home)
 		return !known || seen <= 0 || birth <= seen+int64(2*time.Second)
@@ -223,20 +243,22 @@ var enterpriseHookResolveGatewayPeers = func(path string, last map[int]enterpris
 	return resolved
 }
 
-// enterpriseHookLocalAccountsStamp is the size, modification time and inode
-// of /etc/passwd, which useradd, userdel and usermod replace; "" when it
-// cannot be read. Tests replace it.
-var enterpriseHookLocalAccountsStamp = func() string {
-	info, err := os.Stat("/etc/passwd")
+// enterpriseHookAgentLastHooks is, per uid, the last hook the gateway's
+// agent ledger in dataDir recorded (inventory.ReadAgentLastHooks, read only);
+// nil when it cannot be read. Tests replace it.
+var enterpriseHookAgentLastHooks = func(dataDir string) map[int]int64 {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	hooks, err := inventory.ReadAgentLastHooks(ctx, filepath.Join(dataDir, "inventory.db"))
 	if err != nil {
-		return ""
+		return nil
 	}
-	stamp := strconv.FormatInt(info.ModTime().UnixNano(), 10) + "/" + strconv.FormatInt(info.Size(), 10)
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		stamp += "/" + strconv.FormatUint(uint64(st.Ino), 10)
-	}
-	return stamp
+	return hooks
 }
+
+// enterpriseHookLocalAccountsStamp is enterprisehooks.LocalAccountsStamp.
+// Tests replace it.
+var enterpriseHookLocalAccountsStamp = func() string { return enterprisehooks.LocalAccountsStamp() }
 
 // enterpriseHookHomeInode is the inode of home, 0 when it is not an
 // absolute path to a directory the guardian can stat.

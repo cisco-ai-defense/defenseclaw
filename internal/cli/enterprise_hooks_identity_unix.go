@@ -1011,6 +1011,16 @@ func enterpriseHookIdentitySpoolDirForConfig() string {
 	return enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
 }
 
+// enterpriseHookIdentitySpoolFingerprint is what a pass of the identity
+// spool depends on: the sorted account keys and the local account database's
+// stamp. A change of the database (useradd, userdel) makes the next tick
+// rewrite the records, whose home proofs the gateway does not take for the
+// uid's holder while they carry an earlier stamp (GAP-0422, GAP-1876,
+// GAP-2026).
+func enterpriseHookIdentitySpoolFingerprint(keys []string) string {
+	return strings.Join(keys, ";") + "|" + enterpriseHookLocalAccountsStamp()
+}
+
 func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return
@@ -1027,11 +1037,7 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	startEnterpriseHookDirectoryReturnWatch(ctx, stderr, dir, enrolled)
 	startEnterpriseHookDirectoryReachWatch(ctx, stderr, dir, enrolled)
 	sort.Strings(keys)
-	// A change of the local account database (useradd, userdel) makes the
-	// next tick rewrite the records, whose home proofs the gateway does not
-	// take for the uid's holder while they are older than the change
-	// (GAP-0422, GAP-1876).
-	fingerprint := strings.Join(keys, ";") + "|" + enterpriseHookLocalAccountsStamp()
+	fingerprint := enterpriseHookIdentitySpoolFingerprint(keys)
 	now := time.Now()
 	state := &enterpriseHookIdentitySpoolState
 	state.Lock()

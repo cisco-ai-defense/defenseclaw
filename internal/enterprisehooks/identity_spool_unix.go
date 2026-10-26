@@ -138,6 +138,10 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	// which drops the extension when it rewrites a record) wrote that
 	// previous pass (writeLegacyAgentOwnersOnce, GAP-0709, GAP-1787).
 	mapRecords, preMapRecords := 0, 0
+	// Read before any account is collected: a change of the account
+	// database during the pass leaves the records with the earlier stamp,
+	// which the gateway then no longer takes as current.
+	accountsStamp := LocalAccountsStamp()
 	var passErr error
 	answeredDirectories := map[string]bool{}
 	for _, account := range accounts {
@@ -203,6 +207,9 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			}
 			if record.User != "" {
 				record.LegacyOwnerToken = LegacyAgentOwnerToken(record.AccountIncarnation, identitySpoolAccountHome(account.UID))
+				if record.LegacyOwnerToken != "" {
+					record.AccountsStamp = accountsStamp
+				}
 			}
 			if previousRecorded && (record.AccountIncarnation != "" || record.LegacyOwnerToken != "") {
 				mapRecords++

@@ -67,7 +67,7 @@ var legacyAgentOwnerTokenNow = func(uid int, account string) string {
 		if record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), validateManagedGuardianAuthorization); err == nil &&
 			legacyAgentOwnerSameAccount(record.User, account) && !record.UpdatedAt.IsZero() &&
 			!record.UpdatedAt.After(time.Now().Add(time.Minute)) && time.Since(record.UpdatedAt) <= enterprisehooks.IdentitySpoolMaxAge {
-			if record.LegacyOwnerToken != "" && (strings.HasPrefix(record.LegacyOwnerToken, "sid:") || guardianHomeProofCurrent(record.UpdatedAt)) {
+			if record.LegacyOwnerToken != "" && (strings.HasPrefix(record.LegacyOwnerToken, "sid:") || guardianHomeProofCurrent(record)) {
 				return record.LegacyOwnerToken
 			}
 			if strings.HasPrefix(record.AccountIncarnation, "sid:") {
@@ -81,21 +81,34 @@ var legacyAgentOwnerTokenNow = func(uid int, account string) string {
 	return enterprisehooks.LegacyAgentOwnerToken(incarnation, managedHookPeerHome(uid))
 }
 
-// guardianHomeProofCurrent reports whether a home proof the root guardian
-// wrote into an identity record at recordedAt can name the account that
-// holds the record's uid now: the local account database did not change
-// after it (localAccountsChangedAt). userdel and useradd rewrite /etc/passwd,
-// so a record written before the last change can name the home of an
-// account deleted since, whose name and uid a new account took over: the new
-// account was bound to the earlier holder's 1.0.3 agents entries and got its
-// agent identity until the guardian's next pass (GAP-0422, GAP-1876). The
-// guardian writes the records again at its next tick after such a change.
-// A database the gateway cannot stat (macOS, where the listed record tells
-// a recreated account apart) tells nothing.
-func guardianHomeProofCurrent(recordedAt time.Time) bool {
+// guardianHomeProofCurrent reports whether the home proof the root guardian
+// wrote into record can name the account that holds the record's uid now:
+// the local account database did not change since the guardian read it.
+// userdel and useradd rewrite /etc/passwd, so a record written before the
+// last change can name the home of an account deleted since, whose name and
+// uid a new account took over: the new account was bound to the earlier
+// holder's 1.0.3 agents entries and got its agent identity until the
+// guardian's next pass (GAP-0422, GAP-1876). The guardian writes the records
+// again at its next tick after such a change. A record with the stamp the
+// guardian read (enterprisehooks.LocalAccountsStamp) is current while that
+// stamp is; the wall clock does not decide, so a database dated in the
+// future (a useradd while the clock was ahead) does not keep every bound
+// account refused once the guardian rewrote the records (GAP-2025). A record
+// 1.0.4 wrote has no stamp: it is current when it is not older than the
+// database. A database the gateway cannot stat (macOS, where the listed
+// record tells a recreated account apart) tells nothing.
+func guardianHomeProofCurrent(record enterprisehooks.IdentitySpoolRecord) bool {
+	if record.AccountsStamp != "" {
+		now := localAccountsStamp()
+		return now == "" || now == record.AccountsStamp
+	}
 	changed := localAccountsChangedAt()
-	return changed.IsZero() || !recordedAt.Before(changed)
+	return changed.IsZero() || !record.UpdatedAt.Before(changed)
 }
+
+// localAccountsStamp is enterprisehooks.LocalAccountsStamp. Tests replace
+// it.
+var localAccountsStamp = func() string { return enterprisehooks.LocalAccountsStamp() }
 
 // localAccountsChangedAt is when /etc/passwd last changed on Linux, zero
 // when it cannot be read and on other systems. Tests replace it.

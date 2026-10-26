@@ -377,35 +377,32 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 	// recorded before this gateway took over bounds it too, since an
 	// account created after that hook did not make it (GAP-1947).
 	if len(fromFile) > 0 {
-		if hooks := managedHookPeerLastHooks(); len(hooks) > 0 {
+		if hooks := managedHookPeerLastHooks(); hooks != nil {
 			for _, uid := range fromFile {
 				if at, ok := hooks[uid]; ok && at > 0 && at < c.firstSeen[uid] {
 					c.firstSeen[uid] = at
 				}
 			}
+			// The guardian reads these sightings from the file (first_seen).
+			// Written now, they are bounded before this gateway's own hooks
+			// reach the ledger, which can then name a later hook of the
+			// uid's new holder (GAP-2024). While the ledger cannot be read
+			// the guardian bounds them itself.
+			c.saveHomesLocked()
 		}
 	}
 }
 
 // managedHookPeerLastHooks is, per uid, the newest last_seen of the agent
-// ledger's rows (Unix nanoseconds); nil while the ledger cannot be read.
-// Tests replace it.
+// ledger's rows (Unix nanoseconds, inventory.AgentLastHooksByUID, which the
+// guardian reads too); nil while the ledger cannot be read, empty when it
+// has no row. Tests replace it.
 var managedHookPeerLastHooks = func() map[int]int64 {
 	records, ok := profileAgentLedger(inventory.AgentIdentityFilter{Retired: true})
 	if !ok {
 		return nil
 	}
-	hooks := make(map[int]int64, len(records))
-	for _, record := range records {
-		uid, err := strconv.Atoi(strings.TrimSpace(record.UserID))
-		if err != nil || uid < 0 || record.LastSeen.IsZero() {
-			continue
-		}
-		if at := record.LastSeen.UnixNano(); at > hooks[uid] {
-			hooks[uid] = at
-		}
-	}
-	return hooks
+	return inventory.AgentLastHooksByUID(records)
 }
 
 // saveHomesLocked writes homes and names to the store. c.mu is held; it
@@ -1373,7 +1370,7 @@ var managedHookPeerHomeProof = func(uid int, name, incarnation string) string {
 	if record.UpdatedAt.After(now.Add(time.Minute)) || now.Sub(record.UpdatedAt) > enterprisehooks.IdentitySpoolMaxAge {
 		return ""
 	}
-	if record.AccountIncarnation != "" && record.AccountIncarnation != incarnation || !guardianHomeProofCurrent(record.UpdatedAt) {
+	if record.AccountIncarnation != "" && record.AccountIncarnation != incarnation || !guardianHomeProofCurrent(record) {
 		return ""
 	}
 	return normalizeHomeProof(record.LegacyOwnerToken)
