@@ -37,6 +37,13 @@ func TestSQLCommentsDoNotHideDestructiveSQL(t *testing.T) {
 		{"postgres trailing nested block comment", "psql -c 'DELETE FROM customers /* a /* b */ c */'", "postgresql", SQLMutationDeleteUnbounded},
 		{"sql server nested block comment", `sqlcmd -Q "DROP DATABASE production /* a /* b */ */"`, "sqlserver", SQLMutationDropDatabase},
 		{"mysql hash comment in stdin", "mysql app <<'SQL'\n# cleanup\nDELETE FROM audit_log;\nSQL", "mysql", SQLMutationDeleteUnbounded},
+		// GAP-2010: MySQL does not nest block comments (the comment ends at
+		// the first "*/") and runs the body of an executable comment.
+		{"mysql comment holding an opener before the end", "mysql -e 'DELETE FROM customers /* a /* b */'", "mysql", SQLMutationDeleteUnbounded},
+		{"mysql drop database after a comment holding an opener", "mysql -e 'DROP DATABASE production /* x /* y */'", "mysql", SQLMutationDropDatabase},
+		{"mysql executable comment body", "mysql -e '/*! DROP DATABASE production */'", "mysql", SQLMutationDropDatabase},
+		{"mysql versioned executable comment body", "mysql -e '/*!50000 DROP DATABASE production */'", "mysql", SQLMutationDropDatabase},
+		{"mariadb executable comment body", "mariadb -e '/*M! TRUNCATE TABLE events */'", "mysql", SQLMutationTruncate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := Analyze(Input{Tool: "shell", Command: tc.command})
@@ -61,6 +68,10 @@ func TestSQLCommentsDoNotHideDestructiveSQL(t *testing.T) {
 		{"mysql bounded delete with hash comment", "mysql -e 'DELETE FROM customers WHERE id = 7 # nightly'"},
 		{"unterminated block comment", "psql -c 'DELETE FROM customers /* open'"},
 		{"stray comment close", "psql -c 'DELETE FROM customers */'"},
+		{"empty mysql executable comment", "mysql -e 'SELECT 1 /*! */'"},
+		{"unterminated mysql executable comment", "mysql -e '/*! DROP DATABASE production'"},
+		{"mysql executable comment in an executable comment", "mysql -e '/*! DROP DATABASE /*! x */ production */'"},
+		{"executable comment is not a postgres form", "psql -c '/*! DROP DATABASE production */'"},
 		// A multi-line -c value is not an exact argv scalar, with or without a
 		// comment ("psql -c 'DELETE\nFROM customers'" gives no fact either).
 		{"leading comment line in a multi-line argument", "psql -c '-- maintenance\nDELETE FROM customers'"},

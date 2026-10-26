@@ -533,16 +533,24 @@ func exactSQLMutation(engine, query string) (SQLMutationOperation, SQLMutationSc
 // withoutSQLComments removes the SQL comments of query, each replaced by a
 // space as the database reads it. The caller has refused every quote
 // character, so no comment marker can sit inside a string literal or quoted
-// identifier. A form whose meaning differs between engines or that a database
-// may execute stays indeterminate (false): an unterminated or nested block
-// comment, a stray "*/", a MySQL or MariaDB executable comment ("/*!",
-// "/*M!"), and in MySQL (and the engine-neutral db.execute) a "--" that is not
-// followed by whitespace, which MySQL does not read as a comment.
+// identifier. A form whose meaning differs between engines stays
+// indeterminate (false): an unterminated block comment, a nested block
+// comment outside PostgreSQL and SQL Server, a stray "*/", and in MySQL (and
+// the engine-neutral db.execute) a "--" that is not followed by whitespace,
+// which MySQL does not read as a comment. MySQL and MariaDB do not nest block
+// comments, so a comment ends at its first "*/", and they run the body of an
+// executable comment ("/*!", "/*M!", with an optional 5 or 6 digit version):
+// its markers are removed and its body is read as SQL (GAP-2010).
 func withoutSQLComments(engine, query string) (string, bool) {
 	var out strings.Builder
+	inExecutable := false
 	for index := 0; index < len(query); {
 		rest := query[index:]
 		switch {
+		case inExecutable && (strings.HasPrefix(rest, "--") || rest[0] == '#'):
+			// A line comment inside an executable comment could swallow its
+			// "*/"; stay indeterminate.
+			return "", false
 		case strings.HasPrefix(rest, "--") || engine == "snowflake" && strings.HasPrefix(rest, "//"):
 			if strings.HasPrefix(rest, "--") && (engine == "mysql" || engine == "generic") &&
 				len(rest) > 2 && !strings.ContainsRune(" \t\r\n", rune(rest[2])) {
@@ -580,6 +588,37 @@ func withoutSQLComments(engine, query string) (string, bool) {
 			}
 			out.WriteByte(' ')
 			index += end
+		case engine == "mysql" && (strings.HasPrefix(rest, "/*!") || strings.HasPrefix(rest, "/*M!")):
+			if inExecutable {
+				return "", false
+			}
+			marker := 3
+			if rest[2] == 'M' {
+				marker = 4
+			}
+			digits := 0
+			for marker+digits < len(rest) && rest[marker+digits] >= '0' && rest[marker+digits] <= '9' {
+				digits++
+			}
+			if digits != 0 && digits != 5 && digits != 6 {
+				return "", false
+			}
+			inExecutable = true
+			out.WriteByte(' ')
+			index += marker + digits
+		case engine == "mysql" && inExecutable && strings.HasPrefix(rest, "*/"):
+			inExecutable = false
+			out.WriteByte(' ')
+			index += 2
+		case engine == "mysql" && strings.HasPrefix(rest, "/*"):
+			// MySQL and MariaDB end a block comment at the first "*/",
+			// whatever its body holds (GAP-2010).
+			end := strings.Index(rest[2:], "*/")
+			if end < 0 || inExecutable {
+				return "", false
+			}
+			out.WriteByte(' ')
+			index += 2 + end + 2
 		case strings.HasPrefix(rest, "/*"):
 			end := strings.Index(rest[2:], "*/")
 			if end < 0 {
@@ -597,6 +636,9 @@ func withoutSQLComments(engine, query string) (string, bool) {
 			out.WriteByte(query[index])
 			index++
 		}
+	}
+	if inExecutable {
+		return "", false
 	}
 	return out.String(), true
 }
