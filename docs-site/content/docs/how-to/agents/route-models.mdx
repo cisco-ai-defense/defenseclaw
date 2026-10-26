@@ -86,6 +86,8 @@ X-Semantic-Router: routed
 X-Semantic-Router-Reason: decision=… model=… confidence=…
 ```
 
+Each routed request also records one `defenseclaw.semantic_routing.decision` count and a `defenseclaw.semantic_routing.latency` measurement. The labels are a closed set: `result` (`applied` or `fallback`), `error.code` (`none`, `timeout`, `upstream_status`, `decode_failure`, `unknown_alias`, `credential_failure` or `configuration_failure`) and `decision` (`override` or `default`). Prompt text, credentials, endpoints and the header reason string are never labels.
+
 {/* needs-live-capture: the --status output while enabled, and the headers from a proxied request */}
 
 ## Undo
@@ -105,8 +107,9 @@ Requests use their original provider again. Connector and guardrail config stay.
 | No routing headers | The agent must be OpenClaw or ZeptoClaw and the path must end in `/chat/completions`. |
 | `unknown model alias` in the gateway log | The router's alias must match a `routing.models[].name`. |
 | Authentication errors from a backend | Check the key with `defenseclaw keys list`. |
+| The router fails to start after you edit the YAML | Check the port, that model names are unique, that every decision's `model_refs` names a model, and the Docker logs of the labeled container. |
 
-The classifier receives message roles and content. Keys, headers, tools and user ids are not sent. Port 8080 is the loopback classifier API, not a chat endpoint.
+The classifier receives message roles and content. Keys, headers, tools and user ids are not sent. Port 8080 is the loopback classifier API, not a chat endpoint; clients keep using their normal DefenseClaw connector endpoint. The managed container is the digest-pinned v0.3.0 image, with a read-only config mount, a read-only root filesystem, all Linux capabilities dropped and `no-new-privileges`.
 
 ## Next
 

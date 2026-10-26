@@ -86,7 +86,41 @@ Alert #2
 
 ## When the agent cannot ask
 
-On Codex, Cursor, Hermes, OpenCode, Devin, Kiro and ZeptoClaw a confirm verdict becomes an alert. The call is not paused and the TUI cannot resume it. If a call must never run on those agents, make the rule block instead.
+Only an event with a native ask can pause a call. Any other event takes its connector's fallback at once, and nothing in DefenseClaw can resume the call later. The audit log keeps `raw_action: "confirm"` either way.
+
+<Flow
+  direction="TB"
+  caption="What happens to a confirm verdict, such as the webhook.site request above. Only an event with native ask can pause the call. Every other event takes its connector's fallback, and nothing in DefenseClaw can resume it later."
+>
+  <Node id="verdict" kind="gateway">{`Verdict is confirm\nHIGH finding, HITL on`}</Node>
+  <Node id="native" kind="decision">{`Can this event ask?\nsee the table below`}</Node>
+  <Node id="ask" kind="agent">{`Agent pauses and asks\nits own permission prompt`}</Node>
+  <Node id="decide" kind="operator">{`You approve or deny\nthe call runs or stops`}</Node>
+  <Node id="fallback" kind="connector">{`No pause\nalert or block, by connector`}</Node>
+  <Node id="review" kind="operator">{`Review it afterwards\naudit log or TUI`}</Node>
+  <Edge from="verdict" to="native" />
+  <Edge from="native" to="ask" label="yes" />
+  <Edge from="ask" to="decide" label="waits for" />
+  <Edge from="native" to="fallback" label="no" />
+  <Edge from="fallback" to="review" label="logged for" />
+</Flow>
+
+| Agent | What a confirm verdict does |
+| --- | --- |
+| Claude Code | Native ask on `PreToolUse`. CRITICAL still blocks. |
+| Antigravity | Native ask on `PreToolUse` only. DefenseClaw sends `force_ask`, which ignores cached Always Allow grants. |
+| Amp | Asks in the active foreground thread, on `tool.call` and before a `tool.result` reaches the model. A denial, a background thread or an unavailable plugin UI rejects the call or withholds the result. |
+| OpenClaw | DefenseClaw approval prompts. They reach chat-origin sessions through the bundled plugin. |
+| Copilot CLI | The confirmation blocks, because its hook does not prove an approval prompt is available. VS Code Local uses its own native ask. |
+| Codex | An alert and a system message. No native ask surface. |
+| Cursor | An attributed alert. DefenseClaw does not enable Cursor's native approval. |
+| Hermes | Recorded and alerted. No native approval surface. |
+| OpenCode | No native approval surface. The bridge plugin blocks by throwing in `tool.execute.before`, and a confirm verdict falls back to allow. |
+| Devin | Can block documented events, but has no resumable approval. The confirm falls back explicitly. |
+| Kiro | Downgraded to an alert. Kiro's ACP permission requests stay native client interactions and may be denied before the client shows them. |
+| ZeptoClaw | An explicit fallback. No resumable approval. |
+
+The TUI shows alerts and audit events but has no pending-approval queue, so it cannot resume a call. If a call must never run on an agent that cannot ask, make the rule block instead.
 
 ## Undo
 

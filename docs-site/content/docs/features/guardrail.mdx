@@ -72,12 +72,11 @@ Only these agent events can pause for your approval. Every other agent applies a
 | Agent | Event that can ask |
 | --- | --- |
 | Claude Code | `PreToolUse`, in Manual mode only (any other permission mode blocks the call) |
-| GitHub Copilot CLI | `preToolUse` |
 | Antigravity | `PreToolUse` |
 | Amp | `tool.call` and `tool.result` in the active foreground thread |
 | OpenClaw | `before_tool_call` |
 
-Codex, Cursor, Hermes, OpenCode, Devin, Kiro and ZeptoClaw cannot ask. The [capability matrix](/docs/reference/apis/capability-matrix) lists block events and fail-closed support for every agent.
+Codex, Cursor, Hermes, OpenCode, Devin, Kiro and ZeptoClaw cannot ask. GitHub Copilot CLI blocks a confirmation, because its hook does not show whether an approval prompt is available; Copilot in VS Code (Local) uses its own native ask. The [capability matrix](/docs/reference/apis/capability-matrix) lists block events and fail-closed support for every agent.
 
 ## What it does not do
 

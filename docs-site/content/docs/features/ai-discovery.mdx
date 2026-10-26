@@ -39,6 +39,26 @@ A new configuration turns on A and B. Plane C is opt-in. Every plane reports wha
 
 ## Where the data goes
 
+<Flow
+  direction="LR"
+  compact
+  caption="The CLI commands run when you call them. The continuous scan (every 5 minutes by default) and the runtime planes run inside the gateway, which records everything in the local audit log and exports it to your telemetry. A registry is not a discovery source: it decides what is allowed."
+>
+  <Node id="rt" kind="generic" tag="in the gateway">{`What actually ran\nruntime planes`}</Node>
+  <Node id="cont" kind="generic" tag="in the gateway">{`AI on the host\ncontinuous scan`}</Node>
+  <Node id="bom" kind="operator" tag="CLI, on demand">{`Agent assets\naibom scan`}</Node>
+  <Node id="disc" kind="operator" tag="CLI, on demand">{`Installed agents\nagent discover`}</Node>
+  <Node id="gateway" kind="gateway">{`Gateway\nchecks and records`}</Node>
+  <Node id="sinks" kind="datastore">{`Your telemetry\nOTLP, Splunk`}</Node>
+  <Node id="audit" kind="datastore">{`Audit log\nlocal SQLite`}</Node>
+  <Edge from="rt" to="gateway" label="reports" />
+  <Edge from="cont" to="gateway" label="reports" />
+  <Edge from="disc" to="gateway" label="emits" />
+  <Edge from="bom" to="audit" label="stores" />
+  <Edge from="gateway" to="sinks" label="exports" />
+  <Edge from="gateway" to="audit" label="records" />
+</Flow>
+
 - The gateway keeps every scan in the local audit database. This is always on.
 - It exports `ai_discovery`, `ai_component.*` and `ai.runtime.*` records to your observability destinations: Grafana, Splunk or any OTLP destination.
 - It never sends discovery results to Galileo.

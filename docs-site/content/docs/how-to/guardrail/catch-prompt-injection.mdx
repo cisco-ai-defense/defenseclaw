@@ -58,6 +58,24 @@ defenseclaw-gateway audit export --connector codex --since 30m \
 {"event":"UserPromptSubmit","rule_ids":["TRUST-IGNORE-PREVIOUS"]}
 ```
 
+## How the two layers compose
+
+<Flow
+  direction="TB"
+  caption="What happens to a Codex prompt, tool call or tool output with regex_judge. The judge runs only when codex is listed in guardrail.judge.hook_connectors. If the local result already blocks or is CRITICAL, as TRUST-IGNORE-PREVIOUS is, the judge is skipped. Otherwise the judge reviews the content and the stricter of the two verdicts wins. If the judge fails or times out, the local verdict stands."
+>
+  <Node id="prompt" kind="agent">{`Codex hook event\nprompt · tool call · output`}</Node>
+  <Node id="rules" kind="policy">{`Local rules check it\nplus Cisco AI Defense, if set`}</Node>
+  <Node id="level" kind="decision">{`Blocked or CRITICAL?`}</Node>
+  <Node id="judge" kind="policy">{`LLM judge reviews it\nstricter verdict wins`}</Node>
+  <Node id="verdict" kind="generic">{`Hook answers Codex\nblock, or continue with a warning`}</Node>
+  <Edge from="prompt" to="rules" label="sends" />
+  <Edge from="rules" to="level" />
+  <Edge from="level" to="judge" label="no" />
+  <Edge from="level" to="verdict" label="yes, skip judge" />
+  <Edge from="judge" to="verdict" label="returns" />
+</Flow>
+
 ## Good to know
 
 - Prompt findings follow the configured block threshold in action mode. HIGH prompt findings can block when `block_at` is HIGH. A finding below the threshold alerts; CRITICAL findings block. See [Thresholds](/docs/reference/policy/thresholds).

@@ -156,4 +156,14 @@ When a hook fails closed because DefenseClaw cannot decide, `Stop`, `SubagentSto
 | Connections to OpenAI when the gateway starts (Windows) | Each gateway start or restart with the Codex connector enabled runs Codex's app-server once to read its effective requirements. It connects to OpenAI (for example chatgpt.com) and can reach your model provider. |
 | Hooks fail after a Codex update (Windows) | Setup records the Codex executable's path and SHA-256. An update changes it, so doctor fails the **Hook contract** and **Codex hooks** rows with `policy-blocked: selected Codex executable no longer matches protected Setup evidence`. Run `defenseclaw setup codex --yes`. |
 
-**Behind an HTTP proxy.** Hooks reach the gateway on 127.0.0.1 and ignore proxy variables. Managed Linux and macOS setup retains a marked `NO_PROXY` block for cloud instance metadata and container credentials. Host setup does not install a native exporter.
+**Behind an HTTP proxy.** Hooks reach the gateway on 127.0.0.1 and ignore proxy variables. Host setup does not install a native exporter.
+
+On Linux and macOS, setup keeps a marked block in `$CODEX_HOME/.env` (default `~/.codex/.env`), which Codex loads when it starts. The block appends `127.0.0.1,localhost,::1` and the cloud instance-metadata addresses (`169.254.169.254,169.254.170.2,fd00:ec2::254`) to the `NO_PROXY` and `no_proxy` values you already have. Loopback traffic and AWS credential lookups then skip your proxy, and everything else still uses it. Codex sessions started before setup keep the old environment until you restart them. Uninstall and `defenseclaw guardrail disable --connector codex` remove only that block, and the file too if setup created it.
+
+Codex applies the lines of `.env` in order, so a later `NO_PROXY=...` line of your own replaces the block's value. Write it as `NO_PROXY="${NO_PROXY},.corp.example.com"` to keep the loopback. When a proxy variable is set and the loopback is not covered, or the block is older and lacks the metadata addresses, `defenseclaw doctor` warns on the **Codex telemetry proxy** row. The warning names the line number and gives a one-line fix. A block without the metadata addresses is refreshed by the next Codex setup or `defenseclaw-gateway restart`.
+
+On Windows there is no block. Set it once for your account with `setx NO_PROXY 127.0.0.1,localhost,::1` and open a new terminal before you start Codex. On Linux and macOS without the block, `doctor` suggests:
+
+```bash
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1" no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1"
+```

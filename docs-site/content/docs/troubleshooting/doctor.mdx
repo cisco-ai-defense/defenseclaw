@@ -73,16 +73,44 @@ defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize
 
 ## Policy, migration and file rows
 
-| Row | Status | What to do |
+| Row | Status | What it says and what to do |
 | --- | --- | --- |
-| Policy | PASS | The gateway applies what `config.yaml` and its assets compute to. |
-| Policy | FAIL | The last change was rejected (fix what the reason names; the gateway applies it once it builds), or the gateway applies a different digest than the files compute to (run `defenseclaw-gateway restart`). |
-| Policy | WARN | `config.yaml` was edited outside the DefenseClaw writer. On a per-user install the gateway records the hand edit itself and the row clears. Make later changes with `defenseclaw config set`. |
+| Policy | PASS | `generation N, digest sha256:... (applied by the gateway)`. The gateway applies what `config.yaml` and its assets compute to. |
+| Policy | FAIL | Either the last change was rejected (`... is still enforcing: the last change was rejected (<reason>)`: fix what the reason names, and the gateway applies it once it builds), or the gateway applies a different digest than the files compute to (run `defenseclaw-gateway restart`). |
+| Policy | WARN | `config.yaml was edited outside the DefenseClaw writer`: the edit is not yet in `config.generation.json`. On a per-user install the running gateway records the hand edit itself (actor `hand-edit:<user>`) and the row clears. Make later changes with `defenseclaw config set`, the TUI or `defenseclaw setup`. |
 | Config validation | FAIL | `config.yaml` is invalid; the line names the field. A running gateway keeps the config it started with. |
-| Config migration | PASS or WARN | Shows until you run `defenseclaw config migrate --ack`. WARN when the migration recorded conflicts. |
+| Retired policy data | WARN | A leftover `policies/rego/data.json` (or `policies/data.json`) is ignored since `config_version` 9, because admission and thresholds live in `config.yaml`. Review `defenseclaw config get admission`, then remove the file. |
+| Config migration | PASS or WARN | `migrated to 9 on <date>: N value(s) moved, N conflict(s); details in .../migration-v9.json`. Shows until you run `defenseclaw-gateway config migrate --ack`. WARN when the migration recorded conflicts. |
+| Custom-provider overlay | FAIL | `custom-providers.json` was edited by hand or no longer matches `llm_providers`. The gateway ignores those edits. `defenseclaw doctor --fix` rewrites it. |
 | Hook runtime files | FAIL | A generated hook script was edited or replaced. `defenseclaw doctor --fix` re-renders it. |
-| Claude Code hooks freshness, Codex hooks freshness | WARN | A hook script is from an older build, or bakes a different fail mode. The line names the command that regenerates it. |
-| Orphaned hook entries | FAIL or WARN | Entries remain for a connector that is no longer configured. Run `defenseclaw setup remove CONNECTOR`. |
+| Orphaned hook entries `[<connector>]` | FAIL or WARN | Entries remain for a connector that is no longer configured. A missing script or credential fails the check; an existing target warns. Run `defenseclaw setup remove CONNECTOR`. |
+| Native OTLP credentials | WARN | An agent can keep an old credential after an upgrade, rollback or token rotation. Restart that agent and its background server, then run doctor again. |
+| Claude Code hooks freshness, Codex hooks freshness | WARN | `stale generated script (...)`: a hook script is from an older build, or bakes a different fail mode. The line names the command that regenerates it. |
+
+Real lines (paths shortened). A healthy gateway:
+
+```text
+  [PASS] Policy  -  generation 2, digest sha256:22fa11f6a549 (applied by the gateway)
+```
+
+A hand-edited `custom-providers.json`:
+
+```text
+  [FAIL] Custom-provider overlay  -  /home/alice/.defenseclaw/custom-providers.json was edited by hand; the gateway ignores those edits
+```
+
+A rejected change, here a custom rule pack whose files changed after it was pinned. The writer refuses such a change up front. The gateway rejects it when someone edits the file by hand:
+
+```text
+  [FAIL] Policy  -  generation 20, digest sha256:f61a485cfcbf is still enforcing: the last change was rejected (config reload rule pack preflight: global rule pack "badpack": digest sha256:47c1... does not match guardrail.custom_packs.badpack.digest)
+      -> Next step: Fix the change the error names in config.yaml or the policy asset; the gateway applies it once it builds
+```
+
+After a migration that moved values:
+
+```text
+  [PASS] Config migration  -  migrated to 9 on 2026-10-06: 21 value(s) moved, 0 conflict(s); details in /home/alice/.defenseclaw/migration-v9.json
+```
 
 `defenseclaw status` prints the config generation the gateway applied (the number `config set` prints, from `config.generation.json`) and the policy digest. Compare it with what the files compute to: `defenseclaw-gateway policy digest`.
 

@@ -47,6 +47,8 @@ These `defenseclaw mcp` steps are for a per-user installation. On managed Linux 
 
    A first `npx -y` download can take longer than the scan waits, and a remote hostname may temporarily fail to resolve. When the scan does not finish, `mcp set` adds the server with a warning and records the failed scan in the audit log; scan it later with `defenseclaw mcp scan context7`. To refuse such servers instead, run `defenseclaw config set scanners.mcp_scanner.unverified_server block`.
 
+   `mcp set` also takes `--url` and `--transport` for an SSE or HTTP server, `--env KEY=VAL` (repeatable) for the server's environment, `--allow-private` to let the pre-add scan reach a private URL, and `--skip-scan`. For OpenCode only, `--force-untrusted-command` writes a command outside the trusted install prefixes when `unverified_server` is `block`.
+
 ## Use it in CI
 
 `--all --json` prints one JSON array with a result object per server. A failed scan is an error object in the same array, with an `error` field and no findings, and the command then exits 1. Save the output, then check it before you count, so a failed or empty scan fails the job:
@@ -84,13 +86,31 @@ Pick one:
 
 ## Servers on private addresses
 
-The scanner refuses loopback, private, link-local and multicast addresses:
+The scanner does not connect to loopback (`localhost`, `127.0.0.1`), private (`10.x`, `172.16-31.x`, `192.168.x`), link-local (`169.254.x`), carrier-grade NAT (`100.64.x` to `100.127.x`) or multicast addresses, or to a host name that resolves to one:
 
 ```text
 error: scan failed: refusing to scan MCP URL 'https://10.20.30.40:8080/mcp': host '10.20.30.40' resolves to private address 10.20.30.40 (use --allow-private to opt in)
 ```
 
-From your shell, add `--allow-private`. The scan the gateway runs when a server appears has no such option, so it rejects the server. To admit a server you trust, run `defenseclaw mcp allow <name>` (it pins the server's URL), or set `admission.mcp.scan_on_install` to `false`.
+From your shell, add `--allow-private` to scan such a server. The scan the gateway runs when a server is added has no such option, so the server is not scanned and admission blocks it. Its `install-scan-error` audit row says `the MCP scanner does not connect to loopback, private, link-local or multicast addresses ... so the server was not scanned` and names two ways to admit a server you trust:
+
+- Allow it by name and URL with `defenseclaw mcp allow <name>`, or `asset_policy.mcp.allowed` in the admin config on a managed device. An allowed server is not scanned.
+- Set `admission.mcp.scan_on_install` to `false`, which admits new MCP servers without a scan.
+
+Servers started by a `command` (stdio) are scanned on your computer and are not affected.
+
+A block follows the name. An allow is pinned to the server you reviewed: `mcp allow` copies its `url`, or its `command` and arguments, from the connector's MCP config into the rule, so a different server added later under the same name is scanned again. For a server that is not configured yet, pass `--url`, or `--command` and `--args`; otherwise the rule matches the name only and the command prints a note saying so.
+
+`defenseclaw mcp unblock <name>` removes the server's block or allow entry, and its quarantine and disable state, so its scan verdict decides again. It says which entry it removed. Run `defenseclaw mcp scan <name>` afterwards to scan it now. With `--connector`, it clears only that connector's state.
+
+When a server's latest scan failed, `mcp list` shows `scan failed` and a Severity of `-`, then a footer with one next step per server:
+
+```text
+  ! 1 MCP server(s) could not be scanned (last scan failed): internal-docs (claudecode)
+  internal-docs (claudecode): refused, the URL is a private or loopback address; to scan it anyway: defenseclaw mcp scan internal-docs --connector claudecode --allow-private
+```
+
+An older result is kept only as `last_good_severity` in `mcp list --json`, next to `last_scan_error`.
 
 ## Check it worked
 

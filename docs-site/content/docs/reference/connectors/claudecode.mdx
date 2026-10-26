@@ -38,9 +38,9 @@ On every host install, setup sets Claude Code telemetry and all OTLP exporters o
   <Edge from="otel" to="gateway" label="logs + metrics" />
 </Flow>
 
-**Behind an HTTP proxy.** Host hooks reach the gateway on 127.0.0.1 and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Host setup does not enable native OTLP.
+**Behind an HTTP proxy.** Host hooks reach the gateway on 127.0.0.1 and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Host setup does not enable native OTLP. DefenseClaw does not add `NO_PROXY` to the `env` block in `~/.claude/settings.json`, because a value there would replace your shell's `NO_PROXY` for all Claude Code traffic. If your proxy log still shows `POST http://127.0.0.1:<port>/...` requests from Claude Code, set `NO_PROXY=127.0.0.1,localhost` (and `no_proxy`) in the shell that starts it, for example in `~/.bashrc` or `~/.zshrc`. On Windows run `setx NO_PROXY 127.0.0.1,localhost` once and open a new terminal.
 
-**Another account on the gateway port.** Host hooks verify the listener before sending an event. Native exporters cannot make that check, so host setup disables them and removes their old credentials on Linux, macOS and Windows. `defenseclaw status` and `defenseclaw doctor` name a peer-held API port and suggest a free one. A Claude Code process started before the upgrade must be restarted to discard its old settings.
+**Another account on the gateway port.** Host hooks verify the listener before sending an event. Native exporters cannot make that check, so host setup disables them and removes their old credentials on Linux, macOS and Windows. `defenseclaw status` and `defenseclaw doctor` name a peer-held API port and suggest a free one. To give this account its own port, run `defenseclaw setup gateway --api-port <port>`. Keep the gateway running while Claude Code runs. A Claude Code process started before the upgrade must be restarted to discard its old settings.
 
 ### Files
 

@@ -10,3 +10,29 @@ How the CEL engine runs, how to write CEL rules, and the tool-call state they ca
   <Card title="CEL authoring" href="/docs/reference/policy/cel/authoring" description="The CEL rule-file contract, ActionFacts fields, enum families and expression patterns for DefenseClaw rule packs." />
   <Card title="Tool-call state" href="/docs/reference/policy/cel/tool-call-state" description="How authenticated connector hooks prove outcomes, commit ordered tool-call state, and preserve conservative enforcement guarantees." />
 </Cards>
+
+## Where CEL fits
+
+<Flow
+  direction="TB"
+  caption="How a CEL rule turns a tool call into an action. Static tool block and allow lists are checked before this. If a CEL expression errors or runs out of budget, that rule falls back to its regex pattern."
+>
+  <Node id="call" kind="connector">{`Tool call arrives\nfrom a connector hook or inspect call`}</Node>
+  <Node id="parse" kind="gateway">{`Gateway parses the arguments\ncommands, paths, network, data flow`}</Node>
+  <Node id="cel" kind="policy">{`CEL expression\nmatches the parsed facts`}</Node>
+  <Node id="regex" kind="policy">{`Rule's regex pattern\nmatches the raw text`}</Node>
+  <Node id="finding" kind="decision">{`Finding\ntitle and severity from the YAML`}</Node>
+  <Node id="proof" kind="decision">{`Fully proven for this rule?\nand the connector can block`}</Node>
+  <Node id="action" kind="decision">{`Severity picks the action\nallow · alert · confirm · block`}</Node>
+  <Node id="logged" kind="decision">{`Detection only\nrecorded, action unchanged`}</Node>
+  <Edge from="call" to="parse" label="sends" />
+  <Edge from="parse" to="cel" label="fully parsed" />
+  <Edge from="parse" to="regex" label="not fully parsed" variant="dashed" />
+  <Edge from="cel" to="finding" label="true" />
+  <Edge from="regex" to="finding" label="matches" />
+  <Edge from="finding" to="proof" label="checked" />
+  <Edge from="proof" to="action" label="yes" />
+  <Edge from="proof" to="logged" label="no" />
+</Flow>
+
+The connector's authenticated hook route, or a trusted inspect call, decides that a request is a tool call. A payload cannot mark itself as structured. DefenseClaw parses the arguments into private `ActionFacts` and exposes them to CEL as one typed variable, `f`. Each rule takes exactly one route: its CEL expression when the arguments are fully parsed, or its own regex `pattern` when they are not. Both routes produce the finding defined in the YAML. A finding changes the action only when DefenseClaw's own code holds complete proof for that same rule ID and the connector can block. A regex match on its own is recorded as detection-only.

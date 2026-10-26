@@ -28,7 +28,7 @@ Preset-file keys are in the first column. `skill_actions`, `scanner_overrides` a
 | `skill_actions.critical` | quarantine + disable + block | quarantine + disable + block | quarantine + disable + block |
 | `skill_actions.high` | none + enable + none | quarantine + disable + block | quarantine + disable + block |
 | `skill_actions.medium` | none + enable + none | none + enable + none | quarantine + disable + block |
-| `scanner_overrides.mcp` | none | MEDIUM blocks and quarantines; LOW disables at runtime | MEDIUM blocks and quarantines; LOW disables at runtime |
+| `scanner_overrides.mcp` | none | HIGH, MEDIUM and LOW findings warn and the server runs | MEDIUM blocks and quarantines; LOW disables at runtime |
 | `scanner_overrides.plugin` | none | HIGH blocks and quarantines; MEDIUM installs and runs | HIGH blocks and quarantines; MEDIUM installs and runs |
 | `guardrail.block_threshold` | `4` (CRITICAL) | `4` (CRITICAL) | `2` (MEDIUM) |
 | `guardrail.alert_threshold` | `3` (HIGH) | `2` (MEDIUM) | `1` (LOW) |
@@ -80,6 +80,23 @@ Available policies:
     strict [built-in]
       Maximum security policy for high-risk environments
 ```
+
+### Block risky plugins at install
+
+The shipped `default` preset installs a plugin with a MEDIUM finding and lets it run. To block and quarantine those plugins instead, edit the live policy:
+
+```bash
+defenseclaw policy edit scanner --type plugin --severity medium \
+  --install block --file quarantine --runtime disable
+```
+
+```text title="Terminal output"
+  OK Updated admission.plugin.actions.medium: runtime=disable, file=quarantine, install=block
+```
+
+That writes `admission.plugin.actions.medium` in `config.yaml`, and the running gateway applies it. Read it back with `defenseclaw config get admission.plugin.actions`; before any edit it prints `(source: builtin)` and the shipped actions. Activating a preset again replaces the whole `admission` section, so make this change after the last `policy activate`.
+
+To change a named preset instead, add `--policy-name default`. The first edit of a built-in saves your own copy in `~/.defenseclaw/policies/default.yaml`, `policy activate default` applies it, and `defenseclaw policy delete default` removes your copy and restores the built-in. Every admission key is in [admission](/docs/reference/scanning/admission).
 
 ## Block and alert levels
 
@@ -136,7 +153,7 @@ A built-in pack is a name, not a path. `block_at` and `alert_at` stay unset, so 
 | Knob | Default | Notes |
 | --- | --- | --- |
 | `observability.local` SQLite history | always present | Local durability for collected logs |
-| `guardrail.hook_fail_mode` | `closed` | `open` only under Secure Client ([fail modes](/docs/reference/configuration/fail-modes)) |
+| `guardrail.hook_fail_mode` | `closed` on managed installs | A per-user install follows its rule pack when the gateway is down: open with a warning in `default` and `permissive`, closed in `strict` ([fail modes](/docs/reference/configuration/fail-modes)) |
 | `guardrail.judge.enabled` | `false` | Turn on with `--judge-model` or the setup prompt |
 | `guardrail.hilt.enabled` | `false` | `min_severity` is `HIGH`; the config key is spelled `hilt` |
 | `guardrail.judge.timeout` | `30s` | Judge latency budget |
@@ -172,7 +189,26 @@ defenseclaw guardrail list-packs
 grep -rn "RULE_ID" ~/.defenseclaw/policies/guardrail/default/rules/
 ```
 
-`config show --section NAME` keeps one section; `config get KEY` prints one dotted key. A default value prints with a note on stderr; the exit code is `1` when the key has no value and no default, `2` for an unknown section. `(built-in default)` in `list-packs` means no pack is selected, so `default` applies.
+`config show` prints every section: the values `config.yaml` sets plus the defaults for the keys it leaves out, with secrets masked. These options narrow it:
+
+| Option | Shows |
+| --- | --- |
+| `--section NAME` | One top-level section, for example `guardrail` or `asset_policy` |
+| `--source` | `config.yaml` as written, with no defaults filled in |
+| `--effective` | Only the `observability` section, resolved with its defaults |
+| `--provenance` | With `--effective`, where each observability setting comes from |
+| `--format yaml\|json` | The output format (default `yaml`) |
+
+`config get KEY` prints one dotted key, such as `asset_policy.mcp.registry_required`. A default value prints with a note on stderr; the exit code is `1` when the key has no value and no default, `2` for an unknown section. With `--effective`, `guardrail.block_at`, `guardrail.alert_at`, `guardrail.connectors.<name>.block_at` and `alert_at`, `admission[.<type>]` and `guardrail.cisco_trust_level` print the value the gateway enforces, and the first line says where it comes from:
+
+```text
+(source: pack-default:default)
+CRITICAL
+```
+
+`pack-default:default` means nothing is set in `config.yaml` and the `default` rule pack decides. `(source: builtin)` is a shipped default, and `config:<key>` is a value you set.
+
+`policy show NAME` prints a preset's severity actions, scanner overrides, block and alert thresholds and audit retention; `--json` gives the same as JSON. `policy list` names the presets. `guardrail list-packs` shows the rule packs, and `(built-in default)` in its first line means no pack directory is set, so `default` applies. To see what the gateway compiled from `config.yaml`, run `defenseclaw-gateway policy show`. To dry-run an asset against it, use `defenseclaw-gateway policy evaluate`.
 
 There is no `--reset` flag. To go back to the defaults:
 
