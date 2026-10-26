@@ -234,6 +234,10 @@ unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 {{if not .Sandbox}}# The hook path is resolved: this is the data directory it was installed in.
 _DC_HOOK_DATA_DIR="${HOOK_DIR}/.."
+# An inherited DEFENSECLAW_HOME that names no folder does not retire the
+# hook installed here, and does not block it: the hook keeps the data
+# directory it was installed in and asks its gateway (GAP-1256).
+[ -d "${DEFENSECLAW_HOME}" ] || DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 {{end}}{{end}}
 
 # Plan B4 / S0.4: shell-side hook hardening. Source the helpers BEFORE
@@ -380,12 +384,13 @@ fi
 
 # The tool input reaches the JSON encoder on stdin and the gateway on a curl
 # descriptor, never on a command line.
-INSPECT_BODY="$(printf '%s' "$TOOL_INPUT" | defenseclaw_inspect_tool_body "$TOOL_NAME" args)" || {
+if [ "${_DC_OVERSIZED_INSPECT:-0}" = 1 ]; then
+  INSPECT_BODY="$(printf '%s' "$TOOL_INPUT" | defenseclaw_inspect_bounded_body "$TOOL_NAME" args)"
+else
+  INSPECT_BODY="$(printf '%s' "$TOOL_INPUT" | defenseclaw_inspect_tool_body "$TOOL_NAME" args)"
+fi || {
   {{if and .Managed (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "failed to build inspect body"
 }
-if [ "${_DC_OVERSIZED_INSPECT:-0}" = 1 ]; then
-  INSPECT_BODY="${INSPECT_BODY%?},\"content_truncated\":true,\"bounded_prefix_review\":true}"
-fi
 {{if .Sandbox}}RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool" "$INSPECT_BODY" \
   "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
   -H "Content-Type: application/json" \

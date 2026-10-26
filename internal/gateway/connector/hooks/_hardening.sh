@@ -808,6 +808,28 @@ defenseclaw_inspect_tool_body() {
   fi
 }
 
+# defenseclaw_inspect_bounded_body TOOL FIELD encodes the cap's prefix (on
+# stdin) as a generic inspect request the gateway accepts: the request, with
+# its incomplete-review markers, stays within the 900 KiB the bounded reviews
+# of the other hooks keep under the gateway's 1 MiB cap. JSON escaping can
+# grow the prefix past the cap (a 1 MiB prefix alone is over it), so the
+# prefix is halved until the request fits. The gateway judges what it gets
+# and warns that the rest was not inspected (GAP-1512).
+defenseclaw_inspect_bounded_body() {
+  local LC_ALL=C
+  local tool="$1" field="$2" input body keep=$((900 * 1024))
+  input="$(cat; printf x)" || return 1
+  input="${input%x}"
+  while :; do
+    body="$(printf '%s' "${input:0:$keep}" | defenseclaw_inspect_tool_body "$tool" "$field")" || return 1
+    body="${body%?},\"content_truncated\":true,\"bounded_prefix_review\":true}"
+    [ "${#body}" -gt $((900 * 1024)) ] || break
+    [ "$keep" -gt 4096 ] || return 1
+    keep=$((keep / 2))
+  done
+  printf '%s' "$body"
+}
+
 # defenseclaw_json_string_field extracts a top-level JSON string field when
 # jq and python3 are unavailable. The whole answer is validated first: a
 # malformed sibling field cannot turn an "action":"allow" into a verdict.
