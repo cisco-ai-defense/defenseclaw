@@ -690,6 +690,8 @@ def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> Non
     from defenseclaw.commands.cmd_config import validate_config
 
     result = validate_config()
+    if not_checked := getattr(result, "not_checked", ""):
+        ux.echo(f"Config check: not run: {not_checked}", err=True)
     if not result.ok and _webhook_url_cleanup(ctx, result):
         # The message says "fix the url, or remove the webhook": list, disable and remove
         # have to run for that to be possible (GAP-0219).
@@ -17859,7 +17861,11 @@ def _native_windows_local_splunk() -> bool:
 @click.option(
     "--accept-splunk-license", is_flag=True, help="Acknowledge the Splunk General Terms for local Splunk enablement"
 )
-@click.option("--skip-test", is_flag=True, help="Skip the live HEC probe after remote Splunk Enterprise setup")
+@click.option(
+    "--skip-test",
+    is_flag=True,
+    help="Save remote Splunk Enterprise setup without the live HEC probe that otherwise runs first",
+)
 @click.option(
     "--show-credentials",
     is_flag=True,
@@ -17921,7 +17927,8 @@ def setup_splunk(
       --enterprise
                Remote Splunk Enterprise HEC endpoint + token.
                No Docker, local bridge, or Splunk-side automation.
-               Sends one best-effort HEC probe unless --skip-test is set.
+               Probes the HEC endpoint before saving; a failed probe
+               saves nothing (exit 1). --skip-test saves without it.
 
     Both can run simultaneously. Without flags, runs an interactive wizard.
     """
@@ -18452,16 +18459,16 @@ def _interactive_enterprise(app: AppContext, *, skip_test: bool = False) -> None
     source = click.prompt("  Source", default="defenseclaw")
     sourcetype = click.prompt("  Sourcetype", default="_json")
 
-    sink_name = _apply_enterprise_config(
+    _apply_enterprise_config(
         app,
         endpoint=endpoint,
         token=token,
         index=index,
         source=source,
         sourcetype=sourcetype,
+        skip_test=skip_test,
     )
     click.echo("  Splunk Enterprise configured (HEC)")
-    _maybe_probe_enterprise_hec(app, sink_name, skip_test=skip_test)
 
 
 # ---------------------------------------------------------------------------
@@ -18582,16 +18589,16 @@ def _setup_enterprise(
         click.echo("  error: HEC token is required for Splunk Enterprise", err=True)
         raise SystemExit(1)
 
-    sink_name = _apply_enterprise_config(
+    _apply_enterprise_config(
         app,
         endpoint=endpoint,
         token=token,
         index=index or "defenseclaw",
         source=source or "defenseclaw",
         sourcetype=sourcetype or "_json",
+        skip_test=skip_test,
     )
     click.echo("  Splunk Enterprise configured (HEC)")
-    _maybe_probe_enterprise_hec(app, sink_name, skip_test=skip_test)
 
 
 def _print_splunk_license_notice() -> None:
@@ -18645,6 +18652,7 @@ def _apply_v8_observability_preset(
     local_stack: dict[str, str] | None = None,
     legacy_local_destination: tuple[dict[str, Any], str] | None = None,
     allow_private_networks: bool = False,
+    probe_timeout: float | None = None,
 ) -> str:
     """Write one setup alias through the canonical v8 destination writer.
 
@@ -18676,6 +18684,7 @@ def _apply_v8_observability_preset(
         allow_private_networks=allow_private_networks,
         local_stack=local_stack,
         legacy_local_destination=legacy_local_destination,
+        probe_timeout=probe_timeout,
     )
     return resolved_name
 
@@ -19109,12 +19118,19 @@ def _apply_enterprise_config(
     index: str,
     source: str,
     sourcetype: str,
+    skip_test: bool = False,
 ) -> str:
     """Configure a remote Splunk Enterprise HEC sink.
 
     This is intentionally config-only: no Docker preflight, local bridge
     bootstrap, Splunk license prompt, or Splunk-side token/index creation.
+    Without *skip_test*, one live HEC probe of the validated candidate runs
+    before anything is saved; a failed probe stops setup with config.yaml
+    and .env unchanged (GAP-1600).
     """
+    from defenseclaw.commands.cmd_setup_observability import DestinationProbeFailed
+
+    click.echo("  Live HEC probe skipped." if skip_test else "  Live HEC probe:")
     try:
         name = _apply_v8_observability_preset(
             app,
@@ -19126,7 +19142,16 @@ def _apply_enterprise_config(
                 "sourcetype": sourcetype,
             },
             secret_value=token or None,
+            probe_timeout=None if skip_test else 10.0,
         )
+    except DestinationProbeFailed as exc:
+        click.echo(f"  error: {exc.message}", err=True)
+        click.echo(
+            "  Nothing was saved. Fix the HEC endpoint or token, or run again with --skip-test "
+            "to save it without the probe.",
+            err=True,
+        )
+        raise SystemExit(1) from exc
     except ValueError as exc:
         message = str(exc)
         if "set allow_private_networks" in message:
@@ -19139,25 +19164,6 @@ def _apply_enterprise_config(
         raise SystemExit(2) from exc
     _reload_cfg_from_data_dir(app)
     return name
-
-
-def _maybe_probe_enterprise_hec(
-    app: AppContext,
-    sink_name: str,
-    *,
-    skip_test: bool,
-) -> None:
-    if skip_test:
-        click.echo("  Live HEC probe skipped.")
-        return
-
-    from defenseclaw.commands.cmd_setup_observability import _test_v8_destination
-
-    click.echo("  Live HEC probe:")
-    try:
-        _test_v8_destination(app.cfg.data_dir, sink_name, 10.0, write_probe=False)
-    except click.ClickException as exc:
-        click.echo(f"    warning: {exc}")
 
 
 def _reload_cfg_from_data_dir(app: AppContext) -> None:
@@ -19471,14 +19477,20 @@ def _bootstrap_bridge(
         click.echo("  Local Splunk is ready")
         web_url = contract.get("splunk_web_url", "http://127.0.0.1:8000")
         click.echo(f"    Web UI: {web_url}")
-        if str(contract.get("license_group", "")).lower() == "free":
+        free = str(contract.get("license_group", "")).lower() == "free"
+        if free:
             click.echo("    License: Free")
         click.echo()
-        click.echo("  Splunk Web login:")
-        click.echo("    Username:  admin")
+        if free:
+            # Splunk Free has no Web login: the UI opens as admin (GAP-1398).
+            click.echo("  Splunk Web: no login in Free mode (it opens as admin)")
+        else:
+            # Any other license asks for the admin login (GAP-1750).
+            click.echo(
+                "  Splunk Web: log in as admin; show the password with: defenseclaw setup splunk --show-credentials"
+            )
         env_file = os.path.join(data_dir, "splunk-bridge", "env", ".env")
-        click.echo(f"    Password:  (stored in {env_file})")
-        ux.echo("    Note: Free mode may still show a login page — use these credentials")
+        click.echo(f"    Runtime secret: stored in {env_file}")
         return contract
     except subprocess.TimeoutExpired:
         click.echo("  Bridge startup timed out after 3 hours (including image download)")
@@ -20127,13 +20139,10 @@ def _print_splunk_next_steps(did_o11y: bool, did_logs: bool, did_enterprise: boo
     click.echo("    1. Start (or restart) the DefenseClaw sidecar:")
     click.echo("       defenseclaw-gateway restart")
     if did_logs:
+        # Local Splunk runs in Free mode on every OS: no Web login (GAP-1398).
         click.echo("    2. Open local Splunk Web at http://127.0.0.1:8000")
-        if _native_windows_local_splunk():
-            click.echo("       Web authentication is disabled in Splunk Free mode.")
-            click.echo("       To view the HEC/runtime secrets explicitly: defenseclaw setup splunk --show-credentials")
-        else:
-            click.echo("       Log in with admin / the password from setup output above.")
-            click.echo("       To view credentials later: defenseclaw setup splunk --show-credentials")
+        click.echo("       Web authentication is disabled in Splunk Free mode.")
+        click.echo("       To view the HEC/runtime secrets explicitly: defenseclaw setup splunk --show-credentials")
         click.echo("    3. Validate data in local Splunk")
     if did_enterprise:
         step = "3" if did_logs else "2"
@@ -20205,6 +20214,7 @@ def _show_splunk_credentials(data_dir: str) -> None:
         click.echo("  Splunk Web Credentials")
         ux.echo("  ──────────────────────")
         click.echo("    URL:       http://127.0.0.1:8000")
+        click.echo("    Web auth:  disabled in Splunk Free mode; these apply only if Splunk asks for a login")
         click.echo("    Username:  admin")
         click.echo(f"    Password:  {password}")
     click.echo()

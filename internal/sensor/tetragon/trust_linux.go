@@ -187,7 +187,7 @@ func (t trustPolicy) checkPeer(conn net.Conn, pid int) error {
 // feed the helper numbers.
 func listenerOwnedBy(port int, pid int) error {
 	inodes := map[string]bool{}
-	for _, table := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+	for _, table := range []string{"/proc/self/net/tcp", "/proc/self/net/tcp6"} {
 		file, err := os.Open(table)
 		if err != nil {
 			continue

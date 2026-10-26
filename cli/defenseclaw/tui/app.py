@@ -5332,6 +5332,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "off": TOKENS.text_muted,
             "waiting": TOKENS.accent_blue,
             "degraded": TOKENS.accent_amber,
+            "partial": TOKENS.accent_cyan,
             "healthy": TOKENS.accent_green,
         }[state]
         badge_color = {
@@ -5904,7 +5905,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         enabled = bool(model.snapshot.enabled)
         self._set_button_visible("#runtime-enable", model.needs_enable())
         self._set_button_visible("#runtime-scan", enabled)
-        self._set_button_visible("#runtime-permissions", model.health_state() == "degraded")
+        self._set_button_visible("#runtime-permissions", model.health_state() in ("degraded", "partial"))
         refresh.disabled = False
         detail.disabled = model.selected() is None
 
@@ -10728,11 +10729,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             width=width - 2 - _status_text_cells(text) - 5 if width > 0 else None,
         )
         rendered = f"{text}  [#444444]│[/]  {strip}" if strip else text
-        if not _is_command_result(text) and any(
+        if any(
             service.label not in strip
             for service in (status_model.gateway, status_model.watchdog, status_model.guardrail)
         ):
-            rendered = render_status_with_hint(status_model, text, max(0, width - 2))
+            # The 80-column footer keeps Gateway, Watchdog and Guardrail and
+            # lets the digest, then "gen N", give way. A command result
+            # ("Command cancelled.", "Done: ...") goes through it too while
+            # it stays whole; it kept gen and digest and dropped Watchdog
+            # and Guardrail (GAP-0524).
+            narrow = render_status_with_hint(status_model, text, max(0, width - 2))
+            if not _is_command_result(text) or _keeps_whole_text(narrow, text):
+                rendered = narrow
         if self._config_error:
             rendered = f"[bold {TOKENS.accent_red}]{rich_escape(self._config_error)}[/]"
         elif _is_command_result(text) and _status_text_fills_line(text, self.size.width):
@@ -12783,7 +12791,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
         if model.goal_active:
             label = setup_catalog.wizard_label(model.active_wizard)
-            summary = wizard_state_summary(model.active_wizard, model.config)
+            summary = wizard_state_summary(model.active_wizard, model.config, model.observability_status)
             head = f"[bold #22D3EE]Setup[/] · [bold]{rich_escape(label)}[/] · What do you want to do?"
             return head + (f"\n{self._setup_line(summary, style=TOKENS.text_secondary)}" if summary else "")
         if model.form_active:
@@ -17072,6 +17080,20 @@ _COMMAND_RESULT_FOLLOW_S = 15.0
 
 def _is_command_result(text: object) -> bool:
     return bool(_COMMAND_RESULT_RE.match(str(text or "")))
+
+
+def _keeps_whole_text(rendered: str, text: str) -> bool:
+    """Whether the footer ``rendered`` starts with all of ``text``."""
+    from rich.text import Text
+
+    try:
+        plain = Text.from_markup(text).plain
+    except Exception:  # noqa: BLE001 - malformed operator text stays literal
+        plain = text
+    try:
+        return Text.from_markup(rendered).plain.startswith(plain)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _service_reported(state: str) -> bool:

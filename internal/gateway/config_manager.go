@@ -1041,9 +1041,30 @@ func (m *ConfigManager) setStartupSource(sourceName string, raw []byte) {
 	switch {
 	case err == nil && strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)):
 		m.appliedGeneration, m.appliedGenerationKnown = state.Generation, true
+	case err == nil && m.bootBytesFollowRecord(raw):
+		// A hand edit made while the gateway was stopped: the boot bytes
+		// came after the recorded generation, so that generation and the
+		// edit are both applied. Starting from 0 made the next saved write
+		// read as "generations 1-N applied together" and lost its writer
+		// (GAP-1338).
+		m.appliedGeneration, m.appliedGenerationKnown = state.Generation, true
 	case err == nil || errors.Is(err, fs.ErrNotExist):
 		m.appliedGeneration, m.appliedGenerationKnown = 0, true
 	}
+}
+
+// bootBytesFollowRecord reports whether config.yaml still holds the boot
+// bytes although the generation record names other bytes: they were written
+// after that record, by hand, rather than a writer committing a newer
+// generation between the boot read and the record read (that generation
+// stays pending for the startup reconcile). Managed installs keep the strict
+// rule: there only a lifecycle record makes bytes a known generation.
+func (m *ConfigManager) bootBytesFollowRecord(raw []byte) bool {
+	if cfg := m.Current(); cfg == nil || managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return false
+	}
+	current, err := os.ReadFile(m.path)
+	return err == nil && bytes.Equal(current, raw)
 }
 
 // noteAppliedGeneration records the generation of the applied raw bytes;
@@ -1508,6 +1529,25 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 			recordHandEdit(ctx, next, m.path, source.raw)
 			refreshConfigGeneration(source.raw)
 			version.SetContentHash(source.raw)
+			if !managed.IsManagedEnterprise(next.DeploymentMode) && !next.StandaloneEnterprise() && !next.SecureClientIntegration() {
+				// A generation that changed no setting is still applied
+				// now: the hand edit just recorded (one made while the
+				// gateway was stopped) or a writer's comment-only change.
+				// Attribute it once, as the unchanged-diff branch does, and
+				// advance the applied generation; otherwise the next write
+				// read as "generations N-M applied together" (GAP-0005).
+				if m.logger != nil && m.savedWriteNotApplied(source.raw) {
+					if activity, _, recorded := configChangeActivity(m.path, m.appliedRaw, source.raw,
+						pendingRestart, pendingRestart, m.appliedGeneration, m.appliedGenerationKnown); recorded {
+						_ = m.logger.LogActivity(activity)
+					}
+				}
+				m.noteAppliedGeneration(source.raw)
+				// These bytes are applied now, as in the unchanged-diff
+				// branch: a second reload of them attributed the same write
+				// again (GAP-1895).
+				m.appliedRaw = source.raw
+			}
 		}
 		// The startup reconcile of the boot bytes applies nothing new: they
 		// become the applied bytes, so a later event for the same bytes

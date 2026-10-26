@@ -747,6 +747,26 @@ func postDeliveryRefusalReason(managed bool) string {
 		"Tool actions may have run. Inspect their results before retrying. " + next
 }
 
+// postDeliveryReason is the refusal of a check that failed after the guard
+// forwarded the prompt. A plain outage gets postDeliveryRefusalReason; a
+// specific cause (ACP switched off, a rejected or another account's
+// credential, the gateway's own refusal) keeps its words, with the
+// post-delivery warning appended (GAP-1546). Secure Client hosts keep the
+// wording of main (GAP-1560).
+func (s *proxyState) postDeliveryReason(opts ProxyOptions, err error) string {
+	reason := s.refusalReason(opts, err)
+	if !s.peerProtocolFixes {
+		return reason
+	}
+	var refused *GatewayRefusedError
+	if errors.Is(err, ErrACPDisabled) || errors.Is(err, ErrCredentialOtherAccount) ||
+		errors.Is(err, ErrCredentialRejected) || errors.As(err, &refused) {
+		return reason + " Your prompt may already have reached the agent, and tool actions may have run: " +
+			"inspect their results before retrying."
+	}
+	return postDeliveryRefusalReason(opts.Managed)
+}
+
 // authenticationFailure is an evaluation that failed authentication: an
 // answer whose MAC does not verify, or a credential the gateway refused. It
 // is not an outage.
@@ -791,6 +811,7 @@ func (s *proxyState) refusalReason(opts ProxyOptions, err error) string {
 	}
 	const prefix = "DefenseClaw could not check this step because "
 	next := "if it keeps happening, contact your administrator."
+	var refused *GatewayRefusedError
 	switch {
 	case errors.Is(err, ErrACPDisabled) && opts.Managed:
 		return prefix + "your administrator switched ACP checking off, so it was not delivered. Contact your administrator."
@@ -810,6 +831,12 @@ func (s *proxyState) refusalReason(opts ProxyOptions, err error) string {
 			rerun = "Run '" + opts.SetupCommand + "' again."
 		}
 		return prefix + "the gateway did not accept the ACP token, so it was not delivered. " + rerun
+	case errors.As(err, &refused) && opts.Managed:
+		return prefix + "the gateway refused to check it (" + refused.Error() + "), so it was not delivered. " +
+			"Contact your administrator if it keeps happening."
+	case errors.As(err, &refused):
+		return prefix + "the gateway refused to check it (" + refused.Error() + "), so it was not delivered. " +
+			"Run defenseclaw acp status; if it keeps happening, report this message."
 	case !opts.Managed:
 		return unavailableReason(err)
 	case errors.Is(err, ErrGatewayNotReady):
@@ -1102,7 +1129,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 				logf(opts.Stderr, "[defenseclaw-acp] evaluation unavailable, refused %s %s: %v\n", direction, msg.Method, evalErr)
 				reason := state.refusalReason(opts, evalErr)
 				if direction == AgentToClient && state.agentFramePromptDelivered(msg, opts.Mode) {
-					reason = postDeliveryRefusalReason(opts.Managed)
+					reason = state.postDeliveryReason(opts, evalErr)
 				}
 				verdict = Verdict{Action: "block", Reason: reason}
 				if opts.Mode != ModeAction {
@@ -1150,7 +1177,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 					logf(opts.Stderr, "[defenseclaw-acp] completed-turn evaluation unavailable, refused the turn: %v\n", turnErr)
 					reason := state.refusalReason(opts, turnErr)
 					if delivered {
-						reason = postDeliveryRefusalReason(opts.Managed)
+						reason = state.postDeliveryReason(opts, turnErr)
 					}
 					turnVerdict = Verdict{Action: "block", Reason: reason}
 				}
@@ -1177,7 +1204,8 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 				return err
 			}
 		}
-		if direction == AgentToClient && opts.Mode == ModeObserve && matchedMethod == "session/prompt" {
+		if direction == AgentToClient && opts.Mode == ModeObserve && matchedMethod == "session/prompt" &&
+			state.peerProtocolFixes {
 			state.finishIfPromptResponse(msg)
 		}
 		if direction == ClientToAgent && msg.Method == "session/prompt" && msg.IsRequest() {

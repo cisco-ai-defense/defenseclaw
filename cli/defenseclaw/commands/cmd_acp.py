@@ -38,6 +38,9 @@ from defenseclaw.file_permissions import (
 
 _SCHEMA_VERSION = "schema-v1.21.0"
 _SCHEMA_SHA256 = "caf62ff962ada396878372ced11efb2c6764e59d90919a38583c319948931a42"
+# A contract lock whose client pin starts with this prefix pins the guarded
+# entry, not the whole editor file (acp.EntryDigestPrefix; enterprise setup).
+_ENTRY_DIGEST_PREFIX = "entry-sha256:"
 _REGISTRY = ACP_REGISTRY
 _CLIENTS = set(ACP_CLIENT_IDS)
 _AGENTS = {agent_id: (command, list(args)) for agent_id, (command, args) in ACP_AGENT_ENTRY_POINTS.items()}
@@ -391,6 +394,39 @@ def _entry_digest(entry: dict[str, Any], client: str) -> str:
     pinned = {key: value for key, value in entry.items() if key not in editor_owned}
     canonical = json.dumps(pinned, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# Characters Go's json.Marshal escapes inside strings and Python's json.dumps does not.
+_GO_JSON_ESCAPES = (
+    ("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026"),
+    ("\u2028", "\\u2028"), ("\u2029", "\\u2029"),
+)
+
+
+def _guard_entry_sha256(servers: Any, client: str, agent: str) -> str:
+    """The digest the guard computes for the pair's entry (acp.ClientEntrySHA256), or "".
+
+    Go's json.Marshal: sorted keys, no spaces, and <, >, &, U+2028 and U+2029
+    escaped. The keys the editor owns for client are left out, as there.
+    """
+    entry = servers.get(_managed_name(agent)) if isinstance(servers, dict) else None
+    if entry is None:
+        return ""
+    if isinstance(entry, dict):
+        editor_owned = _EDITOR_OWNED_ENTRY_KEYS.get(client, frozenset())
+        entry = {key: value for key, value in entry.items() if key not in editor_owned}
+    canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    for raw, escaped in _GO_JSON_ESCAPES:
+        canonical = canonical.replace(raw, escaped)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _is_regular_no_follow(path_value: str) -> bool:
+    """Whether path_value is itself a regular file: the guard lstats the pinned agent and refuses a link."""
+    try:
+        return stat.S_ISREG(os.lstat(path_value).st_mode)
+    except OSError:
+        return False
 
 
 def _path_key(value: str | Path) -> str:
@@ -877,11 +913,23 @@ def _verify_binding(
         or lock_agent.get("id") != agent
     ):
         problems.append("contract lock identity does not match")
+    # The guard starts only a version 1 lock for this protocol schema (GAP-0879).
+    version = lock.get("version")
+    if (
+        type(version) is not int
+        or version != 1
+        or lock.get("protocol") != {"schema_version": _SCHEMA_VERSION, "schema_sha256": _SCHEMA_SHA256}
+    ):
+        problems.append("contract lock version or protocol pins are not the ones the guard starts with")
     same_editor = isinstance(lock_client, dict) and _lock_binds_editor(lock, client)
     if isinstance(lock_client, dict):
         client_digest = lock_client.get("config_sha256")
         if not same_editor:
             problems.append("client configuration path does not match")
+        elif settings_usable and isinstance(client_digest, str) and client_digest.startswith(_ENTRY_DIGEST_PREFIX):
+            # The lock pins the guarded entry, checked as the guard checks it (GAP-0912).
+            if client_digest[len(_ENTRY_DIGEST_PREFIX):].lower() != _guard_entry_sha256(servers, client, agent):
+                problems.append(f"the {_managed_name(agent)} entry changed after setup (the contract lock pins it)")
         elif settings_usable and (not isinstance(client_digest, str) or client_digest != _client_digest(client_path)):
             problems.append("client configuration digest has drifted")
     for key in ("agent", "guard"):
@@ -890,6 +938,9 @@ def _verify_binding(
         digest = item.get("sha256") if isinstance(item, dict) else None
         if not isinstance(path_value, str) or not Path(path_value).is_file():
             problems.append(f"{key} executable is missing")
+        elif key == "agent" and not _is_regular_no_follow(path_value):
+            # The guard lstats the pinned agent and refuses a link (GAP-0911).
+            problems.append("agent executable is a link or not a regular file; the guard starts only the pinned file")
         elif digest != _sha256_file(path_value) and not (
             key == "guard"
             and isinstance(lock_guard, dict)
@@ -1246,10 +1297,12 @@ def setup_cmd(
     if not managed:
         _wait_for_gateway_acp(app, profile, mode, show)
     _warn_left_entries(left, path, client, agent, own=sorted(written))
+    # A profile setup created is named, so a typo in --profile shows (GAP-1589).
+    created = f", new profile {profile}" if existing_profile is None and not managed else ""
     click.echo(
         json.dumps(result, sort_keys=True)
         if json_output
-        else f"Configured {agent} through DefenseClaw in {client} ({mode}) at {path}"
+        else f"Configured {agent} through DefenseClaw in {client} ({mode}{created}) at {path}"
     )
 
 
@@ -1383,6 +1436,9 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
         if not managed:
             active_clients = set(app.cfg.acp.clients)
             active_agents = set(app.cfg.acp.agents)
+            served = {
+                name for name, value in app.cfg.acp.profiles.items() if value.allowed_clients or value.allowed_agents
+            }
             for profile_name, profile_value in app.cfg.acp.profiles.items():
                 profile_value.allowed_clients = [
                     value for value in profile_value.allowed_clients if value in active_clients
@@ -1391,6 +1447,22 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
                     value for value in profile_value.allowed_agents if value in active_agents
                 ]
             app.cfg.acp.enabled = bool(active_clients and active_agents)
+            # Remove takes out the profiles setup wrote for the pairs it
+            # removed (GAP-1589): one that allowed a pair, now allows none,
+            # names no denied method and no remaining pair uses. While ACP
+            # stays on, the default profile stays (default_profile names it).
+            in_use = {app.cfg.acp.profile_for_pair(pair_client, pair_agent) for pair_client, pair_agent in remaining}
+            for profile_name in sorted(served):
+                profile_value = app.cfg.acp.profiles[profile_name]
+                if (
+                    profile_value.allowed_clients
+                    or profile_value.allowed_agents
+                    or profile_value.denied_methods
+                    or profile_name in in_use
+                    or (app.cfg.acp.enabled and profile_name == app.cfg.acp.default_profile)
+                ):
+                    continue
+                del app.cfg.acp.profiles[profile_name]
             _progress(True, "Saving the ACP policy to the DefenseClaw config...")
             app.cfg.save()
     except Exception as exc:

@@ -357,6 +357,8 @@ def status(app: AppContext, as_json: bool) -> None:
         problems = list(getattr(app, "config_problems", None) or [])
         if problems:
             payload["config_errors"] = problems
+        if not_checked := getattr(app, "config_not_checked", ""):
+            payload["config_not_checked"] = not_checked
         click.echo(json.dumps(payload, indent=2))
         if problems:
             raise SystemExit(1)
@@ -386,6 +388,8 @@ def status(app: AppContext, as_json: bool) -> None:
             ux._style(f"{len(config_problems)} problem(s), listed above", fg="yellow")
             + ux.dim(" (details: defenseclaw config validate)"),
         )
+    elif not_checked := getattr(app, "config_not_checked", ""):
+        _status_row("Config check", ux._style(f"not run: {not_checked}", fg="yellow"))
     _status_row("Audit DB", cfg.audit_db)
     _status_row("Scope", _connector_scope_text(cfg))
     _print_removed_connector_cleanup(cfg)
@@ -1247,10 +1251,12 @@ def _refused_scoped_hook_credentials(cfg, health: dict | None) -> set[str]:
 
 
 def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bool = False) -> str:
-    """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)."""
+    """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)
+    or the agent's own settings turn its hooks off (GAP-1634)."""
     try:
         from defenseclaw.hook_integrity import (
             HookProblem,
+            agent_hook_switch_problems,
             hook_registration_problems,
             hook_runtime_problems,
             repair_command,
@@ -1263,7 +1269,12 @@ def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bo
                 blocking=True,
             )]
             if credential_refused
-            else hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
+            # An agent setting that turns every hook off (Claude Code or
+            # Copilot disableAllHooks, Codex [features] hooks = false) is
+            # DEGRADED here as in the alert and doctor (GAP-1634).
+            else hook_runtime_problems(cfg, connector)
+            or hook_registration_problems(cfg, connector)
+            or agent_hook_switch_problems(cfg, connector)
         )
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         return ""

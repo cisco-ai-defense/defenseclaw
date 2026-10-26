@@ -865,6 +865,32 @@ func newAuditEventRuntimeV8GeneratedMetric(event Event) (RuntimeV8GeneratedMetri
 	}, nil
 }
 
+// activityMetricActorKinds is the closed vocabulary of the activity
+// counters' actor label. An actor is audit evidence: the record keeps it
+// whole, while the label keeps only its kind, the part before ":" ("cli"
+// for "cli:alice"), so an account name, SID, UPN or a caller-chosen API
+// token never becomes a metric dimension (GAP-0377).
+var activityMetricActorKinds = map[string]bool{
+	"api": true, "cli": true, "control-plane": true, "defenseclaw": true, "defenseclaw-gateway": true,
+	"defenseclaw-hook": true, "defenseclaw-hook-guard": true, "gateway": true, "guardian": true,
+	"hand-edit": true, "lifecycle": true, "local_account": true, "migration": true, "operator": true,
+	"os": true, "sandbox": true, "system": true, "tui": true, "unattributed": true, "watchdog": true,
+	"watcher": true,
+}
+
+// activityMetricActor is the actor label of the activity counters: the
+// actor's kind from activityMetricActorKinds, "other" for anything else.
+func activityMetricActor(actor string) string {
+	kind, _, _ := strings.Cut(strings.TrimSpace(actor), ":")
+	if kind == "" {
+		return ""
+	}
+	if activityMetricActorKinds[kind] {
+		return kind
+	}
+	return "other"
+}
+
 func newActivityRuntimeV8GeneratedMetrics(
 	event Event,
 	action string,
@@ -882,7 +908,7 @@ func newActivityRuntimeV8GeneratedMetrics(
 	}{
 		action:     optionalAuditMetricDimension(action),
 		targetType: observability.Present(activityMetricTargetType(targetType)),
-		actor:      observability.Present(activityMetricActor(actor)),
+		actor:      optionalAuditMetricDimension(activityMetricActor(actor)),
 	}
 	build := func(
 		family observability.EventName,
@@ -940,33 +966,6 @@ func newActivityRuntimeV8GeneratedMetrics(
 		build(observability.EventName(observability.TelemetryInstrumentDefenseClawActivityTotal), 1),
 		build(observability.EventName(observability.TelemetryInstrumentDefenseClawActivityDiffEntries), int64(diffEntries)),
 	}, nil
-}
-
-// Activity actors are audit evidence, never metric dimensions. Keep the
-// metric vocabulary closed even when an API caller supplies a stable token
-// containing an account name, or a bundle receipt names an OS identity.
-func activityMetricActor(actor string) string {
-	switch actor {
-	case "system", "defenseclaw", "defenseclaw-gateway", "gateway", "watcher":
-		return "system"
-	case "cli", "tui", configChangeMetricActor:
-		// configChangeMetricActor is the fixed label a trust anchor or
-		// credential change already counts under.
-		return actor
-	}
-	if strings.HasPrefix(actor, "cli:") {
-		return "cli"
-	}
-	if strings.HasPrefix(actor, "tui:") {
-		return "tui"
-	}
-	if strings.HasPrefix(actor, "os:") || strings.HasPrefix(actor, "operator:") {
-		return "operator"
-	}
-	if strings.HasPrefix(actor, "control-plane:") {
-		return "control_plane"
-	}
-	return "other"
 }
 
 // Activity input retains its raw target and actor in audit evidence. Metric

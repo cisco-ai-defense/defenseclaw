@@ -24,6 +24,7 @@ def test_grafana_no_hook_and_would_block_count_distinct_findings() -> None:
         assert "sum by (host_name, body_defenseclaw_ai_runtime_finding_id" in expression
         assert "[$__range]" in expression
         assert target["instant"] is True
+    assert "body_defenseclaw_ai_runtime_kernel_target" in control["targets"][0]["expr"]  # GAP-1400
     assert no_hook["type"] == "stat"
     assert control["type"] == "bargauge"
 
@@ -36,7 +37,9 @@ def test_splunk_timecharts_keep_first_sighting_bucket() -> None:
     panels = {panel.findtext("title"): panel for panel in view.iter("panel")}
     for title, distinct_fields in (
         ("Host-plane tactics by kill-chain stage", "host runtime_finding_id runtime_tactic"),
-        ("Would-block by control (monitor mode)", "host runtime_finding_id runtime_kernel_control"),
+        # GAP-1400: one finding ID can carry several native hits (two
+        # autostart files); each target counts once, repeats of a hit do not.
+        ("Would-block by control (monitor mode)", "host runtime_finding_id runtime_kernel_control runtime_kernel_target"),
     ):
         query = panels[title].findtext("chart/search/query")
         assert query is not None

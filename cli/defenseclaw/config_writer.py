@@ -40,6 +40,7 @@ actor is :data:`ACTOR_LIFECYCLE` or :data:`ACTOR_MIGRATION`
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -168,7 +169,13 @@ class Change:
     unset: bool = False
     # For a rule override removal, discard empty parent maps up to this path.
     # Global connector entries stop at rules: an empty entry means enabled.
+    # PRUNE_TO_TOP also removes a top-level section the unset leaves empty.
     prune_empty_to: str = ""
+
+
+# ``Change.prune_empty_to`` that stops at the document: an empty top-level
+# section goes too (GAP-0967).
+PRUNE_TO_TOP = "<top>"
 
 
 @dataclass(frozen=True)
@@ -1040,6 +1047,22 @@ def _ordered_mutations(mutations: list[Any]) -> list[Any]:
     )
 
 
+def _set_in_document(document: Any, parts: tuple[str | int, ...], value: Any) -> None:
+    """Write ``value`` at ``parts`` of the parsed document, creating maps on
+    the way; a path through a list or a non-map value is left alone."""
+    if not isinstance(document, dict) or not parts or any(not isinstance(part, str) for part in parts):
+        return
+    node = document
+    for part in parts[:-1]:
+        child = node.get(part)
+        if child is None:
+            child = node[part] = {}
+        if not isinstance(child, dict):
+            return
+        node = child
+    node[parts[-1]] = copy.deepcopy(value)
+
+
 def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[bytes, list[str]]:
     from defenseclaw.observability.v8_yaml import V8YAMLMutation, prepare_v8_yaml_write
 
@@ -1053,7 +1076,7 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
             if before is _MISSING:
                 continue
             if change.prune_empty_to:
-                stop = parse_path(change.prune_empty_to)
+                stop = () if change.prune_empty_to == PRUNE_TO_TOP else parse_path(change.prune_empty_to)
                 # Delete an empty child of the stop scope, never the scope itself.
                 # An assigned guardrail profile remains valid even when it is {}.
                 while len(parts) > len(stop) + 1 and parts[: len(stop)] == stop:
@@ -1062,11 +1085,22 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
                         break
                     parts = parts[:-1]
             mutations.append(V8YAMLMutation.delete(parts))
+            # The next unset of this batch prunes against the document as
+            # this one leaves it: unsetting the last two profiles together
+            # left profiles: {} (GAP-1746).
+            parent = _lookup(document, parts[:-1]) if len(parts) > 1 else document
+            if isinstance(parent, dict) and isinstance(parts[-1], str):
+                parent.pop(parts[-1], None)
         else:
             if before is not _MISSING and _same_config_value(before, change.value):
                 continue
             _check_destination_index(document, change.path, parts)
             mutations.append(V8YAMLMutation.set(parts, change.value))
+            # A later unset of this batch prunes against the document as this
+            # set leaves it: 'guardrail rule enable R' sets rules.enable and
+            # unsets rules.disable, and pruning against the old document
+            # dropped the new enable with its parent (GAP-1893).
+            _set_in_document(document, parts, change.value)
         changed.append(change.path)
     if not mutations:
         return current, []

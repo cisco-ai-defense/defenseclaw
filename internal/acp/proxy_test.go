@@ -1032,3 +1032,83 @@ func TestCopyFramesObserveFailureEndsOnlyTheFailingFramesTurn(t *testing.T) {
 		})
 	}
 }
+
+type refusingAfterPromptEvaluator struct{}
+
+func (refusingAfterPromptEvaluator) Evaluate(_ context.Context, in Evaluation) (Verdict, error) {
+	if in.Direction == AgentToClient && in.Method == "session/update" {
+		return Verdict{}, &GatewayRefusedError{Status: 400, Message: "invalid ACP evaluation body"}
+	}
+	return Verdict{Action: "allow"}, nil
+}
+
+// A specific refusal after a delivered prompt keeps its cause and adds the
+// post-delivery warning (GAP-1546); a Secure Client host keeps the wording
+// of main (GAP-1560).
+func TestCopyFramesRefusalAfterDeliveredPromptKeepsItsCause(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		peerFixes bool
+		want      []string
+		forbid    []string
+	}{
+		{name: "gateway refusal", peerFixes: true, want: []string{"refused to check it", "invalid ACP evaluation body", "may have run", "before retrying"}},
+		{name: "secure client", peerFixes: false, want: []string{"did not answer"}, forbid: []string{"may have run"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: tc.peerFixes}
+			var agentInput, clientOutput bytes.Buffer
+			opts := ProxyOptions{Mode: ModeAction, Evaluator: refusingAfterPromptEvaluator{}, Stderr: io.Discard}
+			prompt := `{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"s","prompt":[{"type":"text","text":"run a terminal command"}]}}` + "\n"
+			if err := copyFrames(context.Background(), opts, state, ClientToAgent, strings.NewReader(prompt), &agentInput, &clientOutput); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(agentInput.String(), `"method":"session/prompt"`) {
+				t.Fatalf("prompt was not delivered to agent: %q", agentInput.String())
+			}
+			agentInput.Reset()
+			updates := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"terminal-1","status":"completed","content":[{"type":"text","text":"command exited 0"}]}}}` + "\n" +
+				`{"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}` + "\n"
+			if err := copyFrames(context.Background(), opts, state, AgentToClient, strings.NewReader(updates), &clientOutput, &agentInput); err != nil {
+				t.Fatal(err)
+			}
+			text, _ := blockedTurn(t, clientOutput.Bytes(), "7")
+			for _, want := range tc.want {
+				if !strings.Contains(text, want) {
+					t.Fatalf("refusal %q lacks %q", text, want)
+				}
+			}
+			for _, forbid := range tc.forbid {
+				if strings.Contains(text, forbid) {
+					t.Fatalf("refusal %q has %q", text, forbid)
+				}
+			}
+		})
+	}
+}
+
+type refusingEvaluator struct{}
+
+func (refusingEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
+	return Verdict{}, &GatewayRefusedError{Status: 400, Message: "invalid ACP evaluation body"}
+}
+
+// A gateway that answered with a refusal is reported as that refusal: the
+// editor read it as "the gateway did not answer" and retried for ever
+// (GAP-1327). The frame stays refused in action mode.
+func TestCopyFramesGatewayRefusalIsNotReportedAsNoAnswer(t *testing.T) {
+	for _, managed := range []bool{false, true} {
+		state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+		var agentInput, clientOutput bytes.Buffer
+		opts := ProxyOptions{Mode: ModeAction, Managed: managed, Evaluator: refusingEvaluator{}, Stderr: io.Discard}
+		load := `{"jsonrpc":"2.0","id":3,"method":"session/load","params":{"sessionId":"s","cwd":"/p","mcpServers":[]}}` + "\n"
+		if err := copyFrames(context.Background(), opts, state, ClientToAgent, strings.NewReader(load), &agentInput, &clientOutput); err != nil {
+			t.Fatal(err)
+		}
+		out := clientOutput.String()
+		if agentInput.Len() != 0 || !strings.Contains(out, "refused to check it") ||
+			!strings.Contains(out, "invalid ACP evaluation body") || strings.Contains(out, "did not answer") {
+			t.Fatalf("managed=%v: agent got %q, editor got %q", managed, agentInput.String(), out)
+		}
+	}
+}

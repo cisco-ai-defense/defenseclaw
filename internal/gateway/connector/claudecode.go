@@ -1891,6 +1891,14 @@ func claudeCodeOperatorOtelSettings(existing map[string]interface{}, previous ma
 	if len(keep) == 0 {
 		return keep
 	}
+	// The generic OTEL_EXPORTER_OTLP_PROTOCOL also sets the protocol of a
+	// signal endpoint that has no protocol of its own (OTel spec), so an
+	// operator route keeps it unless host Setup wrote that exact value
+	// (GAP-1871: a traces-only collector lost its http/protobuf).
+	if protocol, _ := existing["OTEL_EXPORTER_OTLP_PROTOCOL"].(string); protocol != "" &&
+		protocol != previous["OTEL_EXPORTER_OTLP_PROTOCOL"] {
+		keep["OTEL_EXPORTER_OTLP_PROTOCOL"] = true
+	}
 	keep["CLAUDE_CODE_ENABLE_TELEMETRY"] = true
 	for key, value := range existing {
 		if (strings.HasPrefix(key, "OTEL_EXPORTER_OTLP_") && strings.HasSuffix(key, "_HEADERS") ||

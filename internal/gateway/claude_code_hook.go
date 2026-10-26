@@ -444,7 +444,7 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	if cfg.Guardrail.HasConnector("claudecode") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "claudecode")
+	return cfg.Guardrail.NamesConnector("claudecode")
 }
 
 func (a *APIServer) claudeCodeMode(ctx context.Context) string {

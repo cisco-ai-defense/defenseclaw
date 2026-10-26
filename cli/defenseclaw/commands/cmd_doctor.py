@@ -1437,7 +1437,22 @@ def _check_config(cfg, r: _DoctorResult) -> None:
         return
     except ConfigInspectError as exc:
         from defenseclaw.commands.cmd_config import _v8_failure_detail
+        from defenseclaw.file_permissions import UNSAFE_PATH_NAMESPACE_VIEW
 
+        if getattr(exc.__cause__, "code", "") == UNSAFE_PATH_NAMESPACE_VIEW:
+            # Not judged: an agent sandbox hides who owns the gateway's
+            # folders, so the validator did not run (GAP-1561, as
+            # config validate and status say since GAP-1395).
+            _emit(
+                "warn",
+                "Config validation",
+                f"not run: {exc.__cause__}",
+                r=r,
+                check_id=check_id,
+                reason_code="canonical-validation-not-run",
+                remediation="run `defenseclaw doctor` in a normal terminal to check config.yaml",
+            )
+            return
         detail = _v8_failure_detail(cfg_path, exc)
         # Not `config validate`: it prints the same line again (GAP-1662).
         # A refusal outside the file (the validator could not run) keeps
@@ -1732,6 +1747,15 @@ def _plan_canonical_config_preflight(cfg) -> RepairDecision:
     try:
         validation = inspect_v8_config("validate", config_path=str(config_path))
     except ConfigInspectError as exc:
+        from defenseclaw.file_permissions import UNSAFE_PATH_NAMESPACE_VIEW
+
+        if getattr(exc.__cause__, "code", "") == UNSAFE_PATH_NAMESPACE_VIEW:
+            # The check did not run (GAP-1561); repairs still wait for it.
+            reason = (
+                f"the configuration check did not run: {exc.__cause__}; Doctor repairs nothing from inside "
+                "this sandbox. Run `defenseclaw doctor --fix` in a normal terminal"
+            )
+            return RepairDecision("blocked", reason, blockers=("configuration check not run",))
         # ConfigInspectError text is bounded and display-safe; it names the
         # real problem (for example the folder that fails the custody check).
         field_path = getattr(exc, "field_path", None)
