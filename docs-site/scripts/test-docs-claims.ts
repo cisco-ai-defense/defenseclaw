@@ -197,7 +197,7 @@ describe('Observe mode policy findings and gateway outages', () => {
     for (const connector of ['claudecode', 'antigravity']) {
       const section = page(`connectors/${connector}.mdx`).split('## What it can block or ask')[1]?.split('## Files it changes')[0] ?? '';
       assert.match(section, /Observe mode.{0,120}policy findings without blocking/i, connector);
-      assert.match(section, /When the gateway is not running, the default and permissive policies let the call run with one warning and strict (?:blocks it|denies `PreToolUse`)/i, connector);
+      assert.match(section, /when the gateway is not running, the default and permissive policies let the call run with one warning(?: and strict|; strict and managed installs) (?:blocks? it|denies `PreToolUse`)/i, connector);
     }
   });
 
