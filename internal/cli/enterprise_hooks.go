@@ -70,7 +70,9 @@ var enterpriseHookWatchDebounceMaxWait = 1 * time.Second
 // per pass judged a file that a writer rewrites between its hooks and none
 // every 200 ms by whichever phase the read met: the hooks were back at the
 // read of most passes, so the first repair came 5-15 s into the burst
-// (GAP-1825). Checking for longer than one phase meets the damaged one.
+// (GAP-1825). Checking for longer than one phase meets the damaged one. The
+// windows of a pass's targets run at the same time, after every target was
+// checked once, so a pass takes one window longer, not one per target.
 var enterpriseHookWatchRecheckWindow = 300 * time.Millisecond
 
 // enterpriseHookRecheckStep is the pause between two checks of a window.
@@ -88,35 +90,48 @@ func enterpriseHookWatchRecheckFor(reason string) time.Duration {
 	return 0
 }
 
-// verifyEnterpriseHookTargetOverWindow verifies a target and, with a window,
-// verifies it again every enterpriseHookRecheckStep until the window ends.
-// It returns the first failure, which the caller repairs.
-func verifyEnterpriseHookTargetOverWindow(
+// recheckEnterpriseHookTargetsOverWindow checks again, round-robin every
+// enterpriseHookRecheckStep, the targets of a pass that verified, each until
+// window after its first check (checkedAt), and calls failed with the first
+// failure of a target, which repairs it; that target is then not checked
+// again. All windows of a pass run together (GAP-1825: one window per target
+// in turn made each pass 300 ms longer per target and repaired a target late
+// in the order seconds later).
+func recheckEnterpriseHookTargetsOverWindow(
 	ctx context.Context,
-	verify func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error),
-	opts enterprisehooks.InstallOptions,
 	window time.Duration,
-) (enterprisehooks.InstallResult, error) {
-	result, err := verify(ctx, opts)
-	if err != nil || window <= 0 {
-		return result, err
+	checkedAt []time.Time,
+	verify func(int) error,
+	failed func(int, error),
+) {
+	if window <= 0 {
+		return
 	}
-	deadline := time.Now().Add(window)
-	for time.Now().Before(deadline) {
+	open := make([]int, 0, len(checkedAt))
+	for index := range checkedAt {
+		open = append(open, index)
+	}
+	for len(open) > 0 {
 		timer := time.NewTimer(enterpriseHookRecheckStep)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return result, nil
+			return
 		case <-timer.C:
 		}
-		next, err := verify(ctx, opts)
-		if err != nil {
-			return next, err
+		next := open[:0]
+		for _, index := range open {
+			if !time.Now().Before(checkedAt[index].Add(window)) {
+				continue
+			}
+			if err := verify(index); err != nil {
+				failed(index, err)
+				continue
+			}
+			next = append(next, index)
 		}
-		result = next
+		open = next
 	}
-	return result, nil
 }
 
 // enterpriseHookWatchDebounceDelay is the delay to arm the debounce with at
@@ -762,6 +777,14 @@ func enterpriseHookAwaitingSignInCause(guardianErr string) string {
 // DefenseClaw never protected.
 var errEnterpriseHookProtectionRetired = errors.New("enterprise hooks: protected target was retired by an uninstall")
 
+// enterpriseHookReconcileRecheck is a target of the in-process reconcile
+// that verified and is checked again over the pass's recheck window.
+type enterpriseHookReconcileRecheck struct {
+	row    int
+	target enterprisehooks.ManifestTarget
+	opts   enterprisehooks.InstallOptions
+}
+
 // enterpriseHookVerifyOrRepairTarget keeps repair classification adjacent to
 // the operation that proves it. A target is repaired only when it was already
 // protected, verification failed, its authenticated session was available
@@ -777,10 +800,22 @@ func enterpriseHookVerifyOrRepairTarget(
 		result, err := enterpriseHookReconcileInstaller(ctx, opts)
 		return result, false, err
 	}
-	result, verifyErr := verifyEnterpriseHookTargetOverWindow(ctx, enterpriseHookReconcileVerifier, opts, enterpriseHookReconcileRecheckWindow)
+	result, verifyErr := enterpriseHookReconcileVerifier(ctx, opts)
 	if verifyErr == nil {
 		return result, false, nil
 	}
+	return enterpriseHookRepairAfterVerifyFailure(ctx, target, opts, verifyErr)
+}
+
+// enterpriseHookRepairAfterVerifyFailure repairs a previously protected
+// target whose verification failed with verifyErr, under the session rules
+// of enterpriseHookVerifyOrRepairTarget.
+func enterpriseHookRepairAfterVerifyFailure(
+	ctx context.Context,
+	target enterprisehooks.ManifestTarget,
+	opts enterprisehooks.InstallOptions,
+	verifyErr error,
+) (enterprisehooks.InstallResult, bool, error) {
 	available, err := enterpriseHookReconcileSessionAvailable(target)
 	if err != nil {
 		return enterprisehooks.InstallResult{}, false, err
@@ -842,7 +877,7 @@ func enterpriseHookVerifyOrRepairTarget(
 			verifyErr,
 		)
 	}
-	result, err = enterpriseHookReconcileInstaller(ctx, opts)
+	result, err := enterpriseHookReconcileInstaller(ctx, opts)
 	return result, err == nil, err
 }
 
@@ -2677,11 +2712,18 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
 	claudeMachineContract := enterpriseHookMachinePolicyContract(manifest)
+	// The targets that verified in a pass a filesystem event armed, checked
+	// again over one shared window after the loop (GAP-1825).
+	recheckWindow := enterpriseHookReconcileRecheckWindow
+	var rechecks []enterpriseHookReconcileRecheck
+	var recheckedAt []time.Time
 	for index, target := range manifest.Targets {
 		enterpriseHookStartup.target(os.Stderr, index, len(manifest.Targets))
 		if !target.IsEnabled() {
 			continue
 		}
+		recheck := false
+		var recheckOpts enterprisehooks.InstallOptions
 		row := enterpriseHookReconcileRow{
 			User:      strings.TrimSpace(target.User),
 			UserHome:  strings.TrimSpace(target.UserHome),
@@ -2797,6 +2839,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 						// (GAP-0588).
 						notices = append(notices, enterpriseHookGuardianNotice{User: firstNonEmptyString(row.User, row.SID), Connector: row.Connector, AgentConfig: result.AgentConfig})
 					}
+					recheck = recheckWindow > 0 && previousProtection.PreviouslyProtected && !repaired
+					recheckOpts = opts
 					reconcileEnterpriseForeignHooks(opts)
 				}
 			}
@@ -2827,7 +2871,54 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			row.Error = err.Error()
 		}
 		rows = append(rows, row)
+		if recheck {
+			rechecks = append(rechecks, enterpriseHookReconcileRecheck{row: len(rows) - 1, target: target, opts: recheckOpts})
+			recheckedAt = append(recheckedAt, time.Now())
+		}
 	}
+	recheckEnterpriseHookTargetsOverWindow(ctx, recheckWindow, recheckedAt,
+		func(index int) error {
+			_, err := enterpriseHookReconcileVerifier(ctx, rechecks[index].opts)
+			return err
+		},
+		func(index int, verifyErr error) {
+			recheck := rechecks[index]
+			row := &rows[recheck.row]
+			result, repaired, err := enterpriseHookRepairAfterVerifyFailure(ctx, recheck.target, recheck.opts, verifyErr)
+			if err == nil {
+				if repaired {
+					repairs++
+					restored = append(restored, enterpriseHookGuardianRestore{
+						SID:        row.SID,
+						Connector:  row.Connector,
+						RestoredAt: time.Now().UTC().Format(time.RFC3339Nano),
+					})
+				}
+				row.UserHome = result.UserHome
+				row.Connector = result.Connector
+				row.Result = &result
+				if result.AgentConfig != "" {
+					notices = append(notices, enterpriseHookGuardianNotice{User: firstNonEmptyString(row.User, row.SID), Connector: row.Connector, AgentConfig: result.AgentConfig})
+				}
+				return
+			}
+			row.OK = false
+			row.Result = nil
+			retired := errors.Is(err, errEnterpriseHookProtectionRetired)
+			deferredPending, err := enterpriseHookDeferredPendingAfterSessionError(recheck.target, !retired, err)
+			if deferredPending {
+				row.Pending = true
+				row.RevokeProtection = retired
+				pending++
+				pendingTargets = append(pendingTargets, recheck.target)
+				return
+			}
+			failures++
+			if errors.Is(err, errEnterpriseHookAwaitingSignIn) {
+				awaitingSignIn++
+			}
+			row.Error = err.Error()
+		})
 	enterpriseHookStartup.target(os.Stderr, len(manifest.Targets), len(manifest.Targets))
 	// A restore that is not recorded is not named by status, so the pass
 	// reports it and retries instead of waiting for the interval (GAP-0626).

@@ -155,8 +155,9 @@ type enterpriseHookWorkerRequest struct {
 	// user's own home before an apply, so an enrolled user cannot stop
 	// repair of their hooks by loosening their home's mode.
 	TightenHome bool `json:"tighten_home,omitempty"`
-	// RecheckMillis keeps a verify_or_repair target under check for this
-	// long after it verified (verifyEnterpriseHookTargetOverWindow).
+	// RecheckMillis keeps the verify_or_repair targets that verified under
+	// check for this long, all at the same time
+	// (recheckEnterpriseHookTargetsOverWindow).
 	RecheckMillis int `json:"recheck_ms,omitempty"`
 	// StaticDiscovery restricts the discover operation to package metadata
 	// and the presence of the agent CLIs, executing nothing: the parent
@@ -564,11 +565,15 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 	// still loads, or could not be checked. The purge deletes the backups and
 	// receipts a later cleanup needs to restore those files (GAP-0632).
 	purgeBlocked := ""
+	recheckWindow := time.Duration(request.RecheckMillis) * time.Millisecond
+	var rechecks []enterpriseHookWorkerRecheck
+	var recheckedAt []time.Time
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
 		outcome := enterpriseHookWorkerTargetResult{Index: target.Index}
 		var result enterprisehooks.InstallResult
 		var err error
+		recheck := false
 		switch target.Mode {
 		case enterpriseHookWorkerModeInstall:
 			result, err = enterpriseHookWorkerInstaller(ctx, opts)
@@ -579,7 +584,8 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				result, err = enterpriseHookWorkerInstaller(ctx, opts)
 				break
 			}
-			result, err = verifyEnterpriseHookTargetOverWindow(ctx, enterpriseHookWorkerVerifier, opts, time.Duration(request.RecheckMillis)*time.Millisecond)
+			result, err = enterpriseHookWorkerVerifier(ctx, opts)
+			recheck = err == nil && recheckWindow > 0
 			if err != nil {
 				result, err = enterpriseHookWorkerInstaller(ctx, opts)
 				outcome.Repaired = err == nil
@@ -682,8 +688,40 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 		}
 		results = append(results, outcome)
+		if recheck {
+			rechecks = append(rechecks, enterpriseHookWorkerRecheck{result: len(results) - 1, opts: opts})
+			recheckedAt = append(recheckedAt, time.Now())
+		}
 	}
+	recheckEnterpriseHookTargetsOverWindow(ctx, recheckWindow, recheckedAt,
+		func(index int) error {
+			_, err := enterpriseHookWorkerVerifier(ctx, rechecks[index].opts)
+			return err
+		},
+		func(index int, _ error) {
+			outcome := &results[rechecks[index].result]
+			result, err := enterpriseHookWorkerInstaller(ctx, rechecks[index].opts)
+			if err != nil {
+				outcome.OK, outcome.Result, outcome.AgentConfig = false, nil, ""
+				outcome.Pending = enterprisehooks.PendingTargetError(err) &&
+					enterprisehooks.CheckUnixTargetHome(request.Home, request.UID).State == enterprisehooks.HomePending
+				if !outcome.Pending {
+					outcome.Error = err.Error()
+				}
+				return
+			}
+			outcome.Repaired = true
+			outcome.Result = &result
+			outcome.AgentConfig = result.AgentConfig
+		})
 	return enterpriseHookWorkerResponse{Targets: results}
+}
+
+// enterpriseHookWorkerRecheck is a verify_or_repair target that verified and
+// is checked again over the request's recheck window.
+type enterpriseHookWorkerRecheck struct {
+	result int
+	opts   enterprisehooks.InstallOptions
 }
 
 // repairManagedCodexUserFeature runs with the target user's uid. The machine

@@ -8,11 +8,17 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 )
 
 // A writer rewrites a Hermes hooks block between its DefenseClaw hooks and
@@ -66,5 +72,139 @@ func TestEnterpriseHookWatchRecheckOnlyForFilesystemPasses(t *testing.T) {
 		if got := enterpriseHookWatchRecheckFor(reason); got != 0 {
 			t.Fatalf("%s pass recheck window = %s, want none", reason, got)
 		}
+	}
+}
+
+// The windows of a pass's targets run together (GAP-1825 refix). One window
+// per target in turn made a pass 300 ms longer per target: with six targets
+// the sixth was checked first about 1.6 s in, so a burst on it was repaired
+// past 3 s. Six previously protected targets, the last one damaged 100 ms
+// in: it is repaired inside the one window and the worker ends with it.
+func TestWorkerRecheckWindowIsSharedByAllTargets(t *testing.T) {
+	previousVerifier, previousInstaller := enterpriseHookWorkerVerifier, enterpriseHookWorkerInstaller
+	t.Cleanup(func() {
+		enterpriseHookWorkerVerifier, enterpriseHookWorkerInstaller = previousVerifier, previousInstaller
+	})
+	connectors := []string{"amp", "claudecode", "codex", "cursor", "devin", "hermes"}
+	start := time.Now()
+	enterpriseHookWorkerVerifier = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		if opts.ConnectorName == "hermes" && time.Since(start) >= 100*time.Millisecond {
+			return enterprisehooks.InstallResult{}, errors.New("hermes hooks block is missing the DefenseClaw hooks")
+		}
+		return enterprisehooks.InstallResult{Connector: opts.ConnectorName}, nil
+	}
+	var repairedAt atomic.Int64
+	enterpriseHookWorkerInstaller = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		repairedAt.Store(int64(time.Since(start)))
+		return enterprisehooks.InstallResult{Connector: opts.ConnectorName}, nil
+	}
+	request := enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true, RecheckMillis: 300}
+	for index, name := range connectors {
+		request.Targets = append(request.Targets, enterpriseHookWorkerTarget{
+			Index: index, Mode: enterpriseHookWorkerModeVerifyOrRepair, PreviouslyProtected: true,
+			Options: enterpriseHookWorkerOptions{ConnectorName: name},
+		})
+	}
+	response := runEnterpriseHookWorkerApply(context.Background(), request)
+	took := time.Since(start)
+	repaired := 0
+	for _, target := range response.Targets {
+		if target.Repaired {
+			repaired++
+			if target.Index != len(connectors)-1 || !target.OK {
+				t.Fatalf("repaired target %+v, want only the last (hermes), ok", target)
+			}
+		}
+	}
+	if repaired != 1 || len(response.Targets) != len(connectors) {
+		t.Fatalf("targets %+v: want %d results and one repair", response.Targets, len(connectors))
+	}
+	if at := time.Duration(repairedAt.Load()); at > 400*time.Millisecond {
+		t.Fatalf("the sixth target, damaged 100 ms in, was repaired %s in; want within the one 300 ms window", at)
+	}
+	if took > 600*time.Millisecond {
+		t.Fatalf("a pass of six targets with a 300 ms window took %s; want about one window", took)
+	}
+}
+
+// The in-process reconcile (the Windows guardian, all users' targets in
+// one loop) shares one window per pass the same way.
+func TestEnterpriseHookReconcileRecheckWindowIsSharedByAllTargets(t *testing.T) {
+	restoreEnterpriseHooksLifecycleTestState(t)
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
+	stubEnterpriseHookTokenSources(t)
+	enableEnterpriseHookGuardianRestores(t, true)
+	previousManifest, previousAPI, previousProxy := enterpriseHookManifest, enterpriseHookAPIAddr, enterpriseHookProxyAddr
+	previousVerifier, previousInstaller := enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller
+	previousSession, previousCleanup := enterpriseHookReconcileSessionAvailable, enterpriseForeignHookCleanup
+	previousWindow := enterpriseHookReconcileRecheckWindow
+	t.Cleanup(func() {
+		enterpriseHookManifest, enterpriseHookAPIAddr, enterpriseHookProxyAddr = previousManifest, previousAPI, previousProxy
+		enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller = previousVerifier, previousInstaller
+		enterpriseHookReconcileSessionAvailable, enterpriseForeignHookCleanup = previousSession, previousCleanup
+		enterpriseHookReconcileRecheckWindow = previousWindow
+	})
+	enterpriseForeignHookCleanup = func(enterprisehooks.TargetCredentials, string, string) (enterprisepolicy.CleanupResult, error) {
+		return enterprisepolicy.CleanupResult{}, nil
+	}
+	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) { return true, nil }
+
+	scope := t.TempDir()
+	dataDir := filepath.Join(scope, "runtime")
+	home := filepath.Join(scope, "home")
+	for _, dir := range []string{dataDir, home} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv(hookGuardianAuthorizationDirEnv, filepath.Join(scope, "authorization"))
+	const sid = "S-1-5-21-1-2-3-1001"
+	connectors := []string{"amp", "claudecode", "codex", "cursor", "devin", "hermes"}
+	manifest := "version: 1\ntargets:\n"
+	protected := []enterpriseHookReconcileRow{}
+	for _, name := range connectors {
+		manifest += fmt.Sprintf("  - user_home: %q\n    uid: %d\n    gid: %d\n    sid: %s\n    connector: %s\n", home, os.Getuid(), os.Getgid(), sid, name)
+		protected = append(protected, enterpriseHookReconcileRow{UserHome: home, SID: sid, Connector: name, OK: true})
+	}
+	manifestPath := filepath.Join(scope, "targets.yaml")
+	if err := os.WriteFile(manifestPath, []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, manifestSHA256, err := enterprisehooks.LoadManifestWithSHA256(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg = &config.Config{DataDir: dataDir, DeploymentMode: "local"}
+	enterpriseHookManifest, enterpriseHookAPIAddr, enterpriseHookProxyAddr = manifestPath, "127.0.0.1:18970", "127.0.0.1:4000"
+	if err := writeEnterpriseHookGuardianState(dataDir, manifestPath, manifestSHA256, protected, 0, true); err != nil {
+		t.Fatal(err)
+	}
+
+	var start time.Time
+	enterpriseHookReconcileVerifier = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		if opts.ConnectorName == "hermes" && time.Since(start) >= 100*time.Millisecond {
+			return enterprisehooks.InstallResult{}, errors.New("hermes hooks block is empty")
+		}
+		return enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}, nil
+	}
+	var repairedAt time.Duration
+	installs := []string{}
+	enterpriseHookReconcileInstaller = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		repairedAt = time.Since(start)
+		installs = append(installs, opts.ConnectorName)
+		return enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}, nil
+	}
+	enterpriseHookReconcileRecheckWindow = 300 * time.Millisecond
+	start = time.Now()
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	took := time.Since(start)
+	if err != nil || run.Failures != 0 || run.Repairs != 1 || strings.Join(installs, ",") != "hermes" {
+		t.Fatalf("run=%+v installs=%v err=%v, want the one Hermes repair", run, installs, err)
+	}
+	if _, ok := guardianRestoresForTest(t, dataDir)[enterpriseHookGuardianRestoreKey(sid, "hermes")]; !ok {
+		t.Fatalf("the Hermes repair inside the window was not recorded as a restore")
+	}
+	if repairedAt > 400*time.Millisecond || took > 1500*time.Millisecond {
+		t.Fatalf("the sixth target, damaged 100 ms in, was repaired %s in and the pass took %s; want one shared 300 ms window", repairedAt, took)
 	}
 }
