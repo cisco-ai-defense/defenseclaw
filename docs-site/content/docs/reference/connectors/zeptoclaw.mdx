@@ -19,6 +19,8 @@ Reference for the [ZeptoClaw connector](/docs/connectors/zeptoclaw), the second 
 
 ### Setup defaults
 
+Before setup: no hook connector may be configured (ZeptoClaw is proxy-backed; setup refuses with "cannot run next to hook connectors" unless you pass `--replace`, which replaces them), and `~/.zeptoclaw/config.json` must define at least one provider (otherwise the gateway fails with `no usable providers found` and setup rolls back).
+
 `defenseclaw setup zeptoclaw` is the dedicated alias. It delegates to the shared guardrail setup and exposes the common options, not every `setup guardrail` flag ([quick-alias reference](/docs/reference/commands/guardrail-setup#aliases), [full guardrail setup](/docs/features/guardrail)). The proxy is in the data path in both modes. Everything not set by a flag uses the shipped defaults ([Defaults](/docs/reference/policy/defaults)).
 
 | Knob | Value when omitted | Flag to override |
@@ -30,7 +32,7 @@ Reference for the [ZeptoClaw connector](/docs/connectors/zeptoclaw), the second 
 | HITL | off | `--human-approval` plus `--hilt-min-severity` |
 | HITL minimum severity | `HIGH` when `--human-approval` is on | `--hilt-min-severity low\|medium\|high\|critical` |
 | Hook fail mode | current config; `closed` on a fresh install | `defenseclaw guardrail fail-mode <open\|closed>` |
-| Proxy port | `4000` | `--port <int>` |
+| Proxy port | `4000`, or the free port `init` chose when another account holds 4000 (it says so, for example 4090) | `--port <int>` |
 | Block message | empty (built-in copy) | `--block-message "<text>"` |
 | Redaction | v8 bucket and profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles` ([Redaction](/docs/reference/observability/redaction/)) |
 
@@ -87,4 +89,4 @@ ZeptoClaw 0.9.2 sends `max_tokens` on its OpenAI-style chat requests. The Bedroc
 
 ### Subprocess policy
 
-The policy is `shims` on every platform. Setup installs PATH shims for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` that send each invocation to the gateway's tool-inspection endpoint before running the real binary. They give no syscall, filesystem or network isolation. ZeptoClaw does not run in an OpenShell sandbox. Support is pending in the [capability matrix](/docs/reference/apis/capability-matrix).
+The policy is `shims` on every platform. Setup installs seven PATH shims, for `curl`, `wget`, `ssh`, `nc`, `ncat` (a link to the `nc` shim), `pip` and `npm`, that send each invocation to the gateway's tool-inspection endpoint before running the real binary. They give no syscall, filesystem or network isolation. ZeptoClaw does not run in an OpenShell sandbox. Support is pending in the [capability matrix](/docs/reference/apis/capability-matrix).

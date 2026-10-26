@@ -47,13 +47,13 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 | What | Where |
 | --- | --- |
 | Providers and private-endpoint setting | `~/.zeptoclaw/config.json` (`providers.*.api_base`, `safety.allow_private_endpoints`) |
-| Subprocess shims | on `PATH`, for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` |
+| Subprocess shims | on `PATH` (`~/.defenseclaw/shims`), for `curl`, `wget`, `ssh`, `nc`, `ncat`, `pip` and `npm` |
 
 `safety.allow_private_endpoints` is set to `true` so ZeptoClaw accepts the `127.0.0.1` address.
 
 ## Limits
 
-- The shims inspect those six commands only. They give no syscall, filesystem or network isolation.
+- The shims inspect those seven commands only. They give no syscall, filesystem or network isolation.
 - ZeptoClaw 0.9.2 sends `max_tokens`, which the Bedrock `gpt-5.6-luna` model refuses. Pick a model that accepts it.
 - The local event database keeps seven days of prompts and responses by default. Treat it as sensitive data and set `observability.local.retention_days` (see the reference).
 - ZeptoClaw does not run in an OpenShell sandbox.
