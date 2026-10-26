@@ -18,92 +18,64 @@ import (
 
 const foreignHookSessionPathPrefix = "/api/v1/foreign-hook-session/"
 
-// ForeignHookSessionRecordUnavailableReason is the gateway's denial of an
-// exchange it could not apply to the session record (a record read or write
-// that failed, the account's removal lock that could not be taken, or an
-// allow it could not give within the hold). It is the reason
-// enterprisepolicy's session store gives, word for word.
-const ForeignHookSessionRecordUnavailableReason = "enterprise_foreign_hook_blocked: DefenseClaw cannot verify this agent session's hook record. Remove any unapproved hook and restart the agent."
-
-// The exchange of a scan that found no unapproved hook is sent again when the
-// gateway answers ForeignHookSessionRecordUnavailableReason: at most
-// foreignHookSessionRecordRetries more times, foreignHookSessionRecordRetryDelay
-// apart, and only while foreignHookSessionRecordRetryReserve of the call's
-// answer budget is left for the hook request after it.
+// The hook asks the gateway to apply a clean scan again when its session
+// store could not apply it, until foreignHookSessionRetryReserve before the
+// call's answer deadline (or the context's deadline): that much is left for
+// the hook request after the exchange. When neither deadline is set it asks
+// for foreignHookSessionRetryWindow.
 var (
-	foreignHookSessionRecordRetries      = 2
-	foreignHookSessionRecordRetryDelay   = 25 * time.Millisecond
-	foreignHookSessionRecordRetryReserve = 1500 * time.Millisecond
+	foreignHookSessionRetryReserve = 1500 * time.Millisecond
+	foreignHookSessionRetryWindow  = 2 * time.Second
 )
 
 // ExchangeForeignHookSession asks the standalone gateway to apply one scan to
 // its protected session record. An unavailable or malformed answer is an
 // error; the caller must deny the hook invocation in that case.
 //
-// A gateway that could not read, write or fence the record for one exchange
-// (five agents starting at once, a busy disk) answers with
-// ForeignHookSessionRecordUnavailableReason, which names no hook. For a scan
-// that found no unapproved hook that is a store race, not a finding: the
-// exchange is sent again within the call's budget, and the denial stands only
-// when every try gets it (GAP-1711). A scan that found an unapproved hook,
-// and any other denial, is answered at once as before.
+// The exchange carries retry_until: a gateway that could not read, write or
+// fence the record for a scan that found no unapproved hook (five agents
+// starting at once, a busy disk) applies it again until then, and audits
+// only its final answer (GAP-1711, GAP-1812). The hook sends the exchange
+// once.
 func ExchangeForeignHookSession(ctx context.Context, opts Options, connector string, payload []byte) ([]byte, error) {
-	body, err := exchangeForeignHookSessionOnce(ctx, opts, connector, payload)
 	started := opts.StartedAt
 	if started.IsZero() {
 		started = time.Now()
 	}
-	for attempt := 0; err == nil && attempt < foreignHookSessionRecordRetries &&
-		foreignHookSessionRecordBusy(payload, body) &&
-		foreignHookSessionRetryTime(ctx, answerDeadline(opts, started)); attempt++ {
-		timer := time.NewTimer(foreignHookSessionRecordRetryDelay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return body, nil
-		case <-timer.C:
-		}
-		retried, retryErr := exchangeForeignHookSessionOnce(ctx, opts, connector, payload)
-		if retryErr != nil {
-			// The first answer stands: it is a denial already.
-			return body, nil
-		}
-		body = retried
-	}
-	return body, err
+	return exchangeForeignHookSessionOnce(ctx, opts, connector,
+		withForeignHookSessionRetryUntil(payload, foreignHookSessionRetryUntil(ctx, answerDeadline(opts, started))))
 }
 
-// foreignHookSessionRecordBusy reports an answer that is the record-store
-// denial (ForeignHookSessionRecordUnavailableReason) of an exchange whose own
-// scan allowed the call.
-func foreignHookSessionRecordBusy(payload, body []byte) bool {
-	var sent struct {
-		Decision struct {
-			Deny bool `json:"deny"`
-		} `json:"decision"`
-	}
-	var answer struct {
-		Deny   bool   `json:"deny"`
-		Reason string `json:"reason"`
-	}
-	if json.Unmarshal(payload, &sent) != nil || sent.Decision.Deny || json.Unmarshal(body, &answer) != nil {
-		return false
-	}
-	return answer.Deny && answer.Reason == ForeignHookSessionRecordUnavailableReason
-}
-
-// foreignHookSessionRetryTime reports that another exchange still leaves the
-// hook request after it foreignHookSessionRecordRetryReserve before the
-// answer deadline (or the context's deadline when the call has none).
-func foreignHookSessionRetryTime(ctx context.Context, answerBy time.Time) bool {
-	if ctx.Err() != nil {
-		return false
-	}
+// foreignHookSessionRetryUntil is the exchange's retry_until: the earlier of
+// answerBy and the context's deadline, less foreignHookSessionRetryReserve.
+func foreignHookSessionRetryUntil(ctx context.Context, answerBy time.Time) time.Time {
 	limit := answerBy
 	if deadline, ok := ctx.Deadline(); ok && (limit.IsZero() || deadline.Before(limit)) {
 		limit = deadline
 	}
-	return limit.IsZero() || time.Until(limit) > foreignHookSessionRecordRetryReserve
+	if limit.IsZero() {
+		return time.Now().Add(foreignHookSessionRetryWindow)
+	}
+	return limit.Add(-foreignHookSessionRetryReserve)
+}
+
+// withForeignHookSessionRetryUntil sets retry_until in the exchange payload,
+// or returns the payload unchanged when it is not a JSON object.
+func withForeignHookSessionRetryUntil(payload []byte, until time.Time) []byte {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil || fields == nil {
+		return payload
+	}
+	value, err := json.Marshal(until.UTC())
+	if err != nil {
+		return payload
+	}
+	fields["retry_until"] = value
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return payload
+	}
+	return out
 }
 
 func exchangeForeignHookSessionOnce(ctx context.Context, opts Options, connector string, payload []byte) ([]byte, error) {

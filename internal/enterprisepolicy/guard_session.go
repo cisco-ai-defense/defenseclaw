@@ -440,9 +440,15 @@ func validGatewaySessionRecord(record SessionRecord, key SessionKey, kind string
 	return record.Session == key.Session
 }
 
+// SessionRecordUnavailableReason is the denial of an exchange the session
+// store could not apply (a record read or write that failed, the account's
+// removal lock that could not be taken, or an allow it could not give within
+// the hold). The gateway applies a clean scan's exchange again on it.
+const SessionRecordUnavailableReason = "enterprise_foreign_hook_blocked: DefenseClaw cannot verify this agent session's hook record. Remove any unapproved hook and restart the agent."
+
 func sessionUnavailableDecision(decision GuardDecision) GuardDecision {
 	decision.Deny = true
-	decision.Reason = "enterprise_foreign_hook_blocked: DefenseClaw cannot verify this agent session's hook record. Remove any unapproved hook and restart the agent."
+	decision.Reason = SessionRecordUnavailableReason
 	return decision
 }
 

@@ -82,10 +82,58 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	stateDir := enterprisepolicy.ForeignHookSessionStoreDir(dataDir, identity)
-	// Each identity has its own store, so only that identity's exchanges
-	// are serialized; another account's exchange never waits on this one.
-	unlock := sync.OnceFunc(a.foreignHookSessionLocks.lock(stateDir))
-	defer unlock()
+	// A clean scan the store could not apply (a record read or write that
+	// failed, a lock it could not take, an allow too late for the hold) is
+	// a store race, not a finding: it is applied again, each try a whole
+	// exchange that takes the locks and reads the removals again, while the
+	// hook still waits for the answer (exchange.RetryUntil). Only the final
+	// answer is audited, so a call that ends up allowed leaves no block row
+	// (GAP-1711, GAP-1812, GAP-1813).
+	retryUntil := foreignHookSessionRetryUntil(exchange, time.Now())
+	for attempt := 0; ; attempt++ {
+		decision, answerBy, release := a.applyForeignHookSessionOnce(r.Context(), dataDir, identity, stateDir, exchange)
+		if attempt < foreignHookSessionRecordRetries && foreignHookSessionRecordBusy(exchange, decision) &&
+			time.Now().Add(foreignHookSessionRecordRetryDelay).Before(retryUntil) {
+			release()
+			timer := time.NewTimer(foreignHookSessionRecordRetryDelay)
+			select {
+			case <-r.Context().Done():
+				timer.Stop()
+			case <-timer.C:
+				continue
+			}
+		}
+		if decision.Deny {
+			// A denial cannot become an allow when the guardian commits a
+			// removal, so neither lock is held through the audit export or
+			// the response write.
+			release()
+			foreignHookSessionDenialAudit(a, r.Context(), connector, exchange, decision)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(decision)
+			return
+		}
+		if refusal := writeFencedForeignHookAllow(w, decision, answerBy); refusal != "" {
+			release()
+			writeManagedHookRefusal(w, http.StatusServiceUnavailable, refusal)
+		}
+		release()
+		return
+	}
+}
+
+// applyForeignHookSessionOnce applies one exchange to the session record
+// under the identity's exchange mutex and its account's removal lock, and
+// returns the decision, the deadline of an allow and the release of both
+// locks (safe to call more than once). Each identity has its own store, so
+// only that identity's exchanges are serialized; another account's exchange
+// never waits on this one.
+func (a *APIServer) applyForeignHookSessionOnce(
+	ctx context.Context,
+	dataDir, identity, stateDir string,
+	exchange enterprisepolicy.SessionExchange,
+) (enterprisepolicy.GuardDecision, time.Time, func()) {
+	unlock := a.foreignHookSessionLocks.lock(stateDir)
 	removalsDir := managed.HookGuardianAuthorizationDir(dataDir)
 	// The deadline of an allow is set before the account's lock is asked
 	// for, not once it is held. This exchange takes the gate before any
@@ -97,15 +145,18 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	// Only a standalone gateway gets here (userScopedCredentialsRequired),
 	// so every exchange takes its account's removal lock.
 	var lockErr error
-	release := func() {}
-	ctx, cancel := context.WithTimeout(r.Context(), foreignHookExchangeWait)
-	if held, err := foreignHookAccountExchangeLock(ctx, dataDir, identity); err != nil {
+	held := func() {}
+	lockCtx, cancel := context.WithTimeout(ctx, foreignHookExchangeWait)
+	if release, err := foreignHookAccountExchangeLock(lockCtx, dataDir, identity); err != nil {
 		lockErr = err
 	} else {
-		release = held
+		held = release
 	}
 	cancel()
-	defer release()
+	release := sync.OnceFunc(func() {
+		held()
+		unlock()
+	})
 	removals, ledgerErr := a.foreignHookRemovals.forIdentity(removalsDir, identity)
 	// A removal in progress keeps its own reason through the join
 	// (ApplyForeignHookRemovals checks it first).
@@ -124,22 +175,40 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 		// have stopped waiting for this exchange.
 		decision = enterprisepolicy.ApplyForeignHookRemovals(decision, exchange.Key, nil, errForeignHookExchangeExpired, time.Now())
 	}
-	if decision.Deny {
-		// A denial cannot become an allow when the guardian commits a
-		// removal, so neither lock is held through the audit export or the
-		// response write.
-		release()
-		unlock()
-		a.auditForeignHookSessionDenial(r.Context(), connector, exchange, decision)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(decision)
-		return
+	return decision, answerBy, release
+}
+
+// A clean scan the session store could not apply is applied again at most
+// foreignHookSessionRecordRetries more times, foreignHookSessionRecordRetryDelay
+// apart, while the hook still waits (exchange.RetryUntil), and never for
+// longer than foreignHookSessionRecordRetryWindow after the exchange arrived.
+// A hook that sends no RetryUntil (one before 1.0.5) gets the first answer.
+// foreignHookSessionDenialAudit records a final denial (replaceable in
+// tests).
+var (
+	foreignHookSessionRecordRetries     = 2
+	foreignHookSessionRecordRetryDelay  = 25 * time.Millisecond
+	foreignHookSessionRecordRetryWindow = 2 * time.Second
+	foreignHookSessionDenialAudit       = (*APIServer).auditForeignHookSessionDenial
+)
+
+// foreignHookSessionRetryUntil is when the gateway stops applying a busy
+// clean scan again: the hook's RetryUntil, at most
+// foreignHookSessionRecordRetryWindow after now.
+func foreignHookSessionRetryUntil(exchange enterprisepolicy.SessionExchange, now time.Time) time.Time {
+	until := exchange.RetryUntil
+	if limit := now.Add(foreignHookSessionRecordRetryWindow); until.After(limit) {
+		until = limit
 	}
-	if refusal := writeFencedForeignHookAllow(w, decision, answerBy); refusal != "" {
-		release()
-		unlock()
-		writeManagedHookRefusal(w, http.StatusServiceUnavailable, refusal)
-	}
+	return until
+}
+
+// foreignHookSessionRecordBusy reports the store's record-unavailable
+// denial (enterprisepolicy.SessionRecordUnavailableReason) of an exchange
+// whose own scan allowed the call. A scan that found a hook, a removal in
+// progress and every other denial are answered at once.
+func foreignHookSessionRecordBusy(exchange enterprisepolicy.SessionExchange, decision enterprisepolicy.GuardDecision) bool {
+	return !exchange.Decision.Deny && decision.Deny && decision.Reason == enterprisepolicy.SessionRecordUnavailableReason
 }
 
 // errForeignHookExchangeExpired is an exchange that could not answer within
@@ -257,7 +326,7 @@ func (a *APIServer) auditForeignHookSessionDenial(
 	}
 	block := "call"
 	switch {
-	case strings.Contains(decision.Reason, "cannot verify this agent session's hook record"):
+	case decision.Reason == enterprisepolicy.SessionRecordUnavailableReason:
 		block = "session_record_unavailable"
 	case exchange.SessionStart && exchange.Decision.Deny:
 		block = "session_recorded"
