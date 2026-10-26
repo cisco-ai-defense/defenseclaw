@@ -9,11 +9,87 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 )
+
+// privateInstallWalkDefaultMaxEntries is the home walk's entry bound on
+// Linux and macOS. Real developer homes are far larger than the 524,288 the
+// walk first allowed, so every developer account was reported NOT COVERED
+// (agent_install_scan_incomplete, home_unreadable). Measured 2026-10-26: a
+// developer Mac lists 1.92 million entries outside its privacy-protected
+// folders and 0.64 million once the tool-owned trees below are pruned, and
+// the macOS 15 GitHub runner account failed the 1.0.4 release upgrade gate
+// on the same bound. 2,097,152 leaves that pruned home three times its
+// size. The walk reads directory entries only, never their metadata
+// (120,630 entries of an EC2 Mac home took 0.43 s), and the scan deadline
+// still bounds its time: a home it cannot list in time stays incomplete.
+const privateInstallWalkDefaultMaxEntries = 1 << 21
+
+// unixPrivateWalkPrunedHomeTrees are trees below a home, by path from the
+// home, that the walk does not list: language toolchains and the package
+// stores and caches their own tools manage. npm never installs a runnable
+// prefix there, and together they are most of a developer home (on a
+// developer Mac: the Go module cache 257,148 entries, the pnpm store
+// 100,079, uv's Pythons 100,282). An agent copied into one of them on
+// purpose is not found, as one copied anywhere outside node_modules is not
+// found: application control covers that.
+var unixPrivateWalkPrunedHomeTrees = append([]string{
+	"go/pkg/mod", ".cargo/registry", ".cargo/git", ".rustup", ".gradle", ".m2/repository",
+	".nuget/packages", ".dotnet", ".npm/_cacache", ".bun/install/cache",
+	".local/share/pnpm/store", ".local/share/uv",
+}, unixPrivateWalkPlatformPrunedHomeTrees...)
+
+// unixPrivateWalkCacheRoots hold data an app can recreate (the XDG cache
+// folder, and ~/Library/Caches on macOS). The walk lists them but enters
+// only pnpm's folder, whose dlx cache holds runnable npm installs ("pnpm
+// dlx @openai/codex"); npx keeps its own in ~/.npm/_npx, which is walked.
+// The rest (uv, pip, Homebrew, browsers, build caches) are the largest
+// trees of a developer home: on the Mac above ~/Library/Caches held 341,064
+// entries and ~/.cache/uv 341,008.
+var unixPrivateWalkCacheRoots = append([]string{".cache"}, unixPrivateWalkPlatformCacheRoots...)
+
+const unixPrivateWalkCacheKept = "pnpm"
+
+// errPrivateWalkPruned is the open of a pruned tree: it hides nothing the
+// walk inspects, so the walk stays complete.
+var errPrivateWalkPruned = errors.New("the walk does not list this tool-owned tree")
+
+// unixPrivateWalkPruned reports a folder of home the walk does not list:
+// a pruned tree, a cache other than pnpm's, or a version-control store
+// (.git) at any depth.
+func unixPrivateWalkPruned(home, dir string) bool {
+	rel, err := filepath.Rel(home, filepath.Clean(dir))
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return false
+	}
+	rel = filepath.ToSlash(rel)
+	same := func(a, b string) bool {
+		if unixHomeCaseInsensitive {
+			return strings.EqualFold(a, b)
+		}
+		return a == b
+	}
+	name := path.Base(rel)
+	if same(name, ".git") {
+		return true
+	}
+	for _, tree := range unixPrivateWalkPrunedHomeTrees {
+		if same(rel, tree) {
+			return true
+		}
+	}
+	parent := path.Dir(rel)
+	for _, root := range unixPrivateWalkCacheRoots {
+		if same(parent, root) && !same(name, unixPrivateWalkCacheKept) {
+			return true
+		}
+	}
+	return false
+}
 
 // unixPrivateWalkOpenTimeout bounds one directory open of the home walk.
 // Tests lower it.
@@ -46,6 +122,9 @@ func unixPrivateWalkOpener(home string) func(string) (*os.File, error) {
 	return func(dir string) (*os.File, error) {
 		if unixPrivateWalkPrivacyProtected(home, dir) {
 			return nil, &os.PathError{Op: "open", Path: dir, Err: syscall.EPERM}
+		}
+		if unixPrivateWalkPruned(home, dir) {
+			return nil, &os.PathError{Op: "open", Path: dir, Err: errPrivateWalkPruned}
 		}
 		type opened struct {
 			f   *os.File

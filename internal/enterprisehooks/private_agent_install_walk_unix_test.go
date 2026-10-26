@@ -87,3 +87,55 @@ func TestUnixPrivateWalkSkipsPrivacyProtectedFolders(t *testing.T) {
 		t.Fatalf("opened = %v, want every folder opened off macOS", opened)
 	}
 }
+
+// The release upgrade gate found the 1.0.4 walk incomplete for the macOS
+// runner account: a developer home is mostly toolchains, package stores and
+// caches, which the walk listed against its bound. It now leaves those trees
+// unlisted, and still enters pnpm's dlx cache and npx's folder, which hold
+// runnable npm installs.
+func TestUnixPrivateWalkPrunesToolOwnedTrees(t *testing.T) {
+	home := filepath.Clean(t.TempDir())
+	cases := map[string]bool{
+		".cache":                        false,
+		".cache/uv":                     true,
+		".cache/pnpm":                   false,
+		".cache/pnpm/dlx/abc":           false,
+		".npm/_cacache":                 true,
+		".npm/_npx":                     false,
+		"go/pkg/mod":                    true,
+		"go/src":                        false,
+		".rustup":                       true,
+		".local/share/uv":               true,
+		".local/share/pnpm/store":       true,
+		".local/share/pnpm/global":      false,
+		"src/proj/.git":                 true,
+		"src/proj/node_modules":         false,
+		"src/.cache":                    false,
+		"src/.cache/uv":                 false,
+		"Library/Caches/Homebrew":       runtime.GOOS == "darwin",
+		"Library/Caches/pnpm":           false,
+		"Library/Developer":             runtime.GOOS == "darwin",
+		"Library/pnpm/store":            runtime.GOOS == "darwin",
+		"Library/pnpm/global":           false,
+		"Android/Sdk":                   runtime.GOOS != "darwin",
+		"GO/PKG/MOD":                    runtime.GOOS == "darwin",
+		"Library/Application Support/x": false,
+	}
+	for rel, want := range cases {
+		if got := unixPrivateWalkPruned(home, filepath.Join(home, filepath.FromSlash(rel))); got != want {
+			t.Errorf("unixPrivateWalkPruned(%q) = %v, want %v", rel, got, want)
+		}
+	}
+	if unixPrivateWalkPruned(home, home) || unixPrivateWalkPruned(home, filepath.Dir(home)) {
+		t.Fatal("the home and its parent are never pruned")
+	}
+	// A pruned tree is not opened, and its open hides nothing from the walk.
+	previousOpen := unixPrivateWalkOpenFile
+	t.Cleanup(func() { unixPrivateWalkOpenFile = previousOpen })
+	opened := false
+	unixPrivateWalkOpenFile = func(dir string) (*os.File, error) { opened = true; return os.Open(dir) }
+	_, err := unixPrivateWalkOpener(home)(filepath.Join(home, ".cache", "uv"))
+	if opened || err == nil || !unixPrivateWalkUnreachable(filepath.Join(home, ".cache", "uv"), err) {
+		t.Fatalf("pruned open: opened=%v err=%v", opened, err)
+	}
+}

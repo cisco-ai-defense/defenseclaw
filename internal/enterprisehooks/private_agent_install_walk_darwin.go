@@ -21,3 +21,14 @@ var unixPrivacyProtectedHomeFolders = []string{
 	"Library/Application Support/CallHistoryTransactions", "Library/Application Support/com.apple.TCC",
 	"Library/Application Support/Knowledge", "Library/Metadata/CoreSpotlight",
 }
+
+// unixHomeCaseInsensitive: the macOS file system compares names without case.
+const unixHomeCaseInsensitive = true
+
+// unixPrivateWalkPlatformPrunedHomeTrees are the macOS toolchain trees the
+// walk does not list (unixPrivateWalkPrunedHomeTrees): Xcode's derived data,
+// simulators and device support, the Android SDK and pnpm's content store.
+var unixPrivateWalkPlatformPrunedHomeTrees = []string{"Library/Developer", "Library/Android", "Library/pnpm/store"}
+
+// unixPrivateWalkPlatformCacheRoots: the macOS cache folder.
+var unixPrivateWalkPlatformCacheRoots = []string{"Library/Caches"}
