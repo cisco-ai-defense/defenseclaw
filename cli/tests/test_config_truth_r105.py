@@ -121,6 +121,17 @@ def test_migrate_ack_prints_what_the_helper_did(tmp_path: Path, monkeypatch) -> 
     assert "Marked" not in result.output
 
 
+def test_the_config_schema_id_names_the_version_it_describes() -> None:
+    # GAP-1651: the title said v9 and $id named the v8 schema URL.
+    import json
+
+    schema = json.loads(
+        (Path(__file__).resolve().parents[2] / "schemas/config/v8/defenseclaw-config.schema.json").read_text()
+    )
+    assert "v9" in schema["title"]
+    assert schema["$id"] == "https://schemas.defenseclaw.dev/config/v9/defenseclaw-config.schema.json"
+
+
 def test_unset_keeps_a_connector_entry_that_says_it_is_guarded(tmp_path: Path, monkeypatch) -> None:
     # guardrail.connectors.<C>: {} means "guarded with the defaults"; only the
     # maps under that entry are pruned.
