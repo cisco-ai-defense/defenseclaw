@@ -240,8 +240,10 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 	release, run, refusal, logNow := a.hookCallerLimits.acquire(hookCallerBudgetKey(identity, r.URL.Path))
 	if refusal == "" {
 		if r.Context().Err() != nil {
-			// The client left before it had a slot: nothing to serve.
+			// The client left before it had a slot: nothing to serve, but
+			// a managed call still gets its audit row (GAP-0286).
 			release()
+			a.recordHookCallerGone(w, r)
 			return r, nil
 		}
 		// Advertise the receipt protocol as soon as a managed hook is
@@ -265,6 +267,7 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 			}
 		case <-r.Context().Done():
 			release()
+			a.recordHookCallerGone(w, r)
 			return r, nil
 		}
 	}
