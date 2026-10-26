@@ -1387,6 +1387,14 @@ func (repo *CorrelationRepository) RecordObservations(
 	})
 }
 
+// correlationObservationInsertSQL inserts one correlation observation
+// (txExecPrepared).
+const correlationObservationInsertSQL = `INSERT INTO correlation_observations (
+			record_id, semantic_event_id, signal, bucket, event_name, observed_time_unix_nano,
+			trace_id, span_id, session_id, turn_id, agent_id, lifecycle_id, execution_id,
+			model_request_id, model_response_id, tool_invocation_id, projection_hash, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
 func putCorrelationObservationTx(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -1405,12 +1413,7 @@ func putCorrelationObservationTx(
 	if err := validateObservation(observation); err != nil {
 		return err
 	}
-	_, err := txExecContextObserved(ctx, tx, "correlation_observation_insert",
-		store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_observations (
-			record_id, semantic_event_id, signal, bucket, event_name, observed_time_unix_nano,
-			trace_id, span_id, session_id, turn_id, agent_id, lifecycle_id, execution_id,
-			model_request_id, model_response_id, tool_invocation_id, projection_hash, status
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err := store.txExecPrepared(ctx, tx, "correlation_observation_insert", correlationObservationInsertSQL,
 		observation.RecordID, string(observation.SemanticEventID), string(observation.Signal),
 		observation.Bucket, observation.EventName, unixNano(observation.ObservedAt),
 		nullStr(observation.TraceID), nullStr(observation.SpanID), nullStr(observation.SessionID),

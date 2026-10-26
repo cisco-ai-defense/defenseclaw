@@ -228,6 +228,10 @@ type Store struct {
 	// (WithSecureClientSchema).
 	secureClientSchema bool
 
+	// prepared holds the repeated hook-call inserts, prepared once the store
+	// is ready (prepareStatements).
+	prepared atomic.Pointer[map[string]*sql.Stmt]
+
 	// lifecycleMu serializes initialization/close and lets mandatory v8
 	// event-history transactions pin a ready store until commit or rollback.
 	lifecycleMu sync.RWMutex
@@ -2145,6 +2149,7 @@ func (s *Store) Init() error {
 		return fmt.Errorf("audit: revalidate database paths after initialization: %w", err)
 	}
 
+	s.prepareStatements(context.Background())
 	s.ready.Store(true)
 	return nil
 }

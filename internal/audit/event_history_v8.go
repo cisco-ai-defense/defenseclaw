@@ -746,27 +746,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	if err != nil {
 		return eventHistoryAppendOutcome{}, eventHistoryFailure(EventHistoryHealthProjectionRejected, err)
 	}
-	_, err = txExecContextObserved(ctx, tx, "v8_event_history_insert", writer.store.sqliteBusyObservabilityV8(), `
-		INSERT INTO audit_events (
-			id, timestamp, action, target, actor, details, structured_json, severity,
-			run_id, trace_id, request_id, session_id, turn_id, agent_name, agent_instance_id,
-			policy_id, destination_app, tool_name, tool_id,
-			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id,
-			connector, step_idx, enforced, rule_pack_dir,
-			bucket, event_name, source, signal, bucket_catalog_version, payload_json, projected_record_json,
-			record_schema_version, projection_hash,
-			redaction_profile, mandatory, evaluation_id, scan_id, finding_id,
-			enforcement_action_id, payload_hmac, integrity_algorithm, integrity_key_id, record_sha256
-		) VALUES (
-			?, ?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?,
-			?, ?,
-			?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?
-		)`,
+	_, err = writer.store.txExecPrepared(ctx, tx, "v8_event_history_insert", eventHistoryInsertSQL,
 		record.RecordID(), record.Timestamp().Format(time.RFC3339Nano),
 		action, legacyTarget, legacyActor, legacyDetails, legacyStructured, legacySeverity,
 		nullStr(correlation.RunID), nullStr(correlation.TraceID), nullStr(correlation.RequestID),
@@ -821,6 +801,29 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	}
 	return outcome, nil
 }
+
+// eventHistoryInsertSQL inserts one v8 event-history row (txExecPrepared).
+const eventHistoryInsertSQL = `
+		INSERT INTO audit_events (
+			id, timestamp, action, target, actor, details, structured_json, severity,
+			run_id, trace_id, request_id, session_id, turn_id, agent_name, agent_instance_id,
+			policy_id, destination_app, tool_name, tool_id,
+			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id,
+			connector, step_idx, enforced, rule_pack_dir,
+			bucket, event_name, source, signal, bucket_catalog_version, payload_json, projected_record_json,
+			record_schema_version, projection_hash,
+			redaction_profile, mandatory, evaluation_id, scan_id, finding_id,
+			enforcement_action_id, payload_hmac, integrity_algorithm, integrity_key_id, record_sha256
+		) VALUES (
+			?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?,
+			?, ?,
+			?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?
+		)`
 
 // exactLogLifecycleAndExecution reads only the two registered canonical
 // lifecycle attributes. They are intentionally not generic Correlation fields,
