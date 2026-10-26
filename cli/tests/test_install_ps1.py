@@ -4692,6 +4692,12 @@ def test_an_upgrade_replaces_an_installed_binary_in_place() -> None:
     switch = _ps_functions("Switch-InPlace")
     assert "Remove-Aside" not in switch and "Move-Path" not in switch
     assert "Invoke-AtomicReplace $New $Destination" in switch
+    # GAP-0311/0732: a running image is renamed aside, back to back with the
+    # new file's rename, by the native helper, after the atomic retries.
+    assert "Invoke-AsideReplace $New $Destination" in switch
+    aside = _ps_functions("Invoke-AsideReplace")
+    assert "[DefenseClawInstall.Rename]::Aside($New, $Destination, $aside)" in aside
+    assert '"$Destination.old-"' in aside
     assert "FileRenameInfoEx" in _ps_functions("Invoke-AtomicReplace")
     assert "FILE_RENAME_FLAG_POSIX_SEMANTICS" in _ps_functions("Invoke-AtomicReplace")
     assert "function Invoke-FileReplace" not in _text()
@@ -4871,6 +4877,75 @@ try {{ Switch-InPlace '{staged}' '{hook}'; 'SWAPPED' }} catch {{ 'REFUSED' }}
     assert hook.read_text(encoding="ascii") == "new" and not staged.exists()
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("aside", ["works", "refused"])
+def test_a_launcher_mapped_for_good_is_renamed_aside_or_left_whole(tmp_path: Path, aside: str) -> None:
+    # GAP-0311/0732: under steady registered traffic some hook call always
+    # maps the image, so the atomic replacement never finds a gap and the
+    # upgrade (or its restore) stopped with Access is denied. Windows lets a
+    # running image be renamed: after the retries it goes aside and the new
+    # file takes its name. A file that cannot be renamed either is left whole.
+    staged, hook = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
+    staged.write_text("new", encoding="ascii")
+    hook.write_text("old", encoding="ascii")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$script:atomic = 0
+$script:asides = 0
+function Start-Sleep {{ param([int]$Milliseconds) }}
+function Invoke-AtomicReplace([string]$New, [string]$Destination) {{ $script:atomic++; throw 'Access is denied.' }}
+function Invoke-AsideReplace([string]$New, [string]$Destination) {{
+    $script:asides++
+    {'throw "Access is denied."' if aside == "refused" else '[IO.File]::Move($Destination, "$Destination.old-1"); [IO.File]::Move($New, $Destination)'}
+}}
+{_ps1_function('Switch-InPlace')}
+try {{ Switch-InPlace '{staged}' '{hook}'; 'SWAPPED' }} catch {{ "REFUSED: $($_.Exception.Message)" }}
+"ATOMIC=$script:atomic ASIDES=$script:asides"
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    atomic = int(re.search(r"ATOMIC=(\d+)", out).group(1))
+    assert atomic == 80, out
+    if aside == "works":
+        assert "SWAPPED" in out and "ASIDES=1" in out, out
+        assert hook.read_text(encoding="ascii") == "new" and not staged.exists()
+        assert (tmp_path / "defenseclaw-hook.exe.old-1").read_text(encoding="ascii") == "old"
+    else:
+        assert "REFUSED: Could not replace" in out and "it was left as it was" in out, out
+        assert hook.read_text(encoding="ascii") == "old" and not staged.exists()
+        assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe"]
+
+
+@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="requires a running Windows executable")
+def test_native_running_hook_is_renamed_aside_and_replaced(tmp_path: Path) -> None:
+    # GAP-0311/0732 on Windows itself: the image a running hook maps refuses
+    # the atomic replacement, and the whole Switch-InPlace still publishes the
+    # new file while that process keeps running from the old image.
+    system32 = Path(os.environ["SystemRoot"]) / "System32"
+    hook = tmp_path / "defenseclaw-hook.exe"
+    staged = tmp_path / "defenseclaw-hook.exe.new"
+    shutil.copyfile(system32 / "cmd.exe", hook)
+    shutil.copyfile(system32 / "ping.exe", staged)
+    new = staged.read_bytes()
+    running = subprocess.Popen([str(hook), "/c", "ping -n 120 127.0.0.1 >nul"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        script = (
+            "$ErrorActionPreference = 'Stop'\n"
+            + _ps_functions("Invoke-AtomicReplace", "Invoke-AsideReplace", "Switch-InPlace")
+            + f"\nSwitch-InPlace '{staged}' '{hook}' 3\n'SWAPPED'\n"
+        )
+        result = _run_powershell(script)
+        assert result.returncode == 0 and "SWAPPED" in result.stdout, result.stdout + result.stderr
+        assert running.poll() is None
+        assert hook.read_bytes() == new and not staged.exists()
+        assert len(list(tmp_path.glob("defenseclaw-hook.exe.old-*"))) == 1
+    finally:
+        running.kill()
+        running.wait(timeout=30)
+
+
 # ── 1.0.4 (W4b loop round 1) ────────────────────────────────────────────────
 
 
@@ -4987,6 +5062,34 @@ def test_a_restore_a_running_hook_refuses_keeps_the_snapshot_and_never_claims_re
     failed = list(data.glob(".failed-*"))
     assert len(failed) == 1
     assert (failed[0] / "data" / "config.yaml").read_text(encoding="ascii") == "new data"
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_restore_under_steady_hook_traffic_finishes_in_one_run(tmp_path: Path) -> None:
+    # GAP-0311/0732: the automatic restore of the previous install could not
+    # put the old hook back while registered calls kept the new image mapped
+    # (Replace: Access is denied), so the install stayed locked with its
+    # hooks closed until a quiet rerun. The running image is renamed aside.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        _write(bin_dir / name, "new " + name)
+        _write(slot / "bin" / name, "old " + name)
+    _write(slot / "COMPLETE", "")
+    _write(data / "config.yaml", "new data")
+    _write(slot / "data" / "config.yaml", "old data")
+    out = _restore_case(
+        tmp_path,
+        "function Invoke-AsideReplace([string]$New, [string]$Destination) {\n"
+        "    $aside = \"$Destination.old-1\"; [IO.File]::Move($Destination, $aside); [IO.File]::Move($New, $Destination)\n}\n"
+        f"try {{ Restore-Slot '{slot}' | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}",
+    )
+    assert "RESTORED" in out and "REFUSED" not in out, out
+    assert not slot.exists()
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        assert (bin_dir / name).read_text(encoding="ascii") == "old " + name
+    # The image the running calls still map stays aside until it is free.
+    assert (bin_dir / "defenseclaw-hook.exe.old-1").read_text(encoding="ascii") == "new defenseclaw-hook.exe"
+    assert (data / "config.yaml").read_text(encoding="ascii") == "old data"
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")

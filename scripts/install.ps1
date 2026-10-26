@@ -1776,10 +1776,11 @@ function Publish-File([string]$New, [string]$Destination) {
     Move-Path $New $Destination
 }
 
-function Invoke-AtomicReplace([string]$New, [string]$Destination) {
+function Invoke-AtomicReplace([string]$New, [string]$Destination, [switch]$Compile) {
     # FileRenameInfoEx atomically replaces a name when existing open handles
     # permit it. A mapped executable image can still refuse the replacement;
-    # Switch-InPlace retries for a short idle window (GAP-0732).
+    # Switch-InPlace retries for a short idle window, then renames the image
+    # aside (Invoke-AsideReplace, GAP-0732). -Compile only loads the helper.
     if (-not ("DefenseClawInstall.Rename" -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
@@ -1832,11 +1833,35 @@ namespace DefenseClawInstall {
                 }
             }
         }
+
+        public static void Aside(string source, string destination, string aside) {
+            // A running program's image refuses to be replaced but not to be
+            // renamed: move it aside and the staged file in, back to back,
+            // and put it back if the second rename fails.
+            if (!MoveFileExW(destination, aside, 0)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (MoveFileExW(source, destination, 0)) return;
+            int error = Marshal.GetLastWin32Error();
+            if (!MoveFileExW(aside, destination, 0)) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "the previous file is at " + aside);
+            }
+            throw new Win32Exception(error);
+        }
     }
     }
 '@
     }
+    if ($Compile) { return }
     [DefenseClawInstall.Rename]::Replace($New, $Destination)
+}
+
+function Invoke-AsideReplace([string]$New, [string]$Destination) {
+    # Switch-InPlace when the atomic replacement keeps being refused: the
+    # running image is renamed aside (.old-*, removed now if it is free and
+    # by the next install otherwise) and the new file renamed in its place.
+    [void](Invoke-AtomicReplace -Compile)
+    $aside = "$Destination.old-" + (Get-Date -Format "yyyyMMddTHHmmssfff")
+    [DefenseClawInstall.Rename]::Aside($New, $Destination, $aside)
+    Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
 }
 
 function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) {
@@ -1848,10 +1873,13 @@ function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) 
     # mapped executable image, even with POSIX rename semantics. Registered
     # calls arriving once a second can phase-lock a 500 ms retry to the busy
     # part of every call. Probe each 25 ms gap while the whole old launcher
-    # remains callable, then refuse without changing it if no gap appears.
+    # remains callable. After two seconds a running image is renamed aside
+    # instead, which Windows allows: an upgrade or its restore under steady
+    # hook traffic completes (GAP-0311, GAP-0732). Only a file that can be
+    # neither replaced nor renamed (a scanner holding it) is refused, unchanged.
     for ($attempt = 0; ; $attempt++) {
         try {
-            Invoke-AtomicReplace $New $Destination
+            if ($attempt -ge 80) { Invoke-AsideReplace $New $Destination } else { Invoke-AtomicReplace $New $Destination }
             return
         } catch {
             $reason = $_.Exception.Message
