@@ -706,6 +706,49 @@ try {
                 }
             }
 
+            # GAP-1304 (r105): a hook process that runs the executable, not
+            # only reads it. Windows refuses to delete a running image but
+            # renames it; the restore of a fresh InstallRoot renames it
+            # aside and goes on, and anywhere else the refusal stands.
+            $running = New-TestLayout 'rollback-running'
+            $runningHook = [IO.Path]::Combine($running.BinDirectory, 'defenseclaw-hook.exe')
+            [IO.File]::Copy([IO.Path]::Combine([Environment]::SystemDirectory, 'PING.EXE'), $runningHook)
+            $runner = Start-Process -FilePath $runningHook -ArgumentList '-n', '30', '127.0.0.1' -WindowStyle Hidden -PassThru
+            try {
+                Start-Sleep -Milliseconds 500
+                $controlRefused = $false
+                try {
+                    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $runningHook -Force -ErrorAction Stop
+                }
+                catch {
+                    $controlRefused = $true
+                }
+                if (-not $controlRefused) {
+                    $failures.Add('control: a running hook executable was deleted; the GAP-1304 case did not reproduce')
+                }
+                elseif (-not (Get-Command Remove-DefenseClawTransactionCreatedFile -ErrorAction SilentlyContinue)) {
+                    $failures.Add('fresh-install restore refuses a running hook executable (no rename-aside removal)')
+                }
+                else {
+                    Test-Refused 'running executable outside a fresh InstallRoot' {
+                        Remove-DefenseClawTransactionCreatedFile -Path $runningHook
+                    } ''
+                    try {
+                        Remove-DefenseClawTransactionCreatedFile -Path $runningHook -InFreshInstallRoot
+                    }
+                    catch {
+                        $failures.Add("fresh-install restore refused a running hook executable: $($_.Exception.Message)")
+                    }
+                    if ([IO.File]::Exists($runningHook)) {
+                        $failures.Add('fresh-install restore left the running hook executable at its registered path')
+                    }
+                }
+            }
+            finally {
+                if (-not $runner.HasExited) { $runner.Kill() }
+                [void]$runner.WaitForExit(10000)
+            }
+
             $otherRoot = New-TestLayout 'rollback-other-root'
             $otherSnapshot = $security::GetDirectorySecuritySnapshotNoFollowIfExists($otherRoot.InstallRoot)
             $otherOptions = @{}

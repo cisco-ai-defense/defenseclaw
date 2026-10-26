@@ -15185,6 +15185,49 @@ function Invoke-DefenseClawUserNativeOTLPRestoreBestEffort {
     }
 }
 
+function Remove-DefenseClawTransactionCreatedFile {
+    <#
+        Removes a file the transaction created. Windows refuses to delete an
+        executable a process is running, even to LocalSystem, but lets it be
+        renamed. In a fresh standalone InstallRoot (absent before the
+        transaction) a hook process the failed install already started keeps
+        defenseclaw-hook.exe open while registered hooks fire, so the restore
+        failed with Access denied, kept the transaction pending and every
+        service stopped (GAP-1304). There the file is renamed aside in its own
+        folder: no new hook starts from it, the restore goes on, and the
+        InstallRoot removal after it waits out the last holder. Anywhere else
+        the refusal stands.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$InFreshInstallRoot
+    )
+    try {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        return
+    }
+    catch {
+        if (-not $InFreshInstallRoot) {
+            throw
+        }
+        $failure = $_
+    }
+    $aside = $Path + '.rollback-' + [Guid]::NewGuid().ToString('N')
+    try {
+        [IO.File]::Move($Path, $aside)
+    }
+    catch {
+        throw $failure
+    }
+    try {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $aside -Force -ErrorAction Stop
+    }
+    catch {
+        # Still running: the InstallRoot removal takes it once it exits.
+        $null = $_
+    }
+}
+
 function Restore-DefenseClawTransaction {
     param(
         [Parameter(Mandatory)][string]$SnapshotPath,
@@ -15458,6 +15501,14 @@ function Restore-DefenseClawTransaction {
         $null -ne $managedHooksLifecycleRecovery -and
         [string]$managedHooksLifecycleRecovery.state -ceq 'adopted'
     )
+    # A standalone transaction that created InstallRoot removes it whole once
+    # the restore is done (Complete-DefenseClawInstallRollbackIntent).
+    $freshInstallRootProperty = $snapshot.PSObject.Properties['install_root_created']
+    $freshStandaloneInstallRoot = [bool](
+        (Test-DefenseClawStandaloneProfile) -and
+        $null -ne $freshInstallRootProperty -and
+        [bool]$freshInstallRootProperty.Value
+    )
     if ($Layout.ContainsKey('ManagedHooksLifecycleJournalPath') -and
         $null -eq $unboundLegacyLifecyclePreimage -and
         (Microsoft.PowerShell.Management\Test-Path `
@@ -15590,7 +15641,9 @@ function Restore-DefenseClawTransaction {
             }
         }
         elseif (Microsoft.PowerShell.Management\Test-Path -LiteralPath $destination -PathType Leaf) {
-            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $destination -Force
+            Remove-DefenseClawTransactionCreatedFile `
+                -Path $destination `
+                -InFreshInstallRoot:($inInstall -and $freshStandaloneInstallRoot)
         }
     }
     if (Test-DefenseClawStandaloneProfile) {
