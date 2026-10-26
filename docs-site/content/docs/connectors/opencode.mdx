@@ -67,7 +67,7 @@ Setup also writes a connector-scoped token sidecar under `~/.defenseclaw/hooks`.
 
 ## On a managed computer
 
-The per-user `setup`, `status` and `guardrail` commands on this page refuse on a standalone enterprise Linux or macOS host. An administrator adds `guardrail.connectors.opencode: {}` to the managed `config.yaml`, applies it through the [enterprise lifecycle](/docs/enterprise/operate/lifecycle#change-the-config), and runs `enterprise policy verify`. DefenseClaw registers its plugin in OpenCode's managed config (`/etc/opencode/opencode.json` on Linux). Set `guardrail.connectors.opencode.enabled: false` in the managed config to turn it off. [Machine policy](/docs/enterprise/configure/machine-policy#managed-opencode-plugin) describes the route.
+The per-user `setup`, `status` and `guardrail` commands on this page refuse on a standalone enterprise host, on Windows too. An administrator adds `guardrail.connectors.opencode: {}` to the managed `config.yaml`, applies it through the [enterprise lifecycle](/docs/enterprise/operate/lifecycle#change-the-config), and runs `enterprise policy verify`. DefenseClaw registers its plugin in OpenCode's managed config (`/etc/opencode/opencode.json` on Linux; on Windows `C:\ProgramData\opencode\opencode.json`, whose plugin entry points at `C:\Program Files\Cisco\DefenseClaw\share\opencode\defenseclaw.js`). The per-user plugin file in [Files it changes](#files-it-changes) is not used there. Set `guardrail.connectors.opencode.enabled: false` in the managed config to turn it off. [Machine policy](/docs/enterprise/configure/machine-policy#managed-opencode-plugin) describes the route.
 
 ## Turn it off
 
