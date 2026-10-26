@@ -2701,12 +2701,27 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 				t.Errorf("generated config survived teardown: %v", err)
 			}
-			// Connector teardown only unwires the agent config. Setup owns these
-			// managed sidecars until the enclosing lifecycle removes them.
-			for _, name := range []string{filepath.Base(tokenPath), hookConfigSidecarName} {
-				if _, err := os.Stat(filepath.Join(dataDir, "hooks", name)); err != nil {
-					t.Errorf("shared sidecar %s removed by connector teardown: %v", name, err)
+			// A per-user teardown revokes the connector's own hook token once
+			// VerifyClean proves the registration gone (58ed56d79d); the
+			// sidecar retries a revocation that did not finish
+			// (HookAPITokenRevocationPending). A managed teardown keeps it for
+			// the machine lifecycle. The shared hook config sidecar stays until
+			// the enclosing lifecycle removes it.
+			_, tokenErr := os.Stat(tokenPath)
+			if opts.ManagedEnterprise {
+				if tokenErr != nil {
+					t.Errorf("managed teardown removed the %s hook token: %v", connectorName, tokenErr)
 				}
+			} else {
+				if !errors.Is(tokenErr, os.ErrNotExist) {
+					t.Errorf("per-user teardown left the %s hook token: %v", connectorName, tokenErr)
+				}
+				if err := HookAPITokenRevocationPending(opts, connectorName); err != nil {
+					t.Errorf("hook token revocation still pending after teardown: %v", err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(dataDir, "hooks", hookConfigSidecarName)); err != nil {
+				t.Errorf("shared sidecar %s removed by connector teardown: %v", hookConfigSidecarName, err)
 			}
 		})
 	}
