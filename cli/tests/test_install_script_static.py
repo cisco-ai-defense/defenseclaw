@@ -1474,12 +1474,16 @@ _AGENT_SCAN = ("loaded_plugin_agents", "process_argv", "process_cwd", "process_p
                "assert_no_loaded_plugin_agents")
 
 
-def _agent_scan(home: Path, path: list[Path]) -> subprocess.CompletedProcess[str]:
+def _agent_scan(home: Path, path: list[Path], pids: list[int] | None = None,
+                **env: str) -> subprocess.CompletedProcess[str]:
     # The installer's agent check, as the upgrade runs it before the gateway stops.
+    # pids: the only processes it lists (GAP-1309): a real OpenCode or Amp the
+    # same account runs on the test host is not one of the test's processes.
+    listed = "" if pids is None else "ps() { printf '%s\\n' " + " ".join(map(str, pids)) + "; }\n"
     return subprocess.run(
         [BASH, "-c", 'set -euo pipefail\ndie() { printf "%s\\n" "$*" >&2; exit 1; }\n'
-         + _install_sh_functions(*_AGENT_SCAN) + "assert_no_loaded_plugin_agents\necho scan-passed\n"],
-        env={"HOME": str(home), "PATH": ":".join([*map(str, path), "/usr/bin", "/bin"])},
+         + _install_sh_functions(*_AGENT_SCAN) + listed + "assert_no_loaded_plugin_agents\necho scan-passed\n"],
+        env={"HOME": str(home), "PATH": ":".join([*map(str, path), "/usr/bin", "/bin"]), **env},
         capture_output=True, text=True, timeout=60, check=False,
     )
 
@@ -1586,6 +1590,7 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
     assert upgrade_guard < source.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway"', upgrade_guard)
 
     sleep, home, path = shutil.which("sleep", path="/usr/bin:/bin"), tmp_path / "home", []
+    env: dict[str, str] = {}
     node = _program(tmp_path / "nodejs" / "bin" / "node", BASH)
     script_body = "sleep 60\n"
 
@@ -1703,7 +1708,7 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
         if case == "opencode replaced while running":
             program.unlink()
             _program(program, sleep)
-        result = _agent_scan(home, path)
+        result = _agent_scan(home, path, [proc.pid], **env)
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
@@ -1760,6 +1765,33 @@ def test_live_agent_identity_uses_only_an_exact_entry(tmp_path: Path, case: str,
     assert result.stdout == want, (case, result.stdout, result.stderr)
 
 
+@pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="reads /proc/<pid>/exe")
+def test_agent_scan_tests_list_only_their_own_processes(tmp_path: Path) -> None:
+    # GAP-1309: the scan lists every process of the account, so a real nvm
+    # OpenCode this user runs on the test host failed expected-pass tests.
+    # Here such an agent runs beside an unrelated process: the scan the tests
+    # use sees only the process it is given.
+    home = tmp_path / "home"
+    runtime = home / ".nvm" / "versions" / "node" / "v22.0.0" / "bin"
+    entry = runtime.parent / "lib" / "node_modules" / "opencode-ai" / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("sleep 60\n", encoding="utf-8")
+    node = _program(runtime / "node", BASH)
+    (runtime / "opencode").symlink_to(entry)
+    agent = _started([str(node), str(entry)], node)
+    sleep = shutil.which("sleep", path="/usr/bin:/bin")
+    other = _started([sleep, "60"], Path(sleep))
+    try:
+        alone = _agent_scan(home, [], [other.pid])
+        seen = _agent_scan(home, [], [agent.pid])
+    finally:
+        for proc in (agent, other):
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+    assert alone.returncode == 0 and "scan-passed" in alone.stdout, (alone.stdout, alone.stderr)
+    assert seen.returncode == 1 and f"OpenCode (PID {agent.pid})" in seen.stderr, (seen.stdout, seen.stderr)
+
+
 @pytest.mark.skipif(shutil.which("node") is None or not Path("/proc/self/exe").exists(), reason="runs Node, reads /proc")
 @pytest.mark.parametrize("manifest", [
     '{"author":{"name":"opencode-ai"},"name":"innocent-tool"}',
@@ -1776,7 +1808,7 @@ def test_manifest_names_never_establish_a_live_entry(tmp_path: Path, manifest: s
     node = Path(shutil.which("node")).resolve()
     proc = _started([str(node), str(script)], node)
     try:
-        result = _agent_scan(home, [])
+        result = _agent_scan(home, [], [proc.pid])
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
@@ -1840,7 +1872,7 @@ def test_a_real_node_option_value_naming_opencode_ai_does_not_refuse(tmp_path: P
     script = launcher if case.startswith("agent") else worker
     proc = _started([str(node), *options, str(script)], node)
     try:
-        result = _agent_scan(home, [])
+        result = _agent_scan(home, [], [proc.pid])
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
@@ -1873,7 +1905,7 @@ def test_only_the_installed_node_entry_is_a_live_agent(tmp_path: Path, script_na
     launcher.symlink_to(package / "bin" / "opencode")
     proc = _started([str(node), str(package / script_name)], node)
     try:
-        result = _agent_scan(home, [])
+        result = _agent_scan(home, [], [proc.pid])
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
@@ -1996,7 +2028,8 @@ def test_a_refused_upgrade_leaves_no_staged_release(tmp_path: Path) -> None:
     # failed check, a cancel) now drops what it staged and the uv files it
     # added; from the swap on, its own undo does (drop_staging).
     source = INSTALL_SH.read_text(encoding="utf-8")
-    exit_trap = next(line for line in source.splitlines() if line.startswith("trap ") and line.endswith("' EXIT") and "LOCK_DIR" in line)
+    # The EXIT trap gives back the locks that are still this run's (release_locks).
+    exit_trap = next(line for line in source.splitlines() if line.startswith("trap ") and line.endswith("' EXIT") and "release_locks" in line)
     staged = source.index('mkdir -p "${STAGING}/bin"\nUNSWAPPED_STAGE=1\n')
     assert source.index(exit_trap) < staged
     assert staged < source.index("assert_no_loaded_plugin_agents\nWAS_RUNNING=false") < source.index('UNSWAPPED_STAGE=""\n')
@@ -2013,8 +2046,9 @@ def test_a_refused_upgrade_leaves_no_staged_release(tmp_path: Path) -> None:
             "set -euo pipefail\n"
             'err() { echo "x $*" >&2; }\ndie() { err "$@"; exit 1; }\n'
             f'DEFENSECLAW_HOME="{home}" STAGING="{home}/.staging" LOCK_DIR="{lock}" BIN_DIR="{tmp_path}/bin" SELF_TMP=""\n'
-            'UV_DIR_NEW=1 UV_INSTALLED=""\n'
-            + _install_sh_functions("drop_unswapped_stage")
+            'UV_DIR_NEW=1 UV_INSTALLED="" LOCK_STARTED=1 DATA_LOCK_DIRS=() MADE_DATA_DIRS=()\n'
+            'echo $$ > "${LOCK_DIR}/pid"; echo 1 > "${LOCK_DIR}/started"\n'
+            + _install_sh_functions("drop_unswapped_stage", "lock_is_ours", "release_locks")
             + exit_trap + "\nUNSWAPPED_STAGE=1\n"
             + ('UNSWAPPED_STAGE=""\n' if swapped else "")
             + 'die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: OpenCode (PID 1)"\n'
