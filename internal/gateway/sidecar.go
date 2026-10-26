@@ -7434,10 +7434,9 @@ func connectorDroppable(registry *connector.Registry, name string) bool {
 // (connector.RetiredConnector). A cleanup it cannot finish or verify is
 // returned with the lock entry kept, the way a registered connector's failed
 // teardown is: the caller keeps the name (active roster or lock) so a later
-// boot retries it. A removed connector (OpenHands, OmniGent; until 1.1) keeps
-// its lock entry even then: its teardown changes only its hook script and
-// tokens, and clearing its entry is a no-op. Any other name only loses
-// DefenseClaw's lock state (dropUnregisteredConnectorState).
+// boot retries it. OpenHands and OmniGent (until 1.1) never fail: their
+// teardown removes what DefenseClaw wrote and lists the rest. Any other name
+// only loses DefenseClaw's lock state (dropUnregisteredConnectorState).
 //
 // opts is retiredConnectorOpts: the data directory and the configured
 // connector workspace, where a workspace-pinned older setup registered its
@@ -7460,18 +7459,26 @@ func retireOrDropUnregisteredConnector(ctx context.Context, registry *connector.
 		return fmt.Errorf("retired connector %s left state: %w; %s", retired.Name(), err, removedConnectorDocHint)
 	}
 	if err := clearLock(dataDir, retired.Name()); err != nil {
-		return fmt.Errorf("clear hook contract lock for retired connector %s: %w", retired.Name(), err)
+		if !connector.IsRemovedConnector(retired.Name()) {
+			return fmt.Errorf("clear hook contract lock for retired connector %s: %w", retired.Name(), err)
+		}
+		// until 1.1: an OpenHands/OmniGent lock entry guards nothing; a
+		// leftover one never keeps the name for a retry.
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: clear hook contract lock for %s: %v\n", retired.Name(), err)
 	}
 	RemoveConnectorRulePackOverrides(retired.Name())
 	return nil
 }
 
-// logRemovedConnectorLeftovers logs one line for each thing a removed
-// connector's teardown leaves for the user to remove by hand (an agent config
-// that still names its hook or policy module, its stub, a kept token), with
+// logRemovedConnectorLeftovers logs the one removal notice for OpenHands or
+// OmniGent, then one line for each thing its teardown could not remove, with
 // the step, so the upgrade log names every such file. until 1.1.
 func logRemovedConnectorLeftovers(name string, opts connector.SetupOpts) {
-	leftovers, _ := connector.RemovedConnectorLeftovers(name, opts)
+	leftovers, removed := connector.RemovedConnectorLeftovers(name, opts)
+	if !removed {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] %s\n", connector.RemovedConnectorNotice)
 	for _, left := range leftovers {
 		fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s left %s: %s; to remove it: %s\n", name, left.Path, left.What, left.Step)
 	}

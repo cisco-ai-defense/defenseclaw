@@ -2973,95 +2973,68 @@ def test_a_signature_that_does_not_verify_stops_the_install(tmp_path: Path) -> N
 # ── 1.0.4 (T8 smoke review loop round 3) ────────────────────────────────────
 
 
-def test_an_upgrade_finishes_the_removed_connector_cleanup_or_fails(tmp_path: Path) -> None:
-    # A gateway start that brought the other connectors up only logged a
-    # removed connector (OpenHands, OmniGent) whose teardown it could not
-    # finish, and the upgrade exited 0. The installer now checks each: one not
-    # done is torn down again, and one still not done is named with its cause
-    # and the install exits 3.
+def test_an_upgrade_removes_what_defenseclaw_wrote_for_openhands_and_omnigent_and_never_fails(
+    tmp_path: Path,
+) -> None:
+    # 1.0.5: when something of OpenHands or OmniGent is still here, the
+    # installer runs their gateway teardown (an upgrade of a stopped gateway
+    # does not start it). The teardown never blocks or fails the install;
+    # with nothing left, nothing runs.
     home = tmp_path / "dc"
     home.mkdir()
-    (home / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
     calls = tmp_path / "calls"
     gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_text(f'#!/bin/sh\necho "$*" >> "{calls}"\nexit 1\n', encoding="utf-8")
+    gateway.chmod(0o755)
+    python = venv / "bin" / "python"
+    script = tmp_path / "finish.sh"
+    script.write_text(
+        'set -euo pipefail\nerr() { echo "err: $*" >&2; }\n'
+        + _install_sh_functions("finish_retired_connector_cleanup")
+        + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" VENV="{venv}" LOG="{tmp_path / "log"}" VERSION=1.0.5\n'
+        + "finish_retired_connector_cleanup\n",
+        encoding="utf-8",
+    )
 
-    def run(dirty: dict[str, str]) -> subprocess.CompletedProcess[str]:
-        # dirty: connector -> "once" (clean after a teardown) or "always".
-        state = tmp_path / "state"
-        state.mkdir(exist_ok=True)
-        for name, how in dirty.items():
-            (state / name).write_text(how, encoding="utf-8")
-        gateway.write_text(
-            "#!/bin/sh\n"
-            f'echo "$*" >> "{calls}"\n'
-            "name=$4; action=$2\n"
-            f'state="{state}/$name"\n'
-            '[ -f "$state" ] || exit 0\n'
-            'if [ "$action" = teardown ]; then\n'
-            '  [ "$(cat "$state")" = once ] && rm -f "$state"\n'
-            "  exit 1\n"
-            "fi\n"
-            'echo "  X $name: $name cleanup incomplete: /h/openhands-hook.sh is gone, but /w/.openhands/hooks.json still runs it. To finish: run defenseclaw-gateway connector teardown --connector $name" >&2\n'
-            "exit 1\n",
-            encoding="utf-8",
-        )
-        gateway.chmod(0o755)
-        script = tmp_path / "finish.sh"
-        script.write_text(
-            'set -euo pipefail\nerr() { echo "err: $*" >&2; }\n'
-            + _install_sh_functions("finish_retired_connector_cleanup")
-            + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" LOG="{tmp_path / "log"}" VERSION=1.0.4\n'
-            + "finish_retired_connector_cleanup\n",
-            encoding="utf-8",
-        )
+    def run(leftovers: bool) -> subprocess.CompletedProcess[str]:
+        python.write_text(f"#!/bin/sh\nexit {0 if leftovers else 1}\n", encoding="utf-8")
+        python.chmod(0o755)
         if calls.exists():
             calls.unlink()
         return _run([str(script)], tmp_path)
 
-    verify = f"connector verify --connector {{}} --data-dir {home}"
+    unconfigured = run(True)
+    assert unconfigured.returncode == 0 and not calls.exists(), unconfigured.stderr
+
+    (home / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    clean = run(False)
+    assert clean.returncode == 0 and not calls.exists(), clean.stderr
+
+    left = run(True)
+    assert left.returncode == 0, left.stderr
     teardown = f"connector teardown --connector {{}} --data-dir {home}"
+    assert calls.read_text(encoding="utf-8").splitlines() == [teardown.format("openhands"), teardown.format("omnigent")]
 
-    clean = run({})
-    assert clean.returncode == 0, clean.stderr
-    assert calls.read_text(encoding="utf-8").splitlines() == [verify.format("openhands"), verify.format("omnigent")]
-
-    healed = run({"omnigent": "once"})
-    assert healed.returncode == 0, healed.stderr
-    assert calls.read_text(encoding="utf-8").splitlines() == [
-        verify.format("openhands"),
-        verify.format("omnigent"),
-        teardown.format("omnigent"),
-        verify.format("omnigent"),
-    ]
-
-    stuck = run({"openhands": "always"})
-    assert stuck.returncode == 1
-    assert "could not finish removing the openhands connector" in stuck.stderr
-    assert "/w/.openhands/hooks.json still runs it" in stuck.stderr
-    assert "To finish: run defenseclaw-gateway connector teardown --connector openhands" in stuck.stderr
-    assert "omnigent" not in stuck.stderr
-
-
-
-# ── 1.0.4 (T8 smoke review loop round 2 of the Hermes/upgrade class) ────────
+    gateway.unlink()
+    missing = run(True)
+    assert missing.returncode == 0 and not missing.stderr, missing.stderr
 
 
 @pytest.mark.parametrize("was_running", ["true", "false"])
-def test_every_upgrade_checks_the_removed_connectors_whatever_the_gateway_state(
+def test_every_upgrade_runs_the_openhands_omnigent_cleanup_and_it_never_sets_exit_3(
     tmp_path: Path, was_running: str
 ) -> None:
-    # An upgrade of a stopped gateway skipped the removed-connector check
-    # (it ran only when WAS_RUNNING), so a 1.0.3 OpenHands or OmniGent hook
-    # could stay registered unsealed and the upgrade exited 0.
     text = INSTALL_SH.read_text(encoding="utf-8")
     start = text.index("finish_swap\n# until 1.1")
     main = text[start : text.index("report_retired_connector_leftovers\n", start)]
     script = tmp_path / "main.sh"
     script.write_text(
         "set -euo pipefail\nfinish_swap() { :; }\n"
-        'finish_retired_connector_cleanup() { echo "checked" >&2; return 1; }\n'
+        'finish_retired_connector_cleanup() { echo "checked" >&2; }\n'
         f"PREV_VERSION=1.0.3 WAS_RUNNING={was_running} START_RC=0\n" + main + 'echo "START_RC=${START_RC}"\n',
         encoding="utf-8",
     )
@@ -3069,36 +3042,7 @@ def test_every_upgrade_checks_the_removed_connectors_whatever_the_gateway_state(
     result = _run([str(script)], tmp_path)
 
     assert result.returncode == 0, result.stderr
-    assert "checked" in result.stderr and "START_RC=3" in result.stdout, result.stdout + result.stderr
-
-
-def test_the_removed_connector_check_fails_loudly_without_the_gateway_and_skips_an_unconfigured_install(
-    tmp_path: Path,
-) -> None:
-    # The check returned 0 when the gateway binary was not there, so nothing
-    # proved the removed connectors' hooks were sealed. With no config there
-    # was never a connector, and the gateway cannot read one.
-    home = tmp_path / "dc"
-    home.mkdir()
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    script = tmp_path / "finish.sh"
-    script.write_text(
-        'set -euo pipefail\nerr() { echo "err: $*" >&2; }\n'
-        + _install_sh_functions("finish_retired_connector_cleanup")
-        + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" LOG="{tmp_path / "log"}" VERSION=1.0.4\n'
-        + "finish_retired_connector_cleanup\n",
-        encoding="utf-8",
-    )
-
-    unconfigured = _run([str(script)], tmp_path)
-    assert unconfigured.returncode == 0 and not unconfigured.stderr, unconfigured.stderr
-
-    (home / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
-    missing = _run([str(script)], tmp_path)
-    assert missing.returncode == 1
-    assert "could not check that the removed OpenHands and OmniGent connectors are blocked" in missing.stderr
-    assert f"{bin_dir}/defenseclaw-gateway is missing" in missing.stderr
+    assert "checked" in result.stderr and "START_RC=0" in result.stdout, result.stdout + result.stderr
 
 
 # ── 1.0.4 (T8 smoke review loop round 4: GAP-0878, GAP-0899) ────────────────

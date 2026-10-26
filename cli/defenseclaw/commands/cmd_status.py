@@ -711,16 +711,13 @@ def _status_refused_detail(cfg, client, public) -> str:
 
 
 def _print_removed_connector_cleanup(cfg) -> None:
-    """until 1.1: name a removed connector that left things to remove by hand."""
-    from defenseclaw.removed_connectors import leftovers
+    """until 1.1: one row when OpenHands or OmniGent left something on this host (information)."""
+    from defenseclaw.removed_connectors import NOTICE, leftovers
 
     workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
-    for left in leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace):
-        _status_row(
-            "Cleanup",
-            ux._style(f"{left.label} was removed in 1.0.4; {len(left.items)} item(s) to remove by hand", fg="yellow")
-            + ux.dim(" (steps: defenseclaw doctor)"),
-        )
+    if found := leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace):
+        count = sum(len(left.items) for left in found)
+        _status_row("Removed", NOTICE + ux.dim(f" ({count} item(s) left; steps: defenseclaw doctor)"))
 
 
 def _live_gateway_pid(cfg) -> int:
@@ -2089,7 +2086,7 @@ def _status_payload(app) -> dict:
 
     workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
     if left := [item.as_json() for item in leftovers(str(cfg.data_dir or ""), workspace=workspace)]:
-        # until 1.1: what the removed OpenHands/OmniGent teardown left.
+        # until 1.1: what the OpenHands/OmniGent teardown could not remove.
         payload["removed_connector_cleanup"] = left
 
     if app.store:

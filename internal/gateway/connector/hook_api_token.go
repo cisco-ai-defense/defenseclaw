@@ -595,8 +595,9 @@ func revokePerUserHookAPIToken(opts SetupOpts, connectorName string) error {
 // credential that is still on disk (or its temporary copy) after a teardown:
 // its revocation did not finish, and the credential still authenticates to
 // the connector's hook route. Managed deployments revoke credentials at the
-// machine lifecycle boundary, and a connector 1.0.4 removed keeps its token
-// on purpose (removed.go keepHookToken), so neither is pending here.
+// machine lifecycle boundary, and the OpenHands/OmniGent teardown removes
+// their tokens itself and never fails on one (removed.go), so neither is
+// pending here.
 func HookAPITokenRevocationPending(opts SetupOpts, connectorName string) error {
 	if opts.ManagedEnterprise || strings.TrimSpace(opts.DataDir) == "" || IsRemovedConnector(connectorName) {
 		return nil
@@ -616,10 +617,9 @@ func HookAPITokenRevocationPending(opts SetupOpts, connectorName string) error {
 }
 
 // LoadHookAPITokens loads connector-scoped hook API tokens for known connector
-// names. Missing tokens are omitted, and so are the tokens of the connectors
-// 1.0.4 removed: an upgraded host keeps the OpenHands one only so old hooks
-// reach the route that blocks them (removed.go keepHookToken); it
-// authenticates nothing.
+// names. Missing tokens are omitted, and so is a token OpenHands or OmniGent
+// left that their teardown has not removed yet (removed.go): it authenticates
+// nothing.
 func LoadHookAPITokens(dataDir string, connectorNames []string) (map[string]string, error) {
 	out := map[string]string{}
 	for _, name := range connectorNames {

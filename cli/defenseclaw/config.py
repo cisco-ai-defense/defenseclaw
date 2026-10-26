@@ -7444,8 +7444,8 @@ def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
         changed = True
     if changed:
         logging.warning(
-            "until 1.1: removed OpenHands/OmniGent connector settings from loaded config; "
-            "run defenseclaw migrate"
+            "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it. "
+            "Their settings were dropped; run defenseclaw migrate"
         )
 
 

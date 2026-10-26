@@ -4056,38 +4056,26 @@ function Get-OtherBuildInstalled([string]$StagedGateway) {
     return @{ Installed = (& $name $installed); Staged = (& $name $staged) }
 }
 
-# until 1.1: the gateway tears the removed connectors (OpenHands, OmniGent)
-# down when it starts, but a start that brings the other connectors up only
-# logs one it could not finish, and an upgrade of a stopped gateway does not
-# start it. Check each here: one not done is torn down again, and one still
-# not done (an agent config that runs a hook DefenseClaw could not put the
-# sealed stub under) is named with its cause and step, and the install exits
-# 3, not 0. Without a config nothing was set up and the gateway cannot read
-# one, so there is nothing to check.
+# until 1.1: the gateway removes what an older setup wrote for OpenHands and
+# OmniGent when it starts, but an upgrade of a stopped gateway does not start
+# it. When something of theirs is still here, run that teardown now and print
+# the one removal notice with what it could not remove. It never fails and
+# blocks nothing: DefenseClaw no longer guards them. Without a config nothing
+# was set up.
 function Complete-RetiredConnectorCleanup {
-    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -and -not $env:DEFENSECLAW_CONFIG) { return $true }
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -and -not $env:DEFENSECLAW_CONFIG) { return }
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
-    if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) {
-        Write-Err "DefenseClaw $Ver could not check that the removed OpenHands and OmniGent connectors are blocked: $gateway is missing"
-        return $false
-    }
+    $python = Join-Path $Venv "Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $gateway -PathType Leaf) -or -not (Test-Path -LiteralPath $python -PathType Leaf)) { return }
     $ErrorActionPreference = "Continue"
-    $clean = $true
+    $probe = "import sys`nfrom defenseclaw.removed_connectors import leftovers`nsys.exit(0 if leftovers(sys.argv[1]) else 1)"
+    if ((Invoke-Native $python @("-I", "-c", $probe, $DataDir) -Quiet) -ne 0) { return }
     foreach ($name in @("openhands", "omnigent")) {
-        $verify = @("connector", "verify", "--connector", $name, "--data-dir", $DataDir)
-        if ((Invoke-Native $gateway $verify -Quiet) -eq 0) { continue }
         [void](Invoke-Native $gateway @("connector", "teardown", "--connector", $name, "--data-dir", $DataDir) -Quiet)
-        # "$_" keeps only the text of a stderr line; Windows PowerShell 5.1
-        # formats the record with its script position otherwise.
-        $global:LASTEXITCODE = -1
-        try { $why = @(& $gateway @verify 2>&1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) -join " " } catch { $why = "" }
-        if ($LASTEXITCODE -eq 0) { continue }
-        $why = $why -replace ("^(" + [char]0x2717 + "|X)\s+"), ""
-        if (-not $why) { $why = "run 'defenseclaw-gateway connector verify --connector $name' for the cause" }
-        Write-Err "DefenseClaw $Ver could not finish removing the $name connector, so its agent may not be blocked: $why"
-        $clean = $false
     }
-    return $clean
+    $report = "import sys`nfrom defenseclaw.removed_connectors import leftovers`nfor left in leftovers(sys.argv[1]):`n    print('\n'.join(left.lines()))"
+    try { $notes = @(& $python -I -c $report $DataDir 2>$null) } catch { $notes = @() }
+    if ($notes) { Write-Host ""; $notes | ForEach-Object { Write-Host $_ } }
 }
 
 # A gateway that was not running before an upgrade or repair is not started,
@@ -5131,9 +5119,9 @@ function Invoke-Install {
     Remove-LifecycleManifest
     Remove-DeveloperFiles
     try { [Console]::TreatControlCAsInput = $false } catch { }
-    # until 1.1: an upgrade or repair never ends with a removed connector's
-    # hook left unsealed, whether or not its gateway was running before it.
-    if ($PrevVersion -and -not (Complete-RetiredConnectorCleanup)) { $startRc = 3 }
+    # until 1.1: an upgrade or repair removes what an older setup wrote for
+    # OpenHands and OmniGent, whether or not its gateway was running before it.
+    if ($PrevVersion) { Complete-RetiredConnectorCleanup }
     if ($PrevVersion -and -not $startNew -and -not (Complete-StoppedConnectorReconcile)) { $startRc = 3 }
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }
