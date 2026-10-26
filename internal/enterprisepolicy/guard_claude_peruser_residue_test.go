@@ -48,17 +48,16 @@ func claudeSettingsWith(t *testing.T, handlers ...map[string]any) string {
 	return string(data)
 }
 
-// GAP-0587, GAP-1540, review R1-1: an entry with the exact shape of
-// DefenseClaw's older per-user Claude Code hook in the account's
-// ~/.claude/settings.json is never read as DefenseClaw's own on a
-// machine-policy connector. Its launcher sits in the user's home, which the
-// user and any agent can write, so an agent that writes its own program
-// there and adds the entry after Setup migrated the account must still be
-// blocked. The guard only names such an entry as an older DefenseClaw hook
-// (its own reason and advice); managed Setup and the guardian remove it.
-func TestGuardBlocksDefenseClawPerUserClaudeHookShapeAndNamesIt(t *testing.T) {
-	// A poisoned SystemRoot must neither name the cmd.exe guard's identity
-	// nor change it: cmd.exe is the one the system directory API reports.
+// GAP-1540, GAP-1852 (LEAD DECISION 03:34): ownership is proven by
+// identity, never by shape. An entry with the exact shape of DefenseClaw's
+// older per-user Claude Code hook in the account's ~/.claude/settings.json
+// runs a launcher in the user's own home, which the user and any agent can
+// write, so it is a foreign hook like any other: it blocks, and its finding
+// and denial are the plain foreign ones (an attacker can plant that shape, so
+// it must not get a benign-sounding label). Managed Setup and the guardian
+// migrate the real old entries out before the guard enforces.
+func TestGuardReadsDefenseClawPerUserClaudeHookShapeAsForeign(t *testing.T) {
+	// A poisoned SystemRoot must not change how the cmd.exe guard reads.
 	t.Setenv("SystemRoot", `D:\agent-root`)
 	newReq := func(t *testing.T) GuardRequest {
 		req := guardRequest(t, ConnectorCopilot, config.ForeignHooksRemove)
@@ -72,44 +71,36 @@ func TestGuardBlocksDefenseClawPerUserClaudeHookShapeAndNamesIt(t *testing.T) {
 		return req
 	}
 	settings := func(req GuardRequest) string { return filepath.Join(req.Home, ".claude", "settings.json") }
-
-	t.Run("exact product shape re-added after the migration still blocks", func(t *testing.T) {
-		req := newReq(t)
-		for name, handler := range residueClaudeHandlers(req.Home) {
-			writeFile(t, settings(req), claudeSettingsWith(t, handler))
-			decision := EvaluateForeignHooks(req)
-			if !decision.Deny || len(decision.Findings) != 1 {
-				t.Fatalf("%s: a user-writable launcher was trusted as DefenseClaw's own hook: %+v", name, decision)
-			}
-			if got := decision.Findings[0].Reason; got != perUserClaudeReason {
-				t.Fatalf("%s: finding reason = %q, want %q", name, got, perUserClaudeReason)
-			}
-			if !strings.HasPrefix(decision.Reason, "enterprise_foreign_hook_blocked: ") ||
-				!strings.Contains(decision.Reason, "still holds an older DefenseClaw per-user Claude Code hook") ||
-				!strings.Contains(decision.Reason, "managed Setup removes it") {
-				t.Fatalf("%s: denial does not name the older DefenseClaw hook: %s", name, decision.Reason)
-			}
+	assertForeign := func(t *testing.T, name string, decision GuardDecision) {
+		t.Helper()
+		if !decision.Deny || len(decision.Findings) != 1 {
+			t.Fatalf("%s: must block as a foreign hook: %+v", name, decision)
 		}
-	})
+		if got := decision.Findings[0].Reason; got != "" {
+			t.Fatalf("%s: finding reason = %q, want the plain foreign finding", name, got)
+		}
+		if !strings.HasPrefix(decision.Reason, "enterprise_foreign_hook_blocked: ") ||
+			!strings.Contains(decision.Reason, " defines a hook (digest sha256:") ||
+			!strings.Contains(decision.Reason, "Remove it, or ask your administrator to add the digest") ||
+			strings.Contains(decision.Reason, "older DefenseClaw") {
+			t.Fatalf("%s: denial is not the plain foreign-hook denial: %s", name, decision.Reason)
+		}
+	}
 
-	foreign := map[string]func(home string) map[string]any{
+	forms := map[string]func(home string) map[string]any{}
+	for name := range residueClaudeHandlers(`C:\x`) {
+		forms["product shape "+name] = func(home string) map[string]any { return residueClaudeHandlers(home)[name] }
+	}
+	for name, build := range map[string]func(home string) map[string]any{
 		"another launcher": func(home string) map[string]any {
 			return map[string]any{"type": "command", "command": home + `\tools\defenseclaw-hook.exe`, "args": []any{"hook", "--connector", "claudecode"}}
 		},
 		"edited argv": func(home string) map[string]any {
 			return map[string]any{"type": "command", "command": home + `\.local\bin\defenseclaw-hook.exe`, "args": []any{"hook", "--connector", "claudecode", "--api-addr", "10.0.0.1:1"}}
 		},
-		"command string with a tail": func(home string) map[string]any {
-			return map[string]any{"type": "command", "command": `"` + home + `\.local\bin\defenseclaw-hook.exe" hook --connector claudecode & calc.exe`}
-		},
 		"extra env key": func(home string) map[string]any {
 			h := residueClaudeHandlers(home)["exec"]
 			h["env"] = map[string]any{"PATH": `C:\evil`}
-			return h
-		},
-		"guard of another program": func(home string) map[string]any {
-			h := residueClaudeHandlers(home)["gateway guard"]
-			h["command"] = home + `\Downloads\defenseclaw-gateway.exe`
 			return h
 		},
 		"cmd guard run by the cmd.exe SystemRoot names": func(home string) map[string]any {
@@ -117,43 +108,14 @@ func TestGuardBlocksDefenseClawPerUserClaudeHookShapeAndNamesIt(t *testing.T) {
 			h["command"] = `D:\agent-root\System32\cmd.exe`
 			return h
 		},
-		"http hook": func(home string) map[string]any {
-			h := residueClaudeHandlers(home)["exec"]
-			h["type"] = "http"
-			return h
-		},
+	} {
+		forms["foreign "+name] = build
 	}
-	for name, build := range foreign {
-		t.Run("foreign "+name, func(t *testing.T) {
+	for name, build := range forms {
+		t.Run(name, func(t *testing.T) {
 			req := newReq(t)
 			writeFile(t, settings(req), claudeSettingsWith(t, build(req.Home)))
-			decision := EvaluateForeignHooks(req)
-			if !decision.Deny || len(decision.Findings) != 1 {
-				t.Fatalf("a foreign hook must still block: %+v", decision)
-			}
-			if decision.Findings[0].Reason == perUserClaudeReason {
-				t.Fatalf("a foreign hook was named an older DefenseClaw hook: %+v", decision.Findings[0])
-			}
+			assertForeign(t, name, EvaluateForeignHooks(req))
 		})
 	}
-
-	t.Run("product shape in another file is not named", func(t *testing.T) {
-		req := newReq(t)
-		writeFile(t, filepath.Join(req.WorkingDir, ".claude", "settings.json"), claudeSettingsWith(t, residueClaudeHandlers(req.Home)["exec"]))
-		decision := EvaluateForeignHooks(req)
-		if !decision.Deny || len(decision.Findings) != 1 || decision.Findings[0].Reason == perUserClaudeReason {
-			t.Fatalf("the per-user shape outside the account's Claude settings: %+v", decision)
-		}
-	})
-
-	t.Run("not on Windows", func(t *testing.T) {
-		req := newReq(t)
-		req.GOOS = "linux"
-		req.Policy.Route = RouteFor(ConnectorCopilot, "linux")
-		writeFile(t, settings(req), claudeSettingsWith(t, residueClaudeHandlers(req.Home)["exec"]))
-		decision := EvaluateForeignHooks(req)
-		if !decision.Deny || len(decision.Findings) != 1 || decision.Findings[0].Reason == perUserClaudeReason {
-			t.Fatalf("the Windows per-user forms elsewhere: %+v", decision)
-		}
-	})
 }

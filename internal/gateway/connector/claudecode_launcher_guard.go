@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
@@ -277,40 +276,6 @@ func claudeCodePreToolGuardFor(launcher, stable, installed string) string {
 // 1.0.0; ok is false for any other handler, an edited guard included.
 func ClaudeCodeLauncherGuardTarget(hook map[string]interface{}) (launcher string, hookArgs []string, ok bool) {
 	return claudeCodeLauncherGuardParts(hook)
-}
-
-// ClaudeCodePerUserHandlerOf reports whether hook is a Claude Code handler
-// that per-user Setup (1.0.0 to 1.0.4) wrote for the one-line launcher under
-// home, <home>\.local\bin\defenseclaw-hook.exe: the exec form (command =
-// launcher, args = hook --connector claudecode), the cmd.exe launcher guard,
-// or the PreToolUse guard run by the defenseclaw-gateway.exe beside that
-// launcher. Only those exact generated argv count; any edited argv, another
-// launcher or another guard program is not one. The caller checks the
-// handler's other keys. The managed guardian migrates these handlers out of
-// the user's Claude settings (GAP-0587). The shape does not make a handler
-// DefenseClaw's (the user can write the launcher): the foreign-hook guard
-// still blocks it and only names it as an older DefenseClaw hook (GAP-1540).
-func ClaudeCodePerUserHandlerOf(hook map[string]interface{}, home string) bool {
-	home = strings.TrimRight(strings.TrimSpace(home), `\/`)
-	if home == "" || (!isWindowsAbsolutePath(home) && !filepath.IsAbs(home)) {
-		return false
-	}
-	bin := home + `\.local\bin\`
-	launcher := normalizeWindowsHookExecutable(bin + windowsHookBinaryName)
-	want := []string{"hook", "--connector", "claudecode"}
-	command, _ := hook["command"].(string)
-	if normalizeWindowsHookExecutable(command) == launcher {
-		args, ok := claudeCodeNativeExecArguments(hook)
-		return ok && slices.Equal(args, want)
-	}
-	guarded, hookArgs, ok := claudeCodeLauncherGuardParts(hook)
-	if !ok || normalizeWindowsHookExecutable(guarded) != launcher || !slices.Equal(hookArgs, want) {
-		return false
-	}
-	if _, _, cmdGuard := claudeCodeCmdGuardParts(hook); cmdGuard {
-		return true
-	}
-	return normalizeWindowsHookExecutable(command) == normalizeWindowsHookExecutable(bin+windowsGatewayBinaryName)
 }
 
 // claudeCodeExecView returns a guarded handler as the exec-form handler it

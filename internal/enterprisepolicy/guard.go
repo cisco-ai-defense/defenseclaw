@@ -630,51 +630,6 @@ func (r GuardRequest) ownedHandler(handler any) bool {
 	return commands > 0
 }
 
-// perUserClaudeReason is the Reason of a finding that has the exact shape of
-// a per-user Claude Code handler DefenseClaw's 1.0.x Setup wrote on Windows.
-// It still blocks: the launcher sits in the user's own home, which the user
-// and every agent the user runs can write, so the shape alone does not prove
-// DefenseClaw wrote it. Managed Setup (/ensure) and each guardian pass remove
-// these entries (GAP-0587); the reason only tells the user that it is
-// leftover DefenseClaw state and how it goes away (GAP-1540).
-const perUserClaudeReason = "older DefenseClaw per-user hook"
-
-// perUserClaudeHandler reports a handler in the account's own Claude Code
-// user settings (<account home>\.claude\settings.json, under the home from
-// the system account database) that is exactly one of the per-user Claude
-// Code handlers DefenseClaw's 1.0.x per-user Setup wrote on Windows
-// (connector.ClaudeCodePerUserHandlerOf) and carries no key DefenseClaw does
-// not write. It names the finding (perUserClaudeReason); it never makes the
-// handler owned.
-func (r GuardRequest) perUserClaudeHandler(source hookSource, handler any) bool {
-	accountHome := strings.TrimSpace(r.AccountHome)
-	if r.goos() != "windows" || accountHome == "" || source.format != formatGrouped ||
-		!samePath(filepath.Clean(source.path), filepath.Join(accountHome, ".claude", "settings.json")) {
-		return false
-	}
-	var fields map[string]any
-	switch v := handler.(type) {
-	case *object:
-		fields = v.values
-	case map[string]any:
-		fields = v
-	default:
-		return false
-	}
-	for key, value := range fields {
-		switch {
-		case key == "type":
-			if kind, _ := value.(string); kind != "command" {
-				return false
-			}
-		case key == "command" || key == "args":
-		case !ownedHandlerKeys[key]:
-			return false
-		}
-	}
-	return connector.ClaudeCodePerUserHandlerOf(fields, accountHome)
-}
-
 // ownedExecArgs accepts only the managed invocation DefenseClaw renders:
 // hook --connector <name> --enterprise-managed [--event <event>]. Any other
 // argument list (an unmanaged invocation pointed at another gateway
@@ -954,11 +909,7 @@ func (s *guardScan) scanJSONHooks(source hookSource, data []byte) []Finding {
 				if req.ownedHandler(handler) {
 					continue
 				}
-				finding := s.handlerFinding(source, event, handler)
-				if finding.Reason == "" && req.perUserClaudeHandler(source, handler) {
-					finding.Reason = perUserClaudeReason
-				}
-				findings = append(findings, finding)
+				findings = append(findings, s.handlerFinding(source, event, handler))
 			}
 		}
 	}
@@ -1345,8 +1296,6 @@ func EvaluateForeignHooks(req GuardRequest) GuardDecision {
 			what = "adds a plugin"
 		}
 		what += " that cannot be approved (" + strings.TrimPrefix(first.Reason, unapprovableReason) + ")"
-	case first.Reason == perUserClaudeReason:
-		what = "still holds an older DefenseClaw per-user Claude Code hook"
 	}
 	decision.Deny = true
 	decision.Reason = fmt.Sprintf(
@@ -1360,9 +1309,6 @@ func EvaluateForeignHooks(req GuardRequest) GuardDecision {
 // blocking: remove it or have it approved by digest, unless it is one no
 // approval can cover.
 func foreignHookAdvice(connector, reason string) string {
-	if reason == perUserClaudeReason {
-		return "DefenseClaw's managed Setup removes it when it installs or repairs, and its guardian checks again every few minutes; ask your administrator to repair DefenseClaw if it stays. If it comes back after that, something else writes it: remove it."
-	}
 	if strings.HasPrefix(reason, unapprovableReason) {
 		return "Remove it: an approval must cover every file the entry runs, so it can name only readable regular files and variables DefenseClaw can resolve."
 	}
