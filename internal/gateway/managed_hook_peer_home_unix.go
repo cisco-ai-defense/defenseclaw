@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -308,6 +309,7 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 	if info, statErr := os.Stat(c.homesFile); statErr == nil {
 		savedAt = info.ModTime().UnixNano()
 	}
+	var fromFile []int
 	for key, last := range stored {
 		uid, err := strconv.Atoi(key)
 		if err != nil || uid < 0 {
@@ -364,8 +366,46 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 				c.firstSeen = make(map[int]int64)
 			}
 			c.firstSeen[uid] = firstSeen
+			if last.FirstSeen <= 0 {
+				fromFile = append(fromFile, uid)
+			}
 		}
 	}
+	// The file's mtime is the last time the earlier build wrote it for any
+	// uid, which can come after an account was deleted and created again
+	// (another account's first hook): the uid's last hook the agent ledger
+	// recorded before this gateway took over bounds it too, since an
+	// account created after that hook did not make it (GAP-1947).
+	if len(fromFile) > 0 {
+		if hooks := managedHookPeerLastHooks(); len(hooks) > 0 {
+			for _, uid := range fromFile {
+				if at, ok := hooks[uid]; ok && at > 0 && at < c.firstSeen[uid] {
+					c.firstSeen[uid] = at
+				}
+			}
+		}
+	}
+}
+
+// managedHookPeerLastHooks is, per uid, the newest last_seen of the agent
+// ledger's rows (Unix nanoseconds); nil while the ledger cannot be read.
+// Tests replace it.
+var managedHookPeerLastHooks = func() map[int]int64 {
+	records, ok := profileAgentLedger(inventory.AgentIdentityFilter{Retired: true})
+	if !ok {
+		return nil
+	}
+	hooks := make(map[int]int64, len(records))
+	for _, record := range records {
+		uid, err := strconv.Atoi(strings.TrimSpace(record.UserID))
+		if err != nil || uid < 0 || record.LastSeen.IsZero() {
+			continue
+		}
+		if at := record.LastSeen.UnixNano(); at > hooks[uid] {
+			hooks[uid] = at
+		}
+	}
+	return hooks
 }
 
 // saveHomesLocked writes homes and names to the store. c.mu is held; it
