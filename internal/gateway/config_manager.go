@@ -1041,9 +1041,30 @@ func (m *ConfigManager) setStartupSource(sourceName string, raw []byte) {
 	switch {
 	case err == nil && strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)):
 		m.appliedGeneration, m.appliedGenerationKnown = state.Generation, true
+	case err == nil && m.bootBytesFollowRecord(raw):
+		// A hand edit made while the gateway was stopped: the boot bytes
+		// came after the recorded generation, so that generation and the
+		// edit are both applied. Starting from 0 made the next saved write
+		// read as "generations 1-N applied together" and lost its writer
+		// (GAP-1338).
+		m.appliedGeneration, m.appliedGenerationKnown = state.Generation, true
 	case err == nil || errors.Is(err, fs.ErrNotExist):
 		m.appliedGeneration, m.appliedGenerationKnown = 0, true
 	}
+}
+
+// bootBytesFollowRecord reports whether config.yaml still holds the boot
+// bytes although the generation record names other bytes: they were written
+// after that record, by hand, rather than a writer committing a newer
+// generation between the boot read and the record read (that generation
+// stays pending for the startup reconcile). Managed installs keep the strict
+// rule: there only a lifecycle record makes bytes a known generation.
+func (m *ConfigManager) bootBytesFollowRecord(raw []byte) bool {
+	if cfg := m.Current(); cfg == nil || managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return false
+	}
+	current, err := os.ReadFile(m.path)
+	return err == nil && bytes.Equal(current, raw)
 }
 
 // noteAppliedGeneration records the generation of the applied raw bytes;

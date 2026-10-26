@@ -152,6 +152,58 @@ func TestConfigManagerStartupReconcileSkipsAnUnchangedSource(t *testing.T) {
 	}
 }
 
+// A hand edit made while the gateway was stopped keeps the recorded
+// generation as applied, so the next saved write is attributed to its own
+// writer instead of "generations 1-N applied together" (GAP-1338).
+func TestConfigManagerStartupAfterAStoppedHandEditKeepsTheRecordedGeneration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recorded uint64
+	for _, mode := range []string{"observe", "action"} {
+		next := bytes.Replace(raw, []byte("mode: observe"), []byte("mode: "+mode), 1)
+		next = append([]byte("# saved "+mode+"\n"), next...)
+		result, err := configwrite.ReplaceDocument(t.Context(), path, next, configwrite.Options{Actor: configwrite.ActorPrefixCLI + "tester", Reason: "config set"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorded = result.Generation
+	}
+	if recorded < 2 {
+		t.Fatalf("recorded generation = %d, want at least 2", recorded)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handEdited := append([]byte("# edited by hand while stopped\n"), saved...)
+	if err := os.WriteFile(path, handEdited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", nil)
+	mgr.setStartupSource(path, handEdited)
+	if !mgr.appliedGenerationKnown || mgr.appliedGeneration != recorded {
+		t.Fatalf("after a stopped hand edit: applied generation = %d (known %t), want %d",
+			mgr.appliedGeneration, mgr.appliedGenerationKnown, recorded)
+	}
+
+	// A managed install keeps the strict rule.
+	initial.DeploymentMode = "managed_enterprise"
+	managedMgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", nil)
+	managedMgr.setStartupSource(path, handEdited)
+	if managedMgr.appliedGeneration != 0 {
+		t.Fatalf("managed hand edit: applied generation = %d, want 0", managedMgr.appliedGeneration)
+	}
+}
+
 func TestConfigManagerReloadRejectsInvalidAndKeepsSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
