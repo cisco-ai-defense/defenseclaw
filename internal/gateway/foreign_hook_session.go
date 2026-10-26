@@ -508,23 +508,11 @@ func (foreignHookRemovalSource) forIdentity(dir, identity string) ([]enterprisep
 	return out, nil
 }
 
-// The guardian replaces the ledger while exchanges run. A read that meets
-// the replacement on Windows is tried again foreignHookRemovalsBusyRetries
-// times, foreignHookRemovalsBusyDelay apart, well within an exchange's
-// hold, instead of denying the call.
-const (
-	foreignHookRemovalsBusyRetries = 20
-	foreignHookRemovalsBusyDelay   = 5 * time.Millisecond
-)
-
+// readForeignHookRemovals reads the guardian's removals ledger. A read that
+// meets the guardian replacing it is tried again (readGuardianRecord), well
+// within an exchange's hold, instead of denying the call.
 func readForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {
-	for attempt := 0; ; attempt++ {
-		removals, err := readForeignHookRemovalsOnce(path)
-		if err == nil || attempt == foreignHookRemovalsBusyRetries || !foreignHookRemovalsReadBusy(err) {
-			return removals, err
-		}
-		time.Sleep(foreignHookRemovalsBusyDelay)
-	}
+	return readGuardianRecord(func() ([]enterprisepolicy.ForeignHookRemoval, error) { return readForeignHookRemovalsOnce(path) })
 }
 
 func readForeignHookRemovalsOnce(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {

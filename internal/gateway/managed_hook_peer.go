@@ -434,7 +434,42 @@ func readManagedHookRefusedSurfaces(path string) (managedHookLedger, error) {
 	return readManagedHookLedger(path)
 }
 
+// readManagedHookLedger reads a guardian record the gateway authorizes from
+// (the authorization ledger, the refused surfaces). A read that meets the
+// guardian replacing the record is tried again (readGuardianRecord). Before,
+// one such read failed the ledger, and the per-user credential index derived
+// from it was dropped until the next refresh, so every hook, session
+// exchange and OTLP call of every account was refused 401 for that second
+// (GAP-1711: five-TUI cold start on managed Windows).
 func readManagedHookLedger(path string) (managedHookLedger, error) {
+	return readGuardianRecord(func() (managedHookLedger, error) { return readManagedHookLedgerOnce(path) })
+}
+
+// The guardian replaces its records (and sets their ACL) while the gateway
+// reads them. On Windows a read that meets that moment fails with a sharing
+// or lock violation (guardianRecordReadBusy); it is tried again
+// guardianRecordBusyRetries times, guardianRecordBusyDelay apart, instead of
+// being taken as a missing or untrusted record. Every other error is
+// returned at once.
+const (
+	guardianRecordBusyRetries = 20
+	guardianRecordBusyDelay   = 5 * time.Millisecond
+)
+
+// guardianRecordReadBusy reports a busy read (replaceable in tests).
+var guardianRecordReadBusy = guardianRecordReplaceBusy
+
+func readGuardianRecord[T any](read func() (T, error)) (T, error) {
+	for attempt := 0; ; attempt++ {
+		record, err := read()
+		if err == nil || attempt == guardianRecordBusyRetries || !guardianRecordReadBusy(err) {
+			return record, err
+		}
+		time.Sleep(guardianRecordBusyDelay)
+	}
+}
+
+func readManagedHookLedgerOnce(path string) (managedHookLedger, error) {
 	if err := validateManagedGuardianAuthorization(path, "hook guardian authorization"); err != nil {
 		return managedHookLedger{}, err
 	}
