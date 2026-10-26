@@ -1517,6 +1517,17 @@ describe('edge API examples carry every response field (GAP-1632)', () => {
   });
 });
 
+describe('edge connector variables and the registry (GAP-1639)', () => {
+  it('names exactly the adapter variables the registry lacks', () => {
+    const registry = source('internal/envvars/registry.json');
+    const adapters = ['DCLAW_LIB_PATH', 'DCLAW_SOCKET_PATH', 'DCLAW_LOG_PATH', 'DCLAW_FAIL_OPEN', 'DCLAW_FAIL_OPEN_TOKEN', 'DCLAW_MCP_UPSTREAM', 'DCLAW_MCP_TRANSPORT', 'DCLAW_MCP_PORT'];
+    for (const name of adapters) assert.ok(!registry.includes(`"${name}"`), `${name} is in the registry now; update the page`);
+    assert.ok(registry.includes('"DCLAW_FLEET_API_URL"'));
+    const text = page('reference/edge-connector/configuration.mdx');
+    assert.ok(text.includes('are read only by the adapters and are listed only on this page'));
+  });
+});
+
 describe('1.0.5 docs rows', () => {
   for (const row of r105Rows) {
     it(`${row.gap}: ${row.page}${row.section ? ` "${row.section}"` : ''}`, () => {
