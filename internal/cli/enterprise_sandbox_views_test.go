@@ -503,6 +503,52 @@ func TestPolicyVerifySandboxRows(t *testing.T) {
 	}
 }
 
+// GAP-0714: on the MicroVM driver policy verify --user judges what a run
+// needs: read-write access to /dev/kvm (the kvm group, a user ACL or an open
+// mode, not the group alone) and the docker group, in which the agent
+// images are built; an account that can open /dev/kvm is no "cannot start".
+func TestPolicyVerifyJudgesKVMAccessNotOnlyTheGroup(t *testing.T) {
+	prevProfile, prevGroups, prevDevice := enterprisePolicySandboxProfile, enterpriseAccountGroups, enterpriseKVMDevice
+	t.Cleanup(func() { enterprisePolicySandboxProfile, enterpriseAccountGroups, enterpriseKVMDevice = prevProfile, prevGroups, prevDevice })
+	enterprisePolicySandboxProfile = func(string) (string, string, string, bool, error) { return "eng", "group", "eng", false, nil }
+	enterpriseKVMDevice = filepath.Join(t.TempDir(), "kvm")
+	if err := os.WriteFile(enterpriseKVMDevice, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &config.Config{}
+	c.OpenShell.Enabled = true
+	c.Enterprise.OpenShell.Driver, c.Enterprise.OpenShell.DriverFallback = config.EnterpriseOpenShellDriverAuto, config.EnterpriseOpenShellFallbackDocker
+	c.Guardrail.Profiles = map[string]config.GuardrailProfile{"eng": {Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"claudecode"}}}}
+	states := []enterprisepolicy.State{{Connector: "claudecode", Route: enterprisepolicy.RouteMachinePolicy, Covered: true}}
+	row := func(check string) enterprisePolicySandboxRow {
+		t.Helper()
+		for _, r := range buildEnterprisePolicySandbox(c, "linux", "eng1", 1001, states).Rows {
+			if r.Check == check {
+				return r
+			}
+		}
+		t.Fatalf("no %s row", check)
+		return enterprisePolicySandboxRow{}
+	}
+	enterpriseAccountGroups = func(int) ([]string, error) { return []string{"users", "docker"}, nil }
+	if r := row("kvm group"); r.State != sandboxRowWarn || !strings.Contains(r.Detail, "cannot read and write /dev/kvm") ||
+		!strings.Contains(r.Detail, "docker fallback") || strings.Contains(r.Detail, "no sandbox can start") {
+		t.Errorf("closed /dev/kvm, auto with the docker fallback: %+v", r)
+	}
+	if err := os.Chmod(enterpriseKVMDevice, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if r := row("kvm group"); r.State != sandboxRowOK || !strings.Contains(r.Detail, "can read and write /dev/kvm") {
+		t.Errorf("an account that can open /dev/kvm outside the kvm group: %+v", r)
+	}
+	// The agent images are built in Docker: without the docker group no
+	// MicroVM starts either, whatever /dev/kvm allows.
+	enterpriseAccountGroups = func(int) ([]string, error) { return []string{"users"}, nil }
+	if r := row("docker group"); r.State != sandboxRowFail || !strings.Contains(r.Detail, "MicroVM agent images") {
+		t.Errorf("no docker group on the MicroVM driver: %+v", r)
+	}
+}
+
 // policy verify --user checks the required pack the profile's floor names:
 // present, and its content matches required_pack_digest; nothing pinned is a
 // warning naming the digest to pin (GAP-0327, GAP-0366). The rows are the
