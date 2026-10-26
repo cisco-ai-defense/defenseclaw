@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,17 @@ from defenseclaw.commands.cmd_acp import _write_token, acp_cmd
 from defenseclaw.config import ACPBinding, ACPProfile
 
 from tests.helpers import cleanup_app, make_app_context
+
+
+def _repair_command(*args: str) -> str:
+    """The `defenseclaw` command line setup_repair_command prints for *args*.
+
+    On Windows every argument is a PowerShell single-quoted literal, so a
+    pasted path with spaces or quotes stays one argument.
+    """
+    if os.name == "nt":
+        return "defenseclaw " + " ".join("'" + value.replace("'", "''") + "'" for value in args)
+    return shlex.join(["defenseclaw", *args])
 
 
 def _binary(path: Path) -> str:
@@ -266,7 +278,9 @@ def test_doctor_reports_acp_bindings_and_fails_on_drift(tmp_path, monkeypatch):
         [row] = drifted.checks
         assert row["status"] == "fail"
         assert "agent executable digest has drifted" in row["detail"]
-        assert row["remediation"].startswith("defenseclaw acp setup --client zed --agent kiro --profile default")
+        assert row["remediation"].startswith(
+            _repair_command("acp", "setup", "--client", "zed", "--agent", "kiro", "--profile", "default")
+        )
         assert "--activate" not in row["remediation"]
     finally:
         cleanup_app(app, db_path, data_dir)
@@ -939,7 +953,8 @@ def test_source_install_and_doctor_fix_repin_only_defenseclaws_guard(tmp_path, m
         guard_path.write_bytes(b"upgraded-guard")
         agent_path.write_bytes(b"updated-agent")
         tag, plan = _fix_acp_guard_pins(app.cfg, assume_yes=True, plan_only=True)
-        assert tag == "plan" and "zed/kiro" in plan and "defenseclaw acp setup --client zed --agent kiro" in plan
+        repair = _repair_command("acp", "setup", "--client", "zed", "--agent", "kiro")
+        assert tag == "plan" and "zed/kiro" in plan and repair in plan
         assert _fix_acp_guard_pins(app.cfg, assume_yes=True)[0] == "pass"
         tag, detail = _fix_acp_guard_pins(app.cfg, assume_yes=True, plan_only=True)
         assert tag == "skip" and "pins are current" in detail

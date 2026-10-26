@@ -665,8 +665,10 @@ def test_secure_client_bridge_fingerprint_includes_native_verifier(
     rendered = template
     for field, value in {
         "APIAddr": "127.0.0.1:18970",
-        "TokenFileJS": str(token),
-        "NativePostBinaryJS": str(binary),
+        # The renderer writes *JS fields as JSON string contents, so a
+        # Windows path keeps its backslashes escaped.
+        "TokenFileJS": json.dumps(str(token))[1:-1],
+        "NativePostBinaryJS": json.dumps(str(binary))[1:-1],
         "FailMode": "closed",
         "HookSocketJS": "",
         "ServiceUID": "0",

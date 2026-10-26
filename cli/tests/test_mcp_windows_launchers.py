@@ -867,7 +867,10 @@ def test_installed_cli_batch_entrypoint_scans_npx_and_uvx_for_both_connectors(
         event for event in _read_fixture_trace(install_trace) if event["event"] == "tools_list_responded"
     ]
     assert install_responses == [{"event": "tools_list_responded", "tools": ["benign_echo"]}]
-    assert admitted
+    # The fixture listener is not a recorded DefenseClaw gateway process, so
+    # the installed CLI never sends it the gateway token or an observability
+    # fact (GAP-1260: only a proven gateway listener gets the token).
+    assert admitted == []
 
 
 @pytest.mark.parametrize(

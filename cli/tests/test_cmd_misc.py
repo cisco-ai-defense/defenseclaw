@@ -999,15 +999,19 @@ class TestSetupGuardrailUnifiedLLMSharing(unittest.TestCase):
 
     def _invoke_guardrail(self, *extra):
         from defenseclaw.commands.cmd_setup import setup
+        # The judge key wiring is the same for every connector. Codex runs on
+        # every OS; the implied OpenClaw default is refused on native Windows,
+        # and Codex's own Windows executable receipt is tested elsewhere.
         with patch(
             "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
             return_value=(True, []),
-        ):
+        ), patch("defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections"):
             return self.runner.invoke(
                 setup,
                 [
                     "guardrail",
                     "--non-interactive",
+                    "--connector", "codex",
                     "--no-restart",
                     "--mode", "observe",
                     "--scanner-mode", "local",
