@@ -723,7 +723,7 @@ func enterpriseHookVerifyOrRepairTarget(
 	}
 	result, verifyErr := enterpriseHookReconcileVerifier(ctx, opts)
 	if verifyErr == nil {
-		return result, false, nil
+		return enterpriseHookRetryNativeOTLPTakeBack(ctx, target, opts, result), false, nil
 	}
 	available, err := enterpriseHookReconcileSessionAvailable(target)
 	if err != nil {

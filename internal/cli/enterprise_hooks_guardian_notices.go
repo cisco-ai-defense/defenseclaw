@@ -5,6 +5,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,6 +58,39 @@ func enterpriseHookAgentConfigNotice(result enterprisehooks.InstallResult) strin
 		return connector.AgentConfigNativeOTLPTakeBackPending
 	}
 	return ""
+}
+
+// enterpriseHookRetryNativeOTLPTakeBack retries, once per guardian pass, the
+// native OTLP take-back of a verified target whose account keeps a
+// take-back-pending marker (GAP-1839, GAP-1840, GAP-1170). Verify passes on
+// the marker, as the managed gateway serves no revoked credential, so the
+// repair after a failed verify never reached the take-back, which only the
+// installer runs; the marker and its warning then stayed until the next
+// upgrade. The retry is the installer itself, run only when the account's
+// session is available, and it is best effort: a failure keeps the verified
+// result (its row stays OK and the warning stays) and is logged. Verify
+// itself never fails on the marker: the managed MSI verifies right after a
+// failed take-back and must not end in 1603.
+func enterpriseHookRetryNativeOTLPTakeBack(
+	ctx context.Context,
+	target enterprisehooks.ManifestTarget,
+	opts enterprisehooks.InstallOptions,
+	verified enterprisehooks.InstallResult,
+) enterprisehooks.InstallResult {
+	name := firstNonEmptyString(verified.Connector, target.Connector)
+	if !connector.NativeOTLPTakeBackPending(verified.DataDir, name) {
+		return verified
+	}
+	available, err := enterpriseHookReconcileSessionAvailable(target)
+	if err != nil || !available {
+		return verified
+	}
+	retried, err := enterpriseHookReconcileInstaller(ctx, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[hook-guardian] warn: retry the %s native OTLP take-back: %v\n", name, err)
+		return verified
+	}
+	return retried
 }
 
 // writeEnterpriseHookGuardianNotices replaces the record with this pass's

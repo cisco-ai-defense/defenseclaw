@@ -33,8 +33,9 @@ import (
 // clean the config revokes the earlier install's scoped credential and leaves
 // the take-back-pending marker (GAP-1839, GAP-1840): Verify then passes, as
 // the managed gateway serves no such credential, and the guardian reports the
-// account in status and verify until a later install or repair cleans it
-// (enterpriseHookAgentConfigNotice). A credential still in the data directory
+// account in status and verify, and runs the installer again on each pass
+// the account's session is available, until the take-back cleans it
+// (enterpriseHookAgentConfigNotice, enterpriseHookRetryNativeOTLPTakeBack). A credential still in the data directory
 // beside a linked or pending config is one the take-back could not revoke,
 // and Verify fails with the step (GAP-1170).
 func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, _ *windows.SID) error {
