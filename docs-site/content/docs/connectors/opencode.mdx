@@ -60,7 +60,7 @@ Setup also writes a connector-scoped token sidecar under `~/.defenseclaw/hooks`.
 
 - Setup refuses an OpenCode older than the supported range. A newer one runs as an untested newer version.
 - On Windows only the WinGet `SST.opencode` package and the npm `opencode-ai` package are accepted, run natively. WSL is not part of the contract.
-- A listener owned by another local account receives no credential or tool event; `tool.execute.before` blocks with an unverified-listener reason, including under Secure Client. Per-user host hooks fail closed on gateway failure. A managed administrator can choose outage-only open.
+- A listener owned by another local account receives no credential or tool event; `tool.execute.before` blocks with an unverified-listener reason, including under Secure Client. On a per-user install, the default and permissive policies run with one warning during a classified gateway outage; strict blocks the call. A managed administrator can choose outage-only open.
 - A project plugin that loads after DefenseClaw's can change the arguments. In action mode the bridge then refuses to allow the call.
 - Running OpenCode with `--pure` turns external plugins off, and DefenseClaw sees nothing.
 

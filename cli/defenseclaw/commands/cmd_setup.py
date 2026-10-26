@@ -10496,10 +10496,10 @@ def _write_connector_identity(
             # connector's "open" is derived from observe mode; pinning it made
             # a later `setup <it> --mode action` stay fail-open under a closed
             # global default (GAP-1109), so it inherits instead.
+            # A per-user effective_hook_fail_mode is the policy tier's outage
+            # mode, not the saved value. Managed installs retain their
+            # resolved mode, including Secure Client connector limits.
             seeded_mode = gc.effective_mode(existing_single)
-            # A per-user effective_hook_fail_mode is the outage mode of the
-            # policy tier, not the saved value: pin what was saved (owner
-            # decision 2026-10-23; managed configs resolve the saved value).
             managed = cfg.managed_outside_secure_client() or gc.secure_client_hook_fail_modes()
             pinned = (
                 gc.effective_hook_fail_mode(existing_single)

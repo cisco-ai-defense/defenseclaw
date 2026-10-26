@@ -227,21 +227,6 @@ _BRIDGE_DYNAMIC_LINES = {
         ),
     ),
 }
-# A per-user bridge's gateway-outage mode line (Go pluginOutageFailMode):
-# present once in a per-user render, absent from managed and Secure Client
-# ones; its value is open or closed.
-_BRIDGE_OUTAGE_MODE_LINES = {
-    "amp": (
-        b'const DC_OUTAGE_FAIL_MODE: string = "',
-        b'"\n',
-        b'const DC_OUTAGE_FAIL_MODE: string = "{{.OutageFailMode}}"\n',
-    ),
-    "opencode": (
-        b'const DC_OUTAGE_FAIL_MODE = "',
-        b'";\n',
-        b'const DC_OUTAGE_FAIL_MODE = "{{.OutageFailMode}}";\n',
-    ),
-}
 _LOWER_HEX = frozenset("0123456789abcdef")
 
 
@@ -561,14 +546,7 @@ def _matches_immutable_bridge_template(
         required_lifecycle = b""
     if dynamic_values.get("lifecycle", b"") != required_lifecycle:
         return False
-    prefix, suffix, canonical = _BRIDGE_OUTAGE_MODE_LINES[connector]
-    outage = [index for index, line in enumerate(lines) if line.startswith(prefix) and line.endswith(suffix)]
-    if len(outage) > 1:
-        return False
-    if outage:
-        if lines[outage[0]][len(prefix) : -len(suffix)] not in {b"open", b"closed"}:
-            return False
-        lines[outage[0]] = canonical
+
     def standalone_socket_matches(digest: str) -> bool:
         if digest != _BRIDGE_STANDALONE_TEMPLATE_DIGESTS[connector]:
             return True

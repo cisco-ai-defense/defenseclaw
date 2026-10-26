@@ -163,7 +163,6 @@ def _render_bridge_publication(
         .replace("{{.InstallMarkerJS}}", json.dumps(install_marker)[1:-1])
         .replace("{{.LifecycleMarkerJS}}", json.dumps(lifecycle_marker)[1:-1])
         .replace("{{.ListenerProofJS}}", listener_proof)
-        .replace("{{.OutageFailMode}}", "open")
     )
     assert "{{." not in rendered
     return rendered.encode()

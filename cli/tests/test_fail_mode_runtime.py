@@ -29,6 +29,56 @@ from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa
 
 _WINDOWS_REGISTRATION_FRESHNESS = fail_mode_runtime._windows_registration_freshness
 
+
+def test_current_amp_bridge_reports_the_live_outage_tier(tmp_path: Path) -> None:
+    """A stopped gateway can leave an earlier plugin render on disk."""
+    plugin = tmp_path / "defenseclaw.ts"
+    plugin.write_text(
+        '// defenseclaw-call-time-outage-v1\nconst DC_FAIL_MODE: string = "closed"\n',
+        encoding="utf-8",
+    )
+    selected = {"mode": "closed"}
+    guardrail = SimpleNamespace(effective_hook_outage_fail_mode=lambda _name: selected["mode"])
+    cfg = SimpleNamespace(guardrail=guardrail)
+
+    assert fail_mode_runtime._read_amp_plugin_mode(plugin, cfg) == "closed"
+    selected["mode"] = "open"
+    assert fail_mode_runtime._read_amp_plugin_mode(plugin, cfg) == "open"
+
+
+def test_current_opencode_bridge_reports_the_live_outage_tier(tmp_path: Path) -> None:
+    plugin = tmp_path / "defenseclaw.js"
+    plugin.write_text(
+        '// defenseclaw-call-time-outage-v1\nconst DC_FAIL_MODE = "closed";\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"connectors": {"opencode": {"locations": {"hook_config_paths": [str(plugin)]}}}}),
+        encoding="utf-8",
+    )
+    selected = {"mode": "closed"}
+    guardrail = SimpleNamespace(effective_hook_outage_fail_mode=lambda _name: selected["mode"])
+    cfg = SimpleNamespace(data_dir=str(tmp_path), guardrail=guardrail)
+
+    assert fail_mode_runtime._read_opencode_plugin_mode(cfg) == "closed"
+    selected["mode"] = "open"
+    assert fail_mode_runtime._read_opencode_plugin_mode(cfg) == "open"
+
+
+def test_current_shell_helper_reports_the_live_outage_tier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "codex-hook.sh").write_text('FAIL_MODE="closed"\n', encoding="utf-8")
+    (hooks / "_hardening.sh").write_text("# defenseclaw-call-time-outage-v1\n", encoding="utf-8")
+    selected = {"mode": "closed"}
+    guardrail = SimpleNamespace(effective_hook_outage_fail_mode=lambda _name: selected["mode"])
+    cfg = SimpleNamespace(data_dir=str(tmp_path), deployment_mode="", guardrail=guardrail)
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+
+    assert fail_mode_runtime._platform_runtime_source(cfg, "codex") == ("hook-script", "closed")
+    selected["mode"] = "open"
+    assert fail_mode_runtime._platform_runtime_source(cfg, "codex") == ("hook-script", "open")
+
 # The fail-mode lines of real per-user Unix hook renders; the Go test
 # TestUnixHookFailModeLinesMatchTheSharedGolden checks them against Setup.
 _HOOK_FAIL_MODE_LINES = json.loads(

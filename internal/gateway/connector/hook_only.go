@@ -1428,16 +1428,6 @@ func managedPluginInstallMarker(opts SetupOpts) string {
 	return filepath.Clean(marker)
 }
 
-// pluginOutageFailMode is the outage mode a per-user in-agent plugin bakes
-// (OutageHookFailMode): open in the default and permissive tiers, closed in
-// strict. Managed and Secure Client plugins bake "" and keep FailMode.
-func pluginOutageFailMode(opts SetupOpts) string {
-	if !perUserOutageRender(opts) {
-		return ""
-	}
-	return normalizeHookFailMode(opts.HookFailMode)
-}
-
 // renderPluginArtifact is shared by Setup and standalone verification so
 // verification compares the agent's executable plugin with the bytes Setup
 // would install for the current options.
@@ -1468,7 +1458,6 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 		LifecycleMarkerJS:  javaScriptStringContent(managedPluginLifecycleMarker(opts)),
 		ListenerProofJS:    managedPluginListenerProofJS(opts),
 		FailMode:           failMode,
-		OutageFailMode:     pluginOutageFailMode(opts),
 		Managed:            opts.ManagedEnterprise,
 		SecureClient:       shellHookSecureClientProfile(opts),
 		ConnectorName:      c.name,

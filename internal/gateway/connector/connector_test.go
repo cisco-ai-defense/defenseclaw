@@ -10034,8 +10034,8 @@ func TestHookScript_401WithoutOwnGateway_NamesAnotherListener(t *testing.T) {
 	}
 }
 
-// TestHookScript_EnvFailModeIsNotRead covers inherited environment and legacy
-// configured-open values: neither can reopen a per-user hook.
+// TestHookScript_EnvFailModeIsNotRead covers inherited environment and render
+// modes: neither can change the current config's outage decision.
 func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -10050,18 +10050,19 @@ func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 		{NewClaudeCodeConnector(), "claude-code-hook.sh", nil, `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`},
 	} {
 		for _, tc := range []struct {
-			installed, env string
-			wantBlock      bool
+			installed, env, tier string
+			wantBlock            bool
 		}{
-			{"closed", "open", true},
-			{"closed", "OPEN", true},
+			{"closed", "open", "strict", true},
+			{"closed", "OPEN", "strict", true},
 			// Installed outage open (the default and permissive tiers): the
 			// environment cannot close it either; the outage runs the call.
-			{"open", "closed", false},
-			{"open", "Closed", false},
-			{"open", " CLOSED ", false},
-			{"open", "", false},
-			{"closed", "", true},
+			{"open", "closed", "default", false},
+			{"open", "Closed", "default", false},
+			{"open", " CLOSED ", "default", false},
+			{"open", "", "default", false},
+			{"closed", "", "default", false},
+			{"open", "open", "strict", true},
 		} {
 			t.Run(agent.conn.Name()+"/"+tc.installed+"/env="+tc.env, func(t *testing.T) {
 				home := t.TempDir()
@@ -10069,6 +10070,11 @@ func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 				opts := SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "scoped-test-token", HookFailMode: tc.installed}
 				if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, agent.conn); err != nil {
 					t.Fatal(err)
+				}
+				// The config the outage-open hook reads gives the open tier.
+				installOutageOpenRuntimeForHookTest(t, home, home)
+				if tc.tier == "strict" {
+					writeOutageTierConfig(t, home, outageStrictTierConfig)
 				}
 				cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, agent.script)}, agent.args...)...)
 				cmd.Stdin = strings.NewReader(agent.payload)
