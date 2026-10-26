@@ -75,3 +75,65 @@ func TestExplainCacheAgreesWithTheHookOnAnUnconfirmedNumericGroup(t *testing.T) 
 		})
 	}
 }
+
+// TestExplainNamesTheSandboxRefusalTheHookDoesNotMake is GAP-1789: the
+// GAP-1685 fixture, where the hook path allows the account but a sandbox
+// run, which decides on any path, is still refused. Explain shows the hook
+// decision and names the sandbox refusal, in the cache view as well; the
+// sandbox decision itself does not change.
+func TestExplainNamesTheSandboxRefusalTheHookDoesNotMake(t *testing.T) {
+	previousBlocking := identityLookupBlocking.Load()
+	setIdentityLookupBlocking(true)
+	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
+	now := time.Now()
+	cached := useridentity.DirectoryFacts{
+		Source: useridentity.SourceNSSFiles, Directory: useridentity.DirectoryLocal,
+		Groups: []string{"49202"}, UnconfirmedGroups: []string{"49202"},
+		Assurance: useridentity.AssuranceVerified, ResolvedAt: now.Add(-6 * time.Second),
+	}
+	prevFacts, prevRefresh := cachedDirectoryFacts, cachedDirectoryRefreshFailure
+	t.Cleanup(func() { cachedDirectoryFacts, cachedDirectoryRefreshFailure = prevFacts, prevRefresh })
+	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) { return cached, cached.ResolvedAt, true }
+	cachedDirectoryRefreshFailure = func(string) (time.Time, string, bool) { return time.Time{}, "", false }
+	explained := profileSubject{
+		UserID: "49201", IDKind: useridentity.KindPOSIXUID, UserName: "fcb3r3num",
+		Groups: []string{"49202"}, Directory: useridentity.DirectoryLocal, localAccount: true,
+	}
+	verified := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "49201", IDKind: useridentity.KindPOSIXUID, UserName: "fcb3r3num", Directory: cached,
+	}, true)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Connector = "codex"
+	cfg.Codex.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"watch": {Mode: "observe"}, "numeric": {Mode: "observe"}}
+	cfg.Guardrail.DefaultProfile = "watch"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "numeric", Match: config.ProfileMatch{Groups: []string{"49202"}}},
+	}
+	set := newGuardrailProfileSetFor(t, cfg)
+	resolved := resolveIdentity(&verified, nil)
+	if hook := set.selectProfile(&verified, resolved, profileSubjectVerified, "codex", nil, profilePathHook, ""); hook.Refused != "" {
+		t.Fatalf("fixture: hook decision %+v; want allowed", hook)
+	}
+	sandbox := set.matchResolved(&verified, resolved, profileSubjectVerified, "codex", nil, profilePathAny, "")
+	if sandbox.Refused == "" {
+		t.Fatalf("fixture: sandbox decision %+v; want the pathless refusal", sandbox)
+	}
+	decision := set.match(&explained, profileSubjectLookup, "codex", "")
+	view, _ := explainCacheView(set, &explained, decision, "codex", "", now)
+	if view == nil {
+		t.Fatal("no cache view")
+	}
+	if view["refused"] != false {
+		t.Fatalf("cache view %v; want the hook decision (not refused)", view)
+	}
+	if view["sandbox_refused"] != true || !strings.Contains(explainViewString(view["sandbox_refused_reason"]), "unconfirmed") {
+		t.Fatalf("cache view %v; want the sandbox refusal named with its reason", view)
+	}
+}
+
+func explainViewString(v any) string {
+	s, _ := v.(string)
+	return s
+}

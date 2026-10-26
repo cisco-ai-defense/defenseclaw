@@ -1070,7 +1070,7 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 			return nil, ""
 		}
 		failed := profileSubject{UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, LookupFailed: identityLookupBlocking.Load()}
-		live := set.explainLiveDecision(&failed, connectorName, agent)
+		live, sandboxRefused := set.explainLiveDecision(&failed, connectorName, agent)
 		differs := live.Name != decision.Name || live.Match != decision.Match || live.Refused != decision.Refused
 		view = map[string]any{
 			"failing_since": since.UTC().Format(time.RFC3339),
@@ -1082,6 +1082,10 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 		}
 		if live.Refused != "" {
 			view["refused_reason"] = live.Refused
+		}
+		if sandboxRefused != "" {
+			view["sandbox_refused"] = true
+			view["sandbox_refused_reason"] = sandboxRefused
 		}
 		if differs {
 			warning = fmt.Sprintf("requests of this account currently %s: the gateway's directory lookup for it has failed since %s (%s) "+
@@ -1098,7 +1102,7 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 	cached := profileSubjectFromVerified(VerifiedSubject{
 		UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, Directory: facts,
 	}, identityLookupBlocking.Load())
-	live := set.explainLiveDecision(&cached, connectorName, agent)
+	live, sandboxRefused := set.explainLiveDecision(&cached, connectorName, agent)
 	differs := live.Name != decision.Name || live.Match != decision.Match || live.MatchedGroup != decision.MatchedGroup ||
 		live.Refused != decision.Refused
 	view = map[string]any{
@@ -1111,6 +1115,10 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 	}
 	if live.Refused != "" {
 		view["refused_reason"] = live.Refused
+	}
+	if sandboxRefused != "" {
+		view["sandbox_refused"] = true
+		view["sandbox_refused_reason"] = sandboxRefused
 	}
 	if differs {
 		warning = fmt.Sprintf("requests of this account still use the directory facts the gateway fetched %s ago, so they %s; "+

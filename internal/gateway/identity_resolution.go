@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"fmt"
 	"reflect"
 	"runtime"
 	"slices"
@@ -543,13 +544,16 @@ func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubjec
 // accounts whose hook calls were allowed (GAP-1685). No path refusing gives
 // the hook path's decision; one path refusing keeps the refusal and names
 // that path. Without a connector explain keeps the pathless answer.
-func (set *guardrailProfileSet) explainOnRequestPaths(connectorName string, decide func(profilePath) profileDecision) (profileDecision, []string) {
-	decision := decide(profilePathAny)
+// sandboxRefused is the pathless refusal when no request path refuses: a
+// sandbox run decides on any path (sandboxMatchPeer), so it is still
+// refused, and explain names that refusal beside the hook decision
+// (GAP-1789).
+func (set *guardrailProfileSet) explainOnRequestPaths(connectorName string, decide func(profilePath) profileDecision) (decision profileDecision, refusedOn []string, sandboxRefused string) {
+	decision = decide(profilePathAny)
 	if decision.Refused == "" || connectorName == "" {
-		return decision, nil
+		return decision, nil, ""
 	}
 	hook, inspect := decide(profilePathHook), decide(profilePathInspect)
-	var refusedOn []string
 	if hook.Refused != "" {
 		refusedOn = append(refusedOn, "hook")
 	}
@@ -558,21 +562,27 @@ func (set *guardrailProfileSet) explainOnRequestPaths(connectorName string, deci
 	}
 	switch len(refusedOn) {
 	case 0:
-		return hook, nil
+		return hook, nil, decision.Refused
 	case 1:
-		return decision, refusedOn
+		return decision, refusedOn, ""
 	}
-	return decision, nil
+	return decision, nil, ""
 }
 
 // explainLiveDecision is what subject's requests on connectorName get from
 // the facts the gateway cached for it, decided as explain decides
-// (explainOnRequestPaths).
-func (set *guardrailProfileSet) explainLiveDecision(subject *profileSubject, connectorName, agent string) profileDecision {
-	live, _ := set.explainOnRequestPaths(connectorName, func(path profilePath) profileDecision {
+// (explainOnRequestPaths), and the refusal a sandbox run still gets.
+func (set *guardrailProfileSet) explainLiveDecision(subject *profileSubject, connectorName, agent string) (profileDecision, string) {
+	live, _, sandboxRefused := set.explainOnRequestPaths(connectorName, func(path profilePath) profileDecision {
 		return set.matchResolved(subject, resolveIdentity(subject, nil), profileSubjectLookup, connectorName, nil, path, agent)
 	})
-	return live
+	return live, sandboxRefused
+}
+
+// sandboxRefusedWarning names the refusal a sandbox run of the account gets
+// while its hook and inspect requests are not refused (GAP-1789).
+func sandboxRefusedWarning(connectorName, reason string) string {
+	return fmt.Sprintf("a sandbox run of this account for %s is refused (%s); its hook and inspect requests are not", connectorName, reason)
 }
 
 // profileExplainCommand names the installed administrator command for the
