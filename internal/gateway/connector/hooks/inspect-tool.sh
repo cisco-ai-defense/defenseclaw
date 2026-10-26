@@ -239,7 +239,8 @@ _DC_HOOK_DATA_DIR="${HOOK_DIR}/.."
 # Plan B4 / S0.4: shell-side hook hardening. Source the helpers BEFORE
 # touching any agent-supplied data so resource caps + env sanitization
 # apply to every subprocess this hook spawns.
-. "${HOOK_DIR}/_hardening.sh"
+# command: bash 3.2 (macOS /bin/bash) exits 0 when a sourced helper is missing or unreadable.
+command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
 {{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call.

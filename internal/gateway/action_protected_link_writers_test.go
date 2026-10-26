@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 )
 
 func TestR104ExistingProtectedLinkWriters(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -160,6 +162,12 @@ func TestR104InterpreterTextNeedsAnExecutableWrite(t *testing.T) {
 	if err := os.Link(protected, filepath.Join(home, "linked.txt")); err != nil {
 		t.Fatal(err)
 	}
+	// An absolute path on the host: "/tmp" names the current drive's root
+	// folder on Windows, which Python places under the new cwd's drive.
+	ordinaryAbsolute := "/tmp/ordinary-notes.txt"
+	if runtime.GOOS == "windows" {
+		ordinaryAbsolute = "C:/tmp/ordinary-notes.txt"
+	}
 	for _, tc := range []struct {
 		name, code string
 		want       bool
@@ -168,7 +176,7 @@ func TestR104InterpreterTextNeedsAnExecutableWrite(t *testing.T) {
 		{"reassigned path", `from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('notes.txt'); p.write_text('hello')`, false},
 		{"relative path after chdir", `from pathlib import Path; import os; os.chdir(Path.home() / '.ssh'); p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('authorized_keys'); p.write_text('hello')`, true},
 		{"relative path after aliased chdir", `from pathlib import Path; from os import chdir as enter; enter(Path.home() / '.ssh'); p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('authorized_keys'); p.write_text('hello')`, true},
-		{"absolute path after chdir", `from pathlib import Path; import os; os.chdir(Path.home() / '.ssh'); p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('/tmp/ordinary-notes.txt'); p.write_text('hello')`, false},
+		{"absolute path after chdir", `from pathlib import Path; import os; os.chdir(Path.home() / '.ssh'); p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('` + ordinaryAbsolute + `'); p.write_text('hello')`, false},
 		{"absolute path after runtime link", fmt.Sprintf(`from pathlib import Path; import os; os.symlink(Path.home() / '.ssh' / 'authorized_keys', %q); p = Path.home() / '.ssh' / 'authorized_keys'; p = Path(%q); p.write_text('hello')`, runtimeAlias, runtimeAlias), true},
 		{"hardlink reassignment", `from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; p = Path('linked.txt'); p.write_text('hello')`, true},
 		{"direct path", `from pathlib import Path; p = Path.home() / '.ssh' / 'authorized_keys'; p.write_text('hello')`, true},

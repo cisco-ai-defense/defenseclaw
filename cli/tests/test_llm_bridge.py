@@ -68,9 +68,15 @@ class LLMHelperExitsWithParentTests(unittest.TestCase):
         from defenseclaw import llm
 
         libc = MagicMock()
-        with patch.object(sys, "platform", "linux"), patch("ctypes.CDLL", return_value=libc):
+        # SIGKILL is 9 on Linux; Windows' signal module has no SIGKILL, so the
+        # simulated Linux helper gets the Linux value on every test host.
+        with (
+            patch.object(sys, "platform", "linux"),
+            patch("ctypes.CDLL", return_value=libc),
+            patch.object(signal, "SIGKILL", getattr(signal, "SIGKILL", 9), create=True),
+        ):
             llm._exit_with_parent()
-        libc.prctl.assert_called_once_with(1, int(signal.SIGKILL), 0, 0, 0)
+        libc.prctl.assert_called_once_with(1, 9, 0, 0, 0)
 
     def test_other_platforms_leave_the_helper_as_is(self):
         from defenseclaw import llm

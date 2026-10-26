@@ -17,12 +17,16 @@ import (
 )
 
 // With no tagged plist installed, the jobs have the bare labels of 1.0.0 to
-// 1.0.3 (openshell.FindLaunchAgent).
+// 1.0.3 (openshell.FindLaunchAgent). The plist paths are joined the way
+// FindLaunchAgent joins them on the host running the test.
 const (
 	launcherAgentLabel   = openshell.SandboxAgentBase
-	launcherAgentPlist   = openshell.LaunchAgentsDir + "/" + openshell.SandboxAgentBase + ".plist"
 	launcherGatewayLabel = openshell.GatewayAgentBase
-	launcherGatewayPlist = openshell.LaunchAgentsDir + "/" + openshell.GatewayAgentBase + ".plist"
+)
+
+var (
+	launcherAgentPlist   = filepath.Join(openshell.LaunchAgentsDir, openshell.SandboxAgentBase+".plist")
+	launcherGatewayPlist = filepath.Join(openshell.LaunchAgentsDir, openshell.GatewayAgentBase+".plist")
 )
 
 const launcherCodeSigningState = "state = not running\nruns = 2\nlast exit reason = OS_REASON_CODESIGNING\n"

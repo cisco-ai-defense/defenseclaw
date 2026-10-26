@@ -2701,12 +2701,15 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 				t.Errorf("generated config survived teardown: %v", err)
 			}
-			// Connector teardown only unwires the agent config. Setup owns these
-			// managed sidecars until the enclosing lifecycle removes them.
-			for _, name := range []string{filepath.Base(tokenPath), hookConfigSidecarName} {
-				if _, err := os.Stat(filepath.Join(dataDir, "hooks", name)); err != nil {
-					t.Errorf("shared sidecar %s removed by connector teardown: %v", name, err)
-				}
+			// A per-user teardown revokes the connector's hook credential once
+			// VerifyClean proves the agent no longer registers it
+			// (revokePerUserHookAPIToken, 58ed56d79d); the shared hook config
+			// sidecar stays until the enclosing lifecycle removes it.
+			if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+				t.Errorf("hook credential %s survived a per-user teardown: %v", filepath.Base(tokenPath), err)
+			}
+			if _, err := os.Stat(filepath.Join(dataDir, "hooks", hookConfigSidecarName)); err != nil {
+				t.Errorf("shared sidecar %s removed by connector teardown: %v", hookConfigSidecarName, err)
 			}
 		})
 	}

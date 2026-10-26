@@ -2603,7 +2603,10 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     # codex pins its own overrides — the editor shows the *effective* value.
     assert fields["guardrail.connectors.codex.enabled"].value == "false"
     assert fields["guardrail.connectors.codex.enabled"].kind == "bool"
-    assert fields["guardrail.connectors.codex.hook_fail_mode"].value.startswith("closed (provenance: config; status:")
+    # No installed hook names a mode: the native Windows hook then fails
+    # closed on its own (no-installed-mode); a POSIX hook falls back to config.
+    provenance = "no-installed-mode" if os.name == "nt" else "config"
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value.startswith(f"closed (provenance: {provenance}; status:")
     policy_status = fields["guardrail.connectors.codex.hook_fail_mode"].value
     if os.name == "nt":
         assert "policy-unverified" in policy_status

@@ -40,6 +40,9 @@ var errPrivateWalkOpenTimedOut = errors.New("the folder did not open in time")
 // walk incomplete; its goroutine closes the folder if the open returns later.
 func unixPrivateWalkOpener(home string) func(string) (*os.File, error) {
 	home = filepath.Clean(home)
+	// Read once, before the walk starts its goroutines: an open that is
+	// abandoned at the timeout can still start after the walk returned.
+	openFile, timeout := unixPrivateWalkOpenFile, unixPrivateWalkOpenTimeout
 	return func(dir string) (*os.File, error) {
 		if unixPrivateWalkPrivacyProtected(home, dir) {
 			return nil, &os.PathError{Op: "open", Path: dir, Err: syscall.EPERM}
@@ -51,7 +54,7 @@ func unixPrivateWalkOpener(home string) func(string) (*os.File, error) {
 		result := make(chan opened, 1)
 		abandoned := make(chan struct{})
 		go func() {
-			f, err := unixPrivateWalkOpenFile(dir)
+			f, err := openFile(dir)
 			select {
 			case result <- opened{f, err}:
 			case <-abandoned:
@@ -60,7 +63,7 @@ func unixPrivateWalkOpener(home string) func(string) (*os.File, error) {
 				}
 			}
 		}()
-		timer := time.NewTimer(unixPrivateWalkOpenTimeout)
+		timer := time.NewTimer(timeout)
 		defer timer.Stop()
 		select {
 		case r := <-result:

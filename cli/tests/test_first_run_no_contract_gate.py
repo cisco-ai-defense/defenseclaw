@@ -37,6 +37,17 @@ class FirstRunNoContractGateTests(unittest.TestCase):
         )
         selection.start()
         self.addCleanup(selection.stop)
+        # Native Windows binds those records to its protected receipt, in the
+        # first-run preflight and again in setup. The stand-in records above
+        # are no real selection, so both run as on the other hosts here; the
+        # receipt has its own Windows tests (test_guardrail patches setup's).
+        for target, value in (
+            ("defenseclaw.bootstrap._preflight_first_run_agent_selections", (None, "")),
+            ("defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections", None),
+        ):
+            windows_selection = patch(target, return_value=value)
+            windows_selection.start()
+            self.addCleanup(windows_selection.stop)
         # Setup's own gate is covered by test_setup_hook_contract_gate; here it
         # accepts, so only the first-run gate can keep the connector out.
         gate = patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)

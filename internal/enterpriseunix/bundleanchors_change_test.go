@@ -25,9 +25,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -48,6 +50,14 @@ func recordedChanges(t *testing.T, env *Env) []enterprisestatus.ChangeEvent {
 		}
 		out = append(out, ev)
 	}
+	// The spool lists events by id, whose time is in milliseconds: two
+	// events of the same millisecond list in the order of their content
+	// hashes. The test reads them in the order they were recorded.
+	sort.SliceStable(out, func(i, j int) bool {
+		a, _ := time.Parse(time.RFC3339Nano, out[i].Time)
+		b, _ := time.Parse(time.RFC3339Nano, out[j].Time)
+		return a.Before(b)
+	})
 	if len(out) > 0 {
 		if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o750 {
 			t.Fatalf("change spool mode: %v, %v", info, err)

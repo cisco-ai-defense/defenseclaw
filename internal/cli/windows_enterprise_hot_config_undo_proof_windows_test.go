@@ -284,9 +284,7 @@ func TestWindowsEnterpriseHotConfigDoesNotStopWithUnclosedHooks(t *testing.T) {
 	}
 	stub := &ensureStub{t: t}
 	stub.install(t)
-	windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) {
-		return nil, errors.New("policy digest readback unavailable")
-	}
+	windowsEnterprisePolicyDigest = host.digestThenOutage(errors.New("policy digest readback unavailable"))
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
 	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
 		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)

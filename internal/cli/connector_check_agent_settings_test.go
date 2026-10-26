@@ -194,8 +194,12 @@ func TestConnectorCheckAgentSettingsFollowsExplicitCodexMigrationRoot(t *testing
 	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", "")
 	dataDir := testenv.PrivateTempDir(t)
 	defer withConnectorState(t, dataDir, "codex")()
+	// Native Windows Setup registers only a setup-selected codex.exe.
+	seedCodexSelectionForTest(t, dataDir)
 	if err := connector.NewCodexConnector().Setup(context.Background(), connector.SetupOpts{
 		DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "test-token", HookFailMode: "closed",
+		AgentExecutable: connector.LoadCachedAgentExecutable(dataDir, "codex"),
+		AgentVersion:    connector.LoadCachedAgentVersion(dataDir, "codex"),
 	}); err != nil {
 		t.Fatalf("register old Codex root: %v", err)
 	}
@@ -206,7 +210,7 @@ func TestConnectorCheckAgentSettingsFollowsExplicitCodexMigrationRoot(t *testing
 		t.Fatal(err)
 	}
 	t.Setenv("CODEX_HOME", newRoot)
-	if stdout, stderr, code := runConnectorCmd(t, "check-agent-settings", "--connector", "codex", "--json"); code != 1 || !strings.Contains(stdout, filepath.Join(oldRoot, "config.toml")) {
+	if stdout, stderr, code := runConnectorCmd(t, "check-agent-settings", "--connector", "codex", "--json"); code != 1 || !strings.Contains(stdout, jsonEscapedPath(filepath.Join(oldRoot, "config.toml"))) {
 		t.Fatalf("without migration marker, expected old-root refusal: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", newRoot)
@@ -214,3 +218,7 @@ func TestConnectorCheckAgentSettingsFollowsExplicitCodexMigrationRoot(t *testing
 		t.Fatalf("explicit new-root precheck: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
+
+// jsonEscapedPath is path as --json output spells it: a Windows path's
+// backslashes are escaped.
+func jsonEscapedPath(path string) string { return strings.ReplaceAll(path, `\`, `\\`) }

@@ -12,7 +12,8 @@
 # disposable directory (AF_UNIX paths are limited to 108 characters) under
 # Windows PowerShell 5.1 and PowerShell 7; the live socket leaf needs .NET's
 # AF_UNIX support, so only PowerShell 7 binds one. No service or real machine
-# root is touched.
+# root is touched; the strict-ancestor rollback cases use a disposable
+# protected folder under ProgramData, which they remove.
 
 [CmdletBinding()]
 param(
@@ -44,9 +45,10 @@ try {
         $failures = [Collections.Generic.List[string]]::new()
         $openSockets = [Collections.Generic.List[object]]::new()
         $originalProfile = Get-DefenseClawEnterpriseProfile
+        $trustedBase = ''
         try {
-            function New-TestLayout([string]$Name) {
-                $install = [IO.Path]::Combine($Root, $Name, 'DefenseClaw')
+            function New-TestLayout([string]$Name, [string]$Base = $Root) {
+                $install = [IO.Path]::Combine($Base, $Name, 'DefenseClaw')
                 $bin = [IO.Path]::Combine($install, 'bin')
                 $libexec = [IO.Path]::Combine($install, 'libexec')
                 [void][IO.Directory]::CreateDirectory($bin)
@@ -643,7 +645,25 @@ try {
             # failed fresh install removes its transaction-created root. The
             # authenticated rollback gets a bounded retry after the old
             # five-second delete window, and cannot use it on another root.
-            $rollback = New-TestLayout 'rollback-held'
+            # The rollback walks the install root's ancestors strictly: only
+            # SYSTEM, Administrators or TrustedInstaller may own or replace
+            # them. A folder this elevated process creates in its temporary
+            # directory is owned by its account (the built-in Administrator of
+            # a CI runner) and inherits that account's full control, so these
+            # cases run in a protected fixture under ProgramData, as a real
+            # install root does.
+            $trustedBase = [IO.Path]::Combine(
+                $env:ProgramData,
+                ('DefenseClawInstallTreeSmoke-' + [Guid]::NewGuid().ToString('N'))
+            )
+            [void](New-DefenseClawProtectedDirectory -Path $trustedBase)
+            function New-TrustedTestLayout([string]$Name) {
+                $parent = [IO.Path]::Combine($trustedBase, $Name)
+                [void](New-DefenseClawProtectedDirectory -Path $parent)
+                [void](New-DefenseClawProtectedDirectory -Path ([IO.Path]::Combine($parent, 'DefenseClaw')))
+                return New-TestLayout $Name $trustedBase
+            }
+            $rollback = New-TrustedTestLayout 'rollback-held'
             $rollbackHook = [IO.Path]::Combine($rollback.BinDirectory, 'defenseclaw-hook.exe')
             $ready = [IO.Path]::Combine($Root, 'rollback-hook-held')
             [IO.File]::WriteAllText($rollbackHook, 'stand-in')
@@ -682,7 +702,7 @@ try {
                         try {
                             Remove-DefenseClawManagedTree `
                                 -Path $rollback.InstallRoot `
-                                -RequiredBase $Root `
+                                -RequiredBase $trustedBase `
                                 -Label 'InstallRoot' `
                                 @rollbackOptions
                         }
@@ -706,7 +726,7 @@ try {
                 }
             }
 
-            $otherRoot = New-TestLayout 'rollback-other-root'
+            $otherRoot = New-TrustedTestLayout 'rollback-other-root'
             $otherSnapshot = $security::GetDirectorySecuritySnapshotNoFollowIfExists($otherRoot.InstallRoot)
             $otherOptions = @{}
             if ($rollbackOptions.Count -gt 0) {
@@ -717,7 +737,7 @@ try {
             Test-Refused 'fresh-install rollback root identity changed' {
                 Remove-DefenseClawManagedTree `
                     -Path $otherRoot.InstallRoot `
-                    -RequiredBase $Root `
+                    -RequiredBase $trustedBase `
                     -Label 'InstallRoot' `
                     @otherOptions
             } 'identity changed'
@@ -850,6 +870,9 @@ try {
         finally {
             foreach ($open in $openSockets) {
                 $open.Dispose()
+            }
+            if ($trustedBase) {
+                Microsoft.PowerShell.Management\Remove-Item -LiteralPath $trustedBase -Recurse -Force -ErrorAction SilentlyContinue
             }
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $originalProfile
         }
