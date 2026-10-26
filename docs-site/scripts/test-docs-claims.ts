@@ -519,6 +519,13 @@ describe('per-user outage wording on connector pages (rel-1-0-4 GAP-1301, GAP-13
       assert.ok(!/closed by default/i.test(text.split('## Fail mode')[1]?.split(' ## ')[0] ?? ''), `${name} Fail mode promises a closed default`);
     }
   });
+
+  it('never says per-user hooks default to closed on any page (GAP-1797)', () => {
+    for (const file of enterprisePages(docs)) {
+      const text = readFileSync(file, 'utf8').split(/\s+/).join(' ');
+      assert.ok(!/per-user hooks? defaults? to closed/i.test(text), `${relative(docs, file)} says per-user hooks default to closed`);
+    }
+  });
 });
 
 describe('admission presets table (rel-1-0-4 GAP-1655)', () => {
