@@ -4,6 +4,9 @@
 package gateway
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -136,4 +139,61 @@ func TestExplainNamesTheSandboxRefusalTheHookDoesNotMake(t *testing.T) {
 func explainViewString(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+// TestExplainHandlerNamesTheSandboxRefusal is GAP-1868 (review of GAP-1789):
+// the profile-explain answer itself, not only its cache view, keeps the hook
+// decision (not refused) and names the pathless refusal a sandbox run makes:
+// refused_paths ["sandbox"], sandbox_refused_reason and a warning.
+func TestExplainHandlerNamesTheSandboxRefusal(t *testing.T) {
+	previousBlocking := identityLookupBlocking.Load()
+	setIdentityLookupBlocking(true)
+	t.Cleanup(func() { setIdentityLookupBlocking(previousBlocking) })
+	now := time.Now()
+	cached := useridentity.DirectoryFacts{
+		Source: useridentity.SourceNSSFiles, Directory: useridentity.DirectoryLocal,
+		Groups: []string{"49202"}, UnconfirmedGroups: []string{"49202"},
+		Assurance: useridentity.AssuranceVerified, ResolvedAt: now.Add(-6 * time.Second),
+	}
+	prevFacts, prevRefresh, prevLookup := cachedDirectoryFacts, cachedDirectoryRefreshFailure, profileExplainSubjectLookup
+	t.Cleanup(func() {
+		cachedDirectoryFacts, cachedDirectoryRefreshFailure, profileExplainSubjectLookup = prevFacts, prevRefresh, prevLookup
+		liveGuardrailProfiles.Store(nil)
+	})
+	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) { return cached, cached.ResolvedAt, true }
+	cachedDirectoryRefreshFailure = func(string) (time.Time, string, bool) { return time.Time{}, "", false }
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "49201", IDKind: useridentity.KindPOSIXUID, UserName: "fcb3r3num", Directory: cached,
+	}, true)
+	profileExplainSubjectLookup = func(string) (profileSubject, error) { return subject, nil }
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Connector = "codex"
+	cfg.Codex.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"watch": {Mode: "observe"}, "numeric": {Mode: "observe"}}
+	cfg.Guardrail.DefaultProfile = "watch"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "numeric", Match: config.ProfileMatch{Groups: []string{"49202"}}},
+	}
+	liveGuardrailProfiles.Store(nil)
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?user=49201&connector=codex", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+	rec := httptest.NewRecorder()
+	api.handleGuardrailProfileResolve(rec, req)
+	var out struct {
+		Refused       bool     `json:"refused"`
+		RefusedPaths  []string `json:"refused_paths"`
+		SandboxReason string   `json:"sandbox_refused_reason"`
+		Warnings      []string `json:"warnings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("%v: %s", err, rec.Body.String())
+	}
+	if out.Refused || len(out.RefusedPaths) != 1 || out.RefusedPaths[0] != "sandbox" || !strings.Contains(out.SandboxReason, "unconfirmed") {
+		t.Fatalf("explain = %s; want the hook decision with the sandbox refusal named", rec.Body.String())
+	}
+	if !strings.Contains(strings.Join(out.Warnings, "\n"), out.SandboxReason) && !strings.Contains(strings.Join(out.Warnings, "\n"), "sandbox") {
+		t.Fatalf("explain warnings %q name no sandbox refusal", out.Warnings)
+	}
 }
