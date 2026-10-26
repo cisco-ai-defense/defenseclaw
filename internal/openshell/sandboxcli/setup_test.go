@@ -111,6 +111,31 @@ func TestSetupWaitDaemonRefusesSquattedIngress(t *testing.T) {
 	has(t, ta.output(), "not ready for sandboxes yet", "openshell.ingress_port", "restart")
 }
 
+// GAP-0701: another account's gateway holds this account's ingress port
+// (api_port + 1). Setup offers the next free port and writes it, so the
+// daemon listens there and runs are not refused.
+func TestSetupMovesASandboxPortAnotherProcessHolds(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	squatter, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = squatter.Close() })
+	held := squatter.Addr().(*net.TCPAddr).Port
+	ta.Cfg.OpenShell.IngressPort = held
+	writeConfig(t, ta, fmt.Sprintf("openshell:\n  ingress_port: %d\n", held))
+	ta.Cfg.OpenShell.IngressPort = held
+	ta.HostDoctor = hostReport(func(rep *openshell.DoctorReport) {
+		rep.Checks = append(rep.Checks, openshell.Check{ID: openshell.CheckIDPortPrefix + "ingress", Title: "Sandbox ingress port",
+			Status: openshell.StatusFail, Detail: fmt.Sprintf("127.0.0.1:%d is in use by another process", held)})
+	})
+	_ = ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true})
+	has(t, ta.output(), "Move the sandbox ingress port to")
+	if got := loadConfig(t, ta).OpenShell.IngressPort; got == 0 || got == held {
+		t.Fatalf("openshell.ingress_port = %d after setup, want a free port other than the held %d; output:\n%s", got, held, ta.output())
+	}
+}
+
 func TestSetupWaitDaemonWaitsForListenersToBind(t *testing.T) {
 	ta := setupApp(t, "", "", true)
 	ta.daemon.status.IngressAddr = ""

@@ -20,10 +20,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -594,6 +596,17 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	updates := map[string]any{
 		"openshell.enabled": true, "openshell.harnesses": names, "openshell.upstream_telemetry": !telemetryOff,
 	}
+	// A sandbox port another program holds (another account's gateway on
+	// this account's api_port + 1) keeps the daemon from listening there,
+	// and every run is then refused: setup offers a free port, which the
+	// daemon moves its listener to when config.yaml changes (GAP-0701).
+	moved, err := a.offerFreeSandboxPorts(rep, assume)
+	if err != nil {
+		return err
+	}
+	for key, port := range moved {
+		updates[key] = port
+	}
 	// The daemon runs the CLI from the PATH it started with, which may not
 	// have the folder this shell found it in (a Homebrew of your own).
 	bin := cliBinaryToRecord(a.Cfg.OpenShell.Binary, rep.CLIPath)
@@ -616,6 +629,14 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	}
 	a.Cfg.OpenShell.Enabled, a.Cfg.OpenShell.Harnesses, a.Cfg.OpenShell.UpstreamTelemetry = true, names, !telemetryOff
 	a.ok("openshell.enabled is on in " + a.tildePath(a.ConfigPath))
+	if port, ok := moved[ingressPortKey]; ok {
+		a.Cfg.OpenShell.IngressPort = port
+		a.ok(fmt.Sprintf("%s is %d in %s", ingressPortKey, port, a.tildePath(a.ConfigPath)))
+	}
+	if port, ok := moved[egressPortKey]; ok {
+		a.Cfg.OpenShell.EgressPort = port
+		a.ok(fmt.Sprintf("%s is %d in %s", egressPortKey, port, a.tildePath(a.ConfigPath)))
+	}
 	if bin != "" {
 		a.Cfg.OpenShell.Binary = bin
 		a.note("openshell.binary is " + a.tildePath(bin) + ": the daemon runs the OpenShell CLI from there, as that folder may not be on the PATH it started with")
@@ -977,6 +998,73 @@ func cliBinaryToRecord(configured, found string) string {
 		return ""
 	}
 	return found
+}
+
+// The config keys of the sandbox listener ports.
+const (
+	ingressPortKey = "openshell.ingress_port"
+	egressPortKey  = "openshell.egress_port"
+)
+
+// sandboxPortProbe opens a listener to find a free port (net.Listen; tests
+// replace it).
+var sandboxPortProbe = net.Listen
+
+// offerFreeSandboxPorts offers, for each sandbox listener port the doctor
+// found held by another process (not this daemon), the next free port above
+// it, and returns the config keys the user took (GAP-0701). A port nobody
+// holds, or one the daemon serves, is left as it is; with no free port in
+// reach it says how to choose one.
+func (a *App) offerFreeSandboxPorts(rep *openshell.DoctorReport, assume bool) (map[string]int, error) {
+	moved := map[string]int{}
+	if a.Cfg == nil || rep == nil {
+		return moved, nil
+	}
+	ingress, egress := a.Cfg.OpenShellIngressPort(), a.Cfg.OpenShellEgressPort()
+	taken := map[int]bool{a.Cfg.Gateway.APIPort: true, ingress: true, egress: true, config.DefaultEnterpriseOpenShellGatewayPort: true}
+	for _, p := range []struct {
+		name, key string
+		port      int
+	}{{"ingress", ingressPortKey, ingress}, {"egress", egressPortKey, egress}} {
+		c := rep.Get(openshell.CheckIDPortPrefix + p.name)
+		if c == nil || c.Status != openshell.StatusFail || !strings.Contains(c.Detail, "in use by another process") {
+			continue
+		}
+		free := freeSandboxPort(p.port, taken)
+		if free == 0 {
+			a.warn(fmt.Sprintf("the sandbox %s port 127.0.0.1:%d is in use by another process and no free port was found near it; set %s to a free port, then rerun setup",
+				p.name, p.port, p.key))
+			continue
+		}
+		yes, err := a.ask(fmt.Sprintf("Move the sandbox %s port to %d? 127.0.0.1:%d is in use by another process, so the daemon cannot listen there "+
+			"and every sandbox run is refused (sets %s in %s)", p.name, free, p.port, p.key, a.tildePath(a.ConfigPath)), true, assume)
+		if err != nil {
+			return nil, err
+		}
+		if !yes {
+			continue
+		}
+		taken[free] = true
+		moved[p.key] = free
+	}
+	return moved, nil
+}
+
+// freeSandboxPort is the first port above from, within 200, that no one
+// listens on 127.0.0.1 and that taken does not hold; 0 when none is.
+func freeSandboxPort(from int, taken map[int]bool) int {
+	for port := from + 1; port <= from+200 && port <= 65535; port++ {
+		if taken[port] {
+			continue
+		}
+		ln, err := sandboxPortProbe("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			continue
+		}
+		_ = ln.Close()
+		return port
+	}
+	return 0
 }
 
 // homebrewNotWritable reports a Homebrew prefix that belongs to another
