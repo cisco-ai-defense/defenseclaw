@@ -21,8 +21,14 @@ func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
 		"sudo -l", "sudo -ll", "sudo --list", "sudo -n -l",
 		"sudo -u root -l", "sudo -l /bin/sh", "sudo -l /bin/r*",
 	} {
-		if got := ActionCommandAuditReason(command, cwd, home); got != "" {
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
 			t.Errorf("%q: decision = %q, want allow", command, got)
+		}
+		// The POSIX grammar knows sudo -l lists and runs nothing. A Windows
+		// home reads the command as PowerShell, where sudo is an unknown
+		// program: an audit reason there, never a deny (GAP-0975).
+		if got := ActionCommandAuditReason(command, cwd, home); got != "" && !actionWindowsHome(home) {
+			t.Errorf("%q: audit reason = %q, want none", command, got)
 		}
 	}
 	for _, command := range []string{
