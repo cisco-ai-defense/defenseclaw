@@ -5086,7 +5086,11 @@ function Assert-WizardHookRegistration(
             'afterFileEdit', 'afterTabFileEdit', 'beforeSubmitPrompt', 'afterAgentResponse',
             'afterAgentThought', 'stop', 'preCompact', 'workspaceOpen'
         )
-        $expectedFailClosed = $Mode -eq 'action'
+        # Outside Secure Client every Cursor registration carries failClosed: true,
+        # in action and observe mode (the host flag covers a hook process that
+        # never answers; the hook still makes the configured outage decision),
+        # and the adapter blocks its own failure in both modes.
+        $expectedFailClosed = $true
         foreach ($eventName in $expectedEvents) {
             $eventProperty = $hooksDocument.hooks.PSObject.Properties[$eventName]
             if ($null -eq $eventProperty) {
@@ -5101,7 +5105,7 @@ function Assert-WizardHookRegistration(
             $entry = $managedEntries[0]
             if ([string]$entry.type -cne 'command' -or [int]$entry.timeout -ne 30 -or
                 [bool]$entry.failClosed -ne $expectedFailClosed) {
-                throw "wizard-selected Cursor $eventName entry has the wrong type, timeout, or failClosed value"
+                throw "wizard-selected Cursor $eventName entry has the wrong type, timeout, or failClosed value ($Mode mode)"
             }
             $commandMatch = [regex]::Match(
                 [string]$entry.command,
