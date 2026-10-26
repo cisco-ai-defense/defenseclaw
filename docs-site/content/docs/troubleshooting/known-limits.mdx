@@ -49,7 +49,25 @@ These are bugs in 1.0.4. They are fixed in 1.0.5. Each entry says who is affecte
 
 ### Managed Windows
 
-- **Changing the fail mode with Setup `/ensure`:** an `/ensure` that changes `guardrail.hook_fail_mode` (for example to `open`) can run for about 10 minutes and exit `1603` with `hook_fail_mode_restore_unproven`. Enrolled users' agents can then stay blocked with "the DefenseClaw gateway is not available", even after `/ensure` and `/repair` succeed and `status` and `verify` report healthy. Keep the fail mode you installed with. If `/ensure` already returned `1603` for this reason, run `/ensure` again with the last approved config. If users are still blocked after that, there is no tested recovery in 1.0.4.
+- **Changing the fail mode with Setup `/ensure`:** an `/ensure` that changes `guardrail.hook_fail_mode` (for example to `open`) can run for about 10 minutes and exit `1603` with `hook_fail_mode_restore_unproven`. Enrolled users' agents can then stay blocked with "the DefenseClaw gateway is not available", even after `/ensure` and `/repair` succeed and `status` and `verify` report healthy. Keep the fail mode you installed with. If `/ensure` already returned `1603` for this reason, run `/ensure` again with the last approved config. If users are still blocked after that, an administrator can remove the closure marker once the checks below pass (tested on Windows Server 2025 with 1.0.4-rc.10).
+
+  Check first. Delete the marker only if all of these hold:
+
+  1. The approved config is installed: `/ensure` with it exits 0.
+  2. `defenseclaw enterprise windows verify --profile standalone --json` exits 0 with `ok: true`, `installed: true`, `transaction_pending: false` and no errors.
+  3. The gateway enforces the installed policy: `policy.effective_digest` equals `policy.gateway_reported_digest`, and `policy.applied` is true.
+  4. Every connector's `effective_hook_fail_mode` is what the approved config sets (`closed` unless you set an explicit open mode).
+  5. The marker is a plain file (not a reparse point) whose only content is `hot-config-undo-unproven-v1`.
+
+  If any check fails, keep the marker (users stay blocked, which is safe), fix what the check names and check again.
+
+  Remove the marker from an elevated PowerShell prompt, or as SYSTEM through your MDM:
+
+  ```powershell
+  Remove-Item -LiteralPath 'C:\ProgramData\Cisco\DefenseClaw-HookRuntime\.defenseclaw-hot-config-undo-closed' -Force
+  ```
+
+  Confirm: `Test-Path` on that path returns `False`. No restart or sign-out is needed. The next prompt in an existing agent session reaches the gateway, and so do new sessions. The gateway audit (`defenseclaw-gateway.exe audit export --since 30m`, elevated) shows `llm_prompt` and `tool_invocation` rows for it. If an agent then shows a model provider error such as a 401, that is the provider, not DefenseClaw.
 - **Upgrade returns `1603 scanner_runtime_unavailable`:** after an upgrade from 1.0.2 or 1.0.3, `/ensure` can wait 15 minutes to prepare the scanner runtime and then fail, with 1.0.4 installed and running. Skill, MCP and plugin installs stay blocked. Run `Setup-Enterprise-Standalone-x64.exe /repair JSON=1`, then `/ensure` again.
 - **`verify` returns `1603` while a Hermes user is away:** after an upgrade, `/ensure` exits 0 but `verify` exits `1603` with `guardian_repair_pending`, and `coverage_complete` and `security_complete` are false. Hermes hooks are repaired only in that account's own session, so MDM can report a failed deployment until the user signs in or reconnects. After a clean upgrade, `status` can also show "Hermes NOT COVERED" while services and enforcement run. With everyone signed in, check that `verify` lists no errors.
 - **Upgrade from 1.0.3 rolls back:** on release candidates, `/ensure` rolled back cleanly when an enrolled user's `%USERPROFILE%\.claude\settings.json` still had OTLP export entries from an earlier per-user install. Remove those entries, then run `/ensure` again.
