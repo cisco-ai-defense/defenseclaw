@@ -61,6 +61,71 @@ _WRITE_TOOL_NAMES = frozenset(
 )
 
 
+def _echo_gateway_enforcement(app: AppContext, *, wait_s: float = 5.0) -> None:
+    """Say whether the running gateway enforces the list change (GAP-1879).
+
+    The tool lists live in config.yaml and the gateway reloads them a moment
+    after the write, so a hook call right after this command could still get
+    the previous verdict. Wait briefly for the gateway to apply the policy
+    digest config.yaml now computes to, then say it enforces the change or
+    that it is pending. Nothing is said when no gateway of this account can
+    be asked; a notice never fails the command.
+    """
+    try:
+        _echo_gateway_enforcement_checked(app, wait_s)
+    except Exception:  # noqa: BLE001 - a notice never fails the command.
+        return
+
+
+def _echo_gateway_enforcement_checked(app: AppContext, wait_s: float) -> None:
+    import time
+
+    from defenseclaw.gateway import (
+        OrchestratorClient,
+        foreign_loopback_listener,
+        gateway_api_client_host,
+        local_policy_digest,
+    )
+
+    cfg = app.cfg
+    port = getattr(getattr(cfg, "gateway", None), "api_port", 0)
+    if cfg is None or not port or asset_lists.is_secure_client(cfg):
+        return
+    host = gateway_api_client_host(cfg)
+    if foreign_loopback_listener(host, int(port)):
+        return
+    client = OrchestratorClient(host=host, port=port, timeout=2)
+    try:
+        want = ""
+        deadline = time.monotonic() + wait_s
+        while True:
+            try:
+                health = client.health()
+            except Exception:  # noqa: BLE001 - no gateway to ask.
+                return
+            policy = health.get("policy") if isinstance(health, dict) else None
+            applied = str(policy.get("effective_digest") or "") if isinstance(policy, dict) else ""
+            if not applied:
+                return
+            if not want:
+                local = local_policy_digest(cfg, timeout=10)
+                want = str((local or {}).get("effective_digest") or "")
+                if not want:
+                    return
+            if applied == want:
+                click.echo(f"The running gateway enforces it now (policy digest {want[:12]}).")
+                return
+            if time.monotonic() >= deadline:
+                click.echo(
+                    "Pending: the running gateway has not applied it yet. Hook calls keep the previous "
+                    "verdict until it reloads config.yaml, usually within a few seconds."
+                )
+                return
+            time.sleep(0.25)
+    finally:
+        client.close()
+
+
 def _target_name(name: str, source: str) -> str:
     """Build a source-scoped target: 'source/name' if source given, else 'name'."""
     return f"{source}/{name}" if source else name
@@ -331,6 +396,7 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
             f"reason={reason} effective_target={log_scope} "
             f"requested_scope={connector or source or 'unscoped'}",
         )
+    _echo_gateway_enforcement(app)
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +471,7 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
     )
     if not connector and not source:
         _echo_cleared_connector_overrides(cleared_connectors)
+    _echo_gateway_enforcement(app)
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +531,7 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
             f"{ux.dim('[tool]')} {name!r}{scope_note} removed from block/allow list"
         )
         _echo_cleared_connector_overrides(cleared_connectors)
+        _echo_gateway_enforcement(app)
         return
     elif not asset_lists.is_secure_client(app.cfg):
         # Nothing is stored per source: a --source block is the unscoped block.
@@ -481,6 +549,7 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
     click.echo(
         f"{ux.dim('[tool]')} {name!r}{scope_note} removed from block/allow list"
     )
+    _echo_gateway_enforcement(app)
 
 
 # ---------------------------------------------------------------------------
