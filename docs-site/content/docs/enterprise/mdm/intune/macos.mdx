@@ -101,7 +101,7 @@ trust on a signed and notarized pkg, set `DC_TRUST_MODE=signed` and
 
 | Setting | Value |
 | --- | --- |
-| Upload script | Your edited copy; the wrapper is about 92 KB (1,799 lines) before you add the config |
+| Upload script | Your edited copy; the wrapper is about 108 KB (2,091 lines) before you add the config |
 | Run script as signed-in user | **No** (runs as root) |
 | Hide script notifications on devices | **Yes** |
 | Script frequency | **Every 1 day**. With `DC_SOURCE_URL` set, every run downloads the pkg before it compares versions |
@@ -142,6 +142,8 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret status
 ```
 
 Delete the source file afterwards. Storing the key re-runs `ensure`, which applies it.
+
+When you deliver a credential with a bundle, the script first writes what it replaces to a root-only journal (`/var/lib/defenseclaw-mdm/rotation` on Linux, `/var/db/defenseclaw-mdm/rotation` on macOS). If the bundle does not apply, it puts the earlier value back, or removes a credential it added. If the run is stopped before it finishes, the next ensure does that before it changes anything. The new value stays only when the gateway reports that a bundle confirmed since uses it. If the gateway refuses the put-back for another reason, the journal entry stays, the wrapper log says why, and the script rotates no other credential until it is resolved.
 
 ## Change the config, upgrade and roll back
 

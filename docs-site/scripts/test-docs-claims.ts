@@ -1502,6 +1502,15 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1552", page: "enterprise/runtime/sandboxes.mdx", has: ["a run first waits up to 10 seconds for your sandbox policy"] },
   { gap: "GAP-0701", page: "troubleshooting/sandboxes/setup-and-gateway.mdx", has: ["offers the next free port and writes it as `openshell.ingress_port` or `openshell.egress_port`"] },
   { gap: "GAP-0831", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["it cannot cut that guest off below OpenShell's own network broker", "adds none back (approvals included)"] },
+  { gap: "GAP-1173, GAP-1188", page: "enterprise/mdm/intune/linux.mdx", has: ["the script first writes what it replaces to a root-only journal"] },
+  { gap: "GAP-1536", page: "enterprise/mdm/intune/macos.mdx", has: ["about 108 KB (2,091 lines)"] },
+  { gap: "GAP-1584, GAP-1616", page: "enterprise/mdm/reference.mdx", has: ["including the rotation journal and the staging folders of wrapper runs that were killed", "`--purge` also removes the wrapper's empty state folder `/var/db/defenseclaw-mdm`", "every ensure exits `mdm_secret_failed`"] },
+  { gap: "GAP-0727", page: "enterprise/operate/reference.mdx", has: ["`--purge` leaves that folder and the install's binaries exactly as they are"], lacks: ["to a new `~/.defenseclaw-backup-<UTC time>` folder"] },
+  { gap: "GAP-0727", page: "reference/commands/cli.mdx", lacks: ["is moved to `~/.defenseclaw-backup-<UTC time>` first"] },
+  { gap: "GAP-1654", page: "enterprise/install/reference/linux.mdx", has: ["Accounts the deployment never enrolled keep their DefenseClaw files"] },
+  { gap: "GAP-1542", page: "enterprise/operate/lifecycle.mdx", has: ["`--purge` removes everything DefenseClaw installed", "`eDSPermissionError`"] },
+  { gap: "GAP-0722", page: "reference/edge-connector/configuration.mdx", lacks: ["the message names the missing file instead"] },
+  { gap: "GAP-0286", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["the old gateway's audit row can still say allow", "the gateway records such a call as unconfirmed"] },
   // r105-rows-end
 ];
 

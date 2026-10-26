@@ -1165,7 +1165,7 @@ Every mutating action is a transaction that rolls back on failure. See
 | `--for <duration>` | tetragon pause | How long the pause lasts. Default `4h`, at most `7d` |
 | `--until-reboot` | tetragon pause | Keep the pause in `/run`, so a reboot ends it. Not with `--for` |
 | `--lock-wait <duration>` | install, upgrade, repair, reconcile, rotate-credentials, ensure, uninstall | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
-| `--purge` | uninstall | Also remove each enrolled account's `~/.defenseclaw`, the empty agent folders DefenseClaw created, its per-user binaries and launcher links in `~/.local/bin`, and its uv cache entries, after stopping its per-user gateway and watchdog. An account's own earlier install (its `~/.defenseclaw` has a `config.yaml`, `.env`, `audit.db` or `previous`) is moved to `~/.defenseclaw-backup-<UTC time>` first. It also removes the sandbox registration store, key and setup record. Run it in the first removal: it needs the deployment's binaries. The result names each account it cleaned and each it left alone, with the reason. Without `--purge`, `sandbox` registrations and `redaction-correlation.key` may stay when an account keeps sandboxes. |
+| `--purge` | uninstall | Also remove each enrolled account's `~/.defenseclaw`, the empty agent folders DefenseClaw created, its per-user binaries and launcher links in `~/.local/bin`, and its uv cache entries, after stopping its per-user gateway and watchdog. An account's own earlier install (its `~/.defenseclaw` has a `config.yaml`, `.env`, `audit.db` or `previous`) is left exactly as it is, with its binaries, and the result names the account (`per_user_state_remaining`). It also removes the sandbox registration store, key and setup record. Run it in the first removal: it needs the deployment's binaries. The result names each account it cleaned and each it left alone, with the reason. Without `--purge`, `sandbox` registrations and `redaction-correlation.key` may stay when an account keeps sandboxes. |
 | `--keep-state` | uninstall | Keep the config, credentials, gateway and guardian state (the sandbox registrations and key included), logs and the service account, so a reinstall resumes with them. The deployment record goes either way. Cannot combine with `--purge` |
 | `--keep-service-account` | uninstall | Keep the gateway service account, which uninstall deletes otherwise |
 | `--ready-for <mode>` | tetragon verify | The mode to check readiness for: `consume`, `observe` or `enforce` |
@@ -1305,7 +1305,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --c
 | --- | --- |
 | `defenseclaw-gateway enterprise secret set --name N` | Store a credential. Pass exactly one of `--from-stdin` or `--from-file F`. The value is never printed. On Linux and macOS, `--lock-wait D` (set and remove) waits up to D (at most 15m) for another lifecycle run instead of exiting 75 |
 | `defenseclaw-gateway enterprise secret status` | List stored credentials with a digest prefix and modification time, never the value |
-| `defenseclaw-gateway enterprise secret remove --name N` | Remove a credential |
+| `defenseclaw-gateway enterprise secret remove --name N` | Remove a credential. The MDM wrapper's put-back of a rotated credential (`--undo-rotation` with `--undo-config SHA`) works on Linux and macOS as well as Windows |
 
 Names use lowercase letters, digits, and dashes. Every action takes `--json`.
 
