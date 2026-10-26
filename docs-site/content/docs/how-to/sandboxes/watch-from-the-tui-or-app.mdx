@@ -27,9 +27,17 @@ defenseclaw tui
 
 Press `7` for the Sandboxes panel. The header shows the state (`READY`, `OFF`, `WAITING`, `UNAVAILABLE` or `UNREACHABLE`), how many sandboxes run, how many asks wait, and the gateway with its driver. `OFF` points to the setup wizard. `UNAVAILABLE` gives the daemon's reason.
 
+![DefenseClaw TUI Sandboxes panel on a Mac: READY, one running sandbox and two asks waiting on the OpenShell 0.1.5 gateway (MicroVM), the unblock hint for a refused paste site, the button bar, and the myapp-claude row with its pack, copy mode, sites, blocks, tool calls and alerts](/images/sandboxes/screens/tui-sandboxes.png)
+
 Press `t` to switch views: **Sandboxes** (one row per sandbox), **Activity** (the live feed, newest first) and **Asks** (waiting for you). `Enter` opens details, `Esc` closes them.
 
 ![DefenseClaw TUI Activity view on Linux: the feed of one sandbox, newest first, with allowed sites, two shadow AI warnings, a paste site refused with the key that unblocks it, a blocked tool call and the sandbox's lifecycle lines](/images/sandboxes/screens/tui-sandboxes-activity.png)
+
+![DefenseClaw TUI Asks view on Linux: sandbox svc asks to reach host port 9418 (git) on the OpenShell 0.1.5 gateway (docker driver) and waits for an answer](/images/sandboxes/screens/tui-sandboxes-asks.png)
+
+![DefenseClaw TUI sandbox details on Linux: a mounted project, sites contacted and blocked, hook event counts, the last tool block (C2-METADATA-AWS), and one row per destination: the model provider, two shadow AI sites, package registries, source hosting and a refused paste site](/images/sandboxes/screens/tui-sandbox-destinations.png)
+
+![DefenseClaw TUI sandbox details on a Mac in copy mode: asks waiting, the process tree from OpenShell's runtime through the DefenseClaw supervisor and Claude Code to a rate-limited curl, the pull and undo actions, and the destinations](/images/sandboxes/screens/tui-sandbox-processes.png)
 
 | Key | Action |
 | --- | --- |

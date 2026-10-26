@@ -193,6 +193,10 @@ Your sandbox policy on this computer
 
 ![The end of a sandbox session on Linux: Session ended with 8 tool calls, 1 blocked by a rule, 1 new site contacted, 2 sites blocked, 0 files changed; two DefenseClaw blocked lines for sites not on the organization's allowed list; the sandbox changed nothing; the sandbox is kept stopped with its connect and delete commands, and the note that the claude --resume line works only inside the sandbox](/images/sandboxes/managed/session-end.png)
 
+Sandboxes on a computer serve one account at a time. While one person has a sandbox running, another person's `sandbox run` is refused until it ends:
+
+![A second account on a managed Linux computer is refused: another account is using sandboxes (one account at a time), with the organization's help contacts, then sandbox doctor ending not ready for sandboxes yet](/images/sandboxes/managed/account-busy.png)
+
 ## Check as an admin
 
 Run these as root:
@@ -208,6 +212,8 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux sandbox pack-dige
 On macOS use `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos` instead.
 
 `sandbox list` shows registrations (filter with `--state`), `sandbox explain --registration` shows one the way the person sees it, `policy verify --user` adds the sandbox rows, and `sandbox pack-digest` prints the digest that `required_pack_digest` pins. `ensure` and `verify` print warnings, never failures, for configurations that work but probably are not what you meant. Details: [Sandbox reference](/docs/enterprise/runtime/sandbox-reference#check-as-an-admin-more).
+
+![enterprise linux sandbox explain --registration for a live sandbox: the user, agent, sandbox and driver, the matched profile and its digests, the MCP servers kept and skipped, what the user sees, and where each setting comes from](/images/sandboxes/managed/admin-sandbox-explain.png)
 
 ![The help of enterprise windows sandbox from an elevated prompt: explain, list and pack-digest, read-only, with the note that a user sees only their own policy through defenseclaw sandbox policy explain](/images/sandboxes/managed/windows-admin-sandbox-help.png)
 

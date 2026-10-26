@@ -51,6 +51,10 @@ Install OpenShell … with NVIDIA's installer? (sudo; sha256 verified) [y/N] y
 
 Setup is safe to run again. Say no to mounts, or pass `--no-mounts`, and no Claude Code or Codex sandbox can start. Flags and the full list of steps are in the [sandbox CLI reference](/docs/reference/sandboxes/cli#sandbox-setup). The TUI runs the same setup: `defenseclaw tui`, `0`, **Sandboxes (OpenShell)**.
 
+You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenShell)**). The form shows the command it will run before you start it.
+
+![DefenseClaw TUI Setup, Sandboxes (OpenShell) form on Linux: the command it will run, the harnesses to set up, the credentials found, the This machine checks (Docker, Landlock, OpenShell 0.1.5, bind mounts), and the Mount Project Folder and OpenShell telemetry options](/images/sandboxes/screens/tui-setup-linux.png)
+
 <TerminalAnimation
   cwd="~/code/myapp"
   speed={1.6}
@@ -149,6 +153,8 @@ defenseclaw sandbox doctor
 ```
 
 Every warning or failure names its fix on the next line. `defenseclaw sandbox doctor --fix` applies the fixes that need only your user. The command exits 1 when a check fails.
+
+![defenseclaw sandbox doctor on Linux: every check passes, with OpenShell 0.1.5 on the docker driver, the sandbox ports served by the DefenseClaw daemon, hook-verified harness images and the sandbox TLS trust row, ending ready for sandboxes](/images/sandboxes/screens/linux-doctor.png)
 
 </Step>
 

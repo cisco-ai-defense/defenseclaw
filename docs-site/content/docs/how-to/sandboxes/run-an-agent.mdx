@@ -77,6 +77,8 @@ defenseclaw sandbox activity -f
 
 `✓` is a site reached, `✗ host` a site blocked, `⚠` a tool call allowed with a finding, `✗ tool … blocked` a tool call blocked by the hooks, and `? ask` a request only you can approve. Model calls are not in the feed. The [TUI and macOS app](/docs/how-to/sandboxes/watch-from-the-tui-or-app) show the same feed. If a site was blocked wrongly, [unblock it](/docs/how-to/sandboxes/unblock-a-site).
 
+![defenseclaw sandbox activity on a Mac: the sandbox is created and the copy uploaded, a tool call blocked by C2-METADATA-AWS, npm and GitHub allowed, two shadow AI sites refused with their unblock commands and asks waiting, a pastebin fetch flagged by C2-PASTEBIN and the site refused, then pypi.org allowed](/images/sandboxes/screens/terminal-activity-feed.png)
+
 </Step>
 
 <Step>
@@ -95,6 +97,8 @@ Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
 On a Mac the question is `Bring the changes back? [A] apply (3-way) [b] branch [p] patch file [s] skip`. [Review, undo or pull](/docs/how-to/sandboxes/review-undo-or-pull) explains each answer. A session that changed no files ends without the question.
 
 ![End of a sandbox session on a Mac: the work being pulled, 8 tool calls, 4 new sites contacted, 1 site blocked, 1 file changed, a fetch that DefenseClaw allowed but flagged, the webhook site it blocked and that was unblocked since, and the question to bring the changes back by apply, branch, patch file, skip or show diff](/images/sandboxes/screens/terminal-session-summary.png)
+
+![End of a sandbox session on Linux: 8 tool calls with 1 blocked (C2-METADATA-AWS), 5 new sites contacted and 1 blocked, the shadow AI warnings, the unblock hint, whether the sandbox was kept or stopped, and how to continue](/images/sandboxes/screens/terminal-session-end-linux.png)
 
 ![A defenseclaw sandbox run opencode session ended by DefenseClaw: the banner's Hooks line, the warning that the harness worked for 1m without a hook reaching DefenseClaw, the session summary, and the resume and delete commands](/images/sandboxes/screens/terminal-hook-silence-stop.png)
 

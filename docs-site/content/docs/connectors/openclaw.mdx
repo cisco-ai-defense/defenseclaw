@@ -11,7 +11,7 @@ DefenseClaw ships a plugin for OpenClaw. It redirects recognized model calls thr
 
 <Video
   src="openclaw"
-  caption="Plugin install and first guardrail: the DefenseClaw plugin loads inside OpenClaw, sends recognized model traffic through the guardrail proxy, and returns policy decisions through OpenClaw's own screens."
+  caption="Plugin install and first guardrail on DefenseClaw 1.0.4: setup writes the DefenseClaw plugin into OpenClaw, restarts the gateway, and the first tool call is checked."
 />
 
 ## Platform support
@@ -43,7 +43,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 
 <Video
   src="openclaw-e2e"
-  caption="A full OpenClaw request: the prompt arrives, the gateway inspects it, policy decides, you approve in OpenClaw, the tool runs and an audit row is written."
+  caption="A full OpenClaw run on DefenseClaw 1.0.4: a prompt reaches the gateway, policy decides, OpenClaw asks for approval on a confirm verdict in its Control UI, the tool runs or is denied, and the audit row is written."
 />
 
 The sequence of a model call and a tool call, with approvals, is on the [reference page](/docs/reference/connectors/openclaw#end-to-end-flow).
