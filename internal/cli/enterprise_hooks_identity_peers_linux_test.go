@@ -184,3 +184,61 @@ func TestGatewayPeerListingIsCachedAndKeepsTheLastInode(t *testing.T) {
 		t.Fatalf("a changed homes file gave %d lookups; want the accounts resolved again", resolves)
 	}
 }
+
+// GAP-1865 refix (RV4-1): a machine-policy host with targets 0 that comes
+// from published 1.0.3 directly has only served accounts. If none of them
+// could write the first migration map, the pre-upgrade agents entries of its
+// local accounts were refused for good. The homes file shows whether a 1.0.4
+// gateway served the uids: 1.0.3 writes no format entry, 1.0.4 writes format
+// 1, and this release keeps pre_token_file on a file it took over from 1.0.3.
+// Only the 1.0.4 shape keeps the account from writing the first map.
+func TestServedAccountWritesTheFirstMigrationMapWithoutA104Window(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Skip("no current account:", err)
+	}
+	uid, err := strconv.Atoi(me.Uid)
+	if err != nil || uid <= 0 {
+		t.Skip("not run as a non-root account")
+	}
+	identityCallerTestConfig(t)
+	cfg.Enterprise.Enrollment.UnenrolledUsers = config.EnterpriseUnenrolledInspect
+	cfg.DataDir = t.TempDir()
+	previousMachine := enterpriseHookLoadMachinePolicyConnectors
+	t.Cleanup(func() { enterpriseHookLoadMachinePolicyConnectors = previousMachine; enterpriseHookPeerListing.reset() })
+	enterpriseHookLoadMachinePolicyConnectors = func() ([]string, error) { return []string{"codex"}, nil }
+	entry := `"` + me.Uid + `":{"home":"` + me.HomeDir + `","name":"` + me.Username + `"}`
+	for _, tc := range []struct {
+		name, body string
+		peer       bool
+	}{
+		{"1.0.3 homes file", `{` + entry + `}`, false},
+		{"1.0.4 homes file", `{"format":{"format":1},` + entry + `}`, true},
+		{"homes file this release took over from 1.0.3", `{"format":{"format":1,"pre_token_file":true},` + entry + `}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			enterpriseHookPeerListing.reset()
+			if err := os.WriteFile(filepath.Join(cfg.DataDir, "managed_peer_homes.json"), []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			accounts, _, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, enterpriseHookReconcileRun{})
+			i := slices.IndexFunc(accounts, func(a enterprisehooks.IdentitySpoolAccount) bool { return a.UID == uid })
+			if i < 0 {
+				t.Skip("the account database gives the current account no non-SID incarnation here")
+			}
+			if accounts[i].Peer != tc.peer {
+				t.Fatalf("account %+v: Peer=%v, want %v", accounts[i], accounts[i].Peer, tc.peer)
+			}
+			_ = enterprisehooks.WriteIdentitySpool(context.Background(), dir, accounts[i:i+1], nil, nil, nil)
+			record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, me.Uid, nil)
+			if err != nil || record.LegacyOwnerToken == "" {
+				t.Logf("no record with an owner token for the current account here (%v); the map half rests on enterprisehooks", err)
+				return
+			}
+			if recorded := enterprisehooks.LegacyAgentOwnersRecorded(dir); recorded == tc.peer {
+				t.Fatalf("first pass wrote the migration map=%v, want %v", recorded, !tc.peer)
+			}
+		})
+	}
+}

@@ -132,6 +132,14 @@ var enterpriseHookResolveGatewayPeers = func(path string, last map[int]enterpris
 	if json.Unmarshal(data, &stored) != nil {
 		return last
 	}
+	preTokenFile := true
+	if raw, ok := stored["format"]; ok {
+		var format struct {
+			Format       int  `json:"format"`
+			PreTokenFile bool `json:"pre_token_file"`
+		}
+		preTokenFile = json.Unmarshal(raw, &format) == nil && (format.Format < 1 || format.PreTokenFile)
+	}
 	uids := make([]int, 0, len(stored))
 	for key := range stored {
 		if uid, err := strconv.Atoi(key); err == nil && uid > 0 && strconv.Itoa(uid) == key {
@@ -145,6 +153,7 @@ var enterpriseHookResolveGatewayPeers = func(path string, last map[int]enterpris
 	resolved := make(map[int]enterpriseHookCachedPeer, len(uids))
 	keep := func(uid int) {
 		if peer, ok := last[uid]; ok {
+			peer.PreTokenFile = preTokenFile
 			resolved[uid] = peer
 		}
 	}
@@ -172,7 +181,8 @@ var enterpriseHookResolveGatewayPeers = func(path string, last map[int]enterpris
 		case strings.HasPrefix(incarnation, "sid:"):
 			continue
 		}
-		peer := enterpriseHookCachedPeer{enterpriseHookPeerAccount{UID: uid, User: account.Name, HomeInode: enterpriseHookHomeInode(account.Home)}, account.Home}
+		peer := enterpriseHookCachedPeer{enterpriseHookPeerAccount{UID: uid, User: account.Name, HomeInode: enterpriseHookHomeInode(account.Home),
+			PreTokenFile: preTokenFile}, account.Home}
 		if previous, ok := last[uid]; ok && peer.HomeInode == 0 && previous.User == peer.User {
 			peer.HomeInode = previous.HomeInode
 		}

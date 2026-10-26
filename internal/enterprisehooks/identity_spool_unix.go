@@ -36,10 +36,14 @@ type IdentitySpoolAccount struct {
 	// goes at once.
 	Left bool
 	// Peer marks an account listed only because the gateway served it (a
-	// machine-policy host, GAP-0422). Its record does not write the first
-	// migration map: the account that holds the uid at the upgrade to this
-	// release may not be the one 1.0.3 saw (GAP-1865). It may still join an
-	// existing map under the rollback rule.
+	// machine-policy host, GAP-0422) while a 1.0.4 gateway may have served
+	// its uid. Its record does not write the first migration map: 1.0.4
+	// wrote no record of it, so the account that holds the uid at the
+	// upgrade to this release may not be the one 1.0.3 saw (GAP-1865). It
+	// may still join an existing map under the rollback rule. A served
+	// account on a host that came from a build before 1.0.4 directly is no
+	// Peer: its holder at the first pass is the one 1.0.3 saw, as for an
+	// enrolled account.
 	Peer bool
 }
 

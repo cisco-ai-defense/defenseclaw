@@ -287,7 +287,7 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 		for _, peer := range enterpriseHookGatewayPeerAccounts(enterpriseHookIdentityDataDir()) {
 			if !seen[peer.UID] && !left[peer.UID] {
 				list(peer.UID, peer.User, peer.HomeInode)
-				accounts[len(accounts)-1].Peer = true
+				accounts[len(accounts)-1].Peer = !peer.PreTokenFile
 			}
 		}
 		for _, uid := range enterpriseHookRecordedCallerUIDs(dir) {
@@ -551,6 +551,12 @@ type enterpriseHookPeerAccount struct {
 	UID       int
 	User      string
 	HomeInode uint64
+	// PreTokenFile reports that the homes file shows no 1.0.4 gateway
+	// served the uid: a build before 1.0.4 wrote it last (no format
+	// entry), or this release took it over from one and marks it so
+	// (pre_token_file). The account may then write the first migration
+	// map (IdentitySpoolAccount.Peer, GAP-1865).
+	PreTokenFile bool
 }
 
 // enterpriseHookIdentityDataDir is the managed gateway's data directory of
