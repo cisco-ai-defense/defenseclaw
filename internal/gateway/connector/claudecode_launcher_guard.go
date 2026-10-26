@@ -129,11 +129,13 @@ func claudeCodeLauncherGuardParts(hook map[string]interface{}) (string, []string
 }
 
 // claudeCodeCmdGuardParts returns the launcher and hook argv of an exact
-// generated cmd.exe guard.
+// generated cmd.exe guard. cmd.exe is the one in the system directory the
+// Windows API reports, never one named by SystemRoot in the environment of
+// the agent or hook that asks.
 func claudeCodeCmdGuardParts(hook map[string]interface{}) (string, []string, bool) {
 	command, _ := hook["command"].(string)
 	if command == "" || normalizeWindowsHookExecutable(command) !=
-		normalizeWindowsHookExecutable(claudeCodeWindowsCommandProcessor()) {
+		normalizeWindowsHookExecutable(windowsSystemCmdExe()) {
 		return "", nil, false
 	}
 	args, ok := claudeCodeNativeExecArguments(hook)
@@ -285,8 +287,9 @@ func ClaudeCodeLauncherGuardTarget(hook map[string]interface{}) (launcher string
 // launcher. Only those exact generated argv count; any edited argv, another
 // launcher or another guard program is not one. The caller checks the
 // handler's other keys. The managed guardian migrates these handlers out of
-// the user's Claude settings (GAP-0587); until it has, the foreign-hook guard
-// reads them as DefenseClaw's own, not as a foreign hook (GAP-1540).
+// the user's Claude settings (GAP-0587). The shape does not make a handler
+// DefenseClaw's (the user can write the launcher): the foreign-hook guard
+// still blocks it and only names it as an older DefenseClaw hook (GAP-1540).
 func ClaudeCodePerUserHandlerOf(hook map[string]interface{}, home string) bool {
 	home = strings.TrimRight(strings.TrimSpace(home), `\/`)
 	if home == "" || (!isWindowsAbsolutePath(home) && !filepath.IsAbs(home)) {
