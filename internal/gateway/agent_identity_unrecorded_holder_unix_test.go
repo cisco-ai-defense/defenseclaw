@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -64,5 +65,55 @@ func TestFirstProvenHomeOlderThanTheFirstHookKeepsTheAgentIdentity(t *testing.T)
 	}
 	if _, changed := agentIdentityHolderHistory(f.id); changed {
 		t.Fatal("the first proven home recorded a holder change")
+	}
+}
+
+// GAP-1876 (FC-BLK-167-ER on ee6ebae3a1): on an AD-joined host the gateway
+// service cannot resolve a bare name itself (sssd.conf is root's, so whether
+// a directory account shares the name is unknown and the name is refused,
+// GAP-1131), and a uid filter selected every row of the uid. Right after
+// userdel -r and useradd -u, root's first view by name and by uid lists none
+// of the earlier holder's rows; after the guardian's pass the uid view
+// without a proof does not either. The same account's own view lists its
+// row, and the recreated account's new agent identity is listed.
+func TestRecreatedAccountFirstViewByUnresolvedNameAndByUID(t *testing.T) {
+	f := newRecreatedAccountFixture(t)
+	profileExplainAccount = func(string) (string, string, error) {
+		return "", "", errors.New("whether a directory account shares the name is unknown")
+	}
+	uid := strconv.Itoa(f.uid)
+	oldHome := "home:66308:251958246:" + strconv.FormatInt(f.now.Add(-time.Minute).UnixNano(), 10)
+	f.guardian("")
+	old := f.hook("s-old")
+	f.guardian(oldHome)
+	if got := f.hook("s-old-2").ID; got != old.ID {
+		t.Fatalf("the first proven home moved the agent identity to %s, want %s", got, old.ID)
+	}
+	for _, user := range []string{"alice", uid} {
+		if _, listed := f.view(viewOf(user, uid+":"+oldHome))[old.ID]; !listed {
+			t.Fatalf("the account's own view %q does not list its row %s", user, old.ID)
+		}
+	}
+	f.mu.Lock()
+	f.now = f.now.Add(2 * time.Minute)
+	created := f.now.UnixNano()
+	f.mu.Unlock()
+	newHome := "home:66308:84679938:" + strconv.FormatInt(created, 10)
+	for _, user := range []string{"alice", uid} {
+		if rows := f.view(viewOf(user, uid+":"+newHome)); len(rows) != 0 {
+			t.Fatalf("first view %q of the recreated account lists %v; want none of the earlier holder's rows (%s)", user, listedIDs(rows), old.ID)
+		}
+	}
+	f.guardian(newHome)
+	if _, listed := f.view(viewOf(uid, ""))[old.ID]; listed {
+		t.Fatalf("the uid view after the guardian's pass lists the earlier holder's row %s", old.ID)
+	}
+	recreated := f.hook("s-new")
+	rows := f.view(viewOf(uid, ""))
+	if _, listed := rows[recreated.ID]; !listed || recreated.ID == old.ID {
+		t.Fatalf("uid view %v; want the recreated account's own agent %s", listedIDs(rows), recreated.ID)
+	}
+	if _, listed := rows[old.ID]; listed {
+		t.Fatalf("uid view lists the earlier holder's row %s next to the new one", old.ID)
 	}
 }
