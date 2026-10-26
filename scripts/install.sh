@@ -806,24 +806,38 @@ resolved_agent_path() {
 }
 
 # The installer's entry evidence: native fixed locations and npm/Bun
-# launcher symlinks to their exact Node entry. A folder name, manifest or
-# command on PATH is not an entry record.
+# launcher symlinks to their exact entry: the Node script, or the native
+# bin/opencode.exe that current opencode-ai links (GAP-1356). The links are
+# looked for in the usual prefixes, npm's configured prefix and each PATH
+# folder. A folder name, manifest or plain command on PATH is not an entry
+# record: only a launcher link to the package's own entry is.
 installed_agent_programs() {
-    local agent name path target base link
+    local agent name path target base link prefix seen=":"
+    local -a bases folders
     for agent in OpenCode:opencode Amp:amp; do
         name="${agent#*:}"
         path="${HOME}/.${name}/bin/${name}"
         target="$(resolved_agent_path "${path}")" || continue
         printf '%s\t%s\n' "${agent%%:*}" "${target}"
     done
-    for agent in OpenCode:opencode Amp:amp; do
-        name="${agent#*:}"
-        for base in "${HOME}/.npm-global/bin" "${HOME}/.local/bin" "${HOME}/.bun/bin" /usr/local/bin /opt/homebrew/bin; do
+    bases=("${HOME}/.npm-global/bin" "${HOME}/.local/bin" "${HOME}/.bun/bin" /usr/local/bin /opt/homebrew/bin)
+    prefix="${NPM_CONFIG_PREFIX:-${npm_config_prefix:-}}"
+    [[ -n "${prefix}" ]] || prefix="$(sed -n 's/^[[:space:]]*prefix[[:space:]]*=[[:space:]]*//p' "${HOME}/.npmrc" 2>/dev/null | tail -n 1)" || prefix=""
+    prefix="${prefix%\"}"; prefix="${prefix#\"}"; prefix="${prefix/#\~/${HOME}}"
+    [[ "${prefix}" != /* ]] || bases+=("${prefix%/}/bin")
+    IFS=: read -r -a folders <<< "${PATH:-}"
+    for base in ${folders[@]+"${folders[@]}"}; do [[ "${base}" != /* ]] || bases+=("${base%/}"); done
+    for base in "${bases[@]}"; do
+        [[ "${seen}" != *":${base}:"* ]] || continue
+        seen+="${base}:"
+        for agent in OpenCode:opencode Amp:amp; do
+            name="${agent#*:}"
             link="${base}/${name}"
             [[ -L "${link}" ]] || continue
             target="$(resolved_agent_path "${link}")" || continue
             case "${agent}:${target}" in
-                OpenCode:*/node_modules/opencode-ai/bin/opencode | Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
+                OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
+                    Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                     printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
             esac
         done
@@ -842,7 +856,8 @@ runtime_agent_programs() {
         [[ -L "${link}" ]] || continue
         target="$(resolved_agent_path "${link}")" || continue
         case "${agent}:${target}" in
-            OpenCode:*/node_modules/opencode-ai/bin/opencode | Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
+            OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
+                Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                 printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
         esac
     done
@@ -925,7 +940,8 @@ agent_of() {
     shift 3
     program="${program% (deleted)}"
     while IFS=$'\t' read -r agent path; do
-        [[ -n "${path}" && "${program}" == "${path}" ]] && { printf '%s' "${agent}"; return 0; }
+        [[ -n "${path}" ]] && { [[ "${program}" == "${path}" ]] || [[ "${program}" -ef "${path}" ]]; } &&
+            { printf '%s' "${agent}"; return 0; }
     done <<< "${installed}"
     case "${program##*/}" in node | nodejs) ;; *) return 0 ;; esac
     [[ $# -ge 2 && -n "$2" ]] || { agent_identity_audit "${pid}" 'Node script argument unavailable'; return 0; }

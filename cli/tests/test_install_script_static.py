@@ -1577,6 +1577,14 @@ def _started(argv: list[str], program: Path, executable: str | None = None) -> s
         ("opencode replaced while running", "OpenCode"),
         # GAP-1308: npm launcher beside a Node runtime replaced while it runs.
         ("opencode npm launcher beside a replaced nvm node", "OpenCode"),
+        # GAP-1356: current npm opencode-ai links bin/opencode to its native
+        # bin/opencode.exe, in the usual, the configured and a PATH prefix.
+        ("opencode npm native exe in ~/.npm-global", "OpenCode"),
+        ("opencode npm native exe in the .npmrc prefix", "OpenCode"),
+        ("opencode npm native exe in NPM_CONFIG_PREFIX", "OpenCode"),
+        ("opencode npm native exe in a PATH prefix", "OpenCode"),
+        ("opencode npm native exe run by its platform hard link", "OpenCode"),
+        ("opencode.exe of another package in a PATH prefix", None),
         ("amp npm package", "Amp"),
         ("native installer amp", "Amp"),
     ],
@@ -1666,6 +1674,32 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
         else:
             path.append(link.parent)
             program, argv = node, [str(node), str(link)]
+    elif case.startswith("opencode npm native exe") or case == "opencode.exe of another package in a PATH prefix":
+        prefix = {
+            "opencode npm native exe in ~/.npm-global": home / ".npm-global",
+            "opencode npm native exe in the .npmrc prefix": tmp_path / "opt agents",
+            "opencode npm native exe in NPM_CONFIG_PREFIX": tmp_path / "env-prefix",
+        }.get(case, tmp_path / "dc-agents")
+        package = "opencode-ai-fork" if case.startswith("opencode.exe of another") else "opencode-ai"
+        program = _program(prefix / "lib" / "node_modules" / package / "bin" / "opencode.exe", sleep)
+        _manifest(program.parents[1], package)
+        link = prefix / "bin" / "opencode"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(program)
+        if case.endswith(".npmrc prefix"):
+            home.mkdir(parents=True, exist_ok=True)
+            (home / ".npmrc").write_text(f"cache=/tmp/x\nprefix = {prefix}\n", encoding="utf-8")
+        elif case.endswith("NPM_CONFIG_PREFIX"):
+            env["NPM_CONFIG_PREFIX"] = str(prefix)
+        elif not case.endswith("~/.npm-global"):
+            path.append(link.parent)
+        argv = [str(link), "60"]
+        if case.endswith("hard link"):
+            # npm's postinstall hard-links the platform package's binary.
+            platform = prefix / "lib" / "node_modules" / "opencode-linux-x64" / "bin" / "opencode"
+            platform.parent.mkdir(parents=True)
+            os.link(program, platform)
+            program, argv = platform, [str(platform), "60"]
     elif case in ("opencode npm launcher beside nvm node", "amp npm launcher beside fnm node",
                   "nvm launcher points to another script", "pnpm shell shim",
                   "opencode npm launcher beside a replaced nvm node"):
