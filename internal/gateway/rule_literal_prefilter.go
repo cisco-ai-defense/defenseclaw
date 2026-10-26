@@ -29,7 +29,10 @@ const maxRuleLiteralAlternatives = 32
 // maxRuleLiteralSets bounds how many literal sets a rule checks.
 const maxRuleLiteralSets = 8
 
-// ruleLiteralPlans caches the plan of each compiled rule regexp.
+// ruleLiteralPlans caches the plan of each rule pattern, keyed by its source
+// text. Every generation compile copies the rule regexps, so a key per
+// *regexp.Regexp kept every reloaded generation alive (GAP-1933); the source
+// keys are bounded by the distinct patterns.
 var ruleLiteralPlans sync.Map
 
 // ruleLiteralPlan is what a text must hold for a regexp to match it: for each
@@ -42,16 +45,17 @@ func ruleRequiredLiterals(pattern *regexp.Regexp) ruleLiteralPlan {
 	if pattern == nil {
 		return nil
 	}
-	if cached, ok := ruleLiteralPlans.Load(pattern); ok {
+	source := pattern.String()
+	if cached, ok := ruleLiteralPlans.Load(source); ok {
 		return cached.(ruleLiteralPlan)
 	}
 	var plan ruleLiteralPlan
-	if parsed, err := syntax.Parse(pattern.String(), syntax.Perl); err == nil {
+	if parsed, err := syntax.Parse(source, syntax.Perl); err == nil {
 		if found, ok := requiredLiteralPlan(parsed.Simplify()); ok {
 			plan = strongestLiteralSets(found, maxRuleLiteralSets)
 		}
 	}
-	ruleLiteralPlans.Store(pattern, plan)
+	ruleLiteralPlans.Store(source, plan)
 	return plan
 }
 

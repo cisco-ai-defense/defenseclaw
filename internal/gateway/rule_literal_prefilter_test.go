@@ -144,3 +144,38 @@ func TestBenignPostToolTextRunsOnlyRulesThatCanMatch(t *testing.T) {
 		t.Fatalf("%d of %d content rule regexps run on benign code; want at most an eighth", run, total)
 	}
 }
+
+// GAP-1933: every generation compile copies the rule regexps; the plan cache
+// must not keep one entry per copy, or each reload pins a generation.
+func TestRuleLiteralPlanCacheDoesNotGrowWithGenerations(t *testing.T) {
+	sources := make(map[string]bool)
+	generation := func() {
+		for _, pattern := range shippedRulePatterns(t, false) {
+			sources[pattern.String()] = true
+			ruleRequiredLiterals(pattern.Copy()) //nolint:staticcheck // A generation compile copies each regexp.
+		}
+	}
+	cached := func() int {
+		count := 0
+		ruleLiteralPlans.Range(func(key, _ any) bool {
+			var source string
+			switch k := key.(type) {
+			case string:
+				source = k
+			case *regexp.Regexp:
+				source = k.String()
+			}
+			if sources[source] {
+				count++
+			}
+			return true
+		})
+		return count
+	}
+	for range 5 {
+		generation()
+	}
+	if got, want := cached(), len(sources); got != want {
+		t.Fatalf("plan cache holds %d entries for %d distinct shipped patterns after 5 generations", got, want)
+	}
+}
