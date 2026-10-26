@@ -703,10 +703,12 @@ func parseWindowsCodexRequirements(raw []byte) (map[string]interface{}, error) {
 // byte for byte the same. It is replaced, as the earlier release's group,
 // only when published proves DefenseClaw wrote it and the file holds no exact
 // group of this install for that event (an upgrade from 1.0.2 or 1.0.3 that
-// nobody edited since). Every other such group is the administrator's: it
-// stays and the exact group is added beside it, as uninstall keeps it
-// (removeWindowsCodexOwnedGroups). A publication of this install that already
-// kept it holds the exact group, so later repairs keep it too.
+// nobody edited since). Every other such group is kept and the exact group is
+// added beside it, so a repair never deletes what may be an administrator's
+// edit. A publication of this install that already kept it holds the exact
+// group, so later repairs keep it too. Uninstall takes it with the rest of
+// this install's groups (removeWindowsCodexOwnedGroups, GAP-0907): it runs
+// the hook binary the uninstall deletes.
 func reconcileWindowsCodexRequirements(
 	raw []byte,
 	opts WindowsCodexMachineRequirementsOptions,
@@ -1305,14 +1307,10 @@ func windowsCodexAdoptRequirements(
 		currentDir = opts.ManagedDir
 	}
 	// This install's own command in a shape only an earlier release renders
-	// is the administrator's edit as far as anything here can prove
-	// (windowsCodexEditedCurrentGroup): reconcile keeps it in an adopted
-	// file, so the preimage keeps it too, and a removal that restores the
-	// preimage does not delete it.
-	keepEdited := func(group interface{}, event string) bool {
-		return !opts.SecureClient && windowsCodexEditedCurrentGroup(group, event, opts)
-	}
-	withoutCurrent, strippedCurrent, err := stripWindowsCodexLayoutKeeping(adoption.base, opts.HookBinary, currentDir, keepEdited)
+	// (windowsCodexEditedCurrentGroup) leaves the preimage too: uninstall
+	// removes it with the rest of this install's groups (GAP-0907), so a
+	// restored preimage must not bring it back (GAP-1767).
+	withoutCurrent, strippedCurrent, err := stripWindowsCodexLayout(adoption.base, opts.HookBinary, currentDir)
 	if err != nil {
 		return windowsCodexAdoption{}, fmt.Errorf("strip current Codex managed layout: %w", err)
 	}
@@ -1400,12 +1398,6 @@ func windowsCodexDiscardedPreimageTrusted(
 // that kind. It reports whether anything was removed; the document is
 // re-rendered only then.
 func stripWindowsCodexLayout(raw []byte, hookBinary, managedDir string) ([]byte, bool, error) {
-	return stripWindowsCodexLayoutKeeping(raw, hookBinary, managedDir, nil)
-}
-
-// stripWindowsCodexLayoutKeeping is stripWindowsCodexLayout that leaves
-// every group keep reports (nil keeps none).
-func stripWindowsCodexLayoutKeeping(raw []byte, hookBinary, managedDir string, keep func(group interface{}, event string) bool) ([]byte, bool, error) {
 	if strings.TrimSpace(hookBinary) == "" && strings.TrimSpace(managedDir) == "" {
 		return raw, false, nil
 	}
@@ -1432,7 +1424,7 @@ func stripWindowsCodexLayoutKeeping(raw []byte, hookBinary, managedDir string, k
 			}
 			kept := make([]interface{}, 0, len(groups))
 			for _, candidate := range groups {
-				if windowsCodexOwnedHookGroup(candidate, key, hookBinary) && (keep == nil || !keep(candidate, key)) {
+				if windowsCodexOwnedHookGroup(candidate, key, hookBinary) {
 					stripped = true
 					continue
 				}
