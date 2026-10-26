@@ -519,7 +519,12 @@ func (repo *CorrelationRepository) matchIdentifiers(ctx context.Context, connect
 }
 
 func (repo *CorrelationRepository) matchTraceSpan(ctx context.Context, connector ConnectorInstanceID, traceID, spanID string) ([]correlationMatchRow, error) {
-	return repo.queryCorrelationMatchRows(ctx, `SELECT DISTINCT event.semantic_event_id,
+	return repo.queryCorrelationMatchRows(ctx, correlationTraceSpanMatchSQL, string(connector), traceID, spanID)
+}
+
+// correlationTraceSpanMatchSQL is matchTraceSpan's query; the sparse-key
+// index test runs EXPLAIN on it (GAP-1793).
+const correlationTraceSpanMatchSQL = `SELECT DISTINCT event.semantic_event_id,
 		event.logical_group_id, event.received_time_unix_nano
 		FROM correlation_observations AS observation
 		JOIN correlation_events AS event ON event.semantic_event_id=observation.semantic_event_id
@@ -527,8 +532,7 @@ func (repo *CorrelationRepository) matchTraceSpan(ctx context.Context, connector
 			AND event.source_rail='native_otlp'
 			AND observation.signal='traces'
 			AND observation.trace_id=? AND observation.span_id=?
-		ORDER BY event.received_time_unix_nano, event.semantic_event_id`, string(connector), traceID, spanID)
-}
+		ORDER BY event.received_time_unix_nano, event.semantic_event_id`
 
 func (repo *CorrelationRepository) matchUniquePending(ctx context.Context, connector ConnectorInstanceID, pending CorrelationPendingMatch) ([]correlationMatchRow, error) {
 	clauses := []string{"operation.connector_instance_id=?", "operation.operation_namespace=?",
@@ -555,6 +559,13 @@ func (repo *CorrelationRepository) matchUniquePending(ctx context.Context, conne
 }
 
 func (repo *CorrelationRepository) matchSimilarity(ctx context.Context, connector ConnectorInstanceID, hint CorrelationSimilarityHint) ([]correlationMatchRow, error) {
+	statement, args := correlationSimilarityMatchStatement(connector, hint)
+	return repo.queryCorrelationMatchRows(ctx, statement, args...)
+}
+
+// correlationSimilarityMatchStatement is matchSimilarity's query; the
+// sparse-key index test runs EXPLAIN on it (GAP-1793).
+func correlationSimilarityMatchStatement(connector ConnectorInstanceID, hint CorrelationSimilarityHint) (string, []any) {
 	clauses := []string{"event.connector_instance_id=?", "event.event_name=?", "event.received_time_unix_nano BETWEEN ? AND ?"}
 	args := []any{string(connector), hint.EventName, unixNano(hint.Around.Add(-hint.Window)), unixNano(hint.Around.Add(hint.Window))}
 	if hint.SessionID != "" {
@@ -565,11 +576,11 @@ func (repo *CorrelationRepository) matchSimilarity(ctx context.Context, connecto
 		clauses = append(clauses, "observation.agent_id=?")
 		args = append(args, hint.AgentID)
 	}
-	return repo.queryCorrelationMatchRows(ctx, `SELECT DISTINCT event.semantic_event_id,
+	return `SELECT DISTINCT event.semantic_event_id,
 		event.logical_group_id, event.received_time_unix_nano
 		FROM correlation_events AS event JOIN correlation_observations AS observation
-		ON observation.semantic_event_id=event.semantic_event_id WHERE `+strings.Join(clauses, " AND ")+`
-		ORDER BY event.received_time_unix_nano, event.semantic_event_id LIMIT 2`, args...)
+		ON observation.semantic_event_id=event.semantic_event_id WHERE ` + strings.Join(clauses, " AND ") + `
+		ORDER BY event.received_time_unix_nano, event.semantic_event_id LIMIT 2`, args
 }
 
 func (repo *CorrelationRepository) queryCorrelationMatchRows(ctx context.Context, statement string, args ...any) ([]correlationMatchRow, error) {

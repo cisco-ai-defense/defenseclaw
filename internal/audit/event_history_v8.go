@@ -1353,6 +1353,13 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 	return fallback
 }
 
+// enforcementBlockEvaluationSQL is enforcementBlockCompatibility's lookup;
+// the sparse-key index test runs EXPLAIN on it (GAP-1793).
+const enforcementBlockEvaluationSQL = `
+		SELECT COALESCE(payload_json, '') FROM audit_events
+		WHERE evaluation_id = ? AND event_name = ?
+		ORDER BY rowid DESC LIMIT 1`
+
 // enforcementBlockCompatibility names what a generated enforcement.block.applied
 // row blocked and why. That family carries only identifiers, so a guardrail
 // proxy prompt block was listed in alerts as "block | | enforcement.block.applied"
@@ -1360,10 +1367,7 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 // projected into this table) holds the direction, rule ids and reason.
 func enforcementBlockCompatibility(ctx context.Context, tx *sql.Tx, evaluationID string) (string, string) {
 	var payload string
-	if err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(payload_json, '') FROM audit_events
-		WHERE evaluation_id = ? AND event_name = ?
-		ORDER BY rowid DESC LIMIT 1`,
+	if err := tx.QueryRowContext(ctx, enforcementBlockEvaluationSQL,
 		evaluationID, observability.TelemetryEventGuardrailEvaluationCompleted,
 	).Scan(&payload); err != nil {
 		return "", ""
