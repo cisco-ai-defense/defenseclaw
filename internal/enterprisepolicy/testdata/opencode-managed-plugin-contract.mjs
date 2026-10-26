@@ -202,6 +202,22 @@ for (const [guard, guardExit] of [
 }
 console.log("case ok: an unanswered load-time check is retried");
 
+// GAP-0697: foreign_hooks report lets the unapproved plugin run and shows
+// the guard's warning, which names its file and digest, once per process.
+{
+  const toasts = [];
+  const client = { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body : arg); return true; } } };
+  const warning = "unapproved opencode hook in /work/repo/.opencode/plugins/t7foreign.js (sha256:11b8d8c2); your organization reports it but allows it to run";
+  const hooks = await load({ client, guard: JSON.stringify({ deny: false, warnings: [warning] }) });
+  answer("event.json", JSON.stringify({ action: "allow", mode: "observe", hook_output: { decision: "allow" } }));
+  assert.equal(await before(hooks), undefined);
+  assert.equal(await before(hooks), undefined);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const shown = toasts.filter((toast) => toast.variant === "warning" && toast.message.includes("t7foreign.js (sha256:11b8d8c2)"));
+  assert.equal(shown.length, 1, JSON.stringify(toasts));
+}
+console.log("case ok: a reported foreign plugin is named once");
+
 // A foreign plugin found at load blocks every call for the process, also
 // after its file is removed; each denied call still runs the guard check,
 // which the gateway records.

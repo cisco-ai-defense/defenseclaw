@@ -757,7 +757,7 @@ function runForeignHookCheck(event: string, cwd: string): Promise<ForeignCheck> 
 						fail(safeError(error))
 						return
 					}
-					let verdict: { deny?: unknown, reason?: unknown, retryable?: unknown }
+					let verdict: { deny?: unknown, reason?: unknown, retryable?: unknown, warnings?: unknown }
 					try {
 						verdict = JSON.parse(String(stdout))
 					} catch {
@@ -765,7 +765,9 @@ function runForeignHookCheck(event: string, cwd: string): Promise<ForeignCheck> 
 						return
 					}
 					if (verdict && verdict.deny === false) {
-						resolve({ reason: "", retryable: false })
+						// foreign_hooks report names the unapproved hook's file and
+						// digest for the user (GAP-0697).
+						resolve({ reason: "", retryable: false, warnings: Array.isArray(verdict.warnings) ? verdict.warnings.map(String) : [] })
 						return
 					}
 					resolve({
@@ -802,7 +804,7 @@ function foreignCheckFailure(event: string, why: string): string {
 // A confirmed foreign plugin loaded with Amp stays loaded for this process,
 // so only an availability failure lets a later call retry the load-time
 // check, while this call stays closed.
-type ForeignCheck = { reason: string, retryable: boolean }
+type ForeignCheck = { reason: string, retryable: boolean, warnings?: string[] }
 
 // promptNotice sets DefenseClaw's hidden agent.start notice apart from the
 // user's prompt. Amp places the message right after the prompt text, and a
@@ -1224,12 +1226,24 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	// running for this process even if its file is deleted later, so a block
 	// found at load holds for the whole process.
 	let startupGuard: Promise<ForeignCheck> | null = runForeignHookCheck("session.load", workspaceRoot)
+	let foreignWarned = false
 	const foreignHookCheck = async (event: string): Promise<string> => {
 		if (await managedLifecycleHeld()) return DC_MANAGED_LIFECYCLE_TEXT
 		if (!startupGuard) startupGuard = runForeignHookCheck("session.load", workspaceRoot)
 		const startup = await startupGuard
 		if (startup.retryable) startupGuard = null
-		return startup.reason || (await runForeignHookCheck(event, workspaceRoot)).reason
+		if (startup.reason) return startup.reason
+		const call = await runForeignHookCheck(event, workspaceRoot)
+		const warnings = (call.warnings && call.warnings.length ? call.warnings : startup.warnings) || []
+		if (!call.reason && !foreignWarned && warnings.length) {
+			foreignWarned = true
+			try {
+				void Promise.resolve(amp.ui.notify("DefenseClaw warning: " + warnings.join("; "))).catch(() => {})
+			} catch {
+				// A notice never changes the verdict.
+			}
+		}
+		return call.reason
 	}
 
 	async function agentFacts(threadID: string, ctx: { thread: { agent(): Promise<Agent> } }): Promise<AgentFacts> {

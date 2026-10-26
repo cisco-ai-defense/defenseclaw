@@ -805,7 +805,9 @@ function defenseclawForeignHookCheck(event, cwd) {
             return;
           }
           if (verdict && verdict.deny === false) {
-            resolve({ reason: "", retryable: false });
+            // foreign_hooks report names the unapproved plugin's file and
+            // digest for the user (GAP-0697).
+            resolve({ reason: "", retryable: false, warnings: Array.isArray(verdict.warnings) ? verdict.warnings.map(String) : [] });
             return;
           }
           resolve({
@@ -1567,6 +1569,7 @@ function defenseclawToast(client, reason) {
   // keeps running for this process even if its file is deleted later, so a
   // block found at load holds for the whole process.
   let defenseclawStartupGuard = defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
+  let defenseclawForeignWarned = false;
   return {
     config: async (config) => {
       defenseclawConfigure(config);
@@ -1598,9 +1601,14 @@ function defenseclawToast(client, reason) {
       }
       const startup = await defenseclawStartupGuard;
       if (startup.retryable) defenseclawStartupGuard = null;
-      const callBlock = (await defenseclawForeignHookCheck("tool.execute.before", cwd)).reason;
-      const blocked = startup.reason || callBlock;
+      const callCheck = await defenseclawForeignHookCheck("tool.execute.before", cwd);
+      const blocked = startup.reason || callCheck.reason;
       if (blocked) throw defenseclawBlock(client, blocked);
+      const warnings = (callCheck.warnings && callCheck.warnings.length ? callCheck.warnings : startup.warnings) || [];
+      if (!defenseclawForeignWarned && warnings.length) {
+        defenseclawForeignWarned = true;
+        void defenseclawShowNotice(client, "DefenseClaw warning: " + warnings.join("; "), "warning");
+      }
       const mcpIdentity = defenseclawResolveMCPServer(input && input.tool);
       const verdict = await defenseclawPost(
         "tool.execute.before",

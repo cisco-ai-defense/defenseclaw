@@ -206,7 +206,11 @@ async function defenseclawStartupGuard(cwd) {
     };
   }
   const verdict = defenseclawLastJSON(result.stdout);
-  if (verdict && verdict.deny === false) return { reason: "", retryable: false };
+  if (verdict && verdict.deny === false) {
+    // foreign_hooks report: the unapproved plugin runs, and the guard names
+    // its file and digest for the user (GAP-0697).
+    return { reason: "", retryable: false, warnings: Array.isArray(verdict.warnings) ? verdict.warnings.map(String) : [] };
+  }
   return {
     reason: verdict && typeof verdict.reason === "string" && verdict.reason
       ? verdict.reason
@@ -352,6 +356,7 @@ function defenseclawLifecyclePayload(event, cwd) {
 export const DefenseClawManaged = async ({ client, directory, worktree }) => {
   const cwd = directory || worktree || "";
   let startupGuard = defenseclawStartupGuard(cwd);
+  let warned = false;
   return {
     config: async (config) => {
       defenseclawConfigure(config);
@@ -387,6 +392,10 @@ export const DefenseClawManaged = async ({ client, directory, worktree }) => {
         // again only lets the gateway record this denied call.
         if (!startup.retryable) await defenseclawForeignHookCheck("tool.execute.before", cwd);
         throw defenseclawBlock(client, startup.reason);
+      }
+      if (!warned && startup.warnings && startup.warnings.length) {
+        warned = true;
+        defenseclawShowNotice(client, "DefenseClaw warning: " + startup.warnings.join("; "), "warning");
       }
       const mcpIdentity = defenseclawResolveMCPServer(input && input.tool);
       const verdict = await defenseclawSend(
