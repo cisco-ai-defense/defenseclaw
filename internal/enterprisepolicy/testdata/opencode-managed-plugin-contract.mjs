@@ -186,6 +186,22 @@ for (const response of [
   await assert.rejects(before(hooks, "a_b_tool"), /ambiguous MCP server identity/);
 }
 
+// GAP-1017, GAP-1180, GAP-1520: a load-time check that could not run (the
+// gateway was down), or a deny the guard marks retryable, is asked again on
+// the next tool call: once the gateway answers, the session's tools run
+// without restarting the agent.
+for (const [guard, guardExit] of [
+  ["", 1],
+  [JSON.stringify({ deny: true, retryable: true, reason: "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer." }), 0],
+]) {
+  const hooks = await load({ guard, guardExit });
+  await assert.rejects(before(hooks), /DefenseClaw/);
+  answer("guard.json", JSON.stringify({ deny: false }));
+  answer("event.json", JSON.stringify({ action: "allow", mode: "observe", hook_output: { decision: "allow" } }));
+  assert.equal(await before(hooks), undefined, "the session runs again once the check answers");
+}
+console.log("case ok: an unanswered load-time check is retried");
+
 // A foreign plugin found at load blocks every call for the process, also
 // after its file is removed; each denied call still runs the guard check,
 // which the gateway records.
