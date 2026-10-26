@@ -10,8 +10,32 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from defenseclaw import hook_integrity
 from defenseclaw.commands import cmd_status
+
+
+@pytest.mark.parametrize(
+    ("uid_map", "owner", "hidden"),
+    [
+        ("         0          0 4294967295\n", 65534, False),  # the initial namespace
+        ("      1001       1001          1\n", 65534, True),  # Codex workspace sandbox
+        ("      1001       1001          1\n", 0, False),  # a mapped owner is real
+        ("      1001          0          1\n", 65534, True),
+    ],
+)
+def test_namespace_hides_owner_reads_overflowuid_and_uid_map(monkeypatch, uid_map, owner, hidden) -> None:
+    # GAP-1547: every GAP-1395 test patched this helper; this one runs it.
+    import io
+    import os
+
+    from defenseclaw import file_permissions
+
+    files = {"/proc/sys/kernel/overflowuid": "65534\n", "/proc/self/uid_map": uid_map}
+    monkeypatch.setattr(file_permissions.sys, "platform", "linux")
+    monkeypatch.setattr(file_permissions, "open", lambda path, *a, **k: io.StringIO(files[path]), raising=False)
+    info = os.stat_result((0o40755, 0, 0, 1, owner, owner, 0, 0, 0, 0))
+    assert file_permissions.namespace_hides_owner(info) is hidden
 
 
 def test_disable_all_hooks_shows_degraded_in_status(tmp_path: Path, monkeypatch) -> None:
