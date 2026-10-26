@@ -1991,12 +1991,17 @@ def build_setup_sections(
         ConfigSection(
             "Admission Defaults",
             (
-                _field(
-                    cfg,
-                    "Allow List Bypass",
-                    "admission.defaults.allow_list_bypass_scan",
-                    "bool",
-                    hint="On (default): a first-party allow-list entry installs without a scan; off: it is scanned.",
+                # Unset inherits the built-in default, on: show it, so the
+                # Value column is not blank and the first toggle turns it off.
+                _field_with_original(
+                    _field(
+                        cfg,
+                        "Allow List Bypass",
+                        "admission.defaults.allow_list_bypass_scan",
+                        "bool",
+                        hint="On (default): a first-party allow-list entry installs without a scan; off: it is scanned.",
+                    ),
+                    _value(cfg, "admission.defaults.allow_list_bypass_scan") or "true",
                 ),
             ),
             "Admission defaults for skills, MCP servers and plugins.",

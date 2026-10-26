@@ -2894,3 +2894,19 @@ def test_admission_defaults_has_the_allow_list_bypass_row() -> None:
     [row] = section.fields
     assert (row.key, row.kind, row.label) == ("admission.defaults.allow_list_bypass_scan", "bool", "Allow List Bypass")
     assert "bypass" in row.label.lower()
+
+
+def test_allow_list_bypass_row_shows_its_value_and_toggles_off_first() -> None:
+    # GAP-1870 (round 5 verify): unset left the Value column blank at 80x24 and
+    # the first toggle wrote the default (true) again.
+    [unset] = _section(build_setup_sections({}), "Admission Defaults").fields
+    assert unset.value == "true"
+    model = SetupPanelModel({}, os_name="linux")
+    model.mode = "config"
+    model.active_section = [section.name for section in model.sections].index("Admission Defaults")
+    model.active_line = 0
+    assert model.cycle_current_field()
+    assert model.current_field().value == "false"
+    cfg = {"admission": {"defaults": {"allow_list_bypass_scan": False}}}
+    [explicit] = _section(build_setup_sections(cfg), "Admission Defaults").fields
+    assert explicit.value == "false"
