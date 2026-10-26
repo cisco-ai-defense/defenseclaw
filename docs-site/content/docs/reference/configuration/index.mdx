@@ -951,7 +951,7 @@ There is no `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR` or `DEFENSECLAW_L
 | Devin (Devin CLI and Devin Desktop's Devin Local) | `~/.config/devin/config.json` or `<workspace>/.devin/hooks.v1.json` |
 | GitHub Copilot CLI | `~/.copilot/hooks/defenseclaw.json` by default; `<workspace>/.github/hooks/defenseclaw.json` with `--workspace` |
 | Antigravity | `~/.gemini/config/hooks.json`; Google documents no configuration-home environment override, and DefenseClaw owns only this global registration. Antigravity also discovers `<workspace>/.agents/hooks.json`, which DefenseClaw does not patch to avoid duplicate ownership. |
-| Hermes | `~/.hermes/config.yaml` |
+| Hermes | `~/.hermes/config.yaml` on macOS/Linux or `%LOCALAPPDATA%\hermes\config.yaml` on native Windows (`$HERMES_HOME/config.yaml` when `HERMES_HOME` is set) |
 | Kiro | `~/.kiro/hooks/defenseclaw.json` (Kiro IDE and `kiro-cli --v3`), `~/.kiro/agents/defenseclaw.json` (Kiro CLI 2.x) and `~/.kiro/settings/cli.json`; a workspace copy under `<workspace>/.kiro/hooks/` with `--workspace` |
 | OpenCode | `~/.config/opencode/plugins/defenseclaw.js` (managed bridge plugin — written whole, not patched; removed on teardown) |
 | Amp | `~/.config/amp/plugins/defenseclaw.ts` on macOS/Linux or `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` on native Windows (managed system policy plugin) |
