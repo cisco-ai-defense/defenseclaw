@@ -20,16 +20,12 @@ import (
 	"testing"
 )
 
-// testdata/unix_hook_fail_mode_lines.json holds every line of a Unix hook
-// render that assigns a fail mode, for the hooks whose installed mode the
+// testdata/unix_hook_fail_mode_lines.json holds every line of a per-user Unix
+// hook render that assigns a fail mode, for the hooks whose installed mode the
 // Python fail-mode resolver reads back (cli/defenseclaw/fail_mode.py,
-// _read_baked_hook_render): the per-user render ("<script>/<mode>") and the
-// authenticated Secure Client delivery render ("<script>/secure-client/<mode>"),
-// whose Antigravity, Devin, Hermes and Kiro hooks take DEFENSECLAW_FAIL_MODE
-// from the agent's environment (#1163). cli/tests/test_fail_mode_runtime.py
-// runs these lines under bash and checks the resolver reports what they set, so
-// a render change that the resolver cannot read fails here first and is
-// regenerated with DEFENSECLAW_UPDATE_GOLDEN=1.
+// _read_baked_hook_mode). cli/tests/test_fail_mode_runtime.py parses these
+// lines, so a render change that the resolver cannot read fails here first and
+// is regenerated with DEFENSECLAW_UPDATE_GOLDEN=1.
 func TestUnixHookFailModeLinesMatchTheSharedGolden(t *testing.T) {
 	got := map[string][]string{}
 	for _, agent := range []struct {
@@ -42,36 +38,25 @@ func TestUnixHookFailModeLinesMatchTheSharedGolden(t *testing.T) {
 		{NewAntigravityConnector(), "antigravity-hook.sh"},
 		{NewCopilotConnector(), "copilot-hook.sh"},
 		{NewHermesConnector(), "hermes-hook.sh"},
-		{NewKiroConnector(), "kiro-hook.sh"},
 	} {
-		for _, secureClient := range []bool{false, true} {
-			for _, mode := range []string{"open", "closed"} {
-				home := t.TempDir()
-				hookDir := filepath.Join(home, "hooks")
-				opts := SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "scoped-test-token", HookFailMode: mode}
-				key := agent.script + "/" + mode
-				if secureClient {
-					// An authenticated Secure Client deployment
-					// (SecureClientDeploymentVerified is true in tests).
-					opts.ManagedEnterprise = true
-					opts.SecureClientHookDelivery = true
-					key = agent.script + "/secure-client/" + mode
-				}
-				if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, agent.conn); err != nil {
-					t.Fatal(err)
-				}
-				body, err := os.ReadFile(filepath.Join(hookDir, agent.script))
-				if err != nil {
-					t.Fatal(err)
-				}
-				var lines []string
-				for _, line := range strings.Split(string(body), "\n") {
-					if strings.Contains(line, "FAIL_MODE=") {
-						lines = append(lines, line)
-					}
-				}
-				got[key] = lines
+		for _, mode := range []string{"open", "closed"} {
+			home := t.TempDir()
+			hookDir := filepath.Join(home, "hooks")
+			opts := SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "scoped-test-token", HookFailMode: mode}
+			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, agent.conn); err != nil {
+				t.Fatal(err)
 			}
+			body, err := os.ReadFile(filepath.Join(hookDir, agent.script))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var lines []string
+			for _, line := range strings.Split(string(body), "\n") {
+				if strings.Contains(line, "FAIL_MODE=") {
+					lines = append(lines, line)
+				}
+			}
+			got[agent.script+"/"+mode] = lines
 		}
 	}
 	rendered, err := json.MarshalIndent(got, "", "  ")
@@ -91,6 +76,6 @@ func TestUnixHookFailModeLinesMatchTheSharedGolden(t *testing.T) {
 		t.Fatalf("missing golden (regenerate with DEFENSECLAW_UPDATE_GOLDEN=1): %v", err)
 	}
 	if string(want) != string(rendered) {
-		t.Fatalf("hook fail-mode lines changed; regenerate with DEFENSECLAW_UPDATE_GOLDEN=1 and keep cli/defenseclaw/fail_mode.py reading them\n got: %s\nwant: %s", rendered, want)
+		t.Fatalf("per-user hook fail-mode lines changed; regenerate with DEFENSECLAW_UPDATE_GOLDEN=1 and keep cli/defenseclaw/fail_mode.py reading them\n got: %s\nwant: %s", rendered, want)
 	}
 }

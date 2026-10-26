@@ -4,7 +4,6 @@ import base64
 import hashlib
 import json
 import os
-import shutil
 import stat
 import sys
 from collections.abc import Iterator
