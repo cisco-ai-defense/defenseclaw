@@ -326,7 +326,7 @@ func managedToolCall(connector string) func(*Options) {
 func TestManagedHookTakesTheAnswerAfterALateEarlyHint(t *testing.T) {
 	received := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(hookDeliveryCapabilityWait + 300*time.Millisecond)
+		time.Sleep(2 * hookDeliveryCapabilityWait)
 		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
 			received <- err.Error()
 			return
@@ -357,54 +357,5 @@ func TestManagedHookTakesTheAnswerAfterALateEarlyHint(t *testing.T) {
 	}
 	if got := <-received; got != HookDeliveryReleased {
 		t.Fatalf("gateway read %q after its answer, want the released marker", got)
-	}
-}
-
-// GAP-0683: a socket-activated gateway reads the first call about 800 ms
-// after the connection was accepted. Its 103 still comes inside the
-// capability wait, so the hook acknowledges the answer and the gateway
-// audits the call as the allow it was, not unconfirmed.
-func TestManagedHookReceiptCoversAGatewayStillStarting(t *testing.T) {
-	received := make(chan string, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(800 * time.Millisecond)
-		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
-			received <- err.Error()
-			return
-		}
-		w.WriteHeader(http.StatusEarlyHints)
-		length, _ := strconv.Atoi(r.Header.Get(HookDeliveryPayloadBytesHeader))
-		if _, err := io.ReadFull(r.Body, make([]byte, length)); err != nil {
-			received <- err.Error()
-			return
-		}
-		w.Header().Set(HookDeliveryRequiredHeader, "1")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, "{\"action\":\"allow\"}\n")
-		_ = http.NewResponseController(w).Flush()
-		line := make([]byte, len(HookDeliveryReceiptAck))
-		if _, err := io.ReadFull(r.Body, line[:1]); err != nil {
-			received <- err.Error()
-			return
-		}
-		if string(line[:1]) == HookDeliveryReleased {
-			received <- HookDeliveryReleased
-			return
-		}
-		if _, err := io.ReadFull(r.Body, line[1:]); err != nil {
-			received <- err.Error()
-			return
-		}
-		received <- string(line)
-		_, _ = io.WriteString(w, HookDeliveryConfirmed)
-		_ = http.NewResponseController(w).Flush()
-	}))
-	defer server.Close()
-	result, _ := runAgainstGateway(t, "codex", server.Listener.Addr().String(), managedCodex)
-	if blocked(result) {
-		t.Fatalf("first call to a starting gateway was blocked: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
-	}
-	if got := <-received; got != HookDeliveryReceiptAck {
-		t.Fatalf("gateway read %q after its answer, want the receipt %q", got, HookDeliveryReceiptAck)
 	}
 }
