@@ -2614,6 +2614,12 @@ def _validate_antigravity_hook_matrix(
                 )
         if not isinstance(handler, dict) or handler.get("type") != "command":
             raise _InspectionError("malformed", f"Antigravity {event} handler type is not command")
+        # Setup writes no "enabled" below the registration key; one set on
+        # the matcher group or the handler turns the guard off as surely as
+        # the key's own (GAP-0538).
+        for part in ([entries[0], handler] if uses_matcher else [handler]):
+            if "enabled" in part and part["enabled"] is not True:
+                raise _InspectionError("stale", f"Antigravity DefenseClaw registration {key} has a disabled {event} entry")
         if type(handler.get("timeout")) is not int or handler.get("timeout") != _ANTIGRAVITY_GUARD.timeout:
             raise _InspectionError("stale", f"Antigravity {event} timeout must be {_ANTIGRAVITY_GUARD.timeout} seconds")
         command = handler.get("command")
