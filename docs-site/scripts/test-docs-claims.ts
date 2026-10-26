@@ -1378,6 +1378,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1763", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["a process tracer such as PRoot on Linux", "`unprivileged_ptrace`", "`kernel.yama.ptrace_scope=2`"] },
   { gap: "GAP-1764", page: "troubleshooting/windows.mdx", section: "Codex refuses every command in its first session", has: ["Granular.sandbox_approval is false", "Quit Codex and start it again once", "/docs/troubleshooting/known-limits#codex"] },
   { gap: "GAP-0552", page: "troubleshooting/known-limits.mdx", section: "Scanners on macOS", has: ["run as you, with a timeout", "can escape that tracking and keep running after the scan and after `defenseclaw-gateway stop`", "This is a macOS limit."] },
+  { gap: "GAP-1158", page: "troubleshooting/known-limits.mdx", section: "Codex", has: ["**Shared daemon keeps its model key:**", "fail with `401` until the daemon restarts", "Run `codex app-server daemon restart` from a shell that has the new key."] },
   // r105-rows-end
 ];
 
