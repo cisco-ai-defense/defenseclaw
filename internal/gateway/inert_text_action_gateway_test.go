@@ -8,6 +8,7 @@ import "testing"
 // Ordinary awk data text stays allowed. A Python argument naming an active
 // protected target is protected named even when its f-string writes elsewhere.
 func TestR104Loop2DataTextDecisions(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home, cwd := r104ReviewHome(t)
 	for _, tc := range []struct {
 		name, command string

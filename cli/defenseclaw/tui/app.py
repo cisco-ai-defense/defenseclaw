@@ -41,6 +41,7 @@ from defenseclaw import __version__
 from defenseclaw import config as config_module
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.hook_metrics import connector_hook_decision
+from defenseclaw.scanner_binary import resolve_scanner_binary
 from defenseclaw.tui.command_line import (
     CommandLineError,
     ParsedCommand,
@@ -446,13 +447,18 @@ _on_path_cache: dict[str, tuple[float, bool]] = {}
 
 
 def _on_path(name: str, *, now: float | None = None) -> bool:
-    """``shutil.which(name)`` with a short cache for render paths."""
+    """Whether scanner ``name`` is installed, with a short cache for render paths.
+
+    The scanners DefenseClaw installs live in its own environment's scripts
+    directory, which need not be on ``PATH`` (``defenseclaw status`` and
+    ``doctor`` look there first, then on ``PATH``): resolve_scanner_binary.
+    """
 
     now = monotonic() if now is None else now
     cached = _on_path_cache.get(name)
     if cached is not None and now - cached[0] < _ON_PATH_TTL_SECONDS:
         return cached[1]
-    found = shutil.which(name) is not None
+    found = resolve_scanner_binary(name) is not None
     _on_path_cache[name] = (now, found)
     return found
 
@@ -9447,9 +9453,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         sc_table.add_column(width=2, no_wrap=True)
         sc_table.add_column(width=14, no_wrap=True)
         sc_table.add_column(overflow="fold")
-        # Mirror Go TUI: probe external scanners via PATH so an operator who
-        # runs `brew install skill-scanner` sees the row flip from "missing"
-        # to "installed". The probe is cached for a few seconds: a PATH walk
+        # Probe the scanners as `defenseclaw status` does: DefenseClaw's own
+        # environment first, then PATH, so an operator who runs
+        # `brew install skill-scanner` sees the row flip from "missing" to
+        # "installed". The probe is cached for a few seconds: a PATH walk
         # on every 2 s repaint is disk I/O on the UI thread.
         # Built-ins (aibom + codeguard) ship inside the CLI and are
         # always available. Note: the field is named `aibom` (AI Bill

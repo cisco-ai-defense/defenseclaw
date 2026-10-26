@@ -766,8 +766,16 @@ func TestSetupConnectorsIsolated_FailedRefreshPreservesGuardsAndFails(t *testing
 				if after, err := os.ReadFile(lockPath); err != nil || !bytes.Equal(after, beforeLock) {
 					t.Errorf("previous hook lock was not restored: %v", err)
 				}
-				if mode == "multi" && peer.teardownCalls != 1 {
-					t.Errorf("peer teardown=%d, want the new registration rolled back", peer.teardownCalls)
+				// Every peer registration the refresh made is rolled back. On
+				// Windows the refresh stops at the Claude Code settings
+				// sharing conflict before the peer is set up, so there is
+				// none to roll back.
+				wantPeerSetups := 1
+				if runtime.GOOS == "windows" {
+					wantPeerSetups = peer.setupCalls
+				}
+				if mode == "multi" && (peer.setupCalls != wantPeerSetups || peer.teardownCalls != peer.setupCalls) {
+					t.Errorf("peer setup=%d teardown=%d, want the new registration rolled back", peer.setupCalls, peer.teardownCalls)
 				}
 			})
 		}

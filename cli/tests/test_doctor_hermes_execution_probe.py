@@ -648,7 +648,9 @@ def test_windows_hermes_doctor_probe_ends_child_of_exited_launcher(tmp_path):
         "import subprocess, sys\n"
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
         f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
-        "sys.stdout.write('defenseclaw-execution-probe-ok\\n')\n"
+        # Raw bytes, as the hook executable writes them: text-mode stdout on
+        # Windows would end the line with CRLF, one byte past the bounded proof.
+        "sys.stdout.buffer.write(b'defenseclaw-execution-probe-ok\\n')\n"
     )
     returncode, stdout = cmd_doctor._run_hermes_execution_probe([sys.executable, "-c", code])
     child = _read_pid(pid_file)

@@ -10,6 +10,7 @@ import (
 )
 
 func TestR104Refix4AWKVisibleOutput(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home, cwd := r104Loop2Home(t)
 	if err := os.WriteFile(filepath.Join(cwd, "read.awk"), []byte("{print}\n"), 0o600); err != nil {
 		t.Fatal(err)

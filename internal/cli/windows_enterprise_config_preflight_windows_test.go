@@ -67,8 +67,11 @@ func TestWindowsStandaloneConfigPreflightRefusesForeignRuntimePaths(t *testing.T
 	}{
 		{"macOS data_dir", "data_dir: /opt/cisco/defenseclaw/runtime\n" + standaloneGatewayCheckConfig, "data_dir"},
 		{"Linux data_dir", "data_dir: /var/lib/defenseclaw\n" + standaloneGatewayCheckConfig, "data_dir"},
-		{"foreign API bind", strings.Replace(standaloneGatewayCheckConfig, "api_bind: 127.0.0.1", "api_bind: 0.0.0.0", 1), "gateway.api_bind"},
-		{"foreign API port", strings.Replace(standaloneGatewayCheckConfig, "api_port: 18970", "api_port: 18000", 1), "gateway.api_port"},
+		{"foreign API bind", strings.Replace(standaloneGatewayCheckConfig, "api_bind: 127.0.0.1", "api_bind: 0.0.0.0", 1), "gateway API must bind to exact canonical 127.0.0.1"},
+		// A new gateway.api_port is accepted before the first install
+		// (GAP-0601); moving the port of an installed deployment is refused
+		// before any service stops by refuseWindowsEnterpriseAPIPortChange
+		// (GAP-0865, TestWindowsEnterpriseAPIPortChangeIsRefusedBeforeAnyStop).
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			candidate := filepath.Join(root, strings.ReplaceAll(tc.name, " ", "-")+".yaml")
@@ -327,5 +330,26 @@ func TestWindowsEnterpriseStandaloneRecoveryRecords(t *testing.T) {
 	}
 	if paths := windowsEnterpriseStandaloneRecoveryRecordPaths(winpath.EnterpriseRoots{}, certification); len(paths) != 1 {
 		t.Fatalf("certification records without roots = %q", paths)
+	}
+}
+
+// GAP-0865: a config that moves gateway.api_port of an installed deployment
+// is refused before any service stops: every user's hooks and the Cursor
+// machine hooks name the installed port.
+func TestWindowsEnterpriseAPIPortChangeIsRefusedBeforeAnyStop(t *testing.T) {
+	previous := windowsEnterpriseConfigAPIPort
+	t.Cleanup(func() { windowsEnterpriseConfigAPIPort = previous })
+	ports := map[string]int{"": 18970, `C:\stage\same.yaml`: 18970, `C:\stage\moved.yaml`: 18000}
+	windowsEnterpriseConfigAPIPort = func(path string) (int, error) { return ports[path], nil }
+	opts := &windowsEnterpriseLifecycleOptions{profile: managed.ProfileStandalone, resolvedProfile: managed.ProfileStandalone}
+	opts.configPath = `C:\stage\moved.yaml`
+	err := refuseWindowsEnterpriseAPIPortChange(opts)
+	if err == nil || !strings.Contains(err.Error(), "gateway.api_port from 18970 to 18000") ||
+		!strings.Contains(err.Error(), "no service was stopped") {
+		t.Fatalf("moved port = %v, want a refusal before any stop", err)
+	}
+	opts.configPath = `C:\stage\same.yaml`
+	if err := refuseWindowsEnterpriseAPIPortChange(opts); err != nil {
+		t.Fatalf("unchanged port refused: %v", err)
 	}
 }

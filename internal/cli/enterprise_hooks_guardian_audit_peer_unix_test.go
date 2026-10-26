@@ -16,7 +16,7 @@ import (
 )
 
 func TestGuardianRepairAuditRefusesAnotherAccountHookSocket(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "hook.sock")
+	socket := filepath.Join(shortSocketDir(t), "hook.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -34,4 +34,24 @@ func TestGuardianRepairAuditRefusesAnotherAccountHookSocket(t *testing.T) {
 	reportEnterpriseHookGuardianRepairs(context.Background(), socket, []enterpriseHookGuardianAuditReport{
 		{User: "private-user", UID: os.Geteuid(), Connector: "opencode"},
 	})
+}
+
+// shortSocketDir is a private, link-free directory short enough for a unix
+// socket path: macOS caps sun_path at 104 bytes, and a t.TempDir under the
+// macOS runner's TMPDIR made bind fail with "invalid argument".
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "dc-sock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(canonical, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return canonical
 }

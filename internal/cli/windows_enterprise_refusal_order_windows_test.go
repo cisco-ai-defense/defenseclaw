@@ -57,6 +57,11 @@ func TestWindowsRecordedDeploymentRefusalsComeBeforeAnyChange(t *testing.T) {
 		return deployment, nil
 	}
 	windowsEnterpriseStandaloneTransactionPending = func() bool { return pending }
+	// The deferred-state refusal reads this scope's recovery records
+	// (windowsEnterpriseStandaloneRecoveryPending, GAP S2 loop round 2).
+	originalRecovery := windowsEnterpriseStandaloneRecoveryPending
+	t.Cleanup(func() { windowsEnterpriseStandaloneRecoveryPending = originalRecovery })
+	windowsEnterpriseStandaloneRecoveryPending = func(*windowsEnterpriseLifecycleOptions) bool { return pending }
 	installed := winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled}
 	waiting := winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled, DeferredConfigPending: true}
 	for _, tc := range []struct {

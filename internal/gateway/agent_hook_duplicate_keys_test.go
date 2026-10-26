@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -118,7 +120,12 @@ func postHookDecision(t *testing.T, connectorName, surface, body string) (string
 // plainly, on both Copilot surfaces, still run, and so does a Claude Code
 // write.
 func TestAgentHookRefusesEveryUnreadCall(t *testing.T) {
-	const cli = `{"sessionId":"s","timestamp":1790483549431,"cwd":"/tmp",`
+	// A Copilot CLI call names an existing cwd absolute on its host; a patch
+	// target is placed under it, and on Windows "/tmp" is not absolute.
+	cli := `{"sessionId":"s","timestamp":1790483549431,"cwd":"/tmp",`
+	if runtime.GOOS == "windows" {
+		cli = `{"sessionId":"s","timestamp":1790483549431,"cwd":"` + filepath.ToSlash(t.TempDir()) + `",`
+	}
 	const local = `{"timestamp":"2026-09-30T00:00:00Z","hook_event_name":"PreToolUse","session_id":"s1","tool_use_id":"t1","cwd":"/tmp",`
 	const claude = `{"session_id":"s","hook_event_name":"PreToolUse","cwd":"/tmp",`
 	large := strings.Repeat("a", 300<<10)

@@ -196,7 +196,14 @@ func TestWindowsStatusSettlesOnlyEnforcedAppliedReceipt(t *testing.T) {
 // Status may confirm an applied receipt after a killed run. A full volume
 // during that write is a disk_full refusal, including for an MDM JSON poll.
 func TestWindowsStatusReceiptWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	// Status confirms a receipt only on a host with installed trust anchors
+	// (a receipt without them is never confirmed, so nothing is written).
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
 	layout := stubWindowsBundleHost(t)
+	if _, _, err := installWindowsBundleAnchors(e.anchors, newWindowsBundleDriver(layout).AnchorsPath); err != nil {
+		t.Fatal(err)
+	}
 	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{
 		managed.ProfileStandalone: winpath.EnterpriseDeploymentInstalled,
 	})
@@ -252,9 +259,18 @@ func TestWindowsStatusReceiptWriteOnAFullVolumeIsDiskFull(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
 		t.Fatalf("status result: %v\n%s", err, out)
 	}
-	if len(result.Errors) != 1 || result.Errors[0].Code != string(enterprisebundle.CodeDiskFull) ||
+	if len(result.Errors) == 0 || result.Errors[0].Code != string(enterprisebundle.CodeDiskFull) ||
 		!strings.Contains(result.Errors[0].Message, "free space on that volume") {
 		t.Fatalf("status errors = %+v, want disk_full and the recovery step", result.Errors)
+	}
+	// This fixture stages a bundle with no signed manifest: once Confirm
+	// has made it current, the report cannot read its config back
+	// (file_hash_mismatch). A delivered bundle reads back; nothing else may
+	// be reported.
+	for _, other := range result.Errors[1:] {
+		if other.Code != "bundle_not_applied" || !strings.Contains(other.Message, "file_hash_mismatch") {
+			t.Fatalf("status errors = %+v, want only disk_full", result.Errors)
+		}
 	}
 }
 

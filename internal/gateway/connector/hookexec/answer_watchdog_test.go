@@ -165,14 +165,20 @@ func TestToolCallAnswerBudgetHoldsUnderCPUContention(t *testing.T) {
 // The watchdog stands down when the call is answered in time: it neither
 // writes a second answer nor ends the process.
 func TestAnswerWatchdogStandsDownWhenTheCallIsAnsweredInTime(t *testing.T) {
-	shortAnswerBudget(t, 300*time.Millisecond)
+	// The budget leaves room for the request itself: a Claude Code or Codex
+	// request holds its delivery body up to hookDeliveryCapabilityWait
+	// (250 ms) for the gateway's 103, which the stub never sends, and a
+	// hosted macOS runner adds its own latency (300 ms failed there).
+	const budget = 1500 * time.Millisecond
+	shortAnswerBudget(t, budget)
 	for _, body := range []string{`{"action":"allow"}`, `{"action":"block","reason":"policy rule"}`} {
 		exited := make(chan int, 1)
 		result := run(t, "claudecode", &stubRT{status: http.StatusOK, body: body}, func(opts *Options) {
 			managedWindowsStandalone(opts)
 			opts.Exit = func(code int) { exited <- code }
 		})
-		time.Sleep(500 * time.Millisecond)
+		// Past the deadline: a watchdog that did not stand down has fired.
+		time.Sleep(budget + 500*time.Millisecond)
 		select {
 		case code := <-exited:
 			t.Fatalf("%s: the watchdog ended the process (%d) after the call was answered", body, code)
