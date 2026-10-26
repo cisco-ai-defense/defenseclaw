@@ -691,7 +691,8 @@ describe('Windows Hermes failure guidance', () => {
     assert.match(source('internal/gateway/connector/hookexec/hookexec.go'), /func perUserOutageMode\(opts \*Options, failMode string\) string \{/);
     assert.doesNotMatch(windows, /Hermes[^.]*closed by default/i);
     // r105 docs refix 1: outage behaviour is stated only in the capability matrix (Go TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix).
-    assert.match(windows, /Hermes follows the same gateway outage rule as the other agents \(\[gateway outage table\]\(\/docs\/reference\/apis\/capability-matrix#gateway-outage\)\)\. Every other failure blocks\./);
+    assert.match(windows, /Hermes follows the same gateway outage rule as the other agents \(\[gateway outage table\]\(\/docs\/reference\/apis\/capability-matrix#gateway-outage\)\)\. A running DefenseClaw hook blocks every other failure; for a timed-out or killed hook see \[Hermes fail mode\]\(\/docs\/reference\/connectors\/hermes#fail-mode\)\./);
+    assert.ok(!windows.includes('Every other failure blocks.'), 'GAP-1796: a killed or timed-out Hermes hook can let the call run');
     assert.doesNotMatch(windows, /stopped gateway lets a Hermes call run/i);
     assert.match(windows, /managed host.*administrator.*open.*gateway outage/i);
     assert.match(windows, /Secure Client.*open.*default/i);
