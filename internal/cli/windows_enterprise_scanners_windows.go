@@ -114,6 +114,82 @@ func ensureWindowsScannerRuntimeRoot(root string, gateway *windows.SID) error {
 	return nil
 }
 
+// adoptWindowsAdministratorsDefaultOwner makes BUILTIN\Administrators the
+// default owner of what this elevated process (and every process it starts)
+// creates, as an elevated administrator token under Admin Approval Mode
+// already has. The built-in Administrator (RID 500, which GitHub runners and
+// cloud VMs use) runs without Admin Approval Mode and its token's default
+// owner is its own SID, so the admission record and the prepared files it
+// wrote under the scanner runtime were refused by the runtime trust check
+// ('owner S-1-5-21-...-500 is not trusted ... expected Administrators or
+// LocalSystem', GAP-1718). A token that cannot take that owner (no
+// Administrators group with the owner attribute: LocalSystem, a standard
+// user) is left as it is. The returned function puts the previous default
+// owner back when the scanner runtime work is done.
+func adoptWindowsAdministratorsDefaultOwner() (func(), error) {
+	none := func() {}
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT, &token); err != nil {
+		return none, err
+	}
+	user, err := token.GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil || user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+		_ = token.Close()
+		return none, err
+	}
+	groups, err := token.GetTokenGroups()
+	if err != nil {
+		_ = token.Close()
+		return none, err
+	}
+	var administrators *windows.SID
+	for _, group := range groups.AllGroups() {
+		if group.Sid != nil && group.Sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) &&
+			group.Attributes&windows.SE_GROUP_ENABLED != 0 && group.Attributes&windows.SE_GROUP_OWNER != 0 {
+			administrators = group.Sid
+			break
+		}
+	}
+	if administrators == nil {
+		_ = token.Close()
+		return none, nil
+	}
+	setOwner := func(sid *windows.SID) error {
+		owner := struct{ Owner *windows.SID }{Owner: sid}
+		return windows.SetTokenInformation(token, windows.TokenOwner, (*byte)(unsafe.Pointer(&owner)), uint32(unsafe.Sizeof(owner)))
+	}
+	previous, err := windowsTokenDefaultOwner(token)
+	if err != nil {
+		_ = token.Close()
+		return none, err
+	}
+	if err := setOwner(administrators); err != nil {
+		_ = token.Close()
+		return none, err
+	}
+	return func() {
+		_ = setOwner(previous)
+		_ = token.Close()
+	}, nil
+}
+
+func windowsTokenDefaultOwner(token windows.Token) (*windows.SID, error) {
+	var size uint32
+	_ = windows.GetTokenInformation(token, windows.TokenOwner, nil, 0, &size)
+	if size < uint32(unsafe.Sizeof(uintptr(0))) {
+		return nil, errors.New("token owner is unavailable")
+	}
+	buffer := make([]byte, size)
+	if err := windows.GetTokenInformation(token, windows.TokenOwner, &buffer[0], size, &size); err != nil {
+		return nil, err
+	}
+	owner := (*struct{ Owner *windows.SID })(unsafe.Pointer(&buffer[0])).Owner
+	if owner == nil {
+		return nil, errors.New("token owner is unavailable")
+	}
+	return owner.Copy()
+}
+
 func windowsPathOwnedByAdministrators(path string) (bool, error) {
 	extended, err := winpath.Extended(path)
 	if err != nil {
@@ -545,6 +621,11 @@ func proveWindowsScannerRuntimeAdmissionLocked(root string, opts *windowsEnterpr
 	if err != nil || !unproven {
 		return "", nil
 	}
+	restoreOwner, err := adoptWindowsAdministratorsDefaultOwner()
+	if err != nil {
+		return "", fmt.Errorf("make Administrators the owner of the scanner runtime files: %w", err)
+	}
+	defer restoreOwner()
 	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
 	proveErr := windowsScannerRuntimeACLCheck(root, target)
 	if proveErr == nil {
@@ -948,6 +1029,11 @@ func installWindowsScannerRuntime(source, action string, opts *windowsEnterprise
 	if err != nil {
 		return err
 	}
+	restoreOwner, err := adoptWindowsAdministratorsDefaultOwner()
+	if err != nil {
+		return fmt.Errorf("make Administrators the owner of the scanner runtime files: %w", err)
+	}
+	defer restoreOwner()
 	owner, err := windowsScannerRuntimeOwnerOf(action, opts)
 	if err != nil {
 		return err
@@ -1204,6 +1290,11 @@ func reprepareWindowsScannerRuntimeLocked(action string, opts *windowsEnterprise
 	if err != nil {
 		return err
 	}
+	restoreOwner, err := adoptWindowsAdministratorsDefaultOwner()
+	if err != nil {
+		return fmt.Errorf("make Administrators the owner of the scanner runtime files: %w", err)
+	}
+	defer restoreOwner()
 	release, err := lockWindowsScannerRuntime(root)
 	if err != nil {
 		return err
