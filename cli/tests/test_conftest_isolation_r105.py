@@ -14,6 +14,19 @@ from defenseclaw.config import default_config
 from defenseclaw.logger import CanonicalObservabilityUnavailableError, _GatewayConfigRecorder
 
 
+def test_the_generated_fold_table_keeps_lf_on_every_checkout() -> None:
+    # GAP-1144: TestPythonAssetNameFoldMatchesGo compares exact bytes.
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    attr = subprocess.run(
+        ["git", "check-attr", "eol", "--", "cli/defenseclaw/enforce/_asset_name_fold.py"],
+        cwd=root, capture_output=True, text=True, check=True,
+    ).stdout
+    assert attr.strip().endswith(": eol: lf"), attr
+
+
 class _Ambiguous(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         self.send_response(500)

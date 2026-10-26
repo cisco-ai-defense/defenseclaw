@@ -101,6 +101,11 @@ internal/cli/testdata/enterprise_bundle/*.golden.json text eol=lf
 internal/gateway/connector/hooks/** text eol=lf
 internal/gateway/connector/shims/*.sh text eol=lf
 
+# internal/config TestPythonAssetNameFoldMatchesGo compares this generated
+# fold table with Go's by exact bytes; a CRLF checkout on Windows read as
+# "out of date" (GAP-1144). Keep it LF on Windows checkouts too.
+cli/defenseclaw/enforce/_asset_name_fold.py text eol=lf
+
 # Vendored upstream Eclipse Paho embedded MQTT sources are kept byte-for-byte
 # as published upstream; do not flag their whitespace in git diff --check.
 edge-connector/third_party/** -whitespace
