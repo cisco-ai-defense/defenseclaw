@@ -86,3 +86,11 @@ def test_one_unset_of_the_last_two_profiles_restores_the_exact_bytes(tmp_path: P
     removed = _run("unset", "guardrail.profiles.a", "guardrail.profiles.b")
     assert removed.exit_code == 0, removed.output
     assert path.read_bytes() == before, path.read_text()
+
+
+@pytest.mark.parametrize("key", ["openshell.version", "openshell.auto_pair", "watch.allow_list_bypass_scan"])
+def test_get_prints_no_schema_default_for_a_retired_key(tmp_path: Path, monkeypatch, key: str) -> None:
+    # GAP-1745: 1.0 reads none of these keys, so no default applies.
+    _config(tmp_path, monkeypatch, "guardrail:\n  enabled: true\n")
+    assert cmd_config._schema_default(key.split(".")) == (False, None)
+    assert cmd_config._schema_default(["guardrail", "retain_judge_bodies"]) == (True, True)

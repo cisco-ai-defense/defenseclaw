@@ -1153,7 +1153,13 @@ def _schema_default(parts: list) -> tuple[bool, object]:
         if not isinstance(part, str) or not isinstance(properties, dict) or part not in properties:
             return False, None
         node = properties[part]
+        # A retired key has no default that applies: 1.0 reads none of them
+        # (GAP-1745), so get keeps saying it is not set.
+        if isinstance(node, dict) and node.get("deprecated") is True:
+            return False, None
     node = _resolve(node)
+    if isinstance(node, dict) and node.get("deprecated") is True:
+        return False, None
     if isinstance(node, dict) and "default" in node:
         return True, node["default"]
     return False, None
