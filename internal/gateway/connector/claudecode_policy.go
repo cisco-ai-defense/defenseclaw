@@ -95,7 +95,7 @@ func claudeCodeEffectiveHookContract(opts SetupOpts) (bool, error) {
 	// shell hook in the user's settings (claudeCodeHookInvocation), so that is
 	// the source to verify.
 	managedPolicy := opts.ManagedEnterprise && strings.TrimSpace(opts.HookExecutable) != "" &&
-		!(runtime.GOOS != "windows" && shellHookSecureClientProfile(opts))
+		(runtime.GOOS == "windows" || !shellHookSecureClientProfile(opts))
 	if managedPolicy && activeManaged == managed.userFallback {
 		// HKCU is a user-writable convenience tier. Restoring the higher file
 		// drop-in supersedes it, so even a disabling fallback remains ordinary,

@@ -911,7 +911,7 @@ func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error 
 	if err != nil {
 		return fmt.Errorf("daemon: find process %d: %w", pid, err)
 	}
-	defer proc.Release() //nolint:errcheck -- closes the retained Windows handle.
+	defer proc.Release() //nolint:errcheck // closes the retained Windows handle.
 
 	if request != nil {
 		requestErr := request(pid)
@@ -987,7 +987,7 @@ func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("daemon: find started process %d: %w", pid, err)
 	}
-	defer proc.Release() //nolint:errcheck -- closes the retained Windows handle.
+	defer proc.Release() //nolint:errcheck // closes the retained Windows handle.
 	if err := sendTermSignal(proc); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return fmt.Errorf("daemon: stop started process: %w", err)
 	}
