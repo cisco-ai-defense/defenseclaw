@@ -1098,7 +1098,7 @@ defenseclaw sandbox start myapp-7f3a
 {/* AUTOGEN-BEGIN: sandbox-flags start */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
-| `--end-vm` | switch |  | Start a MicroVM whose workload completed or failed though its VM still runs: OpenShell ends that VM with no flush first, so what it has not written to its disk is lost. |
+| `--end-vm` | switch |  | Start a MicroVM whose workload completed or failed though its VM still runs: OpenShell ends that VM with no flush first, so what it has not written to its disk is lost. OpenShell 0.1.5 refuses this start with Conflict. |
 | `--new-snapshot` | switch |  | Take a new snapshot even if the folder still has an earlier session's changes (undo no longer reverts them). |
 | `--no-snapshot` | switch |  | Keep the previous session's snapshot instead of taking a new one. |
 {/* AUTOGEN-END: sandbox-flags */}

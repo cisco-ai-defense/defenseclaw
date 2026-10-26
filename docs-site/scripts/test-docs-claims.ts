@@ -257,10 +257,10 @@ describe('recovery and repair advice', () => {
     const body = page('troubleshooting/sandboxes/runs-and-sessions.mdx');
     const section = body.split('## A sandbox is in OpenShell\'s error state')[1]?.split('## ')[0];
     assert.ok(section, 'error-state troubleshooting section is missing');
-    for (const text of ['Docker', 'MicroVM', 'MainProcessFailed', '--end-vm', 'has not written to its disk is lost',
+    for (const text of ['Docker', 'MicroVM', 'MainProcessFailed', '--end-vm', 'fails with Conflict', 'keep the VM while you need what it holds',
       'defenseclaw sandbox status NAME', 'defenseclaw sandbox stop NAME', 'defenseclaw sandbox delete NAME',
       'deletes it and its work', 'process exited',
-      'stopped after ending and stopping a failed VM', 'absent after deletion']) {
+      'absent after deletion']) {
       assert.ok(section.includes(text), `error-state recovery must describe ${text}`);
     }
     assert.ok(!section.includes('which keep the sandbox and its work'), 'error-state recovery promises to keep unwritten VM work');
@@ -325,10 +325,9 @@ describe('recovery and repair advice', () => {
     assert.ok(!section.includes('one that is completed or in its error state: `openshell sandbox delete NAME`'),
       'a stoppable raw error state must not be sent directly to deletion');
     const recoverable = section.split('\n').find((line) => line.includes('completed, or has `MainProcessFailed` on OpenShell 0.1.5 or later'));
-    assert.ok(recoverable && recoverable.indexOf('save') < recoverable.indexOf('`openshell sandbox start NAME`') &&
-      recoverable.indexOf('`openshell sandbox start NAME`') < recoverable.indexOf('`openshell sandbox stop NAME`') &&
-      recoverable.indexOf('`openshell sandbox stop NAME`') < recoverable.indexOf('`openshell sandbox delete NAME`'),
-    'recoverable raw MicroVM needs save, start, stop before optional deletion');
+    assert.ok(recoverable && recoverable.includes('fails with Conflict') && recoverable.indexOf('save') >= 0 &&
+      recoverable.indexOf('save') < recoverable.indexOf('`openshell sandbox delete NAME`') && !recoverable.includes('ends the lingering VM'),
+    'a completed raw MicroVM on 0.1.5 cannot start or stop: save first, then delete (GAP-1795)');
     const old = section.split('\n').find((line) => line.includes('completed, or in its error state with a VM still running on a gateway older than 0.1.5'));
     assert.ok(old && old.indexOf('save') < old.indexOf('`openshell sandbox delete NAME`') &&
       !old.includes('`openshell sandbox stop NAME`'),
@@ -1359,6 +1358,11 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-1795", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["fails with Conflict and leaves it starting", "keep the VM while you need what it holds"], lacks: ["can use `defenseclaw sandbox start NAME --end-vm`, then stop it"] },
+  { gap: "GAP-1795", page: "troubleshooting/sandboxes/setup-and-gateway.mdx", has: ["fails with Conflict and leaves it starting"], lacks: ["`start NAME --end-vm` starts it", "or on 0.1.5 start it with `--end-vm`", "can refuse the recovery above", "ends the lingering VM without a flush", "(which ends its VM without a flush)"] },
+  { gap: "GAP-1795", page: "troubleshooting/sandboxes/runs-and-sessions.mdx", section: "A sandbox is in OpenShell's error state", has: ["fails with Conflict and leaves it starting"], lacks: ["run `defenseclaw sandbox stop NAME` once it is ready"] },
+  { gap: "GAP-1795", page: "enterprise/runtime/sandboxes.mdx", has: ["its `--end-vm` start fails with Conflict"], lacks: ["is started with `defenseclaw sandbox start <name> --end-vm`"] },
+  { gap: "GAP-1795", page: "reference/sandboxes/cli.mdx", has: ["OpenShell 0.1.5 refuses this start with Conflict."] },
   // r105-rows-end
 ];
 
