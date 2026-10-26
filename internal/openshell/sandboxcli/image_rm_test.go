@@ -213,8 +213,10 @@ func TestImageRemoveWithoutTheDaemon(t *testing.T) {
 	f := newRMFixture(t, true)
 	f.API = sandboxapi.NewClient("http://127.0.0.1:1", "x")
 	err := f.ImageRemove(bg, ImageRemoveOptions{Harnesses: []string{"claudecode"}, Yes: true})
-	wantErr(t, err, "the DefenseClaw daemon did not list its sandboxes, so which of them boot the 2 MicroVM disks OpenShell prepared from these images "+
-		"(8.0 KiB in ~/.local/state/openshell/vm-driver/images) is not known, and nothing was removed: the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)")
+	wantErr(t, err,
+		"the DefenseClaw daemon did not list its sandboxes, so which of them boot the 2 MicroVM disks OpenShell prepared from these images "+
+			"(8.0 KiB in ~/.local/state/openshell/vm-driver/images) is not known, and nothing was removed",
+		"the DefenseClaw daemon did not answer or could not be verified", "127.0.0.1:1", "connection refused")
 	if len(f.images.removed) != 0 {
 		t.Fatalf("removed %v", f.images.removed)
 	}
