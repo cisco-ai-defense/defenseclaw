@@ -1419,6 +1419,23 @@ Later bundles go through 5.2.
    the sessions restarted (4.3, sessions that need a restart). Report anchor
    and credential changes yourself (section 0).
 
+### 5.3 Release floor
+
+On Linux and macOS, DefenseClaw 1.0.4 and later refuse to install a release
+below the confirmed bundle's `min_product_version` (`product_floor_refused`).
+The rollback marker and `--allow-downgrade` do not lift it.
+
+The preinstall of a 1.0.4 or later package checks the floor before it replaces
+files, but only with a gateway that has the check: the installed gateway when
+it is 1.0.4 or later, or else the floor checker a non-purge uninstall keeps.
+When the installed gateway is older than 1.0.4 or gone and there is no kept
+checker (an older package was installed below the floor, or an uninstall
+warned `floor_checker_not_kept`), the preinstall installs the files. The
+postinstall `ensure` of a 1.0.4 or later package then refuses a release below
+the floor, after its files are in place. Older packages do not check the floor
+in any script and can complete below it. Install only releases that meet the
+floor; to go below it, contact your administrator.
+
 ## 6. Locks
 
 | Command | Linux / macOS | Windows |

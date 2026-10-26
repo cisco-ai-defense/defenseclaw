@@ -106,6 +106,16 @@ lost until the agent is restarted.
 
 ## Roll back
 
+On Linux and macOS with bundle trust anchors, DefenseClaw 1.0.4 and later
+refuse to install a release below the confirmed bundle's `min_product_version`
+(`product_floor_refused`). The rollback marker, `--allow-downgrade` and
+`uninstall --keep-state` do not lift this floor. A package older than 1.0.4
+does not check the floor itself and can complete below it. A floor that cannot
+be read refuses the install too. Install a release that meets the floor; to go
+below it, contact your administrator. [Release floor
+limits](/docs/enterprise/operate/reference#release-floor-limits) says when the
+floor is checked, and what older packages and Windows Setup do.
+
 A failed action rolls itself back. You only need the steps below to go back to an older
 release on purpose. Try the rollback on one test host before the fleet. Every lifecycle
 refuses an older release unless you ask for the rollback (`downgrade_refused`). For an

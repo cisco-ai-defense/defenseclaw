@@ -79,6 +79,49 @@ the run warns `retry limit reached`; run `ensure` once the cause is fixed.
 - **MDM wrapper.** The Linux wrapper installs `.rpm` files with `rpm -U`, so it refuses
   older RHEL packages.
 
+### Release floor limits
+
+On Linux and macOS, `install`, `upgrade`, `repair` and `ensure` check the
+confirmed bundle's release floor before they change anything when:
+
+- there is no deployment record (a first install, or a reinstall after
+  `uninstall --keep-state`),
+- the version changes, up or down, or
+- the version is not a release (for example `dev`).
+
+If that check cannot read the floor, the run refuses (`product_floor_refused`).
+
+A run that keeps the recorded release (a repair, or a reinstall of the same
+version while the deployment record is there) does not check the floor again:
+the bundle was checked against that release when it was applied. If the
+confirmed bundle cannot be read, such a run keeps the config the last deployment
+committed, repairs the host and warns `bundle_state_unreadable`. With
+`--config`, or with no committed config, it stops with that code as an error
+instead. To replace the damaged bundle, contact your administrator.
+
+Package scripts shipped in 1.0.4 and later run the same check before they
+replace files, but only with a gateway that has the check: the installed
+gateway when it is 1.0.4 or later, or else the retained floor checker, a copy of
+the gateway that a non-purge uninstall keeps in the lifecycle directory. A
+checker that is there but cannot be read, is not a root-owned file only root can
+change, or does not run, refuses the install. The preinstall has nothing to
+check with when the installed gateway is older than 1.0.4 or gone and there is
+no retained floor checker: for example, an older package was installed below the
+floor, or an uninstall warned `floor_checker_not_kept`. The preinstall of a
+1.0.4 or later package then installs its files; its postinstall `ensure` refuses
+a release below the floor, after the files are in place. A package older than
+1.0.4 has no floor check in any of its scripts and completes below the floor.
+The apt hook of an installed 1.0.4 or later package runs the check for older
+packages installed through `apt` or `apt-get`.
+
+Packages older than 1.0.4 installed through `rpm`, `dnf`, `dpkg -i` or the
+macOS Installer run their own older scripts, which do not check the floor.
+`dpkg -i` does not run the apt hook. Windows Setup does not check the floor.
+Keep package deployment under administrator control, and check that the
+release you install meets the floor first. To go below the floor, contact your
+administrator. See [Roll back](/docs/enterprise/operate/lifecycle#roll-back) for
+the supported procedure.
+
 ### Applying a config change
 
 `status` and `verify` wait up to 5 seconds for a running apply trigger. If it is still

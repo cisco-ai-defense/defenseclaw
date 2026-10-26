@@ -592,10 +592,13 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	args := o.Args
 	shown := RunOptions{Args: args, Prompt: o.Prompt}
 	if run != nil {
+		shownArgs := sessionArgs(run.Args, o.Args)
 		if !o.Shell {
-			args = sessionArgs(run.Args, o.Args)
+			args = shownArgs
 		}
-		shown = RunOptions{Args: args, Prompt: o.Prompt, Credentials: run.Credentials, GitHubWrite: run.GitHubWrite, HostPorts: run.HostPorts}
+		// A companion shell still shows the saved model, but receives no
+		// harness options itself.
+		shown = RunOptions{Args: shownArgs, Prompt: o.Prompt, Credentials: run.Credentials, GitHubWrite: run.GitHubWrite, HostPorts: run.HostPorts}
 	}
 	started, kept := false, sb.Phase == "ready"
 	if sb.Phase != "ready" {

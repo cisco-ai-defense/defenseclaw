@@ -63,6 +63,12 @@ To check an old `DefenseClawSetup-x64.exe`, compare its SHA-256 (`Get-FileHash -
 
 ## Roll back to 0.8.x
 
+On a managed Linux or macOS computer with bundle trust anchors, a rollback must
+also meet the confirmed bundle's `min_product_version`. See [Roll
+back](/docs/enterprise/operate/lifecycle#roll-back) and the [release floor
+limits](/docs/enterprise/operate/reference#release-floor-limits), including
+packages older than 1.0.4 and Windows Setup.
+
 `defenseclaw rollback` restores the version 8 `config.yaml` saved when the upgrade started, with `data.json` and the block and allow entries in `audit.db`. Policy edits you made after the upgrade stay in `~/.defenseclaw/previous` and return when you roll forward. 0.8.x has no rollback command. To return to 1.x, run the command the rollback prints, or run the install command again:
 
 ```bash

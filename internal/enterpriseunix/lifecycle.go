@@ -3604,16 +3604,17 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		return 0
 	}
 	// A device that takes signed bundles keeps a copy of the gateway for the
-	// package scripts' release floor check: once the binaries are gone (a
-	// --keep-state uninstall, or one that fails after removing them) the
-	// installed gateway cannot answer, and a package below the confirmed
-	// bundle's floor would write its files before its postinstall ensure
-	// refused it. The machine state removal below takes the copy with the
-	// rest of the lifecycle state.
+	// release floor check of the 1.0.4 and later package scripts: once the
+	// binaries are gone (a --keep-state uninstall, or one that fails after
+	// removing them) the installed gateway cannot answer, and a 1.0.4 or
+	// later package below the confirmed bundle's floor would write its files
+	// before its postinstall ensure refused it. A package older than 1.0.4
+	// has no floor check, with or without the copy. The machine state removal
+	// below takes the copy with the rest of the lifecycle state.
 	if !l.opts.Purge {
 		kept, err := env.keepFloorChecker(record)
 		if err != nil {
-			r.AddWarning(codeFloorCheckerNotKept, "could not keep the gateway that checks the release floor of the confirmed policy bundle ("+err.Error()+"); a package below that floor is refused only by its postinstall, after its files are in place")
+			r.AddWarning(codeFloorCheckerNotKept, "could not keep the gateway that checks the release floor of the confirmed policy bundle ("+err.Error()+"); "+floorCheckerNotKeptLimit)
 		}
 		l.floorCheckerKept = kept
 	}
@@ -3960,7 +3961,7 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	case l.opts.KeepState:
 		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
 		if l.floorCheckerKept {
-			lines = append(lines, "kept a root-only copy of the gateway in "+filepath.Join(layout.LifecycleDir, floorCheckerDir)+": the package scripts run its release floor check of the confirmed policy bundle before a reinstall replaces any file")
+			lines = append(lines, "kept a root-only copy of the gateway in "+filepath.Join(layout.LifecycleDir, floorCheckerDir)+": the scripts of a 1.0.4 or later package run its release floor check of the confirmed policy bundle before a reinstall replaces any file; "+olderPackageFloorLimit)
 		}
 		if l.openshellRecordKept {
 			lines = append(lines, "kept the record of the sandbox setup the kept sandboxes were made under in "+layout.LifecycleDir)
