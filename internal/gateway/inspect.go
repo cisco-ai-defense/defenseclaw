@@ -826,9 +826,13 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		runtimeAction := profileMeetActionForFindings(
 			ctx, a.decisionConfig(ctx), req.Connector, ruleFindings, true, false,
 		)
-		if enforceableSeverity != "NONE" {
+		// CodeGuard's findings carry no member and apply to every member.
+		// The rule findings decided above, each under its own member: their
+		// severity folded in here let an action member enforce an observe
+		// member's rule (GAP-1708).
+		if _, codeGuardSeverity := aggregateCodeGuardSeverity(cgFindings, "NONE", "NONE"); codeGuardSeverity != "NONE" {
 			codeGuardAction := profileMeetActionForSeverity(
-				ctx, a.decisionConfig(ctx), req.Connector, enforceableSeverity, true, false,
+				ctx, a.decisionConfig(ctx), req.Connector, codeGuardSeverity, true, false,
 			)
 			runtimeAction = strongerGuardrailAction(runtimeAction, codeGuardAction)
 		}
