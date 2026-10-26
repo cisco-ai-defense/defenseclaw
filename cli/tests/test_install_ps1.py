@@ -7445,4 +7445,3 @@ def test_an_upgrade_from_1_0_3_says_once_that_outages_now_run(tmp_path: Path, gu
     summary = ps[ps.index('$changed = "Upgraded from $PrevVersion"') :][:900]
     assert '[version]$PrevVersion -lt [version]"1.0.4" -and [version]$PrevVersion -lt [version]$Ver -and (Test-OutageOpenNotice)' in summary
     assert f"Write-Host ('  ' + '{sentence}')" in summary
-
