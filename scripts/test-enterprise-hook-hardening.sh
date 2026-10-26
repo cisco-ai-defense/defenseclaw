@@ -532,20 +532,16 @@ if [ "$native_otlp" = true ]; then
     if grep -Fq "/otlp/${connector}/${service_otlp_value}" "$native_config"; then
         fail "native agent config leaked the gateway service OTLP token in an endpoint"
     fi
-    case "$connector" in
-        codex)
-            if ! grep -Fq "authorization = \"Bearer ${service_otlp_value}\"" "$native_config" &&
-                ! grep -Fq "authorization = 'Bearer ${service_otlp_value}'" "$native_config"; then
-                fail "Codex config does not carry the gateway service OTLP token as an Authorization bearer"
-            fi
-            ;;
-        claudecode)
-            grep -Fq "authorization=Bearer ${service_otlp_value}" "$native_config" || fail "Claude config does not carry the gateway service OTLP token as a literal Authorization bearer"
-            if grep -Fq "authorization=Bearer%20${service_otlp_value}" "$native_config"; then
-                fail "Claude config retained the obsolete percent-encoded Authorization bearer"
-            fi
-            ;;
-    esac
+    # Host installs are hook-only: setup disables the agent's native OTLP
+    # exporter, whose loopback listener it cannot prove (GAP-0810), so the
+    # agent config carries neither the service OTLP token nor a DefenseClaw
+    # exporter. Hook events still reach the gateway.
+    if grep -Fq "$service_otlp_value" "$native_config"; then
+        fail "native agent config carries the gateway service OTLP token; host installs send no native OTLP"
+    fi
+    if grep -Fq "x-defenseclaw-source" "$native_config"; then
+        fail "native agent config carries a DefenseClaw OTLP exporter; host installs are hook-only"
+    fi
 fi
 if [ "$user_token_sidecar" = true ]; then
     sudo -n cmp -s "$service_token" "$user_token" || fail "service and user scoped tokens differ"
