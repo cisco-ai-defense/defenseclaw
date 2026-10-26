@@ -1368,6 +1368,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1795", page: "reference/sandboxes/cli.mdx", has: ["OpenShell 0.1.5 refuses this start with Conflict."] },
   { gap: "GAP-1762", page: "troubleshooting/known-limits.mdx", section: "Claude Code shell", has: ["no hook decision and no hook audit row", "the Tetragon runtime layer can still record it (`hook_seen=false`)"], lacks: ["the audit log has no row for it"] },
   { gap: "GAP-1763", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["a process tracer such as PRoot on Linux", "`unprivileged_ptrace`", "`kernel.yama.ptrace_scope=2`"] },
+  { gap: "GAP-1764", page: "troubleshooting/windows.mdx", section: "Codex refuses every command in its first session", has: ["Granular.sandbox_approval is false", "Quit Codex and start it again once", "/docs/troubleshooting/known-limits#codex"] },
   // r105-rows-end
 ];
 

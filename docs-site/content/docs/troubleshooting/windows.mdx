@@ -110,6 +110,12 @@ Disabling stops only what the agent loads by that exact name (Codex `$skill` sel
 
 **Check.** The doctor authentication row is `[PASS]`.
 
+## Codex refuses every command in its first session
+
+**Fix.** The first Codex session after Codex sets up its sandbox (`Sandbox ready`) can refuse every shell command with `approval required by policy, but AskForApproval::Granular.sandbox_approval is false`. This is Codex, with or without DefenseClaw. Quit Codex and start it again once. See [Known limits](/docs/troubleshooting/known-limits#codex).
+
+**Check.** Commands run in the new session.
+
 ## The TUI renders poorly or cannot redraw
 
 **Fix.** Use Windows Terminal or a console of at least 80x24. Start `defenseclaw tui` directly, not through WSL, Git Bash or a pipe. Otherwise use the CLI commands; most take `--json`.
