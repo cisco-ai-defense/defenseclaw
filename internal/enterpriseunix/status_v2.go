@@ -252,7 +252,10 @@ func (l *lifecycle) verifyManagedHermesRegistration(ctx context.Context) error {
 	}
 	sort.Strings(notCovered)
 	for _, user := range notCovered {
-		l.result.MarkCoverageIncomplete(enterprisestatus.CodeStatusDetailUnavailable)
+		// The enabled hooks are installed, so coverage_complete stays true,
+		// as for a failed target of any other connector and on Windows; the
+		// target is not protected, so security_complete is false (GAP-1975).
+		l.result.MarkSecurityIncomplete(enterprisestatus.CodeStatusDetailUnavailable)
 		l.result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, "connectors.hermes: NOT COVERED for user "+user+
 			": the guardian's last reconcile could not protect its Hermes hook; the guardian target warning names the cause")
 	}

@@ -389,8 +389,9 @@ func TestVerifyLeavesAGuardianRecordedHermesFailureToItsTarget(t *testing.T) {
 			if r.ExitCode != 0 || !r.OK {
 				t.Fatalf("one account's own Hermes failure failed host verify: errors=%+v", r.Errors)
 			}
-			if r.CoverageComplete || r.SecurityComplete {
-				t.Fatalf("verify certified Hermes coverage: coverage=%t security=%t", r.CoverageComplete, r.SecurityComplete)
+			if !r.CoverageComplete || r.SecurityComplete {
+				t.Fatalf("coverage=%t security=%t; want coverage true and security false for one account's guardian-recorded Hermes failure, as for every connector and on Windows (GAP-1975)",
+					r.CoverageComplete, r.SecurityComplete)
 			}
 			if msg := messagesOf(r.Warnings, enterprisestatus.CodeStatusDetailUnavailable); !strings.Contains(msg, "NOT COVERED for user bob") {
 				t.Fatalf("verify did not report Bob's Hermes NOT COVERED: %q", msg)
@@ -692,6 +693,29 @@ func TestStatusReportsAGuardianFailedHermesTargetLikeEveryConnector(t *testing.T
 			}
 			if why := messagesOf(r.Warnings, enterprisestatus.CodeSecurityIncomplete); !strings.Contains(why, codeGuardianTargetFailed) || !strings.Contains(why, "coverage_complete is true") {
 				t.Fatalf("status did not name guardian_target_failed for security_complete: %q", why)
+			}
+
+			// Verify reads the same failed target the same way: it fails on
+			// the target, security_complete is false and coverage_complete
+			// follows the installed hooks (GAP-1975, verify half).
+			h.env.ReportLaunchCoverage = func(context.Context, managed.LaunchCoverageReport) error { return nil }
+			readiness := "defenseclaw-gateway enterprise hooks readiness --manifest " + h.env.Layout.ManifestPath + " --json"
+			h.runner.replies = map[string]fakeReply{readiness: {
+				result: CommandResult{Stdout: []byte(`{"ok":false,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[` +
+					`{"connector":"hermes","user":"alice","user_home":"` + home + `","uid":1001,"ok":false,"error":"hook not registered"}]}`), ExitCode: 1},
+				err: errors.New("readiness exited 1"),
+			}}
+			v := h.run(Options{Action: ActionVerify})
+			contracttest.Compile(t).ValidateValue(t, "lifecycle-result.schema.json", v)
+			if v.ExitCode == 0 || v.OK {
+				t.Fatalf("verify passed a guardian-failed Hermes target: errors=%+v", v.Errors)
+			}
+			if failed := messagesOf(v.Errors, codeVerify); !strings.Contains(failed, "hermes for user alice is not protected") {
+				t.Fatalf("verify did not fail on the guardian-failed Hermes target: errors=%+v", v.Errors)
+			}
+			if !v.CoverageComplete || v.SecurityComplete {
+				t.Fatalf("verify coverage=%t security=%t; want coverage true and security false for a guardian-failed Hermes target, as for every connector and on Windows",
+					v.CoverageComplete, v.SecurityComplete)
 			}
 		})
 	}
