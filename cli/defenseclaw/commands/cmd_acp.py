@@ -1246,10 +1246,12 @@ def setup_cmd(
     if not managed:
         _wait_for_gateway_acp(app, profile, mode, show)
     _warn_left_entries(left, path, client, agent, own=sorted(written))
+    # A profile setup created is named, so a typo in --profile shows (GAP-1589).
+    created = f", new profile {profile}" if existing_profile is None and not managed else ""
     click.echo(
         json.dumps(result, sort_keys=True)
         if json_output
-        else f"Configured {agent} through DefenseClaw in {client} ({mode}) at {path}"
+        else f"Configured {agent} through DefenseClaw in {client} ({mode}{created}) at {path}"
     )
 
 
@@ -1383,6 +1385,9 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
         if not managed:
             active_clients = set(app.cfg.acp.clients)
             active_agents = set(app.cfg.acp.agents)
+            served = {
+                name for name, value in app.cfg.acp.profiles.items() if value.allowed_clients or value.allowed_agents
+            }
             for profile_name, profile_value in app.cfg.acp.profiles.items():
                 profile_value.allowed_clients = [
                     value for value in profile_value.allowed_clients if value in active_clients
@@ -1391,6 +1396,22 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
                     value for value in profile_value.allowed_agents if value in active_agents
                 ]
             app.cfg.acp.enabled = bool(active_clients and active_agents)
+            # Remove takes out the profiles setup wrote for the pairs it
+            # removed (GAP-1589): one that allowed a pair, now allows none,
+            # names no denied method and no remaining pair uses. While ACP
+            # stays on, the default profile stays (default_profile names it).
+            in_use = {app.cfg.acp.profile_for_pair(pair_client, pair_agent) for pair_client, pair_agent in remaining}
+            for profile_name in sorted(served):
+                profile_value = app.cfg.acp.profiles[profile_name]
+                if (
+                    profile_value.allowed_clients
+                    or profile_value.allowed_agents
+                    or profile_value.denied_methods
+                    or profile_name in in_use
+                    or (app.cfg.acp.enabled and profile_name == app.cfg.acp.default_profile)
+                ):
+                    continue
+                del app.cfg.acp.profiles[profile_name]
             _progress(True, "Saving the ACP policy to the DefenseClaw config...")
             app.cfg.save()
     except Exception as exc:
