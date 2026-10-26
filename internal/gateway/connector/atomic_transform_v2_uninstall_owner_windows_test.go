@@ -6,10 +6,13 @@
 package connector
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -238,11 +241,13 @@ func TestAtomicTransformV2UninstallAcceptsEnrolledUsersLegacyNamespace(t *testin
 			setOwner(t, path, target, false)
 			setOwner(t, legacy, tc.owner, true)
 			setDACL(t, legacy, tc.dacl)
+			restore := enableAtomicTransformV2BackupRestoreForTest(t)
 			err := atomicTransformFileV2(path, stateDir, 0o600,
 				atomicTransformV2Options{preserveExistingProtection: true, expectedOwner: target},
 				func([]byte, bool) (atomicTransformResult, error) {
 					return atomicTransformResult{Data: []byte(`{"hook":"other"}`)}, nil
 				})
+			restore()
 			after, readErr := os.ReadFile(path)
 			if tc.ok {
 				if err != nil || readErr != nil || string(after) != `{"hook":"other"}` {
@@ -250,7 +255,7 @@ func TestAtomicTransformV2UninstallAcceptsEnrolledUsersLegacyNamespace(t *testin
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), "legacy compare-and-swap state directory") {
+			if err == nil || !strings.Contains(err.Error(), "validate legacy compare-and-swap state directory") {
 				t.Fatalf("unsafe legacy namespace error = %v", err)
 			}
 			if readErr != nil || string(after) != `{"hook":"managed"}` {
@@ -258,4 +263,52 @@ func TestAtomicTransformV2UninstallAcceptsEnrolledUsersLegacyNamespace(t *testin
 			}
 		})
 	}
+}
+
+// The managed purge runs as LocalSystem, which opens a namespace that grants
+// only SYSTEM and the enrolled user through its SYSTEM entry. An elevated
+// runner token is not SYSTEM: give it the same access through backup
+// semantics (Go opens every file with them) instead of an extra trustee the
+// product refuses, so the namespace's owner and DACL decide the outcome.
+func enableAtomicTransformV2BackupRestoreForTest(t *testing.T) func() {
+	t.Helper()
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(),
+		windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token); err != nil {
+		t.Fatal(err)
+	}
+	var restores []windows.Tokenprivileges
+	restore := func() {
+		for i := len(restores) - 1; i >= 0; i-- {
+			if err := windows.AdjustTokenPrivileges(token, false, &restores[i], 0, nil, nil); err != nil {
+				t.Errorf("restore test privilege: %v", err)
+			}
+		}
+		restores = nil
+	}
+	t.Cleanup(func() {
+		restore()
+		token.Close()
+	})
+	for _, name := range []string{"SeBackupPrivilege", "SeRestorePrivilege"} {
+		var luid windows.LUID
+		if err := windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr(name), &luid); err != nil {
+			t.Fatal(err)
+		}
+		enable := windows.Tokenprivileges{PrivilegeCount: 1, Privileges: [1]windows.LUIDAndAttributes{{
+			Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED,
+		}}}
+		var previous windows.Tokenprivileges
+		var size uint32
+		runtime.LockOSThread()
+		err := windows.AdjustTokenPrivileges(token, false, &enable, uint32(unsafe.Sizeof(previous)), &previous, &size)
+		notHeld := err == nil && errors.Is(windows.GetLastError(), windows.ERROR_NOT_ALL_ASSIGNED)
+		runtime.UnlockOSThread()
+		if err != nil || notHeld {
+			restore()
+			t.Fatalf("enable %s: %v (not held: %t)", name, err, notHeld)
+		}
+		restores = append(restores, previous)
+	}
+	return restore
 }
