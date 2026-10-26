@@ -53,7 +53,7 @@ func TestOpenCodeOutageToastOncePerSessionAndAuditEveryCall(t *testing.T) {
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	fake := "#!/bin/sh\nif [ \"$1\" = hook-post ]; then exit 7; fi\nif [ \"$1\" = hook-outage-mode ]; then printf 'open\\n'; exit 0; fi\nexit 1\n"
+	fake := "#!/bin/sh\nif [ \"$1\" = hook-post ]; then echo 'defenseclaw-hook-post: dial tcp 127.0.0.1:1: connectex: refused' >&2; exit 7; fi\nif [ \"$1\" = hook-outage-mode ]; then printf 'open\\n'; exit 0; fi\nexit 1\n"
 	if err := os.WriteFile(filepath.Join(binDir, "defenseclaw-gateway"), []byte(fake), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -82,9 +82,16 @@ func TestOpenCodeOutageToastOncePerSessionAndAuditEveryCall(t *testing.T) {
 			if failFirst {
 				cmd.Env = append(cmd.Env, "DC_TOAST_FAIL_FIRST=1")
 			}
+			// The helper's refused-connection diagnostics stay out of the
+			// agent's terminal: the one warning is all the user sees (GAP-1314).
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
 			out, err := cmd.Output()
 			if err != nil {
 				t.Fatalf("node: %v\n%s", err, out)
+			}
+			if strings.Contains(stderr.String(), "defenseclaw-hook-post") {
+				t.Fatalf("the helper's diagnostics reached the agent's terminal:\n%s", stderr.String())
 			}
 			var result struct {
 				Verdict   string   `json:"verdict"`

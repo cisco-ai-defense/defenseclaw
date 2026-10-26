@@ -631,7 +631,10 @@ async function gatewayFetch(path: string, init: RequestInit, token: string): Pro
 			const binary = perUserHookPostBinary()
 			const output = execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
 				input: JSON.stringify({ path, headers: init.headers || {}, body: String(init.body || "") }),
-				timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8",
+				// The helper's diagnostics (a refused connection during an outage)
+				// stay in the error the caller classifies; inherited, they reached
+				// the agent's screen over the one outage warning (GAP-1314).
+				timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
 			})
 			const reply = JSON.parse(output) as { status: number; body: string; retry_after?: string }
 			if (!Number.isInteger(reply.status) || reply.status < 100 || reply.status > 599 || typeof reply.body !== "string") {
