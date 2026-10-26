@@ -163,17 +163,21 @@ func provedHighWriteFindings(
 		if !instructionLoadLocation(location, flavor, locations) {
 			return instructionNotProved
 		}
+		// A file in a directory the session's snapshot records is protected
+		// only while it is the file that was there when the session reached
+		// the directory; one the session created since is ordinary, also
+		// once the agent reports it loaded (GAP-2046). The snapshot records
+		// only the names the agent loads at every start, so a loaded file of
+		// another name (an @include) is not known to be the session's own.
+		normalized, normalizedOK := activeAgentInstructionPath(location, flavor)
+		covered := normalizedOK && startup.startupCovers(instructionParent(normalized))
+		if covered && startup.startupFiles[normalized] == "" && snapshotRecordsName(request.Connector, normalized) {
+			return instructionNotProved
+		}
 		if loadedAtRuntime(location, flavor) {
 			return instructionIdentityProved
 		}
-		// A file in a directory the session's snapshot records is protected
-		// only while it is the file that was there when the session reached
-		// the directory; one the session created since is ordinary.
-		if normalized, ok := activeAgentInstructionPath(location, flavor); ok &&
-			startup.startupCovers(instructionParent(normalized)) {
-			if startup.startupFiles[normalized] == "" {
-				return instructionNotProved
-			}
+		if covered {
 			if identity := targetIdentity(location, target, flavor); identity != "" && identity == startup.startupFiles[normalized] {
 				return instructionIdentityProved
 			}
@@ -464,6 +468,14 @@ func connectorInstructionLoads(connector string) instructionLoads {
 		every.variables[variable] = allInstructionNames
 	}
 	return every
+}
+
+// snapshotRecordsName reports whether a startup snapshot of connector
+// records a file named like file (instructionSnapshot keeps only the names
+// connectorInstructionLoadNames lists).
+func snapshotRecordsName(connector, file string) bool {
+	name, named := hookpaths.InstructionFileName(path.Base(strings.ReplaceAll(file, `\`, "/")), runtime.GOOS == "windows")
+	return named && slices.Contains(connectorInstructionLoadNames(connector), name)
 }
 
 // connectorInstructionLoadNames are the instruction file names connector's

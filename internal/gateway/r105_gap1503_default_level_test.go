@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -85,5 +86,75 @@ func TestR105GAP1414ThirdAliasOfTwoLoadedNames(t *testing.T) {
 				t.Fatalf("%s through the third alias (resolved root %t): action=%q findings=%v", call.tool, resolve, response.Action, response.Findings)
 			}
 		}
+	}
+}
+
+// GAP-2046: CLAUDE.md files a Claude Code session created stay its own
+// while it lives, also after Claude Code reports them loaded
+// (nested_traversal, include): action mode at the default level allows the
+// next edit. The same files there before the session started still block.
+func TestR105GAP2046SessionCreatedLoadedClaudeMDStaysOwn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell forms")
+	}
+	for _, existed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "session-created", true: "pre-existing"}[existed], func(t *testing.T) {
+			project := filepath.Join(instructionIdentityTestRoot(t), "project")
+			if err := os.MkdirAll(filepath.Join(project, "pkg"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			files := []string{filepath.Join(project, "pkg", "CLAUDE.md"), filepath.Join(project, "CLAUDE.md")}
+			if existed {
+				for _, file := range files {
+					if err := os.WriteFile(file, []byte("there first\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			api := instructionProtectionTestAPI(t, "claudecode", "action", "")
+			ctx := authenticatedClaudeCodeTestContext()
+			api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+				HookEventName: "SessionStart", SessionID: "own", CWD: project, Source: "startup",
+			})
+			write := func(file string) claudeCodeHookResponse {
+				return api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+					HookEventName: "PreToolUse", SessionID: "own", CWD: project, ToolName: "Write",
+					ToolInput: map[string]interface{}{"file_path": file, "content": "edited\n"},
+				})
+			}
+			if !existed {
+				for _, step := range []string{"create", "edit"} {
+					for _, file := range files {
+						if got := write(file); got.Action == guardrailActionBlock {
+							t.Fatalf("%s %s: blocked: %v", step, file, got.Findings)
+						}
+						if err := os.WriteFile(file, []byte(step+"\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			}
+			for i, reason := range []string{"nested_traversal", "include"} {
+				api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+					HookEventName: "InstructionsLoaded", SessionID: "own", CWD: project,
+					FilePath: files[i], LoadReason: reason, MemoryType: "Project",
+				})
+			}
+			for _, file := range files {
+				got := write(file)
+				if blocked := got.Action == guardrailActionBlock; blocked != existed {
+					t.Fatalf("loaded %s (there first %t): action=%q findings=%v", file, existed, got.Action, got.Findings)
+				}
+				if existed && !findingStringHasRuleID(got.Findings, "COG-CLAUDE-MD") {
+					t.Fatalf("loaded %s blocked without COG-CLAUDE-MD: %v", file, got.Findings)
+				}
+			}
+			input := map[string]interface{}{"command": "printf x >> CLAUDE.md"}
+			bash := api.evaluateClaudeCodeHook(withAuthenticatedHookConnector(instructionResolvedWriteContext(t, project, "Bash", input), "claudecode"),
+				claudeCodeHookRequest{HookEventName: "PreToolUse", SessionID: "own", CWD: project, ToolName: "Bash", ToolInput: input})
+			if blocked := bash.Action == guardrailActionBlock; blocked != existed {
+				t.Fatalf("Bash append to the loaded CLAUDE.md (there first %t): action=%q findings=%v", existed, bash.Action, bash.Findings)
+			}
+		})
 	}
 }
