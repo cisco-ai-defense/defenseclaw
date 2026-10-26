@@ -507,8 +507,13 @@ func TestPerUserPluginOutageFollowsTheConfigNow(t *testing.T) {
 						!strings.Contains(result.Notices[0], "fail mode open for an outage") {
 						t.Fatalf("open outage rows=%+v notices=%q, want one audit row and one warning", rows, result.Notices)
 					}
-				} else if len(rows) != 0 {
-					t.Fatalf("a closed outage wrote fail-open rows %+v", rows)
+				} else {
+					// A blocked call may be recorded closed (GAP-1236), never as run.
+					for _, row := range rows {
+						if row["outcome"] != "fail_closed" {
+							t.Fatalf("a closed outage wrote fail-open rows %+v", rows)
+						}
+					}
 				}
 			})
 		}

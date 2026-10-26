@@ -646,13 +646,23 @@ async function gatewayFetch(path: string, init: RequestInit, token: string): Pro
 	if (!DC_HOOK_SOCKET) {
 		if (DC_PER_USER_NATIVE_POST) {
 			const binary = perUserHookPostBinary()
-			const output = execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
+			const post = () => execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
 				input: JSON.stringify({ path, headers: init.headers || {}, body: String(init.body || "") }),
 				// The helper's diagnostics (a refused connection during an outage)
 				// stay in the error the caller classifies; inherited, they reached
 				// the agent's screen over the one outage warning (GAP-1314).
 				timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
 			})
+			let output: string
+			try {
+				output = post()
+			} catch (error) {
+				// One more try for a helper that failed for another reason than an
+				// outage (exit 7) or the time limit (GAP-1236).
+				const failed = error as { status?: unknown; signal?: unknown } | null
+				if (!failed || !Number.isInteger(failed.status) || failed.status === 0 || failed.status === 7 || failed.signal) throw error
+				output = post()
+			}
 			const reply = JSON.parse(output) as { status: number; body: string; retry_after?: string }
 			if (!Number.isInteger(reply.status) || reply.status < 100 || reply.status > 599 || typeof reply.body !== "string") {
 				throw new Error("invalid native gateway response")
@@ -917,7 +927,19 @@ async function perUserOutageNotice(): Promise<string> {
 // write for a call that ran unchecked, in this install's data directory, so
 // the gateway reports it when it is back. Best effort: a row that cannot be
 // written never changes the verdict.
-async function logFailOpen(reason: string, payload: Record<string, unknown>): Promise<void> {
+// perUserFailureCause is the cause of a failed per-user check, for the block
+// text: the helper's last stderr line without its program prefix, else the
+// plugin's own error (an answer it refused), bounded and on one line.
+function perUserFailureCause(error: unknown): string {
+	const failed = error as { stderr?: unknown; status?: unknown } | null
+	const lines = String(failed?.stderr || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+	let cause = lines.length ? lines[lines.length - 1].replace(/^defenseclaw-(gateway|hook-post)( hook-post)?: /, "") : ""
+	if (!cause && !Number.isInteger(failed?.status)) cause = safeError(error)
+	cause = cause.replace(/[\u0000-\u001f]+/g, " ").slice(0, 240)
+	return cause || "per-user gateway peer unverified"
+}
+
+async function logFailOpen(reason: string, payload: Record<string, unknown>, closed = false): Promise<void> {
 	try {
 		const dir = join(dirname(dirname(DC_TOKEN_FILE)), "logs")
 		await mkdir(dir, { recursive: true, mode: 0o700 })
@@ -928,9 +950,9 @@ async function logFailOpen(reason: string, payload: Record<string, unknown>): Pr
 				connector: "amp",
 				hook: "amp-plugin",
 				reason,
-				category: "transport",
-				fail_mode: "open",
-				outcome: "fail_open",
+				category: closed ? "response" : "transport",
+				fail_mode: closed ? "closed" : "open",
+				outcome: closed ? "fail_closed" : "fail_open",
 				session_id: String(payload.session_id || "").slice(0, 256),
 				call_id: String(payload.source_event_id || payload.tool_call_id || randomBytes(16).toString("hex")).slice(0, 256),
 			}) + "\n")
@@ -1425,7 +1447,10 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				if ((error as { status?: unknown } | null)?.status === 7) {
 					return { action: "block", reason: await perUserGatewayDownText(error, 0) }
 				}
-				return { action: "block", reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" }
+				// Name the cause and record the call (GAP-1898, GAP-1236).
+				const cause = perUserFailureCause(error)
+				if (actionable) await logFailOpen(cause, payload, true)
+				return { action: "block", reason: `DefenseClaw hook failed closed (${cause})` }
 			}
 {{else if not .Sandbox}}			if (error && typeof error === "object" && "code" in error && error.code === "DC_PEER_UNVERIFIED") {
 				return { action: "block", reason: `DefenseClaw hook failed closed (${safeError(error)})` }
