@@ -92,10 +92,13 @@ func TestStopManagedSandboxes(t *testing.T) {
 	}
 	// GAP-1550: the unit's stop ends the VM anyway, so a held stop is made
 	// accepting the loss (it keeps what reached the disk and says the rest).
+	// It is made after the other stops, so its second sync wait cannot run
+	// the unit's stop timeout out before a healthy sandbox listed after it
+	// stops synced (GAP-1805).
 	f = &fakeSandboxStopper{list: []sandboxapi.Sandbox{{Name: "a", Phase: "ready"}, {Name: "b", Phase: "ready"}}, held: "a"}
 	if err := stopManagedSandboxes(context.Background(), f, &out); err != nil || !slices.Equal(f.accepted, []string{"a"}) ||
-		!slices.Equal(f.stopped, []string{"a", "b"}) {
-		t.Fatalf("a held stop at ExecStop: %v, accepted %v, stopped %v", err, f.accepted, f.stopped)
+		!slices.Equal(f.stopped, []string{"b", "a"}) {
+		t.Fatalf("a held stop at ExecStop: %v, accepted %v, stopped %v (want b's synced stop first)", err, f.accepted, f.stopped)
 	}
 	f = &fakeSandboxStopper{listErr: &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: "not reachable"}}
 	if err := stopManagedSandboxes(context.Background(), f, &out); err != nil {

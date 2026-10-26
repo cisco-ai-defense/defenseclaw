@@ -412,7 +412,9 @@ type managedSandboxStopper interface {
 // every MicroVM: a stop held because a guest's disk sync failed is made
 // again accepting the loss, so it keeps what reached the disk and the feed
 // says what may be lost (stop_unflushed), where the VM died unsynced with
-// no word (GAP-1550).
+// no word (GAP-1550). Those are made last: each waits for its guest's sync
+// again, and the unit's stop timeout must not end a healthy sandbox listed
+// after them before its own synced stop (GAP-1805).
 func stopManagedSandboxes(ctx context.Context, c managedSandboxStopper, out io.Writer) error {
 	list, err := c.List(ctx)
 	if err != nil {
@@ -422,6 +424,7 @@ func stopManagedSandboxes(ctx context.Context, c managedSandboxStopper, out io.W
 		return err
 	}
 	var failed []error
+	var held []string
 	for _, sb := range list {
 		switch audit.SandboxPhase(sb.Phase) {
 		case audit.SandboxPhaseProvisioning, audit.SandboxPhaseStarting, audit.SandboxPhaseReady, audit.SandboxPhaseUnknown:
@@ -430,13 +433,21 @@ func stopManagedSandboxes(ctx context.Context, c managedSandboxStopper, out io.W
 		}
 		_, err := c.Stop(ctx, sb.Name)
 		if sandboxapi.IsUnsyncedStopHeld(err) {
-			_, err = c.StopAcceptingUnsynced(ctx, sb.Name)
+			held = append(held, sb.Name)
+			continue
 		}
 		if err != nil {
 			failed = append(failed, fmt.Errorf("stop %s: %w", sb.Name, err))
 			continue
 		}
 		fmt.Fprintf(out, "stopped sandbox %s\n", sb.Name)
+	}
+	for _, name := range held {
+		if _, err := c.StopAcceptingUnsynced(ctx, name); err != nil {
+			failed = append(failed, fmt.Errorf("stop %s: %w", name, err))
+			continue
+		}
+		fmt.Fprintf(out, "stopped sandbox %s\n", name)
 	}
 	return errors.Join(failed...)
 }
