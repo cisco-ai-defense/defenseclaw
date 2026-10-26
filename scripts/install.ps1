@@ -215,9 +215,9 @@ function Get-InstallLockLiveOwner([string]$Lock) {
     # The pid of the live installer that owns the lock folder $Lock, or ""
     # once it is gone: no process has its pid, this one has it, a process
     # other than its proc-start record names has it (a reused pid; hookexec
-    # installLockStale), or no PowerShell has it. No clock is read; a lock
-    # without that record (1.0.2, 1.0.3), or a start that cannot be read,
-    # keeps its live pid.
+    # installLockStale), or no PowerShell has it. A lock without that record
+    # (1.0.2, 1.0.3) keeps a live pid whose process started before the lock
+    # folder was made; a start or time that cannot be read keeps it too.
     $holder = "$(Get-Content -LiteralPath (Join-Path $Lock "pid") -ErrorAction SilentlyContinue | Select-Object -First 1)".Trim()
     $process = if ($holder -match '^\d{1,9}$' -and [int]$holder -ne $PID) { Get-Process -Id ([int]$holder) -ErrorAction SilentlyContinue } else { $null }
     # A process that has exited but whose process object a handle keeps runs nothing.
@@ -226,6 +226,13 @@ function Get-InstallLockLiveOwner([string]$Lock) {
     if ($process -and $recorded) {
         try {
             if ([string]$process.StartTime.ToFileTimeUtc() -ne $recorded) { $process = $null }
+        } catch { }
+    } elseif ($process) {
+        # A lock without the record (1.0.2, 1.0.3) whose pid names a process
+        # that started after the lock folder was made: a reused pid, so the
+        # lock is stale (GAP-1465, lead decision 2026-10-26 13:58).
+        try {
+            if ($process.StartTime.ToUniversalTime() -gt (Get-Item -LiteralPath $Lock -Force).CreationTimeUtc.AddSeconds(2)) { $process = $null }
         } catch { }
     }
     if ($process -and $process.ProcessName -match '^(powershell|pwsh)$') { return $holder }

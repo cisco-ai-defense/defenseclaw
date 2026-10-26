@@ -549,16 +549,59 @@ release_locks() {
         rmdir -- "${lock:?}" 2>/dev/null || true
     done
 }
+process_started_epoch() {
+    # process_started_epoch PID: the second process PID started, from the
+    # system's record of it (Linux: boot time + field 22 of /proc/PID/stat;
+    # macOS: ps -o lstart). Fails when the system does not say.
+    local stat fields btime hz lstart
+    if [[ -e /proc/self/stat ]]; then
+        stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+        [[ "${stat}" == *")"* ]] || return 1
+        read -r -a fields <<< "${stat##*)}"
+        [[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 1
+        btime="$(awk '$1 == "btime" { print $2; exit }' /proc/stat 2>/dev/null)"
+        hz="$(getconf CLK_TCK 2>/dev/null)"
+        [[ "${btime}" =~ ^[0-9]+$ && "${hz}" =~ ^[1-9][0-9]*$ ]] || return 1
+        echo $(( btime + fields[19] / hz ))
+        return 0
+    fi
+    [[ "$(uname -s 2>/dev/null)" == Darwin && -x /bin/ps ]] || return 1
+    read -r -a fields <<< "$(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p "$1" 2>/dev/null)"
+    (( ${#fields[@]} == 5 )) || return 1
+    lstart="${fields[*]}"
+    LC_ALL=C TZ=UTC date -j -f "%a %b %d %T %Y" "${lstart}" +%s 2>/dev/null
+}
+lock_created_epoch() {
+    # lock_created_epoch LOCK: the second the lock folder was made (its birth
+    # time), else the second its pid file was written, which every release
+    # writes right after it makes the folder. Fails when neither can be read.
+    local t
+    if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
+        t="$(stat -f %B -- "$1" 2>/dev/null)" && [[ "${t}" =~ ^[1-9][0-9]*$ ]] && { echo "${t}"; return 0; }
+        t="$(stat -f %m -- "$1/pid" 2>/dev/null)" && [[ "${t}" =~ ^[0-9]+$ ]] && { echo "${t}"; return 0; }
+        return 1
+    fi
+    t="$(stat -c %W -- "$1" 2>/dev/null)" && [[ "${t}" =~ ^[1-9][0-9]*$ ]] && { echo "${t}"; return 0; }
+    t="$(stat -c %Y -- "$1/pid" 2>/dev/null)" && [[ "${t}" =~ ^[0-9]+$ ]] && { echo "${t}"; return 0; }
+    return 1
+}
 lock_owner_live() {
     # lock_owner_live LOCK HOLDER: the installer HOLDER that wrote LOCK/pid
     # still runs: its pid names a process that is not this one and, when
-    # LOCK/proc-start is there, is the process that record names. No clock
-    # is read. A lock without that record (1.0.2, 1.0.3) is kept while its
-    # pid names a process; so is one whose record or process identity cannot
-    # be read.
-    local recorded current
+    # LOCK/proc-start is there, is the process that record names. A lock
+    # without that record (1.0.2, 1.0.3) is kept while its pid names a
+    # process that started before the lock was made: one that started
+    # later got a reused pid, and the lock is stale (GAP-1465, lead decision
+    # 2026-10-26 13:58; 2 s for the whole-second readings). A record, an
+    # identity or a time that cannot be read keeps the lock.
+    local recorded current started created
     [[ -n "$2" && "$2" != "$$" ]] && pid_running "$2" || return 1
-    [[ -e "$1/proc-start" || -L "$1/proc-start" ]] || return 0
+    if [[ ! -e "$1/proc-start" && ! -L "$1/proc-start" ]]; then
+        started="$(process_started_epoch "$2")" || return 0
+        created="$(lock_created_epoch "$1")" || return 0
+        (( started <= created + 2 ))
+        return
+    fi
     recorded="$(lock_record "$1/proc-start")" || return 0
     current="$(process_identity "$2")" || return 0
     [[ "${recorded}" == "${current}" ]]

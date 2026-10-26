@@ -7300,7 +7300,12 @@ def test_install_ps1_takes_over_a_lock_whose_pid_was_reused() -> None:
     assert "$process = $null" in owner
     # An exited installer whose process object a handle keeps is gone (round l).
     assert "$process.HasExited" in owner
-    assert "LastWriteTime" not in owner and "AddSeconds" not in owner
+    assert "LastWriteTime" not in owner
+    # GAP-1465 (lead decision 13:58): a record-less 1.0.2/1.0.3 lock whose pid
+    # names a process started after the lock folder was made is stale.
+    legacy = owner[owner.index("} elseif ($process) {") :]
+    assert "$process.StartTime.ToUniversalTime() -gt (Get-Item -LiteralPath $Lock -Force).CreationTimeUtc.AddSeconds(2)" in legacy
+    assert legacy.index("CreationTimeUtc") < legacy.index("$process = $null")
     write = text.index('Set-Content -LiteralPath (Join-Path $LockDir "pid") -Value $PID -Encoding Ascii')
     take = text.rindex("    $taken = $false\n", 0, write)
     block = text[take:write]
