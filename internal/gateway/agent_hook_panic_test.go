@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -124,6 +125,39 @@ func TestSafeEvaluateHookManagedStandalonePanicReturnsNativeDeny(t *testing.T) {
 		agentHookRequest{HookEventName: "UserPromptSubmit"}, nil, nil)
 	if kiro.Action != "block" || kiro.WouldBlock {
 		t.Errorf("Kiro UserPromptSubmit panic = %+v, want native block", kiro)
+	}
+}
+
+func TestManagedClaudeSessionStartFailureWatchesOnlyTheVerifiedCallerHome(t *testing.T) {
+	serviceHome, callerHome := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", serviceHome)
+	t.Setenv("USERPROFILE", serviceHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(serviceHome, ".claude"))
+	cfg := config.DefaultConfig()
+	cfg.DeploymentMode, cfg.Enterprise.Profile = managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone
+	api := &APIServer{scannerCfg: cfg}
+	for _, home := range []string{callerHome, ""} {
+		ctx := withManagedHookPeer(withServiceAccountGateway(context.Background()), managedHookPeer{UID: 1001, Home: home})
+		req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "SessionStart"}
+		resp, panicked := api.safeEvaluateHook(ctx, "claudecode", req,
+			[]byte(`{"hook_event_name":"SessionStart"}`), map[string]interface{}{}, hookProfileRuntime{
+				Evaluate: func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+					panic("managed SessionStart evaluation failure")
+				},
+			})
+		if !panicked {
+			t.Fatal("evaluation did not fail")
+		}
+		output, _ := resp.HookOutput["hookSpecificOutput"].(map[string]interface{})
+		paths, _ := output["watchPaths"].([]string)
+		if home != "" && !slices.Contains(paths, filepath.Join(home, ".claude", "settings.json")) {
+			t.Fatalf("failure watch list omitted the verified caller: %v", paths)
+		}
+		for _, path := range paths {
+			if strings.HasPrefix(path, serviceHome+string(filepath.Separator)) {
+				t.Fatalf("failure watch list included the service home: %v", paths)
+			}
+		}
 	}
 }
 
