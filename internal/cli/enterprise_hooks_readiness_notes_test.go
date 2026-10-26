@@ -41,7 +41,8 @@ func TestEnterpriseHooksWatchIsTheGuardianFromItsFirstReconcile(t *testing.T) {
 }
 
 // GAP-1540 refix: readiness notes are reported under warnings after the
-// excused rows and never count as failures.
+// excused rows, de-duplicated. That they never fail readiness while verify
+// fails is TestEnterpriseHooksReadinessReportsANoteThatVerifyFails (GAP-1968).
 func TestEnterpriseHookReadinessNotesAreWarnings(t *testing.T) {
 	notes := &enterpriseHookNoteSet{}
 	notes.add(`C:\Users\u1\.claude\settings.json cannot be checked`)
@@ -50,9 +51,6 @@ func TestEnterpriseHookReadinessNotesAreWarnings(t *testing.T) {
 	got := enterpriseHookVerifyWarnings(run, notes)
 	if len(got) != 1 || !strings.Contains(got[0], "settings.json") {
 		t.Fatalf("readiness warnings = %q, want the one note", got)
-	}
-	if run.Failures != 0 {
-		t.Fatal("a readiness note counted as a failure")
 	}
 	if got := enterpriseHookVerifyWarnings(run, nil); len(got) != 0 {
 		t.Fatalf("verify (no readiness notes) warnings = %q", got)
