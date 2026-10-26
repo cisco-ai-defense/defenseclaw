@@ -622,14 +622,14 @@ func (e *Env) checkManagedPolicyDir(cfg *config.Config) error {
 		}
 	}
 	entries := 0
-	return filepath.WalkDir(full, func(path string, entry fs.DirEntry, walkErr error) error {
+	return filepath.WalkDir(full, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return fmt.Errorf("config: inspect policy_dir %s: %w", path, walkErr)
 		}
 		if path == full {
 			return nil
 		}
-		if entry != nil && entry.IsDir() && filepath.Dir(path) == packs && !config.PathHoldsAny(path, referenced) {
+		if d != nil && d.IsDir() && filepath.Dir(path) == packs && !config.PathHoldsAny(path, referenced) {
 			// A rule pack folder no setting names loads nothing; a
 			// writable one refused every admin command (GAP-1694).
 			return filepath.SkipDir
