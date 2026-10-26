@@ -1214,6 +1214,12 @@ const knownLimitEntries = [
     phrases: ['**Managed policy before launch:**', 'on managed Linux, macOS and Windows', 'a process device map on Windows', 'This is an operating system limit', '`unprivileged_user_namespaces`', '`user.max_user_namespaces=0`', '/docs/enterprise/install/reference/linux#user-namespaces', '/docs/enterprise/install/reference/macos#machine-policy', '/docs/enterprise/install/reference/windows#inspect-machine-policy'],
     from: [],
   },
+  {
+    gaps: 'GAP-0565',
+    section: 'Codex',
+    phrases: ['the `Sandbox ready` step', '`approval required by policy, but AskForApproval::Granular.sandbox_approval is false`', 'Codex does this with or without DefenseClaw', 'It is a Codex limit.', 'Quit Codex and start it again once'],
+    from: ['connectors/codex.mdx', 'reference/connectors/codex.mdx'],
+  },
 ] as const;
 
 function knownLimitSection(heading: string): string {
@@ -1270,7 +1276,7 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
   });
 
   it('keeps the vendor refusal text out of DefenseClaw source', () => {
-    for (const text of ['style commands are not permitted', 'did not acknowledge permission.requested']) {
+    for (const text of ['style commands are not permitted', 'did not acknowledge permission.requested', 'Granular.sandbox_approval is false']) {
       assert.deepEqual(trackedProductHits(text), [], `DefenseClaw source emits "${text}"; it is not a vendor limit`);
     }
   });
