@@ -94,9 +94,11 @@ const (
 // Guarded by Manager.mu.
 type hookReach struct {
 	// firstWork is the session's first model call of the harness;
-	// firstAttempt the first hook connection OpenShell reported.
+	// firstAttempt the first hook connection OpenShell reported, and
+	// lastAttempt the latest.
 	firstWork    time.Time
 	firstAttempt time.Time
+	lastAttempt  time.Time
 	// modelConns says, for each host:port the session connected to under
 	// a provider rule or on the host alias, whether the harness made the
 	// last connection OpenShell allowed there: the layer-7 records on it,
@@ -170,6 +172,9 @@ func (m *Manager) observeHookConnection(ctx context.Context, b *box, outcome hoo
 	}
 	if current && b.reach.firstAttempt.IsZero() {
 		b.reach.firstAttempt = now
+	}
+	if current {
+		b.reach.lastAttempt = now
 	}
 	refused := outcome == hookConnRefused
 	switch {
