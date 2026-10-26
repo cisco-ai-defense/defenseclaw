@@ -17,8 +17,10 @@
 package sandboxcli
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
@@ -78,8 +80,19 @@ func TestAPIErrorKeepsUnreachableTransportCause(t *testing.T) {
 // so in its own words: a limit on this account's requests in a short time,
 // to retry in a few seconds, never the hook-request words of the limiter.
 func TestAPIErrorWordsTheCallerLimitForTheCLI(t *testing.T) {
-	limited := &sandboxapi.Error{Code: "rate_limited", Status: http.StatusTooManyRequests,
-		Message: "DefenseClaw is limiting the hook requests of this account; retry shortly"}
+	// The body the caller limiter writes (hook_caller_limits.go), read by
+	// the sandbox client as a direct call reads it (review R3-2).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate_limited", "reason": "enterprise_managed_rate_limited",
+			"message": "DefenseClaw is limiting the hook requests of this account; retry shortly", "retry_after_seconds": "1"})
+	}))
+	t.Cleanup(srv.Close)
+	_, limited := sandboxapi.NewClient(srv.URL, "token").List(t.Context())
+	if limited == nil {
+		t.Fatal("the limited call succeeded")
+	}
 	got := apiError(limited).Error()
 	if strings.Contains(got, "hook") || !strings.Contains(got, "a burst of sandbox commands") || !strings.Contains(got, "in a few seconds") {
 		t.Fatalf("limited sandbox command = %q", got)
