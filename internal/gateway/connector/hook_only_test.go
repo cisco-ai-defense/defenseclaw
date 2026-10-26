@@ -2203,6 +2203,7 @@ func TestHermesSetupAdoptsConsentRecordedUnder08x(t *testing.T) {
 	t.Cleanup(func() { HermesConfigPathOverride = previous })
 	conn := NewHermesConnector()
 	opts := SetupOpts{DataDir: filepath.Join(root, "dc"), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	hermesHookHomeForTest(t, opts.DataDir)
 	hookScript := filepath.Join(opts.DataDir, "hooks", "hermes-hook.sh")
 	command := shellWord(hookScript)
 	scriptBody := []byte("#!/bin/bash\n# defenseclaw-managed-hook v6\n")
