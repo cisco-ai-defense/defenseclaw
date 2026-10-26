@@ -94,3 +94,37 @@ def test_get_prints_no_schema_default_for_a_retired_key(tmp_path: Path, monkeypa
     _config(tmp_path, monkeypatch, "guardrail:\n  enabled: true\n")
     assert cmd_config._schema_default(key.split(".")) == (False, None)
     assert cmd_config._schema_default(["guardrail", "retain_judge_bodies"]) == (True, True)
+
+
+def _namespace_view_error() -> ConfigInspectError:
+    cause = UnsafePathError("this agent sandbox hides who owns /home", code=UNSAFE_PATH_NAMESPACE_VIEW)
+    try:
+        raise ConfigInspectError(str(cause)) from cause
+    except ConfigInspectError as exc:
+        return exc
+
+
+def test_doctor_says_the_config_check_did_not_run_in_an_agent_sandbox(tmp_path: Path) -> None:
+    # GAP-1561: a warn "not run" row, never FAIL Config validation.
+    (tmp_path / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+    result = _DoctorResult()
+    with (
+        patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value=""),
+        patch("defenseclaw.config_inspect.inspect_v8_config", side_effect=_namespace_view_error()),
+    ):
+        cmd_doctor._check_config(cfg, result)
+    rows = [row for row in result.checks if row["label"] == "Config validation"]
+    assert [row["status"] for row in rows] == ["warn"], rows
+    assert rows[0]["detail"].startswith("not run: this agent sandbox hides who owns /home")
+    assert all(row["status"] != "fail" for row in result.checks)
+
+
+def test_doctor_fix_names_the_check_that_did_not_run(tmp_path: Path) -> None:
+    (tmp_path / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+    with patch("defenseclaw.config_inspect.inspect_v8_config", side_effect=_namespace_view_error()):
+        decision = cmd_doctor._plan_canonical_config_preflight(cfg)
+    assert decision.state == "blocked"
+    assert "did not run" in decision.detail and "normal terminal" in decision.detail
+    assert "configuration check failed" not in decision.detail
