@@ -5133,11 +5133,18 @@ def test_an_install_refused_before_its_data_copy_puts_the_hook_mode_files_back(t
     (hooks / ".hookcfg.claudecode").write_text("FAIL_MODE=open\n", encoding="ascii")
     (hooks / ".hookcfg.lock").write_text("", encoding="ascii")
     (hooks / ".hook-claudecode.token").write_text("secret", encoding="ascii")
+    # R2-2: a file the running gateway renames away meanwhile (or this
+    # account cannot read) and its atomic .tmp-* writes never stop the copy.
+    (hooks / ".hookcfg.tmp-1234").write_text("partial", encoding="ascii")
+    (hooks / "vanished.sh").write_text("x", encoding="ascii")
     staging = tmp_path / "staging"
     staging.mkdir()
     script = (
         "$ErrorActionPreference = 'Stop'\n"
         + f"$DataDir = '{tmp_path / 'data'}'\n$Staging = '{staging}'\n"
+        + "function Copy-Item { param([string]$LiteralPath, [string]$Destination, [switch]$Force, $ErrorAction)"
+        + " if ($LiteralPath -like '*vanished.sh') { throw 'Could not find file' }"
+        + " Microsoft.PowerShell.Management\\Copy-Item -LiteralPath $LiteralPath -Destination $Destination -Force }\n"
         + "function Install-File([string]$Source, [string]$Destination) { Copy-Item -LiteralPath $Source -Destination $Destination -Force }\n"
         + "function Write-Warn([string]$m) { \"WARN $m\" }\n"
         + _ps1_function("Save-HookFiles")

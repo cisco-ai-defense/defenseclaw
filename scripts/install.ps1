@@ -2881,8 +2881,12 @@ function Save-HookFiles {
     if (-not (Test-Path -LiteralPath $hooks -PathType Container)) { return }
     $copy = Join-Path $Staging "hooks-before"
     New-Item -ItemType Directory -Path $copy -Force | Out-Null
-    foreach ($file in @(Get-ChildItem -LiteralPath $hooks -File -Force | Where-Object { $_.Name -notlike "*.lock" -and $_.Name -notlike "*.token" })) {
-        Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $copy $file.Name) -Force
+    # A file the running gateway replaces meanwhile (its atomic .tmp-* writes)
+    # or this account cannot read is not kept, and so not put back; it never
+    # stops the install (R2-2).
+    foreach ($file in @(Get-ChildItem -LiteralPath $hooks -File -Force | Where-Object {
+                $_.Name -notlike "*.lock" -and $_.Name -notlike "*.token" -and $_.Name -notlike "*.tmp-*" })) {
+        try { Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $copy $file.Name) -Force -ErrorAction Stop } catch { }
     }
     $script:HookFilesBefore = $copy
 }
