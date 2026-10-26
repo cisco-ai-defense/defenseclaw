@@ -107,3 +107,88 @@ def test_rule_enable_for_a_connector_writes_the_enable(guardrail_app) -> None:
     assert result.exit_code == 0, result.output
     codex = yaml.safe_load(path.read_text())["guardrail"]["connectors"]["codex"]
     assert codex == {"rules": {"enable": [rule]}}, codex
+
+
+@pytest.mark.parametrize(
+    ("add", "remove"),
+    [
+        (("rule", "severity", "SOME-RULE", "HIGH", "--connector", "codex"),
+         ("rule", "severity", "SOME-RULE", "default", "--connector", "codex")),
+        (("rule", "disable", "SEC-AWS-KEY", "--connector", "codex"),
+         ("rule", "enable", "SEC-AWS-KEY", "--connector", "codex")),
+        (("suppress", "add", "SUPP-BUILD", "--finding", "JUDGE-PII-IP", "--reason", "test", "--connector", "codex"),
+         ("suppress", "remove", "SUPP-BUILD", "--connector", "codex")),
+        (("protection", "enable", "database-destruction-protection", "--connector", "codex"),
+         ("protection", "disable", "database-destruction-protection", "--connector", "codex")),
+    ],
+)
+def test_guardrail_undo_on_a_single_connector_config_restores_the_exact_bytes(guardrail_app, add, remove) -> None:
+    # GAP-0967 / GAP-1894: no 'connectors: codex: {}' after the undo when
+    # guardrail.connector already names codex and there is no connectors map.
+    app, path = guardrail_app
+    original = b"config_version: 9\nguardrail:\n  enabled: true\n  connector: codex\n"
+    path.write_bytes(original)
+    app.cfg.guardrail.connectors = {}
+    result = _guardrail(app, *add)
+    assert result.exit_code == 0, result.output
+    assert path.read_bytes() != original
+    _reload_connectors(app, path)
+    result = _guardrail(app, *remove)
+    assert result.exit_code == 0, result.output
+    assert path.read_bytes() == original, path.read_text()
+
+
+def test_guardrail_undo_keeps_an_entry_that_puts_the_connector_on_the_roster() -> None:
+    # The entry stays when it is what puts the connector on the roster.
+    cfg = default_config()
+    cfg.claw.mode = "claudecode"
+    cfg.guardrail.connector = "claudecode"
+    assert cmd_guardrail._rule_prune_scope("codex", None, cfg) == "guardrail.connectors.codex"
+    cfg.guardrail.connector = "codex"
+    cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(), "claudecode": PerConnectorGuardrailConfig()}
+    assert cmd_guardrail._rule_prune_scope("codex", None, cfg) == "guardrail.connectors.codex"
+    cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig()}
+    assert cmd_guardrail._rule_prune_scope("codex", None, cfg) == "guardrail"
+    assert cmd_guardrail._rule_prune_scope("codex", "pa", cfg) == "guardrail.profiles.pa"
+
+
+def _wire() -> ConfigV8WireResult:
+    return ConfigV8WireResult(
+        wire_version=1,
+        kind="effective",
+        config_version=9,
+        source="/tmp/config.yaml",
+        data_dir="/tmp/dc",
+        plan_digest="digest",
+        network_validation="offline_syntax_and_literal_policy_only",
+        valid=None,
+        effective={},
+    )
+
+
+def _config(tmp_path: Path, monkeypatch, body: str) -> Path:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    path = tmp_path / "config.yaml"
+    path.write_text("config_version: 9\n" + body)
+    return path
+
+
+def _config_cmd(*args: str):
+    with (
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        patch.object(cmd_config, "inspect_v8_config", return_value=_wire()),
+    ):
+        return CliRunner().invoke(cmd_config.config_cmd, list(args))
+
+
+def test_profile_connector_leaf_unset_restores_the_exact_bytes(tmp_path: Path, monkeypatch) -> None:
+    # GAP-1894: 'config unset' of a profile's connector override left
+    # 'p.connectors.codex: {}'; the profile itself stays.
+    path = _config(tmp_path, monkeypatch, "guardrail:\n  enabled: true\n  profiles:\n    pa:\n      description: a\n")
+    before = path.read_bytes()
+    key = "guardrail.profiles.pa.connectors.codex.rules.enable"
+    added = _config_cmd("set", "--json", key, '["TRUST-IGNORE-PREVIOUS"]')
+    assert added.exit_code == 0, added.output
+    removed = _config_cmd("unset", key)
+    assert removed.exit_code == 0, removed.output
+    assert path.read_bytes() == before, path.read_text()

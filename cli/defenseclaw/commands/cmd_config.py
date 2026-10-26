@@ -1185,18 +1185,13 @@ def _roster_entry_prune_scope(parts: list, written: object, app: AppContext) -> 
     connectors = _lookup(written, ["guardrail", "connectors"])[1]
     if not isinstance(connectors, dict) or list(connectors) != [parts[2]]:
         return ""
-    try:
-        from defenseclaw import connector_paths
+    from defenseclaw.commands.cmd_guardrail import roster_entry_is_redundant
 
+    try:
         cfg = app.cfg if app.cfg is not None else config_module.load()
-        single = str(cfg.guardrail.connector or "").strip() or str(cfg.claw.mode or "").strip()
-        name = connector_paths.normalize(parts[2])
-        single = connector_paths.normalize(single) if single else ""
     except Exception:  # noqa: BLE001 - keep the entry when the roster cannot be read
         return ""
-    if not single or single != name or name == "openclaw":
-        return ""
-    return "guardrail"
+    return "guardrail" if roster_entry_is_redundant(cfg, parts[2], list(connectors)) else ""
 
 
 def _unset_prune_scope(parts: list) -> str:
@@ -1238,6 +1233,11 @@ def _unset_prune_scope(parts: list) -> str:
             keep = index + 1
         else:
             break
+    if parts[:2] == ["guardrail", "profiles"] and len(parts) > 4 and parts[3] == "connectors":
+        # A profile's connector entry only holds overrides (it puts nothing
+        # on the roster), so it goes with its last key, up to the profile
+        # (GAP-1894).
+        keep = min(keep, 3)
     if keep == 0:
         from defenseclaw.config_writer import PRUNE_TO_TOP
 

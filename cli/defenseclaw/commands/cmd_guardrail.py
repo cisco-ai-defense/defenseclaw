@@ -3825,9 +3825,42 @@ def _scope_key(connector_key: str | None, profile: str | None) -> str:
     return key
 
 
-def _rule_prune_scope(connector_key: str | None, profile: str | None) -> str:
-    """Keep the owning scope when its last rule override is removed."""
-    return _scope_key(None, profile) if profile else _scope_key(connector_key, None)
+def _rule_prune_scope(connector_key: str | None, profile: str | None, cfg=None) -> str:
+    """Keep the owning scope when its last rule override is removed.
+
+    A connector entry that only holds overrides goes with its last one when
+    the single-connector setting already puts that connector on the roster:
+    'guardrail rule severity R HIGH --connector codex' then '... default'
+    left 'connectors: codex: {}' behind (GAP-0967, GAP-1894).
+    """
+    if profile:
+        return _scope_key(None, profile)
+    if connector_key and cfg is not None:
+        listed = list((getattr(getattr(cfg, "guardrail", None), "connectors", None) or {}).keys())
+        if roster_entry_is_redundant(cfg, connector_key, listed):
+            return "guardrail"
+    return _scope_key(connector_key, None)
+
+
+def roster_entry_is_redundant(cfg, connector: str, listed: list) -> bool:
+    """Whether the guardrail.connectors entry ``connector`` adds nothing to the roster.
+
+    True when it is the map's only entry and ``guardrail.connector`` (or
+    ``claw.mode``) names the same connector; the entry is what puts the
+    connector on the roster whenever the map has other entries or the
+    single-connector setting names another connector or none.
+    """
+    from defenseclaw import connector_paths
+
+    try:
+        name = connector_paths.normalize(connector)
+        if [connector_paths.normalize(str(key)) for key in listed] != [name]:
+            return False
+        single = str(cfg.guardrail.connector or "").strip() or str(cfg.claw.mode or "").strip()
+        single = connector_paths.normalize(single) if single else ""
+    except Exception:  # noqa: BLE001 - keep the entry when the roster cannot be read
+        return False
+    return bool(single) and single == name and name != "openclaw"
 
 
 def _scope_block(cfg, connector_key: str | None, profile: str | None):
@@ -4811,7 +4844,7 @@ def _change_protection(
         change = (
             config_writer.Change(path, desired)
             if desired else config_writer.Change(
-                path, unset=True, prune_empty_to=_rule_prune_scope(connector_key, profile_name)
+                path, unset=True, prune_empty_to=_rule_prune_scope(connector_key, profile_name, app.cfg)
             )
         )
         _preflight_config_write(app)
@@ -4938,7 +4971,7 @@ def _stale_rule_changes(cfg, pack_dir: str, connector_key: str | None) -> tuple[
                 changes.append(
                     config_writer.Change(path, kept)
                     if kept else config_writer.Change(
-                        path, unset=True, prune_empty_to=_rule_prune_scope(scope_connector, scope_profile)
+                        path, unset=True, prune_empty_to=_rule_prune_scope(scope_connector, scope_profile, cfg)
                     )
                 )
         overrides = dict(getattr(rules, "severity_overrides", None) or {})
@@ -4949,7 +4982,7 @@ def _stale_rule_changes(cfg, pack_dir: str, connector_key: str | None) -> tuple[
             changes.append(
                 config_writer.Change(path, kept_overrides)
                 if kept_overrides else config_writer.Change(
-                    path, unset=True, prune_empty_to=_rule_prune_scope(scope_connector, scope_profile)
+                    path, unset=True, prune_empty_to=_rule_prune_scope(scope_connector, scope_profile, cfg)
                 )
             )
     return changes, dropped
@@ -5009,7 +5042,7 @@ def _change_rule_lists(
                 if rest
                 else config_writer.Change(
                     f"{key}.rules.{remove_from}", unset=True,
-                    prune_empty_to=_rule_prune_scope(connector_key, profile_name),
+                    prune_empty_to=_rule_prune_scope(connector_key, profile_name, app.cfg),
                 )
             )
         if not changes:
@@ -5079,7 +5112,7 @@ def rule_severity_cmd(
     key = config_writer.format_path((*overrides, rule_id))
     level = severity.upper()
     scope_key = _scope_key(connector_key, profile_name)
-    prune_to = _rule_prune_scope(connector_key, profile_name)
+    prune_to = _rule_prune_scope(connector_key, profile_name, app.cfg)
     change = (
         config_writer.Change(key, unset=True, prune_empty_to=prune_to)
         if level == "DEFAULT" else config_writer.Change(key, level)
@@ -5209,7 +5242,7 @@ def _change_suppression(
         change = (
             config_writer.Change(path, updated)
             if updated else config_writer.Change(
-                path, unset=True, prune_empty_to=_rule_prune_scope(connector_key, profile_name)
+                path, unset=True, prune_empty_to=_rule_prune_scope(connector_key, profile_name, app.cfg)
             )
         )
         _preflight_config_write(app)
