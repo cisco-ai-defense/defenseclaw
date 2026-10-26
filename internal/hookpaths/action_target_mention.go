@@ -750,7 +750,8 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 	}
 	hidden := actionGlobViewHidden(cwd, home)
 	dots := sync.OnceValue(func() bool { return globs.dotNames() || actionShellProfileMayDotglob(home) })
-	candidates, complete, unseen := actionExpandGlob(pattern, literal, hidden, dots)
+	userView := !hidden && actionProcessOwnsHome(home)
+	candidates, complete, unseen := actionExpandGlob(pattern, literal, hidden, userView, dots)
 	for _, candidate := range candidates {
 		if protectedReachPath(candidate, protected, ssh) {
 			globs.note(pattern, "1")
@@ -914,13 +915,17 @@ const (
 // walk keeps every match it found before or beside a directory it could not
 // read or past a bound, so such a directory never hides a match (GAP-1481).
 //
+// userView is set when the process runs as the home's owner (a per-user
+// gateway or the hook client): a directory it may not list is one the
+// user's shell may not list either, so it holds no match.
+//
 // hidden is set when the process cannot see the request's cwd or home
 // (systemd ProtectHome on a managed gateway): a directory missing from
 // that view is not proof the user's shell finds no match (GAP-1460).
 //
 // A component that starts with * or ? does not match a name with a leading
 // dot, as in the shell, unless dots reports a setting that changes that.
-func actionExpandGlob(pattern, literal string, hidden bool, dots func() bool) (candidates []string, complete, unseen bool) {
+func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func() bool) (candidates []string, complete, unseen bool) {
 	separator := string(filepath.Separator)
 	start := filepath.VolumeName(pattern) + separator
 	rest := strings.TrimPrefix(pattern, start)
@@ -949,6 +954,12 @@ func actionExpandGlob(pattern, literal string, hidden bool, dots func() bool) (c
 			directory, err := os.Open(dir)
 			if err != nil {
 				if errors.Is(err, fs.ErrNotExist) && !hidden || errors.Is(err, syscall.ENOTDIR) {
+					continue
+				}
+				// A process that runs as the user cannot list what the
+				// user's shell cannot list: the shell expands nothing there
+				// (GAP-1739).
+				if userView && errors.Is(err, fs.ErrPermission) {
 					continue
 				}
 				// Permission denied, or a home this process cannot see:

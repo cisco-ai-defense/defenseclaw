@@ -48,7 +48,6 @@ func TestR104RoundNUnreadableSiblingKeepsGlobMatch(t *testing.T) {
 		`cp payload tree/*/k*`,
 		`cat payload >> tree/[ab]/keyl*`,
 		`for f in tree/*/keyl*; do cp payload "$f"; done`,
-		`cp payload tree/*/*.md`, // b is unreadable: unproved
 	}
 	for _, command := range blocked {
 		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
@@ -57,6 +56,11 @@ func TestR104RoundNUnreadableSiblingKeepsGlobMatch(t *testing.T) {
 		if got := ActionCommandDecisionWithGlobFacts(command, cwd, home, map[string]string{}); got != "protected-target" {
 			t.Errorf("%s: with client evidence = %q, want protected-target", command, got)
 		}
+	}
+	// GAP-1739: b is unreadable to the user as well, so the user's shell
+	// expands nothing there and no match reaches a protected file.
+	if got := ActionCommandDecision(`cp payload tree/*/*.md`, cwd, home); got != "" {
+		t.Errorf("cp payload tree/*/*.md: ActionCommandDecision = %q, want allow", got)
 	}
 	// The hook client (the same walk, as the user) answers 1 for the match
 	// it found beside the unreadable directory, so a gateway behind
