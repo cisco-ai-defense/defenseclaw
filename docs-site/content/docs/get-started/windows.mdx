@@ -79,7 +79,7 @@ defenseclaw upgrade
 defenseclaw rollback
 ```
 
-The installer continues in a new PowerShell window. Close the TUI and other DefenseClaw commands first. In an SSH session there is no desktop for that window, so both commands change nothing, exit 1 and print the `powershell -File ... install.ps1` command to run in your terminal. See [Upgrade](/docs/get-started/upgrade) and, for a 0.8.x Setup install, [Upgrade from 0.8.x](/docs/appendix/upgrade-from-0-8#windows-moving-from-the-setup-package). To repair an install, run the install command again.
+The installer continues in a new PowerShell window. Both commands exit `0` once that window opens, before the installer has finished: read the result in the window or its log in `%USERPROFILE%\.defenseclaw\logs`, then confirm with `defenseclaw --version` and `defenseclaw doctor`. Close the TUI and other DefenseClaw commands first. In an SSH session there is no desktop for that window, so both commands change nothing, exit 1 and print the `powershell -File ... install.ps1` command to run in your terminal. See [Upgrade](/docs/get-started/upgrade) and, for a 0.8.x Setup install, [Upgrade from 0.8.x](/docs/appendix/upgrade-from-0-8#windows-moving-from-the-setup-package). To repair an install, run the install command again.
 
 ## Uninstall
 
