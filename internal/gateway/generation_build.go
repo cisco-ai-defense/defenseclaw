@@ -88,8 +88,13 @@ var managedPolicyTreeTrust = func(cfg *config.Config, dir string) error {
 	}
 	// The same check as the config validation: the rule pack folders no
 	// setting names are not loaded, so they are not trust inputs (GAP-1694).
-	return config.ValidateManagedPolicyDir(cfg, dir, os.Getenv(managed.WindowsServiceAccountEnv))
+	return validateManagedPolicyDir(cfg, dir, os.Getenv(managed.WindowsServiceAccountEnv))
 }
+
+// validateManagedPolicyDir is the shared check managedPolicyTreeTrust runs;
+// a test replaces it (the real one needs root-owned folders) to prove the
+// gateway's build uses it (GAP-1890).
+var validateManagedPolicyDir = config.ValidateManagedPolicyDir
 
 func buildGeneration(ctx context.Context, in generationInputs) (*Generation, error) {
 	cfg := in.cfg
