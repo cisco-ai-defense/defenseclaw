@@ -1227,9 +1227,11 @@ func TestWindowsManagedRuntimeGenerationGCClassifiesPriorInstallState(t *testing
 			if tc.reason != "" && !strings.Contains(classifyErr.Error(), tc.reason) {
 				t.Fatalf("classify lost reason %q: %v", tc.reason, classifyErr)
 			}
-			if tc.invalid && !errors.Is(classifyErr, ErrWindowsManagedRuntimeBundleRefused) &&
-				!errors.Is(classifyErr, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
-				t.Fatalf("classify refusal %v is neither a bundle refusal nor an untrusted folder (GAP-1910)", classifyErr)
+			if tc.invalid && tc.reason != "" && !errors.Is(classifyErr, ErrWindowsManagedRuntimeBundleRefused) {
+				t.Fatalf("bundle refusal %v does not carry ErrWindowsManagedRuntimeBundleRefused (GAP-1910)", classifyErr)
+			}
+			if errors.Is(classifyErr, os.ErrNotExist) && errors.Is(classifyErr, ErrWindowsManagedRuntimeBundleRefused) {
+				t.Fatalf("an absent selected folder %v is reported as a bundle refusal (GAP-1910)", classifyErr)
 			}
 			if after := listHooks(); strings.Join(after, "|") != strings.Join(before, "|") {
 				t.Fatalf("classify changed the hooks folder: before=%v after=%v", before, after)

@@ -458,11 +458,12 @@ func TestWindowsSecretUnchangedCredentialRestartsOnlyAGatewayThatMayHoldAnotherV
 		t.Run(tc.name, func(t *testing.T) {
 			windowsSecretTestHarness(t)
 			name := "absent-key"
+			stored := "other-key" // the store exists, without the removed key
 			if tc.action == "set" {
-				name = "ai-defense-api-key"
-				if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true}, "same-value\n"); err != nil {
-					t.Fatal(err)
-				}
+				name, stored = "ai-defense-api-key", "ai-defense-api-key"
+			}
+			if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: stored, fromStdin: true}, "same-value\n"); err != nil {
+				t.Fatal(err)
 			}
 			saved := windowsSecretGatewayStartedAfter
 			t.Cleanup(func() { windowsSecretGatewayStartedAfter = saved })

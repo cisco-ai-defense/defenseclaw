@@ -1584,8 +1584,8 @@ func TestWindowsHotConfigHookFailModeChanges(t *testing.T) {
 		// hook_fail_mode of its own takes codex off the application
 		// protection guardrail (open) to the global guardrail (closed).
 		{name: "application protection entry switches the chain",
-			previous: "config_version: 9\nguardrail:\n  hook_fail_mode: closed\napplication_protection:\n  enabled: true\n  guardrail:\n    hook_fail_mode: open\n",
-			next:     "config_version: 9\nguardrail:\n  hook_fail_mode: closed\napplication_protection:\n  enabled: true\n  guardrail:\n    hook_fail_mode: open\n  connectors:\n    codex:\n      guardrail:\n        mode: action\n",
+			previous: "config_version: 9\ndeployment_mode: managed_enterprise\nguardrail:\n  hook_fail_mode: closed\napplication_protection:\n  enabled: true\n  guardrail:\n    hook_fail_mode: open\n",
+			next:     "config_version: 9\ndeployment_mode: managed_enterprise\nguardrail:\n  hook_fail_mode: closed\napplication_protection:\n  enabled: true\n  guardrail:\n    hook_fail_mode: open\n  connectors:\n    codex:\n      guardrail:\n        mode: action\n",
 			any:      true, affected: 1},
 	} {
 		change := windowsHotConfigHookFailModeChanges([]byte(tc.previous), []byte(tc.next))
