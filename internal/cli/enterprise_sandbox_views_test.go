@@ -509,7 +509,9 @@ func TestPolicyVerifySandboxRows(t *testing.T) {
 // images are built; an account that can open /dev/kvm is no "cannot start".
 func TestPolicyVerifyJudgesKVMAccessNotOnlyTheGroup(t *testing.T) {
 	prevProfile, prevGroups, prevDevice := enterprisePolicySandboxProfile, enterpriseAccountGroups, enterpriseKVMDevice
-	t.Cleanup(func() { enterprisePolicySandboxProfile, enterpriseAccountGroups, enterpriseKVMDevice = prevProfile, prevGroups, prevDevice })
+	t.Cleanup(func() {
+		enterprisePolicySandboxProfile, enterpriseAccountGroups, enterpriseKVMDevice = prevProfile, prevGroups, prevDevice
+	})
 	enterprisePolicySandboxProfile = func(string) (string, string, string, bool, error) { return "eng", "group", "eng", false, nil }
 	enterpriseKVMDevice = filepath.Join(t.TempDir(), "kvm")
 	if err := os.WriteFile(enterpriseKVMDevice, nil, 0o600); err != nil {
