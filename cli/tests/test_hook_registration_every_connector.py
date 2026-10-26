@@ -76,7 +76,9 @@ _WINDOWS_STATUS_MODES = [
 # The doctor rows that say a hook file does not register DefenseClaw.
 _DOCTOR_UNREGISTERED = re.compile(
     r"does not reference DefenseClaw|no hooks registered|no DefenseClaw hook|hook file not found|not found at"
-    r"|registration .*missing|is missing$|contains no DefenseClaw",
+    r"|registration .*missing|is missing$|contains no DefenseClaw"
+    # The native Windows Devin validator names the tool-call events it lacks.
+    r"|hook contract is missing",
     re.IGNORECASE,
 )
 
@@ -101,6 +103,10 @@ def _without_defenseclaw(value: Any) -> Any:
     return value
 
 
+def _placeholder(path: Path, json_string: bool) -> str:
+    return json.dumps(str(path))[1:-1] if json_string else str(path)
+
+
 def _install(tmp_path: Path, monkeypatch, case: dict[str, Any], *, removed: bool = False):
     home = tmp_path / "home"
     data_dir = home / ".defenseclaw"
@@ -121,16 +127,20 @@ def _install(tmp_path: Path, monkeypatch, case: dict[str, Any], *, removed: bool
             content = json.dumps(_without_defenseclaw(json.loads(content)), indent=2)
         path = Path(file["path"].replace("{data_dir}", str(data_dir)).replace("{home}", str(home)))
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content.replace("{data_dir}", str(data_dir)).replace("{home}", str(home)), encoding="utf-8")
+        # A placeholder in a JSON file sits inside a JSON string, where Setup
+        # writes the path escaped (a Windows path's backslashes doubled).
+        escape = path.suffix == ".json"
+        content = content.replace("{data_dir}", _placeholder(data_dir, escape))
+        path.write_text(content.replace("{home}", _placeholder(home, escape)), encoding="utf-8")
         paths.append(str(path))
     # Files Setup writes beside the hook files (the Hermes approvals); the
     # lock records only the hook files.
     for file in case.get("agent_files", []):
         path = Path(file["path"].replace("{data_dir}", str(data_dir)).replace("{home}", str(home)))
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            file["content"].replace("{data_dir}", str(data_dir)).replace("{home}", str(home)), encoding="utf-8"
-        )
+        escape = path.suffix == ".json"
+        content = file["content"].replace("{data_dir}", _placeholder(data_dir, escape))
+        path.write_text(content.replace("{home}", _placeholder(home, escape)), encoding="utf-8")
     lock = {"version": 2, "connectors": {case["connector"]: {"locations": {"hook_config_paths": paths}}}}
     (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
     cfg = default_config()

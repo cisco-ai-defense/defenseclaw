@@ -9,7 +9,8 @@ set -euo pipefail
 if [ "${1:-}" = "--defenseclaw-execution-probe" ] && [ "${2:-}" = "--forkless" ]; then
   case "${BASH_SOURCE[0]}" in /*) ;; *) exit 125 ;; esac
   _DC_PROBE_HOOK_DIR="${BASH_SOURCE[0]%/*}"
-  . "${_DC_PROBE_HOOK_DIR}/_hardening.sh"
+  # command: bash 3.2 (macOS /bin/bash) exits 0 when a sourced helper is missing or unreadable.
+  command . "${_DC_PROBE_HOOK_DIR}/_hardening.sh" || exit "$?"
   declare -F defenseclaw_harden_resources >/dev/null || exit 125
   declare -F defenseclaw_harden_env >/dev/null || exit 125
   _DC_FORKLESS_PROBE=1
@@ -278,7 +279,8 @@ fi
 # controls (HOME, PATH, locale, GIT_*); none of the subsequent
 # token-resolution logic depends on the operator's original PATH or
 # HOME.
-. "${HOOK_DIR}/_hardening.sh"
+# command: bash 3.2 (macOS /bin/bash) exits 0 when a sourced helper is missing or unreadable.
+command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
 {{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call.
@@ -506,9 +508,10 @@ fi
 
 # W3C trace propagation: forward validated traceparent / tracestate via _hardening.sh v6.
 TRACE_HEADER_ARGS=()
-if command -v mapfile >/dev/null 2>&1; then
-  mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
-fi
+# A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
+while IFS= read -r trace_header_arg; do
+  TRACE_HEADER_ARGS+=("$trace_header_arg")
+done < <(defenseclaw_extract_trace_context)
 
 # Per-user attribution: the gateway cannot read the real user's identity from
 # its own service-account process, so the hook reports it.

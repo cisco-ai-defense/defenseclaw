@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -135,6 +136,10 @@ func TestSandboxForeignIdentityCarriesConfiguredDriver(t *testing.T) {
 		{config.EnterpriseOpenShellDriverDocker, "docker"},
 		{config.EnterpriseOpenShellDriverAuto, ""},
 	} {
+		if tc.configured == config.EnterpriseOpenShellDriverAuto && runtime.GOOS == "darwin" {
+			// macOS runs only the MicroVM driver: auto needs no probe there.
+			tc.want = "vm"
+		}
 		t.Run(tc.configured, func(t *testing.T) {
 			f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
 			f.cfg.Enterprise.OpenShell.Driver = tc.configured

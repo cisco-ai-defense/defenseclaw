@@ -766,7 +766,8 @@ def test_agent_installed_after_discovery_names_the_refresh() -> None:
     # The shell's PATH is no proof that the agent runs (1.0.4 review, loop
     # round 4): still a failure, but the next step is the refresh.
     assert row["status"] == "fail"
-    assert "/opt/bin/claude is on this shell's PATH, unverified" in row["detail"]
+    # The PATH hit is named as an absolute path (a drive letter on Windows).
+    assert f"{os.path.abspath('/opt/bin/claude')} is on this shell's PATH, unverified" in row["detail"]
     assert row["remediation"].startswith("defenseclaw agent discover --refresh")
 
 

@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -72,6 +73,9 @@ func TestRegisterLocalUsesTheBundleTheCLIWillImport(t *testing.T) {
 }
 
 func TestRegisterLocalWaitsForStandardHomebrewTLS(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenShell sandboxes are unsupported on Windows")
+	}
 	r := &doctorRun{Doctor: &Doctor{GOOS: "darwin", Gateway: &GatewayConfigurator{BrewPrefix: "/opt/homebrew"}}}
 	if got, want := r.localRegistrationTLSDir(), "/opt/homebrew/var/openshell/tls"; got != want {
 		t.Fatalf("standard Homebrew TLS wait = %q, want %q", got, want)

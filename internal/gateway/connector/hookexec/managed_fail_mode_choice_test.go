@@ -577,7 +577,11 @@ func TestStandaloneManagedAuthRetryKeepsAnsweredErrorClosed(t *testing.T) {
 	previousDelay := hookAuthRetryDelay
 	hookAuthRetryDelay = time.Millisecond
 	t.Cleanup(func() { hookAuthRetryDelay = previousDelay })
-	shortAnswerBudget(t, 300*time.Millisecond)
+	// The budget leaves room for the request itself: a Claude Code or Codex
+	// request holds its delivery body up to hookDeliveryCapabilityWait
+	// (250 ms) for the gateway's 103, which the stub never sends, and a
+	// hosted macOS runner adds its own latency (300 ms failed there).
+	shortAnswerBudget(t, 1500*time.Millisecond)
 	for connector, event := range map[string]string{
 		"claudecode": "PreToolUse",
 		"codex":      "PreToolUse",

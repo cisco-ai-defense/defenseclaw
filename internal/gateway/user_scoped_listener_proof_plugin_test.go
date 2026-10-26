@@ -47,6 +47,7 @@ func renderListenerProofPlugin(t *testing.T, asset, addr, tokenPath string) []by
 		"{{.ListenerProofJS}}", "1",
 		// Read by the win32 branch only (fix/r104-oss-outage-open template field).
 		"{{.WindowsPowerShellJS}}", `C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
+		"{{.GatewayBinaryJS}}", "",
 	).Replace(string(body))
 	if strings.Contains(rendered, "{{.") {
 		t.Fatalf("%s rendered with a placeholder left", asset)

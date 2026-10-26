@@ -351,6 +351,11 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 			[]byte(`execFileSync(DC_WINDOWS_POWERSHELL, [`),
 			[]byte(windowsHelperACLCheckMarker),
 		)
+		// A plugin that posts through ~/.local/bin on a Setup install fails
+		// closed on every call (GAP-1847); it is repaired.
+		if gateway := perUserPluginGatewayBinary(opts); gateway != "" {
+			markers = append(markers, []byte(`const DC_GATEWAY_BINARY = "`+javaScriptStringContent(gateway)+`";`))
+		}
 	}
 	for _, marker := range markers {
 		if !bytes.Contains(data, marker) {

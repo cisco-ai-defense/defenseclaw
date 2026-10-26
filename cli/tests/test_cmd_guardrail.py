@@ -1244,7 +1244,14 @@ class PerConnectorFailModeTests(unittest.TestCase):
             cmd_guardrail.fail_mode_cmd, ["--connector", "codex"], obj=app
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("unknown", result.output)
+        if os.name == "nt":
+            # The native Windows hook reads its mode from hooks/.hookcfg alone
+            # and fails closed without it (readHookSidecar), so that is the
+            # installed mode, reported with the missing sidecar as drift.
+            self.assertIn("hook_fail_mode: closed", result.output)
+            self.assertIn("windows-sidecar-missing", result.output)
+        else:
+            self.assertIn("unknown", result.output)
         self.assertIn("desired closed", result.output)
         self.assertIn("override", result.output)
         app.cfg.save.assert_not_called()
@@ -1674,7 +1681,9 @@ class HILTCommandTests(unittest.TestCase):
         out = " ".join(result.output.split())
         self.assertIn("Claude Code will prompt for approval on supported confirmable actions at/above MEDIUM", out)
         self.assertNotIn("does not pause", out)
-        self.assertEqual(calls, [("claudecode", True, "MEDIUM", os.path.join("/tmp/dc", "config.yaml"))])
+        # The command passes the normalized path (backslashes on Windows).
+        config_path = os.path.normpath(os.path.join("/tmp/dc", "config.yaml"))
+        self.assertEqual(calls, [("claudecode", True, "MEDIUM", config_path)])
         app.cfg.save.assert_not_called()
 
         self.hilt_preview.side_effect = _fake_hilt_preview("action")

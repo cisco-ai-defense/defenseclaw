@@ -3079,14 +3079,16 @@ defenseclaw_session_facts_full() {
 # it is gone), and stalled when the check gave no answer within a second.
 # find runs the check in a process of its own, with none of the hook's
 # descriptors, so a cache on a stalled network or FUSE mount holds that
-# process, not the hook (bash 3.2 reads with whole seconds only).
+# process, not the hook (bash 3.2 reads with whole seconds only). The "."
+# line after it marks a check that answered: bash 3.2 gives a read that timed
+# out the status of an empty input (1, not over 128).
 _dc_ccache_changed() {
   local line="" status=0
   _DC_CCACHE_CHANGED=stalled
-  IFS= read -r -t 1 line < <(exec find "$1" -prune -newer "$2" -print </dev/null 2>/dev/null) || status=$?
-  if [ "$status" -gt 128 ]; then
+  IFS= read -r -t 1 line < <(exec </dev/null 2>/dev/null; find "$1" -prune -newer "$2" -print || :; printf '.\n') || status=$?
+  if [ "$status" -gt 128 ] || [ -z "$line" ]; then
     return 0
-  elif [ -n "$line" ]; then
+  elif [ "$line" != . ]; then
     _DC_CCACHE_CHANGED=newer
   else
     _DC_CCACHE_CHANGED=same

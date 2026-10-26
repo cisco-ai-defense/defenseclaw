@@ -1207,6 +1207,14 @@ const knownLimitEntries = [
   { gaps: 'GAP-1194', section: 'Claude Code shell', phrases: ['shell mode'], from: ['connectors/claudecode.mdx'] },
   { gaps: 'GAP-1163', section: 'Upgrade and policy limits', phrases: ['**Legacy MicroVM guests:**'], from: [] },
   { gaps: 'GAP-0716, GAP-0716-MAC', section: 'Upgrade and policy limits', phrases: ['**Managed policy before launch:**'], from: [] },
+  // Known issues moved to 1.0.5 by the owner decision of 2026-10-25 10:40 (KNOWN-ISSUES-1.0.4.md).
+  { gaps: 'GAP-0933, GAP-1599', section: 'Known issues', phrases: ['**Changing the fail mode with Setup `/ensure`:**', 'Keep the fail mode you installed with.', 'an administrator can remove the closure marker', 'hot-config-undo-closed'], from: [] },
+  { gaps: 'GAP-1687', section: 'Known issues', phrases: ['`Setup-Enterprise-Standalone-x64.exe /repair JSON=1`, then `/ensure` again'], from: [] },
+  { gaps: 'GAP-1564, GAP-1533, GAP-1593', section: 'Known issues', phrases: ['until the user signs in or reconnects'], from: [] },
+  { gaps: 'GAP-1422', section: 'Known issues', phrases: ['Run `defenseclaw setup claude-code` after the upgrade'], from: [] },
+  { gaps: 'GAP-1522', section: 'Known issues', phrases: ['`log_user_prompt = true`', 'add your keys back after'], from: [] },
+  { gaps: 'GAP-1330, GAP-1680, GAP-1023', section: 'Known issues', phrases: ['`defenseclaw guardrail use-pack strict`'], from: [] },
+  { gaps: 'GAP-1565', section: 'Known issues', phrases: ['**macOS restored hook records:**'], from: [] },
 ] as const;
 
 function knownLimitSection(heading: string): string {

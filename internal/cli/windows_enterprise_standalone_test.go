@@ -1349,11 +1349,13 @@ func TestWindowsEnsureRepairRefusesUnloadableRulePacksBeforeItStops(t *testing.T
 		verifyFails   bool
 		withConfig    bool
 	}{
+		// A repair that supplies a config installs that config, whose own
+		// preflight checks its packs; the packs only the installed config
+		// selects do not block it (GAP-1194,
+		// TestWindowsEnterpriseStandaloneRepairRulePackPreflight).
 		{name: "recorded Cursor repair", cursorPending: true},
-		{name: "recorded Cursor repair with a supplied config", cursorPending: true, withConfig: true},
 		{name: "failed verify with a recorded Cursor repair", cursorPending: true, verifyFails: true},
 		{name: "failed verify", verifyFails: true},
-		{name: "failed verify with a supplied config", verifyFails: true, withConfig: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) { return tc.cursorPending, nil }
@@ -2422,7 +2424,10 @@ func TestWindowsFirstInstallRollbackLeftoverNamesTheElevatedPrompt(t *testing.T)
 // is installed and nothing is pending (a completed uninstall, or a failed
 // first install that rolled back) there is nothing left to secure.
 func TestWindowsEnterpriseUninstallSecurityIncompleteOnlyWhileInstalled(t *testing.T) {
-	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
+	// A published record with no unprotected agent: a missing record is
+	// itself a warning (agent_install_scan_incomplete) that explains an
+	// incomplete result, which would hide the reasons this test checks.
+	stubWindowsUnprotectedAgents(t, []enterprisehooks.UnprotectedAgent{}, nil)
 	previousAmp := windowsEnterpriseAmpMachineFolderProblems
 	t.Cleanup(func() { windowsEnterpriseAmpMachineFolderProblems = previousAmp })
 	windowsEnterpriseAmpMachineFolderProblems = func() []string { return nil }
@@ -3780,6 +3785,9 @@ func TestWindowsCursorRepairPlannerRefusesARecordItCannotRead(t *testing.T) {
 			}
 		})
 	}
+	// The rows above leave a bundle-owned config stubbed; a layout that
+	// names no config is an error whoever owns the config.
+	managedStandaloneBundleCurrent = func() (bool, error) { return false, nil }
 	for name, layout := range map[string]func() (managed.StandaloneLayout, error){
 		"layout failed": func() (managed.StandaloneLayout, error) {
 			return managed.StandaloneLayout{}, errors.New("ProgramData is not trusted")
