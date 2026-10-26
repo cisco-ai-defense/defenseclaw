@@ -227,7 +227,24 @@ func applyPatchTargets(tool string, args json.RawMessage, command, cwd, home str
 				}
 			}
 			if !known {
-				return nil, false
+				// apply_patch < FILE, cat FILE | apply_patch: the targets are
+				// the directives of the staged file (classifier refix 1).
+				inline, _, parsed := patchEnvelopePaths(text)
+				if !parsed {
+					return nil, false
+				}
+				staged, read := patchStagedTargets(text, cwd, home, inline)
+				if !read {
+					return nil, false
+				}
+				for _, path := range staged {
+					resolved, known := patchTargetPaths(path, cwd, home, resolve)
+					if !known {
+						return nil, false
+					}
+					targets = append(targets, resolved...)
+				}
+				calls = 1 // the staged and the inline envelopes are edits
 			}
 			if calls == 0 {
 				// An envelope stored as command data is not an edit.
@@ -447,7 +464,7 @@ func patchShellInvocationsKnown(text string) (known bool, calls int, fedBody []b
 				// A pipe on the next line must continue the quoted printer.
 				next := strings.TrimSpace(lines[end+1])
 				if strings.HasPrefix(next, "'") || strings.HasPrefix(next, "\"") {
-					if patchPipeCall.MatchString(next) {
+					if patchPipeCall.MatchString(next) && !strings.Contains(next, "<") {
 						bound[end+1]++
 						fed = true
 					}

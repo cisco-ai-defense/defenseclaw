@@ -1370,11 +1370,22 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return false
 		}
 	}
+	if !patchKnown && cannotResolveLocally && clientTargets != nil && !truncated &&
+		hookpaths.ApplyPatchStagedFeed(request.Input.Args, input.Command) {
+		// A staged patch file this gateway cannot read: the user's hook read
+		// it and listed each directive target, resolved (classifier refix 1).
+		for operand, resolved := range clientTargets {
+			if isProtected(operand) || isProtected(resolved) {
+				return true
+			}
+		}
+	}
 	if !patchKnown {
 		// Unknown targets (no readable envelope, apply_patch --help, a
 		// lookup of the program) reach the rule only when the call names a
 		// protected target: no protected-named word is never blocked
-		// (TGT-0194; GAP-0781, GAP-1106, GAP-1741, GAP-1872). An apply_patch
+		// (TGT-0194; GAP-0781, GAP-1106, GAP-1741, GAP-1872). A staged patch
+		// file is read above; only one that cannot be read reaches here. An apply_patch
 		// tool call that reaches here with no patch text (a connector
 		// refused or bounded it) stays unknown.
 		if hookpaths.ApplyPatchToolWithoutText(request.Input.Tool, request.Input.Args) {
