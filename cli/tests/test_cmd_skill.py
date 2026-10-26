@@ -286,6 +286,31 @@ class TestSkillAllowScannedCopy(SkillCommandTestBase):
         info = self.invoke(["info", "risky-skill"])
         self.assertIn("Policy: allowed", " ".join(info.output.split()), info.output)
 
+    def test_allow_after_a_url_scan_keeps_the_name_only_rule(self):
+        # GAP-1974: "skill scan <url>" scans a temporary copy and removes it.
+        # An allow must not pin that deleted folder; it keeps the name-only
+        # rule and its note. A fetch folder that still exists is not pinned
+        # either.
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        fetch = tempfile.mkdtemp(prefix="defenseclaw-skill-")
+        self.addCleanup(shutil.rmtree, fetch, True)
+        live = os.path.realpath(os.path.join(fetch, "skill", "fetched-skill"))
+        os.makedirs(live)
+        gone = os.path.realpath(os.path.join(self.tmp_dir, "removed", "gone-skill"))
+        for name, target in (("fetched-skill", live), ("gone-skill", gone)):
+            self.app.store.insert_scan_result(
+                str(uuid.uuid4()), "skill-scanner", target,
+                datetime.now(timezone.utc), 100, 5, "CRITICAL", "{}",
+            )
+            result = self.invoke(["allow", name, "--reason", "reviewed"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("matches the name only", result.output)
+            self.assertNotIn("covers the copy at", result.output)
+        rules = [r.source_path_contains for r in self.app.cfg.asset_policy.skill.allowed]
+        self.assertNotIn([live], rules)
+        self.assertNotIn([gone], rules)
+
     def test_two_scanned_folders_keep_the_name_only_note(self):
         self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
         self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]

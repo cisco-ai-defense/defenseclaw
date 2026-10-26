@@ -4627,6 +4627,10 @@ def _skill_scanned_copy(app: AppContext, skill_name: str, connector: str) -> str
         for ls in latest
         if ls.get("target") and os.path.basename(str(ls["target"]).rstrip("/\\")) == skill_name
     }
+    # A pin must name a copy that stays: the folder still exists and is not
+    # the temporary copy "skill scan <url>" fetched and then removed
+    # (GAP-1974). Otherwise the name-only rule and its note apply.
+    targets = {target for target in targets if _skill_scan_copy_lasts(target)}
     if connector and len(targets) > 1:
         scoped = {
             target for target in targets
@@ -4634,6 +4638,22 @@ def _skill_scanned_copy(app: AppContext, skill_name: str, connector: str) -> str
         }
         targets = scoped or targets
     return next(iter(targets)) if len(targets) == 1 else ""
+
+
+def _skill_scan_copy_lasts(target: str) -> bool:
+    """A scanned folder an allow can pin: it exists and is not under the
+    URL fetch's temporary ``defenseclaw-skill-*`` folder."""
+    import tempfile
+
+    if not os.path.isdir(target):
+        return False
+    tmp_root = os.path.realpath(tempfile.gettempdir())
+    try:
+        rel = os.path.relpath(target, tmp_root)
+    except ValueError:  # another drive on Windows
+        return True
+    first = rel.split(os.sep, 1)[0]
+    return first == ".." or not first.startswith("defenseclaw-skill-")
 
 
 def _echo_skill_allow_scope(skill_name: str, connector: str, pin: str) -> None:
