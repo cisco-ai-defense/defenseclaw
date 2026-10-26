@@ -777,9 +777,14 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// that cannot be bound, or whose bound call cannot be proven now (a
 		// private managed home the user-side hook did not prove for this
 		// callback), keeps its own unparsed decision.
-		if tool, args, bound := a.copilotPermission.match(ctx, req, rawBody); bound {
-			req.ToolName, req.ToolArgs, req.ToolArgsProjectionUncertain = tool, args, false
-			req.ToolCallUnparsed = copilotWriteCallUnproven(tool, args, writeProofCWD,
+		// A callback after a parallel envelope is bound to each of its
+		// calls it can stand for and decided on all of them (GAP-1831).
+		if bound, ok := a.copilotPermission.bind(ctx, req, rawBody); ok {
+			req.ToolName, req.ToolArgs, req.ToolArgsProjectionUncertain = bound[0].Name, bound[0].Args, false
+			if len(bound) > 1 {
+				nativeCalls = bound
+			}
+			req.ToolCallUnparsed = copilotCallsUnproven(req, nativeCalls, writeProofCWD,
 				hookActiveHome(r.Context()), copilotManagedPatchEvidence(r.Context()))
 		}
 		// An uncertain identity refuses before any profile-specific gate can

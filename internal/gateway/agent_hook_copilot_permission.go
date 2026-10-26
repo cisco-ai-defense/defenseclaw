@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -35,6 +36,13 @@ type copilotPermissionEntry struct {
 	args      json.RawMessage
 	at        time.Time
 	ambiguous bool
+	// calls are the calls of an allowed parallel toolCalls envelope. Its
+	// argumentless callbacks cannot say which call each is for, so each is
+	// bound to every call of the envelope its tool can stand for and
+	// decided again on all of them (the most restrictive verdict answers);
+	// uses callbacks consume the entry (GAP-1831).
+	calls []copilotargs.NativeCall
+	uses  int
 }
 
 func copilotPermissionKey(ctx context.Context, req agentHookRequest) string {
@@ -79,10 +87,13 @@ func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest
 			return
 		}
 	}
-	// A parallel toolCalls envelope names several calls: a later callback
-	// cannot tell which one it is for.
-	if calls, _ := req.Payload["toolCalls"].([]any); len(calls) > 1 {
-		allowed = false
+	if raw, _ := req.Payload["toolCalls"].([]any); len(raw) > 1 {
+		calls := copilotNativeToolCalls(req)
+		if !allowed || len(calls) < 2 {
+			return
+		}
+		j.entries[key] = copilotPermissionEntry{calls: append([]copilotargs.NativeCall(nil), calls...), uses: len(calls), at: now}
+		return
 	}
 	if !allowed || req.ToolCallUnparsed || req.ToolArgsProjectionUncertain || req.ToolName == "" || len(req.ToolArgs) == 0 {
 		return
@@ -99,13 +110,24 @@ func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest
 // parser refusal (req.toolCallShapeUnparsed) does. Every callback consumes
 // the prior call, bound or not, so no later callback can reuse it.
 func (j *copilotPermissionJoin) match(ctx context.Context, req agentHookRequest, raw []byte) (string, json.RawMessage, bool) {
+	calls, ok := j.bind(ctx, req, raw)
+	if !ok {
+		return "", nil, false
+	}
+	return calls[0].Name, calls[0].Args, true
+}
+
+// bind is match for every call the callback is bound to: the one call of a
+// single preToolUse, or the calls of a parallel envelope the callback's tool
+// can stand for (each envelope callback takes one of its uses).
+func (j *copilotPermissionJoin) bind(ctx context.Context, req agentHookRequest, raw []byte) ([]copilotargs.NativeCall, bool) {
 	if req.ConnectorName != "copilot" || req.HookEventName != "permissionRequest" ||
 		req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal {
-		return "", nil, false
+		return nil, false
 	}
 	key := copilotPermissionKey(ctx, req)
 	if key == "" {
-		return "", nil, false
+		return nil, false
 	}
 	j.mu.Lock()
 	entry, exists := j.entries[key]
@@ -114,18 +136,36 @@ func (j *copilotPermissionJoin) match(ctx context.Context, req agentHookRequest,
 		exists = false
 	}
 	if exists {
-		// This callback consumes the one prior call even if its tool or
-		// argument shape differs. Another callback cannot bind to it.
-		delete(j.entries, key)
+		// This callback consumes the one prior call (or one use of an
+		// envelope) even if its tool or argument shape differs. Another
+		// callback cannot bind to it.
+		if entry.uses > 1 {
+			kept := entry
+			kept.uses--
+			j.entries[key] = kept
+		} else {
+			delete(j.entries, key)
+		}
 	}
 	j.mu.Unlock()
 	if !exists || entry.ambiguous || req.toolCallShapeUnparsed ||
 		!hookToolCallJSONUnambiguous(req.ConnectorName, raw) ||
-		!copilotEmptyPermissionArgs(req.Payload) ||
-		!copilotPermissionToolMatches(entry.tool, req.ToolName) {
-		return "", nil, false
+		!copilotEmptyPermissionArgs(req.Payload) {
+		return nil, false
 	}
-	return entry.tool, append(json.RawMessage(nil), entry.args...), true
+	if len(entry.calls) > 0 {
+		var bound []copilotargs.NativeCall
+		for _, call := range entry.calls {
+			if copilotPermissionToolMatches(call.Name, req.ToolName) {
+				bound = append(bound, copilotargs.NativeCall{Name: call.Name, Args: append(json.RawMessage(nil), call.Args...)})
+			}
+		}
+		return bound, len(bound) > 0
+	}
+	if !copilotPermissionToolMatches(entry.tool, req.ToolName) {
+		return nil, false
+	}
+	return []copilotargs.NativeCall{{Name: entry.tool, Args: append(json.RawMessage(nil), entry.args...)}}, true
 }
 
 func copilotPermissionToolMatches(pre, permission string) bool {
