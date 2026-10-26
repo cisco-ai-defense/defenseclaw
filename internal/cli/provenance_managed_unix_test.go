@@ -19,7 +19,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestManagedProvenanceShowsTheRunningGatewaySnapshot(t *testing.T) {
@@ -49,7 +48,7 @@ func TestManagedProvenanceShowsTheRunningGatewaySnapshot(t *testing.T) {
 }
 
 func TestManagedProvenanceHealthUsesTheVerifiedSocketConnection(t *testing.T) {
-	path := filepath.Join(testenv.PrivateTempDir(t), "hook.sock")
+	path := filepath.Join(shortSocketDir(t), "hook.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
