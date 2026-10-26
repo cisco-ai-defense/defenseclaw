@@ -4,6 +4,11 @@
 
 """GAP-1389: a plugin whose only HIGH findings are the judge's warns in default.
 
+LEAD DECISION 09:05 (every tier): for a plugin with no executable files the
+plugin scanner caps the judge's findings at MEDIUM, because the judge read no
+code; the admission pre-step below still covers judge-only HIGHs of a plugin
+that does hold code.
+
 The benign skill-only formatting plugin got LLM-OB-009-001 and META-LLM-001
 at HIGH next to a static LOW and was quarantined. The admission pre-step
 (Go ``policy.WarnJudgeOnlyPluginHigh``) warns on it in default and
@@ -74,18 +79,65 @@ def _decide(pe, result, connector: str = "claudecode"):
     return evaluate_admission(pe, target_type="plugin", name="r104fx-ok", connector=connector, scan_result=result)
 
 
-# --- Benign corpus: the GAP-1389 plugin installs with a warning in default ---
+# --- Benign corpus: the GAP-1389 plugin installs with a warning on every tier ---
 
-def test_gap1389_formatting_plugin_warns_in_default_and_keeps_high(tmp_path, monkeypatch, pe) -> None:
-    result = _scan(_plugin(tmp_path, {"skills/helper/SKILL.md": "---\nname: helper\n---\nFormat status notes as a short list.\n"}),
-                   monkeypatch)
-    assert {(f.rule_id, f.severity) for f in result.findings} >= {("LLM-OB-009-001", "HIGH"), ("META-LLM-001", "HIGH")}
-    assert result.max_severity() == "HIGH"
-    decision = _decide(pe, result)
-    assert (decision.verdict, decision.source) == ("warning", "scan-judge-warning"), decision
-    assert "max HIGH" in decision.reason
-    pe.cfg.guardrail.rule_pack = "permissive"
+_SKILL = {"skills/helper/SKILL.md": "---\nname: helper\n---\nFormat status notes as a short list.\n"}
+
+
+def test_gap1389_judge_cannot_rate_a_plugin_without_executable_files_high(tmp_path, monkeypatch, pe) -> None:
+    # LEAD DECISION 09:05: a plugin with no executable files never gets HIGH
+    # for missing source, from rules or the judge, on any tier. The judge
+    # read no code, so its LLM-OB-009-001 / META-LLM-001 are capped at MEDIUM
+    # and an explicit high=block has nothing HIGH to block.
+    result = _scan(_plugin(tmp_path, dict(_SKILL)), monkeypatch)
+    found = {(f.rule_id, f.severity) for f in result.findings}
+    assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
+    assert result.max_severity() == "MEDIUM"
     assert _decide(pe, result).verdict == "warning"
+    for name, edit in (
+        ("explicit plugin HIGH block (G51 fixture)",
+         lambda c: c.admission.plugin.actions.update(critical="block", high="block")),
+        ("explicit defaults HIGH quarantine", lambda c: c.admission.defaults.actions.update(high="quarantine")),
+        ("strict rule pack", lambda c: setattr(c.guardrail, "rule_pack", "strict")),
+        ("permissive rule pack", lambda c: setattr(c.guardrail, "rule_pack", "permissive")),
+    ):
+        edit(pe.cfg)
+        decision = _decide(pe, result)
+        assert decision.verdict == "warning", (name, decision)
+
+
+@pytest.mark.parametrize("name, files, mode", [
+    ("hooks config", {"hooks/hooks.json": '{"hooks":{}}'}, None),
+    ("shell script", {"scripts/run.sh": "echo hi\n"}, None),
+    ("python helper", {"skills/helper/scripts/fmt.py": "print('x')\n"}, None),
+    ("mcp server in the manifest", {".claude-plugin/plugin.json": '{"name":"r104fx-ok","mcpServers":{"x":{}}}'}, None),
+    ("unparsable manifest", {".claude-plugin/plugin.json": "{"}, None),
+    ("extensionless executable", {"bin/fmt": "#!/bin/sh\necho hi\n"}, 0o755),
+])
+def test_a_plugin_that_runs_something_keeps_the_judge_high(tmp_path, monkeypatch, name, files, mode) -> None:
+    if mode is not None and os.name == "nt":
+        pytest.skip("executable bit is POSIX only")
+    plugin = _plugin(tmp_path, {**_SKILL, **files})
+    if mode is not None:
+        for rel in files:
+            (plugin / rel).chmod(mode)
+    result = _scan(plugin, monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}, name
+
+
+def test_operator_severity_override_still_wins(tmp_path, monkeypatch) -> None:
+    from defenseclaw.scanner.plugin_scanner import scanner as plugin_scanner_module
+
+    real = plugin_scanner_module.apply_severity_override
+
+    def override(finding, overrides):
+        real(finding, overrides)
+        if finding.rule_id == "LLM-OB-009-001":
+            finding.severity = "HIGH"
+
+    monkeypatch.setattr(plugin_scanner_module, "apply_severity_override", override)
+    result = _scan(_plugin(tmp_path, dict(_SKILL)), monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
 
 
 # --- Malicious corpus: a static concrete threat beside the same judge HIGH blocks ---

@@ -221,6 +221,15 @@ def scan_plugin(
 
         all_findings.extend(findings)
 
+    # GAP-1389 (LEAD DECISION 09:05): a judge that read no code cannot rate a
+    # plugin with no executable files HIGH. Its findings rest on the manifest
+    # alone ("manifest-only, no source"), so they are capped at MEDIUM on
+    # every tier; static findings keep their severity and an operator's
+    # severity override (applied next) still wins.
+    if not _plugin_has_executable_files(target, ctx):
+        for f in all_findings:
+            _cap_judge_finding_without_code(f)
+
     # --- Apply policy: severity overrides + suppression ---
     for f in all_findings:
         apply_severity_override(f, policy.severity_overrides)
@@ -286,6 +295,94 @@ _MANIFEST_CANDIDATES: tuple[tuple[str, str], ...] = (
     ("plugin.yaml", "plugin.yaml"),
     ("plugin.yml", "plugin.yml"),
 )
+
+
+# Files that run code: source, script and binary suffixes the analyzers
+# read or flag, plus the other common interpreters.
+_EXECUTABLE_SUFFIXES = frozenset({
+    ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".cjs", ".mjs", ".py", ".pyc", ".pyz", ".rb", ".pl", ".php",
+    ".lua", ".go", ".rs", ".java", ".jar", ".class", ".ps1", ".psm1", ".vbs", ".bash", ".zsh", ".fish",
+    ".exe", ".so", ".dylib", ".wasm", ".dll", ".node", ".sh", ".bat", ".cmd",
+})
+# Files that make an agent run a command (hooks, MCP and LSP servers).
+_EXECUTABLE_CONFIG_NAMES = frozenset({"hooks.json", ".mcp.json", "mcp.json", ".lsp.json"})
+# Manifests and the keys in them that start code.
+_MANIFEST_NAMES = frozenset({"plugin.json", "package.json", "openclaw.plugin.json", "plugin.yaml", "plugin.yml"})
+_EXECUTABLE_MANIFEST_KEYS = frozenset({
+    "hooks", "mcpServers", "lspServers", "main", "bin", "scripts", "exports", "module", "browser",
+    "entry", "entrypoint", "entrypoints", "command", "extensions", "runtime",
+})
+_EXECUTABLE_WALK_LIMIT = 5000
+
+
+def _plugin_has_executable_files(target: str, ctx: ScanContext) -> bool:
+    """Whether the plugin holds anything that runs: collected source, a
+    script, binary or interpreter file, an executable-bit file that is
+    extensionless or starts with ``#!``, a hooks/MCP/LSP config, or a
+    manifest key that starts code. A symlink, an unreadable entry, an
+    unparsable manifest or a tree past the walk limit counts as executable,
+    so only a plain tree of documents is "no executable files"."""
+    if ctx.source_files or not os.path.isdir(target) or os.path.islink(target):
+        return True
+    seen = 0
+    for root, dirs, files in os.walk(target, followlinks=False, onerror=lambda _e: None):
+        # A VCS folder's hook samples do not run when the agent loads the plugin.
+        dirs[:] = [name for name in dirs if name != ".git"]
+        for name in dirs:
+            if os.path.islink(os.path.join(root, name)):
+                return True
+        for name in files:
+            seen += 1
+            if seen > _EXECUTABLE_WALK_LIMIT:
+                return True
+            path = os.path.join(root, name)
+            suffix = os.path.splitext(name)[1].casefold()
+            if suffix in _EXECUTABLE_SUFFIXES or name.casefold() in _EXECUTABLE_CONFIG_NAMES:
+                return True
+            try:
+                st = os.lstat(path)
+            except OSError:
+                return True
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                return True
+            if os.name != "nt" and st.st_mode & 0o111 and (not suffix or _starts_with_shebang(path)):
+                return True
+            if name.casefold() in _MANIFEST_NAMES and _manifest_starts_code(path):
+                return True
+    return False
+
+
+def _starts_with_shebang(path: str) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(2) == b"#!"
+    except OSError:
+        return True
+
+
+def _manifest_starts_code(path: str) -> bool:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read(1024 * 1024)
+        data = yaml.safe_load(text) if path.casefold().endswith((".yaml", ".yml")) else json.loads(text)
+    except (OSError, ValueError, yaml.YAMLError):
+        return True
+    if not isinstance(data, dict):
+        return True
+    return any(key in data for key in _EXECUTABLE_MANIFEST_KEYS)
+
+
+def _cap_judge_finding_without_code(finding: Finding) -> None:
+    """Cap an LLM judge or meta-judge HIGH/CRITICAL at MEDIUM (GAP-1389)."""
+    rule = finding.rule_id or ""
+    judge = (rule.startswith("LLM-") and rule != "LLM-SCAN-ERROR") or rule.startswith("META-LLM-")
+    if not judge or str(finding.severity).upper() not in ("HIGH", "CRITICAL"):
+        return
+    finding.severity = "MEDIUM"
+    note = "Capped at MEDIUM: the plugin has no executable files and the judge read no code."
+    finding.description = f"{finding.description} {note}".strip()
+    if "judge-no-executable-files" not in finding.tags:
+        finding.tags.append("judge-no-executable-files")
 
 
 def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
