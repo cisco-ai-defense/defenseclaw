@@ -84,7 +84,7 @@ defenseclaw guardrail disable --yes
 With the default restart, disabling removes DefenseClaw hooks and OpenTelemetry
 settings from Claude Code's settings file. It preserves your other Claude Code
 settings. `defenseclaw guardrail enable` restores DefenseClaw hooks and telemetry
-settings. For a whole-guardrail disable with `--no-restart`, removal takes effect
+settings. It asks `Proceed? [Y/n]`; add `--yes` in scripts or when stdin is not a terminal. For a whole-guardrail disable with `--no-restart`, removal takes effect
 when you restart the gateway. With `--connector claudecode` and `--no-restart`,
 a running gateway removes the connector's entries at once.
 To remove the connector from DefenseClaw's configuration, run
