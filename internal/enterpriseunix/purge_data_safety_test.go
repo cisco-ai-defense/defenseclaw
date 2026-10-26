@@ -22,16 +22,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
 
-// #1299: the purge names the backup it made of an account's own per-user
-// install from before the managed deployment.
-func TestUninstallPurgeNamesTheBackupOfAPerUserInstall(t *testing.T) {
+// GAP-0727: the purge names the account whose own per-user install from
+// before the managed deployment it kept as it is; nothing was moved.
+func TestUninstallPurgeNamesTheKeptPerUserInstall(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
 				return CommandResult{Stdout: []byte(`{"ok":true,"purged":["alice","bob"],` +
-					`"purged_detail":{"alice":{"data":true,"backup":true,"binaries":true},"bob":{"data":true}}}`)}, nil
+					`"purged_detail":{"alice":{"kept":true},"bob":{"data":true}}}`)}, nil
 			}}
 			done := h.run(Options{Action: ActionUninstall, Purge: true})
 			requireOK(t, done)
@@ -44,11 +44,12 @@ func TestUninstallPurgeNamesTheBackupOfAPerUserInstall(t *testing.T) {
 					bob = change
 				}
 			}
-			if !strings.Contains(alice, "was moved to ~/.defenseclaw-backup-<UTC time> in its home first") {
-				t.Fatalf("the purge does not name alice's backup: %q", alice)
+			if !strings.HasPrefix(alice, "kept the DefenseClaw per-user data of user alice (~/.defenseclaw) as it is") ||
+				strings.Contains(alice, "backup") || strings.Contains(alice, "moved to") {
+				t.Fatalf("the purge does not name alice's kept install: %q", alice)
 			}
-			if bob == "" || strings.Contains(bob, "backup-") {
-				t.Fatalf("bob had no per-user install to back up: %q", bob)
+			if !strings.HasPrefix(bob, "removed ") {
+				t.Fatalf("bob's managed-only data was not removed: %q", bob)
 			}
 		})
 	}

@@ -4243,7 +4243,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 // purgedUserDetail is what the purge found and removed for one account.
 type purgedUserDetail struct {
 	Data     bool `json:"data"`
-	Backup   bool `json:"backup"`
+	Kept     bool `json:"kept"`
 	Binaries bool `json:"binaries"`
 	Gateway  bool `json:"gateway"`
 	UVCache  bool `json:"uv_cache"`
@@ -4256,6 +4256,11 @@ type purgedUserDetail struct {
 func purgedUserChange(user string, detail purgedUserDetail) string {
 	const data = "all DefenseClaw per-user data of user %s (~/.defenseclaw, including its hook scripts and the foreign-hooks-backup folder)"
 	var text string
+	if detail.Kept {
+		// A machine uninstall never deletes or moves an account's own
+		// data (GAP-0727, owner 2026-10-23).
+		return fmt.Sprintf("kept the DefenseClaw per-user data of user %s (~/.defenseclaw) as it is: it holds the account's own DefenseClaw install from before the managed deployment (config, secrets, audit history, policies), which a machine uninstall never deletes or moves; its owner can remove it", user)
+	}
 	switch {
 	case detail.Data && detail.Binaries:
 		text = fmt.Sprintf("removed "+data+" and its per-user binaries and launcher links in ~/.local/bin", user)
@@ -4275,9 +4280,6 @@ func purgedUserChange(user string, detail purgedUserDetail) string {
 	}
 	if detail.Gateway {
 		text += ", after stopping its per-user gateway"
-	}
-	if detail.Backup {
-		text += "; the data of its own DefenseClaw install from before the managed deployment (config, secrets, audit history, policies) was moved to ~/.defenseclaw-backup-<UTC time> in its home first, with a DEFENSECLAW-BACKUP.txt that says how to restore it"
 	}
 	return text
 }

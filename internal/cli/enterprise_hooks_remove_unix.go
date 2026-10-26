@@ -66,7 +66,7 @@ func init() {
 	enterpriseHooksRemoveAllCmd.Flags().StringVar(&enterpriseHooksRemoveAllManifest, "manifest", defaultEnterpriseHookManifest,
 		"YAML manifest of per-user hook targets")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHooksRemoveAllPurge, "purge", false,
-		"Also remove each enrolled user's ~/.defenseclaw (its own per-user install's data moved to ~/.defenseclaw-backup-<UTC time> first), per-user binaries in ~/.local/bin and DefenseClaw's entries in ~/.cache/uv, after stopping its per-user gateway")
+		"Also remove each enrolled user's ~/.defenseclaw, per-user binaries in ~/.local/bin and DefenseClaw's entries in ~/.cache/uv, after stopping its per-user gateway; an account's own per-user install from before the enrollment is kept as it is")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHooksRemoveAllCheck, "check", false,
 		"Only check that every manifest row resolves to an account whose registrations can be removed; change nothing")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false, "Emit machine-readable JSON")
@@ -108,8 +108,8 @@ func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "removed %d per-user registrations; %d pending, %d failed\n", report.Removed, len(report.Pending), len(report.Failed))
 		for _, user := range report.Purged {
 			line := "purged " + user + ": ~/.defenseclaw and the per-user binaries in ~/.local/bin are gone"
-			if report.PurgedDetail[user].Backup {
-				line += "; the data of its own DefenseClaw install from before the managed deployment is in ~/.defenseclaw-backup-<UTC time>"
+			if report.PurgedDetail[user].Kept {
+				line = "kept " + user + ": ~/.defenseclaw holds its own DefenseClaw install from before the managed deployment, which stays as it is"
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), line)
 		}
