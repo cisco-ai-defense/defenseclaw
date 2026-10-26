@@ -553,8 +553,10 @@ def test_native_deny_connector_reports_the_mode_its_hook_renders(
     assert report["current"] is False
     assert report["drift"] == (
         # Hermes seals its script in the contract lock: the open rewrite is
-        # also an edit of the sealed hook (registration_integrity_drift).
-        ["registration-digest-stale", "hook-runtime-stale", "hook-script-open"]
+        # also an edit of the sealed hook (registration_integrity_drift). The
+        # sealed-script runtime check (hook_runtime_problems) reads POSIX
+        # scripts only, so a Windows host simulating this hook never runs it.
+        ["registration-digest-stale", *(["hook-runtime-stale"] if os.name != "nt" else []), "hook-script-open"]
         if connector == "hermes"
         else ["hook-script-open"]
     )
@@ -1799,8 +1801,9 @@ def test_doctor_fails_an_open_rendered_hook_whatever_its_own_environment_says(
     cfg.plugin_dirs = lambda connector=None: []
     cfg.mcp_servers = lambda connector=None, **_: []
     hook_dir = Path(cfg.data_dir) / "hooks"
+    # Each case picks the hook it renders, whatever OS runs the test.
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: windows)
     if windows:
-        monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: True)
         (hook_dir / ".hookcfg").write_text(
             json.dumps({"version": 2, "gateway_addr": "127.0.0.1:18970", "fail_modes": {"copilot": "open"}}),
             encoding="utf-8",

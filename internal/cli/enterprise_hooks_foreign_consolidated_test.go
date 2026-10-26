@@ -555,9 +555,15 @@ func TestForeignHookRemovalRecordsBeforeTheFileChanges(t *testing.T) {
 }
 
 // foreignHookTestOpenCodePlugins writes two unapproved OpenCode plugins into
-// home: each is its own removal.
+// home: each is its own removal. The worker cleans with its own environment,
+// which here is the test's: an XDG_CONFIG_HOME or OPENCODE_CONFIG_DIR of the
+// host (a GitHub runner sets XDG_CONFIG_HOME=/home/runner/.config) would
+// send OpenCode, and the cleanup, to that directory instead of home/.config.
 func foreignHookTestOpenCodePlugins(t *testing.T, home string) []string {
 	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("OPENCODE_CONFIG", "")
 	dir := filepath.Join(home, ".config", "opencode", "plugins")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)

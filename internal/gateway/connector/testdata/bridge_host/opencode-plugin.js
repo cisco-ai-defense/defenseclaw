@@ -72,6 +72,11 @@ const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";
 // Per-user plugins ask the native gateway binary to verify the connected
 // listener's account before each request. The proof above serves managed TCP.
 const DC_PER_USER_NATIVE_POST = "1";
+// The gateway binary of the install that rendered this plugin, which a
+// per-user plugin runs for hook-post and session facts: native Windows Setup
+// renders the one in its install root's bin folder (GAP-1847). Empty keeps the
+// ~/.local/bin gateway that install.sh and install.ps1 put there.
+const DC_GATEWAY_BINARY = "{{.GatewayBinaryJS}}";
 // A per-user plugin's gateway-outage mode (config.HookOutageFailMode): "open"
 // in the default and permissive policy tiers lets a tool call run with a
 // warning and a hook-failures.jsonl row while this account's gateway is not
@@ -129,8 +134,8 @@ async function defenseclawIdentityHeaders() {
 // it: `hook session-facts` prints the whole X-DefenseClaw-Session-Facts value,
 // the principal included, and keeps its own five-minute cache in
 // ~/.defenseclaw. A managed install runs its administrator-owned hook binary
-// (DC_FOREIGN_GUARD); a per-user install runs the gateway binary the installer
-// puts in ~/.local/bin. No answer is a supported outcome: the SSH and logind
+// (DC_FOREIGN_GUARD); a per-user install runs its install's gateway binary
+// (DC_GATEWAY_BINARY, or ~/.local/bin). No answer is a supported outcome: the SSH and logind
 // variables alone follow.
 const DC_SESSION_FACTS_TTL_MS = 300000;
 const DC_SESSION_FACTS_RETRY_MS = 30000;
@@ -506,9 +511,9 @@ async function defenseclawProvenTCPRequest(path, init, token) {
 
 function defenseclawPerUserNativePostBinary() {
   const home = homedir();
-  const directory = join(home, ".local", "bin");
-  const binary = join(directory, process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
-  const paths = [home, join(home, ".local"), directory, binary];
+  const binary = DC_GATEWAY_BINARY || join(home, ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
+  const directory = dirname(binary);
+  const paths = DC_GATEWAY_BINARY ? [dirname(directory), directory, binary] : [home, join(home, ".local"), directory, binary];
   const uid = userInfo().uid;
   for (let index = 0; index < paths.length; index++) {
     const info = lstatSync(paths[index]);
@@ -523,14 +528,14 @@ function defenseclawPerUserNativePostBinary() {
 }
 
 // defenseclawPerUserHookPostBinary picks the small hook-post helper the POSIX
-// installer puts beside the gateway, so a hook event does not start the full
+// installer puts beside the gateway (in the same folder), so a hook event does not start the full
 // gateway CLI; both read the same JSON request and run the same
 // connected-peer check. An install without it (Windows, or an older
 // installer's roll-forward) keeps the verified gateway CLI. A present but
 // untrusted helper is refused, never bypassed.
 function defenseclawPerUserHookPostBinary() {
   const gateway = defenseclawPerUserNativePostBinary();
-  const helper = join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-hook-post.exe" : "defenseclaw-hook-post");
+  const helper = join(dirname(gateway), process.platform === "win32" ? "defenseclaw-hook-post.exe" : "defenseclaw-hook-post");
   let info;
   try {
     info = lstatSync(helper);

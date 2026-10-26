@@ -18,6 +18,7 @@ package openshell
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -60,6 +61,9 @@ func TestAdminVMDriver(t *testing.T) {
 // build pins (never a checksum file of the same release) and puts the
 // driver root-owned into the first folder the lifecycle looks in.
 func TestAdminVMDriverFixUsesThePinnedDigest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenShell sandboxes are unsupported on Windows")
+	}
 	for _, tc := range []struct{ goos, goarch, archive, check, dir string }{
 		{"linux", "amd64", "openshell-driver-vm-x86_64-unknown-linux-gnu.tar.gz", "sha256sum -c -", "/usr/libexec/openshell"},
 		{"linux", "arm64", "openshell-driver-vm-aarch64-unknown-linux-gnu.tar.gz", "sha256sum -c -", "/usr/libexec/openshell"},
@@ -88,6 +92,9 @@ func TestAdminVMDriverFixUsesThePinnedDigest(t *testing.T) {
 // Repair a stale administrator driver in the directory the gateway selects,
 // even when it is not the first administrator directory.
 func TestOldAdminVMDriverRepairKeepsSelectedDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenShell sandboxes are unsupported on Windows")
+	}
 	for _, tc := range []struct{ dir, commandDir, commandTarget string }{
 		{"/usr/lib/openshell", "/usr/lib/openshell", "/usr/lib/openshell/openshell-driver-vm"},
 		{"/opt/openshell/libexec", "/opt/openshell/libexec", "/opt/openshell/libexec/openshell-driver-vm"},

@@ -104,3 +104,9 @@ internal/gateway/connector/shims/*.sh text eol=lf
 # Vendored upstream Eclipse Paho embedded MQTT sources are kept byte-for-byte
 # as published upstream; do not flag their whitespace in git diff --check.
 edge-connector/third_party/** -whitespace
+
+# Go tests quote docs pages, a generated Python table and rendered fixtures
+# byte for byte; a Windows checkout (core.autocrlf=true) must keep them LF.
+docs-site/content/**/*.mdx text eol=lf
+cli/defenseclaw/enforce/_asset_name_fold.py text eol=lf
+internal/enterprisepolicy/testdata/copilot-vscode-guarded/** text eol=lf

@@ -5086,7 +5086,11 @@ function Assert-WizardHookRegistration(
             'afterFileEdit', 'afterTabFileEdit', 'beforeSubmitPrompt', 'afterAgentResponse',
             'afterAgentThought', 'stop', 'preCompact', 'workspaceOpen'
         )
-        $expectedFailClosed = $Mode -eq 'action'
+        # Outside Secure Client every Cursor registration carries failClosed: true,
+        # in action and observe mode (the host flag covers a hook process that
+        # never answers; the hook still makes the configured outage decision),
+        # and the adapter blocks its own failure in both modes.
+        $expectedFailClosed = $true
         foreach ($eventName in $expectedEvents) {
             $eventProperty = $hooksDocument.hooks.PSObject.Properties[$eventName]
             if ($null -eq $eventProperty) {
@@ -5101,7 +5105,7 @@ function Assert-WizardHookRegistration(
             $entry = $managedEntries[0]
             if ([string]$entry.type -cne 'command' -or [int]$entry.timeout -ne 30 -or
                 [bool]$entry.failClosed -ne $expectedFailClosed) {
-                throw "wizard-selected Cursor $eventName entry has the wrong type, timeout, or failClosed value"
+                throw "wizard-selected Cursor $eventName entry has the wrong type, timeout, or failClosed value ($Mode mode)"
             }
             $commandMatch = [regex]::Match(
                 [string]$entry.command,
@@ -5251,6 +5255,69 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
     )
 }
 
+# ConvertTo-WindowsNativeCopilotAdapter renders internal/gateway/connector/hooks/copilot-hook.ps1
+# the way the connector's text/template render does, for the probes below: the
+# {{if}}/{{else}}/{{end}} blocks for Managed, SecureClientDelivery and FailMode, and the hook
+# path and timeout. Any other directive is an error, so a template change cannot reach a probe
+# unrendered (a raw {{if}} line is a PowerShell parse error: the adapter then exits before it
+# reads stdin).
+function ConvertTo-WindowsNativeCopilotAdapter {
+    param(
+        [Parameter(Mandatory = $true)][string]$Template,
+        [Parameter(Mandatory = $true)][string]$HookBinary,
+        [Parameter(Mandatory = $true)][int]$TimeoutMS,
+        [bool]$Managed = $false,
+        [bool]$SecureClientDelivery = $false,
+        [ValidateSet('open', 'closed')][string]$FailMode = 'closed'
+    )
+    $conditions = @{
+        '.Managed' = $Managed
+        'not .Managed' = -not $Managed
+        '.SecureClientDelivery' = $SecureClientDelivery
+        'not .SecureClientDelivery' = -not $SecureClientDelivery
+        'eq .FailMode "open"' = ($FailMode -ceq 'open')
+    }
+    $out = [Text.StringBuilder]::new()
+    $frames = [Collections.Generic.Stack[object]]::new()
+    $active = $true
+    $position = 0
+    foreach ($match in [regex]::Matches($Template, '\{\{(.*?)\}\}')) {
+        if ($active) { [void]$out.Append($Template, $position, $match.Index - $position) }
+        $position = $match.Index + $match.Length
+        $directive = $match.Groups[1].Value.Trim()
+        if ($directive.StartsWith('if ', [StringComparison]::Ordinal)) {
+            $condition = $directive.Substring(3).Trim()
+            if (-not $conditions.ContainsKey($condition)) {
+                throw "unsupported Copilot adapter template condition: $condition"
+            }
+            $frames.Push([pscustomobject]@{ Value = [bool]$conditions[$condition]; Parent = $active; Else = $false })
+            $active = $active -and [bool]$conditions[$condition]
+        }
+        elseif ($directive -ceq 'else') {
+            if ($frames.Count -eq 0 -or $frames.Peek().Else) { throw 'Copilot adapter template has an unbalanced {{else}}' }
+            $frame = $frames.Peek()
+            $frame.Else = $true
+            $active = $frame.Parent -and -not $frame.Value
+        }
+        elseif ($directive -ceq 'end') {
+            if ($frames.Count -eq 0) { throw 'Copilot adapter template has an unbalanced {{end}}' }
+            $active = $frames.Pop().Parent
+        }
+        elseif ($directive -ceq '.HookBinaryPS') {
+            if ($active) { [void]$out.Append($HookBinary.Replace("'", "''")) }
+        }
+        elseif ($directive -ceq '.CopilotHookTimeoutMS') {
+            if ($active) { [void]$out.Append([string]$TimeoutMS) }
+        }
+        else {
+            throw "unsupported Copilot adapter template directive: $directive"
+        }
+    }
+    if ($frames.Count -ne 0) { throw 'Copilot adapter template has an unbalanced {{if}}' }
+    [void]$out.Append($Template, $position, $Template.Length - $position)
+    return $out.ToString()
+}
+
 function Assert-CopilotAdapterConcurrentStdin {
     $adapterTemplate = Join-Path $WorkspaceRoot 'internal\gateway\connector\hooks\copilot-hook.ps1'
     if (-not (Test-Path -LiteralPath $adapterTemplate -PathType Leaf)) {
@@ -5290,10 +5357,9 @@ internal static class Program {
             throw "failed to compile Copilot adapter stdin probe: $compile"
         }
         $adapter = Join-Path $work 'copilot-hook.ps1'
-        $rendered = [IO.File]::ReadAllText($adapterTemplate).Replace(
-            '{{.HookBinaryPS}}',
-            $helper.Replace("'", "''")
-        ).Replace('{{.CopilotHookTimeoutMS}}', '8000')
+        # The per-user adapter (not managed, not Secure Client), as setup copilot renders it.
+        $rendered = ConvertTo-WindowsNativeCopilotAdapter `
+            -Template ([IO.File]::ReadAllText($adapterTemplate)) -HookBinary $helper -TimeoutMS 8000
         [IO.File]::WriteAllText($adapter, $rendered, [Text.UTF8Encoding]::new($false))
         $payload = '{"source":"copilot-adapter-probe","padding":"' + ('x' * 65536) + '"}'
         $shell = (Get-Command powershell.exe -CommandType Application).Source
@@ -7438,63 +7504,42 @@ print('DC_GATEWAY_API_PORT=' + str(port))
     return $port
 }
 
-function Assert-ClaudeNativeOtlpProbeAuthority([object[]]$Probes, [int]$GatewayPort) {
-    if ($Probes.Count -ne 2 -or
-        (@($Probes | ForEach-Object { [string]$_.Signal }) -join ',') -cne 'logs,metrics') {
-        throw 'packaged rotation did not persist exactly the Claude logs and metrics probes'
+function Assert-ClaudeNativeOtlpOffAfterRotation([string]$ClaudeHome, [string[]]$Credentials) {
+    $settingsPath = Join-Path ([IO.Path]::GetFullPath($ClaudeHome)) 'settings.json'
+    if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
+        throw 'packaged rotation did not keep the Claude settings'
     }
-    foreach ($probe in $Probes) {
-        $endpoint = $probe.Endpoint
-        if ($null -eq $endpoint -or $endpoint -isnot [Uri] -or
-            $endpoint.Port -ne $GatewayPort -or
-            $endpoint.DnsSafeHost.ToLowerInvariant() -notin @('127.0.0.1', '::1')) {
-            throw 'refusing Claude native OTLP credentials for an endpoint outside the configured gateway listener'
-        }
-    }
-}
-
-function Assert-ClaudeNativeOtlpForeignPortRejected([object[]]$Probes, [int]$GatewayPort) {
-    $foreignPort = if ($GatewayPort -eq 65535) { 65534 } else { $GatewayPort + 1 }
-    $foreignProbes = @($Probes | ForEach-Object {
-        $builder = [UriBuilder]::new($_.Endpoint)
-        $builder.Port = $foreignPort
-        [pscustomobject]@{
-            Signal = [string]$_.Signal
-            Endpoint = $builder.Uri
-            Headers = $_.Headers
-        }
-    })
-    $rejected = $false
+    $text = [IO.File]::ReadAllText($settingsPath)
     try {
-        Assert-ClaudeNativeOtlpProbeAuthority $foreignProbes $GatewayPort
+        $settings = $text | ConvertFrom-Json -ErrorAction Stop
     } catch {
-        if ($_.Exception.Message -cne
-            'refusing Claude native OTLP credentials for an endpoint outside the configured gateway listener') {
-            throw
+        throw 'packaged rotation persisted invalid Claude settings JSON'
+    }
+    $settingsEnvProperty = $settings.PSObject.Properties['env']
+    if ($null -eq $settingsEnvProperty) {
+        throw 'packaged rotation persisted no Claude settings environment'
+    }
+    $settingsEnv = $settingsEnvProperty.Value
+    foreach ($pinned in @(
+        @('CLAUDE_CODE_ENABLE_TELEMETRY', '0'),
+        @('OTEL_LOGS_EXPORTER', 'none'),
+        @('OTEL_METRICS_EXPORTER', 'none'),
+        @('OTEL_TRACES_EXPORTER', 'none')
+    )) {
+        $property = $settingsEnv.PSObject.Properties[$pinned[0]]
+        if ($null -eq $property -or [string]$property.Value -cne $pinned[1]) {
+            throw "packaged rotation left Claude native telemetry on ($($pinned[0]) is not $($pinned[1]))"
         }
-        $rejected = $true
     }
-    if (-not $rejected) {
-        throw 'Claude native OTLP authority guard accepted a foreign loopback port'
+    foreach ($property in @($settingsEnv.PSObject.Properties)) {
+        if ($property.Name -like 'OTEL_EXPORTER_OTLP_*') {
+            throw "packaged rotation left a Claude native OTLP exporter setting: $($property.Name)"
+        }
     }
-}
-
-function Assert-OwnedGatewayApiListener(
-    [object]$GatewayIdentity,
-    [string]$GatewayPath,
-    [int]$GatewayPort
-) {
-    Assert-OwnedManagedProcess $GatewayIdentity $GatewayPath 'rotated gateway'
-    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $GatewayPort -ErrorAction Stop)
-    if ($listeners.Count -eq 0) {
-        throw 'configured gateway API port has no live listener'
-    }
-    foreach ($listener in $listeners) {
-        $address = $null
-        if ([int]$listener.OwningProcess -ne [int]$GatewayIdentity.ProcessId -or
-            -not [Net.IPAddress]::TryParse([string]$listener.LocalAddress, [ref]$address) -or
-            -not [Net.IPAddress]::IsLoopback($address)) {
-            throw 'configured gateway API listener is not loopback-only or is owned by a foreign process'
+    foreach ($credential in $Credentials) {
+        if (-not [string]::IsNullOrEmpty($credential) -and
+            $text.IndexOf($credential, [StringComparison]::Ordinal) -ge 0) {
+            throw 'packaged rotation wrote a gateway credential into the Claude settings'
         }
     }
 }
@@ -7522,152 +7567,6 @@ function Assert-StaleGatewayProcessIdentityRejected(
     }
 }
 
-function Get-ClaudeNativeOtlpRotationProbes([string]$ClaudeHome) {
-    $settingsPath = Join-Path ([IO.Path]::GetFullPath($ClaudeHome)) 'settings.json'
-    if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
-        throw 'packaged rotation did not persist Claude native OTLP settings'
-    }
-    try {
-        $settings = [IO.File]::ReadAllText($settingsPath) | ConvertFrom-Json -ErrorAction Stop
-    } catch {
-        throw 'packaged rotation persisted invalid Claude settings JSON'
-    }
-    $settingsEnvProperty = $settings.PSObject.Properties['env']
-    if ($null -eq $settingsEnvProperty) {
-        throw 'packaged rotation persisted no Claude native OTLP environment'
-    }
-    $settingsEnv = $settingsEnvProperty.Value
-    $telemetryProperty = $settingsEnv.PSObject.Properties['CLAUDE_CODE_ENABLE_TELEMETRY']
-    if ($null -eq $telemetryProperty -or $telemetryProperty.Value -isnot [string] -or
-        [string]$telemetryProperty.Value -cne '1') {
-        throw 'packaged rotation did not enable Claude native telemetry'
-    }
-
-    $probes = [Collections.Generic.List[object]]::new()
-    foreach ($signal in @('logs', 'metrics')) {
-        $upperSignal = $signal.ToUpperInvariant()
-        $prefix = "OTEL_EXPORTER_OTLP_$upperSignal"
-        $requiredValues = @{}
-        foreach ($name in @(
-            "OTEL_${upperSignal}_EXPORTER",
-            "${prefix}_PROTOCOL",
-            "${prefix}_ENDPOINT",
-            "${prefix}_HEADERS"
-        )) {
-            $property = $settingsEnv.PSObject.Properties[$name]
-            if ($null -eq $property -or $property.Value -isnot [string] -or
-                [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-                throw "packaged rotation persisted incomplete Claude $signal OTLP settings"
-            }
-            $requiredValues[$name] = [string]$property.Value
-        }
-        if ($requiredValues["OTEL_${upperSignal}_EXPORTER"] -cne 'otlp' -or
-            $requiredValues["${prefix}_PROTOCOL"] -cne 'http/json') {
-            throw "packaged rotation persisted an unsupported Claude $signal OTLP transport"
-        }
-
-        $endpointText = $requiredValues["${prefix}_ENDPOINT"].Trim()
-        $endpoint = $null
-        if ($endpointText.Contains('\') -or $endpointText.Contains('?') -or
-            $endpointText.Contains('#') -or
-            -not [Uri]::TryCreate($endpointText, [UriKind]::Absolute, [ref]$endpoint) -or
-            $endpoint.Scheme -cne 'http' -or
-            -not [string]::IsNullOrEmpty($endpoint.UserInfo) -or
-            -not [string]::IsNullOrEmpty($endpoint.Query) -or
-            -not [string]::IsNullOrEmpty($endpoint.Fragment) -or
-            $endpoint.Port -lt 1 -or $endpoint.Port -gt 65535 -or
-            $endpoint.AbsolutePath -cne "/v1/$signal") {
-            throw "refusing an unsafe Claude $signal OTLP authentication probe"
-        }
-        $hostName = $endpoint.DnsSafeHost.ToLowerInvariant()
-        if ($hostName -notin @('127.0.0.1', '::1')) {
-            throw "refusing a non-loopback Claude $signal OTLP authentication probe"
-        }
-
-        $headers = [Collections.Generic.Dictionary[string,string]]::new(
-            [StringComparer]::OrdinalIgnoreCase
-        )
-        foreach ($part in $requiredValues["${prefix}_HEADERS"].Split(',')) {
-            $trimmedPart = $part.Trim()
-            $separator = $trimmedPart.IndexOf('=')
-            if ($separator -le 0) {
-                throw "packaged rotation persisted invalid Claude $signal OTLP headers"
-            }
-            $name = $trimmedPart.Substring(0, $separator).Trim().ToLowerInvariant()
-            $value = $trimmedPart.Substring($separator + 1)
-            if ($name -notin @('authorization', 'x-defenseclaw-client', 'x-defenseclaw-source') -or
-                [string]::IsNullOrEmpty($value) -or $value.Contains("`r") -or $value.Contains("`n") -or
-                $headers.ContainsKey($name)) {
-                throw "packaged rotation persisted invalid Claude $signal OTLP headers"
-            }
-            $headers.Add($name, $value)
-        }
-        if ($headers.Count -ne 3 -or
-            $headers['authorization'] -cnotmatch '^Bearer [0-9a-f]{64}$' -or
-            $headers['x-defenseclaw-client'] -cne 'claudecode-otel/1.0' -or
-            $headers['x-defenseclaw-source'] -cne 'claudecode') {
-            throw "packaged rotation persisted invalid Claude $signal OTLP identity headers"
-        }
-        $probes.Add([pscustomobject]@{
-            Signal = $signal
-            Endpoint = $endpoint
-            Headers = $headers
-        })
-    }
-    if (-not [string]::Equals(
-        $probes[0].Endpoint.GetLeftPart([UriPartial]::Authority),
-        $probes[1].Endpoint.GetLeftPart([UriPartial]::Authority),
-        [StringComparison]::OrdinalIgnoreCase
-    )) {
-        throw 'Claude logs and metrics OTLP endpoints do not share one loopback gateway'
-    }
-    return @($probes)
-}
-
-function Assert-ClaudeNativeOtlpRotationAuthentication(
-    [object[]]$Probes,
-    [int]$GatewayPort,
-    [object]$GatewayIdentity,
-    [string]$GatewayPath
-) {
-    Assert-ClaudeNativeOtlpProbeAuthority $Probes $GatewayPort
-    Assert-OwnedGatewayApiListener $GatewayIdentity $GatewayPath $GatewayPort
-    $handler = [Net.Http.HttpClientHandler]::new()
-    $handler.AllowAutoRedirect = $false
-    $handler.UseDefaultCredentials = $false
-    $handler.UseProxy = $false
-    $client = [Net.Http.HttpClient]::new($handler, $true)
-    $client.Timeout = [TimeSpan]::FromSeconds(10)
-    try {
-        foreach ($probe in $Probes) {
-            Assert-OwnedGatewayApiListener $GatewayIdentity $GatewayPath $GatewayPort
-            $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get, $probe.Endpoint)
-            $response = $null
-            try {
-                foreach ($header in $probe.Headers.GetEnumerator()) {
-                    if (-not $request.Headers.TryAddWithoutValidation($header.Key, $header.Value)) {
-                        throw "could not construct the Claude $($probe.Signal) OTLP authentication probe"
-                    }
-                }
-                try {
-                    $response = $client.SendAsync($request).GetAwaiter().GetResult()
-                } catch {
-                    throw "Claude $($probe.Signal) OTLP authentication probe did not reach the loopback gateway"
-                }
-                if ($response.StatusCode -ne [Net.HttpStatusCode]::MethodNotAllowed) {
-                    throw "persisted Claude $($probe.Signal) OTLP credentials were not accepted by the rotated gateway"
-                }
-                Assert-OwnedGatewayApiListener $GatewayIdentity $GatewayPath $GatewayPort
-            } finally {
-                if ($null -ne $response) { $response.Dispose() }
-                $request.Dispose()
-            }
-        }
-    } finally {
-        $client.Dispose()
-    }
-}
-
 function Get-PackagedRotationConnectorPosture([object]$Status) {
     $rows = @($Status.connectors | Sort-Object { [string]$_.name })
     if ($rows.Count -ne 2 -or (@($rows | ForEach-Object { [string]$_.name }) -join ',') -cne 'claudecode,codex') {
@@ -7690,7 +7589,35 @@ function Get-PackagedRotationConnectorPosture([object]$Status) {
     })
 }
 
+# Test-PackagedRotationGap1330Posture is the exact posture of GAP-1330 (a
+# known 1.0.4 issue, fixed in 1.0.5): a per-user install under the default
+# policy tier ignores the saved closed fail mode and runs open, so status
+# reports configured closed but desired/effective/runtime open, with Claude
+# Code's settings env (which setup writes closed) as drift. Only that exact
+# posture skips the closed-posture check; the rotation must still keep it
+# unchanged.
+function Test-PackagedRotationGap1330Posture([object[]]$Posture) {
+    foreach ($row in $Posture) {
+        $drift = @($row.fail_drift | ForEach-Object { [string]$_ })
+        $expectedDrift = if ([string]$row.name -ceq 'claudecode') { 'claude-env-closed' } else { 'policy-unverified' }
+        if ([string]$row.mode -cne 'action' -or -not [bool]$row.enabled -or
+            [string]$row.source -cne 'manual' -or
+            [string]$row.fail_configured -cne 'closed' -or
+            [string]$row.fail_desired -cne 'open' -or
+            [string]$row.fail_effective -cne 'open' -or
+            [string]$row.fail_runtime -cne 'open' -or
+            $drift.Count -ne 1 -or $drift[0] -cne $expectedDrift) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Assert-PackagedRotationActionClosedPosture([object[]]$Posture) {
+    if (Test-PackagedRotationGap1330Posture $Posture) {
+        Write-Host 'SKIP: exact action/closed rotation posture (GAP-1330: known 1.0.4 issue, fixed in 1.0.5)'
+        return
+    }
     foreach ($row in $Posture) {
         # status is passive (GAP-1466): it does not start the Codex app-server
         # to check the effective hook policy, so Codex reports exactly
@@ -7833,7 +7760,6 @@ function Write-PackagedRotationFailureDiagnostic(
 
 function Assert-PackagedClaudeTokenRotation(
     [string]$Launcher,
-    [string]$Python,
     [string]$GatewayPath,
     [string]$DataRoot,
     [string]$CodexHome,
@@ -7937,41 +7863,18 @@ function Assert-PackagedClaudeTokenRotation(
     if (-not [bool]$status.sidecar.running) {
         throw 'packaged token rotation did not preserve the ready dual-connector roster'
     }
-    $gatewayPort = Get-PackagedGatewayApiPort $Python $DataRoot
     $gatewayIdentity = Get-GatewayIdentity $DataRoot
     Assert-StaleGatewayProcessIdentityRejected $gatewayIdentity $GatewayPath
-    $probes = @(Get-ClaudeNativeOtlpRotationProbes $ClaudeHome)
-    $credentialValues = [Collections.Generic.List[string]]::new()
-    [void]$credentialValues.Add($tokenA)
-    [void]$credentialValues.Add($tokenB)
-    $scopedTokens = [Collections.Generic.List[string]]::new()
-    foreach ($probe in $probes) {
-        $authorization = [string]$probe.Headers['authorization']
-        $scopedToken = $authorization.Substring('Bearer '.Length)
-        if ([string]::Equals($scopedToken, $tokenA, [StringComparison]::Ordinal) -or
-            [string]::Equals($scopedToken, $tokenB, [StringComparison]::Ordinal)) {
-            throw 'packaged Claude OTLP settings substituted a gateway master token for scoped credentials'
-        }
-        [void]$scopedTokens.Add($scopedToken)
-        [void]$credentialValues.Add($authorization)
-        [void]$credentialValues.Add($scopedToken)
-    }
-    if ($scopedTokens.Count -ne 2 -or
-        -not [string]::Equals($scopedTokens[0], $scopedTokens[1], [StringComparison]::Ordinal)) {
-        throw 'packaged Claude logs and metrics did not persist the same scoped credential'
-    }
+    Assert-ClaudeNativeOtlpOffAfterRotation $ClaudeHome @($tokenA, $tokenB)
     Assert-WindowsNativeCredentialValuesAbsent `
         @($setupCodexResult, $setupClaudeResult, $statusBeforeResult, $rotateResult, $statusResult) `
-        $credentialLogPaths @($credentialValues)
-    Assert-ClaudeNativeOtlpForeignPortRejected $probes $gatewayPort
-    Assert-ClaudeNativeOtlpRotationAuthentication `
-        $probes $gatewayPort $gatewayIdentity $GatewayPath
+        $credentialLogPaths @($tokenA, $tokenB)
     foreach ($defaultHome in @($DefaultCodexHome, $DefaultClaudeHome)) {
         if (Test-Path -LiteralPath $defaultHome) {
             throw 'packaged token rotation wrote to a fallback connector home'
         }
     }
-    Write-Host 'Packaged dual-connector token rotation authenticated exact Claude logs and metrics settings.'
+    Write-Host 'Packaged dual-connector token rotation replaced the gateway token, kept the connector posture and kept Claude native telemetry off.'
 }
 
 function Invoke-Contract {
@@ -8245,7 +8148,7 @@ function Invoke-Contract {
         }
         if ($Connector -eq 'claudecode') {
             Assert-PackagedClaudeTokenRotation `
-                $launcher (Join-Path $managedPython 'python.exe') $gateway `
+                $launcher $gateway `
                 $dataRoot $codexHome $claudeHome `
                 $defaultCodexHome $defaultClaudeHome $root
         }

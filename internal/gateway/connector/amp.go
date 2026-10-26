@@ -136,6 +136,11 @@ func (c *AMPConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 			[]byte("const DC_PER_USER_NATIVE_POST: string = \"1\"\n"),
 			[]byte(`execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR]`),
 		)
+		// A plugin that posts through ~/.local/bin on a Setup install fails
+		// closed on every call (GAP-1847); it is repaired.
+		if gateway := perUserPluginGatewayBinary(opts); gateway != "" {
+			markers = append(markers, []byte(`const DC_GATEWAY_BINARY: string = "`+javaScriptStringContent(gateway)+"\"\n"))
+		}
 	}
 	if pluginSecureClientProfile(opts) {
 		markers = append(markers,

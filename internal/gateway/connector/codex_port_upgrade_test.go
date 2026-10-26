@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -34,6 +35,10 @@ func TestCodexUpgradeKeepsOperatorAuthorizationOnChangedCollector(t *testing.T) 
 				if err != nil {
 					t.Fatal(err)
 				}
+				// The secret decides: a product bearer makes the whole exporter
+				// the product's, even on an operator endpoint, so it is removed;
+				// an operator credential keeps the exporter byte for byte, stale
+				// markers included.
 				for _, auth := range []struct{ name, value, want string }{
 					{"product", "product", ""},
 					{"operator", "Bearer operator-collector-token", "Bearer operator-collector-token"},
@@ -71,15 +76,13 @@ func TestCodexUpgradeKeepsOperatorAuthorizationOnChangedCollector(t *testing.T) 
 							if err := toml.Unmarshal(data, &parsed); err != nil {
 								t.Fatal(err)
 							}
-							exporter := parsed["otel"].(map[string]interface{})["exporter"]
-							http := exporter.(map[string]interface{})["otlp-http"].(map[string]interface{})
-							headers, _ := http["headers"].(map[string]interface{})
-							gotAuth, _ := headers["authorization"].(string)
-							if http["endpoint"] != "https://operator.example.test/v1/logs" || gotAuth != auth.want {
-								t.Fatalf("collector or authorization changed: endpoint=%v auth_matches=%t", http["endpoint"], gotAuth == auth.want)
-							}
-							if _, exists := headers["x-defenseclaw-source"]; exists {
-								t.Fatal("product marker survived")
+							otel, _ := parsed["otel"].(map[string]interface{})
+							if auth.want == "" {
+								if _, kept := otel["exporter"]; kept || strings.Contains(string(data), productToken) {
+									t.Fatal("exporter carrying the product bearer survived")
+								}
+							} else if !strings.Contains(string(data), config[len(base):]) {
+								t.Fatalf("operator exporter bytes changed:\n%s", data)
 							}
 							if residue, err := UserNativeOTLPResidue("codex", SetupOpts{DataDir: dir, ManagedEnterprise: true}); err != nil || len(residue) != 0 {
 								t.Fatalf("cleanup left native OTLP residue: %v, %v", residue, err)
@@ -100,6 +103,11 @@ func TestCodexPerUserUpgradeRevokesNativeExporterWithoutRemovingOperatorOTel(t *
 				name = goos + "/managed"
 			}
 			t.Run(name, func(t *testing.T) {
+				if managed && runtime.GOOS == "windows" {
+					// GAP-1436: native Windows refuses a managed Setup without the
+					// machine requirements; the enterprise module covers it there.
+					t.Skip("managed Codex Setup needs the Windows machine requirements")
+				}
 				dir := t.TempDir()
 				configPath := filepath.Join(dir, "config.toml")
 				original := "model = \"gpt-5\"\n[otel]\nlog_user_prompt = false\n" +
@@ -114,8 +122,7 @@ func TestCodexPerUserUpgradeRevokesNativeExporterWithoutRemovingOperatorOTel(t *
 				c := NewCodexConnector()
 				opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", APIToken: "test-hook-token", GOOS: goos, ManagedEnterprise: managed}
 				earlier := opts
-				earlier.ManagedEnterprise = true // render the earlier native exporter
-				earlier.sandboxNativeOTLP = true
+				earlier.sandboxNativeOTLP = true // render the earlier native exporter
 				if err := c.Setup(context.Background(), earlier); err != nil {
 					t.Fatalf("earlier setup: %v", err)
 				}
@@ -182,12 +189,18 @@ func TestCodexReleasedNativeExporterUpgradeAcrossOS(t *testing.T) {
 				CodexConfigPathOverride = configPath
 				t.Cleanup(func() { CodexConfigPathOverride = prior })
 				c := NewCodexConnector()
-				// Use the per-user path to save the operator's preimage. Current
-				// managed Windows Setup must run through the machine installer;
-				// the released per-user OTEL shape is written below.
+				// A per-user seed records the same backup on every OS; a managed
+				// seed is refused on native Windows without its machine
+				// requirements (GAP-1436).
 				earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", APIToken: "test-hook-token", GOOS: goos}
 				if err := c.Setup(context.Background(), earlier); err != nil {
 					t.Fatalf("seed earlier setup backup: %v", err)
+				}
+				// Review of 70603235: a real upgrade keeps the scoped sidecar,
+				// which names the released bearer.
+				token, err := EnsureOTLPPathToken(dir, OTLPScopeCodex)
+				if err != nil {
+					t.Fatal(err)
 				}
 				var cfg map[string]interface{}
 				data, err := os.ReadFile(configPath)
@@ -203,7 +216,7 @@ func TestCodexReleasedNativeExporterUpgradeAcrossOS(t *testing.T) {
 						"endpoint": "http://127.0.0.1:19081/v1/" + signal,
 						"protocol": "json",
 						"headers": map[string]interface{}{
-							"authorization":        "Bearer released-static-token",
+							"authorization":        "Bearer " + token,
 							"x-defenseclaw-source": "codex",
 							"x-defenseclaw-client": "codex-otel/1.0",
 						},
@@ -219,7 +232,6 @@ func TestCodexReleasedNativeExporterUpgradeAcrossOS(t *testing.T) {
 				}
 				upgrade := earlier
 				upgrade.APIAddr = "127.0.0.1:19082"
-				upgrade.ManagedEnterprise = false
 				if err := c.Setup(context.Background(), upgrade); err != nil {
 					t.Fatalf("per-user upgrade: %v", err)
 				}
@@ -227,7 +239,7 @@ func TestCodexReleasedNativeExporterUpgradeAcrossOS(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if strings.Contains(string(data), "released-static-token") || strings.Contains(string(data), "http://127.0.0.1:19081/") {
+				if strings.Contains(string(data), token) || strings.Contains(string(data), "http://127.0.0.1:19081/") {
 					t.Fatal("released native exporter or credential survived the port change")
 				}
 				cfg = nil
@@ -252,7 +264,7 @@ func TestCodexReleasedNativeExporterUpgradeAcrossOS(t *testing.T) {
 func TestCodexReleasedOtelUpgradePreservesOperatorBytes(t *testing.T) {
 	for _, release := range []string{"1.0.2", "1.0.3"} {
 		for _, goos := range []string{"linux", "darwin", "windows"} {
-			for _, owner := range []string{"product", "user_edited", "user_preference"} {
+			for _, owner := range []string{"product", "product_markerless", "user_markerless", "product_bearer_operator_endpoint", "user_edited", "user_preference"} {
 				t.Run(release+"/"+goos+"/"+owner, func(t *testing.T) {
 					dir := t.TempDir()
 					configPath := filepath.Join(dir, "config.toml")
@@ -272,12 +284,44 @@ func TestCodexReleasedOtelUpgradePreservesOperatorBytes(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					fixturePath := filepath.Join("testdata", "codex_otel_"+release+"_"+owner+".toml")
+					fixtureOwner := owner
+					if strings.HasSuffix(owner, "_markerless") || owner == "product_bearer_operator_endpoint" {
+						fixtureOwner = "product"
+					}
+					fixturePath := filepath.Join("testdata", "codex_otel_"+release+"_"+fixtureOwner+".toml")
 					fixture, err := os.ReadFile(fixturePath)
 					if err != nil {
 						t.Fatal(err)
 					}
+					fixture = []byte(strings.ReplaceAll(string(fixture), "\r\n", "\n"))
 					fixture = []byte(strings.ReplaceAll(string(fixture), "fixture-os", goos))
+					productBearer := ""
+					if strings.HasSuffix(owner, "_markerless") || owner == "product_bearer_operator_endpoint" {
+						fixture = []byte(strings.ReplaceAll(string(fixture), "x-defenseclaw-client = 'codex-otel/1.0'\n", ""))
+						fixture = []byte(strings.ReplaceAll(string(fixture), "x-defenseclaw-source = 'codex'\n", ""))
+						bearer := "operator-collector-token"
+						if owner == "product_markerless" || owner == "product_bearer_operator_endpoint" {
+							bearer, err = EnsureOTLPPathToken(dir, OTLPScopeCodex)
+							if err != nil {
+								t.Fatal(err)
+							}
+							productBearer = bearer
+						}
+						fixture = []byte(strings.ReplaceAll(string(fixture), "f00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeed", bearer))
+						if owner == "product_bearer_operator_endpoint" {
+							fixture = []byte(strings.ReplaceAll(string(fixture), "http://127.0.0.1:19081", "https://collector.example.test"))
+						}
+					}
+					if owner == "product" {
+						// Review of 70603235: only a known credential proves the
+						// released exporter is the product's. A real upgrade keeps
+						// the scoped sidecar, which names the released bearer.
+						productBearer, err = EnsureOTLPPathToken(dir, OTLPScopeCodex)
+						if err != nil {
+							t.Fatal(err)
+						}
+						fixture = []byte(strings.ReplaceAll(string(fixture), "f00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeed", productBearer))
+					}
 					if goos == "windows" {
 						windowsLines := func(data []byte) []byte {
 							return []byte(strings.ReplaceAll(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n", "\r\n"))
@@ -297,14 +341,19 @@ func TestCodexReleasedOtelUpgradePreservesOperatorBytes(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if owner == "product" {
+					if owner == "product" || owner == "product_markerless" {
 						var parsed map[string]interface{}
 						if err := toml.Unmarshal(got, &parsed); err != nil {
 							t.Fatal(err)
 						}
 						_, retained := parsed["otel"]
-						if retained || strings.Contains(string(got), "released-static-token") {
-							t.Fatalf("released product exporter survived upgrade:\n%s", got)
+						if retained || productBearer != "" && strings.Contains(string(got), productBearer) {
+							t.Fatal("released product exporter or bearer survived upgrade")
+						}
+					} else if owner == "product_bearer_operator_endpoint" {
+						// The product bearer makes each exporter the product's.
+						if strings.Contains(string(got), "https://collector.example.test/v1/") || strings.Contains(string(got), productBearer) {
+							t.Fatal("exporter carrying the product bearer survived")
 						}
 					} else if !strings.Contains(string(got), string(fixture)) {
 						t.Fatalf("operator [otel] bytes changed during hook upgrade; want:\n%s\ngot:\n%s", fixture, got)

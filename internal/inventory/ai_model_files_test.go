@@ -433,6 +433,9 @@ func TestDetectModelFilesRejectsMalformedOllamaManifest(t *testing.T) {
 // a PPPC profile no longer reports every scan partial. Ordinary permission
 // errors, and EPERM on other systems, still count.
 func TestModelScanSkipsSymlinkIntoMacOSProtectedFolder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("macOS privacy folders: the symlink is resolved by the host, and a Windows host is not a macOS one")
+	}
 	restoreGOOS, restoreAccess := discoveryGOOS, macOSFullDiskAccess
 	t.Cleanup(func() { discoveryGOOS, macOSFullDiskAccess = restoreGOOS, restoreAccess })
 	discoveryGOOS = "darwin"

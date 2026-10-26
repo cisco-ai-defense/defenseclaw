@@ -65,7 +65,6 @@ func TestUnixPrivateWalkDoesNotHangOnAFolderThatNeverOpens(t *testing.T) {
 // skipped.
 func TestUnixPrivateWalkSkipsPrivacyProtectedFolders(t *testing.T) {
 	home := filepath.Clean(t.TempDir())
-	opener := unixPrivateWalkOpener(home)
 	previousOpen := unixPrivateWalkOpenFile
 	t.Cleanup(func() { unixPrivateWalkOpenFile = previousOpen })
 	opened := map[string]bool{}
@@ -73,6 +72,8 @@ func TestUnixPrivateWalkSkipsPrivacyProtectedFolders(t *testing.T) {
 		opened[filepath.Base(dir)] = true
 		return nil, os.ErrNotExist
 	}
+	// The opener reads the open it makes when it is made.
+	opener := unixPrivateWalkOpener(home)
 	for _, dir := range []string{"Desktop", "documents", filepath.Join("Library", "Containers"), "Projects"} {
 		_, _ = opener(filepath.Join(home, dir))
 	}

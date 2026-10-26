@@ -66,6 +66,20 @@ type hotConfigHost struct {
 // and to policy a otherwise (the previous config, or the one an undo put
 // back). A gateway that adopts follows config.yaml; one that does not keeps
 // enforcing policy a, the previous config's.
+// digestThenOutage proves the running policy once, for the precommit check
+// that runs before config.yaml changes, and then fails with outage: the
+// gateway goes down during the apply, after that proof.
+func (host *hotConfigHost) digestThenOutage(outage error) func(context.Context) ([]byte, error) {
+	calls := 0
+	return func(ctx context.Context) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return host.digest(ctx)
+		}
+		return nil, outage
+	}
+}
+
 func (host *hotConfigHost) digest(context.Context) ([]byte, error) {
 	host.digestCalls++
 	effective := "sha256:" + strings.Repeat("a", 64)
@@ -758,7 +772,7 @@ func TestWindowsHotBundleNeverAdoptedDuringOutageRestoresPreviousConfig(t *testi
 			savedRestart, savedDigest := windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest
 			t.Cleanup(func() { windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest = savedRestart, savedDigest })
 			windowsEnterpriseHotConfigRestart = func() (bool, error) { return true, nil }
-			windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, errors.New("gateway stopped") }
+			windowsEnterprisePolicyDigest = host.digestThenOutage(errors.New("gateway stopped"))
 			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
 			applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
 				&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
@@ -794,7 +808,7 @@ func TestWindowsRepeatedBundleGatewayOutageRequiresRetry(t *testing.T) {
 		return opt, []byte(confirmed), &enterprisebundle.Ref{BundleID: host.bundleID, Version: host.bundleVersion, SignerKeyID: "k1"}, nil
 	}
 	windowsEnterpriseHotConfigRestart = func() (bool, error) { return true, nil }
-	windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, errors.New("gateway stopped") }
+	windowsEnterprisePolicyDigest = host.digestThenOutage(errors.New("gateway stopped"))
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
 	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
 		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)

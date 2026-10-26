@@ -617,24 +617,45 @@ const lateGatewayThreadEnv = "DC_PROCESSUTIL_LATE_GATEWAY_THREAD"
 
 const clearParentDeathEnv = "DC_PROCESSUTIL_CLEAR_PARENT_DEATH"
 
-func TestRunTrackedCannotClearParentDeathSignal(t *testing.T) {
-	if os.Getenv(clearParentDeathEnv) != "" {
-		if err := unix.Prctl(unix.PR_SET_PDEATHSIG, 0, 0, 0, 0); err != unix.EPERM {
-			t.Fatalf("scanner cleared parent-death signal: %v", err)
-		}
-		uid, gid := os.Geteuid(), os.Getegid()
-		if err := unix.Setresuid(uid, uid, uid); err != nil {
-			t.Fatalf("scanner could not set its own UID: %v", err)
-		}
-		if err := unix.Setresgid(gid, gid, gid); err != nil {
-			t.Fatalf("scanner could not set its own GID: %v", err)
-		}
-		var signal int
-		if err := unix.Prctl(unix.PR_GET_PDEATHSIG, uintptr(unsafe.Pointer(&signal)), 0, 0, 0); err != nil || signal != int(unix.SIGKILL) {
-			t.Fatalf("scanner lost its parent-death signal after an identity call: signal=%d err=%v", signal, err)
-		}
+// The kernel keeps a parent-death signal per thread: the scanner's main
+// thread, the one that executed it, has it, and every thread Go starts later
+// has none. A test goroutine runs on any thread, so PR_GET_PDEATHSIG there
+// read 0 whenever the goroutine was not on the main thread. The scanner side
+// of TestRunTrackedCannotClearParentDeathSignal therefore runs in init, which
+// Go runs on the main thread, and exits before any test starts.
+func init() {
+	if os.Getenv(clearParentDeathEnv) == "" {
 		return
 	}
+	runtime.LockOSThread()
+	if err := scannerKeepsParentDeathSignal(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+// scannerKeepsParentDeathSignal is the scanner's half of the test, on the
+// main thread: it cannot clear the signal, and setting its own IDs keeps it.
+func scannerKeepsParentDeathSignal() error {
+	if err := unix.Prctl(unix.PR_SET_PDEATHSIG, 0, 0, 0, 0); err != unix.EPERM {
+		return fmt.Errorf("scanner cleared parent-death signal: %v", err)
+	}
+	uid, gid := os.Geteuid(), os.Getegid()
+	if err := unix.Setresuid(uid, uid, uid); err != nil {
+		return fmt.Errorf("scanner could not set its own UID: %v", err)
+	}
+	if err := unix.Setresgid(gid, gid, gid); err != nil {
+		return fmt.Errorf("scanner could not set its own GID: %v", err)
+	}
+	var signal int
+	if err := unix.Prctl(unix.PR_GET_PDEATHSIG, uintptr(unsafe.Pointer(&signal)), 0, 0, 0); err != nil || signal != int(unix.SIGKILL) {
+		return fmt.Errorf("scanner lost its parent-death signal after an identity call: signal=%d err=%v", signal, err)
+	}
+	return nil
+}
+
+func TestRunTrackedCannotClearParentDeathSignal(t *testing.T) {
 	cmd := CommandContext(context.Background(), os.Args[0], "-test.run=^TestRunTrackedCannotClearParentDeathSignal$")
 	cmd.Env = append(os.Environ(), clearParentDeathEnv+"=1")
 	var out strings.Builder

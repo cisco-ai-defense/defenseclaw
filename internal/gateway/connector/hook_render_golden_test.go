@@ -296,7 +296,7 @@ const bridgeHostTemplateDir = "testdata/bridge_host"
 var bridgeHostTemplateFields = []string{
 	"APIAddr", "TokenFileJS", "FailMode", "HookSocketJS", "ServiceUID",
 	"ForeignHookGuardJS", "InstallMarkerJS", "ListenerProofJS", "OutageFailMode",
-	"LifecycleMarkerJS",
+	"LifecycleMarkerJS", "GatewayBinaryJS",
 }
 
 // renderBridgeHostTemplate resolves a bridge template's sandbox branches to
