@@ -90,7 +90,12 @@ func claudeCodeEffectiveHookContract(opts SetupOpts) (bool, error) {
 	activeManaged := managed.active()
 	// Unix guardian installs harden per-user hook scripts. Only the native
 	// enterprise path pins an administrator-owned executable in managed policy.
-	managedPolicy := opts.ManagedEnterprise && strings.TrimSpace(opts.HookExecutable) != ""
+	// A macOS Secure Client install names the Secure Client gateway as its
+	// HookExecutable (the listener proof, GAP-0810) but registers the per-user
+	// shell hook in the user's settings (claudeCodeHookInvocation), so that is
+	// the source to verify.
+	managedPolicy := opts.ManagedEnterprise && strings.TrimSpace(opts.HookExecutable) != "" &&
+		!(runtime.GOOS != "windows" && shellHookSecureClientProfile(opts))
 	if managedPolicy && activeManaged == managed.userFallback {
 		// HKCU is a user-writable convenience tier. Restoring the higher file
 		// drop-in supersedes it, so even a disabling fallback remains ordinary,
