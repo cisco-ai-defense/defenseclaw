@@ -1474,6 +1474,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1568", page: "enterprise/configure/reference.mdx", has: ["`! secret remove: done with N warnings`", "`! secret remove: nothing to do (up_to_date), N warnings`"] },
   { gap: "GAP-1573", page: "get-started/install.mdx", section: "Check it worked", has: ["`✓ All components in sync.`", "piped to another command, as above, they use text"] },
   { gap: "GAP-1581", page: "get-started/upgrade.mdx", section: "Rollback", has: ["Rollback needs a previous install that was initialized.", "undoes itself and exits 1"] },
+  { gap: "GAP-1567", page: "for-agents/write-a-rule.mdx", has: ["In action mode DefenseClaw blocks an agent that copies into `~/.defenseclaw` (`tamper.detector_state_write`"] },
   // r105-rows-end
 ];
 
