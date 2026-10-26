@@ -398,3 +398,35 @@ func TestAccountOpenShellReportsChangedManagedRender(t *testing.T) {
 		t.Fatal("status missed the malformed edited render")
 	}
 }
+
+// GAP-0730: install setup (the managed default on these hosts) runs the
+// administrator's rendered gateway.toml too, so the daemon reports its hand
+// edit as drift (the settings_drift event and counter) as status does; it is
+// no pause, and a render setup mode cannot read is no refusal.
+func TestAccountOpenShellReportsChangedRenderInSetupMode(t *testing.T) {
+	r := newOpenShellRig(t, "linux")
+	r.holder = func(int) int { return 5001 }
+	r.active, r.pid = true, 77
+	configPath := filepath.Join(t.TempDir(), openshell.GatewayTOMLFile)
+	r.args = filepath.Join(r.o.home, ".local", "bin", "openshell-gateway") + " --config " + configPath
+	r.o.readRendered = func(string, string) (openshell.RenderedGateway, string, error) {
+		return openshell.RenderedGateway{BindAddress: "127.0.0.1:17671"}, "sha256:edited", nil
+	}
+	s := sandboxrelay.DaemonSettings{Enterprise: sandboxrelay.EnterpriseOpenShell{
+		Install: "setup", Driver: "docker", GatewayPort: 17670,
+		GatewayConfigPath: configPath, GatewayConfigDigest: "sha256:installed",
+	}}
+	drift, err := r.o.Drift(s)
+	if err != nil || len(drift) != 1 || driftEventField(drift[0].Field) != "gateway_configuration" {
+		t.Fatalf("setup mode, edited render: drift = %v, %v", drift, err)
+	}
+	if len(blockingOpenShellDrift(drift)) != 0 {
+		t.Fatalf("the edited render pauses sandboxes: %v", drift)
+	}
+	r.o.readRendered = func(string, string) (openshell.RenderedGateway, string, error) {
+		return openshell.RenderedGateway{}, "", errors.New("unreadable")
+	}
+	if drift, err := r.o.Drift(s); err != nil || len(drift) != 0 {
+		t.Fatalf("setup mode, unreadable render: drift = %v, %v", drift, err)
+	}
+}
