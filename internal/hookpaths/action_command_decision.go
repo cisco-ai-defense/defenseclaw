@@ -154,18 +154,28 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 				}
 				continue
 			}
-			words, start := scan.words, 0
-			for i, word := range words {
-				switch word {
-				case ";", "&", "&&", "|", "||":
-					if actionPrivateKeyReadWords(words[start:i], cwd, home, keyReadWindows, 0) {
-						return true
+			// A reader after a directory change reads relative to it, in
+			// any spelling of the drive (cd /c/Users/me && head .ssh/id_rsa,
+			// GAP-1823).
+			words, start, dir := scan.words, 0, cwd
+			for i := 0; i <= len(words); i++ {
+				if i < len(words) {
+					switch words[i] {
+					case ";", "&", "&&", "|", "||":
+					default:
+						continue
 					}
-					start = i + 1
 				}
-			}
-			if actionPrivateKeyReadWords(words[start:], cwd, home, keyReadWindows, 0) {
-				return true
+				statement := words[start:i]
+				if actionPrivateKeyReadWords(statement, dir, home, keyReadWindows, 0) {
+					return true
+				}
+				if len(statement) == 2 && actionWindowsLocationProgram(statement[0]) {
+					if next, ok := actionWindowsPath(statement[1], dir, home); ok {
+						dir = next
+					}
+				}
+				start = i + 1
 			}
 		}
 		return false
