@@ -3804,6 +3804,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	} else if err := env.clearRotationIntent(); err != nil {
 		errs = append(errs, err)
 	}
+	l.removeKitRotationJournal()
 	// No config is running once the deployment is gone; a reinstall that
 	// keeps the retained config.yaml starts without an old rejection.
 	env.removeRejectedConfig()
