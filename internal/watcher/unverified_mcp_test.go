@@ -51,6 +51,14 @@ func (s *erringScanner) Scan(context.Context, string) (*scanner.ScanResult, erro
 func TestUnverifiedMCPServerFollowsTheUnverifiedServerSetting(t *testing.T) {
 	timeout := fmt.Errorf("scanner: mcp-scanner could not complete: %w", context.DeadlineExceeded)
 	refusal := fmt.Errorf("scanner: mcp-scanner exited 1: %w", scanner.ErrMCPScanRefused)
+	// GAP-1277: the scanner's own answer for a URL whose host has no DNS
+	// answer (.invalid never resolves, RFC 6761).
+	t.Setenv("DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS", "")
+	_, unresolved := scanner.NewMCPScannerFromLLM(config.MCPScannerConfig{Binary: "mcp-scanner"}, config.LLMConfig{}, config.CiscoAIDefenseConfig{}).
+		Scan(context.Background(), "https://t11-dns.invalid/mcp")
+	if unresolved == nil {
+		t.Fatal("scan of https://t11-dns.invalid/mcp did not fail")
+	}
 	for _, tc := range []struct {
 		name      string
 		setting   string
@@ -62,6 +70,8 @@ func TestUnverifiedMCPServerFollowsTheUnverifiedServerSetting(t *testing.T) {
 		typeSkill bool
 	}{
 		{name: "default timeout is kept", err: timeout, wantKept: true},
+		{name: "default unresolved host is kept", err: unresolved, wantKept: true},
+		{name: "block keeps an unresolved host out", setting: "block", err: unresolved},
 		{name: "default exit is kept", err: fmt.Errorf("mcp-scanner exited 1"), wantKept: true},
 		{name: "warn on managed standalone is kept", setting: "warn", managed: true, err: timeout, wantKept: true},
 		{name: "block is blocked", setting: "block", err: timeout},
