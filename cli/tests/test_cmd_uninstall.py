@@ -1855,6 +1855,39 @@ class MCPWriterBackupRemovalTests(unittest.TestCase):
             self.assertTrue(config.exists())
             self.assertIn(str(backup), buf.getvalue())
 
+    def test_full_uninstall_removes_unregistered_mcp_writer_backups(self):
+        # GAP-1636: after a 1.0.3 -> 1.0.4 upgrade uninstall --all left
+        # ~/.codex/.defenseclaw-config.toml.bak (with DefenseClaw hook entries)
+        # because no registry entry named it. The writer's own name beside a
+        # config DefenseClaw edits is removed; other files stay.
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"HOME": tmp, "USERPROFILE": tmp}
+            drop = {k: "" for k in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "COPILOT_HOME", "OPENCODE_CONFIG_DIR")}
+            with patch.dict(os.environ, {**env, **drop}):
+                for key in drop:
+                    os.environ.pop(key, None)
+                codex = Path(tmp) / ".codex"
+                codex.mkdir()
+                (codex / "config.toml").write_text("[mcp_servers]\n")
+                backup = codex / ".defenseclaw-config.toml.bak"
+                backup.write_text('[hooks]\ncommand = "defenseclaw"\n')
+                other = codex / ".other-config.toml.bak"
+                other.write_text("mine")
+                link_target = Path(tmp) / "elsewhere"
+                link_target.write_text("not ours")
+                claude_backup = Path(tmp) / ".defenseclaw-claude.json.bak"
+                claude_backup.symlink_to(link_target)
+
+                with capture_click_output() as buf:
+                    cmd_uninstall._remove_unregistered_mcp_writer_backups()
+
+                self.assertFalse(backup.exists())
+                self.assertIn(str(backup), buf.getvalue())
+                self.assertTrue((codex / "config.toml").exists())
+                self.assertTrue(other.exists())
+                # Only a regular file is removed, never a link at that name.
+                self.assertTrue(claude_backup.is_symlink() and link_target.exists())
+
     def test_full_uninstall_removes_only_empty_legacy_codex_candidate(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}):
             codex = Path(tmp) / ".codex"

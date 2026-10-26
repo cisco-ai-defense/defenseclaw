@@ -2261,6 +2261,7 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
     if plan.remove_data_dir and plan.data_dir:
         # Before the data dir (and the registry naming them) goes.
         _remove_mcp_writer_backups(plan.data_dir)
+        _remove_unregistered_mcp_writer_backups()
         _remove_legacy_codex_candidate()
     if plan.remove_plugin and "openclaw" in plan.connectors:
         # Plugin removal is OpenClaw-specific. For other connectors the
@@ -2515,6 +2516,44 @@ def _remove_mcp_writer_backups(data_dir: str) -> None:
             ux.warn(f"could not remove the MCP config backup {expected}: {exc}")
             continue
         ux.ok(f"removed {expected}")
+
+
+def _remove_unregistered_mcp_writer_backups() -> None:
+    """Remove the MCP writer's backups the registry no longer names (GAP-1636).
+
+    An install upgraded from an earlier release can keep a
+    ``.defenseclaw-<name>.bak`` copy beside an agent config whose registry
+    entry it never had or already dropped, so ``uninstall --all`` left
+    ``~/.codex/.defenseclaw-config.toml.bak`` with DefenseClaw's hook entries.
+    The name is the writer's own marker: only a regular file at exactly the
+    name the writer gives one of the user-scope configs DefenseClaw edits is
+    removed.
+    """
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS, _managed_mcp_backup_path, mcp_source_locations
+
+    seen: set[str] = set()
+    for connector in KNOWN_CONNECTORS:
+        try:
+            locations = mcp_source_locations(connector)
+        except Exception:  # noqa: BLE001 - a connector whose paths do not resolve has no backup to find
+            continue
+        for location in locations:
+            if not os.path.isabs(location):
+                continue
+            backup = os.path.abspath(_managed_mcp_backup_path(location))
+            if backup in seen:
+                continue
+            seen.add(backup)
+            try:
+                if not stat.S_ISREG(os.lstat(backup).st_mode):
+                    continue
+                os.unlink(backup)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                ux.warn(f"could not remove the MCP config backup {backup}: {exc}")
+                continue
+            ux.ok(f"removed {backup}")
 
 
 def _remove_legacy_codex_candidate() -> None:
