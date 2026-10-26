@@ -211,7 +211,9 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		if raw == nil {
 			raw, _ = os.ReadFile(cfg.ConfigFilePath)
 		}
-		switch names := enterprisebundle.VersionDirsNamed(raw, bundlesDir); len(names) {
+		// Only a configuration value names a version directory: a YAML
+		// comment or key that mentions one is not configuration (GAP-1853).
+		switch names := enterprisebundle.VersionDirsInValues(raw, bundlesDir); len(names) {
 		case 0:
 			// A settings-only bundle (config.yaml names no bundle file) is
 			// still digested in the bundle scope: the signer and the staged
