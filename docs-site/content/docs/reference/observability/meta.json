@@ -3,6 +3,8 @@
   "pages": [
     "redaction",
     "dashboards",
+    "splunk",
+    "webhooks",
     "telemetry-identity"
   ]
 }

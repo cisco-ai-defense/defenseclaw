@@ -247,6 +247,52 @@ client or loader and runtime preloads (`LD_PRELOAD`, `LD_AUDIT`,
 `NODE_OPTIONS=--require`); use application control such as fapolicyd for
 those.
 
+### Which setting the warning names
+
+`unprivileged_user_namespaces` goes silent when any one of these holds:
+
+- `user.max_user_namespaces=0`
+- `kernel.unprivileged_userns_clone=0` (Debian kernels)
+- `kernel.apparmor_restrict_unprivileged_userns=1` and
+  `kernel.apparmor_restrict_unprivileged_unconfined=1` together
+
+If it cannot read `user.max_user_namespaces`, it says so and asks you to check
+the kernel setting. Otherwise the text depends on the host:
+
+| Host state | The warning names |
+| --- | --- |
+| `kernel.apparmor_restrict_unprivileged_userns=1`, unconfined restriction `0` or absent (the Ubuntu 24.04 default) | `kernel.apparmor_restrict_unprivileged_unconfined=1` or `user.max_user_namespaces=0`, and says an unconfined process can still switch profile with `aa-exec` |
+| Any other host | `user.max_user_namespaces=0`, or restricting unprivileged user namespaces with SELinux or AppArmor |
+
+`unprivileged_ptrace` goes silent when `kernel.yama.ptrace_scope` is `2` or `3`.
+Otherwise it asks for `kernel.yama.ptrace_scope=2`, because a tracer such as
+PRoot can rewrite the paths an agent opens. Both warnings end with the same
+advice: ask the host administrator to apply optional kernel hardening with
+their own tools. With either warning, `security_complete` is `false`, and
+`detect.sh --require-healthy` reports the host as not healthy.
+
+### What a private-namespace refusal looks like
+
+An agent started inside a private user namespace (for example with `unshare` or
+a sandbox tool) is refused, not allowed. Its hook call is blocked with:
+
+```text
+this agent runs in a private user namespace (for example one started with unshare or a sandbox tool), where DefenseClaw cannot check it or reach its hook socket
+```
+
+The user sees "Start the agent from your normal login session; if this
+continues, contact your administrator." The gateway records the refusal as an
+auth-failure audit row with reason `enterprise_managed_user_namespace`, and
+writes this line to its journal:
+
+```text
+[sidecar-api] hook socket refused uid=1001 connector="codex" route=<route> reason=enterprise_managed_user_namespace: the agent process context is unsafe or unverified
+```
+
+A traced hook is refused the same way ("this agent's hook is being traced, so
+another process may change the policy paths it reads"). To find these, search
+the gateway journal for `hook socket refused`.
+
 ## Tetragon and AI Discovery Plane C
 
 AI Discovery runtime detection has three planes: A watches inference compute, B

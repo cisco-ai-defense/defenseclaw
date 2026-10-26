@@ -118,6 +118,7 @@ Windsurf was renamed Devin Desktop (Cognition). The [`devin` connector](/docs/co
 - The gateway removes only the hook entries DefenseClaw wrote into `~/.codeium/windsurf/hooks.json`. Hooks from other tools stay.
 - It deletes `~/.defenseclaw/hooks/windsurf-hook.sh` (and `windsurf-hook.ps1`) and `~/.defenseclaw/connector_backups/windsurf/`.
 - It installs the Devin hooks in `~/.config/devin/config.json` (Windows: `%APPDATA%\devin\config.json`).
+- The gateway log records one line that starts with `Windsurf is now Devin Desktop:` and names what moved, for example `Windsurf is now Devin Desktop: moved connector "windsurf" to "devin" in <settings> of <config path>`.
 
 Devin Desktop builds before 3.9.19 still run the legacy Cascade agent without DefenseClaw hooks. To confirm, run `defenseclaw doctor`, check that the Devin hook row passes, then open a new Devin tab or session.
 

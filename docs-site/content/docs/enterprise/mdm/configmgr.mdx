@@ -83,6 +83,21 @@ a successful uninstall; only SYSTEM and administrators can write it. Do not use
 installed, which Configuration Manager reports as **Unknown**, not **Not installed**.
 The first install needs the config in the content: `/ensure` without one exits `1639`.
 
+### What Configuration Manager does by default
+
+These are Configuration Manager behaviors this recipe depends on. They come from
+Microsoft's documentation, not from DefenseClaw: check the linked pages if your
+site version differs.
+
+| Behavior | Default | Source |
+| --- | --- | --- |
+| Return codes | `0` Success (no reboot), `1641` Hard Reboot, `3010` Soft Reboot, `1618` Fast Retry. Other codes are failures. | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
+| Fast Retry | Retries every two hours, 10 times in total | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
+| Timeout | **Maximum allowed run time** is 120 minutes | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
+| Detection script | A non-zero exit code means failed, and the state is **Unknown**. Exit `0` with output on STDOUT is **Installed**. Exit `0` with no output is **Not installed**. Exit `0` with output on STDERR only is **Unknown**. | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
+| Re-evaluation | Clients re-evaluate deployments every seven days | [Client settings](https://learn.microsoft.com/en-us/intune/configmgr/core/clients/deploy/about-client-settings) |
+| Scripts the client runs | The **PowerShell execution policy** client setting is **All Signed** | [Client settings](https://learn.microsoft.com/en-us/intune/configmgr/core/clients/deploy/about-client-settings) |
+
 ## Keep it healthy
 
 The registry value proves what is installed, not that it enforces. To repair drift,

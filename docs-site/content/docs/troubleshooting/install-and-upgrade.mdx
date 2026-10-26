@@ -27,7 +27,7 @@ Fixes for installer messages and failed upgrades on macOS, Linux and Windows.
 
 ## Installer exit code 3
 
-**Cause.** DefenseClaw is installed, but a connector refused to start, usually because the agent updated.
+**Cause.** DefenseClaw is installed, but a connector refused to start, usually because the agent updated. The installer says `A connector needs attention before it is guarded again (see the gateway output above)`.
 
 **Fix.** `defenseclaw doctor`, then the next step on the failing row.
 
@@ -48,6 +48,30 @@ Fixes for installer messages and failed upgrades on macOS, Linux and Windows.
 **Fix.** Wait for it to finish, then run the command again.
 
 **Check.** The command proceeds.
+
+## `Could not copy <file> (...)` (Windows)
+
+**Cause.** The installer could not copy a file from `~/.defenseclaw` into its rollback folder. The message gives Windows' reason and lists any DefenseClaw program still running, for example `DefenseClaw programs still running: defenseclaw-gateway (PID 4120) (stop them with Stop-Process -Id <PID>)`.
+
+**Fix.** Stop the program the message names with `Stop-Process -Id <PID>`, or give your account read access to the file (`icacls "<file>"` shows who has it). Run the installer again.
+
+**Check.** The installer gets past the copy.
+
+## `DefenseClaw is in use by ...` (Windows)
+
+**Cause.** A program, such as the DefenseClaw TUI, has files in the install open. The installer waits up to a minute, then stops. Nothing was changed.
+
+**Fix.** Close the programs the message lists and run the installer again.
+
+**Check.** The installer proceeds.
+
+## `Could not save the current install; nothing was changed` (macOS and Linux)
+
+**Cause.** The installer could not copy the current install and its data into the rollback folder. The usual reason is disk space: it then also prints `Not enough free disk space next to ... for a rollback copy`, with the size it needs and the largest item. The installer put the old gateway back and changed nothing.
+
+**Fix.** Free the space it names (`df -h ~/.defenseclaw` shows what is left) or move the largest item elsewhere, then run the installer again. If the disk is fine, check that your account owns `~/.defenseclaw`.
+
+**Check.** The installer proceeds.
 
 ## `defenseclaw upgrade` changes nothing over SSH (Windows)
 

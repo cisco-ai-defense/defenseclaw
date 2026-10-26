@@ -96,6 +96,39 @@ watcher with `health.watcher.details.profile_roots_skipped: true`; the enterpris
 `status` and `verify` results do not report that field separately. See
 [Scan skills, MCP servers and plugins](#scan-skills-mcp-servers-and-plugins).
 
+## What Windows shows after an install
+
+The four services run under Automatic start, and Add/Remove Programs lists
+**Cisco DefenseClaw Enterprise**. The `DefenseClaw` event log (Event Viewer >
+Applications and Services Logs > DefenseClaw) holds one entry per lifecycle run.
+An agent reads its hooks when it starts, so a session a user opened before Setup
+activated DefenseClaw runs uninspected until it restarts: the Setup result,
+`status` and `verify` name each one per user with the
+`agent_sessions_restart_required` warning. To look from an elevated prompt:
+
+```powershell title="Elevated PowerShell"
+Get-Service DefenseClaw* | Format-Table Name, Status, StartType
+Get-WinEvent -LogName DefenseClaw -MaxEvents 3 | Format-Table TimeCreated, Id, LevelDisplayName, ProviderName
+```
+
+Each message names the action and the result and ends with its record, for
+example `DefenseClaw enterprise repair (standalone) ok=true exit=0 ... record <id>`.
+The matching line of `enterprise-lifecycle.log` has the same record.
+
+An event lists only the code of each error and warning (for example
+`warning agent_unprotected (x2)`), never its text. Any account can read the event
+logs, and the text can name other accounts, their SIDs, home folders and
+guardrail profiles. The text is in the lifecycle log line with the same record.
+
+Each elevated lifecycle run appends its result to the lifecycle log. Every run
+except a healthy `status` or `verify` also writes an event to the `DefenseClaw`
+log and a copy to the Application log (source `DefenseClaw Enterprise`). The
+marker key and the Add/Remove Programs entry change only after a successful run,
+and they are for detection only. The event IDs are in
+[Operate reference](/docs/enterprise/operate/reference#windows-event-ids). To check
+that the entries are genuine, run `enterprise windows events` ([Logs and
+events](/docs/enterprise/operate/operations#logs-and-events)).
+
 ## Custom rule packs
 
 A pack folder (a `guardrail.custom_packs` entry) must be
@@ -459,6 +492,20 @@ is the recovered deployment's status, with `transaction_pending: false`. When th
 recovery cannot prove that, the error names what is left (for example a purge or
 install-rollback intent), and the run below recovers it.
 
+Every lifecycle stops the DefenseClaw services before it changes anything. A
+service process that does not answer the stop request within 30 seconds (a hung
+or suspended process) is ended the way Windows ends a stuck stop, and the
+lifecycle continues. The result names each such process in a
+`service_process_terminated` warning.
+
+An uninstall that is refused or fails after it started, and rolls back, removes
+the managed-hook teardown journal it wrote
+(`C:\ProgramData\Cisco\DefenseClaw\install\managed-hooks-teardown-journal.json`).
+The next uninstall removes one that an earlier build left and says so in a
+`stale_lifecycle_journal_removed` warning. Without that, a later config change
+could make the uninstall fail with "managed-hook teardown journal does not match
+the protected deployment".
+
 Recover by running Setup as LocalSystem (Intune install behavior **System**).
 `/ensure` recovers the transaction then installs or upgrades; `/uninstall` recovers
 it and removes the deployment:
@@ -508,16 +555,46 @@ Other recovery notes:
   it leaves those administrator-selected paths in place. When `deployment.json` is readable, Setup
   `/ensure CONFIG=<approved config>` can replace the invalid installed config.
   All paths are checked again after Repair restores its managed permissions.
+- A runtime file the lifecycle cannot open at all keeps its permissions and is
+  named in a `runtime_file_skipped` warning. The audit database and the redaction
+  correlation key are never skipped.
 - The rollback never deletes content in an account's `%USERPROFILE%\.defenseclaw`
   it cannot prove DefenseClaw wrote; it renames the folder to
   `.defenseclaw.rollback-<random>`. Review and delete that folder.
 - A signed-out account whose `.defenseclaw` or `hooks` folder has the wrong owner
   or permissions is skipped with a `user_runtime_folder_untrusted` warning and
   repaired at its next sign-in.
+- For a signed-out account the rollback of a failed first install uses a
+  service-for-user (S4U) logon: a local account always, a domain account when a
+  domain controller answers. Set `DEFENSECLAW_WINDOWS_ROLLBACK_SIGNED_OUT_ACCOUNTS=0`
+  to skip signed-out accounts. No guardian is left to clean an account later, so
+  the result lists each item it could not remove as a `rollback_leftover`
+  warning, by account and connector, with the command that removes it.
 - The rollback of a failed first install acts as each account, which needs
   LocalSystem, and lists leftovers as `rollback_leftover` warnings. Setup run from
   an elevated administrator prompt cannot act as accounts, so run `/ensure` and
   `/uninstall` as LocalSystem while accounts have a connected session.
+
+### Recovery gateway refusal codes
+
+When the staged gateway fails a managed-hook step, recovery may rerun it with the
+gateway that ships beside the running Setup. If recovery declines, the result has
+a `recovery_gateway_not_used` warning with one of these reasons, and the staged
+gateway's error stands:
+
+| Reason | Meaning |
+| --- | --- |
+| `no_payload` | No gateway ships beside the running Setup |
+| `unsigned_scope` | The run is a certification run, not a production one |
+| `not_local_system` | The lifecycle does not run as LocalSystem |
+| `inside_install_root` | The candidate is the installed payload |
+| `untrusted` | The candidate fails the source or trust checks (an administrator-owned source on a local NTFS volume, and a valid signature or the pinned SHA-256) |
+| `same_binary` | The candidate is the staged gateway that already failed |
+| `version_unknown` | The release of the candidate or of the staged gateway cannot be read |
+| `older_release` | The candidate is older than the staged gateway |
+
+A failure that concerns file permissions is reported in plain terms. The
+internal detail is kept in a `lifecycle_diagnostic` warning for support.
 
 ### Run Setup as LocalSystem
 

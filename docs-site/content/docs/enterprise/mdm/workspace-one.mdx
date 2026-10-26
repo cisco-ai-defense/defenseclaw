@@ -207,12 +207,21 @@ lifecycle fails the install after rolling back; the result is in
   mode, deliver a new signed bundle instead)
   ([Roll back](/docs/enterprise/operate/lifecycle#roll-back)).
 
-Exit codes: `0` **Executed**; `1` failed and rolled back; `2` invalid settings
-(`mdm_invalid_arguments`; an invalid config exits `1`); `75` another run holds a lock,
-retried on the next run. Logs: the device's **Scripts** and **Sensors** tabs,
-`/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` (root, `0600`;
-uninstall removes this log with the machine state, so use the script log for the uninstall result) and
-`last-package-result.json`.
+#### macOS logs and exit codes
+
+| Where | What |
+| --- | --- |
+| Workspace ONE: the device's **Scripts** and **Sensors** tabs | Script status and logs, and sensor values |
+| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure runs, with their results (root, `0600`). Uninstall removes this log with the machine state; use the script log for the uninstall result. `detect.sh` does not log; it prints one line. |
+| `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The package's own `ensure` result |
+| `/Library/Logs/Cisco/DefenseClaw/lifecycle.log`, `verify.log` | The automatic apply and daily verify jobs |
+
+| Code | Meaning | In Workspace ONE |
+| --- | --- | --- |
+| `0` | Success, or nothing to do | **Executed** |
+| `1` | The action failed and rolled back, or the wrapper refused an input | **Failed**; read `errors[].code` in the script log |
+| `2` | Invalid arguments, such as a missing or malformed setting (`mdm_invalid_arguments`). A config that does not validate exits `1` (`config_invalid`). | **Failed**; fix the settings block |
+| `75` | Another lifecycle run or the package manager holds a lock | **Failed** for this run; the next periodic run retries |
 
 ## Linux
 

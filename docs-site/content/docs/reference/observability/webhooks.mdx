@@ -1,0 +1,69 @@
+---
+title: Webhook notifier reference
+description: Every defenseclaw setup webhook add flag, the secret variable names the prompt suggests, the address check on webhook URLs and the errors you can get.
+keywords:
+  - defenseclaw setup webhook add
+  - webhook flags
+  - webhook SSRF guard
+  - DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST
+  - DEFENSECLAW_ALLOW_CGNAT
+---
+
+Depth for [Set up webhook alerts](/docs/how-to/observability/set-up-webhook-alerts). `defenseclaw setup webhook` has the subcommands `add`, `list`, `show`, `test`, `enable`, `disable` and `remove`. It is separate from `defenseclaw setup observability add webhook`, which adds a generic HTTP JSON Lines telemetry destination.
+
+## Flags for `add`
+
+```text
+defenseclaw setup webhook add [OPTIONS] <type>
+```
+
+`<type>` is `slack`, `pagerduty`, `webex` or `generic` (a payload signed with HMAC-SHA256).
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--name TEXT` | Derived from the type and the URL host | The name shown in `list` and in the audit log |
+| `--url TEXT` | None | Required. Checked against the address check below when you add it, and again at delivery. |
+| `--secret-env TEXT` | None | The **name** of an environment variable, never the secret. Required for `pagerduty` and `webex`. It must look like a variable name (capital letters, digits and underscores). |
+| `--room-id TEXT` | None | Webex room ID. Required for `webex`, ignored for other types. |
+| `--min-severity [critical\|high\|medium\|low\|info]` | `HIGH` | Events below this level are dropped. Any letter case is accepted. |
+| `--events TEXT` | All categories | Comma-separated list from `block`, `scan`, `guardrail`, `drift`, `health` |
+| `--timeout-seconds INTEGER` | `10` | Timeout for each delivery |
+| `--cooldown-seconds INTEGER` | `300` (the runtime default when omitted) | Deduplication window. `0` turns it off. |
+| `--enabled` / `--disabled` | `--enabled` | Initial state |
+| `--connector TEXT` | Global | Scope the webhook to one connector. That connector's events go to its own webhooks when it has any, and to the global webhooks otherwise. `list` and `remove` take the same option. |
+| `--dry-run` | Off | Print the YAML changes without writing them |
+| `--non-interactive` | Off | Use flags only. A missing required value exits non-zero with a message such as `pagerduty: --secret-env is required (routing key / bot token)`. |
+
+The interactive prompt suggests these variable names for `--secret-env`:
+
+| Type | Suggested variable |
+| --- | --- |
+| `slack` | None. The secret is in the URL. |
+| `pagerduty` | `DEFENSECLAW_PD_ROUTING_KEY` |
+| `webex` | `DEFENSECLAW_WEBEX_TOKEN` |
+| `generic` | `DEFENSECLAW_WEBHOOK_SECRET`, after it asks whether to sign with HMAC |
+
+Store the value with `defenseclaw keys set <NAME>` before you test.
+
+## The address check
+
+Every URL goes through the same check at `add` time and again at delivery, so a hand edit to `config.yaml` is caught too:
+
+- The scheme is `http://` or `https://`, and the host parses.
+- The host resolves to a public address. Private (RFC 1918 and IPv6 unique-local), link-local, loopback, cloud-metadata and carrier-grade NAT (100.64.0.0/10) addresses are refused.
+- The URL has no credentials (`https://user:pass@host`). Put them in `--secret-env`. A Slack URL is the one place a secret in the URL is expected.
+
+Two environment variables open one range each and nothing else:
+
+| Variable | Allows |
+| --- | --- |
+| `DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1` | `localhost` and loopback addresses |
+| `DEFENSECLAW_ALLOW_CGNAT=1` | The 100.64.0.0/10 range, used by Tailscale and similar overlays |
+
+A private address stops at `add`:
+
+```text
+IP 10.0.0.5 is a private or reserved address; webhooks must reach a public address so events can't be sent to internal services (SSRF guard). Use a public endpoint or relay.
+```
+
+On a managed computer the gateway ignores these two variables ([Environment variables](/docs/reference/configuration/env-vars)).

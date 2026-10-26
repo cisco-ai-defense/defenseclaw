@@ -201,22 +201,37 @@ Directory shows `unreported` for a Linux SSSD account whose domain is not a join
 
 ## Sandboxes board
 
-Shows [OpenShell sandbox](/docs/reference/sandboxes/telemetry) activity. Boxes: **Environment** (`deployment.environment.name`, set with `setup observability add --environment`), **Host** (`host.name`), **Connector** (metric panels) and **Sandbox** (log panels). Sandbox names are never metric labels, so the three metric panels ignore the Sandbox box and say "(all names)" in their title.
+The **Sandboxes** board (`defenseclaw-sandboxes`) shows [OpenShell sandbox](/docs/reference/sandboxes/telemetry) activity. It has seven boxes:
 
-The local Collector copies `defenseclaw.sandbox.name` onto the log resource, and the bundled Loki indexes it, along with `deployment.environment.name`, `host.name` and `os.type` (`otlp_config` in `loki/loki.yaml`). If you import the boards into your own Loki, add the same `index_label` rule or the boxes list no values; panels still filter correctly.
+- **Environment** (`$environment`, the gateway's `deployment.environment.name`, set with `defenseclaw setup observability add --environment`) and **Host** (`$host`, the computer's `host.name`). Every panel follows both, so you can scope the board to one computer and show, for example, that a Windows computer has no sandboxes.
+- **Connector** (`$connector`, the sandbox's harness connector) for the metric panels.
+- **Sandbox** (`$sandbox`, the sandbox name) for the log panels. Sandbox names are never metric labels, so the metric panels ignore it and say "(all names)" in their titles: **Active (all names)**, **Active sandboxes by connector (all names)** and **Egress by source and decision (metric, all names)**.
+- **OS** (`$os`), **Driver** (`$driver`, `docker` or `vm`) and **Profile** (`$profile`, a guardrail profile name as a regular expression, default `.*`) for the managed-fleet panels. Selecting a driver hides records that name none, such as host-run refusals.
 
-| Row | Panels |
-| --- | --- |
-| Sandbox fleet | Active (all names), Sandboxes seen, Egress allowed, Egress blocked, Shadow-AI findings, Health degraded (sandboxes and gateway-wide) |
-| Lifecycle | Active sandboxes by connector, Phase transitions, Recent lifecycle changes |
-| Egress decisions | Egress by source and decision, Top blocked hosts, Top allowed hosts |
-| Traffic volume | Bytes up and down by destination and over time. Only the DefenseClaw egress proxy reports bytes. |
-| Destinations | Destinations table, Recent blocked egress |
-| Findings and shadow AI | Findings by kind, Shadow-AI destinations, Recent sandbox findings |
-| Integration health | Health degraded and restored, Recent health transitions |
-| Process starts | Empty unless the sandbox's process tree is on (`observe.process_tree` or `sandbox run --process-tree`). |
+The local Collector copies the sandbox name from each record's body onto the record's resource (the processors `transform/sandbox-identity` and `groupbyattrs/sandbox-identity`), so no panel parses every log line to find a sandbox. A record that names no sandbox keeps its resource unchanged.
 
-Process names, paths and command lines are what the workload claims; each destination's redaction profile decides whether they leave the host.
+The Environment, Host, Sandbox and OS boxes list Loki index labels, because Grafana fills a Loki box through Loki's label API. The bundled Loki indexes `deployment.environment.name`, `host.name`, `os.type` and `defenseclaw.sandbox.name` (`otlp_config` in `loki/loki.yaml`). If you import the boards into your own Loki, add the same `index_label` rule or the boxes list no values; panels still filter correctly. The records behind the panels, and the health codes of the integration row, are in [Sandbox telemetry](/docs/reference/sandboxes/telemetry).
+
+| Row | Panels | What they show |
+| --- | --- | --- |
+| Sandbox fleet | Active (all names), Sandboxes seen, Egress allowed, Egress blocked, Shadow-AI findings, Health degraded | Sandboxes provisioning, starting, ready or stopping now, from the `defenseclaw.sandbox.active` gauge (the largest value per host, so a restarted gateway is not counted twice); then counts for the range. Sandboxes seen counts a host and a name, so two computers' sandboxes with the same name count twice; pick a Host to read one computer's. Egress counts are one per decision; the end of a tunnel is not counted again. Health degraded shows two numbers: **sandboxes** for the sandboxes in the Sandbox box and **gateway-wide** for records about the whole integration. |
+| Managed fleet: who is governed by what | Governed sandboxes, Provisional share, Host runs refused, Sandbox unavailable, Access refused, Foreign items, Asks decided, Asks approved, Asks denied, Policy re-matches, Settings drift, OpenShell versions, Sandbox registrations without a guest, Managed sandbox events, Sandboxes by profile, Profile, match and group, Sandboxes by OS, Sandboxes by driver, OpenShell version and install mode | Enterprise hosts only. Governed sandboxes counts those whose records carry an effective sandbox policy digest, so a personal OpenShell setup is not included. Provisional share is the percent of policy resolutions made on the offline floor while the directory lookup was outstanding. Settings drift counts times the daemon found OpenShell settings that differ from `enterprise.openshell` and refused sandboxes; zero is healthy. More than one OpenShell version means the fleet is mid-upgrade or has drifted. Per-user values are never shown. |
+| Managed fleet: policy changes and drift | Policy re-matches by reason, Settings drift by OpenShell setting, Recent policy resolutions and re-matches | Re-matches by reason (`generation` for a configuration change, `facts` for a directory refresh, `lookup_resolved` for a provisional sandbox that left the offline floor), the name of each drifting OpenShell setting (never its value), and the newest resolutions with the profile and effective policy digest. |
+| Managed fleet: refusals, asks and foreign items | Required-sandbox refusals by reason, Asks decided by result, Refusals by profile, Access refusals by rule, Foreign sandboxes, containers and rules, Recent refusals, unavailable sandboxes and drift, Recent asks and foreign items | Host runs refused or unavailable by machine-readable reason (`required_for`, `os_unsupported`, `no_docker_group`, `no_kvm`, `prerequisite_missing`), how the managed gateway answered asks, and things found on a managed host that DefenseClaw did not create, by kind and what the managed layer did (stop, alert or remove). Containers are reported and never stopped. |
+| Lifecycle | Active sandboxes by connector (all names), Phase transitions, Recent lifecycle changes | The gauge over time, the phase each change entered (creating, provisioning, starting, ready, stopping, stopped, error, deleting, deleted), and the newest changes with trigger and OpenShell condition. |
+| Egress decisions | Egress by source and decision (logs and metric), Top blocked hosts, Top allowed hosts | Who decided (`openshell` is OpenShell's own network boundary, `dc-egress-proxy` is the DefenseClaw egress proxy) and the outcome. The metric panel counts the `defenseclaw.egress.events` counter, which misses a series' first increment, so the log panel is the exact count. |
+| Traffic volume | Bytes up by destination, Bytes down by destination, Bytes up / down over time | Sums of `bytes_up` and `bytes_down` on `egress.completed` records, which only the DefenseClaw egress proxy writes. OpenShell's own connections report no byte counts. |
+| Destinations | Destinations, Recent blocked egress | Each host with allowed and blocked counts and bytes moved (top 50 per column), and the newest refusals with the decision code and the process the workload claims made the request. |
+| Findings and shadow AI | Findings by kind, Shadow-AI destinations, Recent sandbox findings | Findings by kind (`ocsf_finding`, `hook_silence`, `hook_tamper`, `large_upload`, `nested_repo`, `shadow_ai`). A shadow-AI finding names an AI API that is neither the sandbox's model provider nor its harness vendor: MEDIUM when reached, LOW when refused. |
+| Integration health | Health degraded / restored, Recent health transitions | OpenShell health records with their stable error code. Records about the whole integration name no sandbox and show under every `$sandbox` selection. |
+| Process starts | Process starts, Top started programs | Empty unless the sandbox's process tree is on (`observe.process_tree`, or `sandbox run --process-tree`). Sampling misses a process that starts and ends between two samples. |
+
+Things to know when you read it:
+
+- **A host that did not canonicalize shows as its target reference** (`invalid-host`, or `host:` plus the name for a name that starts with `_`).
+- **Bytes stay empty for OpenShell-only traffic.** Only `egress.completed` records from the egress proxy carry byte counts.
+- **Counters miss a series' first increment.** The log panels are the exact count.
+- **Process names, paths and command lines are what the workload claims.** The sandboxed agent chooses that text, and each destination's redaction profile decides whether it leaves the host.
 
 ![Grafana Sandboxes board with the Environment, Host, Connector and Sandbox boxes, Sandbox fleet and Lifecycle rows: tiles for active sandboxes (all names), sandboxes seen, egress allowed, egress blocked, shadow-AI findings and health degraded split into sandboxes and gateway-wide, the active sandboxes by connector (all names) and phase transitions charts, and the recent lifecycle changes of the selected sandbox](/images/grafana/sandboxes-overview.png)
 

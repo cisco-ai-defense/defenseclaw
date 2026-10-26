@@ -300,6 +300,22 @@ observability:
     temporality: cumulative
 ```
 
+### Troubleshoot the local stack
+
+**Grafana shows no data.** A destination test does not fill dashboards. Generate a real agent turn, tool call, scan or approval, widen the time range and clear the dashboard filters. If panels are still empty, run:
+
+```bash
+defenseclaw setup local-observability status
+defenseclaw observability plan
+defenseclaw setup local-observability logs --service otel-collector --follow
+```
+
+`status` shows whether the containers are healthy, `observability plan` shows what the gateway sends and where, and the collector log shows what arrived. Run `defenseclaw setup local-observability up` again if the host-mounted bundle needs a refresh. What 0, No data and Not reported mean is in [Dashboards](/docs/reference/observability/dashboards#read-empty-values).
+
+**Port already in use.** The stack uses 3000 (Grafana), 3100 (Loki), 3200 (Tempo), 4317 and 4318 (OTLP) and 9090 (Prometheus). The Compose file pins them, and the `up` preflight refuses to start when a program outside the stack holds one. Free the port, or stop the foreign container the warning names, and run `up` again. There is no port flag. `up` overwrites the operator-editable files in `~/.defenseclaw/observability-stack/` (the `grafana/`, `prometheus/`, `loki/`, `tempo/` and `otel-collector/` folders and `docker-compose.yml`) on every refresh, so a changed port survives only if you also run every `up` with `--no-refresh-bundle` and `--no-refresh-config` and pass the new collector address with `--endpoint`. Freeing the default port is the supported fix.
+
+**Detach the gateway but keep the data.** `down` keeps the volumes and the `local-observability` destination in `config.yaml`. To turn the destination off as well, run `defenseclaw setup local-observability down --disable-config`, or disable or remove the destination with `defenseclaw setup observability`.
+
 ## Galileo traces
 
 The Galileo preset sends the generated `galileo-rich-v2` trace profile over OTLP HTTP/protobuf. It has six span families: agent invocation, workflow, model chat, tool execution, retrieval and guardrail judge. AI discovery, scanner, audit and other operational records are not in the profile, so Galileo never receives them. For discovery results, use the Grafana **AI Agent Usage & Detection** board, Splunk, or an OTLP destination with logs.
@@ -314,6 +330,31 @@ The Galileo preset sends the generated `galileo-rich-v2` trace profile over OTLP
 | Late tool spans | Galileo drops spans that arrive after it closed the trace. A tool span that ends after its turn was sent is exported as the root of its own trace with the original ID in `defenseclaw.trace.id`. |
 | Diagnostic traces | `setup galileo test` and each `doctor` run (up to four enabled Galileo routes) write an `invoke_agent diagnostic` trace with one `chat defenseclaw-diagnostic` span. Its metadata has `defenseclaw.telemetry.canary: "true"`. |
 | Bedrock | A Claude Code chat span names the model ID (`anthropic.claude-haiku-4-5-20251001-v1:0`), not the cross-region profile from `ANTHROPIC_MODEL`. |
+
+### DefenseClaw and GenAI attributes
+
+The `defenseclaw.*` attributes stay the authoritative policy and forensic record.
+On AI inference spans DefenseClaw adds a standard GenAI projection next to them:
+
+| DefenseClaw data | GenAI attribute |
+| --- | --- |
+| Provider and request model | `gen_ai.provider.name`, `gen_ai.request.model` |
+| Response model and token counts | `gen_ai.response.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` |
+| Session ID | `gen_ai.conversation.id` |
+| Prompt and response | `gen_ai.input.messages`, `gen_ai.output.messages` |
+| Agent identity | `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.agent.type` |
+| Tool name, call ID, arguments and result | `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result` |
+
+Prompt, response, tool-argument and tool-result values follow the redaction
+profile of the Galileo destination ([Redaction](/docs/reference/observability/redaction)).
+The input of a Claude Code `tool_batch` span lists the calls of the batch by tool
+name and call ID. Those are identifiers, as on the span of each call, so the
+`content` profile keeps them in clear.
+
+The generated `galileo-rich-v2` profile, not a hand-written `span_filter`, decides
+which spans are eligible and which attributes, events and links they carry. A span
+that the profile cannot project is rejected as `unsupported_shape`, and destination
+health shows the error.
 
 Galileo metadata keys on agent, model and tool spans:
 

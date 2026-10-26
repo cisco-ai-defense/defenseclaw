@@ -1,0 +1,103 @@
+---
+title: Splunk reference
+description: Every defenseclaw setup splunk flag, what local mode starts, the S3 export option, field extraction in your own Splunk, Splunk Observability Cloud details and fixes for common failures.
+keywords:
+  - defenseclaw setup splunk
+  - Splunk HEC flags
+  - Splunk S3 export
+  - props.conf KV_MODE
+  - Splunk Observability Cloud realm
+  - defenseclaw_local_mode
+---
+
+Depth for [Send to Splunk](/docs/how-to/observability/send-to-splunk). The steps are on that page; the dashboards are in [Dashboards](/docs/reference/observability/dashboards#splunk).
+
+## Flags
+
+`defenseclaw setup splunk` has three modes (`--logs`, `--enterprise`, `--o11y`) and one subcommand, `dashboards`. Without flags it runs a wizard. `--non-interactive` uses flags instead of prompts.
+
+| Flag | Applies to | Purpose |
+| --- | --- | --- |
+| `--logs` | Local | Start Splunk in Docker, in Free mode, with HEC and the bundled app |
+| `--accept-splunk-license` | Local | Acknowledge the Splunk General Terms. Without it the CLI prompts. |
+| `--s3-export` | Local | Enable local Splunk and also start the optional S3 exporter sidecar |
+| `--s3-bucket TEXT` | Local | Bucket for `--s3-export`. Also read from the `S3_BUCKET` environment variable. |
+| `--s3-prefix TEXT` | Local | Prefix for `--s3-export`. Default `agentwatch/defenseclaw`. |
+| `--aws-region TEXT` | Local | Region for `--s3-export`. Default `us-west-2`. |
+| `--show-credentials` | Local | Print the generated HEC token and the runtime-only bootstrap secret. Use it only in a private terminal. |
+| `--refresh-bundle` / `--no-refresh-bundle` | Local | Refresh `~/.defenseclaw/splunk-bridge/` from the installed bundle before starting, keeping your secrets in `env/.env`. On by default. A running stack is stopped, refreshed and restarted. |
+| `--enterprise` | Remote HEC | Send logs to your own Splunk through HEC. No Docker. |
+| `--hec-endpoint TEXT` | Remote HEC | The full HEC URL, used exactly as given |
+| `--hec-token TEXT` | Remote HEC | The HEC token. A value on the command line is visible to other local users in `ps`, so prefer `DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN`. |
+| `--skip-test` | Remote HEC | Skip the live HEC probe after setup |
+| `--index TEXT` | Local, remote HEC | HEC index. Default `defenseclaw_local` for local, `defenseclaw` for remote. Create a remote index ahead of time. |
+| `--source TEXT` | Local, remote HEC | HEC source. Default `defenseclaw`. |
+| `--sourcetype TEXT` | Local, remote HEC | HEC sourcetype. Default `defenseclaw:json` for local, `_json` for remote. |
+| `--o11y` | Observability Cloud | Send OTLP to Splunk Observability Cloud |
+| `--realm TEXT` | Observability Cloud | Your realm, for example `us1`, `us0` or `eu0` |
+| `--access-token TEXT` | Observability Cloud | The access token. Prefer `DEFENSECLAW_SETUP_SPLUNK_ACCESS_TOKEN`. |
+| `--app-name TEXT` | Observability Cloud | The OTel service name and the destination name. Default `defenseclaw`. |
+| `--traces` / `--no-traces` | Observability Cloud | Trace export |
+| `--metrics` / `--no-metrics` | Observability Cloud | Metric export |
+| `--logs-export` / `--no-logs-export` | Observability Cloud | Log export. Off unless you pass `--logs-export`. |
+| `--disable` | All | Disable the destination of the mode you name |
+
+## Local mode
+
+`defenseclaw setup splunk --logs --accept-splunk-license` runs the Compose project `defenseclaw-splunk-local` from `~/.defenseclaw/splunk-bridge/`. In order:
+
+1. **License.** Without `--accept-splunk-license` the CLI prompts. Use `--non-interactive` in CI.
+2. **Docker preflight.** Docker must be running, and ports 8000 (Splunk Web) and 8088 (HEC) must be free. A leftover local Splunk from an interrupted setup does not count as a conflict: setup restarts it.
+3. **Container.** Starts the stock `splunk/splunk:10.2.0` image in Free mode, mounts the bundled `defenseclaw_local_mode` app, and waits for Splunk Web and HEC to answer.
+4. **Destination.** Writes a logs-capable `splunk_hec` destination to `https://127.0.0.1:8088/services/collector/event` (HEC over TLS), index `defenseclaw_local`, sourcetype `defenseclaw:json`. The private-network opt-in applies only to this local destination. The token is kept under `DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN` in `~/.defenseclaw/.env`.
+
+Splunk Web is at [http://127.0.0.1:8000](http://127.0.0.1:8000), and the app appears as **DefenseClaw Local Mode**. The HEC token and the bootstrap secret stay hidden unless you pass `--show-credentials`; keep them out of diagnostics and support output.
+
+The app has its dashboards, the shared SPL macros in `default/macros.conf` and the field extraction in `default/props.conf`.
+
+### S3 export
+
+`--s3-export` starts a second container, `splunk-s3-exporter`, next to Splunk. It needs `--s3-bucket` (or `S3_BUCKET`). The prefix defaults to `agentwatch/defenseclaw` and the region to `us-west-2`:
+
+```bash
+defenseclaw setup splunk --s3-export --s3-bucket my-bucket --accept-splunk-license
+```
+
+## Field extraction in your own Splunk
+
+The events arrive as DefenseClaw's canonical log projection inside the HEC adapter envelope. For Splunk Cloud or Splunk Enterprise without the bundled app, copy the stanza the app ships:
+
+```ini title="props.conf"
+[defenseclaw:json]
+KV_MODE = json
+SHOULD_LINEMERGE = false
+TIME_FORMAT = %Y-%m-%dT%H:%M:%S
+MAX_TIMESTAMP_LOOKAHEAD = 30
+TRUNCATE = 0
+```
+
+The app's own `default/props.conf` sets `KV_MODE = json`, `SHOULD_LINEMERGE = false` and `TRUNCATE = 0` the same way for every sourcetype its macros search: `otel:log`, `otel:metric`, `otel:trace`, `openclaw:gateway:json` and `openclaw:diagnostics:json`.
+
+Splunk then extracts each field once at search time. Do not add `| spath` to a search on these sourcetypes: it extracts every field a second time and doubles multivalue fields and counts. DefenseClaw ships no separate add-on for Splunk Cloud or Enterprise; copy the stanza and any macros you need from the app.
+
+With sourcetype `_json` (the remote default) Splunk extracts the fields on its own, and you need no `props.conf`.
+
+## Splunk Observability Cloud
+
+`--o11y` writes an OTLP HTTP destination under `observability.destinations`, pointed at `ingest.<realm>.observability.splunkcloud.com`. Traces and metrics are on by default and logs are off. The destination is named after `--app-name`, which is also the OTel service name. Apply a [redaction profile](/docs/reference/observability/redaction) when the realm must not receive full content.
+
+Do not pass `--logs` with `--o11y`: in `setup splunk`, `--logs` starts the local Splunk container.
+
+`defenseclaw setup splunk dashboards` has `plan`, `apply` and `destroy`. They use the bundled Terraform, keep its working files in `~/.defenseclaw/splunk-o11y-dashboards`, and update the same Observability objects when you rerun them from the same state path.
+
+## Fix a failure
+
+| Symptom | Cause and fix |
+| --- | --- |
+| Port 8000 or 8088 is in use | Another program holds it. Stop it, or run `defenseclaw setup splunk --disable --logs`, free the port and run setup again. There is no port flag. |
+| Setup stops because the `splunk` container keeps restarting | Splunk exits during its own setup. Read why with `docker logs defenseclaw-splunk-local-splunk-1`, fix what it names, and run `defenseclaw setup splunk --logs` again. That also refreshes `~/.defenseclaw/splunk-bridge/` from the bundle. |
+| `observability destination test` passes but no events arrive | A handshake can pass while HEC rejects events. Run `defenseclaw observability destination test <name> --write-probe`. |
+| `--write-probe` fails with code 7 | The index is missing or the token cannot write to it. Create the index or correct `--index`, then probe again. |
+| Remote HEC returns 403 | The token is wrong, or HEC is not enabled on that endpoint. Check outside DefenseClaw: `curl -k $HEC_ENDPOINT -H "Authorization: Splunk $TOKEN" -d '{"event":"test"}'`. `--skip-test` skips the same probe that setup runs. |
+| Events arrive without extracted fields | The sourcetype is not `_json` and has no `KV_MODE = json` stanza. Use `_json`, or install the `props.conf` stanza above for `defenseclaw:json`. |
+| Observability Cloud shows traces but no logs | Logs are off unless you passed `--logs-export`, and log ingest is a separate entitlement on the realm. Run again with `--no-logs-export` if you have only traces and metrics. |
