@@ -2950,7 +2950,8 @@ def _go_quote(value: Any) -> str:
 
 
 def _sandbox_enum_error(field_name: str, value: Any, *allowed: str) -> str | None:
-    if value in (None, "") or value in allowed:
+    # Any letter case, as the Go loader folds it (GAP-0691, #1226).
+    if value in (None, "") or (isinstance(value, str) and value.lower() in allowed):
         return None
     return f"{field_name} {_go_quote(value)} must be one of {', '.join(allowed)}"
 

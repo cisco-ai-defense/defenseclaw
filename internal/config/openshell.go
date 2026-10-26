@@ -29,6 +29,8 @@ import (
 	"strconv"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -1045,6 +1047,7 @@ func (o *OpenShellConfig) Validate() error {
 	if o == nil {
 		return nil
 	}
+	o.foldEnumCase()
 	var errs []error
 	check := func(err error) {
 		if err != nil {
@@ -1100,6 +1103,7 @@ func (o *OpenShellConfig) Validate() error {
 // validateAs checks one floor section: openshell.admin (prefix "admin") or a
 // profile's sandbox section (prefix "sandbox", the same type).
 func (a *OpenShellAdminConfig) validateAs(prefix string) error {
+	a.foldEnumCase()
 	var errs []error
 	check := func(err error) {
 		if err != nil {
@@ -1172,6 +1176,57 @@ func validateOpenShellNonNegative(field string, value int) error {
 		return fmt.Errorf("%s must not be negative", field)
 	}
 	return nil
+}
+
+// openShellAdminEnumKeys are the floor settings (openshell.admin and a
+// guardrail profile's sandbox section) whose values are lowercase words.
+var openShellAdminEnumKeys = []string{"when_unavailable", "user_approvals", "on_silence", "foreign_sandboxes", "driver_fallback", "min_profile"}
+
+// foldOpenShellEnumCase lowercases, in a parsed config document, the string
+// values of the OpenShell settings whose values are lowercase words: a value
+// in any letter case means the same (#1226). The schema lists only the
+// lowercase words, so `install: Prerequisite`, `driver: VM` or
+// `foreign_sandboxes: Alert` were refused by config validate and ensure
+// while the loader folded the agent names next to them (GAP-0691). The
+// schema check, the typed decode and the plain projection read the folded
+// value; the loader folds the same settings (foldEnumCase), and the file
+// itself is not changed.
+func foldOpenShellEnumCase(root *yaml.Node) {
+	lower := func(mapping *yaml.Node, keys ...string) {
+		for _, key := range keys {
+			if v := v8YAMLMapValue(mapping, key); v != nil && v.Kind == yaml.ScalarNode && v.ShortTag() == "!!str" {
+				v.Value = strings.ToLower(v.Value)
+			}
+		}
+	}
+	lower(v8YAMLMapValue(v8YAMLMapValue(root, "enterprise"), "openshell"), "install", "driver", "driver_fallback")
+	openshell := v8YAMLMapValue(root, "openshell")
+	lower(openshell, "profile", "token_delivery", "llm")
+	lower(v8YAMLMapValue(openshell, "workdir"), "mode", "on_exit")
+	lower(v8YAMLMapValue(openshell, "egress"), "feed")
+	lower(v8YAMLMapValue(openshell, "admin"), openShellAdminEnumKeys...)
+	if profiles := v8YAMLMapValue(v8YAMLMapValue(root, "guardrail"), "profiles"); profiles != nil && profiles.Kind == yaml.MappingNode {
+		for i := 1; i < len(profiles.Content); i += 2 {
+			lower(v8YAMLMapValue(profiles.Content[i], "sandbox"), openShellAdminEnumKeys...)
+		}
+	}
+}
+
+// foldEnumCase lowercases the settings foldOpenShellEnumCase folds in the
+// document, for a configuration the loader decoded from the file itself.
+func (o *OpenShellConfig) foldEnumCase() {
+	for _, v := range []*string{&o.Profile, &o.TokenDelivery, &o.LLM, &o.Workdir.Mode, &o.Workdir.OnExit, &o.Egress.Feed} {
+		*v = strings.ToLower(*v)
+	}
+	o.Admin.foldEnumCase()
+}
+
+// foldEnumCase lowercases a floor's settings that openShellAdminEnumKeys
+// name.
+func (a *OpenShellAdminConfig) foldEnumCase() {
+	for _, v := range []*string{&a.WhenUnavailable, &a.UserApprovals, &a.OnSilence, &a.ForeignSandboxes, &a.DriverFallback, &a.MinProfile} {
+		*v = strings.ToLower(*v)
+	}
 }
 
 func validateOpenShellEnum(field, value string, emptyOK bool, allowed ...string) error {
