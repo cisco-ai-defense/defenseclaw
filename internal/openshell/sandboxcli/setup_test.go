@@ -2369,6 +2369,10 @@ func TestTeardownWithoutDaemonOrGateway(t *testing.T) {
 func TestTeardownDryRunSaysWhatItKnowsOfTheSandboxes(t *testing.T) {
 	ta := newTestApp(t, "")
 	writeConfig(t, ta, "")
+	// The data dir made sandboxes: it has its owner label.
+	if _, err := image.NewStore(ta.Cfg.DataDir).Owner(); err != nil {
+		t.Fatal(err)
+	}
 	ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x")
 	ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
 		return nil, nil, errors.New("the gateway is restarting")

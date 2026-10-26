@@ -1,11 +1,12 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build unix
+
 package sandboxcli
 
 import (
 	"context"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -39,9 +40,6 @@ func (o *overlappingPulls) Pull(context.Context, workspace.PullOptions) (*worksp
 // sandbox copy and the second failed on git's index lock (r105 X1 GAP-0756
 // verify observation).
 func TestPullsOfOneSandboxDoNotOverlap(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("sandboxes run on Linux and macOS")
-	}
 	ta := newTestApp(t, "")
 	pulls := &overlappingPulls{fakeCopy: ta.copy}
 	ta.Workspace = pulls

@@ -65,6 +65,10 @@ func TestSandboxPurgeTearsDownBeforeTheUnitsStop(t *testing.T) {
 func TestSandboxUninstallSaysWhatAnUnsyncedStopMayMiss(t *testing.T) {
 	h := newOSHost(t, "linux")
 	requireOK(t, h.ensure(sandboxConfig(t, "linux", true, setupVMSettings)))
+	h.installTarballFiles(t, h.alice, "0.1.5")
+	for _, name := range []string{"sb-ok", "sb-stuck"} {
+		writeHostFile(t, h.testHost, filepath.Join(h.alice.Home, h.env.daemonStateRel(), "sandboxes", name, "record.json"), "work of "+name+"\n")
+	}
 	h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Running: 2}
 	h.ops.running = map[int][]string{h.alice.UID: {"sb-ok", "sb-stuck (unsynced)"}}
 	r := h.run(Options{Action: ActionUninstall})
