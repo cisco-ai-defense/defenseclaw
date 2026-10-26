@@ -217,7 +217,7 @@ When a sandbox can't run for a person, the refusal says why in words and the rec
 | `no_kvm_group`, `no_kvm_access` | `driver_fallback: none` and the account can't open `/dev/kvm` | Add the person to the group the message names (`kvm`), or allow the Docker fallback |
 | `no_kvm` | `driver_fallback: none` and the CPU shows no virtualization or `/dev/kvm` is missing | Enable hardware (nested) virtualization, or allow the Docker fallback |
 | `driver_unsupported` | The organization's `driver` isn't one this computer can run | Set a driver the OS supports |
-| `prerequisite_missing` | OpenShell or Docker is missing or not set up, or the installed OpenShell is a release the host does not run sandboxes on; the sentence names the piece, and the installed release ("OpenShell 0.1.3 is installed, but that release is unsupported") rather than calling it not installed | `status` and `verify` print the fix line (`openshell_prerequisite_missing`) |
+| `prerequisite_missing` | OpenShell or Docker is missing or not set up, or the installed OpenShell is a release the host does not run sandboxes on; the sentence names the piece, and for an OpenShell release that runs no DefenseClaw sandbox it says so (`sandboxes are unavailable: OpenShell 0.1.3 runs no DefenseClaw sandbox: before 0.1.5 its network broker let a sandbox's connections bypass the sandbox policy ... ask your administrator to upgrade OpenShell`) | `status` and `verify` print the fix line (`openshell_prerequisite_missing`) |
 | `account_busy` | Another account holds the sandbox ports | Clears when that account has no sandbox running |
 
 ### Registration alert reasons

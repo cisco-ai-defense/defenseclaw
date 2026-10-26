@@ -1475,6 +1475,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1573", page: "get-started/install.mdx", section: "Check it worked", has: ["`✓ All components in sync.`", "piped to another command, as above, they use text"] },
   { gap: "GAP-1581", page: "get-started/upgrade.mdx", section: "Rollback", has: ["Rollback needs a previous install that was initialized.", "undoes itself and exits 1"] },
   { gap: "GAP-1567", page: "for-agents/write-a-rule.mdx", has: ["In action mode DefenseClaw blocks an agent that copies into `~/.defenseclaw` (`tamper.detector_state_write`"] },
+  { gap: "GAP-1613", page: "enterprise/runtime/sandbox-reference.mdx", has: ["`sandboxes are unavailable: OpenShell 0.1.3 runs no DefenseClaw sandbox:"], lacks: ["OpenShell 0.1.3 is installed, but that release is unsupported"] },
   // r105-rows-end
 ];
 
