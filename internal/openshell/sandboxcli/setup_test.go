@@ -2362,6 +2362,42 @@ func TestTeardownWithoutDaemonOrGateway(t *testing.T) {
 	has(t, ta.output(), "nothing to tear down")
 }
 
+// GAP-1782, GAP-1810: with no daemon to list them (sandboxes off) and the
+// OpenShell gateway not reachable, the sandboxes of a data dir that made
+// some are unknown, not none; a listed sandbox whose workload stopped says
+// so.
+func TestTeardownDryRunSaysWhatItKnowsOfTheSandboxes(t *testing.T) {
+	ta := newTestApp(t, "")
+	writeConfig(t, ta, "")
+	ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x")
+	ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
+		return nil, nil, errors.New("the gateway is restarting")
+	}
+	ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+	has(t, ta.output(), "  sandboxes         unknown (neither the sandbox daemon nor the OpenShell gateway listed them)\n")
+	lacks(t, ta.output(), "sandboxes         none", "nothing to tear down")
+
+	ta = newTestApp(t, "")
+	writeConfig(t, ta, "")
+	ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x")
+	owner, err := image.NewStore(ta.Cfg.DataDir).Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake, client := useGateway(ta)
+	labels := map[string]string{manager.LabelManaged: "true", manager.LabelOwner: owner}
+	for name, phase := range map[string]openshell.SandboxPhase{"dc-claude-kept": openshell.PhaseStopped, "dc-claude-live": openshell.PhaseReady} {
+		if _, err := client.CreateSandbox(bg, name, &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{Labels: labels}); err != nil {
+			t.Fatal(err)
+		}
+		if err := fake.SetPhase(openshell.DefaultWorkspace, name, phase); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+	has(t, ta.output(), "  sandboxes         dc-claude-kept (stopped), dc-claude-live\n")
+}
+
 // A teardown without the daemon also removes what the daemon's delete would
 // have (the ingress binding, the run files, the record), for the gone
 // sandboxes too; a daemon that is up but cannot list keeps its state.

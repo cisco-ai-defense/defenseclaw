@@ -222,7 +222,7 @@ OFF_LIST_CALLS = [
 ]
 
 
-@pytest.mark.parametrize("plan", ["none", "nothing"])
+@pytest.mark.parametrize("plan", ["none", "nothing", "stopped"])
 def test_sandboxes_off_with_no_sandbox_left_uninstalls(
     install: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, plan: str
 ) -> None:
@@ -235,6 +235,10 @@ def test_sandboxes_off_with_no_sandbox_left_uninstalls(
     (manager / "kept.json").write_text("{}", encoding="utf-8")
     if plan == "none":
         monkeypatch.setenv("DC_TEST_TEARDOWN_SANDBOXES", "none")
+    elif plan == "stopped":
+        # GAP-1810: a kept sandbox that is stopped runs nothing, as with
+        # sandboxes on.
+        monkeypatch.setenv("DC_TEST_TEARDOWN_SANDBOXES", "kept (stopped), other (completed)")
     else:
         # A dry run with nothing at all prints only its "nothing to tear
         # down" line.
@@ -248,6 +252,23 @@ def test_sandboxes_off_with_no_sandbox_left_uninstalls(
     assert "sandbox teardown --yes" in _calls(install)
     assert not install.data_dir.exists()
     assert not install.gateway.exists() and not install.cli.exists()
+
+
+@pytest.mark.parametrize("named", ["unknown (neither the sandbox daemon nor the OpenShell gateway listed them)", "kept (stopped), live"])
+def test_sandboxes_off_with_a_sandbox_that_may_run_refuses(
+    install: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, named: str
+) -> None:
+    """GAP-1782: a dry run that could not list the sandboxes, or that names
+    one that may run, keeps the refusal: nothing is changed."""
+    manager = install.data_dir / "sandboxes" / "manager"
+    manager.mkdir(parents=True)
+    (manager / "kept.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("DC_TEST_TEARDOWN_SANDBOXES", named)
+    result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert "the sandbox list could not be read" in result.output
+    assert "sandbox teardown --yes" not in _calls(install)
+    assert install.data_dir.exists() and install.gateway.exists()
 
 
 @pytest.mark.parametrize("trace", ["gateway-config", "openshell-state", "snapshots-and-shadows", "empty-manager"])

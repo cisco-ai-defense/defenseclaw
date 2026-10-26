@@ -62,6 +62,13 @@ type teardownPlan struct {
 	vmDisks  vmDiskSet
 	// listed is set when the gateway listed this data dir's sandboxes.
 	listed bool
+	// sandboxesUnknown is set when neither the daemon nor the gateway
+	// listed the sandboxes of a data dir that has made some: "none" would
+	// be a guess (GAP-1782).
+	sandboxesUnknown bool
+	// stopped names the phase of each listed sandbox whose workload no
+	// longer runs (stoppedPhase), which the plan's sandboxes row shows.
+	stopped map[string]string
 	// orphans are sandboxes whose data under <data_dir>/sandboxes the
 	// daemon has no record of.
 	orphans []string
@@ -129,6 +136,10 @@ func (a *App) Teardown(ctx context.Context, o TeardownOptions) error {
 		defer p.client.Close()
 	}
 	a.printTeardown(p, o)
+	if p.empty() && p.sandboxesUnknown {
+		a.note("nothing else to tear down; run it again when the OpenShell gateway answers, to see the sandboxes")
+		return nil
+	}
 	if p.empty() {
 		a.ok("nothing to tear down")
 		return nil
@@ -192,7 +203,7 @@ func (a *App) owner() string {
 }
 
 func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPlan, error) {
-	p := &teardownPlan{}
+	p := &teardownPlan{stopped: map[string]string{}}
 	owner := a.owner()
 	// No daemon manages the data dir when none answers, or when the one
 	// that does has sandboxes off; one that has them on but could not list
@@ -203,6 +214,9 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 			p.daemon = true
 			for _, sb := range list {
 				p.sandboxes = append(p.sandboxes, sb.Name)
+				if stoppedPhase(sb.Phase) {
+					p.stopped[sb.Name] = sb.Phase
+				}
 				if lost := a.unhandedWork(ctx, &sb); lost != "" {
 					p.unhanded = append(p.unhanded, "sandbox "+sb.Name+" "+lost)
 				}
@@ -230,6 +244,12 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 				for _, sb := range sbs {
 					if !slices.Contains(p.sandboxes, sb.Name) {
 						p.sandboxes = append(p.sandboxes, sb.Name)
+						switch sb.Status.Phase {
+						case openshell.PhaseStopped:
+							p.stopped[sb.Name] = "stopped"
+						case openshell.PhaseCompleted:
+							p.stopped[sb.Name] = "completed"
+						}
 					}
 				}
 			}
@@ -245,6 +265,7 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 		p.profiles = a.unusedProfiles(ctx, c, p.providers, p.ownIngress)
 	}
 	sort.Strings(p.sandboxes)
+	p.sandboxesUnknown = !p.daemon && !p.listed && owner != ""
 	p.attached = map[string]int{}
 	for _, name := range p.sandboxes {
 		// A count that cannot be made is made again under the gate, which
@@ -349,6 +370,16 @@ func (a *App) unusedProfiles(ctx context.Context, c openshell.Client, ours []str
 	return out
 }
 
+// stoppedPhase reports a daemon phase of a sandbox whose workload no longer
+// runs: stopped, completed, deleted (its snapshot kept) or missing.
+func stoppedPhase(phase string) bool {
+	switch phase {
+	case "stopped", "completed", "deleted", "missing":
+		return true
+	}
+	return false
+}
+
 // printTeardown prints the plan, one step per line. A plan with something
 // to remove lists every step, "none" included, so a dry run shows all of
 // what a teardown does.
@@ -364,7 +395,21 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 		}
 	}
 	a.println(a.bold("Sandbox teardown"))
-	list("sandboxes", p.sandboxes)
+	// A sandbox whose workload no longer runs says so, which an uninstall
+	// with sandboxes off reads (GAP-1810); one neither the daemon nor the
+	// gateway could list is unknown, not none (GAP-1782).
+	var sandboxes []string
+	for _, name := range p.sandboxes {
+		if phase := p.stopped[name]; phase != "" {
+			name += " (" + phase + ")"
+		}
+		sandboxes = append(sandboxes, name)
+	}
+	if len(sandboxes) == 0 && p.sandboxesUnknown {
+		row("sandboxes", "unknown (neither the sandbox daemon nor the OpenShell gateway listed them)")
+	} else {
+		list("sandboxes", sandboxes)
+	}
 	list("providers", p.providers)
 	for i, r := range a.profileRows(p) {
 		if i == 0 {

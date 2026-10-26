@@ -3270,10 +3270,11 @@ def _listed_sandboxes(gateway_path: str) -> tuple[list, str]:
         return [], f"`sandbox list` could not run: {exc.strerror or exc}"
     if proc.returncode == _SANDBOX_UNSUPPORTED_EXIT:
         return [], ""
-    if proc.returncode != 0 and _sandboxes_off(proc.stdout) and _off_teardown_deletes_no_sandbox(gateway_path):
+    if proc.returncode != 0 and _sandboxes_off(proc.stdout) and _off_teardown_finds_no_running_sandbox(gateway_path):
         # Sandboxes are off and the teardown, which asks OpenShell itself
-        # while they are off, finds no sandbox to delete: none runs, and
-        # nothing holds work (GAP-0765). One OpenShell still has keeps the
+        # while they are off, finds no sandbox that runs: none, or only
+        # stopped ones, as with sandboxes on (GAP-0765, GAP-1810). One that
+        # may run, or sandboxes it could not list (GAP-1782), keep the
         # unknown answer below.
         return [], ""
     if proc.returncode != 0:
@@ -3306,19 +3307,22 @@ def _sandboxes_off(stdout: str) -> bool:
     return isinstance(answer, dict) and answer.get("enabled") is False and answer.get("available") is False
 
 
-# The dry run's "sandboxes" row when it deletes none ("sandboxes         none"),
-# and its line when it has nothing to tear down at all.
-_TEARDOWN_NO_SANDBOX = re.compile(r"^\s*sandboxes\s+none\s*$", re.MULTILINE)
+# The dry run's "sandboxes" row ("sandboxes         none", "unknown (...)",
+# or the names, a stopped one as "NAME (stopped)"), and its line when it has
+# nothing to tear down at all.
+_TEARDOWN_SANDBOXES = re.compile(r"^\s*sandboxes\s+(\S.*?)\s*$", re.MULTILINE)
+_TEARDOWN_STOPPED_SANDBOX = re.compile(r"^[a-z0-9][a-z0-9-]* \((?:stopped|completed|deleted|missing)\)$")
 _TEARDOWN_NOTHING = "nothing to tear down"
 
 
-def _off_teardown_deletes_no_sandbox(gateway_path: str) -> bool:
-    """Whether ``sandbox teardown --dry-run`` names no sandbox to delete.
+def _off_teardown_finds_no_running_sandbox(gateway_path: str) -> bool:
+    """Whether ``sandbox teardown --dry-run`` names no sandbox that may run.
 
     With sandboxes off no daemon lists the sandboxes, and the teardown asks
     OpenShell's gateway directly for those of this data directory: a dry run
-    that names none is the answer the list could not give. A dry run that
-    fails or names one keeps the list unknown.
+    that names none, or only stopped ones, is the answer the list could not
+    give. A dry run that fails, could not list them ("unknown") or names one
+    that may run keeps the list unknown.
     """
     if not _gateway_supports_sandbox_teardown(gateway_path):
         return False
@@ -3333,7 +3337,16 @@ def _off_teardown_deletes_no_sandbox(gateway_path: str) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     out = proc.stdout or ""
-    return proc.returncode == 0 and (_TEARDOWN_NOTHING in out or bool(_TEARDOWN_NO_SANDBOX.search(out)))
+    if proc.returncode != 0:
+        return False
+    if _TEARDOWN_NOTHING in out:
+        return True
+    row = _TEARDOWN_SANDBOXES.search(out)
+    if not row:
+        return False
+    if row.group(1) == "none":
+        return True
+    return all(_TEARDOWN_STOPPED_SANDBOX.match(entry) for entry in row.group(1).split(", "))
 
 
 def _live_mounted_sandboxes(rows: list) -> tuple[str, ...]:
