@@ -796,8 +796,25 @@ jobs:
           PY
           )
           "$tmp/venv/bin/python" -c 'from defenseclaw.envvars import load_registry; assert load_registry().entries'
+          # Python 3.10 has no fixed filelock: 4.2.1 fixes its six 2026
+          # CVEs but needs Python >=3.11, so pyproject.toml keeps 3.10 below
+          # 4.1, whose 3.30.2/4.0.x carry the three ignored here. None reaches
+          # DefenseClaw. filelock comes in only through litellm -> tokenizers
+          # -> huggingface-hub, which locks its own cache in the user's
+          # profile with FileLock/SoftFileLock. CVE-2026-112913 and
+          # CVE-2026-112940 are in the SQLite-backed ReadWriteLock, which
+          # nothing in the runtime graph uses. CVE-2026-112907 is a Windows
+          # oplock that stalls a soft lock on a marker another process holds
+          # open, and no installer uses 3.10 (install.sh and install.ps1 pick
+          # >=3.11, the Windows Setup runtime is CPython 3.13). Remove with
+          # Python 3.10 support.
+          py310_known=()
+          if [ "${{ matrix.python-version }}" = "3.10" ]; then
+            py310_known=(--ignore-vuln CVE-2026-112907 --ignore-vuln CVE-2026-112913 --ignore-vuln CVE-2026-112940)
+          fi
           uvx --from pip-audit pip-audit \
             --vulnerability-service osv \
+            "${py310_known[@]}" \
             --path "$tmp/venv/lib/python${{ matrix.python-version }}/site-packages"
 
   install-smoke-assets:
