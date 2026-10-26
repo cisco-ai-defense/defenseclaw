@@ -3981,7 +3981,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// reached with one, whatever header or path carries it.
 		if requestCarriesSandboxCredential(r) {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 		// Fleet API routes carry their own token auth (fleet.API's
@@ -3998,7 +3998,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
 			if !ok {
 				a.emitHTTPAuthFailure(a.withRevokedACPCredential(a.withACPCallerAccount(ctx, r), r), r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			if reason := a.acpCallerAccountRefusal(authenticated); reason != "" {
@@ -4010,7 +4010,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 					writeACPSignedOtherAccountRefusal(w, r, token, nonce)
 					return
 				}
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			// The ACP credential that signed the request names who sent it:
@@ -4023,7 +4023,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if r.URL.Path == "/api/v1/acp/challenge" || r.URL.Path == "/api/v1/acp/evaluate" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "missing_acp_authenticated_transport")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 
@@ -4040,7 +4040,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			// (503) rather than silently allowing loopback — the previous
 			// "no token, trust loopback" path was a local-IDOR risk.
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "no_token_configured")
-			http.Error(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
+			writeJSONRefusal(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
 			return
 		}
 		// Codex and Claude Code support arbitrary OTLP headers. Bind their
@@ -4075,7 +4075,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 						return
 					}
 					a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_scoped_header_token")
-					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
 			}
@@ -4091,7 +4091,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			if scoped != "" {
 				if token != "" {
 					a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "scoped_otlp_rejects_header_token")
-					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
 				if !userScoped && constantTimeStringMatch(pathToken, scoped) {
@@ -4099,7 +4099,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 					return
 				}
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_scoped_path_token")
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			// Legacy compatibility only for deployments that have not
@@ -4160,12 +4160,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if token == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "missing_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 		if !constantTimeStringMatch(token, expected) && !a.matchesRefreshedGatewayToken(token) {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 
