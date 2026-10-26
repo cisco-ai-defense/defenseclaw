@@ -1529,6 +1529,21 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 			recordHandEdit(ctx, next, m.path, source.raw)
 			refreshConfigGeneration(source.raw)
 			version.SetContentHash(source.raw)
+			if !managed.IsManagedEnterprise(next.DeploymentMode) && !next.StandaloneEnterprise() && !next.SecureClientIntegration() {
+				// A generation that changed no setting is still applied
+				// now: the hand edit just recorded (one made while the
+				// gateway was stopped) or a writer's comment-only change.
+				// Attribute it once, as the unchanged-diff branch does, and
+				// advance the applied generation; otherwise the next write
+				// read as "generations N-M applied together" (GAP-0005).
+				if m.logger != nil && m.savedWriteNotApplied(source.raw) {
+					if activity, _, recorded := configChangeActivity(m.path, m.appliedRaw, source.raw,
+						pendingRestart, pendingRestart, m.appliedGeneration, m.appliedGenerationKnown); recorded {
+						_ = m.logger.LogActivity(activity)
+					}
+				}
+				m.noteAppliedGeneration(source.raw)
+			}
 		}
 		// The startup reconcile of the boot bytes applies nothing new: they
 		// become the applied bytes, so a later event for the same bytes
