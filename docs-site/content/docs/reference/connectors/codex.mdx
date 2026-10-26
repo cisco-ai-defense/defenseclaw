@@ -49,6 +49,8 @@ On native Windows, DefenseClaw writes each event and contract into `%CODEX_HOME%
 | Hook program | `~/.defenseclaw/hooks/codex-hook.sh` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 | Credential sidecars | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
 
+On a managed computer these per-user files are not used. The hooks are in Codex's machine requirements file and run the administrator's hook program: `/etc/codex/requirements.toml` with `/opt/defenseclaw/bin/defenseclaw-hook` on Linux, `/etc/codex/requirements.toml` with `/opt/cisco/defenseclaw/bin/defenseclaw-hook` on macOS, and `C:\ProgramData\OpenAI\Codex\requirements.toml` with `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe` on Windows.
+
 See the [Windows path reference](/docs/reference/configuration/paths/).
 
 ### Inventory surfaces
