@@ -402,11 +402,17 @@ def test_opencode_docs_exclude_unqualified_enforcement_media() -> None:
         "connectors"
     ]["opencode"]
 
-    assert len(contracts) == 1
-    assert contracts[0]["agent_version"] == {
+    by_id = {contract["contract_id"]: contract for contract in contracts}
+    assert set(by_id) == {"opencode-hooks-v1", "opencode-hooks-v2"}
+    assert by_id["opencode-hooks-v1"]["agent_version"] == {
         "min_inclusive": "1.18.10",
         "max_exclusive": "1.19.0",
     }
+    assert by_id["opencode-hooks-v2"]["agent_version"] == {
+        "min_inclusive": "2.0.0",
+        "max_exclusive": "2.2.0",
+    }
+    assert "V2 support is currently a preview" in connector_page
     assert validated["live"] is False
     assert validated["os"]["windows"] == {
         "last_validated_version": "",
