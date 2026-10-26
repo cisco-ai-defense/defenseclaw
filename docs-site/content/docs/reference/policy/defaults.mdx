@@ -28,7 +28,7 @@ Preset-file keys are in the first column. `skill_actions`, `scanner_overrides` a
 | `skill_actions.critical` | quarantine + disable + block | quarantine + disable + block | quarantine + disable + block |
 | `skill_actions.high` | none + enable + none | quarantine + disable + block | quarantine + disable + block |
 | `skill_actions.medium` | none + enable + none | none + enable + none | quarantine + disable + block |
-| `scanner_overrides.mcp` | none | MEDIUM blocks and quarantines; LOW disables at runtime | MEDIUM blocks and quarantines; LOW disables at runtime |
+| `scanner_overrides.mcp` | none | HIGH, MEDIUM and LOW install and run (CRITICAL follows `skill_actions.critical`) | MEDIUM blocks and quarantines; LOW disables at runtime |
 | `scanner_overrides.plugin` | none | HIGH blocks and quarantines; MEDIUM installs and runs | HIGH blocks and quarantines; MEDIUM installs and runs |
 | `guardrail.block_threshold` | `4` (CRITICAL) | `4` (CRITICAL) | `2` (MEDIUM) |
 | `guardrail.alert_threshold` | `3` (HIGH) | `2` (MEDIUM) | `1` (LOW) |

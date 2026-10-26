@@ -522,6 +522,19 @@ describe('per-user outage wording on connector pages (rel-1-0-4 GAP-1301, GAP-13
   });
 });
 
+describe('admission presets table (rel-1-0-4 GAP-1655)', () => {
+  it('gives the shipped default MCP overrides', () => {
+    const preset = source('policies/default.yaml').split('scanner_overrides:')[1]?.split('\n  plugin:')[0] ?? '';
+    for (const level of ['HIGH', 'MEDIUM', 'LOW']) {
+      assert.match(preset, new RegExp(`${level}:\\s*runtime: allow\\s*file: none\\s*install: none`), `default.yaml mcp ${level}`);
+    }
+    const row = page('reference/policy/defaults.mdx').split('| `scanner_overrides.mcp` |')[1]?.split(' | `scanner_overrides.plugin`')[0] ?? '';
+    const cells = row.split('|').map((cell) => cell.trim());
+    assert.equal(cells[1], 'HIGH, MEDIUM and LOW install and run (CRITICAL follows `skill_actions.critical`)');
+    assert.equal(cells[2], 'MEDIUM blocks and quarantines; LOW disables at runtime');
+  });
+});
+
 describe('Hook connector setup and teardown', () => {
   it('limits the observe default to first setup in every CLI row and connector page', () => {
     const setupCode = source('cli/defenseclaw/commands/cmd_setup.py');
