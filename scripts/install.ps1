@@ -866,6 +866,8 @@ function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) {
 
 # Resolve a file link without consulting PATH. Get-Item sees Windows file
 # symlinks and junctions; an unreadable or looping link proves no identity.
+# A hard link is not a link to follow: it is the file itself under one of its
+# names, and Get-Item gives it no Target (npm's opencode.exe, GAP-1397).
 function Resolve-AgentPath([string]$Path) {
     if (-not $Path) { return "" }
     try {
@@ -879,7 +881,7 @@ function Resolve-AgentPath([string]$Path) {
                 $current = Join-Path $current $parts[$i]
                 $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
                 $link = $item.PSObject.Properties["LinkType"]
-                if ($null -eq $link -or -not $link.Value) { continue }
+                if ($null -eq $link -or -not $link.Value -or [string]$link.Value -eq "HardLink") { continue }
                 $target = [string](@($item.Target)[0])
                 if (-not $target) { return "" }
                 if (-not [IO.Path]::IsPathRooted($target)) { $target = Join-Path (Split-Path -Parent $current) $target }

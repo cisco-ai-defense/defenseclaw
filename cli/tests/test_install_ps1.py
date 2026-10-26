@@ -6654,6 +6654,37 @@ def test_windows_entry_resolution_follows_a_parent_link(tmp_path: Path) -> None:
     assert result.stdout.strip().lower() == str(entry.resolve()).lower(), result.stdout
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_windows_npm_opencode_exe_that_is_a_hard_link_is_the_recorded_entry(tmp_path: Path) -> None:
+    # GAP-1397: npm's opencode-ai installs bin\opencode.exe as a hard link to
+    # its platform package's binary. Get-Item reports LinkType HardLink with
+    # no Target, and Resolve-AgentPath took that for an unreadable link: the
+    # running OpenCode was never named and the upgrade swapped the gateway.
+    roaming, data = tmp_path / "roaming", tmp_path / "data"
+    data.mkdir()
+    platform = roaming / "npm" / "node_modules" / "opencode-windows-x64" / "bin" / "opencode.exe"
+    platform.parent.mkdir(parents=True)
+    platform.write_bytes(b"MZ native opencode")
+    native = roaming / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
+    native.parent.mkdir(parents=True)
+    os.link(platform, native)
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        + _ps1_function("Resolve-AgentPath") + _ps1_function("Get-InstalledAgentPrograms")
+        + f"$env:USERPROFILE = '{tmp_path / 'profile'}'\n$env:APPDATA = '{roaming}'\n"
+        + f"$env:LOCALAPPDATA = '{tmp_path / 'local'}'\n$DataDir = '{data}'\n"
+        + f"'link=' + (Get-Item -LiteralPath '{native}' -Force).LinkType\n"
+        + f"'resolved=' + (Resolve-AgentPath '{native}')\n"
+        + "$i = Get-InstalledAgentPrograms\nforeach ($k in @($i.Keys | Sort-Object)) { '{0}={1}' -f $k, $i[$k] }\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "link=HardLink" in result.stdout, result.stdout
+    assert f"resolved={native}".lower() in result.stdout.lower(), result.stdout
+    assert f"{str(native).lower()}=opencode" in result.stdout, result.stdout
+
+
 @pytest.mark.skipif(os.name != "nt" or POWERSHELL is None or shutil.which("node") is None, reason="native Windows Node required")
 @pytest.mark.allow_subprocess
 def test_windows_relative_node_entry_does_not_use_the_installers_cwd(tmp_path: Path) -> None:
