@@ -463,7 +463,7 @@ func exactSQLCLIOption(engine, argument string) (key, value string, consumesNext
 
 func exactSQLMutation(engine, query string) (SQLMutationOperation, SQLMutationScope, string, bool) {
 	if query == "" || len(query) > maxCommandBytes || unresolvedSQLMutationValue(query) ||
-		strings.ContainsAny(query, "'\"`[]#") {
+		strings.ContainsAny(query, "'\"`[]") {
 		return "", "", "", false
 	}
 	if engine != "sqlite" {
@@ -476,7 +476,10 @@ func exactSQLMutation(engine, query string) (SQLMutationOperation, SQLMutationSc
 		}
 		query = stripped
 	}
-	if strings.Contains(query, "--") || strings.Contains(query, "/*") || strings.Contains(query, "*/") {
+	// A "#" is a MySQL line comment, removed above; on every other engine
+	// (and in a MySQL statement it could not remove) it stays indeterminate.
+	if strings.Contains(query, "--") || strings.Contains(query, "/*") || strings.Contains(query, "*/") ||
+		strings.Contains(query, "#") {
 		return "", "", "", false
 	}
 	statements := make([][]string, 0, 3)
@@ -558,6 +561,25 @@ func withoutSQLComments(engine, query string) (string, bool) {
 			}
 			out.WriteByte(' ')
 			index += end
+		case engine == "mysql" && rest[0] == '#':
+			// MySQL and MariaDB read "#" to the end of the line as a comment
+			// (GAP-1936).
+			end := strings.IndexByte(rest, '\n')
+			if end < 0 {
+				end = len(rest)
+			}
+			out.WriteByte(' ')
+			index += end
+		case strings.HasPrefix(rest, "/*") && (engine == "postgresql" || engine == "sqlserver"):
+			// PostgreSQL and SQL Server nest block comments: the comment ends
+			// at the "*/" that balances its "/*" (GAP-1936). An unbalanced
+			// nest stays indeterminate.
+			end, ok := nestedSQLBlockCommentEnd(rest)
+			if !ok {
+				return "", false
+			}
+			out.WriteByte(' ')
+			index += end
 		case strings.HasPrefix(rest, "/*"):
 			end := strings.Index(rest[2:], "*/")
 			if end < 0 {
@@ -577,6 +599,28 @@ func withoutSQLComments(engine, query string) (string, bool) {
 		}
 	}
 	return out.String(), true
+}
+
+// nestedSQLBlockCommentEnd returns the length of the nested block comment
+// that starts text ("/*"), or false when its nesting does not balance.
+func nestedSQLBlockCommentEnd(text string) (int, bool) {
+	depth := 0
+	for index := 0; index+1 < len(text); {
+		switch text[index : index+2] {
+		case "/*":
+			depth++
+			index += 2
+		case "*/":
+			depth--
+			index += 2
+			if depth == 0 {
+				return index, true
+			}
+		default:
+			index++
+		}
+	}
+	return 0, false
 }
 
 func exactSQLMutationTokens(engine string, tokens []string) (SQLMutationOperation, SQLMutationScope, string, bool) {
