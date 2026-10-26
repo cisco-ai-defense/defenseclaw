@@ -43,6 +43,7 @@ func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
 }
 
 func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -123,6 +124,7 @@ func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
 }
 
 func TestR104ActionClassBoundedOrdinaryValues(t *testing.T) {
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -173,6 +175,7 @@ func TestR104ActionClassBoundedOrdinaryValues(t *testing.T) {
 }
 
 func TestR104ActionClassWrapperRecursion(t *testing.T) {
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -221,6 +224,7 @@ func TestR104ActionClassWrapperRecursion(t *testing.T) {
 // Each lead gap is kept as a named row so a later parser change cannot
 // silently reopen one variant while the broader class tests stay green.
 func TestR104LeadGapCorpusPOSIX(t *testing.T) {
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -684,6 +688,7 @@ func TestR104ActionWindowsUninspectedScripts(t *testing.T) {
 }
 
 func TestR104ActionBoundedFunctionAndProcessInputs(t *testing.T) {
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {

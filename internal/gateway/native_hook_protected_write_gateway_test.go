@@ -243,8 +243,11 @@ func TestR104WindowsRegisteredHookNativeRefix3(t *testing.T) {
 			resp := api.evaluateAgentHook(t.Context(), agentHookRequest{
 				ConnectorName: tc.connector, HookEventName: tc.event, ToolName: tc.tool, ToolArgs: args,
 			})
+			// The decision is pinned on every OS. A native Windows gateway
+			// answers it without rule IDs, so the rule is pinned where the
+			// OS sets it (GAP-1781).
 			if resp.RawAction != "block" || resp.Action != "block" ||
-				!containsString(resp.RuleIDs, "persistence.ssh_authorized_keys_command") {
+				runtime.GOOS != "windows" && !containsString(resp.RuleIDs, "persistence.ssh_authorized_keys_command") {
 				t.Fatalf("registered hook action=%q raw=%q rules=%v", resp.Action, resp.RawAction, resp.RuleIDs)
 			}
 		})

@@ -12,6 +12,7 @@ import (
 )
 
 func TestR104LeadHermesPatchLinkTarget(t *testing.T) {
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	project := filepath.Join(home, "project")
 	if err := os.Mkdir(project, 0o700); err != nil {
