@@ -169,14 +169,16 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	if enterpriseManaged && enterpriseManagedHookRuntimeForceClosed() {
 		// The administrator-owned runtime failed trust validation. Do not read its
 		// sidecar/token or contact any endpoint derived from those files; hand an
-		// unavailable strict runtime directly to hookexec's fail-closed boundary.
+		// unavailable runtime directly to hookexec's failure boundary.
+		reason := enterpriseManagedHookRuntimeFailureReason()
+		failMode, strict := managedRuntimeFailureDelivery(reason)
 		return hookexec.Options{
 			Connector:             connector,
 			Event:                 event,
-			FailMode:              "closed",
-			StrictAvailability:    true,
+			FailMode:              failMode,
+			StrictAvailability:    strict,
 			ManagedEnterprise:     true,
-			ManagedRuntimeFailure: enterpriseManagedHookRuntimeFailureReason(),
+			ManagedRuntimeFailure: reason,
 		}
 	}
 	home, trustedNativeState := trustedNativeHookHome()
@@ -301,8 +303,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 		opts.ManagedRuntimeFailure = managedRuntimeFailure
 		opts.FailMode = enterpriseManagedHookRuntimeFailMode()
 		if managedRuntimeFailure != "" {
-			opts.FailMode = "closed"
-			opts.StrictAvailability = true
+			opts.FailMode, opts.StrictAvailability = managedRuntimeFailureDelivery(managedRuntimeFailure)
 		}
 	}
 
@@ -316,6 +317,18 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	}
 
 	return opts
+}
+
+// managedRuntimeFailureDelivery returns the fail mode and strict availability
+// of a managed runtime resolver failure: closed and strict, except for an
+// account that is not enrolled yet. That account has no runtime state of its
+// own to tamper with, so it takes the managed open default; strict
+// availability in the agent's environment can still close it.
+func managedRuntimeFailureDelivery(reason string) (failMode string, strict bool) {
+	if reason == hookexec.ManagedSIDUnregisteredReason {
+		return "open", hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY"))
+	}
+	return "closed", true
 }
 
 // readHookSidecar parses the hooks/.hookcfg file setup writes on Windows.

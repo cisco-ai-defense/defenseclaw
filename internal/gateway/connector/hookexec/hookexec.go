@@ -60,9 +60,64 @@ const (
 var (
 	errInvalidHookRequest           = errors.New("invalid hook request")
 	errManagedGatewayPeerUnverified = errors.New("enterprise managed gateway peer unverified")
+	// errManagedGatewayNotRunning and errManagedGatewayPortHeld narrow a peer
+	// failure. Both also wrap errManagedGatewayPeerUnverified, so the hook
+	// never writes bytes to the port.
+	errManagedGatewayNotRunning = errors.New("enterprise managed gateway service is not running")
+	errManagedGatewayPortHeld   = errors.New("another process holds the enterprise managed gateway API port")
 )
 
 const managedGatewayPeerUnverifiedReason = "enterprise_managed_gateway_peer_unverified"
+
+// managedGatewayNotRunningReason: the gateway service is stopped, crashed or
+// still starting, and nothing else listens on its port.
+const managedGatewayNotRunningReason = "enterprise_managed_gateway_not_running"
+
+// managedGatewayPortHeldReason: another process listens on the gateway API
+// port, whether or not the gateway service runs.
+const managedGatewayPortHeldReason = "enterprise_managed_gateway_port_held"
+
+// ManagedSIDUnregisteredReason is the resolver failure of an account that is
+// not in the protected target set yet (enterprisehooks.
+// WindowsManagedSIDUnregisteredReason).
+const ManagedSIDUnregisteredReason = "enterprise_managed_sid_unregistered"
+
+// managedPeerFailMode is the fail mode of a managed peer-verification
+// failure. A gateway service that is not running, with nothing else on its
+// port, is an outage: no peer answered, and a standard user cannot stop the
+// LocalSystem service, so the hook's fail mode decides. Every other peer
+// failure (another process on the port, a service or listener table the hook
+// cannot read) fails closed.
+func managedPeerFailMode(failMode string, err error) string {
+	if errors.Is(err, errManagedGatewayNotRunning) && !errors.Is(err, errManagedGatewayPortHeld) {
+		return failMode
+	}
+	return "closed"
+}
+
+// managedPeerFailureReason returns the hook-failure reason of a managed peer
+// verification error.
+func managedPeerFailureReason(err error) string {
+	switch {
+	case errors.Is(err, errManagedGatewayPortHeld):
+		return managedGatewayPortHeldReason
+	case errors.Is(err, errManagedGatewayNotRunning):
+		return managedGatewayNotRunningReason
+	}
+	return managedGatewayPeerUnverifiedReason
+}
+
+// managedRuntimeFailureMode is the fail mode of a managed runtime resolver
+// failure. An account that is not enrolled yet is an availability gap that
+// only an administrator's enrollment closes, so the hook's fail mode decides.
+// Every other resolver failure can come from target-owned state under the
+// account's own profile and fails closed.
+func managedRuntimeFailureMode(reason, failMode string) string {
+	if reason == ManagedSIDUnregisteredReason {
+		return failMode
+	}
+	return "closed"
+}
 
 // Options configures a single hook invocation. The CLI entrypoint fills these
 // from flags + environment; tests construct them directly so the full decision
@@ -155,13 +210,8 @@ func Run(ctx context.Context, opts Options) int {
 		return blockExit
 	}
 	failMode := normalizeFailMode(opts.FailMode)
-	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
-		return failUnreachable(
-			opts,
-			sp,
-			"closed",
-			strings.TrimSpace(opts.ManagedRuntimeFailure),
-		)
+	if reason := strings.TrimSpace(opts.ManagedRuntimeFailure); opts.ManagedEnterprise && reason != "" {
+		return failUnreachable(opts, sp, managedRuntimeFailureMode(reason, failMode), reason)
 	}
 
 	// DEFENSECLAW_HOME guard: an ordinary removed/disabled installation is an
@@ -365,7 +415,7 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 	resp, err := opts.HTTPClient.Do(req)
 	if err != nil {
 		if opts.ManagedEnterprise && errors.Is(err, errManagedGatewayPeerUnverified) {
-			fmt.Fprintln(opts.Stderr, managedGatewayPeerUnverifiedReason)
+			fmt.Fprintln(opts.Stderr, managedPeerFailureReason(err))
 		}
 		return 0
 	}
@@ -395,11 +445,13 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	if err != nil {
 		reason := "gateway unreachable"
 		if errors.Is(err, errManagedGatewayPeerUnverified) {
-			// Managed peer-verification failure must fail closed on the transport
-			// surface too, mirroring the up-front client-build path. A managed
+			// Managed peer-verification failure fails closed on the transport
+			// surface too, mirroring the up-front client-build path: a managed
 			// hook launched with FailMode="open" must not let an unverified
-			// gateway peer surface as an allow-by-default.
-			return failUnreachable(opts, sp, "closed", managedGatewayPeerUnverifiedReason)
+			// gateway peer surface as an allow-by-default. The one exception is
+			// a stopped gateway service with nothing on its port
+			// (managedPeerFailMode).
+			return failUnreachable(opts, sp, managedPeerFailMode(failMode, err), managedPeerFailureReason(err))
 		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}

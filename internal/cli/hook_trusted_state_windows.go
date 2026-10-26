@@ -7,6 +7,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -269,8 +270,8 @@ func enterpriseManagedRuntimeAbsenceNoop(
 		nativeEnterpriseHookRuntimeSnapshot.connector == connectorName &&
 		nativeEnterpriseHookRuntimeSnapshot.err == nil {
 		nativeEnterpriseHookRuntimeSnapshot.err = fmt.Errorf(
-			"%s: connector %s is absent from the protected target set",
-			enterprisehooks.WindowsManagedSIDUnregisteredReason,
+			"%w: connector %s is absent from the protected target set",
+			enterprisehooks.ErrWindowsManagedSIDUnregistered,
 			connectorName,
 		)
 	}
@@ -308,9 +309,9 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 		nativeEnterpriseHookRuntimeSnapshot.err == nil {
 		return ""
 	}
-	if strings.Contains(
-		nativeEnterpriseHookRuntimeSnapshot.err.Error(),
-		enterprisehooks.WindowsManagedSIDUnregisteredReason,
+	if errors.Is(
+		nativeEnterpriseHookRuntimeSnapshot.err,
+		enterprisehooks.ErrWindowsManagedSIDUnregistered,
 	) {
 		return enterprisehooks.WindowsManagedSIDUnregisteredReason
 	}

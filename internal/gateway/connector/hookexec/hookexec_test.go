@@ -1412,32 +1412,50 @@ func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
 	}
 }
 
-func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing.T) {
-	rt := ok(`{"action":"allow"}`)
-	var out, errb bytes.Buffer
-	home := t.TempDir()
-	code := Run(context.Background(), Options{
-		Connector:             "codex",
-		APIAddr:               "127.0.0.1:1",
-		Home:                  home,
-		HookDir:               filepath.Join(home, "hooks"),
-		Token:                 "target-readable-token",
-		FailMode:              "open",
-		ManagedEnterprise:     true,
-		ManagedRuntimeFailure: "enterprise_managed_sid_unregistered",
-		Stdin:                 strings.NewReader("{}"),
-		Stdout:                &out,
-		Stderr:                &errb,
-		HTTPClient:            &http.Client{Transport: rt},
-	})
-	if code != blockExit {
-		t.Fatalf("code = %d, want fail-closed %d; stdout=%q stderr=%q", code, blockExit, out.String(), errb.String())
-	}
-	if rt.requests != 0 {
-		t.Fatalf("gateway called %d times, want 0", rt.requests)
-	}
-	if !strings.Contains(errb.String(), "enterprise_managed_sid_unregistered") {
-		t.Fatalf("stderr = %q, want stable unregistered-SID diagnostic", errb.String())
+// A resolver failure never contacts the gateway. An account that is not
+// enrolled yet follows the fail mode; every other resolver failure blocks.
+func TestManagedEnterpriseResolverFailureBeforeRuntimeOrGateway(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		reason   string
+		failMode string
+		strict   bool
+		wantCode int
+	}{
+		{name: "unregistered/open", reason: ManagedSIDUnregisteredReason, failMode: "open", wantCode: 0},
+		{name: "unregistered/closed", reason: ManagedSIDUnregisteredReason, failMode: "closed", wantCode: blockExit},
+		{name: "unregistered/strict", reason: ManagedSIDUnregisteredReason, failMode: "open", strict: true, wantCode: blockExit},
+		{name: "state-invalid/open", reason: "enterprise_managed_runtime_state_invalid", failMode: "open", wantCode: blockExit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := ok(`{"action":"allow"}`)
+			var out, errb bytes.Buffer
+			home := t.TempDir()
+			code := Run(context.Background(), Options{
+				Connector:             "codex",
+				APIAddr:               "127.0.0.1:1",
+				Home:                  home,
+				HookDir:               filepath.Join(home, "hooks"),
+				Token:                 "target-readable-token",
+				FailMode:              tc.failMode,
+				StrictAvailability:    tc.strict,
+				ManagedEnterprise:     true,
+				ManagedRuntimeFailure: tc.reason,
+				Stdin:                 strings.NewReader("{}"),
+				Stdout:                &out,
+				Stderr:                &errb,
+				HTTPClient:            &http.Client{Transport: rt},
+			})
+			if code != tc.wantCode {
+				t.Fatalf("code = %d, want %d; stdout=%q stderr=%q", code, tc.wantCode, out.String(), errb.String())
+			}
+			if rt.requests != 0 {
+				t.Fatalf("gateway called %d times, want 0", rt.requests)
+			}
+			if !strings.Contains(errb.String(), tc.reason) {
+				t.Fatalf("stderr = %q, want stable diagnostic %q", errb.String(), tc.reason)
+			}
+		})
 	}
 }
 

@@ -31,7 +31,14 @@ end {
         $targetModes = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($targetModesJSON64)) | ConvertFrom-Json
         $currentSID = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         $targetMode = $targetModes.PSObject.Properties[$currentSID]
-        if ($null -ne $targetMode -and $targetMode.Value -cin @('open', 'closed')) {
+        if ($null -eq $targetMode) {
+            # An account that is not enrolled yet takes the managed open default
+            # unless strict availability is set (the hook's own 1/true/yes set).
+            $strictAvailability = ([string]$env:DEFENSECLAW_STRICT_AVAILABILITY).Trim().ToLowerInvariant()
+            if (@('1', 'true', 'yes') -notcontains $strictAvailability) {
+                $failMode = 'open'
+            }
+        } elseif ($targetMode.Value -cin @('open', 'closed')) {
             $failMode = [string]$targetMode.Value
         }
 {{end}}        if (-not (Test-Path -LiteralPath $hook -PathType Leaf)) {
