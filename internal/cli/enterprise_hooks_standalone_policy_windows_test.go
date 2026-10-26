@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -536,5 +538,149 @@ func TestWindowsCopilotVerifyNamesClaudeSettingsTheMigrationCannotFinish(t *test
 	enterpriseHookGuardianWatching.Store(false)
 	if err := windowsCopilotVSCodeUser(home, true, false); err != nil && strings.Contains(err.Error(), settings) {
 		t.Fatalf("migrated settings must pass: %v", err)
+	}
+	// An administrator console cannot read a profile whose settings carry a
+	// private ACL; only LocalSystem (Setup, the guardian) fails the row on it.
+	previousSystem := windowsClaudeSettingsCheckerIsLocalSystem
+	t.Cleanup(func() { windowsClaudeSettingsCheckerIsLocalSystem = previousSystem })
+	windowsManagedClaudeRegistrationProbe = func(string, string) (bool, []string, error) {
+		return false, nil, fmt.Errorf("open settings.json: %w", os.ErrPermission)
+	}
+	windowsClaudeSettingsCheckerIsLocalSystem = func() bool { return false }
+	if err := windowsCopilotVSCodeUser(home, true, false); err != nil && strings.Contains(err.Error(), settings) {
+		t.Fatalf("an administrator console must not fail the row on a file it may not read: %v", err)
+	}
+	windowsClaudeSettingsCheckerIsLocalSystem = func() bool { return true }
+	if err := windowsCopilotVSCodeUser(home, true, false); err == nil || !strings.Contains(err.Error(), "cannot check "+settings) {
+		t.Fatalf("LocalSystem must fail the row on a file it cannot read: %v", err)
+	}
+}
+
+// GAP-1970: a verify or readiness run lists the eligible profiles once for
+// all its Copilot rows, not once per row; a check outside a run still lists
+// them itself.
+func TestWindowsClaudeSettingsCheckListsProfilesOncePerVerifyRun(t *testing.T) {
+	previousProfiles, previousProbe := enterpriseHookWindowsEligibleProfiles, windowsManagedClaudeRegistrationProbe
+	t.Cleanup(func() {
+		enterpriseHookWindowsEligibleProfiles, windowsManagedClaudeRegistrationProbe = previousProfiles, previousProbe
+		enterpriseHookVerifyProfiles.Store(nil)
+	})
+	homes := []string{t.TempDir(), t.TempDir(), t.TempDir()}
+	lists := 0
+	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) {
+		lists++
+		out := make([]enterprisehooks.TargetCredentials, 0, len(homes))
+		for i, home := range homes {
+			out = append(out, enterprisehooks.TargetCredentials{UserHome: home, UID: -1, GID: -1, SID: fmt.Sprintf("S-1-5-21-1-2-3-%d", 1001+i)})
+		}
+		return out, nil
+	}
+	probed := map[string]int{}
+	windowsManagedClaudeRegistrationProbe = func(home, _ string) (bool, []string, error) {
+		probed[home]++
+		return home == homes[1], nil, nil
+	}
+	end := enterpriseHookVerifyRunScope()
+	for i, home := range homes {
+		err := windowsClaudeUserSettingsMigrated(home)
+		if (i == 1) != (err != nil) {
+			t.Fatalf("home %d: the check must still judge each account on its own file: %v", i, err)
+		}
+	}
+	if lists != 1 {
+		t.Fatalf("one verify run with %d Copilot rows listed the eligible profiles %d times, want 1", len(homes), lists)
+	}
+	for _, home := range homes {
+		if probed[home] != 1 {
+			t.Fatalf("each account's Claude settings are read once per row: %v", probed)
+		}
+	}
+	end()
+	lists = 0
+	_ = windowsClaudeUserSettingsMigrated(homes[0])
+	_ = windowsClaudeUserSettingsMigrated(homes[0])
+	if lists != 2 {
+		t.Fatalf("outside a verify run each check must list the profiles itself (no stale list): %d", lists)
+	}
+}
+
+// GAP-1967 (and the GAP-1969 wording): status, verify and ensure, which
+// Setup /status, /verify, /ensure and Intune detection report, warn
+// claude_settings_unmigrated with the file and the reason for each enrolled
+// account whose Claude settings the migration cannot finish, instead of
+// reporting healthy while that account's Copilot and Cursor calls block.
+func TestWindowsStatusWarnsAnUnmigratableClaudeSettingsFile(t *testing.T) {
+	previousHome, previousProbe, previousSystem := windowsEnterpriseClaudeSettingsHome, windowsManagedClaudeRegistrationProbe, windowsClaudeSettingsCheckerIsLocalSystem
+	t.Cleanup(func() {
+		windowsEnterpriseClaudeSettingsHome, windowsManagedClaudeRegistrationProbe, windowsClaudeSettingsCheckerIsLocalSystem = previousHome, previousProbe, previousSystem
+	})
+	root := t.TempDir()
+	homes := map[string]string{}
+	for _, name := range []string{"bom", "readonly", "clean", "denied"} {
+		homes[name] = filepath.Join(root, name)
+	}
+	sids := map[string]string{
+		"S-1-5-21-1-2-3-1001": "bom",
+		"S-1-5-21-1-2-3-1002": "readonly",
+		"S-1-5-21-1-2-3-1003": "clean",
+		"S-1-5-21-1-2-3-1004": "denied",
+	}
+	windowsEnterpriseClaudeSettingsHome = func(sid string) (string, error) {
+		name, ok := sids[sid]
+		if !ok {
+			return "", os.ErrNotExist
+		}
+		return homes[name], nil
+	}
+	windowsManagedClaudeRegistrationProbe = func(home, _ string) (bool, []string, error) {
+		switch home {
+		case homes["bom"]:
+			return false, nil, errors.New("the Claude settings must be a JSON object: invalid character 'ï' looking for beginning of value")
+		case homes["readonly"]:
+			return true, nil, nil
+		case homes["denied"]:
+			return false, nil, fmt.Errorf("open settings.json: %w", os.ErrPermission)
+		}
+		return false, nil, nil
+	}
+	accounts := []enterprisestatus.EnrollmentAccount{
+		{Account: `DCLAB\bom`, SID: "S-1-5-21-1-2-3-1001"},
+		{Account: `DCLAB\bom`, SID: "s-1-5-21-1-2-3-1001"},
+		{Account: `DCLAB\readonly`, SID: "S-1-5-21-1-2-3-1002"},
+		{Account: `DCLAB\clean`, SID: "S-1-5-21-1-2-3-1003"},
+		{Account: `DCLAB\denied`, SID: "S-1-5-21-1-2-3-1004"},
+		{Account: `DCLAB\gone`, SID: "S-1-5-21-1-2-3-1999"},
+		{Account: "nosid"},
+	}
+	// An administrator console cannot read a profile with a private ACL;
+	// LocalSystem (Setup, the guardian) can, so only it reports access denied.
+	windowsClaudeSettingsCheckerIsLocalSystem = func() bool { return false }
+	admin := &enterprisestatus.Result{}
+	appendWindowsClaudeUserSettingsWarnings(admin, accounts)
+	if len(admin.Warnings) != 2 {
+		t.Fatalf("an administrator console must not report a file it may not read: %+v", admin.Warnings)
+	}
+	windowsClaudeSettingsCheckerIsLocalSystem = func() bool { return true }
+	result := &enterprisestatus.Result{}
+	appendWindowsClaudeUserSettingsWarnings(result, accounts)
+	if len(result.Warnings) != 3 {
+		t.Fatalf("want one warning each for the unreadable, the unremovable and the access-denied file, got %+v", result.Warnings)
+	}
+	for _, warning := range result.Warnings {
+		if warning.Code != "claude_settings_unmigrated" {
+			t.Fatalf("warning code: %+v", warning)
+		}
+	}
+	bom := filepath.Join(homes["bom"], ".claude", "settings.json")
+	if !strings.Contains(result.Warnings[0].Message, "cannot check "+bom) || !strings.Contains(result.Warnings[0].Message, "without a byte order mark") {
+		t.Fatalf("the unreadable file's warning must name the file and the fix: %s", result.Warnings[0].Message)
+	}
+	readonly := filepath.Join(homes["readonly"], ".claude", "settings.json")
+	if !strings.Contains(result.Warnings[1].Message, readonly) || !strings.Contains(result.Warnings[1].Message, "remove the hooks by hand") {
+		t.Fatalf("a file the guardian cannot write must name the by-hand fix (GAP-1969): %s", result.Warnings[1].Message)
+	}
+	denied := filepath.Join(homes["denied"], ".claude", "settings.json")
+	if !strings.Contains(result.Warnings[2].Message, "cannot check "+denied) {
+		t.Fatalf("LocalSystem reports a file it cannot read as verify reports it: %s", result.Warnings[2].Message)
 	}
 }

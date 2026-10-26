@@ -14,11 +14,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -33,6 +35,30 @@ func init() {
 	enterprisehooks.SetWindowsOpenCodeMachinePolicy(windowsOpenCodeMachinePolicy)
 	enterprisehooks.SetWindowsClaudeManagedHooksOnlyPolicy(windowsClaudeManagedHooksOnlyEnforced)
 	enterprisehooks.SetWindowsCopilotVSCodeUser(windowsCopilotVSCodeUser)
+	enterpriseHookVerifyRunScope = func() func() {
+		enterpriseHookVerifyProfiles.Store(&enterpriseHookProfileList{})
+		return func() { enterpriseHookVerifyProfiles.Store(nil) }
+	}
+}
+
+// enterpriseHookVerifyProfiles holds, for one `enterprise hooks verify` or
+// `readiness` run, the eligible profile list its target checks share: the
+// Copilot row check of an account's Claude Code user settings listed every
+// profile again for each row (GAP-1970). It is nil outside a run, so a check
+// outside one lists the profiles itself.
+var enterpriseHookVerifyProfiles atomic.Pointer[enterpriseHookProfileList]
+
+// enterpriseHookProfileList lists the profiles once, on first use, for every
+// check of one run.
+type enterpriseHookProfileList struct {
+	once     sync.Once
+	profiles []enterprisehooks.TargetCredentials
+	err      error
+}
+
+func (l *enterpriseHookProfileList) get(list func() ([]enterprisehooks.TargetCredentials, error)) ([]enterprisehooks.TargetCredentials, error) {
+	l.once.Do(func() { l.profiles, l.err = list() })
+	return l.profiles, l.err
 }
 
 // windowsCopilotVSCodeUser places, checks (verify) or removes DefenseClaw's
@@ -87,9 +113,19 @@ func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
 // the foreign-hook guard deny those agents' tool calls, so verify is not ok
 // and names the file and the reason instead of the calls failing with no
 // status error (GAP-1540, LEAD DECISION 03:34). Read-only; an account the
-// eligible profile list does not name is not checked. Tests replace it.
+// eligible profile list does not name is not checked. A verify or readiness
+// run lists the profiles once for all its rows (GAP-1970). Tests replace it.
 var windowsClaudeUserSettingsMigrated = func(home string) error {
-	profiles, err := enterpriseHookWindowsEligibleProfiles(context.Background())
+	list := func() ([]enterprisehooks.TargetCredentials, error) {
+		return enterpriseHookWindowsEligibleProfiles(context.Background())
+	}
+	var profiles []enterprisehooks.TargetCredentials
+	var err error
+	if run := enterpriseHookVerifyProfiles.Load(); run != nil {
+		profiles, err = run.get(list)
+	} else {
+		profiles, err = list()
+	}
 	if err != nil {
 		return nil
 	}
@@ -103,14 +139,60 @@ var windowsClaudeUserSettingsMigrated = func(home string) error {
 	return nil
 }
 
+// appendWindowsClaudeUserSettingsWarnings warns claude_settings_unmigrated,
+// in the status, verify and ensure result (Setup /status, /verify, /ensure
+// and Intune detection read it), for each enrolled account whose Claude Code
+// user settings the guardian's migration cannot finish or has not finished:
+// that account's Copilot CLI in a home project and Cursor block their tool
+// calls on the file, and only `enterprise hooks verify` and the guardian log
+// named it while the deployment reported healthy (GAP-1967). It is a warning,
+// as in Setup's readiness: one account's file never fails the host.
+func appendWindowsClaudeUserSettingsWarnings(result *enterprisestatus.Result, accounts []enterprisestatus.EnrollmentAccount) {
+	seen := map[string]bool{}
+	for _, account := range accounts {
+		sid := strings.ToUpper(strings.TrimSpace(account.SID))
+		if sid == "" || seen[sid] {
+			continue
+		}
+		seen[sid] = true
+		home, err := windowsEnterpriseClaudeSettingsHome(sid)
+		if err != nil || strings.TrimSpace(home) == "" {
+			continue
+		}
+		err = windowsClaudeUserSettingsMigrationError(enterprisehooks.TargetCredentials{UserHome: home, UID: -1, GID: -1, SID: sid})
+		if err == nil {
+			continue
+		}
+		result.AddWarning("claude_settings_unmigrated", err.Error())
+	}
+}
+
+// windowsClaudeSettingsCheckerIsLocalSystem reports whether this process runs
+// as LocalSystem. Tests replace it.
+var windowsClaudeSettingsCheckerIsLocalSystem = func() bool {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	return err == nil && user != nil && user.User.Sid != nil && user.User.Sid.IsWellKnown(windows.WinLocalSystemSid)
+}
+
+// windowsEnterpriseClaudeSettingsHome resolves an enrolled account's profile
+// folder from its SID. Tests replace it.
+var windowsEnterpriseClaudeSettingsHome = windowsEnterpriseHookSIDProfilePath
+
 // windowsClaudeUserSettingsMigrationError is the verify error for one
-// account's Claude Code user settings, or nil.
+// account's Claude Code user settings, or nil. Access denied is an error only
+// under LocalSystem, the identity of Setup and the guardian, which read every
+// profile: an elevated administrator console cannot read a profile whose
+// settings carry a private ACL, and its `enterprise hooks verify` and status
+// failed that account on a file the guardian reads and migrates.
 func windowsClaudeUserSettingsMigrationError(target enterprisehooks.TargetCredentials) error {
 	settings := filepath.Join(target.UserHome, ".claude", "settings.json")
 	present, _, err := windowsManagedClaudeRegistrationProbe(target.UserHome, target.SID)
+	if err != nil && errors.Is(err, os.ErrPermission) && !windowsClaudeSettingsCheckerIsLocalSystem() {
+		return nil
+	}
 	switch {
 	case err != nil:
-		return fmt.Errorf("DefenseClaw cannot check %s for its older per-user hooks (%v); "+
+		return fmt.Errorf("DefenseClaw cannot check %s for its older per-user hooks (%w); "+
 			"until the file is valid JSON (UTF-8 without a byte order mark) or removed, Copilot CLI in a project "+
 			"under the home and Cursor block their tool calls on it", settings, err)
 	case present:

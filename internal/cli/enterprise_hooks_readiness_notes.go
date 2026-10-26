@@ -60,3 +60,9 @@ func enterpriseHookVerifyWarnings(run enterpriseHookVerifyRun, notes *enterprise
 	}
 	return append(warnings, notes.list()...)
 }
+
+// enterpriseHookVerifyRunScope starts the run-scoped state of one
+// `enterprise hooks verify` or `readiness` run and returns its end. The
+// Windows build shares one eligible profile list among the run's target
+// checks there (GAP-1970); elsewhere there is none.
+var enterpriseHookVerifyRunScope = func() (end func()) { return func() {} }

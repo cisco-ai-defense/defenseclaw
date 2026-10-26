@@ -1787,6 +1787,7 @@ func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool
 	var run enterpriseHookVerifyRun
 	var err error
 	var notes *enterpriseHookNoteSet
+	defer enterpriseHookVerifyRunScope()()
 	if registrationOnly {
 		notes = &enterpriseHookNoteSet{}
 		enterpriseHookReadinessNotes.Store(notes)
