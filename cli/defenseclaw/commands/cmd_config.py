@@ -1075,7 +1075,7 @@ def config_migrate(dry_run: bool, ack: bool, as_json: bool) -> None:
     except ConfigInspectError as exc:
         raise click.ClickException(str(exc)) from exc
     if ack:
-        click.echo("Marked the config_version 9 migration record as read.")
+        click.echo(result.get("message") or "Marked the config_version 9 migration record as read.")
         return
     if as_json:
         click.echo(json.dumps(result, indent=2))

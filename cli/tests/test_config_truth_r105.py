@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -94,6 +95,30 @@ def test_get_prints_the_schema_default_of_a_key_config_yaml_leaves_out(tmp_path:
     assert result.exit_code == 0, result.output
     assert result.output.splitlines()[-1] == "true", result.output
     assert f"config.yaml does not set {key}" in result.output
+
+
+def test_migrate_ack_prints_what_the_helper_did(tmp_path: Path, monkeypatch) -> None:
+    # GAP-1677: with no migration record the helper says there is nothing to
+    # acknowledge; the CLI must not claim it marked a record as read.
+    import importlib.util
+    import subprocess
+
+    from defenseclaw import config_inspect
+
+    _config(tmp_path, monkeypatch, "")
+    said = "There is no config_version 9 migration record (x); nothing to acknowledge.\n"
+    # conftest stands in for config_inspect.migrate_config_v9; load the real one.
+    spec = importlib.util.spec_from_file_location("_config_inspect_r105", config_inspect.__file__)
+    real = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, real)
+    spec.loader.exec_module(real)
+    monkeypatch.setattr(real, "resolve_trusted_gateway_binary", lambda: "/bin/defenseclaw-gateway")
+    monkeypatch.setattr(real, "_run", lambda argv: subprocess.CompletedProcess(argv, 0, said, ""))
+    monkeypatch.setattr(config_inspect, "migrate_config_v9", real.migrate_config_v9)
+    result = CliRunner().invoke(cmd_config.config_cmd, ["migrate", "--ack"])
+    assert result.exit_code == 0, result.output
+    assert "nothing to acknowledge" in result.output
+    assert "Marked" not in result.output
 
 
 def test_unset_keeps_a_connector_entry_that_says_it_is_guarded(tmp_path: Path, monkeypatch) -> None:
