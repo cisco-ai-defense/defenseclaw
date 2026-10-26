@@ -630,6 +630,45 @@ func (r GuardRequest) ownedHandler(handler any) bool {
 	return commands > 0
 }
 
+// perUserClaudeHandler reports a handler in the account's own Claude Code
+// user settings (<account home>\.claude\settings.json, under the home from
+// the system account database) that is exactly one of the per-user Claude
+// Code handlers DefenseClaw's 1.0.x per-user Setup wrote on Windows
+// (connector.ClaudeCodePerUserHandlerOf) and carries no key DefenseClaw does
+// not write. Such an entry is DefenseClaw's own, not a foreign hook: on a
+// managed computer the guardian migrates it out of the file (GAP-0587), and
+// until it has, an agent that reads the file (Copilot CLI in a project under
+// the home) must not block on it (GAP-1540). The same command in any other
+// file, an edited argv or an extra key is foreign as before.
+func (r GuardRequest) perUserClaudeHandler(source hookSource, handler any) bool {
+	accountHome := strings.TrimSpace(r.AccountHome)
+	if r.goos() != "windows" || accountHome == "" || source.format != formatGrouped ||
+		!samePath(filepath.Clean(source.path), filepath.Join(accountHome, ".claude", "settings.json")) {
+		return false
+	}
+	var fields map[string]any
+	switch v := handler.(type) {
+	case *object:
+		fields = v.values
+	case map[string]any:
+		fields = v
+	default:
+		return false
+	}
+	for key, value := range fields {
+		switch {
+		case key == "type":
+			if kind, _ := value.(string); kind != "command" {
+				return false
+			}
+		case key == "command" || key == "args":
+		case !ownedHandlerKeys[key]:
+			return false
+		}
+	}
+	return connector.ClaudeCodePerUserHandlerOf(fields, accountHome)
+}
+
 // ownedExecArgs accepts only the managed invocation DefenseClaw renders:
 // hook --connector <name> --enterprise-managed [--event <event>]. Any other
 // argument list (an unmanaged invocation pointed at another gateway
@@ -906,7 +945,7 @@ func (s *guardScan) scanJSONHooks(source hookSource, data []byte) []Finding {
 				handlers = handlersOf(item)
 			}
 			for _, handler := range handlers {
-				if req.ownedHandler(handler) {
+				if req.ownedHandler(handler) || req.perUserClaudeHandler(source, handler) {
 					continue
 				}
 				findings = append(findings, s.handlerFinding(source, event, handler))
