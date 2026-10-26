@@ -1546,8 +1546,8 @@
         "unset"
       ],
       "security_impact": "medium",
-      "surface_in_doctor": true,
-      "managed": "tighten_only",
+      "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/fail_mode.py",

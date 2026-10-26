@@ -107,6 +107,9 @@ func init() {
 	// Every verb prints its --json failure document for a flag error,
 	// status too (mgmt-agent-api GAP-0029).
 	enterpriseSecretArgumentRefusal = func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error {
+		if ev, ok := secretChangeEvent(action, opts.name, false, "invalid_arguments", err, false); ok {
+			recordWindowsChangeRefusal(cmd, ev)
+		}
 		return reportWindowsSecretFailure(cmd, action, opts, err, opts.json || secretArgsRequestJSON(secretRawArgs()))
 	}
 	enterpriseSecretCmd.AddCommand(&cobra.Command{

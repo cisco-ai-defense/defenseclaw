@@ -1789,7 +1789,9 @@ def _apply_global_fail_mode_transaction(
                         state = resolve_connector_fail_mode(app.cfg, name)
                         if not state.current:
                             raise OSError(
-                                f"connector runtime verification failed for {name}: " + ", ".join(state.drift)
+                                f"connector runtime verification failed for {name}: "
+                                + ", ".join(state.drift)
+                                + ". Run `defenseclaw doctor`, then retry the fail-mode command."
                             )
             except (OSError, RuntimeError, click.ClickException) as exc:
                 gc.hook_fail_mode = old_global
@@ -4433,12 +4435,11 @@ def use_pack_cmd(
     # for that directory so conflicting aliases cannot silently re-pin it.
     path_pins = []
     if kind != "preset":
-        canonical = os.path.normcase(os.path.realpath(path))
         path_pins = [
             (name, pin)
             for name, pin in sorted((getattr(gc, "custom_packs", None) or {}).items())
             if getattr(pin, "path", "")
-            and os.path.normcase(os.path.realpath(policy_catalog.normalize_pack_path(pin.path))) == canonical
+            and policy_catalog.same_pack_path(path, policy_catalog.normalize_pack_path(pin.path))
         ]
         if path_pins and kind != "registered":
             pack_name = path_pins[0][0]
@@ -5571,7 +5572,10 @@ def mode_cmd(
         _unguarded_hook_connectors(app, affected) if new_mode == "action" and outcome in ("live", "restarted") else []
     )
 
-    plain = {"action": "blocks findings at or above the block-at severity", "observe": "logs findings, blocks nothing"}
+    observe_effect = "logs policy findings without blocking on them"
+    if any(str(gc.effective_hook_fail_mode(c) or "").strip().lower() == "closed" for c in affected):
+        observe_effect += "; a gateway outage can still deny a call when hook fail mode is closed"
+    plain = {"action": "blocks findings at or above the block-at severity", "observe": observe_effect}
     if connector_key is None:
         message = f"The global guardrail mode is now {new_mode}: it {plain[new_mode]}."
         not_covered = [c for c in actives if _override(c) and policy_catalog.mode_label(_override(c)) != new_mode]

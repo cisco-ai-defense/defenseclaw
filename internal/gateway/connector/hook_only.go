@@ -2053,7 +2053,7 @@ func (c *hookOnlyConnector) removeHermesHomeEntries(opts SetupOpts, configPath s
 		}
 	}
 	if approvals {
-		if err := removeHermesOwnedApprovals(filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName), command, nil); err != nil {
+		if err := removeHermesOwnedApprovals(filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName), command, nil, managedStandaloneRender(opts)); err != nil {
 			return fmt.Errorf("remove shell hook approvals: %w", err)
 		}
 	}
@@ -4200,6 +4200,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	if err := validateHermesWindowsConfigPath(configPath); err != nil {
 		return err
 	}
+	retireManagedConsent := managedStandaloneRender(opts)
 	logicalName := hermesAllowlistLogicalName
 	path := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
 	backup, backupErr := loadManagedFileBackupForTransform(opts.DataDir, "hermes", logicalName, path)
@@ -4209,7 +4210,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	// Approvals that carry DefenseClaw's ownership marker are DefenseClaw's
 	// even in the copy Setup captured (a file put back from an earlier
 	// enrollment holds them), so that copy is restored only without them.
-	if backup == nil || !hermesAllowlistHoldsOwnedApprovals(backup.PristineBytes) {
+	if !retireManagedConsent && (backup == nil || !hermesAllowlistHoldsOwnedApprovals(backup.PristineBytes)) {
 		restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, "hermes", logicalName, path)
 		if err != nil {
 			return err
@@ -4230,7 +4231,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 			return err
 		}
 	}
-	if err := removeHermesOwnedApprovals(path, command, backup); err != nil {
+	if err := removeHermesOwnedApprovals(path, command, backup, retireManagedConsent); err != nil {
 		return err
 	}
 	discardManagedFileBackup(opts.DataDir, "hermes", logicalName)
@@ -4240,7 +4241,9 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 // removeHermesOwnedApprovals removes DefenseClaw's approvals of command
 // from the Hermes allowlist at path. The approvals the copy Setup captured
 // (backup) held go back as Hermes wrote them.
-func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup) error {
+// retireManagedConsent (a standalone managed uninstall) also removes the
+// consent for the exact hook a supported upgrade retained (GAP-0366).
+func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup, retireManagedConsent bool) error {
 	document, err := readHermesAllowlist(path)
 	if err != nil {
 		return err
@@ -4278,6 +4281,13 @@ func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup)
 		owned, _ := entry[hermesAllowlistOwnerField].(bool)
 		_, requiredEvent := events[event]
 		pair := event + "\x00" + entryCommand
+		if retireManagedConsent && requiredEvent && entryCommand == command &&
+			(owned || hermesConsentForCommand(entry, command)) {
+			// A standalone uninstall removes the product, including consent for
+			// its exact hook retained by a supported upgrade. Restoring that
+			// consent would leave a registration pointing into removed state.
+			continue
+		}
 		if owned && requiredEvent && !pristinePairs[pair] {
 			if entryCommand != command {
 				return fmt.Errorf("Hermes allowlist entry %s has a tampered DefenseClaw command; refusing non-exact cleanup", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
@@ -6237,6 +6247,9 @@ func managedHookCommandEntry(raw interface{}, hookScript string) bool {
 			}
 		}
 		if isCopilotShellHookScript(hookScript) && isCopilotEventBoundShellCommand(command, hookScript) {
+			return true
+		}
+		if isCopilotShellHookScript(hookScript) && copilotManagedShellCommand(command, hookScript) {
 			return true
 		}
 	}

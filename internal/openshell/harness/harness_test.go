@@ -186,7 +186,7 @@ func TestInstallStepsPinContract(t *testing.T) {
 		{"kiro-latest", Kiro, "latest", nil, nil},
 		{"devin-pin", Devin, "", []string{"'https://static.devin.ai/cli/3000.4.25/devin-3000.4.25-aarch64-unknown-linux.tar.gz'"}, nil},
 		{"devin-newer", Devin, "3000.12.0", nil, ErrUnknownContract},
-		{"hermes-pin", Hermes, "", []string{"hermes-agent==0.19.0", "uv python install '3.12.13'", "--exclude-newer '2026-09-27T00:00:00Z'", "UV_NO_CONFIG=1", "is not the pinned"}, nil},
+		{"hermes-pin", Hermes, "", []string{"hermes-agent[anthropic]==0.19.0", "uv python install '3.12.13'", "--exclude-newer '2026-09-27T00:00:00Z'", "UV_NO_CONFIG=1", "is not the pinned"}, nil},
 		{"hermes-below-contract", Hermes, "0.18.2", nil, ErrUnknownContract},
 		{"hermes-above-contracts", Hermes, "0.22.0", nil, ErrUnknownContract},
 		{"hermes-not-exact", Hermes, "latest", nil, nil},

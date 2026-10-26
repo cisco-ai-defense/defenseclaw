@@ -16,7 +16,7 @@ class ManagedScanGuideTest(unittest.TestCase):
         self.assertNotIn("defenseclaw-gateway scan skill", before_steps)
         self.assertIn("sudo /opt/defenseclaw/bin/defenseclaw-gateway scan code /path/to/skill", before_steps)
         self.assertIn("sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan code /path/to/skill", before_steps)
-        self.assertIn("known-limits#managed-linux-and-macos-scans", before_steps)
+        self.assertIn("support-matrix#managed-linux-and-macos-scans", before_steps)
 
     def test_mcp_guide_gives_managed_route_before_per_user_steps(self):
         before_steps = (GUIDES / "mcp-scanner.mdx").read_text().split("## Steps", 1)[0]
@@ -24,10 +24,10 @@ class ManagedScanGuideTest(unittest.TestCase):
         self.assertNotIn("defenseclaw-gateway scan mcp", before_steps)
         self.assertNotIn("install watcher scans it", before_steps)
         self.assertIn("connector's MCP configuration", before_steps)
-        self.assertIn("known-limits#managed-linux-and-macos-scans", before_steps)
+        self.assertIn("support-matrix#managed-linux-and-macos-scans", before_steps)
 
     def test_known_limits_names_the_managed_unix_scanner_limit(self):
-        limits = (GUIDES.parents[1] / "troubleshooting/known-limits.mdx").read_text()
+        limits = (GUIDES.parent / "support-matrix.mdx").read_text()
         section = limits.split("## Managed Linux and macOS scans", 1)[1].split("\n## ", 1)[0]
         self.assertIn("include no skill, MCP or plugin scanner", section)
         self.assertIn("scan code PATH", section)

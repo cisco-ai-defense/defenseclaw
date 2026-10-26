@@ -811,7 +811,7 @@ class OverviewPanelModel:
             notices.append(
                 OverviewNotice(
                     "info",
-                    "Loading the audit history - alert and hook counts show 0 until it finishes",
+                    "Loading the audit history - counts show 0 while loading",
                 )
             )
         if self.not_configured:

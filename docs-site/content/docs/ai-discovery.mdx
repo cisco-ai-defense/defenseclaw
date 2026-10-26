@@ -79,7 +79,7 @@ Take a 30-second inventory of the AI on a machine.
    defenseclaw agent discovery status
    ```
 
-   A fresh install has discovery off. `enable` also turns on runtime planes A and B.
+   A fresh install has discovery off. `enable` also turns on runtime planes A and B. It lists the changes, says it will restart the gateway, and asks `Proceed? [Y/n]`; press Enter to continue. In a script or scheduled task, use `defenseclaw agent discovery enable --restart --scan --yes` to skip the prompt.
 
 3. Read the inventory.
 
@@ -123,6 +123,8 @@ Take a 30-second inventory of the AI on a machine.
 ```bash
 defenseclaw agent discovery disable
 ```
+`disable` asks `Proceed? [Y/n]` before saving the change and restarting the gateway. In a script or scheduled task, use `defenseclaw agent discovery disable --yes` to skip the prompt. A stopped gateway is not started; discovery stays off when it next starts.
+
 
 ## Where discovery data goes
 

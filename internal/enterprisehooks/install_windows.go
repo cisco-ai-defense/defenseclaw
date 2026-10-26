@@ -33,6 +33,9 @@ var (
 	}
 	windowsEnterpriseTargetImpersonation    = withWindowsEnterpriseTargetImpersonation
 	windowsEnterpriseConnectorCertification = certifyWindowsEnterpriseConnector
+	// windowsConnectorSupportedOnHost is the native Windows certification
+	// table; tests of the generic lifecycle replace it for a fixture name.
+	windowsConnectorSupportedOnHost = connector.ConnectorSupportedOnHostOS
 )
 
 func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
@@ -460,7 +463,7 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	// until its release matrix is certified. This enterprise-only lifecycle is
 	// separately gated by the concrete built-in registry and the protected
 	// machine-policy implementation below.
-	if name != "cursor" && !connector.ConnectorSupportedOnHostOS(conn.Name()) {
+	if name != "cursor" && !windowsConnectorSupportedOnHost(conn.Name()) {
 		support := connector.ConnectorSupportOnHostOS(conn.Name())
 		return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: connector %q is not supported on native Windows: %s", conn.Name(), support.Reason)
 	}

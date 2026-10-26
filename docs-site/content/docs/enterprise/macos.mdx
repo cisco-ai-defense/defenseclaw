@@ -66,7 +66,7 @@ home `/var/empty`). Everything else runs as root.
 
 | Label | Runs as | What it does |
 | --- | --- | --- |
-| `com.cisco.defenseclaw.gateway` | `_defenseclaw` | Policy engine and hook API. Binds `127.0.0.1:18970` and `run/hook.sock` |
+| `com.cisco.defenseclaw.gateway` | `_defenseclaw` | Policy engine and hook API. Serves `127.0.0.1:18970`, which launchd holds for it, and binds `run/hook.sock` |
 | `com.cisco.defenseclaw.hook-guardian` | root | Always running. Reconciles each user's hooks every minute through a worker that runs as that user, which also runs the user's AI Discovery scan. Every 5 seconds it checks the hook binary and Claude Code's `90-defenseclaw.json` drop-in; if either is gone or changed it logs `tamper:` and starts `com.cisco.defenseclaw.apply`, whose `ensure` puts them back |
 | `com.cisco.defenseclaw.hook-enumerator` | root | Rewrites the target manifest every five minutes (in `auto` enrollment mode) |
 | `com.cisco.defenseclaw.sensor-helper` | root | Answers the gateway's fixed AI Discovery requests |
@@ -75,7 +75,7 @@ home `/var/empty`). Everything else runs as root.
 
 <Flow
   direction="TB"
-  caption="macOS. launchd starts the gateway as _defenseclaw, and the gateway opens 127.0.0.1:18970 and run/hook.sock itself. Only _defenseclaw can write the run directory, inside the root-owned install tree, so a user cannot create a look-alike socket. The hook sends nothing until it has checked that root or _defenseclaw owns the socket, and the gateway learns the caller's uid from the kernel."
+  caption="macOS. launchd opens 127.0.0.1:18970 when it loads the gateway and keeps it open while the gateway restarts, so a client or agent exporter that connects mid-restart waits for the real gateway. launchd starts the gateway as _defenseclaw, and the gateway opens run/hook.sock itself. Only _defenseclaw can write the run directory, inside the root-owned install tree, so a user cannot create a look-alike socket. The hook sends nothing until it has checked that root or _defenseclaw owns the socket, and the gateway learns the caller's uid from the kernel."
 >
   <Zone id="m0" label="Z0 · Admin and OS (root)" tone="trusted">
     <Node id="ld" kind="generic">{`launchd\nstarts the daemons`}</Node>

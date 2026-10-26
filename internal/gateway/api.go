@@ -1432,6 +1432,11 @@ func (a *APIServer) Run(ctx context.Context) error {
 	}
 
 	serveTCP := func(ln net.Listener) {
+		if err := a.recordRuntimeAPIAddress(ln); err != nil {
+			_ = ln.Close()
+			errCh <- fmt.Errorf("record the running gateway listener: %w; check data directory permissions and run defenseclaw-gateway start", err)
+			return
+		}
 		go func() {
 			fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {

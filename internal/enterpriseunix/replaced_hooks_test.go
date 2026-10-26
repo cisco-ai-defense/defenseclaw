@@ -6,12 +6,14 @@
 package enterpriseunix
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -409,5 +411,36 @@ func TestLifecycleFencesReplacedShellHooksBeforeItStopsTheGateway(t *testing.T) 
 				t.Fatalf("a repair with no replaced hook call running warned: %+v", r.Warnings)
 			}
 		})
+	}
+}
+
+func TestReplacedHookDrainIncludesCallsStartedWhileOtherHomesWereFenced(t *testing.T) {
+	h := newTestHost(t, "linux")
+	boot := time.Now().Add(-time.Hour).Truncate(time.Second)
+	writeHostFile(t, h, "/proc/stat", fmt.Sprintf("cpu 0 0 0 0\nbtime %d\n", boot.Unix()))
+	uid := os.Getuid()
+	first := "/home/alice/.defenseclaw/hooks"
+	second := "/home/bob/.defenseclaw/hooks"
+	start := boot.Add(time.Minute)
+	for _, item := range []struct {
+		pid     string
+		hook    string
+		started time.Time
+	}{
+		{"7001", first + "/claude-code-hook.sh", start.Add(-time.Second)},
+		{"7002", second + "/claude-code-hook.sh", start.Add(2 * time.Second)},
+		{"7003", first + "/claude-code-hook.sh", start.Add(2 * time.Second)},
+	} {
+		writeHostFile(t, h, "/proc/"+item.pid+"/cmdline", "/bin/bash\x00"+item.hook+"\x00")
+		ticks := int64(item.started.Sub(boot) / (10 * time.Millisecond))
+		writeHostFile(t, h, "/proc/"+item.pid+"/stat", fmt.Sprintf("%s (bash) S 1 %s %s%d 0 0", item.pid, item.pid, strings.Repeat("0 ", 16), ticks))
+	}
+	folders := []replacedHookFolder{
+		{user: "alice", uid: uid, path: first, fencedAt: start},
+		{user: "bob", uid: uid, path: second, fencedAt: start.Add(3 * time.Second)},
+	}
+	got := h.env.replacedHookCalls(context.Background(), folders)
+	if want := []string{"alice (pid 7001)", "bob (pid 7002)"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("drain calls = %v, want %v (the later home was not fenced at the first cutoff)", got, want)
 	}
 }

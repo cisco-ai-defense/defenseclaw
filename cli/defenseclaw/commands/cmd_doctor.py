@@ -8472,6 +8472,23 @@ def _check_hermes_hooks(
             pathext=pathext,
         )
         return
+    from defenseclaw.doctor_hooks import unix_hermes_hook_problem
+
+    script = os.path.join(getattr(cfg, "data_dir", "") or "", "hooks", "hermes-hook.sh")
+    # A missing registration and the approvals are _check_hook_health's
+    # (hook_integrity names each unapproved event); this checks the event
+    # matrix, matchers, timeouts and command of one that is there (GAP-0339).
+    state, problem = (
+        unix_hermes_hook_problem(selected_config, script, check_approvals=False)
+        if os.path.isfile(selected_config) else ("", "")
+    )
+    if state:
+        _emit(
+            "fail", _HERMES_HOOKS_LABEL,
+            f"{problem}; a Hermes tool call can run unchecked", r=r,
+            remediation="run 'defenseclaw setup hermes --yes' to re-register the hooks",
+        )
+        return
     _check_hook_health(cfg, "hermes", r)
 
 
@@ -16325,10 +16342,8 @@ def _check_connector_inventory(
                     f"provenance={fail_mode['provenance']}"
                 )
                 desired = fail_mode.get("desired")
-                # A DEFENSECLAW_FAIL_MODE=closed in doctor's own environment
-                # makes the effective mode closed, but the agent that runs an
-                # open-rendered hook may not have it, so the rendered mode is
-                # checked on its own.
+                # Check the installed render against the desired policy;
+                # neither doctor's nor the agent's environment changes it.
                 rendered_open = desired == "closed" and rendered == "open"
                 # A hook or plugin that records its mode but has none that
                 # can be read (missing, or a value no installer writes) does

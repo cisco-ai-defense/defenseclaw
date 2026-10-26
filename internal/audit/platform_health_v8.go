@@ -881,8 +881,8 @@ func newActivityRuntimeV8GeneratedMetrics(
 		actor      observability.Optional[string]
 	}{
 		action:     optionalAuditMetricDimension(action),
-		targetType: optionalAuditMetricDimension(targetType),
-		actor:      optionalAuditMetricDimension(actor),
+		targetType: observability.Present(activityMetricTargetType(targetType)),
+		actor:      observability.Present(activityMetricActor(actor)),
 	}
 	build := func(
 		family observability.EventName,
@@ -940,6 +940,46 @@ func newActivityRuntimeV8GeneratedMetrics(
 		build(observability.EventName(observability.TelemetryInstrumentDefenseClawActivityTotal), 1),
 		build(observability.EventName(observability.TelemetryInstrumentDefenseClawActivityDiffEntries), int64(diffEntries)),
 	}, nil
+}
+
+// Activity actors are audit evidence, never metric dimensions. Keep the
+// metric vocabulary closed even when an API caller supplies a stable token
+// containing an account name, or a bundle receipt names an OS identity.
+func activityMetricActor(actor string) string {
+	switch actor {
+	case "system", "defenseclaw", "defenseclaw-gateway", "gateway", "watcher":
+		return "system"
+	case "cli", "tui", configChangeMetricActor:
+		// configChangeMetricActor is the fixed label a trust anchor or
+		// credential change already counts under.
+		return actor
+	}
+	if strings.HasPrefix(actor, "cli:") {
+		return "cli"
+	}
+	if strings.HasPrefix(actor, "tui:") {
+		return "tui"
+	}
+	if strings.HasPrefix(actor, "os:") || strings.HasPrefix(actor, "operator:") {
+		return "operator"
+	}
+	if strings.HasPrefix(actor, "control-plane:") {
+		return "control_plane"
+	}
+	return "other"
+}
+
+// Activity input retains its raw target and actor in audit evidence. Metric
+// labels use only product categories, including for account-shaped values
+// that happen to be valid stable tokens.
+func activityMetricTargetType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "config", "policy", "policy_bundle", "skill", "mcp", "plugin", "tool",
+		"prompt", "tool_call", "tool_response", "file", "code":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "unknown"
+	}
 }
 
 func (l *Logger) recordAuditEventMetricV8(

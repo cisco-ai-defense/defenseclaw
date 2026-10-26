@@ -911,8 +911,8 @@ func (a *APIServer) writePendingHookRecords(ctx context.Context, p *pendingHookO
 	if held {
 		persistCtx = observability.WithRemoteExport(persistCtx, observability.RemoteExportAfterLocalWrite)
 	}
-	result := a.finalizeAgentHook(persistCtx, req.ConnectorName, req, resp,
-		p.RawEventIDs, nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra)
+	result := a.finalizeAgentHookAnswer(persistCtx, req.ConnectorName, req, resp,
+		p.RawEventIDs, nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra, false)
 	if !result.AuditPersisted || !result.DecisionSettled {
 		// Stable IDs make the next try skip whichever record landed.
 		return fmt.Errorf("%w: audit=%t hook_decision=%t", errPendingHookNotWritten, result.AuditPersisted, result.DecisionSettled)

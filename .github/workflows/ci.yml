@@ -82,6 +82,7 @@ jobs:
       # Syntax, expressions, job graph and runner labels (.github/actionlint.yaml).
       # Embedded scripts are not linted here.
       - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes=
+      - run: python3 -m unittest scripts.test_e2e_splunk_platform -q
 
   version-sync:
     name: Version Sync Check

@@ -86,6 +86,20 @@ session's hook record with its gateway, so the call is blocked. Retry when
 the DefenseClaw gateway is running; if the block continues, restart the agent.
 ```
 
+The managed transport can refuse first. For example, a guarded Claude Code
+prompt or tool call can report:
+
+```text
+DefenseClaw blocked this tool call: the DefenseClaw gateway service is not
+running on this computer. Try again in a moment; if this continues, ask your
+administrator to check DefenseClaw on this computer.
+(enterprise_managed_gateway_not_running)
+```
+
+Both refusals block the call. The service refusal also names the administrator's
+`enterprise linux status`, `enterprise macos status` or `enterprise windows status`
+command for that OS; follow its recovery advice before retrying (GAP-0355).
+
 The block applies to tool calls and, where the agent lets a hook block them, to prompts and session starts. Stop and session-end events get the agent's neutral answer so the agent can finish its turn.
 
 The guardian holds an account's removal lock while it records and removes an unapproved hook. A concurrent gateway check denies that account's call until the removal completes; other accounts are not delayed.

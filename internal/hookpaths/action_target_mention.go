@@ -19,42 +19,49 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/syntax"
 )
 
 // ActionStateTargetMention applies the same independent target scan to the
 // active DefenseClaw security state, without attributing it to SSH keys.
 func ActionStateTargetMention(command, cwd, home string) bool {
-	return actionProtectedTargetMentionDepth(command, cwd, home, 0, true, nil)
+	return actionProtectedTargetMentionDepth(command, cwd, home, 0, true, nil, "")
 }
 
 // actionProtectedTargetMentionDepth is independent of a program's operand
 // roles. A resolved protected path in a writable command is enough for the
 // action decision; commands with no such path continue through the existing
 // proof. globs carries the hook client's pattern answers (actionGlobs).
-func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) bool {
+func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, stateOnly bool, globs *actionGlobs, dialect actionfacts.Dialect) bool {
 	if command == "" || home == "" || len(command) > MaxPayloadBytes || depth >= 8 {
 		return false
 	}
 	if depth == 0 {
 		globs = globs.forCommand(command)
 	}
-	if actionWindowsHome(home) {
-		return actionWindowsTargetMention(command, cwd, home, depth, stateOnly)
+	nativePOSIX := actionWindowsHome(home) && dialect == actionfacts.DialectPOSIX
+	if actionWindowsHome(home) && !nativePOSIX {
+		return actionWindowsTargetMention(command, cwd, home, depth, stateOnly, dialect)
 	}
-	if !filepath.IsAbs(cwd) && (!actionPosixWindowsHome(home) || !path.IsAbs(cwd)) {
+	if !filepath.IsAbs(cwd) && !nativePOSIX && (!actionPosixWindowsHome(home) || !path.IsAbs(cwd)) {
 		return false
 	}
 	file, parsed := parseShell(command)
+	if parsed && nativePOSIX && !stateOnly && actionWindowsLiteralHereDocumentTarget(file, home) {
+		return true
+	}
 	if depth == 0 && parsed && actionKnownReadOnlyShell(file, home) {
 		return false
 	}
 	var nestedBodies []*syntax.Word
 	if parsed {
 		var nestedFound bool
-		nestedBodies, nestedFound = actionPosixNestedShellMention(file, cwd, home, depth, stateOnly, globs)
+		nestedBodies, nestedFound = actionPosixNestedShellMention(file, cwd, home, depth, stateOnly, globs, dialect)
 		if nestedFound {
 			return true
 		}
@@ -73,6 +80,32 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			} else {
 				value = filepath.Join(home, value[2:])
 			}
+		}
+		if nativePOSIX {
+			// The POSIX parser has already expanded HOME and unquoted tildes.
+			// Native $home and %USERPROFILE% expansion would turn POSIX
+			// literals into protected Windows paths.
+			if strings.ContainsAny(value, "$%`") || !tilde &&
+				(value == "~" || strings.HasPrefix(value, "~/")) {
+				return false
+			}
+			if strings.ContainsAny(value, "*?[]") {
+				return !stateOnly && actionWindowsProtectedGlobReach(value, base, home)
+			}
+			resolved, ok := actionWindowsPath(value, base, home)
+			if !ok {
+				return false
+			}
+			root, ok := actionWindowsPath(home, base, home)
+			if !ok {
+				return false
+			}
+			if stateOnly {
+				return strings.HasPrefix(resolved, root+"/") &&
+					actionProtectedStateRelative(strings.TrimPrefix(resolved, root+"/"))
+			}
+			protected, _ := actionWindowsProtected(value, base, home, false)
+			return resolved == root+"/.ssh" || protected
 		}
 		if strings.ContainsAny(value, "*?[]") {
 			if stateOnly {
@@ -239,6 +272,57 @@ func patchCommandResolutionChange(line string) bool {
 		}
 	}
 	return false
+}
+
+// A POSIX here-document passes its literal body through unchanged, including
+// backslashes in an absolute Windows path. The ordinary POSIX text scan treats
+// those backslashes as escapes, so inspect literal bodies separately.
+func actionWindowsLiteralHereDocumentTarget(file *syntax.File, home string) bool {
+	var targets []string
+	for _, target := range ProtectedAuthorizedKeysPaths(home) {
+		targets = append(targets, strings.ToLower(strings.ReplaceAll(target, "\\", "/")))
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		redirect, ok := node.(*syntax.Redirect)
+		if !ok || redirect.Hdoc == nil || redirect.Op != syntax.Hdoc && redirect.Op != syntax.DashHdoc {
+			return true
+		}
+		for _, part := range redirect.Hdoc.Parts {
+			literal, ok := part.(*syntax.Lit)
+			if !ok {
+				continue
+			}
+			body := strings.ToLower(strings.ReplaceAll(literal.Value, "\\", "/"))
+			for _, target := range targets {
+				for start := 0; start < len(body); {
+					index := strings.Index(body[start:], target)
+					if index < 0 {
+						break
+					}
+					index += start
+					end := index + len(target)
+					before, _ := utf8.DecodeLastRuneInString(body[:index])
+					after, _ := utf8.DecodeRuneInString(body[end:])
+					singleQuoted := before == '\'' && after == '\''
+					if (index == 0 || actionWindowsHereDocDelimiter(before) || singleQuoted) &&
+						(end == len(body) || actionWindowsHereDocDelimiter(after) || singleQuoted) {
+						found = true
+						return false
+					}
+					start = index + 1
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func actionWindowsHereDocDelimiter(value rune) bool {
+	// Windows filenames may contain punctuation and Unicode. Only whitespace
+	// and characters forbidden in a filename delimit an unquoted path here.
+	return unicode.IsSpace(value) || strings.ContainsRune("\"<>|?*", value)
 }
 
 // The text scan finds paths in payloads another program interprets (inline
@@ -829,7 +913,7 @@ func (g *actionGlobs) answer(pattern string) string {
 // target scan of command checks, and returns the answers for the gateway.
 func actionGlobFacts(command, cwd, home string) map[string]string {
 	globs := &actionGlobs{record: map[string]string{}}
-	actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs)
+	actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs, "")
 	return globs.record
 }
 
@@ -1151,7 +1235,7 @@ func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeSt
 
 // actionPosixNestedShellMention scans each static shell -c or env -S body as
 // its own command. bodies are the words it scanned without a match.
-func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) (bodies []*syntax.Word, found bool) {
+func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth int, stateOnly bool, globs *actionGlobs, dialect actionfacts.Dialect) (bodies []*syntax.Word, found bool) {
 	if depth+1 >= 8 {
 		return nil, false
 	}
@@ -1176,7 +1260,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 						continue
 					}
 					if child, childStatic := StaticWord(call.Args[j+1], home); childStatic {
-						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs) {
+						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs, dialect) {
 							found = true
 							return false
 						}
@@ -1200,7 +1284,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 				if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&
 					!strings.ContainsAny(option, "=/") && strings.Contains(option[1:], "c") {
 					if child, static := StaticWord(call.Args[j+1], home); static {
-						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs) {
+						if actionProtectedTargetMentionDepth(child, cwd, home, depth+1, stateOnly, globs, dialect) {
 							found = true
 						} else {
 							bodies = append(bodies, call.Args[j+1])
@@ -1337,13 +1421,20 @@ func actionLessWritesFile(option string) bool {
 		(strings.HasPrefix("--log-file", option) || strings.HasPrefix(option, "--log-file"))
 }
 
-func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool) bool {
+func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool, dialect actionfacts.Dialect) bool {
 	if depth >= 8 || len(command) > MaxPayloadBytes {
 		return false
 	}
+	if dialect == actionfacts.DialectPowerShell {
+		command = actionPowerShellCode(command)
+	}
 	// The argument to PowerShell -Command is parsed again by the child shell.
 	// Quotes that are literal in the outer command do not stop expansion there.
-	rawWords, _, rawOK := actionWindowsWords(command)
+	rawCommand := command
+	if dialect == actionfacts.DialectPowerShell {
+		rawCommand = actionPowerShellChildDollars(command)
+	}
+	rawWords, _, rawOK := actionWindowsWords(rawCommand)
 	if rawOK {
 		for i := 0; i+2 < len(rawWords); i++ {
 			program := strings.TrimSuffix(strings.ToLower(programBase(rawWords[i])), ".exe")
@@ -1353,7 +1444,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 						break
 					}
 					if (rawWords[j] == "-S" || rawWords[j] == "--split-string") &&
-						actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly) {
+						actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly, dialect) {
 						return true
 					}
 				}
@@ -1366,7 +1457,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 					break
 				}
 				if strings.EqualFold(rawWords[j], "-command") || strings.EqualFold(rawWords[j], "-c") {
-					if actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly) {
+					if actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly, actionfacts.DialectPowerShell) {
 						return true
 					}
 					break
@@ -1374,23 +1465,9 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 			}
 		}
 	}
-	// PowerShell does not expand variables inside single quoted literals.
-	// Preserve the literal pathname there while keeping its dollar sign from
-	// being mistaken for a resolvable home variable.
-	var normalized strings.Builder
-	normalized.Grow(len(command))
-	singleQuoted := false
-	for i := 0; i < len(command); i++ {
-		if command[i] == '\'' {
-			singleQuoted = !singleQuoted
-		}
-		if singleQuoted && command[i] == '$' {
-			normalized.WriteByte('@')
-		} else {
-			normalized.WriteByte(command[i])
-		}
-	}
-	words, _, ok := actionWindowsWords(normalized.String())
+	// Literal dollars do not expand in PowerShell single quotes or after a
+	// backtick. The raw child-command pass above sees each nested body first.
+	words, _, ok := actionWindowsWords(actionWindowsLiteralDollars(command, string(dialect)))
 	if !ok || len(words) == 0 || depth == 0 && actionKnownReadOnlyWindows(words) {
 		return false
 	}
@@ -1406,7 +1483,7 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 		for j := range letters {
 			letters[j] = uint16(encoded[2*j]) | uint16(encoded[2*j+1])<<8
 		}
-		if actionWindowsTargetMention(string(utf16.Decode(letters)), cwd, home, depth+1, stateOnly) {
+		if actionWindowsTargetMention(string(utf16.Decode(letters)), cwd, home, depth+1, stateOnly, actionfacts.DialectPowerShell) {
 			return true
 		}
 	}
@@ -1426,6 +1503,45 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 		}
 	}
 	return false
+}
+
+// A backtick-dollar in the outer PowerShell command passes a dollar to a
+// quoted child command. The child shell then expands it. Inside an outer
+// single-quoted argument the backtick itself is passed through, so keep it.
+func actionPowerShellChildDollars(command string) string {
+	var child strings.Builder
+	child.Grow(len(command))
+	var quote byte
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if c == '`' && quote != '\'' && i+1 < len(command) {
+			next := command[i+1]
+			if next == '$' || next == '`' {
+				child.WriteByte(next)
+			} else {
+				child.WriteByte(c)
+				child.WriteByte(next)
+			}
+			i++
+			continue
+		}
+		if c == '\'' && quote == 0 {
+			quote = '\''
+		} else if c == '\'' && quote == '\'' {
+			if i+1 < len(command) && command[i+1] == '\'' {
+				child.WriteString("''")
+				i++
+				continue
+			}
+			quote = 0
+		} else if c == '"' && quote == 0 {
+			quote = '"'
+		} else if c == '"' && quote == '"' {
+			quote = 0
+		}
+		child.WriteByte(c)
+	}
+	return child.String()
 }
 
 func actionKnownReadOnlyWindows(words []string) bool {

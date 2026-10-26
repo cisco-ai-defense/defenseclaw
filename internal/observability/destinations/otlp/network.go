@@ -13,6 +13,7 @@ package otlp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -20,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -30,6 +32,51 @@ import (
 )
 
 type attemptContextKey struct{}
+
+// bundledLocalStackDestination reports the destination names the bundled
+// local observability stack's setup writes (the CLI's
+// is_local_observability_stack_destination).
+func bundledLocalStackDestination(name string) bool {
+	return name == "local-observability" || name == "local-otlp-logs"
+}
+
+// verifyBundledCollector proves a connection reaches a listener of this
+// account or of the system account (hookexec.VerifyLocalPeer). Replaceable
+// in tests.
+var verifyBundledCollector = hookexec.VerifyLocalPeer
+
+// errBundledCollectorUnverified is a bundled-stack connection whose listener
+// another account holds, or whose account could not be read: nothing was
+// written to it.
+var errBundledCollectorUnverified = errors.New("OTLP collector listener is not proven to be this account's local stack")
+
+// checkBundledCollector wraps dial for the bundled stack's destination: a
+// loopback connection is closed before any byte unless verifyBundledCollector
+// proves its listener. When the stack is stopped, another account can bind
+// its collector port and would otherwise receive every trace, metric and log
+// (GAP-1087). Other destinations dial as before: an operator's own local
+// agent may run as its own service account.
+func checkBundledCollector(
+	config signalConfig,
+	dial func(context.Context, string, string) (net.Conn, error),
+) func(context.Context, string, string) (net.Conn, error) {
+	if !config.bundledStack {
+		return dial
+	}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		connection, err := dial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		if remote, ok := connection.RemoteAddr().(*net.TCPAddr); ok && remote.IP.IsLoopback() {
+			if verifyErr := verifyBundledCollector(connection); verifyErr != nil {
+				_ = connection.Close()
+				return nil, fmt.Errorf("%w: %v", errBundledCollectorUnverified, verifyErr)
+			}
+		}
+		return connection, nil
+	}
+}
 
 func countAttempt(ctx context.Context) {
 	if counter, ok := ctx.Value(attemptContextKey{}).(*atomic.Uint64); ok && counter != nil {
@@ -151,7 +198,8 @@ func newGRPCConnection(config signalConfig) (*grpc.ClientConn, error) {
 		grpc.WithAuthority(config.url.Host),
 		grpc.WithTransportCredentials(transportCredentials),
 		grpc.WithContextDialer(func(ctx context.Context, address string) (net.Conn, error) {
-			connection, err := netguard.V8SafeDialContext(config.policy, config.dialer, config.resolver)(ctx, "tcp", address)
+			connection, err := checkBundledCollector(config,
+				netguard.V8SafeDialContext(config.policy, config.dialer, config.resolver))(ctx, "tcp", address)
 			config.tracker.record(err)
 			return connection, err
 		}),

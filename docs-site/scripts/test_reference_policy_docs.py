@@ -48,13 +48,17 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         self.assertIn("On a managed standalone host with `foreign_hooks: remove`", guard)
         self.assertIn("GitHub Copilot CLI, Cursor, Devin, OpenCode and Amp", guard)
         self.assertIn("Hermes on Linux and macOS", guard)
+        self.assertIn("Each gateway-backed guarded call requires a current gateway answer", guard)
+        self.assertIn("Windows Amp checks its session record locally", guard)
+        effective = text.split("## Effective behavior", 1)[1].split("These outcomes apply", 1)[0]
+        self.assertIn("A gateway-backed guarded tool call", effective)
 
     def test_managed_open_never_allows_an_accepted_call_without_an_answer(self):
         # oss-outage-open review (round g, loop round 2): managed open applies
         # only to a proven outage (no gateway took the call). A gateway that
         # accepted the call and gave no answer in time blocks (noAnswerFailMode
         # is closed for a managed hook); the docs said open could allow it.
-        text = (DOCS / "configuration/fail-modes.mdx").read_text()
+        text = (DOCS / "fail-modes.mdx").read_text()
         paragraph = next(line for line in text.splitlines()
                          if line.startswith("On a managed standalone host `open` applies only to"))
         self.assertNotIn("or gives no answer in time.", paragraph)
@@ -64,7 +68,7 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         managed = row.split("|")[3]
         self.assertIn("A gateway that took the call and gave no answer in time", managed)
         self.assertIn("blocks", managed)
-        coverage = (DOCS.parent / "appendix/coverage-by-layer.mdx").read_text()
+        coverage = (DOCS.parent / "segmentation.mdx").read_text()
         self.assertNotIn("stopped, restarting or gives\nno answer in time", coverage)
 
     def test_no_doc_lets_managed_open_cover_a_restart_or_an_unanswered_call(self):

@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import itertools
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from defenseclaw.tui.panels.overview import DoctorCache, DoctorCheck
 from defenseclaw.tui.services.overview_state import OVERVIEW_NOTICE_WIDTH, OverviewConfig, runtime_degraded_notice
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -55,16 +57,33 @@ def test_degraded_notice_keeps_the_plane_badges_of_the_fallback_reason() -> None
     assert len(notice) <= OVERVIEW_NOTICE_WIDTH and "shadow-egress idle" in notice, notice
 
 
-async def test_degraded_notice_shows_the_n_key_on_the_80x24_overview(tmp_path) -> None:
+async def test_degraded_notice_shows_the_n_key_on_the_80x24_overview(tmp_path, monkeypatch) -> None:
     app = fixtures.snapshot_app(tmp_path)
+    monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
+        app.overview_model.cfg = OverviewConfig(
+            guardrail_enabled=True,
+            connector_modes=(("claudecode", "action"), ("codex", "action")),
+        )
+        app.overview_model.set_gateway_probe("running")
         app.overview_model.runtime = _standard_account_runtime().overview()
+        app.overview_model.set_doctor_cache(
+            DoctorCache(
+                captured_at=datetime.now(timezone.utc), failed=1, schema_version=2,
+                outcome="failed", exit_code=1,
+                checks=(DoctorCheck("fail", "Hermes hook", "managed hook needs repair"),),
+            )
+        )
         app.action_switch_panel("overview")
         await pilot.pause()
         await pilot.pause()
-        screen = fixtures.screen_text(app)
-    assert "N for details: shadow egress partially covered" in screen, screen
+        for width, height in ((80, 24), (80, 40), (120, 40), (80, 24)):
+            await pilot.resize_terminal(width, height)
+            await pilot.pause()
+            screen = fixtures.screen_text(app)
+            assert "defenseclaw doctor" in screen, screen
+            assert "Runtime DEGRADED" in screen and "N for details" in screen, screen
 
 
 async def test_stopped_gateway_recovery_is_whole_on_the_80x24_overview(tmp_path) -> None:
@@ -82,3 +101,16 @@ async def test_stopped_gateway_recovery_is_whole_on_the_80x24_overview(tmp_path)
         notices = app.overview_model.build_notices()
     recovery = next(notice.message for notice in notices if "Gateway is not running" in notice.message)
     assert any(recovery in line for line in screen.splitlines()), screen
+
+
+async def test_initial_audit_loading_notice_is_whole_on_the_80x24_overview(tmp_path) -> None:
+    app = fixtures.snapshot_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.overview_model.history_loading = True
+        app.action_switch_panel("overview")
+        await pilot.pause()
+        notices = app.overview_model.build_notices()
+        loading = next(notice.message for notice in notices if "Loading the audit history" in notice.message)
+        screen = fixtures.screen_text(app)
+    assert any(loading in line for line in screen.splitlines()), screen

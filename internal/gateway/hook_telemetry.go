@@ -129,7 +129,7 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		// column, as on main (issue #1092).
 		RulePackDirInEnvelope: env.SecureClientRulePackDir != "",
 		// Carry the cloud-controlled per-inspection redaction directive
-		// (re-injected onto ctx before finalizeAgentHook) so the audit
+		// (re-injected onto ctx before finalizeAgentHookAnswer) so the audit
 		// sanitize + webhook fan-out honor it on the Details surface.
 		RedactionEnabled: redactionDecisionFromContext(ctx),
 	})
@@ -351,7 +351,7 @@ func (a *APIServer) effectiveRulePackDir(ctx context.Context, connector string) 
 }
 
 // stampHookEnvelopeIdentity fills the multi-connector identity fields on
-// a HookAuditEnvelope before finalizeAgentHook logs it. connectorName is
+// a HookAuditEnvelope before finalizeAgentHookAnswer logs it. connectorName is
 // threaded explicitly from the request
 // entry point; StepIdx comes from the per-turn populator; Enforced
 // reflects an actual block; RulePackDir from the effective resolver.

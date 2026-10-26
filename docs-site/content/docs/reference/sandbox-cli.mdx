@@ -792,6 +792,9 @@ not one, except for an OpenCode project path and Hermes's `chat`.
 `connect`, and a shell wrapper's resume, pass those options again before
 any new ones, and show the same Model and Secret lines as the run.
 
+`connect --shell` shows the remembered Model and Secret lines too. It opens a
+shell without starting a model or passing harness options to that shell.
+
 #### Examples and flag rules
 
 ```bash
@@ -860,6 +863,9 @@ A few rules the flags follow:
   endpoint from `HERMES_DEFENSECLAW_BASE_URL` and its key from
   `HERMES_DEFENSECLAW_API_KEY`: for your own endpoint, run
   `defenseclaw sandbox run hermes --llm none --credential HERMES_DEFENSECLAW_API_KEY=HOST[:PORT] --env HERMES_DEFENSECLAW_BASE_URL=https://HOST/v1 -- --provider defenseclaw -m MODEL`.
+  The pinned Hermes image also includes Hermes's `anthropic` extra and its
+  pinned Anthropic SDK for the native Anthropic provider. No SDK installation
+  on the host or inside a running sandbox is required.
 - `--pack`, `--profile`, `--copy`, `--safe`, `--unmask`, `--host-port`,
   `--no-mcp`, `--cpu`, and `--memory` go through the
   [sandbox policy](/docs/sandboxes/policy-packs). An organization limit can
@@ -1127,6 +1133,7 @@ defenseclaw sandbox stop myapp-7f3a
 {/* AUTOGEN-BEGIN: sandbox-flags stop */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
+| `--discard-unsynced` | switch |  | Stop a MicroVM whose disk could not be synced first, losing what it wrote since its last sync. |
 | `-y`, `--yes` | switch |  | Stop without asking when a detached run or a session in another terminal is still going. |
 {/* AUTOGEN-END: sandbox-flags */}
 

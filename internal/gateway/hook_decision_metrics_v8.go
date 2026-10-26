@@ -100,10 +100,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 	case severity.Severity == observability.SeverityInfo:
 		logLevel = observability.Present(observability.LogLevelInfo)
 	}
-	result := "ok"
-	if panicked || env.Result == "panic" {
-		result = "panic"
-	}
+	result := hookDecisionResult(env, panicked)
 	effectiveAction := normalizeHookActionLabel(resp.Action)
 	sandboxID, sandboxName := hookV8Sandbox(audit.EnvelopeFromContext(ctx))
 	classification := observability.ClassificationContext{
@@ -244,6 +241,18 @@ func (a *APIServer) emitHookDecisionLogV8(
 	return hookDecisionLogFailed
 }
 
+// hookDecisionResult is the result every sink of a hook decision carries:
+// panic when the evaluator panicked or the decision's audit envelope
+// recorded a panic recovered elsewhere on the call (finalizeAgentHookAnswer),
+// else ok. The hook_decision log and the hook invocation and latency metrics
+// read it, so they agree with the audit row and the span.
+func hookDecisionResult(env HookAuditEnvelope, panicked bool) string {
+	if panicked || env.Result == "panic" {
+		return "panic"
+	}
+	return "ok"
+}
+
 func (a *APIServer) recordHookDecisionMetricsV8(
 	ctx context.Context,
 	req agentHookRequest,
@@ -265,10 +274,10 @@ func (a *APIServer) recordHookDecisionMetricsV8(
 	// event still needs the same bounded dashboard label vocabulary.
 	eventLabel := telemetry.NormalizeHookEventTypeLabel(normalizeHookEventLabel(req.HookEventName))
 	decisionLabel := normalizeHookActionLabel(resp.Action)
-	result := "ok"
+	result := hookDecisionResult(env, panicked)
 	reason := normalizeHookReasonLabel(resp.Action, resp.WouldBlock)
-	if panicked {
-		result, reason = "panic", "panic"
+	if result == "panic" {
+		reason = "panic"
 	}
 	severity := observability.NormalizeSeverity(firstNonEmpty(resp.Severity, "NONE"))
 	if !severity.Valid || !severity.Present {

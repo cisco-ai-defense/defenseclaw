@@ -157,6 +157,16 @@ lost until the agent is restarted.
 
 ## Roll back
 
+On Linux and macOS with bundle trust anchors, DefenseClaw 1.0.4 and later
+refuse to install a release below the confirmed bundle's `min_product_version`
+(`product_floor_refused`). The rollback marker, `--allow-downgrade` and
+`uninstall --keep-state` do not lift this floor. A package older than 1.0.4
+does not check the floor itself and can complete below it. A floor that cannot
+be read refuses the install too. Install a release that meets the floor; to go
+below it, contact your administrator. [Release floor
+limits](/docs/enterprise/lifecycle#release-floor-limits) says when the
+floor is checked, and what older packages and Windows Setup do.
+
 A failed action rolls itself back. You only need the steps below to go back to an older
 release on purpose. Try the rollback on one test host before the fleet. Every lifecycle
 refuses an older release unless you ask for the rollback (`downgrade_refused`). For an
@@ -204,6 +214,48 @@ the older app; otherwise Intune can reapply the newer release.
   [Remove the policies, or downgrade](/docs/enterprise/tetragon/).
 - **MDM wrapper.** The Linux wrapper installs `.rpm` files with `rpm -U`, so it refuses
   older RHEL packages.
+
+### Release floor limits
+
+On Linux and macOS, `install`, `upgrade`, `repair` and `ensure` check the
+confirmed bundle's release floor before they change anything when:
+
+- there is no deployment record (a first install, or a reinstall after
+  `uninstall --keep-state`),
+- the version changes, up or down, or
+- the version is not a release (for example `dev`).
+
+If that check cannot read the floor, the run refuses (`product_floor_refused`).
+
+Every run checks the floor, including a repair or `ensure` that keeps the recorded
+release. If the confirmed bundle cannot be read, a run that keeps the recorded
+release keeps the config the last deployment
+committed, repairs the host and warns `bundle_state_unreadable`. With
+`--config`, or with no committed config, it stops with that code as an error
+instead. To replace the damaged bundle, contact your administrator.
+
+Package scripts shipped in 1.0.4 and later run the same check before they
+replace files, but only with a gateway that has the check: the installed
+gateway when it is 1.0.4 or later, or else the retained floor checker, a copy of
+the gateway that a non-purge uninstall keeps in the lifecycle directory. A
+checker that is there but cannot be read, is not a root-owned file only root can
+change, or does not run, refuses the install. The preinstall has nothing to
+check with when the installed gateway is older than 1.0.4 or gone and there is
+no retained floor checker: for example, an older package was installed below the
+floor, or an uninstall warned `floor_checker_not_kept`. The preinstall of a
+1.0.4 or later package then installs its files; its postinstall `ensure` refuses
+a release below the floor, after the files are in place. A package older than
+1.0.4 has no floor check in any of its scripts and completes below the floor.
+The apt hook of an installed 1.0.4 or later package runs the check for older
+packages installed through `apt` or `apt-get`.
+
+Packages older than 1.0.4 installed through `rpm`, `dnf`, `dpkg -i` or the
+macOS Installer run their own older scripts, which do not check the floor.
+`dpkg -i` does not run the apt hook. Windows Setup does not check the floor.
+Keep package deployment under administrator control, and check that the
+release you install meets the floor first. To go below the floor, contact your
+administrator. See [Roll back](/docs/enterprise/lifecycle#roll-back) for
+the supported procedure.
 
 ### The kept version 8 config
 
@@ -496,9 +548,9 @@ to about 4 seconds, then is blocked the same way. Prompts and session, stop and 
 keep their whole budget. Lifecycle runs run at a lower CPU priority than the hooks on every OS,
 so a repair does not take the CPU the hooks need to answer in time.
 
-The administrator's `hook_fail_mode: open` allows only classified connection outages:
-the service is stopped or restarting before it accepts the call. A hook that
-reaches its answer deadline without a decision blocks. Integrity,
+The administrator's `hook_fail_mode: open` allows a call only while the hook proves the
+gateway service is stopped (no gateway took the call). A restart the hook cannot prove
+stopped blocks, and so does a hook that reaches its answer deadline without a decision. Integrity,
 peer-verification, credential and rate-limit refusals still block. Connectors
 whose foreign-hook guard checks the session with the gateway (`foreign_hooks: remove`,
 the default) block outages too

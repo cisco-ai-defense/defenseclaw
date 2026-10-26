@@ -748,6 +748,7 @@ func TestWindowsManagedRuntimeGenerationEqualityRejectsEveryAuthenticatedContrac
 		HookExecutable:             `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`,
 		GatewayAddr:                "127.0.0.1:18970",
 		GatewayServiceName:         "DefenseClawGateway-Test",
+		FailMode:                   "open",
 		ScopedToken:                "scoped-codex-token",
 		HookContractID:             "codex-hooks-v1",
 		HookContractLockUpdatedAt:  "2026-08-24T10:00:03Z",

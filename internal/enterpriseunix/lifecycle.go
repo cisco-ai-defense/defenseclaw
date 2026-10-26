@@ -3384,6 +3384,11 @@ func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 // KeepState keeps the other machine state for a reinstall to resume with.
 func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
+	// A fresh uninstall lifecycle has not resolved the service account through
+	// ensure. Its restored gateway still belongs to the deployment's uid.
+	if record != nil {
+		l.serviceUID = record.ServiceUID
+	}
 	units := env.Services.Units()
 	if record == nil && !l.opts.Purge {
 		failure := env.lastPackageInstallFailure()
@@ -3497,38 +3502,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// removal below deletes the records that name some of them.
 	sandboxAccounts := l.sandboxAccounts(ctx)
 	var errs []error
-	// Per-user registrations go first, while the binaries they name still
-	// exist: each user's worker removes only DefenseClaw's own entries (and,
-	// on purge, that user's DefenseClaw state).
-	//
-	// Without a deployment record (after a default or --keep-state
-	// uninstall) a purge still finds the enrolled accounts when the
-	// enrollment record and the config it needs are there; otherwise it
-	// names the accounts whose per-user files stay (GAP-2632).
-	perUserLeft := false
-	// Without a record, the package database says whether the deb/rpm owns
-	// the binaries: a purge deleted those of an installed rpm (GAP-2632).
-	l.packageManaged = env.GOOS == "linux" && (record != nil && record.Channel == ChannelPackage ||
-		record == nil && gatewayPresent && env.packageOwned(ctx, filepath.Join(env.Layout.BinDir, binGateway)))
-	if removePerUser {
-		var cacheAccounts []sessionFactsAccount
-		if l.opts.Purge {
-			cacheAccounts = env.sessionFactsAccounts()
-		}
-		perUserLeft = l.removePerUserRegistrations(ctx)
-		l.purgeSessionFactsCaches(cacheAccounts)
-	} else if record == nil && l.opts.Purge {
-		l.warnUnpurgedPerUser(ctx)
-	}
-	if l.opts.Purge {
-		l.reportRetainedEnrolledUserData()
-	}
-	// The sandbox subsystem goes before the binaries it runs: a non-purge
-	// uninstall stops and keeps each account's sandboxes, then its daemon
-	// and OpenShell gateway. A purge tears down the sandboxes as the account
-	// and removes what the subsystem left in its home.
-	l.teardownOpenShell(ctx, sandboxAccounts)
-	// DefenseClaw's vendor machine policy entries go next, while the hook
+	// DefenseClaw's vendor machine policy entries go first, while the hook
 	// binary they name still exists; administrator entries stay byte for
 	// byte (enterprisepolicy restores the recorded preimage or edits only
 	// DefenseClaw's own entries).
@@ -3545,7 +3519,43 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			}
 		}
 	}
-	stillRunning = append(stillRunning, stopGroup(false)...)
+	// A machine-policy failure leaves every user's hooks and state intact:
+	// removing or purging them first would leave the retained deployment
+	// unguarded until its guardian repaired the registrations (GAP-0393).
+	// Per-user registrations go next, while the binaries they name still
+	// exist: each user's worker removes only DefenseClaw's own entries (and,
+	// on purge, that user's DefenseClaw state).
+	//
+	// Without a deployment record (after a default or --keep-state
+	// uninstall) a purge still finds the enrolled accounts when the
+	// enrollment record and the config it needs are there; otherwise it
+	// names the accounts whose per-user files stay (GAP-2632).
+	perUserLeft := false
+	// Without a record, the package database says whether the deb/rpm owns
+	// the binaries: a purge deleted those of an installed rpm (GAP-2632).
+	l.packageManaged = env.GOOS == "linux" && (record != nil && record.Channel == ChannelPackage ||
+		record == nil && gatewayPresent && env.packageOwned(ctx, filepath.Join(env.Layout.BinDir, binGateway)))
+	if removePerUser && !policyLeft {
+		var cacheAccounts []sessionFactsAccount
+		if l.opts.Purge {
+			cacheAccounts = env.sessionFactsAccounts()
+		}
+		perUserLeft = l.removePerUserRegistrations(ctx)
+		l.purgeSessionFactsCaches(cacheAccounts)
+	} else if record == nil && l.opts.Purge && !policyLeft {
+		l.warnUnpurgedPerUser(ctx)
+	}
+	if l.opts.Purge {
+		l.reportRetainedEnrolledUserData()
+	}
+	// The sandbox subsystem goes before the binaries it runs: a non-purge
+	// uninstall stops and keeps each account's sandboxes, then its daemon
+	// and OpenShell gateway. A purge tears down the sandboxes as the account
+	// and removes what the subsystem left in its home.
+	if !policyLeft {
+		l.teardownOpenShell(ctx, sandboxAccounts)
+		stillRunning = append(stillRunning, stopGroup(false)...)
+	}
 	if len(stillRunning) > 0 {
 		errs = append(errs, fmt.Errorf("could not stop %s; stop them with %s and rerun `%s`",
 			strings.Join(stillRunning, ", "), env.stopCommands(stillRunning), l.uninstallCommand()))
@@ -3553,7 +3563,9 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// The sensor helper is stopped. The Tetragon policies it loaded outlive
 	// it and would keep enforcing with frozen anchors: remove them with the
 	// binary that loaded them, before any binary or state goes.
-	l.kernelRemoved = l.retireKernelPolicies(ctx)
+	if !policyLeft {
+		l.kernelRemoved = l.retireKernelPolicies(ctx)
+	}
 	if perUserLeft || policyLeft {
 		if len(l.kernelRemoved) > 0 {
 			r.Changes = append(r.Changes, kernelPolicyChange(l.kernelRemoved))
@@ -3599,16 +3611,17 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		return 0
 	}
 	// A device that takes signed bundles keeps a copy of the gateway for the
-	// package scripts' release floor check: once the binaries are gone (a
-	// --keep-state uninstall, or one that fails after removing them) the
-	// installed gateway cannot answer, and a package below the confirmed
-	// bundle's floor would write its files before its postinstall ensure
-	// refused it. The machine state removal below takes the copy with the
-	// rest of the lifecycle state.
+	// release floor check of the 1.0.4 and later package scripts: once the
+	// binaries are gone (a --keep-state uninstall, or one that fails after
+	// removing them) the installed gateway cannot answer, and a 1.0.4 or
+	// later package below the confirmed bundle's floor would write its files
+	// before its postinstall ensure refused it. A package older than 1.0.4
+	// has no floor check, with or without the copy. The machine state removal
+	// below takes the copy with the rest of the lifecycle state.
 	if !l.opts.Purge {
 		kept, err := env.keepFloorChecker(record)
 		if err != nil {
-			r.AddWarning(codeFloorCheckerNotKept, "could not keep the gateway that checks the release floor of the confirmed policy bundle ("+err.Error()+"); a package below that floor is refused only by its postinstall, after its files are in place")
+			r.AddWarning(codeFloorCheckerNotKept, "could not keep the gateway that checks the release floor of the confirmed policy bundle ("+err.Error()+"); "+floorCheckerNotKeptLimit)
 		}
 		l.floorCheckerKept = kept
 	}
@@ -3955,7 +3968,7 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	case l.opts.KeepState:
 		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
 		if l.floorCheckerKept {
-			lines = append(lines, "kept a root-only copy of the gateway in "+filepath.Join(layout.LifecycleDir, floorCheckerDir)+": the package scripts run its release floor check of the confirmed policy bundle before a reinstall replaces any file")
+			lines = append(lines, "kept a root-only copy of the gateway in "+filepath.Join(layout.LifecycleDir, floorCheckerDir)+": the scripts of a 1.0.4 or later package run its release floor check of the confirmed policy bundle before a reinstall replaces any file; "+olderPackageFloorLimit)
 		}
 		if l.openshellRecordKept {
 			lines = append(lines, "kept the record of the sandbox setup the kept sandboxes were made under in "+layout.LifecycleDir)
@@ -4124,6 +4137,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	}
 	out, err := env.runGatewayCLILong(ctx, removeAllTimeout, args...)
 	var report struct {
+		OK           bool                        `json:"ok"`
 		Pending      []string                    `json:"pending"`
 		Failed       []string                    `json:"failed"`
 		StateFailed  []string                    `json:"state_failed"`
@@ -4131,8 +4145,13 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		Removed      int                         `json:"removed"`
 		PurgedDetail map[string]purgedUserDetail `json:"purged_detail"`
 	}
-	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil && err == nil {
-		return false
+	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil {
+		r.AddError(codePerUserHooks, "the per-user hook removal returned an invalid report; keep the deployment and rerun `"+l.uninstallCommand()+"`")
+		return true
+	}
+	if !report.OK && len(report.Failed) == 0 && err == nil {
+		r.AddError(codePerUserHooks, "the per-user hook removal did not confirm success; keep the deployment and rerun `"+l.uninstallCommand()+"`")
+		return true
 	}
 	l.perUserRemoved = report.Removed
 	rerun := "`" + l.uninstallCommand() + "`"

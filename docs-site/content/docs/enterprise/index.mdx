@@ -164,12 +164,12 @@ enable, approvals (HITL) and discovery are runtime state, not policy.
 Every `DEFENSECLAW_*` variable
 has a `managed` setting in the [registry](/docs/reference/env-vars). `ignore`
 variables read as unset, from the process environment and from `.env` files.
-`tighten_only` variables (`DEFENSECLAW_FAIL_MODE`,
-`DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY`) count only
+`tighten_only` variables (`DEFENSECLAW_STRICT_AVAILABILITY`,
+`DEFENSECLAW_HOOK_MAX_BODY`) count only
 when they make the setting stricter. `allow` variables are read as set. A
 forged `DEFENSECLAW_DEPLOYMENT_MODE` or `DEFENSECLAW_ENTERPRISE_PROFILE`
 cannot make the host look local: the host is managed because `config.yaml`
-says so. `defenseclaw doctor` names ignored variables, never their values.
+says so. Hook fail mode comes only from installed policy; the agent environment cannot change it. `defenseclaw doctor` names ignored variables, never their values.
 
 ### Local block and allow rows are ignored
 
