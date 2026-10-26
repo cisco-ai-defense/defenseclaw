@@ -1837,7 +1837,7 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline b
 		if i < len(words) && words[i] != ";" && words[i] != "|" && words[i] != "||" && words[i] != "&" && words[i] != "&&" {
 			continue
 		}
-		if i > start && !actionWindowsTextProgram(words[start]) && !actionKnownReadOnlyWindowsStatement(words[start:i]) {
+		if i > start && !actionWindowsTextStatement(words[start:i]) && !actionKnownReadOnlyWindowsStatement(words[start:i]) {
 			textOnly = false
 		}
 		start = i + 1
@@ -1955,6 +1955,38 @@ func actionWindowsTextProgram(word string) bool {
 	switch strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(word, `\`, "/"))), ".exe") {
 	case "write-output", "echo", "write", "write-host", "write-information", "write-verbose",
 		"write-warning", "write-debug", "write-error", "git":
+		return true
+	}
+	return false
+}
+
+// actionWindowsTextStatement reports a statement that only prints its words
+// or gives them to a git command that keeps them as text (a message, a
+// pathspec, a search pattern). git runs a configuration value as shell code
+// (an alias, the pager, the editor, a hook path), so a git statement with an
+// option before its subcommand (-c, --config-env, --exec-path ...), the
+// config subcommand, an alias or a subcommand that runs a command it is
+// given (rebase --exec, bisect run, submodule foreach ...) is not text
+// (GAP-2090).
+func actionWindowsTextStatement(words []string) bool {
+	if len(words) == 0 || !actionWindowsTextProgram(words[0]) {
+		return false
+	}
+	if strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(words[0], `\`, "/"))), ".exe") != "git" {
+		return true
+	}
+	if len(words) < 2 || strings.HasPrefix(words[1], "-") {
+		return false
+	}
+	switch strings.ToLower(words[1]) {
+	case "commit", "tag", "notes", "stash", "log", "show", "status", "diff", "blame", "add":
+		return true
+	case "grep":
+		for _, word := range words[2:] {
+			if strings.HasPrefix(word, "-O") || strings.HasPrefix(word, "--open-files-in-pager") {
+				return false
+			}
+		}
 		return true
 	}
 	return false
