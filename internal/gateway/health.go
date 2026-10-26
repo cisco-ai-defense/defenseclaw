@@ -58,12 +58,16 @@ type observabilityV8EventHistoryObservation struct {
 	active             bool
 	lastFailureClass   string
 	lastFailurePrimary uint8
+	lastFailureAt      time.Time
 }
 
 type observabilityV8EventHistorySnapshot struct {
 	activeCode         string
 	lastFailureClass   string
 	lastFailurePrimary uint8
+	// lastFailureAt is when the last write failure happened, so a reader
+	// can tell a recent one from one long recovered (GAP-1627).
+	lastFailureAt time.Time
 }
 
 type SubsystemState string
@@ -1042,10 +1046,12 @@ func (h *SidecarHealth) observeObservabilityV8EventHistory(
 		generation: transition.Generation, sequence: transition.Sequence,
 		active:           transition.State == audit.EventHistoryHealthFailed,
 		lastFailureClass: current.lastFailureClass, lastFailurePrimary: current.lastFailurePrimary,
+		lastFailureAt: current.lastFailureAt,
 	}
 	if observation.active && transition.Code == audit.EventHistoryHealthWriteFailed {
 		observation.lastFailureClass = string(transition.SQLiteClass)
 		observation.lastFailurePrimary = transition.SQLitePrimaryCode
+		observation.lastFailureAt = transition.OccurredAt
 	}
 	h.observabilityV8EventHistory[code] = observation
 	h.noteObservabilityV8ChangeLocked(transition.OccurredAt)
@@ -1105,6 +1111,7 @@ func snapshotObservabilityV8EventHistory(
 	if write.generation != 0 && write.generation <= generation {
 		result.lastFailureClass = write.lastFailureClass
 		result.lastFailurePrimary = write.lastFailurePrimary
+		result.lastFailureAt = write.lastFailureAt
 	}
 	for code, observation := range observations {
 		if observation.generation == 0 || observation.generation > generation || !observation.active ||
@@ -2021,6 +2028,9 @@ func appendObservabilityV8EventHistoryDetails(
 		details["event_history_last_sqlite_class"] = eventHistory.lastFailureClass
 		if eventHistory.lastFailurePrimary != 0 {
 			details["event_history_last_sqlite_primary_code"] = eventHistory.lastFailurePrimary
+		}
+		if !eventHistory.lastFailureAt.IsZero() {
+			details["event_history_last_failure_at"] = eventHistory.lastFailureAt.UTC().Format(time.RFC3339Nano)
 		}
 	}
 }
