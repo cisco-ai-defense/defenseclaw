@@ -136,9 +136,26 @@ func TestRemovedOpenHandsTeardownRemovesOnlyWhatDefenseClawWrote(t *testing.T) {
 	removedTestWrite(t, record, "DEFENSECLAW_FAIL_MODE=open\n", 0o600)
 	receipts := filepath.Join(dataDir, "connector_backups", removedOpenHandsID)
 	removedTestWrite(t, filepath.Join(receipts, "config.json"), "{}", 0o600)
+	// GAP-0955 class: a lock entry an older release left for OpenHands is a
+	// peer every later setup checks; the teardown clears it and only it.
+	for _, entry := range []HookContractLockEntry{
+		{Connector: removedOpenHandsID, HookScriptDigests: map[string]string{removedOpenHandsHookScript: "sha256:00"}},
+		{Connector: "codex", ContractID: "codex-test"},
+	} {
+		if err := SaveHookContractLockEntry(dataDir, entry); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	opts := SetupOpts{DataDir: dataDir}
 	removedTestTeardown(t, removedOpenHandsID, opts)
+
+	if entry := LoadHookContractLockEntry(dataDir, removedOpenHandsID); entry.Connector != "" {
+		t.Fatalf("the OpenHands lock entry is still there: %+v", entry)
+	}
+	if entry := LoadHookContractLockEntry(dataDir, "codex"); entry.ContractID != "codex-test" {
+		t.Fatalf("the codex lock entry changed: %+v", entry)
+	}
 
 	if got := removedTestCommands(t, config); len(got) != 1 || got[0] != "/usr/local/bin/my-own-hook --check" {
 		t.Fatalf("hooks.json commands after teardown = %q, want only the operator's hook", got)

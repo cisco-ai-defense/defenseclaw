@@ -26,7 +26,7 @@ def test_retired_connector_roster_loads_with_remaining_peer(tmp_path, caplog, ve
     assert loaded.active_connectors() == ["codex"]
     assert loaded.guardrail.connector == "codex"
     assert loaded.claw.mode == ""
-    assert "until 1.1" in caplog.text
+    assert "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it." in caplog.text
     loaded.save()
     persisted = (tmp_path / "config.yaml").read_text(encoding="utf-8").lower()
     assert "openhands" not in persisted

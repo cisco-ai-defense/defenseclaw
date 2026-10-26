@@ -1884,7 +1884,7 @@ class GatewayTeardownOutputTests(unittest.TestCase):
             self.assertTrue(cmd_uninstall._run_gateway_connector_teardown("omnigent"))
         teardown = run_mock.call_args_list[0]
         self.assertIn("teardown", teardown.args[0])
-        self.assertNotIn("DEFENSECLAW_REMOVED_CONNECTOR_UNINSTALL", teardown.kwargs.get("env") or {})
+        self.assertNotIn("env", teardown.kwargs)
 
     def test_gateway_teardown_uses_utf8_and_preserves_checkmark(self):
         completed = type(
