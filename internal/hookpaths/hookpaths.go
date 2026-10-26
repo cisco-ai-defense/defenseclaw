@@ -461,9 +461,19 @@ func AuthorizedKeysPaths(home string) []string {
 }
 
 // ProtectedAuthorizedKeysPaths also includes sshd's Windows administrator
-// key file, which may live outside the invoking user's home.
+// key file, which may live outside the invoking user's home. Write targets
+// are compared after their links are resolved, so each key file is listed
+// in its resolved form too when the home (or its .ssh) is below a link:
+// a file that does not exist yet has no identity to compare, and a home
+// below a linked directory (a linked /home, autofs, macOS /var) must
+// protect ~/.ssh/authorized_keys before it exists (GAP-1725).
 func ProtectedAuthorizedKeysPaths(home string) []string {
 	paths := AuthorizedKeysPaths(home)
+	for _, path := range AuthorizedKeysPaths(home) {
+		if resolved, ok := ResolveWriteTarget(path); ok && resolved != path && !slices.Contains(paths, resolved) {
+			paths = append(paths, resolved)
+		}
+	}
 	if runtime.GOOS == "windows" {
 		if programData := os.Getenv("ProgramData"); filepath.IsAbs(programData) {
 			paths = append(paths, filepath.Join(programData, "ssh", "administrators_authorized_keys"))
