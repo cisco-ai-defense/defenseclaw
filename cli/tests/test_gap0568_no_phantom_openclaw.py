@@ -419,7 +419,14 @@ class SetupMenuDefaultTests(unittest.TestCase):
     def test_an_installed_agent_is_the_default(self):
         self.assertEqual(self._menu_default("openclaw", ["claudecode", "codex"], "codex"), "codex")
         self.assertEqual(self._menu_default("openclaw", ["claudecode"], None), "claudecode")
-        self.assertEqual(self._menu_default("openclaw", ["openclaw"], None), "openclaw")
+        from defenseclaw import platform_support
+
+        if platform_support.connector_supported_on_os("openclaw"):
+            self.assertEqual(self._menu_default("openclaw", ["openclaw"], None), "openclaw")
+        else:
+            # Native Windows does not offer OpenClaw (hook-only), so an
+            # installed OpenClaw is no menu default there.
+            self.assertIsNone(self._menu_default("openclaw", ["openclaw"], None))
 
     def test_a_configured_connector_stays_the_default(self):
         self.assertEqual(self._menu_default("cursor", [], None), "cursor")

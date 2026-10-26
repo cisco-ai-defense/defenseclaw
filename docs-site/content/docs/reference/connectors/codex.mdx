@@ -143,6 +143,7 @@ When a hook fails closed because DefenseClaw cannot decide, `Stop`, `SubagentSto
 - A `PostToolUse` block cannot undo the finished tool, and `SessionEnd` is observation only. A post-tool hook may still record a call after a missed `PreToolUse`, but it may itself be stopped or absent.
 - Controls marked v3 or v4 need Codex 0.133 or later.
 - Codex activates project `.codex/` layers only for trusted projects. Inventory reports project entries as `trust_required` and does not infer the trust decision.
+- On Windows, the first Codex session after Codex sets up its sandbox can refuse every shell command (`AskForApproval::Granular.sandbox_approval is false`), with or without DefenseClaw. Quit Codex and start it again once. See [Known limits](/docs/troubleshooting/known-limits#codex).
 
 ### Troubleshooting details
 

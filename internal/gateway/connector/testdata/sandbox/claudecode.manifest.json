@@ -45,8 +45,8 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 156432,
-      "sha256": "cee900c4d33f810257ac9326f2e08062aa1afc74f1a81ee13d9a970d74c3b26f"
+      "size": 155588,
+      "sha256": "2478206deccbbdab2aae869fedd6a051656a44a519e3d11e342da809445801f6"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
@@ -57,32 +57,32 @@
     "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 14409,
-      "sha256": "3923f11601410c01c8709444009d7a52ec7ae37ac38d8ee50877a6cda522f3d3"
+      "size": 14606,
+      "sha256": "a02728a3a38bf7757a0e54abc72e648e81f7c29a6cd08127c97a6346df045c72"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7054,
-      "sha256": "b2b77dc5b9ddac8334a2e5f5de7d57dbd2e3507611c3927d3e32eeb4fbac958c"
+      "size": 7169,
+      "sha256": "fbd25db76d7c52055a5a56a784004884013a0f75ec1e760215cdc908ed76f927"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6245,
-      "sha256": "89707eb9c8f03843bcfd36999f999f24684a0b317ab095727191e411663d0c3c"
+      "size": 6360,
+      "sha256": "710e86c16a999c83ae3e6ee43c1fbab2255775816a9ee1ced47e038843348ae6"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6832,
-      "sha256": "4f809884bcd020b282ebb235c24087522ea6baa6eaa9f60891d196d51f8c5103"
+      "size": 6932,
+      "sha256": "3816c498abff5edcecea9446362124ae57756409169cdd67ceb91545a3fa6c87"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7178,
-      "sha256": "fb90b55dfb4e903aab5536ef8da5dc16cec9fec352368c0aa9cccddb9a6e1211"
+      "size": 7281,
+      "sha256": "193f998c418b9f9a89714c9c00efa7965ac0f828557182cd3eb4974334891447"
     },
     "/usr/local/lib/defenseclaw/otel-headers.sh": {
       "mode": "-rwxr-xr-x",

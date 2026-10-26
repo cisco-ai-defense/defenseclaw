@@ -877,6 +877,16 @@ class TestReadPickedConnector(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+# These cases run `setup guardrail --non-interactive` with no connector, so
+# setup configures the implied OpenClaw default. Native Windows is hook-only
+# and refuses OpenClaw (platform_support), which
+# test_non_interactive_windows_refuses_the_implied_openclaw covers on every OS.
+_IMPLIED_OPENCLAW_POSIX_ONLY = unittest.skipIf(
+    os.name == "nt",
+    "the implied OpenClaw connector is unsupported on native Windows",
+)
+
+
 class TestSetupGuardrailCommand(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
@@ -926,6 +936,34 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertIn("Disabling", result.output)
         self.assertIn("Config saved", result.output)
 
+    def test_non_interactive_windows_refuses_the_implied_openclaw(self):
+        # Native Windows is hook-only: the implied OpenClaw default is refused
+        # with its reason before anything is written.
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        config = os.path.join(self.tmp_dir, "config.yaml")
+
+        def saved() -> bytes | None:
+            if not os.path.exists(config):
+                return None
+            with open(config, "rb") as handle:
+                return handle.read()
+
+        before = saved()
+        with patch("defenseclaw.platform_support.host_os", return_value="windows"):
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
+                obj=self.app,
+            )
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("connector 'openclaw' is unsupported on windows", result.output)
+        self.assertIn("OpenClaw integration requires the guardrail proxy", result.output)
+        self.assertNotIn("Config saved", result.output)
+        self.assertEqual(saved(), before)
+
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_non_interactive_with_model(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -949,6 +987,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertTrue(raw["guardrail"]["enabled"])
         self.assertEqual(raw["guardrail"].get("mode", "observe"), "observe")
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_setup_succeeds_without_openclaw_config(self):
         """Setup no longer requires OpenClaw config — connector setup runs at gateway start."""
         from defenseclaw.commands.cmd_setup import setup
@@ -967,6 +1006,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertIn("Connector: OpenClaw (openclaw)", result.output)
         self.assertIn("Connector setup will run automatically", result.output)
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_preflight_succeeds_with_empty_model(self):
         """Model is no longer required — fetch interceptor scans all models."""
         from defenseclaw.commands.cmd_setup import setup
@@ -983,6 +1023,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         # Setup proceeds without model — all models scanned automatically
         self.assertIn("Connector: OpenClaw (openclaw)", result.output)
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_api_key_env_warning_when_not_set(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -1001,6 +1042,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Connector: OpenClaw (openclaw)", result.output)
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_setup_shows_connector_info(self):
         """Setup shows connector details instead of OpenClaw-specific patching."""
         from defenseclaw.commands.cmd_setup import setup
@@ -1163,6 +1205,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Connector: Codex (codex)", result.output)
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_picked_connector_hint_invalid_value_is_ignored(self):
         """Garbage in picked_connector falls back to openclaw, not a crash."""
         from defenseclaw.commands.cmd_setup import setup
@@ -1197,6 +1240,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Connector: Claude Code (claudecode)", result.output)
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_shows_disable_instructions(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -1213,6 +1257,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("defenseclaw setup guardrail --disable", result.output)
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_block_message_non_interactive(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -1237,6 +1282,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             raw = yaml.safe_load(f)
         self.assertEqual(raw["guardrail"]["block_message"], custom_msg)
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_non_interactive_advanced_hilt_flags(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -1271,6 +1317,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(raw["guardrail"]["rule_pack"], "strict")
         self.assertNotIn("rule_pack_dir", raw["guardrail"])
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_yes_alias_updates_rule_pack(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -1359,6 +1406,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(gc.connectors["codex"].rule_pack, "")
         self.assertEqual(gc.connectors["claudecode"].rule_pack, "strict")
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_block_message_written_to_config_yaml(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -1380,6 +1428,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(doc["guardrail"]["block_message"], custom_msg)
         self.assertEqual(doc["guardrail"]["mode"], "action")
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_block_message_default_is_effective_without_yaml_noise(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -3314,6 +3363,7 @@ class TestSetupGuardrailRestart(unittest.TestCase):
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     @patch("defenseclaw.commands.cmd_setup._restart_services")
     def test_default_restart_calls_restart_services(self, mock_restart):
         from defenseclaw.commands.cmd_setup import setup
@@ -3326,6 +3376,7 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_restart.assert_called_once()
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_no_restart_shows_manual_instructions(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -3337,6 +3388,7 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("defenseclaw-gateway restart", result.output)
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_no_restart_allows_explicit_offline_audit_staging(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -3350,6 +3402,7 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("setup audit event was not recorded", result.output)
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway")
     @patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True)
     def test_no_restart_suppresses_parent_auto_restart(self, _mock_alive, mock_restart):
@@ -3402,6 +3455,7 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--restart", result.output)
 
+    @_IMPLIED_OPENCLAW_POSIX_ONLY
     @patch("defenseclaw.commands.cmd_setup._restart_services")
     def test_accept_defaults_alias_works(self, mock_restart):
         from defenseclaw.commands.cmd_setup import setup

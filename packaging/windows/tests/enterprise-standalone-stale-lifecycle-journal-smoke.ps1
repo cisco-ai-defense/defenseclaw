@@ -250,9 +250,17 @@ try {
             function script:Assert-DefenseClawManagedServiceConfigurations { param($Layout, $GatewayServiceName, $GuardianServiceName, [switch]$AnyStartMode) }
             function script:Remove-DefenseClawStandaloneInstallTreeReplacementBackups { param($Layout) }
             function script:Assert-DefenseClawStandaloneInstallTreeNotInUse { param($Layout, $GatewayServiceName, $GuardianServiceName, $SelfUninstallCallerPID) }
+            # The InstallRoot holder refusal (GAP-0625) has its own cases in
+            # enterprise-standalone-w2b-lifecycle-smoke.ps1.
+            function script:Assert-DefenseClawStandaloneInstallRootNotHeld { param($Layout, $GatewayServiceName, $GuardianServiceName, $SelfUninstallCallerPID) }
             function script:Assert-DefenseClawStandaloneUninstallInstallTree { param($Layout) }
             function script:Assert-DefenseClawRecordedArtifactHashes { param($Metadata, $Layout, $Action) }
             function script:Assert-DefenseClawUninstallStateTreeNoReparse { param($Layout) }
+            # This deployment's helper prepares the hook removal against the
+            # tombstone (teardown-managed-hooks capabilities); the older-helper
+            # paths are covered by enterprise-standalone-uninstall-hook-commit-smoke.ps1.
+            function script:Test-DefenseClawManagedHooksCommittedTeardownSupported { param($Layout, $GatewayServiceName) return $true }
+            $realRemoveRolledBackJournal = ${function:Remove-DefenseClawRolledBackTeardownJournal}
             function script:Remove-DefenseClawRolledBackTeardownJournal { param($Layout, [switch]$Stale) throw 'uninstall reached teardown after stale journal retirement' }
             foreach ($refusal in @($gcRefusal, $selectorRefusal, $identityRefusal, $unknownRefusal, $untrustedFolder)) {
                 [IO.File]::WriteAllText($layout.ManagedHooksLifecycleJournalPath, '{}')
@@ -282,6 +290,9 @@ try {
                 }
                 [IO.File]::Delete($layout.ManagedHooksLifecycleJournalPath)
             }
+            # The uninstall cases stop at teardown; recovery below retires the
+            # journal with the real function.
+            Microsoft.PowerShell.Management\Set-Item -Path function:script:Remove-DefenseClawRolledBackTeardownJournal -Value $realRemoveRolledBackJournal
 
             # GAP-0748: recovery itself retires the rolled-back journal once
             # Complete-DefenseClawTransaction removes pending.json. A later

@@ -33,9 +33,11 @@ func TestInstalledPythonInterpreterRefusesReplaceRightsAroundIt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := managed.WriteScannerRuntimeAdmission(root, digest, managed.ScannerRuntimeTrustAuthenticode); err != nil {
-				t.Fatal(err)
-			}
+			testenv.AsAdministratorsOwner(t, func() {
+				if err := managed.WriteScannerRuntimeAdmission(root, digest, managed.ScannerRuntimeTrustAuthenticode); err != nil {
+					t.Fatal(err)
+				}
+			})
 			python := filepath.Join(root, "python", "python.exe")
 			testenv.WriteAdminOnlyFile(t, python, []byte("python"))
 			seam := windowsScannerRuntimeRoot

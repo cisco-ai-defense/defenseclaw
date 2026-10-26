@@ -34,6 +34,9 @@ import (
 // a release: the host warns about the same releases, and a pin past them
 // must drop them.
 func TestHermesImageRefusesTheUnhookedTUIOfItsPin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenShell sandbox artifacts are rendered only on Linux and macOS hosts")
+	}
 	if got := connector.ResolveHookContract("hermes", Hermes.DefaultVersion); !strings.Contains(got.Warning, "hermes --tui") {
 		t.Fatalf("the image pins Hermes %s, whose TUI runs the hooks (%+v): remove hermesUnhookedAgentModule "+
 			"and the managed layer's TUI pins (HERMES_TUI=0, display.interface: cli in internal/gateway/connector/hermes_sandbox.go)",

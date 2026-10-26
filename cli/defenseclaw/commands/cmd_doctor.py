@@ -143,7 +143,7 @@ from defenseclaw.openclaw_presence import (
     openclaw_implied_but_not_installed,
 )
 from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
-from defenseclaw.process_liveness import pid_alive, process_access_denied
+from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
 from defenseclaw.scanner_binary import SKILL_SCANNER_BINARY, resolve_scanner_binary
 from defenseclaw.webhooks import list_webhooks, network_error_text, validate_webhook_url
@@ -1629,100 +1629,6 @@ def _report_uninitialized_install(
 def _doctor_managed(cfg) -> bool:
     """Whether cfg is a managed (enterprise) install, Secure Client included."""
     return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
-
-
-def _doctor_install_lock_roots(cfg) -> tuple[str, ...]:
-    """The per-user installer home and configured data directory can differ."""
-    if _doctor_managed(cfg):
-        return ()
-    home = os.environ.get("DEFENSECLAW_HOME") or os.path.join(os.path.expanduser("~"), ".defenseclaw")
-    roots = (home, str(getattr(cfg, "data_dir", "") or ""))
-    return tuple(dict.fromkeys(os.path.normcase(os.path.abspath(root)) for root in roots if root))
-
-
-def _doctor_install_lock_state(root: str) -> tuple[str, os.stat_result | None]:
-    """Match the ten-minute, owner-PID bound used by the installed hooks."""
-    lock = os.path.join(root, ".install.lock")
-    try:
-        info = os.lstat(lock)
-    except FileNotFoundError:
-        return ("missing", None)
-    except OSError:
-        return ("unknown", None)
-    age = time.time() - info.st_mtime
-    if age > 600 or age < -60:
-        return ("stale", info)
-    if not stat.S_ISDIR(info.st_mode):
-        return ("live", info)
-    try:
-        raw = read_regular_file_no_follow(os.path.join(lock, "pid"), max_bytes=64).decode("ascii").strip()
-    except (OSError, UnicodeError):
-        return ("live", info)  # the installer may still be writing its pid
-    if not raw.isascii() or not raw.isdecimal():
-        return ("live", info)
-    holder = int(raw)
-    if holder > 0 and not pid_alive(holder) and not process_access_denied(holder):
-        return ("stale", info)
-    return ("live", info)
-
-
-def _doctor_stale_install_locks(cfg) -> tuple[str, ...]:
-    return tuple(root for root in _doctor_install_lock_roots(cfg) if _doctor_install_lock_state(root)[0] == "stale")
-
-
-def _plan_stale_install_lock(cfg) -> RepairDecision:
-    roots = _doctor_stale_install_locks(cfg)
-    if roots:
-        return RepairDecision("applicable", "would remove abandoned install locks in: " + ", ".join(roots),
-                              effects=("remove abandoned per-user install locks",))
-    return RepairDecision("noop", "no abandoned per-user install lock")
-
-
-def _fix_stale_install_lock(cfg, *, assume_yes: bool) -> tuple[str, str]:
-    roots = _doctor_stale_install_locks(cfg)
-    if not roots:
-        return ("skip", "no abandoned per-user install lock")
-    cleared = []
-    for root in roots:
-        lock = os.path.join(root, ".install.lock")
-        if is_link_or_reparse(root):
-            return ("fail", f"refusing install lock cleanup through linked data directory {root}")
-        state, inspected = _doctor_install_lock_state(root)
-        if state != "stale" or inspected is None:
-            return ("warn", f"install lock changed before cleanup: {lock}")
-        if os.name != "nt" and inspected.st_uid != os.geteuid():
-            return ("fail", f"refusing install lock cleanup owned by another account: {lock}")
-        try:
-            current = os.lstat(lock)
-            fingerprint = lambda item: (item.st_dev, item.st_ino, item.st_mtime_ns)
-            if fingerprint(current) != fingerprint(inspected):
-                return ("warn", f"install lock changed before cleanup: {lock}")
-            if stat.S_ISDIR(current.st_mode):
-                entries = os.listdir(lock)
-                if any(name != "pid" for name in entries):
-                    return ("warn", f"install lock has unexpected files; run the installer to recover: {lock}")
-                if entries:
-                    pid_path = os.path.join(lock, "pid")
-                    pid_info = os.lstat(pid_path)
-                    if not stat.S_ISREG(pid_info.st_mode):
-                        return ("warn", f"install lock pid is not a regular file: {pid_path}")
-                    os.unlink(pid_path)
-                os.rmdir(lock)
-            else:
-                os.unlink(lock)
-        except OSError as exc:
-            return ("fail", f"could not clear abandoned install lock {lock}: {exc}")
-        cleared.append(lock)
-    return ("pass", "cleared abandoned install locks: " + ", ".join(cleared) +
-            "; if an upgrade was interrupted, run the installer again to finish recovery")
-
-
-def _check_install_lock(cfg, r: _DoctorResult) -> None:
-    roots = _doctor_stale_install_locks(cfg)
-    if roots:
-        _emit("warn", "Abandoned install lock", ", ".join(roots) +
-              "; run `defenseclaw doctor --fix` to clear it, then rerun an interrupted installer",
-              r=r, check_id="doctor.state.install-lock.stale")
 
 
 def _root_owned_file(path: str) -> bool:
@@ -14065,7 +13971,6 @@ def doctor(
     _check_config(cfg, r)
     _check_ignored_dotenv_keys(cfg, r)
     _check_sudo_runtime_leftovers(cfg, r)
-    _check_install_lock(cfg, r)
     _check_audit_db(cfg, r)
     _check_inventory_storage(cfg, r)
     _check_device_identity(cfg, r)
@@ -15344,15 +15249,6 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             apply=_fix_stale_pid,
             dependencies=(_CONFIG_PREFLIGHT_REPAIR_ID,),
             effects=("remove positively stale same-install PID state",),
-        ),
-        RepairSpec(
-            repair_id="doctor.state.install-lock.remove-stale",
-            label="abandoned per-user install lock",
-            risk="safe",
-            plan=_plan_stale_install_lock,
-            apply=_fix_stale_install_lock,
-            dependencies=(_CONFIG_PREFLIGHT_REPAIR_ID,),
-            effects=("remove abandoned per-user install locks",),
         ),
         RepairSpec(
             repair_id="doctor.state.audit-db.initialize",

@@ -6,6 +6,7 @@ package gateway
 import (
 	"encoding/json"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -80,6 +81,7 @@ func TestR104Loop1WindowsCMDSoleInvocation(t *testing.T) {
 // Dynamic ordinary operands remain allowed. A protected link named inside an
 // interpreter argument is protected named even if its output is ordinary.
 func TestR104Loop1DynamicOperandDecisions(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home, cwd := r104ReviewHome(t)
 	for _, tc := range []struct {
 		name, command string
@@ -130,9 +132,14 @@ func TestR104Loop1WindowsCMDPrefixNative(t *testing.T) {
 			resp := api.evaluateAgentHook(t.Context(), agentHookRequest{
 				ConnectorName: tc.connector, HookEventName: tc.event, ToolName: tc.tool, ToolArgs: args,
 			})
-			if resp.RawAction != "block" || resp.Action != "block" ||
-				!containsString(resp.RuleIDs, "persistence.ssh_authorized_keys_command") {
-				t.Fatalf("registered hook action=%q raw=%q rules=%v", resp.Action, resp.RawAction, resp.RuleIDs)
+			// RuleIDs come from the scan-finding emitter, which this bare
+			// APIServer does not have; the response findings name the rule.
+			named := containsString(resp.RuleIDs, "persistence.ssh_authorized_keys_command")
+			for _, finding := range resp.Findings {
+				named = named || strings.HasPrefix(finding, "persistence.ssh_authorized_keys_command:")
+			}
+			if resp.RawAction != "block" || resp.Action != "block" || !named {
+				t.Fatalf("registered hook action=%q raw=%q rules=%v findings=%v", resp.Action, resp.RawAction, resp.RuleIDs, resp.Findings)
 			}
 		})
 	}

@@ -563,3 +563,28 @@ func TestCheckAgentSettingsAllowsLinkedWindowsCodexHome(t *testing.T) {
 		t.Fatalf("Windows Codex precheck refused readable settings through linked home: %v", err)
 	}
 }
+
+// GAP-0615: a refusal of a Codex config.toml that does not parse names the
+// file with the line and column of the error (file:line:col), not only the
+// parser's message.
+func TestCheckAgentSettingsNamesCodexSyntaxErrorLineAndColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	body := "model = \"gpt-5\"\n\n[otel]\nenvironment = \"dev\"\n[broken\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pointCodexConfig(t, path)
+	err := CheckAgentSettings(NewCodexConnector(), SetupOpts{DataDir: t.TempDir()})
+	if !errors.Is(err, ErrAgentConfigRefusal) {
+		t.Fatalf("CheckAgentSettings = %v; want a refusal", err)
+	}
+	if !strings.Contains(err.Error(), path+":5:") || !strings.Contains(err.Error(), "line 5, column ") {
+		t.Fatalf("refusal does not name %s:5:<col> (line 5 holds the broken table): %v", path, err)
+	}
+	var cfg map[string]interface{}
+	parseErr := ParseCodexTOML(append([]byte{0xef, 0xbb, 0xbf}, body...), &cfg)
+	var decode *toml.DecodeError
+	if !errors.As(parseErr, &decode) || !strings.HasPrefix(parseErr.Error(), "line 5, column ") {
+		t.Fatalf("ParseCodexTOML(BOM + broken table) = %v; want line 5 and an unwrappable parser error", parseErr)
+	}
+}

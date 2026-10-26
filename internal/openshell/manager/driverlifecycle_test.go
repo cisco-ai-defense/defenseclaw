@@ -407,8 +407,8 @@ func TestDeleteOfAnotherDriversSandboxWhenTheGatewayFails(t *testing.T) {
 
 // On vm a stop flushes the sandbox's disk first, in the harness's exit
 // exec, after the harness exited: a MicroVM's stop loses what was not
-// synced. A stop the flush did not reach is reported. On docker the exec
-// is what it always was.
+// synced. A user's stop the flush did not confirm is held, the sandbox
+// keeps running (GAP-1163). On docker the exec is what it always was.
 func TestStopOnVMFlushesFirst(t *testing.T) {
 	e := newVMEnv(t, nil)
 	useOpenCode(t, e)
@@ -444,13 +444,22 @@ func TestStopOnVMFlushesFirst(t *testing.T) {
 		t.Fatalf("a flushed stop was reported: %+v", got)
 	}
 
-	// The sandbox answers, but the flush did not finish.
+	// The sandbox answers, but the flush did not finish: the stop is held
+	// and OpenShell is not asked to stop it.
 	e.startBox("flushbox", sandboxapi.StartRequest{})
 	answer = "exited\n"
-	e.stopBox("flushbox")
-	if got := e.events("flushbox", "", "stop_unflushed"); len(got) != 1 || !strings.Contains(got[0].Message, "may come back empty") {
-		t.Fatalf("feed = %+v", got)
+	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+	if _, err := e.m.Stop(t.Context(), "flushbox"); !sandboxapi.IsCode(err, sandboxapi.CodeConflict) || !strings.Contains(err.Error(), "keeps running") {
+		t.Fatalf("stop after a failed flush = %v", err)
 	}
+	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops || e.get("flushbox").Phase != "ready" {
+		t.Fatalf("a stop whose flush failed went ahead: %d stop calls, phase %s", got-stops, e.get("flushbox").Phase)
+	}
+	if got := e.events("flushbox", "", "stop_unflushed"); len(got) != 0 {
+		t.Fatalf("a held stop was reported as one that lost writes: %+v", got)
+	}
+	answer = "exited\nsynced\n"
+	e.stopBox("flushbox")
 
 	// The exec failed: the flush is tried once more, on its own (after a
 	// look at the detached run, which the failed exec did not report).
@@ -467,7 +476,7 @@ func TestStopOnVMFlushesFirst(t *testing.T) {
 	if len(calls) != 3 || !slices.Contains(calls[1].Command, "defenseclaw-run-probe") || !slices.Equal(calls[2].Command, []string{"/bin/sync"}) {
 		t.Fatalf("exec calls = %+v", calls)
 	}
-	if got := e.events("flushbox", "", "stop_unflushed"); len(got) != 1 {
+	if got := e.events("flushbox", "", "stop_unflushed"); len(got) != 0 {
 		t.Fatalf("a flushed stop was reported: %+v", got)
 	}
 

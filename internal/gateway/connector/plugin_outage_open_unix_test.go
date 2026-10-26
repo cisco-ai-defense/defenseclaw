@@ -300,6 +300,10 @@ func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 			if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			// The plugin reads its tier at call time from this data directory's
+			// config (fix/r104-oss-outage-open); the bounded review is the
+			// default tier's answer to an oversized call.
+			writeOutageTierConfig(t, dataDir, outageDefaultTierConfig)
 			body := renderPluginAssetForTest(t, plugin.asset, templateData{
 				APIAddr: strings.TrimPrefix(server.URL, "http://"), TokenFileJS: javaScriptStringContent(token),
 				FailMode: "closed",
@@ -310,7 +314,7 @@ func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 			}
 			harness := strings.ReplaceAll(plugin.harness, `command: "echo marker"`, plugin.input)
 			cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", harness, path)
-			cmd.Env = append(sanitizedTestEnv(), "HOME="+home)
+			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 			out, err := cmd.Output()
 			if err != nil {
 				t.Fatalf("node: %v\n%s", err, out)
@@ -517,7 +521,11 @@ func TestPerUserPluginOversizedPayloadUsesInstalledTier(t *testing.T) {
 		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness},
 		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness},
 	} {
-		for _, tier := range []struct{ name, mode string }{{"balanced", "open"}, {"strict", "closed"}} {
+		// The tier is the config's rule pack, read at call time
+		// (fix/r104-oss-outage-open), not a mode baked into the render.
+		for _, tier := range []struct{ name, mode, config string }{
+			{"balanced", "open", outageDefaultTierConfig}, {"strict", "closed", outageStrictTierConfig},
+		} {
 			t.Run(plugin.connector+"/"+tier.name, func(t *testing.T) {
 				home := t.TempDir()
 				installNativeGatewayForHookTest(t, home)
@@ -529,6 +537,7 @@ func TestPerUserPluginOversizedPayloadUsesInstalledTier(t *testing.T) {
 				if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
+				writeOutageTierConfig(t, dataDir, tier.config)
 				body := renderPluginAssetForTest(t, plugin.asset, templateData{
 					APIAddr: "127.0.0.1:1", TokenFileJS: javaScriptStringContent(token),
 					FailMode: "closed",
@@ -539,7 +548,7 @@ func TestPerUserPluginOversizedPayloadUsesInstalledTier(t *testing.T) {
 				}
 				harness := strings.ReplaceAll(plugin.harness, `command: "echo marker"`, `description: "x".repeat(1100000), command: "echo marker"`)
 				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", harness, path)
-				cmd.Env = append(sanitizedTestEnv(), "HOME="+home)
+				cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 				out, err := cmd.Output()
 				if err != nil {
 					t.Fatalf("node: %v\n%s", err, out)

@@ -54,6 +54,10 @@ type templateData struct {
 	// NativePostBinaryJS is the administrator-owned native gateway helper a
 	// Secure Client plugin uses to verify the connected service before POST.
 	NativePostBinaryJS string
+	// GatewayBinaryJS is the gateway binary a per-user in-agent plugin runs
+	// for hook-post and session facts (perUserPluginGatewayBinary), escaped
+	// for a JavaScript double-quoted string; empty keeps ~/.local/bin.
+	GatewayBinaryJS string
 	// HookSocketJS is the standalone gateway's unix hook socket, escaped for a
 	// JavaScript double-quoted string; empty keeps the TCP transport.
 	HookSocketJS string

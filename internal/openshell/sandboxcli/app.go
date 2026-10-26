@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,6 +65,10 @@ type API interface {
 	Create(ctx context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error)
 	Delete(ctx context.Context, name string, req sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error)
 	Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
+	// StopAcceptingUnsynced is `stop --yes`'s Stop: a stop held because a
+	// MicroVM's disk sync failed goes ahead the next time
+	// (sandboxapi.StopRequest).
+	StopAcceptingUnsynced(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
 	Start(ctx context.Context, name string, req sandboxapi.StartRequest) (*sandboxapi.Sandbox, error)
 	Undo(ctx context.Context, name string, req sandboxapi.UndoRequest) (*sandboxapi.UndoResponse, error)
 	Review(ctx context.Context, name string, req sandboxapi.ReviewRequest) (*sandboxapi.ReviewResponse, error)
@@ -600,16 +605,30 @@ func apiError(err error) error {
 	if !errors.As(err, &e) {
 		return err
 	}
+	if e.Status == http.StatusTooManyRequests {
+		// The gateway's caller limit answered a burst of sandbox commands
+		// with its hook-request words, which named no hook the user ran
+		// (GAP-1693).
+		return errors.New("DefenseClaw is limiting how many requests this account makes in a short time, and a burst of " +
+			"sandbox commands reached that limit; nothing was changed, run the command again in a few seconds")
+	}
 	switch e.Code {
 	case sandboxapi.CodeUnavailable:
 		if daemonUnreachable(e) {
-			// The HTTP client's error, with the loopback API port, is no
-			// news to the user (GAP-0336); `sandbox doctor` has the detail.
+			// Keep the transport cause: a verified peer failure and a refused
+			// dial need different repairs, even if the gateway reports ready.
+			detail := strings.TrimSpace(e.Detail)
 			if onManagedHost() {
 				// A managed computer disables per-user gateways: the way on
 				// is the organization's service, never a gateway command
 				// (GAP-0451).
+				if detail != "" {
+					return fmt.Errorf("your sandbox service does not answer (%s); %s", detail, managedServiceFix)
+				}
 				return errors.New("your sandbox service does not answer; " + managedServiceFix)
+			}
+			if detail != "" {
+				return fmt.Errorf("the DefenseClaw daemon did not answer or could not be verified (%s); run `defenseclaw sandbox doctor`, and if it is stopped, start it with `defenseclaw-gateway start`", detail)
 			}
 			return errors.New("the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)")
 		}

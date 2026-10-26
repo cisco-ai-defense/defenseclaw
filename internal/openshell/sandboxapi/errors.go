@@ -196,6 +196,18 @@ func AsError(err error) *Error {
 }
 
 // IsCode reports whether err is an *Error with code.
+// UnsyncedStopHeldText is in the message of a MicroVM stop the daemon held
+// because the guest's disk sync failed (GAP-1163).
+const UnsyncedStopHeldText = "could not sync its MicroVM's disk before the stop"
+
+// IsUnsyncedStopHeld reports a stop the daemon held because the MicroVM's
+// disk sync failed: the sandbox keeps running, and a stop that accepts the
+// loss (StopRequest.AcceptUnsynced) is made.
+func IsUnsyncedStopHeld(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Code == CodeConflict && strings.Contains(e.Message, UnsyncedStopHeldText)
+}
+
 func IsCode(err error, code string) bool {
 	var e *Error
 	return errors.As(err, &e) && e.Code == code

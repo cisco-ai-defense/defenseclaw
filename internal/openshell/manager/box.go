@@ -129,6 +129,11 @@ type box struct {
 	// hooks.on_silence: stop) scheduled this session's stop.
 	tamperStop  bool
 	silenceSent bool
+	// stopHeldAt is when a stop was last held because the MicroVM's disk
+	// sync failed (GAP-1163), zero once a stop goes through or the sandbox
+	// starts again: the user's stop that accepts the loss within
+	// unsyncedStopAcceptWindow of it is made (Manager.Stop).
+	stopHeldAt time.Time
 	// oldSupervisorNetworkErr is the last failure to withdraw the network
 	// rules and providers of a live legacy guest (oldSupervisorLive).
 	oldSupervisorNetworkErr string
@@ -700,8 +705,7 @@ func lingeringStartRefusal(name string, d openshell.Driver, sb *openshell.Sandbo
 	}
 	return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
 		Message: "sandbox " + name + " was not started: it is a MicroVM that OpenShell reports " + strings.ToLower(string(sb.Status.Phase)) + "; " + openshell.LingeringVMLoss,
-		Detail: "`defenseclaw sandbox start " + name + " --end-vm` starts it all the same, and what its VM had not written to its disk is lost; `defenseclaw sandbox delete " +
-			name + "` deletes it and its work"}
+		Detail:  openshell.EndedVMWayOn(name)}
 }
 
 // migrateBootstrap moves the Docker bootstrap of the sandbox name (sb, as
@@ -802,17 +806,17 @@ func oldSupervisorLive(phase audit.SandboxPhase, rec record) bool {
 // compute driver driver ("" is docker): the stop of a ready one, which on
 // a MicroVM syncs its disk first because that release's stop does not, and
 // the delete of a MicroVM whose workload ended, which OpenShell does not
-// stop (or, on OpenShell SupportedMin or later, its start with --end-vm).
+// stop (openshell.EndedVMWayOn: OpenShell 0.1.5 does not start it either).
 func legacyWayOn(name string, phase audit.SandboxPhase, driver string) string {
 	if phase == audit.SandboxPhaseReady {
 		way := "save the work you need, then run `defenseclaw sandbox stop " + name + "`"
 		if stopLosesWrites(driver) {
-			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost)"
+			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost); " +
+				"when the sync fails the stop is held, and `defenseclaw sandbox stop " + name + " --yes` then stops it with what reached its disk"
 		}
 		return way
 	}
-	return "OpenShell does not stop this VM, whose workload ended: `defenseclaw sandbox delete " + name + "` deletes it and its work, or on OpenShell " +
-		openshell.SupportedMin + " or later `defenseclaw sandbox start " + name + " --end-vm` ends the VM, losing what it has not written to its disk"
+	return openshell.EndedVMWayOn(name)
 }
 
 // oldSupervisorWarning is the view's warning about the live legacy guest

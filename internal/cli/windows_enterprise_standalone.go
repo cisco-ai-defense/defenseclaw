@@ -385,7 +385,7 @@ func runWindowsEnterprisePowerShellChild(child *exec.Cmd) error {
 	if err != nil {
 		return fmt.Errorf("create Windows enterprise installer job: %w", err)
 	}
-	defer windows.CloseHandle(job) //nolint:errcheck -- closes the kill-on-close job.
+	defer windows.CloseHandle(job) //nolint:errcheck // closes the kill-on-close job.
 	child.Cancel = func() error {
 		_ = windows.TerminateJobObject(job, 1)
 		return child.Process.Kill()
