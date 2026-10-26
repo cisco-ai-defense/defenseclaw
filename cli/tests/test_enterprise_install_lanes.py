@@ -297,14 +297,16 @@ def test_the_rollback_drill_accepts_the_warnings_of_the_restored_release(tmp_pat
         call += " " + lines[start]
     words = shlex.split(call.replace("\\", " "))
     words = words[words.index('$results/05-upgrade-fault.json') + 1:]
-    words = [w for w in words if not w.startswith("${held")]
+    # The host's own policy-view warnings are required, not allowed, by
+    # ${kernel_views[@]} (empty on a host without them, as here).
+    words = [w for w in words if not w.startswith("${held") and not w.startswith("${kernel_views")]
     words = ["linux" if w == "$platform" else w for w in words]
     drill = _result(
         ok=False, exit_code=1, installed_version="1.0.3", security_complete=False,
         errors=[{"code": "lifecycle_test_fault", "message": "fault"}],
         warnings=[{"code": code, "message": code} for code in (
             "lifecycle_test_fault", "rolled_back", "machine_policy_incomplete", "machine_policy_incomplete",
-            "hook_process_fail_open", "hook_process_fail_open", "unprivileged_user_namespaces", "unprivileged_ptrace")],
+            "hook_process_fail_open", "hook_process_fail_open")],
     )
     result = _check(tmp_path, drill, *words)
     assert result.returncode == 0, (words, result.stderr)

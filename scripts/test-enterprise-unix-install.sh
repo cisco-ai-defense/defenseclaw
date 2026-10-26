@@ -691,8 +691,8 @@ upgrade_lane() {
     # The new release reports the restored previous install truthfully
     # (GAP-1412): its hook residual (hook_process_fail_open), a previous
     # release's connectors without a trusted policy-view digest
-    # (machine_policy_incomplete) and the host's own policy-view sysctls
-    # (unprivileged_user_namespaces, unprivileged_ptrace).
+    # (machine_policy_incomplete); the host's own policy-view sysctls are
+    # required where the host has them (kernel_views).
     "$python" "$checker" "$results/05-upgrade-fault.json" --label upgrade-fault --platform "$platform" \
         --action ensure --expect-error lifecycle_test_fault --ready ${held[@]+"${held[@]}"} \
         --allow-warning lifecycle_test_fault --allow-warning rolled_back ${kernel_views[@]+"${kernel_views[@]}"} \
