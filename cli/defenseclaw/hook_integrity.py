@@ -257,13 +257,25 @@ def _untrusted_hook_file(connector: str, script: Path) -> HookProblem | str:
 def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
     """Return short descriptions of drifted hook files for *connector*."""
 
-    if os.name == "nt":
-        return []
     scripts, digests = _locked_hook_scripts(cfg, connector)
     if not scripts:
         return []
 
     from defenseclaw.fail_mode import _sha256_regular_file
+
+    if _is_windows():
+        # Windows: the sealed digests of the files setup wrote, the .ps1
+        # adapters included. An edited copilot-hook.ps1 failed only the
+        # Hook contract row, and doctor --fix said the scripts matched
+        # (GAP-1658). The POSIX owner, mode and token checks do not apply.
+        for script in scripts:
+            expected = digests.get(script.name)
+            if expected and script.is_file() and _sha256_regular_file(script) != expected:
+                return [
+                    f"hook script {script} changed since setup (an edit, or a copy from another build; "
+                    "it does not match hook_contract_lock.json)"
+                ]
+        return []
 
     problems: list[str] = []
     missing = [script for script in scripts if not os.path.lexists(script)]
