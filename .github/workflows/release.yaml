@@ -687,6 +687,16 @@ jobs:
             icacls $logs /inheritance:d | Out-Null
             icacls $logs /remove:g "*$account" | Out-Null
           }
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        if: matrix.lane == 'pkg'
+        with:
+          go-version-file: go.mod
+      - name: "TEMP diag: measure the private-install home walk on the runner home"
+        if: matrix.lane == 'pkg'
+        continue-on-error: true
+        timeout-minutes: 25
+        shell: bash
+        run: DC_MEASURE_HOME="$HOME" go test -count=1 -run TestZZMeasureHomeWalk -v -timeout 24m ./internal/enterprisehooks
       - name: Upgrade, drill the rollback, converge, verify and remove
         if: env.PREVIOUS != '' && runner.os != 'Windows'
         shell: bash

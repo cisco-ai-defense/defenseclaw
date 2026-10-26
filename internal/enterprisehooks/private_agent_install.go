@@ -276,6 +276,7 @@ func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWa
 	}
 	w.mu.Lock()
 	complete = w.complete && w.budget >= 0 && w.ctx.Err() == nil
+	zzLastBudget = w.budget
 	w.mu.Unlock()
 	return prefixes, complete
 }
@@ -512,3 +513,4 @@ func privateNPMEntries(connector string, manifest []byte) []string {
 	}
 	return entries
 }
+var zzLastBudget int
