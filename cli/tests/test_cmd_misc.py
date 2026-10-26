@@ -1713,11 +1713,13 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(destination["token_env"], "DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN")
         self.assertIn("Local Splunk is ready", result.output)
         self.assertIn("License: Free", result.output)
-        self.assertIn("Splunk Web login:", result.output)
-        self.assertIn("Username:  admin", result.output)
-        self.assertIn("Password:", result.output)
+        # GAP-1398: the Free-mode UI has no login; setup must not tell the
+        # user to log in with a password.
+        self.assertIn("Splunk Web: no login in Free mode", result.output)
         self.assertIn("Local Splunk configured (Free mode from day 1)", result.output)
-        self.assertIn("Log in with admin", result.output)
+        self.assertIn("Web authentication is disabled in Splunk Free mode", result.output)
+        self.assertNotIn("Log in with admin", result.output)
+        self.assertNotIn("use these credentials", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
