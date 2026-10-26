@@ -46,6 +46,13 @@ func TestCodeGuardPathTraversalReadsPathOperationsNotImportsOrProse(t *testing.T
 		{"src/win.js", `const p = "..\\..\\secrets.txt";`},
 		{"src/load.js", "const plugin = require(`../plugins/${name}`);"},
 		{"index.php", `include "$dir/../" . $_GET["page"];`},
+		// GAP-1935: classic payloads and Windows two-dot paths whose next
+		// character reads like a string escape.
+		{"src/read.js", `fs.readFileSync("....//....//etc/passwd")`},
+		{"app.py", `open("..././..././etc/passwd")`},
+		{"src/win.js", `const p = "...\\...\\windows\\win.ini";`},
+		{"tools/read.ps1", `Get-Content ..\temp\secrets.txt`},
+		{"app.py", `open(r"..\notes\" + name)`},
 	} {
 		if !fires(tc.file, tc.line) {
 			t.Errorf("CG-PATH-001 did not fire on %s line %q", tc.file, tc.line)

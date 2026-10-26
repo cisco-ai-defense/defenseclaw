@@ -295,10 +295,12 @@ func (r rule) matches(line string) bool {
 // program; it is not a path built from input, so it is not a traversal.
 var pathTraversalModuleSpecifier = regexp.MustCompile(`^\s*(?:import|export)\b[^"'` + "`" + `]*\bfrom\s*(?:"[^"$]*"|'[^']*')|^\s*import\s*(?:"[^"$]*"|'[^']*')|\bimport\s*\(\s*(?:"[^"$]*"|'[^']*')|\b(?:require|require_relative|require_once|include|include_once)\s*\(?\s*(?:"[^"$]*"|'[^']*')|^\s*#\s*include\s*(?:"[^"$]*"|'[^']*')|@import\s+(?:url\(\s*)?(?:"[^"$]*"|'[^']*')`)
 
-// pathTraversalProse is "..." prose and a ".." that ends at a string escape
-// ("Loading...\n", JSON text such as Claude's own onboarding template): no
-// path component follows it.
-var pathTraversalProse = regexp.MustCompile(`\.{3,}|\.\.\\[nrt"']`)
+// pathTraversalProse is a "..." ellipsis that no path separator follows:
+// prose ("Loading...", "days...") and an ellipsis before a string escape
+// ("Loading...\n", JSON text such as Claude's own onboarding template). An
+// ellipsis before "/" or "\" ("....//", "..././", "...\\") and every
+// two-dot form ("..\temp", "..\notes") stay path traversal (GAP-1935).
+var pathTraversalProse = regexp.MustCompile(`\.{3,}(?:\\[nrt"']|[^./\\]|$)`)
 
 // pathTraversalView is the part of a line CG-PATH-001 reads: what the code
 // does with a path, not an import of a sibling module or prose (GAP-1226,
