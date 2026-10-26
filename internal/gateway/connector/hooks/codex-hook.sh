@@ -658,14 +658,18 @@ if [ "$CURL_STATUS" -eq 0 ]; then
 {{else}}  defenseclaw_retry_busy codex_gateway_post_response || CURL_STATUS=$?
 {{end}}fi
 API_TOKEN=
-PAYLOAD=
 AUTH_HEADER_ARGS=()
-unset API_TOKEN PAYLOAD
+unset API_TOKEN
+# fail_unreachable reads the session id from PAYLOAD for the one outage
+# warning per session and the per-call audit row, as in the Claude Code hook:
+# drop the event only after it (GAP-1350, GAP-1352).
 if [ "$CURL_STATUS" -ne 0 ]; then
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}  defenseclaw_split_response
   defenseclaw_managed_http_result "$HTTP_CODE" incomplete
 {{end}}  fail_unreachable "$(defenseclaw_gateway_unreachable_reason 2>/dev/null || printf 'gateway unreachable')"
-fi{{end}}
+fi
+PAYLOAD=
+unset PAYLOAD{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
