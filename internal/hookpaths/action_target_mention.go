@@ -51,6 +51,12 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 	if depth == 0 && parsed && actionKnownReadOnlyShell(file, home) {
 		return false
 	}
+	// A function the command never calls never runs (GAP-1535).
+	var uncalled map[*syntax.FuncDecl]bool
+	if parsed {
+		uncalled = actionUncalledFunctions(file, command)
+		command = actionBlankFunctions(command, uncalled)
+	}
 	var nestedBodies []*syntax.Word
 	if parsed {
 		var nestedFound bool
@@ -128,6 +134,9 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			if found {
 				return false
 			}
+			if decl, ok := node.(*syntax.FuncDecl); ok && uncalled[decl] {
+				return false
+			}
 			if iter, ok := node.(*syntax.WordIter); ok {
 				for _, word := range iter.Items {
 					if checkWord(word) {
@@ -190,6 +199,64 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 		}
 	}
 	return false
+}
+
+// actionUncalledFunctions lists the function definitions whose name the
+// command never names outside the definition itself: no call, no export -f,
+// trap, alias, eval or xargs argument. Such a body never runs. Names the
+// shell calls on its own (command_not_found_handle, zsh hooks and TRAP*)
+// always count as called.
+func actionUncalledFunctions(file *syntax.File, command string) map[*syntax.FuncDecl]bool {
+	var decls []*syntax.FuncDecl
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if decl, ok := node.(*syntax.FuncDecl); ok && decl.Name != nil {
+			decls = append(decls, decl)
+		}
+		return true
+	})
+	if len(decls) == 0 {
+		return nil
+	}
+	uncalled := make(map[*syntax.FuncDecl]bool)
+	for _, decl := range decls {
+		name := decl.Name.Value
+		switch {
+		case name == "" || strings.HasPrefix(name, "TRAP") || strings.HasPrefix(name, "command_not_found_handl"):
+			continue
+		}
+		switch name {
+		case "precmd", "preexec", "chpwd", "periodic", "zshexit", "zshaddhistory", "zle-line-init":
+			continue
+		}
+		start, end := int(decl.Pos().Offset()), int(decl.End().Offset())
+		if start < 0 || end > len(command) || start >= end {
+			continue
+		}
+		pattern := regexp.MustCompile(`(^|[^A-Za-z0-9_.:-])` + regexp.QuoteMeta(name) + `($|[^A-Za-z0-9_.:-])`)
+		rest := command[:start] + strings.Repeat(" ", end-start) + command[end:]
+		if !pattern.MatchString(rest) {
+			uncalled[decl] = true
+		}
+	}
+	return uncalled
+}
+
+// actionBlankFunctions blanks the uncalled function definitions in command,
+// keeping every offset.
+func actionBlankFunctions(command string, uncalled map[*syntax.FuncDecl]bool) string {
+	if len(uncalled) == 0 {
+		return command
+	}
+	out := []byte(command)
+	for decl := range uncalled {
+		start, end := int(decl.Pos().Offset()), int(decl.End().Offset())
+		for i := start; i < end && i < len(out); i++ {
+			if out[i] != '\n' {
+				out[i] = ' '
+			}
+		}
+	}
+	return string(out)
 }
 
 // actionBlankPatchBodies blanks, in the text scan, the content lines of the
