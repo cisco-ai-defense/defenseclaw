@@ -1337,13 +1337,23 @@ func actionLessWritesFile(option string) bool {
 		(strings.HasPrefix("--log-file", option) || strings.HasPrefix(option, "--log-file"))
 }
 
+// actionWindowsTargetMention holds when the PowerShell reading or the plain
+// reading of the command (actionWindowsPlainGrammar: Git Bash and cmd do not
+// read PowerShell comments, smart quotes or the backtick) names a protected
+// target (GAP-1500 refix 2).
 func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool) bool {
+	return actionWindowsTargetMentionAs(command, cwd, home, depth, stateOnly, 0) ||
+		actionWindowsTargetMentionAs(command, cwd, home, depth, stateOnly, actionWindowsPlainGrammar)
+}
+
+func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnly bool, grammar actionWindowsGrammar) bool {
 	if depth >= 8 || len(command) > MaxPayloadBytes {
 		return false
 	}
 	// The argument to PowerShell -Command is parsed again by the child shell.
 	// Quotes that are literal in the outer command do not stop expansion there.
-	rawWords, _, rawOK := actionWindowsWords(command)
+	raw := actionWindowsScan(command, grammar)
+	rawWords, rawOK := raw.words, raw.ok
 	if rawOK {
 		for i := 0; i+2 < len(rawWords); i++ {
 			program := strings.TrimSuffix(strings.ToLower(programBase(rawWords[i])), ".exe")
@@ -1390,7 +1400,8 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 			normalized.WriteByte(command[i])
 		}
 	}
-	words, _, ok := actionWindowsWords(normalized.String())
+	scan := actionWindowsScan(normalized.String(), grammar)
+	words, ok := scan.words, scan.ok
 	if !ok {
 		// A command the scanner cannot read may still be read differently by
 		// the shell that runs it (GAP-1500). Keep the class rule there, as the

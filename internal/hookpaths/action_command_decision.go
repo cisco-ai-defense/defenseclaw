@@ -137,21 +137,27 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 		return false
 	}
 	if actionWindowsHome(home) {
-		words, _, ok := actionWindowsWords(command)
-		if !ok {
-			return false
-		}
-		start := 0
-		for i, word := range words {
-			switch word {
-			case ";", "&", "&&", "|", "||":
-				if actionPrivateKeyReadWords(words[start:i], cwd, home, true, 0) {
-					return true
+		// The PowerShell reading or the plain one (GAP-1500 refix 2).
+		for _, grammar := range []actionWindowsGrammar{0, actionWindowsPlainGrammar} {
+			scan := actionWindowsScan(command, grammar)
+			if !scan.ok {
+				continue
+			}
+			words, start := scan.words, 0
+			for i, word := range words {
+				switch word {
+				case ";", "&", "&&", "|", "||":
+					if actionPrivateKeyReadWords(words[start:i], cwd, home, true, 0) {
+						return true
+					}
+					start = i + 1
 				}
-				start = i + 1
+			}
+			if actionPrivateKeyReadWords(words[start:], cwd, home, true, 0) {
+				return true
 			}
 		}
-		return actionPrivateKeyReadWords(words[start:], cwd, home, true, 0)
+		return false
 	}
 	file, ok := parseShell(command)
 	if !ok {
