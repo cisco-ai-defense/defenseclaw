@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,19 @@ POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shuti
 
 def _text() -> str:
     return INSTALL_PS1.read_text(encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def _windows_powershell_module_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1143: run from PowerShell 7 (the dcw-preflight hosts and the
+    # Windows runners run each step under pwsh), PSModulePath names its
+    # module folders, and the Windows PowerShell 5.1 these tests start then
+    # cannot load its own Microsoft.PowerShell.Utility: Get-FileHash is not
+    # recognized and Get-Sha256 reports "Could not read" before any product
+    # step. Each PowerShell builds its default module path, as the CLI's
+    # installer handoff lets it (upgrade_shim._run_installer).
+    for name in [key for key in os.environ if key.upper() == "PSMODULEPATH"]:
+        monkeypatch.delenv(name)
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -1604,15 +1618,27 @@ _TXN_PRELUDE = (
 
 
 def _run_powershell(script: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=120,
-        check=False,
-    )
+    # GAP-1143: a script past Windows' 32767-character command-line limit
+    # (WinError 206 on the dcw-preflight hosts) is read from a file by a short
+    # -Command and run as -Command would run it: dot-sourced, with no script
+    # path of its own ($PSCommandPath), as the installer's next-step texts expect.
+    if len(script) < 30000:
+        return subprocess.run(
+            [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
+        )
+    folder = tempfile.mkdtemp(prefix="dc-ps1-")
+    path = os.path.join(folder, "case.ps1")
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(script)
+        loader = f". ([scriptblock]::Create([IO.File]::ReadAllText('{path}', [Text.Encoding]::UTF8)))"
+        return subprocess.run(
+            [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", loader],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
+        )
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
