@@ -93,6 +93,17 @@ const (
 	enterpriseHookWorkerModePurge = "purge"
 )
 
+// enterpriseHookWorkerForeignCleanupModes are the target modes a
+// foreign_cleanup worker takes: every mode the guardian's foreign cleanup
+// gives an account's job (runEnterpriseHookStandaloneForeignCleanup). A mode
+// missing here refuses the whole job, its foreign-hook removals and VS Code
+// Local files included (R3-1).
+var enterpriseHookWorkerForeignCleanupModes = map[string]bool{
+	enterpriseHookWorkerModeRemoveLeftover:        true,
+	enterpriseHookWorkerModeBlockPersonalClaude:   true,
+	enterpriseHookWorkerModeUnblockPersonalClaude: true,
+}
+
 // enterpriseHookWorkerTimeout bounds one worker process.
 var enterpriseHookWorkerTimeout = 60 * time.Second
 
@@ -421,7 +432,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		return respond(enterpriseHookWorkerDiscoverWithin(scanCtx, request), 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {
-			if target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModeBlockPersonalClaude {
+			if !enterpriseHookWorkerForeignCleanupModes[target.Mode] {
 				return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("the foreign cleanup does not take mode %q", target.Mode)}, 3)
 			}
 		}
