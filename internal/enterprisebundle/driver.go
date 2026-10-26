@@ -855,17 +855,15 @@ func (d *Driver) lastGoodEnforced(rc *Receipt, installed string, policy *Gateway
 
 // noConfigEnforced proves the last good state of a run that started with no
 // config (GAP-1206): the config file is absent, not merely unreadable (an
-// unreadable file also hashes to ""), and the gateway does not report the
-// candidate's policy or bundle identity.
+// unreadable file also hashes to ""), and the gateway answers and does not
+// report the candidate's policy or bundle identity. A gateway that does not
+// answer proves nothing, as on Linux and macOS (GAP-1617).
 func (d *Driver) noConfigEnforced(rc *Receipt, installed string, policy *GatewayPolicy) bool {
-	if installed != "" || d.ConfigPath == "" {
+	if installed != "" || d.ConfigPath == "" || policy.Unavailable() {
 		return false
 	}
 	if _, err := os.Lstat(d.ConfigPath); !errors.Is(err, fs.ErrNotExist) {
 		return false
-	}
-	if policy == nil {
-		return true
 	}
 	if policy.BundleID != "" && policy.BundleID == rc.BundleID && policy.BundleVersion == rc.Version {
 		return false

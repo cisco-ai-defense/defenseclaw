@@ -14,17 +14,20 @@ import (
 )
 
 // GAP-1206: a first bundle whose transaction failed is rolled back to "no
-// config" only when the config file is absent and the gateway does not
-// report the candidate. An unreadable installed config also hashes to "",
-// and proves nothing.
+// config" only when the config file is absent and the gateway answers and
+// does not report the candidate. An unreadable installed config also hashes
+// to "", and proves nothing; nor does a gateway that does not answer
+// (GAP-1617).
 func TestDriverFirstBundleFailureClaimsRollbackOnlyFromAnAbsentConfig(t *testing.T) {
 	f := newFixture(t, bundleConfig(t), nil)
 	for _, tc := range []struct {
 		name                  string
 		unreadable, candidate bool
+		gatewayDown           bool
 		want                  bool
 	}{
-		{name: "absent config, gateway down", want: true},
+		{name: "absent config, gateway reports no policy", want: true},
+		{name: "absent config, gateway down", gatewayDown: true},
 		{name: "unreadable config", unreadable: true},
 		{name: "absent config, gateway still reports the candidate", candidate: true},
 	} {
@@ -43,7 +46,11 @@ func TestDriverFirstBundleFailureClaimsRollbackOnlyFromAnAbsentConfig(t *testing
 					t.Fatal(err)
 				}
 			}
-			policy := enterprisebundle.GatewayPolicy{}
+			// A gateway that answers but runs no policy for the candidate.
+			policy := enterprisebundle.GatewayPolicy{ReloadError: "no config"}
+			if tc.gatewayDown {
+				policy = enterprisebundle.GatewayPolicy{}
+			}
 			if tc.candidate {
 				policy = enforcing(p.Receipt.ExpectedDigest)
 				policy.BundleID, policy.BundleVersion = p.Receipt.BundleID, p.Receipt.Version
