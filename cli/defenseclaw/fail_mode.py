@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from defenseclaw import config as config_module
+from defenseclaw import envvars
 from defenseclaw.connector_contracts import HOOK_CONTRACTS, connector_lock_contract_invariant
 from defenseclaw.connector_paths import (
     amp_policy_plugin_path,
@@ -38,9 +39,11 @@ _MAX_RUNTIME_FILE = 2 * 1024 * 1024
 # registration-digest-stale on every check (GAP-1922).
 _MAX_DIGEST_FILE = 1024 * 1024 * 1024
 # The installed mode of a rendered Unix hook: FAIL_MODE="closed" since 1.0.4
-# (the hook reads no fail mode from the environment, GAP-0315),
+# (the hook reads no fail mode from the environment, GAP-0315), and
 # FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}" in 1.0.3 and older renders and
-# in Secure Client renders (#1163).
+# in the Antigravity, Devin, Hermes and Kiro renders of an authenticated Secure
+# Client deployment (#1163). That second form takes the agent's
+# DEFENSECLAW_FAIL_MODE as a full override (_hook_environment_source).
 _FAIL_MODE_PATTERN = re.compile(
     r"^FAIL_MODE=\"(?:(open|closed)|\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\})\"", re.MULTILINE
 )
@@ -241,6 +244,8 @@ class ConnectorFailModeState:
                 "the installed hook reads DEFENSECLAW_FAIL_MODE from the agent's environment, which this "
                 f"command cannot see: it runs open when the agent sets open{default}"
             )
+        if self.reads_environment:
+            notes.append(_HOOK_ENVIRONMENT_NOTE)
         return "; ".join(notes)
 
     def to_report(self) -> dict[str, Any]:
@@ -674,9 +679,11 @@ def report_renders_fail_mode(report: dict[str, Any]) -> bool:
 def rendered_fail_mode(report: dict[str, Any]) -> str | None:
     """The fail mode the installed hook of a connector_fail_mode_report was rendered with, or None.
 
-    ``effective`` also counts an inherited DEFENSECLAW_FAIL_MODE=closed, which
-    only the process reading the report has: the agent that runs the hook may
-    not. A hook rendered open is open for every agent without it.
+    A hook rendered open stays open until the fail-mode command refreshes its
+    installed policy. Only a hook installed in the env-reading form (Secure
+    Client delivery, or a render from 1.0.3 or earlier) also takes
+    DEFENSECLAW_FAIL_MODE from the agent's environment; ``effective`` counts
+    that, this does not.
     """
 
     for source in report.get("sources") or ():
@@ -734,7 +741,7 @@ def connector_fail_mode_report(
             name,
             inspect_effective_policy=inspect_effective_policy,
         ).to_report()
-    return {
+    report: dict[str, Any] = {
         "effective": configured,
         "provenance": "config",
         "note": "",
@@ -746,6 +753,73 @@ def connector_fail_mode_report(
         "drift": unguarded,
         "sources": [{"name": "config", "mode": configured}],
     }
+    reads_environment, environment_source = _hook_environment_source(cfg, name)
+    if reads_environment:
+        # Kiro's authenticated Secure Client hook takes DEFENSECLAW_FAIL_MODE
+        # from the agent's environment: a value that changes the configured
+        # mode is what it runs, so the report never shows config alone.
+        report["note"] = _HOOK_ENVIRONMENT_NOTE
+    if environment_source is not None:
+        source, mode = environment_source
+        report["sources"].append({"name": source, "mode": mode})
+        if mode != configured:
+            report.update(effective=mode, provenance=source, runtime=mode, current=False, drift=[f"{source}-{mode}"])
+    return report
+
+
+_HOOK_ENVIRONMENT_NOTE = (
+    "the installed hook takes DEFENSECLAW_FAIL_MODE from the agent's environment "
+    "(authenticated Secure Client delivery, or a hook rendered by 1.0.3 or earlier)"
+)
+# The sources an env-reading hook takes its mode from (_hook_environment_source).
+HOOK_ENVIRONMENT_SOURCES = frozenset({"process-env", "claude-settings-env"})
+
+
+def _hook_environment_mode(value: str | None) -> str | None:
+    """The mode FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-<installed>}" takes from *value*, or None to keep the installed one.
+
+    ``${VAR:-x}`` keeps x for an unset or empty value. The hooks then open only
+    on an exact ``open`` ([ "$FAIL_MODE" = "open" ],
+    defenseclaw_should_fail_closed_on_unreachable) and close on any other value.
+    """
+
+    if not value:
+        return None
+    return "open" if value == "open" else "closed"
+
+
+def _hook_environment_source(
+    cfg: Any, connector: str, claude_env: str | None = None
+) -> tuple[bool, tuple[str, str] | None]:
+    """Whether *connector*'s installed Unix hook reads DEFENSECLAW_FAIL_MODE, and the mode it would take here.
+
+    The authenticated Secure Client Antigravity, Devin, Hermes and Kiro renders
+    and every render from 1.0.3 or earlier keep the environment as a full
+    override (#1163). This process is not the agent, but an agent started from
+    it inherits its environment, so its value is the one reported: a Secure
+    Client hook installed closed that DEFENSECLAW_FAIL_MODE=open opens reports
+    open with process-env-open drift, never closed and current. Claude Code
+    passes its settings env to its hooks over the inherited one. Windows hooks,
+    Amp and OpenCode read no fail mode from the environment.
+    """
+
+    if _is_windows() or connector in {"amp", "opencode"}:
+        return False, None
+    _mode, reads_environment = _read_baked_hook_render(_unix_hook_script_path(cfg, connector))
+    if not reads_environment:
+        return False, None
+    if connector == "claudecode" and claude_env is not None:
+        return True, ("claude-settings-env", claude_env)
+    # The hook shell reads the raw value on every host: the registry's managed
+    # "ignore" governs DefenseClaw's own processes, not what this installed
+    # script does, so the report reads it raw too (managed=False).
+    mode = _hook_environment_mode(envvars.lookup("DEFENSECLAW_FAIL_MODE", managed=False))
+    return True, (("process-env", mode) if mode is not None else None)
+
+
+def _unix_hook_script_path(cfg: Any, connector: str) -> Path:
+    script_name = "claude-code-hook.sh" if connector == "claudecode" else f"{connector}-hook.sh"
+    return Path(cfg.data_dir) / "hooks" / script_name
 
 
 def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]:
@@ -1408,19 +1482,27 @@ def _windows_registration_freshness(
     install_root = _packaged_windows_install_root(str(cfg.data_dir))
     if install_root is None:
         install_root = str(Path.home() / ".local" / "bin")
-    check = validate_windows_hook_registration(
-        connector=connector,
-        config_path=config_path,
-        data_dir=str(cfg.data_dir),
-        install_root=install_root,
-        search_path=os.environ.get("PATH", ""),
-        pathext=os.environ.get("PATHEXT", ""),
-        inspect_effective_policy=inspect_effective_policy,
-        codex_per_user=(
-            connector == "codex"
-            and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
-        ),
-    )
+    # Agents can briefly hold their settings or launcher without read sharing.
+    # Revalidate all evidence after each wait. A persistent permission fault
+    # still refuses the transaction; elapsed time never proves registration.
+    for delay in (0, 0.1, 0.2, 0.4, 0.8):
+        if delay:
+            time.sleep(delay)
+        check = validate_windows_hook_registration(
+            connector=connector,
+            config_path=config_path,
+            data_dir=str(cfg.data_dir),
+            install_root=install_root,
+            search_path=os.environ.get("PATH", ""),
+            pathext=os.environ.get("PATHEXT", ""),
+            inspect_effective_policy=inspect_effective_policy,
+            codex_per_user=(
+                connector == "codex"
+                and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
+            ),
+        )
+        if check.healthy or check.state != "access-denied":
+            break
     return None if check.healthy else f"registration-{check.state}"
 
 
@@ -1752,5 +1834,9 @@ def reconcile_connector_registration(cfg: Any, connector: str) -> ConnectorFailM
             time.sleep(0.15)
             state = resolve_connector_fail_mode(cfg, name)
     if not state.current:
-        raise OSError(f"connector runtime verification failed for {state.connector}: " + ", ".join(state.drift))
+        raise OSError(
+            f"connector runtime verification failed for {state.connector}: "
+            + ", ".join(state.drift)
+            + ". Run `defenseclaw doctor`, then retry the fail-mode command."
+        )
     return state

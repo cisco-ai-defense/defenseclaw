@@ -465,3 +465,55 @@ class ManagedRegistryOverrideTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# What a page may not claim about DEFENSECLAW_FAIL_MODE without naming the
+# Secure Client hooks that still read it (#1163).
+_FAIL_MODE_ENV_DENIALS = (
+    "not read",
+    "no 1.0.4 hook",
+    "has no effect",
+    "cannot change",
+    "never read",
+    "does not set",
+    "changes nothing",
+    "comes only from installed policy",
+    "nothing in the agent",
+)
+
+
+def _doc_claim_units(text: str):
+    """Each table row and each paragraph of an MDX page, headings left out."""
+
+    for block in re.split(r"\n\s*\n", text):
+        lines = [line for line in block.splitlines() if not line.lstrip().startswith("#")]
+        rows = [line for line in lines if line.lstrip().startswith("|")]
+        yield from rows
+        rest = "\n".join(line for line in lines if not line.lstrip().startswith("|"))
+        if rest.strip():
+            yield rest
+
+
+def test_fail_mode_env_reference_names_the_secure_client_hooks_that_read_it() -> None:
+    # The generated reference shows only the first sentence of the registry
+    # purpose; it said no 1.0.4 hook reads DEFENSECLAW_FAIL_MODE while the
+    # authenticated Secure Client Antigravity, Devin, Hermes and Kiro hooks do.
+    entry = _entries_by_name(_REPO_ROOT / "internal" / "envvars" / "registry.json")["DEFENSECLAW_FAIL_MODE"]
+    reference = _REPO_ROOT / "docs-site" / "content" / "docs" / "reference" / "configuration" / "env-vars.mdx"
+    row = next(line for line in reference.read_text(encoding="utf-8").splitlines() if line.startswith("| `DEFENSECLAW_FAIL_MODE`"))
+    for text in (str(entry["purpose"]).split(". ", 1)[0], row):
+        for needed in ("Secure Client", "Antigravity", "Devin", "Hermes", "Kiro", "1.0.3"):
+            assert needed in text, (needed, text)
+    # Every page: a claim that the environment does not set the fail mode
+    # names the exception in the same row or paragraph. Sandbox hooks never
+    # read it at all.
+    offenders = []
+    for path in sorted((_REPO_ROOT / "docs-site" / "content").rglob("*.mdx")):
+        for unit in _doc_claim_units(path.read_text(encoding="utf-8")):
+            low = unit.lower()
+            about_env = "defenseclaw_fail_mode" in low or "hook fail mode" in low or "the environment does not set" in low
+            if not about_env or not any(claim in low for claim in _FAIL_MODE_ENV_DENIALS):
+                continue
+            if "secure client" not in low and "sandbox" not in low:
+                offenders.append(f"{path.relative_to(_REPO_ROOT)}: {unit.strip()[:160]}")
+    assert not offenders, "\n".join(offenders)

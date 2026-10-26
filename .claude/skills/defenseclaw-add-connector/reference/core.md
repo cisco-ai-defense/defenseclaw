@@ -185,7 +185,7 @@ For hook-only connectors, add a case to `hookOnlyProfileRespond` (`hook_only_pro
 2. Resolve `HOOK_DIR` through symlinks (depth 40; exit 2 on failure).
 3. `{{if .Managed}}` pins `DEFENSECLAW_HOME` from the script location. Otherwise honor `.disabled` and exit 0.
 4. Source `_hardening.sh`, then call `defenseclaw_harden_resources` and the env hardening.
-5. `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"`.
+5. `FAIL_MODE="{{.FailMode}}"`. The installed policy is authoritative; never read the agent environment for fail mode.
 6. Call `defenseclaw_handle_missing_token`, then `defenseclaw_read_stdin_capped` (1 MiB).
 7. Read the scoped token into `API_TOKEN`, then `unset DEFENSECLAW_GATEWAY_TOKEN` so no child process inherits it.
 8. Define `fail_unreachable` and `fail_response`.
@@ -327,9 +327,9 @@ A new `SetupOpts` field must also be carried through the Unix worker protocol (e
 **Fail mode.**
 - `resolveHookFailMode` (`subprocess.go`) decides it. Cursor is closed in action mode and open in observe mode. Otherwise the order is `HookFailMode`, then the codex/claudecode enforcement flags, then `defaultHookFailMode="closed"`. Under Secure Client (`SetupOpts.SecureClientHookDelivery`) an unset mode renders **open** and an explicit mode beats the Cursor rule (`docs-site/content/docs/reference/configuration/fail-modes.mdx`, Secure Client).
 - It is persisted in the sidecar `hooks/.hookcfg` as `DEFENSECLAW_FAIL_MODE_<ID>`.
-- In the runner, `normalizeFailMode` treats an empty value as **open**, while rendered templates default to closed. The CLI fills the value from the flag, then the per-connector sidecar key, then the sidecar global. `DEFENSECLAW_FAIL_MODE` is honored only when the runtime is untrusted or the value tightens to closed.
+- In the runner, `normalizeFailMode` treats an empty or invalid value as **closed**, while rendered templates default to closed. The CLI fills the value from the flag, then the per-connector sidecar key, then the sidecar global. `DEFENSECLAW_FAIL_MODE` in the process environment is ignored; only authenticated Secure Client legacy delivery retains its override.
 - `StrictAvailability` forces transport failures closed.
-- `failOpenOnly` connectors (copilot, hermes) never fail closed, except managed Copilot (`managedCopilotFailClosed`).
+- Copilot and Hermes block failed tool checks when the installed mode is closed outside Secure Client. Their upstream hosts may still proceed if the hook cannot start or times out; see the fail-mode reference for that contract limit.
 - Standalone stop and session-end events always get the neutral allow (`allowManagedStandaloneStop`).
 - Enterprise-managed hooks always fail closed. Their lock and status must say so (Devin, `b4aaedb3`).
 

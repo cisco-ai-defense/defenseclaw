@@ -1789,7 +1789,9 @@ def _apply_global_fail_mode_transaction(
                         state = resolve_connector_fail_mode(app.cfg, name)
                         if not state.current:
                             raise OSError(
-                                f"connector runtime verification failed for {name}: " + ", ".join(state.drift)
+                                f"connector runtime verification failed for {name}: "
+                                + ", ".join(state.drift)
+                                + ". Run `defenseclaw doctor`, then retry the fail-mode command."
                             )
             except (OSError, RuntimeError, click.ClickException) as exc:
                 gc.hook_fail_mode = old_global

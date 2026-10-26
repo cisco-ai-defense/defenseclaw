@@ -108,7 +108,7 @@ This is a per-user CLI left from an earlier install. It covers `config set`, `co
 
 ## A `DEFENSECLAW_*` variable or `.env` entry has no effect
 
-The registry marks it `ignore` on a managed standalone host, so the value is read as unset. `DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY` and `DEFENSECLAW_HOOK_MAX_BODY` are `tighten_only`: honored only when stricter.
+The registry marks it `ignore` on a managed standalone host, so the value is read as unset. `DEFENSECLAW_STRICT_AVAILABILITY` and `DEFENSECLAW_HOOK_MAX_BODY` are `tighten_only`: honored only when stricter. Outside an authenticated Secure Client deployment, hook fail mode comes only from installed policy and `DEFENSECLAW_FAIL_MODE` in the agent environment has no effect.
 
 **Fix.** Set the equivalent key in the admin config. See [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host).
 

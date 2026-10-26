@@ -10591,7 +10591,7 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
     # The lock records what Setup asked for; the hook runs what was rendered
     # (the hook script, Windows .hookcfg or the plugin). A Windows .hookcfg
     # left open next to a closed lock lets calls run with the gateway down.
-    from defenseclaw.fail_mode import rendered_fail_mode, report_renders_fail_mode
+    from defenseclaw.fail_mode import HOOK_ENVIRONMENT_SOURCES, rendered_fail_mode, report_renders_fail_mode
 
     rendered = rendered_fail_mode(fail_mode)
     # A current OSS OpenCode bridge asks the installed runtime config when a
@@ -10610,6 +10610,17 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
             name,
             "fail-mode",
             f"rendered={rendered or 'missing'} lock={lock_mode} configured={configured_mode or 'missing'}",
+        )
+    # A Secure Client hook (or one rendered by 1.0.3 or earlier) takes
+    # DEFENSECLAW_FAIL_MODE from the agent's environment: the mode an agent
+    # started here runs is not the one Setup installed.
+    environment = str(fail_mode.get("effective") or "")
+    if fail_mode.get("provenance") in HOOK_ENVIRONMENT_SOURCES and environment != lock_mode_target:
+        return ConnectorSetupReadiness(
+            False,
+            name,
+            "fail-mode",
+            f"environment={environment} rendered={rendered or 'missing'} lock={lock_mode}",
         )
 
     result = _DoctorResult(passive=True, quiet=True)
@@ -16317,6 +16328,7 @@ def _check_connector_inventory(
         if mode:
             try:
                 from defenseclaw.fail_mode import (
+                    HOOK_ENVIRONMENT_SOURCES,
                     connector_fail_mode_report,
                     rendered_fail_mode,
                     report_renders_fail_mode,
@@ -16325,10 +16337,12 @@ def _check_connector_inventory(
                 fail_mode = connector_fail_mode_report(cfg, connector)
                 rendered = rendered_fail_mode(fail_mode)
                 renders = report_renders_fail_mode(fail_mode)
+                from_environment = fail_mode.get("provenance") in HOOK_ENVIRONMENT_SOURCES
             except Exception:  # noqa: BLE001 - doctor must still report partial state.
                 fail_mode = {"effective": "unknown", "provenance": "unavailable"}
                 rendered = None
                 renders = False
+                from_environment = False
             if mode in {"observe", "action"}:
                 fail_mode_note = f" ({fail_mode['note']})" if fail_mode.get("note") else ""
                 detail = (
@@ -16336,10 +16350,10 @@ def _check_connector_inventory(
                     f"provenance={fail_mode['provenance']}"
                 )
                 desired = fail_mode.get("desired")
-                # A DEFENSECLAW_FAIL_MODE=closed in doctor's own environment
-                # makes the effective mode closed, but the agent that runs an
-                # open-rendered hook may not have it, so the rendered mode is
-                # checked on its own.
+                # Check the installed render against the desired policy. Only
+                # a hook installed in the env-reading form (Secure Client
+                # delivery, a render from 1.0.3 or earlier) also takes this
+                # environment's DEFENSECLAW_FAIL_MODE, and ``effective`` says so.
                 rendered_open = desired == "closed" and rendered == "open"
                 # A hook or plugin that records its mode but has none that
                 # can be read (missing, or a value no installer writes) does
@@ -16389,19 +16403,32 @@ def _check_connector_inventory(
                     # The hooks run another fail mode than config.yaml asks
                     # for (GAP-0009): an open hook while config says closed
                     # lets calls through with the gateway down.
+                    remediation = (
+                        "re-render the hooks: defenseclaw-gateway start (or restart), or "
+                        f"defenseclaw guardrail fail-mode {desired} --connector {connector}"
+                    )
                     if rendered_missing:
                         detail += "; the installed hook has no readable fail mode"
                     elif rendered_open and fail_mode.get("effective") == desired:
                         detail += "; the installed hook is rendered fail-mode=open"
+                    elif from_environment:
+                        # The installed hook reads DEFENSECLAW_FAIL_MODE (Secure
+                        # Client delivery, or a render from 1.0.3 or earlier),
+                        # and this environment sets it to another mode.
+                        detail += (
+                            f"; DEFENSECLAW_FAIL_MODE in this environment makes it fail-mode={fail_mode['effective']}"
+                        )
+                        remediation = (
+                            "start the agent without DEFENSECLAW_FAIL_MODE (unset it in the shell and the "
+                            "agent settings that launch it); a hook rendered by 1.0.3 or earlier stops "
+                            f"reading it after defenseclaw guardrail fail-mode {desired} --connector {connector}"
+                        )
                     _emit(
                         "fail" if desired == "closed" else "warn",
                         "Mode",
                         f"{detail}; config wants fail-mode={desired}",
                         r=r,
-                        remediation=(
-                            "re-render the hooks: defenseclaw-gateway start (or restart), or "
-                            f"defenseclaw guardrail fail-mode {desired} --connector {connector}"
-                        ),
+                        remediation=remediation,
                     )
                 else:
                     _emit("pass", "Mode", detail, r=r)

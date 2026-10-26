@@ -3555,6 +3555,20 @@ attributes:
     overrides: {max_utf8_bytes: 1024}
     notes: Bounded reference only; never a raw config document, request body, token, or secret value
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.admin.target_type_detail
+  type: string
+  brief: Source-supplied activity target type, retained as redactable audit evidence rather than a metric label or join identifier
+  examples: [policy]
+  stability: stable
+  owner: defenseclaw
+  field_class: evidence
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 256}
+    notes: Bounded source evidence; may contain account names and must follow the selected redaction profile
+  introduced_in: telemetry-registry-v1
 - id: defenseclaw.admin.before_summary
   type: string
   brief: Sanitized bounded summary of pre-change state
@@ -6162,6 +6176,8 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.admin.target_ref
     requirement_level: recommended
+  - ref: defenseclaw.admin.target_type_detail
+    requirement_level: recommended
   - ref: defenseclaw.admin.before_summary
     requirement_level: recommended
   - ref: defenseclaw.admin.after_summary
@@ -6202,6 +6218,8 @@ groups:
   - ref: defenseclaw.admin.origin
     requirement_level: recommended
   - ref: defenseclaw.admin.target_ref
+    requirement_level: recommended
+  - ref: defenseclaw.admin.target_type_detail
     requirement_level: recommended
   - ref: defenseclaw.admin.before_summary
     requirement_level: recommended

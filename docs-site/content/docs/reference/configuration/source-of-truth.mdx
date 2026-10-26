@@ -241,7 +241,9 @@ Every variable DefenseClaw reads has a managed-host policy in the [environment v
 | --- | --- | --- |
 | `allow` | The value is used | Runtime paths, credentials, values the hook scripts set for themselves |
 | `ignore` | The value is ignored, in the process environment and in `.env` | Security opt-outs, debug switches, test fixtures, `DEFENSECLAW_REPO`, and `DEFENSECLAW_DEPLOYMENT_MODE` and `DEFENSECLAW_ENTERPRISE_PROFILE` |
-| `tighten_only` | The value is used only if it makes things stricter | `DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY` |
+| `tighten_only` | The value is used only if it makes things stricter | `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY` |
+
+Hook fail mode comes only from installed policy: `DEFENSECLAW_FAIL_MODE` in the agent environment has no effect, except on the Antigravity, Devin, Hermes and Kiro hooks of an authenticated Secure Client deployment ([Fail modes](/docs/reference/configuration/fail-modes#the-environment-does-not-set-the-fail-mode)).
 
 A forged `DEFENSECLAW_DEPLOYMENT_MODE` or `DEFENSECLAW_ENTERPRISE_PROFILE` cannot turn a managed host into an unmanaged one. Doctor lists every ignored value it finds, by name only.
 
