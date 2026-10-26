@@ -351,8 +351,17 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
-	wouldBlock := rawAction == "block" && mode != "action"
-	if mode != "action" && rawAction == "block" {
+	stateMutation := a.provenActiveStateMutation(ctx, verdict)
+	effectiveMode := mode
+	if stateMutation {
+		effectiveMode = "action"
+	}
+	if capable, _ := mapHookActionForProfile("block", effectiveMode, req.HookEventName,
+		profile.Capabilities, profile, nil); capable != "block" {
+		stateMutation = false
+	}
+	wouldBlock := rawAction == "block" && mode != "action" && !stateMutation
+	if mode != "action" && rawAction == "block" && !stateMutation {
 		action = "allow"
 	}
 	if mode != "action" && (rawAction == "alert" || rawAction == "confirm") {
@@ -371,7 +380,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		if mergedAction == "block" {
 			capable, capableWouldBlock := mapHookActionForProfile(
 				"block",
-				mode,
+				effectiveMode,
 				req.HookEventName,
 				caps,
 				profile,

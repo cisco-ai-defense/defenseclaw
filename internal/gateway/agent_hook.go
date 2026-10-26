@@ -2977,7 +2977,11 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	caps := profile.Capabilities
-	action, wouldBlock := mapHookActionForProfile(rawAction, mode, req.HookEventName, caps, profile, req.Payload)
+	effectiveMode := mode
+	if mode != "action" && a.provenActiveStateMutation(ctx, verdict) {
+		effectiveMode = "action"
+	}
+	action, wouldBlock := mapHookActionForProfile(rawAction, effectiveMode, req.HookEventName, caps, profile, req.Payload)
 	aiDefenseEnforced := verdict.aiDefenseBlock && action == "block"
 	severity := verdict.Severity
 	reason := verdict.Reason
@@ -2996,7 +3000,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			action, rawAction, severity, reason, findings,
 		)
 		if mergedAction == "block" {
-			capable, capableWouldBlock := mapHookActionForProfile("block", mode, req.HookEventName, caps, profile, req.Payload)
+			capable, capableWouldBlock := mapHookActionForProfile("block", effectiveMode, req.HookEventName, caps, profile, req.Payload)
 			if capable != "block" {
 				mergedAction = capable
 				if capableWouldBlock {
@@ -3639,6 +3643,29 @@ func currentWorkingDir() string {
 
 func mapHookAction(rawAction, mode, event string, caps connector.HookCapability) (string, bool) {
 	return mapHookActionForProfile(rawAction, mode, event, caps, connector.HookProfile{}, nil)
+}
+
+// provenActiveStateMutation is the one observe-mode hard-block exception for
+// DefenseClaw's own state. A rule ID, path mention, or wire finding alone is
+// insufficient: the trusted ActionFacts owner must have proved a mutation of
+// the resolved active target. Secure Client keeps its existing hook mapping.
+func (a *APIServer) provenActiveStateMutation(ctx context.Context, verdict *ToolInspectVerdict) bool {
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		return false
+	}
+	if verdict == nil || normalizeCodexAction(verdict.Action) != "block" {
+		return false
+	}
+	for _, finding := range verdict.DetailedFindings {
+		if finding.RuleID == "tamper.detector_state_write" &&
+			finding.contributesToEnforcement() && finding.proof.authorizes(finding.RuleID) &&
+			(finding.proof.kind == findingProofActionFactsSemantic ||
+				finding.proof.kind == findingProofActionFactsSubgraph ||
+				finding.proof.kind == findingProofActiveStateMutation) {
+			return true
+		}
+	}
+	return false
 }
 
 func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookCapability, profile connector.HookProfile, payload map[string]interface{}) (string, bool) {

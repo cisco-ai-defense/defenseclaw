@@ -335,7 +335,7 @@ func dispatchTrustedActionWith(
 		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)
 	}()
 	defer func() {
-		findings = withActiveStateTargetMention(generation, request, findings)
+		findings = withActiveStateTargetMention(generation, request, facts, findings)
 	}()
 	if !request.simpleCommandPass {
 		defer func() {
@@ -786,16 +786,20 @@ func dispatchTrustedActionWith(
 	return withTwinProvenBlocks(finalized, twinFindings)
 }
 
-// The action target check treats a resolved active security-state mention as
-// a protected target independently of the command's operand roles. Keep its
-// finding separate from the SSH-key proof and honor the selected rule pack.
+// The action target check uses a resolved active security-state mention to
+// find candidates, then requires the executing operand's mutation role and
+// physical target before adding a finding. Keep it separate from SSH keys.
 func withActiveStateTargetMention(
 	generation *compiledRulePackCategories,
 	request trustedActionRequest,
+	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
 	command, known := trustedBashCommandInput(request.Input)
 	if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
+		return findings
+	}
+	if !provenStateMutationPath(facts, request) {
 		return findings
 	}
 	const ruleID = "tamper.detector_state_write"
@@ -811,6 +815,12 @@ func withActiveStateTargetMention(
 	}
 	if index >= 0 {
 		finding = findings[index]
+		// Keep the stronger ActionFacts proof of an actual state mutation.
+		if finding.contributesToEnforcement() && finding.proof.authorizes(ruleID) &&
+			(finding.proof.kind == findingProofActionFactsSemantic ||
+				finding.proof.kind == findingProofActionFactsSubgraph) {
+			return findings
+		}
 	} else {
 		finding = adjustConfidence(request.Input.Tool, finding)
 	}
@@ -818,12 +828,138 @@ func withActiveStateTargetMention(
 	if request.EnforcementCapable {
 		finding.enforcement = findingEnforcementAllowed
 	}
-	finding = finding.withTrustedActionProof(newExactFallbackFindingProof(ruleID, true, true, true, true))
+	finding = finding.withTrustedActionProof(newFindingProof(findingProofActiveStateMutation, ruleID, true))
 	if index >= 0 {
 		findings[index] = finding
 		return findings
 	}
 	return append(findings, finding)
+}
+
+// ActionFacts' executing mutation role plus the physical active target
+// authorize the observe-mode exception. A static shell redirect is independently
+// proven even when unrelated command analysis leaves the action partial. The
+// hook's resolved target map is preferred; a managed call can use only an
+// OS-proved active-state hard link when that map has no entry.
+func provenStateMutationPath(facts actionfacts.Facts, request trustedActionRequest) bool {
+	projected := facts.EnforcementProjection()
+	if projected.ActiveHome == "" {
+		return false
+	}
+	wholeActionProven := projected.Authoritative() && projected.EnforcementEligible()
+	for _, candidate := range projected.Paths {
+		command, ok := integrityCommandByID(projected, candidate.CommandID)
+		if !ok {
+			continue
+		}
+		provenMutation := wholeActionProven && stateCommandMutatesPath(command, candidate)
+		if !provenMutation {
+			provenMutation = provenPartialStateRedirect(facts, command, candidate)
+		}
+		if !provenMutation {
+			continue
+		}
+		if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
+			candidate.Resolved = entry
+			if matchesActiveDefenseClawState(projected, candidate) {
+				return true
+			}
+			continue
+		}
+		physical := ""
+		for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
+			if value, found := request.ResolvedWriteTargets[spelling]; found {
+				physical = value
+				break
+			}
+		}
+		if physical == "" && !request.SkipLocalFilesystemResolution {
+			if request.ProtectedHomeHook {
+				// Only an OS-proved alias is safe to resolve here when the
+				// authenticated hook supplied no target-map entry.
+				physical, _ = hookpaths.ResolveActiveStateHardlinkTarget(candidate.Resolved, projected.ActiveHome)
+			} else {
+				physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
+			}
+		}
+		if physical == "" {
+			continue
+		}
+		if active, same := hookpaths.ResolveActiveStateHardlinkTarget(physical, projected.ActiveHome); same {
+			physical = active
+		}
+		candidate.Resolved = physical
+		if matchesActiveDefenseClawState(projected, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// stateDirectoryEntryTarget places an operand that removes or replaces a
+// directory entry: a delete or move source and a move destination. rm,
+// unlink and mv act on the final name itself, so removing, moving or
+// replacing a project symlink or hard link to active state leaves the state
+// untouched. Only the parent directories are followed. ok is false, and the
+// operand is resolved as a write, when the command also writes through the
+// name (shred -u), a trailing separator makes the kernel follow a link, a
+// move lands inside a (linked) directory, a Windows delete may recurse
+// through a directory link, or the gateway cannot place the parent.
+func stateDirectoryEntryTarget(
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+	request trustedActionRequest,
+) (string, bool) {
+	moveDestination := candidate.Access == actionfacts.PathAccessWrite &&
+		hasOperation(command, actionfacts.OperationMove)
+	if candidate.Access != actionfacts.PathAccessDelete && !moveDestination ||
+		request.SkipLocalFilesystemResolution ||
+		hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend,
+			actionfacts.OperationCopy) {
+		return "", false
+	}
+	windows := candidate.Flavor == actionfacts.PathFlavorWindows
+	value := candidate.Resolved
+	if !filepath.IsAbs(value) || strings.HasSuffix(candidate.Value, "/") ||
+		strings.HasSuffix(candidate.Value, "/.") ||
+		windows && (strings.HasSuffix(candidate.Value, `\`) || strings.HasSuffix(candidate.Value, `\.`)) {
+		return "", false
+	}
+	parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(value))
+	if !ok {
+		return "", false
+	}
+	entry := filepath.Join(parent, filepath.Base(value))
+	if info, err := os.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
+		return "", false
+	}
+	return entry, true
+}
+
+func provenPartialStateRedirect(
+	facts actionfacts.Facts,
+	projected actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	if !integrityCommandOwnsStaticRedirect(projected, candidate) {
+		return false
+	}
+	original, ok := integrityCommandByID(facts, projected.ID)
+	return ok && (original.Effect == actionfacts.EffectExecute ||
+		original.Effect == actionfacts.EffectPreview) &&
+		!original.ControlFlowUncertain &&
+		integrityCommandOwnsStaticRedirect(original, candidate)
+}
+
+func stateCommandMutatesPath(command actionfacts.CommandFact, candidate actionfacts.PathFact) bool {
+	if integrityCommandMutatesPath(command, candidate) {
+		return true
+	}
+	if command.Effect != actionfacts.EffectExecute {
+		return false
+	}
+	return candidate.Access == actionfacts.PathAccessDelete && hasOperation(command, actionfacts.OperationMove) ||
+		candidate.Access == actionfacts.PathAccessMetadata && hasOperation(command, actionfacts.OperationPermissionChange)
 }
 
 // withMigratedLiteralRuleFindings blocks a tool call that a migrated 0.8.x

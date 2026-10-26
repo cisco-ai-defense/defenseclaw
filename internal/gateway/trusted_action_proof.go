@@ -32,6 +32,7 @@ const (
 	findingProofExactFallback
 	findingProofParserShadow
 	findingProofEvaluationFailure
+	findingProofActiveStateMutation
 )
 
 // findingProof is deliberately value-free. It records neither argv nor shell
@@ -156,6 +157,7 @@ func (p findingProof) authorizes(ruleID string) bool {
 	switch p.kind {
 	case findingProofActionFactsSemantic,
 		findingProofActionFactsSubgraph,
+		findingProofActiveStateMutation,
 		findingProofExactCodeGuard,
 		findingProofExactFallback,
 		findingProofEvaluationFailure:
