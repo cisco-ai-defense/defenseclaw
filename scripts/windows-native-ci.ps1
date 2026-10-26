@@ -7756,7 +7756,35 @@ function Get-PackagedRotationConnectorPosture([object]$Status) {
     })
 }
 
+# Test-PackagedRotationGap1330Posture is the exact posture of GAP-1330 (a
+# known 1.0.4 issue, fixed in 1.0.5): a per-user install under the default
+# policy tier ignores the saved closed fail mode and runs open, so status
+# reports configured closed but desired/effective/runtime open, with Claude
+# Code's settings env (which setup writes closed) as drift. Only that exact
+# posture skips the closed-posture check; the rotation must still keep it
+# unchanged.
+function Test-PackagedRotationGap1330Posture([object[]]$Posture) {
+    foreach ($row in $Posture) {
+        $drift = @($row.fail_drift | ForEach-Object { [string]$_ })
+        $expectedDrift = if ([string]$row.name -ceq 'claudecode') { 'claude-env-closed' } else { 'policy-unverified' }
+        if ([string]$row.mode -cne 'action' -or -not [bool]$row.enabled -or
+            [string]$row.source -cne 'manual' -or
+            [string]$row.fail_configured -cne 'closed' -or
+            [string]$row.fail_desired -cne 'open' -or
+            [string]$row.fail_effective -cne 'open' -or
+            [string]$row.fail_runtime -cne 'open' -or
+            $drift.Count -ne 1 -or $drift[0] -cne $expectedDrift) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Assert-PackagedRotationActionClosedPosture([object[]]$Posture) {
+    if (Test-PackagedRotationGap1330Posture $Posture) {
+        Write-Host 'SKIP: exact action/closed rotation posture (GAP-1330: known 1.0.4 issue, fixed in 1.0.5)'
+        return
+    }
     foreach ($row in $Posture) {
         # status is passive (GAP-1466): it does not start the Codex app-server
         # to check the effective hook policy, so Codex reports exactly

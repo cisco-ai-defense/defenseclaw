@@ -232,7 +232,7 @@ func TestWindowsCursorMachineGuardKeepsHooksReadableByUsers(t *testing.T) {
 				}
 				changed = interleaveWindowsCursorSharedWriterForTest(t, paths.Hooks, test.beforeSwap, change, failNext)
 			}
-			watch := watchWindowsCursorMachineGuardForTest(paths, test.steady, true)
+			watch := watchWindowsCursorMachineGuardForTest(paths, test.steady, true, false)
 			err := run()
 			watchErr := watch.Stop()
 			if test.fail != (err != nil) {

@@ -81,6 +81,7 @@ try {
     });
   } else {
     let blocked = false;
+    let reason = "";
     try {
       await hooks["tool.execute.before"](
         {
@@ -92,12 +93,13 @@ try {
       );
     } catch (error) {
       blocked = true;
+      reason = error instanceof Error ? error.message : String(error);
       if (!(error instanceof Error) || !error.message) {
         throw new Error("OpenCode block path did not throw an Error with a reason");
       }
     }
     if ((expected === "block") !== blocked) {
-      throw new Error(`OpenCode plugin verdict mismatch: expected=${expected} blocked=${blocked}`);
+      throw new Error(`OpenCode plugin verdict mismatch: expected=${expected} blocked=${blocked}${reason ? ` reason=${reason.slice(0, 600)}` : ""}`);
     }
 
     // This hook is intentionally observe-only. Awaiting its returned promise

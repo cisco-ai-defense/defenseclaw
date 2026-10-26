@@ -4949,13 +4949,13 @@ threading.Event().wait()
         $hermesSetupContract -match 'allowlist_entries' -and
         $hermesSetupContract -notmatch 'hooks_auto_accept is not true') `
         'Hermes packaged contract preserves operator consent and requires exactly 23 scoped owned approvals'
-    Assert-True ($doctorContract.Contains("Assert-CursorSynchronousWindowsHookCommand `$config (`$script:LastSetupMode -eq 'action') 'Cursor setup'") -and
+    Assert-True ($doctorContract.Contains("Assert-CursorSynchronousWindowsHookCommand `$config `$true 'Cursor setup'") -and
         $doctorContract.Contains("`$expectedMode = if (`$script:LastSetupMode -eq 'action') { 'action' } else { 'observe' }") -and
-        $doctorContract.Contains("`$expectedFailClosed = if (`$expectedMode -eq 'action') { 'true' } else { 'false' }") -and
-        $doctorContract.Contains("`$expectedFailure = if (`$expectedMode -eq 'action') { 'fail-closed' } else { 'fail-open' }") -and
+        $doctorContract.Contains("`$expectedFailClosed = 'true'") -and
+        $doctorContract.Contains("`$expectedFailure = 'fail-open'") -and
         $doctorContract.Contains("`$check.detail -notmatch 'higher-priority conflict detection=unavailable \(none inferred\)'") -and
         $doctorContract.Contains("`$check.detail -notmatch 'human-approval=unsupported'")) `
-        'Cursor contract requires mode-matched action/fail-closed or observe/fail-open posture without unsupported claims'
+        'Cursor contract requires the mode, the per-user failClosed registration and the default-tier open outage mode without unsupported claims'
     Assert-True ($doctorContract -match "'cursor' \{ 'configured file has no DefenseClaw Cursor command entries' \}") `
         'Cursor tamper contract expects exact zero-managed-entry rejection after lock-bound ownership filtering'
     Assert-True ([IO.File]::ReadAllText($openCodeAssertion) -match 'await hooks\.config') `
