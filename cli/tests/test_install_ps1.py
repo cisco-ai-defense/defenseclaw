@@ -4290,6 +4290,8 @@ def test_setup_hook_launcher_answers_until_the_fail_mode_hold_is_ready(
         + _ps1_function("Enable-SetupHooks")
         + _ps1_function("Restore-SetupInstall")
         + _ps1_function("Start-SwapHookFailModes")
+        # The hook mode files' copy (GAP-0009) has its own test.
+        + "function Save-HookFiles { }\nfunction Restore-HookFiles { }\n"
         # This test exercises handoff timing; the publisher's byte and digest
         # contract has its own test below. Model a valid atomic publisher.
         + "function Publish-SetupLauncherTrampoline { [IO.File]::WriteAllText($SetupHookState, 'delegated'); return $true }\n"
@@ -4476,7 +4478,7 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
     real = "".join(
         _ps1_function(name)
         for name in (
-            "Invoke-Quietly", "Start-SwapHookFailModes", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
+            "Invoke-Quietly", "Start-SwapHookFailModes", "Save-HookFiles", "Restore-HookFiles", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
             "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
             "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote", "Resume-InterruptedRun", "Publish-PreviousSlot",
             "Start-AcceptedReplacement", "Finish-EarlySnapshotRestore",
@@ -4626,7 +4628,7 @@ def test_a_step_that_throws_after_the_hook_swap_restores_the_old_install(
     real = "".join(
         _ps1_function(name)
         for name in (
-            "Invoke-Quietly", "Start-SwapHookFailModes", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
+            "Invoke-Quietly", "Start-SwapHookFailModes", "Save-HookFiles", "Restore-HookFiles", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
             "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
             "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote",
             "Start-AcceptedReplacement", "Finish-EarlySnapshotRestore",
@@ -5138,7 +5140,8 @@ def test_an_install_refused_before_its_data_copy_puts_the_hook_mode_files_back(t
         + f"$DataDir = '{tmp_path / 'data'}'\n$Staging = '{staging}'\n"
         + "function Install-File([string]$Source, [string]$Destination) { Copy-Item -LiteralPath $Source -Destination $Destination -Force }\n"
         + "function Write-Warn([string]$m) { \"WARN $m\" }\n"
-        + _ps_functions("Save-HookFiles", "Restore-HookFiles")
+        + _ps1_function("Save-HookFiles")
+        + _ps1_function("Restore-HookFiles")
         + f"\nSave-HookFiles\n[IO.File]::WriteAllText('{hooks / '.hookcfg'}', 'FAIL_MODE=closed')\n"
         + f"[IO.File]::WriteAllText('{hooks / '.hookcfg.claudecode'}', 'FAIL_MODE=closed')\nRestore-HookFiles\n'OK'\n"
     )
