@@ -16172,10 +16172,12 @@ function Start-DefenseClawTransactionServices {
     }
     if ($null -ne $enumeratorService) {
         $enumeratorTargetStartMode = [int]$enumeratorState.start_mode
+        # A running Enumerator next to a stopped gateway is the recorded
+        # preimage (an administrator stopped DefenseClawGateway), and
+        # recovery restores it as recorded. Refusing it left the transaction
+        # pending, so any failed Repair from that state needed /uninstall
+        # FORCE=1 (GAP-1497).
         $enumeratorShouldRun = [bool]$enumeratorState.running
-        if ($enumeratorShouldRun -and -not [bool]$gateway.running) {
-            throw 'refusing to reactivate Enumerator without its recorded running gateway'
-        }
         if ($enumeratorShouldRun) {
             Set-DefenseClawServiceStartMode `
                 -Name $enumeratorServiceName `
