@@ -39095,11 +39095,72 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     finally {
         Exit-DefenseClawLifecycleLock -Lock $lifecycleLock
-        if ($script:DefenseClawRemoveLifecycleLockOnExit -or
-            (Test-DefenseClawStandaloneUninstallLeftNothing -Action $Action -Layout $layout)) {
+        $leftNothing = Test-DefenseClawStandaloneUninstallLeftNothing -Action $Action -Layout $layout
+        if ($script:DefenseClawRemoveLifecycleLockOnExit -or $leftNothing) {
             $script:DefenseClawRemoveLifecycleLockOnExit = $false
             Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout
         }
+        if ($leftNothing) {
+            Remove-DefenseClawMdmRotationJournal -Purge:$Purge
+        }
+    }
+}
+
+function Remove-DefenseClawMdmRotationJournal {
+    <#
+        Once an uninstall removed the deployment and its credentials, the MDM
+        kit's credential rotation journal goes too, whichever route ran it:
+        packaging/mdm/windows/uninstall.ps1 removes it (GAP-1585), and a
+        direct enterprise windows uninstall or Setup /uninstall now does the
+        same, as Linux and macOS do (GAP-1615). An entry can hold a plaintext
+        copy of an earlier credential, so each is overwritten with zeros
+        before it is deleted. A journal that is not administrator-only, or
+        that holds a folder or a link, is left and named on the warning
+        stream. -Purge also removes the kit's empty state folder.
+    #>
+    param(
+        [switch]$Purge,
+        [string]$StateDirectory = ''
+    )
+    try {
+        $state = $StateDirectory
+        if ([string]::IsNullOrWhiteSpace($state)) {
+            $state = [IO.Path]::Combine($script:ProgramData, 'Cisco\DefenseClaw-MDM')
+        }
+        $journal = [IO.Path]::Combine($state, 'rotation')
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $journal -Force -ErrorAction SilentlyContinue
+        if ($null -ne $item) {
+            if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                Microsoft.PowerShell.Utility\Write-Warning -Message "left $journal as it is: it is not an administrator-only folder"
+                return
+            }
+            Assert-DefenseClawPathAcl -Path $journal -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID)
+            $entries = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $journal -Force)
+            foreach ($entry in $entries) {
+                if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    Microsoft.PowerShell.Utility\Write-Warning -Message "left $journal as it is: it holds $($entry.Name), which the MDM kit does not write"
+                    return
+                }
+            }
+            foreach ($entry in $entries) {
+                if ($entry.Length -gt 0) {
+                    [IO.File]::WriteAllBytes($entry.FullName, [byte[]]::new($entry.Length))
+                }
+                Microsoft.PowerShell.Management\Remove-Item -LiteralPath $entry.FullName -Force
+            }
+            [IO.Directory]::Delete($journal, $false)
+        }
+        $lock = Microsoft.PowerShell.Management\Get-Item -LiteralPath ([IO.Path]::Combine($state, 'rotation.lock')) -Force -ErrorAction SilentlyContinue
+        if ($null -ne $lock -and -not $lock.PSIsContainer -and ($lock.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $lock.FullName -Force -ErrorAction SilentlyContinue
+        }
+        if ($Purge -and [IO.Directory]::Exists($state) -and
+            @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $state -Force).Count -eq 0) {
+            [IO.Directory]::Delete($state, $false)
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Warning -Message "could not remove the MDM credential rotation journal: $($_.Exception.Message)"
     }
 }
 

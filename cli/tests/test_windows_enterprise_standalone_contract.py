@@ -452,6 +452,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-install-tree-smoke.ps1",
     "enterprise-standalone-machine-leftovers-purge-smoke.ps1",
     "enterprise-standalone-manifest-adoption-smoke.ps1",
+    "enterprise-standalone-mdm-rotation-journal-smoke.ps1",
     "enterprise-standalone-native-otlp-rollback-smoke.ps1",
     "enterprise-standalone-pretransaction-bundle-classification-smoke.ps1",
     "enterprise-standalone-recorded-trust-smoke.ps1",
