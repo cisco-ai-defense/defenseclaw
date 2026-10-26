@@ -137,3 +137,37 @@ func TestPeerOnlyAccountDoesNotWriteTheFirstMigrationMap(t *testing.T) {
 		t.Fatalf("first map %+v; want the enrolled account only", owners)
 	}
 }
+
+// TestPreTokenHolderJoinsAnExistingMigrationMap is GAP-2085: a 1.0.4
+// guardian wrote the migration map at its first pass with the accounts it
+// enrolled only (alice). ali held her uid under 1.0.3 and no 1.0.4 gateway
+// served it (the homes file marks her a pre-token holder), so she joins
+// the existing map at a later pass, and recorded entries keep theirs. A
+// served account the homes file does not mark (a Peer) and an account
+// enrolled after the map (carol) still do not join it (GAP-1865, GAP-0503).
+func TestPreTokenHolderJoinsAnExistingMigrationMap(t *testing.T) {
+	dir := t.TempDir()
+	homes := map[int]string{501: t.TempDir(), 2201: t.TempDir(), 2202: t.TempDir(), 1007: t.TempDir()}
+	stubIdentitySpoolAccounts(t, homes, "files", nil)
+	alice := IdentitySpoolAccount{UID: 501, User: "alice"}
+	first := rollbackTestPass(t, dir, alice)
+	if len(first) != 1 || first[501].User != "alice" {
+		t.Fatalf("map the 1.0.4 guardian wrote %+v", first)
+	}
+	ali := IdentitySpoolAccount{UID: 2201, User: "ali", PreTokenHolder: true}
+	peer := IdentitySpoolAccount{UID: 2202, User: "rec", Peer: true}
+	carol := IdentitySpoolAccount{UID: 1007, User: "carol"}
+	owners := rollbackTestPass(t, dir, alice, ali, peer, carol)
+	if owners[501] != first[501] {
+		t.Fatalf("map %+v; want alice's entry kept", owners)
+	}
+	if owners[2201].User != "ali" || owners[2201].Token != LegacyAgentOwnerToken("files", homes[2201]) {
+		t.Fatalf("map %+v; want the 1.0.3 holder ali added", owners)
+	}
+	if _, bound := owners[2202]; bound {
+		t.Fatalf("map %+v; a served account the homes file does not mark joined it", owners)
+	}
+	if _, bound := owners[1007]; bound {
+		t.Fatalf("map %+v; an account enrolled after the map joined it", owners)
+	}
+}
