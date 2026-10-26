@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -603,6 +604,13 @@ func apiError(err error) error {
 	var e *sandboxapi.Error
 	if !errors.As(err, &e) {
 		return err
+	}
+	if e.Status == http.StatusTooManyRequests {
+		// The gateway's caller limit answered a burst of sandbox commands
+		// with its hook-request words, which named no hook the user ran
+		// (GAP-1693).
+		return errors.New("DefenseClaw is limiting how many requests this account makes in a short time, and a burst of " +
+			"sandbox commands reached that limit; nothing was changed, run the command again in a few seconds")
 	}
 	switch e.Code {
 	case sandboxapi.CodeUnavailable:

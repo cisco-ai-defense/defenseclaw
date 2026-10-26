@@ -18,6 +18,7 @@ package sandboxcli
 
 import (
 	"errors"
+	"net/http"
 	"runtime"
 	"strings"
 	"testing"
@@ -70,6 +71,18 @@ func TestAPIErrorKeepsUnreachableTransportCause(t *testing.T) {
 		if managed && strings.Contains(got, "defenseclaw-gateway start") {
 			t.Errorf("managed host offered a per-user gateway command: %q", got)
 		}
+	}
+}
+
+// GAP-1693: a sandbox command the gateway's caller limit refused (429) says
+// so in its own words: a limit on this account's requests in a short time,
+// to retry in a few seconds, never the hook-request words of the limiter.
+func TestAPIErrorWordsTheCallerLimitForTheCLI(t *testing.T) {
+	limited := &sandboxapi.Error{Code: "rate_limited", Status: http.StatusTooManyRequests,
+		Message: "DefenseClaw is limiting the hook requests of this account; retry shortly"}
+	got := apiError(limited).Error()
+	if strings.Contains(got, "hook") || !strings.Contains(got, "a burst of sandbox commands") || !strings.Contains(got, "in a few seconds") {
+		t.Fatalf("limited sandbox command = %q", got)
 	}
 }
 
