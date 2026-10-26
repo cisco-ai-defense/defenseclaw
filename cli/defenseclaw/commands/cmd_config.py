@@ -1042,7 +1042,9 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
             raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
     roster = _guarded_connector_modes(app)
     changes = [
-        Change(key, unset=True, prune_empty_to=_roster_entry_prune_scope(parts, written, app) or _unset_prune_scope(parts))
+        Change(
+            key, unset=True, prune_empty_to=_roster_entry_prune_scope(parts, written, app) or _unset_prune_scope(parts)
+        )
         for key, parts in parsed
     ]
     if _write_config_change(app, changes, expect_sha256, "unset"):
