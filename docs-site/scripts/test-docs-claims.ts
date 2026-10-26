@@ -1470,6 +1470,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1713", page: "reference/configuration/paths.mdx", has: ["On a managed Windows computer none of these per-user paths are used", "`C:\\ProgramData\\Cisco\\DefenseClaw\\etc\\config.yaml`"] },
   { gap: "GAP-1671", page: "enterprise/plan/managed-policy.mdx", has: ["| Attempt on managed Windows | Result |", "config set did not change it", "not a command of the administrator's `defenseclaw.exe`"] },
   { gap: "GAP-1678", page: "troubleshooting/doctor.mdx", section: "Observability rows", has: ["| Codex OTel environment |", "| Connector OTLP: CONNECTOR |", "| Native OTLP credentials |"] },
+  { gap: "GAP-1689", page: "enterprise/configure/ai-defense-key.mdx", has: ["`! secret set: done with N warnings`", "The warnings are the host's normal status, not a failed store."] },
+  { gap: "GAP-1568", page: "enterprise/configure/reference.mdx", has: ["`! secret remove: done with N warnings`", "`! secret remove: nothing to do (up_to_date), N warnings`"] },
   // r105-rows-end
 ];
 

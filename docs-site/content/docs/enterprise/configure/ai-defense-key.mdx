@@ -66,7 +66,12 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-de
 The command stores the key, then runs `ensure` with reason `secret`, which
 restarts the gateway so it reads the key. The apply path unit would also
 pick up the change. The output starts with `✓ secret set: done` and
-`- stored credential ai-defense-api-key`, followed by the apply steps.
+`- stored credential ai-defense-api-key`, followed by the apply steps. On most
+Linux hosts it starts with `! secret set: done with N warnings` and the
+warning lines instead (for example `hook_process_fail_open`,
+`unprivileged_user_namespaces`, `unprivileged_ptrace`), then
+`- stored credential ai-defense-api-key`. The warnings are the host's normal
+status, not a failed store.
 
   </Tab>
   <Tab value="macOS">
