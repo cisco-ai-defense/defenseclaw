@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
@@ -1361,6 +1362,44 @@ func TestTheModelChannelClosesAndReopensWithThePolicy(t *testing.T) {
 	}
 	if e.m.enforceAll(t.Context()); len(e.events("mcbox", sandboxapi.ActivityLifecycle, policyReasonRestored)) != 1 {
 		t.Fatal("an unchanged policy attached the provider again")
+	}
+}
+
+// GAP-1859 (review R3-1): a provider the policy detached from a legacy guest
+// whose network DefenseClaw withdrew is not attached again when the policy
+// allows its endpoint again: the provider rule would open the endpoint on a
+// supervisor DefenseClaw cannot contain. It is attached once the guest runs
+// on the current supervisor.
+func TestAContainedLegacyGuestGetsNoProviderBack(t *testing.T) {
+	llm := &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "legacymc", LLM: llm})
+	provider := providerName("legacymc", roleLLM, 0)
+	attached := func() bool {
+		got, err := e.client.GetSandbox(t.Context(), "legacymc")
+		return err == nil && slices.Contains(got.Spec.Providers, provider)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.EgressAllowOnly = []string{"registry.example.org"} })
+	if !e.m.enforceAll(t.Context()) || attached() {
+		t.Fatal("the model provider stayed attached under an allow-only list without its endpoint")
+	}
+	b := e.boxOf("legacymc")
+	e.m.mu.Lock()
+	b.rec.OldSupervisorNetworkClosed = true
+	e.m.mu.Unlock()
+	e.setConfig(func(c *config.Config) {
+		c.OpenShell.Admin.EgressAllowOnly = []string{"registry.example.org", "api.anthropic.com"}
+	})
+	attaches := e.fake.Calls(openshelltest.MethodAttachProvider)
+	e.m.enforceAll(t.Context())
+	if n := e.fake.Calls(openshelltest.MethodAttachProvider) - attaches; n != 0 || attached() {
+		t.Fatalf("a contained legacy guest got its provider back (%d attach calls)", n)
+	}
+	e.m.mu.Lock()
+	b.rec.OldSupervisorNetworkClosed = false
+	e.m.mu.Unlock()
+	if !e.m.enforceAll(t.Context()) || !attached() {
+		t.Fatal("the provider was not attached once the guest no longer runs contained")
 	}
 }
 

@@ -722,13 +722,18 @@ func (m *Manager) enforceAll(ctx context.Context) bool {
 // sandbox reopens, which before stayed cut until the sandbox was created
 // again (GAP-0466). Each reattach is recorded and published; one that
 // fails is retried on the next pass. A sandbox whose policy cannot be
-// resolved (eff nil) gets nothing back.
+// resolved (eff nil) gets nothing back, and neither does a legacy guest
+// whose network DefenseClaw withdrew (networkWithdrawn): a provider rule
+// opens its endpoint around the egress proxy on a supervisor DefenseClaw
+// cannot contain, so it waits for the restart on the current supervisor
+// like every other rule (GAP-1859).
 func (m *Manager) restoreProviderEndpoints(ctx context.Context, gw *Gateway, b *box, eff *packs.Effective) {
 	m.mu.Lock()
 	rec, ready := b.rec, b.phase == audit.SandboxPhaseReady && !b.deleted && !b.creating
 	m.mu.Unlock()
 	if !ready || eff == nil || len(rec.DetachedProviders) == 0 ||
-		credentialsRefusal(m.floor(eff), rec.CredentialProfile, len(rec.Credentials) > 0) != nil {
+		credentialsRefusal(m.floor(eff), rec.CredentialProfile, len(rec.Credentials) > 0) != nil ||
+		m.networkWithdrawn(rec.Name) != nil {
 		return
 	}
 	for _, provider := range rec.DetachedProviders {
