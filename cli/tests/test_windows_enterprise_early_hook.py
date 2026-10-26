@@ -118,7 +118,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Publish-DefenseClawEarlyHook', 'Assert-DefenseClawEarlyHookPublished', 'Restore-DefenseClawEarlyHook', 'Get-DefenseClawEarlyHookField', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds', 'Wait-DefenseClawServiceProcessExit', 'Test-DefenseClawProcessIdentityRunning')) {
+foreach ($name in @('Publish-DefenseClawEarlyHook', 'Assert-DefenseClawEarlyHookPublished', 'Restore-DefenseClawEarlyHook', 'Get-DefenseClawEarlyHookField', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds', 'Assert-DefenseClawInstalledHookCallsEnded', 'Wait-DefenseClawServiceProcessExit', 'Test-DefenseClawProcessIdentityRunning')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -153,7 +153,7 @@ if ($Case -like 'drain*') {
         param([string]$HookPath, [datetime]$StartedBefore)
         $script:looks++
         $script:events.Add('look:' + [string]$script:looks)
-        if ($Case -eq 'drain-timeout' -or $script:looks -le 2) { 4242 }
+        if ($Case -eq 'drain-timeout' -or $Case -eq 'drain-deferred' -or $script:looks -le 2) { 4242 }
     }
 }
 if ($Case -like 'restorer*') {
@@ -289,6 +289,21 @@ try {
             if (-not $child.HasExited) { $child.Kill() }
             # No identity (no prior guardian process): nothing to wait for.
             Wait-DefenseClawServiceProcessExit -Name 'DefenseClawHookGuardian' -Identity $null
+        }
+        'drain-deferred' {
+            # GAP-1124: a hook call of the installed release still runs at the
+            # end of the wait before the transaction: the run defers.
+            try {
+                Assert-DefenseClawInstalledHookCallsEnded -HookPath $hook -TimeoutSeconds 1
+                $script:events.Add('returned')
+            }
+            finally {
+                $result.hook = Get-Content -LiteralPath $hook -Raw
+            }
+        }
+        'drain-ended' {
+            Assert-DefenseClawInstalledHookCallsEnded -HookPath $hook -TimeoutSeconds 30
+            $script:events.Add('returned')
         }
         'drain-timeout' {
             $started = [DateTime]::UtcNow
@@ -581,6 +596,39 @@ def test_the_wait_covers_the_replaced_hooks_whole_budget() -> None:
     match = re.search(r"replacedHookCallsBudget = (\d+) \* time\.Second", unix)
     assert match is not None
     assert int(match.group(1)) == windows
+
+
+def test_a_hook_call_still_running_before_the_transaction_defers_the_run(tmp_path: Path) -> None:
+    """GAP-1124, GAP-1070: a 1.0.2 or 1.0.3 hook process still waiting for its
+    input outlived the drain, the upgrade stopped the gateway anyway, and the
+    old Hermes hook then allowed its call. Before the transaction changes
+    anything, a hook process of the installed release still running at the
+    end of the wait defers the run (retryable 1618): the hook is not replaced
+    and nothing is stopped."""
+    result = _run(tmp_path, "drain-deferred")
+    assert result["threw"].startswith("hook_calls_running: 1 DefenseClaw hook process(es)"), result
+    assert "process ids 4242" in result["threw"], result
+    assert "run the same Setup command again" in result["threw"], result
+    assert "returned" not in result["events"], result
+    assert not any(e.startswith("publish:") for e in result["events"]), result
+    assert result["hook"] == "hook-1.0.2", result
+
+
+def test_the_run_goes_on_once_the_installed_hooks_calls_ended(tmp_path: Path) -> None:
+    result = _run(tmp_path, "drain-ended")
+    assert result["threw"] == "", result
+    assert result["events"] == ["look:1", "look:2", "look:3", "returned"], result
+
+
+def test_the_transaction_waits_for_the_installed_hooks_calls_before_it_stops_anything() -> None:
+    body = _function_body(_text(), "New-DefenseClawTransaction")
+    check = body.index("Assert-DefenseClawInstalledHookCallsEnded -HookPath $Layout.HookPath")
+    guard = body.rindex("if ((Test-DefenseClawStandaloneProfile) -and $PriorDeploymentActive -and", 0, check)
+    assert "$null -ne $EarlyHookSource" in body[guard:check]
+    # Before the transaction directory, the intent and any service change.
+    assert check < body.index("New-DefenseClawDirectory -Path $directory")
+    assert check < body.index("Set-DefenseClawServiceStartMode")
+    assert check < body.index("Publish-DefenseClawEarlyHook")
 
 
 def test_only_hook_processes_started_before_the_swap_are_waited_for(tmp_path: Path) -> None:

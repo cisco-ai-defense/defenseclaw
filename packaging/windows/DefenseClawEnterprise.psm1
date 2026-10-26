@@ -12563,6 +12563,13 @@ function New-DefenseClawTransaction {
             $StateRootCreatedForTransaction)) {
         throw 'an active deployment cannot have a transaction-created managed root'
     }
+    if ((Test-DefenseClawStandaloneProfile) -and $PriorDeploymentActive -and
+        $null -ne $EarlyHookSource) {
+        # GAP-1124, GAP-1070: before anything is stopped or replaced, so the
+        # running gateway answers the installed hook's calls and a deferral
+        # leaves the deployment exactly as it was.
+        Assert-DefenseClawInstalledHookCallsEnded -HookPath $Layout.HookPath
+    }
     $id = [Guid]::NewGuid().ToString('N')
     $directory = Assert-DefenseClawDescendant `
         -Path (Microsoft.PowerShell.Management\Join-Path $Layout.TransactionsDirectory $id) `
@@ -19045,6 +19052,31 @@ function Wait-DefenseClawPriorHookCalls {
         }
         Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
     }
+}
+
+function Assert-DefenseClawInstalledHookCallsEnded {
+    <#
+        GAP-1124, GAP-1070: an upgrade or repair of an active deployment
+        stops its gateway. A hook process of the installed release that
+        still runs then (one still waiting for its input, which has no
+        deadline of its own) answers without its gateway, and a 1.0.2 or
+        1.0.3 Hermes hook, or any hook under an administrator's open, then
+        allows the call. Before the transaction stops or replaces anything,
+        this waits (bounded, the replaced hook's whole budget) while the
+        gateway still answers; a process still running at the end defers the
+        run with the retryable hook_calls_running (exit 1618) and nothing
+        changed. Ending the process instead gives the agent no answer, which
+        most agents take as an allow.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$HookPath,
+        [int]$TimeoutSeconds = 120
+    )
+    $running = @(Wait-DefenseClawPriorHookCalls -HookPath $HookPath -StartedBefore ([DateTime]::Now) -TimeoutSeconds $TimeoutSeconds)
+    if ($running.Count -eq 0) {
+        return
+    }
+    throw ("hook_calls_running: {0} DefenseClaw hook process(es) of the installed release (process ids {1}) were still running after a {2} s wait; the gateway must keep answering them, so this run stopped and replaced nothing. Next step: let those agent calls finish or close those agent sessions, then run the same Setup command again (an MDM retries exit 1618 on its own)" -f $running.Count, ($running -join ', '), $TimeoutSeconds)
 }
 
 function Restore-DefenseClawEarlyHook {

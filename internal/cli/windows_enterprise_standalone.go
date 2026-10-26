@@ -2663,6 +2663,10 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 			return enterprisestatus.WindowsExitBusy
 		case "bundle_apply_failed", "bundle_policy_not_adopted", "bundle_post_verify_failed", "bundle_targets_refresh_failed":
 			return enterprisestatus.WindowsExitBusy
+		case "hook_calls_running":
+			// The lifecycle deferred before it changed anything, while hook
+			// calls of the installed release still run (GAP-1124).
+			return enterprisestatus.WindowsExitBusy
 		case "scanner_runtime_unavailable":
 			if strings.HasSuffix(message.Message, windowsScannerPrepareRetryNotice) {
 				// A prepare that hit its bound is finished by a retry of the
