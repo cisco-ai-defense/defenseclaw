@@ -4633,6 +4633,45 @@ function Test-DefenseClawExactRawDACL {
     return $true
 }
 
+function Test-DefenseClawRestoredUserFileSDDL {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Actual,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Expected
+    )
+
+    # A restored user file must carry its recorded owner, group and DACL.
+    # Putting back an inheriting DACL (SetSecurityInfo with
+    # UNPROTECTED_DACL_SECURITY_INFORMATION) makes NTFS record the
+    # AutoInherited (AI) control flag, also for a file whose recorded
+    # descriptor had none because it was created in its folder without it
+    # (D: before, D:AI after, the same entries). Only that metadata bit is
+    # masked (Test-DefenseClawExactRawDACL); every ACE, its order and every
+    # other control flag must still match.
+    if ([string]::IsNullOrEmpty($Actual) -or [string]::IsNullOrEmpty($Expected)) {
+        return $false
+    }
+    if ($Actual -ceq $Expected) {
+        return $true
+    }
+    try {
+        $actualRaw = [Security.AccessControl.RawSecurityDescriptor]::new($Actual)
+        $expectedRaw = [Security.AccessControl.RawSecurityDescriptor]::new($Expected)
+    }
+    catch {
+        return $false
+    }
+    if ($null -eq $actualRaw.Owner -or $null -eq $expectedRaw.Owner -or
+        $actualRaw.Owner.Value -cne $expectedRaw.Owner.Value) {
+        return $false
+    }
+    if (($null -eq $actualRaw.Group) -ne ($null -eq $expectedRaw.Group) -or
+        ($null -ne $actualRaw.Group -and
+            $actualRaw.Group.Value -cne $expectedRaw.Group.Value)) {
+        return $false
+    }
+    return [bool](Test-DefenseClawExactRawDACL -Actual $actualRaw -Expected $expectedRaw)
+}
+
 function Assert-DefenseClawCanonicalRawPathAcl {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -15125,7 +15164,9 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
                             [IO.File]::GetCreationTimeUtc($backup),
                             [IO.File]::GetLastWriteTimeUtc($backup),
                             $postimage)
-                        if ($actualSDDL -cne [string]$entry.security_descriptor) {
+                        if (-not (Test-DefenseClawRestoredUserFileSDDL `
+                                -Actual $actualSDDL `
+                                -Expected ([string]$entry.security_descriptor))) {
                             throw 'user native OTLP rollback did not restore exact ACL'
                         }
                     }
