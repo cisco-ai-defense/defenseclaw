@@ -2613,7 +2613,9 @@ func TestVerifyClaudeCodeHookMatrixRejectsAsyncAliasesOnEnforcingEvents(t *testi
 		t.Fatal(err)
 	}
 	baseHooks := base["hooks"].(map[string]interface{})
-	baseHandler := baseHooks["PreToolUse"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	// The base invocation is that of an event Setup writes unchanged; on
+	// Windows PreToolUse may differ from it (claudeCodeHandlerInvocation).
+	baseHandler := baseHooks["Stop"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
 	expectedCommand := baseHandler["command"].(string)
 	var expectedArgs []string
 	if rawArgs, exists := baseHandler["args"].([]interface{}); exists {
@@ -2675,10 +2677,12 @@ func TestVerifyClaudeCodeHookMatrixRejectsMalformedUnexpectedEvent(t *testing.T)
 		t.Fatal(err)
 	}
 	hooks := settings["hooks"].(map[string]interface{})
-	preToolHandler := hooks["PreToolUse"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
-	expectedCommand := preToolHandler["command"].(string)
+	// The base invocation is that of an event Setup writes unchanged; on
+	// Windows PreToolUse may differ from it (claudeCodeHandlerInvocation).
+	baseHandler := hooks["Stop"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	expectedCommand := baseHandler["command"].(string)
 	var expectedArgs []string
-	if rawArgs, exists := preToolHandler["args"].([]interface{}); exists {
+	if rawArgs, exists := baseHandler["args"].([]interface{}); exists {
 		for _, rawArg := range rawArgs {
 			expectedArgs = append(expectedArgs, rawArg.(string))
 		}

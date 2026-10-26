@@ -395,6 +395,13 @@ func enterpriseHookWindowsEligibleProfilesFor(ctx context.Context, current *conf
 // still name DefenseClaw are reported, after the removal or, when nothing
 // was removable, from the probe. Passes run once per cleanup interval, so
 // the report repeats at most that often.
+//
+// It runs for every user, also one with a Claude Code manifest row: that row
+// is the machine policy registration and its verify does not touch the user's
+// settings, so skipping such users left the older hooks of every Claude Code
+// user in place and Copilot blocked every tool call in a home project after
+// a 1.0.x per-user to managed upgrade and after a fresh managed install over
+// a retained profile (GAP-0587, T11 TST-28276, T12 TST-29537/29865/29921).
 func migrateWindowsClaudeUserHooks(stderr io.Writer, target enterprisehooks.TargetCredentials) {
 	settings := filepath.Join(target.UserHome, ".claude", "settings.json")
 	present, left, err := windowsManagedClaudeRegistrationProbe(target.UserHome, target.SID)
@@ -500,9 +507,7 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 			blocksError = blocksErr.Error()
 		}
 		logEnterpriseForeignHookBlocks(stderr, current.creds.UserHome, blocks, dropped, blocksError)
-		if !current.rows["claudecode"] {
-			migrateWindowsClaudeUserHooks(stderr, current.creds)
-		}
+		migrateWindowsClaudeUserHooks(stderr, current.creds)
 		for _, name := range connectors {
 			if current.rows[name] {
 				continue
