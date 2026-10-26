@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"unicode/utf16"
 
@@ -33,6 +34,9 @@ func ActionStateTargetMention(command, cwd, home string) bool {
 func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) bool {
 	if command == "" || home == "" || len(command) > MaxPayloadBytes || depth >= 8 {
 		return false
+	}
+	if depth == 0 {
+		globs = globs.forCommand(command)
 	}
 	if actionWindowsHome(home) {
 		return actionWindowsTargetMention(command, cwd, home, depth, stateOnly)
@@ -163,7 +167,7 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			return true
 		}
 	}
-	text := actionMaskLiteralMetacharacters(command)
+	text := actionBlankPatchBodies(command, actionMaskLiteralMetacharacters(command))
 	if parsed && actionLiteralArgumentProgramsOnly(file, home) {
 		text = actionMarkLiteralTildes(text)
 	}
@@ -179,6 +183,55 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 			continue // Shell case labels and patch text are not argv glob operands.
 		}
 		if check(token, !literalTilde, cwd) {
+			return true
+		}
+	}
+	return false
+}
+
+// actionBlankPatchBodies blanks, in the text scan, the content lines of the
+// patch envelopes apply_patch calls read: those calls write only the files
+// their headers name, which stay (GAP-0781, GAP-1106). text is command with
+// its literal metacharacters masked, line for line.
+func actionBlankPatchBodies(command, text string) string {
+	if !strings.Contains(command, patchBeginMarker) {
+		return text
+	}
+	fed := patchFedLines(command)
+	lines := strings.Split(text, "\n")
+	if fed == nil || len(lines) != len(fed) {
+		return text
+	}
+	commandLines := strings.Split(command, "\n")
+	for i, line := range commandLines {
+		if !fed[i] && patchCommandResolutionChange(line) {
+			// Another apply_patch may run and read the body as a script.
+			return text
+		}
+	}
+	for i, line := range commandLines {
+		if fed[i] && !strings.HasPrefix(strings.TrimSpace(line), "***") {
+			lines[i] = strings.Repeat(" ", len(lines[i]))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// patchResolutionChanges match shell text that may change the program an
+// apply_patch word runs: a PATH (zsh path) assignment, export or unset, the
+// PowerShell Env:PATH drive, or a sourced, evaluated or aliased definition.
+// Envelope lines (headers such as "*** Add File: PATH.md") and text that only
+// mentions or reads PATH change nothing (round n review).
+var patchResolutionChanges = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(^|[^a-z0-9_-])path\s*(\+?=|\[)`),
+	regexp.MustCompile(`(?i)(^|[^a-z0-9_-])(export|unset|declare|typeset|readonly|local|setenv|env)\b.*\bpath\b`),
+	regexp.MustCompile(`(?i)env:\\?path\b|setenvironmentvariable|\b(iex|invoke-expression)\b`),
+	regexp.MustCompile(`(^|[\s;&|(])(source|eval|\.)(\s|$)|\b(alias|functions|hash|enable)\b`),
+}
+
+func patchCommandResolutionChange(line string) bool {
+	for _, change := range patchResolutionChanges {
+		if change.MatchString(line) {
 			return true
 		}
 	}
@@ -625,7 +678,9 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 	if _, err := filepath.Match(pattern, ""); err != nil || globs.full() {
 		return false
 	}
-	candidates, complete, unseen := actionExpandGlob(pattern, literal, actionGlobViewHidden(cwd, home))
+	hidden := actionGlobViewHidden(cwd, home)
+	dots := sync.OnceValue(func() bool { return globs.dotNames() || actionShellProfileMayDotglob(home) })
+	candidates, complete, unseen := actionExpandGlob(pattern, literal, hidden, dots)
 	for _, candidate := range candidates {
 		if protectedReachPath(candidate, protected, ssh) {
 			globs.note(pattern, "1")
@@ -636,24 +691,35 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 		globs.note(pattern, "0")
 		return false
 	}
-	if answer := globs.answer(pattern); unseen && answer != "" {
-		// Only a walk this process could not see defers to the client;
-		// past a bound the fallback below decides.
-		return answer == "1"
-	}
-	base := filepath.Base(pattern)
-	if unseen && !strings.ContainsAny(filepath.Dir(pattern), "*?[") && !actionGlobHasLiteral(base) {
-		// Only the last component is a pattern, in a directory this
-		// process cannot read, and it names nothing (git add *): no
-		// directory alias can be selected, so it stays ordinary.
-		return false
-	}
-	for _, name := range append([]string{".ssh"}, AuthorizedKeysFiles[:]...) {
-		if actionGlobNameMatch(base, name) {
-			return true
+	if hidden && unseen {
+		if answer := globs.answer(pattern); answer != "" {
+			// A walk this process could not see defers to the client,
+			// which expanded the pattern as the user.
+			return answer == "1"
+		}
+		if !globs.fromClient() {
+			// No client evidence at all (an older hook client): the
+			// name fallback of round m.
+			base := filepath.Base(pattern)
+			if !strings.ContainsAny(filepath.Dir(pattern), "*?[") && !actionGlobHasLiteral(base) {
+				// Only the last component is a pattern, in a directory
+				// this process cannot read, and it names nothing (git
+				// add *): no directory alias can be selected.
+				return false
+			}
+			for _, name := range append([]string{".ssh"}, AuthorizedKeysFiles[:]...) {
+				if actionGlobNameMatch(base, name) {
+					return true
+				}
+			}
+			return false
 		}
 	}
-	return false
+	// The walk (this one, or the client's that sent no answer) stopped at
+	// a bound or at a directory it could not read, so an alias of any name
+	// may be among the names it did not see: the pattern is unproved,
+	// never an allow (GAP-1481).
+	return true
 }
 
 // actionGlobs carries the hook client's pathname-pattern answers through
@@ -662,6 +728,68 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 type actionGlobs struct {
 	facts  map[string]string
 	record map[string]string
+	// dots is set when the command may make * and ? match a leading dot
+	// (actionCommandMayDotglob).
+	dots bool
+}
+
+// forCommand returns the scan state of one command, sharing the client's
+// facts and record.
+func (g *actionGlobs) forCommand(command string) *actionGlobs {
+	var scan actionGlobs
+	if g != nil {
+		scan = *g
+	}
+	scan.dots = actionCommandMayDotglob(command)
+	return &scan
+}
+
+func (g *actionGlobs) dotNames() bool { return g != nil && g.dots }
+
+// actionDotglobSetting matches, once lowercased without underscores, a
+// shell setting that lets * and ? match a leading dot: bash dotglob or a
+// GLOBIGNORE, zsh GLOB_DOTS or a (D) qualifier, or a startup file
+// (BASH_ENV) that may set one.
+var (
+	actionDotglobSetting   = regexp.MustCompile(`dotglob|globdots|globignore|bashenv`)
+	actionDotglobQualifier = regexp.MustCompile(`[*?\]]\([^()]*D[^()]*\)`)
+)
+
+func actionCommandMayDotglob(command string) bool {
+	return actionDotglobSetting.MatchString(strings.ReplaceAll(strings.ToLower(command), "_", "")) ||
+		actionDotglobQualifier.MatchString(command)
+}
+
+// actionShellProfileMayDotglob reports a startup file of the user's or the
+// system's shell, or an inherited BASHOPTS or GLOBIGNORE, that may set
+// dotglob, or a home this process cannot read.
+func actionShellProfileMayDotglob(home string) bool {
+	if _, err := os.Stat(home); err != nil || strings.Contains(os.Getenv("BASHOPTS"), "dotglob") || os.Getenv("GLOBIGNORE") != "" {
+		return true
+	}
+	files := []string{"/etc/profile", "/etc/bashrc", "/etc/bash.bashrc", "/etc/zshenv", "/etc/zsh/zshenv",
+		"/etc/zprofile", "/etc/zsh/zprofile", "/etc/zshrc", "/etc/zsh/zshrc", "/etc/zlogin", "/etc/zsh/zlogin"}
+	if profiles, err := filepath.Glob("/etc/profile.d/*.sh"); err == nil {
+		files = append(files, profiles...)
+	}
+	for _, name := range []string{".bashrc", ".bash_profile", ".bash_login", ".bash_aliases", ".profile", ".zshenv", ".zprofile", ".zshrc", ".zlogin"} {
+		files = append(files, filepath.Join(home, name))
+	}
+	for _, name := range files {
+		file, err := os.Open(name)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return true
+		}
+		data, err := io.ReadAll(io.LimitReader(file, 1<<20))
+		_ = file.Close()
+		if err != nil || actionDotglobSetting.MatchString(strings.ReplaceAll(strings.ToLower(string(data)), "_", "")) {
+			return true
+		}
+	}
+	return false
 }
 
 // maxGlobFacts bounds the patterns the hook client expands for one call. A
@@ -682,6 +810,10 @@ func (g *actionGlobs) note(pattern, answer string) {
 		g.record[key] = answer
 	}
 }
+
+// fromClient reports a scan that carries the hook client's evidence, so a
+// pattern it sent no answer for is one its own walk could not prove.
+func (g *actionGlobs) fromClient() bool { return g != nil && g.facts != nil }
 
 func (g *actionGlobs) answer(pattern string) string {
 	if g == nil || g.facts == nil {
@@ -708,12 +840,17 @@ const (
 // literal component is joined without a lookup, so a final file that does
 // not exist yet is still a candidate; literal is a prefix of pattern taken
 // as written (the cwd of a relative word). complete is false when a bound
-// is exceeded or a directory cannot be read; unseen tells the latter.
+// is exceeded or a directory cannot be read; unseen tells the latter. The
+// walk keeps every match it found before or beside a directory it could not
+// read or past a bound, so such a directory never hides a match (GAP-1481).
 //
 // hidden is set when the process cannot see the request's cwd or home
 // (systemd ProtectHome on a managed gateway): a directory missing from
 // that view is not proof the user's shell finds no match (GAP-1460).
-func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string, complete, unseen bool) {
+//
+// A component that starts with * or ? does not match a name with a leading
+// dot, as in the shell, unless dots reports a setting that changes that.
+func actionExpandGlob(pattern, literal string, hidden bool, dots func() bool) (candidates []string, complete, unseen bool) {
 	separator := string(filepath.Separator)
 	start := filepath.VolumeName(pattern) + separator
 	rest := strings.TrimPrefix(pattern, start)
@@ -722,6 +859,7 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 	}
 	paths := []string{start}
 	reads := 0
+	complete = true
 	for _, component := range strings.Split(rest, separator) {
 		if component == "" {
 			continue
@@ -734,8 +872,9 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 		}
 		var next []string
 		for _, dir := range paths {
-			if reads++; reads > actionGlobMaxReads {
-				return nil, false, false
+			if reads++; reads > actionGlobMaxReads || len(next) >= actionGlobMaxNames {
+				complete = false
+				break
 			}
 			directory, err := os.Open(dir)
 			if err != nil {
@@ -744,7 +883,9 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 				}
 				// Permission denied, or a home this process cannot see:
 				// the user's shell may still expand the pattern there.
-				return nil, false, true
+				// The siblings are still read.
+				complete, unseen = false, true
+				continue
 			}
 			names, err := directory.Readdirnames(actionGlobMaxNames + 1)
 			_ = directory.Close()
@@ -754,23 +895,20 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 				continue
 			}
 			if err != nil && err != io.EOF || len(names) > actionGlobMaxNames {
-				return nil, false, false
+				complete = false
 			}
 			for _, name := range names {
-				if actionGlobNameMatch(component, name) {
+				if actionGlobNameMatch(component, name) && !actionGlobSkipsDotName(component, name, dots) {
 					next = append(next, filepath.Join(dir, name))
 				}
 			}
-			if len(next) > actionGlobMaxNames {
-				return nil, false, false
-			}
 		}
 		if len(next) == 0 {
-			return nil, true, false
+			return nil, complete, unseen
 		}
 		paths = next
 	}
-	return paths, true, false
+	return paths, complete, unseen
 }
 
 // actionGlobNotDirectory reports that a listing failed because dir, or the
@@ -816,6 +954,13 @@ func actionGlobViewHidden(cwd, home string) bool {
 		}
 	}
 	return false
+}
+
+// actionGlobSkipsDotName reports a leading-dot name that the shell's * or ?
+// does not match. A bracket stays a match: the walk keeps the doubt.
+func actionGlobSkipsDotName(component, name string, dots func() bool) bool {
+	return runtime.GOOS != "windows" && strings.HasPrefix(name, ".") &&
+		(strings.HasPrefix(component, "*") || strings.HasPrefix(component, "?")) && !dots()
 }
 
 // actionGlobNameMatch matches one name component; names compare without case
@@ -909,11 +1054,12 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 			}
 			for j := i + 1; j+1 < len(call.Args); j++ {
 				option, static := StaticWord(call.Args[j], home)
-				if !static || !strings.HasPrefix(option, "-") {
+				if !static || !strings.HasPrefix(option, "-") && !strings.HasPrefix(option, "+") {
 					break
 				}
-				if option == "-o" {
-					j++ // This option consumes the next shell setting.
+				switch option {
+				case "-o", "+o", "-O", "+O", "--rcfile", "--init-file":
+					j++ // This option consumes the next word (bash -O dotglob -c).
 					continue
 				}
 				if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&

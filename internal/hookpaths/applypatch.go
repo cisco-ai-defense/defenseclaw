@@ -59,7 +59,7 @@ func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, hom
 			continue
 		}
 		if !patchTool {
-			known, calls := patchShellInvocationsKnown(text)
+			known, calls, _ := patchShellInvocationsKnown(text)
 			if !known {
 				return nil, false
 			}
@@ -203,6 +203,7 @@ var (
 
 // patchShellInvocationsKnown reports whether every apply_patch that a shell
 // text may run reads an envelope in that text, and how many calls are bound.
+// fedBody marks the body lines of the envelopes bound to a call.
 // Lines of an envelope body are
 // patch data, not shell, while the quote or here-document that feeds the
 // envelope is still open. That state is tracked from the top of the text: it
@@ -212,12 +213,14 @@ var (
 // is not a patch line, or any doubt about the state makes the rest of the
 // text shell, so an apply_patch in it counts as a call of its own, and the
 // envelope binds no call.
-func patchShellInvocationsKnown(text string) (bool, int) {
+func patchShellInvocationsKnown(text string) (known bool, calls int, fedBody []bool) {
 	lines := strings.Split(text, "\n")
 	bound := make([]int, len(lines))
 	body := make([]bool, len(lines))
+	fedBody = make([]bool, len(lines))
 	inert := make([]bool, len(lines))
-	known, cursor := true, 0
+	known = true
+	cursor := 0
 	for start := 0; start < len(lines); start++ {
 		begin := strings.Index(lines[start], patchBeginMarker)
 		if begin < 0 || strings.TrimSpace(lines[start][begin+len(patchBeginMarker):]) != "" {
@@ -265,25 +268,31 @@ func patchShellInvocationsKnown(text string) (bool, int) {
 		if direct == nil {
 			direct = patchPipedHeredoc.FindStringIndex(opener)
 		}
+		fed = false
 		if direct != nil && !strings.Contains(opener[direct[1]:], "<") && !strings.Contains(close, "<") {
 			bound[inputLine]++
+			fed = true
 		} else if patchPrinter.MatchString(opener) {
 			pipeLine := end
 			if patchPipeCall.MatchString(close) && !strings.Contains(close, "<") {
 				bound[pipeLine]++
+				fed = true
 			} else if end+1 < len(lines) {
 				// A pipe on the next line must continue the quoted printer.
 				next := strings.TrimSpace(lines[end+1])
 				if strings.HasPrefix(next, "'") || strings.HasPrefix(next, "\"") {
 					if patchPipeCall.MatchString(next) {
 						bound[end+1]++
+						fed = true
 					}
 				}
 			}
 		}
+		for i := start + 1; fed && i < end; i++ {
+			fedBody[i] = true
+		}
 		start = end
 	}
-	calls := 0
 	for i, line := range lines {
 		if inert[i] ||
 			!body[i] && !invokesApplyPatch(line) && bound[i] == 0 && !strings.ContainsAny(line, ";|&") {
@@ -292,10 +301,26 @@ func patchShellInvocationsKnown(text string) (bool, int) {
 		count := len(patchProgramWord.FindAllString(line, -1))
 		calls += count
 		if count > bound[i] {
-			return false, calls
+			return false, calls, nil
 		}
 	}
-	return true, calls
+	return true, calls, fedBody
+}
+
+// patchFedLines marks the lines inside every envelope in a shell text that
+// an apply_patch call reads: the "***" headers and the added, removed and
+// context lines. apply_patch writes only the files its headers name, so a
+// path in the other lines is file content (GAP-0781). It is nil when any
+// apply_patch in the text has an unknown input.
+func patchFedLines(text string) []bool {
+	known, calls, fedBody := patchShellInvocationsKnown(text)
+	if !known || calls == 0 {
+		return nil
+	}
+	if _, _, parsed := patchEnvelopePaths(text); !parsed {
+		return nil
+	}
+	return fedBody
 }
 
 // patchFeed is the quote, here-document or PowerShell here-string that carries
@@ -419,19 +444,48 @@ func plainShellText(text string) bool {
 }
 
 // shellNesting reports an escape, a line continuation, a here-document or
-// here-string, a command or parameter substitution, a PowerShell block comment
-// or a stop-parsing token, in sh or PowerShell. Quotes inside or after those
-// do not follow the plain quote rules of openQuote.
+// here-string, a command or parameter substitution, an ANSI-C $'...' quote,
+// a PowerShell block comment or a stop-parsing token, in sh or PowerShell.
+// Quotes inside or after those do not follow the plain quote rules of
+// openQuote. Text in single quotes is literal in both shells, so it is not
+// read: printf 'a\n' before an apply_patch heredoc is plain (GAP-0781).
 func shellNesting(text string) bool {
+	text = withoutSingleQuoted(text)
 	if strings.ContainsAny(text, "\\`") {
 		return true
 	}
-	for _, token := range []string{"<<", "<#", "@'", `@"`, "$(", "${", "--%"} {
+	for _, token := range []string{"<<", "<#", "@'", `@"`, "$(", "${", "$'", "--%"} {
 		if strings.Contains(text, token) {
 			return true
 		}
 	}
 	return false
+}
+
+// withoutSingleQuoted drops the text between single quotes that are not
+// inside double quotes, keeping the quotes. A double-quoted part stays,
+// since the shell expands it.
+func withoutSingleQuoted(text string) string {
+	var out strings.Builder
+	var quote byte
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		switch {
+		case quote == '\'':
+			if c != '\'' {
+				continue
+			}
+			quote = 0
+		case quote == '"':
+			if c == '"' {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		}
+		out.WriteByte(c)
+	}
+	return out.String()
 }
 
 // openQuote returns the quote character still open at the end of text, which
