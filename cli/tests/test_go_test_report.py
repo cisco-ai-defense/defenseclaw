@@ -1,0 +1,78 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts" / "go_test_report.py"
+
+
+def _run(events: list[dict], tmp_path: Path, *extra: str) -> tuple[str, list[dict]]:
+    stream = "# github.com/example/pkg [build output]\n" + "".join(json.dumps(e) + "\n" for e in events)
+    timings = tmp_path / "timings.json"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--timings", str(timings), *extra],
+        input=stream,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout, [json.loads(line) for line in timings.read_text(encoding="utf-8").splitlines()]
+
+
+def _out(test: str | None, text: str) -> dict:
+    event = {"Action": "output", "Package": "p", "Output": text}
+    if test:
+        event["Test"] = test
+    return event
+
+
+def test_quiet_log_keeps_failures_and_times(tmp_path: Path) -> None:
+    out, timings = _run(
+        [
+            _out("TestOk", "=== RUN   TestOk\n"),
+            _out("TestOk", "    ok_test.go:1: noise\n"),
+            {"Action": "pass", "Package": "p", "Test": "TestOk", "Elapsed": 3.5},
+            _out("TestBad", "    bad_test.go:2: boom\n"),
+            _out("TestBad/sub", "    bad_test.go:3: sub boom\n"),
+            {"Action": "fail", "Package": "p", "Test": "TestBad/sub", "Elapsed": 0.1},
+            {"Action": "fail", "Package": "p", "Test": "TestBad", "Elapsed": 1.0},
+            _out(None, "FAIL\tp\t5.0s\n"),
+            {"Action": "fail", "Package": "p", "Elapsed": 5.0},
+        ],
+        tmp_path,
+        "--annotate",
+        "shard 3 failed",
+    )
+
+    assert "noise" not in out and "=== RUN" not in out
+    assert "build output" in out and "boom" in out and "sub boom" in out and "FAIL\tp\t5.0s" in out
+    assert out.count("::error title=shard 3 failed::") == 1 and "::TestBad\n" in out
+    assert timings == [
+        {"Action": "pass", "Package": "p", "Test": "TestOk", "Elapsed": 3.5},
+        {"Action": "fail", "Package": "p", "Test": "TestBad", "Elapsed": 1.0},
+        {"Action": "fail", "Package": "p", "Elapsed": 5.0},
+    ]
+
+
+def test_a_test_still_running_at_the_end_is_named(tmp_path: Path) -> None:
+    # go test -timeout kills a hung test binary: its last test never ends.
+    out, _ = _run(
+        [
+            _out("TestHangs", "    hang_test.go:9: waiting for the daemon\n"),
+            _out(None, "panic: test timed out after 11m0s\n"),
+            _out(None, "\trunning tests:\n\t\tTestHangs (10m59s)\n"),
+            {"Action": "fail", "Package": "p", "Elapsed": 660.0},
+        ],
+        tmp_path,
+        "--annotate",
+        "shard 1 failed",
+    )
+
+    assert "panic: test timed out" in out
+    assert "=== still running when go test ended: TestHangs (p)" in out
+    assert "waiting for the daemon" in out
+    assert "::error title=shard 1 failed::TestHangs was still running" in out

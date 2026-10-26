@@ -14,6 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import re
 from pathlib import Path
 
 import yaml
@@ -26,7 +27,8 @@ def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
     exhaustive = (ROOT / ".github/workflows/telemetry-registry.yml").read_text(encoding="utf-8")
 
     assert "name: Python Test (shard ${{ matrix.shard }})" in workflow
-    assert "shard: [0, 1, 2, 3, 4, 5]" in workflow
+    assert "shard: [0, 1, 2, 3, 4, 5, 6, 7]" in workflow
+    assert "PYTHON_TEST_SHARDS: 8" in workflow
     assert "python3 scripts/python_test_shards.py" in workflow
     assert "--timings scripts/test-timings/python-linux.json" in workflow
     assert (ROOT / "scripts/test-timings/python-linux.json").is_file()
@@ -44,7 +46,7 @@ def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
     assert "needs: [changes, python-test, python-lint]" in workflow
     assert workflow.count("run: make py-lint") == 1
     assert "pattern: python-coverage-part-*" in workflow
-    assert 'test "${#coverage_parts[@]}" -eq 6' in workflow
+    assert 'test "${#coverage_parts[@]}" -eq 8' in workflow
     assert ".venv/bin/coverage combine" in workflow
     assert "run: make test" not in workflow
 
@@ -123,16 +125,20 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     assert "--package-dir internal/audit" in workflow
     assert "name: Go Test (remaining packages / shard ${{ matrix.shard }})" in workflow
     assert "GO_PACKAGE_SHARD: ${{ matrix.shard }}" in workflow
-    assert "GO_PACKAGE_SHARDS: 8" in workflow
-    assert "GO_TEST_SHARDS: 16" in workflow
+    assert "GO_PACKAGE_SHARDS: 12" in workflow
+    assert "GO_TEST_SHARDS: 20" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/audit" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/gateway" in workflow
     assert workflow.count("--timings scripts/test-timings/go-linux.json") == 3
-    # 16 gateway + 4 audit + 8 remaining-package shards, one profile each.
-    assert 'test "${#coverage_parts[@]}" -eq 28' in workflow
+    # 20 gateway + 4 audit + 12 remaining-package shards, one profile each.
+    assert 'test "${#coverage_parts[@]}" -eq 36' in workflow
     # checkptr in the transpiled SQLite doubled the cost of every race shard.
-    race = "go test -race -gcflags=modernc.org/...=-d=checkptr=0 "
-    assert workflow.count("go test -race ") == workflow.count(race) == 4
+    # A hang fails at go test's -timeout, well inside the job's budget, and
+    # go_test_report.py names the test still running.
+    race = "go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 11m "
+    assert workflow.count("go test -race") == 0
+    assert workflow.count(race) == 3
+    assert workflow.count("python3 scripts/go_test_report.py --timings") == 3
     assert "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]" in workflow
     assert 'test "$AUDIT_RESULT" = success' in workflow
     assert "python3 scripts/merge_go_coverage.py" in workflow
@@ -187,3 +193,45 @@ def test_make_gateway_test_runs_the_gateway_race_suite_only_as_bounded_shards() 
     assert gateway_runs and all("-timeout $(GO_TEST_TIMEOUT)" in line for line in gateway_runs)
     assert "$(GO_SHARD_RUN) --package-dir internal/gateway --" in target
     assert "GO_SHARD_RUN = $(HOST_PYTHON) scripts/go_test_shards.py" in makefile
+
+
+def _pull_request_jobs():
+    for path in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        triggers = workflow.get(True) or workflow.get("on") or {}
+        if "pull_request" not in triggers:
+            continue
+        for job_id, job in workflow["jobs"].items():
+            yield path.name, job_id, job
+
+
+# Jobs that never run on a pull request (they need a live agent login or a
+# self-hosted runner) keep the longer budget of their live sessions.
+LIVE_ONLY_JOBS = {
+    ("connector-live-e2e.yml", "live-matrix"),
+    ("connector-live-e2e.yml", "windows-live"),
+    ("connector-live-e2e.yml", "windows-copilot-live"),
+    ("connector-live-e2e.yml", "windows-antigravity-live"),
+    ("connector-live-e2e.yml", "windows-antigravity-held-state"),
+}
+
+
+def test_every_pull_request_job_has_a_twenty_minute_budget() -> None:
+    # A hung test or lane fails within the pull request's 20-minute budget
+    # instead of holding the PR for the default six hours.
+    for name, job_id, job in _pull_request_jobs():
+        if (name, job_id) in LIVE_ONLY_JOBS:
+            continue
+        budget = job.get("timeout-minutes")
+        assert isinstance(budget, int), f"{name}:{job_id} has no timeout-minutes"
+        assert budget <= 20, f"{name}:{job_id} timeout-minutes {budget} is over 20"
+
+
+def test_go_test_timeouts_stay_inside_the_job_budget() -> None:
+    # go test's own -timeout must fire before the job's timeout-minutes so a
+    # hung test prints Go's goroutine dump (the 1.0.4 gateway shard that hung
+    # was cancelled by the job at 50 minutes, before go test's 45m).
+    for name in ("ci.yml", "windows-native.yml"):
+        text = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+        for minutes in re.findall(r"-timeout[ =](\d+)m", text):
+            assert int(minutes) <= 14, f"{name}: go test -timeout {minutes}m leaves no room in a 20-minute job"
