@@ -252,14 +252,18 @@ type GatewayConfigurator struct {
 	// removes (the setup receipt).
 	StopSyncWritten func(*GatewayApplyResult)
 	// SyncSandboxes syncs each running MicroVM right before a restart of a
-	// service without the stop sync, the Homebrew launchd service's for one
-	// (GAP-1928; default SyncGatewaySandboxes on Discover).
+	// service without the stop sync, the Homebrew launchd service's for one,
+	// which launchd then stops at once (GAP-1928, GAP-2003; default
+	// SyncGatewaySandboxes on Discover).
 	SyncSandboxes func(context.Context, io.Writer) error
 	// Out hears which MicroVMs a sync before a restart synced or could not
 	// (default: nowhere).
 	Out io.Writer
 	// restartStopSync is the stop sync the last restart wrote.
 	restartStopSync *GatewayApplyResult
+	// rollingBack marks Rollback's restart, whose stop sync Rollback
+	// removes again (StopSyncWritten hears of it only when it stays).
+	rollingBack bool
 }
 
 // managedHost reports whether the gateway belongs to a managed host.
@@ -1726,13 +1730,22 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 		pending.putBack(g)
 		return fmt.Errorf("%w (the rollback was aborted: the active gateway files were kept and the gateway was not restarted)", err)
 	}
-	if err := g.restart(ctx); err != nil {
-		return err
+	// A stop sync this restart writes goes again right after it, so it is
+	// reported (and recorded for teardown) only when it stays (GAP-2004).
+	g.rollingBack = true
+	err = g.restart(ctx)
+	g.rollingBack = false
+	written := g.restartStopSync
+	if err == nil {
+		if written != nil {
+			stopSync.Files = append(stopSync.Files, written.Files...)
+		}
+		err = g.restore(ctx, stopSync)
 	}
-	if g.restartStopSync != nil {
-		stopSync.Files = append(stopSync.Files, g.restartStopSync.Files...)
+	if err != nil && written != nil && g.StopSyncWritten != nil {
+		g.StopSyncWritten(written)
 	}
-	return g.restore(ctx, stopSync)
+	return err
 }
 
 // restartMark is the pending-restart mark as it was before a rollback
@@ -1988,9 +2001,15 @@ func (g *GatewayConfigurator) Restart(ctx context.Context) error {
 
 // restart restarts the gateway service and waits until it is healthy,
 // with each running MicroVM's disk synced before it ends (syncBeforeRestart).
+// On macOS launchd stops the gateway right after that sync and Homebrew
+// starts it again (stopLaunchdGateway), so no slow brew run sits between
+// the sync and the stop (GAP-2003).
 func (g *GatewayConfigurator) restart(ctx context.Context) error {
 	g.syncBeforeRestart(ctx)
 	c := g.restartCommand()
+	if g.stopLaunchdGateway(ctx) {
+		c = serviceCommand{g.BrewCommand(), []string{"services", "start", GatewayFormula}}
+	}
 	if out, err := g.Runner.Output(ctx, Command{Name: c.name, Args: c.args, Timeout: 2 * time.Minute}); err != nil {
 		return fmt.Errorf("%w: %v: %s", errRestartCommand, err, strings.TrimSpace(string(out)))
 	}

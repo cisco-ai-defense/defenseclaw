@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -167,16 +168,39 @@ func TestEveryRestartGivesAMicroVMGatewayTheStopSyncFirst(t *testing.T) {
 	if err != nil || !res.Restarted || h.hasStopSync(t) {
 		t.Fatalf("apply before the stop sync = %+v, %v", res, err)
 	}
-	h.onDriver(t, "vm")
+	_, hw := h.onDriver(t, "vm")
 	before := len(h.serviceCalls())
 	if err := h.cfg.Rollback(ctx, res); err != nil {
 		t.Fatalf("Rollback = %v", err)
+	}
+	// GAP-2004: the stop sync teardown's restart wrote went again right
+	// after it, so teardown neither says it was added nor records it.
+	if len(*hw) != 0 {
+		t.Fatalf("teardown announced %d stop syncs it then removed", len(*hw))
 	}
 	if got := h.serviceCalls()[before:]; !slices.Equal(got, []string{"daemon-reload", "restart openshell-gateway", "daemon-reload"}) {
 		t.Fatalf("teardown service calls = %v, want the stop sync, the restart, then the reload without it", got)
 	}
 	if h.hasStopSync(t) || h.read(t, "gateway.toml") != operatorTOML {
 		t.Fatalf("after the teardown: stop sync kept, or gateway.toml %q", h.read(t, "gateway.toml"))
+	}
+
+	// A teardown whose restart fails keeps the stop sync it wrote: that one
+	// is announced and recorded, so the next teardown removes it.
+	k := newGatewayFixture(t)
+	k.runner.On("systemctl --user daemon-reload", "", nil)
+	k.write(t, "gateway.toml", operatorTOML)
+	kres, err := k.apply(k.plan(t, bindMounts))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, kw := k.onDriver(t, "vm")
+	k.runner.On("systemctl --user restart openshell-gateway", "", errors.New("exit status 1"))
+	if err := k.cfg.Rollback(ctx, kres); err == nil {
+		t.Fatal("Rollback succeeded with a restart that failed")
+	}
+	if !k.hasStopSync(t) || len(*kw) != 1 || (*kw)[0].Files[0].Path != k.stopSyncDropIn() {
+		t.Fatalf("a failed teardown restart: stop sync kept %v, written %+v", k.hasStopSync(t), *kw)
 	}
 
 	// A docker gateway's stop keeps what a workload wrote: no drop-in.
@@ -187,31 +211,77 @@ func TestEveryRestartGivesAMicroVMGatewayTheStopSyncFirst(t *testing.T) {
 	}
 }
 
-// GAP-1928: Homebrew's launchd service has no stop hook, so a restart of a
-// macOS MicroVM gateway syncs each running MicroVM right before the restart
-// command; a sync that fails does not refuse the restart (its check passed).
-func TestAMacOSRestartSyncsTheRunningMicroVMsFirst(t *testing.T) {
-	f := newGatewayFixture(t)
-	f.onDriver(t, "vm")
-	f.cfg.GOOS = "darwin"
-	f.cfg.BrewFormulaInstalled = func() bool { return true }
-	var order []string
-	f.cfg.SyncSandboxes = func(_ context.Context, out io.Writer) error {
-		order = append(order, "sync")
-		_, _ = io.WriteString(out, "could not sync the disk of sandbox raw\n")
-		return errors.New("raw: the supervisor does not answer")
-	}
-	var out bytes.Buffer
-	f.cfg.Out = &out
-	f.runner.OnFunc("brew services restart "+openshell.GatewayFormula, func(context.Context, openshell.Command) ([]byte, error) {
-		order = append(order, "restart")
-		return nil, nil
-	})
-	if err := f.cfg.Restart(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(order, []string{"sync", "restart"}) || f.hasStopSync(t) || !strings.Contains(out.String(), "could not sync the disk of sandbox raw") {
-		t.Fatalf("order %v, out %q", order, out.String())
+// GAP-1928, GAP-2003: Homebrew's launchd service has no stop hook, so a
+// restart of a macOS MicroVM gateway syncs each running MicroVM right
+// before its stop. `brew services restart` spent seconds in Homebrew before
+// it stopped the gateway, in which a raw-started MicroVM got ready and its
+// guest wrote what no sync saw. Now launchd stops the gateway at once after
+// the sync and `brew services start` starts it after. The fake models the
+// window: a brew run on a running gateway lets a raw start get ready and
+// write, and a stop with unsynced work loses it. A sync that fails does not
+// refuse the restart (its check passed).
+func TestAMacOSRestartStopsTheGatewayRightAfterTheSync(t *testing.T) {
+	uid := strconv.Itoa(os.Getuid())
+	label := "homebrew.mxcl." + filepath.Base(openshell.GatewayFormula)
+	for _, tc := range []struct {
+		name, loadedIn string
+		want           []string
+	}{
+		{"graphical session", "gui", []string{"sync", "bootout gui", "start"}},
+		{"background session", "user", []string{"sync", "bootout gui", "bootout user", "start"}},
+		{"no launchd job", "", []string{"sync", "bootout gui", "bootout user", "restart"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGatewayFixture(t)
+			f.onDriver(t, "vm")
+			f.cfg.GOOS = "darwin"
+			f.cfg.BrewFormulaInstalled = func() bool { return true }
+			var order []string
+			running, unsynced, lost := true, false, false
+			stop := func() {
+				lost = lost || unsynced
+				running, unsynced = false, false
+			}
+			f.cfg.SyncSandboxes = func(_ context.Context, out io.Writer) error {
+				order = append(order, "sync")
+				unsynced = false
+				_, _ = io.WriteString(out, "could not sync the disk of sandbox raw\n")
+				return errors.New("raw: the supervisor does not answer")
+			}
+			var out bytes.Buffer
+			f.cfg.Out = &out
+			for _, domain := range []string{"gui", "user"} {
+				f.runner.OnFunc("launchctl bootout "+domain+"/"+uid+"/"+label, func(context.Context, openshell.Command) ([]byte, error) {
+					order = append(order, "bootout "+domain)
+					if domain != tc.loadedIn {
+						return []byte("Boot-out failed: 3: No such process"), errors.New("exit status 3")
+					}
+					stop()
+					return nil, nil
+				})
+			}
+			for _, verb := range []string{"restart", "start"} {
+				f.runner.OnFunc("brew services "+verb+" "+openshell.GatewayFormula, func(context.Context, openshell.Command) ([]byte, error) {
+					order = append(order, verb)
+					if running {
+						// Homebrew's seconds before its stop.
+						unsynced = true
+						stop()
+					}
+					running = true
+					return nil, nil
+				})
+			}
+			if err := f.cfg.Restart(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(order, tc.want) || f.hasStopSync(t) || !strings.Contains(out.String(), "could not sync the disk of sandbox raw") {
+				t.Fatalf("order %v, want %v; out %q", order, tc.want, out.String())
+			}
+			if tc.loadedIn != "" && lost {
+				t.Fatal("the restart stopped the gateway with work a raw-started MicroVM wrote after the sync")
+			}
+		})
 	}
 }
 

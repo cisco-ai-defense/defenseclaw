@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	pathpkg "path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,8 +42,11 @@ import (
 // started it and whoever stops the gateway, before the gateway goes down.
 // Every DefenseClaw restart makes sure the service has it first
 // (GAP-1927); a service that cannot have it, the Homebrew launchd one, has
-// each running MicroVM synced right before the restart command instead
-// (GAP-1928).
+// each running MicroVM synced right before its stop instead, with nothing
+// slow in between: launchd stops the gateway at once after the sync, and
+// only then does `brew services start` start it again (GAP-1928, GAP-2003).
+// A raw start after the sync is still booting when the gateway stops: its
+// guest has written nothing yet.
 
 // stopSyncDropIn is the systemd drop-in that gives the gateway's user unit
 // that ExecStop. It sits next to the umask drop-in (vmUnitDropIn).
@@ -165,7 +170,7 @@ func (g *GatewayConfigurator) syncBeforeRestart(ctx context.Context) {
 			fmt.Fprintf(g.out(), "the %s service could not get the stop sync of its MicroVMs (%v): syncing them before the restart instead\n", GatewayService, err)
 		case res != nil:
 			g.restartStopSync = res
-			if g.StopSyncWritten != nil {
+			if g.StopSyncWritten != nil && !g.rollingBack {
 				g.StopSyncWritten(res)
 			}
 		}
@@ -182,6 +187,31 @@ func (g *GatewayConfigurator) syncBeforeRestart(ctx context.Context) {
 	// SyncRunningSandboxes names each sandbox it could not sync; a gateway
 	// that cannot be reached or listed has nothing it could sync.
 	_ = syncAll(ctx, g.out())
+}
+
+// brewServiceLabel is the launchd job label of Homebrew's GatewayFormula
+// service (Homebrew's homebrew.mxcl.<formula name>).
+var brewServiceLabel = "homebrew.mxcl." + pathpkg.Base(GatewayFormula)
+
+// stopLaunchdGateway stops the gateway that launchd runs as Homebrew's
+// service, at once and before any brew run (`brew services restart` first
+// spends seconds in Homebrew before its stop, in which a raw-started
+// MicroVM gets ready and writes what the sync before it never saw:
+// GAP-2003). It reports whether launchd stopped it, which leaves the start
+// to `brew services start`; false (off macOS, a managed host, no such job
+// loaded in the account's graphical or background session) leaves the
+// whole restart to the restart command.
+func (g *GatewayConfigurator) stopLaunchdGateway(ctx context.Context) bool {
+	if g.GOOS != "darwin" || g.managedHost() {
+		return false
+	}
+	uid := strconv.Itoa(os.Getuid())
+	for _, domain := range []string{"gui/" + uid, "user/" + uid} {
+		if _, err := g.Runner.Output(ctx, Command{Name: "launchctl", Args: []string{"bootout", domain + "/" + brewServiceLabel}, Timeout: time.Minute}); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // runsMicroVMs reports whether the gateway runs, or is configured to run,
