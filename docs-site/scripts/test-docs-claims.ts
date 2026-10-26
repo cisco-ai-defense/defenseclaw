@@ -1509,7 +1509,6 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0727", page: "reference/commands/cli.mdx", lacks: ["is moved to `~/.defenseclaw-backup-<UTC time>` first"] },
   { gap: "GAP-1654", page: "enterprise/install/reference/linux.mdx", has: ["Accounts the deployment never enrolled keep their DefenseClaw files"] },
   { gap: "GAP-1542", page: "enterprise/operate/lifecycle.mdx", has: ["`--purge` removes everything DefenseClaw installed", "`eDSPermissionError`"] },
-  { gap: "GAP-0722", page: "reference/edge-connector/configuration.mdx", lacks: ["the message names the missing file instead"] },
   { gap: "GAP-0286", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["the old gateway's audit row can still say allow", "the gateway records such a call as unconfirmed"] },
   { gap: "GAP-1563", page: "troubleshooting/known-limits.mdx", section: "Codex", has: ["shows `Config check: not run` because the sandbox hides who owns your folders"] },
   { gap: "GAP-1600, GAP-1748", page: "how-to/observability/send-to-splunk.mdx", has: ["setup stops with exit 1 and saves nothing", "run `defenseclaw observability destination test <name>`"] },
