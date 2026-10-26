@@ -1034,11 +1034,10 @@ refresh_hook_fail_modes() {
     # the swap. An open the config sets stays open, from a DEFENSECLAW_CONFIG
     # outside the data directory too. Used when no gateway runs; a running
     # one gets hold_hook_fail_modes.
-    [[ -d "${DEFENSECLAW_HOME}/hooks" ]] || return 0
     local probe=0
     hook_fail_mode_refresh_probe || probe=$?
     case ${probe} in
-        0) "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --data-dir "${DEFENSECLAW_HOME}" ;;
+        0) "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes ;;
         1) return 0 ;;
         *) return 1 ;;
     esac
@@ -1054,7 +1053,6 @@ hold_hook_fail_modes() {
     # runs or shuts down, and they would follow that open while it is down.
     # Returns once the first refresh is written and the lock held;
     # finish_hook_fail_mode_hold waits for the rest.
-    [[ -d "${DEFENSECLAW_HOME}/hooks" ]] || return 0
     local probe=0 waited=0
     hook_fail_mode_refresh_probe || probe=$?
     case ${probe} in
@@ -1064,7 +1062,7 @@ hold_hook_fail_modes() {
     esac
     HOLD_LOG="${STAGING}/refresh-fail-modes.log"
     : >"${HOLD_LOG}"
-    "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --data-dir "${DEFENSECLAW_HOME}" \
+    "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes \
         --hold-until-exit "$1" >"${HOLD_LOG}" 2>&1 &
     HOLD_PID=$!
     while ! grep -q "Holding the hook fail modes" "${HOLD_LOG}" 2>/dev/null; do

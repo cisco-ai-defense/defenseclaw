@@ -675,19 +675,23 @@ async function defenseclawRetryBusy(send, signal) {
 }
 
 // defenseclawForeignHookCheck asks the administrator-owned hook binary for
-// the foreign-hook guard's decision and resolves to a block reason, or ""
-// when no unapproved plugin or hook is present. A binary that cannot be
+// the foreign-hook guard's decision and resolves to { reason, retryable }: a
+// block reason, or "" when no unapproved plugin or hook is present, and
+// whether the block is an availability failure (the check could not run, or
+// the guard says the gateway could not answer for the session). A confirmed
+// foreign plugin loaded with OpenCode stays loaded for this process, so only
+// an availability failure lets a later call retry the load-time check. A binary that cannot be
 // run, times out, or answers anything but {"deny": false} blocks, unless
 // the managed deployment was uninstalled (its install marker is gone):
 // uninstall removes the hook binary too, and this plugin then stops failing
 // closed as it does for the gateway call.
 function defenseclawForeignHookCheck(event, cwd) {
-  if (!DC_FOREIGN_GUARD) return Promise.resolve("");
+  if (!DC_FOREIGN_GUARD) return Promise.resolve({ reason: "", retryable: false });
   return new Promise((resolve) => {
     const fail = (why) => {
       void defenseclawDeploymentRemoved().then((removed) => resolve(removed
-        ? ""
-        : defenseclawForeignCheckFailure(event, why)));
+        ? { reason: "", retryable: false }
+        : { reason: defenseclawForeignCheckFailure(event, why), retryable: true }));
     };
     try {
       const child = execFile(
@@ -707,12 +711,17 @@ function defenseclawForeignHookCheck(event, cwd) {
             return;
           }
           if (verdict && verdict.deny === false) {
-            resolve("");
+            resolve({ reason: "", retryable: false });
             return;
           }
-          resolve(verdict && typeof verdict.reason === "string" && verdict.reason
-            ? verdict.reason
-            : "DefenseClaw blocked this tool call because an unapproved plugin is present.");
+          resolve({
+            reason: verdict && typeof verdict.reason === "string" && verdict.reason
+              ? verdict.reason
+              : "DefenseClaw blocked this tool call because an unapproved plugin is present.",
+            // Only the guard's structured answer marks a deny as the gateway
+            // not answering, never the text of its reason.
+            retryable: Boolean(verdict && verdict.retryable === true),
+          });
         },
       );
       if (child.stdin) {
@@ -726,17 +735,16 @@ function defenseclawForeignHookCheck(event, cwd) {
 }
 
 // defenseclawForeignCheckFailure is the block reason when the foreign-plugin
-// check itself could not run. OpenCode loads plugins once, so a check that
-// failed at load keeps blocking for the life of this process; that reason
-// says to restart the agent.
+// check itself could not run. A later tool call retries this startup check.
 function defenseclawForeignCheckFailure(event, why) {
   const detail = String(why || "").split(/\r?\n/)[0].trim() || "no answer";
   if (event === "defenseclaw.plugin.loaded") {
     return "DefenseClaw could not check for unapproved plugins when the agent started (" + detail +
-      "), so this tool call is blocked. Restart the agent once DefenseClaw is available.";
+      "), so this tool call is blocked. Retry when DefenseClaw is available.";
   }
   return "DefenseClaw could not check for unapproved plugins (" + detail + "), so this tool call is blocked.";
 }
+
 
 // defenseclawBlockError is the error a blocked tool call fails with. OpenCode
 // shows it as the tool's error and hands it to the model, so it says that
@@ -808,6 +816,7 @@ async function defenseclawLogFailOpen(reason, category, context) {
         fail_mode: "open",
 		session_id: String(context && (context.sessionID || context.sessionId) || "").slice(0, 256),
 		call_id: String(context && (context.callID || context.callId) || randomBytes(16).toString("hex")).slice(0, 256),
+        outcome: "fail_open",
       }) + "\n");
     } finally {
       await file.close();
@@ -869,10 +878,11 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       payload.tool_response = toolResult;
       payload.tool_result = toolResult;
     }
+    const body = JSON.stringify(payload);
     const res = await defenseclawRetryBusy(() => defenseclawFetch("/api/v1/opencode/hook", {
       method: "POST",
       headers,
-      body: JSON.stringify(payload),
+      body,
       signal: controller.signal,
     }, token), controller.signal);
     if (!res.ok) {
@@ -1012,7 +1022,7 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
   // OpenCode loads plugins once at startup: a foreign plugin present now
   // keeps running for this process even if its file is deleted later, so a
   // block found at load holds for the whole process.
-  const defenseclawStartupGuard = defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
+  let defenseclawStartupGuard = defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
   return {
     config: async (config) => {
       defenseclawConfigure(config);
@@ -1039,9 +1049,13 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
       if (await defenseclawManagedLifecycleHeld()) throw defenseclawBlock(client, DC_MANAGED_LIFECYCLE_TEXT);
       // Every call runs the check, also after a block at load (which holds
       // for the process), so the gateway records each denied call.
-      const startupBlock = await defenseclawStartupGuard;
-      const callBlock = await defenseclawForeignHookCheck("tool.execute.before", cwd);
-      const blocked = startupBlock || callBlock;
+      if (!defenseclawStartupGuard) {
+        defenseclawStartupGuard = defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
+      }
+      const startup = await defenseclawStartupGuard;
+      if (startup.retryable) defenseclawStartupGuard = null;
+      const callBlock = (await defenseclawForeignHookCheck("tool.execute.before", cwd)).reason;
+      const blocked = startup.reason || callBlock;
       if (blocked) throw defenseclawBlock(client, blocked);
       const mcpIdentity = defenseclawResolveMCPServer(input && input.tool);
       const verdict = await defenseclawPost(

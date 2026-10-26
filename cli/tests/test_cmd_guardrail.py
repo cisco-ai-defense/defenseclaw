@@ -782,11 +782,12 @@ def test_amp_open_preview_and_help_scope_failure_rows_to_per_user_outages() -> N
         "On a per-user install the outage behavior",
         "| `default` (balanced",
         "| Gateway service not running",
-        "When the gateway is down or answers 5xx",
     ):
         line = next(line for line in page_text.splitlines() if line.startswith(prefix))
         assert "hook-failures.jsonl" in line, line
         assert "except for Amp" not in line and "Amp has no such writer" not in line, line
+    stop_events = page_text.split("### Stop and session-end events", 1)[1].split("### ", 1)[0]
+    assert "[gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)" in stop_events
 
 
 def test_per_user_amp_outage_open_template_records_an_actionable_call() -> None:

@@ -47,6 +47,36 @@ func listedUIDs(accounts []enterprisehooks.IdentitySpoolAccount) (listed, left [
 	return listed, left
 }
 
+// GAP-0677: a machine-policy hook accepts a newly created local login even
+// before the per-user enumerator has found an agent or written an eligible
+// account row. The root guardian must spool that account's identity proof
+// so the service-account gateway can match numeric group assignments on its
+// first Codex call, as root profile-explain already can.
+func TestMachinePolicyWarmsFreshLocalAccountIdentityWithoutEnrollmentRow(t *testing.T) {
+	identityCallerTestConfig(t)
+	cfg.Enterprise.Enrollment.UnenrolledUsers = config.EnterpriseUnenrolledInspect
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{Profile: "numeric", Match: config.ProfileMatch{Groups: []string{"49202"}}}}
+	previousMachine, previousLocal := enterpriseHookLoadMachinePolicyConnectors, enterpriseHookLocalAccounts
+	t.Cleanup(func() {
+		enterpriseHookLoadMachinePolicyConnectors = previousMachine
+		enterpriseHookLocalAccounts = previousLocal
+	})
+	enterpriseHookLoadMachinePolicyConnectors = func() ([]string, error) { return []string{"codex"}, nil }
+	enterpriseHookLocalAccounts = func(context.Context) (map[string]int, error) {
+		return map[string]int{"fresh": 1006, "numeric": 49201, "system": 2}, nil
+	}
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"fresh":   {Name: "fresh", UID: 1006, GID: 49202},
+		"numeric": {Name: "numeric", UID: 49201, GID: 49202},
+	}})
+	accounts, keys, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, t.TempDir(), enterpriseHookReconcileRun{})
+	listed, _ := listedUIDs(accounts)
+	if !slices.Contains(listed, 1006) || !slices.Contains(listed, 49201) || slices.Contains(listed, 2) ||
+		!slices.Contains(keys, "1006:fresh") || !slices.Contains(keys, "49201:numeric") {
+		t.Fatalf("fresh machine-policy callers: accounts %+v keys %v", accounts, keys)
+	}
+}
+
 // GAP-0399: an exempt account calls the managed hook socket although the
 // enumerator gives it no row or eligible-account entry. Its record keeps
 // being refreshed, so its UPN profile survives the hourly expiry. An

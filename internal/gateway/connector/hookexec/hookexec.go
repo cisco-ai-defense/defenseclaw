@@ -287,6 +287,10 @@ type Options struct {
 	// The already bounded input is retained for failure-only audit correlation
 	// and session warning deduplication. It is never written to the audit log.
 	failurePayload []byte
+	// oversizedReview marks a balanced per-user call whose bounded prefix was
+	// sent to the gateway (OversizeUninspectedField). Only its answered allow
+	// gets the size warning.
+	oversizedReview bool
 	// answerBy is the answer deadline of a tool call (answerDeadline);
 	// doRequest sets it, and the request then asks for progress reports.
 	answerBy time.Time
@@ -582,7 +586,7 @@ func runHook(ctx context.Context, opts Options) int {
 	}
 	if overflow {
 		opts.Event = managedHermesPrefixEvent(opts, sp, payload)
-		return handleOversized(opts, sp, failMode, payload)
+		return handleOversized(ctx, opts, sp, failMode, payload, startedAt)
 	}
 	if strings.EqualFold(strings.TrimSpace(opts.Connector), "codex") {
 		event, bindingErr := validateCodexInvocationBinding(
@@ -1204,6 +1208,17 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 
 	code := sp.decide(opts, body)
+	if opts.oversizedReview && validUniqueGatewayResponse(body) {
+		var verdict struct {
+			Action string `json:"action"`
+		}
+		if json.Unmarshal(body, &verdict) == nil && (verdict.Action == "allow" || verdict.Action == "alert") {
+			quiet := opts
+			quiet.Stderr = io.Discard
+			logHookFailure(quiet, sp, "stdin body exceeded cap; oversize, command not inspected", "transport", "open", false)
+			fmt.Fprintf(opts.Stderr, "defenseclaw: warning: %s hook payload exceeded the bounded inspection cap (oversize, command not inspected); gateway allowed this call and recorded its verdict\n", sp.connector)
+		}
+	}
 	if delivery != nil && resp.StatusCode == http.StatusOK && readErr == nil {
 		opts.answerWatch.setDeliveryReceipt(func(answered, localBlock bool) {
 			// finish calls this only after it writes the answer to the agent.
@@ -2164,11 +2179,31 @@ func handleUnavailableHome(opts Options, sp spec, failMode, reason string) int {
 
 // handleOversized mirrors the per-connector oversized-payload branch. prefix
 // is the start of the payload the hook read before it stopped at its cap.
-func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int {
+func handleOversized(ctx context.Context, opts Options, sp spec, failMode string, prefix []byte, startedAt time.Time) int {
 	failMode = closeDuringInstall(&opts, failMode)
-	// An input the hook cannot fully read is a local parse failure, never
-	// an outage. Outside Secure Client it closes even if a per-user hook
-	// had an explicit open outage preference.
+	// The bounded read has inspected no more than MaxBody+1 bytes. A balanced
+	// per-user hook asks the gateway to judge the metadata and content prefix.
+	// Only a gateway allow permits the call; a transport outage follows the
+	// existing per-user outage rule in sendToGateway.
+	if !opts.ManagedEnterprise && !opts.SecureClient && !opts.StrictAvailability &&
+		opts.OutageFailModeNow != nil && normalizeFailMode(opts.OutageFailModeNow()) == "open" && !perUserInstallWindow(opts) {
+		// A prefix the reducer cannot turn into one request (a duplicated
+		// key) keeps the closed oversize answer below. Every review is marked
+		// uninspected (OversizeUninspectedField): the gateway warns and
+		// audits it in observe mode and blocks it in action mode.
+		bound := opts.Event
+		if sp.connector == "copilot" || sp.connector == "antigravity" {
+			bound = "" // their bodies carry no event; the request header binds it
+		}
+		if review := oversizedReviewPayload(prefix, bound); review != nil {
+			if strings.TrimSpace(opts.Event) == "" {
+				opts.Event = resolveHookEvent("", review)
+			}
+			opts.oversizedReview = true
+			return sendToGateway(ctx, opts, sp, failMode, review, startedAt)
+		}
+	}
+	// All managed and strict hooks keep their closed local-failure behavior.
 	failMode = managedNonOutageMode(&opts, failMode)
 	if !opts.SecureClient {
 		failMode, opts.FailMode = "closed", "closed"
@@ -2348,8 +2383,7 @@ func perUserInstallWindow(opts Options) bool {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || strings.TrimSpace(opts.Home) == "" {
 		return false
 	}
-	_, err := os.Lstat(filepath.Join(opts.Home, installLockName))
-	return !errors.Is(err, os.ErrNotExist)
+	return installLockHeld(opts.Home)
 }
 
 // Copilot ignores a failed hook process. During a per-user install every

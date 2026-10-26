@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
@@ -76,6 +77,21 @@ func pluginInstallWindowCases(t *testing.T, asset, extension, harness string) {
 			}
 			if string(afterLog) != string(beforeLog) {
 				t.Fatalf("%s logged a blocked install call as fail-open", failure)
+			}
+			then := time.Now().Add(-11 * time.Minute)
+			if err := os.Chtimes(lock, then, then); err != nil {
+				t.Fatal(err)
+			}
+			outside("expired install lock")
+			if err := os.Chtimes(lock, time.Now(), time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(lock, "pid"), []byte("99999999\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			outside("dead install owner")
+			if err := os.Remove(filepath.Join(lock, "pid")); err != nil {
+				t.Fatal(err)
 			}
 			if err := os.Remove(lock); err != nil {
 				t.Fatal(err)

@@ -60,6 +60,41 @@ func oldHookFailMode(t *testing.T, home, connector string) string {
 	return state.FailModes[connector]
 }
 
+func TestRefreshFailModesUsesConfiguredDataDirectoryWithoutInstallerOverride(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	isolateHookEnvForTest(t, home)
+	configPath := filepath.Join(home, "config.yaml")
+	configBody := "config_version: 9\ndata_dir: " + dataDir + "\nobservability: {}\nguardrail:\n  mode: action\n  rule_pack: strict\n"
+	if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open"}}`)
+	writeHookSidecarForTest(t, dataDir, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open"}}`)
+	previousCfg, previousDir, previousJSON := cfg, connectorFlagDataDir, connectorFlagJSON
+	t.Cleanup(func() { cfg, connectorFlagDataDir, connectorFlagJSON = previousCfg, previousDir, previousJSON })
+	connectorFlagDataDir, connectorFlagJSON = "", true
+	var out bytes.Buffer
+	connectorRefreshFailModesCmd.SetOut(&out)
+	t.Cleanup(func() { connectorRefreshFailModesCmd.SetOut(nil) })
+	if err := runConnectorRefreshFailModes(connectorRefreshFailModesCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	var result refreshFailModesResult
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("refresh output %q: %v", out.String(), err)
+	}
+	if result.Config != "loaded" || !reflect.DeepEqual(result.Refreshed, []string{"codex"}) {
+		t.Fatalf("refresh %+v", result)
+	}
+	if got := oldHookFailMode(t, dataDir, "codex"); got != "closed" {
+		t.Fatalf("configured data dir hook mode = %q, want closed", got)
+	}
+	if got := oldHookFailMode(t, home, "codex"); got != "open" {
+		t.Fatalf("default home hook mode = %q, want untouched open", got)
+	}
+}
+
 func isolateHookEnvForTest(t *testing.T, home string) {
 	t.Helper()
 	t.Setenv("DEFENSECLAW_HOME", home)

@@ -1171,7 +1171,9 @@ defenseclaw_log_hook_failure() {
   esac
   # A per-user outage the hook lets through gets its one warning, with the
   # cause and the fix, from defenseclaw_emit_unreachable_stderr.
-  if [ "$outcome" = "fail_open" ] && ! { [ "$category" = transport ] && defenseclaw_per_user_outage_open; }; then
+  if [ "$outcome" = "fail_open" ] &&
+     ! { [ "$category" = transport ] && defenseclaw_per_user_outage_open; } &&
+     ! { [[ "$reason" = "stdin body exceeded "* ]] && defenseclaw_per_user_oversize_open; }; then
     printf 'defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %s\n' \
       "$(defenseclaw_json_escape "$connector")" "$(defenseclaw_json_escape "$hook_name")" \
       "$(defenseclaw_json_escape "$category")" "$(defenseclaw_json_escape "$reason")" >&2 || true
@@ -1281,6 +1283,78 @@ defenseclaw_config_outage_open() {
     fi
   fi
   [ "$_DC_CONFIG_OUTAGE_MODE" = open ]
+}
+
+# A completed bounded read can be sent for prefix review in the balanced
+# per-user tier. The installed flat record carries that tier.
+defenseclaw_per_user_oversize_open() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in 1|true|TRUE|yes|YES) return 1 ;; esac
+  [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
+  [ "${_DC_SECURE_CLIENT_HOOK:-0}" != 1 ] || return 1
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in 1|true|TRUE|yes|YES) return 1 ;; esac
+  ! defenseclaw_install_held || return 1
+  local connector="${DEFENSECLAW_HOOK_CONNECTOR:-}" record="" recorded="" mode="" source=""
+  [ "$connector" != inspect ] || connector="${RUNTIME_CONNECTOR:-}"
+  case "$connector" in ""|*[!a-z0-9_-]*) return 1 ;; esac
+  [ -n "${HOOK_DIR:-}" ] || return 1
+  record="${HOOK_DIR}/.hookcfg.${connector}"
+  recorded="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_CONNECTOR 2>/dev/null)" || return 1
+  mode="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_FAIL_MODE 2>/dev/null)" || return 1
+  source="$(defenseclaw_flat_hookcfg_value "$record" FAIL_MODE_SOURCE 2>/dev/null)" || return 1
+  [ "$recorded" = "$connector" ] && [ "$mode" = open ] && [ "$source" = config ]
+}
+
+# Prepare a valid request from the cap's prefix. The pinned installed helper
+# uses the same JSON encoder as the native hook. A missing or changed helper
+# is a local failure and stays closed; it cannot create another allow path.
+defenseclaw_prepare_oversized_stdin() {
+  if _defenseclaw_prepare_oversized_stdin_impl "$@"; then
+    return 0
+  fi
+  if [ "${1:-}" = 3 ]; then
+    defenseclaw_log_hook_failure "${DEFENSECLAW_HOOK_CONNECTOR:-unknown}" "${DEFENSECLAW_HOOK_NAME:-unknown}" \
+      "oversized prefix review unavailable" transport closed fail_closed
+  fi
+  return 1
+}
+
+_defenseclaw_prepare_oversized_stdin_impl() {
+  [ "${1:-}" = 3 ] && defenseclaw_per_user_oversize_open || return 1
+  local root="${DEFENSECLAW_AGENT_HOME:-}" bin mode path
+  case "$root" in /*) ;; *) return 1 ;; esac
+  bin="$root/.local/bin/defenseclaw-hook-post"
+  for path in "$root" "$root/.local" "$root/.local/bin"; do
+    [ -d "$path" ] && [ -O "$path" ] && [ ! -L "$path" ] || return 1
+    mode="$(stat -c %a "$path" 2>/dev/null || stat -f %Lp "$path" 2>/dev/null)" || return 1
+    case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+    [ $((8#$mode & 8#022)) -eq 0 ] || return 1
+  done
+  [ -f "$bin" ] && [ -x "$bin" ] && [ -O "$bin" ] && [ ! -L "$bin" ] || return 1
+  mode="$(stat -c %a "$bin" 2>/dev/null || stat -f %Lp "$bin" 2>/dev/null)" || return 1
+  case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+  [ $((8#$mode & 8#022)) -eq 0 ] || return 1
+  PAYLOAD="$(printf '%s' "$PAYLOAD" | (
+    if [ -n "${_DC_HOOK_NATIVE_VMEM_LIMIT:-}" ]; then
+      ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 1
+    fi
+    exec "$bin" prefix-review --event "${BOUND_EVENT:-}"
+  ))" || return 1
+  # A reached gateway's malformed or error answer stays closed. The outage
+  # resolver reads the installed record independently of this response mode.
+  FAIL_MODE=closed
+  [ -n "$PAYLOAD" ]
+}
+
+defenseclaw_warn_reviewed_oversize() {
+  case "$1" in *'"bounded_prefix_review":true'*) ;; *) return 0 ;; esac
+  local response="$2" status result action
+  status="${response##*$'\n'}"
+  case "$status" in 200|201|202) ;; *) return 0 ;; esac
+  result="${response%$'\n'*}"
+  action="$(defenseclaw_json_string_field "$result" action 2>/dev/null)" || return 0
+  case "$action" in
+    allow|alert) printf 'defenseclaw: warning: hook payload exceeded the bounded inspection cap; the gateway allowed and audited this call\n' >&2 ;;
+  esac
 }
 
 defenseclaw_hook_delivery_outcome() {
@@ -1690,7 +1764,7 @@ defenseclaw_gateway_cold_start() {
   data="${HOOK_DIR}/.."
   [ -d "$data" ] && [ -f "${data}/config.yaml" ] || return 1
   [ ! -e "${data}/gateway.stopped" ] || return 1
-  [ ! -e "${data}/.install.lock" ] || return 1
+  ! defenseclaw_install_lock_held "$data" || return 1
   [ ! -e "${data}/.disabled" ] || return 1
   lock="${data}/.cold-start.lock"
   token="$$.${RANDOM}${RANDOM}"
@@ -1822,7 +1896,7 @@ defenseclaw_await_gateway() {
     # An operator stop is not a restart: the fail mode applies at once. An
     # install or upgrade stops the gateway the same way and starts it again
     # when it is done (.install.lock), so that one is (GAP-0140).
-    [ ! -e "${data}/gateway.stopped" ] || [ -e "${data}/.install.lock" ] || return "$status"
+    [ ! -e "${data}/gateway.stopped" ] || defenseclaw_install_lock_held "$data" || return "$status"
     if [ "$status" = 7 ] && [ -z "$launched" ]; then
       launched=1
       defenseclaw_gateway_cold_start || true
@@ -2186,7 +2260,7 @@ defenseclaw_should_fail_closed_on_unreachable() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) ;;
     *) [ -n "${DEFENSECLAW_HOOK_SOCKET:-}" ] ||
-      [ ! -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/.install.lock" ] || return 0 ;;
+      ! defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}" || return 0 ;;
   esac
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 0 ;;
@@ -2447,7 +2521,7 @@ defenseclaw_unreachable_next_step() {
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-  if [ -e "${data}/.install.lock" ]; then
+  if defenseclaw_install_lock_held "$data"; then
     printf '%s' 'DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done; try again in a moment, or run the installer again if it has stopped (`defenseclaw-gateway status` shows its state)'
   elif [ -e "${data}/gateway.stopped" ]; then
     printf '%s' 'the gateway was stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection (`defenseclaw-gateway status` shows its state)'
@@ -2615,12 +2689,13 @@ data=sys.stdin.buffer.read(cap+1)
 if b"\0" in data:
     sys.exit(4)
 if len(data)>cap:
+    sys.stdout.buffer.write(data[:cap])
     sys.exit(3)
 sys.stdout.buffer.write(data+b"x")')"
     _dc_rc=$?
     case "$_dc_rc" in
-      3) _dc_stdin_refused "$cap" overflow "$overflow_outcome"; return 1 ;;
-      4) _dc_stdin_refused "$cap" nul "$overflow_outcome"; return 1 ;;
+      3) _dc_stdin_refused "$cap" overflow "$overflow_outcome"; printf '%s' "$_dc_body"; return 3 ;;
+      4) _dc_stdin_refused "$cap" nul "$overflow_outcome"; return 4 ;;
     esac
     printf '%s' "${_dc_body%x}"
     return 0
@@ -2639,18 +2714,19 @@ sys.stdout.buffer.write(data+b"x")')"
   _dc_read_stdin_exact "$cap" "$overflow_outcome"
 }
 
-# _dc_read_stdin_exact prints stdin unchanged, or refuses it (returns 1, prints
-# nothing) when it has a NUL byte or more than $1 bytes. LC_ALL=C makes
+# _dc_read_stdin_exact prints stdin unchanged, or refuses it (returns 4 for
+# NUL, 3 for overflow, and prints nothing). LC_ALL=C makes
 # ${#body} a byte count. See defenseclaw_read_stdin_capped.
 _dc_read_stdin_exact() {
   local cap="$1" outcome="$2" body="" LC_ALL=C
   if IFS= read -r -d '' body; then
     _dc_stdin_refused "$cap" nul "$outcome"
-    return 1
+    return 4
   fi
   if [ "${#body}" -gt "$cap" ]; then
     _dc_stdin_refused "$cap" overflow "$outcome"
-    return 1
+    printf '%s' "${body:0:cap}"
+    return 3
   fi
   printf '%s' "$body"
 }
@@ -2666,9 +2742,17 @@ _dc_stdin_refused() {
     echo "defenseclaw: hook payload has a NUL byte; refusing to alter it" >&2
     return 0
   fi
+  local outcome="$3" log_mode="${FAIL_MODE:-closed}"
+  if defenseclaw_per_user_oversize_open; then
+    outcome=diagnostic
+    log_mode=open
+  fi
   defenseclaw_log_hook_failure "$connector" "$hook_name" \
-    "stdin body exceeded $1 byte cap" transport "${FAIL_MODE:-closed}" "$3"
-  echo "defenseclaw: hook payload exceeded $1 bytes; refusing to truncate" >&2
+    "stdin body exceeded $1 byte cap" transport "$log_mode" "$outcome"
+  case "$outcome" in
+    fail_open|diagnostic) ;;
+    *) echo "defenseclaw: hook payload exceeded $1 bytes; refusing to truncate" >&2 ;;
+  esac
 }
 
 # defenseclaw_validate_traceparent returns 0 when $1 matches the W3C
@@ -3291,6 +3375,7 @@ _dc_gateway_post_once() {
       esac
       return 1
     }
+    defenseclaw_warn_reviewed_oversize "$_dc_post_body" "$_dc_post_output"
     printf '%s' "$_dc_post_output"
     return 0
   fi

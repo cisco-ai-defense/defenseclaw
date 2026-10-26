@@ -292,8 +292,18 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 CONTENT="$(defenseclaw_read_stdin_capped fail_closed)" || {
+  _DC_STDIN_RC=$?
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+  PAYLOAD="$CONTENT"
+  if defenseclaw_prepare_oversized_stdin "$_DC_STDIN_RC"; then
+    CONTENT="$PAYLOAD"
+    _DC_OVERSIZED_INSPECT=1
+  else
+{{end}}
   echo "defenseclaw: inspect response refusing oversized payload" >&2
   exit 2
+{{if and (not .Managed) (not .Sandbox)}}  fi
+{{end}}
 }
 
 API_ADDR="{{.APIAddr}}"
@@ -302,6 +312,9 @@ API_ADDR="{{.APIAddr}}"
 # DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
 fail_unreachable() {
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+  if [ "${_DC_OVERSIZED_INSPECT:-0}" = 1 ]; then
+    local DEFENSECLAW_HOOK_CONNECTOR="$RUNTIME_CONNECTOR"
+  fi
 {{end}}  defenseclaw_log_hook_delivery_failure inspect inspect-response "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "response" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
@@ -373,6 +386,7 @@ RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/api/v1/inspect/response"
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
   "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}") || {
+  _DC_TRANSPORT_STATUS=$?
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}  defenseclaw_split_response
   defenseclaw_managed_http_result "$HTTP_CODE" incomplete
 {{end}}  fail_unreachable "$(defenseclaw_gateway_unreachable_reason 2>/dev/null || printf 'gateway unreachable')"

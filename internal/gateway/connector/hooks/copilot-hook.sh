@@ -445,9 +445,16 @@ fail_response() {
 fi
 
 PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
+  _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+  if defenseclaw_prepare_oversized_stdin "$_DC_STDIN_RC"; then
+    : # the normal gateway path judges the bounded review payload
+  else
+    FAIL_MODE=closed
 {{end}}  echo "defenseclaw: copilot hook refusing oversized payload" >&2
   {{if .Managed}}{{$failure}}{{else}}copilot_hook_failure "it is too large for DefenseClaw to inspect. Make it smaller and try again."{{end}}
+{{if and (not .Managed) (not .Sandbox)}}  fi
+{{end}}
 }
 API_ADDR="{{.APIAddr}}"
 if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then

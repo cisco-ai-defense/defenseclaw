@@ -7,6 +7,7 @@ package connector
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,6 +40,8 @@ try {
 } catch (error) {
   verdict = "block:" + String(error && error.message || error);
 }
+
+
 await new Promise((resolve) => setTimeout(resolve, 50));
 console.log(JSON.stringify({ verdict, notices: toasts, durations, attempts }));
 `
@@ -212,6 +215,111 @@ func TestAmpBackgroundOutageWarnsAffectedThreadForCallAndResult(t *testing.T) {
 	}
 	if rows := hookFailureRecords(t, dataDir); len(rows) != 2 {
 		t.Fatalf("background call/result audit rows = %+v, want two", rows)
+	}
+}
+
+// Every command and target key of an oversized plugin call reaches the
+// gateway's bounded review, before or after a long value (Amp Bash "cmd",
+// OpenCode "command", a write's file path after its content), and every
+// review is marked uninspected.
+func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
+	nodeForTest(t)
+	const pad = `"x".repeat(1100000)`
+	// Loop round 2: context fields that use up the context-head budget, and
+	// command values that together exceed the whole-value budget.
+	const notes = `...Object.fromEntries(Array.from({ length: 40 }, (_, i) => ["note" + i, "z".repeat(9000)])), `
+	const overBudget = `patch: "q".repeat(600000), diff: "r".repeat(400000), `
+	for _, plugin := range []struct {
+		asset, name, connector, harness, input string
+		// targetCut: the review cannot keep the target whole. Every review
+		// is marked oversize_command_not_inspected (loop round 2 review of
+		// 06bb83dd: a review never carries the file text whole).
+		targetCut bool
+	}{
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `command: "cat /home/user/.ssh/authorized_keys " + ` + pad, true},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `description: ` + pad + `, command: "cat /home/user/.ssh/authorized_keys"`, false},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `content: ` + pad + `, filePath: "/home/user/.ssh/authorized_keys"`, false},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `description: ` + pad + `, ` + notes + `command: "cat /home/user/.ssh/authorized_keys"`, false},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, overBudget + notes + `command: "cat /home/user/.ssh/authorized_keys"`, true},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `command: "cat /home/user/.ssh/authorized_keys " + ` + pad, true},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `cmd: "cat /home/user/.ssh/authorized_keys", description: ` + pad, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, path: "/home/user/.ssh/authorized_keys"`, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `description: ` + pad + `, ` + notes + `cmd: "cat /home/user/.ssh/authorized_keys"`, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, overBudget + notes + `cmd: "cat /home/user/.ssh/authorized_keys"`, true},
+		// Loop round 1 review of 06bb83dd: any argument key, past a head or
+		// after notes that spent the head budget, is kept whole.
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `content: ` + pad + `, location: "a".repeat(20000) + "/home/user/.ssh/authorized_keys"`, false},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `content: ` + pad + `, ` + notes + `location: "/home/user/.ssh/authorized_keys"`, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, location: "a".repeat(20000) + "/home/user/.ssh/authorized_keys"`, false},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, ` + notes + `location: "/home/user/.ssh/authorized_keys"`, false},
+		// A review over the native helper's 900 KiB body cap failed closed.
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `content: ` + pad + `, command: "a".repeat(905000) + " cat /home/user/.ssh/authorized_keys"`, true},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, command: "a".repeat(905000) + " cat /home/user/.ssh/authorized_keys"`, true},
+	} {
+		name := strings.SplitN(plugin.input, ":", 2)[0]
+		if strings.HasPrefix(plugin.input, overBudget) {
+			name = "over budget"
+		} else if strings.Contains(plugin.input, "note") {
+			name += " then notes"
+		}
+		if strings.Contains(plugin.input, "location:") {
+			name += " then a long location"
+		}
+		if strings.Contains(plugin.input, "905000") {
+			name += " over the transport cap"
+		}
+		t.Run(plugin.connector+" "+name, func(t *testing.T) {
+			var request []byte
+			// The gateway (action mode) blocks a request that names the
+			// protected target or is marked uninspected.
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				request, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				if !strings.Contains(string(request), "/home/user/.ssh/authorized_keys") &&
+					!strings.Contains(string(request), `"oversize_command_not_inspected":true`) {
+					_, _ = io.WriteString(w, `{"action":"allow","raw_action":"allow","mode":"action","hook_output":{"decision":"allow"}}`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"action":"block","mode":"action","hook_output":{"decision":"deny","reason":"protected target"}}`)
+			}))
+			t.Cleanup(server.Close)
+			home := t.TempDir()
+			installNativeGatewayForHookTest(t, home)
+			dataDir := filepath.Join(home, ".defenseclaw")
+			token := filepath.Join(dataDir, "hooks", ".hook-"+plugin.connector+".token")
+			if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			body := renderPluginAssetForTest(t, plugin.asset, templateData{
+				APIAddr: strings.TrimPrefix(server.URL, "http://"), TokenFileJS: javaScriptStringContent(token),
+				FailMode: "closed",
+			})
+			path := filepath.Join(home, plugin.name)
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			harness := strings.ReplaceAll(plugin.harness, `command: "echo marker"`, plugin.input)
+			cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", harness, path)
+			cmd.Env = append(sanitizedTestEnv(), "HOME="+home)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("node: %v\n%s", err, out)
+			}
+			var result struct {
+				Verdict string `json:"verdict"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &result); err != nil {
+				t.Fatal(err)
+			}
+			marked := strings.Contains(string(request), `"oversize_command_not_inspected":true`)
+			if !strings.HasPrefix(result.Verdict, "block:") || !strings.Contains(string(request), `"bounded_prefix_review":true`) || !marked ||
+				!plugin.targetCut && !strings.Contains(string(request), "/home/user/.ssh/authorized_keys") {
+				t.Fatalf("gateway block=%q marked=%v request=%.300q", result.Verdict, marked, request)
+			}
+		})
 	}
 }
 
@@ -390,6 +498,60 @@ func TestPerUserPluginOutageFollowsTheConfigNow(t *testing.T) {
 					}
 				} else if len(rows) != 0 {
 					t.Fatalf("a closed outage wrote fail-open rows %+v", rows)
+				}
+			})
+		}
+	}
+}
+
+func TestPerUserPluginOversizedPayloadUsesInstalledTier(t *testing.T) {
+	nodeForTest(t)
+	for _, plugin := range []struct{ asset, name, connector, harness string }{
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness},
+	} {
+		for _, tier := range []struct{ name, mode string }{{"balanced", "open"}, {"strict", "closed"}} {
+			t.Run(plugin.connector+"/"+tier.name, func(t *testing.T) {
+				home := t.TempDir()
+				installNativeGatewayForHookTest(t, home)
+				dataDir := filepath.Join(home, ".defenseclaw")
+				token := filepath.Join(dataDir, "hooks", ".hook-"+plugin.connector+".token")
+				if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				body := renderPluginAssetForTest(t, plugin.asset, templateData{
+					APIAddr: "127.0.0.1:1", TokenFileJS: javaScriptStringContent(token),
+					FailMode: "closed",
+				})
+				path := filepath.Join(home, plugin.name)
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				harness := strings.ReplaceAll(plugin.harness, `command: "echo marker"`, `description: "x".repeat(1100000), command: "echo marker"`)
+				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", harness, path)
+				cmd.Env = append(sanitizedTestEnv(), "HOME="+home)
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("node: %v\n%s", err, out)
+				}
+				var result struct {
+					Verdict string   `json:"verdict"`
+					Notices []string `json:"notices"`
+				}
+				if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &result); err != nil {
+					t.Fatalf("harness output %q: %v", out, err)
+				}
+				rows := hookFailureRecords(t, dataDir)
+				if tier.mode == "open" {
+					if result.Verdict != "allow" || len(rows) != 1 || rows[0]["outcome"] != "fail_open" ||
+						!strings.Contains(strings.Join(result.Notices, "\n"), "fail mode open for an outage") {
+						t.Fatalf("balanced verdict=%q notices=%q rows=%+v", result.Verdict, result.Notices, rows)
+					}
+				} else if !strings.HasPrefix(result.Verdict, "block:") || len(rows) != 0 {
+					t.Fatalf("strict verdict=%q rows=%+v", result.Verdict, rows)
 				}
 			})
 		}

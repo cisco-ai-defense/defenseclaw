@@ -258,7 +258,69 @@ type AgentFacts = {
 function stringID(value: unknown): string {
 	return value === undefined || value === null ? "" : String(value)
 }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}
 
+// Command and target fields the bounded review of an oversized call keeps
+// verbatim at any depth (Bash "command" or "cmd", argv arrays, patches,
+// scripts and every path or target form); other strings keep an 8 KiB head.
+// Every value of the call's arguments (tool_input) is kept the same way,
+// whatever its key (an MCP server may act on any argument, and the gateway
+// reads all of them), except its file text and description
+// (DC_REVIEW_BULK_KEYS), which keep a head. Keys are compared lower-case
+// without "_" and "-".
+const DC_REVIEW_KEYS = new Set(["cmd", "command", "commands", "commandline", "args", "arguments", "argv", "toolargs", "script", "code", "input", "patch", "patchtext", "diff", "filepath", "path", "paths", "file", "files", "filename", "target", "targetfile", "targetpath", "targets", "destination", "dest", "source", "sourcepath", "oldpath", "newpath", "absolutepath", "relativepath", "url", "uri", "cwd", "workdir", "workingdirectory", "directory", "dir"]);
+const DC_REVIEW_BULK_KEYS = new Set(["content", "oldstring", "newstring", "oldstr", "newstr", "edits", "newsource", "filetext", "description"]);
+
+// boundedReview reduces an oversized payload to a request under
+// the gateway's 1 MiB cap that keeps every key of the call, so the gateway
+// judges its command and target as at normal size. Every review is marked
+// oversize_command_not_inspected: it keeps only a head of the call's file
+// text, prompt or tool result, where a configured rule may match past the
+// head, so the gateway warns and audits it in observe mode and blocks it in
+// action mode. It returns null only when even the last pass, which keeps no
+// value whole, stays over the cap.
+function boundedReview(payload: Record<string, unknown>, originalBytes: number): string | null {
+  for (let pass = 0; pass <= 4; pass++) {
+    // Command and target values are kept whole while they fit; only the
+    // context heads shrink when the review is too large. The last pass keeps
+    // none whole.
+    let keep = pass === 4 ? 0 : 832 * 1024;
+    let heads = (192 * 1024) >> Math.min(pass, 3);
+    const walk = (value: unknown, inKeep: boolean, depth: number, atArgs = false): unknown => {
+      if (typeof value === "string") {
+        if (inKeep && value.length <= keep) { keep -= value.length; return value; }
+        if (inKeep && depth < 128 && /^\s*[[{]/.test(value)) {
+          try { return JSON.stringify(walk(JSON.parse(value), true, depth + 1)); } catch (_) { /* not JSON */ }
+        }
+        // A command or target value that does not fit whole: only a head.
+        const n = Math.max(0, Math.min(value.length, 8192, heads));
+        heads -= n;
+        return n > 0 || value === "" ? value.slice(0, n) : undefined;
+      }
+      if (value === null || typeof value !== "object") return value;
+      if (depth >= 128) return undefined;
+      if (Array.isArray(value)) return value.map((item) => walk(item, inKeep, depth + 1));
+      const out: Record<string, unknown> = {};
+      for (const [key, item] of Object.entries(value)) {
+        const name = String(key).toLowerCase().replace(/[_-]/g, "");
+        const args = depth === 0 && name === "toolinput";
+        const keepChild = args || (atArgs && DC_REVIEW_BULK_KEYS.has(name) ? false : inKeep || DC_REVIEW_KEYS.has(name));
+        out[key] = walk(item, keepChild, depth + 1, args);
+      }
+      return out;
+    };
+    const review = (walk(payload, false, 0) || {}) as Record<string, unknown>;
+    review.oversize_command_not_inspected = true;
+    review.content_truncated = true;
+    review.bounded_prefix_review = true;
+    review.original_body_bytes = originalBytes;
+    const body = JSON.stringify(review);
+    // The native helper's transport refuses a body over DC_MAX_BODY_BYTES.
+    if (utf8Bytes(body) <= DC_MAX_BODY_BYTES) return body;
+  }
+  return null;
+}
+{{end}}
 function utf8Bytes(value: string): number {
 	return new TextEncoder().encode(value).byteLength
 }
@@ -641,19 +703,19 @@ function assistantResponse(messages: ThreadMessage[]): string {
 }
 
 // runForeignHookCheck asks the administrator-owned hook binary for the
-// foreign-hook guard's decision and resolves to a block reason, or "" when
-// no unapproved plugin or hook is present. A binary that cannot be run,
+// foreign-hook guard's decision and resolves to a ForeignCheck: a block
+// reason, or "" when no unapproved plugin or hook is present. A binary that cannot be run,
 // times out, or answers anything but {"deny": false} blocks, unless the
 // managed deployment was uninstalled (its install marker is gone): uninstall
 // removes the hook binary too, and this plugin then stops failing closed as
 // it does for the gateway call.
-function runForeignHookCheck(event: string, cwd: string): Promise<string> {
-	if (!DC_FOREIGN_GUARD) return Promise.resolve("")
+function runForeignHookCheck(event: string, cwd: string): Promise<ForeignCheck> {
+	if (!DC_FOREIGN_GUARD) return Promise.resolve({ reason: "", retryable: false })
 	return new Promise(resolve => {
 		const fail = (why: string) => {
 			void deploymentRemoved().then(removed => resolve(removed
-				? ""
-				: foreignCheckFailure(event, why)))
+				? { reason: "", retryable: false }
+				: { reason: foreignCheckFailure(event, why), retryable: true }))
 		}
 		try {
 			const child = execFile(
@@ -665,7 +727,7 @@ function runForeignHookCheck(event: string, cwd: string): Promise<string> {
 						fail(safeError(error))
 						return
 					}
-					let verdict: { deny?: unknown, reason?: unknown }
+					let verdict: { deny?: unknown, reason?: unknown, retryable?: unknown }
 					try {
 						verdict = JSON.parse(String(stdout))
 					} catch {
@@ -673,12 +735,17 @@ function runForeignHookCheck(event: string, cwd: string): Promise<string> {
 						return
 					}
 					if (verdict && verdict.deny === false) {
-						resolve("")
+						resolve({ reason: "", retryable: false })
 						return
 					}
-					resolve(verdict && typeof verdict.reason === "string" && verdict.reason
-						? verdict.reason
-						: "DefenseClaw blocked this tool call because an unapproved plugin is present.")
+					resolve({
+						reason: verdict && typeof verdict.reason === "string" && verdict.reason
+							? verdict.reason
+							: "DefenseClaw blocked this tool call because an unapproved plugin is present.",
+						// Only the guard's structured answer marks a deny as the
+						// gateway not answering, never the text of its reason.
+						retryable: Boolean(verdict && verdict.retryable === true),
+					})
 				},
 			)
 			child.stdin?.on("error", () => {})
@@ -690,16 +757,22 @@ function runForeignHookCheck(event: string, cwd: string): Promise<string> {
 }
 
 // foreignCheckFailure is the block reason when the foreign-plugin check
-// itself could not run. Amp loads plugins once, so a check that failed at
-// load keeps blocking for the life of this process; that reason says to
-// restart the agent.
+// itself could not run. A later tool call retries this startup check.
 function foreignCheckFailure(event: string, why: string): string {
 	const detail = String(why || "").split(/\r?\n/)[0].trim() || "no answer"
 	if (event === "session.load") {
-		return `DefenseClaw could not check for unapproved plugins when the agent started (${detail}), so this tool call is blocked. Restart the agent once DefenseClaw is available.`
+		return `DefenseClaw could not check for unapproved plugins when the agent started (${detail}), so this tool call is blocked. Retry when DefenseClaw is available.`
 	}
 	return `DefenseClaw could not check for unapproved plugins (${detail}), so this tool call is blocked.`
 }
+
+// ForeignCheck is the foreign-plugin check's answer: a block reason ("" for
+// none) and whether the block is an availability failure (the check could
+// not run, or the guard says the gateway could not answer for the session).
+// A confirmed foreign plugin loaded with Amp stays loaded for this process,
+// so only an availability failure lets a later call retry the load-time
+// check, while this call stays closed.
+type ForeignCheck = { reason: string, retryable: boolean }
 
 // promptNotice sets DefenseClaw's hidden agent.start notice apart from the
 // user's prompt. Amp places the message right after the prompt text, and a
@@ -1121,10 +1194,14 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	// Amp loads plugins once at startup: a foreign plugin present now keeps
 	// running for this process even if its file is deleted later, so a block
 	// found at load holds for the whole process.
-	const startupGuard = runForeignHookCheck("session.load", workspaceRoot)
-	const foreignHookCheck = async (event: string): Promise<string> =>
-		(await managedLifecycleHeld()) ? DC_MANAGED_LIFECYCLE_TEXT :
-			(await startupGuard) || (await runForeignHookCheck(event, workspaceRoot))
+	let startupGuard: Promise<ForeignCheck> | null = runForeignHookCheck("session.load", workspaceRoot)
+	const foreignHookCheck = async (event: string): Promise<string> => {
+		if (await managedLifecycleHeld()) return DC_MANAGED_LIFECYCLE_TEXT
+		if (!startupGuard) startupGuard = runForeignHookCheck("session.load", workspaceRoot)
+		const startup = await startupGuard
+		if (startup.retryable) startupGuard = null
+		return startup.reason || (await runForeignHookCheck(event, workspaceRoot)).reason
+	}
 
 	async function agentFacts(threadID: string, ctx: { thread: { agent(): Promise<Agent> } }): Promise<AgentFacts> {
 		const cached = agents.get(threadID)
@@ -1212,11 +1289,20 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		}
 
 		const originalBytes = utf8Bytes(body)
+		let oversizedReview = false
 		if (originalBytes > DC_MAX_BODY_BYTES) {
 			if (actionable) {
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
-{{end}}				return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
+				if (configOutageOpen(false)) {
+					const review = boundedReview(payload, originalBytes)
+					if (review) {
+						body = review
+						oversizedReview = true
+					}
+				}
+{{end}}				if (!oversizedReview) return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
 			}
+			if (!oversizedReview) {
 			const reduced = {
 				hook_event_name: payload.hook_event_name || "",
 				session_id: payload.session_id || "",
@@ -1244,6 +1330,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				tool_response: "[DefenseClaw payload omitted: size limit exceeded]",
 			}
 			body = JSON.stringify(reduced)
+			}
 		}
 
 		let token: string
@@ -1279,7 +1366,8 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			if (!response.ok) {
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				// During an install an error status blocks (GAP-1372).
 				if (actionable && await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
-{{end}}{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (response.status >= 500 && (DC_FAIL_MODE === "closed" || await perUserInstallInProgress())) {
+{{end}}				if (oversizedReview) return { action: "block", reason: "DefenseClaw hook failed closed (gateway refused bounded payload review)" }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (response.status >= 500 && (DC_FAIL_MODE === "closed" || await perUserInstallInProgress())) {
 					return { action: "block", reason: await perUserGatewayDownText(null, response.status) }
 				}
 {{end}}				return failureResponse(`HTTP ${response.status}`)
@@ -1290,7 +1378,16 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (actionable && await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
-{{end}}				return failureResponse("invalid gateway verdict")
+{{end}}				if (oversizedReview) return { action: "block", reason: "DefenseClaw hook failed closed (invalid bounded payload verdict)" }
+				return failureResponse("invalid gateway verdict")
+			}
+			if (oversizedReview && (data.action === "allow" || data.action === "alert")) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				await logFailOpen("payload exceeded cap; oversize, command not inspected", payload)
+				const notice = "DefenseClaw warning: this hook payload exceeded the bounded inspection cap (oversize, command not inspected); the gateway allowed and audited this call."
+{{else}}				await logFailOpen("payload exceeded cap; bounded prefix reviewed by gateway", payload)
+				const notice = "DefenseClaw warning: this hook payload exceeded the bounded inspection cap; the gateway allowed and audited this call."
+{{end}}				if (data.action === "allow") data.outage_notice = notice
+				else await notifyIfForeground(String(payload.thread_id || ""), notice)
 			}
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			const lockWindow = actionable ? await installWindow() : "none"
 			if (lockWindow === "closed") return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }

@@ -56,9 +56,6 @@ type documentedOutage struct {
 	// allow, where only the hook decides.
 	ManagedOpen        string `json:"managedOpen"`
 	ManagedOpenNoGuard string `json:"managedOpenNoGuard"`
-	// HeldUntilRestart: where the guard blocks the outage, an agent that
-	// started during it keeps blocking until it restarts.
-	HeldUntilRestart   bool   `json:"heldUntilRestart"`
 	SecureClientClosed string `json:"secureClientClosed"`
 	StrictAvailability string `json:"strictAvailability"`
 }
@@ -115,13 +112,12 @@ func codeOutage(t *testing.T, conn connector.Connector) documentedOutage {
 			noGuard = managedOpenPerUserRouteBlocksLM
 		}
 	}
-	managedOpen, guardBlocksSomewhere := managedOpenWithDefaultGuard(t, conn.Name(), noGuard)
+	managedOpen := managedOpenWithDefaultGuard(t, conn.Name(), noGuard)
 	return documentedOutage{
 		PerUserClosed:      outage.PerUserClosed,
 		PerUserOpen:        outage.PerUserOpen,
 		ManagedOpen:        managedOpen,
 		ManagedOpenNoGuard: noGuard,
-		HeldUntilRestart:   outage.GuardCheckedAtLoad && guardBlocksSomewhere,
 		SecureClientClosed: outage.SecureClientClosed,
 		StrictAvailability: outage.StrictAvailability,
 	}
@@ -130,39 +126,36 @@ func codeOutage(t *testing.T, conn connector.Connector) documentedOutage {
 // managedOpenWithDefaultGuard is the managed open cell under the default
 // machine policy: on each OS the call blocks where the foreign-hook guard
 // blocks the outage (GuardBlocksOutage) and otherwise does what the hook
-// does (noGuard, the cell for foreign_hooks report or allow). It also
-// reports whether the guard blocks the outage on any OS.
-func managedOpenWithDefaultGuard(t *testing.T, name, noGuard string) (string, bool) {
+// does (noGuard, the cell for foreign_hooks report or allow).
+func managedOpenWithDefaultGuard(t *testing.T, name, noGuard string) string {
 	t.Helper()
 	policy := config.EnterpriseMachinePolicyConfig{}.PolicyFor(name)
 	preserve := policy
 	preserve.ManagedHooksOnly = config.ManagedHooksOnlyPreserve
 	guard, guardPreserve := map[string]bool{}, map[string]bool{}
-	somewhere := false
 	for _, goos := range outageTableOSes {
 		guard[goos] = GuardBlocksOutage(name, goos, policy)
 		guardPreserve[goos] = GuardBlocksOutage(name, goos, preserve)
-		somewhere = somewhere || guard[goos]
 	}
 	all := func(m map[string]bool) bool { return m["linux"] && m["darwin"] && m["windows"] }
 	none := func(m map[string]bool) bool { return !m["linux"] && !m["darwin"] && !m["windows"] }
 	switch {
 	case all(guard):
-		return managedOpenBlocks, somewhere
+		return managedOpenBlocks
 	case guard["linux"] && guard["darwin"] && !guard["windows"]:
 		// Windows does what the hook does: every no-guard value but blocks
 		// lets a Windows outage call run.
 		if noGuard == managedOpenBlocks {
-			return managedOpenBlocks, somewhere
+			return managedOpenBlocks
 		}
-		return managedOpenBlocksLinuxMacOS, somewhere
+		return managedOpenBlocksLinuxMacOS
 	case none(guard) && all(guardPreserve) && noGuard == managedOpenRuns:
-		return managedOpenRunsBlocksWithHooksOnlyPreserve, somewhere
+		return managedOpenRunsBlocksWithHooksOnlyPreserve
 	case none(guard) && none(guardPreserve):
-		return noGuard, somewhere
+		return noGuard
 	}
 	t.Errorf("%s: no table value for a guard that blocks an outage on %v (%v with managed_hooks_only preserve) over %q; add one", name, guard, guardPreserve, noGuard)
-	return "", somewhere
+	return ""
 }
 
 func TestDocsCapabilityMatrixOutageMatchesTheHooks(t *testing.T) {

@@ -63,8 +63,10 @@ against the hook code on every change.
   `guardrail.hook_fail_mode` chooses its outage mode. When that setting is
   absent, the connector's policy tier (rule pack) decides: the default
   (balanced) and permissive policies let the call run with one warning and a
-  `hook-failures.jsonl` record, and the strict policy blocks it. Every other
-  failure blocks in every tier
+  `hook-failures.jsonl` record, and the strict policy blocks it. Input over the
+  1 MiB hook cap is not an outage: in the default and permissive policies the
+  hook sends the gateway a bounded review of it and follows the verdict, and
+  the strict policy blocks it. Every other failure blocks in every tier
   ([Fail modes](/docs/reference/configuration/fail-modes#per-user-installs)).
 - **Managed standalone** is an enterprise host outside Secure Client. Its fail
   mode is the administrator's `hook_fail_mode`: `closed`, the default, blocks
