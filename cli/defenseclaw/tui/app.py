@@ -12773,7 +12773,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
         if model.goal_active:
             label = setup_catalog.wizard_label(model.active_wizard)
-            summary = wizard_state_summary(model.active_wizard, model.config)
+            summary = wizard_state_summary(model.active_wizard, model.config, model.observability_status)
             head = f"[bold #22D3EE]Setup[/] · [bold]{rich_escape(label)}[/] · What do you want to do?"
             return head + (f"\n{self._setup_line(summary, style=TOKENS.text_secondary)}" if summary else "")
         if model.form_active:

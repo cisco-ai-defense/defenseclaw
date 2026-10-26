@@ -236,6 +236,9 @@ class V8OperatorStatus:
     buckets: tuple[V8BucketStatus, ...]
     warnings: tuple[tuple[str, str, str], ...]
     judge_bodies_enabled: bool = True
+    # observability.defaults.redaction_profile as config.yaml sets it
+    # ("none" when it does not), for summaries that name the global default.
+    default_redaction_profile: str = "none"
 
     @property
     def unbounded_retention(self) -> bool:
@@ -318,6 +321,12 @@ def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
     if isinstance(guardrail, Mapping) and "retain_judge_bodies" in guardrail:
         retain_judge_bodies = guardrail["retain_judge_bodies"] is True
 
+    defaults = (validated.get("observability") or {}).get("defaults") if isinstance(
+        validated.get("observability"), Mapping
+    ) else None
+    default_profile = defaults.get("redaction_profile") if isinstance(defaults, Mapping) else None
+    default_profile = default_profile if isinstance(default_profile, str) and default_profile.strip() else "none"
+
     source_data_dir = validated.get("data_dir")
     inspection_data_dir = (
         source_data_dir.strip()
@@ -386,6 +395,7 @@ def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
         data_dir=result.data_dir,
         plan_digest=result.plan_digest,
         judge_bodies_enabled=retain_judge_bodies,
+        default_redaction_profile=default_profile,
     )
 
 
@@ -396,6 +406,7 @@ def operator_status_from_effective(
     data_dir: str,
     plan_digest: str,
     judge_bodies_enabled: bool = True,
+    default_redaction_profile: str = "none",
 ) -> V8OperatorStatus:
     """Normalize a decoded canonical effective plan without adding policy."""
 
@@ -429,6 +440,7 @@ def operator_status_from_effective(
         buckets=buckets,
         warnings=warnings,
         judge_bodies_enabled=judge_bodies_enabled,
+        default_redaction_profile=default_redaction_profile,
     )
 
 

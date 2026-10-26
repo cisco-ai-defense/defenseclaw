@@ -4393,7 +4393,9 @@ def _effective_strategy_text(cfg: object | Mapping[str, Any] | None, strategy: s
     return "regex_only (judge on for no active connector)"
 
 
-def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None) -> str:
+def wizard_state_summary(
+    wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None, observability: object | None = None
+) -> str:
     """One-line "here's what's configured today" string for the goal menu.
 
     Returns an empty string for wizards without a useful summary so the
@@ -4411,7 +4413,13 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         role = "judge+agent available" if _any_active_connector_is_proxy(cfg) else "judge only"
         return f"Main: {main}  ·  Judge: {judge}  ·  Connectors: {connector_summary} ({role})"
     if wizard == SetupWizard.REDACTION:
-        profile = _cfg_str(cfg, "observability.defaults.redaction_profile", "none") or "none"
+        # The loaded Config has no observability.defaults; the canonical
+        # status read from config.yaml does (GAP-1394).
+        profile = (
+            str(getattr(observability, "default_redaction_profile", "") or "")
+            or _cfg_str(cfg, "observability.defaults.redaction_profile", "none")
+            or "none"
+        )
         posture = "unredacted" if profile == "none" else "redacted"
         return f"Default profile: {profile} ({posture})  ·  Each observability destination can set its own profile"
     if wizard == SetupWizard.GUARDRAIL:
