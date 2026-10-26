@@ -1442,6 +1442,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1610", page: "how-to/guardrail/catch-prompt-injection.mdx", has: ["Host setup does not wire Codex's native OpenTelemetry; only an isolated OpenShell sandbox uses it."], lacks: ["Setup also wires Codex's native OpenTelemetry."] },
   { gap: "GAP-1618", page: "enterprise/install/reference/macos.mdx", has: ["`enterprise macos status --json` and `enterprise macos verify` report `tetragon_not_applicable`"] },
   { gap: "GAP-1618", page: "enterprise/configure/settings.mdx", has: ["on macOS `status --json` and `verify` report `tetragon_not_applicable`"] },
+  { gap: "GAP-1591", page: "reference/policy/cel/engine.mdx", has: ["`exists`, `all`, `map` and `filter` comprehensions; nesting is limited to two levels"] },
   // r105-rows-end
 ];
 
