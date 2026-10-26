@@ -48,7 +48,7 @@ func validSQLMutationFact(fact SQLMutationFact) bool {
 		return false
 	}
 	switch fact.Engine {
-	case "postgresql", "mysql", "sqlserver":
+	case "postgresql", "mysql", "sqlserver", "snowflake":
 	case "generic":
 		if fact.QuerySource != SQLMutationQueryStructured {
 			return false
@@ -337,6 +337,10 @@ func sqlMutationEngine(program string) (string, bool) {
 		return "mysql", true
 	case "sqlcmd":
 		return "sqlserver", true
+	case "snowsql":
+		// The database destruction pack lists snowsql; its inline query
+		// (-q/--query) is read as the other clients' are (GAP-1030).
+		return "snowflake", true
 	default:
 		return "", false
 	}
@@ -396,7 +400,7 @@ func parseExactSQLCLI(argv []string, engine string) (exactSQLCLI, bool) {
 			}
 			continue
 		}
-		if strings.HasPrefix(argument, "-") || engine == "sqlserver" ||
+		if strings.HasPrefix(argument, "-") || engine == "sqlserver" || engine == "snowflake" ||
 			!exactSQLIdentity(argument) || parsed.database != "" {
 			return exactSQLCLI{}, false
 		}
@@ -422,6 +426,10 @@ func exactSQLCLIOption(engine, argument string) (key, value string, consumesNext
 		options = []option{{"-e", "query", false}, {"--execute", "query", false}, {"-D", "database", false}, {"--database", "database", false}, {"-h", "host", false}, {"--host", "host", false}, {"-P", "port", false}, {"--port", "port", false}, {"-u", "user", false}, {"--user", "user", false}, {"--ssl-mode", "ssl_mode", false}, {"-B", "batch", true}, {"--batch", "batch", true}, {"-N", "skip_column_names", true}, {"--skip-column-names", "skip_column_names", true}}
 	case "sqlserver":
 		options = []option{{"-q", "query", false}, {"-Q", "query", false}, {"-S", "server", false}, {"-d", "database", false}, {"-U", "user", false}, {"-E", "trusted_connection", true}, {"-C", "trust_server_certificate", true}}
+	case "snowflake":
+		// A query file (-f/--filename) is not inline SQL, as psql --file is
+		// not: it stays an unknown option, so no fact.
+		options = []option{{"-q", "query", false}, {"--query", "query", false}, {"-d", "database", false}, {"--dbname", "database", false}, {"-s", "schema", false}, {"--schemaname", "schema", false}, {"-a", "account", false}, {"--accountname", "account", false}, {"-u", "user", false}, {"--username", "user", false}, {"-r", "role", false}, {"--rolename", "role", false}, {"-w", "warehouse", false}, {"--warehouse", "warehouse", false}, {"-c", "connection", false}, {"--connection", "connection", false}}
 	default:
 		return "", "", false, false, false
 	}
