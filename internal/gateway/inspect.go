@@ -1858,7 +1858,35 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// path returns above and deliberately records nothing because installed
 	// hooks fail closed on an unreachable gateway.
 	a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
-	a.writeInspectVerdict(w, r, "/api/v1/inspect/tool", req.Tool, verdict)
+	a.writeInspectVerdict(w, r, "/api/v1/inspect/tool", req.Tool, inspectToolResponseEvidence(verdict, req.Args))
+}
+
+// inspectToolResponseEvidence gives each finding of the response that names
+// no matched text (a semantic rule decides on the parsed call, not a text
+// match) the call it judged as its evidence: the command of a shell call,
+// else the arguments. The response redacts it unless the caller asks for
+// raw evidence (X-DefenseClaw-Reveal-PII: 1, GAP-1602). The audit and
+// telemetry records keep the verdict as decided.
+func inspectToolResponseEvidence(verdict *ToolInspectVerdict, args json.RawMessage) *ToolInspectVerdict {
+	if verdict == nil || len(verdict.DetailedFindings) == 0 {
+		return verdict
+	}
+	text := string(args)
+	if command, present, valid := trustedTopLevelCommandField(args); valid && present && strings.TrimSpace(command) != "" {
+		text = command
+	}
+	evidence := sanitizeEvidence(text)
+	if strings.TrimSpace(evidence) == "" {
+		return verdict
+	}
+	cp := *verdict
+	cp.DetailedFindings = append([]RuleFinding(nil), verdict.DetailedFindings...)
+	for i := range cp.DetailedFindings {
+		if cp.DetailedFindings[i].Evidence == "" {
+			cp.DetailedFindings[i].Evidence = evidence
+		}
+	}
+	return &cp
 }
 
 // writeInspectVerdict is the only response boundary for direct inspect routes
