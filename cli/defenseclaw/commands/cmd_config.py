@@ -298,8 +298,6 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
     if written is not None:
         profile_key = parts[:2] in (["guardrail", "profiles"], ["guardrail", "profile_assignments"])
         view = _merge_defaults(written, _v8_defaults(app, profiles=profile_key))
-        if parts == ["guardrail", "hook_self_heal"]:
-            view.setdefault("guardrail", {}).setdefault("hook_self_heal", True)
         _resolve_defaults(app, view, written, profiles=profile_key)
     else:
         view = _key_view(app, parts)
@@ -310,6 +308,10 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
         found, value = _lookup(written, parts)
     if not found:
         found, value = _admission_lifecycle_field(view, parts)
+    if not found:
+        # A key the CLI's own config model does not carry still has the
+        # default the schema declares (GAP-1622).
+        found, value = _schema_default(parts)
     if not found:
         if _is_destination_key(parts):
             raise click.ClickException(_destination_not_set(key, parts, view))
@@ -1129,6 +1131,29 @@ def _lookup(data: object, parts: list[str]) -> tuple[bool, object]:
         else:
             return False, None
     return True, value
+
+
+def _schema_default(parts: list) -> tuple[bool, object]:
+    """The ``default`` the config schema declares for *parts*, if any."""
+    schema = _v8_schema()
+    defs = schema.get("$defs") or {}
+
+    def _resolve(node: object) -> object:
+        while isinstance(node, dict) and "$ref" in node:
+            node = defs.get(str(node["$ref"]).rsplit("/", 1)[-1])
+        return node
+
+    node: object = schema
+    for part in parts:
+        node = _resolve(node)
+        properties = node.get("properties") if isinstance(node, dict) else None
+        if not isinstance(part, str) or not isinstance(properties, dict) or part not in properties:
+            return False, None
+        node = properties[part]
+    node = _resolve(node)
+    if isinstance(node, dict) and "default" in node:
+        return True, node["default"]
+    return False, None
 
 
 def _unset_prune_scope(parts: list) -> str:

@@ -86,6 +86,16 @@ def test_a_saved_change_without_the_audit_ack_exits_0_with_a_warning(tmp_path: P
     assert reason in result.output
 
 
+@pytest.mark.parametrize("key", ["guardrail.retain_judge_bodies", "guardrail.hook_self_heal"])
+def test_get_prints_the_schema_default_of_a_key_config_yaml_leaves_out(tmp_path: Path, monkeypatch, key) -> None:
+    # GAP-1622: the documented default (true) instead of "not set and has no default".
+    _config(tmp_path, monkeypatch, "guardrail:\n  enabled: true\n")
+    result = _run("get", key)
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines()[-1] == "true", result.output
+    assert f"config.yaml does not set {key}" in result.output
+
+
 def test_unset_keeps_a_connector_entry_that_says_it_is_guarded(tmp_path: Path, monkeypatch) -> None:
     # guardrail.connectors.<C>: {} means "guarded with the defaults"; only the
     # maps under that entry are pruned.
