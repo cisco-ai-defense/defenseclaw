@@ -650,6 +650,13 @@ namespace $nativeNamespace
 
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetKernelObjectSecurity(
+            IntPtr handle,
+            uint securityInformation,
+            IntPtr securityDescriptor);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetSecurityDescriptorOwner(
             IntPtr securityDescriptor,
             out IntPtr owner,
@@ -1787,6 +1794,19 @@ namespace $nativeNamespace
                                     throw new Win32Exception(checked((int)result),
                                         "restore user file inheritance failed: " + path);
                             }
+                            // SetSecurityInfo marks an unprotected DACL as
+                            // auto-inherited (SE_DACL_AUTO_INHERITED). A file
+                            // an agent created never had that bit, so its
+                            // preimage then read back with other control
+                            // flags and the rollback reported its ACL as not
+                            // restored. Write the preimage's DACL and control
+                            // bits as they were.
+                            if (!String.Equals(UserFileSddl(handle, path), sddl,
+                                    StringComparison.Ordinal) &&
+                                !SetKernelObjectSecurity(handle,
+                                    DACL_SECURITY_INFORMATION, descriptor))
+                                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                                    "restore user file DACL control failed: " + path);
                             long creation = creationTimeUtc.ToFileTimeUtc();
                             long modified = lastWriteTimeUtc.ToFileTimeUtc();
                             var creationFileTime = new System.Runtime.InteropServices.ComTypes.FILETIME();
@@ -4631,45 +4651,6 @@ function Test-DefenseClawExactRawDACL {
         }
     }
     return $true
-}
-
-function Test-DefenseClawRestoredUserFileSDDL {
-    param(
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Actual,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Expected
-    )
-
-    # A restored user file must carry its recorded owner, group and DACL.
-    # Putting back an inheriting DACL (SetSecurityInfo with
-    # UNPROTECTED_DACL_SECURITY_INFORMATION) makes NTFS record the
-    # AutoInherited (AI) control flag, also for a file whose recorded
-    # descriptor had none because it was created in its folder without it
-    # (D: before, D:AI after, the same entries). Only that metadata bit is
-    # masked (Test-DefenseClawExactRawDACL); every ACE, its order and every
-    # other control flag must still match.
-    if ([string]::IsNullOrEmpty($Actual) -or [string]::IsNullOrEmpty($Expected)) {
-        return $false
-    }
-    if ($Actual -ceq $Expected) {
-        return $true
-    }
-    try {
-        $actualRaw = [Security.AccessControl.RawSecurityDescriptor]::new($Actual)
-        $expectedRaw = [Security.AccessControl.RawSecurityDescriptor]::new($Expected)
-    }
-    catch {
-        return $false
-    }
-    if ($null -eq $actualRaw.Owner -or $null -eq $expectedRaw.Owner -or
-        $actualRaw.Owner.Value -cne $expectedRaw.Owner.Value) {
-        return $false
-    }
-    if (($null -eq $actualRaw.Group) -ne ($null -eq $expectedRaw.Group) -or
-        ($null -ne $actualRaw.Group -and
-            $actualRaw.Group.Value -cne $expectedRaw.Group.Value)) {
-        return $false
-    }
-    return [bool](Test-DefenseClawExactRawDACL -Actual $actualRaw -Expected $expectedRaw)
 }
 
 function Assert-DefenseClawCanonicalRawPathAcl {
@@ -15164,9 +15145,7 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
                             [IO.File]::GetCreationTimeUtc($backup),
                             [IO.File]::GetLastWriteTimeUtc($backup),
                             $postimage)
-                        if (-not (Test-DefenseClawRestoredUserFileSDDL `
-                                -Actual $actualSDDL `
-                                -Expected ([string]$entry.security_descriptor))) {
+                        if ($actualSDDL -cne [string]$entry.security_descriptor) {
                             throw 'user native OTLP rollback did not restore exact ACL'
                         }
                     }

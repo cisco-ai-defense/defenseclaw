@@ -133,16 +133,12 @@ try {
             $hash = (Get-FileHash -LiteralPath $paths[$index] `
                 -Algorithm SHA256).Hash.ToLowerInvariant()
             $sddl = (Get-Acl -LiteralPath $paths[$index]).Sddl
-            # The entries and every control flag but AutoInherited (AI),
-            # which putting back an inheriting DACL sets (D: becomes D:AI).
-            $aclRestored = Test-DefenseClawRestoredUserFileSDDL `
-                -Actual $sddl -Expected $before[$index].sddl
             $item = Get-Item -LiteralPath $paths[$index]
             if ($hash -cne $before[$index].sha256 -or
-                -not $aclRestored -or
+                $sddl -cne $before[$index].sddl -or
                 $item.CreationTimeUtc -ne $before[$index].creation -or
                 $item.LastWriteTimeUtc -ne $before[$index].modified) {
-                throw "rollback did not restore user file $index exactly (hash=$($hash -ceq $before[$index].sha256), acl=$aclRestored, sddl=$sddl, recorded=$($before[$index].sddl), created=$($item.CreationTimeUtc -eq $before[$index].creation), modified=$($item.LastWriteTimeUtc -eq $before[$index].modified))"
+                throw "rollback did not restore user file $index exactly (hash=$($hash -ceq $before[$index].sha256), acl=$($sddl -ceq $before[$index].sddl), created=$($item.CreationTimeUtc -eq $before[$index].creation), modified=$($item.LastWriteTimeUtc -eq $before[$index].modified))"
             }
         }
         if (Test-Path -LiteralPath $paths[3]) {
@@ -156,9 +152,7 @@ try {
         }
         if (-not (Test-Path -LiteralPath $otherPaths[2] -PathType Leaf) -or
             (Get-FileHash -LiteralPath $otherPaths[2] -Algorithm SHA256).Hash.ToLowerInvariant() -cne $orphanedTokenHash -or
-            -not (Test-DefenseClawRestoredUserFileSDDL `
-                -Actual (Get-Acl -LiteralPath $otherPaths[2]).Sddl `
-                -Expected $orphanedTokenAcl)) {
+            (Get-Acl -LiteralPath $otherPaths[2]).Sddl -cne $orphanedTokenAcl) {
             throw 'rollback did not restore a revoked token without a CAS witness'
         }
         if ([IO.File]::ReadAllText($otherPaths[3]) -cne

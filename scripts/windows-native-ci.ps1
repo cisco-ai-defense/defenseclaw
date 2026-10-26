@@ -5255,6 +5255,69 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
     )
 }
 
+# ConvertTo-WindowsNativeCopilotAdapter renders internal/gateway/connector/hooks/copilot-hook.ps1
+# the way the connector's text/template render does, for the probes below: the
+# {{if}}/{{else}}/{{end}} blocks for Managed, SecureClientDelivery and FailMode, and the hook
+# path and timeout. Any other directive is an error, so a template change cannot reach a probe
+# unrendered (a raw {{if}} line is a PowerShell parse error: the adapter then exits before it
+# reads stdin).
+function ConvertTo-WindowsNativeCopilotAdapter {
+    param(
+        [Parameter(Mandatory = $true)][string]$Template,
+        [Parameter(Mandatory = $true)][string]$HookBinary,
+        [Parameter(Mandatory = $true)][int]$TimeoutMS,
+        [bool]$Managed = $false,
+        [bool]$SecureClientDelivery = $false,
+        [ValidateSet('open', 'closed')][string]$FailMode = 'closed'
+    )
+    $conditions = @{
+        '.Managed' = $Managed
+        'not .Managed' = -not $Managed
+        '.SecureClientDelivery' = $SecureClientDelivery
+        'not .SecureClientDelivery' = -not $SecureClientDelivery
+        'eq .FailMode "open"' = ($FailMode -ceq 'open')
+    }
+    $out = [Text.StringBuilder]::new()
+    $frames = [Collections.Generic.Stack[object]]::new()
+    $active = $true
+    $position = 0
+    foreach ($match in [regex]::Matches($Template, '\{\{(.*?)\}\}')) {
+        if ($active) { [void]$out.Append($Template, $position, $match.Index - $position) }
+        $position = $match.Index + $match.Length
+        $directive = $match.Groups[1].Value.Trim()
+        if ($directive.StartsWith('if ', [StringComparison]::Ordinal)) {
+            $condition = $directive.Substring(3).Trim()
+            if (-not $conditions.ContainsKey($condition)) {
+                throw "unsupported Copilot adapter template condition: $condition"
+            }
+            $frames.Push([pscustomobject]@{ Value = [bool]$conditions[$condition]; Parent = $active; Else = $false })
+            $active = $active -and [bool]$conditions[$condition]
+        }
+        elseif ($directive -ceq 'else') {
+            if ($frames.Count -eq 0 -or $frames.Peek().Else) { throw 'Copilot adapter template has an unbalanced {{else}}' }
+            $frame = $frames.Peek()
+            $frame.Else = $true
+            $active = $frame.Parent -and -not $frame.Value
+        }
+        elseif ($directive -ceq 'end') {
+            if ($frames.Count -eq 0) { throw 'Copilot adapter template has an unbalanced {{end}}' }
+            $active = $frames.Pop().Parent
+        }
+        elseif ($directive -ceq '.HookBinaryPS') {
+            if ($active) { [void]$out.Append($HookBinary.Replace("'", "''")) }
+        }
+        elseif ($directive -ceq '.CopilotHookTimeoutMS') {
+            if ($active) { [void]$out.Append([string]$TimeoutMS) }
+        }
+        else {
+            throw "unsupported Copilot adapter template directive: $directive"
+        }
+    }
+    if ($frames.Count -ne 0) { throw 'Copilot adapter template has an unbalanced {{if}}' }
+    [void]$out.Append($Template, $position, $Template.Length - $position)
+    return $out.ToString()
+}
+
 function Assert-CopilotAdapterConcurrentStdin {
     $adapterTemplate = Join-Path $WorkspaceRoot 'internal\gateway\connector\hooks\copilot-hook.ps1'
     if (-not (Test-Path -LiteralPath $adapterTemplate -PathType Leaf)) {
@@ -5294,10 +5357,9 @@ internal static class Program {
             throw "failed to compile Copilot adapter stdin probe: $compile"
         }
         $adapter = Join-Path $work 'copilot-hook.ps1'
-        $rendered = [IO.File]::ReadAllText($adapterTemplate).Replace(
-            '{{.HookBinaryPS}}',
-            $helper.Replace("'", "''")
-        ).Replace('{{.CopilotHookTimeoutMS}}', '8000')
+        # The per-user adapter (not managed, not Secure Client), as setup copilot renders it.
+        $rendered = ConvertTo-WindowsNativeCopilotAdapter `
+            -Template ([IO.File]::ReadAllText($adapterTemplate)) -HookBinary $helper -TimeoutMS 8000
         [IO.File]::WriteAllText($adapter, $rendered, [Text.UTF8Encoding]::new($false))
         $payload = '{"source":"copilot-adapter-probe","padding":"' + ('x' * 65536) + '"}'
         $shell = (Get-Command powershell.exe -CommandType Application).Source
