@@ -329,7 +329,7 @@ The code requirement needs a signed build. On an unsigned test build, grant Full
 Disk Access to that path by hand in System Settings, then restart the helper with
 `sudo launchctl kickstart -k system/com.cisco.defenseclaw.sensor-helper`. A config
 that carries `enterprise.tetragon` is accepted and ignored on macOS;
-`enterprise macos status` reports `tetragon_not_applicable`.
+`enterprise macos status --json` and `enterprise macos verify` report `tetragon_not_applicable`; plain `status` does not print it.
 
 ## Machine policy
 

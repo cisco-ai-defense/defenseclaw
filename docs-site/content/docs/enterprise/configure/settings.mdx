@@ -79,7 +79,7 @@ Codex always gets its lock on Windows, whatever the key says. Claude Code's Wind
 
 ## Tetragon (Linux)
 
-Under `enterprise.tetragon`. See [Tetragon on a Linux fleet](/docs/enterprise/runtime/tetragon) and the [Tetragon reference](/docs/enterprise/runtime/tetragon-reference). The block applies to the standalone profile on Linux. Windows and macOS accept it and ignore it (macOS `status` reports `tetragon_not_applicable`). The Secure Client profile refuses a config that carries it.
+Under `enterprise.tetragon`. See [Tetragon on a Linux fleet](/docs/enterprise/runtime/tetragon) and the [Tetragon reference](/docs/enterprise/runtime/tetragon-reference). The block applies to the standalone profile on Linux. Windows and macOS accept it and ignore it (on macOS `status --json` and `verify` report `tetragon_not_applicable`). The Secure Client profile refuses a config that carries it.
 
 | Key | Values and default | What it does |
 | --- | --- | --- |
