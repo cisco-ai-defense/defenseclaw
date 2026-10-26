@@ -1491,6 +1491,17 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0725", page: "enterprise/identity/sources.mdx", has: ["the same entry selects the account of that name in each of those domains", "The strict policy tier refuses a request when that ambiguity could change its profile."] },
   { gap: "GAP-0725", page: "reference/policy/guardrail-profiles.mdx", has: ["the entry selects the account of that name in each domain"] },
   { gap: "GAP-0755", page: "enterprise/configure/enrollment.mdx", has: ["Excluding an enrolled account also removes its guardian identity record at the next guardian pass"] },
+  { gap: "GAP-1163", page: "reference/sandboxes/cli.mdx", has: ["If that sync fails, DefenseClaw does not stop the VM"] },
+  { gap: "GAP-1550", page: "troubleshooting/sandboxes/runs-and-sessions.mdx", section: "A MicroVM stop is held because its disk could not sync", has: ["Signing out without linger, `sandbox teardown` and an administrator"] },
+  { gap: "GAP-1595", page: "reference/commands/tui.mdx", has: ["the TUI asks whether to stop it anyway"] },
+  { gap: "GAP-0868", page: "enterprise/runtime/sandboxes.mdx", has: ["the package pauses each account's old sandbox daemon before it replaces any file"] },
+  { gap: "GAP-0546", page: "enterprise/runtime/sandbox-reference.mdx", has: ["`ensure` fails with `config_invalid` and keeps the previous config and the running gateway"] },
+  { gap: "GAP-0691", page: "enterprise/runtime/sandbox-reference.mdx", has: ["can be written in any letter case: `VM` is `vm`"] },
+  { gap: "GAP-0714", page: "enterprise/runtime/sandbox-reference.mdx", has: ["read and write access to `/dev/kvm` (the `kvm` group, a user ACL entry or an open mode)"] },
+  { gap: "GAP-1693", page: "reference/sandboxes/cli.mdx", has: ["can reach your account's request limit"] },
+  { gap: "GAP-1552", page: "enterprise/runtime/sandboxes.mdx", has: ["a run first waits up to 10 seconds for your sandbox policy"] },
+  { gap: "GAP-0701", page: "troubleshooting/sandboxes/setup-and-gateway.mdx", has: ["offers the next free port and writes it as `openshell.ingress_port` or `openshell.egress_port`"] },
+  { gap: "GAP-0831", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["it cannot cut that guest off below OpenShell's own network broker", "adds none back (approvals included)"] },
   // r105-rows-end
 ];
 

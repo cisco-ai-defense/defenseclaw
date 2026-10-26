@@ -37,6 +37,8 @@ The daemon binds the ingress and egress ports (18971 and 18972 by default) at th
 
 ## `enterprise.openshell` keys
 
+The words these settings take (`prerequisite`, `setup`, `docker`, `vm`, `auto`, `none`, `stop`, `alert`, `refuse`, `session`, `open`, `balanced`, `strict`, ...) can be written in any letter case: `VM` is `vm`.
+
 | Key | Meaning |
 | --- | --- |
 | `install` | `prerequisite` (default) or `setup`. |
@@ -110,7 +112,7 @@ An unset key adds no constraint. A list left out is "no constraint", and an empt
 
 Custom packs for managed hosts live under the policies directory in `sandbox/<name>/`, and a `required_pack` outside it is refused. A profile's `required_pack` must be at least as strict as the floor's (with no floor pack, as the default pack: `openshell.pack`, else `balanced`) in network and approvals modes, workspace, MCP, `hooks.fail_mode`, `on_tamper`, `on_silence`, `silence_after` and the egress lists, and must match its `required_pack_digest` when it has one. `ensure` and the config load refuse anything else and keep the previous config, and every create checks again and fails closed.
 
-- **Editing a pack.** A pack edited in place, with `config.yaml` unchanged, is applied by the next `ensure`: it records the next `config_generation` and restarts the gateway, and `policy.applied` reads `true` once the gateway reports the new digest. An edit that no longer loads is refused: `ensure` fails with `config_refused` and the reason, records no `config_generation` and leaves the gateway running the last good pack. A gateway started on a pack that does not load refuses to start, and a reload keeps the previous configuration.
+- **Editing a pack.** A pack edited in place, with `config.yaml` unchanged, is applied by the next `ensure`: it records the next `config_generation` and restarts the gateway, and `policy.applied` reads `true` once the gateway reports the new digest. An edit that no longer loads is refused: `ensure` fails with `config_refused` and the reason, records no `config_generation` and leaves the gateway running the last good pack. A new `config.yaml` (or `ensure --config FILE`) that names a required pack that does not load is a config that fails validation: `defenseclaw-gateway config validate FILE` refuses it, naming the pack and what it lacks, and `ensure` fails with `config_invalid` and keeps the previous config and the running gateway. A gateway started on a pack that does not load refuses to start, and a reload keeps the previous configuration.
 - **Default pack.** A run whose profile names no pack gets the default pack (`openshell.pack`, else `balanced`; never `open`).
 - **Copy only.** A pack that sets or inherits `workspace.mode: mount` (a pack that extends `balanced` inherits it) is refused as looser than the default pack, including an `openshell.pack` that `openshell.admin.locked: [pack]` makes the required pack of every sandbox. Set `workspace.mode: copy` in the pack.
 - **`sandbox run --pack`** under a required pack takes a pack at least as strict in every setting and refuses a looser one, naming your profile and the setting it loosens. `extends` helps you write a pack and guarantees nothing.
@@ -506,7 +508,7 @@ Two residuals come from the operating system. The sandbox daemon is an ordinary 
 - `profile-explain` adds `effective.sandbox` with the source of each value.
 - `sandbox list` lists the registrations of every account, or of one with `--user`, filtered with `--state pending|expired|live|stopped|revoked`, with `--json`. A pending registration that no sandbox bound to within 30 minutes is `expired`; one whose sandbox is not running is `stopped`. A foreign sandbox has no registration, so it is absent; look for `sandbox.foreign_sandbox` in the audit log.
 - `sandbox explain --registration` shows one registration the way the person sees it, then the sources: organization (the floor for everyone) and profile.
-- `policy verify --user` adds the sandbox rows: each required agent, the required pack (present, and its digest matches `required_pack_digest`; an unpinned pack is a warning that prints the digest), the resolved floor's digest, and the docker or kvm group on Linux.
+- `policy verify --user` adds the sandbox rows: each required agent, the required pack (present, and its digest matches `required_pack_digest`; an unpinned pack is a warning that prints the digest), the resolved floor's digest, and on Linux what a MicroVM needs for that account: read and write access to `/dev/kvm` (the `kvm` group, a user ACL entry or an open mode) and the `docker` group, in which the agent images are built. Without `/dev/kvm` access on the `auto` driver with `driver_fallback: docker` the row is a warning and the account gets the docker fallback.
 - `sandbox pack-digest` prints the digest that `required_pack_digest` pins. It reads only the file and needs no sandbox daemon.
 
 ![enterprise linux sandbox list as root: four registrations of one user in the revoked state, each with the engineering profile, matched by group, the claudecode agent, its sandbox name and the docker driver](/images/sandboxes/managed/admin-sandbox-list.png)

@@ -113,6 +113,8 @@ If the message is `DefenseClaw is restarting or upgrading the OpenShell gateway`
 
 **Fix:** stop that gateway, then start the service. For another account's gateway, hand it over ([Linux](/docs/how-to/sandboxes/set-up-on-linux#one-openshell-gateway-per-machine), [macOS](/docs/how-to/sandboxes/set-up-on-macos#one-openshell-gateway-per-mac)). `--fix` leaves this to you.
 
+If another program, such as another account's DefenseClaw gateway, already listens on your sandbox ingress or egress port, `defenseclaw sandbox setup` offers the next free port and writes it as `openshell.ingress_port` or `openshell.egress_port`; answer no to keep your port and free it yourself.
+
 **Check:** `defenseclaw sandbox doctor` shows the gateway service active.
 
 ## The daemon is not running

@@ -110,7 +110,10 @@ commands change in these ways. Everything else on this page works as written.
   (`/usr/bin/defenseclaw` on Linux, `/usr/local/bin/defenseclaw` on macOS) as
   a root-owned link that offers only the `sandbox` commands. Any other command
   prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits `2`. The launcher starts your own sandbox daemon
-  when it is not running.
+  when it is not running. Many sandbox commands in a few seconds (a script
+  that runs `sandbox pack list` in a loop) can reach your account's request
+  limit: the command says so and changes nothing; run it again a few seconds
+  later.
 - **Sandboxes off.** While sandboxes are off, `sandbox list -o json` prints
   `{"sandboxes": []}` and `sandbox policy show` prints your own effective
   policy. Both exit `0`; there is no `enabled: false` output.
@@ -1039,7 +1042,7 @@ the destinations by kind (`AI: 1 model provider, 2 shadow AI`):
 
 ### `sandbox stop`
 
-Stops a sandbox. It is kept, so `start` or `connect` can resume it. When a
+Stops a sandbox. It is kept, so `start` or `connect` can resume it. On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it. If that sync fails, DefenseClaw does not stop the VM: it keeps running with its work, and the command says why. Save the work you need (`defenseclaw sandbox pull NAME` for a copy run), then run `defenseclaw sandbox stop NAME` again; `defenseclaw sandbox delete NAME` ends it without keeping its work. A stop your organization's policy makes (a hook alarm, a revoked registration) still goes ahead and the activity feed says what may be lost. When a
 detached run is still going, or a session runs in it from another terminal
 (a harness session, or `connect --shell`), `stop` names it and asks first on
 a terminal (`--yes` skips the question; without a terminal it warns), and
