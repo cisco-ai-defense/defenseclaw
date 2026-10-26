@@ -1328,10 +1328,27 @@ func reprepareWindowsScannerRuntimeLocked(action string, opts *windowsEnterprise
 // prepare bound exited 0 with ok=true and a warning, and verify then failed
 // with every skill, MCP server and plugin install blocked (GAP-1063).
 func windowsScannerRuntimePrepareFailed(err error) string {
+	if errors.Is(err, errWindowsScannerPrepareTimedOut) {
+		// A busy computer (GAP-1687: ten hook drivers on 8 vCPU) can need
+		// more than the bound for a first prepare inside Setup's own 30
+		// minute limit. The work done is kept, so the same command finishes
+		// it: the run is retryable (1618), not a failed deployment.
+		return "DefenseClaw is installed and its services run, but preparing the skill, MCP and plugin scanner runtime did not finish within " +
+			windowsScannerPrepareTimeout.String() + " on this busy computer, so skill, MCP server and plugin installs stay blocked (scanner failure, fail-closed) until it does; " +
+			windowsScannerPrepareRetryNotice
+	}
 	return "DefenseClaw is installed and its services run, but the skill, MCP and plugin scanner runtime could not be prepared (" +
 		err.Error() + "), so every skill, MCP server and plugin install is blocked (scanner failure, fail-closed) and verify fails; " +
 		"run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 as LocalSystem to prepare it"
 }
+
+// errWindowsScannerPrepareTimedOut marks a scanner runtime step stopped at
+// its bound.
+var errWindowsScannerPrepareTimedOut = errors.New("the bound was reached")
+
+// windowsScannerPrepareRetryNotice ends the message of a prepare that hit its
+// bound; windowsEnterpriseFailureCodeFor reads it as retry-later.
+const windowsScannerPrepareRetryNotice = "run the same DefenseClawSetup-Enterprise-Standalone-x64.exe command again (an MDM retry does): it continues the preparation"
 
 // windowsScannerProgress receives a scanner runtime step progress lines:
 // standard output for a person, the lifecycle log's diagnostics in a JSON
@@ -1405,7 +1422,7 @@ func runWindowsScannerRuntime(executable, step string) error {
 	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		// GAP-0297: Windows reports a process the deadline killed as a bare
 		// "exit status 1", which hid the cause.
-		return fmt.Errorf("%s the scanner runtime: timed out after %s", step, windowsScannerPrepareTimeout)
+		return fmt.Errorf("%s the scanner runtime: timed out after %s: %w", step, windowsScannerPrepareTimeout, errWindowsScannerPrepareTimedOut)
 	}
 	if err != nil {
 		return fmt.Errorf("%s the scanner runtime: %v: %s", step, err, windowsEnterpriseBoundedDiagnostic(strings.TrimSpace(string(out))))
