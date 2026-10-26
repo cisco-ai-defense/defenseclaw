@@ -3996,3 +3996,17 @@ def test_unix_wrapper_settles_only_under_the_rotation_lock(tmp_path: Path, os_di
     settle = [i for i, call in enumerate(calls) if " enterprise secret set " in f" {call} "]
     assert "released" in calls and settle and settle[0] > calls.index("released"), calls
     assert not (journal / "ai-key.entry").exists(), out
+
+
+# GAP-1585: a completed Windows uninstall removes the wrapper's credential
+# rotation journal, overwriting each entry first, as uninstall.sh does on
+# Linux and macOS; -Purge also removes the empty state folder.
+def test_windows_uninstall_removes_the_rotation_journal() -> None:
+    text = _text(MDM / "windows" / "uninstall.ps1")
+    body = text.split("function Remove-DefenseClawRotationJournal {", 1)[1].split("\n}\n", 1)[0]
+    assert "'Cisco\\DefenseClaw-MDM'" in body and "Join-Path $state 'rotation'" in body
+    assert body.index("Test-DefenseClawAdminOnlyItem -Path $journal") < body.index("WriteAllBytes") < body.index("Remove-Item -LiteralPath $item.FullName")
+    assert "ReparsePoint" in body and "rotation.lock" in body and "if ($Purge" in body
+    tail = text.split(SHARED_END, 1)[1]
+    run = tail.index("$code = $run.ExitCode")
+    assert run < tail.index("if (@(0, 3010) -contains $code) {") < tail.index("Remove-DefenseClawRotationJournal }", run)
