@@ -1377,6 +1377,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1762", page: "troubleshooting/known-limits.mdx", section: "Claude Code shell", has: ["no hook decision and no hook audit row", "the Tetragon runtime layer can still record it (`hook_seen=false`)"], lacks: ["the audit log has no row for it"] },
   { gap: "GAP-1763", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["a process tracer such as PRoot on Linux", "`unprivileged_ptrace`", "`kernel.yama.ptrace_scope=2`"] },
   { gap: "GAP-1764", page: "troubleshooting/windows.mdx", section: "Codex refuses every command in its first session", has: ["Granular.sandbox_approval is false", "Quit Codex and start it again once", "/docs/troubleshooting/known-limits#codex"] },
+  { gap: "GAP-0552", page: "troubleshooting/known-limits.mdx", section: "Scanners on macOS", has: ["run as you, with a timeout", "can escape that tracking and keep running after the scan and after `defenseclaw-gateway stop`", "This is a macOS limit."] },
   // r105-rows-end
 ];
 

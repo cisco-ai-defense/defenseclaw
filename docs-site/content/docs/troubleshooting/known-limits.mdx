@@ -34,6 +34,10 @@ The local Splunk bridge works only with an x86_64 Docker engine, because the Spl
 
 The managed Linux and macOS packages include no skill, MCP or plugin scanner; only the managed Windows package does. On those computers `defenseclaw-gateway scan skill`, `scan mcp` and `scan plugin` say so and scan nothing. An administrator checks a skill's or plugin's files with `sudo /opt/defenseclaw/bin/defenseclaw-gateway scan code PATH` on Linux or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan code PATH` on macOS. Users add MCP servers through the agent's own MCP configuration. The full scans run on a per-user installation or a managed Windows computer. See [Scan a skill](/docs/how-to/scanning/scan-a-skill#before-you-start).
 
+## Scanners on macOS
+
+On macOS, the skill, MCP and plugin scanners DefenseClaw starts run as you, with a timeout, and DefenseClaw ends the processes they start when the scan ends. A scanner process that detaches itself completely from the scan between DefenseClaw's process checks can escape that tracking and keep running after the scan and after `defenseclaw-gateway stop`. macOS gives an unprivileged program no race-free way to follow every process its children start. This is a macOS limit. Use scanners you trust, and end a leftover scanner process yourself (Activity Monitor or `ps -U $USER` shows it).
+
 ## Linux sign-out
 
 On Linux, the OpenShell gateway runs in your systemd user manager. Without linger, signing out of your last session stops the gateway and its MicroVMs, even when a disk sync failed, so unsynced work in the guest is lost. This is how systemd works: without linger it ends a user's services when their last session ends. Save your work and stop the sandbox before you sign out, or ask an administrator to enable linger for your account with `sudo loginctl enable-linger USER`. See [A Linux sign-out ends a running MicroVM](/docs/troubleshooting/sandboxes/setup-and-gateway#a-linux-sign-out-ends-a-running-microvm).
