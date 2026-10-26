@@ -48,6 +48,9 @@ func TestHostOwnerUIDFailsClosedWithoutTrackedBroker(t *testing.T) {
 func TestHostOwnerUIDRejectsHostSocketWithParentPID1(t *testing.T) {
 	const stageEnv = "DC_MANAGED_BROKER_TEST_STAGE"
 	const markerEnv = "DC_MANAGED_BROKER_TEST_MARKER"
+	// The middle names itself: it can exit before the leaf first reads its
+	// parent, and the leaf then already sees the process that adopted it.
+	const middleEnv = "DC_MANAGED_BROKER_TEST_MIDDLE"
 	if stage := os.Getenv(stageEnv); stage != "" {
 		if stage == "middle" {
 			null, err := os.Open(os.DevNull)
@@ -55,7 +58,7 @@ func TestHostOwnerUIDRejectsHostSocketWithParentPID1(t *testing.T) {
 				os.Exit(2)
 			}
 			leaf := exec.Command(os.Args[0], "-test.run=^TestHostOwnerUIDRejectsHostSocketWithParentPID1$")
-			leaf.Env = append(os.Environ(), stageEnv+"=leaf")
+			leaf.Env = append(os.Environ(), stageEnv+"=leaf", middleEnv+"="+strconv.Itoa(os.Getpid()))
 			leaf.ExtraFiles = []*os.File{null, null, os.NewFile(5, "host-socket")}
 			if leaf.Start() != nil {
 				os.Exit(2)
@@ -63,7 +66,10 @@ func TestHostOwnerUIDRejectsHostSocketWithParentPID1(t *testing.T) {
 			os.Exit(0)
 		}
 		marker := os.Getenv(markerEnv)
-		middle := os.Getppid()
+		middle, err := strconv.Atoi(os.Getenv(middleEnv))
+		if err != nil {
+			os.Exit(5)
+		}
 		for deadline := time.Now().Add(5 * time.Second); os.Getppid() == middle; time.Sleep(10 * time.Millisecond) {
 			if time.Now().After(deadline) {
 				os.Exit(3)
