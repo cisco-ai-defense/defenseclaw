@@ -23924,6 +23924,38 @@ function Get-DefenseClawGuardianVerificationFailureDiagnostic {
     return ConvertTo-DefenseClawBoundedDiagnostic -Value ($issues -join '; ')
 }
 
+function Invoke-DefenseClawGuardianReadinessCommand {
+    <#
+        Runs the installed gateway's guardian proof. A gateway from before
+        enterprise hooks readiness existed (1.0.2, which a recovery of an
+        interrupted lifecycle can put back) refuses that verb as 'unknown
+        flag: --manifest'; its own release proved readiness with verify, so
+        that answer is taken instead of failing the recovered deployment
+        (GAP-1886). Any other failure is the gateway's answer.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$Verb
+    )
+    $probe = Invoke-DefenseClawGatewayCommand `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -Arguments @('enterprise', 'hooks', $Verb, '--manifest', $Layout.ManifestPath, '--json') `
+        -Capture `
+        -AllowFailure
+    if ($Verb -ceq 'readiness' -and [int]$probe.exit_code -ne 0 -and
+        (($probe.output | Microsoft.PowerShell.Utility\Out-String) -match 'unknown flag: --manifest|unknown command "readiness"')) {
+        $probe = Invoke-DefenseClawGatewayCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Arguments @('enterprise', 'hooks', 'verify', '--manifest', $Layout.ManifestPath, '--json') `
+            -Capture `
+            -AllowFailure
+    }
+    return $probe
+}
+
 function Get-DefenseClawGuardianReadinessProbe {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -23943,12 +23975,10 @@ function Get-DefenseClawGuardianReadinessProbe {
         if (Test-DefenseClawStandaloneProfile) { 'readiness' } else { 'verify' }
     }
     else { 'status' }
-    $probe = Invoke-DefenseClawGatewayCommand `
+    $probe = Invoke-DefenseClawGuardianReadinessCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
-        -Arguments @('enterprise', 'hooks', $verb, '--manifest', $Layout.ManifestPath, '--json') `
-        -Capture `
-        -AllowFailure
+        -Verb $verb
     $ready = [int]$probe.exit_code -eq 0
     return [pscustomobject][ordered]@{
         ready = $ready
