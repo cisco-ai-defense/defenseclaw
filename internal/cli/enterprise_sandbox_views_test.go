@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -548,6 +549,42 @@ func TestPolicyVerifyJudgesKVMAccessNotOnlyTheGroup(t *testing.T) {
 	enterpriseAccountGroups = func(int) ([]string, error) { return []string{"users"}, nil }
 	if r := row("docker group"); r.State != sandboxRowFail || !strings.Contains(r.Detail, "MicroVM agent images") {
 		t.Errorf("no docker group on the MicroVM driver: %+v", r)
+	}
+}
+
+// GAP-1784: a user ACL entry that names the account and withholds
+// read/write from /dev/kvm is the answer, also for an account in the kvm
+// group and on an open mode, as the lifecycle's groups row judges it.
+func TestPolicyVerifyHonoursAKVMACLEntryThatDenies(t *testing.T) {
+	prevProfile, prevGroups, prevDevice, prevACL := enterprisePolicySandboxProfile, enterpriseAccountGroups, enterpriseKVMDevice, enterpriseKVMACL
+	t.Cleanup(func() {
+		enterprisePolicySandboxProfile, enterpriseAccountGroups, enterpriseKVMDevice, enterpriseKVMACL = prevProfile, prevGroups, prevDevice, prevACL
+	})
+	enterprisePolicySandboxProfile = func(string) (string, string, string, bool, error) { return "eng", "group", "eng", false, nil }
+	enterpriseKVMDevice = filepath.Join(t.TempDir(), "kvm")
+	if err := os.WriteFile(enterpriseKVMDevice, nil, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(enterpriseKVMDevice, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	enterpriseKVMACL = func(string) (posixacl.View, error) {
+		return posixacl.View{Present: true, Mask: 0o7, Users: []posixacl.Entry{{Kind: "user", ID: 1001, Perm: 0}}}, nil
+	}
+	enterpriseAccountGroups = func(int) ([]string, error) { return []string{"users", "kvm", "docker"}, nil }
+	c := &config.Config{}
+	c.OpenShell.Enabled = true
+	c.Enterprise.OpenShell.Driver = config.EnterpriseOpenShellDriverVM
+	c.Guardrail.Profiles = map[string]config.GuardrailProfile{"eng": {Sandbox: &config.OpenShellAdminConfig{RequiredFor: []string{"claudecode"}}}}
+	states := []enterprisepolicy.State{{Connector: "claudecode", Route: enterprisepolicy.RouteMachinePolicy, Covered: true}}
+	var kvm *enterprisePolicySandboxRow
+	for _, r := range buildEnterprisePolicySandbox(c, "linux", "eng1", 1001, states).Rows {
+		if r.Check == "kvm group" {
+			kvm = &r
+		}
+	}
+	if kvm == nil || kvm.State != sandboxRowFail || !strings.Contains(kvm.Detail, "withholds read and write") {
+		t.Fatalf("kvm row with a denying user ACL entry = %+v, want a failure", kvm)
 	}
 }
 

@@ -95,25 +95,34 @@ var enterpriseAccountGroups = accountGroupNames
 // enterpriseKVMDevice is the device a MicroVM opens; replaceable in tests.
 var enterpriseKVMDevice = "/dev/kvm"
 
+// enterpriseKVMACL reads the access ACL of enterpriseKVMDevice; replaceable
+// in tests.
+var enterpriseKVMACL = posixacl.ReadAccessXattr
+
 // enterpriseKVMAccess says how the account uid can read and write
-// enterpriseKVMDevice other than through the kvm group: its mode opens it to
-// every account, or a user ACL entry grants it. "" when neither does, and
-// the kvm group decides; an ACL entry that names the account and denies it
-// is no access either (GAP-0714, as the lifecycle's groups row judges it).
-func enterpriseKVMAccess(uid int) string {
+// enterpriseKVMDevice other than through the kvm group: a user ACL entry
+// grants it, or its mode opens it to every account. "" when neither does,
+// and the kvm group decides, unless denied: an ACL entry that names the
+// account and withholds read or write is the whole answer, whatever the kvm
+// group or the mode give (POSIX ACL precedence; GAP-0714, GAP-1784, as the
+// lifecycle's groups row judges it).
+func enterpriseKVMAccess(uid int) (how string, denied bool) {
 	info, err := os.Stat(enterpriseKVMDevice)
 	if err != nil {
-		return ""
+		return "", false
 	}
-	if info.Mode().Perm()&0o006 == 0o006 {
-		return "it is open to every account"
-	}
-	if acl, err := posixacl.ReadAccessXattr(enterpriseKVMDevice); err == nil {
-		if found, allowed := acl.NamedUserAllows(uid, 0o6); found && allowed {
-			return "a user ACL entry grants it"
+	if acl, err := enterpriseKVMACL(enterpriseKVMDevice); err == nil {
+		if found, allowed := acl.NamedUserAllows(uid, 0o6); found {
+			if allowed {
+				return "a user ACL entry grants it", false
+			}
+			return "", true
 		}
 	}
-	return ""
+	if info.Mode().Perm()&0o006 == 0o006 {
+		return "it is open to every account", false
+	}
+	return "", false
 }
 
 // sandboxPolicyConfigured reports whether c carries any sandbox policy: an
@@ -247,8 +256,21 @@ func buildEnterprisePolicySandbox(c *config.Config, goos, account string, uid in
 		for _, need := range needs {
 			if need.group == "kvm" {
 				// Access decides, not the group alone (GAP-0714).
-				if how := enterpriseKVMAccess(uid); how != "" {
+				how, denied := enterpriseKVMAccess(uid)
+				switch {
+				case how != "":
 					add("kvm group", "", sandboxRowOK, "the account can read and write /dev/kvm ("+how+"), so its MicroVM sandboxes can start ("+need.what+")")
+					continue
+				case denied:
+					state := sandboxRowWarn
+					if required && need.essential {
+						state = sandboxRowFail
+					}
+					detail := "a user ACL entry on /dev/kvm withholds read and write from the account, whatever its groups, so no MicroVM can start for it on the " + need.what
+					if !need.essential {
+						detail += "; it gets the docker fallback"
+					}
+					add("kvm group", "", state, detail+"; `setfacl -x u:"+account+" /dev/kvm` removes that entry")
 					continue
 				}
 			}
