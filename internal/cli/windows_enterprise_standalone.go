@@ -4381,11 +4381,47 @@ func compareWindowsEnterpriseVersions(left, right string) int {
 		return 1
 	case rPre == "":
 		return -1
-	case lPre < rPre:
-		return -1
 	default:
+		return compareWindowsEnterprisePrerelease(lPre, rPre)
+	}
+}
+
+// compareWindowsEnterprisePrerelease orders two prerelease strings as semver
+// does: dot-separated identifiers left to right, numeric ones as numbers and
+// below alphanumeric ones, a shorter list first when it is a prefix. Compared
+// as text, rc.4 was newer than rc.10 and ensure refused that upgrade as a
+// downgrade (GAP-1516).
+func compareWindowsEnterprisePrerelease(left, right string) int {
+	l, r := strings.Split(left, "."), strings.Split(right, ".")
+	for i := 0; i < len(l) && i < len(r); i++ {
+		ln, lErr := strconv.ParseUint(l[i], 10, 64)
+		rn, rErr := strconv.ParseUint(r[i], 10, 64)
+		switch {
+		case lErr == nil && rErr == nil:
+			if ln != rn {
+				if ln < rn {
+					return -1
+				}
+				return 1
+			}
+		case lErr == nil:
+			return -1
+		case rErr == nil:
+			return 1
+		case l[i] != r[i]:
+			if l[i] < r[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	switch {
+	case len(l) < len(r):
+		return -1
+	case len(l) > len(r):
 		return 1
 	}
+	return 0
 }
 
 func parseWindowsEnterpriseVersion(value string) ([]int, string, bool) {
