@@ -59,3 +59,22 @@ func TestForeignHookSessionExchangeIsSentOnceWithRetryUntil(t *testing.T) {
 		}
 	}
 }
+
+// withoutRetryUntil is an exchange body without the retry_until the hook
+// adds (TestForeignHookSessionExchangeIsSentOnceWithRetryUntil checks it).
+func withoutRetryUntil(t *testing.T, body []byte) string {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return string(body)
+	}
+	if _, ok := fields["retry_until"]; !ok {
+		t.Fatalf("the exchange carries no retry_until: %s", body)
+	}
+	delete(fields, "retry_until")
+	out, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
