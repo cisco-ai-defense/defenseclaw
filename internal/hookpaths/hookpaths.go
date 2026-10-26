@@ -73,8 +73,11 @@ const maxWriteTargetLinkDepth = 40
 const MaxWriteTargets = 512
 
 // MaxWriteTargetPathBytes bounds one operand. A longer operand is omitted and
-// the map is marked truncated.
-const MaxWriteTargetPathBytes = 1024
+// the map is marked truncated. It is the Linux PATH_MAX, so an ordinary file
+// in a deep working directory is described, not omitted (GAP-1877: at 1024 a
+// redirect from a cwd over 1 KiB left a managed gateway behind ProtectHome
+// without evidence and was denied as an SSH key write).
+const MaxWriteTargetPathBytes = 4096
 
 // maxEncodedTargets bounds the JSON map. MaxHeaderValueBytes is its unpadded
 // base64 size plus slack; it stays well inside one argv string for curl -H in
