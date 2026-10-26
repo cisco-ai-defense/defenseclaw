@@ -708,17 +708,13 @@ defenseclaw config get asset_policy.skill.denied --format json
 ```json
 [
   {
-    "args_prefix": [],
-    "command": "",
-    "connector": "",
     "name": "evil-skill",
-    "reason": "supply-chain advisory",
-    "source_path_contains": [],
-    "transport": "",
-    "url": ""
+    "reason": "supply-chain advisory"
   }
 ]
 ```
+
+Fields that are not set (`connector`, `command`, `url` and the others) are left out.
 
 Lifting it is the same command family, and the entry leaves `config.yaml`:
 
