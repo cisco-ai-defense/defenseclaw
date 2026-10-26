@@ -5277,7 +5277,7 @@ $script:calls | ForEach-Object {{ "CALL=$_" }}
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-@pytest.mark.parametrize("old", ["deletable", "undeletable", "unmovable", "parked-data-stuck"])
+@pytest.mark.parametrize("old", ["deletable", "undeletable", "unmovable", "parked-data-stuck", "own-busy"])
 def test_a_finished_install_never_leaves_previous_new_behind(tmp_path: Path, old: str) -> None:
     # GAP-1860 (and the residue half of GAP-1555): Complete-Swap deleted the
     # old previous\ and renamed previous.new into it in one quiet step. An
@@ -5289,7 +5289,11 @@ def test_a_finished_install_never_leaves_previous_new_behind(tmp_path: Path, old
     # verify round's i62/i63) stays, and this install's copy is kept beside
     # it, with no raw exception. A previous.new that a finished install left
     # (SWAPPED) is finished by the next run instead of undone. A set-aside
-    # copy is .kept-previous-*, which no restore sweeps (R2-1).
+    # copy is .kept-previous-*, which no restore sweeps (R2-1). This
+    # account's own previous\ that is only in use (a console's current folder
+    # inside it) is not another account's: the step stops, previous.new stays
+    # for the next run, and nothing is kept beside it (GAP-2054). A normal
+    # publish removes this account's superseded kept copies.
     data = tmp_path / "data"
     (data / "previous" / "bin").mkdir(parents=True)
     (data / "previous" / "VERSION").write_text("1.0.2", encoding="ascii")
@@ -5299,7 +5303,10 @@ def test_a_finished_install_never_leaves_previous_new_behind(tmp_path: Path, old
     remove = "Remove-Item -LiteralPath $Path -Recurse -Force"
     if old != "deletable":
         remove = "if ($Path -eq $Previous) { throw 'Access is denied.' }; " + remove
-    move_guard = "if ($From -eq $Previous) { throw 'Access to the path is denied.' }" if old == "unmovable" else ""
+    move_guard = "if ($From -eq $Previous) { throw 'Access to the path is denied.' }" if old in ("unmovable", "own-busy") else ""
+    if old == "own-busy":
+        remove = "if ($Path -eq $Previous) { throw 'The process cannot access the file because it is being used by another process.' }; " + "Remove-Item -LiteralPath $Path -Recurse -Force"
+    owned = "$true" if old == "own-busy" else "$false"
     save = "throw 'data held'" if old == "parked-data-stuck" else ""
     script = f"""
 $ErrorActionPreference = 'Stop'
@@ -5307,16 +5314,26 @@ $DataDir = '{data}'
 $Previous = Join-Path $DataDir 'previous'
 function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ {remove} }} }}
 function Save-RolledBackData {{ {save} }}
-function Move-Path([string]$From, [string]$To, [int]$Seconds = 10) {{ {move_guard} Move-Item -LiteralPath $From -Destination $To }}
+function Move-Path([string]$From, [string]$To, [int]$Seconds = 10) {{ "MOVE $From $Seconds"; {move_guard} Move-Item -LiteralPath $From -Destination $To }}
+function Test-OwnedByCurrentUser([string]$Path) {{ return {owned} }}
 function Write-Warn([string]$m) {{ "WARN $m" }}
 function Write-Info([string]$m) {{ "INFO $m" }}
+{_ps1_function("Remove-KeptNewCopies")}
 {_ps1_function("Publish-PreviousSlot")}
-Publish-PreviousSlot (Join-Path $DataDir 'previous.new')
+try {{ Publish-PreviousSlot (Join-Path $DataDir 'previous.new') }} catch {{ "THROWN $($_.Exception.Message)" }}
 'OK'
 """
     result = _run_powershell(script)
     out = result.stdout + result.stderr
     assert result.returncode == 0 and "OK" in out, out
+    if old == "own-busy":
+        assert f"MOVE {data / 'previous'} 10" in out, out
+        assert "THROWN Could not replace the older rollback copy" in out and "next install finishes this" in out, out
+        assert (data / "previous.new" / "VERSION").read_text(encoding="ascii") == "1.0.4", out
+        assert (data / ".kept-previous-20261020T000000-new").exists() and "belongs to another account" not in out, out
+        assert sorted(path.name for path in data.glob(".kept-previous-*")) == [".kept-previous-20261020T000000-new"], out
+        return
+    assert "THROWN" not in out, out
     assert not (data / "previous.new").exists()
     assert not list(data.glob(".failed-*")), out
     asides = sorted(path.name for path in data.glob(".kept-previous-*") if not path.name.endswith("-new"))
@@ -5328,7 +5345,7 @@ Publish-PreviousSlot (Join-Path $DataDir 'previous.new')
         assert asides == [] and "belongs to another account" in out and "Exception" not in out, out
         return
     assert (data / "previous" / "VERSION").read_text(encoding="ascii") == "1.0.4"
-    assert (data / ".kept-previous-20261020T000000-new").exists()
+    assert not (data / ".kept-previous-20261020T000000-new").exists(), out
     if old == "deletable":
         assert asides == [] and "WARN" not in out, out
     else:
@@ -5337,8 +5354,11 @@ Publish-PreviousSlot (Join-Path $DataDir 'previous.new')
     swap = _ps1_function("Complete-Swap")
     assert swap.index('"SWAPPED"') < swap.index('Join-Path $Snap "COMPLETE"')
     assert "Publish-PreviousSlot $Snap" in swap and "Remove-Tree $Previous" not in swap
-    resume = _text()[_text().index("$swapped = @(@((Join-Path $DataDir \"previous.new\")") :][:1500]
+    resume = _text()[_text().index("$swapped = @(@((Join-Path $DataDir \"previous.new\")") :][:2200]
     assert '-or ($swapped.Count -and -not $manifest)' in resume and "Publish-PreviousSlot $slot" in resume
+    # A resume that stops again keeps SWAPPED (GAP-2054).
+    assert '"GATEWAY_RESTART_UNPROVEN", "SWAPPED")' not in resume, resume
+    assert 'Publish-PreviousSlot $slot\n                Remove-Item -LiteralPath (Join-Path $Previous "SWAPPED")' in resume, resume
     # Neither is data, so no later snapshot carries it, and the restore's
     # sweep of .failed-* folders does not take a kept rollback copy.
     head = _text()[: _text().index("$NotData") + 200]

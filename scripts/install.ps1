@@ -3913,12 +3913,16 @@ function Resume-InterruptedRun {
         foreach ($slot in @((Join-Path $DataDir "previous.new"), (Join-Path $DataDir ".repair"))) {
             if (-not (Test-Path -LiteralPath $slot)) { continue }
             Write-Warn "An earlier install finished but was interrupted while it cleaned up; finishing that"
-            foreach ($marker in @("COMPLETE", "HOOK_FIRST", "HOOK_GUARD", "GATEWAY_RESTART_UNPROVEN", "SWAPPED")) {
+            # SWAPPED goes only once the copy is published: one that stops
+            # again (its previous\ still in use, GAP-2054) is finished by the
+            # next run, not taken for an unfinished install.
+            foreach ($marker in @("COMPLETE", "HOOK_FIRST", "HOOK_GUARD", "GATEWAY_RESTART_UNPROVEN")) {
                 Remove-Item -LiteralPath (Join-Path $slot $marker) -Force -ErrorAction SilentlyContinue
             }
             Invoke-Quietly { Remove-Tree (Join-Path $slot "closer") }
             if ($slot -eq (Join-Path $DataDir "previous.new") -and (Read-Text (Join-Path $slot "VERSION"))) {
                 Publish-PreviousSlot $slot
+                Remove-Item -LiteralPath (Join-Path $Previous "SWAPPED") -Force -ErrorAction SilentlyContinue
             } else {
                 Remove-Tree $slot
             }
@@ -4337,6 +4341,23 @@ function Test-OutageOpenNotice {
     }
 }
 
+function Test-OwnedByCurrentUser([string]$Path) {
+    # A folder whose owner this account cannot even read (SYSTEM-only DACL)
+    # is not its own.
+    try {
+        $owner = (Get-Acl -LiteralPath $Path -ErrorAction Stop).GetOwner([Security.Principal.SecurityIdentifier])
+        return $owner -eq [Security.Principal.WindowsIdentity]::GetCurrent().User
+    } catch { return $false }
+}
+
+function Remove-KeptNewCopies {
+    # This account's own rollback copies kept beside another account's
+    # previous\ are superseded by a newer one (best effort).
+    foreach ($old in @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".kept-previous-*-new" -ErrorAction SilentlyContinue)) {
+        try { Remove-Tree $old.FullName } catch { }
+    }
+}
+
 function Publish-PreviousSlot([string]$Slot) {
     # previous.new becomes previous\, the rollback copy. The data a rollback
     # parked in the older previous\ goes to backups\ first (Save-RolledBackData).
@@ -4357,15 +4378,19 @@ function Publish-PreviousSlot([string]$Slot) {
     if ($why -and (Test-Path -LiteralPath $Previous)) {
         $aside = Join-Path $DataDir ".kept-previous-$stamp"
         try {
-            Move-Path $Previous $aside 2
+            Move-Path $Previous $aside
             Write-Warn "The older rollback copy could not be removed ($why); it was set aside in $aside"
             Write-Info "It is not used again; remove it when you no longer need it (as its owner or an administrator): cmd /c rd /s /q `"$aside`""
         } catch {
-            $kept = Join-Path $DataDir ".kept-previous-$stamp-new"
-            # This account's own earlier copies of that kind are superseded.
-            foreach ($old in @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".kept-previous-*-new" -ErrorAction SilentlyContinue)) {
-                try { Remove-Tree $old.FullName } catch { }
+            # This account's own previous\ that is only in use (a console
+            # whose current folder is inside it) is not another account's:
+            # stop, so previous.new keeps SWAPPED and the next run finishes
+            # it (GAP-2054).
+            if (Test-OwnedByCurrentUser $Previous) {
+                throw "Could not replace the older rollback copy $Previous ($why). Close the program using it (for example a console whose current folder is inside it); the next install finishes this"
             }
+            $kept = Join-Path $DataDir ".kept-previous-$stamp-new"
+            Remove-KeptNewCopies
             Move-Path $Slot $kept
             Write-Warn "The older rollback copy $Previous belongs to another account and could not be removed or set aside, so this install's rollback copy was kept in $kept"
             Write-Info "To make it the rollback copy again, an administrator removes $Previous (cmd /c rd /s /q `"$Previous`") and you rename $kept to previous"
@@ -4373,6 +4398,7 @@ function Publish-PreviousSlot([string]$Slot) {
         }
     }
     Move-Path $Slot $Previous
+    Remove-KeptNewCopies
 }
 
 function Complete-Swap {
