@@ -1,18 +1,29 @@
 ---
 title: Connectors
-description: Pick your coding agent and see how DefenseClaw guards it, what it can block, and which operating systems it runs on.
+description: Every DefenseClaw connector shares one adapter interface, and each one exposes only the hook, plugin, policy, ACP, telemetry and approval capabilities its agent offers.
 keywords:
   - DefenseClaw connectors
-  - supported agents
-  - hook connector
-  - proxy connector
+  - Claude Code connector
+  - Codex connector
+  - Cursor connector
+  - OpenClaw connector
+  - GitHub Copilot CLI connector
+  - Antigravity connector
+  - Devin connector
+  - Hermes connector
+  - OpenCode connector
+  - Amp connector
+  - Kiro connector
+  - ZeptoClaw connector
 ---
 
 import { ConnectorOsMatrix } from '@/components/support-matrix';
 
 A connector is how DefenseClaw guards one coding agent. **Hook** connectors register with the agent's own hooks or plugin, and the agent keeps talking to its model provider directly. **Proxy** connectors send the agent's model traffic through the DefenseClaw guardrail proxy.
 
-## Pick your agent
+Connectors are the adapter layer between agent frameworks and DefenseClaw. They share one Go interface, but each connector advertises only the capabilities its agent actually exposes. Proxy routing, lifecycle hooks, subprocess wrapping, telemetry and approval support therefore vary by connector.
+
+## Pick yours
 
 | Agent | Type | Can block | Can ask you first | OS |
 | --- | --- | --- | --- | --- |
@@ -29,13 +40,13 @@ A connector is how DefenseClaw guards one coding agent. **Hook** connectors regi
 | [OpenClaw](/docs/connectors/openclaw) | Proxy | Requests, responses, tool calls | `before_tool_call` | Linux, macOS |
 | [ZeptoClaw](/docs/connectors/zeptoclaw) | Proxy | Requests, responses, tool calls | No | Linux, macOS |
 
-Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept. You can review it in audit or the TUI, but you cannot resume the call. The [capability matrix](/docs/reference/apis/capability-matrix) has the full per-connector detail, and [Human approval](/docs/features/guardrail) has the per-event matrix.
+Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept. You can review it in audit or the TUI, but you cannot resume the call. The [capability matrix](/docs/connectors/capability-matrix) has the full per-connector detail, and [Human approval](/docs/guardrail) has the per-event matrix.
 
-One gateway can serve several hook connectors, each with its own posture under `guardrail.connectors.<name>`. Choose **Add**, not Replace, when you run a second `setup <connector>`. Proxy connectors own the traffic plane and cannot be combined this way. See [Multi-connector](/docs/how-to/agents/add-or-remove-an-agent).
+One gateway can serve several hook connectors, each with its own posture under `guardrail.connectors.<name>`. Choose **Add**, not Replace, when you run a second `setup <connector>`. Proxy connectors own the traffic plane and cannot be combined this way. See [Multi-connector](/docs/guardrail/multi-connector).
 
 ## Platform support
 
-What each OS supports, and what live tests verified. Switch to **Enterprise** for the managed edition. The [support matrix](/docs/get-started/support-matrix) adds features by edition.
+What each OS supports, and what live tests verified. Switch to **Enterprise** for the managed edition. The [support matrix](/docs/support-matrix) adds features by edition.
 
 <ConnectorOsMatrix />
 
@@ -43,15 +54,62 @@ OpenClaw and ZeptoClaw need the guardrail proxy, which native Windows does not h
 
 ## OpenShell sandbox
 
-`defenseclaw sandbox run <harness>` runs a coding agent in an NVIDIA OpenShell sandbox. The [sandbox guide](/docs/how-to/sandboxes/run-an-agent) has setup and every command.
+`defenseclaw sandbox run <harness>` runs a coding agent in an NVIDIA OpenShell sandbox. The [sandbox guide](/docs/sandboxes/first-session) has setup and every command.
 
-- **Run today:** [Claude Code](/docs/reference/connectors/claudecode#openshell-sandbox), [Codex](/docs/reference/connectors/codex#openshell-sandbox), [OpenCode](/docs/reference/connectors/opencode#openshell-sandbox), [GitHub Copilot CLI](/docs/reference/connectors/copilot#openshell-sandbox), [Kiro](/docs/reference/connectors/kiro#openshell-sandbox), [Hermes](/docs/reference/connectors/hermes#openshell-sandbox) and [Antigravity](/docs/reference/connectors/antigravity#openshell-sandbox).
-- **Cannot run yet:** [Amp](/docs/reference/connectors/amp#openshell-sandbox), [Cursor](/docs/reference/connectors/cursor#openshell-sandbox) and [Devin](/docs/reference/connectors/devin#openshell-sandbox) need a vendor account before any agent turn, so their images have not passed the hook check.
+- **Run today:** [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [OpenCode](/docs/connectors/opencode), [GitHub Copilot CLI](/docs/connectors/copilot), [Kiro](/docs/connectors/kiro), [Hermes](/docs/connectors/hermes#openshell-sandbox) and [Antigravity](/docs/connectors/antigravity#openshell-sandbox).
+- **Cannot run yet:** [Amp](/docs/connectors/amp), [Cursor](/docs/connectors/cursor) and [Devin](/docs/connectors/devin) need a vendor account before any agent turn, so their images have not passed the hook check.
 
 OpenClaw and ZeptoClaw do not run in a sandbox.
 
+## How a connector is structured
+
+Every connector implements one Go interface, defined in [`internal/gateway/connector/connector.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/connector.go). Each connector reports only the capabilities its agent offers, so proxy routing, hooks, subprocess wrapping, telemetry and approval support differ per agent. Use the [capability matrix](/docs/connectors/capability-matrix) to compare them and the [hook contracts](/docs/connectors/compatibility) page for supported agent versions.
+
+| Method | Runs | Purpose |
+| --- | --- | --- |
+| `Name`, `Description` | Always | Identify the connector. |
+| `ToolInspectionMode`, `SubprocessPolicy` | Always | Report how tool calls are inspected and whether setup installs PATH shims. |
+| `Setup` | When an agent is wired in | Back up the agent config and add DefenseClaw's hooks, plugin or provider entries. |
+| `Teardown` | When an agent is taken out | Restore the config, or remove only DefenseClaw's entries. |
+| `VerifyClean` | After `Teardown`, and before another connector's `Setup` | Fail with a list of leftover hooks, env files, config patches or shims. |
+| `Authenticate` | On each request | Accept or refuse the caller. |
+| `Route` | On each proxied LLM request | Read the request signals the proxy needs. |
+| `SetCredentials` | At gateway boot | Give the connector the gateway token and master key. |
+
+Two optional interfaces cover the rest. `HookEndpoint` lets a connector declare its hook route, for example `/api/v1/codex/hook`, which the gateway's API server registers when it starts. `NotifyEndpoint` does the same for an auxiliary notify bridge. Cursor and the other hook-only connectors share `hook_only.go`. Other connectors have a file of their own, such as `claudecode.go`, `codex.go` and `devin.go`.
+
+<Flow
+  direction="TB"
+  caption="When a connector is installed or removed. The gateway and the enterprise installer call Setup. The connector commands, switching connectors and uninstalling call Teardown, and VerifyClean then checks for leftovers."
+>
+  <Node id="setup" kind="connector">{`Wire the agent in\nSetup backs up the config\nand adds the hooks`}</Node>
+  <Node id="teardown" kind="connector">{`Take it out\nTeardown restores the config`}</Node>
+  <Node id="verify" kind="connector">{`Check it is clean\nVerifyClean finds no leftovers`}</Node>
+  <Edge from="setup" to="teardown" label="on removal" variant="dashed" />
+  <Edge from="teardown" to="verify" label="then" />
+</Flow>
+
+<Flow
+  direction="TB"
+  caption="On every LLM request through the guardrail proxy. Authenticate accepts the gateway token (X-DC-Auth), the master key (Authorization: Bearer), or a loopback caller when no gateway token is set. Route reads the upstream, model, API key, stream flag and headers."
+>
+  <Node id="agent" kind="agent">{`Agent\nLLM request`}</Node>
+  <Node id="auth" kind="connector">{`Check the caller\nAuthenticate`}</Node>
+  <Node id="route" kind="connector">{`Read the request\nRoute`}</Node>
+  <Edge from="agent" to="auth" label="proxied" />
+  <Edge from="auth" to="route" label="accepted" />
+</Flow>
+
+### Hook and proxy paths
+
+| | Hook connector | Proxy connector |
+| --- | --- | --- |
+| Data path | The agent talks to its upstream directly. | The agent's model calls go through the guardrail proxy (port 4000 by default). |
+| Enforcement | Only the events the selected hook contract declares as blocking. | Request and response policy in the proxy, plus tool-call checks. |
+| Several at once | Yes, each with its own posture under `guardrail.connectors.<name>`. | No. A proxy connector owns the traffic plane. |
+| OS | Linux, macOS, Windows | Linux, macOS |
+
 ## Next
 
-- [Hook contracts](/docs/reference/apis/hook-contracts): supported agent versions per connector.
-- [Connector reference](/docs/reference/connectors): how connectors work inside DefenseClaw.
-- [Upgrade](/docs/get-started/upgrade#renamed-and-removed-connectors): connectors that were renamed or removed.
+- [Hook contracts](/docs/connectors/compatibility): supported agent versions per connector.
+- [Upgrade](/docs/get-started/upgrade): connectors that were renamed or removed.

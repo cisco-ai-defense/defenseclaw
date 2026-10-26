@@ -65,8 +65,8 @@ def test_hook_process_warning_keeps_install_lanes_honest(tmp_path: Path) -> None
     assert "'hook_process_fail_open'" in checks
 
     docs = ROOT / "docs-site/content/docs/enterprise"
-    for page in ("get-started.mdx", "install/linux.mdx", "install/macos.mdx",
-                 "install/reference/windows.mdx"):
+    for page in ("get-started.mdx", "linux.mdx", "macos.mdx",
+                 "windows.mdx"):
         text = (docs / page).read_text(encoding="utf-8")
         assert "hook_process_fail_open" in text and "security_complete" in text, page
 
@@ -89,7 +89,7 @@ def test_lifecycle_checker_keeps_python36_annotations() -> None:
 
 # Secure Client results carry no hook_process_fail_open warning (the warning
 # is standalone-only), so its pages may still expect security_complete true.
-_SECURE_CLIENT_PAGES = ("install/secure-client.mdx", "install/reference/secure-client.mdx")
+_SECURE_CLIENT_PAGES = ("enterprise/secure-client.mdx",)
 _WARNED_CONNECTOR_KEYS = re.compile(r'"(antigravity|claudecode|codex|copilot|devin|hermes|kiro)"\s*:')
 
 

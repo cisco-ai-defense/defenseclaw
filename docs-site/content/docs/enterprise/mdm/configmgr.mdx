@@ -3,6 +3,7 @@ title: Configuration Manager
 description: Install, configure, detect, repair, upgrade and remove the standalone DefenseClaw enterprise profile on Windows with a Microsoft Configuration Manager application and compliance settings.
 keywords:
   - DefenseClaw Configuration Manager
+  - Microsoft Configuration Manager
   - SCCM
   - MECM
   - Script Installer deployment type
@@ -18,11 +19,11 @@ DefenseClaw, and an optional configuration item keeps it healthy. The contract i
 
 ## Prerequisites
 
-- Native x64 Windows that meets the [Windows requirements](/docs/enterprise/install/windows#requirements),
+- Native x64 Windows that meets the [Windows requirements](/docs/enterprise/windows#requirements),
   with no Cisco Secure Client DefenseClaw deployment.
 - PowerShell 7 from Microsoft's x64 MSI, deployed as its own application. The kit
   recommends 7.4 or later.
-- Your administrator `config.yaml` ([choose the agents](/docs/enterprise/configure/configuration#choose-the-agents-to-protect)).
+- Your administrator `config.yaml` ([choose the agents](/docs/enterprise/configuration)).
   The default config protects no agent.
 - `DefenseClawSetup-Enterprise-Standalone-x64.exe`, verified against the release's
   cosign-signed `checksums.txt` ([What you deliver](/docs/enterprise/mdm#what-you-deliver)).
@@ -31,6 +32,21 @@ A **Script Installer** deployment type with **Install for system** installs once
 all users. Script Installer's default return codes apply (`0` Success, `1641` Hard
 Reboot, `3010` Soft Reboot, `1618` Fast Retry; other codes fail). A detection script
 that exits non-zero leaves the state **Unknown**.
+
+## How Configuration Manager runs the application
+
+These are Configuration Manager behaviors this recipe depends on. They come from
+Microsoft's documentation, not from DefenseClaw: check the linked pages if your
+site version differs.
+
+| Behavior | Default | Source |
+| --- | --- | --- |
+| Return codes | `0` Success (no reboot), `1641` Hard Reboot, `3010` Soft Reboot, `1618` Fast Retry. Other codes are failures. | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
+| Fast Retry | Retries every two hours, 10 times in total | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
+| Timeout | **Maximum allowed run time** is 120 minutes | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
+| Detection script | A non-zero exit code means failed, and the state is **Unknown**. Exit `0` with output on STDOUT is **Installed**. Exit `0` with no output is **Not installed**. Exit `0` with output on STDERR only is **Unknown**. | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
+| Re-evaluation | Clients re-evaluate deployments every seven days | [Client settings](https://learn.microsoft.com/en-us/intune/configmgr/core/clients/deploy/about-client-settings) |
+| Scripts the client runs | The **PowerShell execution policy** client setting is **All Signed** | [Client settings](https://learn.microsoft.com/en-us/intune/configmgr/core/clients/deploy/about-client-settings) |
 
 ## Build the content
 
@@ -76,27 +92,14 @@ Deploy it to a device collection as **Required**. `1603` and `1639` report as
 failures: read the error code before you retry, because `1639` always needs a fix.
 `1618` means another lifecycle run holds the lock; **Fast Retry** handles it.
 
-**Why registry detection.** The lifecycle writes `ProductVersion` in the 64-bit view
+### Why registry detection
+
+The lifecycle writes `ProductVersion` in the 64-bit view
 only after a successful install, upgrade, repair or ensure, and removes the key after
 a successful uninstall; only SYSTEM and administrators can write it. Do not use
 `packaging/mdm/windows/detect.ps1` here: it exits `1` when DefenseClaw is not
 installed, which Configuration Manager reports as **Unknown**, not **Not installed**.
 The first install needs the config in the content: `/ensure` without one exits `1639`.
-
-### What Configuration Manager does by default
-
-These are Configuration Manager behaviors this recipe depends on. They come from
-Microsoft's documentation, not from DefenseClaw: check the linked pages if your
-site version differs.
-
-| Behavior | Default | Source |
-| --- | --- | --- |
-| Return codes | `0` Success (no reboot), `1641` Hard Reboot, `3010` Soft Reboot, `1618` Fast Retry. Other codes are failures. | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
-| Fast Retry | Retries every two hours, 10 times in total | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
-| Timeout | **Maximum allowed run time** is 120 minutes | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
-| Detection script | A non-zero exit code means failed, and the state is **Unknown**. Exit `0` with output on STDOUT is **Installed**. Exit `0` with no output is **Not installed**. Exit `0` with output on STDERR only is **Unknown**. | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
-| Re-evaluation | Clients re-evaluate deployments every seven days | [Client settings](https://learn.microsoft.com/en-us/intune/configmgr/core/clients/deploy/about-client-settings) |
-| Scripts the client runs | The **PowerShell execution policy** client setting is **All Signed** | [Client settings](https://learn.microsoft.com/en-us/intune/configmgr/core/clients/deploy/about-client-settings) |
 
 ## Keep it healthy
 
@@ -133,7 +136,7 @@ under the **PowerShell execution policy** client setting (default **All Signed**
 sign the scripts or change the setting. Scripts time out after 60 seconds unless you
 raise **Script Execution Timeout (seconds)**, up to 600; if a repair times out, run
 the application's `/ensure` again on that device. Health means what `verify` reports
-([Health fields](/docs/enterprise/operate/operations#health-fields)).
+([Health fields](/docs/enterprise/operations)).
 
 ## Deliver the AI Defense key
 
@@ -146,14 +149,14 @@ Get-Content -Raw C:\secure\ai-defense-key.txt | & 'C:\Program Files\Cisco\Defens
 
 It runs only elevated with a standalone deployment installed, stores the key and
 restarts the gateway. Then set `enterprise.inspection.ai_defense.enabled: true` and
-`credential: ai-defense-api-key` ([AI Defense key](/docs/enterprise/configure/ai-defense-key)).
+`credential: ai-defense-api-key` ([AI Defense key](/docs/enterprise/ai-defense-key)).
 
 ## Upgrade, roll back and change the config
 
 | Task | What to do |
 | --- | --- |
 | Upgrade | Build content for the new release and create a new application. On its **Supersedence** tab add the old application and leave **Uninstall** cleared. Raise the detection rule to the new version |
-| Roll back | `ensure` refuses to downgrade on Windows ([Roll back](/docs/enterprise/operate/lifecycle#roll-back)) |
+| Roll back | `ensure` refuses to downgrade on Windows ([Roll back](/docs/enterprise/lifecycle)) |
 | Change the config | See [Change the config](#change-the-config). The registry rule checks the version only, so it does not run the application again for a config-only change |
 
 ### Change the config
@@ -198,9 +201,9 @@ Remove the baseline deployment first, so remediation does not run against a remo
 deployment. Then deploy the application with the **Uninstall** action. The uninstall
 program removes the machine deployment; add `PURGE=1` to also remove each enrolled
 account's `%USERPROFILE%\.defenseclaw` and per-user binaries
-([what it removes](/docs/enterprise/mdm/reference#uninstall)).
+([what it removes](/docs/enterprise/mdm#uninstall)).
 
-## Check it worked, logs and exit codes
+## Check it worked and logs
 
 ```powershell
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone --json
@@ -212,8 +215,10 @@ account's `%USERPROFILE%\.defenseclaw` and per-user binaries
 | `%WINDIR%\CCM\Logs\DcmWmiProvider.log` | Configuration item scripts |
 | `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log` | Every lifecycle result, one JSON line per run |
 
+## Exit codes in Configuration Manager
+
 Exit codes: `0` success, `1603` failed and rolled back (read `errors[].code`;
-[lifecycle error codes](/docs/troubleshooting/enterprise#lifecycle-error-codes)),
+[lifecycle error codes](/docs/enterprise/troubleshooting)),
 `1618` Fast Retry, `1639` invalid arguments (fix the content), `3010` reserved
 ([Exit codes](/docs/enterprise/mdm#exit-codes)).
 

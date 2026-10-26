@@ -7,13 +7,19 @@
     ],
     "replays": 0
   },
-  "appendix/coverage-by-layer": {
+  "ai-discovery": {
     "videos": [],
     "images": [
-      "/images/segmentation/terminal-sandbox-ps-tree-kernel.png",
-      "/images/tetragon/terminal-claude-customer-policy-notice.png"
+      "/images/grafana/ai-discovery-sandbox.png",
+      "/images/sandboxes/screens/terminal-agent-usage-sandbox.png",
+      "/images/sandboxes/screens/terminal-sandbox-discover.png",
+      "/images/sandboxes/screens/tui-ai-discovery-sandbox.png",
+      "/images/splunk/ai-discovery-inventory.png",
+      "/images/tui/ai-discovery.png"
     ],
-    "demos": [],
+    "demos": [
+      "ai-discovery-evidence"
+    ],
     "replays": 0
   },
   "connectors/openclaw": {
@@ -28,106 +34,46 @@
     "demos": [],
     "replays": 0
   },
-  "enterprise/runtime/sandbox-reference": {
-    "videos": [],
-    "images": [
-      "/images/sandboxes/managed/admin-sandbox-list.png",
-      "/images/sandboxes/managed/always-refused.png",
-      "/images/sandboxes/managed/driver-fallback-banner.png",
-      "/images/sandboxes/managed/driver-fallback-none.png",
-      "/images/sandboxes/managed/foreign-sandbox-removed.png",
-      "/images/sandboxes/managed/policy-explain.png",
-      "/images/sandboxes/managed/privacy-own-policy-only.png",
-      "/images/sandboxes/managed/run-banner.png",
-      "/images/sandboxes/managed/sandbox-stopped.png",
-      "/images/sandboxes/managed/verify-prerequisite.png"
-    ],
-    "demos": [],
-    "replays": 0
-  },
-  "enterprise/runtime/sandboxes": {
+  "enterprise/sandboxes": {
     "videos": [],
     "images": [
       "/images/sandboxes/managed/access-refused.png",
       "/images/sandboxes/managed/account-busy.png",
       "/images/sandboxes/managed/admin-sandbox-explain.png",
+      "/images/sandboxes/managed/admin-sandbox-list.png",
+      "/images/sandboxes/managed/always-refused.png",
       "/images/sandboxes/managed/ask-waiting.png",
+      "/images/sandboxes/managed/driver-fallback-banner.png",
+      "/images/sandboxes/managed/driver-fallback-none.png",
       "/images/sandboxes/managed/ensure-refuses-contradiction.png",
+      "/images/sandboxes/managed/foreign-sandbox-removed.png",
       "/images/sandboxes/managed/host-refusal-linux.png",
+      "/images/sandboxes/managed/policy-explain.png",
+      "/images/sandboxes/managed/privacy-own-policy-only.png",
+      "/images/sandboxes/managed/run-banner.png",
+      "/images/sandboxes/managed/sandbox-stopped.png",
       "/images/sandboxes/managed/session-end.png",
+      "/images/sandboxes/managed/verify-prerequisite.png",
       "/images/sandboxes/managed/windows-admin-sandbox-help.png",
       "/images/sandboxes/managed/windows-host-refusal.png"
     ],
     "demos": [],
     "replays": 0
   },
-  "enterprise/runtime/tetragon": {
-    "videos": [],
-    "images": [
-      "/images/tetragon/terminal-claude-kernel-notice.png",
-      "/images/tetragon/terminal-tetragon-status.png",
-      "/images/tetragon/terminal-tetragon-verify-consume.png",
-      "/images/tetragon/terminal-tetragon-verify-enforce-holder.png"
-    ],
-    "demos": [],
-    "replays": 3
-  },
-  "enterprise/runtime/tetragon-reference": {
+  "enterprise/tetragon": {
     "videos": [],
     "images": [
       "/images/tetragon/grafana-kernel-your-policies.png",
+      "/images/tetragon/terminal-claude-kernel-notice.png",
       "/images/tetragon/terminal-fleet-readiness.png",
       "/images/tetragon/terminal-tetragon-status-enforce.png",
+      "/images/tetragon/terminal-tetragon-status.png",
+      "/images/tetragon/terminal-tetragon-verify-consume.png",
+      "/images/tetragon/terminal-tetragon-verify-enforce-holder.png",
       "/images/tetragon/terminal-tetragon-verify-enforce.png"
     ],
     "demos": [],
-    "replays": 0
-  },
-  "features/ai-discovery": {
-    "videos": [],
-    "images": [
-      "/images/tui/ai-discovery.png"
-    ],
-    "demos": [
-      "ai-discovery-evidence"
-    ],
-    "replays": 0
-  },
-  "features/policies": {
-    "videos": [],
-    "images": [],
-    "demos": [
-      "policy-decision-trace"
-    ],
-    "replays": 0
-  },
-  "features/sandboxes": {
-    "videos": [
-      "openshell-defenseclaw",
-      "openshell-isolation"
-    ],
-    "images": [
-      "/images/posters/openshell-defenseclaw.jpg",
-      "/images/posters/openshell-isolation.jpg"
-    ],
-    "demos": [],
-    "replays": 0
-  },
-  "features/scanning": {
-    "videos": [],
-    "images": [],
-    "demos": [
-      "skill-quarantine"
-    ],
-    "replays": 0
-  },
-  "features/tui": {
-    "videos": [],
-    "images": [
-      "/images/tui/overview.png"
-    ],
-    "demos": [],
-    "replays": 0
+    "replays": 3
   },
   "get-started/quickstart": {
     "videos": [],
@@ -137,7 +83,21 @@
     "demos": [],
     "replays": 0
   },
-  "how-to/agents/add-or-remove-an-agent": {
+  "get-started/windows/paths-troubleshooting": {
+    "videos": [],
+    "images": [
+      "/images/get-started/windows-uninstall-open-session.png"
+    ],
+    "demos": [],
+    "replays": 0
+  },
+  "guardrail": {
+    "videos": [],
+    "images": [],
+    "demos": [],
+    "replays": 1
+  },
+  "guardrail/multi-connector": {
     "videos": [
       "multi-connector"
     ],
@@ -147,13 +107,13 @@
     "demos": [],
     "replays": 0
   },
-  "how-to/agents/set-up-an-llm-key": {
+  "guardrail/unified-llm-key": {
     "videos": [],
     "images": [],
     "demos": [],
     "replays": 1
   },
-  "how-to/guardrail/ask-before-risky-calls": {
+  "hitl": {
     "videos": [],
     "images": [],
     "demos": [
@@ -161,7 +121,16 @@
     ],
     "replays": 0
   },
-  "how-to/observability/send-to-galileo": {
+  "observability/agent360": {
+    "videos": [],
+    "images": [
+      "/images/grafana/agent360-overview.jpg",
+      "/images/grafana/agent360-topology.jpg"
+    ],
+    "demos": [],
+    "replays": 0
+  },
+  "observability/galileo": {
     "videos": [],
     "images": [
       "/images/galileo/agent-graph.png",
@@ -170,112 +139,9 @@
     "demos": [],
     "replays": 0
   },
-  "how-to/sandboxes/choose-a-policy-pack": {
+  "observability/grafana-dashboards": {
     "videos": [],
     "images": [
-      "/images/sandboxes/screens/terminal-policy-recorded-pack.png",
-      "/images/sandboxes/screens/terminal-policy-test.png"
-    ],
-    "demos": [],
-    "replays": 2
-  },
-  "how-to/sandboxes/review-undo-or-pull": {
-    "videos": [],
-    "images": [],
-    "demos": [],
-    "replays": 1
-  },
-  "how-to/sandboxes/run-an-agent": {
-    "videos": [],
-    "images": [
-      "/images/sandboxes/screens/terminal-activity-feed.png",
-      "/images/sandboxes/screens/terminal-hook-silence-stop.png",
-      "/images/sandboxes/screens/terminal-host-port-banner.png",
-      "/images/sandboxes/screens/terminal-run-banner-linux.png",
-      "/images/sandboxes/screens/terminal-run-banner.png",
-      "/images/sandboxes/screens/terminal-session-end-linux.png",
-      "/images/sandboxes/screens/terminal-session-summary.png"
-    ],
-    "demos": [],
-    "replays": 1
-  },
-  "how-to/sandboxes/set-up-on-linux": {
-    "videos": [],
-    "images": [
-      "/images/sandboxes/screens/linux-doctor.png",
-      "/images/sandboxes/screens/tui-setup-linux.png"
-    ],
-    "demos": [],
-    "replays": 1
-  },
-  "how-to/sandboxes/set-up-on-macos": {
-    "videos": [],
-    "images": [
-      "/images/sandboxes/screens/tui-setup.png"
-    ],
-    "demos": [],
-    "replays": 1
-  },
-  "how-to/sandboxes/unblock-a-site": {
-    "videos": [],
-    "images": [],
-    "demos": [],
-    "replays": 1
-  },
-  "how-to/sandboxes/watch-from-the-tui-or-app": {
-    "videos": [],
-    "images": [
-      "/images/sandboxes/screens/terminal-sandbox-ps-tree-linux.png",
-      "/images/sandboxes/screens/tui-sandbox-destinations.png",
-      "/images/sandboxes/screens/tui-sandbox-launch.png",
-      "/images/sandboxes/screens/tui-sandbox-processes.png",
-      "/images/sandboxes/screens/tui-sandboxes-activity.png",
-      "/images/sandboxes/screens/tui-sandboxes-asks.png",
-      "/images/sandboxes/screens/tui-sandboxes.png"
-    ],
-    "demos": [],
-    "replays": 3
-  },
-  "how-to/scanning/scan-an-mcp-server": {
-    "videos": [],
-    "images": [],
-    "demos": [
-      "mcp-shadow-capability"
-    ],
-    "replays": 0
-  },
-  "how-to/scanning/subscribe-to-a-registry": {
-    "videos": [],
-    "images": [],
-    "demos": [
-      "registry-promote-require"
-    ],
-    "replays": 0
-  },
-  "reference/commands/guardrail-setup": {
-    "videos": [],
-    "images": [],
-    "demos": [],
-    "replays": 1
-  },
-  "reference/commands/tui": {
-    "videos": [],
-    "images": [
-      "/images/sandboxes/screens/tui-ai-discovery-sandbox.png",
-      "/images/sandboxes/screens/tui-alerts-sandbox.png",
-      "/images/sandboxes/screens/tui-sandboxes-windows-unsupported.png",
-      "/images/tui/overview.png",
-      "/images/tui/policies-posture.png",
-      "/images/tui/setup.png"
-    ],
-    "demos": [],
-    "replays": 0
-  },
-  "reference/observability/dashboards": {
-    "videos": [],
-    "images": [
-      "/images/grafana/agent360-overview.jpg",
-      "/images/grafana/agent360-topology.jpg",
       "/images/grafana/sandboxes-egress.png",
       "/images/grafana/sandboxes-overview.png",
       "/images/grafana/sandboxes-processes.png",
@@ -286,7 +152,7 @@
     "demos": [],
     "replays": 0
   },
-  "reference/observability/redaction": {
+  "observability/redaction": {
     "videos": [],
     "images": [
       "/images/tui/setup-redaction.png"
@@ -294,7 +160,24 @@
     "demos": [],
     "replays": 0
   },
-  "reference/sandboxes/cli": {
+  "observability/sandbox-telemetry": {
+    "videos": [],
+    "images": [
+      "/images/grafana/sandboxes-findings.png",
+      "/images/splunk/sandbox-actions.png"
+    ],
+    "demos": [],
+    "replays": 0
+  },
+  "policies": {
+    "videos": [],
+    "images": [],
+    "demos": [
+      "policy-decision-trace"
+    ],
+    "replays": 0
+  },
+  "reference/sandbox-cli": {
     "videos": [],
     "images": [
       "/images/sandboxes/managed/policy-explain.png",
@@ -309,7 +192,70 @@
     "demos": [],
     "replays": 0
   },
-  "reference/sandboxes/network": {
+  "sandboxes": {
+    "videos": [
+      "openshell-defenseclaw",
+      "openshell-isolation"
+    ],
+    "images": [
+      "/images/posters/openshell-defenseclaw.jpg",
+      "/images/posters/openshell-isolation.jpg"
+    ],
+    "demos": [],
+    "replays": 0
+  },
+  "sandboxes/apps": {
+    "videos": [],
+    "images": [
+      "/images/sandboxes/screens/terminal-sandbox-ps-tree-linux.png",
+      "/images/sandboxes/screens/tui-sandbox-destinations.png",
+      "/images/sandboxes/screens/tui-sandbox-launch.png",
+      "/images/sandboxes/screens/tui-sandbox-processes.png",
+      "/images/sandboxes/screens/tui-sandboxes-activity.png",
+      "/images/sandboxes/screens/tui-sandboxes-asks.png",
+      "/images/sandboxes/screens/tui-sandboxes.png"
+    ],
+    "demos": [],
+    "replays": 3
+  },
+  "sandboxes/first-session": {
+    "videos": [],
+    "images": [
+      "/images/sandboxes/screens/terminal-activity-feed.png",
+      "/images/sandboxes/screens/terminal-hook-silence-stop.png",
+      "/images/sandboxes/screens/terminal-host-port-banner.png",
+      "/images/sandboxes/screens/terminal-run-banner-linux.png",
+      "/images/sandboxes/screens/terminal-run-banner.png",
+      "/images/sandboxes/screens/terminal-session-end-linux.png",
+      "/images/sandboxes/screens/terminal-session-summary.png"
+    ],
+    "demos": [],
+    "replays": 1
+  },
+  "sandboxes/guide": {
+    "videos": [],
+    "images": [],
+    "demos": [],
+    "replays": 2
+  },
+  "sandboxes/linux": {
+    "videos": [],
+    "images": [
+      "/images/sandboxes/screens/linux-doctor.png",
+      "/images/sandboxes/screens/tui-setup-linux.png"
+    ],
+    "demos": [],
+    "replays": 1
+  },
+  "sandboxes/macos": {
+    "videos": [],
+    "images": [
+      "/images/sandboxes/screens/tui-setup.png"
+    ],
+    "demos": [],
+    "replays": 1
+  },
+  "sandboxes/network": {
     "videos": [],
     "images": [
       "/images/sandboxes/screens/terminal-destinations.png"
@@ -317,31 +263,57 @@
     "demos": [],
     "replays": 0
   },
-  "reference/sandboxes/telemetry": {
+  "sandboxes/policy-packs": {
     "videos": [],
     "images": [
-      "/images/grafana/sandboxes-findings.png",
-      "/images/splunk/sandbox-actions.png"
+      "/images/sandboxes/screens/terminal-policy-recorded-pack.png",
+      "/images/sandboxes/screens/terminal-policy-test.png"
+    ],
+    "demos": [],
+    "replays": 2
+  },
+  "scanning": {
+    "videos": [],
+    "images": [],
+    "demos": [
+      "skill-quarantine"
+    ],
+    "replays": 0
+  },
+  "scanning/mcp-scanner": {
+    "videos": [],
+    "images": [],
+    "demos": [
+      "mcp-shadow-capability"
+    ],
+    "replays": 0
+  },
+  "scanning/registries": {
+    "videos": [],
+    "images": [],
+    "demos": [
+      "registry-promote-require"
+    ],
+    "replays": 0
+  },
+  "segmentation": {
+    "videos": [],
+    "images": [
+      "/images/segmentation/terminal-sandbox-ps-tree-kernel.png",
+      "/images/tetragon/terminal-claude-customer-policy-notice.png"
     ],
     "demos": [],
     "replays": 0
   },
-  "reference/scanning/ai-discovery": {
+  "tui": {
     "videos": [],
     "images": [
-      "/images/grafana/ai-discovery-sandbox.png",
-      "/images/sandboxes/screens/terminal-agent-usage-sandbox.png",
-      "/images/sandboxes/screens/terminal-sandbox-discover.png",
       "/images/sandboxes/screens/tui-ai-discovery-sandbox.png",
-      "/images/splunk/ai-discovery-inventory.png"
-    ],
-    "demos": [],
-    "replays": 0
-  },
-  "troubleshooting/windows": {
-    "videos": [],
-    "images": [
-      "/images/get-started/windows-uninstall-open-session.png"
+      "/images/sandboxes/screens/tui-alerts-sandbox.png",
+      "/images/sandboxes/screens/tui-sandboxes-windows-unsupported.png",
+      "/images/tui/overview.png",
+      "/images/tui/policies-posture.png",
+      "/images/tui/setup.png"
     ],
     "demos": [],
     "replays": 0

@@ -1,0 +1,233 @@
+---
+title: Keys
+description: The defenseclaw keys registry, credential resolution order, dynamically discovered credential references, and separately managed gateway tokens.
+keywords:
+  - defenseclaw keys
+  - DEFENSECLAW_LLM_KEY
+  - OPENCLAW_GATEWAY_TOKEN
+  - JUDGE_API_KEY
+  - CISCO_AI_DEFENSE_API_KEY
+  - VIRUSTOTAL_API_KEY
+  - SPLUNK_ACCESS_TOKEN
+  - GALILEO_API_KEY
+  - DefenseClaw credentials registry
+  - dotenv
+---
+
+`defenseclaw keys` manages operator-supplied credentials in one local dotenv file and reports which configured features require them. The sidecar's generated gateway, connector-hook and OTLP tokens are separate from the `keys list` registry.
+
+## Where keys live
+
+| Platform | Credential file | Protection |
+| --- | --- | --- |
+| macOS/Linux | `~/.defenseclaw/.env` | Mode `0o600` |
+| Native Windows | `%USERPROFILE%\.defenseclaw\.env` | Owner-private DACL; inherited broad access is removed |
+
+`defenseclaw keys set <ENV>` creates the file with an atomic write. New CLI processes read the new value at once. A running gateway may hold the credential it resolved at start, so restart it after rotating a key unless the setup command documents hot reload, then run `defenseclaw doctor`.
+
+A process environment variable (`export NAME='value'`, or `$env:NAME = 'value'` in PowerShell) overrides the file. DefenseClaw does not read macOS Keychain, Windows Credential Manager, AWS Secrets Manager, HashiCorp Vault or another secret store; fetch those secrets before startup and expose them through the environment.
+
+<Callout title="Credentials on a managed device">
+On a managed standalone device, credential variables stay readable, but `keys set`, `keys remove` and `keys fill-missing` refuse with exit code `3`: they manage a per-user `.env` that the managed gateway does not use. An administrator rotates a credential with `defenseclaw-gateway enterprise secret set --name <configured-credential> --from-stdin`. See
+[Managed hosts and the environment](/docs/reference/env-vars#managed-hosts-and-the-environment).
+</Callout>
+
+## Resolution order
+
+1. Process environment.
+2. The current user's `.defenseclaw/.env` (`~` on macOS and Linux, `%USERPROFILE%` on Windows).
+3. Unset. A required key that is unset marks the installation missing.
+
+`keys list`, `quickstart` and `doctor` share this classification (`cli/defenseclaw/credentials.py`). The Go gateway resolves supported credentials in the same order.
+
+## `keys` subcommands
+
+<Tabs items={['macOS / Linux', 'Windows PowerShell']}>
+
+<Tab value="macOS / Linux">
+
+```bash
+defenseclaw keys list                            # table: env name, feature, requirement, source, status
+defenseclaw keys list --json                     # machine-readable
+defenseclaw keys list --missing-only             # only REQUIRED keys that are unset
+defenseclaw keys list --show-values              # masked previews instead of the status column
+
+defenseclaw keys set DEFENSECLAW_LLM_KEY         # hidden prompt, writes to .env
+printf '%s\n' "$LLM_KEY" | defenseclaw keys set DEFENSECLAW_LLM_KEY --value-stdin   # scripts and CI
+
+defenseclaw keys remove DEFENSECLAW_LLM_KEY      # asks first; --yes skips the prompt
+
+defenseclaw keys fill-missing                    # prompt for every REQUIRED-but-unset key
+defenseclaw keys fill-missing --yes              # skip the upfront confirmation
+
+defenseclaw keys check                           # exit 0 only when every REQUIRED key is set
+```
+
+</Tab>
+
+<Tab value="Windows PowerShell">
+
+```powershell
+defenseclaw keys list
+defenseclaw keys list --json
+defenseclaw keys list --missing-only
+defenseclaw keys list --show-values
+
+defenseclaw keys set DEFENSECLAW_LLM_KEY
+$env:LLM_KEY | defenseclaw keys set DEFENSECLAW_LLM_KEY --value-stdin
+
+defenseclaw keys remove DEFENSECLAW_LLM_KEY
+
+defenseclaw keys fill-missing
+defenseclaw keys fill-missing --yes
+
+defenseclaw keys check
+```
+
+</Tab>
+
+</Tabs>
+
+- `--value-stdin` reads the first line of standard input and never echoes it. `--value V` puts the secret in the process listing; keep it for throwaway values.
+- `keys set` and `keys remove` record a `config-update` audit event with target `dotenv:<ENV>` and only the before and after presence; the value is never logged. With the gateway stopped, the change is saved and the command warns that the audit event was not recorded.
+- `keys remove` works for any name in `.env`, including names outside the registry, and leaves a value exported in your shell alone.
+- `keys set DEFENSECLAW_GATEWAY_TOKEN` reports that it manages gateway authentication (the name is case-insensitive on Windows). The running gateway keeps the token it loaded at start. CLI audit events still use that token, but other CLI calls to the gateway send the saved one and get HTTP 401 until the gateway restarts. Until then `defenseclaw doctor` reports `[FAIL] Gateway authentication  —  local token rejected (HTTP 401) — run 'defenseclaw doctor --fix' to reconcile the running gateway`. To clear the 401, run `defenseclaw-gateway restart`, or run `defenseclaw doctor --fix`, which asks before it restarts the gateway (`--yes` skips the prompt). For a coordinated gateway and connector rotation use `defenseclaw setup rotate-token --yes`.
+
+## Requirement classification
+
+A credential is one of three states **given the current config**:
+
+| State | Glyph | Meaning |
+| --- | --- | --- |
+| `REQUIRED` | `●` | Feature is enabled and the key is mandatory. `keys check` exits non-zero if missing. |
+| `OPTIONAL` | `○` | Feature is enabled and the key would add capability, but the install runs without it. |
+| `NOT_USED` | `·` | Feature is disabled — the key is irrelevant for this config. |
+
+A disabled feature gives `NOT_USED`, never `OPTIONAL`.
+
+## Baseline and discovered credentials
+
+`keys list` shows the static baseline (`CREDENTIALS` in `cli/defenseclaw/credentials.py`), then appends the Splunk and Galileo environment references of enabled observability destinations, the `env_keys` of every `llm_providers.custom` entry, and every non-empty `routing.models[].api_key_env`. Duplicate names collapse into one row.
+
+| Env name and feature | Required when… | Notes |
+| --- | --- | --- |
+| `DEFENSECLAW_LLM_KEY`<br/>`llm.default` | An LLM-using component (guardrail upstream, judge, skill or MCP scanner) is enabled and falls back to the default key. Shown as optional while the guardrail is on and nothing uses it. | The single canonical key. Provider-specific keys (`OPENAI_API_KEY` and others) are derived from it and the model prefix at routing time. |
+| `OPENCLAW_GATEWAY_TOKEN`<br/>`gateway` | OpenClaw is the active connector, including a legacy config whose `claw.mode` default resolves to an installed OpenClaw. Not required when OpenClaw is absent ([OpenClaw fleet link](/docs/reference/configuration#openclaw-fleet-link)). | Upstream OpenClaw gateway token, auto-detected from `~/.openclaw/openclaw.json` when available. |
+| `JUDGE_API_KEY`<br/>`guardrail.judge` | The judge is enabled, uses a hosted provider, and `guardrail.judge.llm.api_key_env` names a key other than `DEFENSECLAW_LLM_KEY`. | Without that override the row folds into `DEFENSECLAW_LLM_KEY`. |
+| `CISCO_AI_DEFENSE_API_KEY`<br/>`guardrail.remote` | `guardrail.scanner_mode` is `remote` or `both`. | API key for the [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) remote scanner. |
+| `VIRUSTOTAL_API_KEY`<br/>`skill-scanner.virustotal` | `scanners.skill_scanner.analyzers.virustotal.enabled` is `true`. | Used when the skill scanner asks VirusTotal. The variable name is `analyzers.virustotal.api_key_env`; the key itself belongs in `.env`, never in `config.yaml`. The [v9 migration](/docs/reference/migrate-v9#scanner-keys) moves an inline v8 `virustotal_api_key` there. |
+| `SPLUNK_ACCESS_TOKEN`<br/>`observability.splunk` | An enabled Splunk destination references it. | The HEC or Observability Cloud token. |
+| `GALILEO_API_KEY`<br/>`observability.galileo` | An enabled observability destination with `preset: galileo` references it. | Galileo Cloud and authenticated self-hosted trace export. `setup observability list` shows the destinations. |
+| `DEFENSECLAW_SKILL_SCANNER_LLM_KEY`<br/>`skill-scanner.llm` | The skill scanner uses an LLM with a hosted provider and `scanners.skill_scanner.llm.api_key_env` overrides the default key. | Without that override the row folds into `DEFENSECLAW_LLM_KEY`. |
+| Each `routing.models[].api_key_env`<br/>`routing.models` | Semantic routing is enabled and a routed backend references that name. | Discovered from the config. Keyless local backends such as Ollama add no row; a shared name is shown once. |
+
+`keys list` shows effective names: with `guardrail.judge.llm.api_key_env: MY_JUDGE_KEY` it shows `MY_JUDGE_KEY` rather than `JUDGE_API_KEY`. A default install shows six rows; the judge and skill-scanner keys appear only when overridden.
+
+For routed traffic the classifier chooses only a configured alias; the gateway resolves that alias's credential and sends it only to the configured provider. The semantic-router container does not read `.env` ([Semantic routing](/docs/guardrail/semantic-routing)).
+
+## Provider-specific SaaS variables are not baseline entries
+
+The Go gateway (Bifrost) and the Python scanners (LiteLLM) derive the provider key from `DEFENSECLAW_LLM_KEY` and the model prefix (`openai/`, `anthropic/`, `bedrock/`, `vertex/`, `azure/`, `ollama/`, and so on). Do not set `OPENAI_API_KEY` separately. The mapping is in `cli/defenseclaw/scanner/_llm_env.py` ([LLM providers](/docs/guardrail/unified-llm-key)).
+
+## Gateway and connector-scoped tokens
+
+| Token | What it is |
+| --- | --- |
+| `DEFENSECLAW_GATEWAY_TOKEN` | Authenticates the sidecar management API. With no token from the environment or `.env`, the sidecar generates a 32-byte random token at first boot and stores its hex value in `~/.defenseclaw/.env` with private permissions. Rotate with `defenseclaw setup rotate-token --yes` so the gateway and active connectors change together. |
+| `OPENCLAW_GATEWAY_TOKEN` | The upstream OpenClaw gateway credential, also kept as a legacy fallback by the sidecar token resolver. Not interchangeable with the sidecar token when an OpenClaw deployment uses different credentials. |
+| `~/.defenseclaw/hooks/.hook-<connector>.token` | Least-privilege connector hook token. A managed runtime file, not a `keys set` input; accepted only on its hook or inspection scope. |
+| `~/.defenseclaw/hooks/.otlp-<source>.token` | Scoped OTLP token. Managed runtime file; accepted only on its OTLP scope. |
+
+## Example: `keys list` output
+
+Captured on a Claude Code and Codex install in observe mode with a Galileo
+destination and `DEFENSECLAW_LLM_KEY` stored in `.env`:
+
+```text
+     ENV NAME                  FEATURE                   REQUIREMENT  SOURCE  STATUS
+  -  ------------------------  ------------------------  -----------  ------  ------
+  ○  DEFENSECLAW_LLM_KEY       llm.default               OPTIONAL     dotenv  ✓ set
+  ·  OPENCLAW_GATEWAY_TOKEN    gateway                   NOT_USED     unset   n/a
+  ·  CISCO_AI_DEFENSE_API_KEY  guardrail.remote          NOT_USED     unset   n/a
+  ·  VIRUSTOTAL_API_KEY        skill-scanner.virustotal  NOT_USED     unset   n/a
+  ·  SPLUNK_ACCESS_TOKEN       observability.splunk      NOT_USED     unset   n/a
+  ●  GALILEO_API_KEY           observability.galileo     REQUIRED     dotenv  ✓ set
+
+  Legend:  ● required   ○ optional   · not used by current config
+           Source: 'env' = process environment, 'dotenv' = ~/.defenseclaw/.env, 'unset' = missing
+  Managed by DefenseClaw (gateway auth token, do not remove): DEFENSECLAW_GATEWAY_TOKEN
+```
+
+`DEFENSECLAW_LLM_KEY` is optional here because no judge or LLM scanner is
+enabled. The last line names the [gateway token](#gateway-and-connector-scoped-tokens)
+that the sidecar generated in `.env`. `keys check` on the same install prints `1/1 required credentials set.` and `OK all required credentials present`, and exits `0`.
+
+See also [LLM providers](/docs/guardrail/unified-llm-key) and [Environment variables](/docs/reference/env-vars).
+
+## Troubleshooting
+
+Fixes for the gateway, the keys it needs and the destinations it exports to.
+
+### Tool calls blocked with `gateway restarting or not running`
+
+**Cause.** The gateway is stopped, and the hook is fail-closed. This holds in observe mode too.
+
+**Fix.** `defenseclaw-gateway status`, then `defenseclaw-gateway start`. A hook does not start a stopped gateway after `defenseclaw-gateway stop`, during an upgrade, for 60 seconds after a failed start, or with `DEFENSECLAW_GATEWAY_AUTOSTART=0`. Read `~/.defenseclaw/gateway.log` for the start error.
+
+**Check.** `defenseclaw-gateway status` shows running.
+
+### `gateway did not answer`
+
+**Cause.** The gateway runs but is frozen. Neither a hook nor the watchdog restarts it.
+
+**Fix.** `defenseclaw-gateway restart`.
+
+**Check.** `defenseclaw doctor` shows the sidecar row as `[PASS]`.
+
+### The API port is held by another account
+
+**Cause.** On a shared host, another account's gateway uses the default port. The installer stops before changing anything.
+
+**Fix.** Run the `defenseclaw setup gateway --api-port <free port>` command it prints, then upgrade again.
+
+**Check.** `defenseclaw status` shows your gateway's API port.
+
+### `refusing to run ... gateway executable ... can be changed by another account`
+
+**Cause.** The gateway file or a directory above it is writable by others.
+
+**Fix.** The message names the command, for example `chmod go-w <file>`. Run it as the file's owner.
+
+**Check.** `defenseclaw doctor` shows `Config validation` as `[PASS]`.
+
+### `Config validation` fails after an edit
+
+**Cause.** `config.yaml` is invalid. A running gateway keeps the config it started with.
+
+**Fix.** `defenseclaw config validate`, fix the field it names, save.
+
+**Check.** `defenseclaw doctor` shows `Policy` as `[PASS]` with the new digest.
+
+### `no gateway token is configured`
+
+**Cause.** The gateway has never started on this account, or its token was removed.
+
+**Fix.** `defenseclaw doctor --fix` (previews with `--dry-run`). It never prints the token.
+
+**Check.** `Gateway authentication` is `[PASS]`.
+
+### `the LLM judge is off`
+
+**Cause.** No LLM key is configured. The local rules work without one.
+
+**Fix.** To add the judge: `defenseclaw setup llm`, or follow [Set up an LLM key](/docs/guardrail/unified-llm-key). Check what is set with `defenseclaw keys list`.
+
+**Check.** `defenseclaw doctor` shows `LLM API key` and `LLM reachable` as `[PASS]`.
+
+### A destination fails or shows degraded
+
+**Cause.** The endpoint, key or route is wrong. Repeated failures pause that destination.
+
+**Fix.** `defenseclaw observability plan`, then `defenseclaw doctor` (Observability rows). Fix and reload the destination, or `defenseclaw setup observability disable NAME`.
+
+**Check.** The doctor row is `[PASS]`. Local audit history kept working throughout.

@@ -4,6 +4,7 @@ description: Install, configure, detect, repair, upgrade and remove the standalo
 keywords:
   - DefenseClaw Workspace ONE
   - Omnissa Workspace ONE UEM
+  - VMware Workspace ONE
   - AirWatch
   - Win32 app software distribution
   - Workspace ONE scripts and sensors
@@ -30,9 +31,9 @@ every value in the script's settings block.
 - Workspace ONE UEM with Intelligent Hub on the devices. macOS scripts need Hub 20.10
   and Workflow Engine 20.10 or later. Scripts and sensors cannot be assigned to
   employee-owned devices.
-- Windows: native x64 ([requirements](/docs/enterprise/install/windows#requirements)).
+- Windows: native x64 ([requirements](/docs/enterprise/windows#requirements)).
   macOS: Apple silicon on macOS 13 or later.
-- Your administrator config ([choose the agents](/docs/enterprise/configure/configuration#choose-the-agents-to-protect)).
+- Your administrator config ([choose the agents](/docs/enterprise/configuration)).
   The default config protects no agent.
 
 Verify every artifact against the release's cosign-signed `checksums.txt` before you
@@ -86,46 +87,70 @@ dependency file**. Then upload the ZIP the same way (answer **No**) and set:
 and prints `DefenseClaw Enterprise <version>` when the deployment is at that version
 or newer, and `1` otherwise.
 
-### Keep it healthy, key, upgrade
+### Keep it healthy
 
-- **Keep it healthy.** Add a Windows script (**Resources** > **Scripts** > **Add** >
-  **Windows**): PowerShell, **System**, timeout `900` seconds or more, code
-  `packaging/mdm/intune/windows/Remediate-Fix.ps1`, on a recurring trigger. It runs
-  `enterprise windows ensure --profile standalone --json` and does nothing on a
-  healthy device.
-- **AI Defense key.** Never put it in the ZIP, config or script body. Add a second
-  **System** script with the key as variable `AIDEFENSE_KEY`:
+Add a Windows script (**Resources** > **Scripts** > **Add** >
+**Windows**): PowerShell, **System**, timeout `900` seconds or more, code
+`packaging/mdm/intune/windows/Remediate-Fix.ps1`, on a recurring trigger. It runs
+`enterprise windows ensure --profile standalone --json` and does nothing on a
+healthy device.
 
-  ```powershell
-  $hklm = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
-      [Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
-  $marker = $hklm.OpenSubKey('SOFTWARE\Cisco\DefenseClaw\Enterprise')
-  if ($null -eq $marker) { throw 'DefenseClaw is not installed yet' }
-  $cli = Join-Path ([string]$marker.GetValue('InstallRoot')) 'bin\defenseclaw.exe'
-  $null = $env:AIDEFENSE_KEY | & $cli enterprise secret set --name ai-defense-api-key --from-stdin --json 2>&1
-  exit $LASTEXITCODE
-  ```
+### Deliver the AI Defense key on Windows
 
-  Run it once and again only to rotate. Then turn the feature on in the config
-  ([AI Defense key](/docs/enterprise/configure/ai-defense-key)).
-- **Upgrade or change the config.** Build new content and add it as a new app version;
-  raise `-MinimumVersion`. `/ensure` upgrades in place and applies the new config.
-  In bundle mode, leave the config out and deliver a new signed bundle for a config
-  change; a plain config is refused with `bundle_required`.
-  `ensure` refuses a downgrade ([Roll back](/docs/enterprise/operate/lifecycle#roll-back)).
-- **Uninstall.** `uninstall.ps1` finds the installed CLI and runs `enterprise windows
-  uninstall`; `-Purge` also removes enrolled accounts' data
-  ([what it removes](/docs/enterprise/mdm/reference#uninstall)).
+Never put the key in the ZIP, config or script body. Add a second
+**System** script with the key as variable `AIDEFENSE_KEY`:
+
+```powershell
+$hklm = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+    [Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+$marker = $hklm.OpenSubKey('SOFTWARE\Cisco\DefenseClaw\Enterprise')
+if ($null -eq $marker) { throw 'DefenseClaw is not installed yet' }
+$cli = Join-Path ([string]$marker.GetValue('InstallRoot')) 'bin\defenseclaw.exe'
+$null = $env:AIDEFENSE_KEY | & $cli enterprise secret set --name ai-defense-api-key --from-stdin --json 2>&1
+exit $LASTEXITCODE
+```
+
+Run it once and again only to rotate. Then turn the feature on in the config
+([AI Defense key](/docs/enterprise/ai-defense-key)).
+
+### Upgrade, roll back and change the config on Windows
+
+Build new content and add it as a new app version;
+raise `-MinimumVersion`. `/ensure` upgrades in place and applies the new config.
+In bundle mode, leave the config out and deliver a new signed bundle for a config
+change; a plain config is refused with `bundle_required`.
+`ensure` refuses a downgrade ([Roll back](/docs/enterprise/lifecycle)).
+
+### Uninstall on Windows
+
+`uninstall.ps1` finds the installed CLI and runs `enterprise windows
+uninstall`; `-Purge` also removes enrolled accounts' data
+([what it removes](/docs/enterprise/mdm#uninstall)).
+
+### Windows logs
+
+Logs: the app's **Details View**,
+`%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log` and the `DefenseClaw` event log.
+
+### Windows exit codes
 
 Exit codes: `0` success, `1603` failed (retried up to **Retry Count**; read
 `errors[].code`), `1618` another run holds the lock (the retry usually succeeds),
 `1639` invalid arguments (fix the content; a retry gives the same result)
-([Exit codes](/docs/enterprise/mdm#exit-codes)). Logs: the app's **Details View**,
-`%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log` and the `DefenseClaw` event log.
+([Exit codes](/docs/enterprise/mdm#exit-codes)).
 
 A malformed, non-UTF-8 or invalid Windows candidate config returns
 `invalid_arguments` and exit `1639`. Fix the content before retrying; the
 installed config stays in force.
+
+### Deliver a custom macOS rule pack
+
+Before the first pkg install, add a root **stage-pack**
+script that copies the pack into
+`/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` ([stage-pack script and pin
+example](/docs/enterprise/mdm#stage-a-custom-macos-rule-pack)) and set
+`guardrail.custom_packs.<name>` to that path and its `sha256:<digest>` pin. Stage
+the pack again before reinstalling after a purge.
 
 ## macOS
 
@@ -180,34 +205,37 @@ Replace the YAML with your config. Never put the AI Defense key in it. A failed
 lifecycle fails the install after rolling back; the result is in
 `/opt/cisco/defenseclaw/lifecycle/last-package-result.json`.
 
-### Keep it applied, detect, key
+### Keep it applied
 
-- **Keep it applied.** Add a macOS script (**Resources** > **Scripting** > **Scripts**):
-  Bash, **System**, timeout `1800` seconds, code `defenseclaw-enterprise.sh` with
-  `DC_ACTION=ensure`, empty source settings and the same YAML between the markers of
-  `dc_inline_config`. Assign it with **Run Periodically** (for example every 12
-  hours). It applies a changed config, repairs drift, or does nothing; where the
-  package is not installed yet it exits `1` with `mdm_not_installed`.
-- **Detect.** Add a sensor (**Resources** > **Scripting** > **Sensors**), name
-  `defenseclaw_status`, Bash, **System**, **String**, code `detect.sh` with
-  `DC_MIN_VERSION="X.Y.Z"`, `DC_REQUIRE_HEALTHY=1`, `DC_FORMAT="value"`. It reports the
-  version, `not-installed`, `outdated`, `unhealthy` or `busy`.
-- **AI Defense key.** A second **System** script with variable `AIDEFENSE_KEY`:
-  `printf '%s' "$AIDEFENSE_KEY" | /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-defense-api-key --from-stdin --json`.
-  It fails until the package is installed, and storing the same key again changes
-  nothing. Then enable AI Defense in the config.
-- **Custom rule pack.** Before the first pkg install, add a root **stage-pack**
-  script that copies the pack into
-  `/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` ([stage-pack script and pin
-  example](/docs/enterprise/mdm/reference#stage-a-custom-macos-rule-pack)) and set
-  `guardrail.custom_packs.<name>` to that path and its `sha256:<digest>` pin. Stage
-  the pack again before reinstalling after a purge.
-- **Upgrade, change the config.** Upload the new package as a new app version and
-  raise `DC_MIN_VERSION`; edit the inline config for a config change (in bundle
-  mode, deliver a new signed bundle instead)
-  ([Roll back](/docs/enterprise/operate/lifecycle#roll-back)).
+Add a macOS script (**Resources** > **Scripting** > **Scripts**):
+Bash, **System**, timeout `1800` seconds, code `defenseclaw-enterprise.sh` with
+`DC_ACTION=ensure`, empty source settings and the same YAML between the markers of
+`dc_inline_config`. Assign it with **Run Periodically** (for example every 12
+hours). It applies a changed config, repairs drift, or does nothing; where the
+package is not installed yet it exits `1` with `mdm_not_installed`.
 
-#### macOS logs and exit codes
+### Detect on macOS
+
+Add a sensor (**Resources** > **Scripting** > **Sensors**), name
+`defenseclaw_status`, Bash, **System**, **String**, code `detect.sh` with
+`DC_MIN_VERSION="X.Y.Z"`, `DC_REQUIRE_HEALTHY=1`, `DC_FORMAT="value"`. It reports the
+version, `not-installed`, `outdated`, `unhealthy` or `busy`.
+
+### Deliver the AI Defense key on macOS
+
+Add a second **System** script with variable `AIDEFENSE_KEY`:
+`printf '%s' "$AIDEFENSE_KEY" | /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-defense-api-key --from-stdin --json`.
+It fails until the package is installed, and storing the same key again changes
+nothing. Then enable AI Defense in the config.
+
+### Upgrade, roll back and change the config on macOS
+
+Upload the new package as a new app version and
+raise `DC_MIN_VERSION`; edit the inline config for a config change (in bundle
+mode, deliver a new signed bundle instead)
+([Roll back](/docs/enterprise/lifecycle)).
+
+### macOS logs and exit codes
 
 | Where | What |
 | --- | --- |

@@ -15,7 +15,7 @@ def test_bucket_catalog_is_one_complete_table():
     registry = yaml.safe_load((ROOT / "schemas/telemetry/v8/registry.yaml").read_text())
     fields = registry["structural_contract"]["envelope"]["fields"]
     expected = next(field["enum"] for field in fields if field["name"] == "bucket")
-    text = (ROOT / "docs-site/content/docs/reference/observability/index.mdx").read_text()
+    text = (ROOT / "docs-site/content/docs/observability/index.mdx").read_text()
     section = text.split("## Buckets\n", 1)[1].split("\n## ", 1)[0]
     tables = re.findall(r"(?m)^\| Bucket \|[^\n]*\n(?:\|[^\n]*\n)+", section)
     assert len(tables) == 1

@@ -69,8 +69,8 @@ describe('Managed custom rule-pack apply', () => {
     assert.match(settle, /if applied \{[\s\S]*?gatewayKeptRunning = true/);
     assert.match(settle, /if err := restartUnit\(ctx, env\.Services, gateway\)/);
 
-    const reference = page('enterprise/configure/reference.mdx');
-    const customPack = reference.split('### Custom rule packs')[1]?.split('### Network proxy')[0] ?? '';
+    const reference = page('enterprise/configuration.mdx');
+    const customPack = reference.split('## Custom rule packs')[1]?.split('## Network proxy')[0] ?? '';
     assert.match(customPack, /without `--no-start`.{0,250}custom pack switch.{0,250}without a restart/i);
     assert.match(customPack, /gateway was running.{0,250}restarts it/i);
     assert.match(customPack, /gateway was stopped.{0,100}starts it/i);
@@ -97,23 +97,23 @@ describe('Cursor observe outage mode', () => {
     const resolve = hooks.split('func resolveHookFailMode(')[1]?.split('\n}')[0] ?? '';
     assert.match(resolve, /return defaultHookFailMode/);
     assert.match(hooks, /func renderedHookFailMode\([\s\S]*?OutageHookFailMode\(opts, conn\)/);
-    const failModes = page('reference/configuration/fail-modes.mdx').split('## Controls')[0] ?? '';
-    const cursor = page('reference/connectors/cursor.mdx').split('## Fail mode')[1]?.split('## Limits')[0] ?? '';
+    const failModes = page('reference/fail-modes.mdx').split('## Controls')[0] ?? '';
+    const cursor = page('connectors/cursor.mdx').split('## Fail mode')[1]?.split('## Limits')[0] ?? '';
     // Owner decision 2026-10-23 (oss-outage-open): a per-user outage follows the
     // policy tier; every other failure blocks.
     assert.match(failModes, /On a per-user install the outage behavior follows the policy tier.{0,600}Every other failure blocks in every tier/i);
     assert.match(cursor, /A per-user Cursor hook makes the outage decision of its policy tier in observe and action mode/i);
-    const coverage = page('appendix/coverage-by-layer.mdx');
+    const coverage = page('segmentation.mdx');
     assert.match(coverage, /On a per-user install the policy tier decides, in observe and action mode alike/i);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
     assert.match(managedRegistration, /"failClosed": true,/);
-    assert.match(page('reference/connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call. The administrator's resolved fail mode decides/i);
+    assert.match(page('connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call. The administrator's resolved fail mode decides/i);
     assert.ok(!/per-user Cursor in observe mode fails open/i.test(failModes));
 
     const overview = page('connectors/cursor.mdx').split('## What it can block or ask')[1]?.split('## Files it changes')[0] ?? '';
     assert.match(overview, /Observe mode.{0,120}policy findings without blocking/i);
     assert.match(overview, /gateway outage.{0,100}blocks supported events by default/i);
-    const mapping = page('reference/connectors/cursor.mdx').split('## Verdict mapping')[1]?.split('## Native ask')[0] ?? '';
+    const mapping = page('connectors/cursor.mdx').split('## Verdict mapping')[1]?.split('## Native ask')[0] ?? '';
     assert.match(mapping, /\| Observe \| `failClosed: true` \|[^|]*policy findings[^|]*gateway outage/i);
     assert.ok(!/observe cannot become blocking/i.test(mapping));
   });
@@ -125,7 +125,7 @@ describe('Observe mode policy findings and gateway outages', () => {
     assert.match(hooks, /const defaultHookFailMode = "closed"/);
     const antigravity = source('internal/gateway/connector/hooks/antigravity-hook.sh');
     assert.match(antigravity, /PreToolUse\)[\s\S]*?if \[ "\$closed" = "1" \]; then[\s\S]*?"decision":"deny"/);
-    const mapping = page('reference/connectors/antigravity.mdx').split('## Verdict mapping')[1]?.split('## Native ask')[0] ?? '';
+    const mapping = page('connectors/antigravity.mdx').split('## Verdict mapping')[1]?.split('## Native ask')[0] ?? '';
     assert.match(mapping, /`observe` records policy findings without blocking on those findings/i);
     assert.match(mapping, /default fail mode `closed`.{0,120}gateway is unreachable.{0,80}denies `PreToolUse`/i);
     assert.ok(!/always permits tool execution/i.test(mapping));
@@ -154,19 +154,19 @@ describe('Observe mode policy findings and gateway outages', () => {
   it('qualifies proxy connector claims for OpenClaw and ZeptoClaw', () => {
     assert.match(source('internal/gateway/proxy.go'), /verdict.Action == "block" && mode == "action"/);
     for (const connector of ['openclaw', 'zeptoclaw']) {
-      const setup = page(`connectors/${connector}.mdx`).split('## Set up')[1]?.split('## Check it')[0] ?? '';
+      const setup = page(`connectors/${connector}.mdx`).split('## Setup')[1]?.split('## Check it')[0] ?? '';
       assert.match(setup, /Observe records policy findings without blocking on those findings/i, connector);
       assert.match(setup, /gateway outage still stops proxied requests/i, connector);
-      assert.match(page(`reference/connectors/${connector}.mdx`), /While the gateway is down, requests are blocked/i, connector);
+      assert.match(page(`connectors/${connector}.mdx`), /While the gateway is down, requests are blocked/i, connector);
     }
   });
 
   it('scopes general guardrail observe guidance to policy findings', () => {
-    assert.match(page('features/guardrail.mdx'), /Observe mode does not enforce policy findings/i);
-    assert.match(page('features/guardrail.mdx'), /Hook fail mode and proxy availability still apply/i);
-    assert.ok(!/\*\*Observe\*\*[^.]*blocks nothing/i.test(page('features/guardrail.mdx')));
-    assert.match(page('reference/policy/thresholds.mdx'), /Observe mode does not enforce policy findings/i);
-    const commands = source('docs-site/content/docs/reference/commands/cli.mdx');
+    assert.match(page('guardrail/index.mdx'), /Observe mode does not enforce policy findings/i);
+    assert.match(page('guardrail/index.mdx'), /Hook fail mode and proxy availability still apply/i);
+    assert.ok(!/\*\*Observe\*\*[^.]*blocks nothing/i.test(page('guardrail/index.mdx')));
+    assert.match(page('policies/thresholds.mdx'), /Observe mode does not enforce policy findings/i);
+    const commands = source('docs-site/content/docs/reference/cli.mdx');
     const modeRow = commands.split('\n').find((line) => line.startsWith('| `defenseclaw guardrail mode observe')) ?? '';
     assert.match(modeRow, /observe \(logs policy findings without enforcing them\)/i);
     assert.match(modeRow, /Hook fail mode and proxy availability still apply/i);
@@ -177,7 +177,7 @@ describe('Observe mode policy findings and gateway outages', () => {
     assert.match(proxy, /state\.profileFailsClosed\(\)/);
     assert.match(proxy, /!opts\.Managed/);
     assert.match(proxy, /!state\.sessionFailsOpen\(promptSessionID\(msg\)\)/);
-    const guide = page('features/acp-guard.mdx');
+    const guide = page('acp-guard.mdx');
     assert.match(guide, /observe mode.{0,100}policy findings without blocking/i);
     assert.match(guide, /standalone managed guard.{0,100}refuses an unevaluated frame by default/i);
   });
@@ -188,7 +188,7 @@ describe('ZeptoClaw removal', () => {
     const removal = source('cli/defenseclaw/commands/cmd_setup.py').split('# WU8 D2=A — last-connector gate.')[1]?.split('elif not yes')[0] ?? '';
     assert.match(removal, /if not remaining:[\s\S]*?if not force and not unshipped:/);
     assert.match(removal, /Pass --force to fully unconfigure enforcement/);
-    const turnOff = page('connectors/zeptoclaw.mdx').split('## Turn it off')[1]?.split('## Details')[0] ?? '';
+    const turnOff = page('connectors/zeptoclaw.mdx').split('## Disable')[1]?.split('## Details')[0] ?? '';
     assert.match(turnOff, /setup remove zeptoclaw --yes`/);
     assert.match(turnOff, /last connector.{0,100}removal refuses/i);
     assert.match(turnOff, /defenseclaw setup remove zeptoclaw --yes --force/);
@@ -204,7 +204,7 @@ function mdxPages(dir: string): string[] {
 
 describe('recovery and repair advice', () => {
   it('describes recovery and data loss for a failed MicroVM', () => {
-    const body = page('troubleshooting/sandboxes/runs-and-sessions.mdx');
+    const body = page('sandboxes/guide.mdx');
     const section = body.split('## A sandbox is in OpenShell\'s error state')[1]?.split('## ')[0];
     assert.ok(section, 'error-state troubleshooting section is missing');
     for (const text of ['Docker', 'MicroVM', 'MainProcessFailed', '--end-vm', 'has not written to its disk is lost',
@@ -223,16 +223,16 @@ describe('recovery and repair advice', () => {
     const refusedStart = body.split('## A sandbox is not as DefenseClaw prepared it')[1]?.split('## ')[0];
     assert.ok(refusedStart?.includes('last successful disk sync'), 'refused-start advice must qualify MicroVM work');
     assert.ok(!refusedStart?.includes('(its work is kept)'), 'refused-start advice promises unsynced work');
-    const handoff = page('reference/sandboxes/cli.mdx').split('Handing the gateway over stops the sandboxes it runs')[1]?.split('</Callout>')[0];
+    const handoff = page('reference/sandbox-cli.mdx').split('Handing the gateway over stops the sandboxes it runs')[1]?.split('</Callout>')[0];
     assert.ok(handoff?.includes('last successful disk sync'), 'gateway handoff advice must qualify copy-mode MicroVM work');
     assert.ok(!handoff?.includes('a copy keeps its work in the sandbox'), 'gateway handoff promises unsynced copy-mode work');
-    const managed = page('enterprise/runtime/sandboxes.mdx');
+    const managed = page('enterprise/sandboxes.mdx');
     assert.ok(managed.includes('last successful disk sync'), 'managed upgrade advice must qualify failed-VM work');
     assert.ok(!managed.includes('a completed or failed MicroVM on 0.1.5 is started'),
       'managed upgrade advice must not send every failed VM through --end-vm');
     assert.ok(!managed.includes('the user stops and starts a MicroVM that was in the error state'),
       'managed upgrade advice promises a failed VM can always stop and start');
-    const upgrade = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
+    const upgrade = page('sandboxes/guide.mdx');
     assert.ok(upgrade.includes('On OpenShell 0.1.5 or later, `openshell sandbox stop` requests a guest flush'),
       'raw OpenShell stops must name the release that flushes the guest');
     assert.ok(upgrade.includes('gateway older than OpenShell 0.1.5, save its work'),
@@ -240,10 +240,10 @@ describe('recovery and repair advice', () => {
     assert.ok(!upgrade.includes('`openshell sandbox stop` does not sync its guest disk'),
       'raw OpenShell stop must not be described as never syncing');
     for (const [name, claim] of [
-      ['troubleshooting/sandboxes/setup-and-gateway.mdx', 'last successful disk sync'],
-      ['troubleshooting/sandboxes/disk-and-telemetry.mdx', 'last successful disk sync'],
-      ['reference/sandboxes/cli.mdx', 'last successful one'],
-      ['enterprise/runtime/sandbox-reference.mdx', 'last successful disk sync'],
+      ['sandboxes/guide.mdx', 'last successful disk sync'],
+      ['sandboxes/guide.mdx', 'last successful disk sync'],
+      ['reference/sandbox-cli.mdx', 'last successful one'],
+      ['enterprise/sandboxes.mdx', 'last successful disk sync'],
     ]) {
       assert.ok(page(name).includes(claim), `${name} must qualify what a failed sync preserves`);
     }
@@ -254,7 +254,7 @@ describe('recovery and repair advice', () => {
     const autoStops = manager.includes('func (m *Manager) stopOldSupervisor(');
     const userStops = manager.includes('func (m *Manager) reconcileOldSupervisor(');
     assert.notEqual(autoStops, userStops, 'the legacy guest stop mechanism needs an explicit docs check');
-    const upgrade = page('troubleshooting/sandboxes/setup-and-gateway.mdx');
+    const upgrade = page('sandboxes/guide.mdx');
     assert.equal(upgrade.includes('It does not stop that legacy guest for you'), userStops,
       'manual legacy-guest stop advice requires the no-auto-stop manager');
     assert.equal(upgrade.includes('run `defenseclaw sandbox stop <name>` yourself'), userStops,
@@ -264,7 +264,7 @@ describe('recovery and repair advice', () => {
   });
 
   it('separates raw MicroVM errors by gateway release and phase reason', () => {
-    const body = readFileSync(join(docs, 'troubleshooting/sandboxes/setup-and-gateway.mdx'), 'utf8');
+    const body = readFileSync(join(docs, 'sandboxes/guide.mdx'), 'utf8');
     const section = body.split('## A raw `openshell` sandbox stops a restart or rollback')[1]?.split('## ')[0];
     assert.ok(section, 'raw sandbox restart section is missing');
     for (const text of ['OpenShell 0.1.5', 'ProcessPollFailed', 'openshell sandbox stop NAME',
@@ -299,21 +299,21 @@ describe('recovery and repair advice', () => {
 
   it('names the save-first path before upgrade and guest stop commands', () => {
     for (const [name, claim] of [
-      ['troubleshooting/sandboxes/setup-and-gateway.mdx', 'save or sync its work first, then `defenseclaw sandbox stop NAME`'],
-      ['reference/commands/tui.mdx', 'save or sync each guest’s work first, then stop it with `defenseclaw sandbox stop NAME`'],
-      ['reference/sandboxes/cli.mdx', 'Save or sync accessible work first. In copy mode, pull work you need on the host; then stop the guest'],
-      ['enterprise/runtime/sandboxes.mdx', 'Users save or pull accessible work first, then stop a running sandbox with `defenseclaw sandbox stop`'],
-      ['troubleshooting/sandboxes/runs-and-sessions.mdx', 'Before following a stop step below, save or sync accessible guest work'],
+      ['sandboxes/guide.mdx', 'save or sync its work first, then `defenseclaw sandbox stop NAME`'],
+      ['macos-app.mdx', 'save or sync each guest’s work first, then stop it with `defenseclaw sandbox stop NAME`'],
+      ['reference/sandbox-cli.mdx', 'Save or sync accessible work first. In copy mode, pull work you need on the host; then stop the guest'],
+      ['enterprise/sandboxes.mdx', 'Users save or pull accessible work first, then stop a running sandbox with `defenseclaw sandbox stop`'],
+      ['sandboxes/guide.mdx', 'Before following a stop step below, save or sync accessible guest work'],
     ] as const) {
       assert.ok(page(name).includes(claim), `${name} must give save-first advice`);
     }
-    assert.ok(!page('troubleshooting/sandboxes/setup-and-gateway.mdx').includes('or `defenseclaw sandbox delete NAME` deletes it with its work'),
+    assert.ok(!page('sandboxes/guide.mdx').includes('or `defenseclaw sandbox delete NAME` deletes it with its work'),
       'do not advise deleting a DefenseClaw guest with a stop recovery path');
-    assert.ok(page('troubleshooting/sandboxes/setup-and-gateway.mdx').includes('save accessible work outside a MicroVM whose VM still runs before deleting it for the upgrade'),
+    assert.ok(page('sandboxes/guide.mdx').includes('save accessible work outside a MicroVM whose VM still runs before deleting it for the upgrade'),
       'legacy MicroVM upgrade summary must put saving work before deletion');
-    assert.ok(!page('enterprise/runtime/sandboxes.mdx').includes('and stopped, or deleted'),
+    assert.ok(!page('enterprise/sandboxes.mdx').includes('and stopped, or deleted'),
       'do not advise deleting a managed guest with a stop recovery path');
-    assert.ok(page('reference/commands/tui.mdx').includes('| `U` | Save work you want to keep first, then undo:'),
+    assert.ok(page('tui.mdx').includes('| `U` | Save work you want to keep first, then undo:'),
       'the Undo action must tell users to save work before it stops a running guest');
   });
 
@@ -357,8 +357,8 @@ function repoText(name: string): string {
 
 describe('1.0.4 audit flood and upgrade claims', () => {
   it('describes the WAL hold and alarm actually used by the gateway', () => {
-    const wal = page('reference/observability/index.mdx');
-    const enterprise = page('troubleshooting/enterprise/index.mdx');
+    const wal = page('observability/index.mdx');
+    const enterprise = page('enterprise/troubleshooting.mdx');
     const changelog = source('CHANGELOG.md').split('- **The audit log catches up during a hook flood on a slow disk')[1]?.split('\n- **')[0] ?? '';
     for (const body of [wal, enterprise, changelog]) {
       assert.match(body, /audit\.db-wal[\s\S]*?176 MiB[\s\S]*?256 MiB/i);
@@ -372,7 +372,7 @@ describe('1.0.4 audit flood and upgrade claims', () => {
   });
 
   it('describes bounded Windows WAL catch-up and the remaining hook delay', () => {
-    const enterprise = page('troubleshooting/enterprise/index.mdx');
+    const enterprise = page('enterprise/troubleshooting.mdx');
     assert.match(enterprise, /Windows.*audit\.db-wal.*catch-up/i);
     assert.match(enterprise, /176 MiB.*256 MiB/i);
     assert.match(enterprise, /0\.9.to.1\.2 GB.*10 calls a second/i);
@@ -399,7 +399,7 @@ describe('Intune base config versus the signed bundle', () => {
     assert.ok(list, 'packager hook-block key list not found');
     const compared = [...list[1].matchAll(/'([a-z_]+)'/g)].map((match) => match[1]);
     assert.ok(compared.length > 0);
-    const reference = readFileSync(join(site, 'content/docs/enterprise/mdm/intune/windows-reference.mdx'), 'utf8');
+    const reference = readFileSync(join(site, 'content/docs/enterprise/mdm/intune-windows.mdx'), 'utf8');
     const row = reference.split('\n').find((line) => line.startsWith('| `-BaseConfigPath` |'));
     assert.ok(row, 'windows-reference has no -BaseConfigPath row');
     assert.ok(row.includes('No other setting is compared'), 'the -BaseConfigPath row does not say nothing else is compared');
@@ -411,16 +411,16 @@ describe('Intune base config versus the signed bundle', () => {
 
 describe('fail mode of Copilot CLI and Antigravity hooks', () => {
   it('says the hooks follow a closed fail mode', () => {
-    const failModes = page('reference/configuration/fail-modes.mdx');
+    const failModes = page('reference/fail-modes.mdx');
     assert.ok(!failModes.includes('The generated hooks stay open even when the effective mode is `closed`'));
     assert.ok(failModes.includes('Copilot and Antigravity still run a call when the hook times out or cannot start'));
     assert.ok(failModes.includes('Under Secure Client they stay open'));
-    for (const name of ['reference/connectors/copilot.mdx']) {
+    for (const name of ['connectors/copilot.mdx']) {
       const text = page(name);
       assert.ok(!/no fail-closed hook transport/i.test(text), name);
       assert.match(text, /in fail mode `closed`, the default/i, name);
     }
-    for (const name of ['reference/connectors/antigravity.mdx']) {
+    for (const name of ['connectors/antigravity.mdx']) {
       const text = page(name);
       assert.ok(!text.includes('A gateway failure lets the call run'), name);
       assert.ok(!text.includes('normal fail-open operation'), name);
@@ -439,8 +439,8 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
 
   it('says an upgrade gives per-user hooks the outage mode of their tier', () => {
     assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks take the outage mode of their policy tier'));
-    assert.ok(page('reference/configuration/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
-    assert.ok(page('reference/configuration/fail-modes.mdx').includes('A per-user install ignores a saved value'));
+    assert.ok(page('reference/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
+    assert.ok(page('reference/fail-modes.mdx').includes('A per-user install ignores a saved value'));
   });
 });
 
@@ -450,14 +450,14 @@ describe('Hook connector setup and teardown', () => {
     const alias = setupCode.split('def _setup_observability_alias(')[1]?.split('def _')[0] ?? '';
     assert.match(alias, /mode = gc\.effective_mode\(connector\) if connector in _configured_connector_set\(gc\) else "observe"/);
     assert.match(alias, /if interactive and not mode_from_flag:\s+normalized_mode = _prompt_connector_mode\(connector, default_mode=normalized_mode\)/);
-    const reference = readFileSync(join(site, 'content/docs/reference/commands/cli.mdx'), 'utf8');
+    const reference = readFileSync(join(site, 'content/docs/reference/cli.mdx'), 'utf8');
     for (const { id, command } of hookConnectors) {
       const row = reference.split('\n').find((line) => line.startsWith(`| \`defenseclaw setup ${command}\` |`));
       assert.ok(row, `${id} CLI reference row is missing`);
       assert.match(row, /first setup.*observe|observe.*first setup/i, `${id} CLI row must qualify the default`);
       assert.match(row, /re-run.*keeps the current mode/i, `${id} CLI row must explain reruns`);
 
-      const setup = page(`connectors/${id}.mdx`).split('## Set up')[1]?.split('## Check it')[0];
+      const setup = page(`connectors/${id}.mdx`).split('## Setup')[1]?.split('## Check it')[0];
       assert.ok(setup, `${id} setup section is missing`);
       assert.match(setup, /first setup.*observe|observe.*first setup/i, `${id} page must qualify the default`);
       assert.match(setup, /re-run without `--mode` keeps the current mode/i, `${id} page must explain scripted reruns`);
@@ -483,7 +483,7 @@ describe('Hook connector setup and teardown', () => {
       assert.match(implementation, /func \(c \*\w+Connector\) Teardown\(/, `${connector} must own its documented teardown`);
     }
     for (const { id, name } of hookConnectors) {
-      const turnOff = page(`connectors/${id}.mdx`).split('## Turn it off')[1]?.split('## Details')[0];
+      const turnOff = page(`connectors/${id}.mdx`).split('## Disable')[1]?.split('## Details')[0];
       assert.ok(turnOff, `${id} turn-off section is missing`);
       assert.ok(!new RegExp(`This keeps ${name}'s settings`, 'i').test(turnOff), `${id} must not imply hooks stay installed`);
       if (id === 'opencode' || id === 'amp') {
@@ -496,9 +496,9 @@ describe('Hook connector setup and teardown', () => {
       }
       assert.match(turnOff, new RegExp(`preserves? (?:your|the) other ${name} settings`, 'i'), `${id} must preserve unrelated settings`);
     }
-    const claude = page('connectors/claudecode.mdx').split('## Turn it off')[1]?.split('## Details')[0];
+    const claude = page('connectors/claudecode.mdx').split('## Disable')[1]?.split('## Details')[0];
     assert.match(claude ?? '', /removes? DefenseClaw(?:'s)? hooks and OpenTelemetry settings/i);
-    const kiro = page('connectors/kiro.mdx').split('## Turn it off')[1]?.split('## Details')[0];
+    const kiro = page('connectors/kiro.mdx').split('## Disable')[1]?.split('## Details')[0];
     assert.match(kiro ?? '', /inert stub/i);
   });
 
@@ -510,9 +510,9 @@ describe('Hook connector setup and teardown', () => {
     assert.match(guardrailCode, /gateway will continue running with the old policy[\s\S]*?until you restart it manually/);
     assert.match(gatewayCode, /guardrailRestart := connectorSetChanged\(oldCfg, newCfg\)/);
     assert.match(gatewayCode, /signalRestart\(s\.guardrailRestartCh\)/);
-    const setup = page('connectors/claudecode.mdx').split('## Set up')[1]?.split('## Check it')[0];
+    const setup = page('connectors/claudecode.mdx').split('## Setup')[1]?.split('## Check it')[0];
     assert.match(setup ?? '', /re-run without `--mode` keeps the current mode/i);
-    const turnOff = page('connectors/claudecode.mdx').split('## Turn it off')[1]?.split('## Details')[0];
+    const turnOff = page('connectors/claudecode.mdx').split('## Disable')[1]?.split('## Details')[0];
     assert.match(turnOff ?? '', /whole-guardrail disable.*`--no-restart`.*restart the gateway/i);
     assert.match(turnOff ?? '', /`--connector claudecode`.*`--no-restart`.*running gateway.*(?:at once|without a restart)/i);
   });
@@ -534,7 +534,7 @@ describe('setup and rollback recovery guides', () => {
   it('says a refused Cursor action setup makes no change and gives an explicit observe command', () => {
     const setup = readFileSync(join(repo, 'cli/defenseclaw/commands/cmd_setup.py'), 'utf8');
     assert.ok(setup.includes('connector was not detected locally; refusing action-mode hook setup.'));
-    const guide = page('how-to/guardrail/stop-a-secret-upload.mdx');
+    const guide = page('stories/cursor-secret-exfil.mdx');
     assert.match(guide, /Cursor was not detected locally.*refuses action mode.*(?:no|nothing) (?:setup or configuration )?change/i);
     assert.ok(guide.includes('defenseclaw setup cursor --yes --mode observe'));
     assert.doesNotMatch(guide, /refuses action mode and configures observe mode/i);
@@ -595,7 +595,7 @@ describe('Windows Hermes failure guidance', () => {
     assert.ok(failMode, 'native Hermes failure mode not found');
     assert.match(failMode, /opts\.ManagedEnterprise && !managedNativeDecision\(opts\)/);
     assert.match(failMode, /opts\.StrictAvailability \|\| !strings\.EqualFold\(strings\.TrimSpace\(opts\.FailMode\), "open"\)/);
-    const windows = page('troubleshooting/windows.mdx');
+    const windows = page('get-started/windows/paths-troubleshooting.mdx');
     assert.doesNotMatch(windows, /Hermes.*(?:fail-open setting|always shows failures as open)/i);
     assert.match(windows, /Hermes.*closed by default.*explicitly.*open/i);
     assert.match(windows, /managed host.*administrator.*open.*gateway outage/i);
@@ -621,7 +621,7 @@ describe('Hermes process failure guidance', () => {
 
 describe('Hermes install-lock attribution', () => {
   it('reports the observed permission error without assigning unproved file ownership', () => {
-    const limits = readFileSync(join(docs, 'reference/connectors/hermes.mdx'), 'utf8');
+    const limits = readFileSync(join(docs, 'connectors/hermes.mdx'), 'utf8');
     const lockLine = limits.split('\n').find((line) => line.includes('.install.lock'));
     assert.ok(lockLine, 'Hermes install-lock guidance is missing');
     assert.match(lockLine, /pm-runtime.*install-stamp\.json.*\.install\.lock/);
@@ -633,12 +633,12 @@ describe('Hermes install-lock attribution', () => {
 
 describe('managed-host enrollment protection', () => {
   const guides = [
-    'enterprise/plan/threat-model.mdx',
-    'enterprise/configure/enrollment.mdx',
-    'enterprise/configure/reference.mdx',
-    'enterprise/configure/machine-policy.mdx',
-    'enterprise/install/reference/windows.mdx',
-    'enterprise/operate/lifecycle.mdx',
+    'enterprise/threat-model.mdx',
+    'enterprise/enrollment.mdx',
+    'enterprise/enrollment.mdx',
+    'enterprise/machine-policy.mdx',
+    'enterprise/windows.mdx',
+    'enterprise/lifecycle.mdx',
   ];
   for (const name of guides) {
     it(`${name} describes zero-enrollment refusal`, () => {
@@ -676,22 +676,22 @@ describe('managed-host enrollment protection', () => {
   });
 
   it('explains Windows protection before first enrollment, after last removal, and repair', () => {
-    const windows = page('enterprise/install/reference/windows.mdx');
+    const windows = page('enterprise/windows.mdx');
     assert.match(windows, /configured Claude Code, Codex and Cursor machine hooks.{0,260}before the first (?:user )?enrollment.{0,260}after the last enrolled (?:user|SID) is removed/i);
     assert.match(windows, /unenrolled (?:account|SID).{0,120}refus/i);
     assert.match(windows, /missing (?:machine )?policy.{0,150}protection failure/i);
     assert.match(windows, /enterprise policy verify.{0,300}enterprise windows (?:reconcile|repair) --profile standalone/i);
 
-    const policy = page('enterprise/configure/machine-policy.mdx');
+    const policy = page('enterprise/machine-policy.mdx');
     assert.match(policy, /configured Claude Code, Codex and Cursor.{0,260}before the first (?:user )?enrollment.{0,260}after the last enrolled (?:user|SID) is removed/i);
-    const ownershipOffRow = readFileSync(join(site, 'content/docs/enterprise/configure/machine-policy.mdx'), 'utf8')
+    const ownershipOffRow = readFileSync(join(site, 'content/docs/enterprise/machine-policy.mdx'), 'utf8')
       .split('\n').find((line) => line.startsWith('| `off` |'));
     assert.ok(ownershipOffRow);
     assert.match(ownershipOffRow, /Windows.{0,150}Claude Code, Codex and Cursor.{0,180}verified even with zero enrolled users/i);
 
-    const configuration = page('enterprise/configure/configuration.mdx');
+    const configuration = page('enterprise/configuration.mdx');
     assert.match(configuration, /On Windows.{0,150}ownership.{0,50}off.{0,180}Claude Code, Codex and Cursor.{0,100}machine hooks/i);
-    const reference = page('enterprise/configure/reference.mdx');
+    const reference = page('enterprise/enrollment.mdx');
     assert.match(reference, /configured Claude Code, Codex and Cursor.{0,260}before the first (?:user )?enrollment.{0,260}after the last enrolled (?:user|SID) is removed/i);
   });
 
@@ -710,7 +710,7 @@ describe('managed-host enrollment protection', () => {
     assert.match(verify, /if !exists \{\s*state\.conflict\(/);
     assert.match(verify, /state\.finish\(\)/);
 
-    const reference = page('enterprise/configure/reference.mdx');
+    const reference = page('enterprise/machine-policy.mdx');
     const claude = /On Windows, Claude Code's .*?(?= On Windows, the guardian keeps Cursor's)/.exec(reference)?.[0];
     assert.ok(claude, 'Windows Claude Code policy paragraph not found');
     assert.match(claude, /status.*does not name a missing Claude Code machine policy/i);
@@ -732,9 +732,9 @@ describe('managed-host enrollment protection', () => {
 
   it('requires full Windows verification before use after hook executable loss', () => {
     for (const name of [
-      'enterprise/configure/machine-policy.mdx',
-      'enterprise/install/reference/windows.mdx',
-      'enterprise/mdm/intune/windows-reference.mdx',
+      'enterprise/machine-policy.mdx',
+      'enterprise/windows.mdx',
+      'enterprise/mdm/intune-windows.mdx',
     ]) {
       const guide = page(name);
       const recovery = /missing hook executable.{0,700}/i.exec(guide)?.[0];
@@ -768,10 +768,10 @@ describe('docs claim CI coverage', () => {
 
 describe('1.0.4 operator routes and limits', () => {
   it('keeps the TUI host-port ask row aligned with the UI and sandbox guide', () => {
-    const tui = source('docs-site/content/docs/reference/commands/tui.mdx');
+    const tui = source('docs-site/content/docs/tui.mdx');
     const asksRow = tui.split('\n').find((line) => line.startsWith('| Asks |')) ?? '';
     const ui = source('cli/defenseclaw/tui/services/sandbox_state.py');
-    const sandboxGuide = page('reference/sandboxes/cli.mdx');
+    const sandboxGuide = page('reference/sandbox-cli.mdx');
     const manager = source('internal/openshell/manager/hostport.go');
     assert.match(ui, /A port on this machine asks only if the run named it [^\n]*\n[^\n]*with --host-port PORT; approve that ask to open the port/);
     assert.match(sandboxGuide, /A `--host-port` port reads `asks` until you approve its first connection/);
@@ -787,23 +787,23 @@ describe('1.0.4 operator routes and limits', () => {
     const words = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
       'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen'];
     const expected = words[count] ?? String(count);
-    assert.match(page('reference/policy/detection.mdx'), new RegExp(`\\b${expected} MCP-description YARA signatures\\b`));
+    assert.match(page('policies/deterministic-detection.mdx'), new RegExp(`\\b${expected} MCP-description YARA signatures\\b`));
   });
 
   it('states that unknown connectors make profile explain fail with valid names', () => {
-    const thresholds = page('reference/policy/thresholds.mdx');
+    const thresholds = page('policies/thresholds.mdx');
     assert.match(thresholds, /profile explain.*unknown connector.*(?:HTTP 400|400 Bad Request).*valid connectors/i);
     assert.doesNotMatch(thresholds, /unknown connector.*(?:uses|falls back to|resolves to) (?:the )?(?:default|global) (?:profile|threshold)/i);
   });
 
   it('limits proxy replacement to Linux and macOS', () => {
-    const agents = page('how-to/agents/add-or-remove-an-agent.mdx');
+    const agents = page('guardrail/switching-connectors.mdx');
     assert.match(agents, /setup openclaw --replace.*Linux and macOS.*native Windows.*(?:unsupported|no guardrail proxy)/i);
   });
 
   it('aligns the TUI footer and status Policy line with the applied config counter', () => {
-    const tui = page('reference/commands/tui.mdx');
-    const cli = page('reference/commands/cli.mdx').split('### Policy generation and digest')[1]?.split('### ')[0] ?? '';
+    const tui = page('tui.mdx');
+    const cli = page('reference/cli.mdx').split('### Policy generation and digest')[1]?.split('### ')[0] ?? '';
     assert.match(tui, /`gen`.*config\.generation\.json.*(?:survives|persists).*gateway restart/i);
     assert.doesNotMatch(tui, /`gen` is the gateway's policy generation|restarts at 1 when the gateway starts/i);
     assert.match(tui, /Policy line.*same.*policy\.config_generation.*config generation N/i);
@@ -817,7 +817,7 @@ describe('1.0.4 operator routes and limits', () => {
   });
 
   it('does not promise enrollment for an extension without an engine version', () => {
-    const enrollment = page('enterprise/configure/enrollment.mdx');
+    const enrollment = page('enterprise/enrollment.mdx');
     assert.match(enrollment, /extension.*engine version.*(?:no engine version|without an engine version).*surface_unverified.*not enrolled/i);
     assert.match(enrollment, /Codex.*Windows.*reported.*not enrolled/i);
     const risk = repoText('docs/ENTERPRISE-THREAT-MODEL.md').split('| R25 |')[1]?.split('| R26 |')[0] ?? '';
@@ -836,7 +836,7 @@ describe('1.0.4 operator routes and limits', () => {
 
   it('describes the managed Unix hook socket directory and listener checks', () => {
     const transport = source('internal/gateway/connector/hookexec/managed_standalone_transport.go');
-    const row = source('docs-site/content/docs/troubleshooting/enterprise/index.mdx')
+    const row = source('docs-site/content/docs/enterprise/troubleshooting.mdx')
       .split('\n').find((line) => line.startsWith('| `enterprise_managed_gateway_peer_unverified` |')) ?? '';
     assert.match(transport, /hook socket directory .* is not owned by root or the gateway service account/);
     assert.match(transport, /hook socket listener uid .* is neither root nor the gateway service uid/);
@@ -845,13 +845,13 @@ describe('1.0.4 operator routes and limits', () => {
   });
 
   it('does not advertise local files as MCP scan targets', () => {
-    const api = page('reference/apis/gateway-api.mdx');
+    const api = page('reference/gateway-api.mdx');
     assert.match(api, /`POST`\s*\|\s*`\/v1\/mcp\/scan`[^\n]*Path or JSON-file targets[^\n]*HTTP 400[^\n]*bare identifier without path or file syntax[^\n]*configured server name/i);
     assert.doesNotMatch(api, /MCP scanner against a target URL or local path/i);
   });
 
   it('keeps managed readers off per-user HITL commands', () => {
-    const ask = page('how-to/guardrail/ask-before-risky-calls.mdx');
+    const ask = page('hitl.mdx');
     assert.match(ask, /managed computer.*guardrail\.connectors\.<id>\.hilt/i);
     assert.match(ask, /per-user.*refus/i);
   });
@@ -865,9 +865,9 @@ describe('1.0.4 operator routes and limits', () => {
   });
 
   it('points managed identity checks to the administrator command', () => {
-    const identity = page('enterprise/identity/sources.mdx');
+    const identity = page('enterprise/identity-sources.mdx');
     const childDomain = identity.split('On a managed Linux host, check an account as root:')[1]?.split('### Windows')[0] ?? '';
-    const groupRow = readFileSync(join(site, 'content/docs/enterprise/identity/sources.mdx'), 'utf8')
+    const groupRow = readFileSync(join(site, 'content/docs/enterprise/identity-and-authentication.mdx'), 'utf8')
       .split('\n').find((line) => line.startsWith('| A group assignment never matches |')) ?? '';
     assert.match(identity, /administrator runs.*defenseclaw-gateway config validate/);
     assert.match(childDomain, /enterprise linux profile-explain --user/);
@@ -880,8 +880,8 @@ describe('1.0.4 operator routes and limits', () => {
   });
 
   it('uses the installed standalone administrator route on every OS', () => {
-    const hooks = page('reference/commands/cli.mdx').split('### Per-user hooks (`enterprise hooks`)')[1]?.split('### ACP')[0] ?? '';
-    const envVars = page('reference/configuration/env-vars.mdx');
+    const hooks = page('reference/cli.mdx').split('### Per-user hooks (`enterprise hooks`)')[1]?.split('### ACP')[0] ?? '';
+    const envVars = page('reference/env-vars.mdx');
     const policy = source('internal/cli/enterprise_policy.go');
     const unixPin = source('internal/cli/enterprise_policy_platform_unix.go');
     assert.match(policy, /pinStandaloneManagedEnv\(\)/);
@@ -899,7 +899,7 @@ describe('1.0.4 operator routes and limits', () => {
   });
 
   it('keeps native-hook warnings and gives plugin readers a working report route', () => {
-    const guard = page('enterprise/configure/foreign-hook-guard.mdx');
+    const guard = page('enterprise/foreign-hook-guard.mdx');
     assert.match(guard, /foreign_hooks: report.*enterprise policy show/i);
     assert.match(guard, /Cursor, Copilot and Devin.*defenseclaw-hook.*warning.*file and digest.*stderr/i);
     assert.match(guard, /Hermes.*stderr warning.*without the file and digest/i);
@@ -908,7 +908,7 @@ describe('1.0.4 operator routes and limits', () => {
   });
 
   it('gives managed profile-explain routes in every identity troubleshooting row', () => {
-    const rows = readFileSync(join(site, 'content/docs/enterprise/identity/sources.mdx'), 'utf8')
+    const rows = readFileSync(join(site, 'content/docs/enterprise/identity-and-authentication.mdx'), 'utf8')
       .split('\n').filter((line) => line.startsWith('| ') && /profile explain/.test(line));
     assert.ok(rows.length >= 4, 'identity troubleshooting rows are missing');
     for (const row of rows) {
@@ -917,32 +917,32 @@ describe('1.0.4 operator routes and limits', () => {
   });
 
   it('gives a working managed restart route without promising it in the refusal', () => {
-    const lifecycle = page('enterprise/operate/lifecycle.mdx');
+    const lifecycle = page('enterprise/lifecycle.mdx');
     assert.match(lifecycle, /Windows \| Run the installed release's Setup with `\/repair JSON=1`/);
     assert.doesNotMatch(lifecycle, /the refusal names the commands below/i);
   });
 
   it('does not promise a Fleet error message that payload inspection cannot reach', () => {
-    const fleet = page('reference/edge-connector/configuration.mdx');
+    const fleet = page('edge-connector/install.mdx');
     assert.match(fleet, /payload_invalid/);
     assert.match(fleet, /--payload <dir>/);
     assert.doesNotMatch(fleet, /`fleet\.enabled is set but the managed payload has no policy_compiler\.py`/);
   });
 
   it('matches the Windows Claude Code version floor', () => {
-    const machine = page('enterprise/configure/machine-policy.mdx');
+    const machine = page('enterprise/machine-policy.mdx');
     assert.match(machine, /Windows.*2\.1\.219.*2\.1\.163.*2\.1\.218/);
     assert.doesNotMatch(machine, /floor stops no build/);
   });
 
   it('treats bare off as a YAML portability issue', () => {
-    const machine = page('enterprise/configure/machine-policy.mdx');
+    const machine = page('enterprise/machine-policy.mdx');
     assert.doesNotMatch(machine, /bare `off`.*config refuses/);
     assert.match(machine, /Quote `"off"`.*YAML 1\.1/);
   });
 
   it('distinguishes config validation from OpenShell install checks', () => {
-    for (const name of ['enterprise/runtime/sandboxes.mdx', 'enterprise/runtime/sandbox-reference.mdx']) {
+    for (const name of ['enterprise/sandboxes.mdx', 'enterprise/sandboxes.mdx']) {
       const sandboxes = page(name);
       assert.match(sandboxes, /config validate.*(?:schema|profile).*ensure.*(?:install|pin)/i, name);
       assert.match(sandboxes, /ensure.*install prerequisites.*exact OpenShell.*install: setup/i, name);
@@ -951,7 +951,7 @@ describe('1.0.4 operator routes and limits', () => {
   });
 
   it('gives an executable uninstall route after sandbox teardown', () => {
-    const uninstall = page('get-started/uninstall.mdx');
+    const uninstall = page('get-started/install.mdx');
     assert.match(uninstall, /If you already ran `defenseclaw sandbox teardown`.*add `--stop-sandboxes`/);
     assert.match(uninstall, /--stop-sandboxes.*running sandboxes/i);
   });
@@ -961,12 +961,12 @@ describe('1.0.4 operator routes and limits', () => {
       join(repo, 'bundles/local_observability_stack/grafana/dashboards/defenseclaw-agent-360.json'),
       'utf8',
     );
-    const agent360 = page('reference/observability/dashboards.mdx');
+    const agent360 = page('observability/grafana-dashboards.mdx');
     assert.equal(agent360.includes('Last seen'), dashboard.includes('Last seen'));
   });
 
   it('omits the retired Omnigent bridge from current receipt paths', () => {
-    const agent360 = page('reference/observability/dashboards.mdx');
+    const agent360 = page('observability/grafana-dashboards.mdx');
     assert.doesNotMatch(agent360, /Omnigent policy bridge/i);
   });
 
@@ -977,12 +977,12 @@ describe('1.0.4 operator routes and limits', () => {
   });
 
   it('states that CEL static cost can reject a regex below the size ceiling', () => {
-    const engine = page('reference/policy/cel/engine.mdx');
+    const engine = page('policies/cel/engine.mdx');
     assert.match(engine, /512-byte CEL regex limit.*static cost limit can reject/i);
   });
 
   it('runs gateway examples on the pinned Go version through the shard runner', () => {
-    for (const name of ['reference/policy/cel/engine.mdx', 'reference/policy/cel/authoring.mdx']) {
+    for (const name of ['policies/cel/engine.mdx', 'policies/cel/authoring.mdx']) {
       const example = page(name);
       assert.match(example, /Go 1\.26\.4/, name);
       assert.match(example, /go test -timeout 30m \.\/internal\/guardrail\/semantic \.\/internal\/guardrail/, name);
@@ -995,7 +995,7 @@ describe('1.0.4 operator routes and limits', () => {
 describe('agent identity rows (rel-1-0-4 GAP-0596)', () => {
   it('documents every JSON field the row has, on every OS', () => {
     const record = source('internal/inventory/agent_identity_store.go');
-    const api = page('reference/apis/gateway-api.mdx');
+    const api = page('reference/gateway-api.mdx');
     for (const field of ['upn', 'subagents_seen', 'last_subagent_id']) {
       assert.ok(new RegExp('json:"' + field + '[,"]').test(record), `AgentIdentityRecord has no ${field} JSON field`);
       assert.ok(api.includes(`"${field}":`), `the agents/identities example shows no ${field}`);
@@ -1026,7 +1026,7 @@ describe('agent identity rows (rel-1-0-4 GAP-0596)', () => {
     assert.ok(recorder.includes('rec.UPN = buffered.UPN'));
     assert.ok(store.includes('user_upn = excluded.user_upn'));
 
-    const api = page('reference/apis/gateway-api.mdx');
+    const api = page('reference/gateway-api.mdx');
     const upn = api.slice(api.indexOf('`upn` is the account'), api.indexOf('`total` counts'));
     assert.ok(upn.includes('current Windows guardian record takes precedence'));
     assert.ok(upn.includes('an expired or failed directory answer omits'));
@@ -1034,7 +1034,7 @@ describe('agent identity rows (rel-1-0-4 GAP-0596)', () => {
     assert.ok(upn.includes('an earlier value is not carried into the row'));
     assert.ok(upn.includes('A completed background lookup does not update the row by itself; another hook must run'));
 
-    const reference = page('enterprise/identity/reference.mdx');
+    const reference = page('enterprise/identity-and-authentication.mdx');
     assert.ok(reference.includes('another hook runs after the directory cache has a current UPN'));
     assert.ok(reference.includes('profile matching still uses that last good UPN'));
     assert.ok(reference.includes("Each hook replaces the row's UPN"));
@@ -1043,7 +1043,7 @@ describe('agent identity rows (rel-1-0-4 GAP-0596)', () => {
 
 describe('Windows AD UPN outage wording', () => {
   it('keeps policy continuity separate from current identity rows', () => {
-    const sources = page('enterprise/identity/sources.mdx');
+    const sources = page('enterprise/identity-sources.mdx');
     const row = sources.split('| AD UPN |')[1]?.split('| Verified |')[0];
     assert.ok(row, 'the Windows AD UPN source row is missing');
     assert.ok(row.includes('the last good answer is kept during the outage for profile matching'), 'the outage policy behavior is missing');
@@ -1065,10 +1065,10 @@ describe('the TUI page on a managed computer (rel-1-0-4 GAP-0597)', () => {
   it('quotes the launcher refusal and links the managed-device steps', () => {
     const refusal = /launcherRefusal = "([^"]+)"/.exec(source('internal/cli/launcher.go'));
     assert.ok(refusal, 'launcher refusal not found');
-    const tui = page('features/tui.mdx');
+    const tui = page('tui.mdx');
     assert.ok(tui.includes(refusal[1]), 'features/tui.mdx does not quote the launcher refusal');
-    assert.ok(tui.includes('/docs/reference/commands/tui#on-a-managed-device'));
-    assert.ok(page('reference/commands/tui.mdx').includes('#### On a managed device'));
+    assert.ok(tui.includes('/docs/tui#on-a-managed-device'));
+    assert.ok(page('tui.mdx').includes('#### On a managed device'));
   });
 });
 
@@ -1078,13 +1078,13 @@ describe('Windows event log check (rel-1-0-4 GAP-0598)', () => {
     assert.ok(command.includes('Use:   "events"'));
     const flags = [...command.matchAll(/Flags\(\)\.\w+Var\(&\w+, "([a-z-]+)"/g)].map((match) => match[1]);
     assert.deepEqual(flags.sort(), ['application', 'json', 'max']);
-    const operations = page('enterprise/operate/operations.mdx');
+    const operations = page('enterprise/operations.mdx');
     assert.ok(operations.includes('enterprise windows events'), 'operations.mdx does not name enterprise windows events');
     for (const flag of flags) {
       assert.ok(operations.includes(`--${flag}`), `operations.mdx does not explain --${flag}`);
     }
     assert.ok(command.includes('within two minutes') && operations.includes('within two minutes'));
-    assert.ok(page('reference/commands/cli.mdx').includes('| `events` | Standalone |'));
+    assert.ok(page('reference/cli.mdx').includes('| `events` | Standalone |'));
   });
 });
 
@@ -1099,9 +1099,9 @@ describe('Hermes tool-call state (rel-1-0-4 GAP-0599)', () => {
       assert.deepEqual(lifecycle.authoritative_pending_discard_events, ['on_session_end'], contract.contract_id);
       assert.ok(!(lifecycle.authoritative_terminal_events as string[]).includes('on_session_end'), contract.contract_id);
     }
-    const state = page('reference/policy/cel/tool-call-state.mdx');
+    const state = page('policies/cel/tool-call-state.mdx');
     assert.ok(state.includes('Hermes `on_session_end` (which Hermes sends at the end of every turn'));
-    assert.ok(/\| \[Hermes\][^\n]*\| `paired-outcomes` \|/.test(readFileSync(join(site, 'content/docs/reference/policy/cel/tool-call-state.mdx'), 'utf8')));
+    assert.ok(/\| \[Hermes\][^\n]*\| `paired-outcomes` \|/.test(readFileSync(join(site, 'content/docs/policies/cel/tool-call-state.mdx'), 'utf8')));
   });
 });
 
@@ -1119,7 +1119,7 @@ const knownLimitEntries = [
   {
     gaps: 'GAP-0794, GAP-1006',
     section: 'Codex',
-    phrases: ['Codex runs the tool when its `PreToolUse` hook is stopped, killed or times out.', 'If the hook stopped before it reached the gateway', 'If it reached the gateway first, the gateway can still record the call', 'It does not prevent a timeout', '`hook_process_fail_open`', '/docs/enterprise/configure/reference#vendor-limits'],
+    phrases: ['Codex runs the tool when its `PreToolUse` hook is stopped, killed or times out.', 'If the hook stopped before it reached the gateway', 'If it reached the gateway first, the gateway can still record the call', 'It does not prevent a timeout', '`hook_process_fail_open`', '/docs/enterprise/machine-policy#vendor-limits'],
     from: ['connectors/codex.mdx'],
   },
   {
@@ -1131,7 +1131,7 @@ const knownLimitEntries = [
   {
     gaps: 'the approved Copilot CLI hook-timeout limit',
     section: 'Copilot CLI',
-    phrases: ["Copilot CLI runs the tool when its `preToolUse` hook times out or cannot start, even when DefenseClaw's fail mode is `closed`.", 'per-user and managed installs on every OS', 'If it reached the gateway first, the gateway can still record the call', '`hook_process_fail_open`', '/docs/enterprise/configure/reference#vendor-limits'],
+    phrases: ["Copilot CLI runs the tool when its `preToolUse` hook times out or cannot start, even when DefenseClaw's fail mode is `closed`.", 'per-user and managed installs on every OS', 'If it reached the gateway first, the gateway can still record the call', '`hook_process_fail_open`', '/docs/enterprise/machine-policy#vendor-limits'],
     from: ['connectors/copilot.mdx'],
   },
   {
@@ -1143,7 +1143,7 @@ const knownLimitEntries = [
   {
     gaps: 'GAP-1164',
     section: 'Linux sign-out',
-    phrases: ['Without linger, signing out of your last session stops the gateway and its MicroVMs', '/docs/troubleshooting/sandboxes/setup-and-gateway#a-linux-sign-out-ends-a-running-microvm'],
+    phrases: ['Without linger, signing out of your last session stops the gateway and its MicroVMs', '/docs/sandboxes/guide#a-linux-sign-out-ends-a-running-microvm'],
     from: [],
   },
   { gaps: 'GAP-1194', section: 'Claude Code shell', phrases: ['shell mode'], from: ['connectors/claudecode.mdx'] },
@@ -1160,7 +1160,7 @@ const knownLimitEntries = [
 ] as const;
 
 function knownLimitSection(heading: string): string {
-  const raw = readFileSync(join(docs, 'troubleshooting/known-limits.mdx'), 'utf8');
+  const raw = readFileSync(join(docs, 'support-matrix.mdx'), 'utf8');
   const parts = raw.split(/^## /m);
   const body = parts.find((part) => part.split('\n')[0].trim() === heading);
   assert.ok(body, `known-limits.mdx has no "## ${heading}" section`);
@@ -1188,7 +1188,7 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
       for (const phrase of entry.phrases) {
         assert.ok(text.includes(phrase), `known-limits "${entry.section}" lacks: ${phrase}`);
       }
-      const target = `/docs/troubleshooting/known-limits#${anchor(entry.section)}`;
+      const target = `/docs/support-matrix#${anchor(entry.section)}`;
       for (const name of entry.from) {
         const limits = page(name).split('## Limits')[1]?.split(' ## ')[0] ?? '';
         assert.ok(limits.includes(target), `${name} Limits does not link ${target}`);
@@ -1197,8 +1197,8 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
   }
 
   it('lists every section in the troubleshooting index summary', () => {
-    const index = page('troubleshooting/index.mdx');
-    const line = index.split('[Known limits in 1.0.4](/docs/troubleshooting/known-limits):')[1]?.split(' - [')[0] ?? '';
+    const index = page('get-started/upgrade.mdx');
+    const line = index.split('[Known limits in 1.0.4](/docs/support-matrix):')[1]?.split(' - [')[0] ?? '';
     for (const words of ['Codex', 'Copilot CLI', 'Antigravity', 'Linux sign-out']) {
       assert.ok(line.includes(words), `troubleshooting index summary omits ${words}`);
     }
@@ -1224,7 +1224,7 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
   // hooks that never reached it, and must not offer signal protection as a cure
   // for timeouts.
   it('scopes every hook-timeout entry on the page', () => {
-    const raw = readFileSync(join(docs, 'troubleshooting/known-limits.mdx'), 'utf8');
+    const raw = readFileSync(join(docs, 'support-matrix.mdx'), 'utf8');
     const entries = raw.split(/\n(?=- |\n)/).map((part) => part.split(/\s+/).join(' '))
       .filter((part) => /\btimes? out\b|\btimed-out\b/.test(part) && /hook/.test(part));
     assert.ok(entries.length >= 3, `expected the Codex, Copilot CLI and Antigravity timeout entries, found ${entries.length}`);

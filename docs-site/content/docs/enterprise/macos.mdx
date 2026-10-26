@@ -1,0 +1,492 @@
+---
+title: macOS standalone deployment
+description: Install the standalone DefenseClaw enterprise LaunchDaemons on Apple silicon Macs from the pkg or the payload tarball, check the result, and remove them.
+keywords:
+  - DefenseClaw macOS enterprise
+  - defenseclaw-enterprise pkg
+  - LaunchDaemon
+  - _defenseclaw
+  - managed_enterprise macOS
+---
+
+The standalone macOS profile installs DefenseClaw machine-wide under
+`/opt/cisco/defenseclaw`, with LaunchDaemons labeled `com.cisco.defenseclaw.*` and
+a hidden service account, `_defenseclaw`. It is separate from the Cisco Secure
+Client module and refuses to install beside it. Standard users cannot stop the
+daemons or change the config, and the hook guardian restores DefenseClaw's hooks if
+a user removes them. Terms are in [Concepts](/docs/enterprise/concepts).
+
+<Callout title="Deploying with an MDM?">
+This page installs on one Mac from an administrator shell. For Jamf Pro, Iru,
+Intune, Workspace ONE or another MDM, start with
+[Install with an MDM](/docs/enterprise/mdm). It uses the same pkg and config.
+</Callout>
+
+## Requirements
+
+| Requirement | Detail |
+| --- | --- |
+| macOS | 13.0 or later. The pkg refuses older versions |
+| Hardware | Apple silicon only. Releases build no Intel macOS binaries |
+| Privileges | root, through `sudo` or an MDM agent. Every `enterprise macos` action, status included, needs root |
+| Other profiles | No Secure Client DefenseClaw module. The pkg's pre-install script refuses when `/opt/cisco/secureclient/defenseclaw` or a `com.cisco.secureclient.defenseclaw*` LaunchDaemon exists |
+| Gatekeeper | Releases currently ship the pkg unsigned, pinned by `checksums.txt` ([details](#gatekeeper)) |
+
+### Gatekeeper
+
+Only the pkg can be Developer ID-signed and notarized, and it is signed only when the release pipeline has Apple signing credentials. Releases currently ship it unsigned, pinned by `checksums.txt`. The tarball's binaries are never Developer ID-signed. On Macs that require notarized software, check the pkg first with `spctl --assess --type install --verbose=2 <pkg>`. Releases currently ship the pkg unsigned, so `pkgutil --check-signature` reports "no signature"; its SHA-256 in `checksums.txt`, whose cosign signature you check, protects it.
+
+## Layout
+
+Paths are under `/opt/cisco/defenseclaw` unless shown in full.
+
+| Item | Path | Owner and mode |
+| --- | --- | --- |
+| Binaries | `bin`: `defenseclaw-gateway`, `defenseclaw-hook`, `defenseclaw-sensor-helper`, and `defenseclaw-acp` when present | `root`, `0755` |
+| Managed OpenCode plugin | `share/opencode/defenseclaw.js` | `root`, `0644` |
+| Config | `etc/config.yaml` | `root:_defenseclaw`, `0640` |
+| Policies | `etc/policies` | `root:_defenseclaw`, `0750` |
+| Secrets | `etc/secrets` | Directory `root:_defenseclaw 0750`, files `0640` |
+| Target manifest | `etc/hook-guardian/targets.yaml` (the enumerator writes it) | Directory `root:_defenseclaw`, `0750` |
+| Runtime descriptor | `etc/managed-runtime.json` | `root`, `0644` |
+| Machine-policy summary | `etc/machine-policy.json` | Readable by users |
+| Lifecycle state | `lifecycle`: `last-package-result.json`, `last-activation-failure.log`, the last applied and a rejected config | `root`, `0700` |
+| Gateway data | `runtime` | `_defenseclaw`, `0700` |
+| Authorization ledger | `hook-guardian-state`, with each user's latest AI Discovery scan in `ai-discovery/` | `root:_defenseclaw`, `0750` |
+| Hook socket | `run/hook.sock` | Directory `_defenseclaw`, `0755` |
+| Logs | `/Library/Logs/Cisco/DefenseClaw`, gateway logs in `gateway/` | `root`, `0755`; `gateway/` is `_defenseclaw`, `0750` |
+| LaunchDaemons | `/Library/LaunchDaemons/com.cisco.defenseclaw.*.plist` | `root`, `0644` |
+| Sandbox launcher | `/usr/local/bin/defenseclaw`, a link to `defenseclaw-gateway` that offers users only the `sandbox` commands | `root`, `0755` |
+| Sandbox LaunchAgents | `/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.<tag>.plist` and `com.cisco.defenseclaw.openshell-gateway.<tag>.plist`, run as each signed-in user. `<tag>` is the first 12 digits of the gateway binary's SHA-256, so each upgrade installs both agents under new labels and removes the plists of the earlier labels; releases before 1.0.4 used the labels without a tag ([Sandboxes](/docs/enterprise/sandboxes)) | `root`, `0644` |
+| Sandbox state | `runtime/sandbox/`, and `etc/openshell/gateway.toml` when `enterprise.openshell` is set | `_defenseclaw`, `0600` files; `root` |
+
+The gateway runs as `_defenseclaw`, a hidden account and group the lifecycle
+creates with `dscl` (the highest free id from 300 to 499, shell `/usr/bin/false`,
+home `/var/empty`). Everything else runs as root.
+
+| Label | Runs as | What it does |
+| --- | --- | --- |
+| `com.cisco.defenseclaw.gateway` | `_defenseclaw` | Policy engine and hook API. Binds `127.0.0.1:18970` and `run/hook.sock` |
+| `com.cisco.defenseclaw.hook-guardian` | root | Always running. Reconciles each user's hooks every minute through a worker that runs as that user, which also runs the user's AI Discovery scan. Every 5 seconds it checks the hook binary and Claude Code's `90-defenseclaw.json` drop-in; if either is gone or changed it logs `tamper:` and starts `com.cisco.defenseclaw.apply`, whose `ensure` puts them back |
+| `com.cisco.defenseclaw.hook-enumerator` | root | Rewrites the target manifest every five minutes (in `auto` enrollment mode) |
+| `com.cisco.defenseclaw.sensor-helper` | root | Answers the gateway's fixed AI Discovery requests |
+| `com.cisco.defenseclaw.apply` | root | Runs `ensure --reason path` when `etc/config.yaml`, `etc/secrets` or `etc/policies` changes |
+| `com.cisco.defenseclaw.verify` | root | Runs `verify` daily at 03:17 local time |
+
+<Flow
+  direction="TB"
+  caption="macOS. launchd starts the gateway as _defenseclaw, and the gateway opens 127.0.0.1:18970 and run/hook.sock itself. Only _defenseclaw can write the run directory, inside the root-owned install tree, so a user cannot create a look-alike socket. The hook sends nothing until it has checked that root or _defenseclaw owns the socket, and the gateway learns the caller's uid from the kernel."
+>
+  <Zone id="m0" label="Z0 · Admin and OS (root)" tone="trusted">
+    <Node id="ld" kind="generic">{`launchd\nstarts the daemons`}</Node>
+  </Zone>
+  <Zone id="m4" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="agent" kind="agent">{`AI agent\nruns as the user`}</Node>
+    <Node id="hook" kind="connector">{`defenseclaw-hook\nchecks the socket owner`}</Node>
+  </Zone>
+  <Zone id="m2" label="Z2 · Gateway (_defenseclaw)" tone="restricted">
+    <Node id="gw" kind="gateway">{`Gateway\nallows or blocks`}</Node>
+  </Zone>
+  <Edge from="ld" to="gw" label="starts as _defenseclaw" />
+  <Edge from="agent" to="hook" label="runs per tool call" />
+  <Edge from="hook" to="gw" label="asks over hook.sock" />
+</Flow>
+
+Unlike systemd on Linux, launchd does not hold the sockets for the gateway:
+launchd hands sockets over only through `launch_activate_socket(3)`, which needs
+cgo, and release builds are built without cgo. The protected socket directory and
+the hook's owner check do the same job.
+
+<Flow
+  direction="TB"
+  caption="macOS. The enumerator lists the users to protect in etc/hook-guardian/targets.yaml. Every minute the guardian, which runs as root, starts a short-lived worker as each listed user, and the worker puts back DefenseClaw's hooks in that user's agent config. Root never writes a user's files with its own rights."
+>
+  <Zone id="m1" label="Z1 · Services (root)" tone="privileged">
+    <Node id="enum" kind="generic">{`Enumerator\nlists the users`}</Node>
+    <Node id="grd" kind="generic">{`Guardian\nchecks every minute`}</Node>
+  </Zone>
+  <Zone id="m3" label="Z3 · Admin-owned files" tone="protected">
+    <Node id="tgt" kind="policy">{`Target manifest\ntargets.yaml`}</Node>
+  </Zone>
+  <Zone id="m4b" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="wrk" kind="generic">{`Per-user worker\nruns as the user`}</Node>
+    <Node id="ucfg" kind="agent">{`Agent config\nin the user's home`}</Node>
+  </Zone>
+  <Edge from="enum" to="tgt" label="writes" />
+  <Edge from="grd" to="tgt" label="reads" />
+  <Edge from="grd" to="wrk" label="starts, as the user" />
+  <Edge from="wrk" to="ucfg" label="repairs hooks" />
+</Flow>
+
+## Install
+
+Stage the config first, then install the pkg or the tarball.
+
+### 1. Get and check the release
+
+Download `defenseclaw-enterprise-<version>-darwin-arm64.pkg` (or the `.tar.gz`),
+`checksums.txt` and `checksums.txt.bundle` from one GitHub release. Check the
+signature on `checksums.txt` with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/),
+then the file against it:
+
+```bash
+VERSION=1.0.4  # the release you deploy
+cosign verify-blob --bundle checksums.txt.bundle \
+  --certificate-identity "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+grep " defenseclaw-enterprise-${VERSION}-darwin-arm64.pkg\$" checksums.txt | shasum -a 256 -c
+```
+
+Pin that SHA-256 in your MDM. `pkgutil --check-signature` reports "no signature"
+on the unsigned pkg; the checks above are what protect it.
+
+### 2. Stage the config
+
+The lifecycle requires `config_version: 9`, `deployment_mode: managed_enterprise`,
+`enterprise.profile: standalone` and `data_dir: /opt/cisco/defenseclaw/runtime`. If
+you set `gateway.api_bind` or `gateway.api_port`, they must be `127.0.0.1` and
+`18970`.
+
+```yaml title="config.yaml"
+config_version: 9
+deployment_mode: managed_enterprise
+data_dir: /opt/cisco/defenseclaw/runtime
+policy_dir: /opt/cisco/defenseclaw/etc/policies
+enterprise:
+  profile: standalone
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    codex: {}
+    claudecode: {}
+ai_discovery:
+  enabled: true
+```
+
+AI Discovery is off unless the config sets `ai_discovery.enabled: true`, as above. Each key under `guardrail.connectors` turns on one agent
+([choose the agents](/docs/enterprise/configuration)).
+Without a config the pkg installs a default that protects nothing.
+
+```bash
+sudo install -d -o root -g wheel -m 0755 /opt/cisco/defenseclaw/etc
+sudo install -o root -g wheel -m 0640 config.yaml /opt/cisco/defenseclaw/etc/config.yaml
+```
+
+### 3a. Install the pkg
+
+```bash
+sudo installer -pkg "defenseclaw-enterprise-${VERSION}-darwin-arm64.pkg" -target /
+sudo cat /opt/cisco/defenseclaw/lifecycle/last-package-result.json
+```
+
+The post-install script runs `enterprise macos ensure --from-package`: it creates
+`_defenseclaw`, validates the config, writes and starts the LaunchDaemons, verifies,
+and rolls back on any failure. A failed apply fails the pkg install, and
+`/var/log/install.log` names the first error. No pkg? Use the
+[tarball](#3b-or-install-from-the-tarball). Exit codes of the
+lifecycle: `0` success or nothing to do, `1` failed (rolled back), `2` invalid
+arguments, `75` another run holds the lock.
+
+#### How the pkg install works
+
+The pkg installs the binaries and its post-install script runs
+`enterprise macos ensure --from-package --reason package --json`: it creates
+`_defenseclaw`, validates the config, lays out the files, writes the LaunchDaemons,
+starts them in order, verifies, and rolls back on any failure. A failed apply fails
+the pkg install, so `installer` and your MDM report it. The result is in
+`last-package-result.json`, and `/var/log/install.log` names its first error. Fix
+it, then install the pkg again. The pkg receipt is
+`com.cisco.defenseclaw.enterprise`; a failed install records none, and
+`ensure --from-package` records none either, so receipt-based inventory reports the
+Mac as not installed until the pkg installs successfully.
+
+If you did not stage a config, the pkg installs the default, which protects
+nothing. Copy your config to `/opt/cisco/defenseclaw/etc/config.yaml` and the apply
+daemon runs `ensure`, or run it yourself:
+
+```bash
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure \
+  --from-package --config "$PWD/config.yaml" --json
+```
+
+### 3b. Or install from the tarball
+
+The payload folder and its binaries must be owned by root and not writable by
+group or others:
+
+```bash
+VERSION=1.0.4  # the release you deploy
+PAYLOAD="/var/root/defenseclaw-enterprise-${VERSION}"
+sudo install -d -o root -g wheel -m 0700 "$PAYLOAD"
+sudo tar -xzf "defenseclaw-enterprise-${VERSION}-darwin-arm64.tar.gz" \
+  -C "$PAYLOAD" --no-same-owner --no-same-permissions
+sudo chmod -R go-w "$PAYLOAD"
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise macos ensure --payload "$PAYLOAD" --json
+```
+
+`ensure` installs when nothing is installed, applies a different payload,
+re-applies a changed config, repairs a deployment that fails verification, and
+otherwise does nothing. Add `--config <absolute path>` for a config elsewhere and
+`--no-start` to stage with the daemons stopped. A hand-built layout stops the
+install with `unmanaged_layout_present`; `--adopt-existing` backs it up and takes it
+over.
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success, or nothing to do |
+| `1` | Failure. A failed install, upgrade or repair is rolled back, and a refusal before any change leaves the computer as it was. For `status` and `verify`, the deployment is unhealthy |
+| `2` | Invalid arguments |
+| `75` | Another lifecycle run holds the lock. Retry later |
+
+### 4. Add the AI Defense key
+
+Optional. Set `enterprise.inspection.ai_defense.enabled: true` and
+`credential: ai-defense-api-key` in the config, then store the key:
+
+```bash
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret set \
+  --name ai-defense-api-key --from-file /var/root/ai-defense.key --json
+sudo rm /var/root/ai-defense.key
+```
+
+Rotation: [AI Defense key](/docs/enterprise/ai-defense-key).
+
+## Verify the install
+
+```bash
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify --json
+pkgutil --pkg-info com.cisco.defenseclaw.enterprise   # pkg installs only
+```
+
+`status` reports the state. `verify` also checks every file, permission (including
+macOS ACL entries), LaunchDaemon and readiness check, and exits `1` when anything
+fails. The JSON has the same shape as the [Linux sample](/docs/enterprise/linux#verify-the-install).
+
+| Field | Healthy value |
+| --- | --- |
+| `ok`, `errors` | `true`, empty |
+| `installed_version` | The version you deployed |
+| `readiness` | `gateway`, `guardian`, `enumerator` and `sensor_helper` all `true` |
+| `coverage_complete` | `true` when the enabled hooks are installed |
+| `security_complete` | `false` with Codex, Claude Code, Copilot, Devin, Hermes, Kiro or Antigravity enabled; `hook_process_fail_open` warns that a stopped, killed or timed-out hook can let a tool run |
+| `policy` | `applied` is `true` ([digest](/docs/enterprise/operations)) |
+| `enrollment.targets` | Per-user targets. `0` is normal when you enable only machine-policy connectors |
+
+With no agent enabled, `status` warns `no_connectors_enabled` and `verify` fails.
+The enumerator enrolls accounts with uid 501 or higher by default
+([Enrollment](/docs/enterprise/enrollment)). To reconcile at once:
+`sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos reconcile --json`.
+The gateway log is `/Library/Logs/Cisco/DefenseClaw/gateway/gateway.err.log`.
+
+### Status details
+
+When the config enables no agent while there are users to enroll, `status` warns
+`no_connectors_enabled`, `verify` fails and `security_complete` is `false`. Neither
+field checks that the expected users are enrolled, so check `enrollment` too. The
+enumerator enrolls accounts with a uid of 501 or higher by default
+([Enrollment](/docs/enterprise/enrollment)). To reconcile at once:
+`sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos reconcile --json`.
+
+`agent_settings_not_restored` warns when the guardian puts back a missing Hermes
+`config.yaml` or Devin `config.json` from a last good copy or recreates it with
+hooks only; it does not make `security_complete` false or fail `verify`, the exit
+code or MDM detection (see [Warnings](/docs/enterprise/troubleshooting)).
+A `guardrail.profile_assignments` group this Mac does not know selects nobody, so
+its members get the default profile; `status` and `verify` warn
+`profile_assignment_unmatched`, with the same list `enterprise macos profile-explain
+--user <account> --connector <connector>` shows. The gateway log is
+`/Library/Logs/Cisco/DefenseClaw/gateway/gateway.err.log`. The managed Mac has no
+`defenseclaw guardrail profile` commands. Monitoring is in
+[Status and verify](/docs/enterprise/operations).
+
+## Sandboxes
+
+A macOS standalone install can run coding agents in OpenShell MicroVM sandboxes on
+Apple silicon, under the sandbox policy of each person's directory group. They are
+off until `openshell.enabled` is on. The pkg packages the `defenseclaw` launcher
+and the LaunchAgents, which stay in place while sandboxes are off and leave with
+`uninstall`; you provide OpenShell or let each person's daemon download it
+(`install: setup`). The pkg supplies a MicroVM `e2fsprogs` fallback; set the
+root-owned `enterprise.openshell.e2fsprogs_dir` to use your own tools. Docker
+Desktop must run for the person, because the agent images are built there. An
+Intel Mac is refused with `os_unsupported`. Write directory groups in the spelling
+macOS reports (`DOMAIN\group`) and check them with `profile-explain`. Keys and
+recipes are in [Sandboxes on managed computers](/docs/enterprise/sandboxes).
+
+## Per-user installs
+
+On a Mac with `/opt/cisco/defenseclaw/etc/managed-runtime.json` the per-user
+product refuses to run: `install.sh` refuses and changes nothing, `defenseclaw
+upgrade` refuses, and the per-user gateway refuses to start. An older per-user
+`install.sh` (0.8.x) predates the managed-host check and can install a per-user
+copy; do not use it on a managed Mac.
+
+Nothing migrates a per-user install. Before you deploy, have each user run
+`defenseclaw uninstall --binaries --yes` (add `--all` to delete `~/.defenseclaw`;
+[Uninstall](/docs/get-started/download)).
+
+A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy the
+device enforces. The installed managed `defenseclaw` launcher offers only `sandbox`
+commands; its `config get`, `guardrail`, `status` and other per-user command forms
+exit `2` and name the managed computer. A separate per-user CLI, if present, exits
+`3` for these commands and `doctor` reports the device as managed.
+
+A per-user gateway still running holds the managed port `127.0.0.1:18970` unless
+its user moved it. The pkg install then stages the package files, but the
+postinstall refuses the managed deployment before applying it, with
+`api_port_held`. `installer -pkg` prints a generic postinstall failure and records
+no package receipt, so detection reports the computer as not installed. The process
+and `kill` command appear in `/var/log/install.log`, the error is in
+`last-package-result.json`, and `enterprise macos status --json` also reports the
+holder. Stop that gateway or move it, then run `installer -pkg` again (or
+`defenseclaw-gateway enterprise macos ensure --from-package`, which records no
+receipt). A per-user gateway on another port keeps running; the install, `status`
+and `verify` name each such account with `per_user_gateway_running`.
+
+## Remove
+
+Run these as root from `/opt/cisco/defenseclaw/bin`.
+
+| Goal | Command |
+| --- | --- |
+| Stop and remove the deployment, its binaries, config, secrets and logs, most of its data and lifecycle state, and the `_defenseclaw` account. Each user keeps `~/.defenseclaw`. When an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` stay with the root-only record `/opt/cisco/defenseclaw/lifecycle/openshell-state.kept.json`. They are root-owned while the service account is gone; the next `ensure` adopts them | `defenseclaw-gateway enterprise macos uninstall --json` |
+| Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `defenseclaw-gateway enterprise macos uninstall --purge --json` |
+| Keep the config, secrets, data and logs (and the account) for a reinstall | `defenseclaw-gateway enterprise macos uninstall --keep-state --json` |
+| Keep only the `_defenseclaw` account | Add `--keep-service-account` |
+
+Uninstall removes each user's DefenseClaw hook registrations and DefenseClaw's own
+machine-policy entries first; administrator entries stay. Use `--purge` for a clean
+image. With `--purge` it also stops each enrolled user's per-user gateway and
+removes `~/.defenseclaw`, the empty agent folders DefenseClaw created, the
+per-user binaries in `~/.local/bin` and DefenseClaw's wheels in `~/.cache/uv`; a
+user's own DefenseClaw install from before enrollment is first moved to
+`~/.defenseclaw-backup-<UTC time>`. The result's `kept:` line names accounts that
+keep data. Pass `--purge` in the same run as the uninstall: uninstall deletes the
+list of enrolled accounts, so a later `--purge` is a no-op (`not_installed`). To
+clean up afterward, delete `~/.defenseclaw` by hand, or install again and run
+`uninstall --purge`. If macOS denies deleting the `_defenseclaw` account (it can,
+from a remote shell), the uninstall still completes with a `service_account`
+warning carrying the two `dscl` commands to delete it.
+
+A pkg has no uninstaller, so the lifecycle removes the binaries itself. The
+root-owned `lifecycle/lifecycle.lock` remains so waiting runs share one lock. For a
+pkg install it also runs `pkgutil --forget com.cisco.defenseclaw.enterprise`.
+launchd keeps a record for each removed label, so `launchctl print system` lists
+the labels as `enabled` while no job stays loaded. macOS also keeps any privacy
+(TCC) decision about the gateway binary, such as Full Disk Access; remove it in
+System Settings > Privacy & Security > Full Disk Access, or remove the MDM PPPC
+profile that granted it.
+
+## Upgrades and changes
+
+- **Upgrade.** Install the newer pkg, or run `ensure` with the newer tarball. An
+  older pkg is refused unless the root-owned marker
+  `/opt/cisco/defenseclaw/lifecycle/allow-downgrade` exists; the lifecycle refuses
+  an older tarball unless you pass `--allow-downgrade`
+  ([Upgrade](/docs/enterprise/lifecycle), [Roll back](/docs/enterprise/lifecycle)).
+  The first `ensure` of a new release migrates an older `config_version` and keeps
+  `config.yaml.v8.bak` and `migration-v9.json`.
+- **Change the config.** Replace `/opt/cisco/defenseclaw/etc/config.yaml`. The apply
+  daemon runs `ensure`, which validates and applies it or rolls back
+  ([Change the config](/docs/enterprise/lifecycle)).
+  In bundle mode the edit is reverted; deliver a new signed bundle.
+- **Failures.** See [Lifecycle error codes](/docs/enterprise/troubleshooting).
+
+## Privacy prompts
+
+The packaging ships no PPPC (Privacy Preferences Policy Control) profile. The
+guardian works only in hidden dot-directories inside each user's home (`~/.claude`,
+`~/.codex`, `~/.config`), which macOS privacy controls (TCC) do not protect.
+
+The per-user AI Discovery scan also walks the home for package manifests and model
+files, and its inventory includes CLI binaries in `/usr/local/bin`,
+`/opt/homebrew/bin`, `/opt/local/bin`, `/opt/dc-agents/bin`, `~/.local/bin` and
+`~/bin` (it checks executability without running them). Without Full Disk Access it
+never opens the folders that make macOS ask the employee for permission: Desktop,
+Documents, Downloads, Movies, Music, Pictures, iCloud Drive, other apps' data in
+`~/Library/Containers` and `~/Library/Group Containers`, and Contacts. No employee
+sees a prompt attributed to `defenseclaw-gateway`. The scan summary is partial:
+`detector_errors.macos_privacy` reports "protected folders were not scanned". Other
+TCC-protected folders answer "operation not permitted" and are skipped the same way.
+
+If your organization moves agent configuration into a TCC-protected folder, deploy
+a PPPC profile that grants Full Disk Access (`SystemPolicyAllFiles`) to
+`/opt/cisco/defenseclaw/bin/defenseclaw-gateway`, the one binary that runs the
+gateway, the guardian and the enumerator. Identify it by its Developer ID code
+requirement, which needs a signed build. With the grant the scan also reads those
+folders; the gateway checks the grant every ten minutes.
+
+### AI Discovery Plane C (Endpoint Security)
+
+AI Discovery runtime detection has three planes: A watches inference compute, B
+attributes network traffic and C records agent actions from kernel events
+([Runtime planes](/docs/ai-discovery)). Plane C
+(`ai_discovery.runtime.enable_host_plane: true` with `c` in
+`ai_discovery.runtime.planes`) reads process and file events through Apple's
+`eslogger`, which the root sensor helper
+(`/opt/cisco/defenseclaw/bin/defenseclaw-sensor-helper`) runs. launchd starts the
+helper directly, so macOS treats it as the responsible process and it is the binary
+that needs Full Disk Access. Without it, Endpoint Security refuses the client
+(`ES_NEW_CLIENT_RESULT_ERR_NOT_PERMITTED`), Plane C reports `running: false` with
+that reason, and the snapshot stays degraded; Planes A and B keep working. A
+detached child of a terminal-launched agent can stay unattributed after it is
+reparented to PID 1.
+
+Grant the access with a PPPC payload (`com.apple.TCC.configuration-profile-policy`):
+
+```xml
+<key>Services</key>
+<dict>
+  <key>SystemPolicyAllFiles</key>
+  <array>
+    <dict>
+      <key>Identifier</key>
+      <string>/opt/cisco/defenseclaw/bin/defenseclaw-sensor-helper</string>
+      <key>IdentifierType</key>
+      <string>path</string>
+      <key>CodeRequirement</key>
+      <string>(the designated requirement printed by codesign -dr - on that path)</string>
+      <key>Allowed</key>
+      <true/>
+    </dict>
+  </array>
+</dict>
+```
+
+The code requirement needs a signed build. On an unsigned test build, grant Full
+Disk Access to that path by hand in System Settings, then restart the helper with
+`sudo launchctl kickstart -k system/com.cisco.defenseclaw.sensor-helper`. A config
+that carries `enterprise.tetragon` is accepted and ignored on macOS;
+`enterprise macos status` reports `tetragon_not_applicable`.
+
+## Machine policy
+
+For Codex, Claude Code, Cursor, GitHub Copilot and OpenCode, DefenseClaw adds its
+hooks to the vendor's machine policy files under `/etc` and
+`/Library/Application Support` ([files](/docs/enterprise/machine-policy)).
+An MDM configuration profile for `com.openai.codex` or `com.anthropic.claudecode`
+outranks those files; export DefenseClaw's entries in plist form and add them to
+your profile ([Higher-precedence sources](/docs/enterprise/machine-policy),
+[Inspect, export and verify](/docs/enterprise/machine-policy)).
+After changing a vendor policy file or MDM preference, run
+`sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos reconcile --json`
+(or `ensure`). Until the new policy view is verified and pinned, managed hooks
+keep sending every call for inspection under the managed policy and the gateway
+raises a `HIGH` runtime alert, `enterprise_managed_policy_view_unverified`. This includes
+a per-user managed preference that appears when an account signs in. An MDM
+agent that delivers the same preference bytes again changes nothing: pins
+compare content only.
+
+On a managed 1.0.2 macOS 15.8 test host, a standard user started Claude Code inside
+a `sandbox-exec` profile that hid its machine policy directory. Claude ran a
+Bash tool call, while the gateway recorded no matching call and administrator
+`status` and `verify` still reported complete security. A hook cannot refuse
+an agent that never loads it. Until agent launch and policy registration are
+enforced outside that process-local view, a healthy result does not prove that
+all Claude tool calls are inspected ([M-34](/docs/enterprise/threat-model)).

@@ -1,7 +1,7 @@
 {
   "_source": "Hand-curated from internal/gateway/connector setup paths and hook profiles, cli/defenseclaw/inventory/hook_contracts.json, the native Windows setup contracts, and the OpenShell sandbox artifacts (internal/gateway/connector/*_sandbox.go, internal/openshell/harness). Re-extract on every connector, hook-contract, or platform-support change.",
   "_lastVerified": "2026-10-23",
-  "_order": "By adoption / popularity — mirrors the hero rotation (lib/hero-connectors.ts) and the docs nav (content/docs/connectors/(hook-connectors)/meta.json).",
+  "_order": "By adoption / popularity — mirrors the hero rotation (lib/hero-connectors.ts) and the docs nav (content/docs/connectors/index(hook-connectors)/meta.json).",
   "connectors": [
     {
       "id": "claudecode",

@@ -6,6 +6,7 @@ keywords:
   - Iru Endpoint Management
   - Kandji Custom Script
   - Kandji Custom App
+  - audit and remediation script
   - macOS MDM
 ---
 
@@ -26,7 +27,7 @@ deploys the standalone profile to Macs with Iru Library Items and the MDM kit
   deployment.
 - For the script-only route, an HTTPS server that serves the package file directly.
   The wrapper does not follow HTTP redirects, and GitHub release links redirect.
-- Your administrator config ([choose the agents](/docs/enterprise/configure/configuration#choose-the-agents-to-protect)).
+- Your administrator config ([choose the agents](/docs/enterprise/configuration)).
   The default config protects no agent.
 
 ## Get and verify the release
@@ -42,6 +43,8 @@ cosign verify-blob --bundle checksums.txt.bundle \
 grep "  $PKG\$" checksums.txt | shasum -a 256 -c -
 grep "  $PKG\$" checksums.txt   # the first field is the pin
 ```
+
+## How Iru runs Library Items
 
 The kit scripts are in `packaging/mdm/macos` and in the release archive. You paste
 them into Iru, so each script's settings block holds its values. The Iru Agent runs
@@ -172,14 +175,14 @@ read -rs KEY && printf '%s' "$KEY" | sudo /opt/cisco/defenseclaw/bin/defenseclaw
 
 Then set `enterprise.inspection.ai_defense.enabled: true` and
 `credential: ai-defense-api-key` in the config
-([AI Defense key](/docs/enterprise/configure/ai-defense-key)).
+([AI Defense key](/docs/enterprise/ai-defense-key)).
 
 ## Upgrade, roll back and change the config
 
 | Task | Iru-hosted package route | Script-only route |
 | --- | --- | --- |
 | Upgrade | Upload the new package to the Custom App and raise `DC_MIN_VERSION` in its audit script | Change the URL, the pin and `DC_PRODUCT_VERSION` |
-| Roll back | [Roll back](/docs/enterprise/operate/lifecycle#roll-back) | [Roll back](/docs/enterprise/operate/lifecycle#roll-back) |
+| Roll back | [Roll back](/docs/enterprise/lifecycle) | [Roll back](/docs/enterprise/lifecycle) |
 | Change the config | Edit the inline config in the ensure script | Edit the inline config in the ensure script |
 
 In bundle mode, deliver a new signed bundle instead; a plain config is refused with `bundle_required`.
@@ -188,7 +191,7 @@ In bundle mode, deliver a new signed bundle instead; a plain config is refused w
 
 Before the first pkg install, add a root **stage-pack** script that copies the pack
 into `/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` with `root:wheel`
-ownership. Use the [stage-pack script and pin example](/docs/enterprise/mdm/reference#stage-a-custom-macos-rule-pack),
+ownership. Use the [stage-pack script and pin example](/docs/enterprise/mdm#stage-a-custom-macos-rule-pack),
 run it before the config and pkg steps, and set `guardrail.custom_packs.<name>` to
 that absolute path and its `sha256:<digest>` pin. Stage the pack again before
 reinstalling after a purge.
@@ -198,7 +201,7 @@ reinstalling after a purge.
 Remove the DefenseClaw Library Items from the Blueprints first. Then run
 `uninstall.sh` once as a Mac Custom Script (**Install once per device**, or on demand
 from Self Service). Set `DC_PURGE=1` in its settings block for a purge
-([what it removes](/docs/enterprise/mdm/reference#uninstall)). On a Mac without the
+([what it removes](/docs/enterprise/mdm#uninstall)). On a Mac without the
 deployment it prints a no-op result and exits `0`.
 
 ## Check it worked and logs
@@ -213,8 +216,10 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --js
 | `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure runs (root, `0600`). Uninstall removes this log with the machine state, so use the audit log for the uninstall result |
 | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The package's own `ensure` result |
 
+## Exit codes in Iru
+
 Exit codes: `0` **Pass**; `1` failed and rolled back or an input was refused (read
-`errors[].code`; [wrapper error codes](/docs/troubleshooting/enterprise#mdm-wrapper-error-codes));
+`errors[].code`; [wrapper error codes](/docs/enterprise/troubleshooting));
 `2` invalid settings (`mdm_invalid_arguments`; a config that does not validate exits
 `1`, `config_invalid`); `75` another run or the installer holds a lock, retried on
 the next run ([Exit codes](/docs/enterprise/mdm#exit-codes)).

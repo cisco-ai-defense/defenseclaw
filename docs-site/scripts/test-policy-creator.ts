@@ -308,15 +308,15 @@ test('deterministic docs: profile totals and chain posture match canonical sourc
   }
 
   const reference = readFileSync(
-    new URL('../content/docs/reference/policy/detection.mdx', import.meta.url),
+    new URL('../content/docs/policies/deterministic-detection.mdx', import.meta.url),
     'utf8',
   );
   const creator = readFileSync(
-    new URL('../content/docs/how-to/policies/build-a-policy-in-the-browser.mdx', import.meta.url),
+    new URL('../content/docs/policies/creator.mdx', import.meta.url),
     'utf8',
   );
   const index = readFileSync(
-    new URL('../content/docs/features/policies.mdx', import.meta.url),
+    new URL('../content/docs/policies/index.mdx', import.meta.url),
     'utf8',
   );
 
@@ -350,8 +350,8 @@ test('deterministic docs: profile totals and chain posture match canonical sourc
   assert.equal(enforcementCapable, 4);
   for (const page of [
     reference,
-    readFileSync(new URL('../content/docs/reference/policy/cel/engine.mdx', import.meta.url), 'utf8'),
-    readFileSync(new URL('../content/docs/reference/policy/cel/tool-call-state.mdx', import.meta.url), 'utf8'),
+    readFileSync(new URL('../content/docs/policies/cel/engine.mdx', import.meta.url), 'utf8'),
+    readFileSync(new URL('../content/docs/policies/cel/tool-call-state.mdx', import.meta.url), 'utf8'),
   ]) {
     assert.ok(page.includes(`${BOUNDED_CHAINS.length} ordered chains`) ||
       page.includes(`${BOUNDED_CHAINS.length} ordered behaviors`));
@@ -1002,7 +1002,7 @@ test('policy export excludes inactive audit choices', () => {
 
 test('manual v9 rollback distinguishes 0.8.4 config v7 from later 0.8.x config v8', () => {
   const guide = readFileSync(
-    new URL('../content/docs/appendix/migrate-v9.mdx', import.meta.url),
+    new URL('../content/docs/reference/migrate-v9.mdx', import.meta.url),
     'utf8',
   );
   const rollback = guide.split('## Going back to 0.8.x')[1] ?? '';

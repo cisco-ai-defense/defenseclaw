@@ -26,12 +26,12 @@ def page(name: str) -> str:
 
 
 def test_cli_uninstall_row_keeps_sandboxes() -> None:
-    text = page("reference/commands/cli.mdx")
+    text = page("reference/cli.mdx")
     assert "Each account keeps `~/.defenseclaw` and its sandboxes." in text
 
 
 def test_dnf_row_explains_kept_sandbox_state() -> None:
-    text = page("enterprise/install/linux.mdx")
+    text = page("enterprise/linux.mdx")
     start = text.index("| `dnf remove defenseclaw-enterprise` |")
     dnf = text[start : start + 600]
     assert "sandbox store and key that an account's kept sandboxes leave behind" in dnf
@@ -44,13 +44,13 @@ def test_linux_removal_keeps_administrator_policies() -> None:
 
 
 def test_restore_notice_lifetime_is_explained() -> None:
-    text = page("troubleshooting/enterprise/index.mdx")
+    text = page("enterprise/troubleshooting.mdx")
     assert "The warning clears at the next successful guardian refresh." in text
     assert "`settings_lost`" in text
 
 
 def test_rpm_architecture_is_checked_before_install() -> None:
-    text = page("troubleshooting/enterprise/index.mdx")
+    text = page("enterprise/troubleshooting.mdx")
     assert "`.deb` and for an RPM, before installation" in text
     assert "reaches `rpm -U`" not in text
 
@@ -69,7 +69,7 @@ def test_macos_detection_documents_busy_and_unknown() -> None:
     mdm = page("enterprise/mdm/index.mdx")
     assert "`unknown` (not run as root) or `busy`" in mdm
     assert "`busy`" in page("enterprise/mdm/jamf.mdx")
-    assert "about 92 KB" in page("enterprise/mdm/intune/macos.mdx")
+    assert "about 92 KB" in page("enterprise/mdm/intune-macos.mdx")
 
 
 def test_configmgr_config_change_checks_the_config_hash() -> None:
@@ -79,6 +79,6 @@ def test_configmgr_config_change_checks_the_config_hash() -> None:
 
 
 def test_group_names_match_without_regard_to_case() -> None:
-    text = page("enterprise/identity/reference.mdx")
+    text = page("enterprise/identity-entra-id.mdx")
     assert "without regard to case" in text
     assert "exactly, including case" not in text

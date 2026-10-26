@@ -1,0 +1,657 @@
+---
+title: Troubleshooting
+description: Fix a standalone DefenseClaw enterprise deployment by lifecycle error code, MDM wrapper code, hook refusal code, or symptom, on Windows, Linux, and macOS.
+keywords:
+  - DefenseClaw enterprise troubleshooting
+  - lifecycle error codes
+  - MDM exit codes
+  - security_complete false
+  - enterprise_managed_uid_unregistered
+---
+
+Start with the result document of the action that failed. Every lifecycle action prints
+one when you pass `--json` (`JSON=1` for the Windows Setup), and the MDM wrapper scripts
+always print one. Find the stable machine code in `errors[].code` and look it up below;
+the `message` next to it has the details. To produce a fresh document, run `verify` (see
+[Status and verify](/docs/enterprise/operations#status-and-verify)).
+
+## Exit codes
+
+| Meaning | Linux and macOS | Windows standalone | What to do |
+| --- | --- | --- | --- |
+| Success, or nothing to change | `0` | `0` | Nothing |
+| The action failed. A mutating action has already rolled back | `1` | `1603` | Read `errors[].code` |
+| Invalid arguments | `2` | `1639` | Fix the command line or MDM settings. Retrying does not help |
+| Another lifecycle run holds the lock | `75` | `1618` | Retry later |
+| A standard account ran an action that needs elevation (`elevation_required`) | — | `5` | Run it from an elevated prompt |
+| Reserved: success, reboot required | — | `3010` | Not used |
+
+The Secure Client profile on Windows returns only `0` and `1603`. The standalone Setup can
+also refuse before the lifecycle starts. It exits `1639` for a malformed command line (a
+relative or environment-expanded `CONFIG=` or `MANIFEST=` path, an unknown property,
+`/install` without `CONFIG=` and `MANIFEST=`, or `TIMEOUTSECONDS` out of range) and for a
+config or manifest file that a non-administrator can change. A token that is not elevated
+exits `1603`. With `JSON=1` the standalone Setup prints the same schema-version-2 document
+as the lifecycle, with `invalid_arguments` in `errors[].code`.
+
+## Lifecycle error codes
+
+These codes come from the lifecycle itself. The OS column says where each one can appear.
+
+
+| Code | OS | Meaning | Fix |
+| --- | --- | --- | --- |
+| `unsupported_platform` | Linux, macOS | The Linux or macOS lifecycle ran on another OS | Run the lifecycle for this OS |
+| `invalid_arguments` | all | The command line is wrong: conflicting flags, a relative `--config`, `install` or `upgrade` without `--payload` or `--from-package`, a first Windows `ensure` without a config, or a Windows `ensure` that must upgrade but was not given the payload files | Correct the command. On Windows, run the Setup, which supplies every payload file. Exit `2` or `1639` |
+| `lifecycle_busy` | all | Another lifecycle run holds the lock. On Linux and macOS the message says how long this run waited | Wait for it to finish and rerun. On Linux and macOS, a longer `--lock-wait <duration>` (at most `15m`) waits for it instead (`verify` has no `--lock-wait`). Exit `75` or `1618` |
+| `bundle_not_applied` | Windows | A signed policy bundle is confirmed but does not enforce: `config.yaml` is not the bundle's config (it was changed outside the lifecycle or deleted), the bundle store cannot render it, or the running gateway reports another effective policy or a rejected reload. `status` and `verify` fail on it, so `Remediate-Detect.ps1` is not compliant | Run `ensure` (the Intune remediation does): it re-applies the confirmed bundle from the bundle store. Exit `1603` |
+| `bundle_restore_failed` | Windows | `ensure` or `repair` could not put the confirmed bundle's config back over an edited or deleted `config.yaml`: the bundle store or its version directory cannot be read, `config.yaml` cannot be read, or the write failed. The run also reports `bundle_not_applied`. Nothing was started on the edited file | Deliver the bundle again, or a newer one. Exit `1603` |
+| `not_root` | Linux, macOS | The action needs root. `status` reports it too when a standard user cannot read the deployment record | Run it with `sudo` or from the MDM agent |
+| `service_manager_unavailable` | Linux | systemd is not the init system (containers, WSL), or it is older than 239 | Use a supported host. See [Requirements](/docs/enterprise/linux#requirements) |
+| `wsl_distribution` | Linux | The host is a WSL distribution. A new install is refused; an existing deployment gets this as a warning | Uninstall it and govern WSL from Windows. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl) |
+| `state_unreadable` | Linux, macOS | The lifecycle state (`/var/lib/defenseclaw-enterprise` on Linux, `/opt/cisco/defenseclaw/lifecycle` on macOS) cannot be read | Check that directory and the disk |
+| `already_installed` | Linux, macOS | `install` ran on a host that already has a deployment | Use `ensure`, `upgrade`, or `repair` |
+| `not_installed` | all | `upgrade`, `repair`, `reconcile`, or `verify` found no deployment. On Windows, also an `install`, `upgrade` or `ensure` that reported success but left no deployment | Install first. `ensure` installs when nothing is there. On Windows, run the same command again; if it repeats, keep the lifecycle log for support |
+| `profile_conflict` | all | A Cisco Secure Client DefenseClaw deployment is present. The two profiles cannot run on one host. On Windows, `--profile secure_client` on a standalone computer is refused the same way, with exit `1639` | Uninstall the Secure Client deployment first; on a standalone computer use `--profile standalone` or omit `--profile` |
+| `unmanaged_layout_present` | Linux, macOS | DefenseClaw files or units exist that no committed deployment owns, for example from a hand-made install | Rerun `install` or `ensure` with `--adopt-existing`. It backs up that layout and takes it over |
+| `payload_invalid` | Linux, macOS | The payload is missing a binary, is not owned by root, is writable by group or others, is a symlink, or is not the `--product-version` you asked for. `repair` also reports this when the installed binaries no longer match the deployment record | Stage the payload again as root. For `repair`, pass `--payload` with the installed release. When a package binary was replaced, reinstall the package of the installed version (the message names the command) |
+| `package_owned_binaries` | Linux | A `--payload` upgrade on a host where the deb or rpm owns the binaries | Upgrade with the package manager |
+| `config_invalid` | Linux, macOS | The `--config` file does not exist, is a symlink, or another account could change it (owner, mode or folder), or the config failed validation. It needs `config_version: 9`, or 8, which `ensure` migrates to 9, and the fixed `data_dir`. If you set them, `deployment_mode` and `enterprise.profile` must be `managed_enterprise` and `standalone`, and `gateway.api_bind` and `gateway.api_port` must be `127.0.0.1` and `18970`. The message names the file, the line, the field and the fix, for example `line 34: guardrail.mode is "blockall"; allowed values: observe, action`, or a protected credential `enterprise secret set` has not stored. It is also reported when the installed `config.yaml` changed while an account other than root could write it; that change is not applied and the last applied config is put back (`config_reverted`). On Windows an invalid config fails under another code (for example `manifest_staging_failed` or `lifecycle_error`); read `errors[].message` | Fix the file or pass the real, root-owned path; the message names the step. See the [settings reference](/docs/enterprise/configuration) |
+| `service_account` | Linux, macOS | Creating or checking the gateway service account (`defenseclaw` or `_defenseclaw`) failed | Check `useradd` or `dscl` and your directory service |
+| `apply_failed` | Linux, macOS | Writing the files failed. The action rolled back | Read the message. Check disk space and read-only mounts |
+| `api_port_held` | Linux, macOS | Before changing anything, an `install`, `ensure`, `upgrade` or `repair` found another process, usually a per-user DefenseClaw gateway, listening on the gateway API port `127.0.0.1:18970`. Nothing was changed | Stop the process with the `kill` command the message gives, or move it to another port, then run the command again. See [Find what holds port 18970](#find-what-holds-port-18970) |
+| `activation_failed` | Linux, macOS | A service did not start or did not become ready. The action rolled back | Read the gateway output excerpt in the message and `last-activation-failure.log` in the lifecycle directory, then the service logs. See [Logs and events](/docs/enterprise/operations#logs-and-events) |
+| `config_refused` | Linux, macOS | `status`, `verify` or a failed `upgrade`, `repair` or `ensure`: the gateway does not start because the installed gateway binary refuses the installed config, for example a custom rule pack whose files no longer match `guardrail.custom_packs.<name>.digest`. The message gives the refusal. `repair` fails the same way | Correct the setting the message names, in `config.yaml` or in the file you pass to `ensure --config`, and run `ensure` |
+| `verify_failed` | Linux, macOS | In `status` and `verify`: one error per problem found (`status` runs fewer checks). In a mutating action: the check after applying failed, and the action rolled back | Read each message. Most are fixed by `ensure` or `repair` |
+| `rollback_failed` | Linux, macOS | A failed action could not restore the previous deployment completely | Run `repair` or `ensure`. If it still fails, save the result and the logs, then uninstall and install again |
+| `disk_full` | Linux, macOS; Windows bundle apply | A failed `install`, `ensure`, `upgrade` or `repair` ran out of disk space. It follows the error of the step that failed (for example `verify_failed` or `apply_failed`) and names the path a write failed on or each filesystem DefenseClaw writes that had less than 16 MiB free. The action rolled back, or changed nothing when it ran out of space before it started. A bundle apply or trust anchor install that cannot write its receipt, state or anchor file for lack of space reports `disk_full` as its own code; the last good policy keeps enforcing | Free space on the named filesystem and run the action again (deliver the bundle again) |
+| `machine_policy_failed` | Linux, macOS | A vendor policy file could not be read or written. A connector you removed from `guardrail.connectors` whose file DefenseClaw cannot change (another tool holds it, for example with `chattr +i`) fails the run too: it rolls back (`rolled_back`) and the previous config stays in force. Invalid `enterprise.machine_policy` settings fail validation as `config_invalid` instead | Check the file named in the message, make it writable, and run `ensure` again. See [Machine policy](/docs/enterprise/machine-policy) |
+| `uninstall_failed` | Linux, macOS | Some files, directories, or the service account could not be removed | Read the message and run `uninstall` again |
+| `uninstall_incomplete` | Linux, macOS | The uninstall stopped before removing binaries that per-user hooks or vendor machine policy still name, and started the services again. On Linux, package removal also stops and keeps the package files | Fix the cause the message names and run uninstall or package removal again |
+| `per_user_hooks_remaining` | Linux, macOS | Uninstall could not remove a user's DefenseClaw hook registrations for an agent; there is one error per user and agent, with the reason. Uninstall stops before it removes the binaries those registrations run. A manifest row that does not resolve to an account is refused before anything changes, and the error names the row. An unavailable home or a re-homed account whose old home cannot be trusted is a warning instead (see [Warnings](#warnings)) | Remove DefenseClaw's entries from that agent's config in the current home, delete a stale copied receipt under that home's `.defenseclaw/connector_backups/<agent>/` if it keeps naming another home, or correct or remove a named invalid receipt, then rerun `uninstall`. For a pending cleanup whose current home is missing or untrusted, fix the account's directory home to an existing directory it owns, without symlinks or group/other write, or remove the account. Fix or remove an unresolved row in `targets.yaml`. `ensure` restores the deployment instead |
+| `replaced_hooks_not_fenced` | Linux, macOS | Before it stopped the gateway, the lifecycle could not fence a user's hooks of the release being replaced (the message names the user, the folder and why: a folder or `_hardening.sh` that is a symlink or not the user's, a home that did not answer). Until the guardian renders this release's hooks, such a hook follows its own fail mode while the gateway is stopped |
+| `replaced_hook_calls_running` | Linux, macOS | Hook calls of the release being replaced (named by user and process ID) were still running 120 seconds after their hooks were fenced, and the lifecycle stopped the gateway. A call such a hook sends before the new gateway answers follows that release's fail mode. Usually the agent stalled its own hook |
+| `reconcile_failed` | Linux, macOS | The immediate guardian reconcile failed. When the guardian could not protect a target, there is one error per target, in the words of its `guardian_target_failed` or `hook_contract_unverified` warning. A target of a deleted account (`guardian_target_account_removed`) or one refused for a path in the account's own home (`guardian_target_user_path`) stays a warning | Read each message. If it does not name a target, read the guardian log |
+| `downgrade_refused` | all | The payload or package is older than the installed release. On Windows, `ensure` found a newer release installed than the Setup you ran | To go back on purpose, see [Roll back](/docs/enterprise/lifecycle#roll-back) (`--allow-downgrade` on Linux and macOS) |
+| `config_rejected` | Linux, macOS | `status` warns and `verify` fails: the run that applied an in-place edit of `config.yaml` failed, the last applied config was put back, and the edit is kept as `rejected-config.yaml` in the lifecycle directory. The run's result in the lifecycle log says what failed | Fix what the lifecycle log names, then write `config.yaml` again, even unchanged, or push a corrected config or the previous one. See [Change the config](/docs/enterprise/lifecycle#change-the-config) |
+| `powershell7_required` | Windows | PowerShell 7 (the x64 MSI) is not installed under Program Files | Install PowerShell 7 x64 |
+| `powershell7_untrusted` | Windows | `pwsh.exe` is not a regular file, is writable by non-administrators, or is not signed by Microsoft | Reinstall PowerShell 7 from the Microsoft MSI |
+| `powershell_execution_policy` | Windows | PowerShell refused to start the lifecycle script: a Group Policy execution policy (for example `AllSigned`) overrides `-ExecutionPolicy Bypass`, and the script signer is not in the Trusted Publishers store. Nothing was changed | Add the certificate that signs DefenseClaw to the computer's Trusted Publishers store, or set that policy to `RemoteSigned` or `Unrestricted`, then run it again. See [Requirements](/docs/enterprise/windows#requirements) |
+| `powershell_32bit_host`, `powershell_constrained_language` | Windows | The lifecycle was started in 32-bit PowerShell or in Constrained Language mode | Start it from a 64-bit process in Full Language mode, or use the MDM wrapper |
+| `unsupported_architecture` | Windows | The host is not native x64. x64 emulation on ARM64 is refused | Use an x64 device |
+| `ensure_refused` | Windows | `ensure` could not choose an action, for example because it could not read the installed deployment's metadata | Read the message, then run `repair` |
+| `manifest_staging_failed` | Windows | `ensure` could not prepare the first target manifest from the config | Check the config |
+| `lifecycle_launch_failed` | Windows | The PowerShell 7 lifecycle did not start, or it printed no result | Read the message and `enterprise-lifecycle.log` |
+| `lifecycle_error` | Windows | The lifecycle reported a failure without a stable code | Read `errors[].message` and `enterprise-lifecycle.log` |
+| `rule_pack_unreadable` | Windows | The gateway service account (`NT SERVICE\DefenseClawGateway`) cannot read the rule-pack folder the config names (`guardrail.rule_pack` or a `guardrail.custom_packs` path). Setup's config preflight reports it before changing anything (exit `1639`). The message gives an `icacls` grant with the service's derived SID, which works before the service exists; a parent folder may need its printed `RX` grant too | Run the printed grant for the pack and any named parent folder, then run Setup again |
+| `not_ready` | Windows | The run finished, but the deployment is not healthy. The message names the stopped services. `verify` also reports it when a required service has stopped | Start them with `repair --profile standalone` (or Setup `/repair JSON=1`) from an elevated prompt; otherwise run `verify`, then read the gateway and guardian logs |
+| `machine_policy_summary_missing` | Windows | `C:\ProgramData\Cisco\DefenseClaw-HookRuntime` is missing while accounts are enrolled, so their hooks cannot check for other machine hooks | Run `repair`; the guardian writes the folder and summary back |
+| `gateway_start_failed` | Windows | `status` or `verify` found the gateway service not running; the message gives the last error the service logged and the log path | Fix what the error names. If it says `Access is denied`, run `repair` from an elevated prompt |
+| `api_port_held` | Windows | The gateway service runs, but another process listens on `127.0.0.1:18970` or on the wildcard address of that port, so the gateway cannot bind its API and hooks fail closed. `status` and `verify` report it even when that process answers the health check, and so does an install, upgrade or repair whose gateway never became ready. The message and `api_port_holders[]` name each process's PID, image and account | Stop that process. The gateway keeps retrying and takes the port back by itself; after a failed install, run the install again. See [Find what holds port 18970](#find-what-holds-port-18970) |
+| `scanner_runtime_unavailable` | Windows | `verify` found the skill, MCP and plugin scanner runtime (`C:\ProgramData\Cisco\DefenseClaw-ScannerRuntime`) missing, not prepared (also when a file of the unpacked runtime is missing or has another size, for example after antivirus quarantine), or changed outside DefenseClaw (state `untrusted`). The message names the file or the access problem. Every skill, MCP server and plugin install is blocked (fail-closed) until it is ready. `status` reports it as a warning; `install`, `upgrade`, `repair` and `ensure` fail with it (`1603`) when they could not install or prepare the runtime | Run Setup `/repair` or `/ensure`: they restore the runtime and its permissions from the Setup payload. `enterprise windows repair` from the installed CLI prepares or re-unpacks a damaged runtime but cannot reinstall a missing or changed one. When the message says `timed out after 15m0s`, the computer was short of CPU: run Setup `/repair JSON=1` as LocalSystem again when it has CPU to spare; it continues the unpack. See [Windows: Run Setup as LocalSystem](/docs/enterprise/windows#run-setup-as-localsystem) |
+| `elevation_required` | Windows | A standard account ran `enterprise windows status`, `verify`, `repair`, `upgrade`, `ensure`, `reconcile` or `uninstall`, `enterprise secret`, or `enterprise policy show`. Only an elevated prompt can run the installer's own checks, read the protected state or change the deployment; nothing was changed. Exit `5`. An unknown command exits `2`, not `5` | Run the command from an elevated PowerShell prompt |
+| `preflight_failed` | Windows | A check before the lifecycle started failed | Read the message |
+| `change_failed` | Linux, macOS | `enterprise secret set` or another protected-state change could not be written before `ensure` applied it | Read the message. Check that you ran it as root and that the secrets folder is writable by root |
+| `rotation_failed` | Linux, macOS | `rotate-credentials` did not commit the new key. The message names the step and the users; the previous key stays in use. When it ends with "nothing was changed", the check before the rotation failed | Fix what the message names (often a user the guardian protected before and cannot protect now), then rotate again. See [Rotate per-user credentials](/docs/enterprise/operations#rotate-per-user-credentials) |
+
+### Warnings
+
+Warnings do not fail an action. They appear in `warnings[]`.
+
+| Code | OS | Meaning |
+| --- | --- | --- |
+| `rolled_back` | Linux, macOS | A failed action restored the previous deployment. The error beside it says why |
+| `recovered_interrupted_transaction` | Linux, macOS | This run found an interrupted run and rolled it back first |
+| `rotation_recovered` | Linux, macOS | This run found an interrupted `rotate-credentials` and completed it (the new key had replaced the old one) or rolled it back |
+| `rotation_incomplete` | Linux, macOS | `status` or `verify` found a `rotate-credentials` run that did not finish. Run `rotate-credentials` again, or any other mutating action, to complete it or roll it back |
+| `recovered_failed_install` | Windows | This run rolled back a failed first install |
+| `rollback_leftover` | Windows | The rollback of a failed first install could not remove one item. The message names it and what removes it: run Setup `/ensure` and then `/uninstall`, both as LocalSystem while the accounts are signed in (see [Run Setup as LocalSystem](/docs/enterprise/windows#run-setup-as-localsystem)), or, for a file the account changed after DefenseClaw wrote it, remove DefenseClaw's entries from that file by hand. A signed-out account keeps DefenseClaw's entries until then. Setup run from an elevated prompt is not LocalSystem, so it leaves every account's registrations |
+| `user_runtime_folder_untrusted` | Windows | An upgrade, ensure or uninstall could not verify or apply the permissions of an account's `%USERPROFILE%\.defenseclaw` folder or its `hooks` folder (for example a stale profile whose folder denies even Administrators). It changed nothing in that folder, left that account's old hook runtime copies there (they are inert), and went on with every other account. The message names each account and folder. **Fix:** Inspect the folder, reset its permissions or remove it if that account no longer uses DefenseClaw, then run Setup `/ensure` again: it removes the old copies and lists them under `changes` |
+| `runtime_generations_not_collected` | Windows | A Setup `/ensure` that found the deployment compliant could not remove the old DefenseClaw hook runtime copies from the accounts' `%USERPROFILE%\.defenseclaw\hooks` folders, for example because another DefenseClaw lifecycle held the lifecycle lock. The copies are inert and the deployment is not affected; the message gives the reason. **Fix:** Run Setup `/ensure` again once no other install, upgrade, repair or uninstall is running |
+| `claude_settings_hook_left` | Windows | After the uninstall removed DefenseClaw's own Claude Code hook from a user's `%USERPROFILE%\.claude\settings.json`, the file still holds a hook command that names a DefenseClaw launcher (a hand-written or differently shaped one, which the uninstall keeps). Claude Code keeps running it and it fails. The message names each file and hook event. The uninstall itself succeeded. **Fix:** Remove those commands from the file as that user |
+| `security_incomplete` | Windows | `security_complete` is `false` and nothing else in the result says why. The message lists the reasons. "The claudecode machine policy is not verified in force" usually means the Claude Code attestation is missing or stale after an upgrade: confirm that an enrolled user's Claude Code runs DefenseClaw's hooks, then run Setup `/repair ATTESTCLAUDEEFFECTIVEPOLICY=1` (see [Verify the install](/docs/enterprise/windows#verify-the-install)). "No account is enrolled for Codex, Claude Code or Cursor" means the target manifest has no enabled row for any of them: enable at least one under `guardrail.connectors`, check the enrollment lists (see [Enrollment](/docs/enterprise/enrollment#windows)), and apply the config with Setup `/ensure CONFIG=<path>` |
+| `config_version_8` | Linux, macOS | The config the run read (`--config`, or the installed `config.yaml`) is still `config_version: 8`. DefenseClaw applied its version 9 migration; the message lists the values that conflicted and how the migration resolved them. Deliver a `config_version: 9` file instead, for example the migrated `config.yaml` |
+| `machine_policy_incomplete` | Linux, macOS | DefenseClaw's hooks are not in place in a vendor policy file for the named connectors, or they are in place but do not take effect (a higher-precedence source such as a `com.anthropic.claudecode` managed-preferences profile outranks them, or the file carries a conflicting value such as `allow_managed_hooks_only = false`). `security_complete` is `false`, and `verify` fails with `verify_failed`. When entries the last transaction placed are gone from their file, `status` fails too and `repair` puts them back; under `ownership: verify_only` the message names the export to deploy instead |
+| `scanner_judge_missing` | Windows | With `scanners.skill_scanner.use_llm: false`, `Scanners:` shows `judge none`; scans use static analyzers without an LLM judge. The warning also appears when no judge model is configured. Set `scanners.skill_scanner.use_llm: true`, configure `llm.model` and store its key with `enterprise secret set` to enable the judge |
+| `claude_version_floor_missing` | Linux, macOS | DefenseClaw's Claude Code version floor drop-in (`00-defenseclaw-version-floor.json`) is missing. The hooks are still in place and `verify` still passes. The next `ensure`, `repair` or `reconcile` writes it back. See [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor) for the builds it applies to |
+| `not_started` | Linux, macOS, Windows | Installed with `--no-start` (Setup `NOSTART=1` on Windows). `ensure` reports it as a warning (on Windows also `install`, `upgrade` and `repair`, which exit `0`); `status` and `verify` fail until the services run, because no agent is protected. Run `repair` or `ensure` (on Windows without `NOSTART=1`) to start them |
+| `adopted_existing_layout` | Linux, macOS | `--adopt-existing` backed up the old layout to the lifecycle directory |
+| `selinux_relabel` | Linux | `restorecon` failed after the files were written |
+| `selinux_module` | Linux | The lifecycle could not load (or, on uninstall, remove) the DefenseClaw SELinux module; the message has `semodule`'s error. Only SELinux-confined users depend on it |
+| `selinux_module_missing` | Linux | `status` or `verify` found SELinux enabled without the DefenseClaw SELinux module, the hook socket without its `defenseclaw_hook_sock_t` label, or the gateway binary without its `defenseclaw_gateway_exec_t` label. SELinux-confined users (`user_u`, `staff_u` and other confined logins) then cannot reach the hook socket, and their hooks are refused with `enterprise_managed_hook_socket_selinux_denied`. Run `repair` |
+| `judge_failing` | Linux, macOS, Windows | The gateway's `/health` reports the LLM judge as `failing` (every recent call failed) or `unavailable`. Prompts still get the rule-pack verdicts, but not the judge's checks, until it recovers. The message has the last error; check the judge's provider credentials and network |
+| `disk_space_low` | Linux, macOS | `status` or `verify` found less than 256 MiB, or less than 2%, free on the filesystem that holds the gateway's audit database or logs. Enforcement continues on a full disk, but the audit trail stops recording; free space on it |
+| `unit_drop_in` | Linux | A local systemd drop-in that DefenseClaw did not write changes a DefenseClaw unit (environment, limits, timeouts) but keeps its account, sandbox and config. The message names the files. A drop-in that changes those fails `status` and `verify` instead |
+| `ai_defense_unavailable` | Linux, macOS | Cisco AI Defense is enabled, but the gateway reports `inspection.ai_defense` as `unavailable:<code>` (for example `auth_failed` or `credential_unavailable`). The local policy engine keeps deciding. Check the credential `enterprise.inspection.ai_defense.credential` names and the network path; see [Check the key](/docs/enterprise/ai-defense-key#check-the-key) |
+| `directory_lookups_failing` | Linux, macOS | The gateway cannot resolve some accounts in the directory (a domain controller or SSSD that does not answer, or an account in more than 2,048 groups). Requests whose assignments need facts absent from the cache are refused with the missing fact named (`default_lookup_failed`), and cached facts are dropped after an hour. Status stays `ok`. The message names the failing accounts by uid. Run `defenseclaw-gateway enterprise linux profile-explain --user <account>` (`macos` on macOS) for the reason, and check `sssctl domain-status` and `getent passwd <account>` on Linux, or `dsconfigad -show` on macOS. On a bound Mac an Active Directory account counts as failing while `odutil show nodenames` lists the domain node `Offline`; `sudo dscacheutil -flushcache; sudo dsmemberutil flushcache` makes the Mac list the domain groups again at once. The warning clears when the lookups work again, or 15 minutes after the last failed one |
+| `per_user_hooks_remaining` | Linux, macOS | A user's home was not available, so uninstall could not remove that user's hook registrations for the named agent and went on without them. A warning about an account with no directory home names its recorded home and what may remain. After a live account is re-homed, the guardian cleans its current home and its old home when it still exists and is trusted; the row stays while a report is missing, a path lies outside the home it cleaned, or the current home still has DefenseClaw entries, and the warning names the path or receipt. An untrusted old home also keeps the row | Remove DefenseClaw's entries from the named agent's config in the current home, delete a stale copied receipt under its `.defenseclaw/connector_backups/<agent>/` if it keeps naming the other home, or correct or remove a named invalid receipt, and rerun. For an untrusted old home, remove its entries, delete that home if unused, or fix its owner or permissions so the guardian can clean it. Other removal failures stop uninstall; see [Lifecycle error codes](#lifecycle-error-codes) |
+| `per_user_state_remaining` | Linux, macOS, Windows | `uninstall --purge` (Setup `PURGE=1` on Windows) could not remove a user's DefenseClaw folder; the message gives the reason. On Windows a purge that did not run as LocalSystem removes the machine deployment but no account's data, so it is an error (non-zero exit) that names the accounts. Run Setup `/ensure` and then `/uninstall PURGE=1`, both as LocalSystem while the accounts are signed in (see [Run Setup as LocalSystem](/docs/enterprise/windows#run-setup-as-localsystem)) |
+| `root_squatted` | Windows | A standard user created `C:\ProgramData\Cisco`, `C:\ProgramData\Cisco\DefenseClaw` or `C:\ProgramData\Cisco\DefenseClaw-Lifecycle` before DefenseClaw (the default ProgramData permissions allow it). Install and Setup `/ensure` remove a junction or symbolic link there as a link and move a folder or file aside to `<name>.untrusted-<UTC time>-<id>`; the warning names the path, what it was, the account that created it and the new name. Other actions refuse with `root_squatted` until an install has run. Review the `.untrusted-` copy, then delete it from an elevated prompt: `Remove-Item -LiteralPath "<path>" -Recurse -Force` |
+| `machine_state_remaining` | Windows | Setup `/uninstall` or the MDM uninstall script could not remove a machine folder DefenseClaw created outside its state folder: an empty `C:\Program Files\ClaudeCode\managed-settings.d` or `ClaudeCode`, or a `DefenseClaw-PowerShell-<32 hex>`, `DefenseClaw-Installer-<32 hex>` or `DefenseClaw-Bootstrap-<32 hex>` folder an interrupted elevated command left. The message gives each path and the reason. Remove them from an elevated prompt |
+| `machine_state_kept` | Windows | Setup `/uninstall PURGE=1` kept a machine file on purpose, for example a runtime selector state in an agent's policy folder that also holds the selections of another DefenseClaw deployment. The message gives each path and why it stays. Leave it in place; that deployment's own uninstall removes it. |
+| `user_registrations_pending`, `user_registrations_failed` | Windows | Uninstall could not act as some users (no active, connected session, or the uninstall did not run as LocalSystem), or a per-user removal failed. The warning lists each account with its connectors. What stays is inert. Run Setup `/ensure` and then `/uninstall`, both as LocalSystem while the accounts have an active session (reconnect a disconnected one first) |
+| `package_install_failed` | Linux, macOS | The package's own install run (`last-package-result.json` in the lifecycle directory) failed: with no deployment, nothing is active; with a deployment, the last package install, reinstall or upgrade did not apply and the deployment keeps running as it was. The message gives that run's first error, for example a protected credential that is not stored yet. Fix it, then run `enterprise linux ensure --from-package`. On macOS install the pkg again: that also records the pkg receipt, which `enterprise macos ensure --from-package` does not |
+| `elevation_required` | Windows | A standard account ran a command that needs elevation. Exit `5`; nothing was changed. See [Lifecycle error codes](#lifecycle-error-codes) |
+| `health_not_checked` | Windows | The request was refused before any health check ran (a standard account's `status` or `verify`, or an unknown `--profile`). The result reports only the recorded deployment and the service states: `readiness.gateway`, `readiness.guardian`, `coverage_complete` and `security_complete` read `false` because they were not checked, and `installed_version` is omitted. For the deployment's health, run `enterprise windows verify --json` from an elevated PowerShell prompt |
+| `deleted_account_rows` | Windows | A local account was deleted. The enumerator drops its enrollment rows at its next pass, also when its profile folder is still there. Until then the guardian's failures for that account are reported here, `status` and `verify` stay healthy, and Setup `/ensure` is not blocked. Domain and Microsoft Entra accounts are not checked, because their lookup also fails while the directory cannot be reached |
+| `enrollment_pending_account_folder` | Windows | An account created its own `%USERPROFILE%\.defenseclaw`, for example when an agent it ran before enrollment was refused, or after it moved DefenseClaw's folder away. DefenseClaw takes over the folder when the account next signs in, and a fresh Setup install takes it over at once; `repair` leaves it alone until then |
+| `hook_contract_unverified` | all | A user runs an agent version that has no verified DefenseClaw hook contract, so that agent runs without DefenseClaw hooks. `coverage_complete` and `security_complete` are `false`; `verify` warns for that account and does not fail |
+| `agent_install_scan_incomplete` | Linux, macOS, Windows | The bounded scan of an enrolled user's agent installs could not finish; the warning names the part (a version manager over its 64-version bound, a home too large or partly unlistable, an editor extensions folder over its bound, too many copies, an account the cycle could not inspect or could not confirm gone). `coverage_complete` and `security_complete` are `false`. Review the account's home and use application control to block unapproved agent binaries; see [Vendor limits](/docs/enterprise/machine-policy#vendor-limits) |
+| `agent_unprotected` | all | The enumerator found an agent installed for a user but could not enroll it, or could not finish the Windows per-user WinGet package listing; the message gives the reason. `security_complete` is `false`; `verify` warns for that account and does not fail. On Windows this also covers a running enabled agent whose account SID cannot be resolved, and an account whose WinGet listing reaches the entry limit or deadline ("not fully scanned"). See [Enrollment](/docs/enterprise/enrollment#agents-that-cannot-be-enrolled) |
+| `agent_settings_not_restored` | Linux, macOS, Windows | The hook guardian put back a missing Hermes `config.yaml` or Devin `config.json` from the last known good copy or the pristine backup, or recreated it with DefenseClaw's hooks only when no copy was available. Review the account's settings: changes after the copy may be missing. The warning clears at the next successful guardian refresh. A restore that could not bring the settings back stays reported (`settings_lost`) until they return. This warning alone does not fail `verify`, set `security_complete` to `false` or fail MDM detection |
+| `guardian_target_failed` | Linux, macOS | The guardian could not install or repair hooks for one user and connector; the message gives the reason. Every other user stays protected. If the message says the guardian state does not say why, the guardian's root-only attestation reports the failure but the state file in the data directory does not; read the guardian log |
+| `guardian_target_user_path` | Linux, macOS | The guardian could not protect one user and connector because of a path in that user's own home: a link, a file where a folder belongs (or the reverse), or a folder the user made unreadable. The message names the path. Only that user is affected, and the guardian protects the account again at its next reconcile after the path is fixed. A warning only: `reconcile`, `verify`, `detect.sh --require-healthy` and `security_complete` do not fail on it. See [When a user breaks their own setup](/docs/enterprise/operations#when-a-user-breaks-their-own-setup-linux-and-macos) |
+| `guardian_target_account_removed` | Linux, macOS | A target's account no longer exists (the directory answers "no such account"), usually because it was deleted. The enumerator removes the target after three consecutive definitive misses, one per cycle, and `enterprise linux repair` or `enterprise macos repair` removes it at once. A warning only: `verify`, `reconcile`, `detect.sh --require-healthy` and `security_complete` do not fail on it. A directory outage that hides an account does not produce it: `directory_lookups_failing` reports the outage, and the target stays |
+| `guardian_cleanup_pending` | Linux, macOS | A user is no longer enrolled for a connector (the connector was disabled or removed from the config, or the user was excluded), and the guardian has not yet removed DefenseClaw's hook registration from that user's home, so the gateway refuses those hooks. The guardian removes it as the user once the home is available and retries a failed removal. A warning only. See [Enrollment](/docs/enterprise/enrollment/#new-changed-and-removed-users) |
+| `guardian_repair_pending` | Linux, macOS | A DefenseClaw hook file of an enrolled account (a hook script, the connector's hook token or its runtime record) no longer holds what the hook guardian left there at its last pass, so that agent's hook calls may not be inspected until the guardian puts it back. The guardian reacts within a few seconds and the warning clears after that pass; `security_complete` is `false` meanwhile. The same code reports a guardian record that cannot be read | Run `status` again after a minute. If the warning stays, check the guardian log and the account's `~/.defenseclaw/hooks` folder |
+| `guardian_repair_pending` | Windows | The hook guardian's last pass could not verify an enrolled account's agent (for example a deleted hook file of an account that is signed out or disconnected, which the guardian repairs only in that account's own session), or a hook file it verified is missing now. `security_complete` is `false` and the warning names the account and the agent. Sign the account in (or reconnect its session), then run `enterprise windows status` again |
+| `enrolled_home_unavailable` | Linux, macOS | An account that `targets.yaml` still enrolls has a home that cannot currently be found. This can be a temporary mount outage; a missing home alone does not prove deletion. Enrollment is kept and retried on the next hook enumerator pass. This is a warning only: `verify` and `security_complete` do not fail on it. |
+| `guardian_user_file_pending` | Linux, macOS | The guardian has not yet had its first pass for a newly enrolled user, so that user's DefenseClaw-owned per-user hook file (Copilot's VS Code Local hook file) is not written yet. It writes it within a minute or two. A warning only. Once written, a missing or edited copy fails `status` and `verify` until the guardian rewrites it |
+| `per_user_gateway_running` | Linux, macOS | An account still runs its own per-user DefenseClaw gateway, started before the deployment, beside the managed one. It keeps its own config and policy. The computer refuses to start it again, so stop it with the `kill` command the message gives, and have that user remove the per-user install with `defenseclaw uninstall --binaries --yes`. The install, `status` and `verify` report it as a warning |
+| `agent_sessions_restart_required` | Linux, macOS, Windows | A user runs an agent CLI (Claude Code, Codex and the other connectors) that started before the deployment was activated, for example one left open through an uninstall and a reinstall. An agent reads its hooks when it starts, so that session runs without DefenseClaw. On Linux and macOS a Codex session is named only with a Codex background server (app-server daemon) that started before the activation: new Codex sessions refuse it until the user runs `codex app-server daemon restart` (or starts `codex --no-daemon`). A Claude Code session open while the DefenseClaw drop-in was changed or removed is named as well. The warning also names a Hermes or other per-user agent session started before the guardian put back hooks the user changed or removed, or before the guardian first wrote a newly enrolled user's hooks (within about five minutes of enrollment); `security_complete` stays `false` until it restarts. On Windows the restore case excludes Claude Code, Codex and Cursor, whose hooks are machine policy; on Linux and macOS it excludes Codex and machine-policy connectors. A guardian restore record that cannot be read reports "restart status unknown" and sets `security_complete` to `false`, even when no session was listed. A process with no account name is checked by its owner SID | Ask the user named in the message to restart those agent sessions; if the owner is unknown, identify the account, and if the restore record is unreadable, resolve that read failure and recheck |
+| `no_connectors_enabled` | Linux, macOS, Windows | The config enables no agent under `guardrail.connectors` (on Linux and macOS: while the enumerator found eligible users), so nobody is protected. `security_complete` is `false`, and `verify` fails (on Windows its error carries this code). An empty entry such as `claudecode: {}` enables that agent, and per-user agents count too. Add the agents to protect under `guardrail.connectors` and apply the config; see [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect) |
+| `unmanaged_leftovers` | Linux, macOS | `status` or `verify` found DefenseClaw state with no deployment. Use `uninstall --purge` to remove it |
+| `unit_failed` | Linux, macOS | A DefenseClaw service or one-shot job failed on its last run (for example `defenseclaw-enterprise-verify.service`). The message names the unit and the log command; on Linux clear it with `systemctl reset-failed <unit>` once resolved |
+| `input_changed` | Linux, macOS | `config.yaml` or a protected credential changed while this run applied the previous version. A follow-up transaction in the same run applied it, or, after a failed run, the apply trigger runs `ensure` for it once this run ends. When the failed run is the Linux apply trigger itself, it starts the trigger again after 30, 60 and then 120 s; after three retries for the same `config.yaml` the warning says `retry limit reached` and you run `ensure` yourself |
+| `policy_not_applied` | Linux, macOS, Windows | After `install`, `upgrade`, `repair` or `ensure`, the gateway is ready but reports another effective policy digest than the installed config computes to. The message gives both and says the gateway applies the config on its next reload. `status` and `verify` show the same condition as `policy.applied: false` and do not warn. See [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation) |
+| `policy_reload_rejected` | Linux, macOS, Windows | Every action, `status` and `verify` included: the gateway rejected its last policy reload (an edited rule pack, `scanners.mcp_scanner.yara.extra_rules` file or custom skill scanner policy that no longer matches its pinned digest, a Rego module that does not parse) and keeps enforcing the previous policy. The message gives the reason, and `policy.last_reload_error` carries the same text. The gateway clears it when a later reload succeeds; nothing needs restarting |
+| `local_enforcement_entries_ignored` | Linux, macOS, Windows | The run migrated a `config_version: 8` config on a host whose `audit.db` holds N local block or allow entries. The message reads "N local block/allow entries in audit.db are ignored; the administrator config is the policy". They are neither imported nor deleted. Add the ones you want to `asset_policy` in the admin config. See [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host) |
+| `scanner_runtime_unavailable` | Windows | `status` found the scanner runtime missing, not prepared or changed outside DefenseClaw, or `install`, `upgrade`, `repair` or `ensure` could not install or prepare it; the message gives the reason and the command that restores it. Every skill, MCP server and plugin install is blocked until it is ready, and `verify` fails with the same code. See [Lifecycle error codes](#lifecycle-error-codes) |
+| `config_reverted` | Linux, macOS | An in-place edit of `config.yaml` was not applied; the last applied config was put back for the rollback and the rejected edit is kept as `rejected-config.yaml`. When a newer `config.yaml` was written during the run, that file is put back afterwards and applied next |
+| `config_reverted` | Windows | `config.yaml` had been changed outside the lifecycle (its hash is not the one `config.generation.json` records); `ensure` put the managed config back and kept the edited file as `rejected-config.yaml` next to it, readable by administrators only. A `config.yaml` that does not parse is kept the same way by Setup `/ensure CONFIG=` and `/repair CONFIG=`; a run without `CONFIG=` refuses before any change and says to supply one |
+| `lifecycle_superseded` | Linux, macOS | A queued apply run of an older binary found a newer release installed while it waited, and stood down; the installed binary applies later changes |
+| `upgrade_rolled_back` | Linux, macOS | In the apply trigger result (`lifecycle.log` on macOS, the journal of `defenseclaw-enterprise-apply.service` on Linux): a package upgrade failed and was rolled back, its newer binaries stay installed, and `config.yaml` and the protected credentials are still the ones the restored deployment applied, so the apply trigger did not retry the upgrade. The package result says why it failed. Fix that, then install the package again, or run `enterprise linux ensure --from-package` (`enterprise macos ensure --from-package`) |
+| `guardian_report_pending` | Linux, macOS | After a change the guardian had not reported its targets within 30 seconds. Run `status` or `verify` a moment later |
+| `guardian_reconcile_pending` | Linux, macOS | `targets.yaml` changed in the last three minutes (an apply, `ensure` or an enumerator cycle) and the guardian has not reconciled it yet. It does within about a minute, and until then enforces the targets it last reconciled. No repair is needed; run `verify` again a minute later. A guardian that stays behind an older `targets.yaml` fails `verify` |
+| `package_installed`, `package_upgraded` | Linux, macOS | In the MDM wrapper's result: the wrapper installed or upgraded the package (the message gives the versions) before the `ensure` whose result follows |
+| `ensure_install`, `ensure_upgrade`, `ensure_repair` | Windows | The action that `ensure` chose, and why |
+| `ensure_config_applied` | Windows | `ensure` applied a config-only change in the running gateway and stopped no service; the message lists the changed keys. See [Restart or repair the gateway](/docs/enterprise/lifecycle#restart-the-managed-gateway) |
+| `policy_reload_rejected` | Windows | The gateway rejected the last policy change (for example a rule pack edited away from the digest `guardrail.custom_packs` pins) and keeps enforcing an earlier policy. The message gives its error; `policy.last_reload_error` and `policy.applied: false` say the same. Restore the asset or apply a corrected config |
+| `policy_not_buildable` | Windows | The installed config and the assets it names no longer build into a policy (a pinned rule pack that no longer matches, for example); the gateway keeps enforcing the earlier policy, and the message names the error |
+| `config_edited_outside_lifecycle` | Windows | `config.yaml` was changed by hand: `config.generation.json` does not record its hash, and the gateway may already enforce it. The hook guardian records such a write as the next config generation (actor `hand-edit:unattributed`) within about a minute; the warning stays and then says the generation "records it as a hand edit". Run `ensure` with the intended config to put the managed config back. On a computer that takes signed policy bundles the same result also carries the error `bundle_not_applied` (exit `1603`) while `config.yaml` is not the confirmed bundle's config; `ensure` without `CONFIG=` re-applies the bundle |
+| `bundle_config_restored` | Windows | `ensure` or `repair` put the confirmed bundle's config back over a `config.yaml` changed outside the lifecycle and kept the edited file as `rejected-config.yaml`, or wrote it in place of a deleted `config.yaml` |
+| `bundle_restore_deferred` | Windows | `config.yaml` is not the confirmed bundle's config, but an install transaction is pending: the run recovers it first (which puts back the config the transaction recorded) and does not re-apply the bundle, so the run fails with `bundle_not_applied` while `config.yaml` is still not the bundle's config. Run `ensure` again; the Intune remediation does on its next run |
+| `policy_state_unrecorded` | Windows | `policy-state.json` could not be written next to `deployment.json`. The result itself stands |
+| `registration_failed`, `lifecycle_log_failed` | Windows | The registry marker, the Add/Remove Programs entry, or the lifecycle log could not be written. The result itself stands |
+
+## Kernel sensor warnings
+
+These appear in `status` and `verify` on Linux when the sensor helper uses Tetragon (see
+[Tetragon on a Linux fleet](/docs/enterprise/tetragon)). They are warnings: a problem with your
+Tetragon never fails `enterprise linux verify`, and `security_complete` does not depend on it.
+`enterprise linux tetragon verify`, the readiness check for a mode, does fail while Tetragon is
+down or refused. The managed `defenseclaw` command runs only `sandbox` commands, so run
+`sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify` first: it prints
+the failing check with the command that fixes it. On a per-user install, `defenseclaw doctor` has
+a **Kernel sensor (Tetragon)** row with two codes: `tetragon-tcp-api` (in brackets below) and
+`tetragon-not-used-per-user`. Every message reads `<what happened> (<impact>); <next step>`.
+
+
+| Code | Meaning | Fix |
+| --- | --- | --- |
+| `tetragon_unavailable` | The sensor helper cannot reach Tetragon (stopped, no socket, or a failing stream). Plane C uses `cn_proc` and `fanotify`, and no kernel control is enforced | Check it with `systemctl status tetragon` and start it with `sudo systemctl start tetragon`. Nothing is wrong with DefenseClaw; kernel enforcement is off until Tetragon returns |
+| `tetragon_tcp_api` [`tetragon-tcp-api`] | Tetragon serves its API on a TCP address, which any local account can use to load kernel policies. The helper never dials it, so `observe` and `enforce` are refused | `echo unix:///var/run/tetragon/tetragon.sock \| sudo tee /etc/tetragon/tetragon.conf.d/server-address`, then `sudo systemctl restart tetragon` (this drops policies added with `tetra`; `tetragon.tp.d` policies reload) |
+| `tetragon_untrusted_endpoint` | The info file `/var/run/tetragon/tetragon-info.json` or its folder is not owned by root or is writable by its group or others, the socket or its folder is not owned by root or is writable by others, or the socket is not served by root and the pid in the info file. The helper does not connect | Restore the owner and mode the message names, or `sudo systemctl restart tetragon` (this drops policies added with `tetra`; `tetragon.tp.d` policies reload) so Tetragon recreates the socket |
+| `tetragon_unsupported_version` | The Tetragon version is not supported for this mode: `consume` works on 1.6 and 1.7, `observe` and `enforce` need 1.7. Plane C uses `cn_proc` and `fanotify` | Install Tetragon 1.7.x, or keep `mode: consume` on 1.6 |
+| `tetragon_persistent_sensors` | Tetragon runs with `keep-sensors-on-exit` on, or its config cannot be read, so stopping it would leave programs enforcing with nobody updating them. `enforce` stays in monitor mode | `echo false \| sudo tee /etc/tetragon/tetragon.conf.d/keep-sensors-on-exit`, `sudo systemctl restart tetragon` (this drops policies added with `tetra`; `tetragon.tp.d` policies reload), then remove leftover pins under `/sys/fs/bpf/tetragon` |
+| `tetragon_plane_c_off` | `enterprise.tetragon.mode` is set, but AI Discovery Plane C is off, so the helper runs with Tetragon off | Set `ai_discovery.runtime.enabled: true` and `ai_discovery.runtime.enable_host_plane: true` in the admin config and apply it |
+| `tetragon_config_invalid:<variable>` | The helper's drop-in `30-defenseclaw-tetragon.conf` has a malformed value for the variable, so the helper used the safe default (`consume`, `168h`, no approval, or no such connector) | `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux repair` writes the drop-in again from `config.yaml` |
+| `tetragon_identity_unknown` | Tetragon's pid is not known from `/var/run/tetragon/tetragon-info.json`, so nothing is loaded | `sudo systemctl restart tetragon` (this drops policies added with `tetra`; `tetragon.tp.d` policies reload), so Tetragon rewrites the file |
+| `tetragon_not_applicable` | macOS: the config carries `enterprise.tetragon`, which only Linux uses | Remove `enterprise.tetragon` from this OS's config to silence it |
+| `tetragon_foreign_defenseclaw_name:<name>` | A policy in Tetragon has a name of DefenseClaw's own form (`defenseclaw-observe-`, `-connect-`, `-controls-` or `-controls-burnin-` and eight hex digits) that this helper did not record loading. DefenseClaw treats it as yours, lists it under your policies and never changes it | Rename your policy so it does not read like one of DefenseClaw's |
+| `tetragon_customer_events_capped` | N events of your policy `<name>` were not forwarded in the last hour: they went over the per-policy limit of 20 a second, which applies before DefenseClaw looks for an AI agent. The counts stay exact | Nothing to do, or set `enterprise.tetragon.customer_events: off` in the admin config |
+| `kernel_lsm_unavailable` | BPF LSM is off on this kernel, so the controls cannot deny and stay in monitor mode | Add `bpf` to the kernel's `lsm=` boot parameter and reboot (`cat /sys/kernel/security/lsm` shows it). See [Tetragon on a Linux fleet](/docs/enterprise/tetragon#harden-tetragon) |
+| `kernel_enforce_ack_missing` | `mode: enforce` has no `enforce_ack`, so the controls stay in monitor mode | Review `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce`, then set `enterprise.tetragon.enforce_ack` to the digest it prints in the admin config and apply it |
+| `kernel_enforce_ack_stale` | `enforce_ack` does not include this build's digest (a release changed a control), so every user is in monitor mode | Review the release notes and `verify --ready-for enforce`, then set `enforce_ack` to the new digest, or to a list of the old and the new digest while the rings upgrade |
+| `kernel_enforce_guardrail_observe:<connector>` | The connector is in observe mode, so its agents are monitored and never denied | To deny for it, set `guardrail.connectors.<connector>.mode: action` in the admin config, or leave it monitor-only |
+| `kernel_enforce_paused` | Kernel enforcement on this computer is paused until the time the warning gives (it also names who set it and why), so every user is in monitor mode | `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon resume`, or wait for the expiry |
+| `kernel_pause_file_invalid` | A pause file is present but is not a root-owned regular file or cannot be read, so enforcement stays paused | Remove it with `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon resume` |
+| `kernel_enforce_inactive` | Nothing can be enforced. Either no enrolled user has an anchored command-line agent (the message names the users without an agent and the connectors with no enrollment rows), or no user has finished burn-in yet (the message gives the estimate) | For no anchors: install the CLI for an enrolled user, or enroll one. For burn-in: nothing to do |
+| `kernel_burn_in_skipped` | `burn_in` is `0`, so users are enforced without a measured window | Set `enterprise.tetragon.burn_in` to at least `24h` in the admin config to measure first |
+| `kernel_policy_operator_override:<family>` | A policy family was moved to monitor mode or deleted with `tetra`, and the helper is honoring that | To hand it back to DefenseClaw, change `enforce_ack` or `mode` in the admin config; otherwise leave it as your decision |
+| `kernel_policy_not_applied` | The helper runs another control set or mode than the deployment renders, or its last pass did not leave Tetragon with every policy the mode calls for (a recorded policy that is missing after a pass is this warning, not a failure) | Wait for the helper's next pass (about a minute). If it stays, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure` so the helper restarts with this build's controls |
+| `kernel_roots_over_limit` | More than four live agent sessions for the monitor controls (see [Known limits](/docs/enterprise/tetragon#the-kernel-controls)). The controls do not count the extra sessions' opens, and their users' covered burn-in time pauses until fewer sessions run | None; the count is reported. Burn-in resumes when the extra sessions end |
+| `kernel_session_policy_pending` | A live agent session's process ID is not yet in an enabled controls policy, so its user accrues no covered time until it is; the covered time measured before stays | Wait for the helper's next policy pass; if it persists, check Tetragon status and the helper journal for a load failure |
+| `kernel_pid_anchor_monitor_only` | In `enforce`, an agent session is matched only by its process ID: a script-hosted agent (for example an npm install that `node` runs), or a session the helper cannot tie to a native agent binary. A process ID can be reused between two passes, so it never denies: the session is monitored and its would-block hits still count. As a user's reason, the user finished burn-in but has no native agent binary to deny through | None; this is a limit. To have a user denied, install the agent's native binary for that user (see [Who a control applies to](/docs/enterprise/tetragon#the-kernel-controls)) |
+| `kernel_sessions_predate_controls` | In `enforce`, the given number of an enforced user's agent sessions started before the controls policy loaded. Tetragon marks an agent's processes when the agent starts, so these sessions are monitored, not denied; `status` lists them under "Observed, not enforced" (`predates_controls`). It happens when enforce first loads or after a Tetragon restart, not after a pause and resume | Restart the sessions that predate the controls; new and restarted sessions are denied |
+| `kernel_sessions_unconfirmed` | In `enforce`, the given number of an enforced user's agent sessions fit the controls policy, but Tetragon never reported their start on the event stream (the stream was down or the sensor helper restarted before it saw them). They are not counted as denied, their user is `armed` (`kernel_unconfirmed`), and `status` lists them under "Observed, not enforced" | Check the stream in `status`, then restart the sessions while it is connected |
+| `no_anchored_session` | A user's reason while `armed`: enforce is loaded for them, but no running agent session of theirs started from an agent binary after the controls policy loaded, so nothing of theirs is denied at this moment | None; the next agent session they start is denied. If one is running, `status` lists it under "Observed, not enforced" with the reason |
+| `kernel_binary_anchor_scope_limited` | More than one user of a controls policy has a native agent install (in `enforce`, the users who finished burn-in). The policy denies for one of them, the lowest uid; the other users stay in monitor mode and their would-block hits still count. As a user's reason, another user's native agent holds the deny anchor. With an agent under an administrator prefix (`agent_prefixes`) every eligible account shares the binary, so the lowest eligible uid holds it | This is a limit (see [Who a control applies to](/docs/enterprise/tetragon#the-kernel-controls)). `verify --ready-for enforce` names the holder; leave accounts that should not hold it out with `enterprise.enrollment.exclude_users` |
+| `kernel_reconcile_failed` | The helper's last pass failed to load or update a policy. Policies stay in or move to monitor mode | See the ERROR column of `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status` and `sudo journalctl -u defenseclaw-sensor-helper -n 50` |
+| `kernel_state_unreadable` | `status` or `verify` could not read the helper's state in `/var/lib/defenseclaw-sensor`, so status shows defaults and no other kernel sensor warning is reported | `sudo systemctl restart defenseclaw-sensor-helper`. If it persists, check that `/var/lib/defenseclaw-sensor` is owned by root with mode `0700` and its files are regular files |
+| `enrollment_unreadable` | `targets.yaml` cannot be read or is not trusted, so the helper keeps its last enrollment | `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux repair` |
+| `tetragon-not-used-per-user` (doctor only) | A per-user install found Tetragon on the computer; it never connects to it. A skip row | None |
+
+`verify` fails only for state DefenseClaw owns:
+
+| Code | Meaning | Fix |
+| --- | --- | --- |
+| `kernel_policy_orphaned` | A policy the helper recorded is still loaded in Tetragon while the mode is `off` or `consume`, or while the helper is not running, so it keeps enforcing with nobody reconciling | Start the helper with `sudo systemctl start defenseclaw-sensor-helper`, or remove the policies with `sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup` (it refuses while a helper in `observe` or `enforce` runs), then run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify`. As a last resort, `sudo systemctl restart tetragon` drops every policy loaded over its API |
+| `kernel_policy_load_error:<name>` | In `observe` or `enforce`, with the helper running, Tetragon reports the named DefenseClaw policy in its load-error or error state. A policy that is missing after a pass is the `kernel_policy_not_applied` warning instead | Check Tetragon's journal with `sudo journalctl -u tetragon -n 50`, then `sudo systemctl restart defenseclaw-sensor-helper`. The helper retries every 5 minutes, and a restart retries at once |
+
+## MDM wrapper error codes
+
+The wrapper scripts in `packaging/mdm` check their inputs before they start the lifecycle. Most
+codes that start with `mdm_` mean the wrapper stopped before the lifecycle ran;
+`mdm_not_installed` after an apply, and `mdm_secret_failed` on Windows, come after the lifecycle
+succeeded. In every `mdm_` document, `installed: false` means "not checked". The exit code of each
+and the full meaning are in [Exit codes](/docs/enterprise/mdm#exit-codes).
+
+| Code | Meaning |
+| --- | --- |
+| `mdm_invalid_arguments` | A flag or setting is missing, malformed, or conflicts with another. On Linux and macOS any unknown or positional argument also exits `2` with this code |
+| `mdm_not_root`, `mdm_not_elevated` | Not running as root, SYSTEM, or an elevated administrator |
+| `mdm_wrong_platform` | The Linux copy ran on macOS, or the reverse |
+| `mdm_hash_mismatch` | The staged source does not match the pinned SHA-256 |
+| `mdm_signature_invalid`, `mdm_signer_not_allowed`, `mdm_signature_unsupported` | Signature trust failed, the signer is not allowed, or this source type cannot be checked by signature |
+| `mdm_version_mismatch` | Linux and macOS: the source is not the `--product-version` you set |
+| `mdm_untrusted_input` | A config, credential or keyring file can be changed by a non-administrator, or (`uninstall.sh`) the installed gateway is not root-owned |
+| `mdm_untrusted_install` | Windows, `uninstall.ps1`: the installed CLI or its folders are not administrator-only |
+| `mdm_input_too_large` | The config is over 1 MiB or the credential is over 16 KiB |
+| `mdm_payload_invalid`, `mdm_package_invalid`, `mdm_wrong_package`, `mdm_wrong_architecture` | Linux and macOS: the archive or package is not a DefenseClaw enterprise artifact for this host. The Linux wrapper reads the package architecture, for a `.deb` and for an RPM, before installation; a package for another CPU architecture reports `mdm_wrong_architecture` and nothing is installed |
+| `mdm_package_manager_busy` | Linux and macOS: dpkg, rpm or the installer held its lock. Exit `75`; retry |
+| `mdm_package_install_failed`, `mdm_package_remove_failed`, `mdm_package_manager_missing` | Linux and macOS: the package manager failed or is missing. On macOS, when the package's own preinstall or postinstall refused (a downgrade, a rejected config), the wrapper prints that result instead, with its own code such as `downgrade_refused` or `config_invalid` |
+| `mdm_package_result_empty` | macOS: the Installer failed and the postinstall left an empty `last-package-result.json`, and no lifecycle run holds the lock. Read `last-package-result.log` next to it. When a run holds the lock, the wrapper reports `lifecycle_busy` and exits `75` instead |
+| `mdm_disk_full` | The volume of the install root has less free space than the package needs, or the installer ran out of space. Nothing was installed; free some space and rerun |
+| `mdm_download_failed`, `mdm_download_unavailable` | Linux and macOS: the HTTPS download failed, or there is no curl or wget |
+| `mdm_not_installed` | A read-only action, or an `ensure` without a source, found no deployment |
+| `mdm_binaries_damaged` | Linux and macOS: an `ensure` without a source found an installed binary missing, not executable or different from its deployment record. Run the wrapper with the package as the source |
+| `mdm_lifecycle_no_result`, `mdm_lifecycle_launch_failed` | The lifecycle did not start or printed no result |
+| `mdm_secret_failed` | Storing the credential failed: on Windows after the deployment applied; on Linux and macOS before the config was applied |
+| `mdm_staging_untrusted`, `mdm_package_incomplete` | The private staging folder or the Intune content is not as expected |
+| `mdm_staging_noexec` | Linux: the staging folder is on a `noexec` mount; pass `--staging-dir` with a root-only folder that allows execution, or use the deb or rpm |
+| `mdm_staging_full`, `mdm_cancelled` | Linux and macOS: the staging filesystem filled while extracting a payload; or the MDM stopped the wrapper and its lifecycle child (inspect the deployment before a fresh run) |
+| `mdm_base_config_mismatch`, `mdm_tar_missing`, `mdm_anchor_install_failed` | Linux and macOS, signed bundles: the base config does not match the bundle, `tar` is missing so the comparison cannot run, or the trust anchor file could not be installed. |
+
+Wrapper logs: `/var/log/defenseclaw-enterprise-mdm.log` on Linux,
+`/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` on macOS, and
+`%WINDIR%\Logs\DefenseClaw\mdm-wrapper.log` on Windows.
+
+## Hook refusal codes
+
+When DefenseClaw refuses a hook call, the agent shows a sentence that names the cause. Some of
+these sentences end with the code; an unenrolled account's does not. For a refusal the gateway
+made, such as `enterprise_managed_uid_unregistered` or `enterprise_managed_root_denied`, the
+gateway log has the code (`journalctl -u defenseclaw-gateway` on Linux), and so does the audit
+log, as the `defenseclaw.admin.reason` of an `api-auth-failure` event
+(`sudo defenseclaw-gateway audit export`). A code the hook raises
+itself, such as `enterprise_managed_gateway_not_running`, is not in the gateway log. The
+runtime-folder codes apply to per-user-runtime agents. A machine-policy Claude Code hook can
+recreate a missing user folder and keeps using the machine gateway; a `.disabled` file in that
+folder does not disable its machine-policy enforcement. If its trusted state is invalid, it may
+report `enterprise_managed_runtime_state_invalid` instead.
+
+
+| Code | OS | Meaning and fix |
+| --- | --- | --- |
+| `enterprise_managed_uid_unregistered` | Linux, macOS | The user is not enrolled for this connector. With `unenrolled_users: deny`, this also applies to machine-policy connectors. **Fix:** Enroll the user, then allow one enumerator cycle and a guardian reconcile. See [A user is not enrolled](/docs/enterprise/troubleshooting) |
+| `enterprise_managed_sid_unregistered` | Windows | The user's SID has no enrolled runtime. **Fix:** Enroll the user. The guardian writes the user's runtime only while the user has a desktop session (console or Remote Desktop); an SSH, scheduled-task or `runas` session does not enroll the account |
+| `enterprise_managed_enrollment_pending` | Windows (standalone) | The user is enrolled but has not signed in to Windows since, so the guardian has not written their runtime yet (for example an account used only through `runas` or a scheduled task). **Fix:** Sign in to Windows once as that user |
+| `enterprise_managed_root_denied` | Linux, macOS | root called a hook while `enrollment.root` is `deny`. **Fix:** Run the agent as a normal user, or change `enrollment.root` |
+| `enterprise_managed_ledger_unavailable` | Linux, macOS | The gateway cannot read the guardian's authorization ledger. **Fix:** Check that the guardian is running, then run `reconcile` |
+| `enterprise_managed_connector_unknown` | Linux, macOS | The hook call named no connector the gateway recognizes. **Fix:** Check the hook registration; run `reconcile` |
+| `enterprise_managed_peer_unverified` | Linux, macOS | The gateway could not read the calling process's identity from the kernel. **Fix:** Run `repair`. If the code persists, save the gateway log and the result of `verify` |
+| `enterprise_managed_gateway_peer_unverified` | all | The hook could not verify the listener before it sent anything. Windows: the process listening on `127.0.0.1:18970` is not the running `DefenseClawGateway` service. Linux and macOS: the native hook checks that the socket directory is owned by root or the gateway account and writable only by its owner, then checks that the listener UID reported by the kernel is root or the gateway account. Managed shell hooks and plugins also require the socket itself to be owned by root or the gateway account. **Fix:** Check `status`. On Windows, find the process that listens on port 18970; on Linux and macOS, run `repair` |
+| `enterprise_managed_gateway_not_running` | all | The gateway service is not running: on Windows the `DefenseClawGateway` service is stopped; on Linux and macOS the hook socket is missing or nothing accepts on it. The hook denies the call (fail closed; with the administrator's `hook_fail_mode: open` it allows it and records the failure instead, see [Fail modes](/docs/reference/fail-modes)) and returns no audit event ID: the gateway that writes the audit log is down, so these denials are not in it. **Fix:** Run `repair`, or start the service (`systemctl start defenseclaw-gateway-hook.socket defenseclaw-gateway.service` on Linux) |
+| `enterprise_managed_gateway_restarting` | Linux | The gateway service was still stopping or starting about 3 seconds after the hook started (a package upgrade, a rollback, or a configuration or bundle change that needs a restart), so the hook blocked the call. It is never an allow unless the administrator set `hook_fail_mode: open`. **Fix:** None for a restart you started; if it persists, check `status` and the gateway log |
+| `enterprise_managed_gateway_no_answer` | all | The gateway gave no final decision on a tool call within about 3.5 seconds of the hook's start (it was restarting, being upgraded or repaired, too busy, or its HTTP 429 resends used the answer budget), so the hook blocked the call, including with the administrator's `hook_fail_mode: open`. With `foreign_hooks: remove`, the guard's session check can block an outage before this deadline too. A decision that waits on Cisco AI Defense or the LLM judge gets up to about 4 seconds. **Fix:** None for a lifecycle run you started; if it persists, check `status` and the gateway log for a gateway that is slow or stuck |
+| `enterprise_managed_hook_socket_selinux_denied` | Linux | SELinux kept the user's account from the hook socket: the account is SELinux-confined and the DefenseClaw SELinux module is not loaded (`status` reports `selinux_module_missing`). The hook fails closed and tells the user that SELinux is the cause. **Fix:** Run `repair`, which loads the module and relabels the socket |
+| `enterprise_managed_runtime_descriptor_missing` | Linux, macOS | The runtime descriptor (`managed-runtime.json`) is missing. A managed hook invocation denies tool calls even if DefenseClaw's machine-policy entry is gone; Stop and session-end events receive a neutral allow. **Fix:** Run `repair` if the deployment should still be installed |
+| `enterprise_managed_runtime_state_invalid` | all | The hook's trusted runtime state is missing or invalid. **Fix:** Run `repair`, then `reconcile` |
+| `enterprise_managed_runtime_home_missing` | all, per-user-runtime agents | The user's DefenseClaw runtime folder is missing (on Windows, `%USERPROFILE%\.defenseclaw` was renamed, moved or deleted). The hook tells the user that the folder is missing and to try again in a minute. **Fix:** The guardian manages this folder and recreates it, on Windows in the account's session, usually within a minute. If the code persists, run `reconcile`, then read the guardian log |
+| `enterprise_managed_runtime_disable_sentinel_forbidden` | all, per-user-runtime agents | A `.disabled` file is in the user's DefenseClaw runtime folder. Managed hooks do not treat it as "off", so they refuse the call. **Fix:** Remove the file |
+| `enterprise_foreign_hook_blocked` | all | A user or repository config adds a hook or plugin that your policy has not approved. **Fix:** Remove it, or add its digest to `enterprise.machine_policy.connectors.<name>.allowed_hooks`. See [Foreign-hook guard](/docs/enterprise/foreign-hook-guard) |
+| `enterprise_foreign_hook_check_failed` | Linux, macOS | Hermes only: DefenseClaw's Hermes hook got no usable answer from the foreign-hook check it runs through `defenseclaw-hook`, so it blocked the tool call. **Fix:** Check that `defenseclaw-hook` is installed and runs for the user; read `~/.defenseclaw/logs/hook-failures.jsonl`; run `repair` |
+| `enterprise_machine_policy_summary_untrusted` | all | The hook could not confirm that only administrators can change the machine policy summary it reads or a folder above it: one is not administrator-owned, or (Windows) standard users cannot read the permissions of `C:\ProgramData\Cisco`, or `C:\ProgramData\Cisco\DefenseClaw-HookRuntime` lets standard users write it or no longer lets them read it. `status` and `verify` fail (`machine_policy_summary_untrusted`) and name the folder, the account and its access. **Fix:** Run `repair`, which writes the hook runtime folder's permissions back (SYSTEM and Administrators full control, `BUILTIN\Users` read and execute). On Windows it grants `BUILTIN\Users` read-permissions and traverse on `C:\ProgramData\Cisco` alone (`icacls C:\ProgramData\Cisco /grant *S-1-5-32-545:(S,RC,RA,X)` does the same) |
+| `enterprise_managed_rate_limited` | all | HTTP 429: this account sent more hook requests than its budget allows (60 a second, a burst of 120, 32 at a time; OTLP export has its own budget). An account runs at most half as many at once as the gateway has processors (at least one), so other accounts keep the other half and are not refused. The hook resends the call a few times within its answer budget. A rate limit is not a classified gateway outage, so if no verdict follows, standalone managed hooks block the call whatever `hook_fail_mode` says. **Fix:** Find what floods the gateway from that account (a loop, many parallel agents). The budget refills within a second |
+| `enterprise_managed_overloaded` | all | HTTP 429: the gateway already holds as many hook requests as it can answer in time, across all accounts (16 per processor, at least 32), so it refuses the next one at once. The hook resends the call a few times within its answer budget. A rate limit is not a classified gateway outage, so if no verdict follows, standalone managed hooks block the call whatever `hook_fail_mode` says. **Fix:** Retry; the places free up within seconds. If it repeats, the host needs more processors for its peak |
+| `HOOK-PAYLOAD-TOO-LARGE` (rule ID) | all | The hook refused a prompt or tool call larger than its body cap (1 MiB; `DEFENSECLAW_HOOK_MAX_BODY` can only lower it) before it reached the gateway. The user sees "DefenseClaw blocked this prompt: it is too large for DefenseClaw to inspect. Make it smaller and try again." The audit has a `hook_decision` block with this rule ID and none of the content. **Fix:** None on the host; the user sends less at once |
+
+### Known limits for managed hooks
+
+- A managed Claude Code or Codex shell command is blocked if it has more write targets than the
+  hook can report: more than 512 targets or more than 64 KiB of target paths. The refusal says
+  DefenseClaw blocked the action under your organization's policy and may name "SSH authorized keys
+  mutation." Split the command into smaller calls. Per-user mode is not affected.
+- On Windows, sustained hook traffic on a disk with slow scattered writes can delay audit writes and
+  hook answers. The gateway checks `audit.db-wal` every two seconds. An ordinary catch-up holds the
+  audit writer for up to 100 ms after the active log passes 176 MiB. At 208 MiB, a flooded log can use
+  one fixed hold of up to 1 second before the 256 MiB ceiling; only the wait to acquire the writer
+  grows after a missed pass, up to 10 seconds. If the file remains over 256 MiB after a check,
+  the gateway warns and repeats the warning every ten minutes while it stays over. A slow disk can
+  still push it past that threshold. In Windows runner tests, the file peaked at 0.9 to 1.2 GB at
+  10 calls a second; that is an observation, not a disk-space guarantee. A SQLite statement can run
+  past the hold, so some hook answers can still wait
+  seconds or exceed their answer budget. Under the default `closed` mode those calls block; an
+  administrator's outage-only `open` applies only to a classified no-answer timeout, and calls of
+  guarded connectors (`foreign_hooks: remove`) still block, as in 1.0.3 (GAP-0352). If the gateway logs a persistent
+  `audit WAL` over-bound warning, check for a long-running reader and available disk space.
+- A tool call that DefenseClaw allowed while the gateway was running still runs if you approve it in
+  the agent after the gateway stops. Every call checked while the gateway is down is blocked.
+- An upgrade from 1.0.2 or 1.0.3 under `hook_fail_mode: open` can still let a call of the old
+  hooks run in three cases, only while the upgrade has the gateway stopped (from the stop until the
+  new gateway answers, which the upgrade bounds at 90 seconds before it rolls back):
+  - Linux and macOS: an old shell hook that had already started when the upgrade fenced the hooks
+    and was still running 120 seconds later (reported as `replaced_hook_calls_running`). On Linux it
+    is affected only when the gateway is back later than the hook waits for it (10 seconds; 29 for
+    Copilot CLI and Antigravity).
+  - Windows: an old hook process that started before the swap but took more than 30 seconds to
+    start running, and was still running 120 seconds after the swap.
+  - Linux, macOS and Windows: an OpenCode or Amp session started under 1.0.2. The plugin runs in
+    the agent, so nothing on disk reaches it; restart the session after the upgrade. 1.0.3 managed
+    plugins already block.
+
+## Symptoms
+
+### Sandboxes and Tetragon
+
+[Sandboxes and Tetragon](/docs/enterprise/sandboxes): `Operation not permitted` on a Tetragon host, Tetragon not reachable.
+
+### Install and MDM
+
+Start with the result document of the failed action (`--json`, or `JSON=1` for the Windows Setup) and look up `errors[].code` in the [code tables](/docs/enterprise/troubleshooting#lifecycle-error-codes). The entries below are the install and upgrade problems that need more than a code lookup.
+
+#### The first install fails with `api_port_held` or does not start the gateway
+
+The first managed install fails with `api_port_held` (Linux and macOS) or `not_ready` (Windows). A per-user DefenseClaw gateway, or another process, still listens on `127.0.0.1:18970`.
+
+**Fix.** Find the process with the [port commands](/docs/enterprise/troubleshooting#find-what-holds-port-18970). If it is a per-user DefenseClaw, have that user run `defenseclaw uninstall --binaries --yes` (`defenseclaw uninstall --all --binaries --yes` on Windows), then run `ensure` again. See [Handle existing per-user installs](/docs/enterprise/rollout#step-4-handle-existing-per-user-installs).
+
+**Check.** `enterprise <os> status` shows the gateway running.
+
+#### The first Windows install stops with `preflight_failed` naming `.defenseclaw`
+
+The message names `C:\Users\<user>\.defenseclaw`, or says "committed, but its protected managed-hook lifecycle journal could not be retired". A per-user install left that folder, and the managed install does not take it over. The first install refuses before it changes anything; a run that had already committed is installed and running.
+
+**Fix.** Have that user run `defenseclaw uninstall --all --binaries --yes`, or move the folder out of the profile, then run Setup `/ensure` again. See [Per-user installs](/docs/enterprise/windows#per-user-installs).
+
+**Check.** Setup `/ensure` exits `0`.
+
+#### The per-user installer or `defenseclaw upgrade` refuses
+
+The host has a managed deployment. The per-user `install.ps1`, `defenseclaw upgrade`, `defenseclaw rollback` and a per-user gateway all refuse to run beside it.
+
+**Fix.** Update through your MDM. See [Per-user installs](/docs/enterprise/windows#per-user-installs).
+
+**Check.** `status` shows the new release.
+
+#### Setup upgrade says another program holds a file open
+
+Setup could not replace the named file while another program had it open.
+
+**Fix.** Close the program holding it (for example an antivirus or editor), then run Setup again.
+
+**Check.** Setup exits `0`.
+
+#### Setup `/ensure` exits `1603` while waiting for the hook guardian
+
+Setup waits up to 10 minutes for the guardian's first reconcile while it makes progress. The error says "the hook guardian's first reconcile is still running" or "the hook guardian process" is "no longer running during its first reconcile".
+
+**Fix.** Read `C:\ProgramData\Cisco\DefenseClaw\logs\guardian\hook-guardian.log` and `C:\ProgramData\Cisco\DefenseClaw\runtime\hook_guardian_startup.json`. On a slow device, check antivirus scanning and disk load, then run Setup `/ensure` again.
+
+**Check.** The second run exits `0`.
+
+#### An action exits `1618`, `75`, `1639` or `2`
+
+`1618` and `75` mean another lifecycle run holds the lock. `1639` and `2` mean invalid arguments.
+
+**Fix.** Retry for `1618` and `75` (Intune retries `1618` by default). For `1639` and `2`, fix the command line or the MDM settings; retrying does not help.
+
+**Check.** The next run exits `0`.
+
+#### A Linux package installed, but nothing runs
+
+The package's postinstall script never fails the package transaction, so a failed lifecycle still leaves the package installed.
+
+**Fix.** Read `/var/lib/defenseclaw-enterprise/last-package-result.json`.
+
+**Check.** After the cause is fixed, `ensure --from-package` followed by `verify` passes.
+
+#### `apt` or `dnf` refused an older package
+
+The package's preinstall refuses a downgrade before it replaces any file. The deployed release keeps running.
+
+**Fix.** For a deliberate downgrade, create the rollback marker first; see [Roll back](/docs/enterprise/lifecycle#roll-back).
+
+**Check.** The package manager installs the older package.
+
+#### A macOS pkg install failed
+
+The lifecycle failed and rolled back, and the install script failed the installation. An older package is refused before any file changes unless the rollback marker exists.
+
+**Fix.** Read `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` and `last-activation-failure.log` in the same folder. For a deliberate downgrade, see [Roll back](/docs/enterprise/lifecycle#roll-back).
+
+**Check.** Install the package again; `verify` passes.
+
+#### `verify` says "the installed package is version X but the deployment applied Y"
+
+The package manager replaced the binaries, but the package's own install run failed and rolled back (or an older package was refused), so the record still describes the previous release.
+
+**Fix.** Read the cause in the message and in `last-package-result.json`, fix it, and run `ensure --from-package`. Add `--allow-downgrade` if X is the older package you meant to go back to.
+
+**Check.** `verify` no longer reports a version mismatch.
+
+#### A release from a mirror is refused
+
+The message says "Releases from `<url>` are verified by their signature: install cosign 2.0 or later", "The release signature on checksums.txt did not verify" or "refusing a mismatched release". `update.source` or `DEFENSECLAW_REPO` points at a mirror. The installers verify every release against the compiled release identity.
+
+**Fix.** Copy the release files and both `checksums.txt` and `checksums.txt.bundle` unchanged, and install cosign 2.0 or later. Or clear `update.source` (and `DEFENSECLAW_REPO`). See [Where releases come from](/docs/enterprise/rollout#where-releases-come-from).
+
+**Check.** The install verifies the release and proceeds.
+
+#### `enterprise secret set` fails on a new Windows host
+
+On Windows it refuses until a standalone deployment is installed. On Linux and macOS it stores the key root-only and the install applies it.
+
+**Fix.** Install first, then store the key. See [AI Defense key](/docs/enterprise/ai-defense-key).
+
+**Check.** `enterprise secret status` shows the credential.
+
+#### `systemctl start defenseclaw-hook-guardian.service` has no effect
+
+The guardian is always running.
+
+**Fix.** Run `enterprise linux reconcile`, or start `defenseclaw-hook-guardian-reconcile.service`.
+
+**Check.** `verify` passes.
+
+### Hooks and policy
+
+Hook refusals show a stable code in the agent's output. Look it up in the [hook refusal codes](/docs/enterprise/troubleshooting#hook-refusal-codes). The entries below are what administrators see on the host.
+
+#### An agent is not protected at all
+
+Its connector is not a key under `guardrail.connectors`, or its entry has `enabled: false`. With no agent enabled, `status` warns `no_connectors_enabled` and `verify` fails.
+
+**Fix.** Enable the connector under `guardrail.connectors` and apply the config ([Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)).
+
+**Check.** `verify` passes.
+
+#### An agent is not protected on one OS
+
+Its route on that OS is unsupported. OpenClaw and ZeptoClaw are unsupported everywhere.
+
+**Fix.** Use a supported agent on that OS. See [Machine policy](/docs/enterprise/machine-policy).
+
+**Check.** `status` lists the agent as protected.
+
+#### A Cursor Agent CLI prompt disappears with no reply
+
+The gateway service is not running, so the hook refused the prompt. Cursor Agent CLI does not display the refusal for prompts; tool calls show theirs.
+
+**Fix.** Check the gateway service (`enterprise <os> status`), start it, or run `repair`. See [Cursor](/docs/connectors/cursor/).
+
+**Check.** The next prompt gets a reply.
+
+#### Claude Code shows `hook error ... ENOENT ... defenseclaw-hook.exe` and runs the tool call (Windows)
+
+An antivirus or EDR quarantined `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`. Claude Code treats a hook that cannot start as non-blocking, so tool calls run unchecked until the file is back.
+
+**Fix.** The hook guardian restores the binary from its protected copy within about 5 seconds; Setup `/ensure` and `/repair` restore it too. Exclude `C:\Program Files\Cisco\DefenseClaw\bin` from quarantine in your EDR policy. See [Intune on Windows](/docs/enterprise/mdm/intune-windows).
+
+**Check.** The next Claude Code tool call runs DefenseClaw's hook.
+
+#### `security_complete` is `false` on Windows
+
+Claude Code is enabled and its attestation is not recorded, no Codex, Claude Code or Cursor row is enabled in the target manifest, or Codex or Claude Code is enabled (`hook_process_fail_open`).
+
+**Fix.** Run `verify` and read the warning `security_incomplete`. See [Health fields](/docs/enterprise/operations#health-fields). `hook_process_fail_open` is a known agent limit: protect the hook process with application control or EDR.
+
+**Check.** `security_complete` is `true`, or `false` with `hook_process_fail_open` as its only warning.
+
+#### `security_complete` is `false` on Linux or macOS
+
+The sensor helper is not running, the run had errors, an agent is `agent_unprotected` or `hook_contract_unverified`, a user target is `guardian_target_failed`, the config enables no agent (`no_connectors_enabled`), or Codex, Claude Code, Copilot, Devin, Hermes, Kiro or Antigravity is enabled (`hook_process_fail_open`).
+
+**Fix.** Run `verify` and read the errors and warnings. `hook_process_fail_open` is a known agent limit: protect the hook process with application control or EDR.
+
+**Check.** `security_complete` is `true`, or `false` with `hook_process_fail_open` as its only warning.
+
+#### `verify` fails because of one user (`guardian_target_failed`)
+
+The guardian cannot repair something in that user's account, for example a config the agent cannot parse or a folder another account owns. A link, non-directory or unreadable folder in the user's home is `guardian_target_user_path` instead and does not fail `verify`.
+
+**Fix.** Read the warning for the user and connector and have the account fixed. See [When a user breaks their own setup](/docs/enterprise/operations#when-a-user-breaks-their-own-setup-linux-and-macos).
+
+**Check.** `verify` passes.
+
+#### `verify` fails with `verify_failed` and `machine_policy_incomplete`
+
+A higher-precedence policy source outranks DefenseClaw's entry, or your own policy sets a conflicting value.
+
+**Fix.** `enterprise policy show` names the source. See [Machine policy](/docs/enterprise/machine-policy).
+
+**Check.** `verify` passes.
+
+#### `enterprise policy show` or `verify` refuses for a standard account
+
+The policy commands read the managed config, which only administrators can read.
+
+**Fix.** Run it as root on Linux and macOS, or from an elevated prompt on Windows. See [Machine policy status](/docs/enterprise/operations#machine-policy-status).
+
+**Check.** The command prints the policy.
+
+#### `policy verify --live` refuses
+
+`--live` needs `--user`, one `--connector` (`codex` or `claudecode`) and `--agent-binary`. On a managed Windows host `--live` is not available.
+
+**Fix.** Add the missing flags. On Windows use the static `verify` and confirm with `audit export`; see [Inspect machine policy](/docs/enterprise/windows#inspect-machine-policy).
+
+**Check.** The command runs.
+
+#### `This computer is managed; only defenseclaw sandbox commands are available here`
+
+The command exits `2`. On a managed Linux or macOS computer the packaged `defenseclaw` runs only `defenseclaw sandbox` commands; everything else, readers included, belongs to the administrator.
+
+**Fix.** Use `defenseclaw sandbox ...` as a user. An administrator runs `defenseclaw-gateway enterprise linux status` (`enterprise macos status` on macOS) as root, by its packaged path. Policy changes go in the admin config.
+
+**Check.** `defenseclaw sandbox list` runs.
+
+#### A command exits `3` with `This device is managed`
+
+This is a per-user CLI left from an earlier install. It covers `config set`, `config unset`, `skill`, `mcp`, `plugin` and `tool block`, `allow`, `unblock`. The gateway answers `403` `managed_device` on `/enforce/block` and `/enforce/allow`. The host is a managed standalone deployment: its policy comes from the admin config only, so every local writer refuses, even for root. Each attempt is audited as `outcome=refused reason=managed_device`.
+
+**Fix.** Make the change in the admin config: `asset_policy` for block and allow lists, `guardrail.block_at` for thresholds. See [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host).
+
+**Check.** The audit log shows no new `managed_device` refusal.
+
+#### A `DEFENSECLAW_*` variable or `.env` entry has no effect
+
+The registry marks it `ignore` on a managed standalone host, so the value is read as unset. `DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY` and `DEFENSECLAW_HOOK_MAX_BODY` are `tighten_only`: honored only when stricter.
+
+**Fix.** Set the equivalent key in the admin config. See [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host).
+
+**Check.** On managed Linux and macOS, `doctor` is unavailable: the packaged launcher runs only sandbox commands. As root, run the installed gateway's `enterprise linux status --json` or `enterprise macos status --json` and check that `policy.applied` is `true`. The `Ignored environment overrides` row belongs to the per-user Python CLI.
+
+#### AI Defense is not used
+
+The credential is missing or unreadable, the `credential` name under `enterprise.inspection.ai_defense` does not match the stored credential, or the proxy blocks the connection. The local engine keeps deciding alone.
+
+**Fix.** Check `enterprise secret status` and `enterprise.network.https_proxy` (restart the gateway after changing it). The gateway logs an error from the `cisco-inspect` subsystem that starts with "standalone managed_enterprise: Cisco AI Defense disabled".
+
+**Check.** `/health` shows `ai_defense_available`; when it is `false`, `ai_defense_error` says why.
+
+#### `policy.applied` is `false`
+
+Two messages are possible. "The gateway applies `sha256:...` but config.yaml and its policy assets compute to `sha256:...`" means a reload is pending or was rejected, or the file changed under the gateway. "The last change was rejected" (`/health` has `policy.last_reload_error`) means the gateway built the new policy generation and rejected it, for example a rule pack or Rego module that no longer loads, or a pinned digest that does not match. It keeps enforcing the previous generation, so nothing is unprotected, but the change is not live.
+
+**Fix.** Wait one reload, then run `status --json` again. If it persists, restart the managed gateway or run `repair` ([Restart the managed gateway](/docs/enterprise/lifecycle#restart-the-managed-gateway)). For a rejection, read the error, fix the config or the asset it names, and apply the config. A custom rule pack edited in place no longer matches its pinned digest: pin the new digest, or restore the pack. `policy digest` prints the components.
+
+**Check.** `policy.applied` is `true` in the native lifecycle's `status --json`. On a per-user install, the equivalent `defenseclaw doctor` rows are:
+
+```text
+[PASS] Policy  —  generation 1, digest sha256:77ef51dce35b (applied by the gateway)
+[FAIL] Policy  —  generation 2, digest sha256:0fa3037ac30c is still enforcing: the last change was rejected (config reload rule pack preflight: global rule pack "acme": digest sha256:46ece6be297f9c9b221524923b4baf2035c810503ddfa1b83a1024ee3c55c6e0 does not match guardrail.custom_packs.acme.digest)
+```
+
+#### Doctor warns "config.yaml was edited outside the DefenseClaw writer"
+
+`policy digest` may print "config.yaml changed outside the DefenseClaw writer since". `config.generation.json` does not record the current bytes of `config.yaml`: someone wrote the file in place. On a managed host the apply trigger runs `ensure`, which records the edit as the next generation or reverts it.
+
+**Fix.** Wait for the apply run, or run `ensure`. If `status` warns `config_rejected`, fix the rejected edit. Change the config through your MDM or `ensure --config`, not by editing the installed file.
+
+In bundle mode (bundle trust anchors installed), the config comes only from signed bundles: a plain config is refused with `bundle_required` and an edit of the file on Linux and macOS is reverted.
+
+**Check.** The warning is gone.
+
+### Identity and enrollment
+
+An unenrolled user's agent is refused with `enterprise_managed_uid_unregistered` (Linux, macOS) or `enterprise_managed_sid_unregistered` (Windows); see the [hook refusal codes](/docs/enterprise/troubleshooting#hook-refusal-codes). After you fix the cause, allow one enumerator cycle (5 minutes) and a guardian reconcile, or run `reconcile`. The rules are in [Enrollment](/docs/enterprise/enrollment).
+
+#### A user is not enrolled (Linux)
+
+A local account's uid is outside `UID_MIN` to `UID_MAX` from `/etc/login.defs` (1000 to 60000 if unset), or any account is above `uid_max` when you set it.
+
+**Fix.** Add the user to `enterprise.enrollment.include_users`, which bypasses the uid range and the shell check, or change `uid_min` or `uid_max`.
+
+**Check.** The user's agent no longer returns `enterprise_managed_uid_unregistered`.
+
+#### A user is not enrolled (Linux and macOS)
+
+The login shell is `nologin` or `false`. Or the user is in `exclude_users` or an excluded group, or in `exempt_users` (inspected without enrollment). Or the home is outside the allowed home roots (`/home` and `/var/home` on Linux, `/Users` on macOS, plus `home_roots`).
+
+**Fix.** Fix the account, the lists or `home_roots`. See [Enrollment](/docs/enterprise/enrollment).
+
+**Check.** The user's agent no longer returns `enterprise_managed_uid_unregistered`.
+
+#### A user is not enrolled (macOS)
+
+The uid is below 501.
+
+**Fix.** Add the user to `include_users` or set `uid_min`.
+
+**Check.** The user's agent no longer returns `enterprise_managed_uid_unregistered`.
+
+#### A user is not enrolled (Windows)
+
+One of these holds:
+
+- The user is in `exclude_users` or an excluded group, or in `exempt_users`.
+- `include_groups` is set and the user is not a member, or their membership is still unknown (a directory user who has not signed in since installation stays pending).
+- The user is signed out or disconnected. The guardian writes hooks only during an active session (console or Remote Desktop); an SSH, scheduled-task or `runas` session does not enroll the account.
+
+**Fix.** Have the user sign in, or change the lists. See [Enrollment](/docs/enterprise/enrollment#windows).
+
+**Check.** The user's agent no longer returns `enterprise_managed_enrollment_pending` or `enterprise_managed_sid_unregistered`.
+
+#### A new user is protected only after a few minutes
+
+The enumerator runs every 5 minutes.
+
+**Fix.** Wait one cycle, or run `reconcile` to apply existing rows at once.
+
+**Check.** The user's agent runs DefenseClaw's hooks.
+
+### Find what holds port 18970
+
+```bash title="Linux"
+sudo ss -ltnp 'sport = :18970'
+```
+
+```bash title="macOS"
+sudo lsof -nP -iTCP:18970 -sTCP:LISTEN
+```
+
+```powershell title="Windows"
+Get-NetTCPConnection -LocalPort 18970 -State Listen | Select-Object LocalAddress, OwningProcess
+```

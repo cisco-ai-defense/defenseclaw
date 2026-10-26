@@ -789,7 +789,7 @@ def test_amp_open_preview_and_help_scope_failure_rows_to_per_user_outages() -> N
     assert help_result.exit_code == 0, help_result.output
     assert "Amp" in help_result.output and "per-user" in help_result.output
     assert "hook-failures.jsonl" in help_result.output
-    page = (Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/configuration/fail-modes.mdx")
+    page = (Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/fail-modes.mdx")
     page_text = page.read_text(encoding="utf-8")
     reporting = page_text.split("## Reporting and diagnosis", 1)[1]
     assert "Amp plugin writes a record only for a call an outage let run" in reporting
@@ -2012,7 +2012,7 @@ class HILTCommandTests(unittest.TestCase):
         from defenseclaw import config as dcconfig
         from defenseclaw.commands import cmd_setup
 
-        page = Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/policy/defaults.mdx"
+        page = Path(__file__).resolve().parents[2] / "docs-site/content/docs/policies/defaults.mdx"
         block = re.search(r"go back to the defaults:\n\n```bash\n(.*?)```", page.read_text(), re.S)
         self.assertIsNotNone(block)
         app = make_multi_ctx({"claudecode": None})
@@ -2037,7 +2037,7 @@ class HILTCommandTests(unittest.TestCase):
                 # `policy activate` does not copy a preset's hilt section.
                 self.assertEqual(args[:2], ["policy", "activate"], msg=line)
         self.assertFalse(gc.effective_hilt("claudecode").enabled)
-        flag_doc = page.parents[1] / "commands/guardrail-setup.mdx"
+        flag_doc = page.parents[1] / "guardrail/index.mdx"
         self.assertIn("Without --connector it changes only the global guardrail.hilt", flag_doc.read_text())
 
 
