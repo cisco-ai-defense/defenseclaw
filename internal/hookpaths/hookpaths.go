@@ -669,6 +669,12 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			}
 			name, value, ok := copilotargs.NativeSingleCall(calls)
 			if !ok {
+				// A model's parallel calls arrive as one envelope of several
+				// calls; the gateway judges each (GAP-1016, agent-hook), so
+				// each is described and the maps are merged.
+				if list, isList := calls.([]any); isList && len(list) > 1 {
+					return resolveCopilotCalls(connector, surface, event, envelope, list)
+				}
 				return incompleteEvidence("")
 			}
 			toolRaw, _ = json.Marshal(name)
@@ -1173,6 +1179,79 @@ func sameAliasValue(a, b json.RawMessage) bool {
 
 // incompleteEvidence is the header for a tool call whose write operands
 // could not be listed. The gateway must not treat it as complete.
+// resolveCopilotCalls describes each call of a Copilot toolCalls envelope as
+// a single-call envelope and merges the maps: operand keys are per path,
+// TruncatedKey is set when any call's map is incomplete, and PatchCompleteKey
+// only when every apply_patch call is complete. A call that is not one fully
+// named call, or a merged map over the bounds, is incomplete.
+func resolveCopilotCalls(connector, surface, event string, envelope map[string]json.RawMessage, calls []any) string {
+	if len(calls) > MaxWriteTargets {
+		return incompleteEvidence("")
+	}
+	merged := map[string]string{}
+	patchCalls, patchComplete := 0, 0
+	var cwd string
+	_ = json.Unmarshal(envelope["cwd"], &cwd)
+	for _, call := range calls {
+		name, _, ok := copilotargs.NativeSingleCall([]any{call})
+		if !ok {
+			return incompleteEvidence(cwd)
+		}
+		single := make(map[string]json.RawMessage, len(envelope))
+		for key, value := range envelope {
+			single[key] = value
+		}
+		raw, err := json.Marshal([]any{call})
+		if err != nil {
+			return incompleteEvidence(cwd)
+		}
+		single["toolCalls"] = raw
+		body, err := json.Marshal(single)
+		if err != nil {
+			return incompleteEvidence(cwd)
+		}
+		encoded := ResolveConnector(connector, surface, event, body)
+		if encoded == "" {
+			continue
+		}
+		targets, ok := Decode(encoded)
+		if !ok {
+			return incompleteEvidence(cwd)
+		}
+		if isApplyPatchToolName(copilotargs.LocalActionTool(name)) {
+			patchCalls++
+			if targets[PatchCompleteKey] == "1" {
+				patchComplete++
+			}
+		}
+		delete(targets, PatchCompleteKey)
+		for key, value := range targets {
+			previous, seen := merged[key]
+			switch {
+			case !seen || previous == value || key == TruncatedKey:
+				merged[key] = value
+			case key == FileIdentitiesKey:
+				merged[key] = previous + "," + value
+			case key == InstructionIdentityKey:
+				merged[key] = previous + "\x00" + value
+			default:
+				return incompleteEvidence(cwd)
+			}
+		}
+	}
+	if len(merged) == 0 && patchCalls == 0 {
+		return ""
+	}
+	if patchCalls > 0 && patchComplete == patchCalls && merged[TruncatedKey] == "" {
+		merged[PatchCompleteKey] = "1"
+	}
+	encoded, err := json.Marshal(merged)
+	if err != nil || len(encoded) > maxEncodedTargets || len(merged) > 2*MaxWriteTargets+6 {
+		return incompleteEvidence(cwd)
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
 func incompleteEvidence(cwd string) string {
 	targets := map[string]string{TruncatedKey: "1"}
 	if cwd != "" && len(cwd) <= MaxWriteTargetPathBytes {
