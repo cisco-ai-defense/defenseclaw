@@ -106,17 +106,31 @@ func TestAStopAnOlderDaemonCouldNotMakeSaysTheWayOn(t *testing.T) {
 	for _, tc := range []struct {
 		name, driver string
 		err          *sandboxapi.Error
-		want, not    string
+		// want are the clauses the refusal must hold, each on its own, so
+		// advice added between them does not break the test (GAP-1129).
+		want []string
+		not  string
 	}{
-		{name: "older daemon, MicroVM", driver: "vm", err: generic,
-			want: "is in error state; t8 is in OpenShell's error state (MainProcessFailed: Canonical main process exited with status 137): OpenShell does not stop it, " +
-				"so its MicroVM may still run, and DefenseClaw stops, restarts and upgrades no OpenShell gateway under it, nor moves this account to another OpenShell setup, " +
-				"until OpenShell reports it stopped: save or sync any accessible guest work outside the guest first; " +
-				"OpenShell 0.1.3 cannot stop or start a completed or error-state MicroVM: " +
-				"`defenseclaw sandbox delete t8` (DefenseClaw sandbox) or `openshell sandbox delete t8` (raw OpenShell sandbox), which deletes it and its work"},
+		{name: "older daemon, MicroVM", driver: "vm", err: generic, want: []string{
+			// The cause OpenShell gave.
+			"is in error state",
+			"t8 is in OpenShell's error state (MainProcessFailed: Canonical main process exited with status 137)",
+			// The gateway it keeps, and why nothing is stopped under it.
+			"OpenShell does not stop it, so its MicroVM may still run",
+			"DefenseClaw stops, restarts and upgrades no OpenShell gateway under it",
+			"until OpenShell reports it stopped",
+			// The work first.
+			"save or sync any accessible guest work outside the guest first",
+			// The 0.1.3 limit.
+			"OpenShell 0.1.3 cannot stop or start a completed or error-state MicroVM",
+			// The delete commands, and what they cost.
+			"`defenseclaw sandbox delete t8` (DefenseClaw sandbox)",
+			"`openshell sandbox delete t8` (raw OpenShell sandbox)",
+			"which deletes it and its work",
+		}},
 		{name: "older daemon, docker", driver: "docker", err: generic, not: "OpenShell does not stop it"},
 		{name: "current daemon", driver: "vm", err: &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: "t8 is in OpenShell's error state", Detail: "its own way on"},
-			want: "t8 is in OpenShell's error state: its own way on", not: "OpenShell does not stop it"},
+			want: []string{"t8 is in OpenShell's error state: its own way on"}, not: "OpenShell does not stop it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sb := sampleSandbox("t8")
@@ -125,8 +139,13 @@ func TestAStopAnOlderDaemonCouldNotMakeSaysTheWayOn(t *testing.T) {
 			ta.daemon.status.Gateway.Version = "0.1.3"
 			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/t8/stop"] = tc.err
 			err := ta.Stop(bg, StopOptions{Name: "t8", Yes: true})
-			if err == nil || tc.want != "" && !strings.Contains(err.Error(), tc.want) || tc.not != "" && strings.Contains(err.Error(), tc.not) {
+			if err == nil || tc.not != "" && strings.Contains(err.Error(), tc.not) {
 				t.Fatalf("stop = %v", err)
+			}
+			for _, clause := range tc.want {
+				if !strings.Contains(err.Error(), clause) {
+					t.Errorf("stop = %v\nmissing %q", err, clause)
+				}
 			}
 		})
 	}
