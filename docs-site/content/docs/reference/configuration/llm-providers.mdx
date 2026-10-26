@@ -27,6 +27,10 @@ DefenseClaw sends every LLM call through one of two layers: the in-process **Bif
       type: 'subcommand',
       description: 'Walk through every REQUIRED-but-unset credential with hidden prompts. Use after `setup guardrail` enabled a feature whose key was not set yet. --yes skips the upfront confirmation.',
     },
+    'remove <ENV_NAME>': {
+      type: 'subcommand',
+      description: 'Remove a value from ~/.defenseclaw/.env. Asks y/N first. Records an audit event.',
+    },
     'check': {
       type: 'subcommand',
       description: 'Exit 0 when every required key is set, non-zero otherwise. Designed for CI and preflight scripts; prints a short summary and nothing else.',
