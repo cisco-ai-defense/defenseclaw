@@ -446,6 +446,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-config-acl-repair-smoke.ps1",
     "enterprise-standalone-enumerator-environment-smoke.ps1",
     "enterprise-standalone-guardian-first-reconcile-wait-smoke.ps1",
+    "enterprise-standalone-guardian-state-identity-smoke.ps1",
     "enterprise-standalone-install-tree-smoke.ps1",
     "enterprise-standalone-machine-leftovers-purge-smoke.ps1",
     "enterprise-standalone-manifest-adoption-smoke.ps1",

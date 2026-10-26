@@ -8865,12 +8865,24 @@ function Get-DefenseClawGuardianStateIdentity {
             -PathType Leaf)) {
         return $null
     }
-    [void](Assert-DefenseClawDescendant `
-        -Path $path `
-        -Root $Layout.RuntimeDirectory `
-        -Label 'hook guardian state')
-    Assert-DefenseClawNoReparsePath -Path $path
-    return Get-DefenseClawFileIdentity -Path $path
+    # The wait polls this file while the guardian that writes it restarts
+    # and may replace it: absent for one read means no identity yet, never
+    # a failed transaction (GAP-1849). A reparse point or a path outside
+    # the runtime folder still throws.
+    try {
+        [void](Assert-DefenseClawDescendant `
+            -Path $path `
+            -Root $Layout.RuntimeDirectory `
+            -Label 'hook guardian state')
+        Assert-DefenseClawNoReparsePath -Path $path
+        return Get-DefenseClawFileIdentity -Path $path
+    }
+    catch {
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
+            return $null
+        }
+        throw
+    }
 }
 
 function Wait-DefenseClawServiceFailureRestartQuiescence {
