@@ -65,11 +65,18 @@ const (
 	hookCallerInFlight = 32
 	// hookGlobalInFlightPerProc and hookGlobalInFlightMin bound the requests
 	// the gateway holds at once for all callers together: 16 per processor,
-	// at least 32. A processor serves about 3 hooks a second, so a full
-	// gateway answers its last admitted request in about 5 s, inside the
-	// shortest hook deadline (10 s).
+	// at least four callers' in-flight caps (128). A caller's share of it is a
+	// quarter, so on a small host the minimum is what lets one account hold
+	// its full hookCallerInFlight: 10 calls a second for the 3.5 s answer
+	// budget. With a minimum of 32 a host of two processors let one account
+	// hold 8, so an ordinary 10 calls a second whose answers took over 0.8 s
+	// under CPU load (five agent TUIs starting beside two busy agents) were
+	// refused 429 and blocked as a gateway no-answer (GAP-1790). A request
+	// that waits for its caller's run slot uses no CPU and is dropped when its
+	// hook gives up, so holding it costs nothing the answer budget does not
+	// already bound.
 	hookGlobalInFlightPerProc = 16
-	hookGlobalInFlightMin     = 32
+	hookGlobalInFlightMin     = 4 * hookCallerInFlight
 	// hookCallerIdle is how long an idle caller's budget is kept.
 	hookCallerIdle = 5 * time.Minute
 	// hookCallerLogInterval paces the refusal log line per caller.
