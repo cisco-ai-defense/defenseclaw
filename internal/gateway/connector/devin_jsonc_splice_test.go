@@ -23,7 +23,8 @@ func TestPatchDevinProjectHooksKeepsOperatorCommentsAndForeignHooks(t *testing.T
 	}
 	foreignPre := `[{"matcher":"*","hooks":[{"type":"command","command":"/bin/true"}]}]`
 	foreignHooks := `{"PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/bin/true"}]}]}`
-	original := "// project hooks: keep this note\n{\n  /* lint hook */\n  \"PreToolUse\": " + foreignPre +
+	// PostToolUse first: the events are edited in document order.
+	original := "// project hooks: keep this note\n{\n  \"PostToolUse\": [],\n  /* lint hook */\n  \"PreToolUse\": " + foreignPre +
 		",\n  \"hooks\": " + foreignHooks + ", // a foreign set\n}\n"
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)

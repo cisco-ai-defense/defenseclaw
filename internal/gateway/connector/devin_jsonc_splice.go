@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"sort"
 )
 
 // spliceDevinProjectHooks returns the project hooks.v1.json document data
@@ -46,6 +47,8 @@ func spliceDevinProjectHooks(data []byte, events []string, want map[string]inter
 		key, _ := json.Marshal(event)
 		inserted = append(inserted, append(append(append([]byte("\n  "), key...), ": "...), value...))
 	}
+	// Members are edited in document order, whatever the event order.
+	sort.Slice(edits, func(a, b int) bool { return edits[a].start < edits[b].start })
 	var out bytes.Buffer
 	last := 0
 	for _, e := range edits {
