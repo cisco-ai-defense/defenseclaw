@@ -56,4 +56,10 @@ runs:
           ${{ steps.paths.outputs.modcache }}
           ${{ steps.paths.outputs.buildcache }}
         key: ${{ steps.paths.outputs.key }}
-        restore-keys: ${{ steps.paths.outputs.prefix }}
+        # The last line matches the entries actions/setup-go saved before
+        # this action (same two paths): it serves pull requests until main
+        # has written a go-* entry for their go.sum, and matches nothing
+        # once those older entries expire.
+        restore-keys: |
+          ${{ steps.paths.outputs.prefix }}
+          setup-go-${{ runner.os }}-
