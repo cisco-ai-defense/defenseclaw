@@ -141,6 +141,16 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 		for _, grammar := range []actionWindowsGrammar{0, actionWindowsPlainGrammar} {
 			scan := actionWindowsScan(command, grammar)
 			if !scan.ok {
+				// An unreadable command: each piece between separators is
+				// read on its own, so a key read the misread quote hides is
+				// still found (GAP-1779).
+				for _, piece := range strings.FieldsFunc(command, func(r rune) bool {
+					return strings.ContainsRune(";|&\r\n", r)
+				}) {
+					if actionPrivateKeyReadWords(strings.Fields(piece), cwd, home, true, 0) {
+						return true
+					}
+				}
 				continue
 			}
 			words, start := scan.words, 0

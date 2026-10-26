@@ -1384,29 +1384,17 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 			}
 		}
 	}
-	// PowerShell does not expand variables inside single quoted literals.
-	// Preserve the literal pathname there while keeping its dollar sign from
-	// being mistaken for a resolvable home variable.
-	var normalized strings.Builder
-	normalized.Grow(len(command))
-	singleQuoted := false
-	for i := 0; i < len(command); i++ {
-		if command[i] == '\'' {
-			singleQuoted = !singleQuoted
-		}
-		if singleQuoted && command[i] == '$' {
-			normalized.WriteByte('@')
-		} else {
-			normalized.WriteByte(command[i])
-		}
-	}
-	scan := actionWindowsScan(normalized.String(), grammar)
+	// PowerShell does not expand variables inside single quoted literals:
+	// the scanner keeps their $ from reading as a home variable, by the
+	// quotes it reads (a quote in a comment or a smart quote no longer flips
+	// the state, GAP-1779).
+	scan := actionWindowsScan(command, grammar|actionWindowsLiteralDollar)
 	words, ok := scan.words, scan.ok
 	if !ok {
 		// A command the scanner cannot read may still be read differently by
 		// the shell that runs it (GAP-1500). Keep the class rule there, as the
-		// POSIX text scan does.
-		return actionWindowsUnreadTargetMention(normalized.String(), cwd, home, stateOnly)
+		// POSIX text scan does, on the command as written (GAP-1779).
+		return actionWindowsUnreadTargetMention(command, cwd, home, stateOnly)
 	}
 	if len(words) == 0 || depth == 0 && actionKnownReadOnlyWindows(words) {
 		return false
