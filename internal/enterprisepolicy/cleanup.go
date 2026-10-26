@@ -71,7 +71,7 @@ func CleanUserForeignHooksWithRedirects(req GuardRequest, redirects []EnvRedirec
 		// remain the user's, and project files are still never rewritten.
 		source := hookSource{scope: ScopeUser, path: filepath.Join(req.Home, ".claude", "settings.json"), format: formatGrouped, home: req.Home, base: req.Home}
 		errs = append(errs, cleanJSONSourceMatching(newGuardScan(req), source, backupDir, &result, func(finding Finding) bool {
-			return connector.IsLegacyClaudeCodeUserHookCommand(finding.Command, req.Home)
+			return connector.IsLegacyClaudeCodeUserHookCommand(finding.command, req.Home)
 		}))
 	}
 	passes := []GuardRequest{req}

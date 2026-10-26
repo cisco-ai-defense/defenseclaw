@@ -121,6 +121,9 @@ type Finding struct {
 	// key locates the entry inside its document for the cleanup (the
 	// entry's own canonical form, independent of what it references).
 	key string
+	// command is the full command; Command is shortened for reports, so
+	// cleanup decisions must use this one.
+	command string
 }
 
 // GuardRequest describes one scan.
@@ -803,6 +806,7 @@ func findingFor(req GuardRequest, source hookSource, event, command string, dige
 		Digest:    digest,
 		Reason:    reason,
 		key:       digest,
+		command:   command,
 	}
 	for _, allowed := range req.Policy.AllowedHooks {
 		if allowed == digest {

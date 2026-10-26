@@ -156,3 +156,28 @@ func TestCopilotCleanupRetiresLegacyClaudeUserHook(t *testing.T) {
 		t.Fatalf("retired legacy gateway still blocks: %+v", got)
 	}
 }
+
+// The report shortens a finding's command; retirement must match the full
+// command, or a long home leaves the retained registration blocking.
+func TestCopilotCleanupRetiresLegacyClaudeUserHookUnderALongHome(t *testing.T) {
+	req := guardRequest(t, ConnectorCopilot, config.ForeignHooksRemove)
+	req.Home = filepath.Join(req.Home, strings.Repeat("h", 120))
+	req.GOOS = "windows"
+	req.WorkingDir = filepath.Join(req.Home, "project")
+	if err := os.MkdirAll(req.WorkingDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `"` + filepath.Join(req.Home, ".local", "bin", "defenseclaw-hook.exe") + `" hook --connector claudecode`
+	data, err := json.Marshal(map[string]any{"hooks": map[string]any{"PreToolUse": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": legacy}}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(req.Home, ".claude", "settings.json"), string(data))
+	req.RetireLegacyClaudeUserHooks = true
+	if result, err := CleanUserForeignHooks(req, time.Now()); err != nil || len(result.Removed) != 1 {
+		t.Fatalf("cleanup under a long home = %+v, %v", result, err)
+	}
+	if got := EvaluateForeignHooks(req); got.Deny {
+		t.Fatalf("retired legacy command still blocks: %+v", got)
+	}
+}
