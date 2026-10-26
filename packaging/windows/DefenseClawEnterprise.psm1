@@ -39060,11 +39060,37 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     finally {
         Exit-DefenseClawLifecycleLock -Lock $lifecycleLock
-        if ($script:DefenseClawRemoveLifecycleLockOnExit) {
+        if ($script:DefenseClawRemoveLifecycleLockOnExit -or
+            (Test-DefenseClawStandaloneUninstallLeftNothing -Action $Action -Layout $layout)) {
             $script:DefenseClawRemoveLifecycleLockOnExit = $false
             Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout
         }
     }
+}
+
+function Test-DefenseClawStandaloneUninstallLeftNothing {
+    <#
+        Every standalone uninstall that leaves no deployment (no StateRoot, no
+        InstallRoot) drops the lifecycle lock and its empty folder, as the
+        install reference says, whichever path removed the deployment: a
+        PURGE=1 over a tombstone an earlier release (1.0.2) wrote set no flag
+        and left them (GAP-1897). The lock goes only once no other run holds
+        it.
+    #>
+    param(
+        [AllowEmptyString()][string]$Action,
+        [hashtable]$Layout
+    )
+    if ($Action -cne 'Uninstall' -or $null -eq $Layout -or -not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    foreach ($root in @([string]$Layout.StateRoot, [string]$Layout.InstallRoot)) {
+        if ([string]::IsNullOrWhiteSpace($root) -or
+            (Microsoft.PowerShell.Management\Test-Path -LiteralPath $root)) {
+            return $false
+        }
+    }
+    return $true
 }
 
 Microsoft.PowerShell.Core\Export-ModuleMember -Function Invoke-DefenseClawEnterpriseLifecycle

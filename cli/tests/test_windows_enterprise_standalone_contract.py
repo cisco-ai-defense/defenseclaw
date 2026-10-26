@@ -466,6 +466,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-stale-lifecycle-journal-smoke.ps1",
     "enterprise-standalone-state-files-in-use-smoke.ps1",
     "enterprise-standalone-uninstall-hook-commit-smoke.ps1",
+    "enterprise-standalone-uninstall-lifecycle-lock-smoke.ps1",
     "enterprise-standalone-uninstall-cleanup-trust-smoke.ps1",
     "enterprise-standalone-user-cleanup-report-smoke.ps1",
 )
