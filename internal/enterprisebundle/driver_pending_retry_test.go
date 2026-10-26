@@ -208,6 +208,9 @@ func TestDriverFailedDeliveryRecordsOnlyAProvenRollback(t *testing.T) {
 		pendingState string
 		policy       func(r *pendingRun) enterprisebundle.GatewayPolicy
 		rolledBack   bool
+		// pending: the gateway was down and the run's own base config is
+		// installed: the delivery stays open (GAP-0751).
+		pending bool
 	}{
 		{name: "pending applied predecessor put back, gateway unavailable", pendingState: enterprisebundle.StateApplied,
 			policy: func(*pendingRun) enterprisebundle.GatewayPolicy { return enterprisebundle.GatewayPolicy{} }},
@@ -218,7 +221,7 @@ func TestDriverFailedDeliveryRecordsOnlyAProvenRollback(t *testing.T) {
 		{name: "last good put back, gateway proves it",
 			policy: func(r *pendingRun) enterprisebundle.GatewayPolicy { return r.aPolicy }, rolledBack: true},
 		{name: "last good put back, gateway unavailable",
-			policy: func(*pendingRun) enterprisebundle.GatewayPolicy { return enterprisebundle.GatewayPolicy{} }},
+			policy: func(*pendingRun) enterprisebundle.GatewayPolicy { return enterprisebundle.GatewayPolicy{} }, pending: true},
 		{name: "last good put back, gateway rejected the reload",
 			policy: func(r *pendingRun) enterprisebundle.GatewayPolicy {
 				p := r.aPolicy
@@ -252,6 +255,12 @@ func TestDriverFailedDeliveryRecordsOnlyAProvenRollback(t *testing.T) {
 			putBack := false
 			_, err = r.d.Finish(c, predecessor.ConfigSHA256, []string{"service_start_failed"}, tc.policy(r), false,
 				func() (string, bool) { putBack = true; return "", true })
+			if tc.pending {
+				if enterprisebundle.CodeOf(err) != enterprisebundle.CodeNotConfirmed || enterprisebundle.Finished(c.Receipt.State) || c.Receipt.RolledBack || putBack {
+					t.Fatalf("outage: finish = %v, receipt %+v, put back %v; want it pending", err, c.Receipt, putBack)
+				}
+				return
+			}
 			if enterprisebundle.CodeOf(err) != enterprisebundle.CodeApplyFailed || c.Receipt.State != enterprisebundle.StateFailed {
 				t.Fatalf("finish = %v, receipt %+v", err, c.Receipt)
 			}
