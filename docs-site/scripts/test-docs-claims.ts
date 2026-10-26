@@ -1221,6 +1221,7 @@ const knownLimitEntries = [
     from: ['connectors/codex.mdx', 'reference/connectors/codex.mdx'],
   },
   { gaps: 'GAP-1110', section: 'Local Splunk', phrases: ['works only with an x86_64 Docker engine', 'published for x86_64 (amd64) only', 'This is a Splunk image limit.', '/docs/how-to/observability/send-to-splunk#before-you-start'], from: [] },
+  { gaps: 'GAP-1565', section: 'Upgrade and policy limits', phrases: ['**Restored hook records on managed macOS:**', '`hook_contract_lock.json`', 'the guardian and gateway rewrite them at the next check', 'compare the hook commands, not the file bytes'], from: [] },
 ] as const;
 
 function knownLimitSection(heading: string): string {
