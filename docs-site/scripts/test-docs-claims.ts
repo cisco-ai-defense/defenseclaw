@@ -1220,6 +1220,7 @@ const knownLimitEntries = [
     phrases: ['the `Sandbox ready` step', '`approval required by policy, but AskForApproval::Granular.sandbox_approval is false`', 'Codex does this with or without DefenseClaw', 'It is a Codex limit.', 'Quit Codex and start it again once'],
     from: ['connectors/codex.mdx', 'reference/connectors/codex.mdx'],
   },
+  { gaps: 'GAP-1110', section: 'Local Splunk', phrases: ['works only with an x86_64 Docker engine', 'published for x86_64 (amd64) only', 'This is a Splunk image limit.', '/docs/how-to/observability/send-to-splunk#before-you-start'], from: [] },
 ] as const;
 
 function knownLimitSection(heading: string): string {

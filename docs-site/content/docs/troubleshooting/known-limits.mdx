@@ -28,7 +28,7 @@ Antigravity can run a tool when its `PreToolUse` hook times out or cannot start,
 
 ## Local Splunk
 
-The local Splunk bridge works only with an x86_64 Docker engine. On ARM64, use `--enterprise` with an existing Splunk HTTP Event Collector (HEC) endpoint. See [Send to Splunk](/docs/how-to/observability/send-to-splunk#before-you-start).
+The local Splunk bridge works only with an x86_64 Docker engine, because the Splunk container image it runs is published for x86_64 (amd64) only. This is a Splunk image limit. On ARM64, use `--enterprise` with an existing Splunk HTTP Event Collector (HEC) endpoint. See [Send to Splunk](/docs/how-to/observability/send-to-splunk#before-you-start).
 
 ## Managed Linux and macOS scans
 
