@@ -24181,6 +24181,11 @@ function Invoke-DefenseClawNuclearUninstall {
     # 3a. Unconditional-delete DefenseClaw-owned sidecar files inside
     #     each agent config directory. These sidecars are our own
     #     per-connector state/lock/receipt files - no other owner.
+    #     The hooks' runtime selector (state and lock) goes too: once
+    #     StateRoot and its Guardian activation are gone, a selector left
+    #     behind made the next install refuse ("legacy deployment has no
+    #     Guardian activation but <connector> runtime selector is
+    #     present") and a different build's Guardian report contract drift.
     foreach ($fixedPath in @(
         # Legacy production IPC dir (orphan NT SERVICE SIDs land here).
         'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc',
@@ -24188,15 +24193,21 @@ function Invoke-DefenseClawNuclearUninstall {
         'C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json',
         'C:\Program Files\ClaudeCode\managed-settings.d\.defenseclaw-managed-hooks.state',
         'C:\Program Files\ClaudeCode\managed-settings.d\.defenseclaw-managed-hooks.lock',
+        'C:\Program Files\ClaudeCode\managed-settings.d\.defenseclaw-managed-runtime-selector.state',
+        'C:\Program Files\ClaudeCode\managed-settings.d\.defenseclaw-managed-runtime-selector.lock',
         # Codex managed hooks sidecars.
         'C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-hooks.state',
         'C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-hooks.lock',
         'C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-hooks.receipt',
+        'C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-runtime-selector.state',
+        'C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-runtime-selector.lock',
         # Cursor managed hooks sidecars + the adapter stub we drop.
         'C:\ProgramData\Cursor\defenseclaw-hook.ps1',
         'C:\ProgramData\Cursor\.defenseclaw-managed-hooks.state',
         'C:\ProgramData\Cursor\.defenseclaw-managed-hooks.lock',
-        'C:\ProgramData\Cursor\.defenseclaw-managed-hooks.receipt'
+        'C:\ProgramData\Cursor\.defenseclaw-managed-hooks.receipt',
+        'C:\ProgramData\Cursor\.defenseclaw-managed-runtime-selector.state',
+        'C:\ProgramData\Cursor\.defenseclaw-managed-runtime-selector.lock'
     )) {
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $fixedPath)) {
             continue
