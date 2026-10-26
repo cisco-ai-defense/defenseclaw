@@ -71,20 +71,20 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 # bridge_host), and the copy the Secure Client profile renders
 # (internal/gateway/connector/hooks/*-secure-client.*), which its release pins.
 _BRIDGE_STANDALONE_TEMPLATE_DIGESTS = {
-    "amp": "f20d4ccd9d2eba4436f6a8a07ffbe49d4d009bb64729b1d420b030be1117c3ec",
-    "opencode": "e3aa5791756f9cf2ce5eeed3164e62279794ace348d1531879920a270cf09bd2",
+    "amp": "c74ee37cafe75e353ecc6b307672b71c486add98d6a2497aa7b637b16ca2b9aa",
+    "opencode": "e565fde92e9b3eac079fe9855f2a45c4f5aa961fd3301fdca1883ccc5ae4136f",
 }
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "14c35301516952830e472a8fcba2b4458ebaa59868a69a631887b615f3745c32",  # amp-plugin.ts
+            "71ea9e971d221a23d86c9bc61415fd84a62ca3af6dfd0c2bf8b303a9ccd5039e",  # amp-plugin.ts
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["amp"],
             "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "97cdf6cbbe1ebab4ed67e4d503e3f652982b063976e9e6aa4af7f5c9b34e2fd5",  # opencode-plugin.js
+            "8e58b972cb7618c9ccc90fa2aa2ecc339c45ea537e28a5eec852659ce27be390",  # opencode-plugin.js
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["opencode"],
             "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
         }
