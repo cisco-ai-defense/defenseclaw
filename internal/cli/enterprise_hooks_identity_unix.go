@@ -14,6 +14,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -290,7 +291,7 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 			}
 		}
 		for _, uid := range enterpriseHookRecordedCallerUIDs(dir) {
-			if !seen[uid] {
+			if !seen[uid] && !enterpriseHookLocalRecordLeft(dir, uid) {
 				list(uid, canonicalUser(uid), 0)
 			}
 		}
@@ -559,6 +560,23 @@ func enterpriseHookIdentityDataDir() string {
 		return ""
 	}
 	return cfg.DataDir
+}
+
+// enterpriseHookLocalRecordLeft reports whether dir's record of uid is a
+// local account's and the account database answers that no account holds
+// the uid any more (unixidentity.ErrNotFound; a lookup error is no deletion
+// signal). Such a record is not refreshed as a recorded caller's: the pass
+// does not list it, so the cleanup removes it as any unlisted local record.
+// Refreshing it kept a deleted local account's record for good, and status
+// and verify warned identity_records_stale for it (GAP-1864). Tests replace
+// it.
+var enterpriseHookLocalRecordLeft = func(dir string, uid int) bool {
+	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), nil)
+	if err != nil || record.Facts.Directory != useridentity.DirectoryLocal {
+		return false
+	}
+	_, err = enterprisehooks.StandaloneResolver().LookupUID(uid)
+	return errors.Is(err, unixidentity.ErrNotFound)
 }
 
 func enterpriseHookRecordedCallerUIDs(dir string) []int {

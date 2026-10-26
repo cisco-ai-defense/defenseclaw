@@ -15,8 +15,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // GAP-0422 (FC-BLK-167-ER): on a host whose gateway accepts every account (a
@@ -87,5 +90,57 @@ func TestGatewayPeerAccountsReadTheGatewayHomesFile(t *testing.T) {
 	}
 	if enterpriseHookGatewayPeerAccounts(t.TempDir()) != nil {
 		t.Fatal("peers without a homes file")
+	}
+}
+
+// GAP-1864: on a machine-policy host the guardian refreshed every record it
+// already held, also the record of a local account deleted since, so the
+// record never went and status and verify warned identity_records_stale for
+// good. A local record whose uid no account holds any more is not listed,
+// and the pass's cleanup removes it; a local record of an account that
+// exists is still refreshed.
+func TestDeletedLocalAccountRecordIsNotRefreshed(t *testing.T) {
+	identityCallerTestConfig(t)
+	cfg.Enterprise.Enrollment.UnenrolledUsers = config.EnterpriseUnenrolledInspect
+	previousMachine, previousPeers := enterpriseHookLoadMachinePolicyConnectors, enterpriseHookGatewayPeerAccounts
+	t.Cleanup(func() {
+		enterpriseHookLoadMachinePolicyConnectors, enterpriseHookGatewayPeerAccounts = previousMachine, previousPeers
+	})
+	enterpriseHookLoadMachinePolicyConnectors = func() ([]string, error) { return []string{"claudecode"}, nil }
+	enterpriseHookGatewayPeerAccounts = func(string) []enterpriseHookPeerAccount { return nil }
+	me, err := user.Current()
+	if err != nil {
+		t.Skip("no current account:", err)
+	}
+	const deleted = 2147400123
+	if _, err := user.LookupId(strconv.Itoa(deleted)); err == nil {
+		t.Skipf("uid %d exists here", deleted)
+	}
+	dir := t.TempDir()
+	for _, record := range []enterprisehooks.IdentitySpoolRecord{
+		{Key: strconv.Itoa(deleted), User: "fcuid1"},
+		{Key: me.Uid, User: me.Username},
+	} {
+		record.Version, record.UpdatedAt = enterprisehooks.IdentitySpoolRecordVersion, time.Now().UTC()
+		record.Facts = useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal}
+		data, err := enterprisehooks.MarshalIdentitySpoolRecord(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, record.Key+".json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	accounts, _, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, enterpriseHookReconcileRun{})
+	listed, _ := listedUIDs(accounts)
+	if slices.Contains(listed, deleted) {
+		t.Fatalf("accounts %+v; the deleted local account's record is still refreshed", accounts)
+	}
+	if uid, _ := strconv.Atoi(me.Uid); !slices.Contains(listed, uid) {
+		t.Fatalf("accounts %+v; want the existing local account's record refreshed", accounts)
+	}
+	_ = enterprisehooks.WriteIdentitySpool(context.Background(), dir, nil, nil, nil, nil)
+	if _, err := os.Stat(filepath.Join(dir, strconv.Itoa(deleted)+".json")); !os.IsNotExist(err) {
+		t.Fatalf("the deleted local account's record is still there after a pass (%v)", err)
 	}
 }
