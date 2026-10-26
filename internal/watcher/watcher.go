@@ -1827,6 +1827,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
 			fmt.Sprintf("type=%s scanner=%s error=%v", targetType, s.Name(), err))
 		w.recordScanError(ctx, s.Name(), targetType, classifyWatcherScanError(err))
+		w.logFailedMCPScan(ctx, evt, s.Name(), target, result, err)
 		if w.keepsUnverifiedMCPServer(evt, targetType, connector, result, err) {
 			return w.keepUnverifiedMCPServer(ctx, evt, targetType, s.Name(), err)
 		}
@@ -2522,6 +2523,39 @@ func (w *InstallWatcher) keepsUnverifiedMCPServer(evt InstallEvent, targetType, 
 		return false
 	}
 	return !w.admissionInputFor(cfg, evt, targetType, connector).BlockListed()
+}
+
+// logFailedMCPScan records an MCP admission scan that did not finish as a
+// failed scan row, so mcp list shows the server's last scan failed instead
+// of an older clean result (GAP-1869). The Secure Client profile keeps the
+// scan log of main.
+func (w *InstallWatcher) logFailedMCPScan(ctx context.Context, evt InstallEvent, scannerName, target string, result *scanner.ScanResult, err error) {
+	if evt.Type != InstallMCP || w.secureClientActive() || err == nil {
+		return
+	}
+	failed := &scanner.ScanResult{
+		Scanner:    scannerName,
+		Target:     target,
+		Timestamp:  time.Now(),
+		TargetType: scanner.InferTargetType(scannerName),
+	}
+	if result != nil {
+		copied := *result
+		failed = &copied
+		if failed.Target == "" {
+			failed.Target = target
+		}
+	}
+	if failed.Target == "" {
+		return
+	}
+	if failed.ExitCode == 0 {
+		failed.ExitCode = -1
+	}
+	if failed.ScanError == "" {
+		failed.ScanError = err.Error()
+	}
+	_ = w.logScan(ctx, evt, failed, "scan-error")
 }
 
 // unverifiedMCPReason leads the reason of an MCP server kept unverified.

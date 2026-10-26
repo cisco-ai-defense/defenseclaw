@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -126,6 +127,9 @@ func TestUnverifiedMCPServerFollowsTheUnverifiedServerSetting(t *testing.T) {
 				if !strings.Contains(got, "install-scan-error") || !strings.Contains(got, "reason=unverified") {
 					t.Fatalf("audit rows:\n%s\nwant install-scan-error and an install-allowed reason=unverified row", got)
 				}
+				// GAP-1869: the scan that did not finish is a failed scan
+				// row, so mcp list does not show an older clean scan.
+				assertLatestMCPScanFailed(t, store, "context7")
 				return
 			}
 			if tc.blockMid {
@@ -170,5 +174,31 @@ func TestUnverifiedMCPServerReleasesAnEarlierScanFailureBlockOnly(t *testing.T) 
 	w.runAdmission(context.Background(), evt)
 	if entry, err := store.GetActionForConnector("mcp", "notes", "codex"); err != nil || entry == nil || entry.Actions.Install != "block" {
 		t.Fatalf("journal %+v (err %v), want the other block kept", entry, err)
+	}
+}
+
+func assertLatestMCPScanFailed(t *testing.T, store *audit.Store, target string) {
+	t.Helper()
+	all, err := store.ListScanResults(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := false
+	for _, row := range all {
+		if row.Scanner == "mcp-scanner" && row.Target == target {
+			recorded = true
+		}
+	}
+	good, err := store.LatestScansByScanner("mcp-scanner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range good {
+		if row.Target == target {
+			t.Fatalf("scan of %s recorded as finished: %+v", target, row)
+		}
+	}
+	if !recorded {
+		t.Fatalf("no failed mcp-scanner row for %s in %+v", target, all)
 	}
 }
