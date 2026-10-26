@@ -49,6 +49,13 @@ func r105StateFixture(t *testing.T) (home, cwd string) {
 // exec_command call in mode and checks the block.
 func r105RunStateRows(t *testing.T, mode, cwd string, rows []r105StateRow) {
 	t.Helper()
+	r105RunStateRowsChecked(t, mode, cwd, rows, false)
+}
+
+// r105RunStateRowsChecked is r105RunStateRows; with quiet, an allowed row
+// must also carry no state tamper finding (no alert either).
+func r105RunStateRowsChecked(t *testing.T, mode, cwd string, rows []r105StateRow, quiet bool) {
+	t.Helper()
 	for _, agent := range []string{"claudecode", "codex"} {
 		t.Run(agent+"/"+mode, func(t *testing.T) {
 			api := instructionProtectionTestAPI(t, agent, mode, "")
@@ -77,6 +84,9 @@ func r105RunStateRows(t *testing.T, mode, cwd string, rows []r105StateRow) {
 					}
 					if r.block && !findingStringHasRuleID(findings, "tamper.detector_state_write") {
 						t.Fatalf("%s: blocked without the state tamper finding: %v", r.command, findings)
+					}
+					if quiet && !r.block && findingStringHasRuleID(findings, "tamper.detector_state_write") {
+						t.Fatalf("%s: allowed row carries the state tamper finding: action=%q findings=%v", r.command, action, findings)
 					}
 				})
 			}
@@ -145,5 +155,48 @@ func TestR105GAP1774WholeTreeOfActiveState(t *testing.T) {
 	}
 	for _, mode := range []string{"observe", "action"} {
 		r105RunStateRows(t, mode, cwd, rows)
+	}
+}
+
+// GAP-2045: an operand that names the state root or a protected tree
+// itself is a state mutation only when it removes or replaces the tree (rm,
+// rmdir, an unfiltered find -delete, a move source, a copy or move onto a
+// tree name). Creating, touching or chowning the directory, and copying or
+// moving a file into the root, are judged by the file reached, so the
+// result does not depend on how the destination is spelled. Benign rows
+// carry no state finding in observe or action.
+func TestR105GAP2045BareStateNamesJudgedByTheFileReached(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell forms")
+	}
+	_, cwd := r105StateFixture(t)
+	if err := os.WriteFile(filepath.Join(cwd, "notes.txt"), []byte("notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows := []r105StateRow{
+		{"mkdir -p root", "mkdir -p ~/.defenseclaw", false, ""},
+		{"mkdir -p policies", "mkdir -p ~/.defenseclaw/policies", false, ""},
+		{"touch root", "touch ~/.defenseclaw", false, ""},
+		{"cp into root slash", "cp notes.txt ~/.defenseclaw/", false, ""},
+		{"cp into root named", "cp notes.txt ~/.defenseclaw/notes.txt", false, ""},
+		{"mv into root slash", "mv notes.txt ~/.defenseclaw/", false, ""},
+		{"find log cleanup", "find ~/.defenseclaw -name '*.log' -mtime +7 -delete", false, ""},
+		{"chown -R root", "chown -R nobody ~/.defenseclaw", false, ""},
+		{"chmod -R root", "chmod -R go-rwx ~/.defenseclaw", false, ""},
+		{"ls root", "ls -la ~/.defenseclaw", false, ""},
+		// Removing, moving or replacing a tree, and a copy that lands on a
+		// protected name, stay blocked.
+		{"rmdir hooks", "rmdir ~/.defenseclaw/hooks", true, ""},
+		{"find -delete hooks", "find ~/.defenseclaw/hooks -delete", true, ""},
+		{"mv hooks away", "mv ~/.defenseclaw/hooks /tmp/r105-h", true, ""},
+		{"mv installer aside", "mv ~/.defenseclaw/installer ~/.defenseclaw/installer.bak", true, ""},
+		{"mv -t hooks away", "mv -t /tmp ~/.defenseclaw/hooks", true, ""},
+		{"mv whole state", "mv ~/.defenseclaw ~/.defenseclaw.old", true, ""},
+		{"mv onto hooks", "mv /tmp/r105-evil ~/.defenseclaw/hooks", true, ""},
+		{"cp config into root", "cp /tmp/config.yaml ~/.defenseclaw/", true, ""},
+		{"cp -r hooks into root", "cp -r /tmp/hooks ~/.defenseclaw/", true, ""},
+	}
+	for _, mode := range []string{"observe", "action"} {
+		r105RunStateRowsChecked(t, mode, cwd, rows, true)
 	}
 }

@@ -2537,9 +2537,10 @@ func matchesActiveDefenseClawState(
 	// The state root and the protected trees themselves: removing,
 	// moving or replacing one removes every file in it (GAP-1774). Removing
 	// hooks/ turns protection off; removing installer/ breaks rollback.
+	// Any other access is judged by the file it reaches (GAP-2045).
 	case "", "cache", "hooks", "installer", "policies", "previous",
 		"previous/installer", "quarantine", "receipts", "registries":
-		return true
+		return stateTreeEntryChanged(facts, candidate, state)
 	case ".env", "config.yaml", "confidence_policy.yaml",
 		"guardrail_runtime.json", "device.key", "picked_connector",
 		"custom-providers.json", "audit.db", "audit.db-wal",
@@ -2562,6 +2563,74 @@ func matchesActiveDefenseClawState(
 	} {
 		if strings.HasPrefix(state, prefix) &&
 			strings.TrimPrefix(state, prefix) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// stateTreeEntryChanged judges an operand that names the state root or a
+// protected tree itself, not a file in it (GAP-1774, GAP-2045). Removing
+// the tree (a delete operand or a move source; a find -delete only when no
+// test narrows it to some entries) changes it, and so does a copy or move
+// onto a tree name, which replaces the tree or lands in it. A copy or move
+// into the root is judged by the name it lands on. Every other access
+// (mkdir -p, touch, chown -R, a read or a list) reaches the directory, not
+// a protected file, so the result never depends on how a destination
+// directory is spelled.
+func stateTreeEntryChanged(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+	state string,
+) bool {
+	command, ok := integrityCommandByID(facts, candidate.CommandID)
+	if !ok {
+		return false
+	}
+	switch candidate.Access {
+	case actionfacts.PathAccessDelete:
+		return !findDeletesOnlyMatches(command)
+	case actionfacts.PathAccessWrite:
+		if !hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove) {
+			return false
+		}
+		if state != "" {
+			return true
+		}
+		destination := strings.TrimRight(strings.ReplaceAll(exactSemanticPathValue(candidate), `\`, "/"), "/")
+		for _, source := range facts.Paths {
+			if source.CommandID != candidate.CommandID || source.Access == actionfacts.PathAccessWrite {
+				continue
+			}
+			base := path.Base(strings.TrimRight(strings.ReplaceAll(exactSemanticPathValue(source), `\`, "/"), "/"))
+			if base == "." || base == ".." || base == "/" || destination == "" {
+				continue
+			}
+			landing := candidate
+			landing.Value = destination + "/" + base
+			landing.Normalized, landing.Resolved = landing.Value, landing.Value
+			if matchesActiveDefenseClawState(facts, landing) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// findDeletesOnlyMatches reports a find -delete whose tests select entries
+// by name, path, time, size, owner or link: it removes the entries that
+// match (log cleanup), not the tree it starts from.
+func findDeletesOnlyMatches(command actionfacts.CommandFact) bool {
+	if !strings.EqualFold(command.Program, "find") || len(command.Argv) < 2 {
+		return false
+	}
+	for _, argument := range command.Argv[1:] {
+		switch strings.ToLower(argument) {
+		case "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
+			"-regex", "-iregex", "-mtime", "-mmin", "-atime", "-amin", "-ctime",
+			"-cmin", "-newer", "-anewer", "-cnewer", "-size", "-empty", "-user",
+			"-group", "-uid", "-gid", "-nouser", "-nogroup", "-perm", "-links",
+			"-inum", "-samefile", "-lname", "-ilname":
 			return true
 		}
 	}
