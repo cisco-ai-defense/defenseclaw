@@ -329,7 +329,11 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			request.cleanupFence = newEnterpriseForeignHookFenceSession(request.ForeignCleanup, stderr, strconv.Itoa(account.UID), account.Home)
 		}
 		names := leftovers(account.User)
-		if len(cleanups) == 0 && len(names) == 0 && vscode == nil {
+		// While the machine policy does not cover Claude Code, a blocker an
+		// earlier enrollment pass wrote over the account's own hook script
+		// blocks every Claude Code tool call with no managed hook deciding:
+		// it goes (GAP-1829).
+		if len(cleanups) == 0 && len(names) == 0 && vscode == nil && claudeManaged {
 			continue
 		}
 		for index, name := range names {
@@ -353,6 +357,12 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 				Index: len(names), Mode: enterpriseHookWorkerModeBlockPersonalClaude,
 				Options: enterpriseHookWorkerOptions{ConnectorName: "claudecode", UserHome: account.Home,
 					OwnerUID: account.UID, OwnerGID: account.GID},
+			})
+		} else {
+			request.Targets = append(request.Targets, enterpriseHookWorkerTarget{
+				Index: len(names), Mode: enterpriseHookWorkerModeUnblockPersonalClaude,
+				Options: enterpriseHookWorkerOptions{ConnectorName: "claudecode", UserHome: account.Home,
+					OwnerUID: account.UID, OwnerGID: account.GID, DataDir: filepath.Join(account.Home, ".defenseclaw")},
 			})
 		}
 		jobs = append(jobs, enterpriseHookWorkerJob{
@@ -441,6 +451,17 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 					clean = false
 					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: could not block the personal Claude Code hook for %s: %s\n", user,
 						boundedString(firstNonEmpty(result.Error, errEnterpriseHookWorkerNoResult.Error()), 512))
+				}
+				continue
+			}
+			if target.Mode == enterpriseHookWorkerModeUnblockPersonalClaude {
+				switch {
+				case !ok || !result.OK:
+					clean = false
+					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: could not remove the Claude Code blocker from the personal hook of %s: %s\n", user,
+						boundedString(firstNonEmpty(result.Error, errEnterpriseHookWorkerNoResult.Error()), 512))
+				case result.Removed:
+					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: removed the Claude Code blocker from the personal hook of %s: the machine policy no longer covers Claude Code; that account runs `defenseclaw setup claude-code` to restore its own hook\n", user)
 				}
 				continue
 			}
