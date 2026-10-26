@@ -277,7 +277,25 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare unselected orphan generation: %v", err)
 	}
-	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(
+	// GAP-1768: a bundle a guardian just prepared may be about to be
+	// selected by its commit; GC leaves it until it is older than the bound.
+	minAge := windowsManagedRuntimeGenerationGCMinAge
+	windowsManagedRuntimeGenerationGCMinAge = time.Hour
+	gcOpts := WindowsManagedRuntimeGenerationGCOptions{
+		Connector:      thirdDesired.Connector,
+		TargetSID:      thirdDesired.TargetSID,
+		DataDir:        thirdDesired.DataDir,
+		HookExecutable: thirdDesired.HookExecutable,
+	}
+	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(gcOpts)
+	windowsManagedRuntimeGenerationGCMinAge = minAge
+	if err != nil || removed != 0 {
+		t.Fatalf("collect just-prepared generations: removed=%d err=%v, want them kept", removed, err)
+	}
+	if _, err := os.Lstat(orphan.BundlePath()); err != nil {
+		t.Fatalf("a just-prepared unselected bundle was collected: %v", err)
+	}
+	removed, err = GarbageCollectWindowsManagedRuntimeGenerations(
 		WindowsManagedRuntimeGenerationGCOptions{
 			Connector:      thirdDesired.Connector,
 			TargetSID:      thirdDesired.TargetSID,
@@ -322,6 +340,10 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 		t.Fatalf("removed selector token bundle survived finalization: %v", err)
 	}
 }
+
+// The fixtures prepare bundles and collect them at once; the publication
+// bound (GAP-1768) is tested where it applies.
+func init() { windowsManagedRuntimeGenerationGCMinAge = 0 }
 
 func TestWindowsManagedRuntimeGenerationGCAllowsAbsentHooksWithoutSelection(t *testing.T) {
 	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)

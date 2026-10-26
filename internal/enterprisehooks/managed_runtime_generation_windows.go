@@ -1061,6 +1061,22 @@ func ClassifyWindowsManagedRuntimeGenerations(opts WindowsManagedRuntimeGenerati
 	return err
 }
 
+// windowsManagedRuntimeGenerationGCMinAge bounds the time between a
+// guardian's prepare, which writes a bundle outside the selector lock, and the
+// commit that selects it. GC leaves an unselected bundle younger than this:
+// deleting it in between failed that guardian publication for the interval
+// (GAP-1768). An old unselected bundle is inert and goes on a later GC.
+var windowsManagedRuntimeGenerationGCMinAge = 10 * time.Minute
+
+func windowsManagedRuntimeBundleYoung(dataDir, connectorName, generationID string) bool {
+	path, err := windowsManagedRuntimeBundlePath(dataDir, connectorName, generationID)
+	if err != nil {
+		return false
+	}
+	info, err := os.Lstat(path)
+	return err == nil && time.Since(info.ModTime()) < windowsManagedRuntimeGenerationGCMinAge
+}
+
 // ErrWindowsManagedRuntimeBundleRefused marks a classification that refused a
 // bundle itself (malformed, unsupported, over the candidate limit). Every
 // other error of the same loop (an absent selected folder, a selector that
@@ -1238,6 +1254,11 @@ func collectWindowsManagedRuntimeGenerations(
 				return windowsManagedRuntimeBundleRefusal{err}
 			}
 			if generationID == selectedGenerationID {
+				continue
+			}
+			if windowsManagedRuntimeBundleYoung(validated.DataDir, validated.Connector, generationID) {
+				// Prepared outside the selector lock and possibly about to
+				// be selected: a later GC collects it (GAP-1768).
 				continue
 			}
 			collect = append(collect, collectable{entry: entry, data: data})
