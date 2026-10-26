@@ -9,6 +9,7 @@
 package enterpriseunix
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
@@ -44,6 +45,46 @@ func TestPendingBundleReplacedByAHigherBundleIsSuperseded(t *testing.T) {
 			}
 			requireOK(t, b.run(Options{Action: ActionEnsure}))
 			requireSuperseded(t, b.receipt(bundleID(2)))
+		})
+	}
+}
+
+// GAP-1574: a first bundle whose run was killed after it was applied, before
+// the deployment committed, is rolled back by the next run's recovery to the
+// config the host had before it. Nothing replaced it: it is interrupted,
+// never superseded.
+func TestKilledFirstBundleIsInterruptedNotSuperseded(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			v1, _, _ := bundleConfigs(b.testHost)
+			before := b.read(b.env.Layout.ConfigPath)
+			b.env.bundleFault = func(phase string) error {
+				if phase == enterprisebundle.StateApplied {
+					panic("crash at applied")
+				}
+				return nil
+			}
+			func() {
+				defer func() { _ = recover() }()
+				b.apply(b.dir(1, v1))
+			}()
+			b.env.bundleFault = nil
+			if got := b.receipt(bundleID(1)); got.State != enterprisebundle.StateApplied {
+				t.Fatalf("setup: receipt = %+v", got)
+			}
+			r := b.run(Options{Action: ActionEnsure})
+			got := b.receipt(bundleID(1))
+			if got.State != enterprisebundle.StateFailed || got.ErrorCode != enterprisebundle.CodeInterrupted ||
+				strings.Contains(got.ErrorMessage, "later config replaced") {
+				t.Fatalf("killed first bundle = %+v, want failed interrupted", got)
+			}
+			if messagesContain(r.Warnings, "replaced by a later config") {
+				t.Fatalf("the settle says a later config replaced the bundle: %+v", r.Warnings)
+			}
+			if b.read(b.env.Layout.ConfigPath) != before {
+				t.Fatal("the recovery did not put the config from before the bundle back")
+			}
 		})
 	}
 }

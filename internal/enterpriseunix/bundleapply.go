@@ -1147,11 +1147,21 @@ func (l *lifecycle) settleReplacedBundle(ctx context.Context, store *enterpriseb
 	}
 	code, message := enterprisebundle.CodeSuperseded, "a later config replaced this bundle's config before the gateway confirmed it; nothing was rolled back, and the config the deployment holds enforces"
 	warning := fmt.Sprintf("policy bundle %s version %d was replaced by a later config before the gateway confirmed it (failed: superseded); nothing was rolled back", rc.BundleID, rc.Version)
-	if raw, current, err := l.env.currentBundleConfig(store); err == nil && current != nil && record != nil &&
-		current.Version < rc.Version && sha256Bytes(raw) == record.ConfigSHA256 {
+	raw, current, err := l.env.currentBundleConfig(store)
+	lastGood := err == nil && current != nil && record != nil && current.Version < rc.Version && sha256Bytes(raw) == record.ConfigSHA256
+	// A killed first bundle has no last good bundle: this run's recovery
+	// rolled back the config its transaction left, so nothing replaced it
+	// (GAP-1574).
+	recovered := l.interruptedConfigSHA != "" && l.interruptedConfigSHA == rc.ConfigSHA256 && record != nil
+	if lastGood || recovered {
 		code = enterprisebundle.CodeInterrupted
-		message = "the run that applied this bundle was rolled back before it committed: the deployment holds the last good bundle again"
-		warning = fmt.Sprintf("policy bundle %s version %d was rolled back after an interrupted apply (failed: interrupted); the deployment holds the last good bundle %s version %d", rc.BundleID, rc.Version, current.BundleID, current.Version)
+		if lastGood {
+			message = "the run that applied this bundle was rolled back before it committed: the deployment holds the last good bundle again"
+			warning = fmt.Sprintf("policy bundle %s version %d was rolled back after an interrupted apply (failed: interrupted); the deployment holds the last good bundle %s version %d", rc.BundleID, rc.Version, current.BundleID, current.Version)
+		} else {
+			message = "the run that applied this bundle was rolled back before it committed: the deployment holds the config it had before this bundle again"
+			warning = fmt.Sprintf("policy bundle %s version %d was rolled back after an interrupted apply (failed: interrupted); the deployment holds the config it had before this bundle", rc.BundleID, rc.Version)
+		}
 		if want, _, err := l.computePolicy(ctx); err == nil && rc.EnforcingDigest != "" && rc.EnforcingDigest == want {
 			rc.RolledBack = true
 		} else {

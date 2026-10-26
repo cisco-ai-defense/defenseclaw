@@ -273,6 +273,11 @@ type lifecycle struct {
 	// generation moved (GAP-0381). After it the counter only moves forward.
 	generationBefore  *generationRecord
 	generationExposed bool
+	// interruptedConfigSHA is the hex SHA-256 of the config.yaml an
+	// interrupted transaction left, which this run's recovery rolled back:
+	// the config of a bundle whose run was killed before it committed. Settle
+	// reports that bundle interrupted, never superseded (GAP-1574).
+	interruptedConfigSHA string
 	// machinePolicyPublished is set once a transaction of this run wrote
 	// vendor machine policy for its config, which a rollback then undoes.
 	machinePolicyPublished bool
@@ -3190,7 +3195,11 @@ func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 	// that still fails (the disk is still full) then leaves the running
 	// services alone instead of stopping and restarting the gateway on every
 	// apply trigger, MDM ensure or package postinstall until it succeeds.
+	left, _ := sha256File(env.P(env.Layout.ConfigPath))
 	restored, err := l.rollback(ctx, snap, pending, true, nil, nil)
+	if restored {
+		l.interruptedConfigSHA = left
+	}
 	switch {
 	case !restored:
 		r.AddError(codeRollbackFailed, fmt.Sprintf("could not roll back the interrupted %s started at %s: %v", pending.Action, pending.StartedAt, err))
