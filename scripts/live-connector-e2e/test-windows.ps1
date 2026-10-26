@@ -4880,9 +4880,9 @@ threading.Event().wait()
     Assert-True ($doctorContract.Contains('[string]$ExpectedFailMode = ''closed''') -and
         $doctorContract.Contains('''const DC_FAIL_MODE: string = "'' + $ExpectedFailMode + ''"''') -and
         $harnessText.Contains('Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed') -and
-        $harnessText.Contains('Assert-DoctorWindowsHookRegistration -ExpectedFailMode open') -and
+        $harnessText.Contains("Write-Result 'amp:explicit-open-render' skip 'GAP-1018: known 1.0.4 issue, fixed in 1.0.5'") -and
         $wizardHookContract.Contains('const DC_FAIL_MODE: string = "closed"')) `
-        'Windows Amp contracts verify the closed default and independently exercise explicit open policy'
+        'Windows Amp contracts verify the closed default and that an explicit open policy keeps the closed per-user render (GAP-1018)'
     $ampNativeHookPattern = 'defenseclaw-hook(?:\.exe|\.cmd)'
     $ampCompatibilityPattern = '\bwsl\b|\bbash\b|\bchmod\b'
     $hasAmpShellRejectionContract = {

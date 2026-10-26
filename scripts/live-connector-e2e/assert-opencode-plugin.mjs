@@ -1,8 +1,11 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { copyFile, rm } from "node:fs/promises";
-import { basename } from "node:path";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const [pluginPath, scratchPath, expected, command] = process.argv.slice(2);
@@ -99,7 +102,7 @@ try {
       }
     }
     if ((expected === "block") !== blocked) {
-      throw new Error(`OpenCode plugin verdict mismatch: expected=${expected} blocked=${blocked}${reason ? ` reason=${reason.slice(0, 600)}` : ""}`);
+      throw new Error(`OpenCode plugin verdict mismatch: expected=${expected} blocked=${blocked}${reason ? ` reason=${reason.slice(0, 600)}` : ""}${perUserPostDiagnostic(reason)}`);
     }
 
     // This hook is intentionally observe-only. Awaiting its returned promise
@@ -132,4 +135,24 @@ try {
 } finally {
   globalThis.fetch = nativeFetch;
   await rm(scratchPath, { force: true });
+}
+
+// perUserPostDiagnostic says why a per-user plugin's post through the native
+// gateway helper failed: the home the plugin resolves, whether the helper is
+// there, and the helper's own error for a bare request (no credential).
+function perUserPostDiagnostic(reason) {
+  if (!/per-user gateway peer unverified/.test(reason || "")) return "";
+  const gateway = join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
+  const address = (/const DC_API_ADDR = "([^"]*)"/.exec(readFileSync(pluginPath, "utf8")) || [])[1] || "";
+  let detail = ` home=${homedir()} gateway=${existsSync(gateway)} api=${address}`;
+  try {
+    execFileSync(gateway, ["hook-post", "--api-addr", address], {
+      input: JSON.stringify({ path: "/health", headers: {}, body: "" }),
+      timeout: 15000, encoding: "utf8", windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+    });
+    detail += " hook-post=ok";
+  } catch (error) {
+    detail += ` hook-post=${String((error && (error.stderr || error.message)) || error).trim().slice(0, 400)}`;
+  }
+  return detail;
 }
