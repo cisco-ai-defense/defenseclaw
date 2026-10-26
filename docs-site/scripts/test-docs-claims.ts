@@ -1437,6 +1437,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1604", page: "index.mdx", has: ["the shipped default blocks CRITICAL and alerts on MEDIUM and above."], lacks: ["alerts on HIGH."] },
   { gap: "GAP-1606", page: "reference/policy/index.mdx", has: ["regex rules and suppressions of the bundled strict pack"] },
   { gap: "GAP-1607", page: "enterprise/configure/enrollment.mdx", has: ["sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise hooks status # macOS"] },
+  { gap: "GAP-0885", page: "enterprise/configure/enrollment.mdx", has: ["under `unenrolled_users: inspect` (the default) an extension-only user of it gets no target row", "with `deny` the user becomes a target"] },
   // r105-rows-end
 ];
 
