@@ -1580,6 +1580,13 @@ func TestWindowsHotConfigHookFailModeChanges(t *testing.T) {
 		{name: "a profile mode is not attributed", previous: "guardrail:\n  profiles:\n    p:\n      hook_fail_mode: closed\n", next: "guardrail:\n  profiles:\n    p:\n      hook_fail_mode: open\n", any: true, affected: 2, reopened: 2},
 		{name: "other keys only", previous: "guardrail:\n  block_at: LOW\n", next: "guardrail:\n  block_at: HIGH\n"},
 		{name: "unparseable", previous: "guardrail:\n  hook_fail_mode: open\n", next: "guardrail: [\n", any: true, affected: 2, reopened: 2},
+		// GAP-1498: an application protection connector entry added with no
+		// hook_fail_mode of its own takes codex off the application
+		// protection guardrail (open) to the global guardrail (closed).
+		{name: "application protection entry switches the chain",
+			previous: "config_version: 9\nguardrail:\n  hook_fail_mode: closed\napplication_protection:\n  enabled: true\n  guardrail:\n    hook_fail_mode: open\n",
+			next:     "config_version: 9\nguardrail:\n  hook_fail_mode: closed\napplication_protection:\n  enabled: true\n  guardrail:\n    hook_fail_mode: open\n  connectors:\n    codex:\n      guardrail:\n        mode: action\n",
+			any:      true, affected: 1},
 	} {
 		change := windowsHotConfigHookFailModeChanges([]byte(tc.previous), []byte(tc.next))
 		if got := change.any(); got != tc.any {

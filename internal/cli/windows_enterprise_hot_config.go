@@ -805,12 +805,23 @@ var windowsEnterpriseHotConfigPublishedTargets = func(layout managed.StandaloneL
 type windowsHotConfigFailModeChange struct {
 	all           bool
 	before, after map[string]string
+	// beforeCfg and afterCfg are the two configs as the gateway loads them,
+	// when both load: the rendered mode of each connector then comes from
+	// the real resolution chain, so an entry added or removed without its
+	// own hook_fail_mode (an application_protection.connectors or a manual
+	// guardrail.connectors entry) that switches the chain is seen (GAP-1498).
+	beforeCfg, afterCfg *config.Config
 }
 
 func windowsHotConfigHookFailModeChanges(previous, next []byte) windowsHotConfigFailModeChange {
 	before, beforeOK := windowsHotConfigHookFailModes(previous)
 	after, afterOK := windowsHotConfigHookFailModes(next)
 	change := windowsHotConfigFailModeChange{before: before, after: after}
+	if beforeCfg, err := config.LoadRuntimeV8InspectionCandidateFromBytes("config.yaml", previous); err == nil {
+		if afterCfg, err := config.LoadRuntimeV8InspectionCandidateFromBytes("config.yaml", next); err == nil {
+			change.beforeCfg, change.afterCfg = beforeCfg, afterCfg
+		}
+	}
 	if !beforeOK || !afterOK || windowsHotConfigAppProtectionEnabled(previous) != windowsHotConfigAppProtectionEnabled(next) {
 		change.all = true
 		return change
@@ -843,6 +854,20 @@ func (c windowsHotConfigFailModeChange) any() bool {
 			}
 		}
 	}
+	for _, cfg := range []*config.Config{c.beforeCfg, c.afterCfg} {
+		if cfg == nil {
+			continue
+		}
+		for name := range cfg.Guardrail.Connectors {
+			names[name] = true
+		}
+		for name := range cfg.ApplicationProtection.Connectors {
+			names[name] = true
+		}
+		for _, name := range cfg.ActiveConnectors() {
+			names[name] = true
+		}
+	}
 	for name := range names {
 		if c.moves(name, false) {
 			return true
@@ -869,6 +894,13 @@ func (c windowsHotConfigFailModeChange) affected(targets []enterprisehooks.Manif
 func (c windowsHotConfigFailModeChange) moves(connector string, reopened bool) bool {
 	if c.all {
 		return true
+	}
+	if c.beforeCfg != nil && c.afterCfg != nil && connector != "\x00" {
+		before := enterprisehooks.ManagedHookFailMode(c.beforeCfg, connector)
+		after := enterprisehooks.ManagedHookFailMode(c.afterCfg, connector)
+		if before != after && (!reopened || after == "open") {
+			return true
+		}
 	}
 	for overlay := 0; overlay < 3; overlay++ {
 		before := windowsHotConfigResolveFailMode(c.before, connector, overlay)
