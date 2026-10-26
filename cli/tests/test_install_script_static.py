@@ -2731,7 +2731,7 @@ def test_a_running_gateway_cannot_reopen_its_hooks_while_it_stops(tmp_path: Path
     assert result.returncode == 0, result.stdout + result.stderr
     lines = calls.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "connector refresh-fail-modes --help", lines
-    assert lines[1].startswith("connector refresh-fail-modes --hold-until-exit "), lines
+    assert lines[1].startswith("connector refresh-fail-modes --hold-timeout 10m --hold-until-exit "), lines
     assert lines[2:] == ["holding", "stopping", "second refresh", "finished"], lines
     assert "Hook fail modes set from the config: codex" in result.stdout
     assert "Holding the hook fail modes" not in result.stdout
