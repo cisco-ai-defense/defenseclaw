@@ -568,6 +568,7 @@ jobs:
           - {os: windows-latest, lane: setup-import}
           - {os: windows-latest, lane: files-in-use}
           - {os: windows-latest, lane: failure-drill}
+          - {os: windows-latest, lane: failure-drill-exit3}
           - {os: windows-latest, lane: policy}
           - {os: windows-latest, lane: upgrade-previous}
           - {os: windows-latest, lane: shim}
