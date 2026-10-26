@@ -20,6 +20,11 @@
       "size": 87,
       "sha256": "8b613731be230abc7dedf4954dc38e8dec435797fb71be118020a1f28fbe694e"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -67,6 +72,11 @@
       "size": 61,
       "sha256": "5707476c002483c7ebea2bb3f7fe2d732fd6484144010928347f69d0975d5ff3"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -113,6 +123,11 @@
       "mode": "-rw-------",
       "size": 86,
       "sha256": "c282a0ed2a5702abfaf1642fef2258950c43947c3fe81e035c27651399f26f49"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     ".token": {
       "mode": "-rw-------",
@@ -165,6 +180,11 @@
       "mode": "-rw-------",
       "size": 84,
       "sha256": "a292858573fb93bcbcdfd7b93da8def79807966ad708d2b0dd48262b7d4cd26d"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     ".token": {
       "mode": "-rw-------",
@@ -223,6 +243,11 @@
       "size": 86,
       "sha256": "c282a0ed2a5702abfaf1642fef2258950c43947c3fe81e035c27651399f26f49"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -275,6 +300,11 @@
       "size": 84,
       "sha256": "a292858573fb93bcbcdfd7b93da8def79807966ad708d2b0dd48262b7d4cd26d"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -316,6 +346,11 @@
       "mode": "-rw-------",
       "size": 62,
       "sha256": "a2d32352b79d733e6c1550ca15bbfbdd72b98889dfd2bab16fa1d1988ee38dcb"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     ".token": {
       "mode": "-rw-------",
@@ -363,6 +398,11 @@
       "mode": "-rw-------",
       "size": 60,
       "sha256": "69e955e4dfc2c92f32f94e4a19aedd95343b3e34978e417821b8b57d7c14f490"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     ".token": {
       "mode": "-rw-------",
@@ -416,6 +456,11 @@
       "size": 62,
       "sha256": "a2d32352b79d733e6c1550ca15bbfbdd72b98889dfd2bab16fa1d1988ee38dcb"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -463,6 +508,11 @@
       "size": 60,
       "sha256": "69e955e4dfc2c92f32f94e4a19aedd95343b3e34978e417821b8b57d7c14f490"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -509,6 +559,11 @@
       "mode": "-rw-------",
       "size": 81,
       "sha256": "34c1ad1fa8326d22a405d552c8d107f97af17b67ebdb35034083fd083008acd4"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     ".token": {
       "mode": "-rw-------",
@@ -561,6 +616,11 @@
       "mode": "-rw-------",
       "size": 79,
       "sha256": "3d2955d2fc4d95681d42e48907879b78ef4e9b124b415bc557384463222698ba"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     ".token": {
       "mode": "-rw-------",
@@ -619,6 +679,11 @@
       "size": 81,
       "sha256": "34c1ad1fa8326d22a405d552c8d107f97af17b67ebdb35034083fd083008acd4"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -671,6 +736,11 @@
       "size": 79,
       "sha256": "3d2955d2fc4d95681d42e48907879b78ef4e9b124b415bc557384463222698ba"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -712,6 +782,11 @@
       "mode": "-rw-------",
       "size": 57,
       "sha256": "9f320f03ebf5bb96b2b4a4161ae9d165240408b2dcaeb736be4341fc146c1120"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     ".token": {
       "mode": "-rw-------",
@@ -759,6 +834,11 @@
       "mode": "-rw-------",
       "size": 55,
       "sha256": "9e1f81caeb1d65ffe3378e4348936003bbfaf0e7e5ecae8a0fb9ed9b69d4ba45"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     ".token": {
       "mode": "-rw-------",
@@ -812,6 +892,11 @@
       "size": 57,
       "sha256": "9f320f03ebf5bb96b2b4a4161ae9d165240408b2dcaeb736be4341fc146c1120"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -858,6 +943,11 @@
       "mode": "-rw-------",
       "size": 55,
       "sha256": "9e1f81caeb1d65ffe3378e4348936003bbfaf0e7e5ecae8a0fb9ed9b69d4ba45"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "_hardening.sh": {
       "mode": "-rw-------",
@@ -911,6 +1001,11 @@
       "size": 83,
       "sha256": "ed5dff37354ff8f2ce48c6a770adb402211c3ea1fd1ed97341a29153203ffefa"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -957,6 +1052,11 @@
       "mode": "-rw-------",
       "size": 57,
       "sha256": "c94147a58daf8c82b9064429bfd0b2cb1a3f5cac7383d5d4d304be408ad387f7"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "_hardening.sh": {
       "mode": "-rw-------",
@@ -1010,6 +1110,11 @@
       "size": 82,
       "sha256": "e5b3a490043fbfba7f3328954ebf73cafff8a5c4f35b24fc39219fdf6d669ae6"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -1056,6 +1161,11 @@
       "mode": "-rw-------",
       "size": 56,
       "sha256": "9ee4231bf80106e2f7d8a985ecee49c28fb43707f49c8f74b20c77822191767b"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "_hardening.sh": {
       "mode": "-rw-------",
@@ -1109,6 +1219,11 @@
       "size": 81,
       "sha256": "463856215deeeecce7b23346912da3b988c2e1b6cc15de5d1ce015ad622ae48b"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -1156,6 +1271,11 @@
       "size": 55,
       "sha256": "adb623e044a051fb8d00ad4cb777dda17ff1b948fdbc7cc9671189543db25187"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -1202,6 +1322,11 @@
       "mode": "-rw-------",
       "size": 76,
       "sha256": "a7d0aac87378c1d99748aadf8b5fcb02664b88560603dcad8685d0dc49559a4a"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     ".token": {
       "mode": "-rw-------",
@@ -1274,6 +1399,11 @@
       "size": 82,
       "sha256": "9fe00609c80328d1ce6480629bd466b61760ec0828bdf6a8ff42cc4f72268ec7"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -1320,6 +1450,11 @@
       "mode": "-rw-------",
       "size": 56,
       "sha256": "426fcff4cc42ffb11ff2a72676d75134e353962873ac7ff76bfbe2bfbbf5edc4"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "_hardening.sh": {
       "mode": "-rw-------",
@@ -1373,6 +1508,11 @@
       "size": 80,
       "sha256": "341e69de21bb9ac9b696c8b749f32f3d275de31526db53f6587834855443b3e8"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -1420,6 +1560,11 @@
       "size": 54,
       "sha256": "5ced5d8b0b5ab21329408cf12aa3c758f344da1b68a8eceebaa4e298d9cdc576"
     },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
     "_hardening.sh": {
       "mode": "-rw-------",
       "size": 155597,
@@ -1466,6 +1611,11 @@
       "mode": "-rw-------",
       "size": 76,
       "sha256": "a7d0aac87378c1d99748aadf8b5fcb02664b88560603dcad8685d0dc49559a4a"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     ".token": {
       "mode": "-rw-------",
@@ -1553,6 +1703,11 @@
       "mode": "-rw-------",
       "size": 76,
       "sha256": "a7d0aac87378c1d99748aadf8b5fcb02664b88560603dcad8685d0dc49559a4a"
+    },
+    ".hookcfg.lock": {
+      "mode": "-rw-------",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     ".token": {
       "mode": "-rw-------",

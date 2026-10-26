@@ -8472,6 +8472,17 @@ def _check_hermes_hooks(
             pathext=pathext,
         )
         return
+    from defenseclaw.doctor_hooks import unix_hermes_hook_problem
+
+    script = os.path.join(getattr(cfg, "data_dir", "") or "", "hooks", "hermes-hook.sh")
+    state, problem = unix_hermes_hook_problem(selected_config, script)
+    if state:
+        _emit(
+            "fail", _HERMES_HOOKS_LABEL,
+            f"{problem}; a Hermes tool call can run unchecked", r=r,
+            remediation="run 'defenseclaw setup hermes --yes' to re-register the hooks",
+        )
+        return
     _check_hook_health(cfg, "hermes", r)
 
 

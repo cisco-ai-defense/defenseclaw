@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from defenseclaw import bootstrap, fail_mode, hook_integrity
 from defenseclaw.commands import cmd_doctor, cmd_status
 from defenseclaw.config import default_config

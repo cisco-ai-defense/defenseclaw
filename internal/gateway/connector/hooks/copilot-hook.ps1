@@ -1,4 +1,5 @@
 # defenseclaw-managed-hook v7
+# defenseclaw-copilot-closed-adapter v1
 # Copilot CLI on Windows sends each hook event as UTF-8 JSON on stdin. The
 # release hook launcher uses the GUI subsystem, so Start-Process cannot be
 # trusted to inherit redirected stdin/stdout. This adapter preserves the bytes
@@ -40,6 +41,11 @@ if ($reviewedEvents -cnotcontains $Event) {
 {{end}}$ErrorActionPreference = 'Stop'
 $hook = '{{.HookBinaryPS}}'
 $timeoutMS = {{.CopilotHookTimeoutMS}}
+$failClosed = '{{if .SecureClientDelivery}}false{{else}}{{if eq .FailMode "open"}}false{{else}}true{{end}}{{end}}' -eq 'true'
+{{if not .SecureClientDelivery}}if ($env:DEFENSECLAW_STRICT_AVAILABILITY -in @('1', 'true', 'TRUE', 'yes', 'YES')) {
+    $failClosed = $true
+}
+{{end}}
 $process = $null
 $started = $false
 $stdinClosed = $false

@@ -2642,6 +2642,64 @@ _UNIX_EVENT_BOUND_HOOK_SCRIPTS = {"antigravity": "antigravity-hook.sh", "copilot
 _UNIX_REGISTRATION_LIMIT = 2 * 1024 * 1024
 
 
+def unix_hermes_hook_problem(config_path: str, script_path: str) -> tuple[str, str]:
+    """Validate the Unix Hermes event matrix and the exact agent approval."""
+    try:
+        document = _read_config(config_path, "hermes")
+        hooks = document.get("hooks")
+        if not isinstance(hooks, dict):
+            raise _InspectionError("missing", "Hermes hook registration has no hooks table")
+        if not os.path.isfile(script_path):
+            raise _InspectionError("missing", f"Hermes hook script is missing: {script_path}")
+        expected = os.path.realpath(script_path)
+        commands: set[str] = set()
+        for event, matcher in _HERMES_REQUIRED_HOOKS.items():
+            entries = hooks.get(event)
+            if not isinstance(entries, list):
+                raise _InspectionError("missing", f"Hermes DefenseClaw hook event {event} is missing")
+            owned = [
+                entry
+                for entry in entries
+                if isinstance(entry, dict)
+                and isinstance(entry.get("command"), str)
+                and (
+                    "hermes-hook.sh" in entry["command"]
+                    or _handler_targets_defenseclaw(entry, "hermes")
+                )
+            ]
+            if len(owned) != 1:
+                raise _InspectionError(
+                    "stale", f"Hermes event {event} has {len(owned)} DefenseClaw handlers; expected exactly one"
+                )
+            entry = owned[0]
+            if type(entry.get("timeout")) is not int or entry["timeout"] != 30:
+                raise _InspectionError("stale", f"Hermes event {event} timeout must be 30 seconds")
+            actual_matcher = entry.get("matcher") if "matcher" in entry else None
+            if actual_matcher != matcher:
+                raise _InspectionError(
+                    "stale", f"Hermes event {event} matcher is {actual_matcher!r}; expected {matcher!r}"
+                )
+            command = entry["command"].strip()
+            try:
+                argv = shlex.split(command)
+            except ValueError as exc:
+                raise _InspectionError("malformed", f"Hermes event {event} command cannot be parsed: {exc}") from exc
+            if len(argv) != 1 or os.path.realpath(argv[0]) != expected:
+                raise _InspectionError("stale", f"Hermes event {event} command does not run {script_path}")
+            commands.add(command)
+        if len(commands) != 1:
+            raise _InspectionError("stale", "Hermes events use inconsistent DefenseClaw commands")
+        for event, entries in hooks.items():
+            if event in _HERMES_REQUIRED_HOOKS or not isinstance(entries, list):
+                continue
+            if any(_handler_targets_defenseclaw(entry, "hermes") for entry in entries):
+                raise _InspectionError("stale", f"unexpected Hermes event {event} contains a DefenseClaw handler")
+        _validate_hermes_allowlist(config_path, next(iter(commands)))
+    except _InspectionError as exc:
+        return exc.state, exc.detail
+    return "", ""
+
+
 def unix_hook_event_binding_problem(connector: str, config_path: str, script_path: str) -> tuple[str, str]:
     """Why a Linux or macOS Copilot CLI or Antigravity registration does not run *script_path* with each event exactly.
 

@@ -466,6 +466,19 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed hook event: " + reason, "reason": hookexec.MalformedHookPayloadReason})
 			return
 		}
+		if connectorName == "hermes" && registeredEvent == "" {
+			named, alternate := strings.TrimSpace(payloadString(payload, "hook_event_name")), strings.TrimSpace(payloadString(payload, "event"))
+			if named != "" && alternate != "" && !strings.EqualFold(named, alternate) {
+				// A conflicting event is not a valid policy boundary. Return the
+				// native block even if an administrator chose open for outages.
+				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "conflicting_event", int64(len(b)))
+				a.writeJSON(w, http.StatusOK, map[string]interface{}{
+					"action": "block", "reason": "Hermes hook event fields disagree",
+					"hook_output": map[string]string{"action": "block", "message": "DefenseClaw blocked this tool call because its hook event could not be verified."},
+				})
+				return
+			}
+		}
 		runtime := hookRuntimeForProfile(profile)
 		// The agent identity (agt-) the hook runs under comes from the
 		// verified caller, not the payload. It scopes the agent ids the
@@ -2698,6 +2711,12 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 			"agent_action_name",
 			"event",
 		)
+		if event == "" && connectorName == "hermes" {
+			// Hermes releases also use `event` for the same hook event.
+			// Keep this connector-scoped: other agents use that field for
+			// unrelated content and its provenance is not a hook binding.
+			event = firstString(payload, "event")
+		}
 	}
 	values := make(map[connector.CorrelationTarget]connector.CorrelationValue)
 	identifiers := spec.HookValues(payload)

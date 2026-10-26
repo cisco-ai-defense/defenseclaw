@@ -36,6 +36,8 @@ import (
 )
 
 type claudeCodeHookRequest struct {
+	watchHome            string
+	managedWatch         bool
 	HookEventName        string                 `json:"hook_event_name"`
 	SessionID            string                 `json:"session_id,omitempty"`
 	TurnID               string                 `json:"turn_id,omitempty"`
@@ -133,6 +135,7 @@ type claudeCodeHookResponse struct {
 // value so downstream tooling and the audit envelope receive them.
 
 func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHookRequest) claudeCodeHookResponse {
+	req = req.withWatchHome(ctx)
 	// Keep authenticated lifecycle state current even while inspection is
 	// disabled so a live same-session re-enable cannot lose active-file authority.
 	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
@@ -326,6 +329,14 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"
 	resp.laneVerdict = verdict.laneVerdict
 	return resp
+}
+
+func (req claudeCodeHookRequest) withWatchHome(ctx context.Context) claudeCodeHookRequest {
+	if serviceAccountGatewayFromContext(ctx) {
+		req.watchHome = trustedActiveHome(ctx)
+		req.managedWatch = true
+	}
+	return req
 }
 
 // dispatchClaudeCodeHookNotification fires a user-session OS toast
