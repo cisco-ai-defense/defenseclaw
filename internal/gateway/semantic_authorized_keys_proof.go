@@ -1353,8 +1353,35 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			request.Input.Tool, request.Input.Args, clientCWD, facts.ActiveHome, request.ResolvedWriteTargets,
 		)
 	}
+	if !patchKnown && cannotResolveLocally && clientTargets != nil && !truncated {
+		// Behind ProtectHome the gateway cannot resolve an envelope's
+		// targets in the user's home; the user's hook resolved each one
+		// (GAP-1106). A target the hook did not resolve stays unknown.
+		if lexical, parsed := hookpaths.ApplyPatchLexicalCommandTargets(
+			request.Input.Tool, request.Input.Args, input.Command, clientCWD, facts.ActiveHome,
+		); parsed && filepath.IsAbs(clientCWD) {
+			for _, target := range lexical {
+				resolved := clientTargets[hookpaths.OperandPath(target, clientCWD)]
+				if !filepath.IsAbs(resolved) || isProtected(resolved) || isProtected(target) {
+					return true
+				}
+			}
+			return false
+		}
+	}
 	if !patchKnown {
-		return true
+		// Unknown targets (no readable envelope, apply_patch --help, a
+		// lookup of the program) reach the rule only when the call names a
+		// protected target: no protected-named word is never blocked
+		// (TGT-0194; GAP-0781, GAP-1106, GAP-1741, GAP-1872). An apply_patch
+		// tool call that reaches here with no patch text (a connector
+		// refused or bounded it) stays unknown.
+		if hookpaths.ApplyPatchToolWithoutText(request.Input.Tool, request.Input.Args) {
+			return true
+		}
+		return hookpaths.PatchCallNamesProtectedTarget(
+			request.Input.Tool, request.Input.Args, input.Command, clientCWD, facts.ActiveHome, clientTargets,
+		) || hookpaths.PatchCallNamesProtectedTarget("", nil, request.LegacyText, clientCWD, facts.ActiveHome, clientTargets)
 	}
 	for _, target := range patchTargets {
 		if writeTarget(target, false, false) {

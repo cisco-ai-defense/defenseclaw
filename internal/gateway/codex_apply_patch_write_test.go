@@ -71,14 +71,17 @@ func TestCodexApplyPatchWriteTargets(t *testing.T) {
 		{"protected last", "apply_patch", command(envelope("*** Add File: a.txt\n+x\n" + update("notes.txt") + update(keys))), "", true},
 		{"hard link absolute", "apply_patch", command(envelope(update(hardLink))), hardLink, true},
 		{"hundred benign first", "apply_patch", command(envelope(hundred.String() + update(hardLink))), hardLink, true},
-		{"truncated", "apply_patch", command("*** Begin Patch\n" + update("notes.txt")), "", true},
+		// No readable envelope and no protected-named word: not the SSH rule
+		// (TGT-0194, GAP-0781/GAP-1106 round 2). A staged patch file is a
+		// documented limit of the pre-tool check.
+		{"truncated", "apply_patch", command("*** Begin Patch\n" + update("notes.txt")), "", false},
 		{"edit tool path", "apply_patch", map[string]any{"path": symlink, "content": "x"}, symlink, true},
 		{"bash -c heredoc", "Bash", command("bash -lc \"apply_patch <<'PATCH'\n" + envelope(update("~/.ssh/authorized_keys")) + "\nPATCH\""), "", true},
-		{"env wrapper", "Bash", command("env apply_patch < draft.patch"), "", true},
-		{"inert envelope then staged redirect", "Bash", command("echo '" + envelope(update("notes.txt")) + "'\napply_patch < staged.patch"), "", true},
-		{"inert envelope then staged pipe", "Bash", command("printf '" + envelope(update("notes.txt")) + "'\ncat staged.patch | apply_patch"), "", true},
-		{"printed envelope with stdin override", "Bash", command("printf '" + envelope(update("notes.txt")) + "' | apply_patch < staged.patch"), "", true},
-		{"inert envelope then same-line staged pipe", "Bash", command("printf '" + envelope(update("notes.txt")) + "'; cat staged.patch | apply_patch"), "", true},
+		{"env wrapper", "Bash", command("env apply_patch < draft.patch"), "", false},
+		{"inert envelope then staged redirect", "Bash", command("echo '" + envelope(update("notes.txt")) + "'\napply_patch < staged.patch"), "", false},
+		{"inert envelope then staged pipe", "Bash", command("printf '" + envelope(update("notes.txt")) + "'\ncat staged.patch | apply_patch"), "", false},
+		{"printed envelope with stdin override", "Bash", command("printf '" + envelope(update("notes.txt")) + "' | apply_patch < staged.patch"), "", false},
+		{"inert envelope then same-line staged pipe", "Bash", command("printf '" + envelope(update("notes.txt")) + "'; cat staged.patch | apply_patch"), "", false},
 		{"here-string", "Bash", command("apply_patch <<< '" + envelope(update("hard.cfg")) + "'"), hardLink, true},
 		{"powershell wrapper", "shell", command("powershell -NoProfile -Command \"apply_patch @'\n" + envelope(update("$HOME/.ssh/authorized_keys")) + "\n'@\""), "", true},
 		// The protected path compares case-insensitively (Windows case forms).
