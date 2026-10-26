@@ -1455,6 +1455,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1404", page: "reference/configuration/index.mdx", has: ["`%LOCALAPPDATA%\\hermes\\config.yaml` on native Windows"] },
   { gap: "GAP-1307", page: "reference/observability/redaction.mdx", has: ["move needs at least two routes on the destination;"] },
   { gap: "GAP-1382", page: "features/acp-guard.mdx", has: ["On a per-user install `defenseclaw acp catalog` prints the list. On a managed computer it is refused (exit 2)"] },
+  { gap: "GAP-1631", page: "how-to/agents/add-or-remove-an-agent.mdx", has: ["`Fail` is `open` under the default policy"], lacks: ["enabled observe closed default"] },
   // r105-rows-end
 ];
 
