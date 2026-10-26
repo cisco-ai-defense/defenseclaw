@@ -484,14 +484,15 @@ func TestWindowsClaudeMigrationRunsBeforeTheMachinePolicyIsPublished(t *testing.
 
 // GAP-1540 (LEAD DECISION 03:34): a migration that cannot finish (a settings
 // file DefenseClaw cannot read, such as one saved with a byte order mark) or
-// has not run yet makes the Copilot row's verify (Setup readiness, enterprise
-// verify) fail with the file and the reason, instead of the guard silently
-// blocking every call. The guardian's own pass does not fail the row on it.
+// has not run yet makes the Copilot row's enterprise verify fail with the file
+// and the reason, instead of the guard silently blocking every call. Setup's
+// readiness reports it as a warning, so one account's file never rolls back
+// Install or Upgrade; the guardian's own pass does not fail the row on it.
 func TestWindowsCopilotVerifyNamesClaudeSettingsTheMigrationCannotFinish(t *testing.T) {
 	previousOptions, previousProfiles, previousProbe := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles, windowsManagedClaudeRegistrationProbe
 	t.Cleanup(func() {
 		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsEligibleProfiles, windowsManagedClaudeRegistrationProbe = previousOptions, previousProfiles, previousProbe
-		windowsGuardianWatching.Store(false)
+		enterpriseHookGuardianWatching.Store(false)
 	})
 	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
 		return enterprisepolicy.Options{HookBinary: `C:\Program Files\Cisco\DefenseClaw\defenseclaw-hook.exe`}, []string{"copilot"}, true, nil
@@ -511,17 +512,28 @@ func TestWindowsCopilotVerifyNamesClaudeSettingsTheMigrationCannotFinish(t *test
 		{"not migrated yet", true, nil, settings + " still holds DefenseClaw's older per-user Claude Code hooks"},
 	} {
 		windowsManagedClaudeRegistrationProbe = func(string, string) (bool, []string, error) { return tc.present, nil, tc.err }
-		windowsGuardianWatching.Store(false)
+		enterpriseHookGuardianWatching.Store(false)
 		if err := windowsCopilotVSCodeUser(home, true, false); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: verify must name the file and the reason: %v", tc.name, err)
 		}
-		windowsGuardianWatching.Store(true)
+		enterpriseHookGuardianWatching.Store(true)
 		if err := windowsCopilotVSCodeUser(home, true, false); err != nil && strings.Contains(err.Error(), settings) {
 			t.Fatalf("%s: the guardian's own pass must not fail the row on the Claude settings: %v", tc.name, err)
 		}
+		enterpriseHookGuardianWatching.Store(false)
+		notes := &enterpriseHookNoteSet{}
+		enterpriseHookReadinessNotes.Store(notes)
+		err := windowsCopilotVSCodeUser(home, true, false)
+		enterpriseHookReadinessNotes.Store(nil)
+		if err != nil && strings.Contains(err.Error(), settings) {
+			t.Fatalf("%s: Setup readiness must not fail the row (and the whole Install/Upgrade) on one account's Claude settings: %v", tc.name, err)
+		}
+		if got := notes.list(); len(got) != 1 || !strings.Contains(got[0], tc.want) {
+			t.Fatalf("%s: Setup readiness must report the file and the reason as a warning: %q", tc.name, got)
+		}
 	}
 	windowsManagedClaudeRegistrationProbe = func(string, string) (bool, []string, error) { return false, nil, nil }
-	windowsGuardianWatching.Store(false)
+	enterpriseHookGuardianWatching.Store(false)
 	if err := windowsCopilotVSCodeUser(home, true, false); err != nil && strings.Contains(err.Error(), settings) {
 		t.Fatalf("migrated settings must pass: %v", err)
 	}

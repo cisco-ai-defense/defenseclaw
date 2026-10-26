@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -47,9 +46,13 @@ func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
 	if err != nil || !ok {
 		return err
 	}
-	if verify && !remove && !windowsGuardianWatching.Load() {
+	if verify && !remove && !enterpriseHookGuardianWatching.Load() {
 		if err := windowsClaudeUserSettingsMigrated(home); err != nil {
-			return err
+			notes := enterpriseHookReadinessNotes.Load()
+			if notes == nil {
+				return err
+			}
+			notes.add(err.Error())
 		}
 	}
 	hookFile, plugin := enterprisepolicy.CopilotVSCodeUserWant(opts)
@@ -76,15 +79,10 @@ func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
 	return nil
 }
 
-// windowsGuardianWatching is set for the life of the guardian's watch loop
-// (enterpriseHookStandalonePlatformWatch). The guardian itself does not fail
-// a Copilot row on the user's Claude settings: its own pass migrates them
-// and a failing row would only reinstall the runtime every pass.
-var windowsGuardianWatching atomic.Bool
-
-// windowsClaudeUserSettingsMigrated is the verify check (Setup's readiness,
-// enterprise verify) that an account's Claude Code user settings, which
-// Copilot CLI in a project under the home and Cursor read, hold none of
+// windowsClaudeUserSettingsMigrated is the verify check (enterprise verify and
+// ensure fail the row; Setup's readiness reports it as a warning, the
+// guardian's own pass skips it) that an account's Claude Code user settings,
+// which Copilot CLI in a project under the home and Cursor read, hold none of
 // DefenseClaw's older per-user hooks and can be read at all. Either one makes
 // the foreign-hook guard deny those agents' tool calls, so verify is not ok
 // and names the file and the reason instead of the calls failing with no
@@ -251,7 +249,6 @@ var windowsStandaloneGoOwnedPolicyMu sync.Mutex
 // watch, which restores the plugin right after a standard account changes
 // its attributes instead of at the next pass.
 func enterpriseHookStandalonePlatformWatch(ctx context.Context, stderr io.Writer) {
-	windowsGuardianWatching.Store(true)
 	go watchWindowsStandaloneHookBinary(ctx, stderr)
 	opts, _, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone || err != nil || strings.TrimSpace(opts.OpenCodePluginPath) == "" {
