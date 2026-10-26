@@ -86,15 +86,12 @@ func (r *r105CodexRoute) bash(session, cwd, command string) (string, []string) {
 	})
 }
 
-// GAP-1503 (decided: not a defect of the startup snapshot). The installed
-// per-user Codex hook route authenticates with the connector-scoped hook
-// token, so the gateway records the session's startup snapshot. A write to
-// the AGENTS.md the session started with is then identity-proved: it blocks
-// in action wherever HIGH blocks (guardrail.block_at HIGH, as the lab's
-// managed hosts set, or the strict pack). The balanced pack's own block level
-// is CRITICAL, so with no block_at the same proved HIGH finding is an alert
-// (BALANCED-DEFAULTS rule 1/2: an organization raises it with block_at). The
-// AGENTS.md the session itself creates stays its own in every case.
+// GAP-1503. The installed per-user Codex hook route authenticates with the
+// connector-scoped hook token, so the gateway records the session's startup
+// snapshot. A write to the AGENTS.md the session started with is then
+// identity-proved, which makes it CRITICAL: it blocks in action mode with the
+// default pack's own block level (no block_at) as well as with block_at
+// HIGH. The AGENTS.md the session itself creates stays its own in every case.
 func TestR105GAP1503PerUserCodexRouteRecordsTheStartupSnapshot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell forms")
@@ -104,7 +101,7 @@ func TestR105GAP1503PerUserCodexRouteRecordsTheStartupSnapshot(t *testing.T) {
 		want    string
 	}{
 		{"HIGH", guardrailActionBlock},
-		{"", "alert"},
+		{"", guardrailActionBlock},
 	} {
 		t.Run("block_at "+tc.blockAt, func(t *testing.T) {
 			home := testenv.PrivateTempDir(t)

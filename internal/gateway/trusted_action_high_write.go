@@ -242,6 +242,15 @@ func provedHighWriteFindings(
 				}
 				_, instructionRule := instructionRuleFiles[rule.ID]
 				alertOnly := instructionRule && instructionProof == instructionExistenceProved && !existenceBlocks
+				// A write to an instruction file the session loaded or found
+				// at its start, proved by the file's identity, is unambiguous
+				// and high impact: CRITICAL (SignalStrengthToSeverity). Action
+				// mode therefore blocks it under every pack's posture, the
+				// default one included; observe only records it (GAP-1503).
+				severity := rule.Severity
+				if instructionRule && instructionProof == instructionIdentityProved && strings.EqualFold(severity, "HIGH") {
+					severity = "CRITICAL"
+				}
 				index := slices.IndexFunc(proved, func(finding RuleFinding) bool {
 					return finding.RuleID == rule.ID
 				})
@@ -251,6 +260,9 @@ func provedHighWriteFindings(
 						proved[index].enforcement = findingEnforcementAllowed
 						proved[index].proof = proof
 					}
+					if severity != rule.Severity {
+						proved[index].Severity = severity
+					}
 					continue
 				}
 				enforcement := findingEnforcementAllowed
@@ -258,7 +270,7 @@ func provedHighWriteFindings(
 					enforcement = findingEnforcementAlertOnly
 				}
 				proved = append(proved, adjustConfidence(request.Input.Tool, RuleFinding{
-					RuleID: rule.ID, Title: rule.Title + note, Severity: rule.Severity,
+					RuleID: rule.ID, Title: rule.Title + note, Severity: severity,
 					Confidence: rule.Confidence, Evidence: path.Base(strings.ReplaceAll(resolved, `\`, "/")),
 					Tags:       append([]string(nil), rule.Tags...),
 					LineNumber: 1, enforcement: enforcement,
