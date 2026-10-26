@@ -720,7 +720,8 @@ func TestWindowsManagedHooksStagedRetireWithNoJournalClassifiesBeforeTheTransact
 		identityCalls++
 		return errors.New("managed enterprise hook mutations require the LocalSystem guardian on native Windows")
 	}
-	classifyErr := errors.New("enterprise hooks: decode managed runtime bundle: unexpected EOF")
+	classifyErr := errors.Join(enterprisehooks.ErrWindowsManagedRuntimeBundleRefused,
+		errors.New("enterprise hooks: decode managed runtime bundle: unexpected EOF"))
 	var classified []enterprisehooks.WindowsManagedRuntimeGenerationGCOptions
 	windowsManagedHooksLifecycleGenerationClassify = func(
 		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
@@ -740,6 +741,15 @@ func TestWindowsManagedHooksStagedRetireWithNoJournalClassifiesBeforeTheTransact
 	if got := classified[0]; got.Connector != "opencode" || got.TargetSID != sid ||
 		got.DataDir != ctx.targets[0].DataDir || got.HookExecutable != ctx.opts.HookBinary {
 		t.Fatalf("classified options = %+v", got)
+	}
+
+	// GAP-1910: an error of the same loop that is not a bundle refusal (a
+	// deleted hooks folder, a busy selector lock) carries no classify
+	// prefix, so Setup warns and continues instead of naming a damaged bundle.
+	classifyErr = errors.New("enterprise hooks: selected managed runtime generation directory is absent: file does not exist")
+	if _, _, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true); err == nil ||
+		strings.HasPrefix(err.Error(), "classify ") || !strings.Contains(err.Error(), sid) {
+		t.Fatalf("staged retire over a deleted hooks folder: err=%v, want an unprefixed error naming the SID", err)
 	}
 
 	classifyErr = fmt.Errorf("%w: access denied", enterprisehooks.ErrWindowsManagedRuntimeGenerationDirectoryUntrusted)

@@ -572,6 +572,12 @@ func retireAbsentWindowsManagedHooksLifecycleJournal(
 			)))
 			continue
 		}
+		if !errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeBundleRefused) {
+			// Not a bundle the new release refuses: Setup warns and the
+			// retire after the commit classifies, as before this check
+			// existed (GAP-1910).
+			return nil, 0, fmt.Errorf("%s generations of SID %s%s: %w", target.Connector, target.SID, account, err)
+		}
 		return nil, 0, fmt.Errorf(
 			"classify %s managed runtime generations for SID %s%s: %w",
 			target.Connector, target.SID, account, err,

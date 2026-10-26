@@ -1061,6 +1061,23 @@ func ClassifyWindowsManagedRuntimeGenerations(opts WindowsManagedRuntimeGenerati
 	return err
 }
 
+// ErrWindowsManagedRuntimeBundleRefused marks a classification that refused a
+// bundle itself (malformed, unsupported, over the candidate limit). Every
+// other error of the same loop (an absent selected folder, a selector that
+// cannot be read or locked) is not about a bundle, so the pre-transaction
+// check must not stop a lifecycle with the damaged-bundle remedy for it
+// (GAP-1910).
+var ErrWindowsManagedRuntimeBundleRefused = errors.New("enterprise hooks: managed runtime bundle refused")
+
+// windowsManagedRuntimeBundleRefusal keeps the refusal's text and adds the
+// sentinel to its chain.
+type windowsManagedRuntimeBundleRefusal struct{ err error }
+
+func (r windowsManagedRuntimeBundleRefusal) Error() string { return r.err.Error() }
+func (r windowsManagedRuntimeBundleRefusal) Unwrap() []error {
+	return []error{ErrWindowsManagedRuntimeBundleRefused, r.err}
+}
+
 func collectWindowsManagedRuntimeGenerations(
 	opts WindowsManagedRuntimeGenerationGCOptions,
 	classifyOnly bool,
@@ -1200,7 +1217,7 @@ func collectWindowsManagedRuntimeGenerations(
 			}
 			candidates++
 			if candidates > windowsManagedRuntimeGenerationGCMaxCandidates {
-				return errors.New("enterprise hooks: managed runtime generation GC candidate limit exceeded")
+				return windowsManagedRuntimeBundleRefusal{errors.New("enterprise hooks: managed runtime generation GC candidate limit exceeded")}
 			}
 			// The selected bundle is classified with the rules this GC will
 			// apply once a later publication unselects it, so a retire before
@@ -1213,7 +1230,7 @@ func collectWindowsManagedRuntimeGenerations(
 				generationID,
 			)
 			if err != nil {
-				return err
+				return windowsManagedRuntimeBundleRefusal{err}
 			}
 			if generationID == selectedGenerationID {
 				continue

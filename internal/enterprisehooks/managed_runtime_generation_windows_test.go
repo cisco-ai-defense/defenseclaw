@@ -397,6 +397,11 @@ func TestWindowsManagedRuntimeGenerationGCFailsClosedWhenSelectedHooksAreAbsent(
 		t.Fatalf("publish protected selected-generation fixture: %v", err)
 	}
 
+	// GAP-1910: an absent selected folder is not a bundle the new release
+	// refuses, so the pre-transaction check does not stop a lifecycle for it.
+	if err := ClassifyWindowsManagedRuntimeGenerations(fixture.options); err == nil || errors.Is(err, ErrWindowsManagedRuntimeBundleRefused) {
+		t.Fatalf("classify of an absent selected folder: err=%v, want an error that is not a bundle refusal", err)
+	}
 	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
 	if err == nil || !errors.Is(err, os.ErrNotExist) || removed != 0 {
 		t.Fatalf("selected generation with absent hooks did not fail closed: removed=%d err=%v", removed, err)
@@ -1187,6 +1192,10 @@ func TestWindowsManagedRuntimeGenerationGCClassifiesPriorInstallState(t *testing
 			}
 			if tc.reason != "" && !strings.Contains(classifyErr.Error(), tc.reason) {
 				t.Fatalf("classify lost reason %q: %v", tc.reason, classifyErr)
+			}
+			if tc.invalid && !errors.Is(classifyErr, ErrWindowsManagedRuntimeBundleRefused) &&
+				!errors.Is(classifyErr, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
+				t.Fatalf("classify refusal %v is neither a bundle refusal nor an untrusted folder (GAP-1910)", classifyErr)
 			}
 			if after := listHooks(); strings.Join(after, "|") != strings.Join(before, "|") {
 				t.Fatalf("classify changed the hooks folder: before=%v after=%v", before, after)
