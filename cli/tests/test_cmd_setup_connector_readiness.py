@@ -1830,3 +1830,50 @@ def test_setup_refuses_a_malformed_shared_hook_sidecar_for_every_connector(
     )
     assert "is malformed" in cmd_setup._agent_settings_refusal(_config(tmp_path), connector)
     assert calls and calls[0][1:5] == ["connector", "check-agent-settings", "--connector", connector]
+
+
+@pytest.mark.parametrize(
+    ("status", "detail", "ready"),
+    (
+        (
+            "warn",
+            "registered at /home/u/.hermes/config.yaml; execution proof unavailable: unprivileged user namespaces "
+            "are disabled (user.max_user_namespaces=0), so the registered hook is read back without running it",
+            True,
+        ),
+        ("warn", "registered at /home/u/.hermes/config.yaml; hooks_auto_accept is on", False),
+        ("fail", "Hermes registered hook execution probe could not run", False),
+    ),
+)
+def test_hermes_setup_is_ready_where_the_execution_proof_cannot_run(
+    monkeypatch, tmp_path: Path, status: str, detail: str, ready: bool
+) -> None:
+    """GAP-1994: with user.max_user_namespaces=0 doctor's Hermes hooks row is the
+    GAP-1525 warning (sealed registration, proof not run), and setup hermes still
+    rolled back and exited 1 on it. That warning is ready; any other warn is not."""
+    cfg = _config(tmp_path)
+    cfg.guardrail = _guardrail(fail_mode="closed")
+    cfg.deployment_mode = "managed_enterprise"
+    monkeypatch.setattr("defenseclaw.fail_mode._is_windows", lambda: True)
+    entry = _entry("hermes", tmp_path)
+    entry["hook_fail_mode"] = "closed"
+    _patch_registration_ready(monkeypatch, entry)
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": {"hermes": entry}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_selection, "setup_agent_lock_executable_invariant", lambda *_args: "")
+    monkeypatch.setattr(cmd_doctor, "hermes_profile_unsupported_reason", lambda *_args: "")
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_windows_native_hook_check",
+        lambda *_args, **_kwargs: WindowsHookCheck("healthy", "registered"),
+    )
+    monkeypatch.setattr(cmd_doctor, "_hermes_windows_execution_probe", lambda check: check)
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_check_hermes_hooks",
+        lambda _cfg, result: cmd_doctor._emit(status, cmd_doctor._HERMES_HOOKS_LABEL, detail, r=result),
+    )
+    readiness = cmd_doctor.connector_setup_readiness(cfg, "hermes")
+    assert bool(readiness) is ready, readiness

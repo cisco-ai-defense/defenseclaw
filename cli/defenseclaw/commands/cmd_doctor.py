@@ -10179,7 +10179,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     _emit(
                         "warn",
                         label,
-                        f"registered at {path}; execution proof unavailable: {unavailable}, so the "
+                        f"registered at {path}; {_HERMES_PROOF_UNAVAILABLE}: {unavailable}, so the "
                         "registered hook is read back without running it",
                         r=r,
                         remediation="enable unprivileged user namespaces (sysctl user.max_user_namespaces) "
@@ -10543,6 +10543,11 @@ class ConnectorSetupReadiness:
         return self.ready
 
 
+# The Hermes hooks row where this host cannot run the contained execution
+# proof (GAP-1525): the sealed registration is current, so it is a warning
+# that the proof did not run, and setup is ready (GAP-1994).
+_HERMES_PROOF_UNAVAILABLE = "execution proof unavailable"
+
 _SETUP_READINESS_PRIMARY_LABELS = {
     "codex": "Codex hooks",
     "claudecode": "Claude Code hooks",
@@ -10666,6 +10671,8 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
         for row in rows:
             status = str(row.get("status") or "")
             detail = str(row.get("detail") or "")
+            if status == "warn" and name == "hermes" and label == primary_label and _HERMES_PROOF_UNAVAILABLE in detail:
+                continue
             if status != "pass":
                 return ConnectorSetupReadiness(
                     False,
