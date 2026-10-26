@@ -123,14 +123,12 @@ func TestSetupMovesASandboxPortAnotherProcessHolds(t *testing.T) {
 	t.Cleanup(func() { _ = squatter.Close() })
 	held := squatter.Addr().(*net.TCPAddr).Port
 	ta.Cfg.OpenShell.IngressPort = held
-	writeConfig(t, ta, fmt.Sprintf("openshell:\n  ingress_port: %d\n", held))
-	ta.Cfg.OpenShell.IngressPort = held
 	ta.HostDoctor = hostReport(func(rep *openshell.DoctorReport) {
 		rep.Checks = append(rep.Checks, openshell.Check{ID: openshell.CheckIDPortPrefix + "ingress", Title: "Sandbox ingress port",
 			Status: openshell.StatusFail, Detail: fmt.Sprintf("127.0.0.1:%d is in use by another process", held)})
 	})
 	_ = ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true})
-	has(t, ta.output(), "Move the sandbox ingress port to")
+	has(t, ta.output(), "openshell.ingress_port is ")
 	if got := loadConfig(t, ta).OpenShell.IngressPort; got == 0 || got == held {
 		t.Fatalf("openshell.ingress_port = %d after setup, want a free port other than the held %d; output:\n%s", got, held, ta.output())
 	}
