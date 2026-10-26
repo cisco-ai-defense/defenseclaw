@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -168,7 +169,8 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 
 // activeStateMutationOwner is the integrity owner of DefenseClaw's active
 // state, where moving a protected file or tree away removes it as surely as
-// deleting it: a move source is a mutation here (GAP-1774), while the other
+// deleting it: a move source is a mutation here (GAP-1774), and so is a
+// chmod that adds group or other write (GAP-2077), while the other
 // integrity owners keep judging only the move destination.
 func activeStateMutationOwner() semanticOwner {
 	owner := integrityMutationOwner(
@@ -186,6 +188,13 @@ func activeStateMutationOwner() semanticOwner {
 				command.Effect == actionfacts.EffectExecute &&
 					candidate.Access == actionfacts.PathAccessDelete &&
 					hasOperation(command, actionfacts.OperationMove) {
+				return true
+			}
+			// A chmod that gives group or other write to state hands it
+			// to another account (GAP-2077); tightening is not a change.
+			if command.Effect == actionfacts.EffectExecute &&
+				candidate.Access == actionfacts.PathAccessMetadata &&
+				strings.EqualFold(command.Program, "chmod") && chmodAddsGroupOrOtherWrite(command) {
 				return true
 			}
 		}
@@ -2590,6 +2599,12 @@ func stateTreeEntryChanged(
 	switch candidate.Access {
 	case actionfacts.PathAccessDelete:
 		return !findDeletesOnlyUnprotectedNames(command, state)
+	case actionfacts.PathAccessMetadata:
+		// chmod that lets group or other write the root or a tree hands
+		// every file in it to another account, and a world-writable
+		// hooks/ makes every hook fail closed (GAP-2077). Tightening
+		// modes and chown/chgrp are judged by the file reached.
+		return strings.EqualFold(command.Program, "chmod") && chmodAddsGroupOrOtherWrite(command)
 	case actionfacts.PathAccessWrite:
 		if !hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove) {
 			return false
@@ -2676,6 +2691,52 @@ func findPatternReachesProtectedState(pattern string, fold bool) bool {
 		matched, err := path.Match(pattern, name)
 		if err != nil || matched {
 			return true
+		}
+	}
+	return false
+}
+
+// chmodAddsGroupOrOtherWrite reports a chmod whose mode gives group or
+// other write: an octal mode with 0o022 bits, or a symbolic clause naming
+// g, o or a with + or = and w. A mode with no who letters is filtered by the
+// umask and is not counted.
+func chmodAddsGroupOrOtherWrite(command actionfacts.CommandFact) bool {
+	for _, argument := range command.Argv[1:] {
+		switch {
+		case argument == "--":
+			continue
+		case strings.HasPrefix(argument, "--"):
+			if strings.HasPrefix(argument, "--reference") {
+				return false
+			}
+			continue
+		case len(argument) > 1 && argument[0] == '-' && strings.Trim(argument[1:], "Rcfv") == "":
+			continue
+		}
+		return chmodModeAddsGroupOrOtherWrite(argument)
+	}
+	return false
+}
+
+func chmodModeAddsGroupOrOtherWrite(mode string) bool {
+	if mode != "" && strings.Trim(mode, "01234567") == "" {
+		value, err := strconv.ParseUint(mode, 8, 32)
+		return err == nil && value&0o022 != 0
+	}
+	for _, clause := range strings.Split(mode, ",") {
+		who := strings.TrimLeft(clause, "ugoa")
+		groupOrOther := strings.ContainsAny(clause[:len(clause)-len(who)], "goa")
+		for operations := who; operations != ""; {
+			operator := operations[0]
+			rest := strings.TrimLeft(operations[1:], "rwxXstugo")
+			perms := operations[1 : len(operations)-len(rest)]
+			if groupOrOther && (operator == '+' || operator == '=') && strings.ContainsAny(perms, "wugo") {
+				return true
+			}
+			if operator != '+' && operator != '-' && operator != '=' {
+				return false
+			}
+			operations = rest
 		}
 	}
 	return false

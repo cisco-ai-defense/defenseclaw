@@ -231,3 +231,40 @@ func TestR105GAP2075FindDeleteOfProtectedStateNames(t *testing.T) {
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)
 	}
 }
+
+// GAP-2077: a chmod that gives group or other write on the state root or a
+// protected tree is a state mutation (every mode), as the same chmod of a
+// file in it already is. Tightening modes and chown stay allowed.
+func TestR105GAP2077ChmodGroupOtherWriteOfStateTree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell forms")
+	}
+	_, cwd := r105StateFixture(t)
+	rows := []r105StateRow{
+		{"chmod -R 777 root", "chmod -R 777 ~/.defenseclaw", true, ""},
+		{"chmod 777 hooks", "chmod 777 ~/.defenseclaw/hooks", true, ""},
+		{"chmod o+w policies", "chmod o+w ~/.defenseclaw/policies", true, ""},
+		{"chmod g=rwx installer", "chmod g=rwx ~/.defenseclaw/installer", true, ""},
+		{"chmod a+w root", "chmod a+w ~/.defenseclaw", true, ""},
+		{"chmod 700 hooks", "chmod 700 ~/.defenseclaw/hooks", false, ""},
+		{"chmod -R go-rwx root", "chmod -R go-rwx ~/.defenseclaw", false, ""},
+		{"chmod u+x hooks", "chmod u+x ~/.defenseclaw/hooks", false, ""},
+		{"chmod 755 root", "chmod 755 ~/.defenseclaw", false, ""},
+		{"chown -R root", "chown -R nobody ~/.defenseclaw", false, ""},
+	}
+	for _, mode := range []string{"observe", "action"} {
+		r105RunStateRowsChecked(t, mode, cwd, rows, true)
+	}
+}
+
+func TestR105GAP2077ChmodModeGroupOtherWrite(t *testing.T) {
+	for mode, want := range map[string]bool{
+		"777": true, "0775": true, "766": true, "744": false, "700": false, "0755": false, "2770": true,
+		"o+w": true, "g+rw": true, "a+w": true, "go=rwx": true, "g=u": true, "u+w,o+w": true,
+		"+w": false, "go-w": false, "u+rwx": false, "a-w": false, "=rx": false, "o=r": false,
+	} {
+		if got := chmodModeAddsGroupOrOtherWrite(mode); got != want {
+			t.Errorf("chmod %s: got %t want %t", mode, got, want)
+		}
+	}
+}
