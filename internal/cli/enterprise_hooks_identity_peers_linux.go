@@ -157,7 +157,8 @@ var enterpriseHookResolveGatewayPeers = func(path string, last map[int]enterpris
 		if json.Unmarshal(stored[strconv.Itoa(uid)], &entry) != nil {
 			return false
 		}
-		if !(entry.PreTokenHolder || (legacyFile || entry.LegacyHolder) && strings.TrimSpace(entry.BaseIncarnation) == "") {
+		unserved := entry.PreTokenHolder || (legacyFile || entry.LegacyHolder) && strings.TrimSpace(entry.BaseIncarnation) == ""
+		if !unserved {
 			return false
 		}
 		// A home created after the gateway last saw the uid's holder
