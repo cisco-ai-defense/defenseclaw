@@ -863,6 +863,25 @@ class PerConnectorToggleTests(unittest.TestCase):
         self.assertTrue(app.cfg.guardrail.effective_enabled("codex"))
         app.cfg.save.assert_called_once()
 
+    def test_enable_one_connector_that_the_gateway_cannot_set_up_stays_disabled(self):
+        """GAP-1534: a readiness failure left the flag enabled with the hooks torn
+        down, and the retry said 'already enabled'. The flag goes back to
+        disabled, and the retry runs the setup again."""
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        failure = click.ClickException("gateway restart/readiness failed for: connector runtime readiness")
+        with patch("defenseclaw.commands.cmd_setup._restart_services", side_effect=failure):
+            result = runner.invoke(cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes"], obj=app)
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
+        self.assertIn("stays disabled", " ".join(result.output.split()))
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart:
+            result = runner.invoke(cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("already enabled", result.output)
+        restart.assert_called_once()
+        self.assertTrue(app.cfg.guardrail.effective_enabled("codex"))
+
     def test_enable_one_connector_refuses_a_malformed_shared_hook_sidecar(self):
         """GAP-1816: enable saved the flag and returned 0 over a malformed
         hooks/.hookcfg; it now runs setup's check first and changes nothing."""

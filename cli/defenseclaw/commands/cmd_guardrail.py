@@ -457,17 +457,38 @@ def _toggle_connector_guardrail(
             if enable
             else None
         )
-        cmd_setup._restart_services(
-            app.cfg.data_dir,
-            app.cfg.gateway.host,
-            app.cfg.gateway.port,
-            connector=key,
-            connectors=roster,
-            teardown=not enable,
-            # Report "setup complete" only once the gateway admitted the
-            # connector (GAP-0069).
-            wait_for_connector_ready=enable,
-        )
+        try:
+            cmd_setup._restart_services(
+                app.cfg.data_dir,
+                app.cfg.gateway.host,
+                app.cfg.gateway.port,
+                connector=key,
+                connectors=roster,
+                teardown=not enable,
+                # Report "setup complete" only once the gateway admitted the
+                # connector (GAP-0069).
+                wait_for_connector_ready=enable,
+            )
+        except (click.ClickException, SystemExit):
+            if not enable:
+                raise
+            # The gateway could not set the connector up, so its hooks are
+            # still the disabled ones: put the flag back, or the connector
+            # read 'enabled' with no hooks and a retry said 'already enabled'
+            # (GAP-1534).
+            entry.enabled = False
+            try:
+                app.cfg.save()
+            except OSError as exc:
+                ux.err(f"{label} could not be set up, and putting it back to disabled failed: {exc}", indent="  ")
+                raise
+            ux.err(
+                f"{label} stays disabled: the gateway could not set it up (see above), so "
+                f"guardrail.connectors.{key}.enabled is false again. Fix that error, then run: "
+                f"defenseclaw guardrail enable --connector {key}",
+                indent="  ",
+            )
+            raise
         ux.ok(f"{label} connector {action} complete", indent="  ")
         click.echo()
 
