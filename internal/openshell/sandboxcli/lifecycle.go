@@ -89,11 +89,18 @@ func otherDriverSandboxes(list []sandboxapi.Sandbox, live string) []sandboxapi.S
 	}
 	var out []sandboxapi.Sandbox
 	for _, sb := range list {
-		if sb.Phase != "deleted" && createdDriver(sb) != live {
+		if sb.Phase != "deleted" && !beingCreated(sb) && createdDriver(sb) != live {
 			out = append(out, sb)
 		}
 	}
 	return out
+}
+
+// beingCreated reports a sandbox whose create is still under way and has
+// recorded no driver yet: it is being made on the driver the gateway runs
+// now, never an old record of the docker driver (GAP-1431).
+func beingCreated(sb sandboxapi.Sandbox) bool {
+	return sb.Driver == "" && (sb.Phase == "creating" || sb.Phase == "provisioning" || sb.Phase == "pending")
 }
 
 // otherDriverNote says which sandboxes belong to a driver the gateway no
