@@ -413,7 +413,7 @@ claude_fail_closed_decision() {
   if defenseclaw_install_held && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
     reason="DefenseClaw blocked this: ${next//\`/}."
   elif [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.stopped" ]; then
-    reason="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection."
+    reason="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection (defenseclaw-gateway status shows its state)."
   elif [ "$1" = "gateway unreachable" ] && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
     reason="DefenseClaw blocked this: ${next//\`/}."
   else
