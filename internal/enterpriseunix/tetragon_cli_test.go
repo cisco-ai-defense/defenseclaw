@@ -415,7 +415,10 @@ func TestUninstallThatKeepsTheBinariesStillRemovesTheTetragonPolicies(t *testing
 	}}}
 	h.env.Runner = runner
 	r := h.run(Options{Action: ActionUninstall})
-	requireError(t, r, codeUninstall)
+	// The refused uninstall restores the services; since GAP-0184 their
+	// readiness is checked as the service account, so only the refusal
+	// itself is an error (no "gateway did not become ready").
+	requireError(t, r, codeUninstallIncomplete)
 	if got := runner.cleanupCalls(); len(got) != 2 {
 		t.Fatalf("cleanup calls %v", got)
 	}
