@@ -84,7 +84,10 @@ defenseclaw_install_lock_stale() {
   # An installer that exited but is not reaped (a zombie) keeps its pid and
   # its start, but runs nothing.
   defenseclaw_process_ended "$pid" && return 0
-  [ -e "${lock}/proc-start" ] || [ -L "${lock}/proc-start" ] || return 1
+  if [ ! -e "${lock}/proc-start" ] && [ ! -L "${lock}/proc-start" ]; then
+    defenseclaw_process_started_after_lock "$pid" "$lock"
+    return
+  fi
   recorded="$(defenseclaw_install_lock_record "${lock}/proc-start")" || return 1
   current="$(defenseclaw_process_identity "$pid")" || return 1
   [ "$recorded" != "$current" ] && return 0
@@ -137,6 +140,36 @@ defenseclaw_process_ended() {
   set -- $stat
   case "${1:-}" in Z*) return 0 ;; esac
   return 1
+}
+# defenseclaw_process_started_after_lock PID LOCK returns 0 when process PID
+# started more than 2 s after LOCK was last changed: a 1.0.2/1.0.3 lock
+# without a proc-start record whose pid a later process got (GAP-1465, the
+# hookexec rule). It returns 1 when it started earlier or the system does not
+# say.
+defenseclaw_process_started_after_lock() {
+  local locked="" started="" boot="" stat="" line="" out="" IFS=' '
+  locked="$(stat -c %Y "${2:-}" 2>/dev/null || stat -f %m "${2:-}" 2>/dev/null)" || return 1
+  case "$locked" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -e /proc/self/stat ]; then
+    while IFS= read -r line; do
+      case "$line" in "btime "*) boot="${line#btime }"; break ;; esac
+    done < /proc/stat
+    case "$boot" in ''|*[!0-9]*) return 1 ;; esac
+    stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
+    case "$stat" in *[\)]*) ;; *) return 1 ;; esac
+    stat="${stat##*[\)]}"
+    set -- $stat
+    [ "$#" -ge 20 ] || return 1
+    shift 19
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    started=$((boot + $1 / 100))
+  else
+    [ "$(uname -s 2>/dev/null)" = Darwin ] && [ -x /bin/ps ] || return 1
+    out="$(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p "${1:-}" 2>/dev/null)" || return 1
+    started="$(LC_ALL=C TZ=UTC date -j -u -f "%a %b %e %T %Y" "$out" +%s 2>/dev/null)" || return 1
+    case "$started" in ''|*[!0-9]*) return 1 ;; esac
+  fi
+  [ "$started" -gt $((locked + 2)) ]
 }
 # defenseclaw_install_lock_record FILE prints the trimmed text of a small
 # owner record (proc-start); it returns 1 when FILE is not a small regular

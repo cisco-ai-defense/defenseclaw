@@ -103,8 +103,6 @@ function Test-DefenseClawInstallLockCurrent([string]$lock) {
     }
     try { $item = Get-Item -LiteralPath $lock -Force -ErrorAction Stop }
     catch { return $true }
-    $age = ([DateTime]::UtcNow - $item.LastWriteTimeUtc).TotalSeconds
-    if ($age -gt 600 -or $age -lt -60) { return $false }
     if (-not $item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $true }
     $pidPath = Join-Path $lock 'pid'
     try {
@@ -113,9 +111,21 @@ function Test-DefenseClawInstallLockCurrent([string]$lock) {
         $holder = [System.IO.File]::ReadAllText($pidPath).Trim()
         [int]$holderId = 0
         if ($holder -notmatch '^[1-9][0-9]*$' -or -not [int]::TryParse($holder, [ref]$holderId)) { return $true }
-        try { return (-not [System.Diagnostics.Process]::GetProcessById($holderId).HasExited) }
+        # The one stale-lock rule (hookexec installLockStale): no clock is
+        # read for a lock with an identity record; a 1.0.2/1.0.3 lock without
+        # one is stale when its pid's process started after the lock
+        # (GAP-1025, GAP-1465).
+        try { $holderProcess = [System.Diagnostics.Process]::GetProcessById($holderId) }
         catch [System.ArgumentException] { return $false }
         catch { return $true }
+        if ($holderProcess.HasExited) { return $false }
+        try { $started = $holderProcess.StartTime.ToUniversalTime() } catch { return $true }
+        $recordPath = Join-Path $lock 'proc-start'
+        if (Test-Path -LiteralPath $recordPath) {
+            try { $recorded = [System.IO.File]::ReadAllText($recordPath).Trim() } catch { return $true }
+            return ($recorded -eq [string]$started.ToFileTimeUtc())
+        }
+        return ($started -le $item.LastWriteTimeUtc.AddSeconds(2))
     }
     catch { return $true }
 }

@@ -34,35 +34,39 @@ func TestInstallLockHeldIgnoresOnlyALockWhoseOwnerIsGone(t *testing.T) {
 	type owner struct {
 		pid, deadline, record string
 	}
+	// legacy: a lock without a proc-start record whose pid names a live
+	// process. Dated a week back, that process started after the lock: its
+	// pid was reused and the lock is stale (LEAD DECISION 13:58, GAP-1465).
 	for _, tc := range []struct {
-		name string
-		lock owner
-		held bool
+		name   string
+		lock   owner
+		held   bool
+		legacy bool
 	}{
-		{"installer exited", owner{pid: dead + "\n"}, false},
-		{"installer exited, Windows line end", owner{pid: dead + "\r\n"}, false},
-		{"installer running", owner{pid: live + "\n"}, true},
-		{"installer running, a deadline an earlier build recorded", owner{pid: live, deadline: "1"}, true},
+		{"installer exited", owner{pid: dead + "\n"}, false, false},
+		{"installer exited, Windows line end", owner{pid: dead + "\r\n"}, false, false},
+		{"installer running", owner{pid: live + "\n"}, true, true},
+		{"installer running, a deadline an earlier build recorded", owner{pid: live, deadline: "1"}, true, true},
 		// Without a proc-start record no clock may tell a reused pid from a
 		// live owner: a 1.0.2/1.0.3 PID-only lock holds while its pid names
 		// a process (GAP-1465 is the reused pid of a lock with a record).
-		{"1.0.2/1.0.3 PID-only lock, its pid names a process", owner{pid: live}, true},
-		{"1.0.2/1.0.3 PID-only lock, installer exited", owner{pid: dead}, false},
+		{"1.0.2/1.0.3 PID-only lock, its pid names a process", owner{pid: live}, true, true},
+		{"1.0.2/1.0.3 PID-only lock, installer exited", owner{pid: dead}, false, false},
 		// Loop round 2 P2: no reader writes a lock, so a lock naming the
 		// reader's own pid is a reused pid.
-		{"lock names this reader's own pid", owner{pid: strconv.Itoa(os.Getpid())}, false},
+		{"lock names this reader's own pid", owner{pid: strconv.Itoa(os.Getpid())}, false, false},
 		// Round k: a lock without a valid pid holds; no wait expires it.
-		{"no pid", owner{}, true},
-		{"empty pid", owner{pid: " "}, true},
-		{"pid not a number", owner{pid: "abc"}, true},
-		{"pid out of range", owner{pid: "99999999999"}, true},
+		{"no pid", owner{}, true, false},
+		{"empty pid", owner{pid: " "}, true, false},
+		{"pid not a number", owner{pid: "abc"}, true, false},
+		{"pid out of range", owner{pid: "99999999999"}, true, false},
 		// GAP-1024: an interrupted-install record does not hold the lock
 		// once its installer is gone.
-		{"interrupted install kept previous.new", owner{pid: dead, record: "previous.new"}, false},
-		{"interrupted install kept .repair", owner{pid: dead, record: ".repair"}, false},
-		{"interrupted install kept .rollback-hold", owner{pid: dead, record: ".rollback-hold"}, false},
-		{"interrupted Windows install kept its record", owner{pid: dead, record: ".lifecycle-txn.json"}, false},
-		{"interrupted install, an earlier build's deadline", owner{pid: dead, record: "previous.new", deadline: "1"}, false},
+		{"interrupted install kept previous.new", owner{pid: dead, record: "previous.new"}, false, false},
+		{"interrupted install kept .repair", owner{pid: dead, record: ".repair"}, false, false},
+		{"interrupted install kept .rollback-hold", owner{pid: dead, record: ".rollback-hold"}, false, false},
+		{"interrupted Windows install kept its record", owner{pid: dead, record: ".lifecycle-txn.json"}, false, false},
+		{"interrupted install, an earlier build's deadline", owner{pid: dead, record: "previous.new", deadline: "1"}, false, false},
 	} {
 		for _, step := range []time.Duration{0, -7 * 24 * time.Hour, 7 * 24 * time.Hour} {
 			t.Run(tc.name+"/times "+step.String(), func(t *testing.T) {
@@ -92,12 +96,13 @@ func TestInstallLockHeldIgnoresOnlyALockWhoseOwnerIsGone(t *testing.T) {
 						}
 					}
 				}
-				if got := InstallLockHeld(home); got != tc.held {
-					t.Fatalf("InstallLockHeld = %v, want %v", got, tc.held)
+				held := tc.held && !(tc.legacy && step < 0)
+				if got := InstallLockHeld(home); got != held {
+					t.Fatalf("InstallLockHeld = %v, want %v", got, held)
 				}
 				opts := Options{Home: home, FailMode: "open"}
-				if got := closeDuringInstall(&opts, "open"); (got == "closed") != tc.held {
-					t.Fatalf("closeDuringInstall = %q with the lock held %v", got, tc.held)
+				if got := closeDuringInstall(&opts, "open"); (got == "closed") != held {
+					t.Fatalf("closeDuringInstall = %q with the lock held %v", got, held)
 				}
 			})
 		}

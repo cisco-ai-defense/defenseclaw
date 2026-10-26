@@ -998,6 +998,30 @@ function defenseclawProcessIdentity(pid) {
   return null;
 }
 
+// defenseclawProcessStartMs is when process pid started (ms since the epoch),
+// from the identity the system keeps (defenseclawProcessIdentity), or null.
+function defenseclawProcessStartMs(pid) {
+  const identity = defenseclawProcessIdentity(pid);
+  if (identity === null) return null;
+  try {
+    if (process.platform === "linux") {
+      const line = String(readFileSync("/proc/stat", "utf8")).split("\n").find((entry) => entry.startsWith("btime "));
+      const boot = line ? Number(line.slice(6).trim()) : NaN;
+      const ticks = Number(identity.split(" ")[1]);
+      return Number.isFinite(boot) && Number.isFinite(ticks) ? boot * 1000 + ticks * 10 : null;
+    }
+    if (process.platform === "darwin") {
+      const [, month, day, time, year] = identity.split(" ");
+      const started = Date.parse(month + " " + day + ", " + year + " " + time + " UTC");
+      return Number.isFinite(started) ? started : null;
+    }
+    if (process.platform === "win32") return Number(BigInt(identity) / 10000n - 11644473600000n);
+  } catch (_) {
+    // The system does not say.
+  }
+  return null;
+}
+
 // defenseclawProcessEnded reports a process that has exited but keeps its
 // pid: a zombie its parent has not reaped (hookexec procidentity.Ended). It
 // keeps its start but runs nothing. On Windows process.kill already reads
@@ -1078,6 +1102,12 @@ async function defenseclawInstallLockState(dir) {
   }
   if (defenseclawProcessEnded(owner.value)) return "stale";
   const identity = await defenseclawInstallLockRecord(join(lock, "proc-start"));
+  if (identity.state === "absent") {
+    // A 1.0.2/1.0.3 lock has no identity record: its pid names a later
+    // process when that process started after the lock (GAP-1465).
+    const started = defenseclawProcessStartMs(owner.value);
+    return started !== null && started > info.mtimeMs + 2000 ? "stale" : "held";
+  }
   if (identity.state !== "valid") return "held";
   const current = defenseclawProcessIdentity(owner.value);
   return current !== null && current !== identity.value ? "stale" : "held";

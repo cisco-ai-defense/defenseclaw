@@ -76,15 +76,16 @@ func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 		pid, deadline string
 		record        string
 		held          bool
+		legacy        bool // no proc-start record, live pid (GAP-1465)
 	}{
 		{name: "installer exited", pid: dead + "\n", held: false},
 		{name: "installer exited, Windows line end", pid: dead + "\r\n", held: false},
-		{name: "installer running", pid: live + "\n", held: true},
-		{name: "installer running, an earlier build's deadline", pid: live, deadline: "1", held: true},
+		{name: "installer running", pid: live + "\n", held: true, legacy: true},
+		{name: "installer running, an earlier build's deadline", pid: live, deadline: "1", held: true, legacy: true},
 		// Without a proc-start record no clock may tell a reused pid from a
 		// live owner: a 1.0.2/1.0.3 PID-only lock holds while its pid names
 		// a process, on every system.
-		{name: "1.0.2/1.0.3 PID-only lock, its pid names a process", pid: live, held: true},
+		{name: "1.0.2/1.0.3 PID-only lock, its pid names a process", pid: live, held: true, legacy: true},
 		{name: "no pid", held: true},
 		{name: "pid not a number", pid: "abc", held: true},
 		{name: "pid out of range", pid: "99999999999", held: true},
@@ -124,8 +125,9 @@ func TestShellHooksIgnoreAStaleInstallLock(t *testing.T) {
 				if err != nil {
 					t.Fatalf("bash: %v: %s", err, out)
 				}
-				if got := strings.TrimSpace(string(out)); got != map[bool]string{true: "held", false: "none"}[tc.held] {
-					t.Fatalf("defenseclaw_install_lock_held = %q, want held %v", got, tc.held)
+				held := tc.held && !(tc.legacy && step < 0)
+				if got := strings.TrimSpace(string(out)); got != map[bool]string{true: "held", false: "none"}[held] {
+					t.Fatalf("defenseclaw_install_lock_held = %q, want held %v", got, held)
 				}
 			})
 		}

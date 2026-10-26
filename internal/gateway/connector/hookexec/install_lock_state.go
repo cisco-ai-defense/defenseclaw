@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/procidentity"
 )
@@ -65,6 +66,9 @@ func installLockOwnerGone(lstat func(string) (fs.FileInfo, error), lock string, 
 		return true
 	}
 	recorded, state := installLockIdentity(lstat, filepath.Join(lock, InstallLockIdentityName))
+	if state == lockNumberAbsent {
+		return legacyInstallLockPIDReused(lstat, lock, pid)
+	}
 	if state != lockNumberValid {
 		return false
 	}
@@ -135,4 +139,24 @@ func installLockPID(lstat func(string) (fs.FileInfo, error), path string) (int64
 		return 0, lockNumberAbsent
 	}
 	return value, lockNumberValid
+}
+
+// installLockLegacySlack is how much later than the lock folder's last change
+// a record-less lock's process may have started and still be its installer
+// (the installer writes its pid right after it makes the folder; times have
+// a coarse resolution).
+const installLockLegacySlack = 2 * time.Second
+
+// legacyInstallLockPIDReused reports a 1.0.2/1.0.3 lock (no identity record)
+// whose pid names a process that started after the lock folder was last
+// changed: a later process got the killed installer's pid, so the lock is
+// stale (LEAD DECISION 2026-10-26 13:58, GAP-1465; install.sh applies the same
+// rule). A live installer started before its lock and keeps holding it.
+func legacyInstallLockPIDReused(lstat func(string) (fs.FileInfo, error), lock string, pid int) bool {
+	info, err := lstat(lock)
+	if err != nil {
+		return false
+	}
+	started, known := procidentity.StartTime(pid)
+	return known && started.After(info.ModTime().Add(installLockLegacySlack))
 }
