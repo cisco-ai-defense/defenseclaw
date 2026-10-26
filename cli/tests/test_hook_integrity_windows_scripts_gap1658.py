@@ -53,3 +53,15 @@ def test_windows_missing_token_and_mode_are_not_reported(tmp_path, monkeypatch):
     cfg, _ = _install(tmp_path)
     (tmp_path / "hooks" / "copilot-hook.sh").chmod(0o600)
     assert hook_integrity.hook_runtime_problems(cfg, "copilot") == []
+
+
+def test_windows_unreadable_adapter_is_not_reported_as_edited(tmp_path, monkeypatch):
+    """GAP-1942: a hook file Defender holds or a deny ACE hides read as "changed
+    since setup (an edit ...)"; it is "cannot be read", as on POSIX (GAP-0403)."""
+    from defenseclaw import fail_mode
+
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    cfg, _ = _install(tmp_path)
+    monkeypatch.setattr(fail_mode, "_sha256_regular_file", lambda _path: "")
+    problems = hook_integrity.hook_runtime_problems(cfg, "copilot")
+    assert len(problems) == 1 and "cannot be read" in problems[0] and "changed since setup" not in problems[0], problems

@@ -270,7 +270,16 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
         # (GAP-1658). The POSIX owner, mode and token checks do not apply.
         for script in scripts:
             expected = digests.get(script.name)
-            if expected and script.is_file() and _sha256_regular_file(script) != expected:
+            if not expected or not script.is_file():
+                continue
+            actual = _sha256_regular_file(script)
+            if not actual:
+                # Defender holding the file, or a deny ACE: not an edit (GAP-0403).
+                return [
+                    f"hook script {script} cannot be read, so the agent cannot run it and DefenseClaw is not "
+                    "guarding its tool calls"
+                ]
+            if actual != expected:
                 return [
                     f"hook script {script} changed since setup (an edit, or a copy from another build; "
                     "it does not match hook_contract_lock.json)"
