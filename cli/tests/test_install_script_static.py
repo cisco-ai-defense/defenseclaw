@@ -1470,7 +1470,7 @@ def _install_sh_functions(*names: str) -> str:
 
 
 _AGENT_SCAN = ("loaded_plugin_agents", "process_argv", "process_cwd", "process_programs", "resolved_agent_path",
-               "agent_identity_audit", "installed_agent_programs", "runtime_agent_programs", "agent_of",
+               "agent_identity_audit", "npm_config_prefixes", "installed_agent_programs", "runtime_agent_programs", "agent_of",
                "assert_no_loaded_plugin_agents")
 
 
@@ -1582,6 +1582,11 @@ def _started(argv: list[str], program: Path, executable: str | None = None) -> s
         ("opencode npm native exe in ~/.npm-global", "OpenCode"),
         ("opencode npm native exe in the .npmrc prefix", "OpenCode"),
         ("opencode npm native exe in NPM_CONFIG_PREFIX", "OpenCode"),
+        # GAP-1761: npm expands ${VAR} in a prefix and reads the user config
+        # NPM_CONFIG_USERCONFIG names and the global npmrc.
+        ("opencode npm native exe in a ${HOME} .npmrc prefix", "OpenCode"),
+        ("opencode npm native exe in the NPM_CONFIG_USERCONFIG prefix", "OpenCode"),
+        ("opencode npm native exe in the NPM_CONFIG_GLOBALCONFIG prefix", "OpenCode"),
         ("opencode npm native exe in a PATH prefix", "OpenCode"),
         ("opencode npm native exe run by its platform hard link", "OpenCode"),
         ("opencode.exe of another package in a PATH prefix", None),
@@ -1679,6 +1684,9 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
             "opencode npm native exe in ~/.npm-global": home / ".npm-global",
             "opencode npm native exe in the .npmrc prefix": tmp_path / "opt agents",
             "opencode npm native exe in NPM_CONFIG_PREFIX": tmp_path / "env-prefix",
+            "opencode npm native exe in a ${HOME} .npmrc prefix": home / ".npm-packages",
+            "opencode npm native exe in the NPM_CONFIG_USERCONFIG prefix": tmp_path / "user-prefix",
+            "opencode npm native exe in the NPM_CONFIG_GLOBALCONFIG prefix": tmp_path / "global-prefix",
         }.get(case, tmp_path / "dc-agents")
         package = "opencode-ai-fork" if case.startswith("opencode.exe of another") else "opencode-ai"
         program = _program(prefix / "lib" / "node_modules" / package / "bin" / "opencode.exe", sleep)
@@ -1691,6 +1699,13 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
             (home / ".npmrc").write_text(f"cache=/tmp/x\nprefix = {prefix}\n", encoding="utf-8")
         elif case.endswith("NPM_CONFIG_PREFIX"):
             env["NPM_CONFIG_PREFIX"] = str(prefix)
+        elif case.endswith("${HOME} .npmrc prefix"):
+            (home / ".npmrc").write_text("prefix=${HOME}/.npm-packages\n", encoding="utf-8")
+        elif case.endswith("CONFIG prefix"):
+            config = tmp_path / "npm-config" / ("user-npmrc" if "USERCONFIG" in case else "global-npmrc")
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(f'prefix="{prefix}"\n', encoding="utf-8")
+            env["NPM_CONFIG_USERCONFIG" if "USERCONFIG" in case else "NPM_CONFIG_GLOBALCONFIG"] = str(config)
         elif not case.endswith("~/.npm-global"):
             path.append(link.parent)
         argv = [str(link), "60"]
@@ -1869,7 +1884,7 @@ def test_the_installed_agents_are_those_of_the_native_installers(tmp_path: Path)
     unrelated_link.parent.mkdir(parents=True)
     unrelated_link.symlink_to(tools / "opencode")
     result = subprocess.run(
-        [BASH, "-c", _install_sh_functions("resolved_agent_path", "installed_agent_programs") + "installed_agent_programs"],
+        [BASH, "-c", _install_sh_functions("resolved_agent_path", "npm_config_prefixes", "installed_agent_programs") + "installed_agent_programs"],
         env={"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin"}, capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stderr

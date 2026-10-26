@@ -805,6 +805,36 @@ resolved_agent_path() {
     fi
 }
 
+# npm_config_prefixes prints the prefix each npm config names: the
+# environment, the user config (NPM_CONFIG_USERCONFIG, else ~/.npmrc) and
+# the global npmrc (NPM_CONFIG_GLOBALCONFIG, else <node prefix>/etc/npmrc).
+# npm expands ${VAR} and a leading ~ in a value, so this does too (GAP-1761).
+npm_config_prefixes() {
+    local file value name node expanded
+    local -a files
+    printf '%s\n' "${NPM_CONFIG_PREFIX:-${npm_config_prefix:-}}"
+    files=("${NPM_CONFIG_USERCONFIG:-${npm_config_userconfig:-${HOME}/.npmrc}}" "${HOME}/.npmrc")
+    if [[ -n "${NPM_CONFIG_GLOBALCONFIG:-${npm_config_globalconfig:-}}" ]]; then
+        files+=("${NPM_CONFIG_GLOBALCONFIG:-${npm_config_globalconfig:-}}")
+    elif node="$(command -v node 2>/dev/null)" && [[ "${node}" == /* ]]; then
+        node="$(resolved_agent_path "${node}" 2>/dev/null || printf '%s' "${node}")"
+        files+=("${node%/bin/node}/etc/npmrc")
+    fi
+    for file in "${files[@]}"; do
+        [[ -f "${file}" ]] || continue
+        value="$(sed -n 's/^[[:space:]]*prefix[[:space:]]*=[[:space:]]*//p' "${file}" 2>/dev/null | tail -n 1)" || value=""
+        value="${value%"${value##*[![:space:]]}"}"
+        value="${value%\"}"; value="${value#\"}"
+        expanded=0
+        while (( expanded++ < 8 )); do
+            [[ "${value}" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]] || break
+            name="${BASH_REMATCH[1]}"
+            value="${value//\$\{${name}\}/${!name:-}}"
+        done
+        printf '%s\n' "${value/#\~/${HOME}}"
+    done
+}
+
 # The installer's entry evidence: native fixed locations and npm/Bun
 # launcher symlinks to their exact entry: the Node script, or the native
 # bin/opencode.exe that current opencode-ai links (GAP-1356). The links are
@@ -821,10 +851,10 @@ installed_agent_programs() {
         printf '%s\t%s\n' "${agent%%:*}" "${target}"
     done
     bases=("${HOME}/.npm-global/bin" "${HOME}/.local/bin" "${HOME}/.bun/bin" /usr/local/bin /opt/homebrew/bin)
-    prefix="${NPM_CONFIG_PREFIX:-${npm_config_prefix:-}}"
-    [[ -n "${prefix}" ]] || prefix="$(sed -n 's/^[[:space:]]*prefix[[:space:]]*=[[:space:]]*//p' "${HOME}/.npmrc" 2>/dev/null | tail -n 1)" || prefix=""
-    prefix="${prefix%\"}"; prefix="${prefix#\"}"; prefix="${prefix/#\~/${HOME}}"
-    [[ "${prefix}" != /* ]] || bases+=("${prefix%/}/bin")
+    while IFS= read -r prefix; do
+        prefix="${prefix/#\~/${HOME}}"
+        [[ "${prefix}" != /* ]] || bases+=("${prefix%/}/bin")
+    done < <(npm_config_prefixes)
     IFS=: read -r -a folders <<< "${PATH:-}"
     for base in ${folders[@]+"${folders[@]}"}; do [[ "${base}" != /* ]] || bases+=("${base%/}"); done
     for base in "${bases[@]}"; do
