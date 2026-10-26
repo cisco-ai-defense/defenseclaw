@@ -1251,12 +1251,18 @@ func runEnterpriseHookWorker(
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = 2 * time.Second
+	if enterpriseHookWorkersStuck.has(account.UID) {
+		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w: its previous worker was killed but has not exited yet (a file system call in the account's home may be stuck)", account.UID, context.DeadlineExceeded)
+	}
 	stopFence, err := attachEnterpriseHookWorkerFence(ctx, cmd, request)
 	if err != nil {
 		return enterpriseHookWorkerResponse{}, err
 	}
-	runErr := cmd.Run()
+	abandoned, runErr := runEnterpriseHookWorkerProcess(ctx, cmd, account.UID)
 	stopFence()
+	if abandoned {
+		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w: it was killed but did not exit (a file system call in the account's home may be stuck)", account.UID, ctx.Err())
+	}
 	forwardEnterpriseHookWorkerStderr(account, stderr)
 	if ctx.Err() != nil {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w", account.UID, ctx.Err())
@@ -1283,6 +1289,88 @@ func runEnterpriseHookWorker(
 		return response, fmt.Errorf("worker for uid %d failed: %w", account.UID, runErr)
 	}
 	return response, nil
+}
+
+// enterpriseHookWorkerWait waits for a started worker. Tests replace it to
+// stand for a worker the kernel cannot reap.
+var enterpriseHookWorkerWait = (*exec.Cmd).Wait
+
+// enterpriseHookWorkerAbandonGrace is how long a worker whose context ended
+// may take to exit after it is killed (and its output pipes are closed,
+// cmd.WaitDelay) before the caller stops waiting for it.
+var enterpriseHookWorkerAbandonGrace = 3 * time.Second
+
+// enterpriseHookWorkersStuck holds the uids whose last worker was killed but
+// has not exited. A worker blocked in an uninterruptible file system call
+// (a stalled FUSE or NFS mount in the home) cannot be reaped, and waiting
+// for it held the enumerator's cycle for good (GAP-1468, GAP-1470). The
+// caller stops waiting, the account is reported not inspected, and no new
+// worker starts for it until the stuck one exits.
+var enterpriseHookWorkersStuck = stuckEnterpriseHookWorkers{uids: map[int]bool{}}
+
+type stuckEnterpriseHookWorkers struct {
+	mu   sync.Mutex
+	uids map[int]bool
+}
+
+func (s *stuckEnterpriseHookWorkers) has(uid int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.uids[uid]
+}
+
+func (s *stuckEnterpriseHookWorkers) set(uid int, stuck bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if stuck {
+		s.uids[uid] = true
+	} else {
+		delete(s.uids, uid)
+	}
+}
+
+// runEnterpriseHookWorkerProcess runs cmd and waits for it. Once ctx ends
+// (cmd.Cancel kills the worker's group) it waits at most
+// enterpriseHookWorkerAbandonGrace more; abandoned is true when the worker
+// still has not exited, and uid stays stuck until it does.
+func runEnterpriseHookWorkerProcess(ctx context.Context, cmd *exec.Cmd, uid int) (abandoned bool, err error) {
+	if err := cmd.Start(); err != nil {
+		return false, err
+	}
+	done := make(chan error, 1)
+	var settled sync.Mutex
+	gaveUp := false
+	go func() {
+		err := enterpriseHookWorkerWait(cmd)
+		settled.Lock()
+		if gaveUp {
+			enterpriseHookWorkersStuck.set(uid, false)
+		}
+		settled.Unlock()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return false, err
+	case <-ctx.Done():
+	}
+	grace := time.NewTimer(enterpriseHookWorkerAbandonGrace)
+	defer grace.Stop()
+	select {
+	case err := <-done:
+		return false, err
+	case <-grace.C:
+	}
+	settled.Lock()
+	defer settled.Unlock()
+	select {
+	case err := <-done:
+		return false, err
+	default:
+	}
+	gaveUp = true
+	enterpriseHookWorkersStuck.set(uid, true)
+	return true, nil
 }
 
 // enterpriseHookWorkerGroupIDs resolves the account's primary and
