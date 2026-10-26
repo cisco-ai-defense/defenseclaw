@@ -763,6 +763,11 @@ def _unguarded_tool_events(cfg: Any, connector: str, document: Any, path: Path) 
     ):
         return False, []
     managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    if path.name.lower() == _DEVIN_PROJECT_HOOKS_FILE and isinstance(document, dict):
+        # The project file is the event map itself, as Setup writes it; a
+        # foreign hook set the project keeps under a "hooks" key is one more
+        # event name there, not the map (GAP-1720).
+        document = {"hooks": document}
     unguarded = unguarded_tool_events(connector, document, owns, managed=managed)
     if connector == "hermes" and not unguarded:
         unguarded = _hermes_unapproved_hooks(document, path, owns)
