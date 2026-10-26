@@ -4833,7 +4833,7 @@ def test_atomic_replacement_native_helper_compiles() -> None:
         "$ErrorActionPreference = 'Stop'\n"
         + _ps1_function("Invoke-AtomicReplace")
         + "\ntry { Invoke-AtomicReplace 'missing.new' 'missing.exe' } catch { }\n"
-        + "if (-not ('DefenseClawInstall.Rename' -as [type])) { throw 'native helper did not compile' }\n"
+        + "if (-not ('DefenseClawInstall.RenameAside' -as [type])) { throw 'native helper did not compile' }\n"
         + "'OK'\n"
     )
     result = _run_powershell(script)

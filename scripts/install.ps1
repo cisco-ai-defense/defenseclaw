@@ -1781,7 +1781,10 @@ function Invoke-AtomicReplace([string]$New, [string]$Destination, [switch]$Compi
     # permit it. A mapped executable image can still refuse the replacement;
     # Switch-InPlace retries for a short idle window, then renames the image
     # aside (Invoke-AsideReplace, GAP-0732). -Compile only loads the helper.
-    if (-not ("DefenseClawInstall.Rename" -as [type])) {
+    # The type has its own name: 1.0.4 loads a DefenseClawInstall.Rename
+    # without Aside, and a session that ran that installer keeps its type, so
+    # this one would never compile there (GAP-1758).
+    if (-not ("DefenseClawInstall.RenameAside" -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -1791,7 +1794,7 @@ using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 namespace DefenseClawInstall {
-    public static class Rename {
+    public static class RenameAside {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern SafeFileHandle CreateFileW(string name, uint access, uint share,
             IntPtr security, uint creation, uint flags, IntPtr templateFile);
@@ -1851,7 +1854,7 @@ namespace DefenseClawInstall {
 '@
     }
     if ($Compile) { return }
-    [DefenseClawInstall.Rename]::Replace($New, $Destination)
+    [DefenseClawInstall.RenameAside]::Replace($New, $Destination)
 }
 
 function Invoke-AsideReplace([string]$New, [string]$Destination) {
