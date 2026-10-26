@@ -1423,6 +1423,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1644", page: "reference/connectors/zeptoclaw.mdx", has: ["`4000`, or the free port `init` chose when another account holds 4000"] },
   { gap: "GAP-1645", page: "reference/connectors/zeptoclaw.mdx", has: ["unless you pass `--replace`", "`no usable providers found`"] },
   { gap: "GAP-0108, GAP-1524", page: "get-started/quickstart.mdx", has: ["its hook lets a call run with one warning while the gateway is not running", "a running hook blocks every other failure it detects"], lacks: ["With the default fail mode closed", "The hook fail mode is closed on a new install", "every other hook failure blocks"] },
+  { gap: "GAP-1620", page: "get-started/quickstart.mdx", has: ["On an install that already guards other agents, `init --connector claudecode` keeps only Claude Code.", "use `defenseclaw setup <agent>` instead"] },
   // r105-rows-end
 ];
 
