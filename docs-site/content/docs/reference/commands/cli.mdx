@@ -1009,8 +1009,7 @@ work.
 A standard user on a Linux or macOS computer with the standalone enterprise
 package does not get the Python CLI. The `defenseclaw` command there offers
 only `sandbox` commands, `help` and `--version`. Every other command, readers
-included (`status`, `doctor`, `config get`, `skill list`), prints "This
-computer is managed; only `defenseclaw sandbox` commands are available here."
+included (`status`, `doctor`, `config get`, `skill list`), prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
 and exits `2`, not `3`. `defenseclaw-gateway` is not on that user's `PATH`.
 The administrator runs it by its packaged path, as root
 (`/opt/defenseclaw/bin` on Linux, `/opt/cisco/defenseclaw/bin` on macOS).

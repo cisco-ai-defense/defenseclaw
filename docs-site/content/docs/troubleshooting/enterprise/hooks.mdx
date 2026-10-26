@@ -90,9 +90,9 @@ The policy commands read the managed config, which only administrators can read.
 
 **Check.** The command runs.
 
-## `This computer is managed; only defenseclaw sandbox commands are available here`
+## This computer is managed (`defenseclaw` exits 2)
 
-The command exits `2`. On a managed Linux or macOS computer the packaged `defenseclaw` runs only `defenseclaw sandbox` commands; everything else, readers included, belongs to the administrator.
+You see: "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." The command exits `2`. On a managed Linux or macOS computer the packaged `defenseclaw` runs only `defenseclaw sandbox` commands; everything else, readers included, belongs to the administrator.
 
 **Fix.** Use `defenseclaw sandbox ...` as a user. An administrator runs `defenseclaw-gateway enterprise linux status` (`enterprise macos status` on macOS) as root, by its packaged path. Policy changes go in the admin config.
 

@@ -1164,6 +1164,20 @@ describe('Windows AD UPN outage wording', () => {
   });
 });
 
+describe('managed launcher refusal on every page (GAP-1387, GAP-1569)', () => {
+  it('quotes launcherRefusal wherever a page quotes the refusal', () => {
+    const refusal = /launcherRefusal = "([^"]+)"/.exec(source('internal/cli/launcher.go'))?.[1];
+    assert.ok(refusal, 'launcher refusal not found');
+    let quoted = 0;
+    for (const file of enterprisePages(docs)) {
+      const text = readFileSync(file, 'utf8').split(/\s+/).join(' ');
+      assert.ok(!text.includes('commands are available here'), `${relative(docs, file)} quotes the retired launcher refusal`);
+      if (text.includes(refusal)) quoted += 1;
+    }
+    assert.ok(quoted >= 10, `expected the launcher refusal on at least 10 pages, found ${quoted}`);
+  });
+});
+
 describe('the TUI page on a managed computer (rel-1-0-4 GAP-0597)', () => {
   it('quotes the launcher refusal and links the managed-device steps', () => {
     const refusal = /launcherRefusal = "([^"]+)"/.exec(source('internal/cli/launcher.go'));
