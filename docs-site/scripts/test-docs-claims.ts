@@ -471,7 +471,9 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
       // oss-outage-open: a per-user outage follows the policy tier; every other failure denies.
       assert.match(text, /On a per-user install a gateway that is not running follows the policy tier/i, name);
       assert.match(text, /the strict policy denies it/i, name);
-      assert.match(text, /Every other failure DefenseClaw sees \(an unusable answer, a missing token, oversized input\) is denied/i, name);
+      assert.match(text, /Every other failure DefenseClaw sees \(an unusable answer, a missing token\) is denied/i, name);
+      // Oversized input is not an outage: default and permissive judge a bounded review (fail-modes.mdx).
+      assert.match(text, /Oversized input is denied on a managed host and in the strict policy/i, name);
     }
     for (const name of ['reference/connectors/antigravity.mdx']) {
       const text = page(name);

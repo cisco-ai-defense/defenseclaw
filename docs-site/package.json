@@ -7,8 +7,7 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
-    "postbuild": "tsx ./scripts/check-search-index-size.ts && tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts && npm run validate-seo",
-    "postbuild": "tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts && npm run validate-seo && npm run test:support-matrix",
+    "postbuild": "tsx ./scripts/check-search-index-size.ts && tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts && npm run validate-seo && npm run test:support-matrix",
     "start": "next start",
     "lint": "eslint .",
     "validate-links": "tsx ./scripts/validate-links.ts",
