@@ -14,6 +14,7 @@ import (
 // and is a protected target in action mode, as the literal and expanduser
 // forms already are. Code with no such path stays allowed.
 func TestActionInterpreterBuiltKeyPathIsProtected(t *testing.T) {
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	for _, code := range []string{

@@ -10,6 +10,7 @@ import "testing"
 // an export -f to a child shell, a trap and a name the shell calls on its
 // own (command_not_found_handle) keep the body checked.
 func TestActionUncalledFunctionBodyIsNotATarget(t *testing.T) {
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := home
 	body := "f() { echo marker >> ~/.ssh/authorized_keys; }; "

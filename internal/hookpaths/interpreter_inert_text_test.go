@@ -104,6 +104,7 @@ func TestR104Loop2AWKProgramTextOnly(t *testing.T) {
 // t-string with a field evaluates code and stays under write analysis, and a
 // protected destination is never proved by its data.
 func TestR104Loop2PythonInertPrefixedData(t *testing.T) {
+	skipPOSIXGrammarOnWindows(t)
 	home, cwd := r104Loop2Home(t)
 	for _, tc := range []struct {
 		name, command, reason string
