@@ -534,11 +534,15 @@ def _add_v8_destination(
     plaintext: bool = False,
     local_stack: dict[str, str] | None = None,
     legacy_local_destination: tuple[dict[str, Any], str] | None = None,
+    probe_timeout: float | None = None,
 ):
     """Add or update one v8 destination through the surgical writer.
 
     Only local Splunk setup passes *local_stack*, the record of the container
-    it started; see :func:`_splunk_destination_preset`.
+    it started; see :func:`_splunk_destination_preset`. With
+    *probe_timeout*, the destination is tested in the validated candidate
+    before it is installed, and a failed test leaves config.yaml and .env
+    as they were (:func:`_probe_candidate_destination`, GAP-1600).
     """
 
     from defenseclaw.observability.v8_writer import mutate_v8_config
@@ -637,6 +641,13 @@ def _add_v8_destination(
         validator = None
         if dry_run and stored_secret and preset.token_env:
             validator = _staged_secret_validator({preset.token_env: stored_secret})
+        if probe_timeout is not None and not dry_run:
+            from defenseclaw.observability import v8_writer
+
+            def validator(path: str, candidate_data_dir: str | None) -> None:
+                v8_writer._validate_candidate(path, candidate_data_dir)
+                _probe_candidate_destination(path, data_dir, destination_name, probe_timeout)
+
         try:
             result = mutate_v8_config(
                 config_path_for_data_dir(data_dir),
@@ -1267,6 +1278,66 @@ def _env_references(value: Any) -> set[str]:
     return set()
 
 
+class DestinationProbeFailed(click.ClickException):
+    """The test of a destination in a staged candidate failed (nothing was saved)."""
+
+
+def _probe_candidate_destination(candidate_path: str, data_dir: str, name: str, timeout: float) -> None:
+    """Test destination *name* of the staged candidate before it is installed.
+
+    A failed connection, DNS lookup, TLS handshake or a non-200 answer
+    raises :class:`DestinationProbeFailed`, so the writer installs nothing
+    (GAP-1600). When the test cannot run at all because its activity cannot
+    be recorded (the gateway is stopped), it says so and the change goes on.
+    """
+    from defenseclaw.config_inspect import inspect_v8_config
+    from defenseclaw.observability.destination_test import (
+        DestinationTestError,
+        canonical_local_compliance_recorder,
+        run_destination_test,
+    )
+
+    inspected = inspect_v8_config("effective", config_path=candidate_path, data_dir=data_dir)
+    effective = inspected.effective or {}
+    try:
+        result = run_destination_test(
+            effective,
+            name=name,
+            data_dir=inspected.data_dir,
+            timeout=timeout,
+            write_probe=False,
+            compliance=canonical_local_compliance_recorder(
+                config_path=str(config_path_for_data_dir(data_dir)),
+                data_dir=inspected.data_dir,
+            ),
+        )
+    except DestinationTestError as exc:
+        if exc.failure_class == "audit_unavailable":
+            click.echo(f"    warning: the live probe did not run: {exc.message}")
+            return
+        raise DestinationProbeFailed(_destination_test_failure(exc, effective, name)) from exc
+    click.echo(f"    {result.destination}: {result.mode} succeeded")
+
+
+def _destination_test_failure(exc: Any, effective: dict, name: str) -> str:
+    """The user's sentence for a failed destination test."""
+    from defenseclaw.observability.destination_test import NETWORK_FAILURE_CLASSES, NETWORK_PATH_NOTE
+
+    message = f"destination test failed ({exc.failure_class}): {exc.message}"
+    if exc.failure_class == "not_found":
+        message = _unknown_destination_message(name, effective)
+    elif exc.failure_class == "authentication_failed" and _is_galileo_destination(effective, name):
+        # GAP-2289: a key from another Galileo cluster gets 401 at the default endpoint.
+        message += (
+            ". For a Galileo cluster other than api.galileo.ai, run 'defenseclaw setup observability "
+            "add galileo' again with --endpoint <https://<cluster>/otel/traces>"
+        )
+    elif exc.failure_class in NETWORK_FAILURE_CLASSES:
+        # GAP-2344: same note as 'observability destination test'.
+        message += f"\n{NETWORK_PATH_NOTE}"
+    return message
+
+
 def _test_v8_destination(
     data_dir: str,
     name: str,
@@ -1276,7 +1347,6 @@ def _test_v8_destination(
 ) -> None:
     from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
     from defenseclaw.observability.destination_test import (
-        NETWORK_FAILURE_CLASSES,
         NETWORK_PATH_NOTE,
         DestinationTestError,
         canonical_local_compliance_recorder,
@@ -1305,21 +1375,7 @@ def _test_v8_destination(
             click.echo(f"  {name}: skipped: {kind} destinations are not connectivity-tested "
                        "(they write on this machine or wait for a reader)")
             return
-        message = f"destination test failed ({exc.failure_class}): {exc.message}"
-        if exc.failure_class == "not_found":
-            message = _unknown_destination_message(name, inspected.effective or {})
-        elif exc.failure_class == "authentication_failed" and _is_galileo_destination(
-            inspected.effective or {}, name
-        ):
-            # GAP-2289: a key from another Galileo cluster gets 401 at the default endpoint.
-            message += (
-                ". For a Galileo cluster other than api.galileo.ai, run 'defenseclaw setup observability "
-                "add galileo' again with --endpoint <https://<cluster>/otel/traces>"
-            )
-        elif exc.failure_class in NETWORK_FAILURE_CLASSES:
-            # GAP-2344: same note as 'observability destination test'.
-            message += f"\n{NETWORK_PATH_NOTE}"
-        raise click.ClickException(message) from exc
+        raise click.ClickException(_destination_test_failure(exc, inspected.effective or {}, name)) from exc
     click.echo(f"  {result.destination}: {result.mode} succeeded")
     if result.mode == "handshake" and result.authentication_verified:
         click.echo("  authentication: credentials accepted (empty export; nothing was written)")

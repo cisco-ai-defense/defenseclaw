@@ -1506,7 +1506,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
 
         endpoint = "https://splunk.example.com:8088/services/collector/event"
         with patch(
-            "defenseclaw.commands.cmd_setup_observability._test_v8_destination",
+            "defenseclaw.commands.cmd_setup_observability._probe_candidate_destination",
         ) as mock_probe:
             result = self.runner.invoke(
                 setup,
@@ -1524,12 +1524,10 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Splunk Enterprise configured (HEC)", result.output)
         self.assertIn("Live HEC probe:", result.output)
-        mock_probe.assert_called_once_with(
-            self.tmp_dir,
-            "splunk-enterprise-splunk-example-com",
-            10.0,
-            write_probe=False,
-        )
+        # The probe tests the validated candidate before it is saved (GAP-1600).
+        mock_probe.assert_called_once()
+        _candidate, data_dir, name, timeout = mock_probe.call_args.args
+        self.assertEqual((data_dir, name, timeout), (self.tmp_dir, "splunk-enterprise-splunk-example-com", 10.0))
         mock_license.assert_not_called()
         mock_preflight.assert_not_called()
         mock_bootstrap.assert_not_called()
@@ -1561,6 +1559,43 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertNotIn("insecure_skip_verify", cfg)
         self.assertNotIn("verify_tls", cfg)
 
+    def test_setup_splunk_enterprise_failed_probe_saves_nothing(self):
+        # GAP-1600: an unreachable HEC (dns_failed, a connect error, a
+        # non-200 answer) stops setup with config.yaml and .env unchanged.
+        from defenseclaw.commands.cmd_setup import setup
+        from defenseclaw.commands.cmd_setup_observability import DestinationProbeFailed
+
+        config_path = os.path.join(self.tmp_dir, "config.yaml")
+        with open(config_path, "rb") as f:
+            config_before = f.read()
+        dotenv_path = os.path.join(self.tmp_dir, ".env")
+        dotenv_before = open(dotenv_path).read() if os.path.exists(dotenv_path) else None
+        failure = DestinationProbeFailed(
+            "destination test failed (dns_failed): the destination hostname could not be resolved"
+        )
+        with patch(
+            "defenseclaw.commands.cmd_setup_observability._probe_candidate_destination",
+            side_effect=failure,
+        ):
+            result = self.runner.invoke(
+                setup,
+                [
+                    "splunk", "--enterprise",
+                    "--hec-endpoint", "https://splunk.example.com:8088/services/collector/event",
+                    "--hec-token", "hec-token", "--index", "defenseclaw", "--non-interactive",
+                ],
+                obj=self.app,
+            )
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("dns_failed", result.output)
+        self.assertIn("Nothing was saved", result.output)
+        self.assertNotIn("Splunk Enterprise configured", result.output)
+        with open(config_path, "rb") as f:
+            self.assertEqual(f.read(), config_before)
+        dotenv_after = open(dotenv_path).read() if os.path.exists(dotenv_path) else ""
+        self.assertNotIn("hec-token", dotenv_after)
+        self.assertTrue(dotenv_before is None or dotenv_after == dotenv_before)
+
     def test_setup_splunk_enterprise_skip_test(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -1584,35 +1619,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Live HEC probe skipped.", result.output)
         mock_probe.assert_not_called()
-
-    def test_setup_splunk_enterprise_probe_warning_is_best_effort(self):
-        from click import ClickException
-        from defenseclaw.commands.cmd_setup import setup
-
-        endpoint = "https://splunk.example.com:8088/services/collector/event"
-        with patch(
-            "defenseclaw.commands.cmd_setup_observability._test_v8_destination",
-            side_effect=ClickException(
-                "HTTP 401 Unauthorized check token/index permissions"
-            ),
-        ):
-            result = self.runner.invoke(
-                setup,
-                [
-                    "splunk",
-                    "--enterprise",
-                    "--hec-endpoint", endpoint,
-                    "--hec-token", "hec-token",
-                    "--non-interactive",
-                ],
-                obj=self.app,
-                catch_exceptions=False,
-            )
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn(
-            "warning: HTTP 401 Unauthorized check token/index permissions",
-            result.output,
-        )
 
     def test_setup_splunk_enterprise_requires_endpoint(self):
         from defenseclaw.commands.cmd_setup import setup
