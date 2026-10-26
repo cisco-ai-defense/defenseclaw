@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"golang.org/x/sys/windows"
 )
 
 // windowsGuardCaptureConnector stands in for the Amp and OpenCode plugin
@@ -72,6 +73,34 @@ func TestWindowsGenericLifecyclePassesTheForeignHookGuardToPlugins(t *testing.T)
 	if err := os.WriteFile(ampExe, []byte("MZ"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// A per-user connector makes the install grant Users read on the vendor
+	// folder above the per-user hook runtime (C:\ProgramData\Cisco). The
+	// test gives it its own Administrators-owned folder: the runner has none,
+	// and a test must not change the machine's.
+	vendor := filepath.Join(t.TempDir(), "Cisco")
+	if err := os.Mkdir(vendor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminOnly, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminDACL, _, err := adminOnly.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(vendor, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		administrators, nil, adminDACL, nil); err != nil {
+		t.Fatalf("make the test vendor folder Administrators-owned: %v", err)
+	}
+	restoreAncestor := windowsStandaloneHookRuntimeAncestor
+	windowsStandaloneHookRuntimeAncestor = func() (string, error) { return vendor, nil }
+	t.Cleanup(func() { windowsStandaloneHookRuntimeAncestor = restoreAncestor })
 	opts.ConnectorName = name
 	opts.AgentVersion = "0.7.0"
 	opts.Registry = registry
@@ -80,6 +109,10 @@ func TestWindowsGenericLifecyclePassesTheForeignHookGuardToPlugins(t *testing.T)
 
 	if _, _, err := platformInstall(ctx, opts); err != nil {
 		t.Fatalf("platformInstall: %v", err)
+	}
+	if granted, err := windows.GetNamedSecurityInfo(vendor, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION); err != nil ||
+		!strings.Contains(granted.String(), ";;;BU)") {
+		t.Fatalf("the per-user install did not grant Users read on the vendor folder: %v %v", granted, err)
 	}
 	if len(rendered) != 1 || !sameWindowsEnterprisePath(rendered[0], guard) {
 		t.Fatalf("the plugin render received guard %q, want %s", rendered, guard)

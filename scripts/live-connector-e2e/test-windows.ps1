@@ -1010,10 +1010,8 @@ $payload = [ordered]@{
         (Join-Path $root 'internal\gateway\connector\hooks\copilot-hook.ps1')
     )
     $copilotAdapter = Join-Path $temp 'copilot-hook.ps1'
-    $renderedCopilotAdapter = $copilotAdapterSource.Replace(
-        '{{.HookBinaryPS}}',
-        'C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe'
-    ).Replace('{{.CopilotHookTimeoutMS}}', '25000')
+    $renderedCopilotAdapter = ConvertTo-WindowsNativeCopilotAdapter -Template $copilotAdapterSource `
+        -HookBinary 'C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe' -TimeoutMS 25000
     [IO.File]::WriteAllText(
         $copilotAdapter,
         $renderedCopilotAdapter,
@@ -3058,12 +3056,14 @@ threading.Event().wait()
         $nativeHarnessText,
         '(?s)function Assert-PackagedAntigravitySupportedAvailability\b.*?(?=\r?\nfunction )'
     ).Value
+    # Since c525bd3d7e an action-mode setup of an absent Antigravity client is
+    # refused at the discovery gate (exit 1) instead of downgrading to observe.
     Assert-True ($antigravitySupportedAvailability -match
-        '(?s)Invoke-Installed \$Launcher @\(.*?\)\s*\x60\s*@\(0\)\s+300\s+\$LogPath' -and
+        '(?s)Invoke-Installed \$Launcher @\(.*?\)\s*\x60\s*@\(1\)\s+300\s+\$LogPath' -and
         $antigravitySupportedAvailability -match
         'connector was not detected locally; refusing action-mode hook setup' -and
         $antigravitySupportedAvailability -match 'unexpectedly wrote hooks') `
-        'supported Antigravity absent-client setup succeeds after a truthful observe downgrade without writing hooks'
+        'supported Antigravity absent-client action setup is refused at the discovery gate without writing hooks'
     foreach ($wizardChoice in @(
         'none = 0',
         'codex = 1',
