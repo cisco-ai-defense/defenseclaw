@@ -152,7 +152,8 @@ func TestPerUserShellHookOversizedPayloadClosesWhenAnInstallStartsDuringTheRead(
 					// The one outage warning is stderr, or the systemMessage
 					// Claude Code and Codex show (fix/r104-oss-outage-open).
 					rows, readErr := os.ReadFile(filepath.Join(data, "logs", "hook-failures.jsonl"))
-					if readErr != nil || !strings.Contains(string(rows), `"outcome":"fail_open"`) || !(strings.Contains(stderr, "allowing") || strings.Contains(stdout, "DefenseClaw is not checking this session")) {
+					warned := strings.Contains(stderr, "allowing") || strings.Contains(stdout, "DefenseClaw is not checking this session")
+					if readErr != nil || !strings.Contains(string(rows), `"outcome":"fail_open"`) || !warned {
 						t.Fatalf("balanced audit/warning: %q %q %v", rows, stderr, readErr)
 					}
 				}
