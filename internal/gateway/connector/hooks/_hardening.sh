@@ -3336,25 +3336,31 @@ _dc_gateway_post_once() {
     if [ "$_dc_post_max_time" -le 4 ] && [ "$_dc_post_remaining" -gt 2 ]; then
       _dc_post_remaining=$((_dc_post_remaining - 1))
     fi
-    # harden_env moved HOME to a private scratch directory. Use the account
-    # home it retained before that move, then verify every path component.
-    local _dc_agent_home="${DEFENSECLAW_AGENT_HOME:-}"
+    # The executable that receives the bearer is the gateway setup recorded
+    # beside this hook (.gateway-helper, defenseclaw_gateway_binary, which
+    # proves the record and every folder on its path are this account's and
+    # private), never one the agent's HOME or DEFENSECLAW_AGENT_HOME names
+    # (GAP-1755), as the OpenCode and Amp plugins read it.
     local _dc_recovery_home="" _dc_recovery_path="" _dc_secure_meta="" _dc_secure_uid=""
-    local _dc_secure_path _dc_secure_mode
-    case "$_dc_agent_home" in /*) ;; *) return 1 ;; esac
-    _dc_post_bin="${_dc_agent_home}/.local/bin/defenseclaw-gateway"
+    local _dc_secure_path _dc_secure_mode _dc_post_dir
+    _dc_post_bin="$(defenseclaw_gateway_binary)" || return 1
+    _dc_post_dir="${_dc_post_bin%/*}"
     # The small helper has the same connected-socket peer check as the full
     # CLI. An older installation without it keeps the verified CLI path.
     # A present but untrusted helper is refused below, never bypassed.
-    if [ -e "${_dc_agent_home}/.local/bin/defenseclaw-hook-post" ] ||
-       [ -L "${_dc_agent_home}/.local/bin/defenseclaw-hook-post" ]; then
-      _dc_post_bin="${_dc_agent_home}/.local/bin/defenseclaw-hook-post"
+    if [ -e "${_dc_post_dir}/defenseclaw-hook-post" ] ||
+       [ -L "${_dc_post_dir}/defenseclaw-hook-post" ]; then
+      _dc_post_bin="${_dc_post_dir}/defenseclaw-hook-post"
       _dc_legacy_post=0
+      [ -f "$_dc_post_bin" ] && [ -x "$_dc_post_bin" ] && [ -O "$_dc_post_bin" ] && [ ! -L "$_dc_post_bin" ] || return 1
+      _dc_secure_mode="$(stat -c %a "$_dc_post_bin" 2>/dev/null || stat -f %Lp "$_dc_post_bin" 2>/dev/null)" || return 1
+      case "$_dc_secure_mode" in ""|*[!0-7]*) return 1 ;; esac
+      [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
     else
       # An older installer's roll-forward restores its saved installer folder
       # but does not know this new binary name. That folder carries a checked
       # recovery copy, so the 10 Hz path remains fast after the roll-forward.
-      _dc_recovery_home="${DEFENSECLAW_HOME:-${_dc_agent_home}/.defenseclaw}"
+      _dc_recovery_home="${DEFENSECLAW_HOME:-${HOOK_DIR%/*}}"
       case "$_dc_recovery_home" in
         /*)
           _dc_recovery_path="${_dc_recovery_home%/}/installer/defenseclaw-hook-post"
@@ -3383,20 +3389,13 @@ _dc_gateway_post_once() {
               _dc_secure_path="${_dc_secure_path%/*}"
               [ -n "$_dc_secure_path" ] || _dc_secure_path=/
             done
+            [ -f "$_dc_post_bin" ] && [ -x "$_dc_post_bin" ] && [ -O "$_dc_post_bin" ] && [ ! -L "$_dc_post_bin" ] || return 1
+            _dc_secure_mode="$(stat -c %a "$_dc_post_bin" 2>/dev/null || stat -f %Lp "$_dc_post_bin" 2>/dev/null)" || return 1
+            [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
           fi
           ;;
       esac
     fi
-    # This binary receives the bearer on stdin. A stale PID record, PATH
-    # entry, writable path, or symlink cannot select a different executable.
-    for _dc_secure_path in "$_dc_agent_home" "$_dc_agent_home/.local" "$_dc_agent_home/.local/bin"; do
-      [ -d "$_dc_secure_path" ] && [ -O "$_dc_secure_path" ] && [ ! -L "$_dc_secure_path" ] || return 1
-      _dc_secure_mode="$(stat -c %a "$_dc_secure_path" 2>/dev/null || stat -f %Lp "$_dc_secure_path" 2>/dev/null)" || return 1
-      [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
-    done
-    [ -f "$_dc_post_bin" ] && [ -x "$_dc_post_bin" ] && [ -O "$_dc_post_bin" ] && [ ! -L "$_dc_post_bin" ] || return 1
-    _dc_secure_mode="$(stat -c %a "$_dc_post_bin" 2>/dev/null || stat -f %Lp "$_dc_post_bin" 2>/dev/null)" || return 1
-    [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
     _dc_post_prefix="http://${API_ADDR}"
     _dc_post_path="${_dc_post_url:${#_dc_post_prefix}}"
     _dc_post_fields=()
