@@ -52,14 +52,17 @@ func copilotPermissionKey(ctx context.Context, req agentHookRequest) string {
 }
 
 // copilotPermissionCallbackTool is the tool name of the permissionRequest
-// a call's callback carries: an apply_patch call asks as edit. Entries are
-// kept per callback tool, because a callback can stand only for a call of
-// its own tool: a call of another tool (a read, or a shell command the
-// agent approves itself) never gets this callback, so it can neither be
-// bound to it nor make it ambiguous (GAP-1924).
+// a call's callback carries: apply_patch and create calls ask as edit.
+// Entries are kept per callback tool, because a callback can stand only for
+// a call of its own tool: a call of another tool (a read, or a shell command
+// the agent approves itself) never gets this callback, so it can neither be
+// bound to it nor make it ambiguous (GAP-1924). A create callback carries
+// its own arguments; keyed with the patches of its envelope it takes its
+// own use instead of the one an argumentless patch callback needs
+// (GAP-1961).
 func copilotPermissionCallbackTool(tool string) string {
 	tool = strings.TrimSpace(tool)
-	if tool == "apply_patch" {
+	if tool == "apply_patch" || tool == "create" {
 		return "edit"
 	}
 	return tool

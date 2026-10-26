@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -254,3 +255,54 @@ func TestCopilotPermissionJoinStaysAmbiguousForItsOwnTool(t *testing.T) {
 		t.Fatalf("callback after an unrelated read = %q %v, want the apply_patch call", tool, ok)
 	}
 }
+
+// TestCopilotPatchAndCreateEnvelopeCallbacksBindInEveryOrder is GAP-1961: a
+// parallel envelope [apply_patch a.txt, create c.txt] gets two edit
+// permission callbacks, the create one with its own {file_path, diff} and
+// the patch one argumentless. Whichever comes first, the argumentless one is
+// bound to the apply_patch call, so both are allowed in observe and action
+// and neither is HOOK-TOOL-CALL-UNPARSED (red: a create callback first took
+// the patch's only use and left the patch callback unbound).
+func TestCopilotPatchAndCreateEnvelopeCallbacksBindInEveryOrder(t *testing.T) {
+	for _, mode := range []string{"observe", "action"} {
+		for _, order := range []string{"patch-first", "create-first", "create-alone"} {
+			t.Run(mode+"/"+order, func(t *testing.T) {
+				project := t.TempDir()
+				store, logger := testStoreAndLogger(t)
+				cfg := &config.Config{}
+				cfg.Guardrail.Mode = mode
+				cfg.Guardrail.Connector = "copilot"
+				api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth(), store: store, logger: logger}
+				session := "r3-1961-" + mode + "-" + order
+				allow := func(event, body string) {
+					t.Helper()
+					if answer, raw := postCopilotHook(t, api, event, body); answer.Action != "allow" || strings.Contains(raw, hookToolCallUnparsedRuleID) {
+						t.Fatalf("%s = %s: %s", event, answer.Action, raw)
+					}
+				}
+				cpath := filepath.Join(project, "c.txt")
+				g := filepath.ToSlash(cpath)
+				diff := "\ndiff --git a" + g + " b" + g + "\ncreate file mode 100644\nindex 0000000..0000000\n--- a/dev/null\n+++ b" + g + "\n@@ -1,0 +1,1 @@\n+ordinary c\n\n"
+				permHead := `{"hookName":"permissionRequest","sessionId":"` + session + `","cwd":` + jsonQuote(project) + `,"toolName":"edit","toolInput":`
+				permCreate := permHead + `{"file_path":` + jsonQuote(cpath) + `,"diff":` + jsonQuote(diff) + `}}`
+				permPatch := permHead + `{}}`
+				if order == "create-alone" {
+					allow("permissionRequest", permCreate)
+					return
+				}
+				patchA := jsonQuote("*** Begin Patch\n*** Add File: a.txt\n+ordinary a\n*** End Patch\n")
+				create := `{"id":"c1","name":"create","args":{"path":` + jsonQuote(cpath) + `,"file_text":"ordinary c\n"}}`
+				allow("preToolUse", `{"sessionId":"`+session+`","cwd":`+jsonQuote(project)+
+					`,"toolCalls":[{"id":"p1","name":"apply_patch","args":`+patchA+`},`+create+`]}`)
+				seq := []string{permPatch, permCreate}
+				if order == "create-first" {
+					seq = []string{permCreate, permPatch}
+				}
+				for _, body := range seq {
+					allow("permissionRequest", body)
+				}
+			})
+		}
+	}
+}
+
