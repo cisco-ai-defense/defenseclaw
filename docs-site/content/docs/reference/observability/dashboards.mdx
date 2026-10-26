@@ -1,6 +1,6 @@
 ---
 title: Dashboards
-description: The 19 bundled Grafana dashboards, how they link, how to read empty panels, Agent360, and the Splunk dashboards.
+description: The bundled Grafana dashboards, how they link, how to read empty panels, Agent360, and the Splunk dashboards.
 keywords:
   - DefenseClaw Grafana dashboards
   - Agent360
@@ -8,11 +8,11 @@ keywords:
   - Prometheus Loki Tempo
 ---
 
-DefenseClaw provisions 19 Grafana dashboards into a **DefenseClaw** folder. Start the stack with [Run Grafana locally](/docs/how-to/observability/run-grafana-locally); the links on this page assume `localhost:3000`.
+DefenseClaw provisions 18 Grafana dashboards into a **DefenseClaw** folder. The IoT Fleet board is the 19th: it is not in the installed package and is added with the separate Fleet assets ([Fleet dashboard](/docs/reference/edge-connector/api#metrics)). Start the stack with [Run Grafana locally](/docs/how-to/observability/run-grafana-locally); the links on this page assume `localhost:3000`.
 
 Dashboards add no redaction, masking or field hiding. They show every field that reaches Loki, Tempo or Prometheus, including content when the producer supplied it. Set a [redaction profile](/docs/reference/observability/redaction) on the `local-observability` destination to reduce what they receive.
 
-## The 19 dashboards
+## The dashboards
 
 | Dashboard (UID) | Question it answers | Backends |
 | --- | --- | --- |

@@ -1483,6 +1483,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0633", page: "reference/configuration/env-vars.mdx", has: ["where the profile is standalone, the Linux default; on Windows and macOS", "the writers keep writing"] },
   { gap: "GAP-0669", page: "how-to/guardrail/stop-a-secret-upload.mdx", has: ["defenseclaw setup cursor --yes --mode action --rule-pack default --no-human-approval --restart", "`--yes` re-applies hooks when Cursor is already configured and skips the optional LLM judge prompt", "✓ cursor mode=action"] },
   { gap: "GAP-0520", page: "reference/commands/guardrail-setup.mdx", has: ["**Select action connector(s) for LLM judge.**"] },
+  { gap: "GAP-0388", page: "how-to/observability/run-grafana-locally.mdx", has: ["18 DefenseClaw dashboards (19 with the Fleet assets)"] },
+  { gap: "GAP-0388", page: "reference/observability/dashboards.mdx", has: ["DefenseClaw provisions 18 Grafana dashboards", "it is not in the installed package and is added with the separate Fleet assets"] },
   // r105-rows-end
 ];
 
