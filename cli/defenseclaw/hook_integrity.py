@@ -622,6 +622,21 @@ def _registers_defenseclaw_hooks(cfg: Any, connector: str, path: Path, *, strict
     )
 
 
+def registers_defenseclaw_hooks(cfg: Any, connector: str, path: str | os.PathLike[str]) -> bool:
+    """Whether the agent config file at *path* registers a DefenseClaw hook of this install.
+
+    The one ownership test doctor and status share: a hook command runs a
+    script in this data directory's hooks folder (or names DefenseClaw where
+    the install registers its launcher), so a custom DEFENSECLAW_HOME with no
+    "defenseclaw" in its path counts too (GAP-1882).
+    """
+
+    try:
+        return _registers_defenseclaw_hooks(cfg, connector, Path(path), strict=_tool_inspection_strict(cfg))
+    except (OSError, ValueError, ImportError):
+        return False
+
+
 def _hook_config_paths(cfg: Any, connector: str) -> list[Path]:
     """The agent config files setup recorded hooks in for *connector*."""
 

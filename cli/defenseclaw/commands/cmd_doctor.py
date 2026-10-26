@@ -7675,8 +7675,12 @@ def _check_codex_hooks(
         try:
             with open(config_path, "rb") as stream:
                 document = codex_toml.loads(stream.read(1024 * 1024 + 1))
-            hooks = document.get("hooks", {})
-            wired = isinstance(hooks, dict) and "defenseclaw" in str(hooks).lower()
+            # The hook command runs a script in this data directory's hooks
+            # folder, wherever DEFENSECLAW_HOME puts it: a custom home has no
+            # "defenseclaw" in its path (GAP-1882).
+            from defenseclaw.hook_integrity import registers_defenseclaw_hooks
+
+            wired = registers_defenseclaw_hooks(cfg, "codex", config_path)
         except (OSError, UnicodeError, ValueError):
             wired = False
         if not wired:
