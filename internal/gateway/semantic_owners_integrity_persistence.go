@@ -163,11 +163,35 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	"COG-OPENCLAW-JSON": integrityMutationOwner(
 		matchesAgentConfigCandidate, matchesActiveAgentConfig, nil,
 	),
-	"tamper.detector_state_write": integrityMutationOwner(
+	"tamper.detector_state_write": activeStateMutationOwner(),
+}
+
+// activeStateMutationOwner is the integrity owner of DefenseClaw's active
+// state, where moving a protected file or tree away removes it as surely as
+// deleting it: a move source is a mutation here (GAP-1774), while the other
+// integrity owners keep judging only the move destination.
+func activeStateMutationOwner() semanticOwner {
+	owner := integrityMutationOwner(
 		matchesDefenseClawStateCandidate,
 		matchesActiveDefenseClawState,
 		matchesSafeDefenseClawStateCandidate,
-	),
+	)
+	owner.prerequisite = func(facts actionfacts.Facts) bool {
+		for _, candidate := range facts.Paths {
+			command, ok := integrityCommandByID(facts, candidate.CommandID)
+			if !ok || !matchesActiveDefenseClawState(facts, candidate) {
+				continue
+			}
+			if integrityCommandMutatesPath(command, candidate) ||
+				command.Effect == actionfacts.EffectExecute &&
+					candidate.Access == actionfacts.PathAccessDelete &&
+					hasOperation(command, actionfacts.OperationMove) {
+				return true
+			}
+		}
+		return false
+	}
+	return owner
 }
 
 // The dispatcher integrates these aliases only after the command-specific
@@ -2504,11 +2528,18 @@ func matchesActiveDefenseClawState(
 	if runtime.GOOS == "linux" && candidate.Flavor == actionfacts.PathFlavorPOSIX {
 		relative, ok = exactActiveDefenseClawRelative(facts, candidate)
 	}
-	if !ok || !strings.HasPrefix(relative, ".defenseclaw/") {
+	relative = strings.TrimRight(relative, "/")
+	if !ok || relative != ".defenseclaw" && !strings.HasPrefix(relative, ".defenseclaw/") {
 		return false
 	}
-	state := strings.TrimPrefix(relative, ".defenseclaw/")
+	state := strings.TrimPrefix(strings.TrimPrefix(relative, ".defenseclaw"), "/")
 	switch state {
+	// The state root and the protected trees themselves: removing,
+	// moving or replacing one removes every file in it (GAP-1774). Removing
+	// hooks/ turns protection off; removing installer/ breaks rollback.
+	case "", "cache", "hooks", "installer", "policies", "previous",
+		"previous/installer", "quarantine", "receipts", "registries":
+		return true
 	case ".env", "config.yaml", "confidence_policy.yaml",
 		"guardrail_runtime.json", "device.key", "picked_connector",
 		"custom-providers.json", "audit.db", "audit.db-wal",
