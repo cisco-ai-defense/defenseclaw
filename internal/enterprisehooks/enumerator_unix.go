@@ -66,6 +66,33 @@ type UnixEnumeratorState struct {
 	// managed ACP enrollments, keyed by principal (uid:N).
 	ACPMisses  map[string]int    `json:"acp_misses,omitempty"`
 	ACPSources map[string]string `json:"acp_sources,omitempty"`
+	// DiscoveryDeferred names the accounts the last cycle did not inspect:
+	// "budget" when the cycle's discovery budget ran out before them,
+	// "failed" when their discovery failed or timed out. The next cycle
+	// inspects the "budget" accounts first and the "failed" ones last, so
+	// accounts that stall cannot keep the same later accounts uninspected
+	// cycle after cycle (GAP-1586).
+	DiscoveryDeferred map[string]string `json:"discovery_deferred,omitempty"`
+}
+
+const (
+	unixDiscoveryDeferredBudget = "budget"
+	unixDiscoveryDeferredFailed = "failed"
+)
+
+// unixDiscoveryRank orders an account for discovery from the last cycle's
+// DiscoveryDeferred: not reached first, then the rest, then failed.
+func unixDiscoveryRank(state *UnixEnumeratorState, name string) int {
+	if state == nil {
+		return 1
+	}
+	switch state.DiscoveryDeferred[name] {
+	case unixDiscoveryDeferredBudget:
+		return 0
+	case unixDiscoveryDeferredFailed:
+		return 2
+	}
+	return 1
 }
 
 const (
@@ -444,6 +471,17 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		}
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].account.Name < candidates[j].account.Name })
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return unixDiscoveryRank(opts.State, candidates[i].account.Name) < unixDiscoveryRank(opts.State, candidates[j].account.Name)
+	})
+	deferred := map[string]string{}
+	noteDiscoveryError := func(name string, err error) {
+		if errors.Is(err, errUnixDiscoveryBudgetSpent) {
+			deferred[name] = unixDiscoveryDeferredBudget
+		} else {
+			deferred[name] = unixDiscoveryDeferredFailed
+		}
+	}
 	report.Candidates = len(candidates)
 	// A directory account that resolved this cycle shows the directory is
 	// answering, which is what makes another directory account's "no such
@@ -605,6 +643,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			found, err := opts.DiscoverSurfaces(ctx, account, all)
 			if err != nil {
 				discoveryFailed = true
+				noteDiscoveryError(name, err)
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
 			versions, reasons, surfaces = found.Versions, found.Reasons, found.Surfaces
@@ -616,6 +655,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			versions, reasons, err = opts.Discover(ctx, account, all)
 			if err != nil {
 				discoveryFailed = true
+				noteDiscoveryError(name, err)
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
 		}
@@ -885,6 +925,10 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		}
 		delete(opts.State.Misses, key)
 		report.Revoked++
+	}
+	opts.State.DiscoveryDeferred = nil
+	if len(deferred) > 0 {
+		opts.State.DiscoveryDeferred = deferred
 	}
 	for key := range opts.State.Misses {
 		if _, known := previous[key]; !known {
@@ -1883,6 +1927,14 @@ func LoadUnixEnumeratorState(path string) *UnixEnumeratorState {
 				state.ACPSources = map[string]string{}
 			}
 			state.ACPSources[principal] = source
+		}
+	}
+	for user, why := range parsed.DiscoveryDeferred {
+		if user != "" && (why == unixDiscoveryDeferredBudget || why == unixDiscoveryDeferredFailed) {
+			if state.DiscoveryDeferred == nil {
+				state.DiscoveryDeferred = map[string]string{}
+			}
+			state.DiscoveryDeferred[user] = why
 		}
 	}
 	return state
