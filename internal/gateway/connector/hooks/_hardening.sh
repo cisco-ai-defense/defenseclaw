@@ -3079,6 +3079,14 @@ defenseclaw_session_facts_full() {
       fresh=1
     fi
   fi
+  if [ "$fresh" = 1 ] && [ -n "$ccache" ] && [ -z "${KRB5CCNAME:-}" ]; then
+    # The default cache is in the local /tmp: the shell's own test reads it
+    # without a program, so a warm hook stays within its program budget
+    # (GAP-0267). A named cache may sit on a network mount that stalls, so it
+    # keeps the bounded find (_dc_ccache_changed).
+    if [ -e "$ccache" ] && [ "$ccache" -nt "$cache" ]; then _DC_CCACHE_CHANGED=newer; fi
+    ccache=""
+  fi
   if [ "$fresh" = 1 ] &&
     { [ -z "$ccache" ] || _dc_ccache_changed "$ccache" "$cache"; } && [ "${_DC_CCACHE_CHANGED:-same}" != newer ]; then
     # The binary would wait on a stalled cache too.
