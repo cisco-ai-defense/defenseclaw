@@ -4435,12 +4435,11 @@ def use_pack_cmd(
     # for that directory so conflicting aliases cannot silently re-pin it.
     path_pins = []
     if kind != "preset":
-        canonical = os.path.normcase(os.path.realpath(path))
         path_pins = [
             (name, pin)
             for name, pin in sorted((getattr(gc, "custom_packs", None) or {}).items())
             if getattr(pin, "path", "")
-            and os.path.normcase(os.path.realpath(policy_catalog.normalize_pack_path(pin.path))) == canonical
+            and policy_catalog.same_pack_path(path, policy_catalog.normalize_pack_path(pin.path))
         ]
         if path_pins and kind != "registered":
             pack_name = path_pins[0][0]
@@ -5574,7 +5573,7 @@ def mode_cmd(
     )
 
     observe_effect = "logs policy findings without blocking on them"
-    if any(mode == "closed" for mode in fail_after.values()):
+    if any(str(gc.effective_hook_fail_mode(c) or "").strip().lower() == "closed" for c in affected):
         observe_effect += "; a gateway outage can still deny a call when hook fail mode is closed"
     plain = {"action": "blocks findings at or above the block-at severity", "observe": observe_effect}
     if connector_key is None:
