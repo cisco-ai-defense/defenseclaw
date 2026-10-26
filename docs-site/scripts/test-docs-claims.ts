@@ -1443,6 +1443,9 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1618", page: "enterprise/install/reference/macos.mdx", has: ["`enterprise macos status --json` and `enterprise macos verify` report `tetragon_not_applicable`"] },
   { gap: "GAP-1618", page: "enterprise/configure/settings.mdx", has: ["on macOS `status --json` and `verify` report `tetragon_not_applicable`"] },
   { gap: "GAP-1591", page: "reference/policy/cel/engine.mdx", has: ["`exists`, `all`, `map` and `filter` comprehensions; nesting is limited to two levels"] },
+  { gap: "GAP-1587", page: "how-to/guardrail/allow-a-blocked-call.mdx", has: ["fails the **Config validation** and **Rule pack** rows and skips **Policy**"], lacks: ["fails the Policy row until you pin the new digest"] },
+  { gap: "GAP-1656", page: "reference/policy/rules.mdx", has: ["`live state was not checked while config.yaml is invalid`"], lacks: ["fails the **Policy** row: `generation 2"] },
+  { gap: "GAP-1652", page: "troubleshooting/hooks-and-blocking.mdx", has: ["pin the `files digest` value it prints (the guardrail.custom_packs pin, not the `digest` line)", "set both its `path` and `digest`"] },
   // r105-rows-end
 ];
 

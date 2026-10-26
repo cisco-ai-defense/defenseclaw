@@ -87,9 +87,9 @@ The message reads `<connector>'s agent changed`.
 
 **Cause.** The pack's files changed after you pinned its digest.
 
-**Fix.** `defenseclaw guardrail validate-pack <dir>`; if the change was intended, pin the digest it prints: `defenseclaw config set guardrail.custom_packs.<name>.digest sha256:<digest>`.
+**Fix.** `defenseclaw guardrail validate-pack <dir>`; if the change was intended, pin the `files digest` value it prints (the guardrail.custom_packs pin, not the `digest` line): `defenseclaw config set guardrail.custom_packs.<name>.digest sha256:<files digest>`. That works for a pack already registered; register a new pack with `defenseclaw guardrail use-pack <name>`, or set both its `path` and `digest`.
 
-**Check.** `defenseclaw doctor` shows `Policy` as `[PASS]`.
+**Check.** `defenseclaw doctor` shows `Config validation` and `Rule pack` as `[PASS]`, and `Policy` is no longer skipped.
 
 ## Human approval never asks
 

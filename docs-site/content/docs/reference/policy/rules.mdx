@@ -69,9 +69,9 @@ The `digest:` line describes the loaded pack after compilation. The `files diges
 
 The gateway watches pack directories. If you edit a pinned pack in place, the digest no longer matches and the gateway rejects the change. The previous policy generation keeps running, so nothing weakens, and the problem is visible in three places:
 
-- `defenseclaw doctor` fails the **Policy** row: `generation 2, digest sha256:1b2d93180056 is still enforcing: the last change was rejected (config reload rule pack preflight: ... digest ... does not match guardrail.custom_packs.acme-rules.digest)`.
+- `defenseclaw doctor` fails the **Config validation** row (`digest ... does not match guardrail.custom_packs.acme-rules.digest`) and the **Rule pack** row (the pinned and the files digest, with the `config set` command that pins it), and skips **Policy**: `live state was not checked while config.yaml is invalid`.
 - The gateway `/health` output carries the same text in `policy.last_reload_error`.
-- `defenseclaw config validate` and the **Config validation** doctor row fail with `digest ... does not match guardrail.custom_packs.acme-rules.digest`.
+- `defenseclaw config validate` fails with the same text and says the running gateway rejected the last reload.
 
 There are two ways to apply an edit on purpose. The first leaves the running pack untouched until you switch:
 
@@ -206,7 +206,7 @@ The gateway composes the base pack and every layer in memory, once per policy ge
 
 | Situation | What happens |
 | --- | --- |
-| A pinned pack's digest does not match | The gateway rejects the reload and the previous generation keeps running. `doctor` fails the **Policy** and **Config validation** rows, and `/health` shows `policy.last_reload_error`. |
+| A pinned pack's digest does not match | The gateway rejects the reload and the previous generation keeps running. `doctor` fails the **Config validation** and **Rule pack** rows and skips **Policy**, and `/health` shows `policy.last_reload_error`. |
 | A rule ID is unknown, or a layer lists a rule under both `enable` and `disable` | The writer refuses the change and `config.yaml` stays as it was. If a hand edit introduces it, the gateway rejects the reload. |
 | `rule_pack` names a pack that is neither built in nor in `custom_packs` | The writer refuses with `config rule pack "nosuchpack" is neither built in (default, strict, permissive) nor a guardrail.custom_packs entry`. A hand edit fails `defenseclaw config validate` the same way and the gateway keeps the previous generation. |
 | A pack file is invalid | `validate-pack` exits 1 with the component and error code; `use-pack` changes nothing. |

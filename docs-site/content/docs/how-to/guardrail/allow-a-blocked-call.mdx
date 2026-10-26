@@ -95,7 +95,7 @@ Rule pack valid: "/home/alice/my-guardrail-pack"
   files digest: a86e…b6314d (the guardrail.custom_packs pin)
 ```
 
-`use-pack` pins the pack by digest. If you edit the pack later, the gateway keeps the old policy and `defenseclaw doctor` fails the Policy row until you pin the new digest. [Rules and custom packs](/docs/reference/policy/rules) has the details.
+`use-pack` pins the pack by digest. If you edit the pack later, the gateway keeps the old policy; `defenseclaw doctor` fails the **Config validation** and **Rule pack** rows and skips **Policy** until you pin the new `files digest` (the Rule pack row prints the `config set` command). [Rules and custom packs](/docs/reference/policy/rules) has the details.
 
 ## Next
 
