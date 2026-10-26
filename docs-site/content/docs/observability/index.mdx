@@ -1,0 +1,424 @@
+---
+title: Observability
+description: Configure logs, traces, metrics, redaction, local history and independent export destinations from one observability graph.
+keywords:
+  - DefenseClaw observability
+  - config_version 9
+  - OTLP
+  - Splunk HEC
+  - Galileo
+  - Grafana Agent360
+---
+
+DefenseClaw collects each event once and builds one record from it. Log records are stored in local history. Every record, logs, traces and metrics, goes to the destinations you add: an OpenTelemetry (OTLP) collector, Splunk, Galileo, a file, or a webhook. Each destination picks the buckets it wants and applies its own redaction.
+
+<Flow
+  direction="TB"
+  compact
+  caption="Each event becomes one record. Local SQLite keeps every collected log; traces and metrics go only to destinations. Each destination selects and redacts its own copy, limited to the signals its kind supports."
+>
+  <Node id="src" kind="agent">{`Event sources\nagent · guardrail · scan\npolicy · platform`}</Node>
+  <Node id="collect" kind="gateway">{`Bucket collection\nlogs · traces · metrics`}</Node>
+  <Node id="rec" kind="generic">Record</Node>
+  <Node id="sqlite" kind="datastore">{`Local SQLite\nevery log`}</Node>
+  <Node id="dest" kind="generic">{`Your destinations\nOTLP · Splunk HEC · Galileo\nfile · webhook`}</Node>
+  <Edge from="src" to="collect" />
+  <Edge from="collect" to="rec" label="collected buckets" />
+  <Edge from="rec" to="sqlite" label="logs only" />
+  <Edge from="rec" to="dest" label="redacted copy" />
+</Flow>
+
+## How it works
+
+- **Buckets.** Every record belongs to one of 14 buckets, such as `security.finding`, `enforcement.action` or `model.io`. You can turn off collection per bucket. The full list is in the [reference](/docs/observability#buckets).
+- **Local history.** A SQLite database in the DefenseClaw data directory keeps every collected log, 7 days by default. It cannot be turned off or filtered. A small set of content-free compliance events is always written, even when you turn off collection for their bucket.
+- **Destinations.** With no destination configured, nothing leaves the computer. An enabled destination with no filter receives every bucket and every signal its kind supports. Adding a second destination adds a second copy. It is not a failover.
+- **Independent delivery.** Each destination has its own bounded queue, retry and health. A slow or failing destination does not block agents or other destinations.
+- **Redaction.** DefenseClaw redacts a record once, per destination, before it is sent. Four built-in profiles run from `none` (the default) to `strict`. See [Redaction](/docs/observability/redaction).
+
+## Full-fidelity defaults
+
+The smallest valid config is:
+
+```yaml
+config_version: 9
+observability: {}
+```
+
+It collects every registered log, trace and metric, stores every log unredacted in local SQLite, and exports nothing. These commands show the generated policy instead of making you write it out:
+
+```bash
+defenseclaw config validate
+defenseclaw config show --effective --section observability
+defenseclaw config reference observability
+defenseclaw observability plan
+```
+
+The `config reference observability` output starts with `DEFENSECLAW CONFIGURATION v9`, the current `config_version`. Its schema is in the schema family `v8`, which covers `config_version` 8 and 9.
+
+<Callout type="warn" title="The default sends full content">
+With no redaction profile, an enabled destination receives prompts, responses, tool arguments, file paths and identifiers as recorded. Choose a profile before you send to anything outside your trust boundary.
+</Callout>
+
+## What it does not do
+
+- It does not keep traces or metrics locally. Local history holds logs; traces and metrics exist only at the destinations you send them to.
+- It does not replace the audit log. For logs, local history is the durable record; destinations are copies.
+- It does not backfill. Records that a destination missed while it was down or while the gateway restarted are not resent. Export the local history if you need them.
+- Dashboards add no redaction of their own. They show what the destination received.
+- Webhook alerts to Slack, PagerDuty or Webex are a separate feature. They notify; they do not export telemetry.
+
+## Check your setup
+
+```bash
+defenseclaw setup observability list
+```
+
+```text
+  Observability destinations
+  --------------------------
+  NAME                     KIND         STATE     SIGNALS                BUCKETS  POLICY               REDACTION
+  local-sqlite             sqlite       enabled   logs                   14       implicit_local       unredacted (none)
+  engineering              otlp         enabled   logs,traces,metrics    14       capability_default   unredacted (none)
+  Retention: 7 days
+  Plan digest: 9cf948dc…
+```
+
+`defenseclaw observability plan` shows the same policy per bucket and signal.
+
+## Buckets
+
+Every record belongs to one bucket. The catalog is closed at 14 names; you can change collection and delivery for a bucket but cannot add one.
+
+| Bucket | What it records |
+| --- | --- |
+| `compliance.activity` | A control-plane change that was attempted, applied, rejected or failed. |
+| `security.finding` | A durable risk, with status, evidence and remediation. |
+| `guardrail.evaluation` | A runtime inspection and its decision, including clean ones. |
+| `enforcement.action` | A block, quarantine, disable, approval or other policy action. |
+| `model.io` | A model operation, with permitted content, usage, latency and outcome. |
+| `tool.activity` | A tool run, with permitted arguments and results, status and latency. |
+| `asset.scan` | A skill, MCP server, plugin or source scan. |
+| `asset.lifecycle` | Discovery, install, enable, quarantine, restore or removal of an asset. |
+| `network.egress` | An outbound operation or egress decision. |
+| `agent.lifecycle` | Agents, subagents, turns, workflows and executions. |
+| `ai.discovery` | AI components and runtimes found. Includes one `ai.runtime.plane_health` log per running plane per poll (about once a minute). |
+| `telemetry.ingest` | An inbound OTLP record that was accepted, normalized, rejected or re-exported. Also carries `correlation.relationship.changed`. |
+| `platform.health` | Gateway, storage, exporter, queue, guardrail and sidecar health. |
+| `diagnostic` | A debug fact that fits no other bucket. |
+
+A guardrail evaluation records the inspection; zero or more `security.finding` records may follow. A scan records the operation; its findings go to `security.finding`. A lifecycle change also produces an `enforcement.action` only when a policy action is attempted. [OpenShell sandboxes](/docs/observability/sandbox-telemetry) write into the same buckets.
+
+To stop collecting a bucket's signal, set `observability.buckets.<bucket>.collect.<signal>: false`. Collection runs before routing, so no destination route can bring those records back. The mandatory floor (below) is still written.
+
+## Destination capabilities and fan-out
+
+| Destination kind | Signals it receives |
+| --- | --- |
+| `jsonl`, `console`, `splunk_hec`, `http_jsonl` | logs |
+| `prometheus` | metrics |
+| `otlp` | logs, traces, metrics |
+| `otlp` with `preset: galileo` | traces |
+
+An enabled destination with no `send` or `routes` receives every bucket and every signal its kind supports. Each destination has its own filtering, redaction, queue, delivery and health.
+
+```yaml
+observability:
+  destinations:
+    - name: engineering
+      kind: otlp
+      protocol: grpc
+      endpoint: otel.example.com:4317
+      headers:
+        Authorization: {env: OTEL_AUTHORIZATION}
+    - name: soc
+      kind: splunk_hec
+      endpoint: https://splunk.example.com:8088/services/collector/event
+      token_env: SPLUNK_HEC_TOKEN
+```
+
+`engineering` receives all logs, traces and metrics. `soc` receives all logs. Both are unredacted.
+
+## Send to an OTLP collector
+
+An OTLP destination receives logs, traces and metrics from the gateway. Use it for Datadog, Honeycomb, New Relic, Grafana Cloud or your own collector.
+
+### Before you start
+
+- The collector address, and a header or token if it needs one.
+- Store the token in an environment variable, not in a command line. Command-line values are visible to other users in `ps`.
+
+### Steps
+
+1. Add the destination.
+
+   ```bash
+   defenseclaw setup observability add otlp \
+     --name engineering \
+     --endpoint otel.example.com:4317 \
+     --protocol grpc \
+     --non-interactive
+   ```
+
+   ```text
+     Generic OTLP: added as destination 'engineering'
+     Test it with: defenseclaw setup observability test engineering
+     Saved. The gateway isn't running; it loads this destination when it starts (defenseclaw-gateway start).
+   ```
+
+   For a collector on this computer or a private network, add `--allow-private-networks`. If it has no TLS, add `--plaintext` too. Use `--environment <name>` to tell computers with the same host name apart.
+
+2. Narrow what it receives. With no filter, it gets every bucket and every signal. This sends only security logs and traces:
+
+   ```yaml
+   observability:
+     destinations:
+       - name: engineering
+         kind: otlp
+         protocol: grpc
+         endpoint: otel.example.com:4317
+         send:
+           signals: [logs, traces]
+           buckets: [security.finding, enforcement.action]
+   ```
+
+   Edit `~/.defenseclaw/config.yaml`, then run `defenseclaw config validate`. A running gateway applies a valid edit by itself. For filters by connector, action or severity, see [routes and selectors](/docs/observability#narrow-a-destination).
+
+3. Review the result.
+
+   ```bash
+   defenseclaw observability plan --bucket security.finding --signal logs
+   ```
+
+   ```text
+   BUCKET            SIGNAL  COLLECT  DESTINATION   DECISION  ROUTE                                   REDACTION  …
+   security.finding  logs    yes      local-sqlite  send      all-collected-logs-and-mandatory-floor  none       …
+   security.finding  logs    yes      engineering   send      send                                    none       …
+   ```
+
+### Check it worked
+
+```bash
+defenseclaw observability destination test engineering
+```
+
+{/* needs-live-capture: destination test output against a reachable collector */}
+
+Add `--write-probe` to send one marked, content-free record. The test connects from your shell, while the gateway delivers through the proxy it was started with. If the test passes but `defenseclaw doctor` reports `delivery_failed`, look for `export failed` lines in the gateway log.
+
+### Undo
+
+```bash
+defenseclaw setup observability disable engineering
+```
+
+`disable` keeps the entry. `defenseclaw setup observability remove engineering` deletes it.
+
+### Next
+
+- [Redact before export](/docs/observability/redaction#redact-before-export)
+- [Delivery limits and failure circuits](/docs/observability#tune-bounded-delivery)
+- [Alert runbooks](/docs/observability#alert-runbooks)
+
+## Narrow a destination
+
+Use `send` for the common case:
+
+```yaml
+observability:
+  destinations:
+    - name: soc
+      kind: splunk_hec
+      endpoint: https://splunk.example.com:8088/services/collector/event
+      token_env: SPLUNK_HEC_TOKEN
+      send:
+        signals: [logs]
+        buckets: [compliance.activity, security.finding, enforcement.action]
+        redaction_profile: strict
+```
+
+Use ordered `routes` for filters by source, action or severity, and for exclusions:
+
+```yaml
+observability:
+  destinations:
+    - name: archive
+      kind: otlp
+      protocol: http/protobuf
+      endpoint: https://otel.example.com
+      routes:
+        - name: drop-diagnostics
+          signals: [logs, traces, metrics]
+          selector: {buckets: [diagnostic]}
+          action: drop
+        - name: high-security
+          signals: [logs, traces]
+          selector:
+            buckets: [security.finding, enforcement.action]
+            min_severity: HIGH
+          action: send
+          redaction_profile: sensitive
+```
+
+| Rule | Behavior |
+| --- | --- |
+| Order | The first matching route wins, per destination and signal. |
+| Matching | Different selector fields are ANDed. Values in one field are ORed. |
+| No match | The record is not sent to that destination. |
+| Selectors | `buckets`, `sources`, `connectors`, `actions`, `event_names`, `min_severity`. |
+
+To keep relationship records out of a destination, drop them ahead of the routes that send:
+
+```yaml
+observability:
+  destinations:
+    - name: soc
+      kind: splunk_hec
+      endpoint: https://splunk.example.com:8088/services/collector/event
+      token_env: SPLUNK_HEC_TOKEN
+      routes:
+        - name: drop-relationship-changes
+          signals: [logs]
+          selector: {event_names: [correlation.relationship.changed]}
+          action: drop
+        - name: everything-else
+          signals: [logs]
+          selector: {buckets: ["*"]}
+          action: send
+```
+
+The mandatory floor is a small set of content-free compliance events. They are always written to local SQLite and never exported.
+
+## Tune bounded delivery
+
+JSONL and console destinations take queue count and byte limits. Splunk HEC, HTTP JSONL and OTLP also take batch limits. Prometheus is pull-based and rejects `batch`.
+
+| Field | Default | Bounds |
+| --- | ---: | --- |
+| `batch.max_queue_size` | `2048` | `1..65536` records |
+| `batch.max_queue_bytes` | `67108864` | `4198400..268435456` bytes |
+| `batch.max_export_batch_size` | `512` | `1..8192`, no greater than queue count |
+| `batch.max_export_batch_bytes` | `8388608` | `4263936..67108864` encoded bytes |
+| `batch.scheduled_delay_ms` | `5000` | `1..600000`. The Galileo preset defaults to `1000`. |
+| `timeout_ms` | `10000` | Positive, bounded milliseconds |
+
+When a queue is full, DefenseClaw drops the newest record, keeps older queued work and local history, and records the drop. Other destinations continue.
+
+A transient failure keeps the exact projection queued for at most 24 attempts, with exponential backoff from 2 seconds to a cap of 30 seconds. A batch still unacknowledged after that is counted as dropped. Queued records are lost on gateway restart, and optional destinations are not backfilled from local history. A lost acknowledgement can cause a duplicate, so consumers deduplicate on the record ID.
+
+### Destination failure circuits
+
+Each destination and signal (logs, traces or metrics) has its own in-memory circuit.
+
+| Failure | Circuit opens |
+| --- | --- |
+| Three consecutive terminal transient or permanent-payload batches | 30 seconds |
+| Authentication failure | Authentication failures open the affected route immediately for five minutes; a half-open probe then retries it |
+| Unsafe endpoint | 24 hours |
+
+While a circuit is open, work for that route stays in its bounded queue. When the queue fills, the newest record is dropped and counted. Other signals, other destinations and local SQLite continue. The oldest queued batch is the recovery probe: success closes the circuit and another failure reopens it.
+
+`defenseclaw doctor` and gateway health show the state, failure count, failure class and open deadline. Transient-open and half-open states are warnings. An open authentication, permanent-payload or unsafe-endpoint circuit fails the check.
+
+The `defenseclaw.queue.drops` metric counts lost records per `destination.<name>.<signal>` queue, with reason `dropped` (overflow, retry exhaustion, shutdown) or `rejected`. When the gateway stops before a destination takes its queue, `gateway.log` names each destination and count, and the next start adds them to the counters.
+
+A circuit does not edit `config.yaml`. Fix the credential or endpoint and reload. To stop export, run `defenseclaw setup observability disable NAME`.
+
+## Edit bucket and redaction policy safely
+
+Back up the file with private permissions, edit only deliberate overrides, and validate before relying on it:
+
+```bash
+defenseclaw config validate
+defenseclaw config show --effective --section observability
+defenseclaw observability plan
+defenseclaw doctor
+```
+
+A running gateway applies a valid edit to buckets, redaction profiles and destinations without a restart, and keeps the previous policy if it rejects the edit. The **Policy** row of `doctor` shows which. The RELOAD column of `observability plan` says `live_reloadable` or `restart_required` per route. Only a Prometheus destination and `observability.local.path` need `defenseclaw-gateway restart`.
+
+A global or bucket redaction profile also changes local SQLite. To redact only a remote destination, put the profile in that destination's `send` or route. See [Redaction](/docs/observability/redaction).
+
+## Centralized redaction
+
+DefenseClaw redacts each record once, at the boundary between the record and a destination, using the profile chosen for that destination. One event can stay whole in local history, go whole to a forensic backend, and go with only sensitive substrings removed to a SOC backend. For the steps, see [Redact before export](/docs/observability/redaction#redact-before-export).
+
+A new install uses profile `none` everywhere, local SQLite included.
+
+## Local history
+
+One generated `local-sqlite` destination stores every collected log and the mandatory floor. It cannot be disabled or filtered.
+
+```yaml
+observability:
+  local:
+    path: ~/.defenseclaw/audit.db
+    judge_bodies_path: ~/.defenseclaw/judge_bodies.db
+    retention_days: 7
+```
+
+| Setting | Behavior |
+| --- | --- |
+| `local.path` | Must resolve inside the DefenseClaw data directory. `doctor` reports an outside path as a custody failure. A `~` or a relative path is resolved against the data directory by the gateway, `status` and `doctor`. Changing it needs `defenseclaw-gateway restart`. |
+| `retention_days` | Default 7. A reaper runs after startup and every six hours and deletes in small batches. `0` keeps history forever and `doctor` warns about capacity. |
+| `judge_bodies_path` | Raw LLM-judge request and response text, kept while `guardrail.retain_judge_bodies` is `true` (the default). Redaction profiles do not apply. Turn it off with `defenseclaw config set guardrail.retain_judge_bodies false`, then restart the gateway. |
+| Inventory | The same window prunes AI discovery scan history and unseen agent identities (`agt-`) in `inventory.db`. The newest scan is always kept. `doctor` warns at 1 GiB. |
+
+If a write to local history fails, for example on a full disk, the record still goes to destinations and health counts it as `dropped` on `local-sqlite`. When writes resume, the gateway writes one `sqlite.write_failed` record with the number of missing records. The count survives a crash in `local-write-losses.journal` in the data directory (64 KiB, reserved in advance, counts and failure classes only). If the journal cannot be written, `status` and `doctor` report the in-memory count.
+
+The gateway checks the write-ahead log (`audit.db-wal`) every two seconds and copies it into `audit.db`; it trims the file when idle. Once the active log passes 176 MiB, ordinary catch-up holds the audit writer for up to 100 ms. At 208 MiB, a flooded log can use one fixed hold of up to 1 second to restart before the 256 MiB ceiling. Only the wait to acquire the writer grows after a missed pass, up to 10 seconds; the hold cap never grows. A SQLite statement can run past that hold, delaying hook answers. If the file is still over 256 MiB after a check, the gateway warns, repeats the warning every ten minutes while it stays over, and reports when it falls back under. A slow disk or long-lived reader can still push it past 256 MiB; this is an alarm threshold, not a guaranteed disk bound. Secure Client does not run this check. The `defenseclaw.sqlite.wal.bytes` metric reports the file size.
+
+## Choose an operator view
+
+<Cards>
+  <Card title="Run Grafana locally" href="/docs/observability/local-observability" description="Start the bundled Grafana, Prometheus, Loki and Tempo stack." />
+  <Card title="Send to an OTLP collector" href="/docs/observability#send-to-an-otlp-collector" description="Add a destination, narrow it, check delivery." />
+  <Card title="Send to Splunk" href="/docs/observability/splunk" description="Local Splunk, Splunk Enterprise HEC, or Splunk Observability Cloud." />
+  <Card title="Send to Galileo" href="/docs/observability/galileo" description="Send traces to Galileo Cloud or a self-hosted deployment." />
+  <Card title="Set up webhook alerts" href="/docs/observability/webhooks" description="Slack, PagerDuty, Webex or a signed generic webhook." />
+  <Card title="Redact before export" href="/docs/observability/redaction#redact-before-export" description="Pick a redaction profile for each destination." />
+</Cards>
+
+## Reference
+
+- On this page: buckets, routes, delivery limits, failure circuits and alert runbooks.
+- [Redaction](/docs/observability/redaction) and [Dashboards](/docs/observability/grafana-dashboards).
+- [Sandbox telemetry](/docs/observability/sandbox-telemetry) and [Telemetry identity](/docs/observability/end-user-identity).
+
+## Upgrade from v7
+
+Run `defenseclaw upgrade --yes`. It converts and validates the v7 settings. It reads ambient `DEFENSECLAW_OTEL_*` and standard `OTEL_EXPORTER_OTLP_*` values only during that upgrade. The Galileo preset keeps your project and Log stream. See [Upgrade DefenseClaw](/docs/get-started/upgrade).
+
+## Alert runbooks
+
+These are the targets of the bundled alert rules. Keep connector IDs, trace IDs and destination names in incident evidence; do not paste prompts, credentials or raw audit databases into tickets.
+
+### Runbook: schema violations
+
+1. In Grafana, open **Runtime & Reliability → Schema violations by event_type × code** and find the producing event and code.
+2. Run `defenseclaw doctor`, `defenseclaw config validate` and `defenseclaw observability plan`. Fix configuration or registry errors before restarting anything.
+3. Read the gateway or collector logs without copying event content. A sustained count means a producer and the telemetry registry disagree.
+4. In a source checkout, run `make telemetry-check` and `make check-schemas`, then the producer's tests. Roll back the producer or regenerate its registry change.
+
+### Runbook: block SLO
+
+1. Confirm the alert window has real guardrail traffic. An idle histogram is not a breach.
+2. Open **Admission block SLO compliance**, then **Guardrail Evaluations** and **Connector Detail** for the connector and policy.
+3. Compare regex, AI Defense, judge, policy and finalization latency to find the slow stage.
+4. Keep the configured enforcement action during diagnosis. Fail open only under your incident commander's procedure.
+
+### Runbook: exporter stalled
+
+1. Run `defenseclaw observability plan`. Confirm the destination is enabled and selects the signals and buckets you expect.
+2. Check `defenseclaw status`, the gateway log and collector logs. For a remote destination, check DNS, TLS, credentials and the network.
+3. Run `defenseclaw observability destination test <name>`, with `--write-probe` for one marked write. The test connects directly from your shell. The gateway delivers through the proxy it started with (`HTTPS_PROXY` and `NO_PROXY`, or the enterprise proxy). If the test passes but `doctor` shows `delivery_failed`, find `[observability] <name> ... export failed` lines in the gateway log; each says whether the connection was direct or through a proxy. If it used a proxy, restart the gateway from a shell with the right proxy settings.
+4. Inspect the destination's queue, retry, drop and circuit telemetry. Repair and reload it, or run `defenseclaw setup observability disable <name>`.
+
+### Runbook: audit sink
+
+The alert keeps the historical `audit.sink` metric name. The target is a named destination.
+
+1. Find the `sink_kind` and destination name, then its delivered, dropped, retry and circuit telemetry.
+2. Check its credential, endpoint, `network_safety`, `send` and `routes` without printing secrets.
+3. Run `defenseclaw observability destination test <name>`; use `--write-probe` only for an approved write.
+4. Confirm local SQLite is healthy. Repair or disable only the failing destination. Do not remove local retention or widen routing to clear the alert.

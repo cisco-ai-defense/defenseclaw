@@ -1,0 +1,103 @@
+---
+title: Policies
+description: Write Edge Connector policies with capability sequences, destination rules, and canary thresholds.
+keywords:
+  - Edge Connector policy
+  - capability sequence
+  - content pattern
+  - policy compiler
+  - IoT policy
+---
+
+Edge Connector policies are YAML files compiled into binary DFA tables by the policy compiler. The compiled tables are either statically linked into the binary or distributed via OTA.
+
+## Policy structure
+
+```yaml title="~/.defenseclaw/policy.yaml"
+name: my-device-policy
+version: 1
+
+skill_actions:
+  critical:
+    runtime: disable    # BLOCK
+  high:
+    runtime: disable    # BLOCK
+  medium:
+    runtime: warn       # ALLOW + log
+
+iot_extensions:
+  capability_sequences:
+    - sequence: [net_fetch, exec_shell]
+      action: block
+  destination_allowlist:
+    - "1.1.1.1" # illustrative; replace with an approved public IP
+  canary:
+    baseline_blocks_per_min: 5
+```
+
+## Capability sequences
+
+Define dangerous multi-step patterns. When a session completes a configured sequence, the final tool call is blocked.
+
+```yaml
+iot_extensions:
+  capability_sequences:
+    - sequence: [net_fetch, exec_shell]
+      action: block
+    - sequence: [net_fetch, actuate]
+      action: block
+    - sequence: [sensor_read, net_fetch, exec_shell]
+      action: block
+```
+
+The policy compiler converts these into deterministic finite automata (DFA) tables evaluated in constant time per input symbol. Sequences are tracked per `session_id`. Each sequence must list one to four known capabilities; actions must be `allow`, `block`, `warn`, or `escalate`. Unknown capabilities, actions, severity names and malformed values are rejected before either artifact is written. Invalid policy data returns exit 65; an unreadable input returns a concise error and exit 1.
+
+## Destination rules
+
+```yaml
+iot_extensions:
+  destination_allowlist:
+    - "1.1.1.1" # illustrative public IP; replace with one approved for your service
+    - "2606:4700:4700::1111" # illustrative public IPv6, written without brackets
+```
+
+<Callout type="info">
+The compiler rejects `destination_denylist`, `ssrf_protection`, and hostname entries rather than treating them as working controls. The built-in SSRF guard blocks private and metadata addresses across profiles. Replace `1.1.1.1` with an approved public literal for your service.
+</Callout>
+
+The on-device SSRF check blocks hostname destinations on every build profile. Network tools need a nonempty destination, so the allowlist needs a public IPv4 or globally scoped IPv6 literal. Write an IPv6 entry without brackets (`2606:4700:4700::1111`, not `[2606:4700:4700::1111]`): the device takes the host out of each destination, removes the brackets and compares it with the entries as text (case-insensitive), so `https://[2606:4700:4700::1111]:443/` matches the unbracketed entry, and the compiler refuses a bracketed one. Write the address in the form the tool sends. The parser does not prove the address is routable. Private, loopback and link-local addresses, numeric aliases such as octal, hex or decimal forms, and malformed ports are blocked even if listed. A destination absent from the allowlist is also blocked. `1.1.1.1` in the examples is only an illustration; use an address approved for your service.
+
+## Built-in rate and escalation behavior
+
+The C runtime has fixed token-bucket limits of 60 tool calls, 30 network requests, and 10 actuations per minute. Production uses synchronous Fleet escalation by default: an undecided call stays blocked when the gateway is unreachable. `DCLAW_STRICT_MODE=0` permits speculative execution on builds that support it, including on MQTT publication failure, so leave the production default enabled. OTA policy cannot change the rates or select per-capability escalation modes. The compiler rejects `iot_extensions.rate_limits` and `iot_extensions.escalation_mode` instead of signing controls that the receiver would ignore.
+
+## Content inspection
+
+The C build uses fixed content patterns for secrets, credentials, PII, exfiltration indicators, injection text, and dangerous commands. These patterns are generated from constants in the compiler source and are not configured by the policy YAML. The compiler rejects `content_inspection` and custom regex settings so a policy cannot appear to enable a protection the device will ignore. There is no YAML toggle to disable the built-in SSRF guard.
+
+## Compile the policy
+
+```bash
+python3 edge-connector/tools/policy_compiler.py \
+  --input ~/.defenseclaw/policy.yaml \
+  --profile standard \
+  --version 1 \
+  --output-header policy_tables.h \
+  --output-binary policy.bin
+```
+
+The compiler produces:
+- **C header** (`policy_tables.h`) — for static linking into the binary
+- **Binary blob** (`policy.bin`) — an unsigned development stub when no signing key is given. Do not publish this file directly to production devices. Use the Fleet policy-push API to compile and HMAC-sign an OTA update with `DCLAW_OTA_HMAC_KEY`. The compiler's optional Ed25519 `--signing-key` output is not accepted by the current C receiver.
+
+## Canary deployment
+
+Each device that receives a new policy starts its own ten-minute canary window. The Fleet policy endpoint publishes to the whole tenant/fleet topic; it does not select a subset of devices.
+
+```yaml
+iot_extensions:
+  canary:
+    baseline_blocks_per_min: 5
+```
+
+The device restores its previous policy partition if its block count exceeds **five times** the configured per-minute baseline for **three consecutive minutes** in that window. It reports a persistent `CANARY_ROLLBACK` flag in signed heartbeats; the gateway does not initiate the rollback. The reported `policy_version` remains the highest accepted version as an anti-rollback watermark, not the active partition version after rollback. The flag remains until a newer signed policy installs, so operators should investigate the active device policy before interpreting the Fleet version count as successful enforcement.

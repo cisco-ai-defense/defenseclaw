@@ -73,7 +73,7 @@ func UnitFile() string {
 
 [Unit]
 Description=DefenseClaw sandbox kernel feed (Tetragon exec records for OpenShell sandboxes)
-Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/features/sandboxes/
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/
 After=tetragon.service docker.service
 StartLimitIntervalSec=0
 

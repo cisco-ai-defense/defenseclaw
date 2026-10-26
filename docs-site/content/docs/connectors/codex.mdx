@@ -1,21 +1,29 @@
 ---
 title: Codex
-description: Guard Codex with DefenseClaw hooks that can block before a tool runs.
+description: Codex connector wires the documented lifecycle hook set. Hook contracts vary by Codex version, and Codex has no native ask.
 keywords:
-  - Codex connector
+  - DefenseClaw Codex connector
   - Codex hooks
   - Codex PreToolUse
+  - Codex notify bridge
 ---
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-DefenseClaw writes hooks into Codex's `config.toml`. Host setup removes native OpenTelemetry exporters installed by earlier releases: Codex cannot verify which local account holds a stopped gateway's TCP port. Isolated OpenShell images retain native telemetry. On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. Codex in an OpenShell sandbox (`defenseclaw sandbox run codex`) is the exception: the sandbox image installs `codex-notify.sh` and sets `notify` in its managed config. This is a hook connector: Codex talks to OpenAI directly and no proxy is involved.
+DefenseClaw writes hooks into Codex's `config.toml`. Codex talks to `api.openai.com` or the ChatGPT backend directly, and DefenseClaw observes host activity through Codex's hooks. This is a hook connector: no proxy is involved.
+
+Host setup removes native OpenTelemetry exporters installed by earlier releases: Codex cannot verify which local account holds a stopped gateway's TCP port. Isolated OpenShell images retain native telemetry and also use Codex's [native OpenTelemetry exporter](https://learn.chatgpt.com/docs/config-file/config-advanced#observability-and-telemetry). On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge or a native exporter; only Secure Client does. Codex in an OpenShell sandbox (`defenseclaw sandbox run codex`) is the other exception: the sandbox image installs `codex-notify.sh` and sets `notify` in its managed config.
 
 ## Platform support
 
 <ConnectorSupport id="codex" />
 
-## Set up
+| Platform | Status | Connector path |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | Portable command hooks; native OTel only in isolated OpenShell. |
+| Native Windows x64 | **Supported** | A system PowerShell bridge starts the protected `defenseclaw-hook.exe` for each registered event; host native OTel is disabled. |
+
+## Setup
 
 On a new install, run `defenseclaw init --connector codex` first. Until DefenseClaw is initialized, `defenseclaw setup codex` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
 
@@ -24,11 +32,15 @@ defenseclaw setup codex                # first setup defaults to observe: record
 defenseclaw setup codex --mode action  # block on policy hits
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same
-commands in PowerShell. Quit and reopen Codex afterwards.
-After upgrading from an earlier release, quit all running Codex processes and reopen them so they stop using any old exporter configuration.
+A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Quit and reopen Codex afterwards. After upgrading from an earlier release, quit all running Codex processes and reopen them so they stop using any old exporter configuration.
 
-## Check it
+Host setup removes earlier DefenseClaw native exporter blocks and revokes their scoped tokens because Codex cannot verify the account behind the loopback listener. An existing Codex process can retain the old configuration. The isolated OpenShell exporter still uses the gateway's `/v1/{logs,metrics,traces}` endpoints. Do not print or copy old exporter headers.
+
+Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/observability/redaction). The alias options are in the [quick-alias reference](/docs/guardrail/aliases).
+
+On native Windows, DefenseClaw writes each event and contract into `%CODEX_HOME%\config.toml` and marks the hooks trusted there, because Codex on Windows does not read hooks from `managed_config.toml`. The registered command runs system Windows PowerShell with `-EncodedCommand`, which starts `defenseclaw-hook.exe` synchronously with inherited handles and the bound `--event` and `--hook-contract`. No POSIX shell or WSL is involved. On managed Windows, the enumerator enrolls Codex installed with npm, the official `install.ps1` at its default location, or WinGet. A relocated `CODEX_HOME`, or another folder that discovery finds but cannot enroll, is reported as `agent_unprotected` ([Enrollment](/docs/enterprise/enrollment)). Managed enrollment publishes hooks in `%ProgramData%\OpenAI\Codex\requirements.toml`. The per-user `managed_config.toml` is read only to clean up older registrations.
+
+### Check it
 
 ```bash
 defenseclaw status
@@ -36,17 +48,7 @@ defenseclaw status
 
 The agent appears under **Agents** with its mode. `defenseclaw doctor` passes the **Codex hooks** row.
 
-
-## What it can block or ask
-
-<HookEventsList connector="codex" />
-
-- In action mode `PreToolUse` and `PermissionRequest` can deny a call before the tool runs.
-- `UserPromptSubmit`, `PostToolUse`, `Stop` and (on newer Codex versions) the session, subagent and compaction events can also block. Each answers in its own way: `PostToolUse` cannot undo the finished tool, and `Stop` blocks by continuing the turn.
-- Codex has no native ask. A confirm verdict becomes an alert with the original action kept. You can review it in audit or the TUI, but not resume the call.
-- Codex loads skills without a hook of their own. DefenseClaw refuses a denied skill when you select it as `$name` or when a tool call reads its folder.
-
-## Files it changes
+## Files DefenseClaw will modify
 
 | What | macOS and Linux | Windows |
 | --- | --- | --- |
@@ -55,21 +57,13 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 | Connector credentials | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
 | Proxy bypass for cloud credentials | `$CODEX_HOME/.env` (managed, marked block) | not written |
 
-Teardown restores the backup, or removes only DefenseClaw's entries.
+See the [Windows path reference](/docs/get-started/windows/paths-troubleshooting). Teardown restores the backup, or removes only DefenseClaw's entries.
 
-## Limits
-
-- `codex features disable hooks` keeps the entries but runs none of them. DefenseClaw raises a guardrail-degraded alert, `defenseclaw status` shows DEGRADED and `defenseclaw doctor` fails the **Codex hooks** row. Run `codex features enable hooks`.
-- If DefenseClaw's `command` lines are deleted from `config.toml`, Codex may start and run without DefenseClaw hooks. `defenseclaw doctor` reports the missing commands; run `defenseclaw setup codex --yes` or `defenseclaw doctor --fix` to repair them, then restart Codex.
-- Hosted tools, file reads and `write_stdin` have no complete hook coverage. On Windows each gateway start runs Codex's app-server once, which contacts OpenAI.
-- After you rotate a model key, or after an upgrade, run `codex app-server daemon restart`. The daemon keeps the environment and telemetry credential it started with.
-- Codex's own command check can refuse `rm -f` and `rm -rf` cleanups, and Codex runs a tool when its pre-tool hook is stopped or times out. Both are Codex limits. See [Known limits in 1.0.4](/docs/troubleshooting/known-limits#codex).
-
-## On a managed computer
+### On a managed computer
 
 The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup codex` and `setup remove`, and has no `guardrail` group. Protected requirements pin `[features] hooks = true`, so `codex features disable hooks` writes the user's config but hooks stay on. On standalone Linux and macOS, the guardian also removes that conflicting user preference during reconciliation; while it remains, Codex can reject an unrelated project trust write.
 
-The per-user files in [Files it changes](#files-it-changes) are not used there. The hooks are in Codex's machine requirements file and run the administrator's hook program:
+The per-user files in [Files DefenseClaw will modify](#files-defenseclaw-will-modify) are not used there. The hooks are in Codex's machine requirements file and run the administrator's hook program:
 
 | | Hooks | Hook program |
 | --- | --- | --- |
@@ -90,9 +84,160 @@ codex        machine_policy  covered      lock=enforce  foreign_hooks=remove  ow
     file:      C:\ProgramData\OpenAI\Codex\requirements.toml
 ```
 
-The administrator manages Codex in the managed `config.yaml` under `guardrail.connectors.codex` (`{}` adds it, `enabled: false` removes it). Apply the change as in [Change the config](/docs/enterprise/operate/lifecycle#change-the-config), then check it with `enterprise policy verify` ([Machine policy](/docs/enterprise/configure/machine-policy#inspect-export-and-verify)).
+The administrator manages Codex in the managed `config.yaml` under `guardrail.connectors.codex` (`{}` adds it, `enabled: false` removes it). Apply the change as in [Change the config](/docs/enterprise/lifecycle), then check it with `enterprise policy verify` ([Machine policy](/docs/enterprise/machine-policy)).
 
-## Turn it off
+## Hook capabilities
+
+<HookEventsList connector="codex" />
+
+| Contract | Agent versions | Hook script | Events | Can block | Can ask |
+| --- | --- | --- | --- | --- | --- |
+| `codex-hooks-v1` | `>=0.124.0, <0.129.0` | `v6` | 6 | 5 | 0 |
+| `codex-hooks-v2` | `>=0.129.0, <0.133.0` | `v6` | 8 | 5 | 0 |
+| `codex-hooks-v3` | `>=0.133.0, <0.135.0` | `v6` | 10 | 9 | 0 |
+| `codex-hooks-v3-generic` | `>=0.135.0, <0.145.0` | `v6` | 10 | 9 | 0 |
+| `codex-hooks-v4` | `>=0.145.0` | `v6` | 11 | 9 | 0 |
+
+| Contract | Events registered | Block events | Ask events |
+| --- | --- | --- | --- |
+| `codex-hooks-v1` | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop` | `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop` | none |
+| `codex-hooks-v2` | As the previous contract, plus `PreCompact`, `PostCompact` | `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop` | none |
+| `codex-hooks-v3` | As the previous contract, plus `SubagentStart`, `SubagentStop` | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SubagentStop`, `PreCompact`, `PostCompact`, `Stop` | none |
+| `codex-hooks-v3-generic` | As the previous contract | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SubagentStop`, `PreCompact`, `PostCompact`, `Stop` | none |
+| `codex-hooks-v4` | As the previous contract, plus `SessionEnd` | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SubagentStop`, `PreCompact`, `PostCompact`, `Stop` | none |
+
+| Fact | Value |
+| --- | --- |
+| Hook script | `codex-hook.sh` |
+| Hook config paths | `~/.codex/config.toml`, `~/.codex/managed_config.toml` |
+| Response field | `codex_output` |
+| Native OTLP | isolated OpenShell only; host upgrades remove old exporters |
+| W3C traceparent | yes |
+| Fail closed | yes |
+
+Each hook request must match the registered event and its stdin `hook_event_name`. The gateway also compares the event and contract ID with the protected contract lock and rejects mismatches or tampering. Controls marked v3/v4 need Codex `0.133` or later: v3 covers `0.133` to `0.144`, v4 covers `0.145` and later. They do not apply to v1 and v2.
+
+### What it can block or ask
+
+- In action mode `PreToolUse` and `PermissionRequest` can deny a call before the tool runs.
+- `UserPromptSubmit`, `PostToolUse`, `Stop` and (on newer Codex versions) the session, subagent and compaction events can also block. Each answers in its own way: `PostToolUse` cannot undo the finished tool, and `Stop` blocks by continuing the turn.
+- Codex has no native ask. A confirm verdict becomes an alert with the original action kept. You can review it in audit or the TUI, but not resume the call.
+- Codex loads skills without a hook of their own. DefenseClaw refuses a denied skill when you select it as `$name` or when a tool call reads its folder.
+
+### Verdict mapping
+
+In action mode each event answers with its own official response.
+
+| Event | DefenseClaw response |
+| --- | --- |
+| `SessionStart` (`>=0.133`) | `continue: false` ends the turn before another model request. The matcher includes `startup`, `resume`, `clear` and `compact`. |
+| `PostToolUse` | `decision: "block"` cannot undo the finished tool. In interactive use the reason replaces the tool result fed to the next loop. In code mode the tool promise rejects. |
+| `SubagentStop` (`>=0.133`) | `decision: "block"` continues the subagent flow. It does not end the subagent. |
+| `PreCompact` (`>=0.133`) | `continue: false` stops before compaction. |
+| `PostCompact` (`>=0.133`) | `continue: false` stops after compaction has completed. |
+| `Stop` | `decision: "block"` prevents stopping and continues with the reason as a new prompt. |
+| `SessionEnd` (`>=0.145`) | Observation only. Output cannot steer Codex, and the hook has a three-second host maximum. |
+
+Codex loads a skill without a hook of its own. DefenseClaw refuses a skill on `asset_policy.skill.denied` when it is selected as `$name` and when a tool call reads its folder ([where a denied skill is refused](/docs/policies/admission)).
+
+### Native ask
+
+Codex has no native ask surface (Can ask is 0 on every contract). A confirm verdict is recorded and alerted with `raw_action` preserved. The TUI can review the event but cannot resume it.
+
+Codex also applies its own command execution policy after a DefenseClaw hook allows a call. In reviewed native sessions, that policy refused project-local `rm -f` cleanup with its own message while the matching DefenseClaw decision was `ALLOW`. A DefenseClaw allow result therefore does not guarantee that Codex will execute the command.
+
+### Fail mode
+
+Fail closed when the running hook cannot reach the gateway: yes. Codex itself treats a hook process failure or timeout as non-blocking. Setup registers `PreToolUse` with a 30-second timeout, but Codex has no reviewed on-timeout deny setting. A standard user who kills or stops the hook before it sends a request can make a tool run without a pre-tool audit row. Managed `status` and `verify` warn `hook_process_fail_open` and set `security_complete: false`; OS application control or EDR that protects the hook process is needed to prevent it. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes). What a gateway outage does to a Codex call is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
+
+When a hook fails closed because DefenseClaw cannot decide, `Stop`, `SubagentStop` and `SessionEnd` are not blocked. A blocked stop would only make Codex try again. Codex ends the turn, and the next prompt or tool call is blocked until the gateway is back ([Stop and session-end events](/docs/reference/fail-modes)).
+
+## Inventory surfaces
+
+DefenseClaw follows Codex's own layouts, not Claude Code's `.mcp.json`.
+
+| Asset | Sources |
+| --- | --- |
+| Skills | `.agents/skills` from the working directory to the repository root, `$HOME/.agents/skills`, and `$CODEX_HOME/skills` (`/etc/codex/skills` too on Unix). `CODEX_HOME` does not redirect personal `.agents/skills`. Children of `$CODEX_HOME/skills/.system` are vendor-bundled: listed but never scanned, blocked, disabled or quarantined. A `.system` folder elsewhere is not exempt. Linked or reparse-point roots are rejected. |
+| MCP | `[mcp_servers.*]` in project `.codex/config.toml` layers, closest first, then `$CODEX_HOME/config.toml`. The exact URL-only `openaiDeveloperDocs` entry in the user config is vendor-bundled (`bundled: true`, never scanned). A same-named project entry or any added field is not exempt. Codex's generated `node_repl` stays scan-eligible. |
+| Custom agents | `.toml` files in project `.codex/agents/` and `$CODEX_HOME/agents/`. Inventory checks the required `name`, `description` and `developer_instructions` fields without copying instruction text into the AIBOM. |
+| Rules | `*.rules` under `rules/` beside each active config layer. |
+| Memories | `$CODEX_HOME/memories/`. `$CODEX_HOME/history.jsonl` is a separate transcript-history file and is not reported as a memory store. |
+| Plugins | Local `source.path` entries from repository and personal `.agents/plugins/marketplace.json`, the lower-precedence `.claude-plugin/marketplace.json`, and installed copies observed under `$CODEX_HOME/plugins/cache/`. Codex does not promise that cache layout, so Git, URL and npm sources are not claimed to land there. |
+
+Codex activates project `.codex/` layers only for trusted projects. Inventory reports project entries as `trust_required` and does not infer the trust decision.
+
+## How Codex reaches the gateway
+
+<Flow
+  direction="TB"
+  caption="Codex reaches the gateway through hooks. Isolated OpenShell also uses native OpenTelemetry. Only the hooks can block."
+>
+  <Node id="codex" kind="agent">Codex</Node>
+  <Node id="hooks" kind="connector">{`DefenseClaw hooks\nup to eleven events`}</Node>
+  <Node id="otel" kind="connector">{`Built-in telemetry\nOpenTelemetry exporter`}</Node>
+  <Node id="gateway" kind="gateway">{`DefenseClaw gateway\nAPI port, 18970 by default`}</Node>
+  <Edge from="codex" to="hooks" label="runs" />
+  <Edge from="hooks" to="gateway" label="asks for a verdict" />
+  <Edge from="codex" to="otel" label="exports" />
+  <Edge from="otel" to="gateway" label="logs, traces, metrics" />
+</Flow>
+
+Secure Client and the OpenShell sandbox use a notify bridge. Per-user and standalone installs on the host do not register a notify bridge or native exporter.
+
+**Behind an HTTP proxy.** Hooks reach the gateway on 127.0.0.1 and ignore proxy variables. Host setup does not install a native exporter.
+
+On Linux and macOS, setup keeps a marked block in `$CODEX_HOME/.env` (default `~/.codex/.env`), which Codex loads when it starts. The block appends `127.0.0.1,localhost,::1` and the cloud instance-metadata addresses (`169.254.169.254,169.254.170.2,fd00:ec2::254`) to the `NO_PROXY` and `no_proxy` values you already have. Loopback traffic and AWS credential lookups then skip your proxy, and everything else still uses it. Codex sessions started before setup keep the old environment until you restart them. Uninstall and `defenseclaw guardrail disable --connector codex` remove only that block, and the file too if setup created it.
+
+Codex applies the lines of `.env` in order, so a later `NO_PROXY=...` line of your own replaces the block's value. Write it as `NO_PROXY="${NO_PROXY},.corp.example.com"` to keep the loopback. When a proxy variable is set and the loopback is not covered, or the block is older and lacks the metadata addresses, `defenseclaw doctor` warns on the **Codex telemetry proxy** row. The warning names the line number and gives a one-line fix. A block without the metadata addresses is refreshed by the next Codex setup or `defenseclaw-gateway restart`.
+
+On Windows there is no block. Set it once for your account with `setx NO_PROXY 127.0.0.1,localhost,::1` and open a new terminal before you start Codex. On Linux and macOS without the block, `doctor` suggests:
+
+```bash
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1" no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1"
+```
+
+## In an OpenShell sandbox
+
+`defenseclaw sandbox run codex` runs Codex in an OpenShell sandbox ([macOS](/docs/sandboxes/macos), [guide](/docs/sandboxes/first-session)).
+
+| Item | Detail |
+| --- | --- |
+| Tier | Managed. Hooks are in root-owned `/etc/codex/requirements.toml`, which pins `allow_managed_hooks_only` and `features.hooks` on. Root-owned `/etc/codex/managed_config.toml` turns off the update check, analytics and remote-reaching features, sends OTel to DefenseClaw, and pins `BASH_ENV`, `ENV` and the loader variables to empty. Hooks fail closed with a per-sandbox token that never goes on a command line. |
+| Notify bridge | `managed_config.toml` sets `notify` to the root-owned `/usr/local/lib/defenseclaw/hooks/codex-notify.sh`. After each turn it posts Codex's turn JSON to the gateway's `/api/v1/codex/notify` with the per-sandbox token, which it reads from the environment, never from its command line. It only records and never blocks; an unreachable gateway is ignored. Codex passes the turn JSON as its argument, so processes in the sandbox can read it from the process list. |
+| Startup tip | The Codex TUI fetches a tip from `raw.githubusercontent.com` around the egress proxy. OpenShell refuses it and triage rejects the drafted rule (`harness_background_fetch`). It is not counted as a blocked site. |
+| Skip permissions | On by default (`open` and `balanced` packs): `--dangerously-bypass-approvals-and-sandbox`. `--safe` or the `strict` pack keeps approvals with `sandbox_mode="danger-full-access"` and `approval_policy="untrusted"`. A headless `--safe` run cannot ask and refuses those commands. `requirements.toml` refuses the `never` policy, and `--yolo`, `--full-auto` and `--ask-for-approval never` are dropped. |
+| Sign-in | `--llm auto` shares `OPENAI_API_KEY` (or `CODEX_API_KEY`), or else the key `codex login --with-api-key` stored in `~/.codex/auth.json`. A ChatGPT sign-in is not shared. The sandbox gets a placeholder valid only at `api.openai.com`. `--llm bedrock`, and `auto` when neither is set, shares `AWS_BEARER_TOKEN_BEDROCK` for a custom provider on the Bedrock Mantle OpenAI route in `--bedrock-region`, with multi-agent and web search off. A Bedrock run uses `openai.gpt-5.5` unless you pass `-- -m MODEL`. |
+| Per-sandbox settings | Each sandbox gets its own read-only `managed_config.toml` and `requirements.toml`. They pin the model provider and define the MCP servers brought from your setup. Unless the pack sets [`mcp.project_servers: allow`](/docs/sandboxes/policy-packs), only those servers are allowed. `--no-mcp` leaves yours behind. |
+| MCP gap | Codex matches an allowed server by command only and merges a repository's `[mcp_servers.<name>]` table key by key. DefenseClaw leaves such a server behind and names it at start. |
+| Image | Codex 0.146.0 by default, replacing the base image's older one. A version without a reviewed Linux hook contract is refused. Verified against a mock model with hostile config, and in a live run that honored a deny with a Bedrock Mantle model. |
+
+## Limits
+
+- `codex features disable hooks` keeps the entries but runs none of them. DefenseClaw raises a guardrail-degraded alert, `defenseclaw status` shows DEGRADED and `defenseclaw doctor` fails the **Codex hooks** row. Run `codex features enable hooks`.
+- If DefenseClaw's `command` lines are deleted from `config.toml`, Codex may start and run without DefenseClaw hooks. `defenseclaw doctor` reports the missing commands; run `defenseclaw setup codex --yes` or `defenseclaw doctor --fix` to repair them, then restart Codex.
+- Hosted tools, file reads and `write_stdin` have no complete hook coverage. On Windows each gateway start runs Codex's app-server once, which contacts OpenAI.
+- After you rotate a model key, or after an upgrade, run `codex app-server daemon restart`. The daemon keeps the environment and telemetry credential it started with.
+- Codex's own command check can refuse `rm -f` and `rm -rf` cleanups, and Codex runs a tool when its pre-tool hook is stopped or times out. Both are Codex limits. See [Known limits in 1.0.4](/docs/support-matrix#codex).
+- A `PostToolUse` block cannot undo the finished tool, and `SessionEnd` is observation only. A post-tool hook may still record a call after a missed `PreToolUse`, but it may itself be stopped or absent.
+- Controls marked v3 or v4 need Codex 0.133 or later.
+- Codex activates project `.codex/` layers only for trusted projects. Inventory reports project entries as `trust_required` and does not infer the trust decision.
+- Per-user hooks live in a file you own. On a managed computer they are in machine policy instead.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| Hooks do nothing | `codex features disable hooks` (or `[features] hooks = false`). Run `codex features enable hooks`. |
+| Codex refuses to load `config.toml` ("missing field command") | DefenseClaw `command` lines were deleted by hand, leaving `[[hooks.*]]` entries. The self-heal, `defenseclaw setup codex --yes` and `defenseclaw doctor --fix` restore them. To stop guarding Codex, run `defenseclaw guardrail disable --connector codex`. |
+| Notify entry changed or deleted (Secure Client only) | Under Secure Client, the top-level `notify` entry is DefenseClaw's turn-complete bridge. The self-heal writes it back about a second later (500 ms debounce) or at the next 30-second check. A notifier you set yourself is kept and still run by the bridge. `defenseclaw doctor` warns on the **Codex notify** row when the gateway is stopped. |
+| 401 right after rotating a model key | Codex's shared app-server daemon keeps the environment it started with. Run `codex app-server daemon restart` from a shell with the new key. DefenseClaw's hooks are not involved. |
+| `doctor` warns about rejected OTLP attempts after an upgrade | The daemon keeps the old telemetry credential. Run `codex app-server daemon restart`. The **Native OTLP credentials** row clears 24 hours after the last refused attempt. |
+| First prompt of a new session recorded twice | Codex 0.156 starts a second internal session during the first turn, with its own session id. It fires `SessionStart`, `UserPromptSubmit` and `Stop` for the same prompt. Two rows differ in `defenseclaw.session.root.id`. Count prompts by session and turn id. |
+| Connections to OpenAI when the gateway starts (Windows) | Each gateway start or restart with the Codex connector enabled runs Codex's app-server once to read its effective requirements. It connects to OpenAI (for example chatgpt.com) and can reach your model provider. |
+| Hooks fail after a Codex update (Windows) | Setup records the Codex executable's path and SHA-256. An update changes it, so doctor fails the **Hook contract** and **Codex hooks** rows with `policy-blocked: selected Codex executable no longer matches protected Setup evidence`. Run `defenseclaw setup codex --yes`. |
+
+## Disable
 
 For a per-user, single-connector install:
 
@@ -100,14 +245,6 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-With the default gateway restart, disabling removes DefenseClaw's hooks and
-OpenTelemetry entries from Codex's config and preserves your other Codex
-settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks and
-telemetry entries. To remove the connector, run
-`defenseclaw setup remove codex --yes` (add `--force` if it is the last one).
+With the default gateway restart, disabling removes DefenseClaw's hooks and OpenTelemetry entries from Codex's config and preserves your other Codex settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks and telemetry entries. To remove the connector, run `defenseclaw setup remove codex --yes` (add `--force` if it is the last one).
 
 On a multi-connector install, add `--connector codex` to `guardrail disable` and `guardrail enable` to change only this agent.
-
-## Details
-
-Hook contracts by Codex version, response semantics per event, inventory surfaces, proxy handling, Windows requirements and the OpenShell sandbox image are in the [Codex reference](/docs/reference/connectors/codex).

@@ -180,5 +180,5 @@ Windows `ensure` refuses an artifact older than the installed version
 that re-offers an old version never downgrades a host by accident. To go back
 a version on purpose, follow the rollback procedure in the enterprise
 documentation
-(<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/operate/lifecycle/#roll-back>);
+(<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/lifecycle/#roll-back>);
 `detection.md` explains how the inventory markers follow it.

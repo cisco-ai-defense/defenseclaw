@@ -63,7 +63,7 @@ func TestPolicyVersionsResponseIsAnArrayForEveryStore(t *testing.T) {
 
 // Check all composite IDs in the examples, including URLs and batch results.
 func TestDocumentedDeviceCompositeIDs(t *testing.T) {
-	path := filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "edge-connector", "api.mdx")
+	path := filepath.Join("..", "..", "docs-site", "content", "docs", "edge-connector", "api-reference.mdx")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -93,13 +93,13 @@ func fmtCompositeID(tenant, fleet uint16, device uint32) string {
 // commonStatusCodes returns the codes in the page's "Common status codes" table.
 func commonStatusCodes(t *testing.T) map[int]bool {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "edge-connector", "api.mdx"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "edge-connector", "api-reference.mdx"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, table, ok := strings.Cut(string(raw), "## Common status codes")
 	if !ok {
-		t.Fatal("api.mdx has no Common status codes section")
+		t.Fatal("api-reference.mdx has no Common status codes section")
 	}
 	codes := map[int]bool{}
 	for _, m := range regexp.MustCompile("(?m)^\\| `([0-9]{3})` \\|").FindAllStringSubmatch(table, -1) {

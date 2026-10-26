@@ -17,7 +17,7 @@ from defenseclaw.context import AppContext
 
 from tests.test_fail_mode_runtime import _runtime_cfg
 
-PAGE = Path(__file__).resolve().parents[2] / "docs-site" / "content" / "docs" / "reference" / "configuration" / "fail-modes.mdx"
+PAGE = Path(__file__).resolve().parents[2] / "docs-site" / "content" / "docs" / "reference" / "fail-modes.mdx"
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 

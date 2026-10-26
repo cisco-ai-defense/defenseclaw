@@ -1,0 +1,369 @@
+---
+title: Sandboxes on macOS
+description: Set up NVIDIA OpenShell sandboxes on an Apple-silicon Mac, where each sandbox is a MicroVM with its own Linux kernel, the agent works on a copy of your project, and you pull its changes back.
+keywords:
+  - DefenseClaw sandbox macOS
+  - OpenShell macOS
+  - OpenShell MicroVM
+  - Apple silicon sandbox
+  - Homebrew nvidia/openshell
+  - e2fsprogs
+  - sandbox pull
+---
+
+Install and configure OpenShell sandboxes on an Apple-silicon Mac. Each sandbox is a MicroVM with its own Linux kernel. The agent works on a copy of your project, and you bring its changes back when you are happy with them.
+
+## How it fits together
+
+<Flow direction="TB" caption="A Mac sandbox. The agent works on a copy of your project inside a MicroVM; nothing reaches your folder until you pull it back.">
+  <Node id="agent" kind="agent">{`Claude Code or Codex\nskip-permissions on`}</Node>
+  <Node id="sup" kind="generic">{`OpenShell supervisor\nthe only way out`}</Node>
+  <Node id="dc" kind="operator">{`DefenseClaw daemon\nchecks hooks, proxies the web`}</Node>
+  <Node id="gw" kind="generic">{`OpenShell gateway\nHomebrew service`}</Node>
+  <Node id="copy" kind="generic">{`A copy of your project\nat /sandbox/work/myapp`}</Node>
+  <Node id="net" kind="generic">{`Internet\nallowed sites`}</Node>
+  <Node id="model" kind="generic">{`Model provider`}</Node>
+  <Edge from="agent" to="sup" />
+  <Edge from="sup" to="dc" label="hooks, web" />
+  <Edge from="dc" to="net" />
+  <Edge from="sup" to="model" label="model calls" />
+  <Edge from="gw" to="sup" label="starts" />
+  <Edge from="copy" to="agent" />
+</Flow>
+
+## Before you start
+
+| You need | Details |
+| --- | --- |
+| Apple silicon | Intel Macs are refused. Under Rosetta, install the arm64 build of DefenseClaw. |
+| DefenseClaw | Installed, with the daemon running ([quickstart](/docs/get-started/quickstart)). Run as your own user. |
+| Homebrew | Your account must be able to write to Homebrew's folders. OpenShell installs from the `nvidia/openshell` formula, without `sudo`. |
+| Xcode or Command Line Tools | Current for your macOS release. Homebrew may build from source. |
+| `e2fsprogs` | Setup offers to install it with Homebrew. |
+| Docker Desktop, running | Start it once on your own account first. It asks for Rosetta, local-network access and an administrator password. |
+| Disk | At least 12 GiB free in the VM volume (22 GiB recommended). The first image build downloads about 3 GB. |
+
+OpenShell 0.1.5 or newer is required. Setup installs it, or upgrades an older one, after asking. If another account owns Homebrew, setup stops and names the owner and folder. Ask them for write access, or install a Homebrew of your own in your home directory ([below](#a-homebrew-that-belongs-to-another-account)). On a managed Mac an administrator provides OpenShell: [Sandboxes on managed computers](/docs/enterprise/sandboxes).
+
+### A Homebrew that belongs to another account
+
+Setup stops before installing and names the owner and folder. Have the owner give you write access, or install a Homebrew of your own in your home directory, put it first on `PATH` with `eval "$(~/homebrew/bin/brew shellenv)"`, and run setup again. With your own Homebrew, `e2fsprogs` must still come from an administrator's Homebrew under `/opt/homebrew` or `/usr/local`.
+
+## Set up
+
+<Steps>
+
+<Step>
+
+### Run setup
+
+```bash
+defenseclaw sandbox setup
+```
+
+```text
+DefenseClaw sandbox setup
+  Checking this machine…  ✓ darwin/arm64  ✓ Landlock (MicroVM)  ✓ Docker 29.1.5  ✗ OpenShell and its MicroVM driver not installed
+Install OpenShell … with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] y
+Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. [Y/n]
+  ✓ gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs
+  every run works on a copy (the MicroVM driver mounts no host folders); `defenseclaw sandbox pull` brings the changes back
+
+  ✓ Done →  cd <project> && defenseclaw sandbox run claude
+```
+
+Setup installs OpenShell and `e2fsprogs`, switches the gateway to MicroVMs (a backed-up change to its `gateway.toml`, one restart), turns off OpenShell's usage telemetry, and builds the harness images. The MicroVM settings apply to every sandbox on the gateway. Flags are in the [sandbox CLI reference](/docs/reference/sandbox-cli).
+
+You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenShell)**) or the macOS app (**Setup**, **Sandbox**). The app never installs OpenShell: run `defenseclaw sandbox setup --install-openshell` in a terminal first.
+
+![DefenseClaw TUI Setup, Sandboxes (OpenShell) form on a Mac: Docker, Landlock through MicroVMs, OpenShell 0.1.5 and the MicroVM driver ticked, the MicroVM settings, OpenShell telemetry off, shell wrappers and build images now](/images/sandboxes/screens/tui-setup.png)
+
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.6}
+  height={620}
+  ariaLabel="Animated terminal replay of defenseclaw sandbox setup on an Apple-silicon Mac whose shared Homebrew belongs to another account: setup stops and names the owner, then a Homebrew of the user's own installs OpenShell 0.1.5, setup switches the gateway to MicroVMs, and the Claude Code image is built."
+  caption="Bonus replay, recorded on DefenseClaw 1.0.4 on a Mac (Docker Desktop running in the account's session). First run: the shared Homebrew at /opt/homebrew belongs to another account, so setup stops before installing. Second run, after installing Homebrew into `~/homebrew` and putting it first on `PATH`: the install plan, then the gateway changes, the harnesses and the image build (Homebrew output trimmed)."
+  frames={[
+    { type: "cmd", text: "defenseclaw sandbox setup", pauseMs: 700 },
+    { type: "out", text: "DefenseClaw sandbox setup" },
+    { type: "out", text: "  Checking this machine…  ✓ darwin/arm64  ⚠ Landlock not checked  ✓ Docker 29.8.2  ✗ OpenShell and its MicroVM driver not installed" },
+    { type: "prompt", text: "Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Install OpenShell 0.1.5 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "out", text: "✗ install OpenShell: this account cannot write to /opt/homebrew/Library/Taps, which ec2-user owns, so Homebrew at /opt/homebrew cannot install the nvidia/openshell formula as this account" },
+    { type: "out", text: "→ Homebrew installs formulas only as the account that owns its prefix (ec2-user): install OpenShell from that account (`defenseclaw sandbox setup --install-openshell` there), or have it give this account the prefix, then run `defenseclaw sandbox setup` here" },
+    { type: "spacer", pauseMs: 900 },
+    { type: "dim", text: "# install a Homebrew of your own, put it first on PATH, run setup again" },
+    { type: "cmd", text: "mkdir -p ~/homebrew && curl -fsSL https://github.com/Homebrew/brew/tarball/main | tar xz --strip-components 1 -C ~/homebrew && eval \"$(~/homebrew/bin/brew shellenv)\"", pauseMs: 700 },
+    { type: "cmd", text: "defenseclaw sandbox setup", pauseMs: 700 },
+    { type: "out", text: "DefenseClaw sandbox setup" },
+    { type: "out", text: "  Checking this machine…  ✓ darwin/arm64  ⚠ Landlock not checked  ✓ Docker 29.8.2  ✗ OpenShell and its MicroVM driver not installed" },
+    { type: "prompt", text: "Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Install OpenShell 0.1.5 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "out", text: "OpenShell install plan" },
+    { type: "out", text: "  Release     v0.1.5 (NVIDIA OpenShell upstream installer)" },
+    { type: "out", text: "  Script      https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.5/install.sh" },
+    { type: "out", text: "  SHA-256     7bf6706741b8b59c1b61e0c47030f0a34fefba6cee3c74cd52638cbf7cdc3655 (verified)" },
+    { type: "out", text: "  Privileges  none: the script runs Homebrew as you, without sudo" },
+    { type: "out", text: "  Changes     Homebrew may update itself and its taps first (its auto-update, when due; HOMEBREW_NO_AUTO_UPDATE=1 skips it)" },
+    { type: "out", text: "              the release's openshell.rb replaces Formula/openshell.rb in the nvidia/openshell tap (created if missing)" },
+    { type: "out", text: "              the script installs the nvidia/openshell/openshell formula and starts the gateway with brew services" },
+    { type: "out", text: "              it registers that gateway as \"openshell\" in ~/.config/openshell, replacing a registration of that name" },
+    { type: "warn", text: "! Homebrew is at ~/homebrew, not at /opt/homebrew or /usr/local: OPENSHELL_LOCAL_TLS_DIR tells the OpenShell CLI where the gateway's client certificates are" },
+    { type: "warn", text: "! Homebrew has no prebuilt packages for that prefix, so it may build dependencies from source, which can take many minutes (it prints its progress)" },
+    { type: "prompt", text: "Run this plan? [y/N] ", reply: "y", pauseMs: 800 },
+    { type: "dim", text: "... (Homebrew output trimmed) ..." },
+    { type: "dim", text: "🍺  ~/homebrew/Cellar/openshell/0.1.5: 10 files, 169.9MB, built in 4 seconds" },
+    { type: "dim", text: "openshell: openshell status reports connected" },
+    { type: "ok", text: "  ✓ OpenShell 0.1.5 installed, gateway running" },
+    { type: "prompt", text: "Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env, which the Homebrew service reads, and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "out", text: "  OpenShell gateway configuration changes" },
+    { type: "out", text: "    edit ~/homebrew/var/openshell/gateway.toml (a timestamped backup is kept)" },
+    { type: "out", text: "      set [openshell.gateway] compute_driver = \"vm\"" },
+    { type: "out", text: "      set [openshell.drivers.vm] sandbox_uid = 509" },
+    { type: "out", text: "      set [openshell.drivers.vm] sandbox_gid = 20" },
+    { type: "out", text: "      set [openshell.drivers.vm] vcpus = 4" },
+    { type: "out", text: "      set [openshell.drivers.vm] mem_mib = 4096" },
+    { type: "out", text: "      set [openshell.drivers.vm] overlay_disk_mib = 16384" },
+    { type: "out", text: "    create ~/.config/openshell/gateway.env" },
+    { type: "out", text: "      set OPENSHELL_TELEMETRY_ENABLED=false" },
+    { type: "out", text: "    then restart the gateway (brew services restart nvidia/openshell/openshell) on the vm compute driver; running sandboxes stop, and sandboxes made on the docker driver cannot start again (one gateway runs one driver)" },
+    { type: "out", text: "  sandbox_uid and sandbox_gid are gateway-wide: every MicroVM sandbox on this gateway, including ones made outside DefenseClaw with `openshell sandbox create`, then runs as 509:20" },
+    { type: "ok", text: "  ✓ gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs" },
+    { type: "out", text: "  every run works on a copy (the MicroVM driver mounts no host folders); `defenseclaw sandbox pull` brings the changes back" },
+    { type: "out", text: "  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):" },
+    { type: "out", text: "    Claude Code (claude)  model credential AWS_BEARER_TOKEN_BEDROCK ✓" },
+    { type: "out", text: "    Codex (codex)         model credential AWS_BEARER_TOKEN_BEDROCK ✓" },
+    { type: "out", text: "  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, opencode" },
+    { type: "ok", text: "  ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml" },
+    { type: "prompt", text: "Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "out", text: "  Building the Claude Code image (the first build downloads about 3 GB)…" },
+    { type: "ok", text: "  ✓ Claude Code 2.1.156: defenseclaw/sandbox:claudecode-2d7c00d21fdd8f50-u509, hooks verified (built in 59s)" },
+    { type: "prompt", text: "Build the Codex image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run codex` builds it) [Y/n] ", reply: "n", pauseMs: 800 },
+    { type: "dim", text: "  the first run of each image uses about 11 GiB while preparing its MicroVM disk (about a minute; OpenShell keeps the prepared disk)" },
+    { type: "ok", text: "  ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:19072, egress proxy 127.0.0.1:19073)" },
+    { type: "out", text: "  skipped: the Codex image (the first `defenseclaw sandbox run codex` builds it, or `defenseclaw sandbox image build codex`)" },
+    { type: "spacer" },
+    { type: "ok", text: "  ✓ Done →  cd <project> && defenseclaw sandbox run claude" },
+  ]}
+/>
+
+</Step>
+
+<Step>
+
+### Check the Mac
+
+```bash
+defenseclaw sandbox doctor
+```
+
+```text
+  ⚠ Platform                   darwin/arm64: macOS sandboxes run in OpenShell MicroVMs (the vm driver, experimental upstream)
+  ✓ Docker                     Docker 29.1.5 (Docker Desktop)
+  ✓ MicroVM driver             e2fsprogs in /opt/homebrew/opt/e2fsprogs/sbin; …openshell-driver-vm signed for Apple's Hypervisor
+  ✓ Gateway compute driver     vm (OpenShell MicroVM; experimental upstream)
+  - Project bind mounts        the OpenShell MicroVM (vm) driver mounts no host folders: every run works on a copy
+  ✓ Harness images             hook-verified: claudecode 2.1.156, codex 0.146.0
+  …
+
+  ✓ ready for sandboxes
+```
+
+The **Platform** warning is expected on every Mac. Checks marked `-` do not apply to MicroVMs. `defenseclaw sandbox doctor --fix` applies fixes that need only your user.
+
+</Step>
+
+<Step>
+
+### Run your first agent
+
+```bash
+cd ~/code/myapp
+defenseclaw sandbox run claude
+```
+
+The first start of each image takes about a minute while the driver prepares its MicroVM disk. Continue with [run an agent](/docs/sandboxes/first-session) and [bring the changes back](/docs/sandboxes/guide#pull-on-macos).
+
+</Step>
+
+</Steps>
+
+## Run on a copy
+
+`sandbox run` copies the project into the sandbox and says what it left out:
+
+```text
+Copying ~/code/myapp (secrets are held back)…
+Starting a Claude Code sandbox… (the first start prepares its MicroVM disk: about a minute)
+Uploading the copy (412 files, 3.1 MiB)…
+⚠ 1 secret file held back from the copy: .env
+⚠ not copied (git ignores them, or they are package caches): node_modules/, dist/; install the dependencies inside the sandbox
+```
+
+The copy is a shallow git clone (`openshell.workdir.git_depth`) plus your working tree, up to `openshell.workdir.max_upload_mb`. Secret files are held back.
+
+## Bring the changes back
+
+At the end DefenseClaw brings the work back as a git bundle, checks it and reviews it before anything reaches your folder ([pull on macOS](/docs/sandboxes/guide#pull-on-macos)).
+
+## MicroVM specifics
+
+- Every MicroVM gets the same 4 vCPUs, 4 GiB of memory and 16 GiB disk for changes, set in the gateway's `gateway.toml`. `--cpu` and `--memory` have no effect.
+- Each image the driver has started keeps about 5 GB in `~/.local/state/openshell/vm-driver`. `defenseclaw sandbox image prune` removes unused ones.
+
+## Limits on a Mac
+
+- There is no live mount and no pre-session snapshot. `--context` is refused, and `sandbox undo` reverts the last `pull --apply`.
+
+## One OpenShell gateway per Mac
+
+The gateway listens on `127.0.0.1:17670` for the account that started it, so only that account can run sandboxes. To hand sandboxes to another account, run `brew services stop nvidia/openshell/openshell` in the first, then setup in the second.
+
+## Check it worked
+
+`defenseclaw sandbox doctor` ends with `ready for sandboxes`, and its **Gateway compute driver** row reads `vm`.
+
+## Undo
+
+`defenseclaw sandbox teardown` removes this install's sandboxes, images and MicroVM disks, restores the gateway configuration from before setup and turns `openshell.enabled` off. OpenShell stays installed.
+
+## Common problems
+
+Run `defenseclaw sandbox doctor` first. These are the macOS-only failures it reports.
+
+### Homebrew belongs to another account
+
+**You see:** ``install OpenShell: Homebrew at /opt/homebrew belongs to …, and you (…) cannot write to …``.
+
+**Cause:** NVIDIA's installer runs Homebrew as you, without `sudo`.
+
+**Fix:** have its owner give you write access, or use a Homebrew of your own ([Mac setup](/docs/sandboxes/macos#a-homebrew-that-belongs-to-another-account)), then run `defenseclaw sandbox setup` again.
+
+**Check:** setup passes the install step.
+
+### The formula installed but the installer failed
+
+**You see:** ``install OpenShell: the nvidia/openshell formula is installed, but NVIDIA's installer failed after it``.
+
+**Cause:** Homebrew installed OpenShell and started its gateway; the installer then failed starting it or registering it.
+
+**Fix:** setup shows the check that still fails and its fix (on a Homebrew outside `/opt/homebrew`, `openshell gateway add …` with `OPENSHELL_LOCAL_TLS_DIR` set). Run it, then run setup again.
+
+**Check:** the **Gateway registration** check passes.
+
+### Homebrew could not install the formula
+
+**You see:** ``install OpenShell: Homebrew could not install the nvidia/openshell formula``.
+
+**Cause:** read Homebrew's `Error:` line above it. Most often your developer tools are too old (`Your Xcode (26.2) … is too outdated`). Homebrew checks `/Applications/Xcode.app` even when `xcode-select` selects the Command Line Tools.
+
+**Fix:** update the tools as Homebrew says, or update or delete that Xcode, then run setup again.
+
+**Check:** `brew list nvidia/openshell/openshell` succeeds.
+
+### Docker Desktop's VM has no Landlock
+
+**You see:** the **Landlock** check reports no Landlock, ``no sandbox can start on this gateway: it runs sandboxes on the docker driver``, or ``sandbox "<name>" is in error state`` with ``→ this gateway runs sandboxes on the docker driver``.
+
+**Cause:** the gateway still runs the Docker driver, and Docker Desktop's Linux VM kernel has no Landlock. DefenseClaw refuses this combination before it builds anything.
+
+**Fix:** run `defenseclaw sandbox setup` (or `sandbox doctor --fix`) and answer yes to the MicroVM question. Sandboxes made on the Docker driver cannot start on MicroVMs: setup lists them first, and after the switch they can only be deleted.
+
+**Check:** the **Gateway compute driver** row reads `vm`.
+
+### Intel Mac
+
+**You see:** ``OpenShell sandboxes do not run on this machine: … Apple silicon only``.
+
+**Cause:** OpenShell's MicroVM driver needs Apple silicon.
+
+**Fix:** none on this machine. `defenseclaw sandbox teardown` still removes what an earlier setup left.
+
+**Check:** not applicable.
+
+### The MicroVM driver check fails
+
+**You see:** **MicroVM driver** fails with ``e2fsprogs is not installed where the MicroVM driver looks for it``, or the driver is not signed for Apple's Hypervisor.
+
+**Cause:** the driver formats disks with `e2fsprogs` and looks only under `/opt/homebrew` and `/usr/local`. An unsigned driver needs its post-install step.
+
+**Fix:** run `brew install e2fsprogs`, or `defenseclaw sandbox setup`. With a Homebrew elsewhere, have an administrator install it under one of those prefixes. For the signature run `brew postinstall nvidia/openshell/openshell`.
+
+**Check:** the **MicroVM driver** check passes.
+
+### Docker Desktop is not running or not shared
+
+**You see:** the **Docker** check fails, or says ``Docker Desktop is not running in this account (permission denied ...)``, or **Docker file sharing** fails because the hook-fire probe directory is not visible to the engine.
+
+**Cause:** Docker Desktop is not started on this account, or the engine's VM cannot see `~/Library/Caches/defenseclaw/hookfire`.
+
+**Fix:** log in to the Mac's desktop as this account and start Docker Desktop (never point `DOCKER_HOST` at another account's socket). For file sharing, share your home directory with the engine's VM (Docker Desktop: Settings → Resources → File sharing), then run `defenseclaw sandbox image build <harness> --force`.
+
+**Check:** the **Docker** and **Docker file sharing** checks pass.
+
+### `localhost` does not resolve in a MicroVM
+
+**You see:** a run ends with ``<Harness> exited with status <code> before any of its hooks reached DefenseClaw: … does not resolve in <name>: its /etc/hosts is empty``, or ``<Harness> cannot resolve localhost``.
+
+**Cause:** a MicroVM's `/etc/hosts` is empty, so DefenseClaw's images answer `localhost` themselves. Either the sandbox was made from an older image, or the harness resolves names on its own (a Go program built without cgo, a static musl program).
+
+**Fix:** for an old image, run ``defenseclaw sandbox delete <name>`` and run again. For a harness that resolves names itself, run it on a Linux host. The refusal stays until you run `defenseclaw sandbox image build <harness> --force`.
+
+**Check:** the new sandbox starts and its hooks reach DefenseClaw.
+
+### The image is not checked for a MicroVM
+
+**You see:** ``<Harness>'s image is not checked for an OpenShell MicroVM (the vm driver this gateway runs)``, with ``was not checked with a MicroVM's name resolution`` or ``was run with a MicroVM's name resolution, which settled nothing``.
+
+**Cause:** a MicroVM gateway boots only an image checked with a MicroVM's name resolution. This one never was, or the check could not run (a mount Docker refused, a timeout) or the harness failed there.
+
+**Fix:** run `defenseclaw sandbox image build <harness> --force`. If the check could not mount its files, share the home directory with the engine first.
+
+**Check:** the next run starts.
+
+### The first run seems to hang
+
+**You see:** the run waits at ``Starting a Claude Code sandbox…``, or fails after about 5 minutes with `ProvisioningTimedOut: Provisioning repair window expired after 300 seconds`.
+
+**Cause:** the first start of an image prepares a MicroVM disk of about 5 GB, which takes about a minute. The timeout means the volume ran full while the disk was prepared.
+
+**Fix:** wait a minute. After a timeout, check **Disk space** in `defenseclaw sandbox doctor`, then run `defenseclaw sandbox image prune`. Do not stop a sandbox in the `ProvisioningTimedOut` or `ImagePreparationTimedOut` error state: OpenShell refuses the stop while its cleanup runs. Wait a minute, then run `defenseclaw sandbox start NAME`. On OpenShell older than 0.1.5, first run `defenseclaw sandbox setup --install-openshell`.
+
+**Check:** the next start takes a few seconds.
+
+### A start fails the identity check
+
+**You see:** the **vm-identity** check fails, or a create says the MicroVM driver runs sandboxes as another uid.
+
+**Cause:** the gateway's `sandbox_uid` and `sandbox_gid` are not your uid and gid.
+
+**Fix:** run `defenseclaw sandbox doctor --fix`, which sets them and restarts the gateway.
+
+**Check:** the **MicroVM sandbox user** row shows your uid.
+
+### `brew services` refuses in tmux
+
+**You see:** the **Gateway service** check says `` `brew services` refuses to run in a tmux session that has no access to this account's macOS login session ``.
+
+**Cause:** the tmux session was not started from your desktop session.
+
+**Fix:** run the doctor outside tmux, or in a tmux you start from Terminal.
+
+**Check:** the check passes.
+
+### The `openshell` executable is not found
+
+**You see:** a run ends with ``import provider profile …: openshell: exec: "openshell": executable file not found in $PATH``.
+
+**Cause:** the daemon started before your shell had the OpenShell CLI on its `PATH`.
+
+**Fix:** run `defenseclaw sandbox setup` again (it records the path as `openshell.binary`), or run `defenseclaw-gateway restart` from this shell.
+
+**Check:** the run starts.
+
+## Next
+
+- [Run an agent in a sandbox](/docs/sandboxes/first-session)
+- [Troubleshooting](/docs/sandboxes/guide)

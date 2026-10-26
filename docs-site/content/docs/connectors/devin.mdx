@@ -1,21 +1,40 @@
 ---
 title: Devin
-description: Guard Devin CLI and Devin Desktop's Devin Local agent with DefenseClaw hooks that can block before a tool runs.
+description: Guard Devin CLI and Devin Desktop's Devin Local agent with DefenseClaw hooks that can block before a tool runs. One connector, devin, covers both.
 keywords:
-  - Devin connector
+  - DefenseClaw Devin connector
   - Devin CLI hooks
   - Devin Desktop
+  - Devin Cascade
 ---
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-DefenseClaw registers hooks in Devin's own config for Devin CLI and the Devin Local agent in Devin Desktop. This is a hook connector: Devin talks to its model provider directly and no proxy is involved.
+DefenseClaw registers hooks in Devin's own config for Devin CLI and the Devin Local agent in Devin Desktop. It wires into the native [Devin CLI lifecycle-hook surface](https://docs.devin.ai/cli/extensibility/hooks/overview). This is a hook connector: Devin contacts its model provider directly and no proxy is involved.
+
+<Callout type="info" title="One connector for Devin CLI and Devin Desktop">
+Use `devin` for both Devin CLI and Devin Desktop.
+</Callout>
+
+## What this connector protects
+
+| Surface | Protected | Why |
+| --- | --- | --- |
+| Devin CLI | **Yes** | DefenseClaw registers the `devin-hooks-v1` contract in the Devin CLI hook config. |
+| Devin Desktop 3.9.19 or later, **Devin Local** agent (the default for new tabs) | **Yes, per vendor documentation** | [Devin Local](https://docs.devin.ai/desktop/devin-local) shares the agent harness, config file and hooks with Devin CLI. DefenseClaw has not recorded a live Devin Desktop validation run. |
+| Devin Desktop before 3.9.19, legacy **Cascade** agent | **No; turned off under the standalone enterprise profile** | Devin Desktop 3.9.19 [removed Cascade](https://docs.devin.ai/desktop/changelog). Cascade used a separate hook contract DefenseClaw does not inspect. See [Cascade on older builds](#cascade-on-older-builds). |
+| Cloud Devin sessions | **No** | Cloud execution does not run local hooks. |
 
 ## Platform support
 
 <ConnectorSupport id="devin" />
 
-## Set up
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | The `devin-hooks-v1` contract manages user hooks under `~/.config/devin` or an explicitly pinned project hook document. |
+| Native Windows x64 | **Supported** | User hooks in `%APPDATA%\devin\config.json`. Devin's Windows hook runner starts the protected `defenseclaw-hook.exe` directly. No Bash or WSL dependency. |
+
+## Setup
 
 On a new install, run `defenseclaw init --connector devin` first. Until DefenseClaw is initialized, `defenseclaw setup devin` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
 
@@ -24,12 +43,11 @@ defenseclaw setup devin --mode observe
 defenseclaw setup devin --mode action
 ```
 
-A first setup without `--mode` defaults to observe; a re-run without `--mode`
-keeps the current mode.
+A first setup without `--mode` defaults to observe; a re-run without `--mode` keeps the current mode.
 
 On Windows, run the same commands in PowerShell. Review observed events before you use action mode. Restart open Devin CLI sessions and reopen Devin Desktop tabs afterwards.
 
-## Check it
+### Check it
 
 ```bash
 defenseclaw status
@@ -37,17 +55,108 @@ defenseclaw status
 
 The agent appears under **Agents** with its mode. `defenseclaw doctor` reports no failed check for it.
 
+### Native Windows
 
-## What it can block or ask
+User hooks are in `%APPDATA%\devin\config.json`, under `hooks`. Devin's Windows hook runner starts the protected `defenseclaw-hook.exe` directly. There is no Bash or WSL dependency. On Windows a CLI older than `3000.4.25` has no contract, so setup refuses it in observe and action mode.
 
-<HookEventsList connector="devin" />
+## Configuration custody
+
+DefenseClaw manages only documented Devin hook locations. CLI and Devin Local read the same files.
+
+| What | Path |
+| --- | --- |
+| Windows user hooks | `%APPDATA%\devin\config.json`, under `hooks` |
+| macOS and Linux user hooks | `~/.config/devin/config.json`, under `hooks` |
+| Project hooks | `<workspace>/.devin/hooks.v1.json`, where the hook map is the whole JSONC document |
+| MCP | Canonical user and project `mcp_config.json`. Higher-precedence compatibility files are read, not rewritten. |
+| Skills and rules | `.devin` and `.agents` roots, including `AGENT.md`, `AGENTS.md` and `AGENTS.local.md`, plus the pre-rename Devin Desktop rule and skill locations the vendor still loads. `defenseclaw skill quarantine` and `restore` can move a flagged skill. Traversal does not follow links. |
+
+Setup accepts JSONC and keeps foreign hook groups and settings. Modified hook files are written as JSON, so comments and formatting are removed; the pre-edit backup keeps the original bytes. Devin also loads hooks from `.claude/` settings for compatibility, and DefenseClaw does not claim or modify those. DefenseClaw does not install Devin plugins or register hooks through them. The `devin acp` entry point is cataloged for the shared [ACP guard](/docs/acp-guard) but has not completed official-client testing. Cloud execution, proxy transport, native OTLP, sandboxing, egress control and managed higher-layer policy are outside this connector.
+
+In a standalone enterprise deployment on Linux and macOS, each hook runs `defenseclaw-hook hook --connector devin --enterprise-managed`. Windows uses the installed hook binary through the per-user route. What a classified gateway outage does is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage). With `foreign_hooks: remove` (the default), a guarded call during that outage requires fresh, trusted records for the agent process and its session; a missing, blocked or stale record blocks. See [Foreign-hook guard](/docs/enterprise/foreign-hook-guard) and [Machine policy](/docs/enterprise/machine-policy).
+
+### Devin Desktop in a standalone enterprise deployment
+
+Devin Desktop starts its bundled Devin Local agent as `devin acp`, and Devin Local reads the same hook config as the CLI ([ACP](https://docs.devin.ai/desktop/acp)). DefenseClaw also does the following.
+
+| Behavior | Detail |
+| --- | --- |
+| Enrolls Desktop-only users | A user with Devin Desktop but no `devin` CLI is enrolled at the bundled CLI's version, read from its man page without running anything. Discovery looks for `Devin.app` in `/Applications` or `~/Applications` (macOS), `/usr/share/devin-desktop` or an unpacked `Devin` folder in `/opt` or the home (Linux), and `Devin.exe` in `%LOCALAPPDATA%\Programs\Devin` or `%ProgramFiles%\Devin` (Windows). From `3000.4.25` (Desktop 3.10 bundles `3000.10.x`) it is enrolled as an untested newer version. Below that, on the known-broken list, with no bundled CLI, or under `enterprise.enrollment.unverified_versions: refuse`, it goes to `unprotected-agents.json`. |
+| Checks plugin hooks | Plugins can ship hooks that run in every local session and rewrite tool input ([plugins](https://docs.devin.ai/cli/extensibility/plugins/overview)). The foreign-hook guard scans plugins in the CLI data folder (`~/.local/share/devin/cli/plugins`, `$XDG_DATA_HOME`, or `%LOCALAPPDATA%` on Windows), including `--local` installs. Cleanup reports plugin hooks and leaves them in place. |
+| Reports ACP registry entries | `defenseclaw-gateway enterprise policy show` lists Desktop ACP registry entries that start an uncovered agent, or start Devin Local with `--config` or with workspace trust off. Nothing is changed. |
+| Tags the agent host | Each managed hook sends the process name that started the agent, recorded as `agent_host`, so audit separates Devin Local from the CLI. |
+| Explains session blocks | One Devin Local process serves every Desktop tab, so a foreign-hook block covers all tabs. The message says to quit and reopen Devin Desktop. |
+
+Devin Desktop's own enterprise policies cover extensions and updates, not hooks, and Cascade's system hook files do not apply to Devin Local. Desktop on these paths has not completed a live validation run.
+
+### Cascade on older builds
+
+Builds before 3.9.19 still run Cascade, which reads a machine-level hooks file and blocks on exit code 2 ([Cascade hooks](https://docs.devin.ai/desktop/cascade/hooks)). While `devin` is a standalone enterprise connector, DefenseClaw adds one entry to each blocking Cascade event (`pre_user_prompt`, `pre_read_code`, `pre_write_code`, `pre_run_command`, `pre_mcp_tool_use`). The entry prints a message that says to update Devin Desktop and use Devin Local, and exits `2`. It needs no enrollment, runtime or gateway. Administrator entries are kept.
+
+| OS | File |
+| --- | --- |
+| Linux | `/etc/devin/hooks.json` |
+| macOS | `/Library/Application Support/Devin/hooks.json` |
+| Windows | `%ProgramData%\Devin\hooks.json` |
+
+Devin Desktop reads the pre-rename machine hooks file only when the Devin file is absent, and pre-rename apps read only the pre-rename file. DefenseClaw writes into each of the two files that exists, and creates only the Devin file when neither exists. Builds from 3.9.19 on have no Cascade and ignore the entries. Other Cascade hooks (cloud, user, workspace) still run, but a hook can only add a block, so none undoes the refusal. Also turn Cascade off in your Devin team settings. Set `enterprise.machine_policy.connectors.devincascade.ownership` to `verify_only` when your MDM owns the file (deploy `defenseclaw-gateway enterprise policy export --connector devincascade`), or `"off"` to leave Cascade running.
+
+## Lifecycle and enforcement
+
+| Event | DefenseClaw role |
+| --- | --- |
+| `PreToolUse` | Inspect tool input. Action mode returns top-level `decision: "block"`. |
+| `PostToolUse` | Inspect `tool_response`. Completed work cannot be undone. May return additional context. |
+| `PermissionRequest` | Action mode can block. No native resumable ask. |
+| `UserPromptSubmit` | Inspect the prompt. Action mode can block or add context. |
+| `Stop` | Action mode can block through the documented response. |
+| `PostCompaction` | Observe the compaction summary. |
+| `SessionStart` | Observe lifecycle, and optionally add context. |
+| `SessionEnd` | Observe teardown. |
+
+The verdict uses Devin's top-level `decision` and `reason`. A block exits `2`, and Devin shows the hook output as is (`Tool rejected: <output>`), so the hook prints only the reason. `hookSpecificOutput` is event-tagged, and `additionalContext` goes only to `UserPromptSubmit`, `SessionStart` and `PostToolUse`. Only exit `2` blocks; every other hook error fails open. Restricted Mode turns hooks and agents off.
+
+### What it can block or ask
 
 - In action mode `PreToolUse`, `PermissionRequest`, `UserPromptSubmit` and `Stop` can return a block. A block exits with code 2, and Devin shows the reason.
 - `PostToolUse` is advisory. The tool has already run.
 - `SessionStart`, `SessionEnd` and `PostCompaction` are observed only.
 - Devin has no native ask. A confirm verdict stays in audit and cannot pause and resume.
 
-## Files it changes
+### Native ask
+
+Devin has no native resumable ask. A `confirm` finding stays in audit and cannot pause and resume in the TUI.
+
+### Fail mode
+
+Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. In a standalone enterprise deployment each hook follows the administrator's fail mode: `closed` unless `hook_fail_mode` (global or for Devin) is `open`. Devin itself blocks only on exit `2`; every other hook error fails open on its side. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes). What a gateway outage does to a Devin call is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
+
+## Hook capabilities
+
+<HookEventsList connector="devin" />
+
+| Contract | Agent versions | Hook script | Events | Can block | Can ask |
+| --- | --- | --- | --- | --- | --- |
+| `devin-hooks-v1` | `3000.4.25`, `3000.11.3` | `v7` | 8 | 4 | 0 |
+
+| Contract | Events registered | Block events | Ask events |
+| --- | --- | --- | --- |
+| `devin-hooks-v1` | `PreToolUse`, `PostToolUse`, `PermissionRequest`, `UserPromptSubmit`, `Stop`, `PostCompaction`, `SessionStart`, `SessionEnd` | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, `Stop` | none |
+
+| Fact | Value |
+| --- | --- |
+| Hook script | `devin-hook.sh` |
+| Hook config paths | `%APPDATA%/devin/config.json`, `~/.config/devin/config.json`, `<workspace>/.devin/hooks.v1.json` |
+| Response field | `hook_output` |
+| Native OTLP | no |
+| W3C traceparent | yes |
+| Fail closed | yes |
+
+The contract was reviewed against Devin CLI `3000.4.25` on Windows, macOS and Linux. On Linux it is also pinned to `3000.11.3`, which a live check showed delivers `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` under these names and honors exit-code-2 blocks on `UserPromptSubmit` and `PreToolUse` (`PermissionRequest` and `PostCompaction` are not verified). Any other CLI from `3000.4.25` on, on every OS, runs as an untested newer version unless known broken ([version policy](/docs/connectors/compatibility#version-policy)). On Windows a CLI older than `3000.4.25` has no contract, so setup refuses it in observe and action mode.
+
+Devin documents `session_id` and a per-turn `prompt_id` but no per-tool invocation ID. CLI 3000.11.3 sends an undocumented `tool_use_id` that DefenseClaw does not rely on, so cross-event tool pairing is detection-only.
+
+## Local customization surfaces
 
 | What | macOS and Linux | Windows |
 | --- | --- | --- |
@@ -57,15 +166,36 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 
 Setup reads JSONC and keeps other hooks and settings in those files, but writes a changed file back as JSON, so comments and formatting are removed. The pre-edit backup keeps the original bytes.
 
+`defenseclaw setup remove devin --yes` removes DefenseClaw's Devin hook entries and, after the gateway restart verifies removal, revokes `hooks/.hook-devin.token` and removes an empty `connector_backups/devin` folder. The `hooks/devin-hook.sh` path remains as a blocking tombstone for Devin processes that cached it; restart Devin after removal. Devin's own `%APPDATA%/devin` or `~/.config/devin` directory and a credential lock file may remain. `--no-restart` defers hook and credential teardown until the next gateway start.
+
+## Upgrading an older Devin Desktop install
+
+Upgrading from a release that protected Devin Desktop under its previous product name moves that configuration to `devin` and removes the old app's hook entries ([Upgrade](/docs/get-started/upgrade)).
+
+## In an OpenShell sandbox
+
+<Callout type="warn" title="Devin CLI cannot run in a sandbox yet">
+The image is **unverified**, so `defenseclaw sandbox run devin` refuses it. Devin CLI needs a Devin account login (`devin auth login`) before any agent turn, and no API key or bring-your-own model skips it. The image check uses a mock model, so it cannot pass. The unverified image stays (see the [Cursor note](/docs/connectors/cursor) on `image list` and `image prune`).
+</Callout>
+
+| Item | Detail |
+| --- | --- |
+| Tier | User. Devin has no system hook tier, so hooks are in `~/.config/devin/config.json` in the image. The launcher restores them from a root-owned template on every start and refuses a `--config` of your own. The sandbox hook exits 2 on every failure, with a 30-second timeout. |
+| Skip permissions | Would start with `--permission-mode dangerous`. `--safe` drops `--permission-mode dangerous` and `autonomous` from your arguments. |
+| Tamper detection | DefenseClaw pairs each `PostToolUse` with its `PreToolUse` by session, tool name and input. A tool that ran although denied, or whose `PreToolUse` never arrived, raises `hook_tamper` and the pack's `hooks.on_tamper` applies ([policy packs](/docs/sandboxes/policy-packs)). On a logged-in CLI 3000.11.3, `PostToolUse` fires only for a tool that ran. |
+| Workspace trust | The launcher always passes `--respect-workspace-trust false` and refuses that flag from you, because a headless run fails in an untrusted folder. A project's own `.devin/hooks.v1.json` then loads beside DefenseClaw's without a prompt. |
+| Sign-in | A login inside the sandbox (`/usr/local/lib/defenseclaw/bin/devin-launch auth login --force-manual-token-flow`) is the only path. The credential stays in `~/.local/share/devin`, where the agent can read it. Not tested live. |
+| Image | Devin CLI 3000.4.25 from its release archive, checked against the SHA-256 in Devin's manifest. |
+
 ## Limits
 
 - Only exit code 2 blocks. Every other hook error lets the call run. Restricted Mode turns hooks off entirely.
 - Cloud Devin sessions run no local hooks and are not covered.
-- Devin Desktop before 3.9.19 runs the legacy Cascade agent, which DefenseClaw does not inspect. Keep Desktop at 3.9.19 or later.
+- Devin Desktop before 3.9.19 runs the legacy Cascade agent, which DefenseClaw does not inspect. Keep Desktop at 3.9.19 or later. See [Cascade on older builds](#cascade-on-older-builds).
 - Devin Desktop coverage rests on vendor documentation. No live Devin Desktop run is recorded.
 - Devin CLI cannot run in an OpenShell sandbox yet.
 
-## Turn it off
+## Disable
 
 For a per-user, single-connector install:
 
@@ -73,14 +203,6 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-With the default gateway restart, disabling removes DefenseClaw's hooks from
-Devin's user and configured project files and preserves your other Devin
-settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To
-remove the connector, run `defenseclaw setup remove devin --yes` (add
-`--force` if it is the last one).
+With the default gateway restart, disabling removes DefenseClaw's hooks from Devin's user and configured project files and preserves your other Devin settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To remove the connector, run `defenseclaw setup remove devin --yes` (add `--force` if it is the last one).
 
 On a multi-connector install, add `--connector devin` to `guardrail disable` and `guardrail enable` to change only this agent.
-
-## Details
-
-Which Devin surfaces are protected, version pins, the hook table, Devin Desktop under the enterprise profile, Cascade handling and the sandbox image are in the [Devin reference](/docs/reference/connectors/devin).

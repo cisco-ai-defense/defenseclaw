@@ -20,7 +20,7 @@ DOCS = Path(__file__).resolve().parents[2] / "docs-site/content/docs"
 
 
 def _gateway_token_bullet():
-    text = (DOCS / "reference/configuration/keys.mdx").read_text(encoding="utf-8")
+    text = (DOCS / "reference/keys.mdx").read_text(encoding="utf-8")
     start = text.index("- `keys set DEFENSECLAW_GATEWAY_TOKEN`")
     return " ".join(re.split(r"\n(?:- |\s*\n)", text[start + 2 :], maxsplit=1)[0].split())
 

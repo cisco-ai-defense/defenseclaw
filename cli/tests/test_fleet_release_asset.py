@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-POLICY_PAGE = Path("docs-site/content/docs/reference/edge-connector/policies.mdx")
+POLICY_PAGE = Path("docs-site/content/docs/edge-connector/policies.mdx")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the tar/make release target runs on POSIX")

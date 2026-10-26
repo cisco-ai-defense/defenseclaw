@@ -78,7 +78,7 @@ func sandboxPluginNames(plugins []sandboxPlugin) string {
 
 func failModesPage(t *testing.T) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "configuration", "fail-modes.mdx"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "fail-modes.mdx"))
 	if err != nil {
 		t.Fatal(err)
 	}

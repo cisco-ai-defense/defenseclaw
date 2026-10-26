@@ -1,0 +1,219 @@
+---
+title: Local observability stack
+description: One-command OpenTelemetry + Loki + Tempo + Prometheus + Grafana stack, pre-wired to the DefenseClaw gateway. Grafana on :3000, dashboards seeded, no manual config.
+keywords:
+  - defenseclaw setup local-observability
+  - DefenseClaw Grafana
+  - DefenseClaw OTel
+  - Loki Tempo Prometheus
+---
+
+The local stack gives you 19 DefenseClaw dashboards on `localhost:3000` in one command. It is meant for development and evaluation. Every port is bound to `127.0.0.1`.
+
+<Flow
+  direction="TB"
+  compact
+  caption="The gateway sends logs, metrics and traces over OTLP to the collector, which writes each signal to its own store. Grafana queries the three stores. Ports are bound to 127.0.0.1."
+>
+  <Node id="gateway" kind="gateway">{`Gateway\ndefenseclaw-gateway`}</Node>
+  <Node id="collector" kind="generic">{`OTel Collector\n:4317 gRPC · :4318 HTTP`}</Node>
+  <Node id="prom" kind="datastore">{`Prometheus\nmetrics · :9090`}</Node>
+  <Node id="loki" kind="datastore">{`Loki\nlogs · :3100`}</Node>
+  <Node id="tempo" kind="datastore">{`Tempo\ntraces · :3200`}</Node>
+  <Node id="graf" kind="generic">{`Grafana\ndashboards · :3000`}</Node>
+  <Edge from="gateway" to="collector" label="sends OTLP" />
+  <Edge from="collector" to="prom" label="writes" />
+  <Edge from="collector" to="loki" label="writes" />
+  <Edge from="collector" to="tempo" label="writes" />
+  <Edge from="prom" to="graf" label="queried by" variant="dashed" />
+  <Edge from="loki" to="graf" label="queried by" variant="dashed" />
+  <Edge from="tempo" to="graf" label="queried by" variant="dashed" />
+</Flow>
+
+## Before you start
+
+- Docker with Compose v2, running.
+- Ports 3000, 3100, 3200, 4317, 4318 and 9090 free. There is no flag to move them.
+- On Windows, Docker Desktop with Linux containers on Windows Pro, Enterprise or Education. Windows Server and WSL2-only Docker are not supported; send to an existing collector instead ([Send to an OTLP collector](/docs/observability#send-to-an-otlp-collector)).
+
+## What it brings up
+
+`defenseclaw setup local-observability` runs the bundled Compose project `defenseclaw-observability`.
+
+| Service | Image | Role | Port on `127.0.0.1` |
+| --- | --- | --- | --- |
+| `otel-collector` | `otel/opentelemetry-collector-contrib:0.153.0` | Receives OTLP, writes to Prometheus, Loki and Tempo | `4317` (gRPC), `4318` (HTTP) |
+| `prometheus` | `prom/prometheus:v2.54.1` | Metrics | `9090` |
+| `loki` | `grafana/loki:3.2.0` | Logs | `3100` |
+| `tempo` | `grafana/tempo:2.6.0` | Traces | `3200` |
+| `grafana` | `grafana/grafana:11.3.0` | Dashboards | `3000` |
+
+## Bring it up
+
+1. Start the stack.
+
+   ```bash
+   defenseclaw setup local-observability up
+   ```
+
+   {/* needs-live-capture: output of `setup local-observability up` (Docker not run on the shared dev host) */}
+
+   The command starts the five containers, waits for their health checks, and adds a destination named `local-observability` to your observability config. A running gateway picks it up without a restart.
+
+2. Print the addresses.
+
+   ```bash
+   defenseclaw setup local-observability url
+   ```
+
+   ```text
+   Grafana:    http://localhost:3000
+   Prometheus: http://localhost:9090
+   Tempo API:  http://localhost:3200
+   Loki API:   http://localhost:3100
+   OTLP gRPC:  127.0.0.1:4317
+   OTLP HTTP:  127.0.0.1:4318
+   ```
+
+3. Open Grafana and sign in as `admin`. The generated password is in `~/.defenseclaw/observability-stack/.grafana-admin-password`. A stack that was already running with anonymous access keeps it, read-only (Viewer): to edit dashboards, rerun setup with `--password`. The setup summary says which mode applies.
+
+4. Run one agent turn, for example ask Claude Code or Codex to list the files in a folder. Dashboards fill only from real traffic; a destination test adds nothing.
+
+5. Open **Dashboards → DefenseClaw → Overview**. **Hook Connectors** shows the connector's hook calls. **Agent identity → Runtime Agent Directory** lists the agent; click its **Agent ID** to open [Agent360](/docs/observability/agent360).
+
+### Check it worked
+
+```bash
+defenseclaw observability destination test local-observability
+```
+
+{/* needs-live-capture: destination test output against a running local stack */}
+
+The test checks the connection without adding events to history or dashboard counts.
+
+## Useful flags
+
+Subcommands: `up`, `down`, `reset`, `status`, `logs`, `url`, `env`. `up` takes:
+
+| Flag | What it does |
+| --- | --- |
+| `--endpoint` | OTLP endpoint written to `config.yaml`. Default `127.0.0.1:4317`. |
+| `--signals` | Subset of `traces,metrics,logs`. All three are needed for full dashboard coverage. |
+| `--service-name` | Sets `observability.resource.attributes.service.name`. Default `defenseclaw`. |
+| `--no-config` | Start containers without editing `config.yaml`. |
+| `--password` / `--no-password` | Require the generated Grafana `admin` login, or allow anonymous read-only (Viewer) access on the loopback bind: dashboards show, nothing can be edited, and anonymous access is never Admin. New stacks default to a password; an anonymous stack keeps anonymous access, read-only, until you pass `--password`. |
+| `--refresh-bundle` / `--no-refresh-bundle` | Refresh `~/.defenseclaw/observability-stack/` from the bundle before starting. On by default. |
+| `--refresh-config` / `--no-refresh-config` | Also overwrite dashboards, rules and service config. Pass `--no-refresh-config` to keep local edits. |
+| `--no-wait`, `--timeout` | Skip the readiness wait, or set it in seconds (default 180). |
+
+`--no-password` lets every process on the workstation read the dashboards without signing in. The controller still refuses a Grafana bind other than `127.0.0.1`. A raw `docker compose up` bypasses that check.
+
+## What ends up in `config.yaml`
+
+`up` writes this destination (shown for `--service-name defenseclaw-gateway`):
+
+```yaml
+observability:
+  destinations:
+    - name: local-observability
+      kind: otlp
+      enabled: true
+      endpoint: 127.0.0.1:4317
+      protocol: grpc
+      tls:
+        insecure: true
+      network_safety:
+        allow_private_networks: true
+      send:
+        signals: [traces, metrics, logs]
+        buckets: ['*']
+  resource:
+    attributes:
+      service.name: defenseclaw-gateway
+```
+
+The name `local-observability` selects the `local-observability-v1` metric projection, which carries the short Prometheus labels the dashboards filter on (`connector`, `scanner`, `target_type`, `rule_id`, `severity`). An OTLP destination with any other name exports canonical labels (`defenseclaw_connector_source`, `defenseclaw_scan_scanner`, ...), and connector- and scanner-filtered panels stay empty. To send a gateway on another computer to a shared stack, use the `local-otlp` preset, which writes the same name with `tls.insecure: true`. In a managed administrator config, use the name `local-observability` too.
+
+Every signal carries `host.name` from the operating system. To tell computers with the same name apart, add `--environment <name>` to `setup observability add`; it sets `observability.resource.attributes.deployment.environment.name`.
+
+If `up` finds a container name that belongs to another copy of the stack, it stops and names the other stack. A port held by a foreign process also stops it; edits to the stack's `docker-compose.yml` are overwritten on the next refresh.
+
+### Keep the destination name
+
+Do not rename `local-observability`. The bundled dashboards read metric labels that DefenseClaw only exports to a destination with that name. To feed the stack from a gateway on another computer, add the destination with the preset:
+
+```bash
+defenseclaw setup observability add local-otlp --endpoint <stack-host>:4317 --non-interactive
+```
+
+## Bundled Grafana dashboards
+
+[Dashboards](/docs/observability/grafana-dashboards): what each board shows and how to read empty panels.
+
+### Agent Directory and Agent360
+
+Agent360 shows one agent, or an agent and all its descendants, from one stable identity. New root agents and subagents appear as hook events arrive; DefenseClaw creates no dashboard file per agent. Open it from **Agent identity → Runtime Agent Directory** by clicking an **Agent ID**.
+
+## Managed AI Defense fail-open monitoring
+
+In managed enterprise mode, a request is allowed when the AI Defense inspection returns no verdict. Each such decision increments `defenseclaw.managed_aid.fail_open.decisions` (delta, unit `{decision}`). In the local stack it is the Prometheus counter `defenseclaw_managed_aid_fail_open_decisions_total` with a `reason` label.
+
+| `reason` | Meaning | Paging |
+| --- | --- | --- |
+| `inspector_unwired` | The gateway entered managed inspection without an AI Defense inspector. | Page when sustained. |
+| `aid_unavailable` | AI Defense returned no verdict (transport, timeout or token failure). | Page when sustained. |
+| `no_content` | The request had no inspectable messages. | Diagnostic only. |
+| `unknown` | An invalid producer reason, normalized at the metric boundary. | Diagnostic only. |
+
+The bundled `DefenseClawManagedAIDFailOpenSustained` rule fires after 10 minutes of `rate(...{reason=~"inspector_unwired|aid_unavailable"}[5m]) > 0`. An idle gateway produces no decisions. If it fires, check the deployment mode, the inspector wiring at startup, AI Defense credentials and reachability, and provider status.
+
+## Tear it down
+
+```bash
+defenseclaw setup local-observability down
+```
+
+`down` stops the containers and keeps their data. The destination stays in your config, so the gateway keeps trying to send; add `--disable-config` to turn it off too. To delete the stored metrics, logs and traces, run `defenseclaw setup local-observability reset --yes`.
+
+## Use it alongside Splunk
+
+[Send to Splunk](/docs/observability/splunk): run Splunk next to this stack.
+
+## Troubleshooting
+
+<Accordions>
+  <Accordion title="Grafana shows no data">
+
+    A destination test does not fill dashboards. Generate a real agent turn, tool call, scan or approval, widen the time range and clear the dashboard filters. If panels are still empty, run:
+
+    ```bash
+    defenseclaw setup local-observability status
+    defenseclaw observability plan
+    defenseclaw setup local-observability logs --service otel-collector --follow
+    ```
+
+    `status` shows whether the containers are healthy, `observability plan` shows what the gateway sends and where, and the collector log shows what arrived. Run `defenseclaw setup local-observability up` again if the host-mounted bundle needs a refresh. What 0, No data and Not reported mean is in [Dashboards](/docs/observability/grafana-dashboards#read-empty-values-correctly).
+
+  </Accordion>
+  <Accordion title="Counters stay at 0 after a few blocks or findings">
+
+    For empty or zero counters, see [Dashboards](/docs/observability/grafana-dashboards#read-empty-values-correctly). If rare events read `0` in Prometheus panels, send cumulative counters:
+
+    ```yaml
+    observability:
+      metric_policy:
+        temporality: cumulative
+    ```
+
+  </Accordion>
+  <Accordion title="Port already in use">
+
+    The stack uses 3000 (Grafana), 3100 (Loki), 3200 (Tempo), 4317 and 4318 (OTLP) and 9090 (Prometheus). The Compose file pins them, and the `up` preflight refuses to start when a program outside the stack holds one. Free the port, or stop the foreign container the warning names, and run `up` again. There is no port flag. `up` overwrites the operator-editable files in `~/.defenseclaw/observability-stack/` (the `grafana/`, `prometheus/`, `loki/`, `tempo/` and `otel-collector/` folders and `docker-compose.yml`) on every refresh, so a changed port survives only if you also run every `up` with `--no-refresh-bundle` and `--no-refresh-config` and pass the new collector address with `--endpoint`. Freeing the default port is the supported fix.
+
+  </Accordion>
+  <Accordion title="Detach the gateway but keep the data">
+
+    `down` keeps the volumes and the `local-observability` destination in `config.yaml`. To turn the destination off as well, run `defenseclaw setup local-observability down --disable-config`, or disable or remove the destination with `defenseclaw setup observability`.
+
+  </Accordion>
+</Accordions>

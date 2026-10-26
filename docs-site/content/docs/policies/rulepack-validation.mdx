@@ -1,0 +1,144 @@
+---
+title: Validate rule packs
+description: Strict, offline validation for bundled, partial, and custom DefenseClaw guardrail rule packs.
+keywords:
+  - DefenseClaw rule pack validation
+  - validate-pack
+  - custom guardrail rules
+  - defenseclaw doctor
+---
+
+`validate-pack` runs the same loader the gateway uses. It works offline: the gateway does not need to be running and no network request is made.
+
+<Callout type="info" title="Enterprise deployments">
+On a managed computer, `defenseclaw` runs only `sandbox` commands. Use `defenseclaw-gateway rulepack validate --dir PACK`; it prints the digest to pin. See [custom rule packs](/docs/enterprise/configuration).
+</Callout>
+
+1. Validate the pack.
+
+   ```bash
+   defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/default
+   ```
+
+   ```text
+   Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/default"
+     rules: 239/243 enabled across 7 files
+     components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
+     digest: c551079cd1df686fe82d2f87db8c7cdac88667c779266096fc81d70e863fbd75
+     files digest: a80ff5bf86ba3f42af9d64161aec3732a752c7774d31c94936f6e73d5badc5ef (the guardrail.custom_packs pin)
+   ```
+
+   `judges=4` counts the compiled-in exfil judge and the three judge files. The full digest includes compiled defaults and can change between builds even when the files digest stays the same. Use your own run's `files digest` to pin a custom pack. You can pass a pack name instead of a path.
+
+2. In CI, ask for JSON.
+
+   ```bash
+   defenseclaw guardrail validate-pack PATH --json
+   ```
+
+   ```json
+   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"c551079c…","enabled_rule_count":239,"files_digest":"a80ff5bf…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":243,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
+   ```
+
+3. Read a failure. A file the loader does not recognize fails the whole pack and exits `1`:
+
+   ```text
+   Rule pack invalid: "/home/alice/.defenseclaw/policies/guardrail/bad"
+     inventory_unexpected at correlation-patterns.yaml: unexpected YAML component
+   ```
+
+   ```json
+   {"error":{"code":"inventory_unexpected","path":"correlation-patterns.yaml","reason":"unexpected YAML component"},"kind":"validation_error","valid":false,"wire_version":1}
+   ```
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | The pack is valid. |
+| `1` | The pack is invalid. The output names the file, error code and reason. |
+| `2` | Validation is unavailable (gateway binary missing, untrusted, timed out or incompatible). This does not say whether the pack is valid. |
+
+<Callout type="warn" title="Validation is fail-closed for files you provide">
+Validation is all or nothing. If a recognized file is present, the whole file must parse: a malformed rule, an invalid Go regular expression or an unsupported schema version fails the pack. DefenseClaw does not silently discard the bad file or keep only the entries that parsed.
+</Callout>
+
+## CEL expression validation
+
+Every `expression` is compiled, including on disabled rules. For the rule schema and field names, see [CEL authoring](/docs/policies/cel/authoring). The admitted language subset and limits are in the [CEL engine](/docs/policies/cel/engine) reference.
+
+## Partial packs and fallback
+
+A non-empty pack directory is an overlay on the compiled baseline. Missing `suppressions.yaml`, `sensitive-tools.yaml`, judge files and `rules/local-patterns.yaml` keep the baseline. Any other `rules/*.yaml` adds or replaces one category.
+
+## Doctor checks effective connector packs
+
+```bash
+defenseclaw doctor
+```
+
+```text
+  [PASS] Rule pack [codex]  -  configured rule pack "default" "/home/alice/.defenseclaw/policies/guardrail/default": 239/243 rules enabled; digest=c551079c…
+```
+
+Doctor validates the pack every connector uses. It shows `FAIL` for an invalid pack and `WARN` when the validator is missing.
+
+## Apply a validated pack
+
+The pinned digest also covers the optional `defenseclaw-pack.json` posture file.
+
+DefenseClaw ships three rule packs: `permissive`, `default` and `strict`. A pack changes which rules run and the default block and alert levels.
+
+| Pack | Blocks | Alerts | Pick it when |
+| --- | --- | --- | --- |
+| `permissive` | CRITICAL | HIGH and above | You are piloting. Pair it with observe mode and review what would have happened. |
+| `default` | CRITICAL | MEDIUM and above | You want to stop obvious harm. With HITL on, eligible HIGH findings ask first. |
+| `strict` | MEDIUM and above | LOW and above | Regulated work, where a missed attack costs more than an interruption. Turn the LLM judge on too. |
+
+1. Switch every agent to the strict pack.
+
+   ```bash
+   defenseclaw guardrail use-pack strict
+   ```
+
+   Or switch one agent:
+
+   ```bash
+   defenseclaw guardrail use-pack strict --connector codex
+   ```
+
+   `use-pack` validates the pack first and writes nothing if it is invalid. A global switch removes per-agent pack overrides and lists them.
+
+2. Check it worked.
+
+   ```bash
+   defenseclaw guardrail list-packs
+   ```
+
+   ```text
+     Guardrail rule packs
+     --------------------
+     * built-in presets:
+         - default: Balanced built-in pack - the shipped baseline.
+         - strict: Tighter thresholds; blocks more aggressively.
+         - permissive: Looser thresholds; favors availability over blocking.
+   ```
+
+The running gateway applies the change on its next reload. Nothing restarts.
+
+### Move the admission policy too
+
+`use-pack` changes the runtime rules only. The admission policy for skills, MCP servers and plugins is a separate preset:
+
+```bash
+defenseclaw policy activate strict
+```
+
+`policy activate` does not change `guardrail.rule_pack`, and `use-pack` does not change admission. Activation replaces the whole `admission:` section, so run it before any hand-tuned admission edits. See [policy defaults](/docs/policies/defaults#activate-a-preset). To block and quarantine plugins with a MEDIUM finding at install, see [block risky plugins at install](/docs/policies/defaults#block-risky-plugins-at-install).
+
+### Undo
+
+```bash
+defenseclaw guardrail use-pack default
+defenseclaw guardrail use-pack --clear --connector codex
+```
+
+Next: [tune the judge](/docs/policies/suppression-cookbook), [what happens when an edit fails](/docs/policies/rules#when-something-is-wrong), [change the levels](/docs/policies/thresholds), [what each pack ships](/docs/policies/defaults).

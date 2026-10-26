@@ -96,7 +96,7 @@ def _run_fleet_recipe(
     docker = commands / "docker"
     docker.write_text(_FAKE_DOCKER, encoding="utf-8")
     docker.chmod(0o755)
-    page = (REPO_ROOT / "docs-site/content/docs/reference/edge-connector/configuration.mdx").read_text(encoding="utf-8")
+    page = (REPO_ROOT / "docs-site/content/docs/edge-connector/install.mdx").read_text(encoding="utf-8")
     section = page.split("## Grafana dashboard\n", 1)[1].split("## Benchmark\n", 1)[0]
     recipe = re.search(r"```bash\n(.*?)```", section, re.DOTALL)
     assert recipe is not None

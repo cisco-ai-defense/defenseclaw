@@ -3,7 +3,7 @@
 // (which renders the per-connector block) can import it without
 // creating a circular dependency. Order is by adoption / popularity so
 // the rotation leads with the connectors most visitors recognize
-// first; the docs nav (content/docs/connectors/(hook-connectors)/meta.json) and the
+// first; the docs nav (content/docs/connectors/index(hook-connectors)/meta.json) and the
 // capability matrix (data/capability-matrix.json) follow the same
 // ordering.
 //

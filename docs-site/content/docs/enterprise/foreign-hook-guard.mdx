@@ -1,0 +1,167 @@
+---
+title: Foreign-hook guard
+description: How the standalone profile stops user and project hooks that DefenseClaw has not approved from changing an AI agent's tool call after inspection, which agents and files it covers on each OS, and how to approve or restore a hook.
+keywords:
+  - DefenseClaw foreign hooks
+  - hook rewrite
+  - Cursor hooks.json
+  - Copilot hooks
+  - OpenCode plugins
+  - Hermes hooks
+  - allowed_hooks
+---
+
+Most agents run every hook they find, and several let any hook change a tool call's input: Codex and Claude Code (`updatedInput`), Cursor (`updated_input`), Copilot (`modifiedArgs`), Devin (`updatedInput`), OpenCode (`tool.execute.before`), Amp plugins and Hermes (`pre_tool_call` shell hooks, run in order). A hook in a user's own config or in a repository could change a command after DefenseClaw inspected it. The foreign-hook guard covers that gap for agents without a vendor lock. A **foreign hook** is any hook or plugin that DefenseClaw did not write and you have not approved. Terms are in [Concepts](/docs/enterprise/concepts).
+
+## Which connectors it covers
+
+| Connector | Covered | Why |
+| --- | --- | --- |
+| Cursor, Copilot, Devin, OpenCode, Amp | Every OS, unless `foreign_hooks: allow` | These agents have no vendor lock. Windows Amp keeps its guard's session record locally. |
+| Hermes | On Linux and macOS, unless `foreign_hooks: allow` | Hermes has no vendor lock and no way to order hooks. The Windows Hermes registration does not run the guard. |
+| Codex, Claude Code | Only with `managed_hooks_only: preserve` | By default the vendor lock already stops user and project hooks. |
+| Antigravity | Not covered | No vendor lock and no guard. Hooks a user or project adds run next to DefenseClaw's. |
+
+This holds on every OS. `preserve` also removes the vendor lock, except Codex's on Windows, which DefenseClaw always sets; see [Machine policy](/docs/enterprise/machine-policy#locks-on-linux-and-macos) and [Windows differences](/docs/enterprise/machine-policy#windows-differences).
+
+## What it does
+
+1. **Removes foreign hooks from user-level config.** Within about five minutes, the guardian, running as the user, backs up and removes unapproved hook entries and plugins from the user's own files (listed below) and logs each removal. In a Hermes `config.yaml` only the `hooks` section is rewritten. A Codex `config.toml`, Devin's `~/.claude.json` (Claude Code owns that file), and any file or plugin the guardian cannot read or verify, is reported, never changed.
+2. **Blocks while a foreign hook is present.** Before each call, `defenseclaw-hook` checks the user's own files and the project files below, in the working directory and its parents up to the repository root (the first folder with a `.git` entry) or the home directory. On Windows the walk continues to the drive root when there is no repository. While an unapproved hook is present, tool calls are denied: for user files until the guardian removes the hook, for a hook the guardian only reports until someone removes or approves it. Repository files are never changed.
+3. **Checks Claude-format files too.** Cursor and Devin also load Claude Code's user and repository `settings.json` files. Copilot loads only repository `.claude/settings.json` and `.claude/settings.local.json`, never `~/.claude/settings.json`. If a session folder is under the home and has no repository, the guard reports the home's `.claude` files as project files (`scope=project`). Run `policy show --project` from the folder the agent runs in.
+4. **Keeps a session blocked until the agent restarts.** Agents read their hooks when a session starts and keep running them after the file changes; OpenCode and Amp load plugins once per process. So `defenseclaw-hook` records a snapshot at session start. If an unapproved hook or plugin is present then, the rest of that session's tool calls stay denied, even after the hook is removed. The block also covers sessions the same agent process clears, compacts or resumes into. Remove the hook, then restart the agent. A block ends 7 days after it was recorded. A hook that appears after the session started denies the calls that find it but does not block the session: once it is removed, the next call is allowed. For gateway-backed guards, the gateway keeps the snapshots in its protected data directory (`foreign-hook-sessions/`), keyed by the caller's verified uid or SID, so deleting files in the home does not clear a block. Windows Amp keeps its guard snapshot locally in the account home instead; its managed plugin blocks gateway outages. If a required snapshot cannot be read or written, the call is denied. When the guardian removes an unapproved hook it also records the removal, and the gateway denies calls of that account's agent processes (for that connector, and others that load the same file) that started before the removal, naming the file. Restart the agent to clear it; the record lasts 7 days.
+5. **Follows redirected user config.** An agent whose environment moves its user configuration (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `APPDATA`, `HERMES_HOME`, `HERMES_MANAGED_DIR`, or a `HOME` that is not the account's) is checked at that location. The hook records each absolute location it sees in `~/.defenseclaw/foreign-hook-env.json` (at most 8 per connector), and the guardian cleans those after the default ones. On Windows the guardian also reads each signed-in user's persistent environment variables from their loaded registry hive and cleans the folders they name; while a hive is not loaded, it skips that user and logs the skip.
+
+**OpenCode and Amp.** Their DefenseClaw plugin asks `defenseclaw-hook` for the guard's decision when it loads and before each tool call. Only the DefenseClaw plugin DefenseClaw installed is exempt; another file with the same name is foreign.
+
+**Hermes.** Its DefenseClaw hook stays the per-user `~/.defenseclaw/hooks/hermes-hook.sh` in `~/.hermes/config.yaml`. On Linux and macOS that hook asks `defenseclaw-hook` for the guard's decision before each tool call (`pre_tool_call`) and at `on_session_start`. A denied tool call is blocked with the message below and never reaches the gateway; an unclear check blocks too. Hermes lets a shell hook block only `pre_tool_call`. `hermes --accept-hooks` and `hooks_auto_accept` skip only Hermes' own consent prompt; the guard still applies.
+
+The guard does not follow links and reads at most 1 MiB per file. A file it cannot read or parse, or a path that is not a regular file, counts as unapproved, so a malformed hook file denies instead of slipping through. The scan is bounded in files, bytes and time so it finishes inside the agent's hook timeout, and a working directory too deep to find the repository root denies. These deny the call but do not block the session, except when a session-start scan stops early (a folder with more than 256 entries, a hook file over 1 MiB, a plugin folder too deep or large): the agent may have loaded a hook past that point, so the session stays blocked until the agent restarts.
+
+A hook script counts as DefenseClaw's own only when the registration runs the administrator-owned `defenseclaw-hook` exactly as DefenseClaw renders it (or, for a per-user agent, the account's own DefenseClaw registration). A user-owned script, or a registration with extra keys such as an environment block or a working directory, is foreign.
+
+## Files the guard scans
+
+`~` is the user's home directory (`%USERPROFILE%` on Windows). Project paths are relative to the working directory and each parent up to the repository root.
+
+| Connector | User files | Project files |
+| --- | --- | --- |
+| Cursor | `~/.cursor/hooks.json`, `~/.claude/settings.json` | `.cursor/hooks.json`, `.claude/settings.json`, `.claude/settings.local.json` |
+| Copilot | `~/.copilot/hooks/*.json`, `~/.copilot/settings.json` (or under `COPILOT_HOME`) | `.github/hooks/*.json`, `.github/copilot/settings.json`, `.github/copilot/settings.local.json`, `.claude/settings.json`, `.claude/settings.local.json` |
+| Devin | `~/.config/devin/config.json` on Linux and macOS (or under `XDG_CONFIG_HOME`), `%APPDATA%\devin\config.json` on Windows, `~/.claude.json` (reported, never rewritten), `~/.claude/settings.json`, `~/.claude/settings.local.json` | `.devin/hooks.v1.json`, `.devin/config.json`, `.devin/config.local.json`, `.claude/settings.json`, `.claude/settings.local.json` |
+| OpenCode | `~/.config/opencode/plugins/`, `~/.config/opencode/plugin/`, `~/.config/opencode/opencode.json`, `opencode.jsonc` and `config.json` (or under `XDG_CONFIG_HOME`); the file named by `OPENCODE_CONFIG`; the folder named by `OPENCODE_CONFIG_DIR`; the inline `OPENCODE_CONFIG_CONTENT` (reported) | `.opencode/plugins/`, `.opencode/plugin/`, `opencode.json`, `opencode.jsonc`, `.opencode/opencode.json`, `.opencode/opencode.jsonc` |
+| Amp | `~/.config/amp/plugins/` (or under `XDG_CONFIG_HOME`) | `.amp/plugins/` |
+| Hermes (Linux and macOS) | `~/.hermes/config.yaml` (or under `HERMES_HOME`), and `config.yaml` in the folder `HERMES_MANAGED_DIR` names. The `output_spill` and `outbound` settings under `hooks` are not hooks and are left alone | None: Hermes reads no project hook file |
+| Claude Code (when covered) | `~/.claude/settings.json` (or under `CLAUDE_CONFIG_DIR`), and the hooks of plugins it enables | `.claude/settings.json`, `.claude/settings.local.json`, and the hooks of plugins they enable |
+| Codex (when covered) | `~/.codex/config.toml`, `~/.codex/hooks.json` (or under `CODEX_HOME`) | `.codex/config.toml`, `.codex/hooks.json` |
+
+`defenseclaw-hook` reads the redirected locations from the agent's environment. The guardian has no user environment: it cleans the default locations and the redirected ones a DefenseClaw hook has recorded. `enterprise policy show --user` uses the default locations.
+
+## What a blocked user sees
+
+```text
+enterprise_foreign_hook_blocked: your organization blocks cursor hooks it has
+not approved, because they can change a tool call after DefenseClaw checks it.
+The project file /home/alice/repo/.cursor/hooks.json defines a hook (digest
+sha256:3f5c…). Remove it, or ask your administrator to add the digest to
+enterprise.machine_policy.connectors.cursor.allowed_hooks. The agent can
+keep running a hook it loaded when the session started, even after the file
+changes, so DefenseClaw blocks tool calls for the rest of this session: after
+removing the hook, restart the agent.
+```
+
+The last sentence appears only when the hook was present at session start. With `foreign_hooks: report`, the agent runs; `enterprise policy show` lists the finding as `reported` with its file and digest. For Cursor, Copilot and Devin, `defenseclaw-hook` prints a warning that names the file and digest to stderr. Codex and Claude Code use that native-hook warning when `managed_hooks_only: preserve` makes the guard active. On Linux and macOS, Hermes prints a generic stderr warning without the file and digest; use `enterprise policy show` for those details. For OpenCode and Amp, use `enterprise policy show` to see the file and digest. An approval you add while a session is blocked applies to the next agent session.
+
+## Session records and gateway outages
+
+The [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) gives the result of an outage per connector and OS, with this guard and without it.
+
+The gateway keeps each agent session's hook snapshot in its private data directory. A session that loaded an unapproved hook stays blocked after the guardian removes the file, because the agent may still run its loaded copy. Restart the agent after removing or approving the hook. The guardian records removals so agent processes that started before a removal cannot use a stale allow.
+
+Every gateway-backed guarded call needs a fresh session answer. If the gateway is stopped, restarting, or cannot answer before the hook deadline, the guarded connector blocks the call, including when the administrator chose `hook_fail_mode: open`. The managed Windows Amp plugin keeps its session check locally and is rendered closed for gateway failures. This is the 1.0.3 outage limit (GAP-0352). An earlier online allow does not authorize a call during an outage. The hook names a known gateway stop, restart or answer timeout. If it cannot identify the cause, it reports:
+
+```text
+enterprise_foreign_hook_blocked: DefenseClaw could not check this agent
+session's hook record with its gateway, so the call is blocked. Retry when
+the DefenseClaw gateway is running; if the block continues, restart the agent.
+```
+
+The block applies to tool calls and, where the agent lets a hook block them, to prompts and session starts. Stop and session-end events get the agent's neutral answer so the agent can finish its turn.
+
+The guardian holds an account's removal lock while it records and removes an unapproved hook. A concurrent gateway check denies that account's call until the removal completes; other accounts are not delayed.
+
+## Approve a hook
+
+Add the hook's digest to `allowed_hooks`, for one connector or for all of them under `default`. The two lists are merged.
+
+```yaml title="config.yaml (excerpt)"
+enterprise:
+  machine_policy:
+    default:
+      allowed_hooks: []
+    connectors:
+      cursor:
+        allowed_hooks:
+          - sha256:3f5c…              # 64 hex characters; the prefix is optional
+      copilot:
+        foreign_hooks: report         # log findings, do not block
+      amp:
+        foreign_hooks: allow          # do not scan
+```
+
+| `foreign_hooks` | User-level foreign hooks | Project-level foreign hooks |
+| --- | --- | --- |
+| `remove` (default) | Tool calls denied until the guardian removes the hook (about five minutes) or you approve it | Tool calls denied until the hook is removed or approved |
+| `report` | Reported | Reported; calls allowed |
+| `allow` | Ignored | Ignored |
+
+A digest covers the hook entry and the content of every file its command may run, so the same entry with a different script gets a different digest.
+
+**Get the digest.** Copy it from the block message, or list every finding for a user and repository. Each line shows the connector, `blocked`, `reported` or `allowlisted`, the scope, the file and `sha256:<digest>`.
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --user alice --project /home/alice/repo
+```
+
+On macOS use `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`. On Windows, from an elevated prompt:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --user alice --project C:\src\repo
+```
+
+### What a digest covers
+
+A digest covers the hook entry and the content of every file its command may run: paths it names, plain words such as `check.sh` in `bash check.sh` (looked up in the project root, the hook file's folder, the agent's working directory, a Copilot `cwd` and any folder the command changes into), and environment values the entry sets. The same entry in another repository with a different script gets a different digest. An entry that names a variable DefenseClaw cannot resolve, a file larger than 64 MiB, or a file that is not a readable regular file cannot be approved; move its logic into a script and approve that. Programs found through `PATH` (such as `bash` or `node`) and files a command reads on its own (a `Makefile` for `make`) are bound by name only. For a plugin file, the digest is the SHA-256 of the file.
+
+## Restore a removed hook
+
+Before it changes a user's file, the guardian copies the original to:
+
+| OS | Backup directory |
+| --- | --- |
+| Linux and macOS | `~/.defenseclaw/foreign-hooks-backup/<connector>/<timestamp>/` |
+| Windows | `%USERPROFILE%\.defenseclaw\foreign-hooks-backup\<connector>\<timestamp>\` |
+
+`<timestamp>` is UTC, for example `20260926T141500Z`. Each backed-up file is named `<12 hex characters>-<original file name>`. Removed plugin files and folders are moved into the same directory. To bring a hook back, approve its digest first, then copy the file back; otherwise the guardian removes it again. An uninstall without purge keeps these backups. A purge deletes them with the rest of the DefenseClaw folder.
+
+## The summary the hook reads
+
+The hook cannot read the managed config, so the lifecycle (Linux, macOS) or the guardian (Windows) publishes `machine-policy.json`: each connector's route, foreign-hook mode, whether the guard applies and the approved digests. It contains no secrets.
+
+| OS | Path |
+| --- | --- |
+| Linux | `/etc/defenseclaw/machine-policy.json` |
+| macOS | `/opt/cisco/defenseclaw/etc/machine-policy.json` |
+| Windows | `C:\ProgramData\Cisco\DefenseClaw-HookRuntime\machine-policy.json` |
+
+If the summary exists but fails its trust check, every hook call is denied with `enterprise_machine_policy_summary_untrusted`.
+
+## Limits
+
+- The guard knows the locations each vendor documents. A new location in a future agent release is outside the guard until DefenseClaw adds it.
+- The session block does not hold a hook that removes itself before the session-start check reads the files, a hook added after the session started, or a session still running 7 days after its block was recorded. The per-call check still denies while a foreign hook is present. For Claude Code and Codex, the vendor lock (`managed_hooks_only: enforce`, the default) is the complete control.
+- The session block follows the agent process when DefenseClaw can name it (the nearest parent of the hook that is not a shell or launcher). If the OS process lookup fails, only the session ID carries the block, and the next session start resets it.
+- The guardian cleans an environment-moved location only after a DefenseClaw hook has run with that environment, or on Windows from a persistent environment variable in a loaded hive. A relative `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT` are never cleaned; the hook still blocks while they name a foreign plugin.
+- Antigravity, and Hermes on Windows, have no guard. `enterprise policy verify` and `policy show` print `foreign_hooks=n/a foreign=-` for them, with a `no foreign-hook guard` note. See [Residual risks](/docs/enterprise/threat-model#residual-risks).
+- Hermes keeps the shell hooks it loaded at start. If a user removes an unapproved entry after Hermes loaded it but before the next `on_session_start` or tool call, that process keeps running the entry. Hermes Python plugins run inside Hermes and can change a tool call too; the guard does not inspect them.
+- Plugins are code. The guard stops unapproved plugins, but an approved plugin can do anything the user can. Deploying the hooks your developers need through machine policy avoids the guard altogether.

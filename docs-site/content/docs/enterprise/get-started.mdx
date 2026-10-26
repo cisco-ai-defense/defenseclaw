@@ -1,24 +1,25 @@
 ---
 title: Deploy to a fleet
-description: Deploy DefenseClaw enterprise to managed Windows, Linux and macOS endpoints in six steps, from choosing a profile to a ringed rollout.
+description: The six steps to deploy DefenseClaw enterprise to managed Windows, Linux and macOS endpoints, from choosing a profile and agents to your MDM recipe, config, ensure and a ringed rollout.
 keywords:
   - deploy DefenseClaw enterprise
-  - fleet deployment
+  - DefenseClaw fleet deployment
   - standalone profile
   - MDM recipe
   - ensure
+  - observe mode pilot
 ---
 
 Deploy the standalone profile in six steps. You need an MDM, configuration-management
 tool or administrator shell that runs commands as SYSTEM on Windows and as root on
-Linux and macOS. [Concepts](/docs/enterprise/plan/concepts) defines *profile*,
+Linux and macOS. [Concepts](/docs/enterprise/concepts) defines *profile*,
 *lifecycle* and *ensure*. Not sure you need this? Read
 [Is this for you?](/docs/enterprise#is-this-for-you).
 
 ## 1. Pick the profile
 
 Use **standalone** unless you run Cisco Secure Client and want DefenseClaw as one of
-its modules ([Secure Client](/docs/enterprise/install/secure-client)). On Windows and
+its modules ([Secure Client](/docs/enterprise/secure-client)). On Windows and
 macOS the profile defaults to Secure Client, so set `enterprise.profile: standalone`
 ([Two profiles](/docs/enterprise#two-profiles)).
 
@@ -29,19 +30,19 @@ is protected until you list one.
 
 | Route | Agents |
 | --- | --- |
-| [Machine policy](/docs/enterprise/plan/concepts#machine-policy-connector): hooks in the vendor's administrator-owned policy files | Claude Code, Codex, Cursor, GitHub Copilot, OpenCode (with the managed plugin) |
-| [Per-user](/docs/enterprise/plan/concepts#per-user-connector): the guardian writes and repairs the hook in each enrolled user's config | Devin, Antigravity, Hermes, Amp, Kiro |
+| [Machine policy](/docs/enterprise/concepts#machine-policy-connector): hooks in the vendor's administrator-owned policy files | Claude Code, Codex, Cursor, GitHub Copilot, OpenCode (with the managed plugin) |
+| [Per-user](/docs/enterprise/concepts#per-user-connector): the guardian writes and repairs the hook in each enrolled user's config | Devin, Antigravity, Hermes, Amp, Kiro |
 
 OpenClaw and ZeptoClaw are not supported here. The verified combinations are in the
-[enterprise route table](/docs/get-started/support-matrix#enterprise); how to list
-agents and users is in [Plan a rollout](/docs/enterprise/plan/rollout#step-1-choose-the-agents).
+[enterprise route table](/docs/support-matrix#enterprise); how to list
+agents and users is in [Plan a rollout](/docs/enterprise/rollout#step-1-choose-the-agents).
 
 ACP (Agent Client Protocol) editors are a separate route, in preview, and not a
 `guardrail.connectors` key. The central config needs `acp.enabled: true`, a
 binding for each editor and agent pair, and an ACP profile that allows both
-([ACP configuration](/docs/reference/apis/acp-guard#configuration)). Then enroll each
+([ACP configuration](/docs/acp-guard#configuration)). Then enroll each
 user with `defenseclaw-gateway enterprise acp enroll --user --client --agent
---profile` ([Managed computers](/docs/reference/apis/acp-guard#managed-computers)).
+--profile` ([Managed computers](/docs/acp-guard)).
 Enrollment refuses a pair the config does not allow.
 
 ## 3. Pick your MDM
@@ -51,8 +52,8 @@ scripts in [`packaging/mdm`](https://github.com/cisco-ai-defense/defenseclaw/tre
 
 | Tool | What you push |
 | --- | --- |
-| [Intune on Windows](/docs/enterprise/mdm/intune/windows) | A Win32 app that wraps the Setup and your config, plus a PowerShell 7 app |
-| [Intune on macOS](/docs/enterprise/mdm/intune/macos), [Linux](/docs/enterprise/mdm/intune/linux) | One root script: the kit wrapper |
+| [Intune on Windows](/docs/enterprise/mdm/intune-windows) | A Win32 app that wraps the Setup and your config, plus a PowerShell 7 app |
+| [Intune on macOS](/docs/enterprise/mdm/intune-macos), [Linux](/docs/enterprise/mdm/intune-linux) | One root script: the kit wrapper |
 | [Jamf Pro](/docs/enterprise/mdm/jamf), [Iru (Kandji)](/docs/enterprise/mdm/kandji) | The `.pkg` and kit scripts |
 | [Workspace ONE UEM](/docs/enterprise/mdm/workspace-one) | A Win32 app or the `.pkg`, with scripts and sensors |
 | [Configuration Manager](/docs/enterprise/mdm/configmgr) | An application with the Setup and your config |
@@ -67,7 +68,7 @@ signed `checksums.txt` once and pin each file by its SHA-256.
 ## 4. Deliver the config and the AI Defense key
 
 The config is one YAML file only administrators can change. It is the only policy
-the host enforces ([Policy changes on a managed host](/docs/enterprise/plan/managed-policy)).
+the host enforces ([Policy changes on a managed host](/docs/enterprise)).
 The lifecycle installs it at `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`
 (Windows), `/etc/defenseclaw/config.yaml` (Linux) or
 `/opt/cisco/defenseclaw/etc/config.yaml` (macOS). Start from
@@ -108,7 +109,7 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
 On macOS use `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json`.
 On Windows, from an elevated prompt:
 `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone --json`.
-Read `coverage_complete` and `security_complete` ([Health fields](/docs/enterprise/operate/operations#health-fields)).
+Read `coverage_complete` and `security_complete` ([Health fields](/docs/enterprise/operations#health-fields)).
 With Codex, Claude Code, Copilot, Devin, Hermes, Kiro or Antigravity enabled, installed hooks can provide complete coverage
 while `security_complete` remains `false`: the agent can continue after a stopped
 or timed-out hook. `hook_process_fail_open` names that residual risk.
@@ -119,14 +120,14 @@ Deploy a pilot ring with `guardrail.mode: observe`. It records every decision,
 including what DefenseClaw would have blocked, without blocking on policy verdicts.
 When the pilot is healthy and you have reviewed the decisions, set
 `guardrail.mode: action` and deliver the config again. Then grow in rings (pilot,
-early, broad, everyone). [Plan a rollout](/docs/enterprise/plan/rollout#step-5-expand-in-rings)
+early, broad, everyone). [Plan a rollout](/docs/enterprise/rollout#step-5-expand-in-rings)
 has ring sizes and exit criteria.
 
 ## Next steps
 
 <Cards>
-  <Card title="Threat model" href="/docs/enterprise/plan/threat-model" description="Trust zones, how each boundary is protected, and the risks that remain." />
-  <Card title="Operate" href="/docs/enterprise/operate/operations" description="Check status and health, read logs and events, and verify machine policy." />
-  <Card title="Upgrade, repair and remove" href="/docs/enterprise/operate/lifecycle" description="Upgrade, roll back, change the config, repair and uninstall." />
-  <Card title="Troubleshooting" href="/docs/troubleshooting/enterprise" description="Fix a deployment by lifecycle error code, MDM wrapper code, hook refusal code or symptom." />
+  <Card title="Threat model" href="/docs/enterprise/threat-model" description="Trust zones, how each boundary is protected, and the risks that remain." />
+  <Card title="Operate" href="/docs/enterprise/operations" description="Check status and health, read logs and events, and verify machine policy." />
+  <Card title="Upgrade, repair and remove" href="/docs/enterprise/lifecycle" description="Upgrade, roll back, change the config, repair and uninstall." />
+  <Card title="Troubleshooting" href="/docs/enterprise/troubleshooting" description="Fix a deployment by lifecycle error code, MDM wrapper code, hook refusal code or symptom." />
 </Cards>

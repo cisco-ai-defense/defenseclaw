@@ -679,7 +679,7 @@ class UpgradeGuideTests(unittest.TestCase):
     """rel-1-0-4 GAP-0656, GAP-0651: the upgrade page says what the upgrade and uninstall do."""
 
     def _section(self) -> str:
-        path = os.path.join(_REPO, "docs-site", "content", "docs", "appendix", "upgrade-from-0-8.mdx")
+        path = os.path.join(_REPO, "docs-site", "content", "docs", "get-started", "upgrade.mdx")
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
         section = text.split("## Renamed and removed connectors", 1)[1].split("\n## ", 1)[0]
