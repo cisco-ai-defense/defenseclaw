@@ -63,6 +63,8 @@ defenseclaw rollback
 
 Rollback swaps the live install with the one the last upgrade replaced: programs, Python environment, configuration and data as they were at upgrade time. Anything written since moves into `~/.defenseclaw/previous` and returns when you roll forward. One previous install is kept, and rollback needs no network.
 
+Rollback needs a previous install that was initialized. If that install never ran `defenseclaw init`, rollback says `no config.yaml exists yet`, undoes itself and exits 1; the current install stays.
+
 - Between releases from 1.0.1 on, rollback also carries your sandbox setup: sandbox records, hook bindings and harness images. A release before 1.0.1 cannot take over that setup.
 - After rolling forward again, a retained sandbox can still run the older release's supervisor even when the restored gateway is healthy. If `sandbox connect NAME` says `legacy sandbox running`, save or pull accessible work first, then run `defenseclaw sandbox stop NAME`, `defenseclaw sandbox start NAME` and `defenseclaw sandbox connect NAME`. A MicroVM stop requests a disk sync; if the sync fails, changes since its last successful sync may be lost. Keep the gateway running until you have saved work you need.
 - Each install shows only its own audit events. Read the other install's with `~/.defenseclaw/previous/bin/defenseclaw-gateway audit export --db ~/.defenseclaw/previous/data/audit.db`.
