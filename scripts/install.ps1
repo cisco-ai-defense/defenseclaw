@@ -4451,6 +4451,25 @@ function Test-HookRollbackRestoreAvailable {
     return $true
 }
 
+function Protect-BackupsFolder {
+    # The gateway keeps the copy of the Claude Code settings a rollback needs
+    # in backups\ and takes only a private folder there (a protected DACL).
+    # The CLI's rule-pack copies and this installer's kept data create that
+    # folder with inherited permissions, so prepare-rollback refused ("has an
+    # inheritable DACL"), the handler stayed in the 1.0.5 form and the older
+    # release added its own beside it (GAP-1891). The inherited entries become
+    # explicit ones: the same access, no longer inherited. Best effort.
+    $backups = Join-Path $DataDir "backups"
+    try {
+        if (-not (Test-Path -LiteralPath $backups -PathType Container)) { return }
+        if ((Get-Item -LiteralPath $backups -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return }
+        $acl = Get-Acl -LiteralPath $backups
+        if ($acl.AreAccessRulesProtected) { return }
+        $acl.SetAccessRuleProtection($true, $true)
+        Set-DirectoryAcl $backups $acl
+    } catch { Write-Warn "Could not make $backups private: $($_.Exception.Message)" }
+}
+
 function Convert-HooksForRollback([string]$From, [string]$BackTo) {
     # A hook entry this install wrote in a shape the older release does not
     # recognise (the per-user Claude Code cmd.exe launcher guard, GAP-1284)
@@ -4460,6 +4479,7 @@ function Convert-HooksForRollback([string]$From, [string]$BackTo) {
     # connector recovery below prevents the version swap.
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
     if (-not (Test-Path -LiteralPath $gateway)) { return }
+    Protect-BackupsFolder
     if ((Invoke-Native $gateway @("connector", "prepare-rollback", "--data-dir", $DataDir)) -ne 0) {
         Write-Warn ("Could not rewrite the agent hook entries of DefenseClaw $From in the form $BackTo reads (see above). " +
             "After the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as " +

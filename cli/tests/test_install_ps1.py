@@ -5156,6 +5156,35 @@ def test_an_install_refused_before_its_data_copy_puts_the_hook_mode_files_back(t
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_rollback_makes_the_backups_folder_private_before_the_hook_conversion(tmp_path: Path) -> None:
+    # GAP-1891: `defenseclaw rollback` from 1.0.5 to 1.0.2 left two Claude
+    # Code PreToolUse handlers. prepare-rollback refused to keep its settings
+    # copy in backups\ ("bound private compare-and-swap object has an
+    # inheritable DACL"): the CLI had made that folder with inherited
+    # permissions. The installer protects it (same access, explicit entries)
+    # before it asks the gateway to convert the hooks.
+    convert = _ps1_function("Convert-HooksForRollback")
+    assert convert.index("Protect-BackupsFolder") < convert.index('"prepare-rollback"')
+    backups = tmp_path / "data" / "backups"
+    backups.mkdir(parents=True)
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        + f"$DataDir = '{tmp_path / 'data'}'\n"
+        + "$script:set = @()\n"
+        + "function Write-Warn([string]$m) { \"WARN $m\" }\n"
+        + "function Get-Acl { param([string]$LiteralPath) [pscustomobject]@{ AreAccessRulesProtected = $false } |"
+        + " Add-Member -MemberType ScriptMethod -Name SetAccessRuleProtection -Value { param($a, $b) $script:set += \"$a,$b\" } -PassThru }\n"
+        + "function Set-DirectoryAcl([string]$Path, $Acl) { \"SET $Path\" }\n"
+        + _ps1_function("Protect-BackupsFolder")
+        + "\nProtect-BackupsFolder\n\"PROTECTION=$($script:set -join ';')\"\n"
+    )
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "WARN" not in out, out
+    assert f"SET {backups}" in out and "PROTECTION=True,True" in out, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_uv_runs_below_normal_priority_so_hook_calls_keep_their_budget(tmp_path: Path) -> None:
     # GAP-1150: while uv built and byte-compiled the environment on every
     # core, registered Codex calls answered after 5-6 s. uv (and the workers
