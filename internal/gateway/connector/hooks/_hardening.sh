@@ -2041,6 +2041,20 @@ defenseclaw_ipv6_loopback() {
   _DC_IPV6_LOOPBACK="127.$((groups[6] & 255)).$((groups[7] >> 8)).$((groups[7] & 255))"
 }
 
+# defenseclaw_api_listener_foreign HOST:PORT is the pre-send listener check
+# the 1.0.2 and 1.0.3 hook scripts call. An upgrade writes this helper before
+# it replaces those scripts, and for that moment an old script called a
+# function this helper no longer had (GAP-1532). It answers as the old check
+# did: 0 (send nothing) while this account's gateway is stopped and the
+# listener on PORT is not proven to be its own. Kept for upgrades from 1.0.2
+# and 1.0.3; remove when those upgrade paths are retired.
+defenseclaw_api_listener_foreign() {
+  defenseclaw_own_gateway_stopped || return 1
+  local rc=0
+  defenseclaw_api_listener_unproven "${1:-}" || rc=$?
+  [ "$rc" = 0 ]
+}
+
 # defenseclaw_api_listener_unproven HOST:PORT returns 0 for a foreign or
 # unknown listener, 1 for this account's listener, and 2 for a proven free
 # port. Hooks call it only for a call that got no answer
