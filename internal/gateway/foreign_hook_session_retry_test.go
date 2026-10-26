@@ -128,11 +128,13 @@ func TestForeignHookSessionGatewayAppliesAStalledCleanScanAgain(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		retry     bool
+		late      bool // retry_until already past when the exchange arrives; the first try is quick
 		wantAllow bool
 		wantCalls int
 	}{
-		{"stalled past retry_until, then allowed", true, true, 2},
-		{"hook sends no retry_until", false, false, 1},
+		{"stalled past retry_until, then allowed", true, false, true, 2},
+		{"retry_until used up before the first try, then allowed", true, true, true, 2},
+		{"hook sends no retry_until", false, false, false, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			audited, logged = nil, nil
@@ -140,15 +142,22 @@ func TestForeignHookSessionGatewayAppliesAStalledCleanScanAgain(t *testing.T) {
 			foreignHookAccountExchangeLock = func(ctx context.Context, dataDir, identity string) (func(), error) {
 				calls++
 				if calls == 1 {
-					time.Sleep(foreignHookExchangeHold + 50*time.Millisecond)
+					if !tc.late {
+						time.Sleep(foreignHookExchangeHold + 50*time.Millisecond)
+					}
 					return nil, errors.New("lock unavailable")
 				}
 				return previousLock(ctx, dataDir, identity)
 			}
 			body := `{"key":{"connector":"claudecode","session":"s-stall","process":"` + runtime.GOOS + `:b:4243:100"},"session_start":false,"decision":{"deny":false}`
 			if tc.retry {
-				// The stall outlasts the hook's whole retry window.
-				body += `,"retry_until":"` + time.Now().Add(100*time.Millisecond).UTC().Format(time.RFC3339Nano) + `"`
+				// The stall outlasts the hook's whole retry window, or (late)
+				// the gateway used it up before the exchange was read.
+				until := time.Now().Add(100 * time.Millisecond)
+				if tc.late {
+					until = time.Now().Add(-50 * time.Millisecond)
+				}
+				body += `,"retry_until":"` + until.UTC().Format(time.RFC3339Nano) + `"`
 			}
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/foreign-hook-session/claudecode", strings.NewReader(body+"}"))
 			ctx := withAuthenticatedHookConnector(req.Context(), "claudecode")

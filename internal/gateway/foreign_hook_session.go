@@ -96,13 +96,17 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	// applied again at once while the hook still waits for this exchange,
 	// even after RetryUntil: its unavailable answer says nothing about the
 	// session, and the stall used the time the retry window was for
-	// (GAP-1813, D11 cold start on ewin3).
+	// (GAP-1813, D11 cold start on ewin3). The same holds for a first try
+	// that starts when RetryUntil has already passed: the gateway lost that
+	// time before the try (an auth or body read stall), so a quick busy
+	// answer is applied again too (GAP-1813 review RR3-3).
 	retryUntil := foreignHookSessionRetryUntil(exchange, time.Now())
 	for attempt := 0; ; attempt++ {
 		tried := time.Now()
 		decision, answerBy, release := a.applyForeignHookSessionOnce(r.Context(), dataDir, identity, stateDir, exchange)
 		busy := attempt < foreignHookSessionRecordRetries && foreignHookSessionRecordBusy(exchange, decision) && !exchange.RetryUntil.IsZero()
-		if busy && time.Since(tried) >= foreignHookExchangeHold && r.Context().Err() == nil {
+		stalled := time.Since(tried) >= foreignHookExchangeHold || (attempt == 0 && !tried.Before(retryUntil))
+		if busy && stalled && r.Context().Err() == nil {
 			release()
 			foreignHookSessionRetryLog(connector, attempt+1, "stalled")
 			continue
