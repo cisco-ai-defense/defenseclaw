@@ -30,7 +30,7 @@ func TestProductDocsLinksNameExistingPages(t *testing.T) {
 	if _, err := os.Stat(content); err != nil {
 		t.Skipf("docs-site sources not in this tree: %v", err)
 	}
-	if !strings.HasSuffix(EnterpriseSettingsReferenceURL, "/docs/enterprise/configure/settings/") {
+	if !strings.HasSuffix(EnterpriseSettingsReferenceURL, "/docs/enterprise/configuration/") {
 		t.Errorf("EnterpriseSettingsReferenceURL = %q, want the enterprise settings page", EnterpriseSettingsReferenceURL)
 	}
 	skipDirs := map[string]bool{".git": true, "node_modules": true, "docs-site": true, ".venv": true, "vendor": true, "testdata": true, "tests": true}

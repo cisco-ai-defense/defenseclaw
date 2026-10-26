@@ -209,7 +209,7 @@ Without these, the plugin fails closed with "hook credential is unavailable".
 ## 10. Docs and threat model
 
 - **Docs:**
-  - `docs-site/content/docs/enterprise/configure/machine-policy.mdx`: the routes table, the paths table and the who-writes table.
+  - `docs-site/content/docs/enterprise/machine-policy.mdx`: the routes table, the paths table and the who-writes table.
   - `foreign-hook-guard.mdx`, `concepts.mdx`, `threat-model.mdx`, `troubleshooting.mdx`, `enrollment.mdx`, `windows.mdx`, `rollout.mdx`.
   - `docs-site/content/docs/connectors/<id>.mdx`: the `## Enterprise deployments` section.
 - **`docs/ENTERPRISE-THREAT-MODEL.md`:**

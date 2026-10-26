@@ -76,7 +76,7 @@ Setup backs up `hooks.json` and keeps unrelated hooks. It writes only the global
 
 ### Verdict mapping
 
-`observe` records policy findings without blocking on those findings. With the default fail mode `closed`, when the gateway is unreachable the running hook denies `PreToolUse`. `action` may deny or ask on policy findings only at `PreToolUse`. The [official hooks documentation](https://antigravity.google/docs/hooks) defines `PreToolUse` as a synchronous pre-execution hook whose stdout carries one of `allow`, `deny`, `ask` or `force_ask` in `decision`. DefenseClaw sends `{ "decision": "deny", "reason": "policy denied" }` for a hard block and `{ "decision": "force_ask", "reason": "operator confirmation required" }` for native confirmation. This synchronous `PreToolUse` decision is the only hard-blocking claim for the connector.
+`observe` records policy findings without blocking on those findings. `action` may deny or ask on policy findings only at `PreToolUse`. The [official hooks documentation](https://antigravity.google/docs/hooks) defines `PreToolUse` as a synchronous pre-execution hook whose stdout carries one of `allow`, `deny`, `ask` or `force_ask` in `decision`. DefenseClaw sends `{ "decision": "deny", "reason": "policy denied" }` for a hard block and `{ "decision": "force_ask", "reason": "operator confirmation required" }` for native confirmation. This synchronous `PreToolUse` decision is the only hard-blocking claim for the connector.
 
 ### Native ask
 

@@ -325,7 +325,7 @@ A new `SetupOpts` field must also be carried through the Unix worker protocol (e
 ## 8. Fail modes and exit codes
 
 **Fail mode.**
-- `resolveHookFailMode` (`subprocess.go`) decides it. Cursor is closed in action mode and open in observe mode. Otherwise the order is `HookFailMode`, then the codex/claudecode enforcement flags, then `defaultHookFailMode="closed"`. Under Secure Client (`SetupOpts.SecureClientHookDelivery`) an unset mode renders **open** and an explicit mode beats the Cursor rule (`docs-site/content/docs/reference/configuration/fail-modes.mdx`, Secure Client).
+- `resolveHookFailMode` (`subprocess.go`) decides it. Cursor is closed in action mode and open in observe mode. Otherwise the order is `HookFailMode`, then the codex/claudecode enforcement flags, then `defaultHookFailMode="closed"`. Under Secure Client (`SetupOpts.SecureClientHookDelivery`) an unset mode renders **open** and an explicit mode beats the Cursor rule (`docs-site/content/docs/reference/fail-modes.mdx`, Secure Client).
 - It is persisted in the sidecar `hooks/.hookcfg` as `DEFENSECLAW_FAIL_MODE_<ID>`.
 - In the runner, `normalizeFailMode` treats an empty value as **open**, while rendered templates default to closed. The CLI fills the value from the flag, then the per-connector sidecar key, then the sidecar global. `DEFENSECLAW_FAIL_MODE` is honored only when the runtime is untrusted or the value tightens to closed.
 - `StrictAvailability` forces transport failures closed.

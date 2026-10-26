@@ -2,9 +2,9 @@
 
 Operator setup, commands, dashboards, retention, and troubleshooting live in
 the
-[published local-observability guide](https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/run-grafana-locally/).
-The [Grafana catalog](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/observability/dashboards/)
-and [Agent360 guide](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/observability/dashboards/#agent360)
+[published local-observability guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/local-observability/).
+The [Grafana catalog](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/grafana-dashboards/)
+and [Agent360 guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/local-observability/#agent-directory-and-agent360)
 describe the user-visible dashboard behavior.
 
 This directory is the source bundle copied into an installed DefenseClaw
@@ -99,4 +99,4 @@ python scripts/check_grafana_dashboards.py --require-packaged
 The optional `--live --inventory` mode requires a running local stack and
 checks the provisioned services and dashboards. Alert response procedures are
 the
-[published runbooks](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/observability/#alert-runbooks).
+[published runbooks](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/#alert-runbooks).

@@ -80,7 +80,7 @@ OpenCode 1.18.10 to 1.18.33 also expose `permission.ask`, `chat.params`, `chat.h
 
 Fail closed: yes, for the awaited `tool.execute.before` only. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes).
 
-A per-user host bridge blocks `tool.execute.before` when the gateway is unreachable or its listener cannot be verified, even if an older sidecar still says `open`. On managed hosts, an administrator may select open for a classified outage only; an unverified listener never receives the bearer or payload. Secure Client uses an administrator-owned native helper to verify the connected gateway service and blocks an unverified peer even when its outage mode is open. The bridge also awaits `tool.execute.after` for attribution but cannot undo a completed call. Generic lifecycle delivery is not awaited.
+A per-user host bridge blocks `tool.execute.before` when its listener cannot be verified, even if an older sidecar still says `open`. What a gateway outage does is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage). On managed hosts, an administrator may select open for a classified outage only; an unverified listener never receives the bearer or payload. Secure Client uses an administrator-owned native helper to verify the connected gateway service and blocks an unverified peer even when its outage mode is open. The bridge also awaits `tool.execute.after` for attribution but cannot undo a completed call. Generic lifecycle delivery is not awaited.
 
 ## The bridge plugin
 

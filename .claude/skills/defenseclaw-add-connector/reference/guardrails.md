@@ -211,4 +211,4 @@ The symptom of a missed step is a finding with CRITICAL severity, `raw_action=al
 - `test/e2e/testdata/v7/golden/<id>/verdict-blocked.golden.json` with `TestGoldenPerConnectorLayout`.
 - `internal/actionfacts` dialect and input tests for any new tool name or closed schema.
 
-**Docs:** `docs-site/content/docs/reference/policy/cel/tool-call-state.mdx`, which has an outcome and identity matrix and a tool-surface matrix.
+**Docs:** `docs-site/content/docs/policies/cel/tool-call-state.mdx`, which has an outcome and identity matrix and a tool-surface matrix.

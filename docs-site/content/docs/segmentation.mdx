@@ -58,13 +58,13 @@ A sandboxed agent's hooks run inside the sandbox and reach the gateway through a
 Hooks fail closed for every failure that is not a gateway outage, everywhere
 except Secure Client. During an outage a per-user hook follows its policy tier:
 the default and permissive policies let the call run with a warning, strict
-denies it (see the [gateway outage table](/docs/connectors/capability-matrix)). On a managed
+denies it (see the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). On a managed
 standalone computer, the administrator may choose `hook_fail_mode: open`, an
 outage-only exception for a gateway service that is stopped, restarting or gives
 no answer in time. With `foreign_hooks: remove`, a guarded call needs fresh,
 trusted records for its agent process and session to follow that outage mode.
 Windows Amp keeps its guard record locally; its managed plugin's outage result
-is in the [gateway outage table](/docs/connectors/capability-matrix).
+is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
 A missing or invalid administrator-owned runtime, an unverified gateway peer,
 missing or refused credentials, rate limits (HTTP 429, also when the resends
 run out) and unusable responses still block. Secure Client keeps its separate open default and honors an explicit

@@ -31,7 +31,7 @@ import (
 // Every other page links to the table instead of restating it
 // (TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix).
 
-const outageTableLink = "/docs/reference/apis/capability-matrix#gateway-outage"
+const outageTableLink = "/docs/connectors/capability-matrix#gateway-outage"
 
 // Values of the table's managed open columns.
 const (
@@ -294,7 +294,8 @@ func TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix(t *testing.T) {
 		if strings.Contains(text, outageTableLink) {
 			linked[rel] = true
 		}
-		connectorPage := strings.HasPrefix(rel, "connectors/") && rel != "connectors/index.mdx"
+		// The table page itself (connectors/capability-matrix.mdx) is not a connector page.
+		connectorPage := strings.HasPrefix(rel, "connectors/") && rel != "connectors/index.mdx" && rel != "connectors/capability-matrix.mdx"
 		for _, sentence := range sentenceBreak.Split(text, -1) {
 			sentence = strings.Join(strings.Fields(sentence), " ")
 			if restatement.match(sentence, connectorPage) {
@@ -308,8 +309,8 @@ func TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix(t *testing.T) {
 	}
 	// The pages that describe fail modes and outages point at the table.
 	for _, page := range []string{
-		"reference/configuration/fail-modes.mdx", "enterprise/plan/threat-model.mdx",
-		"enterprise/configure/machine-policy.mdx", "enterprise/configure/foreign-hook-guard.mdx",
+		"reference/fail-modes.mdx", "enterprise/threat-model.mdx",
+		"enterprise/machine-policy.mdx", "enterprise/foreign-hook-guard.mdx",
 		"connectors/amp.mdx", "connectors/copilot.mdx", "connectors/hermes.mdx", "connectors/opencode.mdx",
 	} {
 		if !linked[page] {

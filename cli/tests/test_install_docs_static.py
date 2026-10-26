@@ -628,20 +628,20 @@ def test_public_operator_docs_never_advertise_direct_defenseclaw_package_install
 
     cli = (ROOT / "docs/CLI.md").read_text(encoding="utf-8")
     assert "published CLI reference" in cli
-    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/commands/cli/" in cli
+    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cli/" in cli
 
 
 def test_repository_operator_pointers_delegate_to_the_canonical_website() -> None:
     expected = {
-        "docs/API.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/gateway-api/",
-        "docs/CLI.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/commands/cli/",
+        "docs/API.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/gateway-api/",
+        "docs/CLI.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cli/",
         "docs/CONFIG_FILES.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/",
-        "docs/CONNECTOR-MATRIX.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/hook-contracts/",
-        "docs/ENV-VARS.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/env-vars/",
+        "docs/CONNECTOR-MATRIX.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/",
+        "docs/ENV-VARS.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/env-vars/",
         "docs/INSTALL.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/install/",
         "docs/QUICKSTART.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/quickstart/",
-        "docs/REGISTRIES.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/scanning/registries/",
-        "docs/SPLUNK_APP.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/send-to-splunk/",
+        "docs/REGISTRIES.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/scanning/registries/",
+        "docs/SPLUNK_APP.md": "https://cisco-ai-defense.github.io/defenseclaw/docs/observability/splunk/",
     }
     for rel, canonical_url in expected.items():
         text = (ROOT / rel).read_text(encoding="utf-8")
@@ -940,7 +940,7 @@ def test_readme_delegates_observability_operations_to_the_website() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     implementation = (ROOT / "docs/OBSERVABILITY.md").read_text(encoding="utf-8")
 
-    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/features/observability/" in readme
+    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/observability/" in readme
     assert "schemas/telemetry/v8/registry.yaml" in implementation
     assert "make telemetry-generate" in implementation
     assert "make telemetry-check" in implementation

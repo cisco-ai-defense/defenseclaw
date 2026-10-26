@@ -97,7 +97,7 @@ Proxy connector: not gated by a hook contract version. The guardrail proxy inspe
 
 - The proxy can block a checked request, a checked response and a tool-call payload.
 - ZeptoClaw has no native ask. A confirm verdict takes an immediate fallback with the original action (`raw_action`) kept. Audit and the TUI can show it but cannot resume it.
-- ZeptoClaw is a proxy connector with no hooks. While the gateway is down, requests are blocked whatever `guardrail.hook_fail_mode` says. See [Fail modes](/docs/reference/fail-modes).
+- ZeptoClaw is a proxy connector with no hooks. While the gateway is down, requests are blocked ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). See [Fail modes](/docs/reference/fail-modes).
 
 ## Subprocess policy
 

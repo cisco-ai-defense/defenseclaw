@@ -258,8 +258,8 @@ def test_connector_matrix_delegates_current_support_to_the_website() -> None:
         ROOT / "docs-site/content/docs/connectors/compatibility.mdx"
     ).read_text(encoding="utf-8")
 
-    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/hook-contracts/" in repository_pointer
-    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/capability-matrix/" in repository_pointer
+    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/" in repository_pointer
+    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/capability-matrix/" in repository_pointer
     assert "not current support matrices" in " ".join(repository_pointer.split())
     for connector_id in (
         "codex",
