@@ -5079,7 +5079,7 @@ function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Q
 }}
 function Test-DiskFull {{ return $false }}
 function Write-Warn([string]$m) {{ }}
-{_ps_functions("Invoke-Uv", "Invoke-UvPipInstall")}
+{_ps_functions("Invoke-BelowNormal", "Invoke-Uv", "Invoke-UvPipInstall")}
 $before = [string][Diagnostics.Process]::GetCurrentProcess().PriorityClass
 if (-not (Invoke-UvPipInstall @('pip', 'install'))) {{ throw 'install failed' }}
 [void](Invoke-Uv @('venv', 'x') -Quiet)

@@ -2052,16 +2052,24 @@ function New-Venv([string]$Path, [string]$Where) {
     return (Invoke-UvPipInstall @("pip", "install", "--quiet", "--compile-bytecode", "--python", $python, "--no-deps", (Join-Path $Staging $Wheel)))
 }
 
-function Invoke-Uv([string[]]$UvArgs, [switch]$Quiet) {
-    # uv builds and byte-compiles the Python environment on every core. It
-    # runs below normal priority (its workers inherit it), so the agents'
-    # hook calls during the install still answer within 5 s (GAP-1150). The
-    # installer goes back to its own priority before it starts anything else.
+function Invoke-BelowNormal([scriptblock]$Action) {
+    # Run $Action, and every process it starts (they inherit the priority),
+    # below normal priority, then go back to the installer's own priority.
+    # The work that only builds or checks the staged release (uv's venv
+    # build and byte-compile, the staged CLI's first start and its migrate
+    # check) yields to the running gateway and the agents' hook calls, which
+    # must answer within 5 s while the previous install still runs
+    # (GAP-1150, GAP-0008).
     $self = [Diagnostics.Process]::GetCurrentProcess()
     $before = $self.PriorityClass
     try { $self.PriorityClass = [Diagnostics.ProcessPriorityClass]::BelowNormal } catch { }
-    try { return (Invoke-Native $Uv $UvArgs -Quiet:$Quiet) }
+    try { return (& $Action) }
     finally { try { $self.PriorityClass = $before } catch { } }
+}
+
+function Invoke-Uv([string[]]$UvArgs, [switch]$Quiet) {
+    # uv builds and byte-compiles the Python environment on every core.
+    return (Invoke-BelowNormal { Invoke-Native $Uv $UvArgs -Quiet:$Quiet })
 }
 
 function Invoke-UvPipInstall([string[]]$UvArgs) {
@@ -4958,10 +4966,10 @@ function Invoke-Install {
         Die "Could not install the DefenseClaw $Ver Python package; nothing was changed"
     }
     $stagedCli = Join-Path $Staging "venv\Scripts\defenseclaw.exe"
-    if (-not (Get-NativeOutput $stagedCli @("--version")).Contains($Ver)) { Die "The staged CLI does not start; nothing was changed" }
+    if (-not (Invoke-BelowNormal { Get-NativeOutput $stagedCli @("--version") }).Contains($Ver)) { Die "The staged CLI does not start; nothing was changed" }
     $checkArgs = @("migrate", "--check", "--gateway-binary", $stagedGateway)
     if ($PrevVersion) { $checkArgs += @("--from-version", $PrevVersion) }
-    switch (Invoke-Native $stagedCli $checkArgs) {
+    switch (Invoke-BelowNormal { Invoke-Native $stagedCli $checkArgs }) {
         0 { }
         2 { Die "Your configuration is from a newer DefenseClaw than $Ver; nothing was changed" }
         default { Die "Your configuration cannot be migrated to $Ver; nothing was changed (see above)" }
