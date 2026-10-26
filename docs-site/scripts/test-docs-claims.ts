@@ -1412,6 +1412,9 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1701", page: "connectors/hermes.mdx", has: ["| Hook program, managed Windows | `C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook.exe`", "the administrator sets `guardrail.connectors.hermes.enabled: false` in the managed `config.yaml` and runs `ensure`"] },
   { gap: "GAP-1598", page: "reference/connectors/antigravity.mdx", has: ["`antigravity-hook.sh PreToolUse`", "a per-user install in the default or permissive policy lets `PreToolUse` run with one warning"], lacks: ["With the default fail mode closed", "binds each registration to a trusted `--event` argument"] },
   { gap: "GAP-1637", page: "reference/connectors/kiro.mdx", section: "Fail mode", has: ["the default and permissive policies let the call run with one warning, and the strict policy blocks it"] },
+  { gap: "GAP-1590", page: "reference/connectors/amp.mdx", section: "Fail mode", has: ["the default and permissive policies let the call run with one warning"], lacks: ["closed by default"] },
+  { gap: "GAP-1670", page: "connectors/cursor.mdx", has: ["a gateway outage lets the call run with a warning in the default and permissive policies and blocks it in strict"], lacks: ["a gateway outage blocks supported events by default"] },
+  { gap: "GAP-1670", page: "reference/connectors/cursor.mdx", section: "Fail mode", has: ["the default and permissive policies let the call run with a warning, strict blocks it"], lacks: ["still blocks supported events during a gateway outage by default"] },
   // r105-rows-end
 ];
 
