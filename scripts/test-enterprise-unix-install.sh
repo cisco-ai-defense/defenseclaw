@@ -764,7 +764,10 @@ else
     # ---- reconfigure ---------------------------------------------------------------
     step "ensure with an administrator config that enables Claude Code and Codex"
     write_admin_config
-    lifecycle 02-ensure-config ensure --from-package --config "$stage/config.yaml" --reason ci-install-lane
+    # On macOS the package's config write fires the launchd path job
+    # (ensure --reason path) right after the install; it can still hold the
+    # lifecycle lock here, so wait for it instead of failing with lifecycle_busy.
+    lifecycle 02-ensure-config ensure --from-package --config "$stage/config.yaml" --reason ci-install-lane --lock-wait 2m
     check "$results/02-ensure-config.json" ensure-config --action ensure --changed --installed --version "$version" --ready \
         --coverage-complete --security-incomplete --allow-warning hook_process_fail_open \
         --allow-warning agent_install_scan_incomplete "${policy_checks[@]}" ${kernel_views[@]+"${kernel_views[@]}"}
