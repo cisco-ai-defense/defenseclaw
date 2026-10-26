@@ -123,21 +123,64 @@ def _runs_marked_hook(text: str) -> bool:
     return False
 
 
-def _text_names(c: _Removed, text: str) -> bool:
-    """Whether one config text (a command, a module name) is DefenseClaw's (removed.go textNames)."""
-    lower = text.lower()
+# The characters that may stand next to a path in a command (removed.go removedWordEdge).
+_WORD_EDGE = " \t\r\n\"'`=;&|()"
+
+
+def _runs_path(text: str, paths: list[str]) -> bool:
+    """Whether a command names one of *paths* whole, never a longer name that ends with it (removed.go removedRunsPath)."""
+
+    def fold(value: str) -> str:
+        return value.replace("\\", "/").lower() if os.name == "nt" else value
+
+    text = fold(text)
+    for path in paths:
+        word = fold(path)
+        start = text.find(word) if word else -1
+        while start >= 0:
+            end = start + len(word)
+            if (start == 0 or text[start - 1] in _WORD_EDGE) and (end == len(text) or text[end] in _WORD_EDGE):
+                return True
+            start = text.find(word, start + 1)
+    return False
+
+
+def _owned_hook_paths(data_dir: str, c: _Removed, home: str) -> list[str]:
+    """The paths an older setup wrote the hook script to, as a command names them (removed.go ownedHookPaths)."""
+    if not data_dir:
+        return []
+    paths = [os.path.join(_absolute(data_dir), "hooks", c.script)]
+    locations = _lock_entry(data_dir, c).get("locations")
+    recorded = locations.get("hook_script_paths") if isinstance(locations, dict) else None
+    if isinstance(recorded, list):
+        paths += [_absolute(p) for p in recorded if isinstance(p, str) and os.path.basename(p) == c.script]
+    home = _absolute(home) if home else ""
+    for path in list(paths):
+        if home and _is_under(path, home) and _key(path) != _key(home):
+            paths.append("~/" + os.path.relpath(path, home).replace(os.sep, "/"))
+    return list(dict.fromkeys(paths))
+
+
+def _text_names(c: _Removed, text: str, paths: list[str]) -> bool:
+    """Whether one config text (a command, a module name) is DefenseClaw's (removed.go namesFor).
+
+    An OpenHands command is DefenseClaw's only when it runs DefenseClaw's hook
+    script by its path (*paths*), runs a file that carries the hook marker, or
+    names the launcher's OpenHands connector; the script name alone is not
+    identity (GAP-1842).
+    """
     if c.name == "omnigent":
-        return _MODULE in lower
-    return "openhands-hook.sh" in lower or bool(_LAUNCHER_FLAG.search(text)) or _runs_marked_hook(text)
+        return _MODULE in text.lower()
+    return bool(_LAUNCHER_FLAG.search(text)) or _runs_path(text, paths) or _runs_marked_hook(text)
 
 
-def _value_names(c: _Removed, value: object) -> bool:
+def _value_names(c: _Removed, value: object, paths: list[str]) -> bool:
     """Whether a string or key anywhere in a decoded JSON or YAML value names DefenseClaw's entries."""
     stack, seen = [value], set()
     while stack:
         item = stack.pop()
         if isinstance(item, str):
-            if _text_names(c, item):
+            if _text_names(c, item, paths):
                 return True
         elif isinstance(item, (dict, list, tuple)):
             # YAML aliases share one object: visit it once.
@@ -146,7 +189,7 @@ def _value_names(c: _Removed, value: object) -> bool:
             seen.add(id(item))
             if isinstance(item, dict):
                 for key, val in item.items():
-                    if _text_names(c, str(key)):
+                    if _text_names(c, str(key), paths):
                         return True
                     stack.append(val)
             else:
@@ -154,9 +197,9 @@ def _value_names(c: _Removed, value: object) -> bool:
     return False
 
 
-def _config_names(c: _Removed, data: bytes) -> tuple[bool, str]:
+def _config_names(c: _Removed, data: bytes, paths: list[str]) -> tuple[bool, str]:
     """Whether an agent config still names DefenseClaw's entries, and why it could not be checked."""
-    if _text_names(c, data.decode("utf-8", "replace")):
+    if _text_names(c, data.decode("utf-8", "replace"), paths):
         return True, ""
     if len(data) > _READ_LIMIT:
         return False, f"it is larger than {_READ_LIMIT >> 20} MiB"
@@ -169,7 +212,7 @@ def _config_names(c: _Removed, data: bytes) -> tuple[bool, str]:
     except (UnicodeDecodeError, ValueError, yaml.YAMLError, RecursionError) as exc:
         kind = "JSON" if c.name == "openhands" else "YAML"
         return False, f"it is not {kind}: {exc}"
-    return _value_names(c, doc), ""
+    return _value_names(c, doc, paths), ""
 
 
 def _same_path(left: str, right: str) -> bool:
@@ -351,6 +394,7 @@ def _config_paths(data_dir: str, c: _Removed, home: str, workspace: str = "") ->
 
 def _leftovers_of(data_dir: str, c: _Removed, home: str, workspace: str = "") -> list[Leftover]:
     items: list[Leftover] = []
+    owned = _owned_hook_paths(data_dir, c, home)
     for path in _config_paths(data_dir, c, home, workspace):
         try:
             if not os.path.exists(path):
@@ -360,7 +404,7 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str, workspace: str = "") ->
         except OSError as exc:
             items.append(Leftover(path, f"could not be read ({exc})", "check it by hand: " + c.config_step))
             continue
-        names, why = _config_names(c, data)
+        names, why = _config_names(c, data, owned)
         if names:
             items.append(
                 Leftover(path, f"still names DefenseClaw's {c.label} entries, which DefenseClaw could not remove",

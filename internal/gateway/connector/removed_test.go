@@ -300,3 +300,69 @@ func TestRemovedConnectorLeftoverIsInformationUnderTheNotice(t *testing.T) {
 		t.Fatalf("notice changed: %q", RemovedConnectorNotice)
 	}
 }
+
+// GAP-1842 class: a hook is DefenseClaw's by identity (its path, its marker
+// or the launcher flag), never by its name. An operator's own hook whose
+// name is or holds openhands-hook.sh stays on every teardown, also on a host
+// DefenseClaw never set up for OpenHands, and is never listed as a leftover.
+func TestRemovedOpenHandsTeardownKeepsTheOperatorsHookOfTheSameName(t *testing.T) {
+	t.Run("never set up", func(t *testing.T) {
+		home, dataDir := removedTestHome(t)
+		config := filepath.Join(home, ".openhands", "hooks.json")
+		body := removedTestHooksJSON(t, filepath.Join(home, "bin", "my-"+removedOpenHandsHookScript))
+		removedTestWrite(t, config, body, 0o600)
+
+		opts := SetupOpts{DataDir: dataDir}
+		removedTestTeardown(t, removedOpenHandsID, opts)
+
+		if got, err := os.ReadFile(config); err != nil || string(got) != body {
+			t.Fatalf("the operator's hooks.json changed: %v\n%s", err, got)
+		}
+		if left, _ := RemovedConnectorLeftovers(removedOpenHandsID, opts); len(left) != 0 {
+			t.Fatalf("leftovers = %+v, want none", left)
+		}
+	})
+	t.Run("next to DefenseClaw's", func(t *testing.T) {
+		home, dataDir := removedTestHome(t)
+		script := filepath.Join(dataDir, "hooks", removedOpenHandsHookScript)
+		removedTestWrite(t, script, removedTestHook, 0o700)
+		own := filepath.Join(home, "scripts", removedOpenHandsHookScript)
+		removedTestWrite(t, own, "#!/bin/sh\n# my OpenHands hook\nexit 0\n", 0o700)
+		mine := []string{
+			filepath.Join(home, "bin", "my-"+removedOpenHandsHookScript),
+			own,
+			"bash ~/scripts/" + removedOpenHandsHookScript + " --pre",
+			script + ".bak",
+		}
+		config := filepath.Join(home, ".openhands", "hooks.json")
+		ours := []string{script, `"` + script + `"`, "~/.defenseclaw/hooks/" + removedOpenHandsHookScript}
+		removedTestWrite(t, config, removedTestHooksJSON(t, append(ours, mine...)...), 0o600)
+
+		opts := SetupOpts{DataDir: dataDir}
+		removedTestTeardown(t, removedOpenHandsID, opts)
+
+		if got := removedTestCommands(t, config); strings.Join(got, "\n") != strings.Join(mine, "\n") {
+			t.Fatalf("hooks.json commands = %q, want only the operator's %q", got, mine)
+		}
+		removedTestGone(t, script)
+		if _, err := os.Stat(own); err != nil {
+			t.Fatalf("the operator's own hook script was removed: %v", err)
+		}
+		if left, _ := RemovedConnectorLeftovers(removedOpenHandsID, opts); len(left) != 0 {
+			t.Fatalf("leftovers = %+v, want none", left)
+		}
+	})
+	t.Run("data dir with a space", func(t *testing.T) {
+		home, _ := removedTestHome(t)
+		dataDir := filepath.Join(home, "My Data")
+		script := filepath.Join(dataDir, "hooks", removedOpenHandsHookScript)
+		config := filepath.Join(home, ".openhands", "hooks.json")
+		removedTestWrite(t, config, removedTestHooksJSON(t, script, "echo mine"), 0o600)
+
+		removedTestTeardown(t, removedOpenHandsID, SetupOpts{DataDir: dataDir})
+
+		if got := removedTestCommands(t, config); len(got) != 1 || got[0] != "echo mine" {
+			t.Fatalf("hooks.json commands = %q, want only the operator's hook", got)
+		}
+	})
+}

@@ -24,9 +24,11 @@ package connector
 // connector), and nothing else:
 //
 //   - its entries in the agent configs: OpenHands hooks whose command runs
-//     DefenseClaw's openhands-hook.sh (or any file that carries DefenseClaw's
-//     OpenHands hook marker, such as a hard link or copy of it) or the native
-//     launcher's OpenHands connector; OmniGent's policy_modules entry and the
+//     DefenseClaw's hook script by its path (<data>/hooks/openhands-hook.sh or
+//     a hook script path the lock entry records), any file that carries
+//     DefenseClaw's OpenHands hook marker (such as a hard link or copy of it),
+//     or the native launcher's OpenHands connector. A name alone is not
+//     identity: an operator's own openhands-hook.sh elsewhere stays; OmniGent's policy_modules entry and the
 //     policies whose handler is in DefenseClaw's policy module. Every other
 //     entry of the file stays;
 //   - once no agent config runs or imports it: the hook script or policy
@@ -53,6 +55,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -171,8 +174,9 @@ func (c removedOnlyConnector) Teardown(_ context.Context, opts SetupOpts) error 
 	// The config paths come from the setup receipts and the lock entry, so
 	// they are read before either goes.
 	configs := c.configPaths(opts)
+	names := c.namesFor(opts)
 	for _, path := range configs {
-		_ = c.removeEntries(path)
+		_ = c.removeEntries(path, names)
 	}
 	hooks := filepath.Join(opts.DataDir, "hooks")
 	_ = RemoveHookAPIToken(opts.DataDir, c.name)
@@ -181,7 +185,7 @@ func (c removedOnlyConnector) Teardown(_ context.Context, opts SetupOpts) error 
 		_ = removeOwnedOTLPPathTokenFile(path)
 	}
 	_ = removeRegularFile(filepath.Join(hooks, hookConfigSidecarName+"."+c.name))
-	if len(c.liveRegistrations(configs)) > 0 {
+	if len(c.liveRegistrations(configs, names)) > 0 {
 		// A valid config still runs or imports the script in a form this
 		// cleanup does not remove: the script, receipts and lock entry stay
 		// for it, and the leftover list names the file.
@@ -274,17 +278,79 @@ func removedHasMarker(data []byte, marker string) bool {
 	return false
 }
 
-// textNames reports whether one config text (a command, a module name) is
-// DefenseClaw's: it names OpenHands' hook script, the native launcher's
-// OpenHands connector or a file that carries DefenseClaw's OpenHands hook
-// marker; or OmniGent's policy module.
-func (c removedOnlyConnector) textNames(text string) bool {
-	lower := strings.ToLower(text)
+// namesFor returns the identity rule for one host's agent configs: whether
+// one config text (a command, a module name) is DefenseClaw's. For OpenHands
+// a command is DefenseClaw's only when it runs DefenseClaw's hook script by
+// its path (ownedHookPaths), runs a file that carries DefenseClaw's
+// OpenHands hook marker, or names the native launcher's OpenHands
+// connector. The script name alone is not identity: an operator's own
+// ~/scripts/openhands-hook.sh or my-openhands-hook.sh stays (GAP-1842). For
+// OmniGent the text names DefenseClaw's policy module.
+func (c removedOnlyConnector) namesFor(opts SetupOpts) func(string) bool {
 	if c.name == removedOmnigentID {
-		return strings.Contains(lower, removedOmnigentModuleName)
+		return func(text string) bool { return strings.Contains(strings.ToLower(text), removedOmnigentModuleName) }
 	}
-	return strings.Contains(lower, removedOpenHandsHookScript) || removedOpenHandsLauncherFlag.MatchString(text) ||
-		removedRunsMarkedHook(text)
+	paths := c.ownedHookPaths(opts)
+	return func(text string) bool {
+		return removedOpenHandsLauncherFlag.MatchString(text) || removedRunsPath(text, paths) || removedRunsMarkedHook(text)
+	}
+}
+
+// ownedHookPaths are the paths an older setup wrote the hook script to, as
+// a command names them: <data>/hooks/<script> and the hook script paths of
+// that name the lock entry records, each also as ~/... when under the home.
+func (c removedOnlyConnector) ownedHookPaths(opts SetupOpts) []string {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	paths := []string{c.scriptPath(removedAbsolute(opts.DataDir))}
+	if entry, err := LoadHookContractLockEntryForMode(opts.DataDir, c.name, opts.ManagedEnterprise); err == nil {
+		for _, path := range entry.Locations.HookScriptPaths {
+			if filepath.Base(path) == c.script {
+				paths = append(paths, removedAbsolute(path))
+			}
+		}
+	}
+	home := homePath()
+	for _, path := range paths {
+		if rel, err := filepath.Rel(home, path); home != "" && err == nil && rel != ".." &&
+			!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			paths = append(paths, "~/"+filepath.ToSlash(rel))
+		}
+	}
+	return uniqueNonEmptyStrings(paths)
+}
+
+// removedWordEdge are the bytes that may stand next to a path in a command.
+const removedWordEdge = " \t\r\n\"'`=;&|()"
+
+// removedRunsPath reports whether a command names one of paths whole: the
+// bare path (which may hold spaces, as an older setup wrote it) or the path
+// in quotes, never a longer name that ends with it.
+func removedRunsPath(command string, paths []string) bool {
+	fold := func(text string) string {
+		if runtime.GOOS == "windows" {
+			return strings.ToLower(strings.ReplaceAll(text, `\`, "/"))
+		}
+		return text
+	}
+	text := fold(command)
+	for _, path := range paths {
+		word := fold(path)
+		for from := 0; word != "" && from < len(text); {
+			i := strings.Index(text[from:], word)
+			if i < 0 {
+				break
+			}
+			start, end := from+i, from+i+len(word)
+			if (start == 0 || strings.IndexByte(removedWordEdge, text[start-1]) >= 0) &&
+				(end == len(text) || strings.IndexByte(removedWordEdge, text[end]) >= 0) {
+				return true
+			}
+			from = start + 1
+		}
+	}
+	return false
 }
 
 // removedRunsMarkedHook reports whether a command runs a file (an absolute
@@ -309,8 +375,8 @@ func removedRunsMarkedHook(command string) bool {
 // entries, in its bytes or its decoded values (JSON for hooks.json, YAML for
 // config.yaml). The error says why a file that does not name them could not
 // be checked: too large, or not JSON or YAML.
-func (c removedOnlyConnector) configNames(data []byte) (bool, error) {
-	if c.textNames(string(data)) {
+func (c removedOnlyConnector) configNames(data []byte, names func(string) bool) (bool, error) {
+	if names(string(data)) {
 		return true, nil
 	}
 	if len(data) > removedConfigReadLimit {
@@ -320,7 +386,7 @@ func (c removedOnlyConnector) configNames(data []byte) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return removedValueNames(doc, c.textNames), nil
+	return removedValueNames(doc, names), nil
 }
 
 // decode parses an agent config (nil for an empty one).
@@ -343,12 +409,12 @@ func (c removedOnlyConnector) decode(data []byte) (any, error) {
 // removeEntries removes DefenseClaw's entries from one agent config. A file
 // that cannot be read or parsed is left as it is (the agent cannot load it
 // either); the file keeps its mode and, where the platform allows, its owner.
-func (c removedOnlyConnector) removeEntries(path string) error {
+func (c removedOnlyConnector) removeEntries(path string, names func(string) bool) error {
 	data, err := readRemovedConfig(path)
 	if err != nil || len(data) > removedConfigReadLimit {
 		return err
 	}
-	if names, _ := c.configNames(data); !names {
+	if named, _ := c.configNames(data, names); !named {
 		return nil
 	}
 	var updated []byte
@@ -356,7 +422,7 @@ func (c removedOnlyConnector) removeEntries(path string) error {
 	if c.name == removedOmnigentID {
 		updated, changed, err = removedOmnigentConfigWithout(data)
 	} else {
-		updated, changed, err = removedOpenHandsConfigWithout(data, c.textNames)
+		updated, changed, err = removedOpenHandsConfigWithout(data, names)
 	}
 	if err != nil || !changed {
 		return err
@@ -379,7 +445,7 @@ func (c removedOnlyConnector) removeEntries(path string) error {
 
 // liveRegistrations are the valid agent configs that still run or import the
 // script after removeEntries.
-func (c removedOnlyConnector) liveRegistrations(configs []string) []string {
+func (c removedOnlyConnector) liveRegistrations(configs []string, names func(string) bool) []string {
 	var live []string
 	for _, path := range configs {
 		data, err := readRemovedConfig(path)
@@ -390,7 +456,7 @@ func (c removedOnlyConnector) liveRegistrations(configs []string) []string {
 		if err != nil {
 			continue
 		}
-		if removedValueNames(doc, c.textNames) {
+		if removedValueNames(doc, names) {
 			live = append(live, path)
 		}
 	}
@@ -420,6 +486,7 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 	add := func(path, what, step string) {
 		out = append(out, RemovedLeftover{Path: path, What: what, Step: step})
 	}
+	names := c.namesFor(opts)
 	for _, path := range c.configPaths(opts) {
 		data, err := readRemovedConfig(path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -429,9 +496,9 @@ func (c removedOnlyConnector) leftovers(opts SetupOpts) []RemovedLeftover {
 			add(path, fmt.Sprintf("could not be read (%v)", err), "check it by hand: "+c.configStep)
 			continue
 		}
-		names, checkErr := c.configNames(data)
+		named, checkErr := c.configNames(data, names)
 		switch {
-		case names:
+		case named:
 			add(path, "still names DefenseClaw's "+c.label+" entries, which DefenseClaw could not remove", c.configStep)
 		case checkErr != nil:
 			add(path, fmt.Sprintf("could not be checked (%v)", checkErr), "check it by hand: "+c.configStep)

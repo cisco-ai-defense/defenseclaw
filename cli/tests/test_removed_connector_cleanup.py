@@ -112,6 +112,32 @@ class LeftoversTests(_Host):
         _write(os.path.join(self.home, ".omnigent", "config.yaml"), "policy_modules:\n  - mine\n")
         self.assertEqual(self.leftovers(), [])
 
+    def test_an_operators_hook_of_the_same_name_is_not_defenseclaws(self):
+        # GAP-1842 class: identity is the path, the marker or the launcher flag, never the name.
+        own = _write(os.path.join(self.home, "scripts", "openhands-hook.sh"), "#!/bin/sh\nexit 0\n", 0o700)
+        commands = [
+            os.path.join(self.home, "bin", "my-openhands-hook.sh"),
+            own,
+            "bash ~/scripts/openhands-hook.sh --pre",
+            os.path.join(self.hooks, "openhands-hook.sh") + ".bak",
+        ]
+        _write(
+            os.path.join(self.home, ".openhands", "hooks.json"),
+            json.dumps({"PreToolUse": [{"hooks": [{"type": "command", "command": c} for c in commands]}]}),
+        )
+        self.assertEqual(self.leftovers(), [])
+
+    def test_defenseclaws_hook_path_is_listed_in_every_form(self):
+        script = os.path.join(self.hooks, "openhands-hook.sh")
+        for command in (script, f'"{script}"', "~/.defenseclaw/hooks/openhands-hook.sh"):
+            with self.subTest(command=command):
+                config = _write(
+                    os.path.join(self.home, ".openhands", "hooks.json"),
+                    json.dumps({"PreToolUse": [{"hooks": [{"type": "command", "command": command}]}]}),
+                )
+                [left] = self.leftovers()
+                self.assertEqual([item.path for item in left.items], [config])
+
     def test_omnigent_import_path_line_is_listed(self):
         pth = _write(os.path.join(self.home, "site", "defenseclaw_omnigent.pth"), self.hooks + "\n/opt/other\n")
         _write(
