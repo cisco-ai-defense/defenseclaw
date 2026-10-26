@@ -1461,6 +1461,7 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 		APIAddr:            opts.APIAddr,
 		TokenFileJS:        javaScriptStringContent(tokenPath),
 		NativePostBinaryJS: javaScriptStringContent(secureClientPluginNativePostBinary(opts)),
+		GatewayBinaryJS:    javaScriptStringContent(perUserPluginGatewayBinary(opts)),
 		HookSocketJS:       javaScriptStringContent(hookSocket),
 		ServiceUID:         serviceUID,
 		ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts)),
@@ -1477,6 +1478,25 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 		return nil, fmt.Errorf("%s render plugin template: %w", c.name, err)
 	}
 	return []byte(rendered), nil
+}
+
+// perUserPluginGatewayBinary is the gateway binary a per-user in-agent plugin
+// (OpenCode, Amp) runs for hook-post and session facts: the gateway of the
+// install that renders it. Native Windows Setup installs it in
+// InstallRoot\bin and has no ~/.local/bin gateway, so the plugin gets that
+// path when this gateway is Setup's (the same proof that registers Setup's
+// hook launcher for the other connectors, GAP-1847). "" keeps the
+// ~/.local/bin gateway install.sh and install.ps1 put there; managed and
+// Secure Client plugins never use it.
+func perUserPluginGatewayBinary(opts SetupOpts) string {
+	if runtime.GOOS != "windows" || opts.ManagedEnterprise || pluginSecureClientProfile(opts) {
+		return ""
+	}
+	launcher := canonicalNativeWindowsHookBinary()
+	if launcher == "" || !sameWindowsInstallPath(defenseclawHookBinary(), launcher) {
+		return ""
+	}
+	return canonicalNativeWindowsInstalledGatewayBinary()
 }
 
 func secureClientPluginNativePostBinary(opts SetupOpts) string {

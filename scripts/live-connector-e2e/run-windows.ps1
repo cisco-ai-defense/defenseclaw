@@ -5194,10 +5194,6 @@ function Wait-GatewayHookReady([int]$Timeout = 90) {
     }
 
     if ($Connector -eq 'opencode') {
-        if (Test-OpenCodeSetupGatewayHelperMissing) {
-            Write-Result 'gateway-hook-readiness' skip 'GAP-1847: known 1.0.4 issue, fixed in 1.0.5'
-            return
-        }
         for ($attempt = 1; [DateTime]::UtcNow -lt $deadline; $attempt++) {
             $beforeTool = @(Get-EventLines $script:AuditDb).Count
             try {
@@ -5482,7 +5478,6 @@ function Invoke-Setup([string]$Mode) {
     $setupRuntimeProbe = if ($Connector -ceq 'opencode') {
         {
             param([Diagnostics.Process]$SetupProcess)
-            if (Test-OpenCodeSetupGatewayHelperMissing) { return }
             $deadline = [DateTime]::UtcNow.AddSeconds(90)
             $lastError = 'managed OpenCode plugin was not published'
             for ($attempt = 1; -not $SetupProcess.HasExited -and [DateTime]::UtcNow -lt $deadline; $attempt++) {
@@ -6624,17 +6619,6 @@ function Get-TreeFingerprint([string]$Root) {
     } finally {
         $sha.Dispose()
     }
-}
-
-# Test-OpenCodeSetupGatewayHelperMissing: the per-user OpenCode plugin posts
-# through ~\.local\bin\defenseclaw-gateway.exe (the gateway install.ps1
-# puts there); a DefenseClaw Setup install has none, so the plugin fails
-# closed on every call (GAP-1847, a known 1.0.4 issue, fixed in 1.0.5). The
-# plugin resolves the home the same way (USERPROFILE).
-function Test-OpenCodeSetupGatewayHelperMissing {
-    if ($Connector -ne 'opencode') { return $false }
-    $gatewayHelper = Join-Path ([string]$env:USERPROFILE) '.local\bin\defenseclaw-gateway.exe'
-    return -not (Test-Path -LiteralPath $gatewayHelper -PathType Leaf)
 }
 
 function Invoke-OpenCodePluginProbe(
@@ -9511,13 +9495,6 @@ function Invoke-ContractRun {
     Invoke-Tool 'defenseclaw' $initArgs | Out-Null
     Set-IsolatedGatewayPort
     Invoke-Setup observe
-    if (Test-OpenCodeSetupGatewayHelperMissing) {
-        # Every plugin verdict below needs the plugin's gateway helper.
-        Write-Result 'opencode:plugin-verdicts' skip 'GAP-1847: known 1.0.4 issue, fixed in 1.0.5'
-        Invoke-Teardown
-        Write-Result teardown pass 'observe setup restored connector configuration'
-        return
-    }
     Assert-DoctorHookRegistration
     if ($Connector -eq 'amp') {
         # A per-user plugin renders DC_FAIL_MODE closed in either mode

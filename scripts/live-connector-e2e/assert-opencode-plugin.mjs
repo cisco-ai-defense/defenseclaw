@@ -4,6 +4,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { copyFile, rm } from "node:fs/promises";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -39,6 +40,24 @@ globalThis.fetch = async (url, init) => {
   }
   return nativeFetch(url, init);
 };
+// A per-user plugin posts through its gateway's hook-post (execFileSync, the
+// JSON request on stdin) rather than fetch: capture the after payload there
+// too. The plugin imports execFileSync by name, so the patched CommonJS export
+// is synced into the ESM binding before the plugin loads.
+const childProcess = createRequire(import.meta.url)("node:child_process");
+const nativeExecFileSync = childProcess.execFileSync;
+childProcess.execFileSync = function (file, args, options) {
+  if (Array.isArray(args) && args[0] === "hook-post" && typeof options?.input === "string") {
+    const request = JSON.parse(options.input);
+    const payload = JSON.parse(request.body || "{}");
+    if (payload.hook_event_name === "tool.execute.after") {
+      observedAfterPayload = payload;
+      return JSON.stringify({ status: 200, body: JSON.stringify({ hook_output: { decision: "allow" } }) });
+    }
+  }
+  return nativeExecFileSync.apply(this, arguments);
+};
+syncBuiltinESMExports();
 try {
   const module = await import(moduleURL);
   if (typeof module.DefenseClaw !== "function") {
@@ -134,6 +153,8 @@ try {
   }
 } finally {
   globalThis.fetch = nativeFetch;
+  childProcess.execFileSync = nativeExecFileSync;
+  syncBuiltinESMExports();
   await rm(scratchPath, { force: true });
 }
 
@@ -142,9 +163,11 @@ try {
 // there, and the helper's own error for a bare request (no credential).
 function perUserPostDiagnostic(reason) {
   if (!/per-user gateway peer unverified/.test(reason || "")) return "";
-  const gateway = join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
-  const address = (/const DC_API_ADDR = "([^"]*)"/.exec(readFileSync(pluginPath, "utf8")) || [])[1] || "";
-  let detail = ` home=${homedir()} gateway=${existsSync(gateway)} api=${address}`;
+  const plugin = readFileSync(pluginPath, "utf8");
+  const rendered = (/const DC_GATEWAY_BINARY = "((?:[^"\\]|\\.)*)";/.exec(plugin) || [])[1] || "";
+  const gateway = rendered ? JSON.parse(`"${rendered}"`) : join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
+  const address = (/const DC_API_ADDR = "([^"]*)"/.exec(plugin) || [])[1] || "";
+  let detail = ` home=${homedir()} gateway=${gateway} exists=${existsSync(gateway)} api=${address}`;
   try {
     execFileSync(gateway, ["hook-post", "--api-addr", address], {
       input: JSON.stringify({ path: "/health", headers: {}, body: "" }),
