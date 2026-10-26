@@ -10175,6 +10175,17 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     _emit("fail", label, problem, r=r,
                           remediation="run 'defenseclaw setup hermes --yes --restart', then rerun 'defenseclaw doctor'")
                     return
+                if unavailable := _hermes_execution_proof_unavailable():
+                    _emit(
+                        "warn",
+                        label,
+                        f"registered at {path}; execution proof unavailable: {unavailable}, so the "
+                        "registered hook is read back without running it",
+                        r=r,
+                        remediation="enable unprivileged user namespaces (sysctl user.max_user_namespaces) "
+                        "for the execution proof",
+                    )
+                    return
                 if r.list_processes and _hermes_host_running() is False:
                     _emit(
                         "pass",
@@ -10228,11 +10239,40 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     )
 
 
+def _hermes_execution_proof_unavailable() -> str:
+    """Why this host cannot run the contained Hermes probe, or "" (GAP-1525).
+
+    On Linux an account without CAP_SYS_ADMIN needs an unprivileged user
+    namespace for the probe's PID namespace; ``user.max_user_namespaces=0`` (or
+    ``kernel.unprivileged_userns_clone=0``) refuses it. The gateway reads the
+    sealed registration back without running it there
+    (hermesExecutionContainmentUnavailable), and doctor says so as a warning,
+    not as a registration that is gone.
+    """
+    if not sys.platform.startswith("linux") or os.geteuid() == 0:
+        return ""
+    for path, name in (
+        ("/proc/sys/user/max_user_namespaces", "user.max_user_namespaces"),
+        ("/proc/sys/kernel/unprivileged_userns_clone", "kernel.unprivileged_userns_clone"),
+    ):
+        try:
+            with open(path, encoding="ascii") as handle:
+                value = handle.read().strip()
+        except OSError:
+            continue
+        if value == "0":
+            return f"unprivileged user namespaces are disabled ({name}=0)"
+    return ""
+
+
 def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
     """Read Hermes' active matrix and execute its sealed command as a bounded probe."""
     problem = _hermes_registration_problem(cfg, config_path)
     if problem:
         return problem
+    if _hermes_execution_proof_unavailable():
+        # The caller reports the unavailable proof as a warning.
+        return ""
     expected = os.path.normpath(os.path.join(str(getattr(cfg, "data_dir", "") or ""), "hooks", "hermes-hook.sh"))
     probe_argv = [expected, "--defenseclaw-execution-probe"]
     if sys.platform == "darwin":

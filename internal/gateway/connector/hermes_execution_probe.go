@@ -6,10 +6,12 @@ package connector
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
@@ -58,8 +60,60 @@ func hermesRegisteredCommandExecutable(opts SetupOpts, hookCommand string) bool 
 		if runtime.GOOS == "darwin" {
 			args = append(args, "--forkless")
 		}
+		if reason := hermesExecutionContainmentUnavailable(); reason != "" {
+			// The probe never runs without its PID namespace, and a host
+			// that cannot create one is not a host whose registration is
+			// gone: a registration read back above whose script still has
+			// the digest setup sealed stays current, for read-back, the
+			// gateway start and the guard (GAP-1525). An edited script is
+			// not current.
+			if !hermesHookScriptSealed(opts, target) {
+				return false
+			}
+			hermesContainmentWarning.Do(func() {
+				fmt.Fprintf(os.Stderr, "[guardrail] connector hermes: execution proof unavailable (%s); "+
+					"the sealed hook registration was read back without running it\n", reason)
+			})
+			return true
+		}
 	}
 	return runHermesExecutionProbe(target, args)
+}
+
+// hermesHookScriptSealed reports whether the hook script at target has the
+// digest the hook contract lock sealed for it.
+func hermesHookScriptSealed(opts SetupOpts, target string) bool {
+	sealed := LoadHookContractLockEntry(opts.DataDir, "hermes").HookScriptDigests[filepath.Base(target)]
+	if sealed == "" {
+		return false
+	}
+	data, err := os.ReadFile(target)
+	return err == nil && "sha256:"+sha256Hex(data) == sealed
+}
+
+// hermesContainmentWarning says once per process that the Hermes execution
+// proof is unavailable on this host.
+var hermesContainmentWarning sync.Once
+
+// hermesExecutionContainmentUnavailable says why a contained probe cannot
+// run on this host, or "": on Linux an account without CAP_SYS_ADMIN needs an
+// unprivileged user namespace for the probe's PID namespace, and
+// user.max_user_namespaces=0 (or kernel.unprivileged_userns_clone=0) refuses
+// it (processutil.RunContained). Tests replace it.
+var hermesExecutionContainmentUnavailable = func() string {
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		return ""
+	}
+	for _, setting := range []struct{ path, name string }{
+		{"/proc/sys/user/max_user_namespaces", "user.max_user_namespaces"},
+		{"/proc/sys/kernel/unprivileged_userns_clone", "kernel.unprivileged_userns_clone"},
+	} {
+		data, err := os.ReadFile(setting.path)
+		if err == nil && strings.TrimSpace(string(data)) == "0" {
+			return "unprivileged user namespaces are disabled (" + setting.name + "=0)"
+		}
+	}
+	return ""
 }
 
 // runHermesExecutionProbe keeps no more stdout than the proof itself: one
