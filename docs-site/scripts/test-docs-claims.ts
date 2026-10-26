@@ -1463,6 +1463,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1707", page: "enterprise/plan/rollout.mdx", has: ["On Linux and macOS a healthy install keeps it at `false` with only `hook_process_fail_open`", "`unprivileged_ptrace` while the kernel allows them"] },
   { gap: "GAP-1630", page: "how-to/policies/use-a-different-rule-pack.mdx", section: "Undo", has: ["defenseclaw policy activate default", "with `strict` a call is blocked while the gateway is not running, and `default` lets it run with a warning again"] },
   { gap: "GAP-1653", page: "reference/configuration/llm-providers.mdx", has: ["'remove <ENV_NAME>': {"] },
+  { gap: "GAP-1623", page: "how-to/guardrail/block-a-destructive-command.mdx", has: ["Select-String -Path", "ConvertFrom-Json"], lacks: ["`closed` (the default) blocks"] },
   // r105-rows-end
 ];
 

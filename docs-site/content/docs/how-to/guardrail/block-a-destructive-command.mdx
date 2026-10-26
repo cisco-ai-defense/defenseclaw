@@ -37,6 +37,12 @@ Run Claude Code under observe mode first, then switch to action mode so the bund
    grep -n -A10 'id: CMD-RM-RF' ~/.defenseclaw/policies/guardrail/default/rules/commands.yaml
    ```
 
+   In PowerShell:
+
+   ```powershell
+   Select-String -Path "$HOME\.defenseclaw\policies\guardrail\default\rules\commands.yaml" -Pattern 'id: CMD-RM-RF' -Context 0,10
+   ```
+
    ```text
    114:  - id: CMD-RM-RF
    …
@@ -66,6 +72,15 @@ defenseclaw-gateway audit export --connector claudecode --since 30m \
   | jq -c 'select(.action == "connector-hook") | {timestamp, action: .structured.action, rule_ids: .structured.rule_ids}'
 ```
 
+In PowerShell:
+
+```powershell
+defenseclaw-gateway audit export --connector claudecode --since 30m |
+  ForEach-Object { $_ | ConvertFrom-Json } |
+  Where-Object { $_.action -eq 'connector-hook' } |
+  ForEach-Object { [pscustomobject]@{ timestamp = $_.timestamp; action = $_.structured.action; rule_ids = $_.structured.rule_ids } }
+```
+
 ```text
 {"timestamp":"2026-10-21T06:59:40.323651948Z","action":"block","rule_ids":["CMD-RM-RF"]}
 ```
@@ -74,7 +89,7 @@ Each hook call writes one `connector-hook` row. `action` is the answer Claude Co
 
 ## If the gateway is unreachable
 
-The hook follows the fail mode: `closed` (the default) blocks the events that can carry a block, `open` allows and logs. Check it with `defenseclaw guardrail status` ([fail modes](/docs/reference/configuration/fail-modes)).
+On a per-user install with the default or permissive policy the call runs with one warning; the strict policy or a saved `closed` blocks it ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)). Check it with `defenseclaw guardrail status` ([fail modes](/docs/reference/configuration/fail-modes)).
 
 ## Undo
 
