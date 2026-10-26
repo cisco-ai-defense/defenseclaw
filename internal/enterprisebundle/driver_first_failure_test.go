@@ -7,11 +7,65 @@
 package enterprisebundle_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
+
+// GAP-0751: a delivery whose transaction failed while the gateway was held
+// down installed nothing: the config the run started with (or none) stays,
+// the receipt stays pending (never failed, never rolled back) and the run
+// reports not_confirmed; the next run that does not retry it settles it as
+// interrupted.
+func TestDriverGatewayOutageLeavesTheDeliveryPending(t *testing.T) {
+	for _, first := range []bool{true, false} {
+		name := "first bundle"
+		if !first {
+			name = "over the last good bundle"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, bundleConfig(t), nil)
+			d := driverFor(t, f)
+			installed, base := "", []byte("config_version: 9\n")
+			if !first {
+				d.EnforcedConfig = base
+				if err := os.MkdirAll(filepath.Dir(d.ConfigPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(d.ConfigPath, base, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				sum := sha256.Sum256(base)
+				installed = hex.EncodeToString(sum[:])
+			}
+			p, err := d.Prepare(t.Context(), f.bundle, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rolledBack := false
+			_, err = d.Finish(p, installed, []string{"bundle_policy_not_adopted"}, enterprisebundle.GatewayPolicy{}, false,
+				func() (string, bool) { rolledBack = true; return "", true })
+			if enterprisebundle.CodeOf(err) != enterprisebundle.CodeNotConfirmed || rolledBack {
+				t.Fatalf("finish = %v (rollback %v), want not_confirmed with nothing rolled back", err, rolledBack)
+			}
+			if enterprisebundle.Finished(p.Receipt.State) || p.Receipt.RolledBack {
+				t.Fatalf("receipt = %+v, want pending", p.Receipt)
+			}
+			var cfg []byte
+			if !first {
+				cfg = base
+			}
+			report, _, err := d.SettleRun(cfg, nil)
+			if err != nil || len(report.Interrupted) != 1 {
+				t.Fatalf("next run: report=%+v err=%v, want the pending delivery interrupted", report, err)
+			}
+		})
+	}
+}
 
 // GAP-1206: a first bundle whose transaction failed is rolled back to "no
 // config" only when the config file is absent and the gateway answers and
@@ -27,7 +81,6 @@ func TestDriverFirstBundleFailureClaimsRollbackOnlyFromAnAbsentConfig(t *testing
 		want                  bool
 	}{
 		{name: "absent config, gateway reports no policy", want: true},
-		{name: "absent config, gateway down", gatewayDown: true},
 		{name: "unreadable config", unreadable: true},
 		{name: "absent config, gateway still reports the candidate", candidate: true},
 	} {

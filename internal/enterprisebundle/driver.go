@@ -352,7 +352,17 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 			message = fmt.Sprintf("the ensure transaction failed (%s)", joinCodes(failure))
 		}
 		rc.RolledBack = false
-		switch owner := d.installedPendingOwner(rc, installed); {
+		owner := d.installedPendingOwner(rc, installed)
+		if owner == nil && policy.Unavailable() && d.installedIsRunBase(rc, installed) {
+			// The gateway was down (held down, stopped): the transaction
+			// installed nothing and the config the run found stays. An
+			// outage proves nothing about the bundle, so its receipt stays
+			// open (pending) instead of failed: a retry applies it, and the
+			// next run that does not settles it as interrupted (GAP-0751).
+			return State{}, &Error{Code: CodeNotConfirmed, Detail: message +
+				"; the gateway was unavailable, so this bundle stays pending: the config the run started with keeps enforcing, and the next lifecycle run retries or settles it"}
+		}
+		switch {
 		case owner != nil:
 			// The installed config is another receipt's pending commit (a
 			// retry that failed before its own commit, or a transaction that
@@ -757,6 +767,23 @@ func (d *Driver) settleCommitted(installedConfig []byte, installed string, polic
 // record existed falls back to the version directories the installed
 // config's YAML values (never its comments) name: only rc's own config can
 // point into rc's directory.
+// installedIsRunBase reports whether the installed config is the one rc's
+// run started from: the same bytes, or still no config at all.
+func (d *Driver) installedIsRunBase(rc *Receipt, installed string) bool {
+	switch rc.BaseConfigSHA256 {
+	case "":
+		return false
+	case NoBaseConfig:
+		if installed != "" || d.ConfigPath == "" {
+			return false
+		}
+		_, err := os.Lstat(d.ConfigPath)
+		return errors.Is(err, fs.ErrNotExist)
+	default:
+		return installed != "" && rc.BaseConfigSHA256 == installed
+	}
+}
+
 func (d *Driver) installedBeforeRun(rc *Receipt, installedConfig []byte, installed string) bool {
 	switch rc.BaseConfigSHA256 {
 	case "":
