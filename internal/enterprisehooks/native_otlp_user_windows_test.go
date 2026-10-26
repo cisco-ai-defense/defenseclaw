@@ -8,6 +8,7 @@ package enterprisehooks
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -389,4 +390,133 @@ func TestWindowsManagedNativeOTLPVerifyFailsOnLinkedConfigWithCredential(t *test
 			}
 		})
 	}
+}
+
+// GAP-1170 (refix 1): a signed-out user's take-back runs under an S4U token
+// with no network credentials, so it cannot read a .codex or .claude linked
+// to a network share, writable or not, clean or not. The install kept the
+// scoped credential, the linked-config Verify failed, and the managed
+// upgrade rolled back (1603). The take-back now revokes the credential anyway
+// and names the account's step, and Verify passes the install.
+func TestWindowsManagedNativeOTLPTakeBackRevokesCredentialWhenLinkedConfigUnreadable(t *testing.T) {
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, dir, file, body string
+		scope                 connector.OTLPPathTokenScope
+	}{
+		{"codex", ".codex", "config.toml", "[otel.exporter.otlp-http]\r\nendpoint = 'http://127.0.0.1:19010/v1/logs'\r\n" +
+			"[otel.exporter.otlp-http.headers]\r\nauthorization = 'Bearer " + strings.Repeat("e7", 32) + "'\r\n", connector.OTLPScopeCodex},
+		{"claudecode", ".claude", "settings.json", `{"env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1","OTEL_EXPORTER_OTLP_ENDPOINT":"http://127.0.0.1:19010",` +
+			`"OTEL_EXPORTER_OTLP_HEADERS":"authorization=Bearer ` + strings.Repeat("e7", 32) + `"}}`, connector.OTLPScopeClaude},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			dataDir := filepath.Join(home, ".defenseclaw")
+			share := filepath.Join(t.TempDir(), "share")
+			if err := os.MkdirAll(share, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			config := filepath.Join(share, tc.file)
+			if err := os.WriteFile(config, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			makeTestJunction(t, filepath.Join(home, tc.dir), share)
+			denyWindowsTestPathReadForTest(t, config, user.User.Sid)
+			if _, err := os.ReadFile(filepath.Join(home, tc.dir, tc.file)); err == nil {
+				t.Fatal("fixture: the linked config is still readable")
+			}
+			tokenPath, err := connector.OTLPPathTokenFilePath(dataDir, tc.scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(tokenPath, []byte(strings.Repeat("e7", 32)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			report := captureWindowsTestStderr(t, func() {
+				if err := connector.WithUserHomeDir(home, func() error {
+					return removeWindowsManagedUserNativeOTLPAsTarget(tc.name, dataDir)
+				}); err != nil {
+					t.Fatalf("take-back failed the install: %v", err)
+				}
+			})
+			if _, err := os.Lstat(tokenPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("take-back kept the scoped credential beside an unreadable linked config: %v", err)
+			}
+			if !strings.Contains(report, "revoked its scoped credential") || !strings.Contains(report, "as that user") {
+				t.Fatalf("take-back report does not name the step: %q", report)
+			}
+			if strings.Contains(report, "e7e7") || strings.Contains(report, "19010") {
+				t.Fatalf("take-back report carries a value: %q", report)
+			}
+			if err := windowsManagedUserNativeOTLPAbsent(tc.name, home, dataDir, user.User.Sid); err != nil {
+				t.Fatalf("verify fails the install on a linked config after the credential was revoked: %v", err)
+			}
+		})
+	}
+}
+
+// denyWindowsTestPathReadForTest denies sid read access to path, as an S4U
+// token meets a share it has no credentials for, and puts the DACL back on
+// cleanup so the temporary directory can be removed.
+func denyWindowsTestPathReadForTest(t *testing.T, path string, sid *windows.SID) {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.FILE_GENERIC_READ,
+		AccessMode:        windows.DENY_ACCESS,
+		Inheritance:       windows.NO_INHERITANCE,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}}, dacl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, denied, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+	})
+}
+
+// captureWindowsTestStderr returns what fn writes to os.Stderr.
+func captureWindowsTestStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := os.Stderr
+	os.Stderr = writer
+	done := make(chan string)
+	go func() {
+		data, _ := io.ReadAll(reader)
+		done <- string(data)
+	}()
+	func() {
+		defer func() { os.Stderr = previous }()
+		fn()
+	}()
+	_ = writer.Close()
+	out := <-done
+	_ = reader.Close()
+	return out
 }
