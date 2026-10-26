@@ -84,6 +84,17 @@ func TestAPIErrorWordsTheCallerLimitForTheCLI(t *testing.T) {
 	if strings.Contains(got, "hook") || !strings.Contains(got, "a burst of sandbox commands") || !strings.Contains(got, "in a few seconds") {
 		t.Fatalf("limited sandbox command = %q", got)
 	}
+	// As the managed daemon relays it: the limiter's word is the reason.
+	relayed := &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusTooManyRequests,
+		Message: "DefenseClaw is limiting the hook requests of this account; retry shortly", Detail: "rate_limited"}
+	if got := apiError(relayed).Error(); strings.Contains(got, "hook") || !strings.Contains(got, "a burst of sandbox commands") {
+		t.Fatalf("relayed caller limit = %q", got)
+	}
+	// GAP-1808: the daemon's own 429 keeps its words, which name the cause.
+	streams := &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusTooManyRequests, Message: "too many activity streams are open"}
+	if got := apiError(streams).Error(); !strings.Contains(got, "too many activity streams are open") || strings.Contains(got, "a burst of sandbox commands") {
+		t.Fatalf("too many activity streams = %q", got)
+	}
 }
 
 // r103 GAP-0332: on a Linux computer without Docker or KVM, `sandbox run`

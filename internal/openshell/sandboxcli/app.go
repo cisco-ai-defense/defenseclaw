@@ -595,6 +595,11 @@ func sandboxRuntimeMissing() string {
 		"(https://docs.docker.com/engine/install/) first, and see `defenseclaw sandbox doctor` for every prerequisite"
 }
 
+// callerLimitReason is the error word of the gateway's per-account caller
+// limit (hook_caller_limits.go): the code of its 429, or its reason once the
+// managed daemon relays it.
+const callerLimitReason = "rate_limited"
+
 // apiError explains a daemon error for people. Admin refusals start with
 // "blocked by your organization's DefenseClaw policy".
 func apiError(err error) error {
@@ -605,10 +610,12 @@ func apiError(err error) error {
 	if !errors.As(err, &e) {
 		return err
 	}
-	if e.Status == http.StatusTooManyRequests {
+	if e.Status == http.StatusTooManyRequests && (e.Code == callerLimitReason || e.Detail == callerLimitReason) {
 		// The gateway's caller limit answered a burst of sandbox commands
 		// with its hook-request words, which named no hook the user ran
-		// (GAP-1693).
+		// (GAP-1693). Only its answer: the daemon's own 429 (too many
+		// activity streams open) keeps its words, which name the cause
+		// (GAP-1808).
 		return errors.New("DefenseClaw is limiting how many requests this account makes in a short time, and a burst of " +
 			"sandbox commands reached that limit; nothing was changed, run the command again in a few seconds")
 	}
