@@ -49,11 +49,17 @@ def install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         '    printf "%s\\n" \'{"sandboxes":[]}\'\n'
         "    exit 0\n"
         "  fi\n"
+        '  printf "%s\\n" \'{"available": false, "enabled": false, "reason": "OpenShell sandboxes are off"}\'\n'
         "  printf \"%s\\n\" '✗ OpenShell sandboxes are off; run `defenseclaw sandbox setup` to turn them on' >&2\n"
         "  exit 1\n"
         "fi\n"
         'if [ "$1" = sandbox ] && [ "$2" = teardown ] && [ "$3" = --help ]; then\n'
         '  printf "%s\\n" --keep-images\n'
+        "  exit 0\n"
+        "fi\n"
+        # The off-state dry run names what OpenShell still has (GAP-0765).
+        'if [ "$1" = sandbox ] && [ "$2" = teardown ] && [ "$3" = --dry-run ]; then\n'
+        '  printf "%s\\n" "Sandbox teardown" "sandboxes         ${DC_TEST_TEARDOWN_SANDBOXES:-kept}"\n'
         "  exit 0\n"
         "fi\n"
         'if [ "$1" = sandbox ] && [ "$2" = teardown ]; then exit 0; fi\n'
@@ -71,6 +77,7 @@ def install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("DC_TEST_GATEWAY_CALLS", str(calls))
     monkeypatch.delenv("DC_TEST_LIST_OK", raising=False)
+    monkeypatch.delenv("DC_TEST_TEARDOWN_SANDBOXES", raising=False)
     monkeypatch.setattr(cmd_uninstall.config_module, "default_data_path", lambda: data_dir)
     monkeypatch.setattr(cmd_uninstall.config_module, "config_path_for_data_dir", lambda _=None: config_file)
     monkeypatch.setattr(cmd_uninstall.config_module, "load", lambda **_: cfg)
@@ -193,7 +200,7 @@ def test_real_state_still_refuses_unreadable_list_and_skip_works(
     assert "nothing was changed" in result.output
     assert install.data_dir.exists() and (sandboxes / "images.json.lock").exists()
     assert install.gateway.exists() and install.cli.exists()
-    assert _calls(install) == ["sandbox list --output json", "sandbox teardown --help"]
+    assert _calls(install) == OFF_LIST_CALLS
 
     skipped = CliRunner().invoke(
         cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--skip-sandbox-teardown", "--yes"]
@@ -202,7 +209,42 @@ def test_real_state_still_refuses_unreadable_list_and_skip_works(
     assert "sandbox teardown:    skipped (--skip-sandbox-teardown)" in skipped.output
     assert not install.data_dir.exists()
     assert not install.gateway.exists() and not install.cli.exists()
-    assert _calls(install) == ["sandbox list --output json", "sandbox teardown --help"]
+    assert _calls(install) == OFF_LIST_CALLS
+
+
+# The list says sandboxes are off; the dry run of the off-state teardown
+# names a sandbox OpenShell still has, so the answer stays unknown.
+OFF_LIST_CALLS = [
+    "sandbox list --output json",
+    "sandbox teardown --help",
+    "sandbox teardown --dry-run",
+    "sandbox teardown --help",
+]
+
+
+@pytest.mark.parametrize("plan", ["none", "nothing"])
+def test_sandboxes_off_with_no_sandbox_left_uninstalls(
+    install: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, plan: str
+) -> None:
+    """GAP-0765: after `sandbox teardown` (sandboxes off, none left) the
+    documented `uninstall --all --binaries --yes` goes on: off is no
+    sandbox running when the off-state teardown finds none to delete."""
+    (install.home / ".local" / "state" / "openshell").mkdir(parents=True)
+    if plan == "none":
+        monkeypatch.setenv("DC_TEST_TEARDOWN_SANDBOXES", "none")
+    else:
+        # A dry run with nothing at all prints only its "nothing to tear
+        # down" line.
+        script = install.gateway.read_text(encoding="utf-8").replace(
+            '"sandboxes         ${DC_TEST_TEARDOWN_SANDBOXES:-kept}"', '"✓ nothing to tear down"'
+        )
+        install.gateway.write_text(script, encoding="utf-8")
+    result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "the sandbox list could not be read" not in result.output
+    assert "sandbox teardown --yes" in _calls(install)
+    assert not install.data_dir.exists()
+    assert not install.gateway.exists() and not install.cli.exists()
 
 
 @pytest.mark.parametrize("trace", ["gateway-config", "openshell-state", "snapshots-and-shadows", "empty-manager"])
