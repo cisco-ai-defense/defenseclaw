@@ -1927,6 +1927,10 @@ var migrations = []migration{
 		description: configChangeRecordDigestMigrationDescription,
 		apply:       migrateAuditEventRecordDigest,
 	},
+	{
+		description: sparseKeyIndexesMigrationDescription,
+		apply:       migrateSparseKeyIndexes,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -2048,6 +2052,9 @@ func (s *Store) Init() error {
 	// Before the reclaim below, so the dropped indexes' pages are reclaimed
 	// with the purged history.
 	if err := s.trimUnreadAuditIndexes(); err != nil {
+		return err
+	}
+	if err := s.keepSecureClientSparseKeyIndexes(); err != nil {
 		return err
 	}
 	if purgedHistory {
