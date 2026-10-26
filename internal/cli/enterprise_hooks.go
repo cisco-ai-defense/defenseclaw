@@ -82,6 +82,41 @@ var enterpriseHookRecheckStep = 40 * time.Millisecond
 // that runs now: the watch loop sets it for a pass a filesystem event armed.
 var enterpriseHookReconcileRecheckWindow time.Duration
 
+// enterpriseHookReconcileRecheckPaths are the paths of the filesystem events
+// that armed the pass that runs now; enterpriseHookReconcileRecheckAll is set
+// when events were dropped (an overflow) or more paths changed than the watch
+// loop keeps. The standalone Unix pass gives the recheck window only to the
+// accounts those paths are in: one window per account, run in waves of
+// workers, made every pass about 0.3 s longer per wave of four accounts, so a
+// change in one home delayed the repair of a home in a later wave
+// (GAP-1825 review R4-2).
+var (
+	enterpriseHookReconcileRecheckPaths []string
+	enterpriseHookReconcileRecheckAll   bool
+)
+
+// enterpriseHookWatchMaxTriggerPaths bounds the paths one pass remembers.
+const enterpriseHookWatchMaxTriggerPaths = 64
+
+// enterpriseHookWatchAddTriggerPath adds the cleaned path of an event to the
+// pass's trigger paths, once; all is true once more paths changed than the
+// bound.
+func enterpriseHookWatchAddTriggerPath(paths []string, all bool, name string) ([]string, bool) {
+	if all {
+		return paths, true
+	}
+	cleaned := filepath.Clean(name)
+	for _, path := range paths {
+		if path == cleaned {
+			return paths, false
+		}
+	}
+	if len(paths) >= enterpriseHookWatchMaxTriggerPaths {
+		return nil, true
+	}
+	return append(paths, cleaned), false
+}
+
 // enterpriseHookWatchRecheckFor is the recheck window of a pass run for reason.
 func enterpriseHookWatchRecheckFor(reason string) time.Duration {
 	if reason == "fsnotify" {
@@ -3191,6 +3226,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	}
 	debouncePending := false
 	debounceReason := ""
+	// debouncePaths are the paths of the filesystem events of the pending
+	// pass; debounceAllPaths says events were dropped or too many changed.
+	var debouncePaths []string
+	debounceAllPaths := false
 	// debounceArmedAt is when the pending debounce was first armed.
 	var debounceArmedAt time.Time
 	repairRetry := time.NewTimer(time.Hour)
@@ -3235,6 +3274,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		}
 		debouncePending = false
 		debounceReason = ""
+		debouncePaths, debounceAllPaths = nil, false
 	}
 	scheduleRepairRetry()
 	// Windows standalone: restore the managed OpenCode plugin as soon as its
@@ -3311,6 +3351,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// Record which specific event armed the debounce so the
 			// resulting reconcile log line names the culprit path.
 			lastTriggerPath, lastTriggerOp = enterpriseHookWatchNoteTrigger(lastTriggerPath, lastTriggerOp, event)
+			debouncePaths, debounceAllPaths = enterpriseHookWatchAddTriggerPath(debouncePaths, debounceAllPaths, event.Name)
 			if !debouncePending {
 				debounceArmedAt = time.Now()
 			}
@@ -3333,6 +3374,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			}
 			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounceDelay(time.Now(), debounceArmedAt, enterpriseHookWatchDebounce, enterpriseHookWatchDebounceMaxWait))
 			debouncePending = true
+			debounceAllPaths = true
 			if debounceReason == "" {
 				debounceReason = "fsnotify"
 			}
@@ -3345,8 +3387,11 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 					reason = "fsnotify"
 				}
 				enterpriseHookReconcileRecheckWindow = enterpriseHookWatchRecheckFor(reason)
+				enterpriseHookReconcileRecheckPaths, enterpriseHookReconcileRecheckAll = debouncePaths, debounceAllPaths
+				debouncePaths, debounceAllPaths = nil, false
 				_, err := reconcile(reason)
 				enterpriseHookReconcileRecheckWindow = 0
+				enterpriseHookReconcileRecheckPaths, enterpriseHookReconcileRecheckAll = nil, false
 				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after %s failed: %s\n", reason, err)
 				}
