@@ -68,6 +68,18 @@ func copilotPermissionCallbackTool(tool string) string {
 	return tool
 }
 
+// copilotPermissionCallsNeedTheJoin reports whether an argumentless
+// callback can stand for one of the calls: every call but a create or edit,
+// whose callbacks always carry their own arguments.
+func copilotPermissionCallsNeedTheJoin(calls []copilotargs.NativeCall) bool {
+	for _, call := range calls {
+		if name := strings.TrimSpace(call.Name); name != "create" && name != "edit" {
+			return true
+		}
+	}
+	return false
+}
+
 func copilotPermissionToolKey(scope, tool string) string {
 	return scope + "\x00" + copilotPermissionCallbackTool(tool)
 }
@@ -129,7 +141,13 @@ func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest
 			j.entries[key] = prior
 			continue
 		}
-		if !allowed {
+		// A call whose own callback carries its arguments (create and edit
+		// ask with {file_path, diff}) never needs the join, so it is not
+		// kept: when its callback does not arrive, it cannot make the next
+		// patch's argumentless callback ambiguous (GAP-2012). It still makes
+		// a live entry of its tool ambiguous (above), and inside an envelope
+		// with a patch it still counts as a use (GAP-1961).
+		if !allowed || !copilotPermissionCallsNeedTheJoin(byKey[key]) {
 			continue
 		}
 		if len(j.entries) >= copilotPermissionJoinMax {
