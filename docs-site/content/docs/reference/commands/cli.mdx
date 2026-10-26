@@ -1238,7 +1238,7 @@ its transaction on PowerShell 7, which must be installed.
 | `--json` | Print the result as JSON |
 
 Exit codes: standalone `0`, `1603` failure, `1618` busy, `1639` invalid
-arguments, and `3010` (reserved). Secure Client: `0` and `1603`.
+arguments, `5` when run from a standard account (`status` and `verify` need an elevated prompt; the JSON error code is `elevation_required`), and `3010` (reserved). Secure Client: `0` and `1603`.
 
 ```powershell
 $DefenseClaw = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
