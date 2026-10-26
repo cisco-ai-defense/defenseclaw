@@ -1860,6 +1860,7 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline b
 			continue
 		}
 		if i > start && (actionWindowsTextProgram(words[start]) || actionWindowsNativeProgram(words[start])) {
+			pattern := start + actionWindowsSearchPatternWord(words[start:i])
 			for j := start + 1; j < i; j++ {
 				if !scan.quoted[j] || strings.Contains(words[j], "$(") || actionWindowsRedirectOperator(words[j-1]) != "" {
 					continue
@@ -1867,11 +1868,15 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline b
 				if actionWindowsTextProgram(words[start]) && textOnly {
 					words[j] = strings.ReplaceAll(words[j], "~", "tilde-text")
 				}
-				// A quoted pattern given to a native program or printed is
-				// the program's text: neither PowerShell nor Git Bash
-				// expands it (GAP-1717: echo "*" and grep -rn "*** Begin
-				// Patch" . from the home folder).
-				words[j] = actionWindowsLiteralPattern.Replace(words[j])
+				// A quoted pattern that is printed, given to git or is the
+				// pattern of a search tool is text: nothing expands it
+				// (GAP-1717: echo "*" and grep -rn "*** Begin Patch" . from
+				// the home folder). Other native programs (the MSYS tools
+				// of Git for Windows) expand a quoted word of their own
+				// argv, so it stays a path pattern (GAP-1984).
+				if actionWindowsTextProgram(words[start]) || j == pattern {
+					words[j] = actionWindowsLiteralPattern.Replace(words[j])
+				}
 			}
 		}
 		start = i + 1
@@ -1929,6 +1934,42 @@ func actionWindowsBlankPatchText(command string) string {
 }
 
 var actionWindowsLiteralPattern = strings.NewReplacer("*", "_", "?", "_", "[", "_", "]", "_")
+
+// actionWindowsSearchPatternWord returns the index in words of the pattern
+// argument of a search tool (grep, rg, findstr ...): the word after -e or
+// --regexp, else the first word that is not an option. It returns -1 for
+// any other program (GAP-1984).
+func actionWindowsSearchPatternWord(words []string) int {
+	if len(words) == 0 {
+		return -1
+	}
+	switch strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(words[0], `\`, "/"))), ".exe") {
+	case "grep", "egrep", "fgrep", "rg", "ag", "ack", "findstr":
+	default:
+		return -1
+	}
+	for k := 1; k < len(words); k++ {
+		switch word := words[k]; {
+		case word == "--":
+			if k+1 < len(words) {
+				return k + 1
+			}
+			return -1
+		case word == "-e" || word == "--regexp":
+			if k+1 < len(words) {
+				return k + 1
+			}
+			return -1
+		case strings.HasPrefix(word, "--regexp="):
+			return k
+		case strings.HasPrefix(word, "-") || strings.HasPrefix(word, "/"):
+			continue
+		default:
+			return k
+		}
+	}
+	return -1
+}
 
 // actionWindowsNativeProgram reports a program PowerShell runs as a native
 // executable that is neither a shell nor an alias of a cmdlet: it receives a
