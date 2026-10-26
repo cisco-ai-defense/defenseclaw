@@ -68,7 +68,7 @@ func TestEnterpriseACPSetupStateRejectsChangedEditorCommand(t *testing.T) {
 		}
 	}
 	writeEntry(guard)
-	digest, err := acp.ClientEntrySHA256(settings, "zed", "kiro")
+	digest, err := acp.ClientEntrySHA256(settings, "zed", "kiro", "")
 	if err != nil {
 		t.Fatal(err)
 	}

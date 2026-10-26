@@ -246,16 +246,18 @@ def _write_contract_lock(
 ) -> Path:
     """Write the pair's contract lock.
 
-    pin_entry: pin the pair's guarded entry (acp.EntryDigestPrefix) instead
-    of the whole editor file, so a theme or agent-panel edit elsewhere in the
-    file keeps the guard starting (GAP-0504). The guard finds that entry only
-    under its reserved name, so setup asks for it only when the pair's one
-    entry has that name; an adopted or numbered entry keeps the file pin.
+    pin_entry: pin the pair's guarded entries (acp.EntryDigestPrefix): the
+    entries that start the guard with this lock, under the reserved name, an
+    adopted name or a numbered one, instead of the whole editor file, so a
+    theme or agent-panel edit elsewhere in the file keeps the guard starting
+    (GAP-0504).
     """
     path = _contract_lock_path(data_dir, client, agent)
     client_pin = _sha256_file(str(client_path))
     if pin_entry:
-        entry_digest = _guard_entry_sha256(_read_json_object(client_path).get("agent_servers"), client, agent)
+        entry_digest = _guard_entry_sha256(
+            _read_json_object(client_path).get("agent_servers"), client, agent, path.resolve()
+        )
         if entry_digest:
             client_pin = _ENTRY_DIGEST_PREFIX + entry_digest
     document: dict[str, Any] = {
@@ -423,19 +425,47 @@ _GO_JSON_ESCAPES = (
 )
 
 
-def _guard_entry_sha256(servers: Any, client: str, agent: str) -> str:
-    """The digest the guard computes for the pair's entry (acp.ClientEntrySHA256), or "".
+def _entry_starts_lock(entry: Any, lock_path: str | Path) -> bool:
+    """Whether an editor entry starts the guard with the contract lock at lock_path (acp entryStartsLock)."""
+    value = _guard_options(entry).get("--contract-lock") if isinstance(entry, dict) else None
+    if not value:
+        return False
+    return os.path.normcase(os.path.abspath(value)) == os.path.normcase(os.path.abspath(str(lock_path)))
 
-    Go's json.Marshal: sorted keys, no spaces, and <, >, &, U+2028 and U+2029
-    escaped. The keys the editor owns for client are left out, as there.
+
+def _guard_entry_sha256(servers: Any, client: str, agent: str, lock_path: str | Path | None = None) -> str:
+    """The digest the guard computes for the pair's entries (acp.ClientEntrySHA256), or "".
+
+    The entries are those that start the guard with the lock at lock_path
+    (an adopted or numbered entry too, GAP-0504); with none, the entry under
+    the reserved name. One entry is pinned alone, several as one object by
+    name. Go's json.Marshal: sorted keys, no spaces, and <, >, &, U+2028 and
+    U+2029 escaped. The keys the editor owns for client are left out, as there.
     """
-    entry = servers.get(_managed_name(agent)) if isinstance(servers, dict) else None
-    if entry is None:
+    if not isinstance(servers, dict):
         return ""
-    if isinstance(entry, dict):
-        editor_owned = _EDITOR_OWNED_ENTRY_KEYS.get(client, frozenset())
-        entry = {key: value for key, value in entry.items() if key not in editor_owned}
-    canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    editor_owned = _EDITOR_OWNED_ENTRY_KEYS.get(client, frozenset())
+
+    def pinned(entry: Any) -> Any:
+        if not isinstance(entry, dict):
+            return entry
+        return {key: value for key, value in entry.items() if key not in editor_owned}
+
+    guarded = {
+        name: pinned(entry)
+        for name, entry in servers.items()
+        if lock_path is not None and _entry_starts_lock(entry, lock_path)
+    }
+    if len(guarded) == 1:
+        value: Any = next(iter(guarded.values()))
+    elif guarded:
+        value = guarded
+    else:
+        value = servers.get(_managed_name(agent))
+        if value is None:
+            return ""
+        value = pinned(value)
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     for raw, escaped in _GO_JSON_ESCAPES:
         canonical = canonical.replace(raw, escaped)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -1008,8 +1038,10 @@ def _verify_binding(
         if not same_editor:
             problems.append("client configuration path does not match")
         elif settings_usable and isinstance(client_digest, str) and client_digest.startswith(_ENTRY_DIGEST_PREFIX):
-            # The lock pins the guarded entry, checked as the guard checks it (GAP-0912).
-            if client_digest[len(_ENTRY_DIGEST_PREFIX):].lower() != _guard_entry_sha256(servers, client, agent):
+            # The lock pins the guarded entries, checked as the guard checks them (GAP-0912, GAP-0504).
+            if client_digest[len(_ENTRY_DIGEST_PREFIX):].lower() != _guard_entry_sha256(
+                servers, client, agent, lock_path.resolve()
+            ):
                 problems.append(f"the {_managed_name(agent)} entry changed after setup (the contract lock pins it)")
         elif settings_usable and (not isinstance(client_digest, str) or client_digest != _client_digest(client_path)):
             problems.append("client configuration digest has drifted")
@@ -1299,7 +1331,7 @@ def setup_cmd(
             agent_executable=agent_executable,
             client_path=path,
             managed=managed,
-            pin_entry=list(written) == [_managed_name(agent)] and not is_secure_client(app.cfg),
+            pin_entry=not is_secure_client(app.cfg),
         )
         _refresh_client_contract_digests(data_dir, client, path)
         # Record what was written, so this runtime can later prove these

@@ -333,7 +333,7 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 	}
 	// The lock pins this entry, not the whole file the editor rewrites
 	// (GAP-0708).
-	entryDigest, err := acp.ClientEntrySHA256(clientPath, in.client, in.agent)
+	entryDigest, err := acp.ClientEntrySHA256(clientPath, in.client, in.agent, lockPath)
 	if err != nil {
 		return result, err
 	}

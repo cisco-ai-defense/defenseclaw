@@ -88,7 +88,7 @@ func TestValidateRuntimeContractBindsExecutableDigestsAndMetadata(t *testing.T) 
 	if err := os.WriteFile(clientConfig, []byte(`{"agent_servers":{`+entry+`}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	entryDigest, err := ClientEntrySHA256(clientConfig, "zed", "kiro")
+	entryDigest, err := ClientEntrySHA256(clientConfig, "zed", "kiro", "")
 	if err != nil {
 		t.Fatal(err)
 	}

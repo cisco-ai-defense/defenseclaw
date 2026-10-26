@@ -81,6 +81,34 @@ def test_guard_entry_digest_matches_go():
     assert _guard_entry_sha256(servers, "zed", "opencode") == ""
 
 
+# The same settings text and digests as internal/acp
+# TestClientEntrySHA256PinsTheEntriesThatStartTheLock: every entry that starts
+# the guard with the lock, pinned together by name (GAP-0504).
+_KIRO_GUARD_ARGS = ["--client", "zed", "--contract-lock", "/l/zed-kiro.contract-lock.json", "--", "/opt/a&b<c>", "acp"]
+_PARITY_MULTI = json.dumps({
+    "agent_servers": {
+        "DefenseClaw · Kiro": {
+            "command": "/opt/dc/defenseclaw-acp", "args": _KIRO_GUARD_ARGS, "type": "custom", "default_mode": "ask",
+        },
+        "My Kiro": {"command": "/opt/dc/defenseclaw-acp", "args": _KIRO_GUARD_ARGS, "env": {"N": "ü"}},
+        "Other": {
+            "command": "/opt/dc/defenseclaw-acp",
+            "args": ["--contract-lock", "/l/zed-opencode.contract-lock.json", "--", "/o"],
+        },
+    }
+})
+_PARITY_MULTI_DIGEST = "0e5ca901649cabbb9d3bd4ace7f7c4a84431c625fa6e59b69325c0cdf712ed34"
+_PARITY_ADOPTED_DIGEST = "a6dac44c3a23621edd8fd9d27e60f9b86c5e92d18cf621e15df07c7189025d59"
+
+
+def test_guard_entries_digest_matches_go():
+    servers = json.loads(_PARITY_MULTI)["agent_servers"]
+    lock = "/l/zed-kiro.contract-lock.json"
+    assert _guard_entry_sha256(servers, "zed", "kiro", lock) == _PARITY_MULTI_DIGEST
+    alone = {name: servers[name] for name in ("My Kiro", "Other")}
+    assert _guard_entry_sha256(alone, "zed", "kiro", lock) == _PARITY_ADOPTED_DIGEST
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -200,8 +228,8 @@ def test_setup_pins_the_guarded_entry_so_unrelated_edits_stay_verified(tmp_path,
         cleanup_app(app, db_path, data_dir)
 
 
-def test_numbered_entry_keeps_the_whole_file_pin(tmp_path, monkeypatch):
-    """GAP-0504: the guard looks the entry up by its reserved name, so a numbered entry pins the file."""
+def test_numbered_entry_pins_the_guarded_entry(tmp_path, monkeypatch):
+    """GAP-0504: a numbered entry (the reserved name is taken) is pinned by its entry, as the guard finds it."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
     settings = (
@@ -213,9 +241,65 @@ def test_numbered_entry_keeps_the_whole_file_pin(tmp_path, monkeypatch):
     settings.write_text(json.dumps({"agent_servers": {"DefenseClaw · Kiro": {"command": "/usr/bin/true", "args": []}}}))
     app, data_dir, db_path, settings, _guard, _agent, lock_path = _setup(tmp_path, monkeypatch)
     try:
-        assert "DefenseClaw · Kiro (2)" in json.loads(settings.read_text())["agent_servers"]
+        document = json.loads(settings.read_text())
+        assert "DefenseClaw · Kiro (2)" in document["agent_servers"]
         pin = json.loads(lock_path.read_text())["client"]["config_sha256"]
-        assert pin == hashlib.sha256(settings.read_bytes()).hexdigest()
+        numbered = _guard_entry_sha256(
+            {"DefenseClaw · Kiro": document["agent_servers"]["DefenseClaw · Kiro (2)"]}, "zed", "kiro"
+        )
+        assert pin == "entry-sha256:" + numbered
+        assert pin == "entry-sha256:" + _guard_entry_sha256(document["agent_servers"], "zed", "kiro", lock_path.resolve())
+        document["theme"] = "One Dark"
+        document["agent_servers"]["DefenseClaw · Kiro (2)"]["default_mode"] = "accept_edits"
+        settings.write_text(json.dumps(document, indent=2))
+        assert "entry changed after setup" not in _verify(app).output
+        document["agent_servers"]["DefenseClaw · Kiro (2)"]["env"] = {"LD_PRELOAD": "/tmp/x.so"}
+        settings.write_text(json.dumps(document))
+        assert "entry changed after setup" in _verify(app).output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_adopted_entry_pins_the_guarded_entry(tmp_path, monkeypatch):
+    """GAP-0504: acp adopt pins the adopted entry, so a theme edit keeps it verified; a launch edit does not."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    settings = (
+        tmp_path / "AppData" / "Roaming" / "Zed" / "settings.json"
+        if os.name == "nt"
+        else tmp_path / ".config" / "zed" / "settings.json"
+    )
+    settings.parent.mkdir(parents=True)
+    data = tmp_path / "data"
+    data.mkdir()
+    app, data_dir, db_path = make_app_context(str(data))
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    settings.write_text(json.dumps({"agent_servers": {"My Kiro": {"command": agent, "args": ["acp"], "env": {}}}}))
+    try:
+        adopted = CliRunner().invoke(
+            acp_cmd, ["adopt", "--client", "zed", "--guard-binary", guard, "--yes", "--json-output"], obj=app
+        )
+        assert adopted.exit_code == 0, adopted.output
+        lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+        document = json.loads(settings.read_text())
+        assert list(document["agent_servers"]) == ["My Kiro"]
+        pin = json.loads(lock_path.read_text())["client"]["config_sha256"]
+        assert pin == "entry-sha256:" + _guard_entry_sha256(
+            {"DefenseClaw · Kiro": document["agent_servers"]["My Kiro"]}, "zed", "kiro"
+        )
+        assert _verify(app).exit_code == 0
+        document["theme"] = "One Dark"
+        document.setdefault("agent", {})["default_mode"] = "ask"
+        document["agent_servers"]["My Kiro"]["default_mode"] = "accept_edits"
+        settings.write_text(json.dumps(document, indent=2))
+        result = _verify(app)
+        assert result.exit_code == 0, result.output
+        document["agent_servers"]["My Kiro"]["env"] = {"LD_PRELOAD": "/tmp/x.so"}
+        settings.write_text(json.dumps(document))
+        result = _verify(app)
+        assert result.exit_code != 0, result.output
     finally:
         cleanup_app(app, db_path, data_dir)
 
