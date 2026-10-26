@@ -45,8 +45,8 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 155408,
-      "sha256": "3ab130c66dc52c65f5ef8951485851ad7046bc63c4faf629e3f7a00db5346cbd"
+      "size": 156432,
+      "sha256": "cee900c4d33f810257ac9326f2e08062aa1afc74f1a81ee13d9a970d74c3b26f"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
@@ -75,14 +75,14 @@
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6817,
-      "sha256": "a1cb0a1b4d504e1924c1e847b104adf794db97082d3ff404e09c491ef7f521f8"
+      "size": 6832,
+      "sha256": "4f809884bcd020b282ebb235c24087522ea6baa6eaa9f60891d196d51f8c5103"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7166,
-      "sha256": "3cf9d72ea5f949bd349ab63af054e100c9dd2825e81fc70faa2613f01f4bdb48"
+      "size": 7178,
+      "sha256": "fb90b55dfb4e903aab5536ef8da5dc16cec9fec352368c0aa9cccddb9a6e1211"
     },
     "/usr/local/lib/defenseclaw/otel-headers.sh": {
       "mode": "-rwxr-xr-x",
