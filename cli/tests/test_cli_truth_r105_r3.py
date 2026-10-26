@@ -139,3 +139,25 @@ def test_setup_splunk_help_says_the_probe_runs_before_saving() -> None:
     assert "best-effort" not in result.output
     assert "saves nothing" in result.output
     assert "without the live HEC probe that otherwise runs first" in result.output
+
+
+def _probe(monkeypatch, tmp_path: Path, error: Exception):
+    from defenseclaw.commands import cmd_setup_observability as obs
+
+    monkeypatch.setattr("defenseclaw.config_inspect.inspect_v8_config", lambda *_a, **_k: SimpleNamespace(effective={}, data_dir=str(tmp_path)))
+    monkeypatch.setattr("defenseclaw.observability.destination_test.canonical_local_compliance_recorder", lambda **_k: None)
+
+    def run(*_a, **_k):
+        raise error
+
+    monkeypatch.setattr("defenseclaw.observability.destination_test.run_destination_test", run)
+    return obs
+
+
+def test_a_failed_probe_of_the_candidate_saves_nothing(monkeypatch, tmp_path: Path) -> None:
+    # GAP-1749: the probe the enterprise path calls, failure branch.
+    from defenseclaw.observability.destination_test import DestinationTestError
+
+    obs = _probe(monkeypatch, tmp_path, DestinationTestError("dns_failed", "the destination hostname could not be resolved"))
+    with pytest.raises(obs.DestinationProbeFailed, match="dns_failed"):
+        obs._probe_candidate_destination(str(tmp_path / "candidate.yaml"), str(tmp_path), "splunk-enterprise", 1.0)

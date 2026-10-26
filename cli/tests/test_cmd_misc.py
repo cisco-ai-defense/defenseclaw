@@ -1600,8 +1600,9 @@ class TestSetupSplunkCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_setup import setup
 
         endpoint = "https://splunk.example.com:8088/services/collector/event"
+        # GAP-1749: the probe the enterprise path runs before saving.
         with patch(
-            "defenseclaw.commands.cmd_setup_observability._test_v8_destination"
+            "defenseclaw.commands.cmd_setup_observability._probe_candidate_destination"
         ) as mock_probe:
             result = self.runner.invoke(
                 setup,
