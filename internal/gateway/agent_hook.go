@@ -1121,6 +1121,9 @@ func (a *APIServer) finalizeAgentHook(
 		Result:       envResult,
 		Action:       resp.Action,
 		RawAction:    resp.RawAction,
+		// The verdict's enforcement holds even if identity stamping
+		// panics before it sets the bit (GAP-1098).
+		Enforced:     resp.Action == "block",
 		Severity:     resp.Severity,
 		Mode:         resp.Mode,
 		Reason:       hookSourceReason(resp),
