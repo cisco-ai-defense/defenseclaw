@@ -1780,9 +1780,7 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 		}
 	}
 	policyTree := func(root, label, serviceAccount string) error {
-		return validatePolicyTree(root, label, serviceAccount, referenced, policyTreeChecks{
-			dir: managed.ValidateTrustedServiceRuntimeDir, tree: managed.ValidateTrustedServiceRuntimeTree, file: managed.ValidateTrustedServiceRuntimeFilePath,
-		})
+		return validatePolicyTree(root, label, serviceAccount, referenced, managedPolicyTreeChecks)
 	}
 	if err := check("policy_dir", cfg.PolicyDir, policyTree); err != nil {
 		return err
@@ -1799,6 +1797,29 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 // alone, a folder with everything below it, and a file.
 type policyTreeChecks struct {
 	dir, tree, file func(path, label, serviceAccount string) error
+}
+
+// managedPolicyTreeChecks are the checks of a managed standalone policy_dir
+// tree (a test replaces them: the real ones need root-owned folders).
+var managedPolicyTreeChecks = policyTreeChecks{
+	dir: managed.ValidateTrustedServiceRuntimeDir, tree: managed.ValidateTrustedServiceRuntimeTree, file: managed.ValidateTrustedServiceRuntimeFilePath,
+}
+
+// ValidateManagedPolicyDir is the trust check of a managed standalone
+// policy_dir: dir and everything below it, except the rule pack folders
+// under <dir>/guardrail that no setting of cfg names. The config validation
+// and the gateway's policy build both use it, so a folder the CLI accepts
+// is one the gateway loads: the gateway kept its own whole-tree check and
+// refused to start on an unreferenced 0777 folder the CLI accepted
+// (GAP-1694).
+func ValidateManagedPolicyDir(cfg *Config, dir, serviceAccount string) error {
+	var referenced []string
+	for _, pack := range cfg.ReferencedRulePackDirs() {
+		if pack = strings.TrimSpace(pack); pack != "" {
+			referenced = append(referenced, filepath.Clean(pack))
+		}
+	}
+	return validatePolicyTree(dir, "policy_dir", serviceAccount, referenced, managedPolicyTreeChecks)
 }
 
 // validatePolicyTree checks root and everything below it, except the
@@ -1850,8 +1871,22 @@ func validatePolicyTree(root, label, serviceAccount string, referenced []string,
 }
 
 // PathHoldsAny reports whether dir is one of paths or a folder above one.
+// On macOS and Windows, whose volumes ignore case, a path spelled with
+// another case names the same folder: a referenced pack "guardrail/Strict"
+// is the folder "strict", which must keep its full check (GAP-1802).
 func PathHoldsAny(dir string, paths []string) bool {
+	return pathHoldsAny(runtime.GOOS, dir, paths)
+}
+
+func pathHoldsAny(goos, dir string, paths []string) bool {
+	fold := goos == "darwin" || goos == "windows"
+	if fold {
+		dir = strings.ToLower(dir)
+	}
 	for _, p := range paths {
+		if fold {
+			p = strings.ToLower(p)
+		}
 		if p == dir || strings.HasPrefix(p, dir+string(filepath.Separator)) {
 			return true
 		}

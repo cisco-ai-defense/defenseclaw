@@ -78,7 +78,7 @@ type generationInputs struct {
 }
 
 // managedPolicyTreeTrust refuses a managed standalone policy_dir that a
-// standard user could change (managed.ValidateTrustedServiceRuntimeTree).
+// standard user could change (config.ValidateManagedPolicyDir).
 var managedPolicyTreeTrust = func(cfg *config.Config, dir string) error {
 	if !cfg.StandaloneEnterprise() || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
@@ -86,7 +86,9 @@ var managedPolicyTreeTrust = func(cfg *config.Config, dir string) error {
 	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	return managed.ValidateTrustedServiceRuntimeTree(dir, "policy_dir", os.Getenv(managed.WindowsServiceAccountEnv))
+	// The same check as the config validation: the rule pack folders no
+	// setting names are not loaded, so they are not trust inputs (GAP-1694).
+	return config.ValidateManagedPolicyDir(cfg, dir, os.Getenv(managed.WindowsServiceAccountEnv))
 }
 
 func buildGeneration(ctx context.Context, in generationInputs) (*Generation, error) {
