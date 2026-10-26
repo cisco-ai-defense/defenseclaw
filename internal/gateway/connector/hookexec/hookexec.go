@@ -1894,7 +1894,7 @@ func failNativeDecision(opts Options, sp spec, reason string) int {
 			return 0
 		}
 	}
-	return failResponse(opts, sp, normalizeFailMode(opts.FailMode), reason)
+	return failResponse(opts, sp, failMode, reason)
 }
 
 func managedNativeBlockableEvent(connector, event string) bool {

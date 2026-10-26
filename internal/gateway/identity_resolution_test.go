@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -177,8 +176,8 @@ func TestGAP0522UncertainIdentityNamesTheMissingFact(t *testing.T) {
 					!strings.Contains(w.Body.String(), "UPN is unconfirmed") {
 					t.Fatalf("inspect refusal = %d %s", w.Code, w.Body.String())
 				}
-				if response, refused := api.refuseProfileHook(ctx, connector.HookProfile{}, "hermes",
-					agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_use"}, nil, nil); !refused ||
+				if response, refused := api.refuseProfileHook(ctx, api.hookProfileForConnector("hermes"), "hermes",
+					agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_call"}, nil, nil); !refused ||
 					response.Action != "block" || response.Reason != got.Refused {
 					t.Fatalf("hook refusal = %+v, %v", response, refused)
 				}

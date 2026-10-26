@@ -956,6 +956,7 @@ func (a *APIServer) safeApplyAgentHookToolChains(
 			}
 		}
 	}()
+	hookStageForTest(ctx, "chain")
 	return a.applyAgentHookToolChains(
 		ctx,
 		profile,
