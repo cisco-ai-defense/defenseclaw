@@ -1041,7 +1041,10 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
                 raise click.ClickException(f"{_destination_not_set(key, parts, view)} config.yaml was not changed.")
             raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
     roster = _guarded_connector_modes(app)
-    changes = [Change(key, unset=True, prune_empty_to=_unset_prune_scope(parts)) for key, parts in parsed]
+    changes = [
+        Change(key, unset=True, prune_empty_to=_roster_entry_prune_scope(parts, written, app) or _unset_prune_scope(parts))
+        for key, parts in parsed
+    ]
     if _write_config_change(app, changes, expect_sha256, "unset"):
         for note in _left_roster_notes(parsed, roster):
             click.echo(note)
@@ -1154,6 +1157,38 @@ def _schema_default(parts: list) -> tuple[bool, object]:
     if isinstance(node, dict) and "default" in node:
         return True, node["default"]
     return False, None
+
+
+def _roster_entry_prune_scope(parts: list, written: object, app: AppContext) -> str:
+    """``guardrail`` when an unset may also remove the roster entry it empties.
+
+    ``config set guardrail.connectors.<C>.<key>`` on a file whose roster
+    comes from the single-connector setting (``guardrail.connector`` or
+    ``claw.mode`` naming ``<C>``, no ``guardrail.connectors`` map) creates
+    the entry ``<C>``. The roster does not change, so undoing that set must
+    not leave ``connectors: {<C>: {}}`` behind (GAP-0967). The entry stays
+    whenever it is what puts ``<C>`` on the roster: the map has other
+    entries, or the single-connector setting names another connector or none.
+    """
+    if len(parts) < 4 or parts[:2] != ["guardrail", "connectors"] or not isinstance(parts[2], str):
+        return ""
+    if not isinstance(written, dict):
+        return ""
+    connectors = _lookup(written, ["guardrail", "connectors"])[1]
+    if not isinstance(connectors, dict) or list(connectors) != [parts[2]]:
+        return ""
+    try:
+        from defenseclaw import connector_paths
+
+        cfg = app.cfg if app.cfg is not None else config_module.load()
+        single = str(cfg.guardrail.connector or "").strip() or str(cfg.claw.mode or "").strip()
+        name = connector_paths.normalize(parts[2])
+        single = connector_paths.normalize(single) if single else ""
+    except Exception:  # noqa: BLE001 - keep the entry when the roster cannot be read
+        return ""
+    if not single or single != name or name == "openclaw":
+        return ""
+    return "guardrail"
 
 
 def _unset_prune_scope(parts: list) -> str:
