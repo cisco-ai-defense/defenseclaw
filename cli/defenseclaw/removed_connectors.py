@@ -128,7 +128,7 @@ _WORD_EDGE = " \t\r\n\"'`=;&|()"
 
 
 def _runs_path(text: str, paths: list[str]) -> bool:
-    """Whether a command names one of *paths* whole, never a longer name that ends with it (removed.go removedRunsPath)."""
+    """Whether a command names one of *paths* whole, never a longer name ending in it (removed.go removedRunsPath)."""
 
     def fold(value: str) -> str:
         return value.replace("\\", "/").lower() if os.name == "nt" else value
