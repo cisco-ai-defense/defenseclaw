@@ -200,3 +200,34 @@ func TestR105GAP2045BareStateNamesJudgedByTheFileReached(t *testing.T) {
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)
 	}
 }
+
+// GAP-2075: a find -delete is log cleanup only from the state root, with
+// every -name/-iname pattern matching no protected name and no OR or
+// negation. A start at a protected tree, a pattern that can match a
+// protected name, and a time, size or path test alone remove protected
+// state and block in every mode.
+func TestR105GAP2075FindDeleteOfProtectedStateNames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell forms")
+	}
+	_, cwd := r105StateFixture(t)
+	rows := []r105StateRow{
+		{"find hooks name star", "find ~/.defenseclaw/hooks -name '*' -delete", true, ""},
+		{"find root name config", "find ~/.defenseclaw -name config.yaml -delete", true, ""},
+		{"find root mtime", "find ~/.defenseclaw -mtime +0 -delete", true, ""},
+		{"find root size", "find ~/.defenseclaw -size -1G -delete", true, ""},
+		{"find root path hooks", "find ~/.defenseclaw -path '*hooks*' -delete", true, ""},
+		{"find installer sh", "find ~/.defenseclaw/installer -type f -name '*.sh' -delete", true, ""},
+		{"find installer mtime", "find ~/.defenseclaw/installer -type f -mtime +9999 -delete", true, ""},
+		{"find root iname yaml", "find ~/.defenseclaw -iname '*.YAML' -delete", true, ""},
+		{"find root log or config", "find ~/.defenseclaw -name '*.log' -o -name config.yaml -delete", true, ""},
+		{"find root not log", "find ~/.defenseclaw -not -name '*.log' -delete", true, ""},
+		// Log cleanup from the root stays allowed with no state finding.
+		{"find root log cleanup", "find ~/.defenseclaw -name '*.log' -mtime +7 -delete", false, ""},
+		{"find root tmp cleanup", "find ~/.defenseclaw -type f -name '*.tmp' -delete", false, ""},
+		{"find logs tree", "find ~/.defenseclaw/logs -mtime +7 -delete", false, ""},
+	}
+	for _, mode := range []string{"observe", "action"} {
+		r105RunStateRowsChecked(t, mode, cwd, rows, true)
+	}
+}

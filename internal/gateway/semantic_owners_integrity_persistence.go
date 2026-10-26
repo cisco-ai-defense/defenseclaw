@@ -2589,7 +2589,7 @@ func stateTreeEntryChanged(
 	}
 	switch candidate.Access {
 	case actionfacts.PathAccessDelete:
-		return !findDeletesOnlyMatches(command)
+		return !findDeletesOnlyUnprotectedNames(command, state)
 	case actionfacts.PathAccessWrite:
 		if !hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove) {
 			return false
@@ -2617,20 +2617,64 @@ func stateTreeEntryChanged(
 	return false
 }
 
-// findDeletesOnlyMatches reports a find -delete whose tests select entries
-// by name, path, time, size, owner or link: it removes the entries that
-// match (log cleanup), not the tree it starts from.
-func findDeletesOnlyMatches(command actionfacts.CommandFact) bool {
-	if !strings.EqualFold(command.Program, "find") || len(command.Argv) < 2 {
+// findDeletesOnlyUnprotectedNames reports a find -delete that removes only
+// entries no protected state name can be (log cleanup such as
+// `find ~/.defenseclaw -name '*.log' -mtime +7 -delete`), not the tree it
+// starts from (GAP-2075). It holds only for a find from the state root
+// (state ""), whose tests are all joined by AND, with at least one -name or
+// -iname and every such pattern matching no protected name. A start at a
+// protected tree, a time, size or path test alone, and an OR or a negation
+// never exempt, because each can still reach config.yaml, a hook or the
+// saved installer.
+func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state string) bool {
+	if state != "" || !strings.EqualFold(command.Program, "find") || len(command.Argv) < 2 {
 		return false
 	}
-	for _, argument := range command.Argv[1:] {
-		switch strings.ToLower(argument) {
-		case "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
-			"-regex", "-iregex", "-mtime", "-mmin", "-atime", "-amin", "-ctime",
-			"-cmin", "-newer", "-anewer", "-cnewer", "-size", "-empty", "-user",
-			"-group", "-uid", "-gid", "-nouser", "-nogroup", "-perm", "-links",
-			"-inum", "-samefile", "-lname", "-ilname":
+	named := false
+	for index := 1; index < len(command.Argv); index++ {
+		argument := strings.ToLower(command.Argv[index])
+		switch argument {
+		case "-o", "-or", "!", "-not", ",":
+			return false
+		case "-name", "-iname":
+			if index+1 >= len(command.Argv) {
+				return false
+			}
+			index++
+			if findPatternReachesProtectedState(command.Argv[index], argument == "-iname") {
+				return false
+			}
+			named = true
+		}
+	}
+	return named
+}
+
+// protectedStateNameSamples are the names a file of the active state can
+// have: the root's own files, the tree names and the files the trees hold
+// (hooks, the saved installer and its digest, policies, receipts).
+var protectedStateNameSamples = []string{
+	".env", "config.yaml", "confidence_policy.yaml", "guardrail_runtime.json",
+	"device.key", "picked_connector", "custom-providers.json", "audit.db",
+	"audit.db-wal", "audit.db-shm", "judge.db", "judge.db-wal", "judge.db-shm",
+	"judge_bodies.db", "judge_bodies.db-wal", "judge_bodies.db-shm",
+	"cache", "hooks", "installer", "policies", "previous", "quarantine",
+	"receipts", "registries",
+	"claude-code-hook.sh", "inspect-tool.sh", "_hardening.sh", "hook.ps1", "hook.cmd",
+	"install.sh", "install.ps1", "binaries.sha256", "installer.sha256",
+	"defenseclaw-hook-post", "default.yaml", "rules.yml", "policy.rego", "data.json",
+}
+
+func findPatternReachesProtectedState(pattern string, fold bool) bool {
+	if fold {
+		pattern = strings.ToLower(pattern)
+	}
+	for _, name := range protectedStateNameSamples {
+		if fold {
+			name = strings.ToLower(name)
+		}
+		matched, err := path.Match(pattern, name)
+		if err != nil || matched {
 			return true
 		}
 	}
