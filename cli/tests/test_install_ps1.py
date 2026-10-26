@@ -7328,3 +7328,61 @@ def test_install_ps1_takes_a_stale_lock_over_in_place_behind_a_claim() -> None:
     live = live[: live.index("\n}\n")]
     assert "[int]$claimer -eq $PID" in live and "StartTime.ToFileTimeUtc() -eq $recorded" in live
     assert "$process.HasExited" in live
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("tui", [False, True])
+def test_the_gateways_own_scans_do_not_hold_up_an_upgrade_or_rollback(tmp_path: Path, tui: bool) -> None:
+    # GAP-2000 (r105 install-window round 3, a4-win1): right after an upgrade
+    # the gateway rescans every plugin (scanner-fingerprint-changed), each scan
+    # a defenseclaw.exe -> venv python child of the gateway. The documented
+    # `install.ps1 -Rollback -Yes` then waited 60 s and refused: "DefenseClaw
+    # is in use by defenseclaw.exe (pid 12544), python.exe (pid 10772). Close
+    # it (for example the DefenseClaw TUI)". Those are the gateway's own
+    # processes, which Stop-Gateway ends; a program the user runs still stops it.
+    bin_dir = tmp_path / "bin"
+    venv = tmp_path / "data" / ".venv"
+    (venv / "Scripts").mkdir(parents=True)
+    bin_dir.mkdir()
+    rows = [
+        (10, 1, str(bin_dir / "defenseclaw-gateway.exe"), "defenseclaw-gateway.exe", 100),
+        (11, 10, str(bin_dir / "defenseclaw.exe"), "defenseclaw.exe", 200),
+        (12, 11, f"{venv}\\Scripts\\python.exe", "python.exe", 201),
+        # An older process whose parent pid the gateway reused: not a scan.
+        (13, 10, f"{venv}\\Scripts\\python.exe", "python.exe", 50) if tui else None,
+    ]
+    rows = [row for row in rows if row]
+    objects = ",".join(
+        f"[pscustomobject]@{{ ProcessId = {pid}; ParentProcessId = {ppid}; ExecutablePath = '{image}'; Name = '{name}';"
+        f" CreationDate = [datetime]::new(2026, 10, 26).AddSeconds({born}) }}"
+        for pid, ppid, image, name, born in rows
+    )
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$BinDir = '{bin_dir}'
+$Venv = '{venv}'
+$script:sleeps = 0
+function Get-CimInstance {{ param($ClassName, $ErrorAction, $ErrorVariable) @({objects}) }}
+function Move-Path([string]$From, [string]$To, [int]$Seconds = 10) {{ throw 'The process cannot access the file' }}
+function Start-Sleep {{ param([int]$Seconds) $script:sleeps++ }}
+function Write-Info([string]$m) {{ "INFO $m" }}
+function Die([string]$m) {{ throw "DIE $m" }}
+{_ps1_function("Get-ProcessesUnder")}
+{_ps1_function("Get-GatewayDescendants")}
+{_ps1_function("Wait-VenvFree")}
+"SCANS=$((Get-GatewayDescendants | ForEach-Object {{ $_.ProcessId }}) -join ',')"
+try {{ Wait-VenvFree; "FREE sleeps=$script:sleeps" }} catch {{ "$($_.Exception.Message)" }}
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "SCANS=11,12" in out, out
+    if tui:
+        assert "DIE DefenseClaw is in use by python.exe (pid 13)" in out, out
+        assert "pid 11" not in out and "pid 12" not in out, out
+    else:
+        assert "FREE sleeps=0" in out, out
+    stop = _ps1_function("Stop-Gateway")
+    assert stop.index("$scans = @(Get-GatewayDescendants)") < stop.index('@("stop")')
+    assert stop.index("Stop-Watchdog\n    foreach ($scan in $scans)") > stop.index('@("stop")')
+

@@ -1130,6 +1130,8 @@ function Stop-Gateway {
     $process = Get-GatewayProcess
     if (-not $process) { Stop-Watchdog; return $true }
     $image = $process.Path
+    # Its scans (Get-GatewayDescendants) go with it; Wait-VenvFree left them.
+    $scans = @(Get-GatewayDescendants)
     Invoke-Native $image @("stop") -Quiet | Out-Null
     if (-not $process.WaitForExit(15000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
@@ -1143,6 +1145,13 @@ function Stop-Gateway {
         Start-Sleep -Seconds 1
     }
     Stop-Watchdog
+    foreach ($scan in $scans) {
+        $alive = Get-Process -Id $scan.ProcessId -ErrorAction SilentlyContinue
+        # The same process, not one that got its pid since.
+        if ($alive -and (-not $scan.CreationDate -or $alive.StartTime -le $scan.CreationDate.AddSeconds(1))) {
+            Stop-Process -Id $scan.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    }
     return $process.HasExited -and -not (Get-GatewayProcess)
 }
 
@@ -1366,22 +1375,60 @@ function Stop-ProcessesUnder([string]$Root) {
     }
 }
 
+function Get-GatewayDescendants {
+    # The processes the running gateway or its watchdog started, and theirs:
+    # its plugin and skill scans run the CLI from the venv for minutes after
+    # an upgrade (scanner-fingerprint-changed). They end with the gateway
+    # (Stop-Gateway), so they are not programs the user has to close. A child
+    # is one created after its parent, so a reused parent pid adopts nothing.
+    # Empty where Win32_Process is refused (an SSH session).
+    $all = @()
+    try { $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) } catch { }
+    if (-not $all.Count) { return @() }
+    $prefix = Join-Path $BinDir "defenseclaw-gateway"
+    $born = @{}
+    foreach ($process in $all) {
+        $image = [string]$process.ExecutablePath
+        if ($image -and $image.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { $born[[int]$process.ProcessId] = $process.CreationDate }
+    }
+    $found = @()
+    do {
+        $more = $false
+        foreach ($process in $all) {
+            $id = [int]$process.ProcessId
+            $parent = [int]$process.ParentProcessId
+            if ($born.ContainsKey($id) -or -not $born.ContainsKey($parent)) { continue }
+            if ($born[$parent] -and $process.CreationDate -and $process.CreationDate -lt $born[$parent]) { continue }
+            $born[$id] = $process.CreationDate
+            $found += $process
+            $more = $true
+        }
+    } while ($more)
+    return $found
+}
+
 function Wait-VenvFree {
     # A program running from the venv (the TUI, or the CLI that started this
     # installer and is still exiting) keeps its files from being deleted, and
     # an open file keeps the venv from being moved. Wait for them, then give
-    # up before anything has changed.
+    # up before anything has changed. The gateway's own scans are not waited
+    # for: they stop with the gateway, before anything uses the venv (a
+    # rollback right after an upgrade was refused for them).
     if (-not (Test-Path -LiteralPath $Venv)) { return }
     for ($waited = 0; $waited -le 60; $waited++) {
-        if (-not @(Get-ProcessesUnder @("$Venv\")).Count) {
+        $own = @(Get-GatewayDescendants | ForEach-Object { [int]$_.ProcessId })
+        $others = @(Get-ProcessesUnder @("$Venv\") | Where-Object { $own -notcontains [int]$_.ProcessId })
+        if (-not $others.Count) {
             $moved = $true
             try { Move-Path $Venv "$Venv.busy" 0 } catch { $moved = $false }
             if ($moved) { Move-Path "$Venv.busy" $Venv 60; return }
+            if ($own.Count) { return }
         }
         if ($waited -eq 0) { Write-Info "Waiting for programs that use $Venv to exit" }
         Start-Sleep -Seconds 1
     }
-    $users = @(Get-ProcessesUnder @("$Venv\", "$BinDir\defenseclaw") | Where-Object { $_.Name -ne "defenseclaw-gateway.exe" } |
+    $own = @(Get-GatewayDescendants | ForEach-Object { [int]$_.ProcessId })
+    $users = @(Get-ProcessesUnder @("$Venv\", "$BinDir\defenseclaw") | Where-Object { $_.Name -ne "defenseclaw-gateway.exe" -and $own -notcontains [int]$_.ProcessId } |
         ForEach-Object { "$($_.Name) (pid $($_.ProcessId))" })
     $list = if ($users.Count) { $users -join ", " } else { "another program" }
     Die "DefenseClaw is in use by $list. Close it (for example the DefenseClaw TUI) and run the installer again; nothing was changed"
