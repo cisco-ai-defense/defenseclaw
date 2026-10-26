@@ -1354,6 +1354,9 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 	// Quotes that are literal in the outer command do not stop expansion there.
 	raw := actionWindowsScan(command, grammar)
 	rawWords, rawOK := raw.words, raw.ok
+	if rawOK && actionWindowsInvokedTextMention(rawWords, cwd, home, depth, stateOnly) {
+		return true
+	}
 	if rawOK {
 		for i := 0; i+2 < len(rawWords); i++ {
 			program := strings.TrimSuffix(strings.ToLower(programBase(rawWords[i])), ".exe")
@@ -1428,6 +1431,44 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 	}
 	for i, word := range words {
 		if !skip[i] && actionWindowsWordMentionsTarget(word, cwd, home, stateOnly) {
+			return true
+		}
+	}
+	return false
+}
+
+// actionWindowsInvokedTextMention runs the scan on the text that
+// Invoke-Expression (iex) runs, given as its argument or piped into it: the
+// text is parsed again when it runs, so a $HOME that a single-quoted string
+// or an @'...'@ here-string kept literal is expanded there (GAP-1523).
+func actionWindowsInvokedTextMention(words []string, cwd, home string, depth int, stateOnly bool) bool {
+	invoke := func(word string) bool {
+		program := strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(word, `\`, "/"))), ".exe")
+		return program == "iex" || program == "invoke-expression"
+	}
+	body := func(word string) string {
+		if len(word) >= 2 && word[0] == '@' && word[len(word)-1] == '@' && strings.ContainsAny(word, "\r\n") {
+			return word[1 : len(word)-1]
+		}
+		return word
+	}
+	for i, word := range words {
+		if invoke(word) {
+			for j := i + 1; j < len(words); j++ {
+				if words[j] == ";" || words[j] == "|" || words[j] == "&" || words[j] == "&&" || words[j] == "||" {
+					break
+				}
+				if strings.HasPrefix(words[j], "-") {
+					continue
+				}
+				if actionWindowsTargetMention(body(words[j]), cwd, home, depth+1, stateOnly) {
+					return true
+				}
+				break
+			}
+		}
+		if i+2 < len(words) && words[i+1] == "|" && invoke(words[i+2]) &&
+			actionWindowsTargetMention(body(word), cwd, home, depth+1, stateOnly) {
 			return true
 		}
 	}
