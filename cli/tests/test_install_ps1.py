@@ -7391,3 +7391,58 @@ try {{ Wait-VenvFree; "FREE sleeps=$script:sleeps" }} catch {{ "$($_.Exception.M
     stop = _ps1_function("Stop-Gateway")
     assert stop.index("$scans = @(Get-GatewayDescendants)") < stop.index('@("stop")')
     assert stop.index("Stop-Watchdog\n    foreach ($scan in $scans)") > stop.index('@("stop")')
+
+
+def _outage_notice_python() -> tuple[str, str]:
+    sh = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    body = sh[sh.index("outage_open_notice() {") :]
+    body = body[body.index("<<'PY' 2>/dev/null || true\n") + len("<<'PY' 2>/dev/null || true\n") :]
+    sh_py = body[: body.index("\nPY\n") + 1]
+    ps = _text()
+    ps_py = ps[ps.index("$OutageOpenNoticePython = @'\n") + len("$OutageOpenNoticePython = @'\n") :]
+    ps_py = ps_py[: ps_py.index("'@\n")]
+    return sh_py, ps_py
+
+
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("guardrail", "notice"),
+    [
+        ("  connectors:\n    claudecode: {}\n    codex: {}\n", True),
+        ("  hook_fail_mode: closed\n  connectors:\n    claudecode: {}\n", False),
+        ("  hook_fail_mode: open\n  connectors:\n    claudecode: {}\n", False),
+        ("  connectors:\n    claudecode:\n      hook_fail_mode: closed\n    codex: {}\n", False),
+        ("  rule_pack: strict\n  connectors:\n    claudecode: {}\n", False),
+    ],
+    ids=["unset", "saved-closed", "saved-open", "connector-closed", "strict"],
+)
+def test_an_upgrade_from_1_0_3_says_once_that_outages_now_run(tmp_path: Path, guardrail: str, notice: bool) -> None:
+    # GAP-1885 (lead 13:58, failmode's exact sentence): a 1.0.2 or 1.0.3
+    # config that saves no hook fail mode blocked calls during a gateway
+    # outage; after the upgrade the default and permissive tiers let them
+    # run with a warning (owner decision 2026-10-23). Both installers say so
+    # once, after "Upgraded from"; a saved mode (which now wins), the strict
+    # tier, a managed install or an upgrade from 1.0.4 say nothing.
+    sh_py, ps_py = _outage_notice_python()
+    assert sh_py == ps_py
+    home = tmp_path / ".defenseclaw"
+    home.mkdir()
+    (home / "config.yaml").write_text("guardrail:\n  enabled: true\n  mode: action\n" + guardrail, encoding="utf-8")
+    env = {**os.environ, "DEFENSECLAW_HOME": str(home)}
+    env.pop("DEFENSECLAW_CONFIG", None)
+    result = subprocess.run([sys.executable, "-I", "-"], input=sh_py, capture_output=True, text=True, env=env, timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert (result.stdout.strip() == "notice") is notice, result.stdout + result.stderr
+    sentence = (
+        "Gateway outages now let calls run with a warning (the default and permissive policies). "
+        "Run `defenseclaw guardrail fail-mode closed` to keep blocking them."
+    )
+    sh = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    summary = sh[sh.index('changed="Upgraded from ${PREV_VERSION}"') :][:1200]
+    assert 'version_lt "${PREV_VERSION}" 1.0.4 && version_lt "${PREV_VERSION}" "${VERSION}" && [[ "$(outage_open_notice)" == notice ]]' in summary
+    assert f"printf '  %s\\n' '{sentence}'" in summary
+    ps = _text()
+    summary = ps[ps.index('$changed = "Upgraded from $PrevVersion"') :][:900]
+    assert '[version]$PrevVersion -lt [version]"1.0.4" -and [version]$PrevVersion -lt [version]$Ver -and (Test-OutageOpenNotice)' in summary
+    assert f"Write-Host ('  ' + '{sentence}')" in summary
+

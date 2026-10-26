@@ -1732,12 +1732,42 @@ elif [[ "${RUN_QUICKSTART}" == true ]]; then
 fi
 rm -rf "${STAGING}"
 ensure_path_hint
+outage_open_notice() {
+    # An upgrade from 1.0.2 or 1.0.3 of a config that saves no hook fail
+    # mode: gateway outages now run with a warning in the default and
+    # permissive tiers (owner decision 2026-10-23), which those releases
+    # blocked. Said once, after the upgrade (GAP-1885).
+    [[ -x "${VENV}/bin/python" ]] || return 0
+    DEFENSECLAW_HOME="${DEFENSECLAW_HOME}" "${VENV}/bin/python" -I - <<'PY' 2>/dev/null || true
+# GAP-1885: "notice" when this config saves no hook fail mode (global or for
+# an active connector) and a per-user connector now lets a gateway outage
+# run (the default and permissive tiers); 1.0.2 and 1.0.3 closed it.
+try:
+    from defenseclaw import config as dc_config
+    cfg = dc_config.load()
+    guard = cfg.guardrail
+    names = list(cfg.active_connectors())
+    if guard.enabled and names and not cfg.managed_outside_secure_client() and not guard.secure_client_hook_fail_modes():
+        saved = bool(getattr(guard, "_hook_fail_mode_saved", False) and str(guard.hook_fail_mode or "").strip())
+        for name in names:
+            override = guard._connector_override(name)
+            if override is not None and str(override.hook_fail_mode or "").strip():
+                saved = True
+        if not saved and any(guard.effective_hook_fail_mode(name) == "open" for name in names):
+            print("notice")
+except Exception:
+    pass
+PY
+}
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
 if [[ -n "${PREV_VERSION}" && "${REPAIR}" != true ]]; then
     changed="Upgraded from ${PREV_VERSION}"
     version_lt "${VERSION}" "${PREV_VERSION}" && changed="Downgraded from ${PREV_VERSION}"
     [[ "${PREV_VERSION}" == "${VERSION}" ]] && changed="Replaced the other build of ${VERSION}"
     printf "  ${changed}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
+    if version_lt "${PREV_VERSION}" 1.0.4 && version_lt "${PREV_VERSION}" "${VERSION}" && [[ "$(outage_open_notice)" == notice ]]; then
+        printf '  %s\n' 'Gateway outages now let calls run with a warning (the default and permissive policies). Run `defenseclaw guardrail fail-mode closed` to keep blocking them.'
+    fi
     if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
         printf "  The audit history ${PREV_VERSION} recorded is not carried over to 1.0; a copy is in ${PREVIOUS}/data/audit.db\n"
     fi
