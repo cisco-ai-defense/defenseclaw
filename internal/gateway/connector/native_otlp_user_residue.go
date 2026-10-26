@@ -18,6 +18,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // A native OTLP exporter sends to whatever process holds the port named in its
@@ -628,14 +630,32 @@ func nativeOTLPTakeBackPendingPath(dataDir, connectorName string) (string, OTLPP
 	return filepath.Join(dataDir, nativeOTLPTakeBackPendingPrefix+strings.ToLower(strings.TrimSpace(connectorName))+".json"), scope, true
 }
 
+// nativeOTLPTakeBackPendingBeforeRead runs between the marker's checks and
+// its read. Tests replace it.
+var nativeOTLPTakeBackPendingBeforeRead = func(string) {}
+
+// readNativeOTLPTakeBackPending reads the marker in the account's data
+// directory, which the SYSTEM guardian does every pass (GAP-2021): only a
+// regular file the account (or a trusted principal) owns counts, and it is
+// read without following a link or blocking on a FIFO, at most
+// nativeOTLPTakeBackPendingMaxBytes, and only while it is still the file
+// that was checked. Anything else is no marker.
 func readNativeOTLPTakeBackPending(path string) (nativeOTLPTakeBackPendingRecord, bool) {
 	var record nativeOTLPTakeBackPendingRecord
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > nativeOTLPTakeBackPendingMaxBytes {
+	if err != nil || !info.Mode().IsRegular() || info.Size() > nativeOTLPTakeBackPendingMaxBytes ||
+		nativeOTLPTakeBackMarkerOwnerTrusted(path, info) != nil {
 		return record, false
 	}
-	data, err := os.ReadFile(path)
-	if err != nil || json.Unmarshal(data, &record) != nil {
+	nativeOTLPTakeBackPendingBeforeRead(path)
+	data, err := safefile.ReadRegularFileBounded(path, nativeOTLPTakeBackPendingMaxBytes)
+	if err != nil {
+		return record, false
+	}
+	if after, err := os.Lstat(path); err != nil || !os.SameFile(info, after) {
+		return record, false
+	}
+	if json.Unmarshal(data, &record) != nil {
 		return nativeOTLPTakeBackPendingRecord{}, true
 	}
 	return record, true
