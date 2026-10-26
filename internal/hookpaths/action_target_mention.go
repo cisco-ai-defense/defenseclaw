@@ -64,6 +64,9 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 		if nestedFound {
 			return true
 		}
+		if !stateOnly && actionInterpreterBuildsKeyPath(file, home) {
+			return true
+		}
 	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
@@ -199,6 +202,36 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 		}
 	}
 	return false
+}
+
+// actionInterpreterKeyPath matches inline interpreter code that builds a
+// path to an authorized-keys file from parts: an f-string or concatenation
+// ({h}/.ssh/authorized_keys, h + "/.ssh/authorized_keys"), os.path.join(h,
+// ".ssh", "authorized_keys") or Path(h) / ".ssh" / "authorized_keys". The
+// .ssh and authorized_keys names are both in the code, a protected-named
+// word whatever builds the prefix (GAP-1732, the GAP-0475 class).
+var actionInterpreterKeyPath = regexp.MustCompile(`\.ssh(?:['"\s,/+)\\]|os\.sep|File::Spec|path\.sep){1,12}authorized_keys2?\b`)
+
+// actionInterpreterBuildsKeyPath reports a python -c, perl/ruby/node -e call
+// whose code builds a path to an authorized-keys file.
+func actionInterpreterBuildsKeyPath(file *syntax.File, home string) bool {
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if found || !ok || len(call.Args) < 3 {
+			return !found
+		}
+		program, known := staticProgramWord(call.Args[0], home)
+		if !known {
+			return true
+		}
+		if code, _, ok := interpreterCodeOperand(call, programBase(program), home); ok &&
+			actionInterpreterKeyPath.MatchString(code) {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // actionUncalledFunctions lists the function definitions whose name the
