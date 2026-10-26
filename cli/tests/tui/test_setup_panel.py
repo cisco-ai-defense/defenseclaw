@@ -113,6 +113,7 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "Gateway Watchdog",
         "Observability",
         "Webhooks",
+        "Admission Defaults",
         "Skill Admission",
         "MCP Admission",
         "Plugin Admission",
@@ -2884,3 +2885,12 @@ def test_multi_action_wizards_clear_their_running_badge() -> None:
     model.wizard_status[SetupWizard.LLM] = "running..."
     model.mark_wizard_complete(("setup", "splunk", "dashboards", "destroy"), success=True)
     assert model.wizard_status[SetupWizard.LLM] == "running..."
+
+
+def test_admission_defaults_has_the_allow_list_bypass_row() -> None:
+    # GAP-1870: quarantine-strict needs admission.defaults.allow_list_bypass_scan
+    # in the Config editor; the retired watch row left no way to set it.
+    section = _section(build_setup_sections({}), "Admission Defaults")
+    [row] = section.fields
+    assert (row.key, row.kind, row.label) == ("admission.defaults.allow_list_bypass_scan", "bool", "Allow List Bypass")
+    assert "bypass" in row.label.lower()

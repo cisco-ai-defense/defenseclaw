@@ -1986,6 +1986,21 @@ def build_setup_sections(
             "Read-only effective plan; press E to manage destinations through setup observability.",
         ),
         ConfigSection("Webhooks", tuple(_webhook_summary_fields(cfg)), "Read-only notifier webhook summary."),
+        # The admission defaults had no row since the retired
+        # watch.allow_list_bypass_scan row went (GAP-1870).
+        ConfigSection(
+            "Admission Defaults",
+            (
+                _field(
+                    cfg,
+                    "Allow List Bypass",
+                    "admission.defaults.allow_list_bypass_scan",
+                    "bool",
+                    hint="On (default): a first-party allow-list entry installs without a scan; off: it is scanned.",
+                ),
+            ),
+            "Admission defaults for skills, MCP servers and plugins.",
+        ),
         ConfigSection("Skill Admission", admission_action_fields("skill", cfg), "Skill admission action per severity."),
         ConfigSection("MCP Admission", admission_action_fields("mcp", cfg), "MCP admission action per severity."),
         ConfigSection("Plugin Admission", admission_action_fields("plugin", cfg), "Plugin admission action per severity."),
