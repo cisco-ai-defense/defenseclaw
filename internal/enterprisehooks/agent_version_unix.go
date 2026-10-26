@@ -694,17 +694,8 @@ var unixAdminGroupMember = func(uid, gid uint32) bool {
 	if err != nil {
 		return false
 	}
-	groups, err := unixidentity.AccountGroupIDs(context.Background(), account)
-	if err != nil {
-		return false
-	}
-	want := strconv.FormatUint(uint64(gid), 10)
-	for _, group := range groups {
-		if group == want {
-			return true
-		}
-	}
-	return false
+	member, err := unixidentity.AccountInGroup(context.Background(), account, int(gid))
+	return err == nil && member
 }
 
 // UnixPathTrustedFor is unixPathTrustedFor for callers outside this package.
