@@ -674,8 +674,20 @@ func (m *Manager) checkHookSilence(ctx context.Context) {
 		}
 		response, after := silenceResponse(b.rec.TamperTier, b.eff)
 		ref := b.silenceRef()
-		if ref.IsZero() || b.activeSince.Before(ref) || b.activeAt.Sub(b.activeSince) < after {
+		since := b.activeSince
+		working := !ref.IsZero() && !since.Before(ref) && b.activeAt.Sub(since) >= after
+		// The reach check found the session's hooks not reaching DefenseClaw
+		// (they connect and none authenticates, or OpenShell refuses them)
+		// and not one hook of the session authenticated, for silence_after:
+		// the harness tried its hooks, which is its work, while OpenShell
+		// showed DefenseClaw none of its traffic (a MicroVM's model calls,
+		// GAP-1328).
+		unreached := !b.reach.since.IsZero() && !b.hooks.lastHook.After(b.started) && now.Sub(b.reach.since) >= after
+		if !working && !unreached {
 			continue
+		}
+		if !working {
+			since = b.reach.since
 		}
 		if b.silentSince.IsZero() {
 			b.silentSince = ref
@@ -685,7 +697,7 @@ func (m *Manager) checkHookSilence(ctx context.Context) {
 		}
 		b.silenceSent = true
 		a := silenceAlarm{id: b.identity(), name: b.rec.Name, bindingID: b.rec.BindingID, tier: b.rec.TamperTier,
-			response: response, since: b.activeSince, after: after}
+			response: response, since: since, after: after}
 		if response == packs.OnSilenceStop {
 			a.stop, a.stopping = !b.tamperStop, b.tamperStop
 			b.tamperStop = true
