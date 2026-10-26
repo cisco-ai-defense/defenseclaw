@@ -54,6 +54,18 @@ var launchPathsBlocked = struct {
 	paths map[string]bool
 }{paths: map[string]bool{}}
 
+// PathAnswers reports whether a lookup of path answers (found or not) within
+// the launch-path bound. The lookup runs in a stat(1) child, so a path on a
+// stalled mount holds only that child. Status and verify ask it before they
+// read a user's files in this process (GAP-1751).
+func PathAnswers(path string) bool {
+	_, err := statLaunchPath(path)
+	return !errors.Is(err, errLaunchPathLookupTimeout)
+}
+
+// LaunchPathLookupTimeout is the bound of one PathAnswers lookup.
+func LaunchPathLookupTimeout() time.Duration { return launchPathLookupTimeout }
+
 func statLaunchPath(path string) (launchDirIdentity, error) {
 	launchPathsBlocked.Lock()
 	blocked := launchPathsBlocked.paths[path]
