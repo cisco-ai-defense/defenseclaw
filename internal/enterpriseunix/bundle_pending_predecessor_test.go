@@ -76,3 +76,54 @@ func TestAFailedHigherDeliveryOverAPendingBundleIsNotARollback(t *testing.T) {
 		})
 	}
 }
+
+// GAP-1803 (review RB1-4), the killed variant of GAP-1186: a higher
+// delivery killed after its config write over a committed, unconfirmed
+// bundle is rolled back by the next run's recovery to that bundle's bytes,
+// and that same plain ensure confirms the bundle without a redelivery. This
+// already holds without a rebind: the recovery puts the snapshot's
+// generation record back with the bytes, so the pending receipt's
+// generation still names them.
+func TestAKilledHigherDeliveryOverAPendingBundleKeepsItProvable(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			v1, v2, restart := bundleConfigs(b.testHost)
+			requireOK(t, b.apply(b.dir(1, v1)))
+			b.env.bundleFault = func(phase string) error {
+				if phase == enterprisebundle.StateApplied {
+					b.healthy = false
+				}
+				return nil
+			}
+			requireError(t, b.apply(b.dir(3, v2)), codeBundleNotConfirmed)
+			pendingConfig := b.read(b.env.Layout.ConfigPath)
+			if got := b.receipt(bundleID(3)); got.State != enterprisebundle.StateApplied {
+				t.Fatalf("setup: receipt = %+v", got)
+			}
+			b.healthy = true
+			b.env.bundleFault = func(phase string) error {
+				if phase == "transaction" {
+					panic("killed after the config write")
+				}
+				return nil
+			}
+			func() {
+				defer func() { _ = recover() }()
+				b.apply(b.dir(4, restart))
+			}()
+			b.env.bundleFault = nil
+			r := b.run(Options{Action: ActionEnsure})
+			requireOK(t, r)
+			if b.read(b.env.Layout.ConfigPath) != pendingConfig {
+				t.Fatal("the recovery did not put the pending bundle's config back")
+			}
+			if got := b.receipt(bundleID(3)); got.State != enterprisebundle.StateConfirmed || b.state().Current.BundleID != bundleID(3) {
+				t.Fatalf("the pending bundle was not confirmed after the recovery: receipt=%+v state=%+v warnings=%+v", got, b.state(), r.Warnings)
+			}
+			if got := b.receipt(bundleID(4)); got.State != enterprisebundle.StateFailed || got.RolledBack {
+				t.Fatalf("killed delivery = %+v, want failed without a rollback claim", got)
+			}
+		})
+	}
+}
