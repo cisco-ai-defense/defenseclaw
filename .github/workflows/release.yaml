@@ -542,7 +542,7 @@ jobs:
           retention-days: 3
 
   install-gate:
-    name: Install and upgrade (${{ matrix.os }})
+    name: Install and upgrade (${{ matrix.os }}${{ matrix.lane && format(', {0}', matrix.lane) || '' }})
     needs: [validate, sign, dry-run-assets]
     # Either sign or dry-run-assets runs, never both. A dry run's assets have
     # no signature bundle, so the installers take their checksum-only path for
@@ -552,10 +552,25 @@ jobs:
       ${{ !cancelled() && needs.validate.result == 'success' &&
       ((!inputs.dry_run && needs.sign.result == 'success') ||
       (inputs.dry_run && needs.dry-run-assets.result == 'success')) }}
+    # Windows runs one lifecycle lane per job. Each lane installs into its own
+    # profile, and in series they no longer fit the job timeout: with a
+    # previous 1.x release the eight lanes took 57 minutes and the 1.0.4 run
+    # was cancelled at 60. Publish still needs every job of this gate.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, windows-latest]
+        include:
+          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
+          - os: macos-15
+          - {os: windows-latest, lane: fresh}
+          - {os: windows-latest, lane: fleet-opt-in}
+          - {os: windows-latest, lane: setup-import}
+          - {os: windows-latest, lane: files-in-use}
+          - {os: windows-latest, lane: failure-drill}
+          - {os: windows-latest, lane: policy}
+          - {os: windows-latest, lane: upgrade-previous}
+          - {os: windows-latest, lane: shim}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
@@ -597,14 +612,19 @@ jobs:
           fi
           lanes="$lanes drills"
           scripts/test-install-lifecycle.sh --assets release --lanes "$lanes" ${args[@]+"${args[@]}"}
-      - name: Lifecycle (Windows)
+      - name: Lifecycle (Windows, ${{ matrix.lane }})
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          LIFECYCLE_LANE: ${{ matrix.lane }}
         run: |
-          $lanes = @('fresh', 'fleet-opt-in', 'setup-import', 'files-in-use', 'failure-drill', 'policy')
           $extra = @{}
-          if ($env:PREVIOUS) { $lanes += 'upgrade-previous', 'shim'; $extra['PreviousAssets'] = 'previous' }
-          & scripts/test-install-lifecycle.ps1 -Assets release -Lanes ($lanes -join ' ') @extra
+          if ($env:PREVIOUS) { $extra['PreviousAssets'] = 'previous' }
+          elseif ($env:LIFECYCLE_LANE -in @('upgrade-previous', 'shim')) {
+            Write-Host "::notice title=Install lifecycle::No previous 1.x release, so the $env:LIFECYCLE_LANE lane has nothing to upgrade from"
+            exit 0
+          }
+          & scripts/test-install-lifecycle.ps1 -Assets release -Lanes $env:LIFECYCLE_LANE @extra
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   # Upgrades the previous release's standalone enterprise packages to this
