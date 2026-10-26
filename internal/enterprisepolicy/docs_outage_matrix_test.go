@@ -272,7 +272,11 @@ var sentenceBreak = regexp.MustCompile(`(?:[.!?])\s+|\s\|\s|\n\s*\n`)
 func pinnedOutageSentence(rel, sentence string) bool {
 	switch rel {
 	case "connectors/antigravity.mdx":
-		return strings.HasPrefix(sentence, "With the default fail mode `closed`, when the gateway is unreachable the running hook denies `PreToolUse`")
+		// The two 1.0.5 per-user/managed outage sentences of the Antigravity verdict
+		// mapping are pinned by test-docs-claims.ts as well (train T2).
+		return strings.HasPrefix(sentence, "With the default fail mode `closed`, when the gateway is unreachable the running hook denies `PreToolUse`") ||
+			strings.HasPrefix(sentence, "When the gateway is not running, a per-user install in the default or permissive policy lets `PreToolUse` run with one warning") ||
+			strings.HasPrefix(sentence, "On a managed host the administrator's fail mode decides an outage: `closed`, the default, denies it")
 	case "connectors/cursor.mdx":
 		return strings.HasPrefix(sentence, "The administrator's resolved fail mode decides what the running hook does on a gateway outage")
 	}
