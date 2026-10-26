@@ -1694,8 +1694,11 @@ def _fix_stale_install_lock(cfg, *, assume_yes: bool) -> tuple[str, str]:
             return ("fail", f"refusing install lock cleanup owned by another account: {lock}")
         try:
             current = os.lstat(lock)
-            fingerprint = lambda item: (item.st_dev, item.st_ino, item.st_mtime_ns)
-            if fingerprint(current) != fingerprint(inspected):
+            if (current.st_dev, current.st_ino, current.st_mtime_ns) != (
+                inspected.st_dev,
+                inspected.st_ino,
+                inspected.st_mtime_ns,
+            ):
                 return ("warn", f"install lock changed before cleanup: {lock}")
             if stat.S_ISDIR(current.st_mode):
                 entries = os.listdir(lock)
