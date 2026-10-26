@@ -592,20 +592,26 @@ func TestWindowsManagedNativeOTLPTakeBackPendingUntilTheExporterIsGone(t *testin
 	if err := os.Remove(tokenPath); err != nil {
 		t.Fatal(err)
 	}
-	// The account signs in (the config is readable again): the next take-back
-	// proves the exporter by the revoked credential's digest, removes it,
-	// keeps the operator's key and clears the marker.
+	// Readable again (the account signed in), a config reached through a
+	// junction is still not one the take-back rewrites: the transaction
+	// refuses a reparse component, so the marker stays and status keeps
+	// warning.
 	restore()
 	report = takeBack()
-	if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("take-back kept the pending marker after it removed the exporter: %v (report %q)", err, report)
+	if _, err := os.Lstat(marker); err != nil {
+		t.Fatalf("take-back cleared the pending marker while the exporter is still there: %v (report %q)", err, report)
 	}
-	cleaned, err := os.ReadFile(config)
-	if err != nil {
+	// The account removes the exporter itself, as the warning says: the next
+	// take-back finds nothing left and clears the marker.
+	if err := os.WriteFile(config, []byte("model = 'o4'\r\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(cleaned), "127.0.0.1:19010") || !strings.Contains(string(cleaned), "model = 'o4'") {
-		t.Fatalf("config after the retried take-back = %q", cleaned)
+	report = takeBack()
+	if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("take-back kept the pending marker after the exporter was removed: %v (report %q)", err, report)
+	}
+	if err := windowsManagedUserNativeOTLPAbsent("codex", home, dataDir, user.User.Sid); err != nil {
+		t.Fatalf("verify after the exporter was removed: %v", err)
 	}
 }
 

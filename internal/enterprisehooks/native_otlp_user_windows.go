@@ -149,9 +149,11 @@ func windowsManagedUserNativeOTLPPaths(connectorName, home, dataDir string) []st
 // token of a signed-out user cannot read), it still revokes the scoped
 // credential, which the managed gateway never serves, so no live credential
 // is kept (GAP-1170), and it leaves the take-back-pending marker: status and
-// verify report the account, and every later install or repair takes the
-// exporter back again until it is gone and then clears the marker (GAP-1839,
-// GAP-1840). The report names the error and the account's own step.
+// verify report the account, and every later install or repair tries the
+// take-back again and clears the marker once no exporter is left (GAP-1839,
+// GAP-1840). A config reached through a reparse point is never rewritten (the
+// transaction refuses the link), so there the account removes the exporter
+// itself, as the report and the status warning say.
 func removeWindowsManagedUserNativeOTLPAsTarget(connectorName, dataDir string) error {
 	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
 	if residue, err := connector.UserNativeOTLPResidue(connectorName, opts); err == nil && len(residue) == 0 {
