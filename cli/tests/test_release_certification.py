@@ -195,6 +195,32 @@ def test_resolve_version_prefers_request_or_next_live_stable_patch() -> None:
     ) == ("1.0.0", "0.8.5")
 
 
+def test_resolve_version_ignores_newer_major_lines() -> None:
+    releases = [
+        {"tag_name": "1.0.3", "draft": False, "prerelease": False},
+        {"tag_name": "1.0.0", "draft": False, "prerelease": False},
+        {"tag_name": "0.8.10", "draft": False, "prerelease": False},
+        {"tag_name": "0.8.6", "draft": False, "prerelease": False},
+    ]
+
+    assert release_certification.resolve_version(
+        requested=None,
+        source_version="0.8.6",
+        published_releases=releases,
+    ) == ("0.8.11", "0.8.10")
+    assert release_certification.resolve_version(
+        requested=None,
+        source_version="1.0.0",
+        published_releases=releases,
+    ) == ("1.0.4", "1.0.3")
+    with pytest.raises(release_certification.CertificationError, match="no stable version in the 0.x line"):
+        release_certification.resolve_version(
+            requested=None,
+            source_version="0.8.6",
+            published_releases=releases[:2],
+        )
+
+
 def test_release_version_resolution_rejects_v_prefixed_tags() -> None:
     releases = [{"tag_name": "v0.8.5", "draft": False, "prerelease": False}]
 
