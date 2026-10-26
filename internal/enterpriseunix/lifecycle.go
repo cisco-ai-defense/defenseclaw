@@ -202,6 +202,9 @@ type lifecycle struct {
 	// uninstall; keptKnown is false when the accounts record was unreadable.
 	keptPerUser []perUserKept
 	keptKnown   bool
+	// enrolledHomes are the (rooted, clean) homes of the enrolled accounts
+	// the record named before the uninstall removed it.
+	enrolledHomes map[string]bool
 	// packageManaged is set when the deb/rpm owns the binaries, so the
 	// uninstall leaves them to the package manager.
 	packageManaged bool
@@ -3472,7 +3475,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// Read before the machine state, and the accounts record with it, go.
 	// A Unix purge also needs this snapshot to report enrolled OSS data that
 	// the per-user worker leaves untouched (GAP-0727).
-	l.keptPerUser, l.keptKnown = env.perUserLeftovers()
+	l.keptPerUser, l.enrolledHomes, l.keptKnown = env.perUserLeftovers()
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	// stopUnits stops a group of units and returns the ones still running.
@@ -3581,6 +3584,9 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	if l.opts.Purge {
 		l.reportRetainedEnrolledUserData()
+		if removePerUser {
+			l.reportUnenrolledUserData(ctx)
+		}
 	}
 	// The sandbox subsystem goes before the binaries it runs: a non-purge
 	// uninstall stops and keeps each account's sandboxes, then its daemon

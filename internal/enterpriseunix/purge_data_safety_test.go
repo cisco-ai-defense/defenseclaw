@@ -96,6 +96,31 @@ func TestUnixPurgeReportsAnEnrolledOSSInstallItLeavesBehind(t *testing.T) {
 	}
 }
 
+// GAP-1654: a purge names, on a kept: line, the accounts the deployment never
+// enrolled whose home still holds DefenseClaw files, and leaves those files.
+func TestUnixPurgeNamesUnenrolledAccountsWithDefenseClawFiles(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.3")}))
+	writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath), fmt.Sprintf(
+		`{"accounts":[{"user":"std1","uid":%d,"home":"/Users/std1"}]}`, os.Getuid()))
+	hook := "/Users/eng1/.defenseclaw/hooks/kiro-hook.sh"
+	writeHostFile(t, h, hook, "#!/bin/sh\n")
+	writeHostFile(t, h, "/Users/Shared/.defenseclaw/x", "shared")
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true,"removed":0}`)}, nil
+	}}
+	done := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, done)
+	got := messagesOf(done.Warnings, codePerUserState)
+	if !strings.Contains(got, "kept: the DefenseClaw per-user data (~/.defenseclaw) of eng1") ||
+		!strings.Contains(got, "did not enroll") || strings.Contains(got, "of std1") || strings.Contains(got, "Shared") {
+		t.Fatalf("the purge does not name the unenrolled account's files: %q", got)
+	}
+	if h.read(hook) != "#!/bin/sh\n" {
+		t.Fatal("the purge changed an unenrolled account's files")
+	}
+}
+
 // GAP-0582: a purge that keeps an account's per-user state (its pending
 // cleanup still needs it) also keeps that account's session-facts cache;
 // the other accounts' caches go.
