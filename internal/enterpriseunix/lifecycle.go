@@ -3804,7 +3804,6 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	} else if err := env.clearRotationIntent(); err != nil {
 		errs = append(errs, err)
 	}
-	l.removeKitRotationJournal()
 	// No config is running once the deployment is gone; a reinstall that
 	// keeps the retained config.yaml starts without an old rejection.
 	env.removeRejectedConfig()
@@ -3819,6 +3818,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// an ensure that restores the deployment.
 	removeState := l.opts.Purge || (!l.opts.KeepState && len(errs) == 0)
 	if removeState {
+		// The MDM wrapper's rotation journal goes with the credentials it
+		// can put back: --keep-state and a failed uninstall keep both, so
+		// a reinstall or ensure can still settle the rotation (GAP-1801).
+		l.removeKitRotationJournal()
 		for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, env.Layout.LogDir} {
 			var err error
 			if dir == env.Layout.ConfigDir && !l.opts.Purge && env.GOOS == "linux" {

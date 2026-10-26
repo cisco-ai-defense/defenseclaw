@@ -85,3 +85,24 @@ func TestUninstallPurgeRemovesTheKitRotationJournal(t *testing.T) {
 		})
 	}
 }
+
+// GAP-1801: --keep-state keeps the credentials, so it keeps the journal that
+// can put the earlier one back: a reinstall or ensure still settles the
+// rotation.
+func TestUninstallKeepStateKeepsTheKitRotationJournal(t *testing.T) {
+	for goos, state := range kitStates {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			journal, copyOfValue := plantKitJournal(t, h, state)
+			requireOK(t, h.run(Options{Action: ActionUninstall, KeepState: true}))
+			for _, name := range []string{"ai-key.value", "ai-key.entry"} {
+				if _, err := os.Lstat(filepath.Join(journal, name)); err != nil {
+					t.Fatalf("--keep-state removed the journal's %s: %v", name, err)
+				}
+			}
+			if got, err := os.ReadFile(copyOfValue); err != nil || string(got) != "old-secret-value" {
+				t.Fatalf("--keep-state overwrote the earlier credential: %q %v", got, err)
+			}
+		})
+	}
+}
