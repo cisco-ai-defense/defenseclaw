@@ -283,6 +283,34 @@ func TestInspectCodexPolicyWithAppServer(t *testing.T) {
 	}
 }
 
+// GAP-0620: Codex whose runtime is not on PATH exits before it reads the
+// first request. The write then failed with a broken pipe, which Setup
+// reported as "send initialize: write |1: broken pipe" with an unrelated next
+// step. It is the app-server exiting before it answered, named with the
+// program and what it said, so the no-answer handling applies.
+func TestInspectCodexPolicyAppServerThatExitsBeforeReadingNamesItsOutput(t *testing.T) {
+	original, originalAfter := codexAppServerCommand, codexAppServerAfterStart
+	t.Cleanup(func() { codexAppServerCommand, codexAppServerAfterStart = original, originalAfter })
+	codexAppServerCommand = func(ctx context.Context, _ string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCodexPolicyAppServerHelper$", "--")
+		cmd.Env = append(os.Environ(), "DEFENSECLAW_CODEX_POLICY_HELPER=exit-at-start")
+		return cmd
+	}
+	// Let the fixture exit before the first request, as a missing runtime does.
+	codexAppServerAfterStart = func() { time.Sleep(time.Second) }
+
+	executable := filepath.Join(t.TempDir(), "codex")
+	_, err := inspectCodexPolicyWithAppServer(context.Background(), executable, t.TempDir())
+	if !errors.Is(err, errCodexAppServerNoAnswer) {
+		t.Fatalf("err = %v, want errCodexAppServerNoAnswer", err)
+	}
+	for _, want := range []string{executable, "'node': No such file or directory"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to name %q", err, want)
+		}
+	}
+}
+
 func TestInspectCodexPolicyWithAppServerDrainsLargeStderr(t *testing.T) {
 	original := codexAppServerCommand
 	t.Cleanup(func() { codexAppServerCommand = original })
@@ -403,6 +431,10 @@ func TestCodexPolicyAppServerHelper(t *testing.T) {
 	}
 	if mode == "stderr-flood" {
 		_, _ = os.Stderr.WriteString(strings.Repeat("diagnostic-flood", 16*1024))
+	}
+	if mode == "exit-at-start" {
+		_, _ = os.Stderr.WriteString("/usr/bin/env: 'node': No such file or directory\n")
+		os.Exit(127)
 	}
 	reader := bufio.NewScanner(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
