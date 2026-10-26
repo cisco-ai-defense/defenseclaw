@@ -958,7 +958,8 @@ loaded_plugin_agents() {
             continue
         fi
         argv=()
-        case "${program##*/}" in
+        word="${program% (deleted)}"
+        case "${word##*/}" in
             node | nodejs)
                 while IFS= read -r -d '' word; do
                     argv+=("${word}")

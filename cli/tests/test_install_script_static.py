@@ -1575,6 +1575,8 @@ def _started(argv: list[str], program: Path, executable: str | None = None) -> s
         ("nvm launcher points to another script", None),
         ("pnpm shell shim", None),
         ("opencode replaced while running", "OpenCode"),
+        # GAP-1308: npm launcher beside a Node runtime replaced while it runs.
+        ("opencode npm launcher beside a replaced nvm node", "OpenCode"),
         ("amp npm package", "Amp"),
         ("native installer amp", "Amp"),
     ],
@@ -1665,7 +1667,8 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
             path.append(link.parent)
             program, argv = node, [str(node), str(link)]
     elif case in ("opencode npm launcher beside nvm node", "amp npm launcher beside fnm node",
-                  "nvm launcher points to another script", "pnpm shell shim"):
+                  "nvm launcher points to another script", "pnpm shell shim",
+                  "opencode npm launcher beside a replaced nvm node"):
         if case.startswith("opencode") or case.startswith("nvm"):
             agent_name, package = "opencode", "opencode-ai"
             entry_name = "bin/worker.js" if case.startswith("nvm") else "bin/opencode"
@@ -1705,7 +1708,7 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
 
     proc = _started(argv, program, executable=sleep if case == "argv0 opencode" else None)
     try:
-        if case == "opencode replaced while running":
+        if case in ("opencode replaced while running", "opencode npm launcher beside a replaced nvm node"):
             program.unlink()
             _program(program, sleep)
         result = _agent_scan(home, path, [proc.pid], **env)
