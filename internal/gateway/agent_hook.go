@@ -1106,14 +1106,14 @@ func (a *APIServer) finalizeAgentHook(
 	if panicked {
 		envResult = "panic"
 	}
+	// Enforced starts from the verdict, so a panic in identity stamping
+	// cannot record a native block as unenforced (GAP-1098).
 	env := HookAuditEnvelope{
 		Connector:    connectorName,
 		Event:        req.HookEventName,
 		Result:       envResult,
 		Action:       resp.Action,
 		RawAction:    resp.RawAction,
-		// The verdict's enforcement holds even if identity stamping
-		// panics before it sets the bit (GAP-1098).
 		Enforced:     resp.Action == "block",
 		Severity:     resp.Severity,
 		Mode:         resp.Mode,
