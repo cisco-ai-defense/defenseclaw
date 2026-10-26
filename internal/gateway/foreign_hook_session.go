@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -89,12 +90,26 @@ func (a *APIServer) handleForeignHookSession(w http.ResponseWriter, r *http.Requ
 	// hook still waits for the answer (exchange.RetryUntil). Only the final
 	// answer is audited, so a call that ends up allowed leaves no block row
 	// (GAP-1711, GAP-1812, GAP-1813).
+	//
+	// A try that the gateway itself held up for longer than an allow's hold
+	// (a stalled disk or process: no answer for seconds on any route) is
+	// applied again at once while the hook still waits for this exchange,
+	// even after RetryUntil: its unavailable answer says nothing about the
+	// session, and the stall used the time the retry window was for
+	// (GAP-1813, D11 cold start on ewin3).
 	retryUntil := foreignHookSessionRetryUntil(exchange, time.Now())
 	for attempt := 0; ; attempt++ {
+		tried := time.Now()
 		decision, answerBy, release := a.applyForeignHookSessionOnce(r.Context(), dataDir, identity, stateDir, exchange)
-		if attempt < foreignHookSessionRecordRetries && foreignHookSessionRecordBusy(exchange, decision) &&
-			time.Now().Add(foreignHookSessionRecordRetryDelay).Before(retryUntil) {
+		busy := attempt < foreignHookSessionRecordRetries && foreignHookSessionRecordBusy(exchange, decision) && !exchange.RetryUntil.IsZero()
+		if busy && time.Since(tried) >= foreignHookExchangeHold && r.Context().Err() == nil {
 			release()
+			foreignHookSessionRetryLog(connector, attempt+1, "stalled")
+			continue
+		}
+		if busy && time.Now().Add(foreignHookSessionRecordRetryDelay).Before(retryUntil) {
+			release()
+			foreignHookSessionRetryLog(connector, attempt+1, "busy")
 			timer := time.NewTimer(foreignHookSessionRecordRetryDelay)
 			select {
 			case <-r.Context().Done():
@@ -190,7 +205,15 @@ var (
 	foreignHookSessionRecordRetryDelay  = 25 * time.Millisecond
 	foreignHookSessionRecordRetryWindow = 2 * time.Second
 	foreignHookSessionDenialAudit       = (*APIServer).auditForeignHookSessionDenial
+	foreignHookSessionRetryLog          = logForeignHookSessionRetry
 )
+
+// logForeignHookSessionRetry writes one gateway log line per re-applied
+// exchange, so a retried call that ends allowed (and leaves no audit row) is
+// still visible to an operator or a verifier (GAP-1812).
+func logForeignHookSessionRetry(connector string, attempt int, why string) {
+	fmt.Fprintf(os.Stderr, "[sidecar-api] foreign-hook session exchange connector=%s applied again attempt=%d cause=%s\n", connector, attempt, why)
+}
 
 // foreignHookSessionRetryUntil is when the gateway stops applying a busy
 // clean scan again: the hook's RetryUntil, at most
