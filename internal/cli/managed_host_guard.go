@@ -58,8 +58,12 @@ func refusePerUserGatewayOnManagedHost() error {
 		return nil
 	}
 	if where, present := managedHostWindowsStandalone(); present {
+		// Name the restart route too, as the Unix refusal does: the managed
+		// gateway is a service Setup /repair restarts (GAP-0718).
 		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so the per-user gateway is disabled; "+
-			"an administrator can check the managed deployment %s", where, managedWindowsAdminStatusHint())
+			"an administrator can check the managed deployment %s, and restart or repair the managed gateway by running "+
+			"`DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1` (the installed release's Setup) from an elevated prompt",
+			where, managedWindowsAdminStatusHint())
 	}
 	path, present := managedHostUnixRecord(os.Stderr)
 	if !present {
