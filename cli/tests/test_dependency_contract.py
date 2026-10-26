@@ -458,10 +458,7 @@ def test_fresh_wheel_metadata_contains_complete_runtime_contract(tmp_path: Path)
     wheel_requirements = _requirements(metadata.get_all("Requires-Dist", []))
     _assert_requirement_contract(wheel_requirements, RUNTIME_CONTRACT)
     _assert_requirement_contract(wheel_requirements, WHEEL_SECURITY_FLOOR_CONTRACT)
-    _assert_requirement_contract(
-        wheel_requirements,
-        {"tomli": TOMLI_COMPATIBILITY_CONTRACT},
-    )
+    assert "tomli" not in wheel_requirements
     assert MAGIKA_MINIMUM_VERSION in wheel_requirements["magika"].specifier
     assert Version("1.0.1") not in wheel_requirements["magika"].specifier
     _assert_skill_scanner_wheels(metadata.get_all("Requires-Dist", []))
