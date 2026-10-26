@@ -18,11 +18,16 @@ const missingPreToolRuleID = "HOOK-PRE-TOOL-MISSING"
 // it does not claim to prevent a tool that the agent already ran.
 const maxPendingPreToolDecisions = 4096
 
+// preToolDecisionKey names one tool call of one caller. The caller is the
+// verified hook caller (copilotDedupeScope), never the correlation-minted
+// connector instance: concurrent hooks of one session can leave one of a
+// call's two deliveries without its correlation, and a key that differed
+// between them reported the audited PreToolUse as missing (GAP-1228).
 type preToolDecisionKey struct {
-	connectorInstance string
-	connector         string
-	session           string
-	toolUse           string
+	caller    string
+	connector string
+	session   string
+	toolUse   string
 }
 
 type preToolDecisionSlot struct {
@@ -72,10 +77,10 @@ func (a *APIServer) auditMissingPreToolDecision(ctx context.Context, req agentHo
 		return
 	}
 	key := preToolDecisionKey{
-		connectorInstance: strings.TrimSpace(req.ConnectorInstanceID),
-		connector:         connector,
-		session:           strings.TrimSpace(req.SessionID),
-		toolUse:           strings.TrimSpace(req.ToolInvocationID),
+		caller:    copilotDedupeScope(ctx),
+		connector: connector,
+		session:   strings.TrimSpace(req.SessionID),
+		toolUse:   strings.TrimSpace(req.ToolInvocationID),
 	}
 	if event == "PreToolUse" {
 		if key.session != "" && key.toolUse != "" && resp.Action != hookActionUnconfirmed {
