@@ -2483,8 +2483,11 @@ defenseclaw_emit_unreachable_stderr() {
     echo "defenseclaw: gateway unreachable, blocking ${subject} (fail mode closed): ${reason}" >&2
   elif defenseclaw_per_user_outage_open; then
     if defenseclaw_first_outage_warning; then
-      case "${DEFENSECLAW_HOOK_CONNECTOR:-}" in
-        claudecode|codex) : ;; # Their systemMessage below is user-visible.
+      # The Claude Code and Codex hooks show their systemMessage instead; the
+      # generic inspect hooks rendered for them print none, so they keep
+      # this line (GAP-1757).
+      case "${DEFENSECLAW_HOOK_CONNECTOR:-}|${subject}" in
+        "claudecode|claude-code "*|"codex|codex "*) : ;;
         *) echo "defenseclaw: gateway unreachable, allowing ${subject} unchecked (fail mode open for an outage): ${reason}. If it does not start, run \`defenseclaw doctor\`." >&2 ;;
       esac
     fi
