@@ -841,12 +841,49 @@ func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatu
 			}
 		}
 	}
+	if state != nil && !state.Applied {
+		// The gateway reports another digest or a reload error: the
+		// installed policy is not the one it enforces, so nothing certifies
+		// security_complete, and status and verify name it (GAP-1329).
+		result.SecurityComplete = false
+		if !change {
+			appendWindowsEnterprisePolicyNotApplied(result, state)
+		}
+	}
 	if state == nil || !state.Applied || !change || len(result.Errors) != 0 {
 		return
 	}
 	if err := writeWindowsEnterprisePolicyState(state); err != nil {
 		result.AddWarning("policy_state_unrecorded", "could not record "+enterprisestatus.PolicyStateFileName+": "+err.Error())
 	}
+}
+
+// appendWindowsEnterprisePolicyNotApplied reports, for a read (status,
+// verify), a policy the running gateway has not applied. A reload error the
+// report already warned about (policy_reload_rejected) fails verify; another
+// digest is a policy_not_applied warning on status and an error on verify.
+func appendWindowsEnterprisePolicyNotApplied(result *enterprisestatus.Result, state *enterprisestatus.PolicyState) {
+	if state.LastReloadError != "" {
+		if result.Action != "verify" {
+			return
+		}
+		for index, message := range result.Warnings {
+			if message.Code == "policy_reload_rejected" {
+				result.Warnings = append(result.Warnings[:index], result.Warnings[index+1:]...)
+				result.AddError(message.Code, message.Message)
+				return
+			}
+		}
+		return
+	}
+	message := fmt.Sprintf(
+		"the gateway enforces effective policy %s but the installed config computes to %s; it applies the config on its next reload. If this stays, run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 from an elevated prompt",
+		shortPolicyDigest(state.GatewayReportedDigest), shortPolicyDigest(state.EffectiveDigest))
+	if result.Action == "verify" {
+		result.AddError("policy_not_applied", message)
+		return
+	}
+	result.AddWarning("policy_not_applied", message)
 }
 
 // writeWindowsEnterprisePolicyState records the applied policy in
