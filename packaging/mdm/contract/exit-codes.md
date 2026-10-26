@@ -89,7 +89,11 @@ evaluated". Run the `status` action to inspect the host.
 
 Every other code (for example `config_invalid`, `lifecycle_busy`,
 `rolled_back`, `profile_conflict`, `downgrade_refused`) comes from the
-lifecycle itself.
+lifecycle itself, except `sandboxes_running`: the macOS package refused to
+install while a sandbox daemon of DefenseClaw 1.0.3 or older runs a sandbox
+(the Linux packages refuse the same way, with the reason on stderr). The
+message names each user, sandbox and the command that user runs to end it;
+install again once they are gone.
 
 A signed policy bundle (`--bundle-file`, `-BundlePath`, Setup `BUNDLE=`) uses
 the same exit codes. Its refusals (`signature_invalid`, `version_not_newer`,

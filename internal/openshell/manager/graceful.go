@@ -152,7 +152,11 @@ func parseHarnessEnd(out []byte) harnessEnd {
 // else from a look at the run of its own (probeRun). The second result is
 // why a flush that was tried was not confirmed (nil when none was tried or
 // it was). It publishes nothing: only the stop knows whether it went ahead
-// (Manager.stop), which it does without the flush and says so.
+// (Manager.stop), which it does without the flush and says so. A MicroVM
+// that is not ready but may still run what its guest wrote (a start or stop
+// OpenShell could not be asked about after it failed, restorePhase; a phase
+// a restarted daemon has not learned) has no harness to ask, but is flushed
+// all the same: a stop with no sync would lose that.
 func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) (harness.DetachedRun, error) {
 	none := harness.DetachedRun{State: sandboxapi.RunNone}
 	m.mu.Lock()
@@ -160,12 +164,16 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) (harness.
 	// stop has just fetched b.sb from OpenShell. A raw OpenShell client can
 	// start or stop the guest without updating the manager's cached phase.
 	ready := b.sb != nil && auditPhase(b.sb.Status.Phase) == audit.SandboxPhaseReady && !b.creating && !b.deleted && !b.retained
+	unsettled := !ready && !b.creating && !b.deleted && !b.retained && !workloadEnded(b.phase) && holdsCompute(b.phase, driver, b.rec.PhaseReason)
 	tamper := b.tamperStop
 	m.mu.Unlock()
+	flush := stopLosesWrites(driver)
 	if !ready {
+		if unsettled && flush {
+			return none, m.flushSandbox(ctx, gw, name)
+		}
 		return none, nil
 	}
-	flush := stopLosesWrites(driver)
 	spec, ok := harness.Get(harnessName)
 	if !ok {
 		if flush {

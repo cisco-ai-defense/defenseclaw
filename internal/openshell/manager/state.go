@@ -233,6 +233,15 @@ type record struct {
 	// after a change (a policy OpenShell did not load, a record that could
 	// not be saved) still has the next start restore it.
 	OldSupervisorNetworkRestore bool `json:"old_supervisor_network_restore,omitempty"`
+	// Contained is why DefenseClaw keeps running, contained, a MicroVM it
+	// had to stop on its own (a hook alarm, repeated foreign network rules,
+	// a lost listener, a revoked registration, a start that failed) but
+	// could not stop without losing what its guest had not synced
+	// (containUnsynced, GAP-0902). Its network is withdrawn as a legacy
+	// guest's is (the OldSupervisor fields), it is reported unprotected and
+	// no new sandbox runs while it lives (containedLive); the next
+	// successful start restores its create-time network and clears it.
+	Contained string `json:"contained,omitempty"`
 	// HookCounts are the hook counters as the daemon last kept them
 	// (keepHookCounts): a restarted daemon goes on from them. Copies of a
 	// record share them, so they are replaced, never changed in place.

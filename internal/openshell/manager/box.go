@@ -93,7 +93,21 @@ type box struct {
 	// gateway is its own but runs another compute driver now.
 	elsewhere   string
 	otherDriver bool
-	started     time.Time
+	// gone is set once the sandbox's own place proved it gone: a lookup
+	// there had nothing of it (missingFromLocked), or a read of it said so
+	// (proveGuests). Its identity does not come back, so the proof is the
+	// guest's, whichever gateway DefenseClaw is connected to and whatever a
+	// lookup elsewhere or a later word finds, until a lookup finds the
+	// sandbox (foundOnLocked).
+	gone bool
+	// read is the latest read of the sandbox at the place its record names
+	// (proveGuests), which the guest inventory goes on where no lookup of
+	// the connected gateway does, or none since the read (provenPhase).
+	// word counts the lookups of that place and the phases given at it
+	// (heardLocked), which tells which came last.
+	read    guestRead
+	word    uint64
+	started time.Time
 
 	watchCancel context.CancelFunc
 	watchDone   chan struct{}
@@ -130,7 +144,8 @@ type box struct {
 	tamperStop  bool
 	silenceSent bool
 	// oldSupervisorNetworkErr is the last failure to withdraw the network
-	// rules and providers of a live legacy guest (oldSupervisorLive).
+	// rules and providers of a live legacy or contained guest
+	// (unprotectedLive).
 	oldSupervisorNetworkErr string
 	// oldSupervisorNetworkBusy prevents duplicate containment workers while
 	// a lifecycle operation holds op.
@@ -430,6 +445,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	force bool, cond *audit.SandboxCondition, exit *int32) {
 	release := m.gatewayRelease()
 	m.mu.Lock()
+	heardLocked(b, m.lastGw.Load())
 	if b.phase == phase && !force {
 		m.mu.Unlock()
 		return
@@ -558,9 +574,25 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		m.containOldSupervisorNetwork(ctx, b)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
 			Reason: sandboxapi.ReasonOldSupervisor, Message: oldSupervisorMessage(rec.Name, rec.SessionRelease, phase, rec.Driver, m.upgradeWayOn(release))})
+	} else if containedLive(phase, rec) && !ownTransition(phase, trigger) {
+		// A contained VM (containUnsynced, which said so when it contained
+		// it) is named again for a restarted daemon that finds it, and when
+		// its workload ends with its VM still held; reconcile withdraws its
+		// network again (reconcileOldSupervisor). Not for the phase a
+		// start or stop of it passes through, whose outcome says where it
+		// stands.
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "HIGH",
+			Reason: sandboxapi.ReasonContained, Message: truncate("⚠ "+rec.Name+": "+containedWords(rec.Name, rec.Contained, phase, rec.Driver), 2048)})
 	}
 	m.syncGuard(b, phase)
 	m.syncObserve(b, phase)
+}
+
+// ownTransition reports the phase a DefenseClaw start or stop (trigger)
+// passes through on its way to its outcome.
+func ownTransition(phase audit.SandboxPhase, trigger audit.SandboxLifecycleTrigger) bool {
+	return (trigger == audit.SandboxTriggerStart || trigger == audit.SandboxTriggerStop) &&
+		(phase == audit.SandboxPhaseProvisioning || phase == audit.SandboxPhaseStarting || phase == audit.SandboxPhaseStopping)
 }
 
 // phaseMissing is the phase of the view of a sandbox OpenShell no longer
@@ -761,7 +793,7 @@ func (m *Manager) sandboxReleaseRefusal(gw *Gateway) error {
 
 // legacyUnprotected opens every account of a live legacy guest
 // (oldSupervisorLive): the owner's words for the state.
-const legacyUnprotected = "legacy sandbox running, not protected by the 1.0.4 egress policy"
+const legacyUnprotected = sandboxapi.LegacyUnprotected
 
 // legacyContainment is what DefenseClaw does, and does not, about a live
 // legacy guest. Closing its egress proxy and withdrawing the network rules
@@ -798,21 +830,141 @@ func oldSupervisorLive(phase audit.SandboxPhase, rec record) bool {
 	return phase == audit.SandboxPhaseReady && !openshell.RunsSandboxes(rec.SessionRelease) || oldSupervisorLingering(phase, rec)
 }
 
-// legacyWayOn is how the user ends the live legacy guest name in phase on
-// compute driver driver ("" is docker): the stop of a ready one, which on
-// a MicroVM syncs its disk first because that release's stop does not, and
-// the delete of a MicroVM whose workload ended, which OpenShell does not
-// stop (or, on OpenShell SupportedMin or later, its start with --end-vm).
+// containedLive reports a contained MicroVM (record.Contained) whose VM may
+// still run: every phase in which it may still hold its compute
+// (holdsCompute), not only ready and an ended workload with the VM still
+// held. A start whose check failed keeps its own phase, starting, when
+// OpenShell cannot be asked for the one after it (restorePhase), and a
+// restarted daemon that has not reached the gateway knows none: neither
+// proves the VM gone, so it stays unprotected, its network withdrawal is
+// retried and no new sandbox runs. Deleting does not release it either:
+// until OpenShell reports the delete done the VM may still run (a delete
+// OpenShell refused leaves its phase unknown, restorePhase). Only
+// OpenShell's account of the VM stopped, deleted, missing or gone releases
+// it.
+func containedLive(phase audit.SandboxPhase, rec record) bool {
+	return rec.Contained != "" && (holdsCompute(phase, rec.Driver, rec.PhaseReason) || phase == audit.SandboxPhaseDeleting)
+}
+
+// unprotectedKind reports whether b is a guest DefenseClaw cannot show
+// protected while it may still run, which, and the phase that says so:
+// unprotectedLegacy for a live legacy one (oldSupervisorLive),
+// sandboxapi.UnprotectedContained for a contained one (containedLive),
+// sandboxapi.UnprotectedUnknown for one that may be either and whose own
+// place cannot say whether it runs, "" for none. It is the one account the
+// status (which the doctor, the managed verify and the package upgrade
+// read), the run refusal and the view give of it. here is the gateway
+// DefenseClaw is connected to, or was last (Manager.lastGw).
+//
+// The phase is the one b's own place proves (provenPhase): the connected
+// gateway's lookups where b lives there, else a read of the gateway its
+// record names. Missing from another gateway or compute driver than its own
+// proves nothing; its own one saying it is gone releases it. Unproven, a
+// guest is kept as it was last seen running (legacy or contained), released
+// when it was last seen not to hold its compute (only a start, which runs
+// the gateway's own supervisor, brings it back), and unknown otherwise: a
+// legacy session no gateway has reported since the daemon started
+// (GAP-1085), or one last seen on its way up. A box being created, or one
+// deleted or kept only for its snapshot, is none. The caller holds m.mu.
+func unprotectedKind(b *box, here *Gateway) (string, audit.SandboxPhase) {
+	if b.deleted || b.retained || b.creating || !mayBeUnprotected(b.rec) {
+		return "", b.phase
+	}
+	phase, proven := provenPhase(b, here)
+	switch {
+	case oldSupervisorLive(phase, b.rec):
+		return unprotectedLegacy, phase
+	case containedLive(phase, b.rec):
+		return sandboxapi.UnprotectedContained, phase
+	case proven, phase != "" && !holdsCompute(phase, b.rec.Driver, b.rec.PhaseReason):
+		return "", phase
+	}
+	return sandboxapi.UnprotectedUnknown, phase
+}
+
+// unprotectedWayOn is how the user ends the unprotected guest b of kind in
+// phase (unprotectedKind): legacyWayOn, after connecting to its gateway
+// when that is not here; for an unknown one, unknownWhy. The caller holds
+// m.mu.
+func unprotectedWayOn(b *box, here *Gateway, kind string, phase audit.SandboxPhase) string {
+	if kind == sandboxapi.UnprotectedUnknown {
+		return unknownWhy(b, here)
+	}
+	way := legacyWayOn(b.rec.Name, phase, b.rec.Driver)
+	if !atConnectedPlace(b, here) {
+		way = "it runs on " + gatewayMismatch(b.rec, here) + ", not the gateway DefenseClaw is connected to: connect DefenseClaw to that gateway " +
+			"(openshell.gateway), then " + way
+	}
+	return way
+}
+
+// unprotectedLegacy is the unprotectedKind of a live legacy guest.
+const unprotectedLegacy = "legacy"
+
+// unprotectedLive reports a guest DefenseClaw cannot show protected while
+// it runs, a live legacy one (oldSupervisorLive) or a contained one
+// (containedLive): DefenseClaw withdraws what it added to its network,
+// reports it unprotected and runs no new sandbox while it lives.
+func unprotectedLive(phase audit.SandboxPhase, rec record) bool {
+	return oldSupervisorLive(phase, rec) || containedLive(phase, rec)
+}
+
+// containedUnprotected opens every account of a contained guest
+// (containedLive).
+const containedUnprotected = sandboxapi.ContainedUnprotected
+
+// containedContainment is what DefenseClaw does about a contained guest.
+const containedContainment = "DefenseClaw closed its egress proxy, rotated its ingress token where a provider delivers it, and withdraws the network " +
+	"rules (approved host ports among them) and providers it added; it does not stop the VM for you, and until it is gone it creates and " +
+	"starts no sandbox"
+
+// containedRulesKept opens the warning about a withdrawal of a contained
+// guest's network rules that failed (the error follows).
+const containedRulesKept = "DefenseClaw could not withdraw the network rules it added to this contained sandbox, or confirm them withdrawn, so they may still let it out: "
+
+// containedWords is what the view and the feed say of the contained guest
+// name (containedLive) in phase on driver, that DefenseClaw had to stop
+// for why.
+func containedWords(name, why string, phase audit.SandboxPhase, driver string) string {
+	return containedUnprotected + ": DefenseClaw had to stop it (" + why + "), but its MicroVM's disk could not be synced first, so it keeps " +
+		"running rather than lose what its guest has not written to its disk. " + containedContainment + ": " + legacyWayOn(name, phase, driver)
+}
+
+// legacyWayOn is how the user ends the live legacy or contained guest name
+// in phase on compute driver driver ("" is docker): the stop of one whose
+// workload has not ended (workloadEnded: a ready one, and a contained one
+// in another phase that may hold its VM), which on a MicroVM syncs its disk
+// first because that release's stop does not, and the delete of a MicroVM
+// whose workload ended, which OpenShell does not stop (or, on OpenShell
+// SupportedMin or later, its start with --end-vm).
 func legacyWayOn(name string, phase audit.SandboxPhase, driver string) string {
-	if phase == audit.SandboxPhaseReady {
-		way := "save the work you need, then run `defenseclaw sandbox stop " + name + "`"
+	if !workloadEnded(phase) {
+		way := "save the work you need, then run `" + legacyStopCommand(name, phase) + "`"
 		if stopLosesWrites(driver) {
-			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost)"
+			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost) " +
+				"and, when that sync fails, asks before it stops the VM"
 		}
 		return way
 	}
 	return "OpenShell does not stop this VM, whose workload ended: `defenseclaw sandbox delete " + name + "` deletes it and its work, or on OpenShell " +
 		openshell.SupportedMin + " or later `defenseclaw sandbox start " + name + " --end-vm` ends the VM, losing what it has not written to its disk"
+}
+
+// legacyStopCommand is the command that ends the live legacy or contained
+// guest name in phase: its stop, else the delete of a MicroVM whose
+// workload ended (workloadEnded; legacyWayOn says what each costs).
+func legacyStopCommand(name string, phase audit.SandboxPhase) string {
+	if !workloadEnded(phase) {
+		return "defenseclaw sandbox stop " + name
+	}
+	return "defenseclaw sandbox delete " + name
+}
+
+// workloadEnded reports a phase in which a sandbox's workload ended
+// (completed, error): OpenShell returns the stop of a MicroVM in it as it
+// is, so only its delete, or a start with --end-vm, ends that VM.
+func workloadEnded(phase audit.SandboxPhase) bool {
+	return phase == audit.SandboxPhaseCompleted || phase == audit.SandboxPhaseError
 }
 
 // oldSupervisorWarning is the view's warning about the live legacy guest
@@ -857,44 +1009,82 @@ func oldSupervisorMessage(name, release string, phase audit.SandboxPhase, driver
 // interval is the backoff after a failed policy update.
 func (m *Manager) reconcileOldSupervisor(ctx context.Context, b *box) {
 	m.mu.Lock()
-	live := oldSupervisorLive(b.phase, b.rec)
+	live := unprotectedLive(b.phase, b.rec)
 	m.mu.Unlock()
 	if live {
 		m.containOldSupervisorNetwork(ctx, b)
 	}
 }
 
-// legacyRunRefusal refuses a create or a start while a live legacy guest
-// (oldSupervisorLive) other than except runs: its network cannot be
-// contained (GAP-0831), so DefenseClaw runs no new sandbox until its user
-// ends it. except is the sandbox a start ends that way (an ended legacy
-// MicroVM started with --end-vm). The refusal names each guest with the
-// command that ends it.
-func (m *Manager) legacyRunRefusal(except string) error {
+// legacyRunRefusal refuses a create or a start while a guest DefenseClaw
+// cannot show protected (unprotectedLive) other than except runs: a live
+// legacy guest, whose network cannot be contained (GAP-0831), or a
+// contained one, which DefenseClaw had to stop but could not sync first.
+// DefenseClaw runs no new sandbox until its user ends it. except is the
+// sandbox a start ends that way (an ended legacy MicroVM started with
+// --end-vm). The refusal names each guest with the command that ends it.
+// So does one that may be either, whose own place cannot say whether it
+// runs (sandboxapi.UnprotectedUnknown): it is read first (proveGuests).
+// The create or start checks again, reading no place, right before its
+// gateway call (lockRun).
+func (m *Manager) legacyRunRefusal(ctx context.Context, except string) error {
+	m.proveGuests(ctx)
+	return m.unprotectedRunRefusal(except)
+}
+
+// unprotectedRunRefusal is legacyRunRefusal's refusal on what the guest
+// inventory holds now, without reading any guest's place.
+func (m *Manager) unprotectedRunRefusal(except string) error {
+	here := m.lastGw.Load()
 	m.mu.Lock()
-	var live []string
+	var legacy, contained, unknown []string
 	ways := map[string]string{}
 	for name, b := range m.boxes {
-		if name == except || b.retained || b.missing || b.deleted || b.creating || !oldSupervisorLive(b.phase, b.rec) {
+		if name == except {
 			continue
 		}
-		live = append(live, name)
-		ways[name] = name + ": " + legacyWayOn(name, b.phase, b.rec.Driver)
+		kind, phase := unprotectedKind(b, here)
+		switch kind {
+		case unprotectedLegacy:
+			legacy = append(legacy, name)
+		case sandboxapi.UnprotectedContained:
+			contained = append(contained, name)
+		case sandboxapi.UnprotectedUnknown:
+			unknown = append(unknown, name)
+		default:
+			continue
+		}
+		ways[name] = name + ": " + unprotectedWayOn(b, here, kind, phase)
 	}
 	m.mu.Unlock()
-	if len(live) == 0 {
+	if len(legacy)+len(contained)+len(unknown) == 0 {
 		return nil
 	}
-	slices.Sort(live)
-	detail := make([]string, 0, len(live))
-	for _, name := range live {
+	slices.Sort(legacy)
+	slices.Sort(contained)
+	slices.Sort(unknown)
+	var why []string
+	if len(legacy) > 0 {
+		why = append(why, strings.Join(legacy, ", ")+" runs ("+legacyUnprotected+"): its session runs the supervisor "+
+			"of an OpenShell release older than "+openshell.SupportedMin+", whose network broker can let connections bypass sandbox policy "+
+			"(NVIDIA/OpenShell#4494), and DefenseClaw cannot contain it")
+	}
+	if len(contained) > 0 {
+		why = append(why, strings.Join(contained, ", ")+" runs ("+containedUnprotected+"): DefenseClaw had to stop it, but its MicroVM's disk "+
+			"could not be synced first, so it keeps running contained")
+	}
+	if len(unknown) > 0 {
+		why = append(why, "DefenseClaw cannot see whether "+strings.Join(unknown, ", ")+" runs ("+unknownUnprotected+"): it may be a "+
+			"legacy or contained sandbox, and the gateway it lives on has not said")
+	}
+	names := slices.Concat(legacy, contained, unknown)
+	detail := make([]string, 0, len(names))
+	for _, name := range names {
 		detail = append(detail, ways[name])
 	}
 	return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
-		Message: "DefenseClaw runs no new sandbox while " + strings.Join(live, ", ") + " runs (" + legacyUnprotected + "): its session runs the supervisor " +
-			"of an OpenShell release older than " + openshell.SupportedMin + ", whose network broker can let connections bypass sandbox policy " +
-			"(NVIDIA/OpenShell#4494), and DefenseClaw cannot contain it",
-		Detail: strings.Join(detail, "; ") + "; then run again"}
+		Message: "DefenseClaw runs no new sandbox while " + strings.Join(why, ", and while "),
+		Detail:  strings.Join(detail, "; ") + "; then run again"}
 }
 
 // unflushedStopMessage is the feed's warning about the MicroVM name that
@@ -1264,12 +1454,21 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		v.StartedAt = started
 		v.UptimeSeconds = int64(m.now().Sub(started) / time.Second)
 	}
-	if oldSupervisorLive(b.phase, r) {
-		v.Warnings = append(slices.Clone(v.Warnings), oldSupervisorWarning(r.Name, b.phase, r.Driver))
+	here := m.lastGw.Load()
+	switch kind, phase := unprotectedKind(b, here); kind {
+	case unprotectedLegacy:
+		v.Warnings = append(slices.Clone(v.Warnings), oldSupervisorWarning(r.Name, phase, r.Driver))
 		if b.oldSupervisorNetworkErr != "" {
 			v.Warnings = append(v.Warnings, legacyRulesKept+b.oldSupervisorNetworkErr)
 		}
 		v.OldSupervisor = true
+	case sandboxapi.UnprotectedContained:
+		v.Warnings = append(slices.Clone(v.Warnings), containedWords(r.Name, r.Contained, phase, r.Driver))
+		if b.oldSupervisorNetworkErr != "" {
+			v.Warnings = append(v.Warnings, containedRulesKept+b.oldSupervisorNetworkErr)
+		}
+	case sandboxapi.UnprotectedUnknown:
+		v.Warnings = append(slices.Clone(v.Warnings), unknownUnprotected+": "+unknownWhy(b, here))
 	}
 	v.Hooks = sandboxapi.HookCoverage{
 		LastHookAt: b.hooks.lastHook, LastOTLPAt: b.hooks.lastOTLP, HookRequests: b.hooks.requests,
