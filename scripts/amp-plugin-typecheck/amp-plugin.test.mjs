@@ -26,6 +26,8 @@ async function renderAmpPlugin(values = {}) {
 		.replaceAll("{{.InstallMarkerJS}}", values.installMarker ?? "")
 		.replaceAll("{{.LifecycleMarkerJS}}", values.lifecycleMarker ?? "")
 		.replaceAll("{{.ListenerProofJS}}", values.listenerProof ?? "")
+		// perUserPluginGatewayBinary: "" keeps the ~/.local/bin gateway.
+		.replaceAll("{{.GatewayBinaryJS}}", values.gatewayBinary ?? "")
 		// config.HookOutageFailMode: "open" for a per-user install in the
 		// default policy tier.
 		.replaceAll("{{.OutageFailMode}}", values.outageFailMode ?? "open")
