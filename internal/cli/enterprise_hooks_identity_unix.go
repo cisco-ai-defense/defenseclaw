@@ -279,6 +279,15 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 	// so a UPN assignment does not disappear at the record's one-hour limit
 	// while the gateway continues to inspect that caller (T7-07).
 	if accepted.everyone || accepted.unknown {
+		// The local accounts the gateway served get a record too, keyed on
+		// their home inode, so the gateway can tell an account deleted and
+		// created again under the same name and uid from the one before it
+		// at the next tick (enterpriseHookGatewayPeerAccounts, GAP-0422).
+		for _, peer := range enterpriseHookGatewayPeerAccounts(enterpriseHookIdentityDataDir()) {
+			if !seen[peer.UID] && !left[peer.UID] {
+				list(peer.UID, peer.User, peer.HomeInode)
+			}
+		}
 		for _, uid := range enterpriseHookRecordedCallerUIDs(dir) {
 			if !seen[uid] {
 				list(uid, canonicalUser(uid), 0)
@@ -534,6 +543,23 @@ func (a enterpriseHookAcceptedAccounts) listedUIDs() []int {
 // enterpriseHookRecordedCallerUIDs lists every existing uid record when the
 // authorization accepts callers without listing their uids. It reads names
 // only; WriteIdentitySpool resolves the uid again before publishing facts.
+// enterpriseHookPeerAccount is one account enterpriseHookGatewayPeerAccounts
+// lists.
+type enterpriseHookPeerAccount struct {
+	UID       int
+	User      string
+	HomeInode uint64
+}
+
+// enterpriseHookIdentityDataDir is the managed gateway's data directory of
+// the current settings, "" without settings.
+func enterpriseHookIdentityDataDir() string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.DataDir
+}
+
 func enterpriseHookRecordedCallerUIDs(dir string) []int {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

@@ -160,6 +160,10 @@ type managedHookPeerHomeCache struct {
 	// record reads for managedHookPeerAccountRecheck.
 	homeProofs map[int]string
 	proofReads map[int]managedHookPeerProofRead
+	// firstSeen keeps, per uid, when this gateway first asked for the token
+	// of its holder (holderToken, Unix nanoseconds), persisted with the
+	// homes: a home created after it is another account's (GAP-0422).
+	firstSeen map[int]int64
 	// homesFile persists homes and names in the gateway's data directory,
 	// so a gateway that starts while the directory is away still has the
 	// last home and name of each uid and keeps its agent identity
@@ -258,6 +262,10 @@ type managedHookPeerLast struct {
 	// HomeProof is the first proof of the uid's holder's home this gateway
 	// read (managedHookPeerHomeCache.homeProofs). Other builds ignore it.
 	HomeProof string `json:"home_proof,omitempty"`
+	// FirstSeen is when this gateway first asked for the uid's holder token
+	// (managedHookPeerHomeCache.firstSeen), Unix nanoseconds. Other builds
+	// ignore it.
+	FirstSeen int64 `json:"first_seen,omitempty"`
 	// Format is set on the managedHookPeerHomesFormatKey entry only.
 	Format int `json:"format,omitempty"`
 }
@@ -318,6 +326,12 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 			}
 			c.homeProofs[uid] = last.HomeProof
 		}
+		if _, known := c.firstSeen[uid]; !known && last.FirstSeen > 0 && len(c.firstSeen) < managedHookPeerHomesMax {
+			if c.firstSeen == nil {
+				c.firstSeen = make(map[int]int64)
+			}
+			c.firstSeen[uid] = last.FirstSeen
+		}
 	}
 }
 
@@ -349,6 +363,11 @@ func (c *managedHookPeerHomeCache) saveHomesLocked() {
 	for uid, proof := range c.homeProofs {
 		last := stored[strconv.Itoa(uid)]
 		last.HomeProof = proof
+		stored[strconv.Itoa(uid)] = last
+	}
+	for uid, at := range c.firstSeen {
+		last := stored[strconv.Itoa(uid)]
+		last.FirstSeen = at
 		stored[strconv.Itoa(uid)] = last
 	}
 	stored[managedHookPeerHomesFormatKey] = managedHookPeerLast{Format: 1}
@@ -1128,6 +1147,14 @@ func (c *managedHookPeerHomeCache) holderToken(uid int, name, incarnation string
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.loadHomesLocked()
+	firstSeen, sighted := c.firstSeen[uid]
+	if !sighted && len(c.firstSeen) < managedHookPeerHomesMax {
+		if c.firstSeen == nil {
+			c.firstSeen = make(map[int]int64)
+		}
+		c.firstSeen[uid] = c.now().UnixNano()
+		defer c.saveHomesLocked()
+	}
 	first, seen := c.homeProofs[uid]
 	switch {
 	case proof == "":
@@ -1136,12 +1163,24 @@ func (c *managedHookPeerHomeCache) holderToken(uid int, name, incarnation string
 		}
 		return incarnation
 	case !seen:
+		// The first proof read for the uid names its holder's home, unless
+		// that home was created after this gateway first saw the uid: an
+		// account the gateway saw before, whose home was never proven (no
+		// identity record yet), held the uid then (GAP-0422, FC-BLK-167-ER).
+		// That earlier holder keeps the plain token.
+		earlier := sighted && homeProofCreatedAfter(proof, firstSeen)
 		if len(c.homeProofs) < managedHookPeerHomesMax {
 			if c.homeProofs == nil {
 				c.homeProofs = make(map[int]string)
 			}
 			c.homeProofs[uid] = proof
+			if earlier {
+				c.homeProofs[uid] = unprovenEarlierHomeProof
+			}
 			c.saveHomesLocked()
+		}
+		if earlier {
+			return incarnation + "|" + proof
 		}
 		return incarnation
 	case sameHomeProof(proof, first):
@@ -1204,14 +1243,20 @@ func (c *managedHookPeerHomeCache) adminHolderToken(uid int, proof string) (stri
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.loadHomesLocked()
-	if first, seen := c.homeProofs[uid]; seen {
+	first, seen := c.homeProofs[uid]
+	if seen {
 		reference = first
 	}
-	if reference == "" {
+	firstSeen, sighted := c.firstSeen[uid]
+	// A home created after this gateway first saw the uid is another
+	// account's than the one the hooks saw then, also before any proof of
+	// that account's home was read (GAP-0422, FC-BLK-167-ER).
+	newer := !seen && sighted && homeProofCreatedAfter(proof, firstSeen)
+	if reference == "" && !newer {
 		return "", false
 	}
 	token := incarnation
-	if !sameHomeProof(proof, reference) {
+	if newer || !sameHomeProof(proof, reference) {
 		token = incarnation + "|" + proof
 	}
 	if !validAccountToken(token) {
@@ -1288,6 +1333,29 @@ func homeProofParts(proof string) (inode, birth string, ok bool) {
 		return "", "", false
 	}
 	return inode, birth, true
+}
+
+// unprovenEarlierHomeProof is the first home proof of a uid whose first
+// holder this gateway saw was never proven: no home has inode 0, so every
+// proof read later names another account (holderToken).
+const unprovenEarlierHomeProof = "home:0"
+
+// homeProofCreatedSlack absorbs the clock steps between the file system's
+// creation time and the gateway's clock.
+const homeProofCreatedSlack = 2 * time.Second
+
+// homeProofCreatedAfter reports whether proof's home was created after at
+// (Unix nanoseconds) by more than homeProofCreatedSlack: a home created
+// after this gateway first saw the uid belongs to an account created after
+// it, since an agent runs in a home that exists. false when the file system
+// keeps no creation time.
+func homeProofCreatedAfter(proof string, at int64) bool {
+	_, birth, ok := homeProofParts(proof)
+	if !ok || birth == "" || at <= 0 {
+		return false
+	}
+	created, err := strconv.ParseInt(birth, 10, 64)
+	return err == nil && created > at+int64(homeProofCreatedSlack)
 }
 
 // sameHomeProof reports whether two proofs name one home directory: the
