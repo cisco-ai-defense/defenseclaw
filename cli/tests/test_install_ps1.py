@@ -820,7 +820,7 @@ def test_the_locked_package_install_is_retried_with_backoff() -> None:
     # GAP-1941: on a busy host one retry hit the same hold on the next
     # package, so it backs off several times, checks for a full disk before
     # each attempt, and the last failure says to run the command again.
-    helper = _text()[_text().index("function Invoke-UvPipInstall(") :][:1200]
+    helper = _ps1_function("Invoke-UvPipInstall")
     assert "$waits = @(5, 15, 30)" in helper
     assert helper.index("Test-DiskFull") > helper.index("for ($i = 0")
     assert "Start-Sleep -Seconds $waits[$i]" in helper

@@ -2076,7 +2076,11 @@ function Invoke-UvPipInstall([string[]]$UvArgs) {
         if (Test-DiskFull) { return $false }
         Write-Warn ("Retrying the Python package install in {0} s (attempt {1} of {2}; a busy host can hold uv's cache files)" -f $waits[$i], ($i + 2), ($waits.Count + 1))
         Start-Sleep -Seconds $waits[$i]
-        if ((Invoke-Uv $UvArgs) -eq 0) { return $true }
+        # A failed attempt can leave a package half copied with its
+        # dist-info in place, which the next attempt takes as installed (a
+        # venv without typing_extensions.py, GAP-1555): a retry reinstalls
+        # every package of the step from the cache.
+        if ((Invoke-Uv ($UvArgs + @("--reinstall"))) -eq 0) { return $true }
     }
     Write-Warn "uv kept failing; if it reported a file in use or access denied (os error 32 or 5), another program held the file: run the same command again"
     return $false
