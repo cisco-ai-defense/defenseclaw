@@ -646,7 +646,10 @@ func TestShellHookOnlyRetriesRefusedConnections(t *testing.T) {
 // A restart or outage longer than the budget blocks the call within about
 // 3 seconds and names this account's unavailable gateway.
 func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
-	for _, rc := range []string{"7", "56"} {
+	// A reset (56) is classified as a possibly processed call and blocks
+	// immediately (rc.11 T12b and fix/r104-oss-outage-open); only a refused
+	// connection (7) waits for a restart.
+	for _, rc := range []string{"7"} {
 		t.Run("claude-code/"+rc, func(t *testing.T) {
 			run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, nil,
 				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC="+rc, "DC_COLD_DROP_LISTENER=1")
@@ -671,6 +674,37 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 				(!strings.Contains(run.stderr, "this account's gateway is not running") &&
 					!strings.Contains(run.stderr, "restarting or not running")) {
 				t.Fatalf("exit %d stderr %q, want a block naming this account's unavailable gateway", code, run.stderr)
+			}
+		})
+	}
+}
+
+// A reset (56) after the native helper's peer check may have reached a
+// gateway that processed the call: it is final, so the hook blocks on the
+// first attempt without waiting for a restart (rc.11 T12b loop 2, kept by
+// the carry over the older-base rows that waited for it).
+func TestShellHookBlocksAResetWithoutWaitingForARestart(t *testing.T) {
+	for _, hook := range []struct {
+		c      Connector
+		script string
+	}{
+		{NewClaudeCodeConnector(), "claude-code-hook.sh"},
+		{NewCodexConnector(), "codex-hook.sh"},
+	} {
+		t.Run(hook.script, func(t *testing.T) {
+			var args []string
+			if hook.script == "codex-hook.sh" {
+				args = codexBoundShellHookArgsForTest(t, hook.script, "PreToolUse")[1:]
+			}
+			run := runHookForColdStart(t, hook.c, hook.script, args, nil,
+				"DEFENSECLAW_FAIL_MODE=closed", "DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=56", "DC_COLD_DROP_LISTENER=1")
+			if count := strings.TrimSpace(readColdStartCapture(t, run.capDir, "count")); count != "1" {
+				t.Fatalf("native post ran %q times for a reset, want 1", count)
+			}
+			if hook.script == "claude-code-hook.sh" {
+				_ = failClosedDenyReason(t, run)
+			} else if !codexBlockedOrExit2(exitCodeOf(run.err), run.stdout) {
+				t.Fatalf("Codex reset did not block: err=%v stdout=%q stderr=%q", run.err, run.stdout, run.stderr)
 			}
 		})
 	}

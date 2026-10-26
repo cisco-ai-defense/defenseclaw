@@ -76,7 +76,12 @@ func TestPerUserPluginsPostThroughTheLightHelper(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				tokenPath := filepath.Join(root, ".hook-"+plugin.connector+".token")
+				// The plugins take the gateway from the .gateway-helper record
+				// setup writes beside the hook (fix/r104-oss-outage-open), and
+				// the light helper from beside that gateway.
+				hookDir := filepath.Join(root, ".defenseclaw", "hooks")
+				recordGatewayHelperForTest(t, hookDir, filepath.Join(bin, "defenseclaw-gateway"))
+				tokenPath := filepath.Join(hookDir, ".hook-"+plugin.connector+".token")
 				if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}

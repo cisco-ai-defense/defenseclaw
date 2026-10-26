@@ -171,7 +171,11 @@ func shellInstallLockCheck(t *testing.T) string {
 	return text[start : start+held+end+3]
 }
 
-func TestShellInstallLockExpiresWithOwnerOrAge(t *testing.T) {
+// The carry keeps the fix/r104-oss-outage-open identity rule
+// (defenseclaw_install_lock_stale, hookexec installLockStale): the lock is
+// stale only when its installer is proven gone. It reads no clock, so an
+// old lock whose installer runs, or that names no installer pid yet, holds.
+func TestShellInstallLockExpiresWithItsOwnerNotItsAge(t *testing.T) {
 	check := shellInstallLockCheck(t)
 	for _, tc := range []struct {
 		name, pid string
@@ -180,8 +184,8 @@ func TestShellInstallLockExpiresWithOwnerOrAge(t *testing.T) {
 	}{
 		{"live installer", strconv.Itoa(os.Getpid()), 0, true},
 		{"dead installer", "99999999", 0, false},
-		{"old live installer", strconv.Itoa(os.Getpid()), 11 * time.Minute, false},
-		{"old orphan marker", "", 11 * time.Minute, false},
+		{"old live installer", strconv.Itoa(os.Getpid()), 11 * time.Minute, true},
+		{"old orphan marker", "", 11 * time.Minute, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data := t.TempDir()

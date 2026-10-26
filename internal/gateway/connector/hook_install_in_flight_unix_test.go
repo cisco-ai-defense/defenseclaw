@@ -129,6 +129,9 @@ func TestPerUserShellHookOversizedPayloadClosesWhenAnInstallStartsDuringTheRead(
 				t.Parallel()
 				data := t.TempDir()
 				installNativeHookPostForHookTest(t, data)
+				// The balanced tier is the config's rule pack, read at call
+				// time (fix/r104-oss-outage-open), not the render's mode.
+				installOutageOpenRuntimeForHookTest(t, data, data)
 				write := func(stdin io.WriteCloser) {
 					// The hook has started and selected its mode before the
 					// agent is done writing.
@@ -141,13 +144,15 @@ func TestPerUserShellHookOversizedPayloadClosesWhenAnInstallStartsDuringTheRead(
 					_, _ = io.WriteString(stdin, `{"hook_event_name":"PreToolUse","tool_input":{"command":"echo ok","description":"`+strings.Repeat("a", 16<<10)+`"}}`)
 					_ = stdin.Close()
 				}
-				stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, freeAPIAddr(t), write)
+				stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, freeAPIAddr(t), write, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 				if got := shellHookBlocked(err, stdout); got != install {
 					t.Fatalf("blocks=%v, want %v (install %v): err=%v stdout=%q stderr=%q", got, install, install, err, stdout, stderr)
 				}
 				if !install {
+					// The one outage warning is stderr, or the systemMessage
+					// Claude Code and Codex show (fix/r104-oss-outage-open).
 					rows, readErr := os.ReadFile(filepath.Join(data, "logs", "hook-failures.jsonl"))
-					if readErr != nil || !strings.Contains(string(rows), `"outcome":"fail_open"`) || !strings.Contains(stderr, "allowing") {
+					if readErr != nil || !strings.Contains(string(rows), `"outcome":"fail_open"`) || !(strings.Contains(stderr, "allowing") || strings.Contains(stdout, "DefenseClaw is not checking this session")) {
 						t.Fatalf("balanced audit/warning: %q %q %v", rows, stderr, readErr)
 					}
 				}
@@ -196,7 +201,7 @@ func TestPerUserShellOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 // runInstallInFlightShellHook renders tc's per-user hooks into data in fail
 // mode open and runs the hook once against addr. write, when set, writes
 // the hook's stdin; otherwise the case's payload is.
-func runInstallInFlightShellHook(t *testing.T, tc installInFlightShellCase, data, addr string, write func(io.WriteCloser)) (string, string, error) {
+func runInstallInFlightShellHook(t *testing.T, tc installInFlightShellCase, data, addr string, write func(io.WriteCloser), env ...string) (string, string, error) {
 	t.Helper()
 	hooks := filepath.Join(data, "hooks")
 	if tc.conn.Name() == "cursor" {
@@ -217,6 +222,7 @@ func runInstallInFlightShellHook(t *testing.T, tc installInFlightShellCase, data
 	cmd := exec.Command("bash", append([]string{filepath.Join(hooks, tc.invoke.script)}, tc.invoke.args...)...)
 	cmd.Env = append(sanitizedTestEnv(), "HOME="+data, "DEFENSECLAW_HOME="+data, "DEFENSECLAW_HOOK_MAX_BODY=4096")
 	cmd.Env = append(cmd.Env, tc.invoke.env...)
+	cmd.Env = append(cmd.Env, env...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if write == nil {
