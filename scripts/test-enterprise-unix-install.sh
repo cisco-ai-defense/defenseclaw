@@ -666,9 +666,15 @@ upgrade_lane() {
     # it after it saved this result.
     held=()
     [ "$platform" != linux ] || held=(--held-service defenseclaw-enterprise-apply.path)
+    # The new release reports the restored previous install truthfully
+    # (GAP-1412): its hook residual (hook_process_fail_open), a previous
+    # release's connectors without a trusted policy-view digest
+    # (machine_policy_incomplete) and the host's own policy-view sysctls
+    # (unprivileged_user_namespaces, unprivileged_ptrace).
     "$python" "$checker" "$results/05-upgrade-fault.json" --label upgrade-fault --platform "$platform" \
         --action ensure --expect-error lifecycle_test_fault --ready ${held[@]+"${held[@]}"} \
-        --allow-warning lifecycle_test_fault --allow-warning rolled_back --allow-warning unprivileged_user_namespaces
+        --allow-warning lifecycle_test_fault --allow-warning rolled_back --allow-warning unprivileged_user_namespaces \
+        --allow-warning unprivileged_ptrace --allow-warning hook_process_fail_open --allow-warning machine_policy_incomplete
     services_running
     if [ "$platform" = linux ]; then
         systemctl is-active --quiet defenseclaw-enterprise-apply.path ||

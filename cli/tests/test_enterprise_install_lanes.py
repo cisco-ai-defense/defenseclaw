@@ -283,6 +283,36 @@ def test_checker_upgrade_gate_options(tmp_path: Path) -> None:
     assert "  - the result reports no policy" in result.stderr.splitlines(), result.stderr
 
 
+def test_the_rollback_drill_accepts_the_warnings_of_the_restored_release(tmp_path: Path) -> None:
+    # GAP-1412: the pinned UBI 1.0.3 -> 1.0.4 lane stopped at 05-upgrade-fault
+    # although the rollback worked: the new release reported the restored
+    # 1.0.3 install's hook residual, its connectors without a trusted
+    # policy-view digest and the host's ptrace sysctl, and the drill's
+    # allow list named none of them. Its own checker call is run here.
+    lines = UNIX_LANE.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if '"$checker" "$results/05-upgrade-fault.json"' in line)
+    call = lines[start]
+    while lines[start].rstrip().endswith("\\"):
+        start += 1
+        call += " " + lines[start]
+    words = shlex.split(call.replace("\\", " "))
+    words = words[words.index('$results/05-upgrade-fault.json') + 1:]
+    words = [w for w in words if not w.startswith("${held")]
+    words = ["linux" if w == "$platform" else w for w in words]
+    drill = _result(
+        ok=False, exit_code=1, installed_version="1.0.3", security_complete=False,
+        errors=[{"code": "lifecycle_test_fault", "message": "fault"}],
+        warnings=[{"code": code, "message": code} for code in (
+            "lifecycle_test_fault", "rolled_back", "machine_policy_incomplete", "machine_policy_incomplete",
+            "hook_process_fail_open", "hook_process_fail_open", "unprivileged_user_namespaces", "unprivileged_ptrace")],
+    )
+    result = _check(tmp_path, drill, *words)
+    assert result.returncode == 0, (words, result.stderr)
+    # A warning the restored release does not report still fails the drill.
+    other = dict(drill, warnings=[*drill["warnings"], {"code": "guardian_target_failed", "message": "x"}])
+    assert "unexpected warning guardian_target_failed" in _check(tmp_path, other, *words).stderr
+
+
 def test_upgrade_config_check_requires_a_v9_source_and_every_value_kept(tmp_path: Path) -> None:
     before = "config_version: 9\nguardrail:\n  mode: observe\n  connectors:\n    codex: {enabled: true}\n"
     (tmp_path / "before.yaml").write_text(before, encoding="utf-8")
