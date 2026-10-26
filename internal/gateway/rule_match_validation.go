@@ -482,10 +482,11 @@ func gitUserEmailPlaceholder(before, email string) bool {
 }
 
 // emailIsPathSegment reports an address-shaped match that is one folder or
-// file name of a path, such as the home folder of a directory account
+// file name of a local path, such as the home folder of a directory account
 // (/home/user@corp.example/project): a path, not someone's address
-// (GAP-1286). A segment of a URL to another host is not a local path: the
-// address goes off the machine and still alerts (GAP-1934).
+// (GAP-1286). Only a token that starts like a local path counts; a URL with
+// or without a scheme, an scp host:path and a UNC \\host\share path go to
+// another host, so the address still alerts (GAP-1934, GAP-1973).
 func emailIsPathSegment(text string, start, end int) bool {
 	if start <= 0 || start > len(text) || end > len(text) || (text[start-1] != '/' && text[start-1] != '\\') {
 		return false
@@ -493,19 +494,27 @@ func emailIsPathSegment(text string, start, end int) bool {
 	if end != len(text) && strings.IndexByte("/\\ \t\r\n\"'`:;,)", text[end]) < 0 {
 		return false
 	}
-	return !pathBeforeIsRemoteURL(text[:start])
+	return tokenIsLocalPath(text[:start])
 }
 
-// pathBeforeIsRemoteURL reports a path whose token (delimited by whitespace
-// or quotes) is a URL with a host: it holds "://" with a scheme other than
-// file, or starts with "//".
-func pathBeforeIsRemoteURL(before string) bool {
-	token := before[strings.LastIndexAny(before, " \t\r\n\"'`")+1:]
-	if strings.HasPrefix(token, "//") {
+// tokenIsLocalPath reports a path whose token (after whitespace, a quote or
+// "=") starts like a local path: "/" (not "//"), "~/", "./", "../", a drive
+// "X:\" or "X:/", or "file:///".
+func tokenIsLocalPath(before string) bool {
+	token := before[strings.LastIndexAny(before, " \t\r\n\"'`=")+1:]
+	switch {
+	case strings.HasPrefix(token, "//"):
+		return false
+	case strings.HasPrefix(token, "/"), strings.HasPrefix(token, "~/"), strings.HasPrefix(token, "~\\"),
+		strings.HasPrefix(token, "./"), strings.HasPrefix(token, "../"),
+		strings.HasPrefix(token, ".\\"), strings.HasPrefix(token, "..\\"):
+		return true
+	case len(token) >= 3 && token[1] == ':' && (token[2] == '\\' || token[2] == '/') &&
+		(token[0]|0x20 >= 'a' && token[0]|0x20 <= 'z'):
 		return true
 	}
-	scheme, _, isURL := strings.Cut(token, "://")
-	return isURL && !strings.EqualFold(scheme, "file")
+	scheme, rest, isURL := strings.Cut(token, "://")
+	return isURL && strings.EqualFold(scheme, "file") && strings.HasPrefix(rest, "/")
 }
 
 // isoDatePlus is "+YYYY-MM-DD": a date after a plus sign (a diff's added
