@@ -24634,10 +24634,19 @@ function Get-DefenseClawStandaloneManifestAdoption {
     $untrustedFolders = [Collections.Generic.List[string]]::new()
     $folderRows = [int64]0
     $waitingRows = [int64]0
+    # A deleted account's row the guardian reports through the session wait
+    # ('user home ... no longer exists') is a removed account, not a
+    # signed-out one: repair said to remove its profile and run again, which
+    # could never pass because the profile was already gone (GAP-1657).
+    $removedRows = [int64]0
     foreach ($row in @(& $field $records.state 'results')) {
         if ($null -eq $row -or
             [bool](& $field $row 'ok') -or
             [bool](& $field $row 'pending')) {
+            continue
+        }
+        if ([string](& $field $row 'error') -match 'no longer exists: the account was deleted or its profile folder removed') {
+            $removedRows++
             continue
         }
         if (([string](& $field $row 'error')).Trim().StartsWith(
@@ -24682,11 +24691,17 @@ function Get-DefenseClawStandaloneManifestAdoption {
             $signedOut.Add($account)
         }
     }
+    if ($removedRows -gt 0) {
+        # The gateway may already count them in removed_account_failures.
+        $gatewayRemoved = [Math]::Max([int64](& $count $report 'removed_account_failures'), [int64]0)
+        if ($gatewayRemoved -lt $removedRows) {
+            $excused += $removedRows - $gatewayRemoved
+        }
+    }
     if ($folderRows -gt 0) {
-        # Every failed row must be one of these or a waiting row: a removed
-        # account's rows (which only the gateway can tell) or any other
-        # failure keep the adoption refused.
-        $excused = $folderRows + $waitingRows
+        # Every failed row must be one of these, a waiting row or a removed
+        # account's row; any other failure keeps the adoption refused.
+        $excused = $folderRows + $waitingRows + $removedRows
     }
     $nextStep = ''
     if ($signedOut.Count -gt 0 -and -not $otherFailure) {
