@@ -61,9 +61,8 @@ func TestCopilotNativeBenignCorpus(t *testing.T) {
 				t.Fatal(err)
 			}
 			if item.OS != runtime.GOOS || item.Fixture == "managed-private-home" {
-				name, args, ok := copilotargs.NativeSingleCall(item.Input["toolCalls"])
-				if !ok || name != "apply_patch" && name != "powershell" || len(copilotargs.CLIToolArgs(name, args)) == 0 {
-					t.Fatalf("%s native patch did not project", item.OS)
+				if _, ok := copilotargs.NativeCalls(item.Input["toolCalls"]); !ok {
+					t.Fatalf("%s native tool calls did not project", item.OS)
 				}
 				return
 			}
@@ -90,8 +89,8 @@ func TestCopilotNativeBenignCorpus(t *testing.T) {
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if count != 12 {
-		t.Fatalf("native benign corpus has %d cases, want 12", count)
+	if count != 15 {
+		t.Fatalf("native benign corpus has %d cases, want 15", count)
 	}
 }
 

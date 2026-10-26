@@ -535,17 +535,16 @@ func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 		ToolName:      hookFirstString(payload, "toolName"),
 	}
 	if calls, present := payload["toolCalls"]; present {
-		name, args, ok := copilotargs.NativeSingleCall(calls)
+		// The first call names the request; the gateway judges every call
+		// of a parallel envelope (copilotargs.NativeCalls).
+		native, ok := copilotargs.NativeCalls(calls)
 		if !ok || req.ToolName != "" || payload["toolArgs"] != nil || payload["toolInput"] != nil {
 			req.ToolCallUnparsed = true
 			return req
 		}
-		req.ToolName = name
+		req.ToolName = native[0].Name
 		req.ToolArgsAuthoritative = true
-		req.ToolArgs = copilotargs.CLIToolArgs(name, args)
-		if len(req.ToolArgs) == 0 {
-			req.ToolCallUnparsed = true
-		}
+		req.ToolArgs = native[0].Args
 		return req
 	}
 	args, present := payload["toolArgs"]

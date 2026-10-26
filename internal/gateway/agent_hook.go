@@ -517,9 +517,14 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// a permission callback bound to an earlier call (below) is proven
 		// again the same way.
 		writeProofCWD := req.CWD
-		if structuredToolRoute && connectorName == "copilot" &&
-			copilotWriteCallUnproven(req.ToolName, req.ToolArgs, writeProofCWD, hookActiveHome(r.Context()), copilotManagedPatchEvidence(r.Context())) {
-			req.ToolCallUnparsed = true
+		// A native Copilot preToolUse can carry a model's parallel tool
+		// calls; every call is proven and judged (copilotNativeToolCalls).
+		var nativeCalls []copilotargs.NativeCall
+		if structuredToolRoute && connectorName == "copilot" {
+			nativeCalls = copilotNativeToolCalls(req)
+			if copilotCallsUnproven(req, nativeCalls, writeProofCWD, hookActiveHome(r.Context()), copilotManagedPatchEvidence(r.Context())) {
+				req.ToolCallUnparsed = true
+			}
 		}
 		a.hermesTasks.fill(&req)
 		if req.HookEventName == "" {
@@ -810,7 +815,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		panicked := false
 		if !gated {
-			resp, panicked = a.safeEvaluateHook(evaluationCtx, connectorName, req, b, payload, runtime)
+			resp, panicked, req = a.safeEvaluateHookCalls(evaluationCtx, connectorName, req, nativeCalls, b, payload, runtime)
 		}
 		var chainFinalization toolChainHookFinalization
 		if !panicked && !gated {

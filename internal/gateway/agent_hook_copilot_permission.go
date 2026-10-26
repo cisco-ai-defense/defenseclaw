@@ -79,6 +79,11 @@ func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest
 			return
 		}
 	}
+	// A parallel toolCalls envelope names several calls: a later callback
+	// cannot tell which one it is for.
+	if calls, _ := req.Payload["toolCalls"].([]any); len(calls) > 1 {
+		allowed = false
+	}
 	if !allowed || req.ToolCallUnparsed || req.ToolArgsProjectionUncertain || req.ToolName == "" || len(req.ToolArgs) == 0 {
 		return
 	}

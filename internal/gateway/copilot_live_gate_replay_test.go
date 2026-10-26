@@ -38,8 +38,8 @@ func TestCopilotUnparsedObserveAllowRunsTheSandboxGate(t *testing.T) {
 	}{
 		{"unbound argumentless permission callback", copilotLiveGateHook("permissionRequest",
 			`{"hookName":"permissionRequest","sessionId":"unbound","cwd":"__CWD__","toolName":"edit","toolInput":{}}`)},
-		{"two native tool calls", copilotLiveGateHook("preToolUse",
-			`{"sessionId":"multi","cwd":"__CWD__","toolCalls":[{"id":"a","name":"bash","args":{"command":"ls"}},{"id":"b","name":"bash","args":{"command":"pwd"}}]}`)},
+		{"native tool call with an unknown field", copilotLiveGateHook("preToolUse",
+			`{"sessionId":"multi","cwd":"__CWD__","toolCalls":[{"id":"a","name":"bash","args":{"command":"ls"}},{"id":"b","name":"bash","args":{"command":"pwd"},"extra":true}]}`)},
 		{"decoy dialect field", copilotLiveGateHook("preToolUse",
 			`{"sessionId":"decoy","cwd":"__CWD__","toolName":"bash","toolArgs":"{\"command\":\"ls\"}","tool_name":"bash"}`)},
 	} {
