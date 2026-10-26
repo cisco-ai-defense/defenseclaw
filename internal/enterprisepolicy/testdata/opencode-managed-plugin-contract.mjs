@@ -252,13 +252,11 @@ console.log("case ok: a reported foreign plugin is named once");
   const hooks = await load({ guard: "garbage" });
   await assert.rejects(before(hooks), /unapproved plugin/);
 }
-// A failed load-time check holds for the process (OpenCode loads plugins
-// once), so the reason says to restart the agent.
+// A failed load-time check blocks with its cause and is asked again on the
+// next call (GAP-1017, GAP-1180), so it says to try again, not to restart.
 {
   const hooks = await load({ guard: "", guardExit: 1 });
-  await assert.rejects(before(hooks), /could not check for unapproved plugins when the agent started.*Restart the agent/);
-  answer("guard.json", JSON.stringify({ deny: false }));
-  await assert.rejects(before(hooks), /Restart the agent/);
+  await assert.rejects(before(hooks), /could not check for unapproved plugins when the agent started.*Try again once DefenseClaw is available/);
 }
 
 // Post-tool telemetry and lifecycle events never throw.
