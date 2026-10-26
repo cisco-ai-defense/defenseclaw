@@ -219,8 +219,24 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 // word whatever builds the prefix (GAP-1732, the GAP-0475 class).
 var actionInterpreterKeyPath = regexp.MustCompile(`\.ssh(?:['"\s,/+)\\]|os\.sep|File::Spec|path\.sep){1,12}authorized_keys2?\b`)
 
+// actionInterpreterCodeWrites reports a writer call (open, write_text,
+// appendFileSync ...) in executable code, not inside a string or comment:
+// a path built only inside inert text writes nothing (GAP-0475 row).
+func actionInterpreterCodeWrites(code, language string) bool {
+	for _, location := range unprovenWriter.FindAllStringIndex(code, -1) {
+		if language == "python" || strings.HasPrefix(language, "python3") {
+			if pythonExecutableCodePosition(code, location[0]) {
+				return true
+			}
+		} else if literalCodePosition(code, location[0], language) {
+			return true
+		}
+	}
+	return false
+}
+
 // actionInterpreterBuildsKeyPath reports a python -c, perl/ruby/node -e call
-// whose code builds a path to an authorized-keys file.
+// whose code builds a path to an authorized-keys file and has a write.
 func actionInterpreterBuildsKeyPath(file *syntax.File, home string) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -232,8 +248,9 @@ func actionInterpreterBuildsKeyPath(file *syntax.File, home string) bool {
 		if !known {
 			return true
 		}
-		if code, _, ok := interpreterCodeOperand(call, programBase(program), home); ok &&
-			actionInterpreterKeyPath.MatchString(code) {
+		language := programBase(program)
+		if code, _, ok := interpreterCodeOperand(call, language, home); ok &&
+			actionInterpreterKeyPath.MatchString(code) && actionInterpreterCodeWrites(code, language) {
 			found = true
 		}
 		return !found
