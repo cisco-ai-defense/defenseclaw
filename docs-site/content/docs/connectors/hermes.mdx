@@ -71,6 +71,7 @@ What a gateway outage does to a Hermes call, per install and fail mode, is in th
 | Approvals | `shell-hooks-allowlist.json` in the same folder |
 | Hook program, macOS and Linux | `~/.defenseclaw/hooks/hermes-hook.sh` |
 | Hook program, Windows | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
+| Hook program, managed Windows | `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`, written by the guardian into each enrolled account's `%LOCALAPPDATA%\hermes\config.yaml` |
 
 ## Limits
 
@@ -87,6 +88,8 @@ The per-user commands on this page do not run on a computer with a standalone en
 The administrator manages Hermes in the managed `config.yaml`. `guardrail.connectors.hermes: {}` adds it for the accounts that [enrollment](/docs/enterprise/configure/enrollment) selects, the connector's `mode` and `hook_fail_mode` tune it, and `guardrail.connectors.hermes.enabled: false` removes it. Apply the change as in [Change the config](/docs/enterprise/operate/lifecycle#change-the-config), then check it with `enterprise <os> verify --json` (on Windows add `--profile standalone`; see [Operations](/docs/enterprise/operate/operations)). On Windows, machine ensure and upgrade can complete while an enrolled Hermes account reports `NOT COVERED`: a session-only `HERMES_HOME` may select a home the guardian cannot see or hook. Ensure, status, verify and the managed `doctor` answer name this limit; the lifecycle records a managed coverage alert. Managed verification reports session-home coverage as unknown because a shell can select an unhooked `HERMES_HOME` after the guardian checks. On Linux and macOS, `enterprise hooks verify --json` as root also checks the current hook files and reports this limit. `enterprise policy verify` checks machine-policy connectors only. See [Managed verification](/docs/reference/connectors/hermes#managed-verification).
 
 ## Turn it off
+
+On a managed computer, the administrator sets `guardrail.connectors.hermes.enabled: false` in the managed `config.yaml` and runs `ensure` ([On a managed computer](#on-a-managed-computer)); the commands below are refused there.
 
 For a per-user, single-connector install:
 
