@@ -185,7 +185,8 @@ fi
 # downstream code controls (HOME, PATH, locale, GIT_*); none of the
 # subsequent token-resolution logic depends on the operator's
 # original PATH or HOME.
-. "${HOOK_DIR}/_hardening.sh"
+# command: bash 3.2 (macOS /bin/bash) exits 0 when a sourced helper is missing or unreadable.
+command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
 {{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call.
@@ -379,16 +380,14 @@ fail_response() {
   exit 2
 }
 
-# W3C trace propagation: mapfile fills
-# TRACE_HEADER_ARGS with a sequence of `-H "traceparent: …"` /
-# `-H "tracestate: …"` arguments; invalid env values are dropped
-# by defenseclaw_extract_trace_context. On bash<4 the array stays
-# empty (set -u-safe expansion below) so older shells degrade
-# gracefully.
+# W3C trace propagation: TRACE_HEADER_ARGS gets a sequence of
+# `-H "traceparent: …"` / `-H "tracestate: …"` arguments; invalid env
+# values are dropped by defenseclaw_extract_trace_context.
 TRACE_HEADER_ARGS=()
-if command -v mapfile >/dev/null 2>&1; then
-  mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
-fi
+# A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
+while IFS= read -r trace_header_arg; do
+  TRACE_HEADER_ARGS+=("$trace_header_arg")
+done < <(defenseclaw_extract_trace_context)
 
 # Per-user attribution: the gateway cannot read the real user's identity from
 # its own service-account process, so the hook reports it.
