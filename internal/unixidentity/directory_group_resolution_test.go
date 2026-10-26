@@ -173,7 +173,7 @@ func TestDirectoryLookupBudgetNamesAColdLargeMembership(t *testing.T) {
 	run := func(budget time.Duration) error {
 		ctx, cancel := context.WithTimeout(context.Background(), budget)
 		defer cancel()
-		_, _, err := (&NSSResolver{path: "/usr/bin/getent", runner: slow, ctx: ctx}).groupNames(ids)
+		_, _, err := (&NSSResolver{path: "/usr/bin/getent", runner: slow, ctx: ctx}).groupNames(ids, false)
 		return err
 	}
 	if err := run(DirectoryLookupBudget()); err != nil {
@@ -192,7 +192,7 @@ func TestDirectoryLookupBudgetNamesAColdLargeMembership(t *testing.T) {
 func TestUnnamedGroupNeedsAProvenMissFromEveryNSSProvider(t *testing.T) {
 	accountHost(t, "", "", "passwd: files himmelblau\ninitgroups: files himmelblau\ngroup: files himmelblau\n")
 	r := newFakeNSS(&fakeRun{})
-	names, unconfirmed, err := r.groupNames([]int{7000, 7001})
+	names, unconfirmed, err := r.groupNames([]int{7000, 7001}, false)
 	if err != nil || !reflect.DeepEqual(names, []string{"7000", "7001"}) || !reflect.DeepEqual(unconfirmed, []string{"7000", "7001"}) {
 		t.Fatalf("uncheckable NSS provider: names %v, unconfirmed %v, err %v; want both numeric and unconfirmed, no error", names, unconfirmed, err)
 	}
@@ -201,7 +201,7 @@ func TestUnnamedGroupNeedsAProvenMissFromEveryNSSProvider(t *testing.T) {
 func TestUnnamedGroupKeepsNumericIDWhenLocalNSSProviderAnswers(t *testing.T) {
 	accountHost(t, "", "", "group: files systemd\n")
 	r := newFakeNSS(&fakeRun{})
-	if names, unconfirmed, err := r.groupNames([]int{7000}); err != nil || !reflect.DeepEqual(names, []string{"7000"}) || len(unconfirmed) != 0 {
+	if names, unconfirmed, err := r.groupNames([]int{7000}, false); err != nil || !reflect.DeepEqual(names, []string{"7000"}) || len(unconfirmed) != 0 {
 		t.Fatalf("confirmed local NSS miss = %v, unconfirmed %v, %v", names, unconfirmed, err)
 	}
 }
@@ -245,7 +245,7 @@ func TestUnnamedGroupNeverTakesAProviderName(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			accountHost(t, "", "", tc.nss)
 			r := newFakeNSS(&fakeRun{results: tc.results, errs: tc.errs})
-			names, unconfirmed, err := r.groupNames([]int{7000})
+			names, unconfirmed, err := r.groupNames([]int{7000}, false)
 			if err != nil || !reflect.DeepEqual(names, []string{"7000"}) || !reflect.DeepEqual(unconfirmed, tc.wantUnconfirmed) {
 				t.Fatalf("names %v, unconfirmed %v, err %v; want [7000], unconfirmed %v", names, unconfirmed, err, tc.wantUnconfirmed)
 			}
