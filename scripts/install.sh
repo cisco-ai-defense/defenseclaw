@@ -182,7 +182,6 @@ is_valid_connector() {
 # ── Arguments ────────────────────────────────────────────────────────────────
 
 YES=false
-ACCEPT_FAIL_MODE_CHANGE=false
 TARGET_VERSION=""
 LOCAL_DIR=""
 ROLLBACK=false
@@ -216,10 +215,6 @@ Options:
   --no-openclaw            First install only: do not install OpenClaw
   --quickstart             Run 'defenseclaw quickstart' afterwards if nothing is configured yet
   --quickstart-mode MODE   observe or action (implies --quickstart)
-  --accept-fail-mode-change
-                           Upgrade from 0.8.10 or 1.0.0-1.0.3 although hooks installed
-                           open no longer block during an outage for an agent started
-                           with DEFENSECLAW_FAIL_MODE=closed
   --help, -h               Show this help
 
 Exit codes:
@@ -243,7 +238,6 @@ while [[ $# -gt 0 ]]; do
     esac
     case "$1" in
         --yes|-y) YES=true ;;
-        --accept-fail-mode-change) ACCEPT_FAIL_MODE_CHANGE=true ;;
         --version)
             # An empty --version= picked the latest release (GAP-0012).
             [[ $# -ge 2 && -n "$2" ]] || usage_error "--version needs a value such as 1.2.3"
@@ -402,10 +396,6 @@ if ! is_version "${VERSION}"; then
         target="${TARGET_VERSION:-$(latest_release)}"
         version_lt "${target}" 1.0.0 \
             && die "DefenseClaw ${target} predates this installer; see ${RELEASE_BASE}/releases/tag/${target}"
-        # Releases before 1.0.4 have no such option (and no such check).
-        if [[ "${ACCEPT_FAIL_MODE_CHANGE}" == true ]] && ! version_lt "${target}" 1.0.4; then
-            FORWARD+=(--accept-fail-mode-change)
-        fi
         run_release_installer "${target}" ${FORWARD[@]+"${FORWARD[@]}"}
     fi
 fi
@@ -951,7 +941,6 @@ fi
 
 migrate_args=()
 [[ -n "${PREV_VERSION}" ]] && migrate_args+=(--from-version "${PREV_VERSION}")
-[[ "${ACCEPT_FAIL_MODE_CHANGE}" == true ]] && migrate_args+=(--accept-fail-mode-change)
 set +e
 "${STAGING}/venv/bin/defenseclaw" migrate --check \
     --gateway-binary "${STAGING}/bin/defenseclaw-gateway" ${migrate_args[@]+"${migrate_args[@]}"}
@@ -960,19 +949,6 @@ set -e
 case "${check_rc}" in
     0) ;;
     2) die "Your configuration is from a newer DefenseClaw than ${VERSION}; nothing was changed" ;;
-    3)
-        # GAP-0361: hooks installed open by a release that let an agent's
-        # DEFENSECLAW_FAIL_MODE=closed block during an outage. The upgraded
-        # hooks run only the installed mode, so an unattended upgrade stops
-        # and an interactive one asks, with no as the answer.
-        stop_fail_mode="Save closed first (defenseclaw guardrail fail-mode closed, as shown above), or run the installer again with --accept-fail-mode-change to keep them open"
-        [[ "${YES}" != true ]] || { rm -rf "${STAGING:?}"; drop_new_uv; die "Not upgraded: --yes does not accept that change. ${stop_fail_mode}; nothing was changed"; }
-        if ! ask_yes_no "Upgrade anyway, with the hooks named above open while the gateway is down?" n; then
-            rm -rf "${STAGING:?}"
-            drop_new_uv
-            die "Not upgraded. ${stop_fail_mode}; nothing was changed"
-        fi
-        ;;
     *) die "Your configuration cannot be migrated to ${VERSION}; nothing was changed (see above)" ;;
 esac
 ok "DefenseClaw ${VERSION} is staged and checked"

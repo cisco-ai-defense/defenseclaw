@@ -24,8 +24,6 @@ The command downloads the latest release's installer (`install.sh` on macOS and 
 
 An upgrade sets each hook's fail mode from your config before the new hook runs. A fail mode you set to open stays open; outside Secure Client one you never set is closed.
 
-Hooks of 0.8.10 and 1.0.0-1.0.3 also read `DEFENSECLAW_FAIL_MODE` from the agent's environment; the new hooks don't. So when you upgrade from one of those releases with a hook set to open, step 2 names it and asks before going on, with no as the answer. `--yes`, or a run without a terminal, stops with nothing changed. Run `defenseclaw guardrail fail-mode closed` first, or run the installer with `--accept-fail-mode-change` (`-AcceptFailModeChange` on Windows) to keep those hooks open. See [Fail modes](/docs/reference/configuration/fail-modes#the-environment-does-not-set-the-fail-mode).
-
 If a step fails, the installer puts the previous version back, restarts it and keeps the failed attempt in `~/.defenseclaw/.failed-<time>`. Every run writes a log to `~/.defenseclaw/logs/`. On Windows the installer continues in a new PowerShell window so the running command can release its files.
 
 | Command | What it does |
@@ -34,7 +32,7 @@ If a step fails, the installer puts the previous version back, restarts it and k
 | `defenseclaw upgrade --yes` | The same, without prompting. |
 | `defenseclaw upgrade --version X.Y.Z` | Install a specific release, newer or older. |
 | `defenseclaw rollback` | Put back the install that the last upgrade replaced. Run it again to roll forward. |
-| `defenseclaw migrate --check` | List pending config migrations. Exit 0: can be applied. 1: cannot. 2: the config is from a newer release. 3: an upgrade from 0.8.10 or 1.0.0-1.0.3 with hooks set to open, not accepted with `--accept-fail-mode-change`. |
+| `defenseclaw migrate --check` | List pending config migrations. Exit 0: can be applied. 1: cannot. 2: the config is from a newer release. |
 
 If the `defenseclaw` command does not start, run the install command again. It repairs any install and keeps your data:
 

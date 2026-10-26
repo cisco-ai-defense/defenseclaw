@@ -52,7 +52,6 @@ param(
     [switch]$NoPersistPath,
     [string]$CosignPath = "",
     [switch]$Help,
-    [switch]$AcceptFailModeChange,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$UnknownArguments = @()
 )
@@ -2299,9 +2298,6 @@ Options:
   -QuickstartMode MODE  observe or action (implies -Quickstart)
   -NoPersistPath        Do not change the user PATH in the registry
   -CosignPath FILE      cosign to check the release signature with (default: cosign on PATH)
-  -AcceptFailModeChange Upgrade from 0.8.10 or 1.0.0-1.0.3 although hooks installed
-                        open no longer block during an outage for an agent started
-                        with DEFENSECLAW_FAIL_MODE=closed
   -Help                 Show this help
 
 Exit codes (run as a file):
@@ -2665,10 +2661,6 @@ function Invoke-Install {
     if ($QuickstartMode) { $Forward += @("-QuickstartMode", $QuickstartMode) }
     if ($NoPersistPath) { $Forward += "-NoPersistPath" }
     if ($CosignPath) { $Forward += @("-CosignPath", $CosignPath) }
-    # Releases before 1.0.4 have no such switch (and no such check).
-    if ($AcceptFailModeChange -and (-not $TargetVersion -or [version]$TargetVersion -ge [version]"1.0.4")) {
-        $Forward += "-AcceptFailModeChange"
-    }
     if ($TargetVersion -and -not $Rollback -and [version]$TargetVersion -lt [version]"1.0.0") {
         Die "DefenseClaw $TargetVersion predates this installer; see $ReleaseBase/releases/tag/$TargetVersion"
     }
@@ -2828,21 +2820,9 @@ function Invoke-Install {
     if (-not (Get-NativeOutput $stagedCli @("--version")).Contains($Ver)) { Die "The staged CLI does not start; nothing was changed" }
     $checkArgs = @("migrate", "--check", "--gateway-binary", $stagedGateway)
     if ($PrevVersion) { $checkArgs += @("--from-version", $PrevVersion) }
-    if ($AcceptFailModeChange) { $checkArgs += "--accept-fail-mode-change" }
     switch (Invoke-Native $stagedCli $checkArgs) {
         0 { }
         2 { Die "Your configuration is from a newer DefenseClaw than $Ver; nothing was changed" }
-        3 {
-            # GAP-0361: hooks installed open by a release that let an agent's
-            # DEFENSECLAW_FAIL_MODE=closed block during an outage. The upgraded
-            # hooks run only the installed mode, so an unattended upgrade stops
-            # and an interactive one asks, with no as the answer.
-            $stopFailMode = "Save closed first (defenseclaw guardrail fail-mode closed, as shown above), or run the installer again with -AcceptFailModeChange to keep them open"
-            if ($Yes) { Die "Not upgraded: -Yes does not accept that change. $stopFailMode; nothing was changed" }
-            if (-not (Confirm-Step "Upgrade anyway, with the hooks named above open while the gateway is down?" -DefaultNo)) {
-                Die "Not upgraded. $stopFailMode; nothing was changed"
-            }
-        }
         default { Die "Your configuration cannot be migrated to $Ver; nothing was changed (see above)" }
     }
     Write-Ok "DefenseClaw $Ver is staged and checked"

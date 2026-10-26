@@ -9843,15 +9843,6 @@ def _check_ignored_dotenv_keys(cfg, r: _DoctorResult) -> None:
     )
 
 
-def _check_ignored_process_fail_mode(cfg, r: _DoctorResult) -> None:
-    """WARN for a DEFENSECLAW_FAIL_MODE in doctor's environment, which no hook reads (GAP-0361)."""
-    from defenseclaw.fail_mode import ignored_process_fail_mode
-
-    detail = ignored_process_fail_mode(cfg)
-    if detail:
-        _emit("warn", "Fail-mode variable", detail, r=r)
-
-
 def _short_policy_digest(digest: str) -> str:
     """``sha256:`` plus the first 12 hex digits, as status and the TUI show it."""
     return digest[: len("sha256:") + 12] if digest.startswith("sha256:") else digest
@@ -11986,7 +11977,6 @@ def doctor(
     r.set_section("configuration")
     _check_config(cfg, r)
     _check_ignored_dotenv_keys(cfg, r)
-    _check_ignored_process_fail_mode(cfg, r)
     _check_sudo_runtime_leftovers(cfg, r)
     _check_audit_db(cfg, r)
     _check_inventory_storage(cfg, r)
@@ -14320,8 +14310,10 @@ def _check_connector_inventory(
                     f"provenance={fail_mode['provenance']}"
                 )
                 desired = fail_mode.get("desired")
-                # The rendered mode is checked on its own: an open-rendered
-                # hook is open whatever any environment sets.
+                # A DEFENSECLAW_FAIL_MODE=closed in doctor's own environment
+                # makes the effective mode closed, but the agent that runs an
+                # open-rendered hook may not have it, so the rendered mode is
+                # checked on its own.
                 rendered_open = desired == "closed" and rendered == "open"
                 # A hook or plugin that records its mode but has none that
                 # can be read (missing, or a value no installer writes) does

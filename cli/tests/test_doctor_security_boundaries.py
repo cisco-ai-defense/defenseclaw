@@ -108,61 +108,6 @@ def test_dotenv_control_keys_are_named_with_their_replacement_not_on_every_comma
     assert [row["status"] for row in result.checks] == ["warn"]
 
 
-def _fail_mode_cfg(*, secure_client: bool = False) -> SimpleNamespace:
-    return SimpleNamespace(guardrail=SimpleNamespace(secure_client_hook_fail_modes=lambda: secure_client))
-
-
-@pytest.mark.parametrize(
-    ("name", "value", "command"),
-    [
-        ("DEFENSECLAW_FAIL_MODE", "closed", "defenseclaw guardrail fail-mode closed"),
-        ("DEFENSECLAW_FAIL_MODE", " Open ", "defenseclaw guardrail fail-mode open"),
-        ("DEFENSECLAW_FAIL_MODE", "strict", "defenseclaw guardrail fail-mode open|closed"),
-        ("defenseclaw_fail_mode", "closed", "defenseclaw guardrail fail-mode closed"),
-    ],
-)
-def test_process_fail_mode_variable_is_named_as_unread_with_its_persistent_command(
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-    value: str,
-    command: str,
-) -> None:
-    # GAP-0361: 1.0.3 hooks read DEFENSECLAW_FAIL_MODE=closed as a process
-    # override; 1.0.4 hooks run only their installed mode, so an upgraded
-    # shell that still exports it silently runs open hooks open. Doctor and
-    # a migrate that is no upgrade from such a release (test_migrate covers
-    # the upgrade notice) name it with the command that persists it.
-    from defenseclaw.commands import cmd_migrate
-    from defenseclaw.fail_mode import ignored_process_fail_mode
-    from defenseclaw.migrations import MigrateResult
-
-    for key in [key for key in os.environ if key.upper() == "DEFENSECLAW_FAIL_MODE"]:
-        monkeypatch.delenv(key)
-    environ = {name: value}
-    detail = ignored_process_fail_mode(_fail_mode_cfg(), environ)
-    assert detail is not None and command in detail and "do not read it" in detail
-    assert ignored_process_fail_mode(_fail_mode_cfg(secure_client=True), environ) is None
-    assert ignored_process_fail_mode(_fail_mode_cfg(), {}) is None
-    assert ignored_process_fail_mode(_fail_mode_cfg(), {name: "  "}) is None
-
-    monkeypatch.setenv(name, value)
-    result = cmd_doctor._DoctorResult()
-    cmd_doctor._check_ignored_process_fail_mode(_fail_mode_cfg(), result)
-    assert [row["status"] for row in result.checks] == ["warn"]
-    assert command in str(result.checks[0])
-    monkeypatch.setattr(config_module, "load", lambda **_kwargs: _fail_mode_cfg())
-    (notice,), needs_consent = cmd_migrate._process_fail_mode_notices(
-        "/nonexistent-data-dir", "1.0.4", MigrateResult(9, 9)
-    )
-    # Not an upgrade from a release whose hooks read it: named, never a stop.
-    assert command in notice and needs_consent is False
-
-    monkeypatch.delenv(name)
-    result = cmd_doctor._DoctorResult()
-    cmd_doctor._check_ignored_process_fail_mode(_fail_mode_cfg(), result)
-    assert result.checks == []
-
-
 def test_python_dotenv_loader_warns_when_safe_read_is_refused(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,

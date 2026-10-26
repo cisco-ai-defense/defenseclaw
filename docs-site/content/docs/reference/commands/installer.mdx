@@ -26,7 +26,6 @@ The installer downloads the release's gateway, CLI wheel and a hash-pinned list 
 | `--quickstart-mode MODE` | `-QuickstartMode MODE` | `observe` or `action` for that quickstart (implies quickstart). |
 | | `-NoPersistPath` | Do not change the user `PATH` in the registry. |
 | | `-CosignPath FILE` | The `cosign` to check the release signature with. |
-| `--accept-fail-mode-change` | `-AcceptFailModeChange` | Upgrade from 0.8.10 or 1.0.0-1.0.3 although hooks are installed `open`. Those hooks then let a call through while the gateway is down, even for an agent started with `DEFENSECLAW_FAIL_MODE=closed`, which the earlier release blocked. Without it the installer asks, and `--yes` or a run with no terminal stops with nothing changed. See [Fail modes](/docs/reference/configuration/fail-modes#the-environment-does-not-set-the-fail-mode). |
 | `--help`, `-h` | `-Help` | Show the installer's help. |
 
 Options that take a value also accept `--name=value`. `defenseclaw quickstart --help` lists the connector names.

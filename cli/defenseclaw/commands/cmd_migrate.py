@@ -20,9 +20,7 @@ The installer runs this from the version it just installed, with the gateway
 stopped. Operators rarely need it directly; it is safe to re-run.
 
 Exit codes: 0 done (or nothing to do), 1 a step failed, 2 the configuration
-was written by a newer DefenseClaw than this one, 3 (--check only) an upgrade
-that swaps hooks installed open from a release whose hooks read
-DEFENSECLAW_FAIL_MODE, without --accept-fail-mode-change.
+was written by a newer DefenseClaw than this one.
 """
 
 from __future__ import annotations
@@ -39,9 +37,6 @@ from defenseclaw import ux
 
 EXIT_FAILED = 1
 EXIT_CONFIG_TOO_NEW = 2
-# Only --check returns it, after every other check passed: the installers run
-# that check before the swap and ask, or stop an unattended upgrade.
-EXIT_FAIL_MODE_CHANGE_NOT_ACCEPTED = 3
 
 
 def _default_data_dir() -> str:
@@ -68,9 +63,7 @@ def _validate_from_version(_ctx, _param, value):
     is_flag=True,
     help=(
         "List pending steps without changing anything. Exit 0 when they can be applied "
-        "(pending or not), 1 when they cannot, 2 when the config is from a newer release, "
-        "3 when the upgrade changes the outage behavior of hooks installed open "
-        "(see --accept-fail-mode-change)."
+        "(pending or not), 1 when they cannot, 2 when the config is from a newer release."
     ),
 )
 @click.option(
@@ -83,17 +76,8 @@ def _validate_from_version(_ctx, _param, value):
 @click.option("--data-dir", default=None, type=click.Path(file_okay=False), help="Data directory to migrate.")
 @click.option("--openclaw-home", default=None, type=click.Path(file_okay=False), help="OpenClaw home directory.")
 @click.option("--gateway-binary", default=None, type=click.Path(dir_okay=False), help="Gateway used by --check.")
-@click.option(
-    "--accept-fail-mode-change",
-    is_flag=True,
-    help=(
-        "With --check: pass an upgrade from 0.8.10 or 1.0.0-1.0.3 whose hooks are installed open. "
-        "The upgraded hooks stay open while the gateway is down even for an agent started with "
-        "DEFENSECLAW_FAIL_MODE=closed."
-    ),
-)
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, accept_fail_mode_change, as_json) -> None:
+def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as_json) -> None:
     """Bring config and data to this version's schema."""
     from defenseclaw.migrations import ConfigTooNewError, MigrationError, display_step_name, migrate
 
@@ -119,15 +103,6 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, ac
         ux.err(str(exc))
         raise SystemExit(EXIT_FAILED) from None
 
-    # Notices that hold whatever this process's environment is: --check (the
-    # installer runs it before the swap) names them before the hooks are
-    # replaced, and --json lists them under "warnings". An upgrade notice
-    # about hooks installed open also stops --check unless the change is
-    # accepted (GAP-0361): the installers ask, and an unattended upgrade
-    # must not make it silently.
-    with progress:
-        warnings, needs_acceptance = _process_fail_mode_notices(data_dir or _default_data_dir(), from_version, result)
-    refused = check and needs_acceptance and not accept_fail_mode_change
     if as_json:
         # In check mode nothing ran: list the steps under "pending" and keep
         # "applied" empty so a script never mistakes a dry run for a migration.
@@ -140,8 +115,6 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, ac
                     "pending": result.applied if check else [],
                     "changed": result.changed,
                     "check": check,
-                    "fail_mode_change_not_accepted": refused,
-                    "warnings": warnings,
                 },
                 sort_keys=True,
             )
@@ -165,72 +138,6 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, ac
     if not check and not as_json and _upgraded_from_0x(result):
         _report_hook_fail_mode_changes(data_dir or _default_data_dir())
         _report_ignored_dotenv_keys(data_dir or _default_data_dir())
-    with progress:
-        for notice in warnings:
-            ux.warn(notice)
-        if refused:
-            ux.err(
-                "This upgrade needs your consent before it replaces these hooks: save closed first as shown, "
-                "or accept the change at the installer's prompt or with --accept-fail-mode-change "
-                "(-AcceptFailModeChange in install.ps1). Nothing was changed."
-            )
-    if refused:
-        raise SystemExit(EXIT_FAIL_MODE_CHANGE_NOT_ACCEPTED)
-
-
-# The first release whose hooks run only the fail mode installed with them
-# (GAP-0315): the hooks of every earlier release (0.8.10, 1.0.0-1.0.3) read
-# DEFENSECLAW_FAIL_MODE from the agent's environment.
-_FIRST_INSTALLED_FAIL_MODE_RELEASE = (1, 0, 4)
-
-
-def _previous_hooks_read_process_fail_mode(from_version: str | None, from_config_version: int | None) -> bool:
-    """Whether the install being upgraded has hooks that read DEFENSECLAW_FAIL_MODE.
-
-    The installers pass the release they replace as --from-version; without
-    it, only a 0.x config (below config_version 8) proves an older release.
-    """
-    match = re.match(r"v?(\d+)\.(\d+)\.(\d+)", (from_version or "").strip())
-    if match:
-        return tuple(int(part) for part in match.groups()) < _FIRST_INSTALLED_FAIL_MODE_RELEASE
-    return from_config_version is not None and from_config_version < _FIRST_1X_CONFIG_VERSION
-
-
-def _process_fail_mode_notices(data_dir: str, from_version: str | None, result) -> tuple[list[str], bool]:
-    """The DEFENSECLAW_FAIL_MODE notices of this run (GAP-0361), and whether the upgrade needs consent.
-
-    An upgrade from a release whose hooks read the variable names each
-    connector installed open, whatever the upgrade's environment is: the
-    agent that set the variable runs elsewhere. Such an upgrade needs
-    consent (``migrate --check`` exits 3 without --accept-fail-mode-change):
-    the old hooks blocked during an outage for an agent started with
-    DEFENSECLAW_FAIL_MODE=closed and the upgraded ones let the call through.
-    A config that cannot be read, or a notice that cannot be worked out,
-    needs consent too. Otherwise a variable this process sets is named, as
-    doctor does, and nothing needs consent.
-    """
-    if result.from_config_version is None:
-        return [], False
-    try:
-        from defenseclaw.config import load
-
-        cfg = load(data_dir=data_dir)
-    except Exception:  # noqa: BLE001 - an unreadable config still gets the upgrade notice
-        cfg = None
-    from defenseclaw.fail_mode import ignored_process_fail_mode, process_fail_mode_upgrade_notice
-
-    if _previous_hooks_read_process_fail_mode(from_version, result.from_config_version):
-        try:
-            notice = process_fail_mode_upgrade_notice(cfg, from_version)
-        except Exception:  # noqa: BLE001 - not knowing which hooks are open is not consent
-            notice = process_fail_mode_upgrade_notice(None, from_version)
-        if notice:
-            return [notice], True
-    try:
-        detail = ignored_process_fail_mode(cfg) if cfg is not None else None
-    except Exception:  # noqa: BLE001 - this notice must never fail the migration
-        return [], False
-    return ([detail] if detail else []), False
 
 
 def _report_ignored_dotenv_keys(data_dir: str) -> None:
