@@ -303,7 +303,15 @@ _EXECUTABLE_SUFFIXES = frozenset({
     ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".cjs", ".mjs", ".py", ".pyc", ".pyz", ".rb", ".pl", ".php",
     ".lua", ".go", ".rs", ".java", ".jar", ".class", ".ps1", ".psm1", ".vbs", ".bash", ".zsh", ".fish",
     ".exe", ".so", ".dylib", ".wasm", ".dll", ".node", ".sh", ".bat", ".cmd",
+    ".com", ".scr", ".msi", ".cpl", ".hta", ".wsf", ".vbe", ".jse", ".psd1", ".pyw",
 })
+# First bytes of a file the OS can run whatever its name: a #! script, an
+# ELF, Mach-O (thin and fat, both byte orders) or Windows PE (MZ) binary.
+_EXECUTABLE_MAGIC = (
+    b"#!", b"\x7fELF", b"MZ",
+    b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf", b"\xbe\xba\xfe\xca", b"\xbf\xba\xfe\xca",
+)
 # Files that make an agent run a command (hooks, MCP and LSP servers).
 _EXECUTABLE_CONFIG_NAMES = frozenset({"hooks.json", ".mcp.json", "mcp.json", ".lsp.json"})
 # Manifests and the keys in them that start code.
@@ -317,15 +325,19 @@ _EXECUTABLE_WALK_LIMIT = 5000
 
 def _plugin_has_executable_files(target: str, ctx: ScanContext) -> bool:
     """Whether the plugin holds anything that runs: collected source, a
-    script, binary or interpreter file, an executable-bit file that is
-    extensionless or starts with ``#!``, a hooks/MCP/LSP config, or a
-    manifest key that starts code. A symlink, an unreadable entry, an
-    unparsable manifest or a tree past the walk limit counts as executable,
-    so only a plain tree of documents is "no executable files"."""
+    script, binary or interpreter suffix, a regular file with an executable
+    bit or whose first bytes are ``#!``, ELF, Mach-O or ``MZ`` (on every OS),
+    a hooks/MCP/LSP config, or a manifest key that starts code. A symlink, a
+    non-regular file, an unreadable file or folder, an unparsable manifest or
+    a tree past the walk limit counts as executable, so only a plain,
+    readable tree of documents is "no executable files" (GAP-1389, GAP-2009)."""
     if ctx.source_files or not os.path.isdir(target) or os.path.islink(target):
         return True
+    walk_errors: list[OSError] = []
     seen = 0
-    for root, dirs, files in os.walk(target, followlinks=False, onerror=lambda _e: None):
+    for root, dirs, files in os.walk(target, followlinks=False, onerror=walk_errors.append):
+        if walk_errors:
+            return True
         # A VCS folder's hook samples do not run when the agent loads the plugin.
         dirs[:] = [name for name in dirs if name != ".git"]
         for name in dirs:
@@ -345,19 +357,20 @@ def _plugin_has_executable_files(target: str, ctx: ScanContext) -> bool:
                 return True
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
                 return True
-            if os.name != "nt" and st.st_mode & 0o111 and (not suffix or _starts_with_shebang(path)):
+            if st.st_mode & 0o111 or _starts_with_executable_magic(path):
                 return True
             if name.casefold() in _MANIFEST_NAMES and _manifest_starts_code(path):
                 return True
-    return False
+    return bool(walk_errors)
 
 
-def _starts_with_shebang(path: str) -> bool:
+def _starts_with_executable_magic(path: str) -> bool:
     try:
         with open(path, "rb") as fh:
-            return fh.read(2) == b"#!"
+            head = fh.read(4)
     except OSError:
         return True
+    return head.startswith(_EXECUTABLE_MAGIC)
 
 
 def _manifest_starts_code(path: str) -> bool:

@@ -125,6 +125,52 @@ def test_a_plugin_that_runs_something_keeps_the_judge_high(tmp_path, monkeypatch
     assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}, name
 
 
+_ELF = b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 56
+_MACHO = b"\xcf\xfa\xed\xfe\x07\x00\x00\x01" + b"\x00" * 24
+_PE = b"MZ\x90\x00\x03\x00\x00\x00" + b"\x00" * 56
+
+
+_GAP2009_ROWS = [
+    # GAP-2009 probe rows: each was capped to MEDIUM at c4a1f6f113.
+    ("ELF binary with a suffix, mode 0755", "bin/tool.bin", _ELF, 0o755),
+    ("extensionless #! script without an exec bit (the Windows view)", "bin/fmt", b"#!/bin/sh\necho hi\n", 0o644),
+    # The same class: the first bytes decide on every OS, whatever the name or mode.
+    ("ELF binary with a suffix, no exec bit", "bin/tool.bin", _ELF, 0o644),
+    ("Mach-O binary, extensionless, no exec bit", "bin/tool", _MACHO, 0o644),
+    ("PE binary with a data suffix", "bin/helper.dat", _PE, 0o644),
+    ("exec-bit file with a document suffix", "bin/run.txt", b"echo hi\n", 0o755),
+    ("Windows installer suffix", "setup/agent.msi", b"x", 0o644),
+    ("Windows script host suffix", "setup/run.wsf", b"<job/>", 0o644),
+]
+
+
+@pytest.mark.parametrize("name, rel, data, mode", _GAP2009_ROWS, ids=[row[0] for row in _GAP2009_ROWS])
+def test_gap2009_a_runnable_file_keeps_the_judge_high(tmp_path, monkeypatch, name, rel, data, mode) -> None:
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    (plugin / rel).parent.mkdir(parents=True, exist_ok=True)
+    (plugin / rel).write_bytes(data)
+    if os.name != "nt":
+        (plugin / rel).chmod(mode)
+    elif mode & 0o111:
+        pytest.skip("executable bit is POSIX only")
+    result = _scan(plugin, monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}, name
+
+
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                    reason="needs a POSIX folder the scanner cannot list")
+def test_gap2009_an_unreadable_folder_counts_as_executable(tmp_path, monkeypatch) -> None:
+    # GAP-2009 probe row: scripts/ at mode 000 holding run.sh. os.walk's error
+    # used to be swallowed, so the plugin read as "no executable files".
+    plugin = _plugin(tmp_path, {**_SKILL, "scripts/run.sh": "echo hi\n"})
+    (plugin / "scripts").chmod(0)
+    try:
+        result = _scan(plugin, monkeypatch)
+    finally:
+        (plugin / "scripts").chmod(0o755)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
+
+
 def test_operator_severity_override_still_wins(tmp_path, monkeypatch) -> None:
     from defenseclaw.scanner.plugin_scanner import scanner as plugin_scanner_module
 
