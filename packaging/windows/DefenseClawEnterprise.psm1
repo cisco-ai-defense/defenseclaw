@@ -650,6 +650,13 @@ namespace $nativeNamespace
 
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetKernelObjectSecurity(
+            IntPtr handle,
+            uint securityInformation,
+            IntPtr securityDescriptor);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetSecurityDescriptorOwner(
             IntPtr securityDescriptor,
             out IntPtr owner,
@@ -1787,6 +1794,19 @@ namespace $nativeNamespace
                                     throw new Win32Exception(checked((int)result),
                                         "restore user file inheritance failed: " + path);
                             }
+                            // SetSecurityInfo marks an unprotected DACL as
+                            // auto-inherited (SE_DACL_AUTO_INHERITED). A file
+                            // an agent created never had that bit, so its
+                            // preimage then read back with other control
+                            // flags and the rollback reported its ACL as not
+                            // restored. Write the preimage's DACL and control
+                            // bits as they were.
+                            if (!String.Equals(UserFileSddl(handle, path), sddl,
+                                    StringComparison.Ordinal) &&
+                                !SetKernelObjectSecurity(handle,
+                                    DACL_SECURITY_INFORMATION, descriptor))
+                                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                                    "restore user file DACL control failed: " + path);
                             long creation = creationTimeUtc.ToFileTimeUtc();
                             long modified = lastWriteTimeUtc.ToFileTimeUtc();
                             var creationFileTime = new System.Runtime.InteropServices.ComTypes.FILETIME();
