@@ -886,6 +886,18 @@ func TestWindowsManagedRuntimeGenerationGCRecoversASetupRelaxedDataDirectory(t *
 	if err := validate(); err == nil {
 		t.Fatal("relaxed data directory validated as canonical")
 	}
+	// GAP-1765: a relax the running guardian made (its own setup, which may
+	// last past the wait) is skipped, never hardened under it.
+	stale := windowsSetupRelaxIsStale
+	t.Cleanup(func() { windowsSetupRelaxIsStale = stale })
+	windowsSetupRelaxIsStale = func(string) bool { return false }
+	if _, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options); !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
+		t.Fatalf("collect over a running guardian's relax: err=%v, want the account skipped as untrusted", err)
+	}
+	if err := validate(); err == nil {
+		t.Fatal("a running guardian's relax was hardened")
+	}
+	windowsSetupRelaxIsStale = func(string) bool { return true }
 	if removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options); err != nil || removed != 0 {
 		t.Fatalf("collect with a relaxed data directory: removed=%d err=%v", removed, err)
 	}
