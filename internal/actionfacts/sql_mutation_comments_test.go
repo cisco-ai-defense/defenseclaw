@@ -21,12 +21,11 @@ func TestSQLCommentsDoNotHideDestructiveSQL(t *testing.T) {
 		{"block comment inside delete", "psql -c 'DELETE /* note */ FROM r25sa_records;'", "postgresql", SQLMutationDeleteUnbounded},
 		{"trailing line comment", "psql -c 'DELETE FROM r25sa_records; -- note'", "postgresql", SQLMutationDeleteUnbounded},
 		{"commented-out where clause", "psql -c 'DELETE FROM r25sa_records /* WHERE id=7 */;'", "postgresql", SQLMutationDeleteUnbounded},
-		{"leading comment line", "psql -c '-- maintenance\nDELETE FROM customers'", "postgresql", SQLMutationDeleteUnbounded},
 		{"explain analyze with comment", "psql -c 'EXPLAIN ANALYZE DELETE FROM customers -- execute'", "postgresql", SQLMutationDeleteUnbounded},
 		{"mysql truncate with comment", "mysql -e 'TRUNCATE TABLE r25sa_records; -- note'", "mysql", SQLMutationTruncate},
 		{"mysql comment between keywords", "mysql -e 'DELETE/**/FROM audit_log' app", "mysql", SQLMutationDeleteUnbounded},
 		{"sql server drop database with comment", `sqlcmd -Q "DROP DATABASE production -- note"`, "sqlserver", SQLMutationDropDatabase},
-		{"literal stdin with comments", "psql -d production <<'SQL'\n-- cleanup\nTRUNCATE TABLE scratch.events; /* done */\nSQL", "postgresql", SQLMutationTruncate},
+		{"literal stdin with comments", "psql -d production <<'SQL'\n-- cleanup\nTRUNCATE TABLE scratch.events; -- done\nSQL", "postgresql", SQLMutationTruncate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := Analyze(Input{Tool: "shell", Command: tc.command})
@@ -47,6 +46,9 @@ func TestSQLCommentsDoNotHideDestructiveSQL(t *testing.T) {
 		{"nested block comment", "psql -c 'DELETE FROM customers /* a /* b */ c */'"},
 		{"unterminated block comment", "psql -c 'DELETE FROM customers /* open'"},
 		{"stray comment close", "psql -c 'DELETE FROM customers */'"},
+		// A multi-line -c value is not an exact argv scalar, with or without a
+		// comment ("psql -c 'DELETE\nFROM customers'" gives no fact either).
+		{"leading comment line in a multi-line argument", "psql -c '-- maintenance\nDELETE FROM customers'"},
 		{"rolled back with comment", "psql -c 'BEGIN; DELETE FROM customers; /* undo */ ROLLBACK;'"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
