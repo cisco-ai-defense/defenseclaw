@@ -3152,7 +3152,8 @@ func unparsedToolCallReason(connectorName string) string {
 // connector name, nothing from the payload, so the agent is shown it as
 // written.
 func trustedUnparsedToolCallReason(reason string) bool {
-	if reason == oversizeUninspectedReason {
+	if reason == oversizeUninspectedReason || reason == copilotObserveUnparsedReason ||
+		reason == copilotObserveProtectedUnparsedReason {
 		return true
 	}
 	name, ok := strings.CutPrefix(reason, unparsedToolCallReasonPrefix)
