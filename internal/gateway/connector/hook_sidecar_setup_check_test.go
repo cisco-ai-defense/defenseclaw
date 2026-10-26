@@ -65,6 +65,52 @@ func TestSharedHookSidecarRefusalNamesMalformedSidecar(t *testing.T) {
 	}
 }
 
+// GAP-1815: the unmanaged writer rebuilds a null fail_modes map from the
+// flat records when the gateway restarts (GAP-0512), so the refusal says the
+// restart repairs it and carries ErrSharedHookSidecarRestartRepairs, which a
+// setup that restarts the gateway goes ahead on. A null map the flat
+// records cannot rebuild is refused without it.
+func TestSharedHookSidecarRefusalLetsARestartRepairANullFailModesMap(t *testing.T) {
+	const nullMap = `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":null,"fail_mode_sources":{"codex":"config"}}`
+	writeFlat := func(t *testing.T, dataDir, name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dataDir, "hooks", hookConfigSidecarName+"."+name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range map[string]string{
+		"T10-L5 shape, no flat records": `{"version":2,"fail_modes":null,"legacy_fail_mode":"open"}`,
+		"corroborating flat records":    nullMap,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			path := writeSidecarFixture(t, dataDir, body)
+			if body == nullMap {
+				writeFlat(t, dataDir, "codex", "DEFENSECLAW_FAIL_MODE=open\nFAIL_MODE_SOURCE=config\n")
+				writeFlat(t, dataDir, "claudecode", "DEFENSECLAW_FAIL_MODE=closed\n")
+			}
+			err := SharedHookSidecarRefusal(SetupOpts{DataDir: dataDir})
+			if !errors.Is(err, ErrSharedHookSidecarRestartRepairs) || !errors.Is(err, ErrAgentConfigRefusal) ||
+				!strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "without --no-restart") {
+				t.Fatalf("SharedHookSidecarRefusal = %v; want the restart-repairs refusal naming %s", err, path)
+			}
+			if after, _ := os.ReadFile(path); string(after) != body {
+				t.Fatalf("the check changed the sidecar: %q", after)
+			}
+		})
+	}
+	t.Run("flat records cannot rebuild it", func(t *testing.T) {
+		dataDir := t.TempDir()
+		path := writeSidecarFixture(t, dataDir, nullMap)
+		// fail_mode_sources names codex, but its flat record is gone.
+		err := SharedHookSidecarRefusal(SetupOpts{DataDir: dataDir})
+		if errors.Is(err, ErrSharedHookSidecarRestartRepairs) || !errors.Is(err, ErrAgentConfigRefusal) ||
+			!strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "flat records cannot rebuild it") {
+			t.Fatalf("SharedHookSidecarRefusal = %v; want a plain refusal naming %s", err, path)
+		}
+	})
+}
+
 func writeSidecarFixture(t *testing.T, dataDir, body string) string {
 	t.Helper()
 	path := filepath.Join(dataDir, "hooks", hookConfigSidecarName)

@@ -594,6 +594,9 @@ func runConnectorCheckAgentSettings(cmd *cobra.Command, _ []string) error {
 		payload := map[string]any{"connector": name, "action": "check-agent-settings", "refused": refusal != nil}
 		if refusal != nil {
 			payload["reason"] = refusal.Error()
+			// A setup that restarts the gateway goes ahead: the gateway's
+			// writer repairs this sidecar (GAP-1815).
+			payload["repaired_by_restart"] = errors.Is(refusal, connector.ErrSharedHookSidecarRestartRepairs)
 		}
 		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
 	} else if refusal != nil {

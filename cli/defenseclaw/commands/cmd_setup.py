@@ -10706,7 +10706,7 @@ def _apply_hook_connector_setup(
     if connector == "opencode":
         _preflight_opencode_plugin_folder()
 
-    if refusal := _agent_settings_refusal(app.cfg, connector, workspace_dir=workspace_dir):
+    if refusal := _agent_settings_refusal(app.cfg, connector, workspace_dir=workspace_dir, will_restart=restart):
         ux.echo(f"  ✗ {refusal}", err=True)
         return False
 
@@ -12239,7 +12239,7 @@ def _apply_setup_batch(
     if "opencode" in connectors:
         _preflight_opencode_plugin_folder()
     for connector_name in connectors:
-        if refusal := _agent_settings_refusal(app.cfg, connector_name, workspace_dir=""):
+        if refusal := _agent_settings_refusal(app.cfg, connector_name, workspace_dir="", will_restart=restart):
             _restore_setup_config_snapshot(app, setup_snapshot)
             raise click.ClickException(refusal)
 
@@ -13010,7 +13010,15 @@ def _connector_not_shipped(cfg, name: str) -> bool:
 _GATEWAY_RESTART_STEP_RE = re.compile(r",? then run: defenseclaw-gateway restart\.?$")
 
 
-def _agent_settings_refusal(cfg, connector: str, *, workspace_dir: str | None = None) -> str:
+def _agent_settings_refusal(
+    cfg,
+    connector: str,
+    *,
+    workspace_dir: str | None = None,
+    will_restart: bool = False,
+    changed: str = "Setup changed nothing",
+    rerun: str = "setup command",
+) -> str:
     """Why the gateway would refuse *connector*'s agent settings, or "".
 
     The agent's own settings can refuse DefenseClaw hooks: a Codex
@@ -13023,7 +13031,10 @@ def _agent_settings_refusal(cfg, connector: str, *, workspace_dir: str | None = 
     fix. When the check cannot run, the gateway start still refuses those
     settings and setup's readiness wait reports that reason. Every connector
     is asked: the check also refuses a malformed shared hook config
-    (hooks/.hookcfg) that every connector's hooks close on (GAP-1325).
+    (hooks/.hookcfg) that every connector's hooks close on (GAP-1325),
+    except one the gateway's own writer repairs when *will_restart*: a null
+    fail_modes map its flat records rebuild (GAP-1815). *rerun* names the
+    command to run again after the fix, *changed* what the caller did.
     """
     executable = _gateway_lifecycle_executable()
     if not executable:
@@ -13055,13 +13066,15 @@ def _agent_settings_refusal(cfg, connector: str, *, workspace_dir: str | None = 
         payload = None
     if not isinstance(payload, dict) or payload.get("refused") is not True:
         return ""
+    if will_restart and payload.get("repaired_by_restart") is True:
+        return ""
     reason = str(payload.get("reason") or "").strip()
     if not reason:
         return ""
     label = _CONNECTOR_META.get(connector, {}).get("label", connector)
     return (
-        f"{label}: {_GATEWAY_RESTART_STEP_RE.sub('', reason)}. Setup changed nothing and the gateway keeps "
-        "running as it was; after the fix, run the same setup command again."
+        f"{label}: {_GATEWAY_RESTART_STEP_RE.sub('', reason)}. {changed} and the gateway keeps "
+        f"running as it was; after the fix, run the same {rerun} again."
     )
 
 

@@ -1794,6 +1794,24 @@ def test_setup_continues_when_the_agent_settings_let_hooks_run(monkeypatch, tmp_
     assert cmd_setup._agent_settings_refusal(_config(tmp_path), "claudecode") == ""
 
 
+def test_setup_that_restarts_goes_ahead_over_a_sidecar_the_restart_repairs(monkeypatch, tmp_path: Path) -> None:
+    """GAP-1815: the gateway's writer rebuilds a null fail_modes map from the
+    flat hook records when it restarts (GAP-0512), so setup with its default
+    restart goes ahead; setup --no-restart is still refused."""
+    payload = {
+        "connector": "claudecode",
+        "refused": True,
+        "repaired_by_restart": True,
+        "reason": f"the shared hook config {tmp_path}/hooks/.hookcfg has a null fail_modes map",
+    }
+    _gateway_check_agent_settings(monkeypatch, payload)
+    assert cmd_setup._agent_settings_refusal(_config(tmp_path), "claudecode", will_restart=True) == ""
+    refusal = cmd_setup._agent_settings_refusal(_config(tmp_path), "claudecode", will_restart=False)
+    assert "null fail_modes map" in refusal
+    _gateway_check_agent_settings(monkeypatch, {**payload, "repaired_by_restart": False})
+    assert "null fail_modes map" in cmd_setup._agent_settings_refusal(_config(tmp_path), "claudecode", will_restart=True)
+
+
 @pytest.mark.parametrize("connector", ("claudecode", "hermes", "cursor", "opencode"))
 def test_setup_refuses_a_malformed_shared_hook_sidecar_for_every_connector(
     monkeypatch, tmp_path: Path, connector: str
