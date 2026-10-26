@@ -1363,6 +1363,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1795", page: "troubleshooting/sandboxes/runs-and-sessions.mdx", section: "A sandbox is in OpenShell's error state", has: ["fails with Conflict and leaves it starting"], lacks: ["run `defenseclaw sandbox stop NAME` once it is ready"] },
   { gap: "GAP-1795", page: "enterprise/runtime/sandboxes.mdx", has: ["its `--end-vm` start fails with Conflict"], lacks: ["is started with `defenseclaw sandbox start <name> --end-vm`"] },
   { gap: "GAP-1795", page: "reference/sandboxes/cli.mdx", has: ["OpenShell 0.1.5 refuses this start with Conflict."] },
+  { gap: "GAP-1762", page: "troubleshooting/known-limits.mdx", section: "Claude Code shell", has: ["no hook decision and no hook audit row", "the Tetragon runtime layer can still record it (`hook_seen=false`)"], lacks: ["the audit log has no row for it"] },
   // r105-rows-end
 ];
 

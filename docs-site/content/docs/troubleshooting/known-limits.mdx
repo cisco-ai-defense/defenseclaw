@@ -5,7 +5,7 @@ description: Agent, operating system, local Splunk bridge, sandbox, upgrade and 
 
 ## Claude Code shell
 
-Claude Code does not run its hook for a command you type with `!` in shell mode. DefenseClaw cannot inspect or block that command, and the audit log has no row for it. This applies on every OS, to per-user and managed installs, in observe and action mode. It is a Claude Code limit: shell mode runs no `PreToolUse` hook. Use a normal Claude Code tool action when you need DefenseClaw to check a command. See [Claude Code](/docs/connectors/claudecode#limits).
+Claude Code does not run its hook for a command you type with `!` in shell mode. DefenseClaw's hook cannot inspect or block that command, so there is no hook decision and no hook audit row for it. This applies on every OS, to per-user and managed installs, in observe and action mode. On managed Linux the Tetragon runtime layer can still record it (`hook_seen=false`), see [Coverage by layer](/docs/appendix/coverage-by-layer). It is a Claude Code limit: shell mode runs no `PreToolUse` hook. Use a normal Claude Code tool action when you need DefenseClaw to check a command. See [Claude Code](/docs/connectors/claudecode#limits).
 
 ## Codex
 
