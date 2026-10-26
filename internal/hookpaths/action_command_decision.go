@@ -55,8 +55,38 @@ func ActionCommandDecisionWithGlobFacts(command, cwd, home string, facts map[str
 	return ""
 }
 
+// ActionCommandDecisionInShell is ActionCommandDecisionWithGlobFacts for a
+// call the gateway knows a POSIX shell runs (posixShell: Claude Code's Bash
+// tool, Git Bash, MSYS). On a native Windows host with a Windows home the
+// command is read with the Windows grammar and, as well, with the POSIX
+// grammar on the Windows file system, which is how Git Bash runs it: a
+// protected target either reading finds is the decision (GAP-1717, the
+// route 0 cases of TestR104ProtectedWriteRefix3 natively on Windows).
+func ActionCommandDecisionInShell(command, cwd, home string, facts map[string]string, posixShell bool) string {
+	decision := ActionCommandDecisionWithGlobFacts(command, cwd, home, facts)
+	if decision != "" || !posixShell || runtime.GOOS != "windows" || !actionWindowsHome(home) ||
+		command == "" || len(command) > MaxPayloadBytes {
+		return decision
+	}
+	var globs *actionGlobs
+	if facts != nil {
+		globs = &actionGlobs{facts: facts}
+	}
+	if actionPosixTargetMention(command, cwd, home, 0, false, globs.forCommand(command)) ||
+		actionConcreteProtectedWriteOn(command, cwd, home, true) {
+		return "protected-target"
+	}
+	return decision
+}
+
 func actionConcreteProtectedWrite(command, cwd, home string) bool {
-	if command == "" || home == "" || actionWindowsHome(home) || !filepath.IsAbs(cwd) {
+	return actionConcreteProtectedWriteOn(command, cwd, home, false)
+}
+
+// actionConcreteProtectedWriteOn reads POSIX write operands; windowsHome
+// allows a Windows home (a POSIX shell on a native Windows host).
+func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool) bool {
+	if command == "" || home == "" || actionWindowsHome(home) && !windowsHome || !filepath.IsAbs(cwd) {
 		return false
 	}
 	protected := newProtectedFiles(home)

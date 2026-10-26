@@ -44,6 +44,13 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 	if actionWindowsHome(home) {
 		return actionWindowsTargetMention(command, cwd, home, depth, stateOnly)
 	}
+	return actionPosixTargetMention(command, cwd, home, depth, stateOnly, globs)
+}
+
+// actionPosixTargetMention is the POSIX-grammar target scan. On a native
+// Windows host it also reads a POSIX shell's command (Git Bash, MSYS) under
+// a Windows home, on the Windows file system (ActionCommandDecisionInShell).
+func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) bool {
 	if !filepath.IsAbs(cwd) && (!actionPosixWindowsHome(home) || !path.IsAbs(cwd)) {
 		return false
 	}

@@ -1206,7 +1206,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
-	if hookpaths.ActionCommandDecisionWithGlobFacts(input.Command, input.CWD, facts.ActiveHome, globFacts) != "" {
+	if hookpaths.ActionCommandDecisionInShell(input.Command, input.CWD, facts.ActiveHome, globFacts,
+		trustedPOSIXShellCall(input, facts)) != "" {
 		return true
 	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
@@ -1389,6 +1390,12 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 	}
 	return false
+}
+
+// trustedPOSIXShellCall reports a call a POSIX shell runs (Bash tool,
+// POSIX dialect), which Git Bash runs on a Windows host.
+func trustedPOSIXShellCall(input actionfacts.Input, facts actionfacts.Facts) bool {
+	return input.DialectHint == actionfacts.DialectPOSIX || input.DialectHint == "" && facts.Parse.Dialect == actionfacts.DialectPOSIX
 }
 
 func trustedBase64ShellAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {
