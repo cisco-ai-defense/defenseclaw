@@ -44,19 +44,19 @@ An antivirus or EDR quarantined `C:\Program Files\Cisco\DefenseClaw\bin\defensec
 
 ## `security_complete` is `false` on Windows
 
-Claude Code is enabled and its attestation is not recorded, no Codex, Claude Code or Cursor row is enabled in the target manifest, or Codex or Claude Code is enabled (`hook_process_fail_open`).
+Claude Code is enabled and its attestation is not recorded (`machine_policy.claudecode` without `effective_lock: enforce`; run Setup `/repair ATTESTCLAUDEEFFECTIVEPOLICY=1`, again after each upgrade), no Codex, Claude Code or Cursor row is enabled in the target manifest, an enabled agent's hook can let a call run (`hook_process_fail_open`), an account's Hermes coverage cannot be confirmed (`status_detail_unavailable`, Hermes `NOT COVERED`), an account is still pending enrollment, or an enrolled user's Claude Code state cannot be read (`claude_state_unreadable`).
 
-**Fix.** Run `verify` and read the warning `security_incomplete`. See [Health fields](/docs/enterprise/operate/operations#health-fields). `hook_process_fail_open` is a known agent limit: protect the hook process with application control or EDR.
+**Fix.** Run `verify` and read every warning: the codes above say why, and on 1.0.3 or a host without Claude Code or Codex the warning `security_incomplete` lists the reasons. See [Health fields](/docs/enterprise/operate/operations#health-fields). `hook_process_fail_open` is a known agent limit: protect the hook process with application control or EDR.
 
 **Check.** `security_complete` is `true`, or `false` with `hook_process_fail_open` as its only warning.
 
 ## `security_complete` is `false` on Linux or macOS
 
-The sensor helper is not running, the run had errors, an agent is `agent_unprotected` or `hook_contract_unverified`, a user target is `guardian_target_failed`, the config enables no agent (`no_connectors_enabled`), or Codex, Claude Code, Copilot, Devin, Hermes, Kiro or Antigravity is enabled (`hook_process_fail_open`).
+The sensor helper is not running, the run had errors, an agent is `agent_unprotected` or `hook_contract_unverified`, a user target is `guardian_target_failed`, the config enables no agent (`no_connectors_enabled`), Codex, Claude Code, Copilot, Devin, Hermes, Kiro or Antigravity is enabled (`hook_process_fail_open`), or on Linux the kernel allows unprivileged user namespaces or process tracing (`unprivileged_user_namespaces`, `unprivileged_ptrace`, see [Known limits](/docs/troubleshooting/known-limits#upgrade-and-policy-limits)).
 
 **Fix.** Run `verify` and read the errors and warnings. `hook_process_fail_open` is a known agent limit: protect the hook process with application control or EDR.
 
-**Check.** `security_complete` is `true`, or `false` with `hook_process_fail_open` as its only warning.
+**Check.** `security_complete` is `true`, or `false` with only `hook_process_fail_open`, `unprivileged_user_namespaces` and `unprivileged_ptrace` warnings.
 
 ## `verify` fails because of one user (`guardian_target_failed`)
 
@@ -100,11 +100,11 @@ You see: "This computer is managed; use `defenseclaw sandbox status` for your re
 
 ## A command exits `3` with `This device is managed`
 
-This is a per-user CLI left from an earlier install. It covers `config set`, `config unset`, `skill`, `mcp`, `plugin` and `tool block`, `allow`, `unblock`. The gateway answers `403` `managed_device` on `/enforce/block` and `/enforce/allow`. The host is a managed standalone deployment: its policy comes from the admin config only, so every local writer refuses, even for root. Each attempt is audited as `outcome=refused reason=managed_device`.
+This is a per-user CLI left from an earlier install. It covers `config set`, `config unset`, `skill`, `mcp`, `plugin` and `tool block`, `allow`, `unblock`. The gateway answers `403` `managed_device` on `/enforce/block` and `/enforce/allow`. The host is a managed standalone deployment: its policy comes from the admin config only, so every local writer refuses, even for root. On Linux and macOS each attempt is audited as `outcome=refused reason=managed_device`. On managed Windows `defenseclaw.exe` exits `3` and writes no audit row, so check the exit code there.
 
 **Fix.** Make the change in the admin config: `asset_policy` for block and allow lists, `guardrail.block_at` for thresholds. See [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host).
 
-**Check.** The audit log shows no new `managed_device` refusal.
+**Check.** The change applies from the admin config; on Linux and macOS the audit log shows no new `managed_device` refusal.
 
 ## A `DEFENSECLAW_*` variable or `.env` entry has no effect
 

@@ -1457,6 +1457,10 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1382", page: "features/acp-guard.mdx", has: ["On a per-user install `defenseclaw acp catalog` prints the list. On a managed computer it is refused (exit 2)"] },
   { gap: "GAP-1631", page: "how-to/agents/add-or-remove-an-agent.mdx", has: ["`Fail` is `open` under the default policy"], lacks: ["enabled observe closed default"] },
   { gap: "GAP-1673", page: "troubleshooting/enterprise/index.mdx", section: "Common errors", has: ["| `hook_process_fail_open` | Linux, macOS, Windows |", "| `status_detail_unavailable` |", "| `claude_state_unreadable` |"] },
+  { gap: "GAP-1696", page: "troubleshooting/enterprise/hooks.mdx", section: "`security_complete` is `false` on Windows", has: ["`status_detail_unavailable`", "`claude_state_unreadable`", "ATTESTCLAUDEEFFECTIVEPOLICY=1", "`security_incomplete` lists the reasons"] },
+  { gap: "GAP-1700", page: "troubleshooting/enterprise/hooks.mdx", section: "`security_complete` is `false` on Linux or macOS", has: ["`unprivileged_user_namespaces`", "with only `hook_process_fail_open`, `unprivileged_user_namespaces` and `unprivileged_ptrace` warnings"] },
+  { gap: "GAP-1697", page: "troubleshooting/enterprise/hooks.mdx", has: ["On managed Windows `defenseclaw.exe` exits `3` and writes no audit row"] },
+  { gap: "GAP-1707", page: "enterprise/plan/rollout.mdx", has: ["On Linux and macOS a healthy install keeps it at `false` with only `hook_process_fail_open`", "`unprivileged_ptrace` while the kernel allows them"] },
   // r105-rows-end
 ];
 
