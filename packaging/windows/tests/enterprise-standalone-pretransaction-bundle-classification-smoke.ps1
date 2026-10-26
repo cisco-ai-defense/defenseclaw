@@ -29,6 +29,9 @@ $failures = & $module {
     function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
         param([hashtable]$Layout, [string]$GatewayServiceName, [string]$Action, [hashtable]$GatewaySource)
         $script:TestSnapshotCalls.Add("$Action staged=$($null -ne $GatewaySource)")
+        # The real command keeps every retire_skipped entry for the result.
+        $script:DefenseClawRetireSkipped = @($script:DefenseClawRetireSkipped) + @('opencode generations of SID S-1-5-21-1-2-3-1017: relaxed by a stopped guardian')
+        $script:DefenseClawRuntimeGenerationsCollected += 1
         if ($null -eq $script:TestSnapshotError) {
             return [pscustomobject]@{ ok = $true }
         }
@@ -53,11 +56,17 @@ $failures = & $module {
             error = @{ report = 'staged managed-hook retirement: managed enterprise hook mutations require the LocalSystem guardian on native Windows' } },
         @{ name = 'staged image refusal'; wantThrow = $false
             error = @{ report = 'staged managed-hook retirement requires protected installed deployment metadata' } },
-        @{ name = 'unreported failure'; wantThrow = $false; error = 'gateway process could not start' }
+        @{ name = 'unreported failure'; wantThrow = $false; error = 'gateway process could not start' },
+        # GAP-1910: an error of the classification loop that is not a bundle
+        # refusal (a deleted hooks folder, a busy selector lock) goes on.
+        @{ name = 'deleted hooks folder'; wantThrow = $false
+            error = @{ report = 'opencode generations of SID S-1-5-21-1-2-3-1017 (CONTOSO\std1): enterprise hooks: selected managed runtime generation directory is absent: file does not exist' } }
     )
     foreach ($case in $cases) {
         $script:TestSnapshotError = $case.error
         $script:TestSnapshotCalls.Clear()
+        $script:DefenseClawRetireSkipped = @('earlier skip')
+        $script:DefenseClawRuntimeGenerationsCollected = 7
         $threw = $false
         $message = ''
         try {
@@ -71,6 +80,11 @@ $failures = & $module {
         catch {
             $threw = $true
             $message = [string]$_.Exception.Message
+        }
+        # GAP-1817: the folders this check defers are the post-commit
+        # retire's to report; its skips and counter stay out of the result.
+        if ((@($script:DefenseClawRetireSkipped) -join '|') -cne 'earlier skip' -or $script:DefenseClawRuntimeGenerationsCollected -ne 7) {
+            $failures.Add("$($case.name): the pre-check changed the run's retire skips ($(@($script:DefenseClawRetireSkipped) -join '|')) or counter ($($script:DefenseClawRuntimeGenerationsCollected))")
         }
         if ($threw -ne $case.wantThrow) {
             $failures.Add("$($case.name): threw=$threw ($message), want $($case.wantThrow)")

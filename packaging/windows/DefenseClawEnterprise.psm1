@@ -22619,6 +22619,11 @@ function Assert-DefenseClawStagedRuntimeBundleClassification {
         [Parameter(Mandatory)][hashtable]$GatewaySource,
         [Parameter(Mandatory)][string]$Action
     )
+    # The folders this check defers are the post-commit retire's to repair
+    # and report: keep its skips and counter out of this run's result, or
+    # the result names folders that same retire then fixed (GAP-1817).
+    $savedSkipped = @($script:DefenseClawRetireSkipped)
+    $savedCollected = $script:DefenseClawRuntimeGenerationsCollected
     try {
         [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
             -Layout $Layout `
@@ -22629,6 +22634,10 @@ function Assert-DefenseClawStagedRuntimeBundleClassification {
     }
     catch {
         $failure = $_
+    }
+    finally {
+        $script:DefenseClawRetireSkipped = $savedSkipped
+        $script:DefenseClawRuntimeGenerationsCollected = $savedCollected
     }
     $data = $failure.Exception.Data
     $reportError = ''
