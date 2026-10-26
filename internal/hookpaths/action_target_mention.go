@@ -311,7 +311,128 @@ func actionUncalledFunctions(file *syntax.File, command string) map[*syntax.Func
 			uncalled[decl] = true
 		}
 	}
+	if len(uncalled) > 0 && actionEvaluatesRuntimeNames(file, uncalled) {
+		// bash evaluates a string as code or arithmetic here, and a
+		// subscript such as a[$(f""oo)] runs a command substitution that
+		// can call any function: every body is scanned (GAP-2089).
+		return nil
+	}
 	return uncalled
+}
+
+// actionEvaluatesRuntimeNames reports whether the command, outside its
+// uncalled function bodies, has a construct in which bash evaluates a string
+// that the command does not spell as a call: an arithmetic expansion,
+// command or loop, let, a [[ ]] arithmetic or -v test, an indirect,
+// subscripted, sliced or @-transformed parameter expansion, an assignment
+// with a subscript or to a prompt variable, a declaration with options, and
+// the builtins that take a variable name or a callback (mapfile -C, read,
+// printf -v, test -v ...). Plain $name expansions only expand (GAP-2089).
+func actionEvaluatesRuntimeNames(file *syntax.File, uncalled map[*syntax.FuncDecl]bool) bool {
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.FuncDecl:
+			if uncalled[node] {
+				return false // never runs
+			}
+		case *syntax.ArithmExp, *syntax.ArithmCmd, *syntax.LetClause, *syntax.CStyleLoop:
+			found = true
+		case *syntax.BinaryTest:
+			switch node.Op {
+			case syntax.TsEql, syntax.TsNeq, syntax.TsLeq, syntax.TsGeq, syntax.TsLss, syntax.TsGtr:
+				found = true
+			}
+		case *syntax.UnaryTest:
+			found = node.Op == syntax.TsVarSet || node.Op == syntax.TsRefVar
+		case *syntax.ParamExp:
+			found = node.Excl || node.Slice != nil || node.NestedParam != nil || !actionPlainSubscript(node.Index) ||
+				(node.Exp != nil && node.Exp.Op == syntax.OtherParamOps)
+		case *syntax.Assign:
+			if !actionPlainSubscript(node.Index) {
+				found = true
+			} else if node.Name != nil {
+				switch node.Name.Value {
+				case "PS0", "PS1", "PS2", "PS3", "PS4", "PROMPT_COMMAND":
+					found = true
+				}
+			} else if node.Value != nil {
+				// declare -i, local -n, typeset -a ...: an option word.
+				value, fixed := StaticWord(node.Value, "")
+				found = !fixed || strings.HasPrefix(value, "-") || strings.HasPrefix(value, "+")
+			}
+		case *syntax.ArrayElem:
+			found = !actionPlainSubscript(node.Index)
+		case *syntax.DeclClause:
+			found = node.Variant != nil && node.Variant.Value == "nameref"
+		case *syntax.CallExpr:
+			found = actionCallEvaluatesNames(node.Args)
+		}
+		return !found
+	})
+	return found
+}
+
+// actionPlainSubscript reports a missing subscript or one bash does not
+// evaluate as an expression: a number, @ or *.
+func actionPlainSubscript(index syntax.ArithmExpr) bool {
+	if index == nil {
+		return true
+	}
+	word, ok := index.(*syntax.Word)
+	if !ok {
+		return false
+	}
+	value, fixed := StaticWord(word, "")
+	if !fixed || value == "" {
+		return false
+	}
+	if value == "@" || value == "*" {
+		return true
+	}
+	return strings.Trim(value, "0123456789") == ""
+}
+
+// actionCallEvaluatesNames reports a call of a builtin that evaluates a
+// variable name (with its subscript) or runs a callback it is given.
+func actionCallEvaluatesNames(args []*syntax.Word) bool {
+	for i := 0; i < len(args); i++ {
+		program, fixed := StaticWord(args[i], "")
+		if !fixed {
+			return false // a run-time program word is actionStaticCallWords' case
+		}
+		switch programBase(program) {
+		case "builtin", "command":
+			for i+1 < len(args) {
+				option, fixed := StaticWord(args[i+1], "")
+				if !fixed || !strings.HasPrefix(option, "-") {
+					break
+				}
+				i++
+			}
+			continue
+		case "mapfile", "readarray", "let", "read", "unset", "getopts", "wait", "fc",
+			"declare", "typeset", "local", "export", "readonly":
+			return true
+		case "printf":
+			if i+1 < len(args) {
+				option, fixed := StaticWord(args[i+1], "")
+				return !fixed || strings.HasPrefix(option, "-v")
+			}
+		case "test", "[":
+			for _, arg := range args[i+1:] {
+				value, fixed := StaticWord(arg, "")
+				if !fixed || value == "-v" || value == "-R" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // actionStaticCallWords lists the static values of the words of every call
