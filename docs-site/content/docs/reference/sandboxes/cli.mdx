@@ -1079,7 +1079,7 @@ defenseclaw sandbox stop myapp-7f3a
 
 ### `sandbox start`
 
-Starts a stopped sandbox as a new session. A mounted project gets a fresh
+Starts a stopped sandbox as a new session. OpenShell 0.1.5 refuses `--end-vm` for a MicroVM whose workload completed or failed while its VM still runs: the start fails with Conflict ([A sandbox is in OpenShell's error state](/docs/troubleshooting/sandboxes/runs-and-sessions#a-sandbox-is-in-openshells-error-state)). A mounted project gets a fresh
 snapshot only when nothing would be lost: there is no snapshot yet, the last
 one was undone, or the folder hasn't changed since it. If an earlier
 session's changes are still in the folder, the old snapshot is kept, so

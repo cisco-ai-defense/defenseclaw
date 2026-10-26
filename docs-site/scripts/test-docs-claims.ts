@@ -1524,6 +1524,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1714", page: "troubleshooting/enterprise/hooks.mdx", section: "An account on a stalled network or FUSE mount", has: ["`fusermount -uz`"] },
   { gap: "GAP-1503", page: "reference/policy/detection.mdx", has: ["instruction-file writes are HIGH, so they are reported, not blocked"] },
   { gap: "GAP-1254", page: "reference/connectors/copilot.mdx", has: ["removes the `enabledPlugins` entry `defenseclaw@defenseclaw`"] },
+  { gap: "GAP-1795", page: "reference/sandboxes/cli.mdx", has: ["OpenShell 0.1.5 refuses `--end-vm` for a MicroVM whose workload completed or failed while its VM still runs"] },
   // r105-rows-end
 ];
 
