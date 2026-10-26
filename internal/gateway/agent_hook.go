@@ -945,7 +945,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// offer returns. Only a hang-up observed before the answer was sent
 		// can establish that an unreceipted hook missed that answer.
 		hungUpBeforeAnswer := r.Context().Err() != nil
+		var preKey preToolDecisionKey
+		preNoted := false
 		if delivery != nil {
+			preKey, preNoted = a.notePreToolDecision(ctx, req, wireResp)
 			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, "")
 			attemptedWrite = true
 			receipt := func() string {
@@ -981,6 +984,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// a degraded-audit alert or a closed answer. The agent and accounting
 		// must receive the same final verdict.
 		resp = finalization.Response
+		if preNoted && (!finalization.AuditPersisted || panicked || resp.Action == hookActionUnconfirmed) {
+			a.preToolDecisions.forget(preKey)
+		}
 		a.copilotPermission.record(persistCtx, req, finalization.AuditPersisted && !panicked && resp.Action == "allow")
 		if delivery == nil && !finalization.AuditPersisted {
 			wireResp = resp
