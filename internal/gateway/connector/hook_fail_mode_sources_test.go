@@ -384,7 +384,10 @@ func TestSharedShellReaderClosesEveryPerUserOpen(t *testing.T) {
 	for _, test := range []struct {
 		name, flat, sidecar, want string
 		needsJSON                 bool
+		managed                   bool
 	}{
+		{name: "stale sourced managed peer without JSON", flat: "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\nFAIL_MODE_SOURCE=config\n", managed: true, want: "closed"},
+		{name: "stale sourced managed JSON", sidecar: `{"version":2,"fail_modes":{"codex":"open"},"fail_mode_sources":{"codex":"config"}}`, managed: true, want: "closed"},
 		{name: "earlier release's flat open", flat: "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\n", want: "closed"},
 		{name: "flat open from the config", flat: "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\nFAIL_MODE_SOURCE=config\n", want: "closed"},
 		{name: "flat closed", flat: "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=closed\nFAIL_MODE_SOURCE=config\n", want: "closed"},
@@ -411,6 +414,9 @@ func TestSharedShellReaderClosesEveryPerUserOpen(t *testing.T) {
 			}
 			cmd := exec.Command("bash", "-c", `. "$1/_hardening.sh"; defenseclaw_shared_runtime_fail_mode "$1" codex`, "test", hookDir)
 			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir()}
+			if test.managed {
+				cmd.Env = append(cmd.Env, "DEFENSECLAW_MANAGED_HOOK=1")
+			}
 			out, err := cmd.Output()
 			if err != nil {
 				t.Fatalf("reader: %v", err)

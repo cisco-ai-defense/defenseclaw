@@ -12529,10 +12529,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def _setup_table(self) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
         if self.first_run_model.active:
-            return (
-                ("Field", "Value", "Hint"),
-                tuple((field.label, field.display_value, field.hint) for field in self.first_run_model.fields),
-            )
+            columns = ("Field", "Value", "Hint")
+            rows = tuple((field.label, field.display_value, field.hint) for field in self.first_run_model.fields)
+            return columns, self._wrap_last_table_column(columns, rows)
         if self.setup_model.goal_active:
             columns = ("Goal", "What it does")
             labels = [goal.label for goal in self.setup_model.goals]

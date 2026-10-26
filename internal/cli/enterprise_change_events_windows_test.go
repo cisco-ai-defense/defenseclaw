@@ -294,6 +294,42 @@ func TestWindowsStagedAnchorsOfARejectedBundleRecordOneRefusal(t *testing.T) {
 	assertNoWindowsChangeReservations(t, spool)
 }
 
+func TestWindowsAnchorArgumentConflictRecordsOnlyElevatedInstalledStandaloneRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		installed, elevated bool
+		profile             string
+		want                int
+	}{
+		{"installed", true, true, managed.ProfileStandalone, 1},
+		{"unelevated", true, false, managed.ProfileStandalone, 0},
+		{"not installed", false, true, managed.ProfileStandalone, 0},
+		{"secure client", true, true, managed.ProfileSecureClient, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubWindowsBundleHost(t)
+			spool := stubWindowsChangeSpool(t)
+			saved := windowsEnterpriseIsElevated
+			windowsEnterpriseIsElevated = func() bool { return tc.elevated }
+			t.Cleanup(func() { windowsEnterpriseIsElevated = saved })
+			cmd, _ := windowsBundleCommand()
+			opts := &windowsEnterpriseLifecycleOptions{trustAnchors: "delivered-anchors.json", configPath: "delivered-config.yaml",
+				profile: tc.profile, installedBeforeRun: tc.installed, jsonOutput: true}
+			done, err := prepareWindowsEnterpriseBundle(t.Context(), cmd, "ensure", opts)
+			if !done || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+				t.Fatalf("conflict accepted: done=%v err=%v", done, err)
+			}
+			if events := windowsChangeEvents(t, spool); len(events) != tc.want {
+				t.Fatalf("refusal events=%v, want %d", events, tc.want)
+			}
+			if tc.want == 1 {
+				assertOneRefusedAnchorInstall(t, spool, "bundle_required")
+			}
+			assertNoWindowsChangeReservations(t, spool)
+		})
+	}
+}
+
 // A run that returns after prepare without finish installed none of the
 // anchors it staged: release records one refused install (interrupted),
 // once.

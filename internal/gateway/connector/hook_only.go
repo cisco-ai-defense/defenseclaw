@@ -6249,6 +6249,9 @@ func managedHookCommandEntry(raw interface{}, hookScript string) bool {
 		if isCopilotShellHookScript(hookScript) && isCopilotEventBoundShellCommand(command, hookScript) {
 			return true
 		}
+		if isCopilotShellHookScript(hookScript) && copilotManagedShellCommand(command, hookScript) {
+			return true
+		}
 	}
 	return false
 }
