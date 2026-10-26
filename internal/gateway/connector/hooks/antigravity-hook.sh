@@ -269,8 +269,13 @@ export DEFENSECLAW_HOME
 # agent's environment, where they would change how the per-user hook answers
 # a missing token.
 unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
-DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-{{if not .Sandbox}}# The hook path is resolved: this is the data directory it was installed in.
+{{if .Sandbox}}DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+{{else}}# Without DEFENSECLAW_HOME the hook's home is the data directory it was
+# installed in, not ~/.defenseclaw: a custom-home install keeps its own
+# config, lock and gateway when the agent does not pass the variable
+# (GAP-1854).
+DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-$(cd "${HOOK_DIR}/.." && pwd -P)}"
+{{end}}{{if not .Sandbox}}# The hook path is resolved: this is the data directory it was installed in.
 _DC_HOOK_DATA_DIR="${HOOK_DIR}/.."
 # An inherited DEFENSECLAW_HOME that names no folder does not retire the
 # hook installed here, and does not block it: the hook keeps the data

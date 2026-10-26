@@ -74,3 +74,46 @@ func TestPerUserHookKeepsItsFolderWhenTheInheritedHomeIsMissing(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1854: a per-user hook installed in a custom DEFENSECLAW_HOME, run by an
+// agent that does not pass the variable, took ~/.defenseclaw as its home. An
+// unrelated (here disabled) ~/.defenseclaw then decided the call instead of
+// the install the hook belongs to, and with no ~/.defenseclaw at all rc.11
+// blocked every call as "hook home unavailable". The hook's home is the
+// folder it was installed in: it asks its own gateway.
+func TestPerUserHookWithoutHomeUsesItsInstalledFolder(t *testing.T) {
+	gateway, addr := newHookArgvGateway(t)
+	for _, conn := range hookArgvShellConnectors {
+		conn := conn
+		cases := []hookArgvCase{hookArgvConnectorCase(t, conn.Name())}
+		if conn.Name() == "claudecode" {
+			cases = append(cases, hookArgvInspectCases()[0])
+		}
+		for _, tc := range cases {
+			t.Run(conn.Name()+"/"+tc.script, func(t *testing.T) {
+				root := t.TempDir()
+				data := filepath.Join(root, "custom-home")
+				hookDir := filepath.Join(data, "hooks")
+				if err := WriteHookScriptsForConnectorObject(hookDir, addr, "dccert-fake-token-"+conn.Name(), conn); err != nil {
+					t.Fatalf("write hooks: %v", err)
+				}
+				installNativeGatewayForHookTest(t, data, hookDir)
+				user := filepath.Join(root, "user")
+				other := filepath.Join(user, ".defenseclaw")
+				if err := os.MkdirAll(other, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(other, ".disabled"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				gateway.take()
+				code, stdout, stderr := runHookArgvCase(t, hookDir, tc, []string{"HOME=" + user})
+				requests := gateway.take()
+				if strings.Contains(stderr, "hook home unavailable") || code != 0 || len(requests) != 1 {
+					t.Fatalf("%s: exit %d, %d gateway requests, want its own gateway's allow\nstdout=%s\nstderr=%s",
+						tc.script, code, len(requests), stdout, stderr)
+				}
+			})
+		}
+	}
+}
