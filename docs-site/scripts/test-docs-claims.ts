@@ -1436,6 +1436,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1626", page: "reference/commands/cli.mdx", has: ["`5` when run from a standard account", "`elevation_required`"] },
   { gap: "GAP-1604", page: "index.mdx", has: ["the shipped default blocks CRITICAL and alerts on MEDIUM and above."], lacks: ["alerts on HIGH."] },
   { gap: "GAP-1606", page: "reference/policy/index.mdx", has: ["regex rules and suppressions of the bundled strict pack"] },
+  { gap: "GAP-1607", page: "enterprise/configure/enrollment.mdx", has: ["sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise hooks status # macOS"] },
   // r105-rows-end
 ];
 

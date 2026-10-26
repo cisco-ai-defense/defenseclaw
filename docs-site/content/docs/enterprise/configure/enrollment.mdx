@@ -113,7 +113,8 @@ The full rules, including cleanup of signed-out users, are in [Enrollment detail
 On Linux and macOS, `enterprise hooks status` shows each row, including deferred, pending and failed installs:
 
 ```bash
-sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks status
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks status          # Linux
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise hooks status    # macOS
 ```
 
 On Windows, run from an elevated prompt and read `enrollment.accounts`, which lists each account and connector as enrolled, pending or failed:
