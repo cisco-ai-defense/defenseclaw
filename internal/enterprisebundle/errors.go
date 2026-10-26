@@ -73,8 +73,10 @@ const (
 	CodeRestartDeferred Code = "restart_deferred"
 	CodeNotConfirmed    Code = "not_confirmed"
 	CodeInterrupted     Code = "interrupted"
-	// CodeSuperseded ends the receipt of an inbox bundle that one run
-	// did not apply because the same inbox held a higher version.
+	// CodeSuperseded ends the receipt of an inbox bundle that one run did
+	// not apply because the same inbox held a higher version, and (Linux and
+	// macOS) an applied receipt whose config a later config replaced before
+	// the gateway confirmed it: nothing was rolled back (GAP-1166, GAP-1576).
 	CodeSuperseded     Code = "superseded"
 	CodeLifecycleBusy  Code = "lifecycle_busy"
 	CodeBundleRequired Code = "bundle_required"

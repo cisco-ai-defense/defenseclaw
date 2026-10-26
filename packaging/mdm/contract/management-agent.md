@@ -922,6 +922,15 @@ off the device. The agent does not read `/health` itself (section 7); the
   Windows, when no bundle was confirmed before (a killed first bundle), there
   is no last good bundle to put back: the verified config of the unconfirmed
   bundle stays installed until a signed bundle is delivered and confirmed.
+  On Linux and macOS an `applied` receipt whose config a later config
+  replaced before the gateway confirmed it ends `failed` with `error_code`
+  `superseded` and `rolled_back` false; one whose run was killed and rolled
+  back by recovery ends `interrupted`, `rolled_back` true only when the
+  gateway reports the restored policy. A rollback that puts a pending
+  bundle's config back keeps that receipt confirmable by the next run. On
+  Windows a delivery whose transaction failed while the gateway was down
+  (nothing installed) stays open and the run reports `not_confirmed`: a
+  retry applies it, else the next run settles it `interrupted`.
   After the run, status reports no `bundle_pending` for them. Windows settles under
   `bundle.lock` (try-lock): a live apply that holds it keeps its own receipt.
   When an install transaction is pending, Windows recovers it first and
