@@ -4192,6 +4192,23 @@ class TestSkillInstallQuarantineNeverWarns(SkillCommandTestBase):
             result, scanned = self._install("qfail-skill", ["--action"], self.FILE_ONLY)
         self._assert_refused(result, scanned, "reason=enforcement-failed failed=quarantine")
 
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), "POSIX mode bits as non-root")
+    def test_action_refuses_with_one_line_when_the_quarantine_folder_is_unwritable(self):
+        # GAP-1740: with ~/.defenseclaw/quarantine not writable, --action
+        # printed a raw PermissionError traceback from SkillEnforcer(). It
+        # is the failed-quarantine refusal: one clear line, rolled back.
+        quarantine = self.app.cfg.quarantine_dir
+        os.makedirs(quarantine, exist_ok=True)
+        os.chmod(quarantine, 0o500)
+        try:
+            result, scanned = self._install("qperm-skill", ["--action"], self.FILE_ONLY)
+        finally:
+            os.chmod(quarantine, 0o700)
+        self.assertNotIn("Traceback", result.output)
+        self.assertIsNone(result.exception if not isinstance(result.exception, SystemExit) else None, result.output)
+        self.assertIn("quarantine of 'qperm-skill' failed", result.output)
+        self._assert_refused(result, scanned, "reason=enforcement-failed failed=quarantine")
+
     def test_action_refuses_when_the_gateway_disable_fails(self):
         with patch("defenseclaw.commands.cmd_skill._normalize_runtime_connector", return_value="openclaw"), \
                 patch("defenseclaw.gateway.OrchestratorClient.disable_skill", side_effect=RuntimeError("down")):
