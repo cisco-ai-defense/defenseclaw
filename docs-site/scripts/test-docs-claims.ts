@@ -1446,6 +1446,9 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1587", page: "how-to/guardrail/allow-a-blocked-call.mdx", has: ["fails the **Config validation** and **Rule pack** rows and skips **Policy**"], lacks: ["fails the Policy row until you pin the new digest"] },
   { gap: "GAP-1656", page: "reference/policy/rules.mdx", has: ["`live state was not checked while config.yaml is invalid`"], lacks: ["fails the **Policy** row: `generation 2"] },
   { gap: "GAP-1652", page: "troubleshooting/hooks-and-blocking.mdx", has: ["pin the `files digest` value it prints (the guardrail.custom_packs pin, not the `digest` line)", "set both its `path` and `digest`"] },
+  { gap: "GAP-1649", page: "troubleshooting/gateway-and-keys.mdx", has: ["`DefenseClaw blocked this because its gateway is stopped`", "`defenseclaw: gateway unreachable, blocking <agent> tool (fail mode closed)`"] },
+  { gap: "GAP-1667", page: "troubleshooting/gateway-and-keys.mdx", has: ["Under the default and permissive policies a per-user call runs with one warning instead"], lacks: ["the hook is fail-closed. This holds in observe mode too."] },
+  { gap: "GAP-1666", page: "troubleshooting/gateway-and-keys.mdx", has: ["(on Windows the row is `Config file`)", "`Gateway token env`, `Gateway token drift` and `Gateway PID identity`"] },
   // r105-rows-end
 ];
 

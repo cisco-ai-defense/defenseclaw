@@ -10,9 +10,11 @@ keywords:
 
 Fixes for the gateway, the keys it needs and the destinations it exports to.
 
-## Tool calls blocked with `gateway restarting or not running`
+## Tool calls blocked while the gateway is stopped
 
-**Cause.** The gateway is stopped, and the hook is fail-closed. This holds in observe mode too.
+**You see.** The agent says `DefenseClaw blocked this because its gateway is stopped`. The shell hook prints `defenseclaw: gateway unreachable, blocking <agent> tool (fail mode closed)`; the native Windows hook gives `gateway restarting or not running`.
+
+**Cause.** The gateway is stopped and this hook blocks during an outage: under the strict policy, a saved `closed`, or a managed install, in observe and action mode. Under the default and permissive policies a per-user call runs with one warning instead ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)).
 
 **Fix.** `defenseclaw-gateway status`, then `defenseclaw-gateway start`. A hook does not start a stopped gateway after `defenseclaw-gateway stop`, during an upgrade, for 60 seconds after a failed start, or with `DEFENSECLAW_GATEWAY_AUTOSTART=0`. Read `~/.defenseclaw/gateway.log` for the start error.
 
@@ -40,7 +42,7 @@ Fixes for the gateway, the keys it needs and the destinations it exports to.
 
 **Fix.** The message names the command, for example `chmod go-w <file>`. Run it as the file's owner.
 
-**Check.** `defenseclaw doctor` shows `Config validation` as `[PASS]`.
+**Check.** `defenseclaw doctor` shows `Config validation` as `[PASS]` (on Windows the row is `Config file`).
 
 ## `Config validation` fails after an edit
 
@@ -56,7 +58,7 @@ Fixes for the gateway, the keys it needs and the destinations it exports to.
 
 **Fix.** `defenseclaw doctor --fix` (previews with `--dry-run`). It never prints the token.
 
-**Check.** `Gateway authentication` is `[PASS]`.
+**Check.** `Gateway authentication` is `[PASS]`. On Windows doctor shows `Gateway token env`, `Gateway token drift` and `Gateway PID identity` instead.
 
 ## `the LLM judge is off`
 
