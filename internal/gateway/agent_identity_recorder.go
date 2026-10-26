@@ -959,9 +959,11 @@ var adminViewAccountIDs = func(user string) []string {
 
 // adminViewBareAccountIDs is the uid a bare --user name of the agent
 // identity view names now, as profile-explain resolves it, or the uid the
-// filter is (a uid filter selects that uid's rows, so the rows another
-// holder of it left are kept out the same way, GAP-1876), or none (a
-// qualified name, a SID, a name no account or more than one account holds). A bare name still selects the rows recorded with that name for
+// filter is while an account holds it (a uid filter selects that uid's rows,
+// so the rows another holder of it left are kept out the same way,
+// GAP-1876; a uid nobody holds now lists every holder's rows, as before,
+// GAP-1949), or none (a qualified name, a SID, a name no account or more
+// than one account holds). A bare name still selects the rows recorded with that name for
 // every account of it; the uid only keeps the rows another holder of that
 // uid left from being listed as the account's own
 // (useridentity.AccountFilter.MatchesIn): a local account deleted and
@@ -970,6 +972,9 @@ var adminViewAccountIDs = func(user string) []string {
 var adminViewBareAccountIDs = func(user string) []string {
 	user = strings.TrimSpace(user)
 	if useridentity.KindForID(user) == useridentity.KindPOSIXUID {
+		if strings.TrimSpace(userScopedIdentityName(user)) == "" {
+			return nil
+		}
 		return []string{user}
 	}
 	if user == "" || useridentity.QualifiedAccountName(user) || useridentity.KindForID(user) != "" {
