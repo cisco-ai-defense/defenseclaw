@@ -1208,7 +1208,12 @@ const knownLimitEntries = [
   },
   { gaps: 'GAP-1194', section: 'Claude Code shell', phrases: ['shell mode'], from: ['connectors/claudecode.mdx'] },
   { gaps: 'GAP-1163', section: 'Upgrade and policy limits', phrases: ['**Legacy MicroVM guests:**'], from: [] },
-  { gaps: 'GAP-0716, GAP-0716-MAC', section: 'Upgrade and policy limits', phrases: ['**Managed policy before launch:**'], from: [] },
+  {
+    gaps: 'GAP-0716, GAP-0716-MAC, GAP-0716-WIN',
+    section: 'Upgrade and policy limits',
+    phrases: ['**Managed policy before launch:**', 'on managed Linux, macOS and Windows', 'a process device map on Windows', 'This is an operating system limit', '`unprivileged_user_namespaces`', '`user.max_user_namespaces=0`', '/docs/enterprise/install/reference/linux#user-namespaces', '/docs/enterprise/install/reference/macos#machine-policy', '/docs/enterprise/install/reference/windows#inspect-machine-policy'],
+    from: [],
+  },
 ] as const;
 
 function knownLimitSection(heading: string): string {
@@ -1268,6 +1273,10 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
     for (const text of ['style commands are not permitted', 'did not acknowledge permission.requested']) {
       assert.deepEqual(trackedProductHits(text), [], `DefenseClaw source emits "${text}"; it is not a vendor limit`);
     }
+  });
+
+  it('names the Linux namespace warning the product emits (GAP-0716)', () => {
+    assert.ok(source('internal/enterpriseunix/userns.go').includes('codeUserNamespaces               = "unprivileged_user_namespaces"'));
   });
 
   it('matches the managed hook_process_fail_open warning for Codex, Copilot and Antigravity', () => {
