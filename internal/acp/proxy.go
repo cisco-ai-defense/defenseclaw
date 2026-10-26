@@ -686,6 +686,26 @@ func postDeliveryRefusalReason(managed bool) string {
 		"Tool actions may have run. Inspect their results before retrying. " + next
 }
 
+// postDeliveryReason is the refusal of a check that failed after the guard
+// forwarded the prompt. A plain outage gets postDeliveryRefusalReason; a
+// specific cause (ACP switched off, a rejected or another account's
+// credential, the gateway's own refusal) keeps its words, with the
+// post-delivery warning appended (GAP-1546). Secure Client hosts keep the
+// wording of main (GAP-1560).
+func (s *proxyState) postDeliveryReason(opts ProxyOptions, err error) string {
+	reason := s.refusalReason(opts, err)
+	if !s.peerProtocolFixes {
+		return reason
+	}
+	var refused *GatewayRefusedError
+	if errors.Is(err, ErrACPDisabled) || errors.Is(err, ErrCredentialOtherAccount) ||
+		errors.Is(err, ErrCredentialRejected) || errors.As(err, &refused) {
+		return reason + " Your prompt may already have reached the agent, and tool actions may have run: " +
+			"inspect their results before retrying."
+	}
+	return postDeliveryRefusalReason(opts.Managed)
+}
+
 // authenticationFailure is an evaluation that failed authentication: an
 // answer whose MAC does not verify, or a credential the gateway refused. It
 // is not an outage.
@@ -1048,7 +1068,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 				logf(opts.Stderr, "[defenseclaw-acp] evaluation unavailable, refused %s %s: %v\n", direction, msg.Method, evalErr)
 				reason := state.refusalReason(opts, evalErr)
 				if direction == AgentToClient && state.deliveredActivePrompt() {
-					reason = postDeliveryRefusalReason(opts.Managed)
+					reason = state.postDeliveryReason(opts, evalErr)
 				}
 				verdict = Verdict{Action: "block", Reason: reason}
 				if opts.Mode != ModeAction {
@@ -1096,7 +1116,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 					logf(opts.Stderr, "[defenseclaw-acp] completed-turn evaluation unavailable, refused the turn: %v\n", turnErr)
 					reason := state.refusalReason(opts, turnErr)
 					if delivered {
-						reason = postDeliveryRefusalReason(opts.Managed)
+						reason = state.postDeliveryReason(opts, turnErr)
 					}
 					turnVerdict = Verdict{Action: "block", Reason: reason}
 				}
@@ -1123,7 +1143,8 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 				return err
 			}
 		}
-		if direction == AgentToClient && opts.Mode == ModeObserve && matchedMethod == "session/prompt" {
+		if direction == AgentToClient && opts.Mode == ModeObserve && matchedMethod == "session/prompt" &&
+			state.peerProtocolFixes {
 			state.finishIfPromptResponse(msg)
 		}
 		if direction == ClientToAgent && msg.Method == "session/prompt" && msg.IsRequest() {

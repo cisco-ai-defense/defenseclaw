@@ -592,6 +592,60 @@ func TestCopyFramesActionOutageAfterDeliveredPromptNamesPossibleToolEffect(t *te
 	}
 }
 
+type refusingAfterPromptEvaluator struct{}
+
+func (refusingAfterPromptEvaluator) Evaluate(_ context.Context, in Evaluation) (Verdict, error) {
+	if in.Direction == AgentToClient && in.Method == "session/update" {
+		return Verdict{}, &GatewayRefusedError{Status: 400, Message: "invalid ACP evaluation body"}
+	}
+	return Verdict{Action: "allow"}, nil
+}
+
+// A specific refusal after a delivered prompt keeps its cause and adds the
+// post-delivery warning (GAP-1546); a Secure Client host keeps the wording
+// of main (GAP-1560).
+func TestCopyFramesRefusalAfterDeliveredPromptKeepsItsCause(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		peerFixes bool
+		want      []string
+		forbid    []string
+	}{
+		{name: "gateway refusal", peerFixes: true, want: []string{"refused to check it", "invalid ACP evaluation body", "may have run", "before retrying"}},
+		{name: "secure client", peerFixes: false, want: []string{"did not answer"}, forbid: []string{"may have run"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: tc.peerFixes}
+			var agentInput, clientOutput bytes.Buffer
+			opts := ProxyOptions{Mode: ModeAction, Evaluator: refusingAfterPromptEvaluator{}, Stderr: io.Discard}
+			prompt := `{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"s","prompt":[{"type":"text","text":"run a terminal command"}]}}` + "\n"
+			if err := copyFrames(context.Background(), opts, state, ClientToAgent, strings.NewReader(prompt), &agentInput, &clientOutput); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(agentInput.String(), `"method":"session/prompt"`) {
+				t.Fatalf("prompt was not delivered to agent: %q", agentInput.String())
+			}
+			agentInput.Reset()
+			updates := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"terminal-1","status":"completed","content":[{"type":"text","text":"command exited 0"}]}}}` + "\n" +
+				`{"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}` + "\n"
+			if err := copyFrames(context.Background(), opts, state, AgentToClient, strings.NewReader(updates), &clientOutput, &agentInput); err != nil {
+				t.Fatal(err)
+			}
+			text, _ := blockedTurn(t, clientOutput.Bytes(), "7")
+			for _, want := range tc.want {
+				if !strings.Contains(text, want) {
+					t.Fatalf("refusal %q lacks %q", text, want)
+				}
+			}
+			for _, forbid := range tc.forbid {
+				if strings.Contains(text, forbid) {
+					t.Fatalf("refusal %q has %q", text, forbid)
+				}
+			}
+		})
+	}
+}
+
 // One slow gateway answer must not end the agent session: the guard retries
 // once, then refuses only that prompt and keeps proxying (GAP-1834).
 func TestCopyFramesActionEvaluationTimeoutRefusesOnlyThatFrame(t *testing.T) {
