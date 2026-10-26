@@ -684,9 +684,16 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 			if err != nil {
 				return
 			}
-			if now.Phase == "ready" {
+			switch now.Phase {
+			case "ready", "starting", "provisioning":
+				// A session started it during this pull. The line says so
+				// whether or not its terminal has attached yet: a connect
+				// 0.3 s after the pull is still starting the sandbox when
+				// the pull ends (GAP-0756).
 				if n, err := a.attachedSessions(o.Name); err == nil && n > 0 {
 					a.note(o.Name + " keeps running: " + attachedText(o.Name, n) + " → stop it once " + map[bool]string{true: "it ends", false: "they end"}[n == 1] + ": " + CommandName + " stop " + o.Name)
+				} else {
+					a.note(o.Name + " keeps running: another command started it during this pull → stop it once you are done with it: " + CommandName + " stop " + o.Name)
 				}
 				return
 			}
