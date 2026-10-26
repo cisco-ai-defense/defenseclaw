@@ -5163,6 +5163,13 @@ def test_an_install_refused_before_its_data_copy_puts_the_hook_mode_files_back(t
                     "# A stop that was refused or threw leaves the hold waiting for a"):
         block = text[text.index(refusal) :][:600]
         assert block.index("Stop-HookFailModeHold") < block.index("Restore-HookFiles"), refusal
+    # R2-3: the two refusals inside Start-SwapHookFailModes (refresh failed,
+    # hold not taken) put the files back too.
+    swap = _ps1_function("Start-SwapHookFailModes")
+    dies = [i for i in range(len(swap)) if swap.startswith('Die "Could not set the hooks', i)]
+    assert len(dies) == 2
+    for at in dies:
+        assert "Restore-HookFiles" in swap[max(0, at - 160) : at], swap[max(0, at - 160) : at]
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")

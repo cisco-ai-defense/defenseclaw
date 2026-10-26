@@ -2919,6 +2919,7 @@ function Start-SwapHookFailModes([string]$StagedGateway, $GatewayProcess) {
     Save-HookFiles
     if (-not $GatewayProcess) {
         if (-not (Update-HookFailModes $StagedGateway)) {
+            Restore-HookFiles
             Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
         }
         if (-not $Setup) { return $null }
@@ -2928,6 +2929,8 @@ function Start-SwapHookFailModes([string]$StagedGateway, $GatewayProcess) {
         Enable-SetupHooks
     }
     if (-not (Start-HookFailModeHold $StagedGateway $GatewayProcess.Id)) {
+        # The hold has let go (Start-HookFailModeHold stops or completes it).
+        Restore-HookFiles
         Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
     }
     return $GatewayProcess
