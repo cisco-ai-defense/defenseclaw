@@ -19,6 +19,37 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// GAP-1396: run as LocalSystem (the native suite's account on the managed
+// hosts), two fixtures failed for prerequisites of the fixture, not of the
+// code: the cleanup impersonates the running account as the target, which
+// enterprise hooks refuse for LocalSystem (as
+// TestWindowsClaudeManagedVerifyAndRepairStalePerUserNativeOTLP skips), and
+// assigning another account (Guest) as a file owner needs a privilege the
+// token may not hold. Each now skips with its prerequisite.
+func skipNativeOTLPFixtureAsLocalSystem(t *testing.T, sid *windows.SID) {
+	t.Helper()
+	if sid.IsWellKnown(windows.WinLocalSystemSid) {
+		t.Skip("skipped as LocalSystem: the fixture targets the running account, and enterprise hooks refuse LocalSystem as a target; run the package as an interactive administrator")
+	}
+}
+
+func assignNativeOTLPFixtureOwnerOrSkip(t *testing.T, path string, owner *windows.SID) {
+	t.Helper()
+	set := func() error {
+		return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil)
+	}
+	err := RunWithWindowsAdministratorOwnerRestorePrivilege(set)
+	if errors.Is(err, windows.ERROR_INVALID_OWNER) {
+		err = RunWithWindowsOwnerRestorePrivilege(set)
+	}
+	if errors.Is(err, windows.ERROR_INVALID_OWNER) {
+		t.Skipf("this token cannot assign another account as the owner of a fixture file (SeRestorePrivilege): %v", err)
+	}
+	if err != nil {
+		t.Fatalf("assign test owner on %s: %v", path, err)
+	}
+}
+
 // A managed profile directory gives the target write access but reserves
 // WRITE_DAC for SYSTEM. The native exporter edit must not try to replace that
 // directory's DACL while impersonating the target account.
@@ -28,6 +59,7 @@ func TestWindowsManagedNativeOTLPCleanupKeepsProtectedDataDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	sid := user.User.Sid
+	skipNativeOTLPFixtureAsLocalSystem(t, sid)
 	home := t.TempDir()
 	dataDir := filepath.Join(home, ".defenseclaw")
 	if err := os.Mkdir(dataDir, 0o700); err != nil {
@@ -248,7 +280,7 @@ func TestWindowsManagedNativeOTLPVerifyIgnoresOtherUserToken(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 64)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	setWindowsTestPathExactOwner(t, tokenPath, target)
+	assignNativeOTLPFixtureOwnerOrSkip(t, tokenPath, target)
 	if _, err := connector.LoadOTLPPathToken(dataDir, connector.OTLPScopeClaude); err == nil {
 		t.Fatal("foreign-owned token unexpectedly passed the gateway trust check")
 	}
