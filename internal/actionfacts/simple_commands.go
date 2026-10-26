@@ -5,6 +5,7 @@ package actionfacts
 
 import (
 	"maps"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -122,8 +123,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 	}
 	home, _ := normalizeActiveHome(input.ActiveHome)
 	initialVars := map[string]string{"HOME": home}
-	if filepath.IsAbs(input.CWD) {
-		initialVars["PWD"] = filepath.Clean(input.CWD)
+	if simplePathAbs(input.CWD) {
+		initialVars["PWD"] = simplePathClean(input.CWD)
 	}
 	states := map[string][]simpleShellState{
 		"0": {{cwd: input.CWD, vars: initialVars}},
@@ -1152,7 +1153,7 @@ func simpleRelativePathOperand(source string) bool {
 	}
 	for _, redirect := range file.Stmts[0].Redirs {
 		value, known := simpleStaticWord(redirect.Word, nil)
-		if !known || !filepath.IsAbs(value) {
+		if !known || !simplePathAbs(value) {
 			return true
 		}
 	}
@@ -1167,15 +1168,15 @@ func simpleRelativePathOperand(source string) bool {
 		}
 		if value == "." || value == ".." || strings.HasPrefix(value, "./") ||
 			strings.HasPrefix(value, "../") || strings.Contains(value, "/") &&
-			!filepath.IsAbs(value) && !strings.Contains(value, "://") {
+			!simplePathAbs(value) && !strings.Contains(value, "://") {
 			return true
 		}
 	}
 	// Reviewed command grammars also identify bare file operands such as
 	// `cat id_rsa`, which have no slash to recognize lexically.
 	facts := Analyze(Input{Tool: "shell", Command: source, DialectHint: DialectPOSIX})
-	for _, path := range facts.Paths {
-		if path.Flavor == PathFlavorPOSIX && !path.Absolute {
+	for _, operand := range facts.Paths {
+		if operand.Flavor == PathFlavorPOSIX && !operand.Absolute {
 			return true
 		}
 	}
@@ -1268,8 +1269,8 @@ func simpleCommandNextCWD(source string, state *simpleShellState, vars map[strin
 	if program == "pushd" {
 		state.dirStack = append(state.dirStack, state.cwd)
 	}
-	if filepath.IsAbs(dir) {
-		return filepath.Clean(dir), true
+	if simplePathAbs(dir) {
+		return simplePathClean(dir), true
 	}
 	if program == "cd" && vars["CDPATH"] != "" &&
 		!strings.HasPrefix(dir, "./") && !strings.HasPrefix(dir, "../") {
@@ -1278,5 +1279,32 @@ func simpleCommandNextCWD(source string, state *simpleShellState, vars map[strin
 	if state.cwd == "" {
 		return "", true
 	}
+	if simplePOSIXAbs(state.cwd) {
+		return path.Join(state.cwd, dir), true
+	}
 	return filepath.Clean(filepath.Join(state.cwd, dir)), true
+}
+
+// simplePathAbs reports whether a shell directory or operand is absolute.
+// The commands are POSIX shell text, so a "/" path is absolute on every
+// host; filepath.IsAbs alone made `cd /home/alice` relative on a Windows
+// gateway, which joined it under the current directory and hid the file a
+// later relative read names. A Windows drive path keeps its native meaning.
+func simplePathAbs(value string) bool {
+	return strings.HasPrefix(value, "/") || filepath.IsAbs(value)
+}
+
+// simplePathClean cleans a POSIX path with POSIX rules (filepath.Clean
+// rewrites "/" to "\" on Windows) and a native path with native rules.
+func simplePathClean(value string) string {
+	if simplePOSIXAbs(value) {
+		return path.Clean(value)
+	}
+	return filepath.Clean(value)
+}
+
+// simplePOSIXAbs reports a "/" path that is not a "//host/share" one, which
+// keeps its native (UNC) meaning on Windows.
+func simplePOSIXAbs(value string) bool {
+	return strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//")
 }

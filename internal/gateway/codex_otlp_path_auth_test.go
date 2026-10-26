@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,9 @@ import (
 // runs, Teardown must remove every token artifact, and a later credential must
 // never revive the revoked one.
 func TestCodexHostSetupAndTeardownRevokeCachedOTLPToken(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed Windows Codex hooks are machine policy that the administrator-owned requirements installer writes; host Setup refuses them")
+	}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(configPath, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {

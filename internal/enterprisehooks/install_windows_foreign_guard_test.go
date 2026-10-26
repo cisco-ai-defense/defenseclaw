@@ -9,6 +9,8 @@ package enterprisehooks
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -45,7 +47,9 @@ func (c *windowsGuardCaptureConnector) AgentPaths(opts connector.SetupOpts) conn
 // connector.
 func TestWindowsGenericLifecyclePassesTheForeignHookGuardToPlugins(t *testing.T) {
 	fixture := newWindowsGenericCodexFixture(t)
-	const name = "plugin-fixture"
+	// A name native Windows certifies: an uncertified plugin connector is
+	// refused before its render (ConnectorSupportOnOS fails closed).
+	const name = "amp"
 	var rendered, seen []string
 	registry := connector.NewRegistry()
 	registry.RegisterBuiltin(&windowsGuardCaptureConnector{
@@ -60,6 +64,14 @@ func TestWindowsGenericLifecyclePassesTheForeignHookGuardToPlugins(t *testing.T)
 		t.Fatal(err)
 	}
 	opts := fixture.opts
+	// The guardian binds Amp to the native image npm installs for the user.
+	ampExe := filepath.Join(append([]string{opts.UserHome}, windowsStandaloneManagedExecutableRelative["amp"][0]...)...)
+	if err := os.MkdirAll(filepath.Dir(ampExe), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ampExe, []byte("MZ"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	opts.ConnectorName = name
 	opts.AgentVersion = "0.7.0"
 	opts.Registry = registry

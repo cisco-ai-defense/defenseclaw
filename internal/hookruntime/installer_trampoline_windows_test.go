@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -82,9 +83,14 @@ func TestInstallerPointsSetupsLauncherAtAPrivateCopyOfItsHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script,
+	harness := exec.Command(shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script,
 		"-Installer", installer, "-Template", template, "-Hook", hook, "-Gateway", gateway,
-		"-State", paths.State, "-Delegated", filepath.Join(paths.Root, "delegated"), "-Bin", bin, "-Data", dataRoot).CombinedOutput()
+		"-State", paths.State, "-Delegated", filepath.Join(paths.Root, "delegated"), "-Bin", bin, "-Data", dataRoot)
+	// Windows PowerShell started from pwsh (a GitHub Actions step) inherits
+	// pwsh's PSModulePath and then cannot load its own modules (Get-FileHash);
+	// without it, it builds its default module path.
+	harness.Env = withoutPSModulePath(os.Environ())
+	out, err := harness.CombinedOutput()
 	if err != nil {
 		t.Fatalf("installer publish: %v\n%s", err, out)
 	}
@@ -111,4 +117,14 @@ func TestInstallerPointsSetupsLauncherAtAPrivateCopyOfItsHook(t *testing.T) {
 	if filepath.Dir(filepath.Dir(state.HookPath)) != filepath.Join(paths.Root, "delegated") {
 		t.Fatalf("hook copy %s is not under the runtime's delegated folder", state.HookPath)
 	}
+}
+
+func withoutPSModulePath(environment []string) []string {
+	kept := environment[:0:0]
+	for _, entry := range environment {
+		if name, _, _ := strings.Cut(entry, "="); !strings.EqualFold(name, "PSModulePath") {
+			kept = append(kept, entry)
+		}
+	}
+	return kept
 }

@@ -21,3 +21,6 @@ package enterprisepolicy
 import "testing"
 
 func copilotRefixOptions(t *testing.T) Options { return testOptions(t) }
+
+// writeAdministratorPolicy writes a policy file an administrator owns.
+func writeAdministratorPolicy(t *testing.T, path, content string) { writeFile(t, path, content) }
