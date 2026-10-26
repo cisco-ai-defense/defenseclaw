@@ -90,13 +90,14 @@ var ClaudeCodeLauncherMissingMessage = strings.Join(claudeCodeLauncherGuardWords
 // guard handler.
 const ClaudeCodeLauncherGuardSubcommand = "launcher-guard"
 
-// claudeCodeWindowsCommandProcessor is the system cmd.exe the guard runs.
+// claudeCodeWindowsCommandProcessor is the system cmd.exe the guard runs: the
+// one in the system directory the Windows API reports (windowsSystemCmdExe),
+// never one named by SystemRoot in the environment of whoever runs Setup. The
+// writer and the recognizer (claudeCodeCmdGuardParts) use the same one, so a
+// Setup run with SystemRoot unset or changed still recognizes the guard it
+// wrote (GAP-1851).
 func claudeCodeWindowsCommandProcessor() string {
-	root := strings.TrimSpace(os.Getenv("SystemRoot"))
-	if root == "" || !filepath.IsAbs(root) {
-		root = `C:\Windows`
-	}
-	return filepath.Join(root, "System32", "cmd.exe")
+	return windowsSystemCmdExe()
 }
 
 // claudeCodeLauncherGuardable reports whether cmd.exe reads the launcher path
@@ -134,7 +135,7 @@ func claudeCodeLauncherGuardParts(hook map[string]interface{}) (string, []string
 func claudeCodeCmdGuardParts(hook map[string]interface{}) (string, []string, bool) {
 	command, _ := hook["command"].(string)
 	if command == "" || normalizeWindowsHookExecutable(command) !=
-		normalizeWindowsHookExecutable(windowsSystemCmdExe()) {
+		normalizeWindowsHookExecutable(claudeCodeWindowsCommandProcessor()) {
 		return "", nil, false
 	}
 	args, ok := claudeCodeNativeExecArguments(hook)
