@@ -93,6 +93,38 @@ Continue with [run an agent](/docs/how-to/sandboxes/run-an-agent).
 
 </Steps>
 
+## How it fits together
+
+<Flow direction="TB" caption="A Linux sandbox. The agent's tool calls and web traffic go through DefenseClaw; model calls go straight to the provider, opened by OpenShell for the harness's own program.">
+  <Node id="agent" kind="agent">{`Claude Code or Codex\nskip-permissions on`}</Node>
+  <Node id="sup" kind="generic">{`OpenShell supervisor\nthe only way out`}</Node>
+  <Node id="dc" kind="operator">{`DefenseClaw daemon\nchecks hooks, proxies the web`}</Node>
+  <Node id="gw" kind="generic">{`OpenShell gateway\nsystemd user service`}</Node>
+  <Node id="proj" kind="generic">{`Your project folder\nlive at /work/myapp`}</Node>
+  <Node id="net" kind="generic">{`Internet\nallowed sites`}</Node>
+  <Node id="model" kind="generic">{`Model provider`}</Node>
+  <Edge from="agent" to="sup" />
+  <Edge from="sup" to="dc" label="hooks, web" />
+  <Edge from="dc" to="net" />
+  <Edge from="sup" to="model" label="model calls" />
+  <Edge from="gw" to="sup" label="starts" />
+  <Edge from="proj" to="agent" label="mounted" />
+</Flow>
+
+## What setup changed
+
+- **OpenShell 0.1.5**, installed with NVIDIA's installer pinned by SHA-256, using `sudo`. DefenseClaw supports 0.1.5 up to, not including, 0.2.0. An older release only connects so that setup can upgrade it.
+- **The gateway** listens on `127.0.0.1:17670` with mutual TLS. Setup turns on project-folder mounts for the Docker driver in `~/.config/openshell/gateway.toml`, turns OpenShell's usage telemetry off in `gateway.env`, backs both files up and restarts the gateway once. The compute driver is `docker` unless you choose MicroVMs.
+- **DefenseClaw's config:** `openshell.enabled: true`, and `openshell.harnesses` lists the harnesses setup prepared (`--harness NAME` adds one; the default is Claude Code and Codex).
+- **Harness images**, built and checked that their hooks reach DefenseClaw. `defenseclaw sandbox image list` shows them.
+- **Shell wrappers** for `claude` and `codex`, if you said yes (`--no-wrappers` skips them).
+
+`defenseclaw sandbox teardown` reverses all of it except the OpenShell install.
+
+## A gateway that runs another way
+
+If you started OpenShell's gateway yourself, not as the `openshell-gateway` user service, setup cannot restart it. It writes `gateway.toml` and `gateway.env` and asks you to restart the gateway the way you started it. Until you do, `sandbox doctor` warns that the gateway has not been restarted since the change. Details: [OpenShell installed another way](/docs/troubleshooting/sandboxes/setup-and-gateway#openshell-installed-another-way).
+
 ## Run sandboxes in MicroVMs with KVM
 
 On a host with KVM, the `vm` driver runs each sandbox as a small virtual machine with its own kernel. It is the way on when the host kernel has no Landlock. Setup offers it when `/dev/kvm` exists and stops with the way on if something is missing: access to `/dev/kvm`, `e2fsprogs` 1.43 or newer, and the `openshell-driver-vm` download. Every MicroVM run works on a copy, so [pull](/docs/how-to/sandboxes/review-undo-or-pull#pull-on-macos) brings the work back.

@@ -140,6 +140,42 @@ For another MicroVM error reason, such as `ProcessPollFailed`, OpenShell may sti
 
 **Check:** the run starts with an allowed value.
 
+## A harness cannot start in a MicroVM
+
+**You see:** ``<Harness> cannot start in an OpenShell MicroVM until OpenShell writes /etc/hosts; a gateway on the docker driver (Linux) runs it``.
+
+**Cause:** OpenShell's MicroVM driver leaves the sandbox's `/etc/hosts` empty, and this harness does not use the system resolver, which answers `localhost` there.
+
+**Fix:** on Linux, run that harness on a gateway with the Docker driver. On a Mac, use another harness until OpenShell fills in `/etc/hosts`.
+
+**Check:** `defenseclaw sandbox run <harness>` starts.
+
+## A sandbox does not answer, though OpenShell reads it as running
+
+**You see:** ``NAME does not answer, though OpenShell still reads it as running: its … may have stopped under the session (…); `defenseclaw sandbox status NAME` shows its state``.
+
+**Cause:** the container or MicroVM behind the sandbox stopped while the session ran, and OpenShell has not noticed yet.
+
+**Fix:** run `defenseclaw sandbox status NAME`. Save what you can reach, then `defenseclaw sandbox stop NAME` and `defenseclaw sandbox connect NAME`.
+
+**Check:** `sandbox status NAME` shows the sandbox running and the session attaches.
+
+## Your ssh configuration shares connections for host `sandbox`
+
+**You see:** `sandbox doctor` warns ``your ssh configuration shares connections for host "sandbox", the name OpenShell gives every sandbox (ControlMaster …, ControlPath …)``.
+
+**Cause:** DefenseClaw turns connection sharing off for the OpenShell sessions it runs. An `openshell sandbox connect`, `upload`, `download` or `forward` that you run yourself can still reach another sandbox than the one you name, through a connection an earlier one left open.
+
+**Fix:** in `~/.ssh/config`, above any `Host *`, add:
+
+```text
+Host sandbox
+  ControlMaster no
+  ControlPath none
+```
+
+**Check:** `defenseclaw sandbox doctor` no longer warns about ssh connection sharing.
+
 ## `sandbox run` needs a terminal
 
 **You see:** `` `sandbox run` attaches Claude Code to your terminal, and there is none ``.

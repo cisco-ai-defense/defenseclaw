@@ -34,6 +34,20 @@ The pack files are embedded in the binary (source: `policies/sandbox/<name>/pack
 
 All three use the built-in blocklist feed, hide the same list of secret files and flag the same list of files that can run code. The `balanced` allowlist covers package registries (npm and Yarn, PyPI, the Go module proxy, crates.io, RubyGems, Maven Central, Gradle, NuGet, Packagist, Hex, pub.dev, conda), source hosts (`github.com`, `api.github.com`, `codeload.github.com`, `*.githubusercontent.com`, `ghcr.io`, `gitlab.com`, `bitbucket.org`), toolchains (Node.js, Rust, `www.python.org`, uv) and common documentation. `defenseclaw sandbox pack show balanced` prints the exact list, which is also the egress proxy's allowlist feed.
 
+In 1.0.4 the list is these 50 hosts, on ports 80 and 443:
+
+```text
+registry.npmjs.org, registry.yarnpkg.com, repo.yarnpkg.com, pypi.org, files.pythonhosted.org,
+proxy.golang.org, sum.golang.org, index.golang.org, crates.io, index.crates.io, static.crates.io,
+rubygems.org, index.rubygems.org, repo.maven.apache.org, repo1.maven.org, plugins.gradle.org,
+services.gradle.org, downloads.gradle.org, api.nuget.org, packagist.org, repo.packagist.org,
+hex.pm, repo.hex.pm, builds.hex.pm, pub.dev, conda.anaconda.org, github.com, api.github.com,
+codeload.github.com, *.githubusercontent.com, ghcr.io, gitlab.com, bitbucket.org, nodejs.org,
+static.rust-lang.org, sh.rustup.rs, www.python.org, astral.sh, releases.astral.sh, docs.python.org,
+developer.mozilla.org, go.dev, pkg.go.dev, docs.rs, doc.rust-lang.org, docs.github.com,
+docs.npmjs.com, www.typescriptlang.org, learn.microsoft.com, stackoverflow.com
+```
+
 An allowlist limits where, not what. The proxy sees HTTPS as encrypted tunnels, so every allowed host can receive data as well as serve it.
 
 ## Pack file

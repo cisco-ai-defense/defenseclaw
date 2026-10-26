@@ -93,6 +93,38 @@ The first start of each image takes about a minute while the driver prepares its
 
 </Steps>
 
+## How it fits together
+
+<Flow direction="TB" caption="A Mac sandbox. The agent works on a copy of your project inside a MicroVM; nothing reaches your folder until you pull it back.">
+  <Node id="agent" kind="agent">{`Claude Code or Codex\nskip-permissions on`}</Node>
+  <Node id="sup" kind="generic">{`OpenShell supervisor\nthe only way out`}</Node>
+  <Node id="dc" kind="operator">{`DefenseClaw daemon\nchecks hooks, proxies the web`}</Node>
+  <Node id="gw" kind="generic">{`OpenShell gateway\nHomebrew service`}</Node>
+  <Node id="copy" kind="generic">{`A copy of your project\nat /sandbox/work/myapp`}</Node>
+  <Node id="net" kind="generic">{`Internet\nallowed sites`}</Node>
+  <Node id="model" kind="generic">{`Model provider`}</Node>
+  <Edge from="agent" to="sup" />
+  <Edge from="sup" to="dc" label="hooks, web" />
+  <Edge from="dc" to="net" />
+  <Edge from="sup" to="model" label="model calls" />
+  <Edge from="gw" to="sup" label="starts" />
+  <Edge from="copy" to="agent" />
+</Flow>
+
+## The copy
+
+`sandbox run` copies the project into the sandbox and says what it left out:
+
+```text
+Copying ~/code/myapp (secrets are held back)…
+Starting a Claude Code sandbox… (the first start prepares its MicroVM disk: about a minute)
+Uploading the copy (412 files, 3.1 MiB)…
+⚠ 1 secret file held back from the copy: .env
+⚠ not copied (git ignores them, or they are package caches): node_modules/, dist/; install the dependencies inside the sandbox
+```
+
+The copy is a shallow git clone (`openshell.workdir.git_depth`) plus your working tree, up to `openshell.workdir.max_upload_mb`. Secret files are held back. At the end DefenseClaw brings the work back as a git bundle, checks it and reviews it before anything reaches your folder ([pull on macOS](/docs/how-to/sandboxes/review-undo-or-pull#pull-on-macos)).
+
 ## What to know about MicroVMs
 
 - Every MicroVM gets the same 4 vCPUs, 4 GiB of memory and 16 GiB disk for changes, set in the gateway's `gateway.toml`. `--cpu` and `--memory` have no effect.
