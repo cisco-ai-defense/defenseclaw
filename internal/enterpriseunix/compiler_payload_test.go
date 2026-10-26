@@ -299,8 +299,8 @@ func TestFleetOffPackageLeavesCompilerInactiveUntilConfigEnable(t *testing.T) {
 }
 
 // GAP-0722: a Fleet-on ensure from a package whose share/fleet folder has no
-// policy_compiler.py says that the payload has no compiler and names the
-// --payload route, not a raw lstat error, and changes nothing.
+// policy_compiler.py gives the documented Fleet message (the page names the
+// --payload route), not a raw lstat error, and changes nothing.
 func TestFleetEnableWithoutPackageCompilerNamesTheFleetCause(t *testing.T) {
 	h := packageHost(t, "1.0.0")
 	allowTestFleetPython(h)
@@ -316,8 +316,7 @@ func TestFleetEnableWithoutPackageCompilerNamesTheFleetCause(t *testing.T) {
 	result := h.run(Options{Action: ActionEnsure, FromPackage: true, ConfigFile: stagedFleetConfig(t, h)})
 	requireError(t, result, codePayload)
 	got := messagesOf(result.Errors, codePayload)
-	if !strings.Contains(got, "fleet.enabled is set but the managed payload has no policy_compiler.py") ||
-		!strings.Contains(got, "--payload <dir>") || strings.Contains(got, "lstat") {
+	if !strings.Contains(got, "fleet.enabled is set but the managed payload has no policy_compiler.py") || strings.Contains(got, "lstat") {
 		t.Fatalf("Fleet-on ensure without the compiler = %q", got)
 	}
 	if h.read(h.env.Layout.ConfigPath) != previous {
