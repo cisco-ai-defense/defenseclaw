@@ -1487,6 +1487,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0388", page: "reference/observability/dashboards.mdx", has: ["DefenseClaw provisions 18 Grafana dashboards", "it is not in the installed package and is added with the separate Fleet assets"] },
   { gap: "GAP-1716", page: "get-started/windows.mdx", section: "Upgrade and roll back", has: ["exit code 0 means the installer started, not that it finished", "-Rollback -Yes`, which waits and sets the exit code"] },
   { gap: "GAP-1716", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["**Windows upgrade and rollback return before the installer finishes:**"] },
+  { gap: "GAP-0922, GAP-0923", page: "troubleshooting/known-limits.mdx", section: "Upgrade and policy limits", has: ["macOS has no setting that stops a user's sandbox profile", "DefenseClaw does not see or audit its tool calls"], lacks: ["unshare -Urm"] },
   // r105-rows-end
 ];
 
