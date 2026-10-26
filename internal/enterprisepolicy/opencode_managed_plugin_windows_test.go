@@ -56,7 +56,7 @@ func TestPublishWindowsGoOwnedInstallsTheOpenCodePlugin(t *testing.T) {
 		t.Fatalf("OpenCode must be published through machine policy: %+v", result)
 	}
 	config, _ := OpenCodeManagedConfigPath(opts)
-	if body, err := os.ReadFile(config); err != nil || !strings.Contains(string(body), strings.ReplaceAll(opts.OpenCodePluginPath, `\`, `\\`)) {
+	if body, err := os.ReadFile(config); err != nil || !strings.Contains(string(body), strings.ReplaceAll(openCodePluginSpec(opts), `\`, `\\`)) {
 		t.Fatalf("OpenCode's managed config must name the plugin: %v\n%s", err, body)
 	}
 	again, err := PublishWindowsGoOwned(opts, []string{ConnectorOpenCode})
@@ -229,7 +229,7 @@ func windowsOpenCodeTestOptions(t *testing.T) Options {
 	install := filepath.Join(programFiles, "Cisco", "DefenseClaw")
 	opts.WindowsProgramFiles = programFiles
 	opts.HookBinary = filepath.Join(install, "bin", "defenseclaw-hook.exe")
-	opts.OpenCodePluginPath = filepath.Join(install, "share", "opencode", "defenseclaw.js")
+	opts.OpenCodePluginPath = filepath.Join(install, "share", "opencode", "index.js")
 	return opts
 }
 

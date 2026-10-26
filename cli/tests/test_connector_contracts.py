@@ -451,7 +451,7 @@ class TestConnectorContractManifest(unittest.TestCase):
             ),
             "antigravity": (("antigravity-hooks-v2", "1.1.8", "", True, "v8", 5),),
             "openhands": (("openhands-hooks-v1", "1.12.0", "", True, "v6", 6),),
-            "opencode": (("opencode-hooks-v1", "1.18.10", "1.19.0", False, "v7", 10),),
+            "opencode": (("opencode-hooks-v1", "1.18.10", "1.19.0", False, "v7", 10), ("opencode-hooks-v2", "2.0.0", "2.2.0", False, "v7", 8)),
             "amp": (("amp-plugin-v1", "0.0.1785334225", "", True, "v2", 5),),
             "devin": (("devin-hooks-v1", "", "", True, "v7", 8),),
         }

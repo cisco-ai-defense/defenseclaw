@@ -199,6 +199,7 @@ For hook-only connectors, add a case to `hookOnlyProfileRespond` (`hook_only_pro
 - Secure Client renders pinned copies (`secureClientPluginAssets`), and `TestSecureClientPluginTemplatesArePinned` pins them. Never edit `*-secure-client.*` when changing `opencode-plugin.js` or `amp-plugin.ts`.
 - Any bridge template edit also needs the plugin-scanner digest bump (assets.md §2, step 11).
 - The managed machine-policy OpenCode plugin is `internal/enterprisepolicy/opencode_managed_plugin.js`. It runs `defenseclaw-hook hook --connector opencode --enterprise-managed --event E`.
+- OpenCode v1 and v2 share the bridge: the default definition exposes `server` for v1 and `setup` for v2. Edit `internal/opencodebridge/adapter.js`, then run `python3 scripts/generate_opencode_plugins.py`; `make check-opencode-plugins` checks both inlined copies. Managed installs register the directory containing `index.js`, with legacy file references retained only as upgrade ownership aliases.
 - In-agent plugins must also send the identity headers. They are a hand-kept list in `TestPluginTransportsReportIdentityToo`.
 
 **PowerShell adapters.**

@@ -7,7 +7,7 @@
 //
 //   node opencode-managed-plugin-contract.mjs <plugin> <fake-dir>
 //
-// <plugin> is <root>/share/opencode/defenseclaw.js; <root>/bin/defenseclaw-hook
+// <plugin> is <root>/share/opencode/index.js; <root>/bin/defenseclaw-hook
 // is a fake that logs its argv and stdin to <fake-dir>/calls.jsonl and answers
 // from <fake-dir>/event.json (per-event calls) or <fake-dir>/guard.json
 // (--foreign-hook-check): {"stdout": "...", "exit": N}.
@@ -51,7 +51,8 @@ async function load({ guard = JSON.stringify({ deny: false }), guardExit = 0, or
   serial += 1;
   const url = pathToFileURL(pluginPath).href + "?instance=" + serial;
   const mod = await import(url);
-  assert.deepEqual(Object.keys(mod), ["DefenseClawManaged"]);
+  assert.deepEqual(Object.keys(mod), ["DefenseClawManaged", "default"]);
+  assert.equal(mod.default.server, mod.DefenseClawManaged);
   const hooks = await mod.DefenseClawManaged({ client, directory: "/work/repo", worktree: "/work/repo" });
   answer("event.json", JSON.stringify({ action: "allow", mode: "observe", hook_output: { decision: "allow" } }));
   await hooks.config({

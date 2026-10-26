@@ -3,7 +3,7 @@
 
 # Standalone uninstall and the two directories a standalone install adds under
 # InstallRoot: <InstallRoot>\ipc\ (the sensor helper's AF_UNIX socket, a
-# reparse file on Windows) and <InstallRoot>\share\opencode\defenseclaw.js
+# reparse file on Windows) and <InstallRoot>\share\opencode\index.js
 # (the managed OpenCode plugin the guardian installs from the payload). The
 # install-tree walk must accept exactly those directories and their expected
 # leaves, removal after the services are gone must delete only them (refusing
@@ -71,7 +71,7 @@ try {
             function New-Plugin([hashtable]$Layout) {
                 $directory = [IO.Path]::Combine($Layout.InstallRoot, 'share', 'opencode')
                 [void][IO.Directory]::CreateDirectory($directory)
-                $plugin = [IO.Path]::Combine($directory, 'defenseclaw.js')
+                $plugin = [IO.Path]::Combine($directory, 'index.js')
                 [IO.File]::WriteAllText($plugin, '// defenseclaw-managed-opencode-plugin v1')
                 return $plugin
             }
@@ -173,6 +173,18 @@ try {
             Test-Accepted 'tree without the plugin' $layout
             # Removal with nothing installed is a no-op.
             Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $layout
+
+            # A v1-only deployment can be upgraded and uninstalled after the
+            # v2 index entrypoint is installed alongside its old artifact.
+            $upgraded = New-TestLayout 'plugin-v1-upgrade'
+            [void](New-Plugin $upgraded)
+            $upgradePaths = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $upgraded
+            [IO.File]::WriteAllText([string]$upgradePaths.LegacyPluginPath, '// old managed bridge')
+            Test-Accepted 'standalone tree with both managed plugin generations' $upgraded
+            Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $upgraded
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $upgradePaths.ShareDirectory) {
+                $failures.Add('the legacy managed OpenCode artifact survived uninstall')
+            }
 
             # GAP-0270: a 1.0.2 standalone install left lib\defenseclaw for
             # the Fleet compiler this release no longer installs. Uninstall
@@ -526,7 +538,7 @@ try {
 
             $nested = New-TestLayout 'nested'
             [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($nested.ManagedIPCDirectory, 'sensor-helper.sock'))
-            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($nested.InstallRoot, 'share', 'opencode', 'defenseclaw.js'))
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($nested.InstallRoot, 'share', 'opencode', 'index.js'))
             Test-Refused 'directory named like the socket' { Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $nested } 'unexpected managed IPC content'
             Test-Refused 'directory named like the plugin' { Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $nested } 'not a plain file'
 
@@ -541,7 +553,7 @@ try {
             $linkedPlugin = New-TestLayout 'linked-plugin'
             $linkedDirectory = [IO.Path]::Combine($linkedPlugin.InstallRoot, 'share', 'opencode')
             [void][IO.Directory]::CreateDirectory($linkedDirectory)
-            if (New-TestLink ([IO.Path]::Combine($linkedDirectory, 'defenseclaw.js')) $target) {
+            if (New-TestLink ([IO.Path]::Combine($linkedDirectory, 'index.js')) $target) {
                 Test-Refused 'symbolic link named like the plugin (walk)' { Assert-DefenseClawManagedInstallTree -Layout $linkedPlugin } 'reparse point'
                 Test-Refused 'symbolic link named like the plugin (removal)' { Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $linkedPlugin } 'not a plain file'
             }

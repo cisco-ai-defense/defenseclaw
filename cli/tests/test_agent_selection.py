@@ -1342,3 +1342,16 @@ def test_windows_opencode_npm_image_needs_the_opencode_ai_package(tmp_path: Path
     assert not agent_selection._opencode_npm_package_identity_verified(str(image))
     manifest.write_text('{"name": "opencode-ai"}', encoding="utf-8")
     assert agent_selection._opencode_npm_package_identity_verified(str(image))
+
+
+def test_windows_opencode_v2_npm_image_needs_scoped_package_identity(tmp_path: Path, monkeypatch) -> None:
+    roaming = tmp_path / "Roaming"
+    monkeypatch.setattr(agent_selection, "_windows_known_folder", lambda _identifier: str(roaming))
+    image = Path(agent_selection._windows_opencode_v2_npm_executable())
+    assert image == roaming / "npm" / "node_modules" / "@opencode" / "cli" / "bin" / "opencode.exe"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"native")
+    manifest = image.parent.parent / "package.json"
+    for name, allowed in [("opencode-ai", False), ("@opencode/lookalike", False), ("@opencode/cli", True)]:
+        manifest.write_text(json.dumps({"name": name}))
+        assert agent_selection._opencode_npm_package_identity_verified(str(image)) is allowed

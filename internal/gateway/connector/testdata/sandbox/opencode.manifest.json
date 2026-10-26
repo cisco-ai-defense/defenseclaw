@@ -12,14 +12,14 @@
     "/etc/opencode/opencode.json": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 180,
-      "sha256": "cd7c1a2412b8f2bfe3604fcca4dcd66bab69d1d151566de7c1ce6cab3eeefc14"
+      "size": 165,
+      "sha256": "3468763e1070cafcbc581a1044a68f961151ae5195050b088fa3f25fa23a71d8"
     },
-    "/usr/local/lib/defenseclaw/opencode/defenseclaw.js": {
+    "/usr/local/lib/defenseclaw/opencode/index.js": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 25998,
-      "sha256": "e05b302e7232c2f925bd4f2ffc610639b7c1d6215ec55fe3609b3af43b7a297b"
+      "size": 35800,
+      "sha256": "6d552801597457621e4a33620b270a1a5b75bb8c9b15fe00d6f76cab5e87018c"
     }
   }
 }

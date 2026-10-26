@@ -1159,7 +1159,13 @@ func resolveHookContractForOSMode(connectorName, rawVersion, goos string, strict
 			Reason:            "connector has no hook contract gate",
 		}
 	}
-	resolution := resolveHookContractAgainst(name, rawVersion, hookContractsForOS(name, goos))
+	contracts := hookContractsForOS(name, goos)
+	if strict && name == "opencode" {
+		// The strict profile ships the frozen v1 bridge. Preserve its
+		// pre-v2 catalog even as standalone/per-user support moves forward.
+		contracts = openCodeContractsForVersion(contracts, "1.0.0")
+	}
+	resolution := resolveHookContractAgainst(name, rawVersion, contracts)
 	if strict {
 		return strictHookContractResolutionOf(resolution)
 	}
@@ -1207,7 +1213,7 @@ func resolveHookContractAgainst(name, rawVersion string, contracts []HookContrac
 			Contract:          bestEffortHookContract(contracts),
 		}
 	}
-	if gitBuildVersionRE.MatchString(raw) {
+	if name != "opencode" && gitBuildVersionRE.MatchString(raw) {
 		// A source build (Hermes "vgit.5bba024 (2026.9.24)") has no release
 		// version: its digits are a commit hash or a date. Treat it as newer
 		// than every tested range instead of reading a version out of the hash.
@@ -1240,6 +1246,9 @@ func resolveHookContractAgainst(name, rawVersion string, contracts []HookContrac
 			Status:            HookCompatibilityUnknown,
 			Reason:            fmt.Sprintf("agent version %s is known broken: %s (%s)", normalized, broken.Reason, broken.Issue),
 		}
+	}
+	if name == "opencode" {
+		contracts = openCodeContractsForVersion(contracts, normalized)
 	}
 	for _, contract := range contracts {
 		if contractMatchesAgentVersion(contract, raw, normalized) {
@@ -1502,6 +1511,9 @@ func resolveHookContractForOptions(
 		resolution = ResolveWindowsManagedKiroHookContract(opts.AgentVersion)
 	} else {
 		resolution = resolveHookContractForOS(connectorName, opts.AgentVersion, goos)
+	}
+	if connectorName == "opencode" && pluginSecureClientProfile(opts) {
+		resolution = resolveHookContractForOSMode(connectorName, opts.AgentVersion, goos, true)
 	}
 	if pinnedID != "" {
 		pinned, ok := hookContractByIDForOS(connectorName, pinnedID, goos)

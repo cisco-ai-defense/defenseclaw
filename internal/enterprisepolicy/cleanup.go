@@ -229,15 +229,20 @@ func cleanJSONSource(scan *guardScan, source hookSource, backupDir string, resul
 		return err
 	}
 	if source.format == formatPluginList {
-		value, _ := doc.get("plugin")
-		list, _ := value.([]any)
-		kept := make([]any, 0, len(list))
-		for _, item := range list {
-			if !remove[sha256Hex(canonicalJSON(item))] {
-				kept = append(kept, item)
+		for _, key := range []string{"plugin", "plugins"} {
+			value, exists := doc.get(key)
+			if !exists {
+				continue
 			}
+			list, _ := value.([]any)
+			kept := make([]any, 0, len(list))
+			for _, item := range list {
+				if !remove[sha256Hex(canonicalJSON(item))] {
+					kept = append(kept, item)
+				}
+			}
+			doc.set(key, kept)
 		}
-		doc.set("plugin", kept)
 	} else {
 		hooksValue, _ := doc.get("hooks")
 		hooks, _ := hooksValue.(*object)

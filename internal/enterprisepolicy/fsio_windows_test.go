@@ -732,7 +732,7 @@ func TestWindowsOpenCodeMovesAsideAConfigAUserPlanted(t *testing.T) {
 				t.Fatalf("managed config path: %s %v", config, err)
 			}
 			body, err := os.ReadFile(config)
-			if err != nil || strings.Contains(string(body), "tool.js") || !strings.Contains(string(body), strings.ReplaceAll(opts.OpenCodePluginPath, `\`, `\\`)) {
+			if err != nil || strings.Contains(string(body), "tool.js") || !strings.Contains(string(body), strings.ReplaceAll(openCodePluginSpec(opts), `\`, `\\`)) {
 				t.Fatalf("the managed config must be DefenseClaw's alone: %v\n%s", err, body)
 			}
 			if err := validateTrustedFile(config); err != nil {

@@ -92,7 +92,7 @@ func TestPlatformHookContractsPreservePR655Bands(t *testing.T) {
 		},
 		"antigravity": {{"antigravity-hooks-v2", "1.1.8", "", true, "v8", 5}},
 		"openhands":   {{"openhands-hooks-v1", "1.12.0", "", true, "v6", 6}},
-		"opencode":    {{"opencode-hooks-v1", "1.18.10", "1.19.0", false, "v7", 10}},
+		"opencode":    {{"opencode-hooks-v1", "1.18.10", "1.19.0", false, "v7", 10}, {"opencode-hooks-v2", "2.0.0", "2.2.0", false, "v7", 8}},
 		"amp":         {{"amp-plugin-v1", "0.0.1785334225", "", true, "v2", 5}},
 	}
 

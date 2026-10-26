@@ -1038,8 +1038,12 @@ func (s *guardScan) scanPluginList(source hookSource, data []byte) []Finding {
 	if err != nil {
 		return []Finding{s.unreadable(source, err)}
 	}
-	value, _ := doc.get("plugin")
-	list, _ := value.([]any)
+	var list []any
+	for _, key := range []string{"plugin", "plugins"} {
+		value, _ := doc.get(key)
+		items, _ := value.([]any)
+		list = append(list, items...)
+	}
 	// Plugin paths in a config file resolve against its directory.
 	entrySource := source
 	entrySource.base = filepath.Dir(source.path)
@@ -1049,6 +1053,9 @@ func (s *guardScan) scanPluginList(source hookSource, data []byte) []Finding {
 		switch v := item.(type) {
 		case string:
 			name = v
+		case *object:
+			value, _ := v.get("package")
+			name, _ = value.(string)
 		case []any:
 			if len(v) > 0 {
 				name, _ = v[0].(string)

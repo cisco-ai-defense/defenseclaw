@@ -5708,6 +5708,7 @@ function Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
     $openCodePlugin = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $Layout
     if ($null -ne $openCodePlugin) {
         $files += [string]$openCodePlugin.PluginPath
+        $files += [string]$openCodePlugin.LegacyPluginPath
     }
     foreach ($path in $files) {
         if ([string]::IsNullOrWhiteSpace([string]$path)) {
@@ -23998,7 +23999,7 @@ function Get-DefenseClawSecureClientSensorHelperSocketLeaves {
 function Get-DefenseClawStandaloneOpenCodePluginPaths {
     <#
         The managed OpenCode plugin a standalone deployment carries at
-        <InstallRoot>\share\opencode\defenseclaw.js (enterprisepolicy
+        <InstallRoot>\share\opencode\index.js (enterprisepolicy
         OpenCodeManagedPluginPath) and its two directories. The guardian
         writes it from the payload binaries before it publishes OpenCode's
         managed config. Secure Client returns nothing and keeps its own
@@ -24015,7 +24016,9 @@ function Get-DefenseClawStandaloneOpenCodePluginPaths {
     return @{
         ShareDirectory = $share
         PluginDirectory = $directory
-        PluginPath = [IO.Path]::Combine($directory, 'defenseclaw.js')
+        PluginPath = [IO.Path]::Combine($directory, 'index.js')
+        # Retained for upgrades from the v1-only bridge throughout 1.x.
+        LegacyPluginPath = [IO.Path]::Combine($directory, 'defenseclaw.js')
     }
 }
 
@@ -24034,6 +24037,7 @@ function Remove-DefenseClawStandaloneOpenCodeManagedPlugin {
         return
     }
     $plugin = [string]$paths.PluginPath
+    $legacy = [string]$paths.LegacyPluginPath
     # Every check runs before anything is deleted, so a refusal removes
     # nothing.
     $expected = @(
@@ -24052,11 +24056,14 @@ function Remove-DefenseClawStandaloneOpenCodeManagedPlugin {
         }
         foreach ($child in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force)) {
             $full = [IO.Path]::GetFullPath([string]$child.FullName)
-            if (-not [string]::Equals($full, [string]$pair[1], [StringComparison]::OrdinalIgnoreCase)) {
+            $isPlugin = [string]::Equals($full, $plugin, [StringComparison]::OrdinalIgnoreCase) -or
+                [string]::Equals($full, $legacy, [StringComparison]::OrdinalIgnoreCase)
+            $isExpectedPlugin = $isPlugin -and [string]::Equals($directory, [string]$paths.PluginDirectory, [StringComparison]::OrdinalIgnoreCase)
+            if (-not $isExpectedPlugin -and -not [string]::Equals($full, [string]$pair[1], [StringComparison]::OrdinalIgnoreCase)) {
                 throw "refusing to remove unexpected managed OpenCode content: $full"
             }
             $plain = ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0
-            if ([string]::Equals($full, $plugin, [StringComparison]::OrdinalIgnoreCase) -and
+            if ($isPlugin -and
                 ($child.PSIsContainer -or -not $plain)) {
                 throw "refusing to remove managed OpenCode plugin that is not a plain file: $full"
             }
@@ -24065,8 +24072,8 @@ function Remove-DefenseClawStandaloneOpenCodeManagedPlugin {
             }
         }
     }
-    if ([IO.File]::Exists($plugin)) {
-        [IO.File]::Delete($plugin)
+    foreach ($file in @($plugin, $legacy)) {
+        if ([IO.File]::Exists($file)) { [IO.File]::Delete($file) }
     }
     foreach ($directory in @([string]$paths.PluginDirectory, [string]$paths.ShareDirectory)) {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $directory) {
@@ -24327,6 +24334,7 @@ function Assert-DefenseClawManagedInstallTree {
         $allowedDirectories += [string]$openCodePlugin.ShareDirectory
         $allowedDirectories += [string]$openCodePlugin.PluginDirectory
         $allowedFiles += [string]$openCodePlugin.PluginPath
+        $allowedFiles += [string]$openCodePlugin.LegacyPluginPath
     }
     # A Fleet-enabled 1.0.2 host keeps its compiler (GAP-0274). Only the
     # recorded, unchanged compiler and its two directories are accepted; an

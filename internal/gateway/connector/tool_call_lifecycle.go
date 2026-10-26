@@ -277,6 +277,9 @@ func (contract ToolCallLifecycleContract) ClassifyTerminalOutcome(
 		if !ok {
 			return ToolLifecycleOutcomeUnknown
 		}
+		if wantsFailure { // Only the v2 contract has authoritative failure results.
+			return classifyOpenCodeV2Result(payload, response)
+		}
 		output, exists := firstPresent(response, "output")
 		if !exists {
 			return ToolLifecycleOutcomeUnknown

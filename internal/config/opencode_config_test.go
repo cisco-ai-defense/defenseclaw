@@ -25,6 +25,37 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
+func TestReadMCPServersOpenCodeV2NativeLayers(t *testing.T) {
+	entries := readMCPServersOpenCodeResolution(openCodeConfigResolution{Layers: []openCodeConfigLayer{
+		{Data: map[string]any{"mcp": map[string]any{"docs": map[string]any{"type": "remote", "url": "https://example.test/mcp", "enabled": true}}}},
+		{Data: map[string]any{"mcp": map[string]any{"servers": map[string]any{"docs": map[string]any{"disabled": true}}}}},
+	}})
+	if len(entries) != 1 || entries[0].Name != "docs" || !entries[0].Disabled || entries[0].URL != "https://example.test/mcp" {
+		t.Fatalf("v2 must override v1 while preserving the endpoint: %+v", entries)
+	}
+}
+
+func TestReadMCPServersOpenCodeV2OptionalContainerAndV1ReservedNames(t *testing.T) {
+	for _, native := range []bool{false, true} {
+		mcp := map[string]any{
+			"servers": map[string]any{"type": "local", "command": []any{"echo", "servers"}},
+			"timeout": map[string]any{"type": "local", "command": []any{"echo", "timeout"}},
+		}
+		if native {
+			mcp = map[string]any{"timeout": map[string]any{"execution": 1000}}
+		}
+		entries := readMCPServersOpenCodeResolution(openCodeConfigResolution{Layers: []openCodeConfigLayer{
+			{Data: map[string]any{"mcp": mcp}},
+		}})
+		if native && len(entries) != 0 {
+			t.Fatalf("v2 timeout is not an MCP server: %+v", entries)
+		}
+		if !native && (len(entries) != 2 || entries[0].Name != "servers" || entries[1].Name != "timeout" || entries[0].Command != "echo" || entries[1].Command != "echo") {
+			t.Fatalf("v1 server names must remain valid: %+v", entries)
+		}
+	}
+}
+
 func TestReadMCPServersOpenCodeRejectsOversizedWorkspaceLayerAcrossRescans(t *testing.T) {
 	home := t.TempDir()
 	testenv.SetHome(t, home)

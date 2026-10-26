@@ -436,6 +436,11 @@ def resolve_connector_contract(
                 reason=f"agent version {normalized} is known broken: {entry['reason']} ({entry['issue']})",
                 contract=None,
             )
+    if name == "opencode":
+        # Major versions deliberately change the plugin API. Only reuse a
+        # newer minor within its own major; never silently admit a new API.
+        major = normalized.split(".", 1)[0]
+        contracts = tuple(c for c in contracts if c.min_agent_version.split(".", 1)[0] == major)
     for contract in contracts:
         if _contract_matches_agent_version(contract, raw, normalized):
             return ConnectorCompatibility(

@@ -5504,6 +5504,9 @@ def _connector_contract_upgrade_guidance(
     """Give range-aware remediation without calling every mismatch an upgrade."""
 
     contracts = HOOK_CONTRACTS.get(normalize_connector(connector), ())
+    if normalize_connector(connector) == "opencode" and normalized_version:
+        major = normalized_version.split(".", 1)[0]
+        contracts = tuple(c for c in contracts if c.min_agent_version.split(".", 1)[0] == major)
     if not contracts:
         return f"Use a {label} version covered by a DefenseClaw hook contract, then rerun setup."
 

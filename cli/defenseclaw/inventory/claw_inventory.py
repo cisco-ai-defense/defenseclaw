@@ -4286,9 +4286,11 @@ def _commands_from_opencode_config(
 
     if not isinstance(data, dict):
         return []
-    commands = data.get("command")
-    if not isinstance(commands, dict):
-        return []
+    commands = {}
+    for key in ("command", "commands"):
+        values = data.get(key)
+        if isinstance(values, dict):
+            commands.update(values)
     rows: list[dict[str, Any]] = []
     for command_id, body in commands.items():
         if isinstance(body, dict):
@@ -4385,9 +4387,12 @@ def _agents_from_opencode(cfg: Config) -> list[dict[str, Any]]:
     )
     for layer in connector_paths._resolve_opencode_config(workspace).layers:  # type: ignore[attr-defined]
         data = layer.data
-        agents = data.get("agent") if isinstance(data, dict) else None
-        if not isinstance(agents, dict):
-            continue
+        agents = {}
+        if isinstance(data, dict):
+            for key in ("agent", "agents"):
+                values = data.get(key)
+                if isinstance(values, dict):
+                    agents.update(values)
         for agent_id, body in agents.items():
             row: dict[str, Any] = {
                 "id": str(agent_id),
@@ -4401,7 +4406,7 @@ def _agents_from_opencode(cfg: Config) -> list[dict[str, Any]]:
                         "name": str(body.get("name") or agent_id),
                         "description": str(body.get("description") or ""),
                         "model": str(body.get("model") or ""),
-                        "enabled": not bool(body.get("disable", False)),
+                        "enabled": not bool(body.get("disabled", body.get("disable", False))),
                     }
                 )
             rows.append(row)
@@ -5442,18 +5447,23 @@ def _enumerate_plugins_filesystem(
 
 
 def _opencode_config_plugin_rows(workspace_dir: str) -> list[dict[str, Any]]:
-    """Inventory local config ``plugin`` specs without resolving/installing them."""
+    """Inventory v1 ``plugin`` and v2 ``plugins`` specs without loading them."""
 
     managed_bridge = os.path.normcase(
         os.path.abspath(connector_paths.connector_config_files("opencode")[0])
     )
     rows: list[dict[str, Any]] = []
     for layer in connector_paths._resolve_opencode_config(workspace_dir).layers:  # type: ignore[attr-defined]
-        configured = layer.data.get("plugin") if isinstance(layer.data, dict) else None
-        if not isinstance(configured, list):
-            continue
+        configured = []
+        if isinstance(layer.data, dict):
+            for key in ("plugin", "plugins"):
+                values = layer.data.get(key)
+                if isinstance(values, list):
+                    configured.extend(values)
         for value in configured:
             spec = value[0] if isinstance(value, list) and value else value
+            if isinstance(spec, dict):
+                spec = spec.get("package")
             if not isinstance(spec, str) or not spec.strip():
                 continue
             plugin_id = spec.strip()

@@ -159,14 +159,14 @@ enrolled, Cursor refuses the tool calls of every user who is not.
 ## Managed OpenCode plugin
 
 The standalone payload ships a managed OpenCode plugin at
-`<InstallRoot>/share/opencode/defenseclaw.js`
-(`/opt/defenseclaw/share/opencode/defenseclaw.js` on Linux,
-`/opt/cisco/defenseclaw/share/opencode/defenseclaw.js` on macOS,
-`C:\Program Files\Cisco\DefenseClaw\share\opencode\defenseclaw.js` on
+`<InstallRoot>/share/opencode/index.js`
+(`/opt/defenseclaw/share/opencode/index.js` on Linux,
+`/opt/cisco/defenseclaw/share/opencode/index.js` on macOS,
+`C:\Program Files\Cisco\DefenseClaw\share\opencode\index.js` on
 Windows). The Linux and macOS lifecycle installs it with the deployment's
 files; on Windows the guardian writes it from the payload binaries.
-DefenseClaw adds the plugin to the `plugin` list of OpenCode's managed
-config, so it runs in every user's OpenCode and users cannot edit or delete
+DefenseClaw registers the containing directory in the `plugin` (v1) or
+`plugins` (v2) list of OpenCode's managed config, so it runs in every user's OpenCode and users cannot edit or delete
 it. OpenCode itself can still start without it: see
 [Vendor limits](#vendor-limits).
 
@@ -578,7 +578,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --c
 | `claudecode` | `json` (default): the drop-in. `claude-hklm-json`, `reg`, `intune-settings-catalog`: the same content as a `HKLM\SOFTWARE\Policies\ClaudeCode` `Settings` value. `plist`: a macOS managed-preferences payload. `version-floor`: the [version floor](#claude-code-version-floor) drop-in. |
 | `cursor` | `json`: the enterprise `hooks.json` |
 | `copilot` | `json`: the `policy.d` drop-in |
-| `opencode` | `json`: a managed OpenCode config that loads `<install root>/share/opencode/defenseclaw.js`. Deploy it only where that plugin is installed. |
+| `opencode` | `json`: a managed OpenCode config that loads `<install root>/share/opencode/index.js`. Deploy it only where that plugin is installed. |
 | `devincascade` | `json`: the Cascade `hooks.json` that turns Cascade off |
 | `wsl` | Windows. `reg` (default), `json`, `intune`: the Claude Desktop `disableWslSessions` gate and, with `platform: disable`, `AllowWSL=0`. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl) |
 

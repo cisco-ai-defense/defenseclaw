@@ -522,7 +522,7 @@ func TestOpenCodeBridgePinsPluginOrderMCPIdentityAndHeartbeat(t *testing.T) {
 			t.Errorf("OpenCode bridge is missing audited v1.18.10-v1.18.19 behavior %q", want)
 		}
 	}
-	if strings.Contains(text, "mcp__") || strings.Contains(text, "mcp:") {
+	if strings.Contains(text, "mcp__") || strings.Contains(text, `startsWith("mcp:")`) {
 		t.Fatal("OpenCode bridge must not fall back to another connector's MCP naming grammar")
 	}
 }

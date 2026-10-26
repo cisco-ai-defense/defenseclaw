@@ -193,7 +193,7 @@ class MCPServerEntry:
 
 @dataclass(frozen=True)
 class OpenCodeConfigLayer:
-    """One locally representable OpenCode v1.18.10-v1.18.19 config layer."""
+    """One locally representable OpenCode v1 or v2 config layer."""
 
     source: str
     source_scope: str
@@ -4304,6 +4304,17 @@ def _opencode_config_paths(
     ]
 
 
+def _opencode_mcp_map(mcp: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Select the v2 container without treating a v1 server named servers as one."""
+    servers = mcp.get("servers")
+    if isinstance(servers, dict) and all(isinstance(value, dict) for value in servers.values()):
+        return servers, True
+    timeout = mcp.get("timeout")
+    if isinstance(timeout, dict) and set(timeout) <= {"startup", "catalog", "execution"}:
+        return {}, True
+    return mcp, False
+
+
 def _opencode_mcp_servers(
     workspace_dir: str | None = None,
     *,
@@ -4330,9 +4341,13 @@ def _opencode_mcp_servers(
         servers = data.get("mcp") if isinstance(data, dict) else None
         if not isinstance(servers, dict):
             continue
+        servers, _ = _opencode_mcp_map(servers)
         for name_raw, cfg in servers.items():
             if not isinstance(cfg, dict):
                 continue
+            cfg = dict(cfg)
+            if "disabled" in cfg:
+                cfg["enabled"] = cfg.pop("disabled") is not True
             name = str(name_raw)
             if name not in entries:
                 order.append(name)
@@ -5673,7 +5688,15 @@ def _set_opencode_mcp_server(
     mcp = data.get("mcp")
     if not isinstance(mcp, dict):
         mcp = {}
-    mcp[name] = _opencode_mcp_entry_from_generic(entry)
+    converted = _opencode_mcp_entry_from_generic(entry)
+    servers, native = _opencode_mcp_map(mcp)
+    if native:
+        if "enabled" in converted:
+            converted["disabled"] = not converted.pop("enabled")
+        servers[name] = converted
+        mcp["servers"] = servers
+    else:
+        mcp[name] = converted
     data["mcp"] = mcp
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
@@ -5706,9 +5729,12 @@ def _unset_opencode_mcp_server(
         _reject_symlink_config(path)
         data = _read_opencode_doc_for_write(path)
         mcp = data.get("mcp")
-        if not isinstance(mcp, dict) or name not in mcp:
+        if not isinstance(mcp, dict):
             continue
-        del mcp[name]
+        servers, _ = _opencode_mcp_map(mcp)
+        if name not in servers:
+            continue
+        del servers[name]
         data["mcp"] = mcp
         updates.append((path, data))
     for path, data in updates:

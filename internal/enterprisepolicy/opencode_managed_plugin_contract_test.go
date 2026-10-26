@@ -52,7 +52,7 @@ func TestOpenCodeManagedPluginContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plugin := filepath.Join(root, "share", "opencode", "defenseclaw.js")
+	plugin := filepath.Join(root, "share", "opencode", "index.js")
 	writeFile(t, plugin, string(OpenCodeManagedPlugin()))
 	// OpenCode loads the plugin as an ES module; tell node the same.
 	writeFile(t, filepath.Join(root, "share", "opencode", "package.json"), `{"type":"module"}`)

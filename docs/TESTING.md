@@ -86,6 +86,18 @@ contract is documented in [E2E.md](E2E.md).
 
 Run E2E tests only when the required local services, credentials, and platform assumptions are available.
 
+The OpenCode bridge also has an opt-in test against an already downloaded
+vendor CLI. It uses a temporary home, a local fake model and a local fake
+gateway to verify that a blocked command never executes and that an allowed
+command returns the matching tool result, through both automatic discovery and
+a configured directory entrypoint. It installs nothing and needs no
+model credentials. On a POSIX host, run each supported major separately:
+
+```bash
+python3 scripts/test_opencode_plugin_live.py --binary /path/to/opencode-v1 --major 1
+python3 scripts/test_opencode_plugin_live.py --binary /path/to/opencode-v2 --major 2
+```
+
 ## Install and Upgrade Tests
 
 `scripts/test-install-lifecycle.sh` (macOS and Linux) and

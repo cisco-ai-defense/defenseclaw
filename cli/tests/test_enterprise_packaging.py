@@ -403,7 +403,7 @@ def test_enterprise_package_ships_the_managed_opencode_plugin():
     config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
     (nfpm,) = [n for n in config["nfpms"] if n["id"] == "defenseclaw-enterprise"]
     shipped = {c["dst"]: c for c in nfpm["contents"] if "src" in c}
-    plugin = shipped.get("/opt/defenseclaw/share/opencode/defenseclaw.js")
+    plugin = shipped.get("/opt/defenseclaw/share/opencode/index.js")
     assert plugin is not None and plugin["src"] == "internal/enterprisepolicy/opencode_managed_plugin.js"
     assert plugin.get("file_info", {}).get("mode") == 0o644
 

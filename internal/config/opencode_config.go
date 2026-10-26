@@ -213,6 +213,7 @@ func readMCPServersOpenCodeResolution(resolution openCodeConfigResolution) []MCP
 		if !ok {
 			continue
 		}
+		mcp = openCodeMCPMap(mcp)
 		names := make([]string, 0, len(mcp))
 		for name := range mcp {
 			names = append(names, name)
@@ -227,6 +228,11 @@ func readMCPServersOpenCodeResolution(resolution openCodeConfigResolution) []MCP
 				order = append(order, name)
 				configs[name] = map[string]any{}
 			}
+			entry = mergeOpenCodeConfig(nil, entry)
+			if disabled, native := entry["disabled"]; native {
+				entry["enabled"] = disabled != true
+				delete(entry, "disabled")
+			}
 			configs[name] = mergeOpenCodeConfig(configs[name], entry)
 			provenance[name] = layer
 		}
@@ -236,6 +242,36 @@ func readMCPServersOpenCodeResolution(resolution openCodeConfigResolution) []MCP
 		entries = append(entries, openCodeMCPEntry(name, configs[name], provenance[name]))
 	}
 	return entries
+}
+
+// openCodeMCPMap distinguishes the v2 container from a v1 server literally
+// named "servers" or "timeout". A v2 timeout-only config has no servers.
+func openCodeMCPMap(mcp map[string]any) map[string]any {
+	if servers, ok := mcp["servers"].(map[string]any); ok {
+		native := true
+		for _, value := range servers {
+			if _, ok := value.(map[string]any); !ok {
+				native = false
+				break
+			}
+		}
+		if native {
+			return servers
+		}
+	}
+	if timeout, ok := mcp["timeout"].(map[string]any); ok {
+		native := true
+		for key := range timeout {
+			if key != "startup" && key != "catalog" && key != "execution" {
+				native = false
+				break
+			}
+		}
+		if native {
+			return nil
+		}
+	}
+	return mcp
 }
 
 func mergeOpenCodeConfig(base, override map[string]any) map[string]any {

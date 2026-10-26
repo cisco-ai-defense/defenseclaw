@@ -48,7 +48,7 @@ rollout holds. Existing policy defaults are unchanged.
 | <ConnectorLabel id="copilot" /> | `>=1.0.76` | `copilot-hooks-v2` / `v7` (14 events) | prompt, tool_call, tool_result |
 | <ConnectorLabel id="openhands" /> | `>=1.12.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | <ConnectorLabel id="antigravity" /> | `>=1.1.8` | `antigravity-hooks-v2` / `v8` | tool_call, event_content |
-| <ConnectorLabel id="opencode" /> | `>=1.18.10, <1.19.0` | `opencode-hooks-v1` / `v7` | tool_call, tool_result |
+| <ConnectorLabel id="opencode" /> | v1: `>=1.18.10, <1.19.0`; v2: `>=2.0.0, <2.2.0` | `opencode-hooks-v1` or `opencode-hooks-v2` / `v7` | tool_call, tool_result |
 | <ConnectorLabel id="amp" /> | `>=0.0.1785334225` | `amp-plugin-v1` / `v2` (plugin contract) | prompt, tool_call, tool_result, event_content |
 | <ConnectorLabel id="omnigent" /> | `>=0.7.0, <0.14.0` | `omnigent-custom-policy-v1` / `v1` | prompt, tool_call, tool_result, event_content |
 | <ConnectorLabel id="kiro" /> | not gated per user (see below) | native hooks on both Kiro hook surfaces, plus the optional ACP contract | prompt, tool_call, tool_result; ACP adds permission, filesystem, terminal |
@@ -131,7 +131,7 @@ or source review:
   An earlier date has no contract, and a later one is an untested newer
   version.
 - **OpenHands.** Starts at `1.12.0`, source-reviewed against `1.16.0`.
-- **OpenCode.** Source-reviewed for `>=1.18.10, <1.19.0`, pinned at `1.18.33`.
+- **OpenCode.** V1 is reviewed for `>=1.18.10, <1.19.0`, pinned at `1.18.33`. V2 is reviewed for `>=2.0.0, <2.2.0` against v2.0.0 and dev snapshot `f669c46c` (package version 2.1.4). The default v2 setup adapter retains the v1 server factory. Secure Client remains v1-only.
 - **OmniGent.** Reviewed for `>=0.7.0, <0.14.0`.
 - **Antigravity (`agy`).** Starts at `1.1.8`; the OpenShell sandbox image
   installs agy `1.2.12`.
@@ -147,7 +147,7 @@ starts.
 
 ## Setup-time checks
 
-Every `defenseclaw setup ...` path that chooses a connector refreshes local agent discovery, reads the installed connector version, and checks it against the manifest before writing config. An untested newer version keeps the requested mode (see [Version policy](#version-policy)). A version with no contract (below the floor, known broken, or an unmatched exact build) is allowed in observe mode with a warning, but action mode fails closed unless `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set for exploratory testing. Newer versions no longer need that variable. OpenCode is the exception: a detected version with no contract (below `1.18.10`, or known broken) is refused before any change in both observe and action mode, because its plugin registration and contract lock must change together. A newer OpenCode, such as `1.19.x`, runs as an untested newer version like any other connector.
+Every `defenseclaw setup ...` path that chooses a connector refreshes local agent discovery, reads the installed connector version, and checks it against the manifest before writing config. An untested newer version keeps the requested mode (see [Version policy](#version-policy)). A version with no contract (below the floor, known broken, or an unmatched exact build) is allowed in observe mode with a warning, but action mode fails closed unless `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set for exploratory testing. Newer versions no longer need that variable. OpenCode is the exception: a detected version with no contract (below `1.18.10`, or known broken) is refused before any change in both observe and action mode, because its plugin registration and contract lock must change together. A newer OpenCode minor, such as `1.19.x` or `2.2.x`, uses its own major's contract as an untested newer version. A future major such as `3.x` has no contract.
 
 When a connector's agent is not installed on the host at all — the layout the OpenShell sandbox guide recommends — action mode also accepts the harness image DefenseClaw built for it. That image must be the one a sandbox would run now: built by this DefenseClaw release for this user from the current `openshell.image` settings, hook-fire verified (and, for the macOS MicroVM driver, checked with a MicroVM's name resolution), still the image its tag names, and with a harness version that resolves to a known contract. An image from another release, an image built before a settings change, or one rebuilt and not verified again is refused: run `defenseclaw sandbox image build <harness>` first. A host agent, when one is installed, always decides. The gateway logs what it accepted, and `setup guardrail` prints it.
 

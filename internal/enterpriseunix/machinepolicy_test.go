@@ -552,6 +552,39 @@ func TestDarwinInstallPublishesMachinePolicy(t *testing.T) {
 // publishes OpenCode through machine policy and records it in the
 // descriptor (before this, OpenCode fell back to per-user hooks on every
 // host because nothing installed the plugin).
+func TestOpenCodeV2UpgradeRemovesTheRecordedV1Artifact(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "opencode")}))
+	current := enterprisepolicy.OpenCodeManagedPluginPath(h.env.Layout)
+	legacy := filepath.Join(filepath.Dir(current), "defenseclaw.js")
+	if err := os.Rename(h.env.P(current), h.env.P(legacy)); err != nil {
+		t.Fatal(err)
+	}
+	record, err := h.env.loadDeployment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Files[legacy] = record.Files[current]
+	delete(record.Files, current)
+	if err := h.env.saveDeployment(record); err != nil {
+		t.Fatal(err)
+	}
+	config := h.env.P("/etc/opencode/opencode.json")
+	if err := os.WriteFile(config, []byte(`{"plugin":["`+legacy+`"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	if _, err := os.Lstat(h.env.P(legacy)); !os.IsNotExist(err) {
+		t.Fatalf("legacy artifact remains: %v", err)
+	}
+	if h.read(current) != string(enterprisepolicy.OpenCodeManagedPlugin()) {
+		t.Fatal("new entrypoint not installed")
+	}
+	if !strings.Contains(h.read("/etc/opencode/opencode.json"), `"`+filepath.Dir(current)+`"`) {
+		t.Fatal("managed config did not migrate to directory")
+	}
+}
+
 func TestInstallShipsTheManagedOpenCodePlugin(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
@@ -572,7 +605,7 @@ func TestInstallShipsTheManagedOpenCodePlugin(t *testing.T) {
 			if goos == "darwin" {
 				config = "/Library/Application Support/opencode/opencode.json"
 			}
-			if !strings.Contains(h.read(config), `"`+plugin+`"`) {
+			if !strings.Contains(h.read(config), `"`+filepath.Dir(plugin)+`"`) {
 				t.Fatalf("OpenCode managed config does not name %s:\n%s", plugin, h.read(config))
 			}
 			if got := descriptorConnectors(t, h); !reflect.DeepEqual(got, []string{"claudecode", "opencode"}) {

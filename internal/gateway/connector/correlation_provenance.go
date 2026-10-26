@@ -102,8 +102,11 @@ func correlationContractSources(name string) []CorrelationContractSource {
 		return source("antigravity-hooks-doc-9c9b420a",
 			"https://antigravity.google/docs/hooks", "sha256:9c9b420a22b35ae6610133d803706678c66282cbb5479816a8f56f1175780acb")
 	case "opencode":
-		return source("opencode-source-75cf4cc8",
-			"https://github.com/anomalyco/opencode", "75cf4cc8a83a5b5f99ba974f135f690a1f9b5a76")
+		return append(source("opencode-source-75cf4cc8",
+			"https://github.com/anomalyco/opencode", "75cf4cc8a83a5b5f99ba974f135f690a1f9b5a76"), CorrelationContractSource{
+			ID: "opencode-v2-source-f669c46c", URI: "https://github.com/anomalyco/opencode",
+			Revision: "f669c46c9604ea3d70b8a7ed1f0c10f3a5ac1f61", CheckedDate: "2026-10-25",
+		})
 	case "amp":
 		return []CorrelationContractSource{{
 			ID:          "amp-plugin-npm-0.0.0-20260729002615-g8a974c9",

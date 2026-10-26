@@ -116,6 +116,15 @@ def ran(outputs: dict) -> set[str]:
 MANAGED_LANES = {"managed", "enterprise", "windows_go", "windows_python", "pwsh"}
 
 
+@pytest.mark.parametrize("path", [
+    "internal/opencodebridge/adapter.js",
+    "internal/gateway/connector/hooks/opencode-plugin.js",
+    "scripts/generate_opencode_plugins.py",
+])
+def test_opencode_shared_adapter_runs_managed_lanes(path):
+    assert MANAGED_LANES <= ran(classify(path))
+
+
 ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
 
 

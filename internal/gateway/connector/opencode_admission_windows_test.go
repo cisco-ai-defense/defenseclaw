@@ -19,6 +19,26 @@ import (
 
 const openCodeAdmissionTestRawVersion = "1.18.19"
 
+func TestOpenCodeV2WindowsPackageIdentity(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	plugin := filepath.Join(root, "node_modules", "@opencode", "cli", "bin", "opencode.exe")
+	if err := os.MkdirAll(filepath.Dir(plugin), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{{"opencode-ai", false}, {"@opencode/lookalike", false}, {"@opencode/cli", true}} {
+		data, _ := json.Marshal(map[string]string{"name": tc.name})
+		if err := os.WriteFile(filepath.Join(filepath.Dir(filepath.Dir(plugin)), "package.json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := OpenCodeWindowsPackageIdentityVerified(plugin); got != tc.want {
+			t.Fatalf("package %s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestOpenCodeProtectedLockPersistsExactAuthorityAfterReceiptRemoval(t *testing.T) {
 	opts := prepareOpenCodeSetupAdmissionFixture(t)
 	entry := NewHookContractLockEntry(opts, NewOpenCodeConnector(), "test-build")
