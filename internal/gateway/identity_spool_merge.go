@@ -74,7 +74,7 @@ func awaitingSpoolUPN(facts useridentity.DirectoryFacts) bool {
 	case useridentity.SourceSSSD:
 		return facts.UPN == ""
 	case useridentity.SourceMacOSOpenDirectory:
-		return facts.Directory == "" || facts.UPN == "" && facts.Directory != useridentity.DirectoryLocal
+		return facts.Directory == "" || facts.UPNPending || facts.UPN == "" && facts.Directory != useridentity.DirectoryLocal
 	}
 	return false
 }

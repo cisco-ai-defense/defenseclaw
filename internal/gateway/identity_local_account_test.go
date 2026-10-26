@@ -90,7 +90,12 @@ func TestManagedMacPlatformSSOAccountAwaitsItsGuardianRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	ownFacts := func(platformSSOLinked bool) useridentity.DirectoryFacts {
-		return useridentity.DirectoryFacts{Directory: macOSOwnDirectory(true, platformSSOLinked),
+		link := ssoUnlinked
+		if platformSSOLinked {
+			link = ssoLinked
+		}
+		directory, pending := macOSOwnDirectory(true, link)
+		return useridentity.DirectoryFacts{Directory: directory, UPNPending: pending,
 			Source: useridentity.SourceMacOSOpenDirectory, Groups: []string{"staff"}, ResolvedAt: time.Now()}
 	}
 	subject := func(facts useridentity.DirectoryFacts) profileSubject {
