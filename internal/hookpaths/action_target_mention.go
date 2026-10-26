@@ -1080,7 +1080,8 @@ func actionProtectedStateRelative(relative string) bool {
 
 // activeStateFiles and activeStateTrees are the active security state under
 // .defenseclaw. The trees are listed in the order the identity index visits
-// them: hooks and policies first, the large scan cache last.
+// them: hooks and policies first, the large scan cache last. The saved
+// installer and its previous copy are active state (GAP-1099, instr-protect).
 var (
 	activeStateFiles = []string{
 		".env", "config.yaml", "confidence_policy.yaml", "guardrail_runtime.json",
@@ -1088,7 +1089,7 @@ var (
 		"audit.db-wal", "audit.db-shm", "judge.db", "judge.db-wal",
 		"judge.db-shm", "judge_bodies.db", "judge_bodies.db-wal", "judge_bodies.db-shm",
 	}
-	activeStateTrees = []string{"hooks", "policies", "registries", "receipts", "quarantine", "cache"}
+	activeStateTrees = []string{"hooks", "policies", "installer", "previous/installer", "registries", "receipts", "quarantine", "cache"}
 )
 
 func actionProtectedStatePath(value, home string) bool {
