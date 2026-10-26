@@ -22,6 +22,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -110,6 +111,34 @@ func TestARepeatedStopThatAcceptsTheLossStopsAVMWhoseSyncKeepsFailing(t *testing
 	}
 	if got := e.get("box"); got.Phase != "stopped" {
 		t.Fatalf("after the accepted stop: %s", got.Phase)
+	}
+}
+
+// GAP-1594: a held stop accepts the loss only for a while. Long after it the
+// sync may work again, and a routine `stop --yes` whose sync then fails is
+// held first again, never made at once.
+func TestAnOldHoldDoesNotLetAStopYesSkipTheNextHold(t *testing.T) {
+	e := newVMEnv(t, nil)
+	_, advance := e.fakeClock(time.Now())
+	e.create(sandboxapi.CreateRequest{Name: "box", Copy: true})
+	e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		return openshelltest.ExecResponse{Stdout: []byte("exited\n")}
+	}))
+	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+	if _, err := e.m.Stop(t.Context(), "box"); !sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
+		t.Fatalf("first stop after a failed sync = %v, want held", err)
+	}
+	advance(unsyncedStopAcceptWindow + time.Minute)
+	accept := sandboxapi.WithUnsyncedStopAccepted(t.Context())
+	if _, err := e.m.Stop(accept, "box"); !sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
+		t.Fatalf("stop --yes long after the hold = %v, want held again", err)
+	}
+	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
+		t.Fatalf("a stop --yes long after the hold called OpenShell's stop %d times", got-stops)
+	}
+	// Right after that new hold, --yes goes ahead.
+	if _, err := e.m.Stop(accept, "box"); err != nil {
+		t.Fatalf("stop --yes right after the new hold: %v", err)
 	}
 }
 

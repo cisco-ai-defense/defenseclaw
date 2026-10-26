@@ -267,7 +267,8 @@ func (m *Manager) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, e
 		return nil, err
 	}
 	m.mu.Lock()
-	hold := !b.stopHeld || !sandboxapi.UnsyncedStopAccepted(ctx)
+	held := !b.stopHeldAt.IsZero() && m.now().Sub(b.stopHeldAt) <= unsyncedStopAcceptWindow
+	hold := !held || !sandboxapi.UnsyncedStopAccepted(ctx)
 	m.mu.Unlock()
 	if err := m.stop(ctx, b, hold); err != nil {
 		return nil, err
@@ -275,6 +276,12 @@ func (m *Manager) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, e
 	v := m.viewOf(b)
 	return &v, nil
 }
+
+// unsyncedStopAcceptWindow is how long after a held stop the user's stop
+// that accepts the loss (`sandbox stop --yes`) is made. A hold from long ago,
+// after which the sync may have worked again, does not let a routine
+// `stop --yes` skip the hold (GAP-1594).
+const unsyncedStopAcceptWindow = 15 * time.Minute
 
 // StopForPolicy is Stop for the organization's own decision (a revoked
 // managed registration): a failed MicroVM sync does not hold it back
@@ -420,7 +427,7 @@ func (m *Manager) stop(ctx context.Context, b *box, hold bool) error {
 	if flushErr != nil && hold {
 		m.logf("sandbox %s: the stop is held, the sandbox keeps running: %v", name, flushErr)
 		m.mu.Lock()
-		b.stopHeld = true
+		b.stopHeldAt = m.now()
 		m.mu.Unlock()
 		return unsyncedStopHeld(name, flushErr)
 	}
@@ -444,7 +451,7 @@ func (m *Manager) stop(ctx context.Context, b *box, hold bool) error {
 	}
 	if err == nil {
 		m.mu.Lock()
-		b.stopHeld = false
+		b.stopHeldAt = time.Time{}
 		m.mu.Unlock()
 	}
 	if err != nil {
@@ -659,6 +666,10 @@ func (m *Manager) Start(ctx context.Context, name string, req sandboxapi.StartRe
 	if err := m.start(ctx, b, req); err != nil {
 		return nil, err
 	}
+	// A new run: its first failed sync holds the stop again (GAP-1594).
+	m.mu.Lock()
+	b.stopHeldAt = time.Time{}
+	m.mu.Unlock()
 	v := m.viewOf(b)
 	return &v, nil
 }

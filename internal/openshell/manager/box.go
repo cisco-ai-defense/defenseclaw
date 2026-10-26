@@ -129,10 +129,11 @@ type box struct {
 	// hooks.on_silence: stop) scheduled this session's stop.
 	tamperStop  bool
 	silenceSent bool
-	// stopHeld is set once a stop was held because the MicroVM's disk sync
-	// failed (GAP-1163), until a stop goes through: the user's next stop
-	// that accepts the loss is made (Manager.Stop).
-	stopHeld bool
+	// stopHeldAt is when a stop was last held because the MicroVM's disk
+	// sync failed (GAP-1163), zero once a stop goes through or the sandbox
+	// starts again: the user's stop that accepts the loss within
+	// unsyncedStopAcceptWindow of it is made (Manager.Stop).
+	stopHeldAt time.Time
 	// oldSupervisorNetworkErr is the last failure to withdraw the network
 	// rules and providers of a live legacy guest (oldSupervisorLive).
 	oldSupervisorNetworkErr string
