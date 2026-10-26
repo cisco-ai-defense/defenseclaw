@@ -1399,6 +1399,7 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 	if len(words) == 0 || depth == 0 && actionKnownReadOnlyWindows(words) {
 		return false
 	}
+	skip := actionWindowsTextWords(scan, depth)
 	for i := 0; i+1 < len(words); i++ {
 		if !strings.EqualFold(words[i], "-encodedcommand") && !strings.EqualFold(words[i], "-enc") {
 			continue
@@ -1417,18 +1418,77 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 	}
 	effectiveCWD := cwd
 	var directoryStack []string
-	for _, statement := range actionWindowsResolvedStatements(words, cwd, home) {
-		for _, word := range statement {
-			if actionWindowsWordMentionsTarget(word, effectiveCWD, home, stateOnly) {
+	for _, span := range actionWindowsResolvedSpans(words, cwd, home) {
+		for j, word := range span.words {
+			if !skip[span.start+j] && actionWindowsWordMentionsTarget(word, effectiveCWD, home, stateOnly) {
 				return true
 			}
 		}
-		actionWindowsAdvanceDirectory(statement, home, &effectiveCWD, &directoryStack)
+		actionWindowsAdvanceDirectory(span.words, home, &effectiveCWD, &directoryStack)
 	}
-	for _, word := range words {
-		if actionWindowsWordMentionsTarget(word, cwd, home, stateOnly) {
+	for i, word := range words {
+		if !skip[i] && actionWindowsWordMentionsTarget(word, cwd, home, stateOnly) {
 			return true
 		}
+	}
+	return false
+}
+
+// actionWindowsTextWords marks the words the mention scan does not read as
+// targets: every word of a top-level list element (between ;, &, && and
+// ||) that is a known read pipeline with no redirect, because each
+// statement is judged on its own targets (GAP-1799); a location change (cd,
+// Push-Location ...) still counts, since it places the writes after it.
+// It also rewrites the ~ of a quoted word (no $( subexpression) that is
+// printed (Write-Output, echo, Write-Host ...) or given to git: PowerShell
+// passes that text as written, and only a cmdlet path parameter or a
+// redirect reads its ~ as the home (GAP-1473). An absolute or $HOME path in
+// the same word still counts.
+func actionWindowsTextWords(scan actionWindowsScanResult, depth int) []bool {
+	words := scan.words
+	skip := make([]bool, len(words))
+	start := 0
+	for i := 0; i <= len(words); i++ {
+		if i < len(words) && words[i] != ";" && words[i] != "&" && words[i] != "&&" && words[i] != "||" {
+			continue
+		}
+		if depth == 0 && i > start && actionKnownReadOnlyWindows(words[start:i]) && !actionWindowsLocationProgram(words[start]) {
+			for j := start; j < i; j++ {
+				skip[j] = true
+			}
+		}
+		start = i + 1
+	}
+	start = 0
+	for i := 0; i <= len(words); i++ {
+		if i < len(words) && words[i] != ";" && words[i] != "|" && words[i] != "||" && words[i] != "&" && words[i] != "&&" {
+			continue
+		}
+		if i > start && actionWindowsTextProgram(words[start]) {
+			for j := start + 1; j < i; j++ {
+				if scan.quoted[j] && !strings.Contains(words[j], "$(") && actionWindowsRedirectOperator(words[j-1]) == "" {
+					words[j] = strings.ReplaceAll(words[j], "~", "tilde-text")
+				}
+			}
+		}
+		start = i + 1
+	}
+	return skip
+}
+
+func actionWindowsLocationProgram(word string) bool {
+	switch strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(word, `\`, "/"))), ".exe") {
+	case "cd", "chdir", "sl", "set-location", "pushd", "popd", "push-location", "pop-location":
+		return true
+	}
+	return false
+}
+
+func actionWindowsTextProgram(word string) bool {
+	switch strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(word, `\`, "/"))), ".exe") {
+	case "write-output", "echo", "write", "write-host", "write-information", "write-verbose",
+		"write-warning", "write-debug", "write-error", "git":
+		return true
 	}
 	return false
 }

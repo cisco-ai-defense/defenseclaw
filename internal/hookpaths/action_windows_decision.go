@@ -111,14 +111,13 @@ const (
 	actionWindowsLiteralDollar
 )
 
-// actionWindowsScanResult is one reading of a command. quotedTilde[i]
-// reports a word whose first character is a quoted ~, which PowerShell
-// passes to a program or prints as text (GAP-1473).
+// actionWindowsScanResult is one reading of a command. quoted[i] reports a
+// word whose first character is quoted (GAP-1473).
 type actionWindowsScanResult struct {
-	words       []string
-	literal     []bool
-	quotedTilde []bool
-	ok          bool
+	words   []string
+	literal []bool
+	quoted  []bool
+	ok      bool
 }
 
 // actionWindowsWords treats a quoted command body as one word and emits each
@@ -146,20 +145,20 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 	var quote byte
 	hereLen := -1
 	quoted := false // the current word has a quote, possibly an empty one
-	tilde := false
-	emit := func(value string, isLiteral, isQuotedTilde bool) {
+	startQuoted := false
+	emit := func(value string, isLiteral, isQuoted bool) {
 		result.words = append(result.words, value)
 		result.literal = append(result.literal, isLiteral)
-		result.quotedTilde = append(result.quotedTilde, isQuotedTilde)
+		result.quoted = append(result.quoted, isQuoted)
 	}
 	flush := func() {
 		if word.Len() > 0 {
-			emit(word.String(), word.Len() == hereLen, tilde)
+			emit(word.String(), word.Len() == hereLen, startQuoted)
 			word.Reset()
 		}
 		hereLen = -1
 		quoted = false
-		tilde = false
+		startQuoted = false
 	}
 	quoteAt := func(i int) (byte, int) {
 		if plain {
@@ -189,8 +188,8 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 			case literalDollar && quote == '\'' && c == '$':
 				word.WriteByte('@')
 			default:
-				if word.Len() == 0 && c == '~' {
-					tilde = true
+				if word.Len() == 0 {
+					startQuoted = true
 				}
 				word.WriteByte(c)
 			}
