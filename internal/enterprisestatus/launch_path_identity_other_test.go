@@ -27,14 +27,14 @@ func TestLaunchPathLookupIsBounded(t *testing.T) {
 	var mu sync.Mutex
 	calls := 0
 	oldStat, oldTimeout := launchPathStat, launchPathLookupTimeout
-	launchPathStat = func(path string) (os.FileInfo, error) {
+	launchPathStat = func(path string) (launchDirIdentity, error) {
 		if path == stalled {
 			mu.Lock()
 			calls++
 			mu.Unlock()
 			<-release
 		}
-		return os.Stat(path)
+		return oldStat(path)
 	}
 	launchPathLookupTimeout = 100 * time.Millisecond
 	released := false
