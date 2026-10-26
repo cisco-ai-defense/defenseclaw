@@ -46,7 +46,7 @@ defenseclaw_api_listener_unproven() { return 1; }
 _dc_hook_elapsed_ms() { _DC_ELAPSED_MS=0; }
 defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" 4 "$3" -H 'Authorization: Bearer scoped-token'`
 	cmd := exec.Command("bash", "-c", script, "bash", hook, home, body)
-	cmd.Env = append(os.Environ(), "DC_POST_WIRE="+wire)
+	cmd.Env = append(os.Environ(), "HOOK_DIR="+writeShellPostRecordForTest(t, home), "DC_POST_WIRE="+wire)
 	if out, err := cmd.CombinedOutput(); err != nil || string(out) != "{\"action\":\"allow\"}\n200" {
 		t.Fatalf("full CLI fallback: %v, output=%q", err, out)
 	}
@@ -104,7 +104,7 @@ defenseclaw_api_listener_unproven() { return 1; }
 _dc_hook_elapsed_ms() { _DC_ELAPSED_MS=0; }
 defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" 4 "$3" -H 'Content-Type: application/json' -H 'X-DefenseClaw-Note: quote " and slash \\' -H 'Authorization: Bearer secret-token'`
 	cmd := exec.Command("bash", "-c", script, "bash", hook, home, body)
-	cmd.Env = append(os.Environ(), "DC_POST_WIRE="+wire, "DC_POST_ARGS="+args)
+	cmd.Env = append(os.Environ(), "HOOK_DIR="+writeShellPostRecordForTest(t, home), "DC_POST_WIRE="+wire, "DC_POST_ARGS="+args)
 	out, err := cmd.CombinedOutput()
 	if err != nil || string(out) != "{\"action\":\"allow\"}\n200" {
 		t.Fatalf("hook post: %v, output=%q", err, out)
@@ -165,6 +165,7 @@ func TestPerUserShellPostUsesVerifiedInstallerRecovery(t *testing.T) {
 	if err := os.WriteFile(fullCLI, []byte("#!/bin/sh\nprintf used > \"$DC_POST_FULL_MARKER\"\nexit 77\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	hookDir := writeShellPostRecordForTest(t, home)
 	recovery := filepath.Join(installerDir, "defenseclaw-hook-post")
 	if err := os.WriteFile(recovery, []byte("#!/bin/sh\nprintf '{\"action\":\"allow\"}\\n200'\n"), 0o700); err != nil {
 		t.Fatal(err)
@@ -179,7 +180,7 @@ _dc_hook_elapsed_ms() { _DC_ELAPSED_MS=0; }
 defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" 4 '{}' -H 'Content-Type: application/json'`
 	run := func() ([]byte, error) {
 		cmd := exec.Command("bash", "-c", script, "bash", hook, home)
-		cmd.Env = append(os.Environ(), "DC_POST_FULL_MARKER="+fullMarker)
+		cmd.Env = append(os.Environ(), "HOOK_DIR="+hookDir, "DC_POST_FULL_MARKER="+fullMarker)
 		return cmd.CombinedOutput()
 	}
 	if out, err := run(); err != nil || string(out) != "{\"action\":\"allow\"}\n200" {

@@ -35,6 +35,10 @@ func TestPerUserCopilotUnparsedObserveWarningIsVisible(t *testing.T) {
 	}
 	dcHome := t.TempDir()
 	installNativeGatewayForHookTest(t, dcHome)
+	// The hook's record names the account gateway (GAP-1755).
+	if err := os.WriteFile(filepath.Join(dir, ".gateway-helper"), []byte(filepath.Join(dcHome, ".local", "bin", "defenseclaw-gateway")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command("bash", filepath.Join(dir, "copilot-hook.sh"), "--event", "preToolUse")
 	cmd.Env = append(os.Environ(), "HOME="+dcHome, "DEFENSECLAW_HOME="+dcHome,
 		"DEFENSECLAW_GATEWAY_AUTOSTART=0")

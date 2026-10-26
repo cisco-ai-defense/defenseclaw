@@ -1671,7 +1671,11 @@ defenseclaw_native_output_agrees() {
 # inherited HOME, PATH or XDG variable can choose an executable.
 defenseclaw_gateway_binary() {
   local hook_dir="${HOOK_DIR:-}" record="" candidate="" home="" path=""
-  local modes="" mode="" count=0 extra=""
+  local modes="" mode="" count=0 extra="" want=7
+  local -a checked=()
+  # --folder proves the record and the folders only: the hook-post helper
+  # beside a gateway is checked by its caller (GAP-1755).
+  [ "${1:-}" = --folder ] && want=6
   case "$hook_dir" in /*) ;; *) return 1 ;; esac
   record="${hook_dir}/.gateway-helper"
   [ -f "$record" ] && [ -O "$record" ] && [ ! -L "$record" ] || return 1
@@ -1684,18 +1688,22 @@ defenseclaw_gateway_binary() {
     *) return 1 ;;
   esac
   case "$home" in *'/../'*|*'/./'*|*'/..'|*'/.'|'') return 1 ;; esac
-  [ -f "$candidate" ] && [ -x "$candidate" ] && [ -O "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  if [ "$want" = 7 ]; then
+    [ -f "$candidate" ] && [ -x "$candidate" ] && [ -O "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  fi
   for path in "$hook_dir" "${hook_dir}/.." "$home" "$home/.local" "$home/.local/bin"; do
     [ -d "$path" ] && [ -O "$path" ] && [ ! -L "$path" ] || return 1
   done
-  modes="$(stat -c %a "$hook_dir" "${hook_dir}/.." "$record" "$home" "$home/.local" "$home/.local/bin" "$candidate" 2>/dev/null)" ||
-    modes="$(stat -f %Lp "$hook_dir" "${hook_dir}/.." "$record" "$home" "$home/.local" "$home/.local/bin" "$candidate" 2>/dev/null)" || return 1
+  checked=("$hook_dir" "${hook_dir}/.." "$record" "$home" "$home/.local" "$home/.local/bin")
+  [ "$want" = 6 ] || checked+=("$candidate")
+  modes="$(stat -c %a "${checked[@]}" 2>/dev/null)" ||
+    modes="$(stat -f %Lp "${checked[@]}" 2>/dev/null)" || return 1
   while IFS= read -r mode; do
     case "$mode" in ""|*[!0-7]*) return 1 ;; esac
     [ $((8#${mode} & 8#022)) -eq 0 ] || return 1
     count=$((count + 1))
   done <<< "$modes"
-  [ "$count" -eq 7 ] || return 1
+  [ "$count" -eq "$want" ] || return 1
   printf '%s' "$candidate"
 }
 
@@ -3360,7 +3368,7 @@ _dc_gateway_post_once() {
     # (GAP-1755), as the OpenCode and Amp plugins read it.
     local _dc_recovery_home="" _dc_recovery_path="" _dc_secure_meta="" _dc_secure_uid=""
     local _dc_secure_path _dc_secure_mode _dc_post_dir
-    _dc_post_bin="$(defenseclaw_gateway_binary)" || return 1
+    _dc_post_bin="$(defenseclaw_gateway_binary --folder)" || return 1
     _dc_post_dir="${_dc_post_bin%/*}"
     # The small helper has the same connected-socket peer check as the full
     # CLI. An older installation without it keeps the verified CLI path.
@@ -3412,6 +3420,9 @@ _dc_gateway_post_once() {
           fi
           ;;
       esac
+      if [ "$_dc_legacy_post" -eq 1 ]; then
+        _dc_post_bin="$(defenseclaw_gateway_binary)" || return 1
+      fi
     fi
     _dc_post_prefix="http://${API_ADDR}"
     _dc_post_path="${_dc_post_url:${#_dc_post_prefix}}"

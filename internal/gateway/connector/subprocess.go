@@ -539,8 +539,13 @@ func writePerUserGatewayHelperRecord(hookDir string) error {
 	// Resolve that path once during setup, from the installed hook location;
 	// the hook never derives an executable from its caller's environment.
 	if dataDir != home && filepath.Base(dataDir) != ".defenseclaw" {
-		if info, err := os.Lstat(filepath.Join(dataDir, ".local", "bin", name)); err == nil && info.Mode().IsRegular() {
-			home = dataDir
+		// The gateway or the hook-post helper the shell hooks run beside it
+		// (GAP-1755) marks the data root that carries the installation.
+		for _, installed := range []string{name, "defenseclaw-hook-post"} {
+			if info, err := os.Lstat(filepath.Join(dataDir, ".local", "bin", installed)); err == nil && info.Mode().IsRegular() {
+				home = dataDir
+				break
+			}
 		}
 	}
 	binary := filepath.Join(home, ".local", "bin", name)
