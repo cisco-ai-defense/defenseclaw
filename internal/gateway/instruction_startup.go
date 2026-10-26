@@ -261,7 +261,41 @@ func instructionSnapshot(connector string, files map[string]string, dirs []strin
 			retained[normalized] = identity
 		}
 	}
+	withPhysicalDirectorySpellings(retained, &keys, keyed)
 	return retained, keys, keyed
+}
+
+// withPhysicalDirectorySpellings records each snapshotted directory this
+// host reaches through a symlinked spelling under its physical name as
+// well (macOS /var and /tmp are /private/var and /private/tmp; a linked
+// project), with the same files and identity: the record is keyed by the
+// directory itself, so a later call or write through either spelling finds
+// it (GAP-1388). A directory the host cannot resolve (behind ProtectHome)
+// keeps the one spelling it was named by. Windows names are folded by
+// activeAgentInstructionPath and are not resolved here.
+func withPhysicalDirectorySpellings(retained map[string]string, keys *[]string, keyed map[string]string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	for _, key := range slices.Clone(*keys) {
+		physical, err := filepath.EvalSymlinks(filepath.FromSlash(key))
+		if err != nil {
+			continue
+		}
+		physicalKey, ok := instructionDirectoryKey(physical)
+		if !ok || physicalKey == key || slices.Contains(*keys, physicalKey) {
+			continue
+		}
+		*keys = append(*keys, physicalKey)
+		if identity := keyed[key]; identity != "" {
+			keyed[physicalKey] = identity
+		}
+		for _, file := range slices.Sorted(maps.Keys(retained)) {
+			if instructionParent(file) == key {
+				retained[strings.TrimSuffix(physicalKey, "/")+"/"+path.Base(file)] = retained[file]
+			}
+		}
+	}
 }
 
 // instructionStartupFiles is the snapshot of an authenticated SessionStart.
