@@ -214,3 +214,47 @@ func TestConnectorCheckAgentSettingsFollowsExplicitCodexMigrationRoot(t *testing
 		t.Fatalf("explicit new-root precheck: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
+
+// GAP-1325: `defenseclaw setup claude-code` saved its change and reported
+// success while the data directory's shared hook config was malformed
+// (fail_modes null), which every hook of the data directory closes on. The
+// check setup runs first refuses it for any connector and changes nothing.
+func TestConnectorCheckAgentSettingsRefusesMalformedSharedHookSidecar(t *testing.T) {
+	for _, name := range []string{"claudecode", "cursor"} {
+		t.Run(name, func(t *testing.T) {
+			dataDir := testenv.PrivateTempDir(t)
+			defer withConnectorState(t, dataDir, name)()
+			settings := filepath.Join(t.TempDir(), "settings.json")
+			if err := os.WriteFile(settings, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			previous := connector.ClaudeCodeSettingsPathOverride
+			connector.ClaudeCodeSettingsPathOverride = settings
+			t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = previous })
+			sidecar := filepath.Join(dataDir, "hooks", ".hookcfg")
+			malformed := `{"version":2,"fail_modes":null,"legacy_fail_mode":"open"}`
+			if err := os.MkdirAll(filepath.Dir(sidecar), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(sidecar, []byte(malformed), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			connectorFlagJSON = true
+			stdout, stderr, code := runConnectorCmd(t, "check-agent-settings", "--connector", name, "--json")
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1 (stdout=%q stderr=%q)", code, stdout, stderr)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+				t.Fatalf("stdout is not JSON: %q (%v)", stdout, err)
+			}
+			reason, _ := payload["reason"].(string)
+			if payload["refused"] != true || !strings.Contains(reason, sidecar) || !strings.Contains(reason, "malformed") {
+				t.Fatalf("payload = %v; want a refusal naming %s", payload, sidecar)
+			}
+			if after, err := os.ReadFile(sidecar); err != nil || string(after) != malformed {
+				t.Fatalf("the check changed the sidecar: %q (%v)", after, err)
+			}
+		})
+	}
+}

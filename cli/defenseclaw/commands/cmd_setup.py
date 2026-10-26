@@ -13007,7 +13007,6 @@ def _connector_not_shipped(cfg, name: str) -> bool:
 
 # The connectors whose gateway Setup refuses the agent's own settings before it
 # changes anything (connector.CheckAgentSettings).
-_AGENT_SETTINGS_CHECKED_CONNECTORS = frozenset({"claudecode", "codex", "copilot"})
 _GATEWAY_RESTART_STEP_RE = re.compile(r",? then run: defenseclaw-gateway restart\.?$")
 
 
@@ -13022,10 +13021,10 @@ def _agent_settings_refusal(cfg, connector: str, *, workspace_dir: str | None = 
     check-agent-settings`` runs the gateway's own check and changes nothing,
     so setup stops here, before it changes anything, with the file and the
     fix. When the check cannot run, the gateway start still refuses those
-    settings and setup's readiness wait reports that reason.
+    settings and setup's readiness wait reports that reason. Every connector
+    is asked: the check also refuses a malformed shared hook config
+    (hooks/.hookcfg) that every connector's hooks close on (GAP-1325).
     """
-    if connector not in _AGENT_SETTINGS_CHECKED_CONNECTORS:
-        return ""
     executable = _gateway_lifecycle_executable()
     if not executable:
         return ""
