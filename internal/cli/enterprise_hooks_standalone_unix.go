@@ -1278,17 +1278,19 @@ func standaloneHookTransportFromDescriptor(descriptor *managed.RuntimeDescriptor
 
 // enterpriseHookStandaloneMachinePolicySet names the connectors the
 // lifecycle published through vendor machine policy, from the root-owned
-// runtime descriptor. Replaced in tests.
+// runtime descriptor. It is nil when the descriptor cannot be read (for
+// example mid-upgrade): the published set is then unknown, not empty
+// (GAP-1889). Replaced in tests.
 var enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} {
-	out := map[string]struct{}{}
 	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
 	if err != nil {
-		return out
+		return nil
 	}
 	descriptor, err := managed.LoadRuntimeDescriptor(layout.DescriptorPath)
 	if err != nil {
-		return out
+		return nil
 	}
+	out := map[string]struct{}{}
 	for _, name := range descriptor.MachinePolicyConnectors {
 		out[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
 	}

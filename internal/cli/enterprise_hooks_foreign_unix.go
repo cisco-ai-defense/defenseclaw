@@ -230,8 +230,12 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	}
 	vendor := enterprisepolicy.VendorMachinePolicyConnectors(runtime.GOOS)
 	// The descriptor names policy actually published by the lifecycle;
-	// config alone can name Claude with ownership turned off.
-	_, claudeManaged := enterpriseHookStandaloneMachinePolicySet()[enterprisepolicy.ConnectorClaudeCode]
+	// config alone can name Claude with ownership turned off. A descriptor
+	// that cannot be read says nothing about Claude Code: the pass neither
+	// writes nor removes the blocker (GAP-1889).
+	published := enterpriseHookStandaloneMachinePolicySet()
+	_, claudeManaged := published[enterprisepolicy.ConnectorClaudeCode]
+	claudeKnown := published != nil
 	leftovers := func(user string) []string {
 		out := []string{}
 		for _, name := range vendor {
@@ -242,7 +246,11 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		return out
 	}
 	fingerprint := enterpriseHookForeignCleanupFingerprint(cleanups, accounts)
-	fingerprint += fmt.Sprintf("claude-managed:%t;", claudeManaged)
+	if claudeKnown {
+		fingerprint += fmt.Sprintf("claude-managed:%t;", claudeManaged)
+	} else {
+		fingerprint += "claude-managed:unknown;"
+	}
 	if vscode != nil {
 		fingerprint += fmt.Sprintf("copilot-vscode|%s|%t|%t;", vscode.HookBinary, vscode.HookFile, vscode.Plugin)
 	}
@@ -333,7 +341,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		// earlier enrollment pass wrote over the account's own hook script
 		// blocks every Claude Code tool call with no managed hook deciding:
 		// it goes (GAP-1829).
-		if len(cleanups) == 0 && len(names) == 0 && vscode == nil && claudeManaged {
+		if len(cleanups) == 0 && len(names) == 0 && vscode == nil && (claudeManaged || !claudeKnown) {
 			continue
 		}
 		for index, name := range names {
@@ -358,7 +366,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 				Options: enterpriseHookWorkerOptions{ConnectorName: "claudecode", UserHome: account.Home,
 					OwnerUID: account.UID, OwnerGID: account.GID},
 			})
-		} else {
+		} else if claudeKnown {
 			request.Targets = append(request.Targets, enterpriseHookWorkerTarget{
 				Index: len(names), Mode: enterpriseHookWorkerModeUnblockPersonalClaude,
 				Options: enterpriseHookWorkerOptions{ConnectorName: "claudecode", UserHome: account.Home,

@@ -150,3 +150,35 @@ func TestForeignCleanupWorkerTakesEveryModeTheGuardianSends(t *testing.T) {
 		})
 	}
 }
+
+// GAP-1889: a runtime descriptor the guardian cannot read (mid-upgrade)
+// does not say the machine policy dropped Claude Code: the pass leaves the
+// blocker in place (the managed hook may still decide) and writes none over
+// the account's own script, while the job's other work still runs.
+func TestStandaloneForeignCleanupKeepsTheClaudeBlockerWhenThePolicyIsUnknown(t *testing.T) {
+	home := foreignCleanupRealWorkerPass(t, false)
+	enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} { return nil }
+	cursorHook := foreignHookTestCursorHook(t, home)
+	hooks := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(hooks, "claude-code-hook.sh")
+	for _, body := range []string{enterprisehooks.PersonalClaudeHookBlocker, "#!/bin/bash\n# defenseclaw-managed-hook v3\nexec defenseclaw-hook claude-code\n"} {
+		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		enterpriseHookForeignCleanupState.fingerprint = ""
+		var log strings.Builder
+		runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, time.Now(), enterprisehooks.Manifest{}, map[string]map[string]bool{}, "")
+		if got, err := os.ReadFile(path); err != nil || string(got) != body {
+			t.Fatalf("an unknown machine policy changed the Claude Code hook script: %q %v\n%s", got, err, log.String())
+		}
+		if strings.Contains(log.String(), "removed the Claude Code blocker") {
+			t.Fatalf("an unknown machine policy logged a blocker removal:\n%s", log.String())
+		}
+	}
+	if foreignHookTestHookPresent(cursorHook) {
+		t.Fatal("the unapproved Cursor hook stayed: the job's foreign cleanup did not run")
+	}
+}
