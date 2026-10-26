@@ -186,8 +186,9 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 			}
 			// A reader after a directory change reads relative to it, in
 			// any spelling of the drive (cd /c/Users/me && head .ssh/id_rsa,
-			// GAP-1823).
-			words, start, dir := scan.words, 0, cwd
+			// GAP-1823). The previous directories stay candidates: cmd's cd
+			// without /d does not switch the drive.
+			words, start, dirs := scan.words, 0, []string{cwd}
 			for i := 0; i <= len(words); i++ {
 				if i < len(words) {
 					switch words[i] {
@@ -197,12 +198,14 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 					}
 				}
 				statement := words[start:i]
-				if actionPrivateKeyReadWords(statement, dir, home, keyReadWindows, 0) {
-					return true
+				for _, dir := range dirs {
+					if actionPrivateKeyReadWords(statement, dir, home, keyReadWindows, 0) {
+						return true
+					}
 				}
-				if len(statement) == 2 && actionWindowsLocationProgram(statement[0]) {
-					if next, ok := actionWindowsPath(statement[1], dir, home); ok {
-						dir = next
+				if len(statement) == 2 && actionWindowsLocationProgram(statement[0]) && len(dirs) < 8 {
+					if next, ok := actionWindowsPath(statement[1], dirs[len(dirs)-1], home); ok {
+						dirs = append(dirs, next)
 					}
 				}
 				start = i + 1
