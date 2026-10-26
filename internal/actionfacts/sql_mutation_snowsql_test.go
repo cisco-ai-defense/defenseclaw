@@ -21,6 +21,9 @@ func TestSnowSQLInlineQueryIsASQLClient(t *testing.T) {
 		{"long options", "snowsql --connection prod --dbname analytics --query='DROP DATABASE analytics'", SQLMutationDropDatabase},
 		{"account and warehouse", "snowsql -a acme -u dev -w wh -r analyst -d analytics -s public -q 'DELETE FROM events'", SQLMutationDeleteUnbounded},
 		{"with comment", "snowsql -q 'DROP SCHEMA s; // done'", SQLMutationDropSchema},
+		// GAP-1770: the usual automation form sets display options.
+		{"display options", "snowsql -c prod -o friendly=false -o quiet=true -q 'DROP SCHEMA s'", SQLMutationDropSchema},
+		{"long display option", "snowsql --option=exit_on_error=true -q 'TRUNCATE TABLE events'", SQLMutationTruncate},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := Analyze(Input{Tool: "shell", Command: tc.command})
@@ -37,7 +40,8 @@ func TestSnowSQLInlineQueryIsASQLClient(t *testing.T) {
 		{"query file and query", "snowsql -f cleanup.sql -q 'DROP SCHEMA s'"},
 		{"positional argument", "snowsql analytics -q 'DROP SCHEMA s'"},
 		{"dynamic query", "snowsql -q \"$QUERY\""},
-		{"unknown option", "snowsql -o friendly=false -q 'DROP SCHEMA s'"},
+		{"option without a value", "snowsql -o friendly -q 'DROP SCHEMA s'"},
+		{"unknown option", "snowsql --private-key-path k.p8 -q 'DROP SCHEMA s'"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if mutations := ExactSQLMutations(Analyze(Input{Tool: "shell", Command: tc.command})); len(mutations) != 0 {

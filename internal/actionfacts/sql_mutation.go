@@ -378,7 +378,8 @@ func parseExactSQLCLI(argv []string, engine string) (exactSQLCLI, bool) {
 		argument := argv[index]
 		key, value, consumesNext, flag, ok := exactSQLCLIOption(engine, argument)
 		if ok {
-			if _, duplicate := parsed.options[key]; duplicate {
+			previous, duplicate := parsed.options[key]
+			if duplicate && key != "option" {
 				return exactSQLCLI{}, false
 			}
 			if consumesNext {
@@ -390,6 +391,14 @@ func parseExactSQLCLI(argv []string, engine string) (exactSQLCLI, bool) {
 			}
 			if !flag && (!exactSQLScalar(value, maxCommandBytes) || unresolvedSQLMutationValue(value)) {
 				return exactSQLCLI{}, false
+			}
+			if key == "option" {
+				if !strings.Contains(value, "=") {
+					return exactSQLCLI{}, false
+				}
+				if duplicate {
+					value = previous + "\x00" + value
+				}
 			}
 			parsed.options[key] = value
 			if key == "query" {
@@ -429,7 +438,10 @@ func exactSQLCLIOption(engine, argument string) (key, value string, consumesNext
 	case "snowflake":
 		// A query file (-f/--filename) is not inline SQL, as psql --file is
 		// not: it stays an unknown option, so no fact.
-		options = []option{{"-q", "query", false}, {"--query", "query", false}, {"-d", "database", false}, {"--dbname", "database", false}, {"-s", "schema", false}, {"--schemaname", "schema", false}, {"-a", "account", false}, {"--accountname", "account", false}, {"-u", "user", false}, {"--username", "user", false}, {"-r", "role", false}, {"--rolename", "role", false}, {"-w", "warehouse", false}, {"--warehouse", "warehouse", false}, {"-c", "connection", false}, {"--connection", "connection", false}}
+		options = []option{{"-q", "query", false}, {"--query", "query", false}, {"-d", "database", false}, {"--dbname", "database", false}, {"-s", "schema", false}, {"--schemaname", "schema", false}, {"-a", "account", false}, {"--accountname", "account", false}, {"-u", "user", false}, {"--username", "user", false}, {"-r", "role", false}, {"--rolename", "role", false}, {"-w", "warehouse", false}, {"--warehouse", "warehouse", false}, {"-c", "connection", false}, {"--connection", "connection", false},
+			// -o/--option sets one display or runtime option (key=value,
+			// repeatable), never a query (GAP-1770).
+			{"-o", "option", false}, {"--option", "option", false}}
 	default:
 		return "", "", false, false, false
 	}
