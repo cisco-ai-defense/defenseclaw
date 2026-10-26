@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"io"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -27,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
@@ -70,8 +72,11 @@ type activeAgentContextKey struct {
 }
 
 type activeAgentContextSession struct {
-	files                    []string
-	caseInsensitiveFiles     []string
+	files                []string
+	caseInsensitiveFiles []string
+	// identities maps the hook client's file identity of a loaded file
+	// (hookpaths.LoadedIdentityPrefix) to that file.
+	identities               map[string]string
 	caseInsensitiveUncertain bool
 	uncertain                bool
 	updatedAt                time.Time
@@ -80,6 +85,7 @@ type activeAgentContextSession struct {
 type activeAgentContextSnapshot struct {
 	files                    []string
 	caseInsensitiveFiles     []string
+	identities               map[string]string
 	caseInsensitiveUncertain bool
 	uncertain                bool
 }
@@ -100,6 +106,9 @@ type activeAgentContextCache struct {
 	uncertain                bool
 	caseInsensitiveUncertain bool
 	now                      func() time.Time
+	// storeMu orders the writes of a session's load record
+	// (saveInstructionLoads) with the state each one copies.
+	storeMu sync.Mutex
 }
 
 func (cache *activeAgentContextCache) currentTime() time.Time {
@@ -356,14 +365,27 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 	if !ok {
 		return
 	}
-	cache.seedKey(key, filePath)
+	cache.seedKey(key, filePath, "")
 }
 
-func (cache *activeAgentContextCache) seedKey(key activeAgentContextKey, filePath string) {
+// seedKey records a loaded instruction file. identity is the hook client's
+// file identity of it, read as the user (hookpaths.LoadedIdentityPrefix), or
+// empty.
+func (cache *activeAgentContextCache) seedKey(key activeAgentContextKey, filePath, identity string) {
 	canonicalPath, caseInsensitive, valid := exactActiveAgentFile(filePath)
 	if !valid {
 		if syntacticActiveAgentFileCandidate(filePath) {
-			cache.markUncertain(key, cache.currentTime())
+			now := cache.currentTime()
+			cache.markUncertain(key, now)
+			// A symlinked instruction file is the file it reaches: keep the
+			// loaded name too, so a write to that file under another name is
+			// judged by its identity (GAP-0971, hookpaths.InstructionFiles).
+			// A gateway that cannot read the file (ProtectHome) keeps the
+			// identity the hook client read (GAP-1064).
+			if info, err := os.Stat(filePath); err == nil && info.Mode().IsRegular() || identity != "" {
+				cache.seedLoadedFile(key, filePath, false, now)
+				cache.seedLoadedIdentity(key, filePath, identity)
+			}
 		}
 		return
 	}
@@ -373,6 +395,28 @@ func (cache *activeAgentContextCache) seedKey(key activeAgentContextKey, filePat
 		caseInsensitive,
 		cache.currentTime(),
 	)
+	cache.seedLoadedIdentity(key, canonicalPath, identity)
+}
+
+// seedLoadedIdentity keeps the hook client's identity of a recorded loaded
+// file, so a gateway that cannot read the user's files matches a write
+// target's identity (hookpaths.FileIdentitiesKey) with it.
+func (cache *activeAgentContextCache) seedLoadedIdentity(key activeAgentContextKey, filePath, identity string) {
+	if identity == "" {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	session, ok := cache.sessions[key]
+	if !ok || !slices.Contains(session.files, filePath) ||
+		len(session.identities) >= maxActiveAgentContextFiles {
+		return
+	}
+	if session.identities == nil {
+		session.identities = make(map[string]string)
+	}
+	session.identities[identity] = filePath
+	cache.sessions[key] = session
 }
 
 // seedSandboxKey records an instruction file a sandboxed Claude Code loaded.
@@ -538,6 +582,47 @@ func (cache *activeAgentContextCache) endKey(key activeAgentContextKey) {
 	cache.mu.Unlock()
 }
 
+// sessionKey returns a copy of the session the cache holds for key.
+func (cache *activeAgentContextCache) sessionKey(key activeAgentContextKey) (activeAgentContextSession, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	session, ok := cache.sessions[key]
+	if !ok {
+		return activeAgentContextSession{}, false
+	}
+	session.files = slices.Clone(session.files)
+	session.caseInsensitiveFiles = slices.Clone(session.caseInsensitiveFiles)
+	session.identities = maps.Clone(session.identities)
+	return session, true
+}
+
+// restoreKey gives key the loads a previous gateway process recorded for it
+// (restoreInstructionLoads), unless this process already holds the session.
+// An eviction this process remembers for key keeps the session uncertain.
+func (cache *activeAgentContextCache) restoreKey(key activeAgentContextKey, record instructionLoadRecord, now time.Time) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if _, exists := cache.sessions[key]; exists {
+		return
+	}
+	if cache.sessions == nil {
+		cache.sessions = make(map[activeAgentContextKey]activeAgentContextSession)
+	}
+	uncertain, caseInsensitiveUncertain := false, false
+	if _, evicted := cache.evictions[key]; evicted {
+		uncertain, caseInsensitiveUncertain = cache.consumeEvictionLocked(key)
+	}
+	cache.makeRoomLocked(key)
+	cache.sessions[key] = activeAgentContextSession{
+		files:                    slices.Clone(record.Files),
+		caseInsensitiveFiles:     slices.Clone(record.CaseInsensitiveFiles),
+		identities:               maps.Clone(record.Identities),
+		uncertain:                uncertain,
+		caseInsensitiveUncertain: caseInsensitiveUncertain,
+		updatedAt:                now,
+	}
+}
+
 func (cache *activeAgentContextCache) snapshot(connectorName, sessionID string) activeAgentContextSnapshot {
 	key, ok := validActiveAgentContextKey(connectorName, sessionID)
 	if !ok {
@@ -566,7 +651,8 @@ func (cache *activeAgentContextCache) snapshotKey(key activeAgentContextKey) act
 	session.updatedAt = now
 	cache.sessions[key] = session
 	return activeAgentContextSnapshot{
-		files: append([]string(nil), session.files...),
+		files:      append([]string(nil), session.files...),
+		identities: maps.Clone(session.identities),
 		caseInsensitiveFiles: append(
 			[]string(nil),
 			session.caseInsensitiveFiles...,
@@ -579,7 +665,9 @@ func (cache *activeAgentContextCache) snapshotKey(key activeAgentContextKey) act
 // applyClaudeCodeActiveAgentContext consumes only authenticated, typed Claude
 // Code lifecycle fields. It never reads req.Payload or ToolInput, preventing a
 // generic payload, command mention, or tool argument from manufacturing trusted
-// instruction-file context.
+// instruction-file context. The managed hook client's identity of a loaded
+// file (hookpaths.LoadedIdentityPrefix) only adds protection: it makes more
+// writes writes to that file, never fewer.
 func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req claudeCodeHookRequest) activeAgentContextSnapshot {
 	const connectorName = "claudecode"
 	if a == nil || authenticatedHookConnector(ctx) != connectorName {
@@ -597,15 +685,23 @@ func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req c
 	switch req.HookEventName {
 	case "SessionStart", "CwdChanged":
 		a.activeAgentContext.beginKey(key)
+		a.saveInstructionLoads(key)
 	case "SessionEnd":
 		a.activeAgentContext.endKey(key)
+		a.saveInstructionLoads(key)
 	case "InstructionsLoaded":
+		// A load recorded before this gateway started is still this
+		// session's load.
+		a.restoreInstructionLoads(key)
 		if sandboxed {
 			a.activeAgentContext.seedSandboxKey(key, view, req.FilePath)
 		} else {
-			a.activeAgentContext.seedKey(key, req.FilePath)
+			a.activeAgentContext.seedKey(key, req.FilePath,
+				resolvedWritesFromContext(ctx)[hookpaths.LoadedIdentityPrefix+req.FilePath])
 		}
+		a.saveInstructionLoads(key)
 	case "PreToolUse", "PermissionRequest":
+		a.restoreInstructionLoads(key)
 		return a.activeAgentContext.snapshotKey(key)
 	}
 	return activeAgentContextSnapshot{}

@@ -600,6 +600,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		return ""
 	}
 	copilot := strings.EqualFold(strings.TrimSpace(connector), "copilot")
+	if !copilot {
+		if evidence := instructionLoadEvidence(envelope); evidence != "" {
+			return evidence
+		}
+	}
 	var toolRaw, args json.RawMessage
 	var toolConflict, argsConflict bool
 	if copilot {
@@ -709,6 +714,20 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	opaqueFacts := map[string]string{}
 	var globFacts map[string]string
 	var unprovenReason string
+	// identities is the file-identity evidence for InstructionIdentityKey:
+	// every existing instruction file a write target names.
+	// fileIdentities are the write targets' own identities (FileIdentitiesKey).
+	var identities, fileIdentities []string
+	instructions := NewInstructionFiles(cwd, home, nil)
+	noteIdentity := func(resolved string) {
+		if instruction := instructions.Identity(resolved); filepath.IsAbs(instruction) &&
+			len(instruction) <= MaxWriteTargetPathBytes && !slices.Contains(identities, instruction) {
+			identities = append(identities, instruction)
+		}
+		if identity := FileIdentity(resolved); identity != "" && !slices.Contains(fileIdentities, identity) {
+			fileIdentities = append(fileIdentities, identity)
+		}
+	}
 	if toolArgs != nil {
 		for _, key := range []string{"command", "cmd"} {
 			var command string
@@ -810,6 +829,12 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		size += entry
 		targets[path] = resolved
+		if resolved != "" {
+			// Protection follows the file: a symlink, a hard link, a case or
+			// short-name variant of an instruction file, and the physical
+			// file a symlinked one reaches (GAP-0869, GAP-0971).
+			noteIdentity(resolved)
+		}
 	}
 	// A bounded assignment at the end of a long AND-list is listed first so
 	// ordinary preceding redirects cannot exhaust the client's target map.
@@ -883,13 +908,33 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			size += entry
 		}
 	}
+	identity := strings.Join(identities, "\x00")
 	if unprovenReason != "" {
 		entry := len(jsonString(UnprovenReasonKey)) + 1 + len(jsonString(unprovenReason)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
-			return unprovenEvidence(cwd, unprovenReason)
+			return unprovenEvidence(cwd, unprovenReason, identity)
 		}
 		targets[UnprovenReasonKey] = unprovenReason
 		size += entry
+	}
+	if identity != "" {
+		entry := len(jsonString(InstructionIdentityKey)) + 1 + len(jsonString(identity)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+3 {
+			return unprovenEvidence(cwd, unprovenReason, identity)
+		}
+		targets[InstructionIdentityKey] = identity
+		size += entry
+	}
+	if len(fileIdentities) > 0 {
+		value := strings.Join(fileIdentities, ",")
+		entry := len(jsonString(FileIdentitiesKey)) + 1 + len(jsonString(value)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+4 {
+			// A gateway that cannot read the files cannot place them.
+			truncated = true
+		} else {
+			targets[FileIdentitiesKey] = value
+			size += entry
+		}
 	}
 	if truncated {
 		targets[TruncatedKey] = "1"
@@ -1025,12 +1070,18 @@ func incompleteEvidence(cwd string) string {
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
-func unprovenEvidence(cwd, reason string) string {
-	// The full target map overflowed while adding the class reason. Keep
-	// both incomplete-map and unproven-command evidence in the small header.
-	encoded, _ := json.Marshal(map[string]string{
-		CWDKey: cwd, TruncatedKey: "1", UnprovenReasonKey: reason,
-	})
+func unprovenEvidence(cwd, reason, identity string) string {
+	// The full target map overflowed while adding the class reason or the
+	// file-identity evidence. Keep the incomplete-map marker and both facts
+	// in the small header.
+	targets := map[string]string{CWDKey: cwd, TruncatedKey: "1"}
+	if reason != "" {
+		targets[UnprovenReasonKey] = reason
+	}
+	if identity != "" {
+		targets[InstructionIdentityKey] = identity
+	}
+	encoded, _ := json.Marshal(targets)
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
@@ -1049,13 +1100,31 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	var targets map[string]string
-	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+4 ||
+	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+5 ||
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
 		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false
 	}
+	if value, present := targets[InstructionIdentityKey]; present {
+		for _, identity := range strings.Split(value, "\x00") {
+			if !filepath.IsAbs(identity) || len(identity) > MaxWriteTargetPathBytes {
+				return nil, false
+			}
+		}
+	}
+	if value, present := targets[FileIdentitiesKey]; present {
+		for _, identity := range strings.Split(value, ",") {
+			if !validFileIdentity(identity) {
+				return nil, false
+			}
+		}
+	}
 	for key, value := range targets {
+		if strings.HasPrefix(key, LoadedIdentityPrefix) &&
+			(!filepath.IsAbs(strings.TrimPrefix(key, LoadedIdentityPrefix)) || !validFileIdentity(value)) {
+			return nil, false
+		}
 		if strings.HasPrefix(key, DirectoryFactPrefix) && value != "?" && !filepath.IsAbs(value) {
 			return nil, false
 		}
@@ -1717,8 +1786,12 @@ func (l Links) OpaqueTargetWithFacts(path string, ownCopy bool, facts map[string
 }
 
 // SplitOpaqueScopeFacts separates the OpaqueScopeFactPrefix entries from the
-// rest of a decoded map. targets is returned unchanged when it has none.
+// rest of a decoded map. The identity facts (InstructionIdentityKey,
+// FileIdentitiesKey, LoadedIdentityPrefix) are for the cognitive-file proof
+// only and are in neither. targets is returned unchanged when it has neither
+// kind of entry.
 func SplitOpaqueScopeFacts(targets map[string]string) (rest, facts map[string]string) {
+	identity := false
 	for key, value := range targets {
 		if strings.HasPrefix(key, OpaqueScopeFactPrefix) {
 			if facts == nil {
@@ -1726,13 +1799,14 @@ func SplitOpaqueScopeFacts(targets map[string]string) (rest, facts map[string]st
 			}
 			facts[key] = value
 		}
+		identity = identity || clientIdentityFact(key)
 	}
-	if facts == nil {
+	if facts == nil && !identity {
 		return targets, nil
 	}
 	rest = make(map[string]string, len(targets)-len(facts))
 	for key, value := range targets {
-		if !strings.HasPrefix(key, OpaqueScopeFactPrefix) {
+		if !strings.HasPrefix(key, OpaqueScopeFactPrefix) && !clientIdentityFact(key) {
 			rest[key] = value
 		}
 	}

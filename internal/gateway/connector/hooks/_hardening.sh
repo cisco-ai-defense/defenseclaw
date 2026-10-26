@@ -1234,9 +1234,9 @@ defenseclaw_log_hook_delivery_failure() {
 # defenseclaw_per_user_outage_open returns 0 (true) when a per-user hook lets
 # the call through because this account's gateway is down (owner decision
 # 2026-10-23, config.HookOutageFailMode): the call's last transport status
-# (_DC_TRANSPORT_STATUS, defenseclaw_await_gateway) is 7, no gateway took the
-# connection after the cold-start retries, and the connector's current config
-# selects an open tier. Strict availability, this account's install
+# (_DC_TRANSPORT_STATUS, defenseclaw_await_gateway) is 7, 52, 55 or 56, with
+# no HTTP status or body after the cold-start retries, and the connector's
+# current config selects an open tier. Strict availability, this account's install
 # window, an answer the gateway gave (any HTTP status, a cut-off or
 # malformed body), another program on the port, a missing token and a
 # config that is missing, malformed or strict keep the call closed. Managed,
@@ -1249,7 +1249,10 @@ defenseclaw_per_user_outage_open() {
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
   [ "${_DC_SECURE_CLIENT_HOOK:-0}" != 1 ] || return 1
-  [ "${_DC_TRANSPORT_STATUS:-}" = 7 ] || return 1
+  case "${_DC_TRANSPORT_STATUS:-}:${RESPONSE:-}" in
+    7:|7:$'\n000'|52:$'\n000'|55:$'\n000'|56:$'\n000') ;;
+    *) return 1 ;;
+  esac
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
