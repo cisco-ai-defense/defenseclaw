@@ -16,3 +16,7 @@ package cli
 // local account deleted and created again from the one before it by its
 // listed record (GAP-0669). Tests replace it.
 var enterpriseHookGatewayPeerAccounts = func(string) []enterpriseHookPeerAccount { return nil }
+
+// enterpriseHookLocalAccountsStamp is "" on macOS: the gateway compares no
+// record with the account database there (guardianHomeProofCurrent).
+var enterpriseHookLocalAccountsStamp = func() string { return "" }

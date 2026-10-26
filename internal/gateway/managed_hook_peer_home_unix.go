@@ -1291,7 +1291,8 @@ func (c *managedHookPeerHomeCache) adminHolderToken(uid int, proof string) (stri
 // managedHookPeerHomeProof is the root guardian's proof of the home
 // directory of the account named name, of account incarnation incarnation,
 // that holds uid: the LegacyOwnerToken of the uid's trusted identity record
-// when the record is current and names that account
+// when the record is current, newer than the last change of the local
+// account database (guardianHomeProofCurrent) and names that account
 // (normalizeHomeProof); "" otherwise. Tests replace it.
 var managedHookPeerHomeProof = func(uid int, name, incarnation string) string {
 	dir := currentIdentitySpoolDir()
@@ -1306,7 +1307,7 @@ var managedHookPeerHomeProof = func(uid int, name, incarnation string) string {
 	if record.UpdatedAt.After(now.Add(time.Minute)) || now.Sub(record.UpdatedAt) > enterprisehooks.IdentitySpoolMaxAge {
 		return ""
 	}
-	if record.AccountIncarnation != "" && record.AccountIncarnation != incarnation {
+	if record.AccountIncarnation != "" && record.AccountIncarnation != incarnation || !guardianHomeProofCurrent(record.UpdatedAt) {
 		return ""
 	}
 	return normalizeHomeProof(record.LegacyOwnerToken)

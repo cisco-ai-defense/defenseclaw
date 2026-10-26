@@ -191,6 +191,21 @@ var enterpriseHookResolveGatewayPeers = func(path string, last map[int]enterpris
 	return resolved
 }
 
+// enterpriseHookLocalAccountsStamp is the size, modification time and inode
+// of /etc/passwd, which useradd, userdel and usermod replace; "" when it
+// cannot be read. Tests replace it.
+var enterpriseHookLocalAccountsStamp = func() string {
+	info, err := os.Stat("/etc/passwd")
+	if err != nil {
+		return ""
+	}
+	stamp := strconv.FormatInt(info.ModTime().UnixNano(), 10) + "/" + strconv.FormatInt(info.Size(), 10)
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		stamp += "/" + strconv.FormatUint(uint64(st.Ino), 10)
+	}
+	return stamp
+}
+
 // enterpriseHookHomeInode is the inode of home, 0 when it is not an
 // absolute path to a directory the guardian can stat.
 func enterpriseHookHomeInode(home string) uint64 {

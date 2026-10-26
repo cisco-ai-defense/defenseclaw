@@ -15,6 +15,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,14 +59,15 @@ func legacyAgentOwnerSameAccount(recorded, account string) bool {
 // legacyAgentOwnerTokenNow is the LegacyAgentOwnerToken of the account that
 // holds uid now: its SID from the guardian's identity record of the uid when
 // that record names account, else from the gateway's own lookup; or its home
-// directory's. Tests replace it.
+// directory's, from the record while it is newer than the last change of the
+// local account database (guardianHomeProofCurrent). Tests replace it.
 var legacyAgentOwnerTokenNow = func(uid int, account string) string {
 	incarnation := ""
 	if dir := currentIdentitySpoolDir(); dir != "" {
 		if record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), validateManagedGuardianAuthorization); err == nil &&
 			legacyAgentOwnerSameAccount(record.User, account) && !record.UpdatedAt.IsZero() &&
 			!record.UpdatedAt.After(time.Now().Add(time.Minute)) && time.Since(record.UpdatedAt) <= enterprisehooks.IdentitySpoolMaxAge {
-			if record.LegacyOwnerToken != "" {
+			if record.LegacyOwnerToken != "" && (strings.HasPrefix(record.LegacyOwnerToken, "sid:") || guardianHomeProofCurrent(record.UpdatedAt)) {
 				return record.LegacyOwnerToken
 			}
 			if strings.HasPrefix(record.AccountIncarnation, "sid:") {
@@ -77,6 +79,35 @@ var legacyAgentOwnerTokenNow = func(uid int, account string) string {
 		incarnation, _ = managedHookPeerHomes.incarnation(uid)
 	}
 	return enterprisehooks.LegacyAgentOwnerToken(incarnation, managedHookPeerHome(uid))
+}
+
+// guardianHomeProofCurrent reports whether a home proof the root guardian
+// wrote into an identity record at recordedAt can name the account that
+// holds the record's uid now: the local account database did not change
+// after it (localAccountsChangedAt). userdel and useradd rewrite /etc/passwd,
+// so a record written before the last change can name the home of an
+// account deleted since, whose name and uid a new account took over: the new
+// account was bound to the earlier holder's 1.0.3 agents entries and got its
+// agent identity until the guardian's next pass (GAP-0422, GAP-1876). The
+// guardian writes the records again at its next tick after such a change.
+// A database the gateway cannot stat (macOS, where the listed record tells
+// a recreated account apart) tells nothing.
+func guardianHomeProofCurrent(recordedAt time.Time) bool {
+	changed := localAccountsChangedAt()
+	return changed.IsZero() || !recordedAt.Before(changed)
+}
+
+// localAccountsChangedAt is when /etc/passwd last changed on Linux, zero
+// when it cannot be read and on other systems. Tests replace it.
+var localAccountsChangedAt = func() time.Time {
+	if runtime.GOOS != "linux" {
+		return time.Time{}
+	}
+	info, err := os.Stat("/etc/passwd")
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
 }
 
 // legacyAgentOwners is the migration map the gateway read. It is read until

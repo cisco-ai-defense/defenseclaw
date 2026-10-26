@@ -1024,7 +1024,11 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	startEnterpriseHookDirectoryReturnWatch(ctx, stderr, dir, enrolled)
 	startEnterpriseHookDirectoryReachWatch(ctx, stderr, dir, enrolled)
 	sort.Strings(keys)
-	fingerprint := strings.Join(keys, ";")
+	// A change of the local account database (useradd, userdel) makes the
+	// next tick rewrite the records, whose home proofs the gateway does not
+	// take for the uid's holder while they are older than the change
+	// (GAP-0422, GAP-1876).
+	fingerprint := strings.Join(keys, ";") + "|" + enterpriseHookLocalAccountsStamp()
 	now := time.Now()
 	state := &enterpriseHookIdentitySpoolState
 	state.Lock()
