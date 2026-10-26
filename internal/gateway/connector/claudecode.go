@@ -932,7 +932,9 @@ func ClaudeCodeWatchPaths(cwd string) []string {
 // caller whose home is unverified ("", relative or "/") gets no home entries
 // but keeps every project entry under cwd.
 func ClaudeCodeWatchPathsForHome(cwd, home string) []string {
-	if !filepath.IsAbs(home) || filepath.Clean(home) == string(filepath.Separator) {
+	// A home that is only separators (a slash, or two backslashes, which
+	// Windows reads as a UNC root) names no account: it is unverified.
+	if !filepath.IsAbs(home) || strings.Trim(home, `/\`) == "" {
 		return claudeCodeWatchPaths(cwd, "", "")
 	}
 	return claudeCodeWatchPaths(cwd, filepath.Join(home, ".claude"), filepath.Join(home, ".claude.json"))

@@ -316,6 +316,9 @@ func TestWindowsManagedRowCleansRelocatedAgentConfigurations(t *testing.T) {
 			}
 
 			// With only the machine value set, that root is the account's.
+			// Repair revoked the credential, and only a known credential
+			// owns an OTLP value (base ownership rule), so issue it again.
+			f.ownRuntime(t, true)
 			delete(f.env, tc.variable)
 			f.requireRefusal(t, tc.name, tc.variable+" "+tc.file, f.verify(tc.name))
 			f.repairAsAccount(t, tc.name, filepath.Join(machineRoot, tc.file))
@@ -327,6 +330,7 @@ func TestWindowsManagedRowCleansRelocatedAgentConfigurations(t *testing.T) {
 			inProfile := filepath.Join(f.home, "agent-root")
 			f.env[tc.variable] = `%USERPROFILE%\agent-root`
 			f.write(t, filepath.Join(inProfile, tc.file), stale)
+			f.ownRuntime(t, true)
 			f.requireRefusal(t, tc.name, tc.variable+" "+tc.file, f.verify(tc.name))
 			f.repair(t, tc.name)
 			f.requireClean(t, filepath.Join(inProfile, tc.file))
@@ -550,17 +554,18 @@ func TestWindowsManagedRowChecksNetworkAppDataAsTheAccount(t *testing.T) {
 			f.requireNeedsSession(t, name, source)
 			f.readAsErr = nil
 
-			// Repair cannot edit a share durably: it leaves the file, revokes
-			// the credential, and verify warns to remove the exporter by hand.
+			// Repair cannot edit a share durably: it leaves the file and
+			// revokes the credential. Only a known credential owns an OTLP
+			// value, so the revoked one left on the share is no longer
+			// DefenseClaw's and verify passes the row.
 			stale := staleWindowsNativeOTLP(f.bearer)[name]
 			f.repair(t, name)
 			if data, _ := os.ReadFile(filepath.Join(agentDir, tc.file)); string(data) != stale {
 				t.Fatal("repair edited a configuration on a share")
 			}
 			if err := f.verify(name); err != nil {
-				t.Fatalf("verify after repair = %v, want a warning, not a failed row", err)
+				t.Fatalf("verify after repair = %v, want the row passed", err)
 			}
-			f.requireWarning(t, name, source+" on a network share", "by hand")
 
 			// Once the account removes it, verify has nothing to warn about.
 			clean := `model = "gpt-5"`

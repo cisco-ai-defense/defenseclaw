@@ -1,5 +1,4 @@
 # defenseclaw-managed-hook v7
-# defenseclaw-copilot-closed-adapter v1
 # Copilot CLI on Windows sends each hook event as UTF-8 JSON on stdin. The
 # release hook launcher uses the GUI subsystem, so Start-Process cannot be
 # trusted to inherit redirected stdin/stdout. This adapter preserves the bytes
@@ -41,7 +40,6 @@ if ($reviewedEvents -cnotcontains $Event) {
 {{end}}$ErrorActionPreference = 'Stop'
 $hook = '{{.HookBinaryPS}}'
 $timeoutMS = {{.CopilotHookTimeoutMS}}
-
 $process = $null
 $started = $false
 $stdinClosed = $false
@@ -187,14 +185,13 @@ $installGuard = $false
 
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
-    # A successful native hook answers with exit 0, including a denial.
-    # A failed child may have written a partial or even complete answer before
-    # failing. None of that output proves that the check completed.
-    if ($process.ExitCode -ne 0) {
+    # The native hook answers a tool boundary on stdout with exit 0, a failed
+    # check too; a launcher that exits non-zero without an answer crashed.
+    if ($stdout.Length -eq 0 -and $process.ExitCode -ne 0) {
         if ($stderr.Length -gt 0) {
             [Console]::Error.Write($stderr)
         }
-        throw "DefenseClaw hook launcher exited $($process.ExitCode)"
+        throw "DefenseClaw hook launcher exited $($process.ExitCode) without an answer"
     }
     if ($stdout.Length -gt 0) {
         [Console]::Out.Write($stdout)

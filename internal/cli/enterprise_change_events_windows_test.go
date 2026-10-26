@@ -309,9 +309,9 @@ func TestWindowsAnchorArgumentConflictRecordsOnlyElevatedInstalledStandaloneRefu
 		t.Run(tc.name, func(t *testing.T) {
 			stubWindowsBundleHost(t)
 			spool := stubWindowsChangeSpool(t)
-			saved := windowsEnterpriseIsElevated
-			windowsEnterpriseIsElevated = func() bool { return tc.elevated }
-			t.Cleanup(func() { windowsEnterpriseIsElevated = saved })
+			saved := windowsSecretIsElevated
+			windowsSecretIsElevated = func() bool { return tc.elevated }
+			t.Cleanup(func() { windowsSecretIsElevated = saved })
 			cmd, _ := windowsBundleCommand()
 			opts := &windowsEnterpriseLifecycleOptions{trustAnchors: "delivered-anchors.json", configPath: "delivered-config.yaml",
 				profile: tc.profile, installedBeforeRun: tc.installed, jsonOutput: true}
