@@ -3283,7 +3283,9 @@ func assertCopilotShellBootstrapFailure(t *testing.T, body, failure string) {
 		`HOOK_BASE="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || ` + failure,
 		`HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || ` + failure,
 		`if [ ! -r "${HOOK_DIR}/_hardening.sh" ]; then`,
-		`if ! . "${HOOK_DIR}/_hardening.sh"; then`,
+		// Secure Client keeps its bytes; every other render sources through
+		// command . (GAP-0949).
+		map[bool]string{true: `if ! . "${HOOK_DIR}/_hardening.sh"; then`, false: `if ! command . "${HOOK_DIR}/_hardening.sh"; then`}[failure == "exit 0"],
 		`if ! defenseclaw_harden_resources; then`,
 		`if ! defenseclaw_harden_env; then`,
 	} {

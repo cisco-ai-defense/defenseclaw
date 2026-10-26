@@ -464,7 +464,7 @@ if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
   fi
 elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   # shellcheck source=/dev/null
-  command . "${HOOK_DIR}/{{.TokenFile}}" || DEFENSECLAW_GATEWAY_TOKEN=
+  {{if .SecureClient}}. "${HOOK_DIR}/{{.TokenFile}}"{{else}}command . "${HOOK_DIR}/{{.TokenFile}}" || DEFENSECLAW_GATEWAY_TOKEN={{end}}
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"{{end}}
 # The hook needs only its private shell-local copy from this point forward.
@@ -656,8 +656,9 @@ if [ "$CURL_STATUS" -eq 0 ]; then
 {{else}}  defenseclaw_retry_busy codex_gateway_post_response || CURL_STATUS=$?
 {{end}}fi
 API_TOKEN=
-AUTH_HEADER_ARGS=()
-unset API_TOKEN
+{{if .SecureClient}}PAYLOAD=
+{{end}}AUTH_HEADER_ARGS=()
+unset API_TOKEN{{if .SecureClient}} PAYLOAD{{end}}
 # fail_unreachable reads the session id from PAYLOAD for the one outage
 # warning per session and the per-call audit row, as in the Claude Code hook:
 # drop the event only after it (GAP-1350, GAP-1352).
@@ -666,8 +667,8 @@ if [ "$CURL_STATUS" -ne 0 ]; then
   defenseclaw_managed_http_result "$HTTP_CODE" incomplete
 {{end}}  fail_unreachable "$(defenseclaw_gateway_unreachable_reason 2>/dev/null || printf 'gateway unreachable')"
 fi
-PAYLOAD=
-unset PAYLOAD{{end}}
+{{if not .SecureClient}}PAYLOAD=
+unset PAYLOAD{{end}}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')

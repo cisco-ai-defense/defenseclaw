@@ -371,7 +371,7 @@ if [ ! -r "${HOOK_DIR}/_hardening.sh" ]; then
   echo "defenseclaw: hook hardening helper unavailable{{if .SecureClient}}, allowing copilot tool{{end}}" >&2
   {{$failure}}
 fi
-if ! command . "${HOOK_DIR}/_hardening.sh"; then
+if ! {{if not .SecureClient}}command {{end}}. "${HOOK_DIR}/_hardening.sh"; then
   echo "defenseclaw: hook hardening helper failed{{if .SecureClient}}, allowing copilot tool{{end}}" >&2
   {{$failure}}
 fi
@@ -468,7 +468,7 @@ if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
   fi
 elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   # shellcheck source=/dev/null
-  command . "${HOOK_DIR}/{{.TokenFile}}" || DEFENSECLAW_GATEWAY_TOKEN=
+  {{if .SecureClient}}. "${HOOK_DIR}/{{.TokenFile}}"{{else}}command . "${HOOK_DIR}/{{.TokenFile}}" || DEFENSECLAW_GATEWAY_TOKEN={{end}}
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 # Only the private copy is used from here on: no child process (curl, jq, the

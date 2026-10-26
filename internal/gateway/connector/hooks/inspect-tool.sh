@@ -293,7 +293,7 @@ if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "$TOKEN_FILE" ]; then
     DEFENSECLAW_GATEWAY_TOKEN="$(tr -d '\r\n' < "$TOKEN_FILE")"
   else
     # shellcheck source=/dev/null
-    command . "$TOKEN_FILE" || DEFENSECLAW_GATEWAY_TOKEN=
+    {{if .SecureClient}}. "$TOKEN_FILE"{{else}}command . "$TOKEN_FILE" || DEFENSECLAW_GATEWAY_TOKEN={{end}}
   fi
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
