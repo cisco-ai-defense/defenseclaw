@@ -114,13 +114,18 @@ func TestSpacedGroupNameIsLookedUp(t *testing.T) {
 // Now the lookup fails, and an account in more groups than are named has
 // no facts rather than part of its membership.
 func TestDirectoryFactsFailAsAWholeNotInPart(t *testing.T) {
-	nss := filepath.Join(t.TempDir(), "nsswitch.conf")
-	if err := os.WriteFile(nss, []byte("passwd: sss files\n"), 0o644); err != nil {
-		t.Fatal(err)
+	// The test's own /etc/passwd, which holds no account of uid 1001: the
+	// host's file would decide the shared-uid check (on a GitHub runner
+	// uid 1001 is the runner account, so alice's uid would be shared).
+	dir := t.TempDir()
+	oldNSS, oldPasswd := nsswitchPath, localPasswdPath
+	t.Cleanup(func() { nsswitchPath, localPasswdPath = oldNSS, oldPasswd })
+	nsswitchPath, localPasswdPath = filepath.Join(dir, "nsswitch.conf"), filepath.Join(dir, "passwd")
+	for path, data := range map[string]string{nsswitchPath: "passwd: sss files\n", localPasswdPath: "root:x:0:0::/root:/bin/sh\n"} {
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	orig := nsswitchPath
-	nsswitchPath = nss
-	t.Cleanup(func() { nsswitchPath = orig })
 	startFakeSSSD(t, nil)
 	const account = "alice@corp.example.com:*:1001:1001::/home/alice:/bin/bash\n"
 	const owns, initgroups, groups = "-s sss passwd 1001", "initgroups alice@corp.example.com", "group 1001 5001 5002"

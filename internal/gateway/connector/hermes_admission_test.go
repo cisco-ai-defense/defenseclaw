@@ -68,9 +68,22 @@ func TestFirstHermesVersionLineRejectsEmptyOrNULOutput(t *testing.T) {
 	}
 }
 
+// useHermesDataDirAsDefenseClawHome makes the test's data directory the
+// DefenseClaw home, as it is for the per-user gateway that runs Setup and
+// Verify. The per-user Unix Hermes hook reads its home from DEFENSECLAW_HOME,
+// else ~/.defenseclaw, and blocks before it answers the execution probe when
+// that directory is missing: on a host without ~/.defenseclaw (a GitHub
+// runner) every Hermes Verify failed, and on one with it the probe read the
+// host's DefenseClaw home instead of the test's.
+func useHermesDataDirAsDefenseClawHome(t *testing.T, opts SetupOpts) {
+	t.Helper()
+	t.Setenv("DEFENSECLAW_HOME", opts.DataDir)
+}
+
 func prepareHermesSetupAdmissionFixture(t *testing.T, opts SetupOpts) SetupOpts {
 	t.Helper()
 	if runtime.GOOS != "windows" {
+		useHermesDataDirAsDefenseClawHome(t, opts)
 		return opts
 	}
 	// Verify runs the registered command's execution probe. A per-user
