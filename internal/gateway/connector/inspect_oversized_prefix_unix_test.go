@@ -87,7 +87,9 @@ func TestGenericInspectOversizedPrefixFitsTheGatewayCap(t *testing.T) {
 			if refused {
 				t.Fatalf("the gateway refused the bounded review as over its cap; stderr=%s", stderr.String())
 			}
-			if len(got) == 0 || len(got) > 900*1024 || !bytes.Contains(got, []byte(`"bounded_prefix_review":true`)) ||
+			// An 8 KiB head (GAP-1841): a larger prefix runs past the generic
+			// endpoint's 200 ms scan budget and gets 504 with no verdict.
+			if len(got) == 0 || len(got) > 64*1024 || !bytes.Contains(got, []byte(`"bounded_prefix_review":true`)) ||
 				!bytes.Contains(got, []byte(`"content_truncated":true`)) {
 				t.Fatalf("bounded review request: %d bytes, markers=%v; stderr=%s", len(got),
 					bytes.Contains(got, []byte(`"bounded_prefix_review":true`)), stderr.String())
