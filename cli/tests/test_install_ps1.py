@@ -5289,7 +5289,10 @@ def test_a_finished_install_never_leaves_previous_new_behind(tmp_path: Path, old
     # verify round's i62/i63) stays, and this install's copy is kept beside
     # it, with no raw exception. A previous.new that a finished install left
     # (SWAPPED) is finished by the next run instead of undone. A set-aside
-    # copy is .kept-previous-*, which no restore sweeps (R2-1). This
+    # copy is .failed-kept-previous-*: this restore's sweep keeps it (R2-1),
+    # and the .failed-* name is install machinery to the 1.0.2-1.0.4
+    # installers too, so an older installer never carries it as data
+    # (GAP-2055). This
     # account's own previous\ that is only in use (a console's current folder
     # inside it) is not another account's: the step stops, previous.new stays
     # for the next run, and nothing is kept beside it (GAP-2054). A normal
@@ -5299,7 +5302,7 @@ def test_a_finished_install_never_leaves_previous_new_behind(tmp_path: Path, old
     (data / "previous" / "VERSION").write_text("1.0.2", encoding="ascii")
     (data / "previous.new" / "bin").mkdir(parents=True)
     (data / "previous.new" / "VERSION").write_text("1.0.4", encoding="ascii")
-    (data / ".kept-previous-20261020T000000-new").mkdir()
+    (data / ".failed-kept-previous-20261020T000000-new").mkdir()
     remove = "Remove-Item -LiteralPath $Path -Recurse -Force"
     if old != "deletable":
         remove = "if ($Path -eq $Previous) { throw 'Access is denied.' }; " + remove
@@ -5330,22 +5333,22 @@ try {{ Publish-PreviousSlot (Join-Path $DataDir 'previous.new') }} catch {{ "THR
         assert f"MOVE {data / 'previous'} 10" in out, out
         assert "THROWN Could not replace the older rollback copy" in out and "next install finishes this" in out, out
         assert (data / "previous.new" / "VERSION").read_text(encoding="ascii") == "1.0.4", out
-        assert (data / ".kept-previous-20261020T000000-new").exists() and "belongs to another account" not in out, out
-        assert sorted(path.name for path in data.glob(".kept-previous-*")) == [".kept-previous-20261020T000000-new"], out
+        assert (data / ".failed-kept-previous-20261020T000000-new").exists() and "belongs to another account" not in out, out
+        assert sorted(path.name for path in data.glob(".failed-kept-previous-*")) == [".failed-kept-previous-20261020T000000-new"], out
         return
     assert "THROWN" not in out, out
     assert not (data / "previous.new").exists()
-    assert not list(data.glob(".failed-*")), out
-    asides = sorted(path.name for path in data.glob(".kept-previous-*") if not path.name.endswith("-new"))
+    assert not [path for path in data.glob(".failed-*") if not path.name.startswith(".failed-kept-previous-")], out
+    asides = sorted(path.name for path in data.glob(".failed-kept-previous-*") if not path.name.endswith("-new"))
     if old == "unmovable":
         assert (data / "previous" / "VERSION").read_text(encoding="ascii") == "1.0.2"
-        kept = sorted(path.name for path in data.glob(".kept-previous-*-new"))
-        assert len(kept) == 1 and kept[0] != ".kept-previous-20261020T000000-new", out
+        kept = sorted(path.name for path in data.glob(".failed-kept-previous-*-new"))
+        assert len(kept) == 1 and kept[0] != ".failed-kept-previous-20261020T000000-new", out
         assert (data / kept[0] / "VERSION").read_text(encoding="ascii") == "1.0.4", out
         assert asides == [] and "belongs to another account" in out and "Exception" not in out, out
         return
     assert (data / "previous" / "VERSION").read_text(encoding="ascii") == "1.0.4"
-    assert not (data / ".kept-previous-20261020T000000-new").exists(), out
+    assert not (data / ".failed-kept-previous-20261020T000000-new").exists(), out
     if old == "deletable":
         assert asides == [] and "WARN" not in out, out
     else:
@@ -5362,8 +5365,14 @@ try {{ Publish-PreviousSlot (Join-Path $DataDir 'previous.new') }} catch {{ "THR
     # Neither is data, so no later snapshot carries it, and the restore's
     # sweep of .failed-* folders does not take a kept rollback copy.
     head = _text()[: _text().index("$NotData") + 200]
-    assert '".failed-*"' in head and '".kept-previous-*"' in head
-    assert '-Filter ".failed-*"' in _ps1_function("Restore-Slot")
+    assert '".failed-*"' in head and "kept-previous" not in head
+    restore = _ps1_function("Restore-Slot")
+    assert '-Filter ".failed-*"' in restore and '-notlike ".failed-kept-*"' in restore
+    # Every name this installer sets aside is machinery to the released
+    # installers' data lists (1.0.2-1.0.4 list .failed-*, not .kept-*).
+    publish = _ps1_function("Publish-PreviousSlot")
+    names = re.findall(r'Join-Path \$DataDir "(\.[a-z-]+)', publish)
+    assert names and all(name.startswith(".failed-kept-previous-") for name in names), names
 
 
 def test_the_fail_mode_hold_outlasts_the_installers_own_steps() -> None:

@@ -129,7 +129,7 @@ $ManagedFiles = $ManagedBinaries + @($ManagedShims | ForEach-Object { "$_.cmd" }
 $DeveloperFiles = @("litellm.exe", "skill-scanner.exe", "skill-scanner-api.exe",
     "skill-scanner-pre-commit.exe", "mcp-scanner.exe", "mcp-scanner-api.exe", ".defenseclaw-source-root")
 # Data-dir entries that are install machinery, not user data.
-$NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair", ".staging", ".failed-*", ".kept-previous-*",
+$NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair", ".staging", ".failed-*",
     "installer", "logs", ".install.lock", "backups", ".rollback-hold", ".rollback-hold.done",
     ".lifecycle-txn.json", ".lifecycle-txn.json.new", ".lifecycle-closer")
 # Connectors supported on Windows (cli/defenseclaw/platform_support.py).
@@ -3739,7 +3739,8 @@ function Restore-Slot([string]$Slot) {
         Remove-Item -LiteralPath (Join-Path $Slot "COMPLETE") -Force -ErrorAction Stop
         Invoke-Quietly { Remove-Tree $Slot }
         foreach ($old in @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".failed-*" -ErrorAction Stop)) {
-            if ($old.Name -ne $plan.FailedName) { Invoke-Quietly { Remove-FailedInstall $old.FullName } }
+            # A kept rollback copy (Publish-PreviousSlot) is not a failed install.
+            if ($old.Name -ne $plan.FailedName -and $old.Name -notlike ".failed-kept-*") { Invoke-Quietly { Remove-FailedInstall $old.FullName } }
         }
         return $failed
     } catch {
@@ -4353,7 +4354,7 @@ function Test-OwnedByCurrentUser([string]$Path) {
 function Remove-KeptNewCopies {
     # This account's own rollback copies kept beside another account's
     # previous\ are superseded by a newer one (best effort).
-    foreach ($old in @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".kept-previous-*-new" -ErrorAction SilentlyContinue)) {
+    foreach ($old in @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".failed-kept-previous-*-new" -ErrorAction SilentlyContinue)) {
         try { Remove-Tree $old.FullName } catch { }
     }
 }
@@ -4363,7 +4364,9 @@ function Publish-PreviousSlot([string]$Slot) {
     # parked in the older previous\ goes to backups\ first (Save-RolledBackData).
     # An older previous\ this account cannot delete (an administrator's or
     # SYSTEM's copy), or one whose parked data could not be moved, is set
-    # aside whole in .kept-previous-<time>, which no restore sweeps. One this
+    # aside whole in .failed-kept-previous-<time>: .failed-* is install
+    # machinery to every installer since 1.0.2 (not data an older installer
+    # carries, GAP-2055), and this one's restore sweep keeps it. One this
     # account can neither delete nor rename (SYSTEM-owned with no entry for
     # the user) stays, and this install's rollback copy is kept beside it
     # instead. Either way no previous.new is left: the next install took it
@@ -4376,7 +4379,7 @@ function Publish-PreviousSlot([string]$Slot) {
     }
     $stamp = Get-Date -Format "yyyyMMddTHHmmss"
     if ($why -and (Test-Path -LiteralPath $Previous)) {
-        $aside = Join-Path $DataDir ".kept-previous-$stamp"
+        $aside = Join-Path $DataDir ".failed-kept-previous-$stamp"
         try {
             Move-Path $Previous $aside
             Write-Warn "The older rollback copy could not be removed ($why); it was set aside in $aside"
@@ -4389,7 +4392,7 @@ function Publish-PreviousSlot([string]$Slot) {
             if (Test-OwnedByCurrentUser $Previous) {
                 throw "Could not replace the older rollback copy $Previous ($why). Close the program using it (for example a console whose current folder is inside it); the next install finishes this"
             }
-            $kept = Join-Path $DataDir ".kept-previous-$stamp-new"
+            $kept = Join-Path $DataDir ".failed-kept-previous-$stamp-new"
             Remove-KeptNewCopies
             Move-Path $Slot $kept
             Write-Warn "The older rollback copy $Previous belongs to another account and could not be removed or set aside, so this install's rollback copy was kept in $kept"
