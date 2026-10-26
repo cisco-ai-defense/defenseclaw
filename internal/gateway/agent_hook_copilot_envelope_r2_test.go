@@ -171,3 +171,86 @@ func TestHookJudgeBudgetIsSharedByTheCallsOfOneHook(t *testing.T) {
 		t.Fatalf("judge ran with the hook budget spent: verdict=%v calls=%d->%d", got, calls, len(d.left))
 	}
 }
+
+// TestCopilotCallsWithoutCallbackLeaveTheNextPatchPairBound is GAP-1924: a
+// call that never gets an argumentless edit callback (a read, a parallel
+// envelope of reads, the envelope's own view, or a shell command) must not
+// leave the next ordinary apply_patch pair inside the join lifetime unbound
+// (red: action blocked it and observe warned HOOK-TOOL-CALL-UNPARSED).
+func TestCopilotCallsWithoutCallbackLeaveTheNextPatchPairBound(t *testing.T) {
+	for _, mode := range []string{"observe", "action"} {
+		for _, shape := range []string{"single-view", "view+glob", "patch+view", "single-bash", "none"} {
+			t.Run(mode+"/"+shape, func(t *testing.T) {
+				project := t.TempDir()
+				store, logger := testStoreAndLogger(t)
+				cfg := &config.Config{}
+				cfg.Guardrail.Mode = mode
+				cfg.Guardrail.Connector = "copilot"
+				api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth(), store: store, logger: logger}
+				session := "r1-1924-" + mode + "-" + strings.ReplaceAll(shape, "+", "-")
+				head := `{"sessionId":"` + session + `","cwd":` + jsonQuote(project) + `,`
+				perm := `{"hookName":"permissionRequest","sessionId":"` + session + `","cwd":` + jsonQuote(project) + `,"toolName":"edit","toolInput":{}}`
+				patchA := jsonQuote("*** Begin Patch\n*** Add File: a.txt\n+ordinary a\n*** End Patch\n")
+				patchC := jsonQuote("*** Begin Patch\n*** Add File: c.txt\n+ordinary c\n*** End Patch\n")
+				view := `{"id":"v1","name":"view","args":{"path":` + jsonQuote(project) + `}}`
+				glob := `{"id":"g1","name":"glob","args":{"pattern":"*.go"}}`
+				allow := func(event, body string) {
+					t.Helper()
+					if answer, raw := postCopilotHook(t, api, event, body); answer.Action != "allow" || strings.Contains(raw, hookToolCallUnparsedRuleID) {
+						t.Fatalf("%s = %s: %s", event, answer.Action, raw)
+					}
+				}
+				switch shape {
+				case "single-view":
+					allow("preToolUse", head+`"toolCalls":[`+view+`]}`)
+				case "view+glob":
+					allow("preToolUse", head+`"toolCalls":[`+view+`,`+glob+`]}`)
+				case "patch+view":
+					allow("preToolUse", head+`"toolCalls":[{"id":"p1","name":"apply_patch","args":`+patchA+`},`+view+`]}`)
+					allow("permissionRequest", perm)
+				case "single-bash":
+					allow("preToolUse", head+`"toolCalls":[{"id":"b1","name":"bash","args":{"command":"git status"}}]}`)
+				}
+				allow("preToolUse", head+`"toolCalls":[{"id":"p3","name":"apply_patch","args":`+patchC+`}]}`)
+				allow("permissionRequest", perm)
+			})
+		}
+	}
+}
+
+// TestCopilotPermissionJoinStaysAmbiguousForItsOwnTool keeps the guard of
+// the per-tool join: a second call of the same callback tool, or a
+// preToolUse whose calls cannot be read, still leaves the next argumentless
+// callback unbound, so it is never paired with the wrong call.
+func TestCopilotPermissionJoinStaysAmbiguousForItsOwnTool(t *testing.T) {
+	ctx := context.Background()
+	patch := json.RawMessage(`"*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch\n"`)
+	pre := func(tool string, args json.RawMessage) agentHookRequest {
+		return agentHookRequest{ConnectorName: "copilot", HookEventName: "preToolUse", SessionID: "s", CWD: "/tmp/p",
+			ToolName: tool, ToolArgs: args}
+	}
+	permission := agentHookRequest{ConnectorName: "copilot", HookEventName: "permissionRequest", SessionID: "s", CWD: "/tmp/p",
+		ToolName: "edit", Payload: map[string]any{"hookName": "permissionRequest", "toolName": "edit", "toolInput": map[string]any{}}}
+	raw := []byte(`{"hookName":"permissionRequest","toolName":"edit","toolInput":{}}`)
+	for name, second := range map[string]agentHookRequest{
+		"second patch": pre("apply_patch", patch),
+		"edit call":    pre("edit", json.RawMessage(`{"path":"a.txt","old_str":"a","new_str":"b"}`)),
+		"unreadable":   {ConnectorName: "copilot", HookEventName: "preToolUse", SessionID: "s", CWD: "/tmp/p", ToolCallUnparsed: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var join copilotPermissionJoin
+			join.record(ctx, pre("apply_patch", patch), true)
+			join.record(ctx, pre("view", json.RawMessage(`{"path":"/tmp/p"}`)), true)
+			join.record(ctx, second, true)
+			if _, _, ok := join.match(ctx, permission, raw); ok {
+				t.Fatal("argumentless callback was bound although its call is ambiguous")
+			}
+		})
+	}
+	var join copilotPermissionJoin
+	join.record(ctx, pre("apply_patch", patch), true)
+	join.record(ctx, pre("view", json.RawMessage(`{"path":"/tmp/p"}`)), true)
+	if tool, _, ok := join.match(ctx, permission, raw); !ok || tool != "apply_patch" {
+		t.Fatalf("callback after an unrelated read = %q %v, want the apply_patch call", tool, ok)
+	}
+}

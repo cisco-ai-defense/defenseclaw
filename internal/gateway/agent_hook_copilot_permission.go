@@ -32,15 +32,13 @@ type copilotPermissionJoin struct {
 }
 
 type copilotPermissionEntry struct {
-	tool      string
-	args      json.RawMessage
 	at        time.Time
 	ambiguous bool
-	// calls are the calls of an allowed parallel toolCalls envelope. Its
-	// argumentless callbacks cannot say which call each is for, so each is
-	// bound to every call of the envelope its tool can stand for and
-	// decided again on all of them (the most restrictive verdict answers);
-	// uses callbacks consume the entry (GAP-1831).
+	// calls are the calls of one allowed preToolUse (one, or those of a
+	// parallel toolCalls envelope) that one callback tool can stand for.
+	// An argumentless callback cannot say which of them it is for, so it is
+	// bound to all of them and decided again on each (the most restrictive
+	// verdict answers); uses callbacks consume the entry (GAP-1831).
 	calls []copilotargs.NativeCall
 	uses  int
 }
@@ -53,17 +51,48 @@ func copilotPermissionKey(ctx context.Context, req agentHookRequest) string {
 	return scope + "\x00" + req.SessionID + "\x00" + req.CWD
 }
 
-// record keeps the call of an audited preToolUse when allowed is true. Any
-// other preToolUse in the same scope within the lifetime, allowed or not,
-// leaves the next callback ambiguous.
+// copilotPermissionCallbackTool is the tool name of the permissionRequest
+// a call's callback carries: an apply_patch call asks as edit. Entries are
+// kept per callback tool, because a callback can stand only for a call of
+// its own tool: a call of another tool (a read, or a shell command the
+// agent approves itself) never gets this callback, so it can neither be
+// bound to it nor make it ambiguous (GAP-1924).
+func copilotPermissionCallbackTool(tool string) string {
+	tool = strings.TrimSpace(tool)
+	if tool == "apply_patch" {
+		return "edit"
+	}
+	return tool
+}
+
+func copilotPermissionToolKey(scope, tool string) string {
+	return scope + "\x00" + copilotPermissionCallbackTool(tool)
+}
+
+// record keeps the calls of an audited preToolUse when allowed is true, one
+// entry per callback tool. Any other preToolUse in the same scope within
+// the lifetime, allowed or not, leaves the next callback of the same tool
+// ambiguous; a preToolUse whose calls cannot be read leaves every callback
+// of the scope ambiguous.
 func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest, allowed bool) {
 	if req.ConnectorName != "copilot" || req.HookEventName != "preToolUse" ||
 		req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal {
 		return
 	}
-	key := copilotPermissionKey(ctx, req)
-	if key == "" {
+	scope := copilotPermissionKey(ctx, req)
+	if scope == "" {
 		return
+	}
+	var calls []copilotargs.NativeCall
+	readable := true
+	if raw, _ := req.Payload["toolCalls"].([]any); len(raw) > 1 {
+		calls = copilotNativeToolCalls(req)
+		readable = len(calls) >= 2
+	} else if req.ToolCallUnparsed || strings.TrimSpace(req.ToolName) == "" {
+		readable = false
+	} else {
+		calls = []copilotargs.NativeCall{{Name: req.ToolName, Args: req.ToolArgs}}
+		allowed = allowed && !req.ToolArgsProjectionUncertain && len(req.ToolArgs) > 0
 	}
 	now := time.Now()
 	j.mu.Lock()
@@ -71,34 +100,47 @@ func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest
 	if j.entries == nil {
 		j.entries = make(map[string]copilotPermissionEntry)
 	}
-	if prior, exists := j.entries[key]; exists && now.Sub(prior.at) <= copilotPermissionJoinTTL {
-		prior.ambiguous = true
-		prior.at = now
-		j.entries[key] = prior
-		return
-	}
-	if len(j.entries) >= copilotPermissionJoinMax {
-		for key, entry := range j.entries {
-			if now.Sub(entry.at) > copilotPermissionJoinTTL {
-				delete(j.entries, key)
+	if !readable {
+		for key, prior := range j.entries {
+			if strings.HasPrefix(key, scope+"\x00") && now.Sub(prior.at) <= copilotPermissionJoinTTL {
+				prior.ambiguous = true
+				prior.at = now
+				j.entries[key] = prior
 			}
 		}
+		return
+	}
+	byKey := make(map[string][]copilotargs.NativeCall)
+	var keys []string
+	for _, call := range calls {
+		key := copilotPermissionToolKey(scope, call.Name)
+		if _, seen := byKey[key]; !seen {
+			keys = append(keys, key)
+		}
+		byKey[key] = append(byKey[key], copilotargs.NativeCall{Name: call.Name, Args: append(json.RawMessage(nil), call.Args...)})
+	}
+	for _, key := range keys {
+		if prior, exists := j.entries[key]; exists && now.Sub(prior.at) <= copilotPermissionJoinTTL {
+			prior.ambiguous = true
+			prior.at = now
+			j.entries[key] = prior
+			continue
+		}
+		if !allowed {
+			continue
+		}
 		if len(j.entries) >= copilotPermissionJoinMax {
-			return
+			for old, entry := range j.entries {
+				if now.Sub(entry.at) > copilotPermissionJoinTTL {
+					delete(j.entries, old)
+				}
+			}
+			if len(j.entries) >= copilotPermissionJoinMax {
+				continue
+			}
 		}
+		j.entries[key] = copilotPermissionEntry{calls: byKey[key], uses: len(byKey[key]), at: now}
 	}
-	if raw, _ := req.Payload["toolCalls"].([]any); len(raw) > 1 {
-		calls := copilotNativeToolCalls(req)
-		if !allowed || len(calls) < 2 {
-			return
-		}
-		j.entries[key] = copilotPermissionEntry{calls: append([]copilotargs.NativeCall(nil), calls...), uses: len(calls), at: now}
-		return
-	}
-	if !allowed || req.ToolCallUnparsed || req.ToolArgsProjectionUncertain || req.ToolName == "" || len(req.ToolArgs) == 0 {
-		return
-	}
-	j.entries[key] = copilotPermissionEntry{tool: req.ToolName, args: append(json.RawMessage(nil), req.ToolArgs...), at: now}
 }
 
 // match returns the call of the one prior preToolUse this argumentless
@@ -108,7 +150,8 @@ func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest
 // an empty decoded map. An argumentless callback is unparsed by design (no
 // write evidence), so req.ToolCallUnparsed alone cannot refuse it; any other
 // parser refusal (req.toolCallShapeUnparsed) does. Every callback consumes
-// the prior call, bound or not, so no later callback can reuse it.
+// the prior call of its tool, bound or not, so no later callback can reuse
+// it.
 func (j *copilotPermissionJoin) match(ctx context.Context, req agentHookRequest, raw []byte) (string, json.RawMessage, bool) {
 	calls, ok := j.bind(ctx, req, raw)
 	if !ok {
@@ -119,16 +162,17 @@ func (j *copilotPermissionJoin) match(ctx context.Context, req agentHookRequest,
 
 // bind is match for every call the callback is bound to: the one call of a
 // single preToolUse, or the calls of a parallel envelope the callback's tool
-// can stand for (each envelope callback takes one of its uses).
+// can stand for (each callback takes one of their uses).
 func (j *copilotPermissionJoin) bind(ctx context.Context, req agentHookRequest, raw []byte) ([]copilotargs.NativeCall, bool) {
 	if req.ConnectorName != "copilot" || req.HookEventName != "permissionRequest" ||
 		req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal {
 		return nil, false
 	}
-	key := copilotPermissionKey(ctx, req)
-	if key == "" {
+	scope := copilotPermissionKey(ctx, req)
+	if scope == "" {
 		return nil, false
 	}
+	key := copilotPermissionToolKey(scope, req.ToolName)
 	j.mu.Lock()
 	entry, exists := j.entries[key]
 	if exists && time.Since(entry.at) > copilotPermissionJoinTTL {
@@ -136,15 +180,24 @@ func (j *copilotPermissionJoin) bind(ctx context.Context, req agentHookRequest, 
 		exists = false
 	}
 	if exists {
-		// This callback consumes the one prior call (or one use of an
-		// envelope) even if its tool or argument shape differs. Another
-		// callback cannot bind to it.
+		// This callback consumes one use of the prior calls of its tool
+		// even if its argument shape differs. Another callback cannot
+		// bind to it.
 		if entry.uses > 1 {
 			kept := entry
 			kept.uses--
 			j.entries[key] = kept
 		} else {
 			delete(j.entries, key)
+		}
+	} else {
+		// A callback no preToolUse of its tool announced means the join
+		// lost track of the session's calls: it consumes every prior call
+		// of the scope, so none is bound to a later callback.
+		for other := range j.entries {
+			if strings.HasPrefix(other, scope+"\x00") {
+				delete(j.entries, other)
+			}
 		}
 	}
 	j.mu.Unlock()
@@ -153,19 +206,13 @@ func (j *copilotPermissionJoin) bind(ctx context.Context, req agentHookRequest, 
 		!copilotEmptyPermissionArgs(req.Payload) {
 		return nil, false
 	}
-	if len(entry.calls) > 0 {
-		var bound []copilotargs.NativeCall
-		for _, call := range entry.calls {
-			if copilotPermissionToolMatches(call.Name, req.ToolName) {
-				bound = append(bound, copilotargs.NativeCall{Name: call.Name, Args: append(json.RawMessage(nil), call.Args...)})
-			}
+	var bound []copilotargs.NativeCall
+	for _, call := range entry.calls {
+		if copilotPermissionToolMatches(call.Name, req.ToolName) {
+			bound = append(bound, copilotargs.NativeCall{Name: call.Name, Args: append(json.RawMessage(nil), call.Args...)})
 		}
-		return bound, len(bound) > 0
 	}
-	if !copilotPermissionToolMatches(entry.tool, req.ToolName) {
-		return nil, false
-	}
-	return []copilotargs.NativeCall{{Name: entry.tool, Args: append(json.RawMessage(nil), entry.args...)}}, true
+	return bound, len(bound) > 0
 }
 
 func copilotPermissionToolMatches(pre, permission string) bool {

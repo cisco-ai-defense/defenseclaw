@@ -156,12 +156,13 @@ func TestCopilotPermissionJoinCapacityStillInvalidatesPrior(t *testing.T) {
 	ctx := context.Background()
 	pre := agentHookRequest{ConnectorName: "copilot", HookEventName: "preToolUse", SessionID: "native",
 		CWD: "/tmp/native", ToolName: "apply_patch"}
-	key := copilotPermissionKey(ctx, pre)
-	if key == "" {
+	scope := copilotPermissionKey(ctx, pre)
+	if scope == "" {
 		t.Fatal("expected verified per-user scope")
 	}
 	join := copilotPermissionJoin{entries: map[string]copilotPermissionEntry{
-		key: {tool: "apply_patch", args: json.RawMessage(`"*** Begin Patch\n*** Add File: README.md\n+x\n*** End Patch\n"`), at: time.Now()},
+		copilotPermissionToolKey(scope, "apply_patch"): {calls: []copilotargs.NativeCall{{Name: "apply_patch",
+			Args: json.RawMessage(`"*** Begin Patch\n*** Add File: README.md\n+x\n*** End Patch\n"`)}}, uses: 1, at: time.Now()},
 	}}
 	for i := 1; i < copilotPermissionJoinMax; i++ {
 		join.entries["other"+strconv.Itoa(i)] = copilotPermissionEntry{at: time.Now()}
