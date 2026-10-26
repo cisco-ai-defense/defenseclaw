@@ -23,7 +23,7 @@ DefenseClaw scans Codex at three points: `UserPromptSubmit` for prompts, `PreToo
    defenseclaw setup codex --yes --mode action --restart
    ```
 
-   Setup also wires Codex's native OpenTelemetry. On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. An OpenShell sandbox registers its own ([Codex reference](/docs/reference/connectors/codex#openshell-sandbox)).
+   Host setup does not wire Codex's native OpenTelemetry; only an isolated OpenShell sandbox uses it. On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. An OpenShell sandbox registers its own ([Codex reference](/docs/reference/connectors/codex#openshell-sandbox)).
 
 2. Optional: add the judge. With `regex_judge`, the local rules run first. A result that already blocks, or is CRITICAL, skips the judge. Anything else goes to the judge and the stricter verdict wins. If the judge fails or times out, the local verdict stands.
 
