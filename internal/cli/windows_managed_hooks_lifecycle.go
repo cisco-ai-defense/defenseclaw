@@ -467,12 +467,11 @@ func runWindowsManagedHooksLifecycleWithStagedRetire(
 	case "retire":
 		journal, err := readWindowsManagedHooksLifecycleJournal(ctx.journalPath)
 		if errors.Is(err, os.ErrNotExist) {
-			if err := validateWindowsManagedHooksLifecycleRetirement(
-				pendingExists,
-				nil,
-			); err != nil {
+			skipped, collected, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, pendingExists, stagedRetire)
+			if err != nil {
 				return fail(err)
 			}
+			report.RetireSkipped, report.Collected = skipped, collected
 			report.Phase = "absent"
 			break
 		}
@@ -523,6 +522,29 @@ func runWindowsManagedHooksLifecycleWithStagedRetire(
 	}
 	report.OK = true
 	return report, nil
+}
+
+// retireAbsentWindowsManagedHooksLifecycleJournal is a retire with no
+// journal. Run by the replacement (staged) gateway, it is the retire an
+// upgrade or repair with no committed journal runs before it opens its
+// transaction: the generation collection of the current targets, with the
+// classification the retire after its commit applies. A selected bundle that
+// classification refuses (unsupported schema, malformed JSON) stops the
+// lifecycle before anything changed, instead of after its commit with a
+// journal left behind and 1603 (GAP-0822). An installed gateway's retire with
+// no journal has nothing to do.
+func retireAbsentWindowsManagedHooksLifecycleJournal(
+	ctx windowsManagedHooksLifecycleContext,
+	pendingExists bool,
+	staged bool,
+) ([]string, int, error) {
+	if err := validateWindowsManagedHooksLifecycleRetirement(pendingExists, nil); err != nil {
+		return nil, 0, err
+	}
+	if !staged {
+		return nil, 0, nil
+	}
+	return garbageCollectWindowsManagedHooksLifecycleGenerations(windowsManagedHooksLifecycleJournal{}, ctx)
 }
 
 func validateWindowsManagedHooksLifecycleRetirement(

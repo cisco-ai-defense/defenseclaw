@@ -34203,6 +34203,32 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             }
         }
     }
+    elseif ($priorDeploymentActive -and
+        (Test-DefenseClawStandaloneProfile) -and
+        $Sources.ContainsKey('gateway')) {
+        # With no committed journal the replacement gateway first classified
+        # the per-user runtime bundles after the commit: a selected bundle it
+        # refuses (malformed JSON, unsupported schema) failed an upgrade that
+        # had already committed, with its journal left and 1603 (GAP-0822).
+        # Its staged retire runs the same classification and collection now,
+        # before the transaction opens, so such a bundle stops the lifecycle
+        # with nothing changed.
+        try {
+            [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GatewaySource $Sources['gateway'] `
+                -Action retire)
+        }
+        catch {
+            throw (
+                "$Action stopped before it changed anything: the new release refuses a per-user managed " +
+                'runtime bundle that its upgrade would retire. The error names the connector and the account; ' +
+                'have an administrator remove that account''s damaged bundle from its .defenseclaw\hooks folder, ' +
+                "then run Setup /ensure again. $($_.Exception.Message)"
+            )
+        }
+    }
     $earlyHookSource = $null
     if ($Sources.ContainsKey('hook')) {
         $earlyHookSource = $Sources['hook']

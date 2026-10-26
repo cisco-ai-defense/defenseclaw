@@ -682,6 +682,49 @@ func TestWindowsManagedHooksLifecycleCollectOutsideATransaction(t *testing.T) {
 	}
 }
 
+// GAP-0822: an upgrade with no committed journal ran the replacement
+// gateway's generation collection only after its commit, so a selected
+// bundle it refuses (malformed JSON) failed the upgrade after it committed,
+// with a journal left and 1603. The staged retire Setup now runs before the
+// transaction classifies the current targets the same way and fails there;
+// the installed gateway's retire with no journal still does nothing.
+func TestWindowsManagedHooksStagedRetireWithNoJournalClassifiesBeforeTheTransaction(t *testing.T) {
+	originalGC := windowsManagedHooksLifecycleGenerationGC
+	t.Cleanup(func() { windowsManagedHooksLifecycleGenerationGC = originalGC })
+
+	const sid = "S-1-5-21-111-222-333-1017"
+	ctx := windowsManagedHooksLifecycleContext{
+		journalPath: filepath.Join(t.TempDir(), windowsManagedHooksLifecycleJournalFile),
+		targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "opencode", SID: sid, DataDir: `C:\Users\std1\.defenseclaw`},
+		},
+	}
+	ctx.opts.HookBinary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	calls := 0
+	windowsManagedHooksLifecycleGenerationGC = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) (int, error) {
+		calls++
+		return 0, errors.New("enterprise hooks: decode managed runtime bundle: unexpected EOF")
+	}
+	if _, _, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, false); err != nil || calls != 0 {
+		t.Fatalf("installed retire with no journal: err=%v gc calls=%d, want nothing done", err, calls)
+	}
+	_, _, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true)
+	if err == nil || calls != 1 || !strings.Contains(err.Error(), "retire opencode managed runtime generations for SID "+sid) ||
+		!strings.Contains(err.Error(), "decode managed runtime bundle") {
+		t.Fatalf("staged retire with no journal: err=%v gc calls=%d, want the bundle refusal before the transaction", err, calls)
+	}
+	windowsManagedHooksLifecycleGenerationGC = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) (int, error) {
+		return 2, nil
+	}
+	if _, collected, err := retireAbsentWindowsManagedHooksLifecycleJournal(ctx, false, true); err != nil || collected != 2 {
+		t.Fatalf("staged retire over healthy bundles: collected=%d err=%v", collected, err)
+	}
+}
+
 func TestRenameWindowsManagedHooksLifecycleRecoveryHandleIsDurableAndNoReplace(t *testing.T) {
 	root := t.TempDir()
 	sourcePath := filepath.Join(root, "legacy-journal.json")
