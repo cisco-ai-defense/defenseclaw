@@ -73,7 +73,11 @@ func TestLaunchPathLookupRunsOutOfProcess(t *testing.T) {
 	if !sameLaunchDirIdentity(a, b) || sameLaunchDirIdentity(a, c) || sameLaunchDirIdentity(f, f) {
 		t.Fatalf("identities: dir %+v link %+v other %+v file %+v", a, b, c, f)
 	}
-	for _, path := range []string{filepath.Join(root, "absent"), filepath.Join(file, "below")} {
+	dangling := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(root, "nowhere"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(root, "absent"), filepath.Join(file, "below"), dangling} {
 		_, childErr := lookupLaunchPathOutOfProcess(path)
 		_, localErr := lookup(path)
 		if errors.Is(localErr, fs.ErrNotExist) != errors.Is(childErr, fs.ErrNotExist) || childErr == nil {

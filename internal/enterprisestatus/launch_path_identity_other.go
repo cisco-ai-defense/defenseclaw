@@ -119,8 +119,18 @@ func lookupLaunchPathOutOfProcess(path string) (launchDirIdentity, error) {
 		}
 		return launchDirIdentity{}, fmt.Errorf("stat %s: %w", path, err)
 	}
-	return parseLaunchPathStat(stdout.String())
+	id, err := parseLaunchPathStat(stdout.String())
+	if errors.Is(err, errLaunchPathStatLink) {
+		// BSD stat -L falls back to lstat for a dangling link and answers
+		// with the link itself; os.Stat and GNU stat give ENOENT (GAP-1754).
+		return launchDirIdentity{}, &fs.PathError{Op: "stat", Path: path, Err: syscall.ENOENT}
+	}
+	return id, err
 }
+
+// errLaunchPathStatLink is the answer of a followed lookup that names a
+// link: the link leads nowhere.
+var errLaunchPathStatLink = errors.New("the followed lookup answered with a link")
 
 // parseLaunchPathStat reads "device inode mode", the mode in hexadecimal.
 func parseLaunchPathStat(out string) (launchDirIdentity, error) {
@@ -139,6 +149,9 @@ func parseLaunchPathStat(out string) (launchDirIdentity, error) {
 	mode, err := strconv.ParseUint(fields[2], 16, 32)
 	if err != nil {
 		return launchDirIdentity{}, fmt.Errorf("unexpected stat mode %q", fields[2])
+	}
+	if mode&syscall.S_IFMT == syscall.S_IFLNK {
+		return launchDirIdentity{}, errLaunchPathStatLink
 	}
 	return launchDirIdentity{dev: dev, ino: ino, dir: mode&syscall.S_IFMT == syscall.S_IFDIR}, nil
 }
