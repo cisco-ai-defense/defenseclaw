@@ -932,3 +932,26 @@ func TestFleetSQLiteAddsBootCounterToExistingDeviceDatabase(t *testing.T) {
 		t.Fatalf("reloaded boot counter=%+v err=%v", reloaded, err)
 	}
 }
+
+// GAP-0569: the fleet API's own JSON error bodies (credential delivery over
+// plain HTTP, a missing CSRF header) are sent as application/json, as the API
+// reference says, not text/plain.
+func TestFleetJSONErrorsAreApplicationJSON(t *testing.T) {
+	t.Setenv("DCLAW_FLEET_API_TOKEN", "admin-review")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	api := NewAPI(ctx, manager.New(nil), securityTestCache(), WithAuditEmitter(&passingCredentialAudit{}))
+	plain := securityTestRequest(api, http.MethodPost, "/token/rotate", "admin-review", "{}", false)
+	req := httptest.NewRequest(http.MethodPost, "/token/rotate", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer admin-review")
+	req.Header.Set("Content-Type", "application/json")
+	noCSRF := httptest.NewRecorder()
+	api.Handler().ServeHTTP(noCSRF, req)
+	for name, got := range map[string]*httptest.ResponseRecorder{"plain HTTP rotate": plain, "missing CSRF header": noCSRF} {
+		var body map[string]string
+		if got.Code != http.StatusForbidden || got.Header().Get("Content-Type") != "application/json" ||
+			json.Unmarshal(got.Body.Bytes(), &body) != nil || body["error"] == "" {
+			t.Fatalf("%s: status %d, Content-Type %q, body %q", name, got.Code, got.Header().Get("Content-Type"), got.Body.String())
+		}
+	}
+}
