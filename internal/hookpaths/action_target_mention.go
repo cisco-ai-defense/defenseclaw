@@ -219,6 +219,11 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 // word whatever builds the prefix (GAP-1732, the GAP-0475 class).
 var actionInterpreterKeyPath = regexp.MustCompile(`\.ssh(?:['"\s,/+)\\]|os\.sep|File::Spec|path\.sep){1,12}authorized_keys2?\b`)
 
+// actionInterpreterHomeCall matches the home spellings the interpreter-path
+// proof already judges with its binding rules (Path.home(), expanduser:
+// GAP-0475, a path bound again before the write, GAP-1299).
+var actionInterpreterHomeCall = regexp.MustCompile(`Path\.home\(\)|expanduser\(`)
+
 // actionInterpreterCodeWrites reports a writer call (open, write_text,
 // appendFileSync ...) in executable code, not inside a string or comment:
 // a path built only inside inert text writes nothing (GAP-0475 row).
@@ -250,7 +255,8 @@ func actionInterpreterBuildsKeyPath(file *syntax.File, home string) bool {
 		}
 		language := programBase(program)
 		if code, _, ok := interpreterCodeOperand(call, language, home); ok &&
-			actionInterpreterKeyPath.MatchString(code) && actionInterpreterCodeWrites(code, language) {
+			actionInterpreterKeyPath.MatchString(code) && actionInterpreterCodeWrites(code, language) &&
+			!actionInterpreterHomeCall.MatchString(code) {
 			found = true
 		}
 		return !found
