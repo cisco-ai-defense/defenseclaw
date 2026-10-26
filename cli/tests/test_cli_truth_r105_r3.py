@@ -74,3 +74,15 @@ def test_unset_keeps_an_entry_that_puts_the_connector_on_the_roster(tmp_path: Pa
     import yaml
 
     assert yaml.safe_load(path.read_text())["guardrail"]["connectors"] == {"codex": {}}
+
+
+def test_one_unset_of_the_last_two_profiles_restores_the_exact_bytes(tmp_path: Path, monkeypatch) -> None:
+    # GAP-1746: a multi-key unset prunes as the one-at-a-time unsets do.
+    path = _config(tmp_path, monkeypatch, "guardrail:\n  enabled: true\n")
+    before = path.read_bytes()
+    for name in ("a", "b"):
+        added = _run("set", f"guardrail.profiles.{name}.description", f"temp {name}")
+        assert added.exit_code == 0, added.output
+    removed = _run("unset", "guardrail.profiles.a", "guardrail.profiles.b")
+    assert removed.exit_code == 0, removed.output
+    assert path.read_bytes() == before, path.read_text()

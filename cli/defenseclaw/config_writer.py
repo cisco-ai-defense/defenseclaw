@@ -1009,6 +1009,12 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
                         break
                     parts = parts[:-1]
             mutations.append(V8YAMLMutation.delete(parts))
+            # The next unset of this batch prunes against the document as
+            # this one leaves it: unsetting the last two profiles together
+            # left profiles: {} (GAP-1746).
+            parent = _lookup(document, parts[:-1]) if len(parts) > 1 else document
+            if isinstance(parent, dict) and isinstance(parts[-1], str):
+                parent.pop(parts[-1], None)
         else:
             if before is not _MISSING and _same_config_value(before, change.value):
                 continue
