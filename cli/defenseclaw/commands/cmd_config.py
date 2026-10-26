@@ -1031,7 +1031,8 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
                 raise click.ClickException(f"{_destination_not_set(key, parts, view)} config.yaml was not changed.")
             raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
     roster = _guarded_connector_modes(app)
-    if _write_config_change(app, [Change(key, unset=True) for key in keys], expect_sha256, "unset"):
+    changes = [Change(key, unset=True, prune_empty_to=_unset_prune_scope(parts)) for key, parts in parsed]
+    if _write_config_change(app, changes, expect_sha256, "unset"):
         for note in _left_roster_notes(parsed, roster):
             click.echo(note)
         return
@@ -1120,6 +1121,47 @@ def _lookup(data: object, parts: list[str]) -> tuple[bool, object]:
         else:
             return False, None
     return True, value
+
+
+def _unset_prune_scope(parts: list) -> str:
+    """The scope ``config unset`` keeps when it removes a key's last child.
+
+    The unset also removes the parent maps it leaves empty, so undoing the
+    last edit of a scope restores the file as it was (GAP-0967), up to the
+    deepest scope whose emptiness means something: the top-level section,
+    an entry of a named map (``guardrail.connectors.codex``,
+    ``guardrail.profiles.p``: present even when it is ``{}``) or a map whose
+    schema default is not empty. A path through a list is not pruned.
+    """
+    if any(not isinstance(part, str) for part in parts):
+        return ""
+    schema = _v8_schema()
+    if not schema:
+        return ""
+    defs = schema.get("$defs") or {}
+
+    def _resolve(node: object) -> object:
+        while isinstance(node, dict) and "$ref" in node:
+            node = defs.get(str(node["$ref"]).rsplit("/", 1)[-1])
+        return node
+
+    keep = 1
+    node: object = schema
+    for index, part in enumerate(parts[:-1]):
+        node = _resolve(node)
+        if not isinstance(node, dict):
+            break
+        properties = node.get("properties") or {}
+        if part in properties:
+            node = properties[part]
+            if (_resolve(node) or {}).get("default") not in (None, {}, []):
+                keep = index + 1
+        elif isinstance(node.get("additionalProperties"), dict):
+            node = node["additionalProperties"]
+            keep = index + 1
+        else:
+            break
+    return ".".join(parts[:keep])
 
 
 def _unlisted_entry_key(parts: list) -> bool:
