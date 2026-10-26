@@ -884,7 +884,9 @@ func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatu
 			// CLI the custody check refused to run (GAP-0594).
 			cause := "the installed CLI reported no effective policy digest"
 			if err != nil {
-				cause = err.Error()
+				// A custody refusal names the account and the icacls
+				// command that clears it, as the folder case does (GAP-0594).
+				cause = windowsEnterpriseNamePrincipals(err.Error())
 			}
 			message := "the effective policy the gateway enforces could not be checked: " + cause
 			if result.Action == "verify" {

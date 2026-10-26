@@ -3134,6 +3134,9 @@ func TestWindowsEnterprisePolicyNamesADigestItCouldNotRead(t *testing.T) {
 	}{
 		"custody refused": {err: errors.New(`refuse to run the installed CLI: C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe is writable by BUILTIN\Users`),
 			code: "policy_unverified", contains: "refuse to run the installed CLI"},
+		// GAP-0594: the custody refusal names the icacls fix.
+		"custody refused writer": {err: errors.New(`refuse to run the installed CLI: C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe: untrusted Windows principal S-1-5-32-545 has write-like access mask 0x1301bf`),
+			code: "policy_unverified", contains: `Fix: icacls "C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe" /remove:g *S-1-5-32-545`},
 		"run failed":    {err: errors.New("exit status 1"), code: "policy_unverified", contains: "exit status 1"},
 		"no digest":     {out: `{}`, code: "policy_unverified", contains: "no effective policy digest"},
 		"not buildable": {out: `{"error":"rule pack \"p\": digest does not match","gateway_reported_digest":"sha256:aa"}`, code: "policy_not_buildable"},
