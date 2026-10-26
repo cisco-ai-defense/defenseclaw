@@ -1417,6 +1417,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1670", page: "reference/connectors/cursor.mdx", section: "Fail mode", has: ["the default and permissive policies let the call run with a warning, strict blocks it"], lacks: ["still blocks supported events during a gateway outage by default"] },
   { gap: "GAP-1683", page: "reference/connectors/codex.mdx", has: ["host setup removes only exporters that carry a DefenseClaw credential", "your own exporters stay"], lacks: ["host upgrades remove old exporters"] },
   { gap: "GAP-1702", page: "reference/connectors/codex.mdx", section: "Install surface", has: ["`/etc/codex/requirements.toml` with `/opt/defenseclaw/bin/defenseclaw-hook` on Linux"] },
+  { gap: "GAP-1315", page: "connectors/codex.mdx", section: "On a managed computer", has: ["when it reconciles an enrolled account", "for an account that is not enrolled the preference stays"], lacks: ["removes that conflicting user preference during reconciliation"] },
   // r105-rows-end
 ];
 
