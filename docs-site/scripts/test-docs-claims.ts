@@ -1506,6 +1506,16 @@ describe('scanner settings warning (GAP-1648)', () => {
   });
 });
 
+describe('edge API examples carry every response field (GAP-1632)', () => {
+  it('names each Device JSON field and the list paging keys', () => {
+    const fields = [...source('internal/fleet/manager/manager.go').split('type Device struct')[1].split('\n}')[0].matchAll(/json:"([a-z_]+)"/g)].map((m) => m[1]);
+    assert.ok(fields.length >= 25, `Device has ${fields.length} JSON fields`);
+    const api = page('reference/edge-connector/api.mdx');
+    for (const field of fields) assert.ok(api.includes(`"${field}":`), `api.mdx device example lacks ${field}`);
+    for (const key of ['"limit": 10000', '"offset": 0', '"total": 150']) assert.ok(api.includes(key), key);
+  });
+});
+
 describe('1.0.5 docs rows', () => {
   for (const row of r105Rows) {
     it(`${row.gap}: ${row.page}${row.section ? ` "${row.section}"` : ''}`, () => {
