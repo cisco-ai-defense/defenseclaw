@@ -168,7 +168,13 @@ class Change:
     unset: bool = False
     # For a rule override removal, discard empty parent maps up to this path.
     # Global connector entries stop at rules: an empty entry means enabled.
+    # PRUNE_TO_TOP also removes a top-level section the unset leaves empty.
     prune_empty_to: str = ""
+
+
+# ``Change.prune_empty_to`` that stops at the document: an empty top-level
+# section goes too (GAP-0967).
+PRUNE_TO_TOP = "<top>"
 
 
 @dataclass(frozen=True)
@@ -1000,7 +1006,7 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
             if before is _MISSING:
                 continue
             if change.prune_empty_to:
-                stop = parse_path(change.prune_empty_to)
+                stop = () if change.prune_empty_to == PRUNE_TO_TOP else parse_path(change.prune_empty_to)
                 # Delete an empty child of the stop scope, never the scope itself.
                 # An assigned guardrail profile remains valid even when it is {}.
                 while len(parts) > len(stop) + 1 and parts[: len(stop)] == stop:

@@ -173,3 +173,19 @@ def test_a_probe_that_cannot_run_says_the_destination_is_saved_untested(monkeypa
     assert "the live probe did not run: the gateway is not running" in out
     assert "saved untested" in out
     assert "defenseclaw observability destination test splunk-enterprise" in out
+
+
+@pytest.mark.parametrize("key", ["scanners.mcp_scanner.scan_prompts", "scanners.mcp_scanner.unverified_server"])
+@pytest.mark.parametrize("body", ["guardrail:\n  enabled: true\n", "scanners:\n  skill_scanner:\n    policy: strict\n"])
+def test_unset_of_a_scanner_key_the_set_added_restores_the_exact_bytes(tmp_path: Path, monkeypatch, key, body) -> None:
+    # GAP-0967 (carry verify w2): the set created scanners.mcp_scanner (and
+    # scanners) and the unset left 'scanners: {}' behind.
+    path = _config(tmp_path, monkeypatch, body)
+    before = path.read_bytes()
+    value = "true" if key.endswith("scan_prompts") else "block"
+    added = _run("set", key, value)
+    assert added.exit_code == 0, added.output
+    assert path.read_bytes() != before
+    removed = _run("unset", key)
+    assert removed.exit_code == 0, removed.output
+    assert path.read_bytes() == before, path.read_text()

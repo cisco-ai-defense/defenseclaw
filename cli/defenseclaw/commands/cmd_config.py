@@ -1204,10 +1204,11 @@ def _unset_prune_scope(parts: list) -> str:
 
     The unset also removes the parent maps it leaves empty, so undoing the
     last edit of a scope restores the file as it was (GAP-0967), up to the
-    deepest scope whose emptiness means something: the top-level section,
-    an entry of a named map (``guardrail.connectors.codex``,
-    ``guardrail.profiles.p``: present even when it is ``{}``) or a map whose
-    schema default is not empty. A path through a list is not pruned.
+    deepest scope whose emptiness means something: an entry of a named map
+    (``guardrail.connectors.codex``, ``guardrail.profiles.p``: present even
+    when it is ``{}``) or a map whose schema default is not empty. A top-level
+    section left empty goes too (``scanners: {}`` reads as no section), and
+    a path through a list is not pruned.
     """
     if any(not isinstance(part, str) for part in parts):
         return ""
@@ -1221,7 +1222,7 @@ def _unset_prune_scope(parts: list) -> str:
             node = defs.get(str(node["$ref"]).rsplit("/", 1)[-1])
         return node
 
-    keep = 1
+    keep = 0
     node: object = schema
     for index, part in enumerate(parts[:-1]):
         node = _resolve(node)
@@ -1237,6 +1238,10 @@ def _unset_prune_scope(parts: list) -> str:
             keep = index + 1
         else:
             break
+    if keep == 0:
+        from defenseclaw.config_writer import PRUNE_TO_TOP
+
+        return PRUNE_TO_TOP
     return ".".join(parts[:keep])
 
 
