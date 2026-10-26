@@ -268,12 +268,10 @@ func TestWindowsEnterpriseHotConfigClosureSurvivesUntilPolicyProof(t *testing.T)
 			// OK is left as Finish leaves it before it runs (false): the
 			// error list decides (GAP-1599).
 			result.Installed = true
-			code := 0
 			if !tc.verified {
 				result.AddError("lifecycle_error", "ensure failed")
-				code = 1
 			}
-			err := windowsEnterpriseReleaseHotConfigClosureIfProven(context.Background(), result, code)
+			err := windowsEnterpriseReleaseHotConfigClosureIfProven(context.Background(), result)
 			if tc.wantRelease {
 				if err != nil || host.closureHeld || host.releases != 1 {
 					t.Fatalf("proven recovery: err=%v held=%t releases=%d", err, host.closureHeld, host.releases)
@@ -329,6 +327,50 @@ func TestWindowsEnterpriseHeldHookClosureIsReportedAndReleased(t *testing.T) {
 			}
 			if !windowsBundleHasCode(messages, tc.wantCode) || !strings.Contains(messages[len(messages)-1].Message, "/repair") {
 				t.Fatalf("held closure not named: errors=%v warnings=%v", result.Errors, result.Warnings)
+			}
+		})
+	}
+}
+
+// GAP-2087: a clean ensure releases a held closure once the gateway proves
+// the installed config, through the exit every ensure takes (its failure
+// code is nonzero even for a clean run); when the gateway proves nothing,
+// ensure fails and names the closure instead of reporting compliant.
+func TestWindowsEnterpriseEnsureSettlesAHeldHookClosure(t *testing.T) {
+	const config = "config_version: 9\nguardrail:\n  hook_fail_mode: open\n"
+	for _, digestFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("digestFails=%t", digestFails), func(t *testing.T) {
+			host, opts := newHotConfigHost(t, config, config)
+			host.closureHeld, host.adopted = true, true
+			digest := windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterprisePolicyDigest = digest })
+			opts.configPath = ""
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+			stub.install(t)
+			windowsEnterprisePolicyDigest = host.digest
+			if digestFails {
+				windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, errors.New("readback unavailable") }
+			}
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			runErr := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("ensure output: %v\n%s", err, stdout.String())
+			}
+			if !digestFails {
+				if runErr != nil || host.closureHeld || host.releases != 1 || !result.OK || result.Noop {
+					t.Fatalf("clean ensure kept the closure: err=%v held=%t releases=%d ok=%t noop=%t errors=%v",
+						runErr, host.closureHeld, host.releases, result.OK, result.Noop, result.Errors)
+				}
+				return
+			}
+			if runErr == nil || !host.closureHeld || host.releases != 0 || result.OK ||
+				!windowsBundleHasCode(result.Errors, "hook_closure_held") {
+				t.Fatalf("unproven ensure: err=%v held=%t releases=%d ok=%t errors=%v",
+					runErr, host.closureHeld, host.releases, result.OK, result.Errors)
 			}
 		})
 	}

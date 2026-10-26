@@ -722,9 +722,10 @@ func settleWindowsEnterpriseHotConfigClosure(ctx context.Context, result *enterp
 	}
 	reason := ""
 	if action != "status" && windowsEnterpriseIsElevated() && len(result.Errors) == 0 {
-		err := windowsEnterpriseReleaseHotConfigClosureIfProven(ctx, result, 0)
+		err := windowsEnterpriseReleaseHotConfigClosureIfProven(ctx, result)
 		if held, heldErr := windowsEnterpriseHotConfigHooksHeld(); err == nil && heldErr == nil && !held {
 			result.Changes = append(result.Changes, "released the standalone hook closure a failed config undo left; the gateway proves the installed config's policy")
+			result.Noop, result.NoopReason = false, ""
 			return
 		}
 		if err != nil {
@@ -3542,9 +3543,13 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				code = windowsEnterpriseFailureCodeFor(result)
 			}
 		}
-		if err := windowsEnterpriseReleaseHotConfigClosureIfProven(ctx, result, code); err != nil {
-			result.AddError("hook_closure_release_failed", "standalone hooks remain closed after the unproven config undo: "+
-				windowsEnterpriseBoundedDiagnostic(err.Error())+"; rerun ensure after repairing the gateway")
+		// Every exit passes windowsEnterpriseFailureCodeFor, which is nonzero
+		// even for a clean run, so the closure is settled on the error list
+		// as repair and verify settle it: released once the gateway proves
+		// the installed config, otherwise named (GAP-2087).
+		errorsBefore := len(result.Errors)
+		settleWindowsEnterpriseHotConfigClosure(ctx, result, "ensure")
+		if len(result.Errors) != errorsBefore {
 			code = windowsEnterpriseFailureCodeFor(result)
 		}
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, code)
@@ -3942,10 +3947,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 }
 
-func windowsEnterpriseReleaseHotConfigClosureIfProven(ctx context.Context, result *enterprisestatus.Result, code int) error {
-	// Finish sets result.OK only after this runs, so the error list is the
-	// verdict: gating on OK kept every closure for good (GAP-1599).
-	if code != 0 || len(result.Errors) != 0 || !result.Installed {
+func windowsEnterpriseReleaseHotConfigClosureIfProven(ctx context.Context, result *enterprisestatus.Result) error {
+	// Finish sets result.OK only after this runs, and no exit code is final
+	// before it either, so the error list is the verdict: gating on OK
+	// (GAP-1599) or on the failure code (GAP-2087) kept every closure.
+	if len(result.Errors) != 0 || !result.Installed {
 		return nil
 	}
 	// A failed hot-config undo left this administrator-owned closure across
