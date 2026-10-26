@@ -821,9 +821,12 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
             _check_connector_inventory(cfg, "codex", r)
         labels = {c["label"]: c for c in r.checks}
         self.assertIn("Mode", labels)
+        # Without hooks/.hookcfg the native Windows hook fails closed on its
+        # own (no-installed-mode); a POSIX hook falls back to config.
+        provenance = "no-installed-mode" if os.name == "nt" else "config"
         self.assertEqual(
             labels["Mode"]["detail"],
-            "action; fail-mode=closed; provenance=config",
+            f"action; fail-mode=closed; provenance={provenance}",
         )
         self.assertIn("Rule pack", labels)
 
