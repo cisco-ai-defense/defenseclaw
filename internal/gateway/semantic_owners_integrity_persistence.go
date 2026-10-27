@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -163,11 +164,43 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	"COG-OPENCLAW-JSON": integrityMutationOwner(
 		matchesAgentConfigCandidate, matchesActiveAgentConfig, nil,
 	),
-	"tamper.detector_state_write": integrityMutationOwner(
+	"tamper.detector_state_write": activeStateMutationOwner(),
+}
+
+// activeStateMutationOwner is the integrity owner of DefenseClaw's active
+// state, where moving a protected file or tree away removes it as surely as
+// deleting it: a move source is a mutation here (GAP-1774), and so is a
+// chmod that adds group or other write (GAP-2077), while the other
+// integrity owners keep judging only the move destination.
+func activeStateMutationOwner() semanticOwner {
+	owner := integrityMutationOwner(
 		matchesDefenseClawStateCandidate,
 		matchesActiveDefenseClawState,
 		matchesSafeDefenseClawStateCandidate,
-	),
+	)
+	owner.prerequisite = func(facts actionfacts.Facts) bool {
+		for _, candidate := range facts.Paths {
+			command, ok := integrityCommandByID(facts, candidate.CommandID)
+			if !ok || !matchesActiveDefenseClawState(facts, candidate) {
+				continue
+			}
+			if integrityCommandMutatesPath(command, candidate) ||
+				command.Effect == actionfacts.EffectExecute &&
+					candidate.Access == actionfacts.PathAccessDelete &&
+					hasOperation(command, actionfacts.OperationMove) {
+				return true
+			}
+			// A chmod that gives group or other write to state hands it
+			// to another account (GAP-2077); tightening is not a change.
+			if command.Effect == actionfacts.EffectExecute &&
+				candidate.Access == actionfacts.PathAccessMetadata &&
+				strings.EqualFold(command.Program, "chmod") && chmodAddsGroupOrOtherWrite(command) {
+				return true
+			}
+		}
+		return false
+	}
+	return owner
 }
 
 // The dispatcher integrates these aliases only after the command-specific
@@ -2504,11 +2537,19 @@ func matchesActiveDefenseClawState(
 	if runtime.GOOS == "linux" && candidate.Flavor == actionfacts.PathFlavorPOSIX {
 		relative, ok = exactActiveDefenseClawRelative(facts, candidate)
 	}
-	if !ok || !strings.HasPrefix(relative, ".defenseclaw/") {
+	relative = strings.TrimRight(relative, "/")
+	if !ok || relative != ".defenseclaw" && !strings.HasPrefix(relative, ".defenseclaw/") {
 		return false
 	}
-	state := strings.TrimPrefix(relative, ".defenseclaw/")
+	state := strings.TrimPrefix(strings.TrimPrefix(relative, ".defenseclaw"), "/")
 	switch state {
+	// The state root and the protected trees themselves: removing,
+	// moving or replacing one removes every file in it (GAP-1774). Removing
+	// hooks/ turns protection off; removing installer/ breaks rollback.
+	// Any other access is judged by the file it reaches (GAP-2045).
+	case "", "cache", "hooks", "installer", "policies", "previous",
+		"previous/installer", "quarantine", "receipts", "registries":
+		return stateTreeEntryChanged(facts, candidate, state)
 	case ".env", "config.yaml", "confidence_policy.yaml",
 		"guardrail_runtime.json", "device.key", "picked_connector",
 		"custom-providers.json", "audit.db", "audit.db-wal",
@@ -2516,10 +2557,15 @@ func matchesActiveDefenseClawState(
 		"judge_bodies.db", "judge_bodies.db-wal", "judge_bodies.db-shm":
 		return true
 	}
+	// installer/ and previous/installer/ hold the saved installer the
+	// upgrade and rollback paths run (GAP-1099); its digest record is
+	// receipts/installer.sha256.
 	for _, prefix := range []string{
 		"cache/",
 		"hooks/",
+		"installer/",
 		"policies/",
+		"previous/installer/",
 		"quarantine/",
 		"receipts/",
 		"registries/",
@@ -2527,6 +2573,270 @@ func matchesActiveDefenseClawState(
 		if strings.HasPrefix(state, prefix) &&
 			strings.TrimPrefix(state, prefix) != "" {
 			return true
+		}
+	}
+	return false
+}
+
+// stateTreeEntryChanged judges an operand that names the state root or a
+// protected tree itself, not a file in it (GAP-1774, GAP-2045). Removing
+// the tree (a delete operand or a move source; a find -delete only when no
+// test narrows it to some entries) changes it, and so does a copy or move
+// onto a tree name, which replaces the tree or lands in it. A copy or move
+// into the root is judged by the name it lands on. Every other access
+// (mkdir -p, touch, chown -R, a read or a list) reaches the directory, not
+// a protected file, so the result never depends on how a destination
+// directory is spelled.
+func stateTreeEntryChanged(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+	state string,
+) bool {
+	command, ok := integrityCommandByID(facts, candidate.CommandID)
+	if !ok {
+		return false
+	}
+	switch candidate.Access {
+	case actionfacts.PathAccessDelete:
+		return !findDeletesOnlyUnprotectedNames(command, state)
+	case actionfacts.PathAccessMetadata:
+		// chmod that lets group or other write the root or a tree hands
+		// every file in it to another account, and a world-writable
+		// hooks/ makes every hook fail closed (GAP-2077). Tightening
+		// modes and chown/chgrp are judged by the file reached.
+		return strings.EqualFold(command.Program, "chmod") && chmodAddsGroupOrOtherWrite(command)
+	case actionfacts.PathAccessWrite:
+		if !hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove) {
+			return false
+		}
+		if state != "" {
+			return true
+		}
+		destination := strings.TrimRight(strings.ReplaceAll(exactSemanticPathValue(candidate), `\`, "/"), "/")
+		for _, source := range facts.Paths {
+			if source.CommandID != candidate.CommandID || source.Access == actionfacts.PathAccessWrite {
+				continue
+			}
+			base := path.Base(strings.TrimRight(strings.ReplaceAll(exactSemanticPathValue(source), `\`, "/"), "/"))
+			if base == "." || base == ".." || base == "/" || destination == "" {
+				continue
+			}
+			landing := candidate
+			landing.Value = destination + "/" + base
+			landing.Normalized, landing.Resolved = landing.Value, landing.Value
+			if matchesActiveDefenseClawState(facts, landing) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// findDeletesOnlyUnprotectedNames reports a find -delete that removes only
+// entries no protected state name can be (log cleanup such as
+// `find ~/.defenseclaw -name '*.log' -mtime +7 -delete`), not the tree it
+// starts from (GAP-2075). It holds only for a find from the state root
+// (state ""), whose tests are all joined by AND, with at least one -name or
+// -iname and every such pattern a cleanup pattern (findPatternIsCleanupOnly).
+// A start at a protected tree, a time, size or path test alone, and an OR
+// or a negation never exempt, because each can still reach config.yaml, a
+// hook, a rule pack file or the saved installer.
+func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state string) bool {
+	if state != "" || !strings.EqualFold(command.Program, "find") || len(command.Argv) < 2 {
+		return false
+	}
+	named := false
+	for index := 1; index < len(command.Argv); index++ {
+		argument := strings.ToLower(command.Argv[index])
+		switch argument {
+		case "-o", "-or", "!", "-not", ",":
+			return false
+		case "-name", "-iname":
+			if index+1 >= len(command.Argv) {
+				return false
+			}
+			index++
+			if !findPatternIsCleanupOnly(command.Argv[index], argument == "-iname") {
+				return false
+			}
+			named = true
+		}
+	}
+	return named
+}
+
+// protectedStateNameSamples are names a file of the active state can have:
+// the root's own files, the tree names and files the trees hold (hooks, the
+// saved installer and its digest, policies, receipts). A cleanup pattern
+// that matches one of them is not exempt.
+var protectedStateNameSamples = []string{
+	".env", "config.yaml", "confidence_policy.yaml", "guardrail_runtime.json",
+	"device.key", "picked_connector", "custom-providers.json", "audit.db",
+	"audit.db-wal", "audit.db-shm", "judge.db", "judge.db-wal", "judge.db-shm",
+	"judge_bodies.db", "judge_bodies.db-wal", "judge_bodies.db-shm",
+	"cache", "hooks", "installer", "policies", "previous", "quarantine",
+	"receipts", "registries",
+	"claude-code-hook.sh", "inspect-tool.sh", "_hardening.sh", "hook.ps1", "hook.cmd",
+	"install.sh", "install.ps1", "binaries.sha256", "installer.sha256",
+	"defenseclaw-hook-post", "default.yaml", "rules.yml", "policy.rego", "data.json",
+}
+
+// cleanupNameMarkers are the file kinds a state-root cleanup removes: logs,
+// temporary files, backups, rotated or compressed copies and event logs.
+// No hook, rule pack, config, receipt or installer file has one, while a
+// hand list of protected names can never be complete (every connector adds
+// its own hook names and every pack its own rule files).
+var cleanupNameMarkers = []string{".log", ".tmp", ".bak", ".old", ".gz", ".jsonl"}
+
+// findPatternIsCleanupOnly reports a -name/-iname pattern that selects only
+// cleanup files: it carries a cleanup marker as literal text (outside any
+// bracket expression or wildcard, findPatternLiteralText) and matches none
+// of the sample protected names. Every other pattern (a hook name,
+// codex*, *.yaml, *) can reach protected state and is not exempt (GAP-2075).
+func findPatternIsCleanupOnly(pattern string, fold bool) bool {
+	if fold {
+		pattern = strings.ToLower(pattern)
+	}
+	literal, ok := findPatternLiteralText(pattern)
+	if !ok {
+		return false
+	}
+	literal = strings.ToLower(literal)
+	marked := false
+	for _, marker := range cleanupNameMarkers {
+		if strings.Contains(literal, marker) {
+			marked = true
+			break
+		}
+	}
+	if !marked {
+		return false
+	}
+	for _, name := range protectedStateNameSamples {
+		if fold {
+			name = strings.ToLower(name)
+		}
+		matched, err := path.Match(pattern, name)
+		if err != nil || matched {
+			return false
+		}
+	}
+	return true
+}
+
+// findPatternLiteralText returns the text a name must hold for a find glob
+// pattern to match it: escaped characters are kept, while '*', '?' and a
+// whole bracket expression become a separator, so a cleanup marker spelled
+// inside a bracket (`codex*[.log]*` matches codex-hook.sh) is not literal
+// (GAP-2075). An unterminated bracket reports false.
+func findPatternLiteralText(pattern string) (string, bool) {
+	var literal strings.Builder
+	for index := 0; index < len(pattern); index++ {
+		switch character := pattern[index]; character {
+		case '\\':
+			if index+1 < len(pattern) {
+				index++
+				literal.WriteByte(pattern[index])
+			}
+		case '*', '?':
+			literal.WriteByte(0)
+		case '[':
+			end := index + 1
+			if end < len(pattern) && (pattern[end] == '!' || pattern[end] == '^') {
+				end++
+			}
+			if end < len(pattern) && pattern[end] == ']' {
+				end++
+			}
+			for end < len(pattern) && pattern[end] != ']' {
+				if pattern[end] == '\\' {
+					end++
+				}
+				end++
+			}
+			if end >= len(pattern) {
+				return "", false
+			}
+			index = end
+			literal.WriteByte(0)
+		default:
+			literal.WriteByte(character)
+		}
+	}
+	return literal.String(), true
+}
+
+// chmodAddsGroupOrOtherWrite reports a chmod whose mode gives group or
+// other write: an octal mode with 0o022 bits, or a symbolic clause naming
+// g, o or a with + or = and w, or a macOS ACL entry (+a, =a, +ai and their
+// # forms) that allows a write permission. A mode with no who letters is
+// filtered by the umask and is not counted. GNU (-R -c -f -v) and BSD/macOS
+// (-h -H -L -P) options before the mode are skipped.
+func chmodAddsGroupOrOtherWrite(command actionfacts.CommandFact) bool {
+	argv := command.Argv
+	for index := 1; index < len(argv); index++ {
+		argument := argv[index]
+		switch {
+		case argument == "--":
+			continue
+		case strings.HasPrefix(argument, "--"):
+			if strings.HasPrefix(argument, "--reference") {
+				return false
+			}
+			continue
+		case len(argument) > 1 && argument[0] == '-' && strings.Trim(argument[1:], "RcfvhHLP") == "":
+			continue
+		case argument == "+a" || argument == "=a" || argument == "+ai":
+			return index+1 < len(argv) && chmodACLAllowsWrite(argv[index+1])
+		case argument == "+a#" || argument == "=a#" || argument == "+ai#":
+			return index+2 < len(argv) && chmodACLAllowsWrite(argv[index+2])
+		}
+		return chmodModeAddsGroupOrOtherWrite(argument)
+	}
+	return false
+}
+
+// chmodACLAllowsWrite reports a macOS ACL entry ("everyone allow write")
+// that grants a permission which changes a file or a directory's entries.
+func chmodACLAllowsWrite(entry string) bool {
+	fields := strings.FieldsFunc(strings.ToLower(entry), func(r rune) bool {
+		return r == ' ' || r == ',' || r == '\t'
+	})
+	allow := false
+	for _, field := range fields {
+		switch field {
+		case "allow":
+			allow = true
+		case "deny":
+			return false
+		case "write", "append", "add_file", "add_subdirectory", "delete", "delete_child", "writesecurity", "chown":
+			if allow {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func chmodModeAddsGroupOrOtherWrite(mode string) bool {
+	if mode != "" && strings.Trim(mode, "01234567") == "" {
+		value, err := strconv.ParseUint(mode, 8, 32)
+		return err == nil && value&0o022 != 0
+	}
+	for _, clause := range strings.Split(mode, ",") {
+		who := strings.TrimLeft(clause, "ugoa")
+		groupOrOther := strings.ContainsAny(clause[:len(clause)-len(who)], "goa")
+		for operations := who; operations != ""; {
+			operator := operations[0]
+			rest := strings.TrimLeft(operations[1:], "rwxXstugo")
+			perms := operations[1 : len(operations)-len(rest)]
+			if groupOrOther && (operator == '+' || operator == '=') && strings.ContainsAny(perms, "wugo") {
+				return true
+			}
+			if operator != '+' && operator != '-' && operator != '=' {
+				return false
+			}
+			operations = rest
 		}
 	}
 	return false

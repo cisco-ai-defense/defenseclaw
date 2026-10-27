@@ -41,10 +41,13 @@ type instructionStartupContextKey struct{}
 // the call's rule pack posture: only there does an instruction file that
 // merely exists now, in a directory the snapshot does not record, block.
 type instructionStartupView struct {
-	present  bool
-	strict   bool
-	snapshot activeAgentContextSnapshot
-	extend   func(dirs []string) activeAgentContextSnapshot
+	present bool
+	strict  bool
+	// permissive: the call's rule pack has the permissive posture, which
+	// keeps an instruction-file write at the rule's own severity.
+	permissive bool
+	snapshot   activeAgentContextSnapshot
+	extend     func(dirs []string) activeAgentContextSnapshot
 	// lostIdentities: the session's first sighting is gone (pruned from
 	// the store, or evicted unsaved); these are the identities of the
 	// instruction files it had proved, so a file with one of them is still
@@ -60,7 +63,8 @@ func (view instructionStartupView) existenceBlocks() bool {
 }
 
 func (a *APIServer) withInstructionStartup(ctx context.Context, connector, sessionID string, snapshot activeAgentContextSnapshot) context.Context {
-	view := instructionStartupView{present: true, strict: a.instructionStrictTier(ctx, connector), snapshot: snapshot}
+	posture := a.instructionPackPosture(ctx, connector)
+	view := instructionStartupView{present: true, strict: posture == "strict", permissive: posture == "permissive", snapshot: snapshot}
 	if !snapshot.startupKnown {
 		if key, ok := instructionStartupKey(ctx, connector, sessionID); ok {
 			view.lostIdentities, _ = a.instructionFirstSightingLost(key)
@@ -78,15 +82,15 @@ func (a *APIServer) withInstructionStartup(ctx context.Context, connector, sessi
 	return context.WithValue(ctx, instructionStartupContextKey{}, view)
 }
 
-// instructionStrictTier reports whether connector's rule pack for the call
-// (its profile's, else the configuration's) has the strict posture.
-func (a *APIServer) instructionStrictTier(ctx context.Context, connector string) bool {
+// instructionPackPosture is the posture of connector's rule pack for the
+// call (its profile's, else the configuration's); "" without a config.
+func (a *APIServer) instructionPackPosture(ctx context.Context, connector string) string {
 	cfg := a.decisionConfig(ctx)
 	if cfg == nil {
-		return false
+		return ""
 	}
 	ref := cfg.EffectiveRulePackRefForConnector(connector)
-	return packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref)) == "strict"
+	return packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref))
 }
 
 func instructionStartupFromContext(ctx context.Context) instructionStartupView {
@@ -261,7 +265,41 @@ func instructionSnapshot(connector string, files map[string]string, dirs []strin
 			retained[normalized] = identity
 		}
 	}
+	withPhysicalDirectorySpellings(retained, &keys, keyed)
 	return retained, keys, keyed
+}
+
+// withPhysicalDirectorySpellings records each snapshotted directory this
+// host reaches through a symlinked spelling under its physical name as
+// well (macOS /var and /tmp are /private/var and /private/tmp; a linked
+// project), with the same files and identity: the record is keyed by the
+// directory itself, so a later call or write through either spelling finds
+// it (GAP-1388). A directory the host cannot resolve (behind ProtectHome)
+// keeps the one spelling it was named by. Windows names are folded by
+// activeAgentInstructionPath and are not resolved here.
+func withPhysicalDirectorySpellings(retained map[string]string, keys *[]string, keyed map[string]string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	for _, key := range slices.Clone(*keys) {
+		physical, err := filepath.EvalSymlinks(filepath.FromSlash(key))
+		if err != nil {
+			continue
+		}
+		physicalKey, ok := instructionDirectoryKey(physical)
+		if !ok || physicalKey == key || slices.Contains(*keys, physicalKey) {
+			continue
+		}
+		*keys = append(*keys, physicalKey)
+		if identity := keyed[key]; identity != "" {
+			keyed[physicalKey] = identity
+		}
+		for _, file := range slices.Sorted(maps.Keys(retained)) {
+			if instructionParent(file) == key {
+				retained[strings.TrimSuffix(physicalKey, "/")+"/"+path.Base(file)] = retained[file]
+			}
+		}
+	}
 }
 
 // instructionStartupFiles is the snapshot of an authenticated SessionStart.
@@ -283,7 +321,8 @@ func instructionStartupFiles(ctx context.Context, connector, cwd string) (map[st
 		}
 		identities, reachedFiles, _ := hookpaths.ReachedInstructions(facts)
 		dirs := hookpaths.InstructionDirectories(cwd, home)
-		if client := startupClientCWD(ctx, cwd, facts, identities); client != cwd {
+		if client := startupClientCWD(cwd, facts); client != cwd {
+			identities = withLocalDirectoryIdentities(identities, hookpaths.InstructionDirectories(client, home))
 			dirs, files = startupClientSighting(client, home, dirs, files, identities, reachedFiles)
 		}
 		return instructionSnapshot(connector, files, dirs, identities)
@@ -300,35 +339,44 @@ func instructionStartupFiles(ctx context.Context, connector, cwd string) (map[st
 }
 
 // startupClientCWD is the directory the hook client read a startup snapshot
-// in (hookpaths.CWDKey) when it is another spelling of cwd, the directory
+// in (hookpaths.CWDKey) when it spells another directory than cwd, the one
 // the gateway placed the session in: the agent started in a symlinked (or
 // junction, case or short-name) spelling of its project, which the gateway
-// resolved to the physical directory (sanitizeHookCWD). Both name one
-// directory by file system identity, from the client's sighting as the user
-// or, for a gateway that reads the caller's files, from its own. Otherwise
-// it is cwd.
-func startupClientCWD(ctx context.Context, cwd string, facts, identities map[string]string) string {
+// resolved to the physical directory (sanitizeHookCWD). The client's files
+// are keyed by its spelling, so the snapshot is taken in that spelling
+// (startupClientSighting). It is not first matched to cwd by identity:
+// when the identities did not fit the hook header (GAP-1508), or the client
+// named an unrelated directory, keying the client's files by cwd dropped
+// every one of them and recorded cwd as holding none, so a write to the
+// AGENTS.md the session started with looked like one to a file it created.
+// Otherwise it is cwd.
+func startupClientCWD(cwd string, facts map[string]string) string {
 	client := facts[hookpaths.CWDKey]
 	if !filepath.IsAbs(client) || strings.ContainsRune(client, 0) {
 		return cwd
 	}
-	client = filepath.Clean(client)
-	if client == cwd {
-		return cwd
+	return filepath.Clean(client)
+}
+
+// withLocalDirectoryIdentities adds to the client's directory identities
+// the gateway's own identity of each of dirs the client sent none for (its
+// sighting did not fit the header): a gateway that can stat them carries
+// the session's first record across spellings by identity
+// (extendStartupKey); one that cannot (ProtectHome) adds nothing.
+func withLocalDirectoryIdentities(identities map[string]string, dirs []string) map[string]string {
+	out := maps.Clone(identities)
+	if out == nil {
+		out = make(map[string]string)
 	}
-	clientID, cwdID := identities[client], identities[cwd]
-	if instructionGatewayReadsFiles(ctx) {
-		if clientID == "" {
-			clientID = hookpaths.DirectoryIdentity(client)
+	for _, dir := range dirs {
+		if _, sent := out[dir]; sent {
+			continue
 		}
-		if cwdID == "" {
-			cwdID = hookpaths.DirectoryIdentity(cwd)
+		if identity := hookpaths.DirectoryIdentity(dir); identity != "" {
+			out[dir] = identity
 		}
 	}
-	if clientID == "" || clientID != cwdID {
-		return cwd
-	}
-	return client
+	return out
 }
 
 // startupClientSighting is the startup snapshot's directories and files

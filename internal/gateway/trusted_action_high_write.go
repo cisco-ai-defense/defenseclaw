@@ -163,17 +163,21 @@ func provedHighWriteFindings(
 		if !instructionLoadLocation(location, flavor, locations) {
 			return instructionNotProved
 		}
+		// A file in a directory the session's snapshot records is protected
+		// only while it is the file that was there when the session reached
+		// the directory; one the session created since is ordinary, also
+		// once the agent reports it loaded (GAP-2046). The snapshot records
+		// only the names the agent loads at every start, so a loaded file of
+		// another name (an @include) is not known to be the session's own.
+		normalized, normalizedOK := activeAgentInstructionPath(location, flavor)
+		covered := normalizedOK && startup.startupCovers(instructionParent(normalized))
+		if covered && startup.startupFiles[normalized] == "" && snapshotRecordsName(request.Connector, normalized) {
+			return instructionNotProved
+		}
 		if loadedAtRuntime(location, flavor) {
 			return instructionIdentityProved
 		}
-		// A file in a directory the session's snapshot records is protected
-		// only while it is the file that was there when the session reached
-		// the directory; one the session created since is ordinary.
-		if normalized, ok := activeAgentInstructionPath(location, flavor); ok &&
-			startup.startupCovers(instructionParent(normalized)) {
-			if startup.startupFiles[normalized] == "" {
-				return instructionNotProved
-			}
+		if covered {
 			if identity := targetIdentity(location, target, flavor); identity != "" && identity == startup.startupFiles[normalized] {
 				return instructionIdentityProved
 			}
@@ -242,6 +246,17 @@ func provedHighWriteFindings(
 				}
 				_, instructionRule := instructionRuleFiles[rule.ID]
 				alertOnly := instructionRule && instructionProof == instructionExistenceProved && !existenceBlocks
+				// A write to an instruction file the session loaded or found
+				// at its start, proved by the file's identity, is unambiguous
+				// and high impact: CRITICAL (SignalStrengthToSeverity). Action
+				// mode therefore blocks it under the default and strict packs;
+				// observe only records it (GAP-1503). The permissive pack
+				// keeps the rule's severity, so it alerts there (GAP-2049).
+				severity := rule.Severity
+				if instructionRule && instructionProof == instructionIdentityProved && !startupView.permissive &&
+					strings.EqualFold(severity, "HIGH") {
+					severity = "CRITICAL"
+				}
 				index := slices.IndexFunc(proved, func(finding RuleFinding) bool {
 					return finding.RuleID == rule.ID
 				})
@@ -251,6 +266,9 @@ func provedHighWriteFindings(
 						proved[index].enforcement = findingEnforcementAllowed
 						proved[index].proof = proof
 					}
+					if severity != rule.Severity {
+						proved[index].Severity = severity
+					}
 					continue
 				}
 				enforcement := findingEnforcementAllowed
@@ -258,7 +276,7 @@ func provedHighWriteFindings(
 					enforcement = findingEnforcementAlertOnly
 				}
 				proved = append(proved, adjustConfidence(request.Input.Tool, RuleFinding{
-					RuleID: rule.ID, Title: rule.Title + note, Severity: rule.Severity,
+					RuleID: rule.ID, Title: rule.Title + note, Severity: severity,
 					Confidence: rule.Confidence, Evidence: path.Base(strings.ReplaceAll(resolved, `\`, "/")),
 					Tags:       append([]string(nil), rule.Tags...),
 					LineNumber: 1, enforcement: enforcement,
@@ -290,6 +308,13 @@ func provedHighWriteFindings(
 		addTarget(resolved, hostFlavor, exactProof, note)
 	}
 	for _, target := range facts.Paths {
+		// A POSIX shell on a Windows host (Git Bash, the shell of Claude
+		// Code's Bash tool) writes host paths (GAP-0768).
+		if hostFlavor == actionfacts.PathFlavorWindows && target.Flavor == actionfacts.PathFlavorPOSIX && !isSandboxHookRequest(ctx) {
+			if host, ok := windowsHostPathOfPOSIXOperand(target.Value, request.Input.CWD, request.Input.ActiveHome); ok {
+				target.Resolved, target.Flavor = host, actionfacts.PathFlavorWindows
+			}
+		}
 		write := target.Access == actionfacts.PathAccessWrite || target.Access == actionfacts.PathAccessAppend
 		if !write && target.Access != actionfacts.PathAccessDelete || target.Resolved == "" {
 			continue
@@ -447,6 +472,14 @@ func connectorInstructionLoads(connector string) instructionLoads {
 	return every
 }
 
+// snapshotRecordsName reports whether a startup snapshot of connector
+// records a file named like file (instructionSnapshot keeps only the names
+// connectorInstructionLoadNames lists).
+func snapshotRecordsName(connector, file string) bool {
+	name, named := hookpaths.InstructionFileName(path.Base(strings.ReplaceAll(file, `\`, "/")), runtime.GOOS == "windows")
+	return named && slices.Contains(connectorInstructionLoadNames(connector), name)
+}
+
 // connectorInstructionLoadNames are the instruction file names connector's
 // agent loads in any of its places.
 func connectorInstructionLoadNames(connector string) []string {
@@ -553,4 +586,40 @@ func highWriteCatalogRule(rule PatternRule) bool {
 	return strings.Contains(rule.Expression, "PATH_ACCESS_WRITE") ||
 		strings.Contains(rule.Expression, "PATH_ACCESS_APPEND") ||
 		strings.Contains(rule.Expression, "PATH_ACCESS_DELETE")
+}
+
+// windowsHostPathOfPOSIXOperand is the Windows path a POSIX-shell operand
+// names on a Windows host, where Git Bash (MSYS) runs it: a drive path
+// (C:\x, C:/x), an MSYS drive mount (/c/x), a path under ~ when the home
+// is a Windows path, or a relative path against a Windows working
+// directory, in the forward-slash spelling ActionFacts gives Windows paths.
+// Any other operand (/tmp, /etc: the MSYS root) is not placed (ok false).
+func windowsHostPathOfPOSIXOperand(value, cwd, home string) (string, bool) {
+	drive := func(p string) bool {
+		return len(p) >= 3 && (p[1] == ':') && (p[2] == '/' || p[2] == '\\') &&
+			('a' <= p[0] && p[0] <= 'z' || 'A' <= p[0] && p[0] <= 'Z')
+	}
+	clean := func(p string) string { return path.Clean(strings.ReplaceAll(p, `\`, "/")) }
+	switch {
+	case value == "" || strings.ContainsRune(value, 0) || strings.ContainsAny(value, "$`*?[{"):
+		return "", false
+	case drive(value):
+		return clean(value), true
+	case len(value) >= 2 && value[0] == '/' && ('a' <= value[1] && value[1] <= 'z' || 'A' <= value[1] && value[1] <= 'Z') &&
+		(len(value) == 2 || value[2] == '/'):
+		return clean(strings.ToUpper(value[1:2]) + ":/" + value[min(3, len(value)):]), true
+	case strings.HasPrefix(value, "/"):
+		return "", false
+	case value == "~" || strings.HasPrefix(value, "~/"):
+		if !drive(home) {
+			return "", false
+		}
+		return clean(home + "/" + strings.TrimPrefix(value, "~")), true
+	case strings.HasPrefix(value, "~"):
+		return "", false
+	}
+	if !drive(cwd) {
+		return "", false
+	}
+	return clean(cwd + "/" + value), true
 }

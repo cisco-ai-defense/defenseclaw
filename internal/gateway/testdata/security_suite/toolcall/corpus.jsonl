@@ -644,3 +644,18 @@
 {"id":"gap1409-diagnostic-log","rule_id":"tamper.detector_state_write","command":"printf changed >> /home/alice/.defenseclaw/logs/gateway.log","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"gap1409-cli-config","rule_id":"tamper.detector_state_write","command":"defenseclaw config set guardrail.mode observe","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"gap1409-case-different-lookalike","rule_id":"tamper.detector_state_write","command":"printf changed >> /home/alice/.DefenseClaw/config.yaml","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap1099-installer-append","rule_id":"tamper.detector_state_write","command":"printf changed >> /home/alice/.defenseclaw/installer/install.sh","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"gap1099-previous-installer-write","rule_id":"tamper.detector_state_write","command":"printf changed > /home/alice/.defenseclaw/previous/installer/install.sh","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"gap1099-installer-delete","rule_id":"tamper.detector_state_write","command":"rm -f /home/alice/.defenseclaw/installer/install.sh","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"gap1099-installer-read","rule_id":"tamper.detector_state_write","command":"cat /home/alice/.defenseclaw/installer/install.sh","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap1099-project-installer-lookalike","rule_id":"tamper.detector_state_write","command":"printf changed >> /repo/.defenseclaw/installer/install.sh","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap2045-mkdir-root","rule_id":"tamper.detector_state_write","command":"mkdir -p /home/alice/.defenseclaw","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap2045-mkdir-policies","rule_id":"tamper.detector_state_write","command":"mkdir -p /home/alice/.defenseclaw/policies","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap2045-touch-root","rule_id":"tamper.detector_state_write","command":"touch /home/alice/.defenseclaw","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap2045-cp-into-root","rule_id":"tamper.detector_state_write","command":"cp /home/alice/notes.txt /home/alice/.defenseclaw/","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap2045-mv-into-root","rule_id":"tamper.detector_state_write","command":"mv /home/alice/notes.txt /home/alice/.defenseclaw/","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap2045-find-log-cleanup","rule_id":"tamper.detector_state_write","command":"find /home/alice/.defenseclaw -name '*.log' -mtime +7 -delete","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap2045-chown-root","rule_id":"tamper.detector_state_write","command":"chown -R alice /home/alice/.defenseclaw","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"gap2045-rmdir-hooks","rule_id":"tamper.detector_state_write","command":"rmdir /home/alice/.defenseclaw/hooks","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"gap2045-mv-hooks-away","rule_id":"tamper.detector_state_write","command":"mv /home/alice/.defenseclaw/hooks /tmp/h","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"gap2045-cp-config-into-root","rule_id":"tamper.detector_state_write","command":"cp /tmp/config.yaml /home/alice/.defenseclaw/","is_attack":true,"expect_route":"semantic","no_other_finding":true}
