@@ -63,6 +63,8 @@ def _helpers() -> str:
         "Assert-GatewayQuiescent",
         # Convert-HooksForRollback makes backups\ private first (GAP-1891, GAP-2138).
         "Protect-BackupsFolder",
+        # Invoke-Rollback reads the older install's recorded Codex program first (GAP-2299).
+        "Get-StaleAgentEvidence",
     )
     return "\n".join(_function(name) for name in names)
 
