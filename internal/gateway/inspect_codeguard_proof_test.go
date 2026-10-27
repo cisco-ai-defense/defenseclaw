@@ -448,3 +448,32 @@ func inspectCodeGuardProofTestRequest(
 		EnforcementCapable: true,
 	})
 }
+
+// GAP-2220: a Write of a PowerShell or batch script reached the hook with a
+// path traversal and CodeGuard never read it, because the hook only scans
+// files CodeGuard counts as code and .ps1 was not one of them. The same line
+// in a .py file was found. Script files are scanned in any letter case.
+func TestInspectCodeGuardScansWindowsScriptWrites(t *testing.T) {
+	api := testAPIServerWithConfig(t, "action")
+	hasPath := func(v *ToolInspectVerdict) bool {
+		for _, f := range v.DetailedFindings {
+			if f.RuleID == "CG-PATH-001" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, path := range []string{`C:\work\probe.ps1`, `C:\work\Probe.PS1`, `C:\work\mod.psm1`, `C:\work\run.cmd`, `C:\work\run.bat`, "/tmp/app.py"} {
+		args, err := json.Marshal(map[string]string{"file_path": path, "content": `Get-Content ..\temp\secrets.txt`})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v := inspectCodeGuardProofTestRequest(t, api, args); !hasPath(v) {
+			t.Errorf("CG-PATH-001 not found for a Write of %s: %+v", path, v.DetailedFindings)
+		}
+	}
+	args, _ := json.Marshal(map[string]string{"file_path": `C:\work\notes.md`, "content": `see ..\docs`})
+	if v := inspectCodeGuardProofTestRequest(t, api, args); hasPath(v) {
+		t.Errorf("a Markdown Write was scanned as code: %+v", v.DetailedFindings)
+	}
+}
