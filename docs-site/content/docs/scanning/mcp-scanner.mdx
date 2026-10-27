@@ -61,7 +61,7 @@ Each server is scanned independently and findings are tagged with the connector 
 
 ### Before you start
 
-These `defenseclaw mcp` steps are for a per-user installation. On managed Linux and macOS, the standard user's `defenseclaw` launcher offers only `sandbox` commands, and the managed packages include no MCP scanner (see [Known limits](/docs/support-matrix#managed-linux-and-macos-scans)). Add the server through the connector's MCP configuration, for example `claude mcp add`. On managed Windows, use the administrator's `defenseclaw.exe scan mcp` command for a remote URL.
+These `defenseclaw mcp` steps are for a per-user installation. On managed Linux and macOS, the standard user's `defenseclaw` launcher offers only `sandbox` commands, so users add the server through the connector's MCP configuration, for example `claude mcp add`. An administrator scans a remote server with the managed gateway: `sudo /opt/defenseclaw/bin/defenseclaw-gateway scan mcp URL` on Linux or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan mcp URL` on macOS (see [Known limits](/docs/support-matrix#managed-linux-and-macos-scans)). On managed Windows, use the administrator's `defenseclaw.exe scan mcp` command for a remote URL.
 
 - A judge: `defenseclaw setup llm` and `defenseclaw keys set DEFENSECLAW_LLM_KEY`. Without one the scan runs YARA signatures only and prints `LLM analyzer skipped`.
 - A configured connector (`defenseclaw setup <connector>`). DefenseClaw reads each connector's MCP config.

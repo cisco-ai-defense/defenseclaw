@@ -22,8 +22,8 @@ import (
 )
 
 // scan skill|mcp|plugin run the gateway's scanners through its API: on a
-// managed Windows computer, where the per-user Python CLI is not installed,
-// they are how an administrator scans with the scanners, policy and judge
+// managed computer, where the per-user Python CLI is not installed, they are
+// how an administrator scans with the scanners, policy and judge
 // the admin config sets (GAP-0132).
 var (
 	scanGatewayJSON bool
@@ -106,7 +106,7 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 		}
 		target = absolute
 	}
-	if err := managedScanUnavailable(kind); err != nil {
+	if err := managedScanUnavailable(kind, target); err != nil {
 		return err
 	}
 	base, token, err := scanGatewayEndpoint()

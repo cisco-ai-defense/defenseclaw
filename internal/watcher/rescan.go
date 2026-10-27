@@ -506,7 +506,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			entries, err := discover(dir, hermesskills.DefaultDirectoryLimit)
 			if err == nil {
 				for _, entry := range entries {
-					if entry.Bundled && trustBundled {
+					if (entry.Bundled && trustBundled) || w.inSkillInstallStaging(dir, entry.Path, claudeStagingGrace) {
 						continue
 					}
 					targets = append(targets, InstallEvent{

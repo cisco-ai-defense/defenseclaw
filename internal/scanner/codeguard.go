@@ -232,6 +232,12 @@ func collectCodeFiles(root string, strict bool) ([]string, error) {
 			if base == ".git" || base == "node_modules" || base == "__pycache__" || base == ".venv" || base == "venv" {
 				return filepath.SkipDir
 			}
+			if perr := probeDirOpen(path); perr != nil {
+				if strict {
+					return incompleteScan(path, perr)
+				}
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !codeExtensions[filepath.Ext(path)] {

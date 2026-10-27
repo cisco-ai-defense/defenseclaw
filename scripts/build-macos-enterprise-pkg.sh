@@ -27,7 +27,12 @@
 #
 #   --payload DIR   use prebuilt darwin/arm64 binaries (defenseclaw-gateway,
 #                   defenseclaw-hook, defenseclaw-sensor-helper and optionally
-#                   defenseclaw-acp) instead of building them.
+#                   defenseclaw-acp and defenseclaw-scanners) instead of
+#                   building them.
+#   --scanner-runtime DIR
+#                   use a prebuilt darwin-arm64 scanner runtime tree
+#                   (packaging/unix/build-scanner-runtime.sh --target
+#                   darwin-arm64) instead of building it; building needs uv.
 #
 # Signing is optional and off by default:
 #   MACOS_APP_SIGN_IDENTITY        "Developer ID Application: ..." codesigns
@@ -48,11 +53,13 @@ readonly LAUNCH_AGENTS_DIR="Library/LaunchAgents"
 VERSION=""
 DIST_DIR="dist"
 PAYLOAD=""
+SCANNER_RUNTIME=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --version) VERSION="${2:?--version needs a value}"; shift 2 ;;
         --dist-dir) DIST_DIR="${2:?--dist-dir needs a value}"; shift 2 ;;
         --payload) PAYLOAD="${2:?--payload needs a value}"; shift 2 ;;
+        --scanner-runtime) SCANNER_RUNTIME="${2:?--scanner-runtime needs a value}"; shift 2 ;;
         -h | --help) sed -n '2,35p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -84,10 +91,10 @@ mkdir -p "$ROOT/$INSTALL_BIN" "$SCRIPTS"
 
 binaries=(defenseclaw-gateway defenseclaw-hook defenseclaw-sensor-helper)
 if [ -n "$PAYLOAD" ]; then
-    for name in "${binaries[@]}" defenseclaw-acp; do
+    for name in "${binaries[@]}" defenseclaw-acp defenseclaw-scanners; do
         if [ -f "$PAYLOAD/$name" ]; then
             install -m 0755 "$PAYLOAD/$name" "$ROOT/$INSTALL_BIN/$name"
-        elif [ "$name" != defenseclaw-acp ]; then
+        elif [ "$name" != defenseclaw-acp ] && [ "$name" != defenseclaw-scanners ]; then
             echo "payload $PAYLOAD lacks $name" >&2
             exit 1
         fi
@@ -109,6 +116,23 @@ else
     build defenseclaw-hook ./cmd/defenseclaw-hook "$version_flags"
     build defenseclaw-sensor-helper ./cmd/defenseclaw-sensor-helper "$version_flags"
     build defenseclaw-acp ./cmd/defenseclaw-acp "$version_flags"
+    build defenseclaw-scanners ./cmd/defenseclaw-scanners "-s -w"
+fi
+
+# The scanner runtime defenseclaw-scanners runs (GAP-1527): CPython and the
+# locked scanner packages, root-owned under the install root. Without it the
+# package's scan skill|mcp|plugin cannot run.
+runtime_root="$ROOT/opt/cisco/defenseclaw/scanner-runtime"
+if [ -n "${SCANNER_RUNTIME:-}" ]; then
+    [ -f "$SCANNER_RUNTIME/runtime.json" ] || { echo "scanner runtime $SCANNER_RUNTIME has no runtime.json" >&2; exit 1; }
+    mkdir -p "$runtime_root"
+    cp -R "$SCANNER_RUNTIME/." "$runtime_root/"
+else
+    "$REPO_ROOT/packaging/unix/build-scanner-runtime.sh" --target darwin-arm64 --out-dir "$runtime_root"
+fi
+if [ -n "$(find "$runtime_root" -type l -print -quit)" ]; then
+    echo "scanner runtime $runtime_root holds links" >&2
+    exit 1
 fi
 
 # The standard account cannot install Homebrew or Xcode tools. Build these on
@@ -139,6 +163,23 @@ if [ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]; then
     for binary in "$ROOT/$INSTALL_BIN"/* "$e2fs_root/sbin"/*; do
         codesign "${sign_args[@]}" --identifier "com.cisco.defenseclaw.$(basename "$binary")" "$binary"
     done
+    # Every Mach-O file of the scanner runtime carries the same signature.
+    # The interpreter loads the extension modules of other packages, so it
+    # may load libraries this identity signed (library validation) and keeps
+    # the executable-memory rights CPython's ctypes and cffi need.
+    entitlements="$WORK/scanner-python.entitlements"
+    cat >"$entitlements" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.security.cs.disable-library-validation</key><true/>
+<key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+</dict></plist>
+PLIST
+    find "$runtime_root" -type f \( -name '*.so' -o -name '*.dylib' \) -print0 |
+        xargs -0 -n 50 codesign "${sign_args[@]}"
+    codesign "${sign_args[@]}" --entitlements "$entitlements" --identifier com.cisco.defenseclaw.scanner-python \
+        "$runtime_root"/python/bin/python3.*
 fi
 gateway_digest=$(shasum -a 256 "$ROOT/$INSTALL_BIN/defenseclaw-gateway" | awk '{print $1}')
 agent_program="/$INSTALL_BIN/launch-agents/$gateway_digest/defenseclaw-gateway"
@@ -437,9 +478,9 @@ refresh_program() {
 }
 refresh_programs() {
     for program in "$1/bin/defenseclaw-gateway" "$1/bin/defenseclaw-hook" "$1/bin/defenseclaw-sensor-helper" \
-        "$1/bin/defenseclaw-acp" "$1"/bin/launch-agents/*/defenseclaw-gateway "$1"/share/e2fsprogs/sbin/*; do
+        "$1/bin/defenseclaw-acp" "$1/bin/defenseclaw-scanners" "$1"/bin/launch-agents/*/defenseclaw-gateway "$1"/share/e2fsprogs/sbin/*; do
         case $program in
-        */bin/defenseclaw-acp | */bin/launch-agents/* | */share/e2fsprogs/sbin/*)
+        */bin/defenseclaw-acp | */bin/defenseclaw-scanners | */bin/launch-agents/* | */share/e2fsprogs/sbin/*)
             # Optional: an unmatched pattern stays literal and is skipped.
             [ -e "$program" ] || [ -L "$program" ] || continue
             ;;
