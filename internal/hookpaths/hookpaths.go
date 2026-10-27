@@ -73,8 +73,11 @@ const maxWriteTargetLinkDepth = 40
 const MaxWriteTargets = 512
 
 // MaxWriteTargetPathBytes bounds one operand. A longer operand is omitted and
-// the map is marked truncated.
-const MaxWriteTargetPathBytes = 1024
+// the map is marked truncated. It is the Linux PATH_MAX, so an ordinary file
+// in a deep working directory is described, not omitted (GAP-1877: at 1024 a
+// redirect from a cwd over 1 KiB left a managed gateway behind ProtectHome
+// without evidence and was denied as an SSH key write).
+const MaxWriteTargetPathBytes = 4096
 
 // maxEncodedTargets bounds the JSON map. MaxHeaderValueBytes is its unpadded
 // base64 size plus slack; it stays well inside one argv string for curl -H in
@@ -117,6 +120,22 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		}
 		switch redirect.Op {
 		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+		case syntax.DplOut:
+			// bash writes the file of >&word and 1>&word when word is not a
+			// descriptor number or "-" (GAP-2143); 2>&1, >&$fd stay copies.
+			if redirect.N != nil && redirect.N.Value != "1" {
+				return true
+			}
+			name, static := staticShellWord(redirect.Word, env, home != "")
+			if !static {
+				dynamic = dynamic || shellWordHasSlash(redirect.Word)
+				return true
+			}
+			if name == "" || name == "-" || strings.Trim(name, "0123456789") == "" {
+				return true
+			}
+			operands = append(operands, OperandPath(name, cwd))
+			return true
 		default:
 			return true
 		}
@@ -132,6 +151,22 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		return true
 	})
 	return operands, true, dynamic
+}
+
+// shellWordHasSlash reports a literal "/" anywhere in word, quoted or not: a
+// >& word holding one names a file whatever its expansions are.
+func shellWordHasSlash(word *syntax.Word) bool {
+	slash := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.Lit:
+			slash = slash || strings.Contains(typed.Value, "/")
+		case *syntax.SglQuoted:
+			slash = slash || strings.Contains(typed.Value, "/")
+		}
+		return !slash
+	})
+	return slash
 }
 
 // calledFunctions walks executable top-level calls, then reachable bodies.
@@ -458,9 +493,19 @@ func AuthorizedKeysPaths(home string) []string {
 }
 
 // ProtectedAuthorizedKeysPaths also includes sshd's Windows administrator
-// key file, which may live outside the invoking user's home.
+// key file, which may live outside the invoking user's home. Write targets
+// are compared after their links are resolved, so each key file is listed
+// in its resolved form too when the home (or its .ssh) is below a link:
+// a file that does not exist yet has no identity to compare, and a home
+// below a linked directory (a linked /home, autofs, macOS /var) must
+// protect ~/.ssh/authorized_keys before it exists (GAP-1725).
 func ProtectedAuthorizedKeysPaths(home string) []string {
 	paths := AuthorizedKeysPaths(home)
+	for _, path := range AuthorizedKeysPaths(home) {
+		if resolved, ok := ResolveWriteTarget(path); ok && resolved != path && !slices.Contains(paths, resolved) {
+			paths = append(paths, resolved)
+		}
+	}
 	if runtime.GOOS == "windows" {
 		if programData := os.Getenv("ProgramData"); filepath.IsAbs(programData) {
 			paths = append(paths, filepath.Join(programData, "ssh", "administrators_authorized_keys"))
@@ -666,6 +711,12 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			}
 			name, value, ok := copilotargs.NativeSingleCall(calls)
 			if !ok {
+				// A model's parallel calls arrive as one envelope of several
+				// calls; the gateway judges each (GAP-1016, agent-hook), so
+				// each is described and the maps are merged.
+				if list, isList := calls.([]any); isList && len(list) > 1 {
+					return resolveCopilotCalls(connector, surface, event, envelope, list)
+				}
 				return incompleteEvidence("")
 			}
 			toolRaw, _ = json.Marshal(name)
@@ -839,6 +890,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3
 	// A shell operand is already the literal path the shell opens; only a
 	// path fact can still carry unexpanded syntax.
+	var dotDotOperands []string
 	add := func(path string, literal, safeRedirect bool) {
 		if path == "" || !literal && (strings.ContainsAny(path, "*?[]$`") || strings.HasPrefix(path, "~")) {
 			return
@@ -926,6 +978,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		if raw, ok := RawDotDotOperand(candidate.Value, cwd); ok {
 			path = raw
 		}
+		if value := filepath.ToSlash(candidate.Value); value == ".." || strings.HasPrefix(value, "../") {
+			dotDotOperands = append(dotDotOperands, candidate.Value)
+		}
 		if slices.Contains(operands, path) && pathFactIsRedirect(candidate, facts.Commands) {
 			continue
 		}
@@ -940,6 +995,18 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		add(target, true, false)
 		if targets[OperandPath(target, cwd)] == "" {
 			patchListed = false
+		}
+	}
+	// The kernel resolves ".." against the physical directory, so from a
+	// linked cwd a relative "../x" write lands beside the link's target, not
+	// in the lexical parent (cd .. stays lexical). Describe that target too,
+	// with its identities, for a gateway that cannot stat the home
+	// (GAP-1501, instr-protect request).
+	if physicalCWD := sourceFacts[DirectoryFactPrefix+cwd]; filepath.IsAbs(physicalCWD) && physicalCWD != cwd {
+		for _, operand := range dotDotOperands {
+			if physical := filepath.Join(physicalCWD, operand); physical != OperandPath(operand, cwd) {
+				add(physical, true, false)
+			}
 		}
 	}
 	if isApplyPatchToolName(tool) && patchListed {
@@ -1170,6 +1237,79 @@ func sameAliasValue(a, b json.RawMessage) bool {
 
 // incompleteEvidence is the header for a tool call whose write operands
 // could not be listed. The gateway must not treat it as complete.
+// resolveCopilotCalls describes each call of a Copilot toolCalls envelope as
+// a single-call envelope and merges the maps: operand keys are per path,
+// TruncatedKey is set when any call's map is incomplete, and PatchCompleteKey
+// only when every apply_patch call is complete. A call that is not one fully
+// named call, or a merged map over the bounds, is incomplete.
+func resolveCopilotCalls(connector, surface, event string, envelope map[string]json.RawMessage, calls []any) string {
+	if len(calls) > MaxWriteTargets {
+		return incompleteEvidence("")
+	}
+	merged := map[string]string{}
+	patchCalls, patchComplete := 0, 0
+	var cwd string
+	_ = json.Unmarshal(envelope["cwd"], &cwd)
+	for _, call := range calls {
+		name, _, ok := copilotargs.NativeSingleCall([]any{call})
+		if !ok {
+			return incompleteEvidence(cwd)
+		}
+		single := make(map[string]json.RawMessage, len(envelope))
+		for key, value := range envelope {
+			single[key] = value
+		}
+		raw, err := json.Marshal([]any{call})
+		if err != nil {
+			return incompleteEvidence(cwd)
+		}
+		single["toolCalls"] = raw
+		body, err := json.Marshal(single)
+		if err != nil {
+			return incompleteEvidence(cwd)
+		}
+		encoded := ResolveConnector(connector, surface, event, body)
+		if encoded == "" {
+			continue
+		}
+		targets, ok := Decode(encoded)
+		if !ok {
+			return incompleteEvidence(cwd)
+		}
+		if isApplyPatchToolName(copilotargs.LocalActionTool(name)) {
+			patchCalls++
+			if targets[PatchCompleteKey] == "1" {
+				patchComplete++
+			}
+		}
+		delete(targets, PatchCompleteKey)
+		for key, value := range targets {
+			previous, seen := merged[key]
+			switch {
+			case !seen || previous == value || key == TruncatedKey:
+				merged[key] = value
+			case key == FileIdentitiesKey:
+				merged[key] = previous + "," + value
+			case key == InstructionIdentityKey:
+				merged[key] = previous + "\x00" + value
+			default:
+				return incompleteEvidence(cwd)
+			}
+		}
+	}
+	if len(merged) == 0 && patchCalls == 0 {
+		return ""
+	}
+	if patchCalls > 0 && patchComplete == patchCalls && merged[TruncatedKey] == "" {
+		merged[PatchCompleteKey] = "1"
+	}
+	encoded, err := json.Marshal(merged)
+	if err != nil || len(encoded) > maxEncodedTargets || len(merged) > 2*MaxWriteTargets+6 {
+		return incompleteEvidence(cwd)
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
 func incompleteEvidence(cwd string) string {
 	targets := map[string]string{TruncatedKey: "1"}
 	if cwd != "" && len(cwd) <= MaxWriteTargetPathBytes {
@@ -1454,6 +1594,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		return links
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
+	linkDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds := false, false
 	var copyScopes []string
@@ -1498,6 +1639,9 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			links.unknown(false)
 		case slices.Contains(linkPrograms, program):
 			workingDirectory := cwd
+			if dir, placed := linkDirs[call]; placed {
+				workingDirectory = dir
+			}
 			if call == linkCall {
 				workingDirectory = linkCWD
 			}
@@ -1584,7 +1728,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			links.unknownCopyIn(scope)
 		}
 	}
-	if len(links.aliases) > 0 && (renames || cds && links.relative && linkCall == nil) {
+	if len(links.aliases) > 0 && (renames || cds && links.relative && linkCall == nil && !linkDirsKnown) {
 		links.unknown(true)
 	}
 	// Scopes are read against the starting directory; after a directory
@@ -1593,6 +1737,76 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		links.globalOpaque = true
 	}
 	return links
+}
+
+// topLevelLinkDirectories places the link calls of a command whose
+// directory changes are all static top-level cd statements in a ; / && / ||
+// list (cd build && ln ../a.txt b1): each link call runs in the directory the
+// cd statements before it name, read lexically from cwd (GAP-1742). known is
+// false when any cd, pushd or popd is elsewhere or dynamic, so the link scope
+// keeps its conservative reading.
+func topLevelLinkDirectories(file *syntax.File, cwd, home string) (dirs map[*syntax.CallExpr]string, known bool) {
+	var statements []*syntax.Stmt
+	var flatten func(*syntax.Stmt)
+	flatten = func(stmt *syntax.Stmt) {
+		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated &&
+			(pair.Op == syntax.AndStmt || pair.Op == syntax.OrStmt) {
+			flatten(pair.X)
+			flatten(pair.Y)
+			return
+		}
+		statements = append(statements, stmt)
+	}
+	for _, stmt := range file.Stmts {
+		flatten(stmt)
+	}
+	topLevel := make(map[*syntax.CallExpr]bool)
+	for _, stmt := range statements {
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && !stmt.Background {
+			topLevel[call] = true
+		}
+	}
+	known = true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 || topLevel[call] {
+			return true
+		}
+		if program, static := StaticWord(call.Args[0], home); !static || slices.Contains(cdPrograms, programBase(program)) {
+			known = known && static && !slices.Contains(cdPrograms, programBase(program))
+		}
+		return true
+	})
+	if !known {
+		return nil, false
+	}
+	dirs = make(map[*syntax.CallExpr]string)
+	dir := cwd
+	for _, stmt := range statements {
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			continue
+		}
+		program, static := StaticWord(call.Args[0], home)
+		if !static {
+			return nil, false
+		}
+		if slices.Contains(cdPrograms, programBase(program)) {
+			if programBase(program) != "cd" || len(call.Args) != 2 || len(call.Assigns) != 0 {
+				return nil, false
+			}
+			target, static := StaticWord(call.Args[1], home)
+			if !static || target == "" || strings.HasPrefix(target, "-") || !filepath.IsAbs(dir) {
+				return nil, false
+			}
+			dir = OperandPath(target, dir)
+			continue
+		}
+		if slices.Contains(linkPrograms, programBase(program)) {
+			dirs[call] = dir
+		}
+	}
+	return dirs, true
 }
 
 // staticChangedDirectoryLink handles one ordered cd/link/write chain. The

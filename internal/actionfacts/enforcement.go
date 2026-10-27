@@ -16,6 +16,8 @@
 
 package actionfacts
 
+import "strings"
+
 // EnforcementProjection returns an independent view containing only commands
 // and effects that are statically proven to execute.
 //
@@ -90,8 +92,14 @@ func (f Facts) EnforcementProjection() Facts {
 		if command.Effect == EffectExecute {
 			executing[command.ID] = struct{}{}
 			retainedHierarchy[command.ID] = struct{}{}
-		} else if command.Effect == EffectPreview &&
+		} else if (command.Effect == EffectPreview || opaqueProgramPath(command) ||
+			argumentExpansionOnly(command)) &&
 			hasStaticRedirect(command.Redirects) {
+			// The shell opens a static redirect target before it runs the
+			// program: a program named by a relative or untrusted path
+			// (./build.sh > f) has an uncertain effect, yet its redirect
+			// writes f (GAP-2268). Any other uncertain command (unparsed
+			// construct, dynamic word) is still not projected.
 			redirecting[command.ID] = struct{}{}
 			retainedHierarchy[command.ID] = struct{}{}
 		}
@@ -117,6 +125,7 @@ func (f Facts) EnforcementProjection() Facts {
 			f.CWD,
 			f.ActiveHome,
 		)
+		keepRedirectResolution(paths, f.Paths, command.ID)
 		mergeProjectionParseResult(
 			&projected.Parse,
 			parse,
@@ -164,6 +173,22 @@ func (f Facts) EnforcementProjection() Facts {
 	}
 
 	return projected
+}
+
+// keepRedirectResolution gives a projected redirect path the resolution
+// that the parse already found for the same spelling of the same command: a
+// trusted-home rewrite respells its target back to "$HOME/...", which the
+// projection alone cannot resolve (GAP-2268).
+func keepRedirectResolution(paths []PathFact, parsed []PathFact, commandID int64) {
+	for index := range paths {
+		for _, fact := range parsed {
+			if fact.CommandID == commandID && fact.Value == paths[index].Value &&
+				fact.Access == paths[index].Access && fact.Resolved != "" {
+				paths[index].Resolved = fact.Resolved
+				break
+			}
+		}
+	}
 }
 
 func projectRedirectExecution(
@@ -270,6 +295,45 @@ func markProjectionFactLimit(projected *Facts) {
 			len(projected.Network) > 0 ||
 			len(projected.DataFlows) > 0,
 	)
+}
+
+// opaqueProgramPath reports a command whose only uncertainty is its
+// program: a complete, static argv whose executable is a path the
+// classifier does not name (./build.sh, scripts/gen.sh, /opt/x/tool).
+func opaqueProgramPath(command CommandFact) bool {
+	return command.Effect == EffectUncertain &&
+		command.ArgvComplete &&
+		redirectRunsUnderControlFlow(command) &&
+		command.Program == "" &&
+		command.Executable != "" &&
+		strings.Contains(strings.ReplaceAll(command.Executable, `\`, "/"), "/")
+}
+
+// argumentExpansionOnly reports a command left uncertain by words that
+// expand (echo $X, make $FLAGS, ./build.sh "$X"): the shell opens a static
+// redirect target before it runs the program, whatever those words expand
+// to, so the redirect is a write (GAP-2298).
+func argumentExpansionOnly(command CommandFact) bool {
+	if command.Effect != EffectUncertain || command.ArgvComplete ||
+		command.Executable == "" || !redirectRunsUnderControlFlow(command) {
+		return false
+	}
+	for _, argument := range command.Arguments {
+		if argument.Expands {
+			return true
+		}
+	}
+	return false
+}
+
+// redirectRunsUnderControlFlow reports a command that runs unconditionally
+// or as one side of a plain && or || list (cd sub && ./build.sh > f): that
+// list attempts the redirect, so it counts as the write it names
+// (GAP-2225 RV13-3). Other control flow is still not projected.
+func redirectRunsUnderControlFlow(command CommandFact) bool {
+	return !command.ControlFlowUncertain ||
+		command.ControlFlowOperator == ControlFlowOperatorAnd ||
+		command.ControlFlowOperator == ControlFlowOperatorOr
 }
 
 func hasStaticRedirect(redirects []RedirectFact) bool {

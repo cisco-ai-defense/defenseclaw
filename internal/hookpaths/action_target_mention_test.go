@@ -11,7 +11,6 @@ import (
 )
 
 func TestR104ActionProtectedMentionIndependentOfOperandRole(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -348,6 +347,7 @@ func TestR104WindowsNestedProtectedMention(t *testing.T) {
 }
 
 func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {

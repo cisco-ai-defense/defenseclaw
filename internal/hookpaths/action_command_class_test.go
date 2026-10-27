@@ -12,7 +12,6 @@ import (
 
 // These parser cases preserve audit classifications; enforcement requires a resolved protected target.
 func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -22,8 +21,14 @@ func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
 		"sudo -l", "sudo -ll", "sudo --list", "sudo -n -l",
 		"sudo -u root -l", "sudo -l /bin/sh", "sudo -l /bin/r*",
 	} {
-		if got := ActionCommandAuditReason(command, cwd, home); got != "" {
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
 			t.Errorf("%q: decision = %q, want allow", command, got)
+		}
+		// The POSIX grammar knows sudo -l lists and runs nothing. A Windows
+		// home reads the command as PowerShell, where sudo is an unknown
+		// program: an audit reason there, never a deny (GAP-0975).
+		if got := ActionCommandAuditReason(command, cwd, home); got != "" && !actionWindowsHome(home) {
+			t.Errorf("%q: audit reason = %q, want none", command, got)
 		}
 	}
 	for _, command := range []string{
@@ -38,7 +43,7 @@ func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
 }
 
 func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -119,7 +124,7 @@ func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
 }
 
 func TestR104ActionClassBoundedOrdinaryValues(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -170,7 +175,7 @@ func TestR104ActionClassBoundedOrdinaryValues(t *testing.T) {
 }
 
 func TestR104ActionClassWrapperRecursion(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -219,7 +224,7 @@ func TestR104ActionClassWrapperRecursion(t *testing.T) {
 // Each lead gap is kept as a named row so a later parser change cannot
 // silently reopen one variant while the broader class tests stay green.
 func TestR104LeadGapCorpusPOSIX(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -683,7 +688,7 @@ func TestR104ActionWindowsUninspectedScripts(t *testing.T) {
 }
 
 func TestR104ActionBoundedFunctionAndProcessInputs(t *testing.T) {
-	skipNativeWindowsHomeGrammar(t)
+	skipPOSIXGrammarOnWindows(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {

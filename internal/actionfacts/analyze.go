@@ -18,6 +18,7 @@ package actionfacts
 
 import (
 	"path"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -227,7 +228,8 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			// exact; the rewrite is kept only when nothing else is dynamic.
 			home, _ := normalizeActiveHome(input.ActiveHome)
 			if rewrite, ok := rewriteTrustedPOSIXHomeTilde(command, home); ok {
-				if resolved := parse(rewrite.source); resolved.status == StatusComplete {
+				if resolved := parse(rewrite.source); resolved.status == StatusComplete ||
+					issuesNarrowed(resolved, parsed) {
 					parsed = resolved
 					// A Windows drive home (GAP-0912) keeps its rewritten
 					// spelling: the POSIX parse cannot resolve a drive path,
@@ -2213,4 +2215,38 @@ func safeToolName(value string) string {
 		return ""
 	}
 	return value
+}
+
+// issuesNarrowed reports a partial parse of the trusted-home rewrite that
+// knows no less than the partial parse of the command as sent: it drops an
+// issue of the original and adds none, because the rewrite only made the
+// home words exact and what else stays unknown (a program with no operand
+// grammar, as in `make > ~/f`) stays partial the same way, so its static
+// redirect targets keep their path facts (GAP-2225). A dynamic home word can
+// also stop the original parse at a wrapper before its child (`env make >
+// ~/f`, `sudo make > ~/f`): once the rewrite drops that dynamic_word issue,
+// the child may add only the program-grammar issues that the absolute
+// spelling of the same command has too (GAP-2225 RV12-1).
+func issuesNarrowed(resolved, original parseOutput) bool {
+	if resolved.status != StatusPartial {
+		return false
+	}
+	dropped := false
+	for _, issue := range original.issues {
+		if !slices.Contains(resolved.issues, issue) {
+			dropped = true
+		}
+	}
+	dynamicDropped := slices.Contains(original.issues, IssueDynamicWord) &&
+		!slices.Contains(resolved.issues, IssueDynamicWord)
+	for _, issue := range resolved.issues {
+		if slices.Contains(original.issues, issue) {
+			continue
+		}
+		if dynamicDropped && (issue == IssueUnknownOperandGrammar || issue == IssueUnsupportedConstruct) {
+			continue
+		}
+		return false
+	}
+	return dropped
 }

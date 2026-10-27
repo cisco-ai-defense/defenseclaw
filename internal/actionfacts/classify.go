@@ -751,6 +751,13 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifySourceInvocation(out, command)
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
 		classifyPowerShellArtifactInvocation(out, command)
+	case ":":
+		// ":" runs nothing: its redirects are its only effect (`: > f`,
+		// GAP-2076). A ': <<EOF' comment block, or any other stdin, keeps
+		// the parse partial, so text in it is never enforced.
+		if command.LiteralStdin != "" || command.LiteralStdinAmbiguous || posixDescriptorIsRedirected(command, 0) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
 	case "cmd", "cmd.exe",
 		"echo", "printf", "pwd", "cd", "true", "false", "sleep", "date",
 		"whoami", "id", "uname", "test", "[", "expr", "read", "export",

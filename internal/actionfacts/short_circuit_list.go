@@ -780,6 +780,17 @@ func simpleMayImportExportedFunctions(call *syntax.CallExpr, source string, expo
 		func(dir string) bool { return strings.HasPrefix(program, dir) }) {
 		return true
 	}
+	// Only a shell runs an exported function by name. A name in the argv
+	// of an ordinary program (ls f, nice ls f, time grep f x) is data; it
+	// counts when the program word itself is the name, or a runner that
+	// hands its words to a shell (watch, parallel ...) is present
+	// (GAP-1094).
+	shellText := known && slices.Contains(exported, program)
+	for _, arg := range call.Args {
+		if word, static := simpleStaticWord(arg, nil); static && simpleShellTextRunner(path.Base(word)) {
+			shellText = true
+		}
+	}
 	for _, arg := range call.Args {
 		start, end := int(arg.Pos().Offset()), int(arg.End().Offset())
 		if start < 0 || end <= start || end > len(source) {
@@ -797,12 +808,26 @@ func simpleMayImportExportedFunctions(call *syntax.CallExpr, source string, expo
 				return true
 			}
 			if strings.HasSuffix(token, ".sh") || strings.HasSuffix(token, ".bash") ||
-				slices.Contains(exported, token) {
+				shellText && slices.Contains(exported, token) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// simpleShellTextRunner reports a program that runs its argument words as
+// shell text (watch joins them for sh -c; parallel, script and flock take
+// a command string) or an interpreter whose code can start a
+// shell (os.system, system(), backticks), so a word naming an exported
+// function may call it.
+func simpleShellTextRunner(program string) bool {
+	switch program {
+	case "watch", "parallel", "script", "flock",
+		"perl", "ruby", "node", "nodejs", "deno", "bun", "php", "lua", "tclsh", "awk", "gawk", "mawk", "nawk":
+		return true
+	}
+	return strings.HasPrefix(program, "python") || strings.HasPrefix(program, "pypy")
 }
 
 // simpleNotWordTokenRune separates the program-name and path tokens of an

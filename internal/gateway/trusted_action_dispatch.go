@@ -799,7 +799,8 @@ func withActiveStateTargetMention(
 	if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
 		return findings
 	}
-	if !provenStateMutationPath(facts, request) {
+	if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) &&
+		!provenHomeRedirectStateWrite(request) {
 		return findings
 	}
 	const ruleID = "tamper.detector_state_write"
@@ -834,6 +835,67 @@ func withActiveStateTargetMention(
 		return findings
 	}
 	return append(findings, finding)
+}
+
+// provenBashAggregateStateWrite judges the Bash reading of an all-output
+// redirect (true &> ~/.defenseclaw/config.yaml, echo x &>> f, : >& f):
+// bash and zsh write f, while the POSIX facts read "cmd &" and "> f" and
+// tie no write of f to a command (GAP-2143). The command is analyzed again
+// with the redirects spelled > f 2> f, which proves the write as it does
+// for the ordinary redirect.
+func provenBashAggregateStateWrite(request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return false
+	}
+	spelled, ok := actionfacts.BashAggregateRedirectsAsPOSIX(command)
+	if !ok {
+		return false
+	}
+	input := request.Input
+	input.Command, input.Args, input.Argv = spelled, nil, nil
+	twin := request
+	twin.Input = input
+	return provenStateMutationPath(actionfacts.Analyze(input), twin)
+}
+
+// provenHomeRedirectStateWrite judges the command with the home spelling of
+// each output redirect target written as the active home (~/f, $HOME/f,
+// "$HOME"/f, /home/$USER/f): the shell expands the target from HOME and
+// opens it before it runs the program, whatever the program is, whatever
+// its other words expand to, and on either side of a plain && or || list,
+// so a home-spelled target is the write its absolute spelling is
+// (GAP-2225, GAP-2268, GAP-2298). The Bash reading of an all-output
+// redirect is judged the same way.
+func provenHomeRedirectStateWrite(request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return false
+	}
+	spellings := []string{command}
+	if aggregate, ok := actionfacts.BashAggregateRedirectsAsPOSIX(command); ok {
+		spellings = append(spellings, aggregate)
+	}
+	for _, spelling := range spellings {
+		absolute, ok := actionfacts.HomeRedirectTargetsAsAbsolute(spelling, request.Input.ActiveHome)
+		if !ok {
+			continue
+		}
+		input := request.Input
+		input.Command, input.Args, input.Argv = absolute, nil, nil
+		twin := request
+		twin.Input = input
+		if provenStateMutationPath(actionfacts.Analyze(input), twin) {
+			return true
+		}
+	}
+	return false
 }
 
 // ActionFacts' executing mutation role plus the physical active target
@@ -944,10 +1006,20 @@ func provenPartialStateRedirect(
 	if !integrityCommandOwnsStaticRedirect(projected, candidate) {
 		return false
 	}
+	// The shell opens a static redirect target before it runs the program,
+	// so the write does not depend on what the program is: a program named
+	// by a relative path (./build.sh, scripts/gen.sh) has an uncertain
+	// effect, yet its redirect writes the target as `make > f` does
+	// (GAP-2268).
 	original, ok := integrityCommandByID(facts, projected.ID)
 	return ok && (original.Effect == actionfacts.EffectExecute ||
-		original.Effect == actionfacts.EffectPreview) &&
-		!original.ControlFlowUncertain &&
+		original.Effect == actionfacts.EffectPreview ||
+		original.Effect == actionfacts.EffectUncertain) &&
+		(!original.ControlFlowUncertain ||
+			// One side of a plain && or || list attempts its redirect
+			// (cd sub && make >& ~/f, GAP-2225 RV13-3).
+			original.ControlFlowOperator == actionfacts.ControlFlowOperatorAnd ||
+			original.ControlFlowOperator == actionfacts.ControlFlowOperatorOr) &&
 		integrityCommandOwnsStaticRedirect(original, candidate)
 }
 

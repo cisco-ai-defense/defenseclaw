@@ -38,6 +38,12 @@ func actionPureMake(command, home string) bool {
 // write. Missing, unreadable, or complex make input leaves the call to make
 // alone: parse uncertainty is audit information, not a protected target.
 func actionMakeProtectedRecipe(command, cwd, home string) bool {
+	return actionMakeProtectedRecipeDepth(command, cwd, home, 0)
+}
+
+// A recipe that runs make again ($(MAKE) -f other.mk) is read the same way,
+// to a bounded depth (GAP-0996).
+func actionMakeProtectedRecipeDepth(command, cwd, home string, depth int) bool {
 	return actionMakeRecipeMatches(command, cwd, home, func(recipe, dir, home string) bool {
 		protected := newProtectedFiles(home)
 		ssh := filepath.Join(home, ".ssh")
@@ -48,7 +54,7 @@ func actionMakeProtectedRecipe(command, cwd, home string) bool {
 				return true
 			}
 		}
-		return false
+		return depth < 4 && actionMakeProtectedRecipeDepth(recipe, dir, home, depth+1)
 	})
 }
 
@@ -227,12 +233,19 @@ func (p *makeRecipeProof) matches(match func(string, string, string) bool) bool 
 		}
 		for _, recipe := range rule.recipes {
 			recipe = strings.TrimLeft(recipe, " \t@-+")
+			// make passes the environment's HOME as a variable and runs
+			// $(MAKE) as make (GAP-0996).
+			recipe = makeRecipeVariables(p.home).Replace(recipe)
 			if match(recipe, p.dir, p.home) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func makeRecipeVariables(home string) *strings.Replacer {
+	return strings.NewReplacer("$(HOME)", home, "${HOME}", home, "$(MAKE)", "make", "${MAKE}", "make")
 }
 
 func makeRecipeMatch(pattern, goal string) (string, bool) {
