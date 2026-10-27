@@ -5570,8 +5570,11 @@ function Test-OwnedByCurrentUser([string]$Path) {{ return {owned} }}
 function Write-Warn([string]$m) {{ "WARN $m" }}
 function Write-Info([string]$m) {{ "INFO $m" }}
 {_ps1_function("Remove-KeptNewCopies")}
+{_ps1_function("Get-UndoHint")}
 {_ps1_function("Publish-PreviousSlot")}
+$script:KeptRollbackCopy = ""
 try {{ Publish-PreviousSlot (Join-Path $DataDir 'previous.new') }} catch {{ "THROWN $($_.Exception.Message)" }}
+"UNDO $(Get-UndoHint)"
 'OK'
 """
     result = _run_powershell(script)
@@ -5594,9 +5597,17 @@ try {{ Publish-PreviousSlot (Join-Path $DataDir 'previous.new') }} catch {{ "THR
         assert len(kept) == 1 and kept[0] != ".failed-kept-previous-20261020T000000-new", out
         assert (data / kept[0] / "VERSION").read_text(encoding="ascii") == "1.0.4", out
         assert asides == [] and "belongs to another account" in out and "Exception" not in out, out
+        # The install summary must not send `defenseclaw rollback` at the
+        # other account's older copy without the steps that make this copy
+        # the rollback copy again.
+        undo = re.search(r"UNDO (.*)", out).group(1)
+        assert undo != "Undo with: defenseclaw rollback", out
+        assert str(data / "previous") in undo and str(data / kept[0]) in undo and undo.endswith("defenseclaw rollback"), out
+        assert '$changed. $(Get-UndoHint)' in _text() and '$changed. Undo with: defenseclaw rollback' not in _text()
         return
     assert (data / "previous" / "VERSION").read_text(encoding="ascii") == "1.0.4"
     assert not (data / ".failed-kept-previous-20261020T000000-new").exists(), out
+    assert "UNDO Undo with: defenseclaw rollback" in out, out
     if old == "deletable":
         assert asides == [] and "WARN" not in out, out
     else:

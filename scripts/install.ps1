@@ -92,6 +92,7 @@ $ReleaseSigner = '^https://github\.com/cisco-ai-defense/defenseclaw/\.github/wor
 $DataDir = if ($env:DEFENSECLAW_HOME) { $env:DEFENSECLAW_HOME } else { Join-Path $env:USERPROFILE ".defenseclaw" }
 $Venv = Join-Path $DataDir ".venv"
 $BinDir = Join-Path $env:USERPROFILE ".local\bin"
+$script:KeptRollbackCopy = ""
 $Previous = Join-Path $DataDir "previous"
 $Staging = Join-Path $DataDir ".staging"
 $InstallerDir = Join-Path $DataDir "installer"
@@ -4455,6 +4456,16 @@ function Remove-KeptNewCopies {
     }
 }
 
+function Get-UndoHint {
+    # defenseclaw rollback uses previous\. When this install's copy had to be
+    # kept beside another account's previous\ (Publish-PreviousSlot), a plain
+    # "Undo with: defenseclaw rollback" pointed at the other, older copy.
+    if ($script:KeptRollbackCopy) {
+        return "To undo it, an administrator first removes $Previous and you rename $($script:KeptRollbackCopy) to previous; then run: defenseclaw rollback"
+    }
+    return "Undo with: defenseclaw rollback"
+}
+
 function Publish-PreviousSlot([string]$Slot) {
     # previous.new becomes previous\, the rollback copy. The data a rollback
     # parked in the older previous\ goes to backups\ first (Save-RolledBackData).
@@ -4491,6 +4502,7 @@ function Publish-PreviousSlot([string]$Slot) {
             $kept = Join-Path $DataDir ".failed-kept-previous-$stamp-new"
             Remove-KeptNewCopies
             Move-Path $Slot $kept
+            $script:KeptRollbackCopy = $kept
             Write-Warn "The older rollback copy $Previous belongs to another account and could not be removed or set aside, so this install's rollback copy was kept in $kept"
             Write-Info "To make it the rollback copy again, an administrator removes $Previous (cmd /c rd /s /q `"$Previous`") and you rename $kept to previous"
             return
@@ -5602,7 +5614,7 @@ function Invoke-Install {
         $changed = "Upgraded from $PrevVersion"
         if ((Test-Version $PrevVersion) -and [version]$Ver -lt [version]$PrevVersion) { $changed = "Downgraded from $PrevVersion" }
         if ($PrevVersion -eq $Ver) { $changed = "Replaced the other build of $Ver" }
-        Write-Host "  $changed. Undo with: defenseclaw rollback"
+        Write-Host "  $changed. $(Get-UndoHint)"
         if ((Test-Version $PrevVersion) -and [version]$PrevVersion -lt [version]"1.0.4" -and [version]$PrevVersion -lt [version]$Ver -and (Test-OutageOpenNotice)) {
             Write-Host ('  ' + 'Gateway outages now let calls run with a warning (the default and permissive policies). Run `defenseclaw guardrail fail-mode closed` to keep blocking them.')
         }
