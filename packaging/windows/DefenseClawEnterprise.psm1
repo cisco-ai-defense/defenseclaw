@@ -26048,7 +26048,13 @@ function Assert-DefenseClawRecordedArtifactHashes {
         [string[]]$ReplacedArtifacts = @(),
         # Names the caller in drift errors. Every lifecycle action shares this
         # gate, and the only way out is an Upgrade that replaces the artifact.
-        [string]$Action = 'this action'
+        [string]$Action = 'this action',
+        # A retry of a committed uninstall whose managed-hook teardown is
+        # already finalized: the InstallRoot removal of the earlier run may
+        # have retired some artifacts, and nothing installed runs any more.
+        # An absent artifact is admitted; a present one is still hashed
+        # (GAP-1375).
+        [switch]$AllowRetiredArtifacts
     )
     # A standalone deployment has no CMID broker, so it records no broker
     # hash; the same list as Assert-DefenseClawEnterpriseDeployment applies.
@@ -26078,6 +26084,10 @@ function Assert-DefenseClawRecordedArtifactHashes {
         }
         $path = Get-DefenseClawArtifactPath -Layout $Layout -Name $property.Name
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+            if ($AllowRetiredArtifacts -and
+                -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
+                continue
+            }
             throw "recorded managed artifact is missing before lifecycle mutation: $($property.Name)"
         }
         Assert-DefenseClawNoReparsePath -Path $path
@@ -28656,11 +28666,36 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
         }
     }
     $teardownPhase = ''
+    # A standalone retry after a finalized teardown runs no installed binary
+    # (no Go finalizer: not a purge, or its contract receipt is finalized),
+    # so artifacts the earlier InstallRoot removal retired do not refuse it
+    # (GAP-1375).
+    $retiredRetry = $false
+    if ((Test-DefenseClawStandaloneProfile) -and
+        (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.ManagedHooksTeardownJournalPath `
+            -PathType Leaf) -and
+        (Get-DefenseClawManagedHooksTeardownJournalPhase `
+            -Layout $Layout `
+            -Metadata $metadata `
+            -GatewayServiceName $GatewayServiceName `
+            -AllowLegacyInactive) -ceq 'finalized') {
+        $retiredRetry = (
+            -not $Purge -or
+            [string](Get-DefenseClawManagedHookContractCleanupReceipt `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName `
+                -Metadata $metadata `
+                -Required).phase -ceq 'finalized'
+        )
+    }
     if (Test-DefenseClawStandaloneProfile) {
         Assert-DefenseClawRecordedArtifactHashes `
             -Metadata $metadata `
             -Layout $Layout `
-            -Action 'Committed Uninstall finalization'
+            -Action 'Committed Uninstall finalization' `
+            -AllowRetiredArtifacts:$retiredRetry
         Assert-DefenseClawInstallTreeRetirementState `
             -Layout $Layout `
             -AllowUnretiredAcls
@@ -28742,7 +28777,8 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
     Assert-DefenseClawRecordedArtifactHashes `
         -Metadata $metadata `
         -Layout $Layout `
-        -Action 'Committed Uninstall finalization'
+        -Action 'Committed Uninstall finalization' `
+        -AllowRetiredArtifacts:$retiredRetry
     # A crash can occur after the native finalizer durably changes the
     # authenticated journal to finalized, but before self-uninstall retires
     # the InstallRoot. Re-entering the native finalizer is unnecessary and
