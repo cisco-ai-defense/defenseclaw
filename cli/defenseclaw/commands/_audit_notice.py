@@ -69,6 +69,25 @@ def saved_change_audit(logger: Any, *, unavailable_warning: str | None = None) -
     return _SavedChangeAudit(logger, unavailable_warning=unavailable_warning)
 
 
+def release_superseded_scan_decision(
+    logger: Any, pe: Any, target_type: str, name: str, connector: str,
+) -> None:
+    """An install that stands replaces the runtime disable or install block
+    an earlier CLI scan of that asset recorded for this connector, says so
+    and audits it (GAP-0021). Operator records stay
+    (PolicyEngine.release_scan_decision)."""
+    cleared = pe.release_scan_decision(target_type, name, connector)
+    if not cleared:
+        return
+    ux.echo(f"[install] {name!r}: the earlier scan's {', '.join(cleared)} no longer applies (connector={connector})")
+    if logger:
+        saved_change_audit(logger).log_action(
+            "enable",
+            name,
+            f"type={target_type} released: install admitted; cleared {' '.join(cleared)} connector={connector}",
+        )
+
+
 def note_asset_policy_observed(
     logger: Any, decision: Any, *, target_type: str, name: str, connector: str = "",
 ) -> None:

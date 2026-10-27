@@ -4286,6 +4286,47 @@ class TestSkillInstallQuarantineNeverWarns(SkillCommandTestBase):
 
     WARN = {"install": "none", "file": "none", "runtime": "enable"}
 
+    def _runtime_rows(self, name):
+        return {e.connector: e for e in self.app.store.list_actions_by_type("skill") if e.target_name == name}
+
+    def _refuse_then_allow(self, name, *, operator_reason=""):
+        with patch("defenseclaw.commands.cmd_skill._normalize_runtime_connector", return_value="hermes"):
+            result, _ = self._install(name, ["--action"], self.RUNTIME_ONLY)
+            self.assertEqual(result.exit_code, 1, result.output)
+            rows = self._runtime_rows(name)
+            self.assertTrue(rows and all(r.actions.runtime == "disable" for r in rows.values()), rows)
+            self.assertTrue(all(r.reason.startswith("post-install scan:") for r in rows.values()), rows)
+            if operator_reason:
+                pe = PolicyEngine(self.app.store, self.app.cfg)
+                for connector in rows:
+                    pe.disable_for_connector("skill", name, connector, operator_reason)
+            result, scanned = self._install(name, [], self.WARN)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(scanned and os.path.isdir(scanned[0]), result.output)
+        return result
+
+    def test_gap0021_an_allowed_install_replaces_the_disable_an_earlier_refused_install_recorded(self):
+        """GAP-0021: a runtime-only disable refuses the install and records
+        the disable for each connector. Once admission allows the skill, the
+        next install stands and that scan-decided record no longer keeps it
+        disabled, said on screen and audited."""
+        name = "rd-then-allow"
+        result = self._refuse_then_allow(name)
+        for connector, row in self._runtime_rows(name).items():
+            self.assertNotEqual(row.actions.runtime, "disable", f"{connector}: still disabled by the refused install")
+        self.assertIn("no longer applies", result.output)
+        released = [e for e in self.app.store.list_events(50) if e.action == "enable" and "released" in e.details]
+        self.assertTrue(released, [e.action for e in self.app.store.list_events(50)])
+
+    def test_gap0021_an_operator_disable_stays_after_an_allowed_install(self):
+        """GAP-0021 control: an operator's own disable is not the CLI's scan
+        record, so an allowed install keeps it."""
+        name = "op-disabled"
+        result = self._refuse_then_allow(name, operator_reason="operator: hold for review")
+        rows = self._runtime_rows(name)
+        self.assertTrue(rows and all(r.actions.runtime == "disable" for r in rows.values()), rows)
+        self.assertNotIn("no longer applies", result.output)
+
     def _connector_roots(self, hermes_root=None):
         roots = {
             "openclaw": os.path.join(self.tmp_dir, "openclaw-skills"),

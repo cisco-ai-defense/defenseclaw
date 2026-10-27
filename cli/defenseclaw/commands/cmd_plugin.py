@@ -36,7 +36,11 @@ import click
 
 from defenseclaw import connector_paths, ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
-from defenseclaw.commands._audit_notice import note_asset_policy_observed, saved_change_audit
+from defenseclaw.commands._audit_notice import (
+    note_asset_policy_observed,
+    release_superseded_scan_decision,
+    saved_change_audit,
+)
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.enforce import asset_lists
@@ -1577,6 +1581,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
             raise SystemExit(1)
         for connector, plugin_path in installed_by_connector.items():
             click.echo(f"[install] installed {plugin_name!r} -> {plugin_path} (connector={connector})")
+            release_superseded_scan_decision(app.logger, pe, "plugin", plugin_name, connector)
             if app.logger:
                 saved_change_audit(app.logger).log_action(
                     "plugin-install",

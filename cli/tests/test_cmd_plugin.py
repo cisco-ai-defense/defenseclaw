@@ -3798,6 +3798,33 @@ class TestPluginInstallQuarantineNeverWarns(PluginCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(os.path.isdir(scanned[0]))
 
+    def test_gap0021_an_allowed_install_replaces_the_disable_an_earlier_refused_install_recorded(self):
+        """GAP-0021 (plugin twin): the runtime disable a refused --action
+        install recorded no longer keeps the plugin disabled once admission
+        allows it and the next install stands; an operator disable stays."""
+        warn = {"install": "none", "file": "none", "runtime": "enable"}
+        for operator in (False, True):
+            with self.subTest(operator=operator):
+                name = f"rd-allow-{int(operator)}"
+                with patch("defenseclaw.commands.cmd_plugin._normalize_runtime_connector", return_value="hermes"):
+                    result, _ = self._install(name, ["--action"], self.RUNTIME_ONLY)
+                    self.assertEqual(result.exit_code, 1, result.output)
+                    rows = [e for e in self.app.store.list_actions_by_type("plugin") if e.target_name == name]
+                    self.assertTrue(rows and all(r.actions.runtime == "disable" for r in rows), rows)
+                    if operator:
+                        pe = PolicyEngine(self.app.store, self.app.cfg)
+                        for row in rows:
+                            pe.disable_for_connector("plugin", name, row.connector, "operator: hold")
+                    result, scanned = self._install(name, [], warn)
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertTrue(os.path.isdir(scanned[0]))
+                rows = [e for e in self.app.store.list_actions_by_type("plugin") if e.target_name == name]
+                disabled = [r.connector for r in rows if r.actions.runtime == "disable"]
+                if operator:
+                    self.assertTrue(disabled, "the operator disable was lifted")
+                else:
+                    self.assertEqual(disabled, [], "the refused install's disable still applies")
+
     def _two_connectors(self, order):
         roots = {c: os.path.join(self.tmp_dir, f"{c}-plugins") for c in order}
         for path in roots.values():
