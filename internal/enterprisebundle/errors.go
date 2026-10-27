@@ -77,6 +77,8 @@ const (
 	// not apply because the same inbox held a higher version, and (Linux and
 	// macOS) an applied receipt whose config a later config replaced before
 	// the gateway confirmed it: nothing was rolled back (GAP-1166, GAP-1576).
+	// Windows: a pending receipt whose rendered bytes a higher bundle
+	// committed before it settled (GAP-1187, GAP-2088).
 	CodeSuperseded     Code = "superseded"
 	CodeLifecycleBusy  Code = "lifecycle_busy"
 	CodeBundleRequired Code = "bundle_required"
