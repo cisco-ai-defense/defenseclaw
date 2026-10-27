@@ -245,16 +245,19 @@ func (a *APIServer) auditForeignHookSessionDenial(
 	if a == nil {
 		return
 	}
-	// The denial names the agent identity (agt-) of the caller like any
-	// other hook decision: the verified user and the connector derive it, no
-	// session is needed. The rows had the user but no agt- (GAP-1039). The
-	// guard keys its block on the agent process, not a session, so an
-	// OpenCode denial carries no ais-.
-	if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName}); facts.ID != "" {
-		identity := AgentIdentityFromContext(ctx)
-		identity.IdentityID, identity.IdentityVerified = facts.ID, facts.Verified
-		ctx = ContextWithAgentIdentity(ctx, identity)
-	}
+	// The denial names the caller like the allow rows of the same agent: the
+	// agent identity (agt-) from the verified user and the connector
+	// (GAP-1039), and the session and session instance (ais-) of the
+	// exchange's session through the same context enrichment as every hook
+	// call, and the session's agent (its live hook snapshot, else its root
+	// agent, as the session's own rows), so a SIEM joins the block to the
+	// session and agent it stopped (GAP-1903). An exchange with no session
+	// (an OpenCode denial keyed on the agent process) still names the agt-.
+	ctx = enrichAgentHookContext(ctx, agentHookRequest{
+		ConnectorName: connectorName,
+		SessionID:     strings.TrimSpace(exchange.Key.Session),
+	})
+	ctx = a.contextWithSessionAgentV8(ctx, connectorName)
 	block := "call"
 	switch {
 	case strings.Contains(decision.Reason, "cannot verify this agent session's hook record"):
