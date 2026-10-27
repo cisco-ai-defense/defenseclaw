@@ -4386,7 +4386,10 @@ function Test-OutageOpenNotice {
     # An upgrade from 1.0.2 or 1.0.3 of a config that saves no hook fail
     # mode: gateway outages now run with a warning in the default and
     # permissive tiers (owner decision 2026-10-23), which those releases
-    # blocked. Said once, after the upgrade (GAP-1885).
+    # blocked. Said once, after the upgrade (GAP-1885). Windows PowerShell
+    # 5.1 turns a native stderr line (a Python warning) into an error under
+    # the installer's Stop preference, which lost the notice (GAP-2056).
+    $ErrorActionPreference = "Continue"
     $python = Join-Path $Venv "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { return $false }
     $setHome = -not $env:DEFENSECLAW_HOME
