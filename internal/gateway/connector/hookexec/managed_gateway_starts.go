@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"sync"
@@ -118,12 +119,25 @@ func gatewayRestartShaped(err error) bool {
 		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
+// managedCallDroppedUnsent reports a managed try whose connection was
+// closed while the request was still being written: the peer reset it
+// (net/http then reports the write on the closed connection, not the
+// reset). A socket unit whose service is masked or failing does this to the
+// call it queued (GAP-0807). It is sent again like a reset; the try after it
+// verifies the socket again, and only a socket proven gone makes it an
+// outage. Only managed hooks wait through awaitGatewayRestart, and never
+// after the hook's own context ended.
+func managedCallDroppedUnsent(err error) bool {
+	return err != nil && errors.Is(err, net.ErrClosed) &&
+		!errors.Is(err, errManagedGatewayPeerUnverified) && !errors.Is(err, errInvalidHookRequest)
+}
+
 // awaitGatewayRestart waits before the next try of a call that failed
 // because its gateway is restarting, and reports whether to try again: only
 // for a restart-shaped error, and only while the next try still starts
 // before deadline.
 func awaitGatewayRestart(ctx context.Context, deadline time.Time, err error) bool {
-	if deadline.IsZero() || ctx.Err() != nil || !gatewayRestartShaped(err) {
+	if deadline.IsZero() || ctx.Err() != nil || (!gatewayRestartShaped(err) && !managedCallDroppedUnsent(err)) {
 		return false
 	}
 	delay := gatewayRestartRetryDelay
