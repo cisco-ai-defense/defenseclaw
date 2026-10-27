@@ -51,6 +51,49 @@ var enterpriseHookLoadIdentityAccounts = enterprisehooks.LoadUnixIdentityAccount
 // of whether an agent's per-user files produced an enrollment row.
 var enterpriseHookLocalAccounts = unixidentity.LocalAccounts
 
+// enterpriseHookAccountDatabasePoll is how often the watch loop reads the
+// local account database's stamp (enterpriseHookLocalAccountsStamp).
+var enterpriseHookAccountDatabasePoll = 2 * time.Second
+
+// enterpriseHookAccountDatabaseChanges receives after the local account
+// database changes (useradd, userdel, usermod): the watch loop then
+// reconciles, so the guardian spools a new account's identity record before
+// its first hook. At the one-minute tick a fresh local account's first
+// Codex turn came first and was refused "group membership is unconfirmed"
+// although profile-explain placed it on its group's profile (GAP-2108). nil
+// outside the standalone enterprise guardian and where no stamp is kept
+// (macOS).
+func enterpriseHookAccountDatabaseChanges(ctx context.Context) <-chan struct{} {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	stamp, poll := enterpriseHookLocalAccountsStamp, enterpriseHookAccountDatabasePoll
+	last := stamp()
+	if last == "" || poll <= 0 {
+		return nil
+	}
+	changes := make(chan struct{}, 1)
+	go func() {
+		ticker := time.NewTicker(poll)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if now := stamp(); now != "" && now != last {
+				last = now
+				select {
+				case changes <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+	return changes
+}
+
 var enterpriseHookIdentitySpoolState struct {
 	sync.Mutex
 	running     bool

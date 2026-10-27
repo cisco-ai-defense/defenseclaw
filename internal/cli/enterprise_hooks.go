@@ -56,6 +56,11 @@ import (
 // token the guardian impersonates.
 var enterpriseHookWatchSessionSettle = 5 * time.Second
 
+// enterpriseHookAccountChangeSettle is the delay between a change of the
+// local account database and the reconcile it triggers, so a useradd
+// followed by usermod or passwd runs one pass (GAP-2108).
+var enterpriseHookAccountChangeSettle = time.Second
+
 // enterpriseHookWatchDebounceMaxWait bounds how long filesystem events can
 // postpone the pass they armed. Every event re-armed the debounce with no
 // limit, so writes faster than the debounce held the pass back until the
@@ -3093,6 +3098,9 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// Windows standalone: restore the managed OpenCode plugin as soon as its
 	// attributes change, without waiting for the interval pass.
 	enterpriseHookStandalonePlatformWatch(cmd.Context(), cmd.ErrOrStderr())
+	// A local account created or changed (useradd, usermod) gets its
+	// identity record within seconds, before its first hook (GAP-2108).
+	accountChanges := enterpriseHookAccountDatabaseChanges(cmd.Context())
 
 	for {
 		select {
@@ -3230,6 +3238,20 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			debouncePending = true
 			if debounceReason == "" {
 				debounceReason = "session sign-in"
+			}
+		case <-accountChanges:
+			// The local account database changed: the next pass lists
+			// the new account and spools its identity record, which the
+			// gateway (not root) needs to confirm an unnamed gid on an
+			// sss-first host; at the interval tick its first hook could
+			// come first and be refused (GAP-2108).
+			if !debouncePending {
+				debounceArmedAt = time.Now()
+			}
+			resetEnterpriseHookWatchTimer(debounce, enterpriseHookAccountChangeSettle)
+			debouncePending = true
+			if debounceReason == "" {
+				debounceReason = "account database change"
 			}
 		case <-ticker.C:
 			if enterpriseHookStandaloneConfigChanged(standaloneConfigFingerprint, cmd.ErrOrStderr()) {
