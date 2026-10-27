@@ -1470,7 +1470,7 @@ def _install_sh_functions(*names: str) -> str:
 
 
 _AGENT_SCAN = ("loaded_plugin_agents", "process_argv", "process_cwd", "process_programs", "resolved_agent_path",
-               "agent_identity_audit", "npm_config_prefixes", "installed_agent_programs", "runtime_agent_programs", "agent_of",
+               "agent_identity_audit", "npm_config_prefixes", "installed_agent_programs", "runtime_agent_programs", "entry_prefix_agent_programs", "agent_of",
                "assert_no_loaded_plugin_agents")
 
 
@@ -1589,6 +1589,12 @@ def _started(argv: list[str], program: Path, executable: str | None = None) -> s
         ("opencode npm native exe in the NPM_CONFIG_GLOBALCONFIG prefix", "OpenCode"),
         ("opencode npm native exe in a PATH prefix", "OpenCode"),
         ("opencode npm native exe run by its platform hard link", "OpenCode"),
+        # GAP-1761 case B: the prefix is named only in the agent's own shell
+        # (NPM_CONFIG_USERCONFIG there): the running entry names its prefix,
+        # and npm's launcher in <prefix>/bin must resolve to it.
+        ("opencode npm native exe in a prefix only the agent's shell names", "OpenCode"),
+        ("amp npm package in a prefix only the agent's shell names", "Amp"),
+        ("opencode npm native exe without its prefix launcher", None),
         ("opencode.exe of another package in a PATH prefix", None),
         ("amp npm package", "Amp"),
         ("native installer amp", "Amp"),
@@ -1679,6 +1685,23 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
         else:
             path.append(link.parent)
             program, argv = node, [str(node), str(link)]
+    elif case.endswith("only the agent's shell names") or case == "opencode npm native exe without its prefix launcher":
+        prefix = tmp_path / "agent prefix"
+        if case.startswith("amp"):
+            entry = prefix / "lib" / "node_modules" / "@sourcegraph" / "amp" / "dist" / "main.js"
+            entry.parent.mkdir(parents=True)
+            entry.write_text(script_body, encoding="utf-8")
+            link = prefix / "bin" / "amp"
+            link.parent.mkdir(parents=True)
+            link.symlink_to(entry)
+            program, argv = node, [str(node), str(link)]
+        else:
+            program = _program(prefix / "lib" / "node_modules" / "opencode-ai" / "bin" / "opencode.exe", sleep)
+            if not case.endswith("launcher"):
+                link = prefix / "bin" / "opencode"
+                link.parent.mkdir(parents=True)
+                link.symlink_to(program)
+            argv = [str(program), "60"]
     elif case.startswith("opencode npm native exe") or case == "opencode.exe of another package in a PATH prefix":
         prefix = {
             "opencode npm native exe in ~/.npm-global": home / ".npm-global",

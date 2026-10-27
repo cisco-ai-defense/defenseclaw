@@ -936,6 +936,39 @@ runtime_agent_programs() {
     done
 }
 
+# An npm prefix that no config the installer can read names
+# (NPM_CONFIG_USERCONFIG or NPM_CONFIG_PREFIX set only in the agent's own
+# shell, npm --prefix): the running entry's own path names it,
+# <prefix>/lib/node_modules/<package>/... For Node it is the script argument.
+# Only the launcher npm put in <prefix>/bin, resolving to exactly that entry,
+# is evidence, as for a configured prefix (GAP-1761).
+entry_prefix_agent_programs() {
+    local pid="$1" entry="${2% (deleted)}" word agent prefix link target
+    local -a argv=()
+    case "${entry##*/}" in
+        node | nodejs)
+            while IFS= read -r -d '' word; do
+                argv+=("${word}")
+                [[ ${#argv[@]} -ge 2 ]] && break
+            done < <(process_argv "${pid}" 2>/dev/null)
+            [[ ${#argv[@]} -ge 2 && "${argv[1]}" == /* ]] || return 0
+            entry="$(resolved_agent_path "${argv[1]}")" || return 0
+            ;;
+    esac
+    case "${entry}" in
+        */lib/node_modules/opencode-ai/bin/opencode | */lib/node_modules/opencode-ai/bin/opencode.exe)
+            agent=OpenCode:opencode; prefix="${entry%/lib/node_modules/opencode-ai/bin/*}" ;;
+        */lib/node_modules/@sourcegraph/amp/dist/main.js)
+            agent=Amp:amp; prefix="${entry%/lib/node_modules/@sourcegraph/amp/dist/main.js}" ;;
+        *) return 0 ;;
+    esac
+    link="${prefix}/bin/${agent#*:}"
+    [[ -L "${link}" ]] || return 0
+    target="$(resolved_agent_path "${link}")" || return 0
+    [[ "${target}" == "${entry}" ]] && printf '%s\t%s\n' "${agent%%:*}" "${target}"
+    return 0
+}
+
 # One proc_pidpath call per PID in one interpreter on macOS. An absent old
 # venv or an unreadable process yields an empty path; never fall back to lsof.
 process_programs() {
@@ -1032,13 +1065,15 @@ agent_of() {
 }
 
 loaded_plugin_agents() {
-    local pids installed rows runtime pid program agent word fresh
+    local pids installed rows runtime prefixed pid program agent word fresh
     local -a argv
     installed="$(installed_agent_programs)"
     pids="$(ps -u "$(id -u)" -o pid= 2>/dev/null)" || { [[ -z "${installed}" ]] || agent_identity_audit 0 'process list unreadable'; return 0; }
     rows="$(process_programs "${pids}")"
     runtime="$(while IFS=$'\t' read -r pid program; do runtime_agent_programs "${program}"; done <<< "${rows}")"
     [[ -z "${runtime}" ]] || installed+="${installed:+$'\n'}${runtime}"
+    prefixed="$(while IFS=$'\t' read -r pid program; do [[ -z "${program}" ]] || entry_prefix_agent_programs "${pid}" "${program}"; done <<< "${rows}")"
+    [[ -z "${prefixed}" ]] || installed+="${installed:+$'\n'}${prefixed}"
     [[ -n "${installed}" ]] || return 0
     while IFS=$'\t' read -r pid program; do
         [[ "${pid}" =~ ^[0-9]+$ ]] || continue
