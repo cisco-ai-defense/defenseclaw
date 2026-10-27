@@ -58,7 +58,11 @@ def _helpers() -> str:
         "Clear-SetupDataDir",
         "Invoke-Quietly",
         "Assert-NoActiveConnectorRecovery",
+        # Assert-GatewayQuiescent filters launcher guards through it (GAP-2053, GAP-2138).
+        "Get-GatewayProcessesUnder",
         "Assert-GatewayQuiescent",
+        # Convert-HooksForRollback makes backups\ private first (GAP-1891, GAP-2138).
+        "Protect-BackupsFolder",
     )
     return "\n".join(_function(name) for name in names)
 
@@ -79,6 +83,10 @@ function Remove-Tree([string]$Path) {{
 # No OpenCode or Amp process runs in these fixtures. The plugin-agent refusal
 # and its place before every gateway stop are tested in test_install_ps1.py.
 function Assert-NoLoadedPluginAgents {{ }}
+# Restore-Slot rewrites a newer gateway's hook entries before an older
+# release goes back; no gateway runs here, and that rewrite is tested in
+# test_install_ps1.py (rel-1-0-5 GAP-0020, GAP-2138).
+function Convert-HooksForRestore([string]$Slot) {{ }}
 {_helpers()}
 {body}
 exit 0
@@ -221,6 +229,9 @@ function Clear-StagedRelease {}
 function Test-RecoveryPending { return $false }
 function Get-RestoredNote { return 'Your previous install is back.' }
 function Get-UnchangedNote { return 'nothing was changed' }
+# The hook-file copy of a refused install (GAP-0009) has its own tests there.
+function Save-HookFiles {}
+function Restore-HookFiles {}
 """
     + _function("Start-SwapHookFailModes")
 )
@@ -1119,6 +1130,10 @@ def _local_install_stubs(data: Path, assets: Path, target: str, installed: str =
         "Get-ListedSha256",
         "Test-Checksum",
         "Get-Asset",
+        # Invoke-Install reads the lock owner through it (GAP-1465) and runs
+        # the staged checks below normal priority (GAP-0008); GAP-2138.
+        "Get-InstallLockLiveOwner",
+        "Invoke-BelowNormal",
         "Invoke-Install",
     )
     # The C# here-string has its own column-zero braces; retain the complete
