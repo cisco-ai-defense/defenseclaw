@@ -214,7 +214,9 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 			return validUSSSN(match) && credibleSSNContext(text, start, end)
 		}
 	case "ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER":
-		return func(_, match string, _, _ int) bool { return validPaymentCardCandidate(match) }
+		return func(text, match string, start, _ int) bool {
+			return validPaymentCardCandidate(match) && !decimalFractionAt(text, start)
+		}
 	case "ENT-IBAN":
 		return func(_, match string, _, _ int) bool { return validIBAN(match) }
 	case "ENT-EMAIL-BULK":
@@ -686,7 +688,18 @@ func acceptedLocalPIIMatchAt(text, match string, start, end int) bool {
 	if len(digits) == 9 && strings.Count(match, "-") == 2 {
 		return credibleSSNContext(text, start, end)
 	}
+	if len(digits) >= 13 && len(digits) <= 19 && decimalFractionAt(text, start) {
+		return false
+	}
 	return true
+}
+
+// decimalFractionAt reports a match that starts right after the decimal
+// point of a number ("9.371449635398431"): the digits of a float, not a card
+// number. Claude Code's ~/.claude.json holds such floats (GAP-2062).
+func decimalFractionAt(text string, start int) bool {
+	return start >= 2 && start <= len(text) && text[start-1] == '.' &&
+		text[start-2] >= '0' && text[start-2] <= '9'
 }
 
 func credibleSSNContext(text string, start, end int) bool {
