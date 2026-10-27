@@ -331,6 +331,31 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 		}
 	}
 	validate("kiro", kiroBinary, result.contractLock)
+	// The per-user CLI's verify and status trust only an entry this runtime
+	// recorded writing (GAP-2111).
+	recordBody, err := os.ReadFile(filepath.Join(dataDir, "acp", "owned-entries.json"))
+	if err != nil {
+		t.Fatalf("setup wrote no owned-entries record: %v", err)
+	}
+	var record struct {
+		Version int             `json:"version"`
+		Runtime string          `json:"runtime"`
+		Entries []acpOwnedEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(recordBody, &record); err != nil {
+		t.Fatal(err)
+	}
+	wantDigest, err := acp.RecordedEntrySHA256("zed", entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Version != 1 || record.Runtime != dataDir || len(record.Entries) != 1 ||
+		record.Entries[0] != (acpOwnedEntry{Client: "zed", Agent: "kiro", ConfigPath: settings, Name: "DefenseClaw · Kiro", SHA256: wantDigest}) {
+		t.Fatalf("the owned-entries record does not name the entry setup wrote:\n%s", recordBody)
+	}
+	if info, err := os.Stat(filepath.Join(dataDir, "acp", "owned-entries.json")); err != nil || info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("the owned-entries record is not private: %v %v", info, err)
+	}
 
 	hermesBinary := enroll("hermes")
 	type setupOutcome struct {
@@ -362,6 +387,13 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 	hermes := outcome.result
 	validate("hermes", hermesBinary, hermes.contractLock)
 	validate("kiro", kiroBinary, result.contractLock)
+	if recordBody, err = os.ReadFile(filepath.Join(dataDir, "acp", "owned-entries.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(recordBody, &record); err != nil || len(record.Entries) != 2 ||
+		record.Entries[0].Agent != "hermes" || record.Entries[1].Agent != "kiro" {
+		t.Fatalf("a second enrollment did not keep the first entry's record: %v\n%s", err, recordBody)
+	}
 
 	// An older lock pins the whole settings file. The next enrollment uses
 	// another data directory but still rewrites that one shared editor file.

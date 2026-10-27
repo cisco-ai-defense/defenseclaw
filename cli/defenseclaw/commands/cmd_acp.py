@@ -47,15 +47,58 @@ _CLIENTS = set(ACP_CLIENT_IDS)
 _AGENTS = {agent_id: (command, list(args)) for agent_id, (command, args) in ACP_AGENT_ENTRY_POINTS.items()}
 
 
+# The home of the account whose managed runtime an administrator checks
+# (_runtime_owner_view), or None for this account's own home.
+_RUNTIME_OWNER_HOME: Path | None = None
+
+
 def _client_path(client: str) -> Path:
+    owner_home = _RUNTIME_OWNER_HOME
     if client == "jetbrains":
-        return Path.home() / ".jetbrains" / "acp.json"
+        return (owner_home or Path.home()) / ".jetbrains" / "acp.json"
     if os.name == "nt":
         appdata = os.environ.get("APPDATA")
         if not appdata:
             raise click.ClickException("APPDATA is required to configure Zed on Windows")
         return Path(appdata) / "Zed" / "settings.json"
+    if owner_home is not None:
+        return owner_home / ".config" / "zed" / "settings.json"
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "zed" / "settings.json"
+
+
+def _runtime_owner_uid(data_dir: str) -> int | None:
+    """The account that owns <data_dir>/acp, when root checks another account's runtime (POSIX), else None."""
+    if os.name == "nt" or os.geteuid() != 0:
+        return None
+    try:
+        owner = (Path(data_dir).expanduser() / "acp").lstat().st_uid
+    except OSError:
+        return None
+    return owner if owner != 0 else None
+
+
+@contextlib.contextmanager
+def _runtime_owner_view(data_dir: str):
+    """Read a managed enrollment as the account it belongs to (GAP-2111).
+
+    The administrator checks a user's managed enrollment with
+    --runtime-data-dir. The editor settings file is that user's, under the
+    home of the account that owns the runtime directory, not root's.
+    """
+    global _RUNTIME_OWNER_HOME
+    owner = _runtime_owner_uid(data_dir)
+    previous = _RUNTIME_OWNER_HOME
+    if owner is not None:
+        import pwd
+
+        try:
+            _RUNTIME_OWNER_HOME = Path(pwd.getpwuid(owner).pw_dir)
+        except KeyError:
+            pass
+    try:
+        yield
+    finally:
+        _RUNTIME_OWNER_HOME = previous
 
 
 def _resolve_executable(value: str, label: str) -> str:
@@ -499,13 +542,21 @@ def _record_is_private(path: Path, info: os.stat_result) -> bool:
     """Whether the record is this account's own file, private to it.
 
     On POSIX it must be a regular file this account owns with no group or
-    other permission bit. On Windows the check is the guard's private-file
+    other permission bit. Root checking another account's managed runtime
+    (--runtime-data-dir) accepts that account's own record in its own acp
+    directory, where its enterprise setup writes it (GAP-2111). On Windows the check is the guard's private-file
     rule: no reparse point on the path, owned by this account, and a DACL
     that grants only this account, OWNER RIGHTS and SYSTEM.
     """
     if os.name == "nt":
         return windows_guard_private_file_error(path) is None
-    return stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and not stat.S_IMODE(info.st_mode) & 0o077
+    owner = os.geteuid()
+    if owner == 0:
+        try:
+            owner = path.parent.lstat().st_uid
+        except OSError:
+            return False
+    return stat.S_ISREG(info.st_mode) and info.st_uid == owner and not stat.S_IMODE(info.st_mode) & 0o077
 
 
 def _owned_entry_records(data_dir: str | None) -> EntryRecords:
@@ -1613,6 +1664,11 @@ def status_cmd(app: AppContext, runtime_data_dir: Path | None, json_output: bool
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
     data_dir = str((runtime_data_dir or Path(app.cfg.data_dir)).expanduser().resolve())
+    with _runtime_owner_view(data_dir) if runtime_data_dir else contextlib.nullcontext():
+        _status(app, data_dir, json_output)
+
+
+def _status(app: AppContext, data_dir: str, json_output: bool) -> None:
     bindings = {}
     for client, agent in sorted(_binding_pairs(app.cfg, data_dir)):
         problems = _verify_binding(data_dir, client, agent, app.cfg.acp, _expected_gateway(app.cfg))
@@ -1703,6 +1759,11 @@ def verify_cmd(app: AppContext, client: str | None, agent: str | None, runtime_d
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
     data_dir = str((runtime_data_dir or Path(app.cfg.data_dir)).expanduser().resolve())
+    with _runtime_owner_view(data_dir) if runtime_data_dir else contextlib.nullcontext():
+        _verify(app, client, agent, data_dir)
+
+
+def _verify(app: AppContext, client: str | None, agent: str | None, data_dir: str) -> None:
     if client and agent:
         pairs = [(client, agent)]
     else:

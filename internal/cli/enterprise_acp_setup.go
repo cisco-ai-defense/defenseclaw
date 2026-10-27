@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -261,6 +262,7 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 		return result, err
 	}
 	lockPath := acpContractLockPath(in.dataDir, in.client, in.agent)
+	recordPath := acpOwnedEntriesPath(in.dataDir)
 
 	document, prefix, err := readACPClientConfig(clientPath)
 	if err != nil {
@@ -274,7 +276,7 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 	if err != nil {
 		return result, err
 	}
-	touched := append([]string{clientPath, lockPath}, siblings...)
+	touched := append([]string{clientPath, lockPath, recordPath}, siblings...)
 	snapshots := make(map[string][]byte, len(touched))
 	for _, path := range touched {
 		body, readErr := os.ReadFile(path)
@@ -360,6 +362,18 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 		return result, err
 	}
 	if err := safefile.WritePrivate(lockPath, append(body, '\n')); err != nil {
+		return result, err
+	}
+	// The per-user CLI's verify and status trust an entry only when this
+	// runtime recorded writing it; enterprise setup wrote none, so every
+	// untouched managed entry read as foreign (GAP-2111).
+	recorded, err := acp.RecordedEntrySHA256(in.client, entry)
+	if err != nil {
+		return result, err
+	}
+	if err := recordACPOwnedEntry(in.dataDir, acpOwnedEntry{
+		Client: in.client, Agent: in.agent, ConfigPath: clientPath, Name: acpManagedEntryName(in.agent), SHA256: recorded,
+	}); err != nil {
 		return result, err
 	}
 	for _, sibling := range siblings {
@@ -462,6 +476,60 @@ func acpContractLockPath(dataDir, client, agent string) string {
 // acpManagedEntryName is the editor entry name for an agent, the one the
 // Python CLI writes and verifies.
 func acpManagedEntryName(agent string) string { return acp.ManagedEntryName(agent) }
+
+// maxACPOwnedEntriesBytes is the record size the per-user CLI reads
+// (cmd_acp._ENTRY_RECORD_LIMIT).
+const maxACPOwnedEntriesBytes = 256 << 10
+
+// acpOwnedEntry is one row of <data-dir>/acp/owned-entries.json, the record
+// of the editor entries a runtime wrote (cmd_acp._ENTRY_RECORD_FIELDS).
+type acpOwnedEntry struct {
+	Client     string `json:"client"`
+	Agent      string `json:"agent"`
+	ConfigPath string `json:"config_path"`
+	Name       string `json:"name"`
+	SHA256     string `json:"sha256"`
+}
+
+func acpOwnedEntriesPath(dataDir string) string {
+	return filepath.Join(dataDir, "acp", "owned-entries.json")
+}
+
+// recordACPOwnedEntry adds or replaces one entry in the runtime's record and
+// keeps the others. A record that is unreadable or for another runtime is
+// replaced, as the per-user CLI does.
+func recordACPOwnedEntry(dataDir string, entry acpOwnedEntry) error {
+	type document struct {
+		Version int             `json:"version"`
+		Runtime string          `json:"runtime"`
+		Entries []acpOwnedEntry `json:"entries"`
+	}
+	path := acpOwnedEntriesPath(dataDir)
+	var entries []acpOwnedEntry
+	if body, err := safefile.ReadRegularFileBounded(path, maxACPOwnedEntriesBytes); err == nil {
+		var previous document
+		if json.Unmarshal(body, &previous) == nil && previous.Version == 1 && filepath.Clean(previous.Runtime) == filepath.Clean(dataDir) {
+			for _, kept := range previous.Entries {
+				if kept.Client == entry.Client && kept.Agent == entry.Agent && kept.Name == entry.Name &&
+					filepath.Clean(kept.ConfigPath) == filepath.Clean(entry.ConfigPath) {
+					continue
+				}
+				entries = append(entries, kept)
+			}
+		}
+	}
+	entries = append(entries, entry)
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i], entries[j]
+		return strings.Join([]string{a.Client, a.Agent, a.ConfigPath, a.Name}, "\x00") <
+			strings.Join([]string{b.Client, b.Agent, b.ConfigPath, b.Name}, "\x00")
+	})
+	body, err := json.MarshalIndent(document{Version: 1, Runtime: dataDir, Entries: entries}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return safefile.WritePrivate(path, append(body, '\n'))
+}
 
 // acpSiblingLockPaths finds existing locks both in the new enrollment's data
 // directory and in the managed entries of the shared editor settings file.
