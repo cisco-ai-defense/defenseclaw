@@ -1113,7 +1113,7 @@ function Get-InstallGatewayState {
     $setupInstall = Get-Variable -Name Setup -ValueOnly -ErrorAction SilentlyContinue
     if ($setupInstall -and (Get-Field $setupInstall "Root")) { $images += Join-Path $setupInstall.Root "bin\defenseclaw-gateway" }
     try { if (Get-GatewayProcess) { return "running" } } catch { return "unknown" }
-    try { if (@(Get-ProcessesUnder $images).Count) { return "running" } } catch { return "unknown" }
+    try { if (@(Get-GatewayProcessesUnder $images).Count) { return "running" } } catch { return "unknown" }
     $file = Join-Path $DataDir "gateway.pid"
     if (-not (Test-Path -LiteralPath $file)) { return "down" }
     try {
@@ -1146,7 +1146,7 @@ function Stop-Gateway {
     }
     # Its watchdog runs the same binary; nothing of this install may keep running.
     for ($waited = 0; $waited -lt 10; $waited++) {
-        $left = @(Get-ProcessesUnder @($image) | Where-Object { $_.ExecutablePath -eq $image })
+        $left = @(Get-GatewayProcessesUnder @($image) | Where-Object { $_.ExecutablePath -eq $image })
         if (-not $left.Count) { break }
         if ($waited -eq 5) { $left | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } }
         Start-Sleep -Seconds 1
@@ -1173,7 +1173,7 @@ function Stop-UnprovenGateway {
     $prefix = Join-Path $BinDir "defenseclaw-gateway"
     $stopped = 0
     for ($attempt = 0; $attempt -lt 10; $attempt++) {
-        $running = @(Get-ProcessesUnder @($prefix))
+        $running = @(Get-GatewayProcessesUnder @($prefix))
         if (-not $running.Count -and -not (Get-GatewayProcess)) { return $stopped }
         foreach ($row in $running) {
             $process = Get-Process -Id $row.ProcessId -ErrorAction SilentlyContinue
@@ -1194,11 +1194,11 @@ function Stop-Watchdog {
     # ownership lock, and the new gateway's watchdog cannot start (GAP-1833).
     # The prefix also matches a binary an earlier run renamed aside.
     $image = Join-Path $BinDir "defenseclaw-gateway.exe"
-    if (-not @(Get-ProcessesUnder @($image)).Count) { return }
+    if (-not @(Get-GatewayProcessesUnder @($image)).Count) { return }
     Write-Info "Stopping the watchdog"
     if (Test-Path -LiteralPath $image -PathType Leaf) { Invoke-Native $image @("watchdog", "stop") -Quiet | Out-Null }
     for ($waited = 0; $waited -lt 10; $waited++) {
-        $left = @(Get-ProcessesUnder @($image))
+        $left = @(Get-GatewayProcessesUnder @($image))
         if (-not $left.Count) { return }
         if ($waited -eq 3) { $left | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } }
         Start-Sleep -Seconds 1
@@ -1207,10 +1207,23 @@ function Stop-Watchdog {
 }
 
 function Assert-GatewayQuiescent([string]$Operation) {
+    # A gateway or watchdog keeps running; a hook's short use of the gateway
+    # image does not: a 1.0.2-1.0.4 hook's cold start that the install lock
+    # refuses exits at once. So only a process still there after three
+    # seconds refuses; under steady hook traffic one of those short runs was
+    # often seen and the upgrade refused (GAP-2053).
     $image = Join-Path $BinDir "defenseclaw-gateway.exe"
-    if ((Get-GatewayProcess) -or @(Get-ProcessesUnder @($image)).Count) {
-        throw "${Operation} refused: the current gateway or watchdog is still running; stop it before retrying"
+    # Arrays stay arrays: Windows PowerShell 5.1 under strict mode has no
+    # Count on the one pid or $null an if expression unrolls to.
+    $kept = @()
+    for ($look = 0; $look -lt 4; $look++) {
+        if ($look) { Start-Sleep -Seconds 1 }
+        if (Get-GatewayProcess) { $kept = @(0); break }
+        $now = @(Get-GatewayProcessesUnder @($image) | ForEach-Object { [int]$_.ProcessId })
+        if ($look) { $kept = @($kept | Where-Object { $now -contains $_ }) } else { $kept = $now }
+        if (-not $kept.Count) { return }
     }
+    throw "${Operation} refused: the current gateway or watchdog is still running; stop it before retrying"
 }
 
 # A 1.0.0 gateway cannot start on a WAL-mode audit.db whose 5-second startup
@@ -1367,6 +1380,24 @@ function Get-ProcessesUnder([string[]]$Prefixes) {
     return @($all | Where-Object {
         $image = $_.ExecutablePath
         $image -and @($Prefixes | Where-Object { $image.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count
+    })
+}
+
+function Get-GatewayProcessesUnder([string[]]$Prefixes) {
+    # The processes run from this install's gateway image, without the
+    # Claude Code PreToolUse launcher guards: a one-line install's handler is
+    # "<bin>\defenseclaw-gateway.exe launcher-guard <launcher> hook ...", so
+    # every Claude Code tool call runs the gateway image for as long as its
+    # hook runs. A guard is not the gateway or its watchdog: it serves and
+    # restarts nothing, a swap renames its image aside, and stopping it
+    # fails the agent's call. Counted as one, any Claude Code traffic made
+    # an upgrade or rollback refuse "the current gateway or watchdog is
+    # still running" and the stop steps kill the calls (GAP-2053). A process
+    # whose command line cannot be read (an SSH session) still counts.
+    @(Get-ProcessesUnder $Prefixes | Where-Object {
+        $line = ""
+        if ($_.PSObject.Properties["CommandLine"]) { $line = [string]$_.CommandLine }
+        $line -notmatch '^\s*("[^"]*"|\S+)\s+launcher-guard(\s|$)'
     })
 }
 
@@ -3190,7 +3221,7 @@ function Stop-UnprovenRecoveryGateway($Manifest, [string]$Slot) {
     # renamed aside, .old-*) is stopped too (Stop-UnprovenGateway).
     $running = Get-GatewayProcess
     $hooks = Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container
-    $images = @(Get-ProcessesUnder @(Join-Path $BinDir "defenseclaw-gateway"))
+    $images = @(Get-GatewayProcessesUnder @(Join-Path $BinDir "defenseclaw-gateway"))
     if (-not $running -and -not $hooks -and -not $images.Count) { return }
     $checked = $null
     if ($running -or $hooks) {

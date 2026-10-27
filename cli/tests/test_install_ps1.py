@@ -1225,7 +1225,7 @@ def test_the_previous_watchdog_is_stopped_even_when_the_gateway_is_down() -> Non
     # renamed binary and held its ownership lock against the new one.
     body = _ps1_function("Stop-Watchdog")
     assert '$image = Join-Path $BinDir "defenseclaw-gateway.exe"' in body
-    assert "Get-ProcessesUnder @($image)" in body  # a prefix: .old-* too
+    assert "Get-GatewayProcessesUnder @($image)" in body  # a prefix: .old-* too
     assert 'Invoke-Native $image @("watchdog", "stop") -Quiet' in body
     assert "Stop-Process -Id $_.ProcessId -Force" in body
     # Rollback and recovery stop the gateway through Stop-Gateway, running or not.
@@ -2072,7 +2072,7 @@ function Invoke-Native {{
     if (($Arguments -join ' ') -like 'connector refresh-fail-modes --closed*') {{ $script:closes++; return 0 }}
     return 1
 }}
-{_resume_functions("Read-Text", "Get-InstallGatewayState", "Stop-UnprovenRecoveryGateway", "Test-RecoveryPending",
+{_resume_functions("Get-GatewayProcessesUnder", "Read-Text", "Get-InstallGatewayState", "Stop-UnprovenRecoveryGateway", "Test-RecoveryPending",
                    "Close-InstallLock", "Finish-InstallLock", "Close-UnfinishedInstallHooks", "Resume-InterruptedRun")}
 function Get-ProcessesUnder {{ return @() }}
 {_txn_real_functions()}
@@ -2184,7 +2184,7 @@ def test_a_failed_run_keeps_the_lock_only_on_proof_its_gateway_is_down_and_hooks
     # instead of cold-starting it. The lock now stays only when the run
     # closed every hook and, afterwards, no process of this install's
     # gateway image runs; an unknown state releases it, like a running one.
-    result = _txn_harness(tmp_path, _resume_functions("Get-InstallGatewayState", "Test-RecoveryPending", "Close-InstallLock",
+    result = _txn_harness(tmp_path, _resume_functions("Get-GatewayProcessesUnder", "Get-InstallGatewayState", "Test-RecoveryPending", "Close-InstallLock",
                                                       "Finish-InstallLock", "Close-UnfinishedInstallHooks") + f"""
 $Previous = Join-Path $DataDir 'previous'
 $Staging = Join-Path $DataDir '.staging'
@@ -2276,7 +2276,7 @@ def test_a_held_gateway_retry_keeps_the_lock_while_the_lifecycle_record_is_pendi
     # unfinished install. The lock now stays, retry after retry, until the
     # record is settled. Without a record, or with a gateway still running,
     # the lock goes as before.
-    result = _txn_harness(tmp_path, _resume_functions("Get-InstallGatewayState", "Test-RecoveryPending", "Close-InstallLock",
+    result = _txn_harness(tmp_path, _resume_functions("Get-GatewayProcessesUnder", "Get-InstallGatewayState", "Test-RecoveryPending", "Close-InstallLock",
                                                       "Finish-InstallLock", "Close-UnfinishedInstallHooks") + f"""
 $Previous = Join-Path $DataDir 'previous'
 $Staging = Join-Path $DataDir '.staging'
@@ -2845,6 +2845,7 @@ function Stop-Process {{ param($Id, [switch]$Force, $ErrorAction)
 function Start-Sleep {{ param($Seconds) }}
 function Invoke-Native {{ throw 'an unproven program was executed' }}
 function Get-LifecycleNextStep {{ param([switch]$Accept) return 'the retry with -AcceptCurrentInstall' }}
+{_ps1_function('Get-GatewayProcessesUnder')}
 {_ps1_function('Stop-UnprovenGateway')}
 try {{ $stopped = Stop-UnprovenGateway; "STOPPED=$stopped" }} catch {{ "THROWN=$($_.Exception.Message)" }}
 "LEFT=$(@($script:table.Keys | Sort-Object) -join ',')"
@@ -2868,7 +2869,7 @@ def test_a_renamed_watchdog_of_the_accepted_install_is_stopped_and_its_hooks_clo
     # retry and the recovery of an interrupted one) terminate it without
     # running it and verify nothing of the install runs. With no gateway.pid
     # there was no hold, so the hooks are closed once more after it exited.
-    result = _txn_harness(tmp_path, _resume_functions("Stop-UnprovenGateway", "Prepare-UnprovenReplacement",
+    result = _txn_harness(tmp_path, _resume_functions("Get-GatewayProcessesUnder", "Stop-UnprovenGateway", "Prepare-UnprovenReplacement",
                                                       "Stop-UnprovenRecoveryGateway") + f"""
 $Staging = Join-Path $DataDir '.staging'
 $Ver = '1.0.4'
@@ -5617,7 +5618,7 @@ def _close_mocks(capable: str = "new ", close_rc: int = 0, running: bool = False
         "function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Quiet) {\n"
         "    Write-Host \"RAN: $FilePath $($Arguments -join ' ')\"\n"
         f"    return {close_rc}\n}}\n"
-        + _resume_functions("Get-InstallGatewayState")
+        + _resume_functions("Get-GatewayProcessesUnder", "Get-InstallGatewayState")
         + _ps1_function("Close-UnfinishedInstallHooks")
         + _ps1_function("Close-AllHooks")
     )
@@ -6065,7 +6066,7 @@ def _txn_harness(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
         "    return @($script:images | Where-Object { $image = $_.ExecutablePath\n"
         "        @($Prefixes | Where-Object { $image.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count })\n"
         "}\n"
-        + _resume_functions("Get-InstallGatewayState")
+        + _resume_functions("Get-GatewayProcessesUnder", "Get-InstallGatewayState")
         + "\n"
         + body,
         encoding="utf-8",
@@ -7510,3 +7511,62 @@ def test_an_upgrade_from_1_0_3_says_once_that_outages_now_run(tmp_path: Path, gu
     summary = ps[ps.index('$changed = "Upgraded from $PrevVersion"') :][:900]
     assert '[version]$PrevVersion -lt [version]"1.0.4" -and [version]$PrevVersion -lt [version]$Ver -and (Test-OutageOpenNotice)' in summary
     assert f"Write-Host ('  ' + '{sentence}')" in summary
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    "case", ["launcher-guard", "refused-cold-start", "watchdog", "unreadable-command-line", "gateway-pid"]
+)
+def test_hook_calls_that_run_the_gateway_image_do_not_refuse_the_upgrade(case: str) -> None:
+    # GAP-2053: a one-line install's Claude Code PreToolUse handler runs
+    # <bin>\defenseclaw-gateway.exe launcher-guard for every tool call, and a
+    # 1.0.2-1.0.4 hook's refused cold start runs the gateway image for a
+    # moment. Under steady hook traffic one of them was often running when
+    # the installer checked, and the upgrade (or rollback) refused "the
+    # current gateway or watchdog is still running"; Stop-Watchdog killed the
+    # call. Only a process that stays (the gateway or its watchdog), or one
+    # whose command line cannot be read, still refuses.
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$BinDir = Join-Path ([IO.Path]::GetTempPath()) 'defenseclaw-2053-bin'
+$gateway = Join-Path $BinDir 'defenseclaw-gateway.exe'
+$script:look = 0
+$script:killed = @()
+$script:case = '{case}'
+function Start-Sleep {{ param($Seconds, $Milliseconds) $script:look++ }}
+function Get-GatewayProcess {{ if ($script:case -eq 'gateway-pid') {{ return [pscustomobject]@{{ Id = 9 }} }} }}
+function Get-ProcessesUnder {{ param([string[]]$Prefixes)
+    $rows = @()
+    switch ($script:case) {{
+        'launcher-guard' {{ $rows += [pscustomobject]@{{ ProcessId = 50; ExecutablePath = $gateway;
+            CommandLine = "`"$gateway`" launcher-guard C:\\Users\\u\\.local\\bin\\defenseclaw-hook.exe hook --connector claudecode" }} }}
+        'refused-cold-start' {{ if ($script:look -eq 0) {{ $rows += [pscustomobject]@{{ ProcessId = 60; ExecutablePath = $gateway;
+            CommandLine = "$gateway start --hook-cold-start" }} }} }}
+        'watchdog' {{ $rows += [pscustomobject]@{{ ProcessId = 70; ExecutablePath = $gateway; CommandLine = "$gateway watchdog run" }} }}
+        'unreadable-command-line' {{ $rows += [pscustomobject]@{{ ProcessId = 80; ExecutablePath = $gateway }} }}
+    }}
+    @($rows | Where-Object {{ $image = $_.ExecutablePath; @($Prefixes | Where-Object {{ $image.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }}).Count }})
+}}
+function Stop-Process {{ param($Id, [switch]$Force, $ErrorAction) $script:killed += [int]$Id }}
+function Invoke-Native {{ param($FilePath, $Arguments, [switch]$Quiet) return 0 }}
+function Write-Info([string]$m) {{ "INFO $m" }}
+function Write-Warn([string]$m) {{ "WARN $m" }}
+{_resume_functions("Get-GatewayProcessesUnder", "Stop-Watchdog", "Assert-GatewayQuiescent")}
+try {{ Assert-GatewayQuiescent 'Version change to 1.0.5'; 'QUIET' }} catch {{ "REFUSED $($_.Exception.Message)" }}
+$script:look = 0
+Stop-Watchdog
+"KILLED=$($script:killed -join ',')"
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    if case in ("launcher-guard", "refused-cold-start"):
+        assert "QUIET" in out and "REFUSED" not in out, out
+    else:
+        assert "REFUSED Version change to 1.0.5 refused: the current gateway or watchdog is still running" in out, out
+    if case == "launcher-guard":
+        # The guard is an agent's call in flight: never stopped or killed.
+        assert "Stopping the watchdog" not in out and "KILLED=\n" in out + "\n", out
+    if case == "watchdog":
+        assert "INFO Stopping the watchdog" in out and "KILLED=70" in out, out
