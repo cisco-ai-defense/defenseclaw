@@ -335,6 +335,23 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 	return storeBusyObserver{store: s, inner: observer}
 }
 
+// groupedTxBusyObservabilityV8 is the busy observer of a grouped transaction
+// (runGroupedTx). Its caller leads a writeGroup until the batch is handed
+// on, and the busy metric records correlation observations and event-history
+// rows through the same groups: reported in line, the report joined the
+// group its own caller leads and waited for itself, every later audit write
+// queued behind it, and a managed gateway answered no hook until a restart
+// (rel-1-0-5 GAP-0027). It reports in the background, bounded, as a busy
+// statement of an open transaction does.
+func (s *Store) groupedTxBusyObservabilityV8() SQLiteBusyObservabilityV8 {
+	observer, ok := s.sqliteBusyObservabilityV8().(storeBusyObserver)
+	if !ok {
+		return nil
+	}
+	observer.detached = true
+	return observer
+}
+
 // auditPragmas is the pragma set applied to every connection in the
 // audit store's pool via the DSN query string. Putting them in the
 // DSN (as opposed to db.Exec at startup) is critical: PRAGMA

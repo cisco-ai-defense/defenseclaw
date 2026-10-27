@@ -75,9 +75,17 @@ const (
 type storeBusyObserver struct {
 	store *Store
 	inner SQLiteBusyObservabilityV8
+	// detached reports in the background (reportSQLiteBusyDetached): the
+	// caller leads a grouped write (writeGroup), and the report itself writes
+	// through those groups.
+	detached bool
 }
 
 func (o storeBusyObserver) RecordSQLiteBusyMetric(ctx context.Context, op string) error {
+	if o.detached {
+		reportSQLiteBusyDetached(ctx, o.inner, op)
+		return nil
+	}
 	return o.inner.RecordSQLiteBusyMetric(ctx, op)
 }
 
