@@ -2583,7 +2583,7 @@ func matchesActiveDefenseClawState(
 			return true
 		}
 	}
-	return false
+	return findReachesPastItsEntries(facts, candidate)
 }
 
 // stateTreeEntryChanged judges an operand that names the state root or a
@@ -2672,12 +2672,17 @@ func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state stri
 	if state != "" {
 		return false
 	}
-	return findDeletesOnlyNames(command, findPatternIsCleanupOnly)
+	return findDeletesOnlyNames(command, findPatternIsCleanupOnly, findCommandActsOnEntryOnly)
 }
 
 // findDeletesOnlyNames is findDeletesOnlyUnprotectedNames with the name
-// test judged by cleanup.
-func findDeletesOnlyNames(command actionfacts.CommandFact, cleanup func(pattern string, fold bool) bool) bool {
+// test judged by cleanup and each -exec/-execdir/-ok/-okdir command by
+// command (GAP-2305).
+func findDeletesOnlyNames(
+	command actionfacts.CommandFact,
+	cleanup func(pattern string, fold bool) bool,
+	commandOK func(words []string, inEntryDir bool) bool,
+) bool {
 	if !strings.EqualFold(command.Program, "find") || len(command.Argv) < 2 {
 		return false
 	}
@@ -2709,10 +2714,18 @@ func findDeletesOnlyNames(command actionfacts.CommandFact, cleanup func(pattern 
 			acted = true
 			// The command of the action ends at ';' or '+'; its words are
 			// not find tests.
-			for index+1 < len(command.Argv) && command.Argv[index+1] != ";" && command.Argv[index+1] != "+" {
-				index++
+			end := index + 1
+			for end < len(command.Argv) && command.Argv[end] != ";" && command.Argv[end] != "+" {
+				end++
 			}
-			index++
+			// The names only bound what the command is handed: a command
+			// that reaches past the entry (`-execdir rm -rf ../hooks`,
+			// `rm -rf {}/..`, a shell script, another operand) can change
+			// any state file (GAP-2305).
+			if !commandOK(command.Argv[index+1:end], argument == "-execdir" || argument == "-okdir") {
+				return false
+			}
+			index = end
 		default:
 			// Every other primary is skipped with its arguments, so an
 			// argument is never read as a test (`-fprintf -name '*.log'`
@@ -2739,6 +2752,209 @@ func findDeletesOnlyNames(command actionfacts.CommandFact, cleanup func(pattern 
 		}
 	}
 	return named && acted
+}
+
+// findCommandActsOnEntryOnly reports an -exec/-execdir/-ok/-okdir command
+// that reaches only the entry find hands it (GAP-2305): a program that only
+// reads or copies out what it is handed (a copy-out output is judged on its
+// own), or rm, unlink, rmdir, shred, gzip, bzip2 or xz with only plain
+// options and the entry itself ({}, or ./{} where -execdir runs it).
+// {} inside a longer word, any other operand and a shell or wrapper reach
+// past the entry.
+func findCommandActsOnEntryOnly(words []string, inEntryDir bool) bool {
+	if len(words) == 0 {
+		return false
+	}
+	argv := append(append([]string{"find", "-exec"}, words...), ";")
+	if !actionfacts.FindHandedEntries(argv).MayChange {
+		return true
+	}
+	program := findProgramName(words[0])
+	if _, shell := findShellPrograms[program]; shell {
+		return findShellScriptActsOnEntryOnly(words)
+	}
+	if program == "mv" {
+		return findMoveActsOnEntryOnly(words[1:], inEntryDir)
+	}
+	if _, entryOnly := findEntryOnlyChangers[program]; !entryOnly {
+		return false
+	}
+	entries := 0
+	for _, word := range words[1:] {
+		switch {
+		case word == "{}" || inEntryDir && word == "./{}":
+			entries++
+		case findPlainOption(word):
+		default:
+			return false
+		}
+	}
+	return entries > 0
+}
+
+// findMoveActsOnEntryOnly reads `mv [options] {} /absolute/dest`: the
+// entry moves out to one literal absolute destination, which the move
+// facts judge on its own (log rotation out of the state root).
+func findMoveActsOnEntryOnly(args []string, inEntryDir bool) bool {
+	var operands []string
+	for _, word := range args {
+		switch {
+		case findPlainOption(word):
+			if strings.HasPrefix(word, "-t") || strings.HasPrefix(word, "--t") {
+				return false
+			}
+		default:
+			operands = append(operands, word)
+		}
+	}
+	if len(operands) != 2 || !(operands[0] == "{}" || inEntryDir && operands[0] == "./{}") {
+		return false
+	}
+	destination := operands[1]
+	return strings.HasPrefix(destination, "/") && !strings.ContainsAny(destination, "{}$`*?[~\\") &&
+		!strings.Contains("/"+destination+"/", "/../")
+}
+
+// findEntryOnlyChangers remove or compress exactly the operands they are
+// given, so with only plain options and {} they change only the entry.
+var findEntryOnlyChangers = map[string]struct{}{
+	"rm": {}, "unlink": {}, "rmdir": {}, "shred": {}, "gzip": {}, "bzip2": {}, "xz": {},
+}
+
+// findShellPrograms run a script; findInlineInterpreters run code given on
+// their command line; findCommandWrappers run another command.
+var (
+	findShellPrograms = map[string]struct{}{
+		"sh": {}, "bash": {}, "dash": {}, "zsh": {}, "ksh": {}, "mksh": {}, "ash": {}, "fish": {}, "csh": {}, "tcsh": {},
+	}
+	findInlineInterpreters = map[string]struct{}{
+		"perl": {}, "ruby": {}, "node": {}, "php": {}, "python": {}, "python3": {}, "pwsh": {}, "osascript": {},
+	}
+	findCommandWrappers = map[string]struct{}{
+		"sudo": {}, "doas": {}, "su": {}, "runuser": {}, "env": {}, "nice": {}, "nohup": {}, "timeout": {},
+		"command": {}, "exec": {}, "xargs": {}, "find": {}, "busybox": {}, "stdbuf": {}, "ionice": {},
+		"chroot": {}, "setsid": {}, "time": {}, "watch": {}, "parallel": {},
+	}
+)
+
+func findProgramName(word string) string {
+	return strings.ToLower(word[strings.LastIndex(word, "/")+1:])
+}
+
+// findPlainOption is an option word with no path, value or expansion in it
+// (-f, -rf, --force, -9, --).
+func findPlainOption(word string) bool {
+	return len(word) > 1 && word[0] == '-' && !strings.ContainsAny(word, "/={}$`~*?[\\'\";&|<>() ")
+}
+
+// findShellScriptActsOnEntryOnly reads `sh -c 'rm -f "$1"' _ {}`: a script
+// that is one simple command of an entry-only changer with plain options
+// and only "$1" or "$@" as operands, handed only {}. Any other script
+// (a $(dirname ...), ${1%/*}, a redirect, a second command) may reach past
+// the entry.
+func findShellScriptActsOnEntryOnly(words []string) bool {
+	if len(words) < 5 || words[1] != "-c" || strings.Contains(words[3], "{}") {
+		return false
+	}
+	for _, word := range words[4:] {
+		if word != "{}" {
+			return false
+		}
+	}
+	fields := strings.Fields(words[2])
+	if len(fields) < 2 {
+		return false
+	}
+	if _, entryOnly := findEntryOnlyChangers[findProgramName(fields[0])]; !entryOnly ||
+		strings.ContainsAny(fields[0], "$`\\'\";&|<>(){}*?[~=") {
+		return false
+	}
+	operands := 0
+	for _, field := range fields[1:] {
+		switch field {
+		case `"$1"`, `"$@"`, "$1", "$@":
+			operands++
+		default:
+			if !findPlainOption(field) {
+				return false
+			}
+		}
+	}
+	return operands > 0
+}
+
+// findCommandStaysOffState reports an -exec/-execdir/-ok/-okdir command
+// that is handed only entries outside the state (its name test matches no
+// state name) and cannot reach the state on its own: an entry-only
+// command, or a program that is not a shell, a wrapper, inline code or a
+// remover, with no {} inside a longer word and, where -execdir runs it in
+// the entry's directory, no operand but the entry (`find ~ -name '*.py'
+// -exec python3 -m py_compile {} +` stays allowed; `-execdir rm -rf
+// .defenseclaw` does not; GAP-2305).
+func findCommandStaysOffState(words []string, inEntryDir bool) bool {
+	if findCommandActsOnEntryOnly(words, inEntryDir) {
+		return true
+	}
+	if len(words) == 0 {
+		return false
+	}
+	program := findProgramName(words[0])
+	if _, shell := findShellPrograms[program]; shell {
+		return false
+	}
+	if _, wrapper := findCommandWrappers[program]; wrapper {
+		return false
+	}
+	if _, inline := findInlineInterpreters[program]; inline &&
+		!(strings.HasPrefix(program, "python") && len(words) > 2 && words[1] == "-m") {
+		return false
+	}
+	switch program {
+	case "rm", "unlink", "rmdir", "shred", "mv", "ln", "truncate", "dd", "tee", "install", "rsync", "cp":
+		return false
+	}
+	for _, word := range words[1:] {
+		if word == "{}" || inEntryDir && word == "./{}" {
+			continue
+		}
+		if strings.Contains(word, "{}") || inEntryDir && !findPlainOption(word) {
+			return false
+		}
+	}
+	return true
+}
+
+// findReachesPastItsEntries reports a written find starting point whose
+// -exec/-execdir/-ok/-okdir command may change more than the entry it is
+// handed: from anywhere in the state tree, logs/ included,
+// `-execdir rm -rf ../hooks` or a shell script reaches the protected
+// trees beside it (GAP-2305).
+func findReachesPastItsEntries(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	if candidate.Access != actionfacts.PathAccessWrite {
+		return false
+	}
+	command, ok := integrityCommandByID(facts, candidate.CommandID)
+	if !ok || !strings.EqualFold(command.Program, "find") {
+		return false
+	}
+	argv := command.Argv
+	for index := 1; index < len(argv); index++ {
+		action := argv[index]
+		switch action {
+		case "-exec", "-execdir", "-ok", "-okdir":
+		default:
+			continue
+		}
+		end := index + 1
+		for end < len(argv) && argv[end] != ";" && argv[end] != "+" {
+			end++
+		}
+		if !findCommandStaysOffState(argv[index+1:end], action == "-execdir" || action == "-okdir") {
+			return true
+		}
+		index = end
+	}
+	return false
 }
 
 // findExpressionStart returns the index of the first expression word of a
@@ -2835,10 +3051,16 @@ func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfact
 	// the sample list or in the account's real state tree (`find ~ -name
 	// .DS_Store -exec rm {} +`, `-name '*.py'`), keeps it out of the
 	// state tree.
+	// Cleanup and bytecode names also match state entries (logs, the saved
+	// venv's bytecode), so the command must act on the entry alone; a name
+	// that matches no state entry needs only a command that cannot reach the
+	// state on its own (GAP-2305).
+	noStateName := func(pattern string, fold bool) bool {
+		return findPatternMatchesNoStateName(pattern, fold) && !activeStateTreeHasName(root, pattern, fold)
+	}
 	if findDeletesOnlyNames(acted, func(pattern string, fold bool) bool {
-		return findPatternIsCleanupOnly(pattern, fold) || findPatternIsRegenerableBytecode(pattern, fold) ||
-			findPatternMatchesNoStateName(pattern, fold) && !activeStateTreeHasName(root, pattern, fold)
-	}) {
+		return findPatternIsCleanupOnly(pattern, fold) || findPatternIsRegenerableBytecode(pattern, fold) || noStateName(pattern, fold)
+	}, findCommandActsOnEntryOnly) || findDeletesOnlyNames(acted, noStateName, findCommandStaysOffState) {
 		return false
 	}
 	// The root is at depth `depth` below the start; its entries one deeper.
