@@ -1,6 +1,11 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+// ProtectHome is a POSIX gateway service setting; the harness helpers are
+// POSIX-only (over_limit_write_targets_test.go).
+
+//go:build !windows
+
 package gateway
 
 import (
