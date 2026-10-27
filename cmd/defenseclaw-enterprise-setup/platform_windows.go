@@ -736,8 +736,8 @@ func removeEnterpriseSetupStageEntry(path string) error {
 	delay := 25 * time.Millisecond
 	for {
 		err := removeEnterpriseSetupStageFile(path)
-		if err == nil || !(errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED)) ||
-			!time.Now().Add(delay).Before(deadline) {
+		retryable := errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED)
+		if err == nil || !retryable || !time.Now().Add(delay).Before(deadline) {
 			return err
 		}
 		time.Sleep(delay)

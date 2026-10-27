@@ -282,7 +282,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			}
 		}
 		// A peer (GAP-1865) is not in the first map, as owner or as pending.
-		if _, proven := owners[account.UID]; !proven && !(account.Peer && ownersUnrecorded) {
+		if _, proven := owners[account.UID]; !proven && (!account.Peer || !ownersUnrecorded) {
 			if user := cmp.Or(record.User, account.User, holderBefore); user != "" {
 				// No owner proof on this pass (the lookup failed, or the
 				// home is not there now, as an automounted one can be): the
