@@ -23,6 +23,35 @@ import (
 // and no clock step changes the answer.
 const InstallLockIdentityName = "proc-start"
 
+// installRecoveryRecords are the interrupted-install records install.sh and
+// install.ps1 leave beside .install.lock when an upgrade stops between the
+// binary swap and its finish (power loss, a killed installer): the next
+// installer run takes the lock over and finishes or undoes that install.
+var installRecoveryRecords = []string{"previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"}
+
+// InstallRecoveryPending reports an interrupted install of the per-user data
+// directory home that waits for the next installer run: its .install.lock is
+// there (any file type, or it cannot be read) and an interrupted-install
+// record sits beside it (or cannot be read). A hook call does not read it:
+// its allow or deny follows the lock's owner alone (installLockStale,
+// GAP-1024). What would run the half-done install does: a hook cold start,
+// the watchdog's start and the strict install window still treat it as an
+// install in progress until the installer finishes or undoes it (GAP-2082).
+func InstallRecoveryPending(home string) bool {
+	if strings.TrimSpace(home) == "" {
+		return false
+	}
+	if _, err := installLockLstat(filepath.Join(home, ".install.lock")); err != nil && errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	for _, name := range installRecoveryRecords {
+		if _, err := installLockLstat(filepath.Join(home, name)); err == nil || !errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+	}
+	return false
+}
+
 // installLockStale is the one stale-lock rule of every per-user hook (this
 // package, hook-outage-mode, the shell hooks, the OpenCode and Amp plugins)
 // and of `defenseclaw doctor`. It reads only the owner's identity, never a

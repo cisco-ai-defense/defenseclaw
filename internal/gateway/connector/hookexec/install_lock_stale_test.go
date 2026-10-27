@@ -126,3 +126,59 @@ func TestInstallLockHeldIgnoresOnlyALockWhoseOwnerIsGone(t *testing.T) {
 		}
 	})
 }
+
+// GAP-2082: a pending recovery (lock + interrupted-install record) is read
+// by what would start the install, never by a hook's allow or deny: the lock
+// of a dead installer stays free for the hooks (GAP-1024) while
+// InstallRecoveryPending reports the recovery.
+func TestInstallRecoveryPendingNeedsTheLockAndARecord(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exited := exec.Command(self, "-test.run=^$")
+	if err := exited.Run(); err != nil {
+		t.Fatal(err)
+	}
+	dead := strconv.Itoa(exited.ProcessState.Pid())
+	for _, tc := range []struct {
+		name          string
+		lock, pending bool
+		record        string
+	}{
+		{"no lock, no record", false, false, ""},
+		{"record without a lock", false, false, "previous.new"},
+		{"lock without a record", true, false, ""},
+		{"lock and previous.new", true, true, "previous.new"},
+		{"lock and .repair", true, true, ".repair"},
+		{"lock and .rollback-hold", true, true, ".rollback-hold"},
+		{"lock and .lifecycle-txn.json", true, true, ".lifecycle-txn.json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			if tc.lock {
+				lock := filepath.Join(home, ".install.lock")
+				if err := os.Mkdir(lock, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(lock, "pid"), []byte(dead+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.record != "" {
+				if err := os.WriteFile(filepath.Join(home, tc.record), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := InstallRecoveryPending(home); got != tc.pending {
+				t.Fatalf("InstallRecoveryPending = %v, want %v", got, tc.pending)
+			}
+			if InstallLockHeld(home) {
+				t.Fatal("a dead installer's lock holds the hooks (GAP-1024)")
+			}
+		})
+	}
+	if InstallRecoveryPending("") || InstallRecoveryPending(" ") {
+		t.Fatal("an empty home reports a recovery")
+	}
+}
