@@ -282,6 +282,12 @@ The managed config is administrator-owned. For what it contains, see
 
 **Bundle mode.** On a device whose MDM installed bundle trust anchors, the config comes only from signed bundles. `ensure --config`, Setup `CONFIG=` or a wrapper run with a config that is not the current bundle's is refused with `bundle_required`, and on Linux and macOS an edit of the installed file is reverted to the bundle's config. Deliver a new bundle instead. The rest of this section is for devices without bundle trust anchors.
 
+**Leave bundle mode on Windows.** `/repair`, a new `CONFIG=` and moving the anchor file away do not turn bundle mode off: while a signed bundle is current, Setup still refuses `CONFIG=` with `bundle_required`. To go back to a local admin config:
+
+1. Stop delivering bundles to the computer in your MDM (remove the bundle app or package assignment). A later `BUNDLE=` with `TRUSTANCHORS=` puts it back in bundle mode.
+2. Run Setup as LocalSystem ([Run Setup as LocalSystem](/docs/enterprise/windows#run-setup-as-localsystem)) with `/uninstall JSON=1`, without `PURGE=1`, so each user's `%USERPROFILE%\.defenseclaw` stays. It removes the trust anchors, the bundle state and the rest of the machine state ([Remove](/docs/enterprise/windows#remove)). It removes the connector registrations of each user with an active (connected) session. A user who is signed out, or whose session is disconnected, keeps an inert registration and is named in the `user_registrations_pending` warning; that is expected here and needs no `/repair`. From an elevated prompt instead of LocalSystem every user is named, except the Claude Code registration of the account running Setup, which is removed.
+3. Run Setup as LocalSystem with `/ensure CONFIG=<file> JSON=1`. It installs again from that config and enrolls the users again: a signed-in user at once, a signed-out user at their next sign-in (until then `status` counts their connectors as pending). Later changes go through `/ensure CONFIG=` as on any device without anchors.
+
 A change is applied by the apply trigger on Linux and macOS. While it runs, `status` and `verify` report `lifecycle_busy` and exit `75`; that is not a failure, so run them again. A hand edit of the config as root is applied, not reported as drift.
 
 On Linux and macOS you can also hand the new file to `ensure`. It validates the file,
@@ -600,7 +606,7 @@ Uninstall does the following on every OS:
 
 Restart agents after an uninstall: a session that started earlier keeps the hook it read at its start, and once the hook binary is gone it runs that hook as a missing command, so its tool calls run without DefenseClaw. To go back to an older release without that window, use [Roll back](#roll-back).
 
-A standalone uninstall also removes the config, credentials, most machine state and logs. Each user's `~/.defenseclaw` and per-user binaries stay; `--purge` removes everything DefenseClaw installed (on macOS, removing the `_defenseclaw` account can be refused from a remote shell (`eDSPermissionError`); the uninstall then completes with a `service_account` warning that gives the two `dscl` commands to delete it), and `--keep-state` keeps machine state for a reinstall.
+A standalone uninstall also removes the config, credentials, most machine state and logs. Each user's `~/.defenseclaw` and per-user binaries stay; `--purge` removes everything DefenseClaw installed (on macOS, macOS lets only a process with Full Disk Access delete the `_defenseclaw` account, so from an ssh session or MDM agent without it the delete is refused (`eDSPermissionError`); the uninstall then completes with a `service_account` warning that gives the two `dscl` commands to run from a Terminal or MDM script that has Full Disk Access), and `--keep-state` keeps machine state for a reinstall.
 
 | Install channel | Remove the deployment and keep each user's data (Linux/macOS may keep sandbox state) | Remove everything |
 | --- | --- | --- |

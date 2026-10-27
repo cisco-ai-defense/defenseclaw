@@ -219,25 +219,55 @@ func TestFailedUninstallKeepsTheRecordForARetryOrReinstall(t *testing.T) {
 	}
 }
 
-// failingRemoveAccounts cannot delete the service account.
-type failingRemoveAccounts struct{ AccountManager }
+// failingRemoveAccounts cannot delete the service account: Remove returns
+// what dscl's delete error becomes (eDSPermissionError unless err is set).
+type failingRemoveAccounts struct {
+	AccountManager
+	err error
+}
 
-func (failingRemoveAccounts) Remove(context.Context, string) error {
-	return errors.New("remove /Users/_defenseclaw: eDSPermissionError")
+func (a failingRemoveAccounts) Remove(context.Context, string) error {
+	if a.err != nil {
+		return dsclDeleteError("/Users/_defenseclaw", a.err)
+	}
+	return dsclDeleteError("/Users/_defenseclaw", errors.New("dscl . -delete /Users/_defenseclaw: exit status 40: DS Error: -14120 (eDSPermissionError)"))
 }
 
 // macOS can deny the directory-record delete of the service account (GAP-0101).
 // The uninstall had already removed the binaries, the CLI included, so
 // failing it left a command that could not be rerun. It completes and tells
 // the administrator how to delete the account.
+// Full Disk Access is named only when it is why macOS refused the delete
+// (eDSPermissionError); another refusal gets the dscl commands alone, not
+// advice that would send the administrator after the wrong cause.
+func TestServiceAccountWarningNamesFullDiskAccessOnlyForAPermissionRefusal(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.Accounts = failingRemoveAccounts{AccountManager: h.env.Accounts,
+		err: errors.New("dscl . -delete /Users/_defenseclaw: exit status 40: DS Error: -14987 (eDSServiceUnavailable)")}
+	done := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, done)
+	if len(done.Warnings) != 1 || done.Warnings[0].Code != codeAccount {
+		t.Fatalf("warnings = %+v, want one service-account warning", done.Warnings)
+	}
+	msg := done.Warnings[0].Message
+	if !strings.Contains(msg, "eDSServiceUnavailable") || !strings.Contains(msg, "`sudo dscl . -delete /Users/"+h.env.Layout.ServiceUser+"` and `sudo dscl . -delete /Groups/"+h.env.Layout.ServiceUser+"`") {
+		t.Fatalf("warning = %q, want the refusal and the delete commands", msg)
+	}
+	if strings.Contains(msg, "Full Disk Access") {
+		t.Fatalf("warning = %q names Full Disk Access for a refusal it did not cause", msg)
+	}
+}
+
 func TestUninstallCompletesWhenTheServiceAccountCannotBeDeleted(t *testing.T) {
 	h := newTestHost(t, "darwin")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	h.env.Accounts = failingRemoveAccounts{h.env.Accounts}
+	h.env.Accounts = failingRemoveAccounts{AccountManager: h.env.Accounts}
 	done := h.run(Options{Action: ActionUninstall, Purge: true})
 	requireOK(t, done)
 	if len(done.Warnings) != 1 || done.Warnings[0].Code != codeAccount ||
-		!strings.Contains(done.Warnings[0].Message, "sudo dscl . -delete /Users/"+h.env.Layout.ServiceUser) {
+		!strings.Contains(done.Warnings[0].Message, "sudo dscl . -delete /Users/"+h.env.Layout.ServiceUser) ||
+		!strings.Contains(done.Warnings[0].Message, "from a Terminal or an MDM script that has Full Disk Access") {
 		t.Fatalf("warnings = %+v, want the service-account warning with the delete command", done.Warnings)
 	}
 	if exists(h.env.deploymentPath()) {

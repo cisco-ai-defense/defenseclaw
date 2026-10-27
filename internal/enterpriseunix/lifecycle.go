@@ -3943,7 +3943,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			if err := env.Accounts.Remove(ctx, env.Layout.ServiceUser); err != nil {
 				l.serviceAccountKept = true
 				r.AddWarning(codeAccount, fmt.Sprintf("the service account %s was not removed: %v; everything else is removed. Delete the account by hand: %s",
-					env.Layout.ServiceUser, err, serviceAccountDeleteCommand(env.GOOS, env.Layout.ServiceUser)))
+					env.Layout.ServiceUser, err, serviceAccountDeleteCommand(env.GOOS, env.Layout.ServiceUser, err)))
 			} else if packageManaged {
 				// The package stays installed, and its tmpfiles.d entries
 				// name the removed account: every boot logged ten
@@ -4014,9 +4014,15 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 
 // serviceAccountDeleteCommand is how an administrator deletes the service
 // account by hand after an uninstall could not.
-func serviceAccountDeleteCommand(goos, name string) string {
+// On macOS it names Full Disk Access only when removeErr says that was the
+// cause (errNoFullDiskAccess); any other refusal gets just the commands.
+func serviceAccountDeleteCommand(goos, name string, removeErr error) string {
 	if goos == "darwin" {
-		return "`sudo dscl . -delete /Users/" + name + "` and `sudo dscl . -delete /Groups/" + name + "`"
+		commands := "`sudo dscl . -delete /Users/" + name + "` and `sudo dscl . -delete /Groups/" + name + "`"
+		if errors.Is(removeErr, errNoFullDiskAccess) {
+			commands += ", from a Terminal or an MDM script that has Full Disk Access (System Settings > Privacy & Security > Full Disk Access, or a PPPC profile); an ssh session without it is refused the same way"
+		}
+		return commands
 	}
 	return "`sudo userdel " + name + "`"
 }

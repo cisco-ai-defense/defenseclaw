@@ -821,12 +821,13 @@ func (t tetragonIntent) helperModeLoadsPolicies() bool {
 
 // agentInstallRule says where the sensor helper looks for an enrolled
 // user's agent (kernelpolicy searchDirs and trustedExecutable): the user's
-// home, the machine prefixes /usr/local/bin and /usr/bin, and the bin
+// home, the machine prefixes /usr/local/bin, /usr/bin and the shared
+// Linuxbrew /home/linuxbrew/.linuxbrew/bin, and the bin
 // folder of each enterprise.enrollment.agent_prefixes prefix, outside the
 // home only on a path that only root or that user can change. A shared
 // install elsewhere (for example an npm prefix in /opt) is not seen until
 // the administrator lists its prefix (GAP-1965).
-const agentInstallRule = "an agent counts when it is installed in the user's home (for example ~/.local/bin/claude), in /usr/local/bin or /usr/bin, or in the bin folder of a prefix listed in enterprise.enrollment.agent_prefixes, on a path only root or that user can change; a shared install anywhere else, or on a path other accounts can write, is not seen"
+const agentInstallRule = "an agent counts when it is installed in the user's home (for example ~/.local/bin/claude), in /usr/local/bin, /usr/bin or /home/linuxbrew/.linuxbrew/bin, or in the bin folder of a prefix listed in enterprise.enrollment.agent_prefixes, on a path only root or that user can change; a shared install anywhere else, or on a path other accounts can write, is not seen"
 
 // hasAnchoredAgent reports whether a user's agent was anchored: a live root
 // now, covered burn-in time, a hit, or enforcement.

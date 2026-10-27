@@ -623,3 +623,30 @@ def test_sandbox_docs_name_the_openshell_release_setup_installs() -> None:
         ):
             for found in re.finditer(pattern, text):
                 assert found.group(1) == pinned, (page, found.group(0))
+
+
+def test_windows_docs_say_how_to_leave_bundle_mode() -> None:
+    # GAP-2261: managed Windows had no documented way back to a local admin
+    # config. A current signed bundle keeps bundle mode on without the anchor
+    # file, so the documented way is uninstall without purge, then ensure.
+    source = (ROOT / "internal/cli/windows_enterprise_bundle.go").read_text(encoding="utf-8")
+    mode = source.split("func windowsBundleMode(", 1)[1].split("\n}\n", 1)[0]
+    assert "state.Current != nil" in mode
+    lifecycle = _flat("enterprise/lifecycle.mdx")
+    section = lifecycle.split("**Leave bundle mode on Windows.**", 1)[1].split("A change is applied by the apply trigger", 1)[0]
+    for phrase in (
+        "`/repair`, a new `CONFIG=` and moving the anchor file away do not turn bundle mode off",
+        "Stop delivering bundles",
+        "`/uninstall JSON=1`, without `PURGE=1`",
+        "removes the trust anchors, the bundle state",
+        "`user_registrations_pending`",
+        "A user who is signed out, or whose session is disconnected, keeps an inert registration",
+        "needs no `/repair`",
+        "except the Claude Code registration of the account running Setup, which is removed",
+        "`/ensure CONFIG=<file> JSON=1`",
+        "a signed-out user at their next sign-in",
+    ):
+        assert phrase in section, phrase
+    windows = (DOCS / "enterprise/windows.mdx").read_text(encoding="utf-8")
+    assert "\n## Remove\n" in windows
+    assert "\n### Run Setup as LocalSystem\n" in windows
