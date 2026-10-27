@@ -270,6 +270,11 @@ func TestPolicyViewAlertNeverDelaysTheCallItRidesOn(t *testing.T) {
 	}
 	t.Cleanup(func() { hookSocketPeerCredentials = restoreCredentials })
 	socket, api, store := startTestHookSocketServer(t, hookSocketTestServer{ledger: `{"version":1,"ok":true,"protected_targets":[{"user":"user7102","uid":7102,"connector":"claudecode","ok":true}]}`})
+	// The stalled alert writer, not the scan latency, is under test: the
+	// client deadline below (2 s) still fails a call the alert holds up, but
+	// the 200 ms production inspect deadline (inspectScanTimeout) is missed by
+	// a CPU-starved inspect under -race, which answered 504 (GAP-0014).
+	api.inspectToolScanTimeout = 5 * time.Second
 	api.managedPolicyView.Store(&managedPolicyView{connectors: map[string]managedPolicyViewConnector{"claudecode": {shared: true}}})
 	const calls = 5
 	// Registered after the server: runs first, so every queued alert is
