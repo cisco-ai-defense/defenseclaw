@@ -372,7 +372,7 @@ def test_managed_install_is_left_alone(account):
 def test_the_repair_is_registered_and_documented():
     ids = [spec.repair_id for spec in cmd_doctor._doctor_repair_specs()]
     assert "doctor.install.stale-lock.clear" in ids
-    for page in ("troubleshooting/doctor.mdx", "reference/commands/cli.mdx"):
+    for page in ("reference/cli.mdx",):
         assert "doctor.install.stale-lock.clear" in (REPO / "docs-site/content/docs" / page).read_text()
     # The plugins and doctor share the same records and bounds.
     for asset in ("amp-plugin.ts", "opencode-plugin.js"):

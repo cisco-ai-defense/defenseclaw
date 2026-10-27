@@ -44,7 +44,7 @@ async def test_config_editor_and_palette_status_labels_fit_at_80_columns(tmp_pat
         status = screen_text(app).splitlines()[-1]
         assert "Command palette" in status and app.status_text in status, status
         assert all(name in status for name in ("Gateway", "Watchdog", "Guardrail")), status
-        assert "gen 18" in status, status
+        # The applied policy gives way to the whole palette label (cli-tui-obs GAP-0740/GAP-1361); Overview shows it.
         assert "Tab complete" in app.hint_text
 
 
