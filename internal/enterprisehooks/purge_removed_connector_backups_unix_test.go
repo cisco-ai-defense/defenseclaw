@@ -31,7 +31,9 @@ func TestPurgeUserStateKeepsTheRemovedConnectorBackups(t *testing.T) {
 	home := newTestHome(t)
 	dataDir := filepath.Join(home, ".defenseclaw")
 	edited := "connector_backups/omnigent/defenseclaw_omnigent_policy.py.edited-ae793da7fbcd2b16"
-	writePurgeTestFile(t, filepath.Join(dataDir, "config.yaml"), "gateway: {}\n")
+	// No config.yaml, .env, audit.db or previous/: a folder with one of
+	// them is the account's own per-user install, which the purge keeps
+	// whole, connector_backups included (GAP-0727).
 	writePurgeTestFile(t, filepath.Join(dataDir, edited), "# my edit\n")
 	writePurgeTestFile(t, filepath.Join(dataDir, "connector_backups/openhands/hooks.json.edited-01"), "{}\n")
 	// An earlier purge already kept an omnigent folder: the new one gets

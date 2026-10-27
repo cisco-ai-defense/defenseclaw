@@ -41,6 +41,11 @@ func TestStandaloneCleanupRetiresADeletedAccountAStaleLookupStillFinds(t *testin
 	useReportingStandaloneRunner(t)
 	deleted := filepath.Join(f.homes, "pod-deleted") // removed with the account
 	unmounted := filepath.Join(f.homes, "unmounted-volume", "pod-offline")
+	// Another account's home: an empty home parent reads as the mount point
+	// of an unmounted volume, so its missing home is not gone (GAP-0443).
+	if err := os.MkdirAll(filepath.Join(f.homes, "pod-other"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	// The stale answer: the account as it was before it was deleted.
 	resolver.accounts["pod-deleted"] = unixidentity.Account{Name: "pod-deleted", UID: uid, GID: gid, Home: deleted}
 	resolver.accounts["pod-offline"] = unixidentity.Account{Name: "pod-offline", UID: uid + 1, GID: gid, Home: unmounted}
