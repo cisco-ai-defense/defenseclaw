@@ -108,6 +108,15 @@ func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands [
 					for _, name := range literalProgramOperands(words[:i], stmt, cwd, home, depth, len(file.Stmts) == 1) {
 						add(name)
 					}
+				} else if i > 0 && awkProgramName(words[0]) {
+					// A double-quoted awk program with an expansion: its
+					// literal print targets stay targets (GAP-2197).
+					if text, rendered := awkRenderedProgram(arg); rendered {
+						prefix := append(append([]string(nil), words[:i]...), text)
+						for _, name := range literalProgramOperands(prefix, stmt, cwd, home, depth, len(file.Stmts) == 1) {
+							add(name)
+						}
+					}
 				}
 				return true
 			}

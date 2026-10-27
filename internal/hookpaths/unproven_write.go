@@ -624,6 +624,25 @@ func awkDynamicOptionName(word *syntax.Word) string {
 // shell expansion. A shell word's outer quotes are syntax, not AWK source.
 // Exposed file output is unproved because the expansion can change its target.
 func awkDynamicProgram(word *syntax.Word, cwd, home string) (string, bool) {
+	text, ok := awkRenderedProgram(word)
+	if !ok {
+		return "", false
+	}
+	if !strings.Contains(text, "{") || !strings.Contains(text, "}") {
+		return "", false
+	}
+	output, unsafe, _ := awkOutputProof(text, cwd, home)
+	if output || unsafe || awkCommandEffect(text) {
+		return "", false
+	}
+	return text, true
+}
+
+// awkRenderedProgram is the awk source of a double-quoted program word with
+// each shell expansion replaced by X. A literal print target in it is still
+// a target whatever the expansion holds (GAP-2197: awk "BEGIN {print $1 >>
+// \"alias\"}").
+func awkRenderedProgram(word *syntax.Word) (string, bool) {
 	if word == nil || len(word.Parts) != 1 {
 		return "", false
 	}
@@ -653,15 +672,7 @@ func awkDynamicProgram(word *syntax.Word, cwd, home string) (string, bool) {
 			return "", false
 		}
 	}
-	text := rendered.String()
-	if !strings.Contains(text, "{") || !strings.Contains(text, "}") {
-		return "", false
-	}
-	output, unsafe, _ := awkOutputProof(text, cwd, home)
-	if output || unsafe || awkCommandEffect(text) {
-		return "", false
-	}
-	return text, true
+	return rendered.String(), true
 }
 
 // awkCommandEffect reports awk code that runs a command (a pipe, system(),

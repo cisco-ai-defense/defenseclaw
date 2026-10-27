@@ -66,6 +66,7 @@ func TestR105ProtectHomeAWKOutputUsesClientTargets(t *testing.T) {
 		{`awk -fwriter.awk input.txt`, true},
 		{`gawk --file=writer.awk input.txt`, true},
 		{`out=alias; awk "BEGIN {print \"# reviewed 2026-10-23\" >> \"$out\"}"`, true},
+		{`awk "BEGIN {print $1 >> \"alias\"}" input.txt`, true},
 		{`awk 'BEGIN {print "marker" >> "report.txt"}' "$input"`, false},
 		{`awk -f read.awk input.txt`, false},
 		{`awk -f report.awk input.txt`, false},
