@@ -6750,3 +6750,64 @@ def test_install_ps1_takes_a_stale_lock_over_in_place_behind_a_claim() -> None:
     live = live[: live.index("\n}\n")]
     assert "[int]$claimer -eq $PID" in live and "StartTime.ToFileTimeUtc() -eq $recorded" in live
     assert "$process.HasExited" in live
+
+
+def test_path_variables_are_resolved_before_the_data_dir_is_computed() -> None:
+    text = _text()
+    call = text.index("\nResolve-DcPathVariables\n")
+    assert call < text.index("\n$DataDir = ")
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("home_value", "config_value", "want_home", "want_config"),
+    [
+        ("~", "~\\c.yaml", "{home}", "{home}|c.yaml"),
+        ("~/dc", "~/c.yaml", "{home}|dc", "{home}|c.yaml"),
+        ("dc", "c.yaml", "{cwd}|dc", "{cwd}|c.yaml"),
+        ("", "", "", ""),
+    ],
+)
+def test_a_quoted_tilde_or_relative_path_names_the_callers_home_or_directory(
+    tmp_path: Path, home_value: str, config_value: str, want_home: str, want_config: str
+) -> None:
+    # rel-1-0-4:GAP-2113: PowerShell's Test-Path read "~\\x.yaml" as the home
+    # folder but the Python config reader got the literal text, so the upgrade
+    # stopped with "Cannot read the effective config's connectors".
+    home = tmp_path / "home"
+    cwd = tmp_path / "cwd"
+    home.mkdir()
+    cwd.mkdir()
+    absolute = str(tmp_path / "abs.yaml")
+
+    def want(value: str) -> str:
+        if not value:
+            return ""
+        base, _, leaf = value.partition("|")
+        root = str(home) if base == "{home}" else str(cwd)
+        return os.path.join(root, leaf) if leaf else root
+
+    def quote(value: str) -> str:
+        return value.replace("'", "''")
+
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$env:USERPROFILE = '{quote(str(home))}'
+Set-Location -LiteralPath '{quote(str(cwd))}'
+$env:DEFENSECLAW_HOME = '{quote(home_value)}'
+$env:DEFENSECLAW_CONFIG = '{quote(config_value)}'
+{_ps1_function('Resolve-DcPathVariables')}
+Resolve-DcPathVariables
+"HOME=$env:DEFENSECLAW_HOME"
+"CONFIG=$env:DEFENSECLAW_CONFIG"
+$env:DEFENSECLAW_CONFIG = '{quote(absolute)}'
+Resolve-DcPathVariables
+"ABS=$env:DEFENSECLAW_CONFIG"
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    assert lines["HOME"] == want(want_home)
+    assert lines["CONFIG"] == want(want_config)
+    assert lines["ABS"] == absolute
