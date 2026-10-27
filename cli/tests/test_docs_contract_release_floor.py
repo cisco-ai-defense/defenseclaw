@@ -68,6 +68,32 @@ def test_gap_0350_package_floor_limits_include_old_scripts_and_windows() -> None
     assert "release-floor-limits" in _flat("appendix/upgrade-from-0-8.mdx")
 
 
+def test_every_run_checks_the_floor_including_a_same_release_repair() -> None:
+    """rel-1-0-4:GAP-2033: the page said a repair or ensure that keeps the
+    recorded release skips the floor check; the lifecycle checks every run."""
+    text = _section(REFERENCE, "### Release floor limits")
+    assert "every `install`, `upgrade`, `repair` and `ensure` checks the confirmed bundle's release floor" in text
+    assert "including a repair or ensure that keeps the recorded release" in text
+    assert "does not check the floor again" not in text
+    assert "`bundle_state_unreadable`" in text
+    assert "The floor is read from the confirmed bundle's manifest" in text
+    row = _table_row(TROUBLESHOOTING, "bundle_state_unreadable")
+    assert "does not check the release floor again" not in row
+    assert "the release floor is still checked" in row
+    # Ground truth: no record or version test gates the check
+    # (internal/enterpriseunix/lifecycle.go), the floor comes from the
+    # manifest only (enterprisebundle ConfirmedProductFloor), and a damaged
+    # config is the warning (bundleapply.go).
+    lifecycle = _go_source("internal/enterpriseunix/lifecycle.go")
+    assert "// Every candidate must meet an authenticated floor." in lifecycle
+    assert "} else if err := env.BundleProductFloorRefusal(p.version); err != nil {" in lifecycle
+    assert "m, err := s.ConfirmedManifest()" in _go_source("internal/enterprisebundle/product_floor.go")
+    assert (
+        'r.AddWarning(codeBundleStateUnreadable, "cannot read the current policy bundle, so the config the last deployment committed is kept'
+        in _go_source("internal/enterpriseunix/bundleapply.go")
+    )
+
+
 def test_troubleshooting_lists_floor_codes_in_the_right_tables() -> None:
     text = (DOCS / TROUBLESHOOTING).read_text(encoding="utf-8")
     errors = text[text.index("## Lifecycle error codes") : text.index("### Warnings")]

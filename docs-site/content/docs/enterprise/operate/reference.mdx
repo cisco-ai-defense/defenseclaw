@@ -81,23 +81,17 @@ the run warns `retry limit reached`; run `ensure` once the cause is fixed.
 
 ### Release floor limits
 
-On Linux and macOS, `install`, `upgrade`, `repair` and `ensure` check the
-confirmed bundle's release floor before they change anything when:
+On Linux and macOS, every `install`, `upgrade`, `repair` and `ensure` checks
+the confirmed bundle's release floor before it changes anything, including a
+repair or ensure that keeps the recorded release. A version that is not a
+release (for example `dev`) never meets a floor. If that check cannot read the
+floor, the run refuses (`product_floor_refused`).
 
-- there is no deployment record (a first install, or a reinstall after
-  `uninstall --keep-state`),
-- the version changes, up or down, or
-- the version is not a release (for example `dev`).
-
-If that check cannot read the floor, the run refuses (`product_floor_refused`).
-
-A run that keeps the recorded release (a repair, or a reinstall of the same
-version while the deployment record is there) does not check the floor again:
-the bundle was checked against that release when it was applied. If the
-confirmed bundle cannot be read, such a run keeps the config the last deployment
-committed, repairs the host and warns `bundle_state_unreadable`. With
-`--config`, or with no committed config, it stops with that code as an error
-instead. To replace the damaged bundle, contact your administrator.
+The floor is read from the confirmed bundle's manifest. If another file of the
+confirmed bundle cannot be read, `repair` and `ensure` keep the config the last
+deployment committed, repair the host and warn `bundle_state_unreadable`. With
+`--config`, or with no committed config, the run stops with that code as an
+error instead. To replace the damaged bundle, contact your administrator.
 
 Package scripts shipped in 1.0.4 and later run the same check before they
 replace files, but only with a gateway that has the check: the installed
