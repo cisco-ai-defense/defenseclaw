@@ -30,7 +30,7 @@ Reference for the [OpenClaw connector](/docs/connectors/openclaw). It is the onl
 | Detection strategy | `regex_judge` if the judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
 | HITL | off | `--human-approval` plus `--hilt-min-severity` |
 | HITL minimum severity | `HIGH` when `--human-approval` is on | `--hilt-min-severity low\|medium\|high\|critical` |
-| Hook fail mode | current config; `closed` on a fresh install | `defenseclaw guardrail fail-mode <open\|closed>` |
+| Gateway outage | `closed`: no hooks, so a call is blocked while the gateway is down; `status`, the setup summary and `guardrail fail-mode` all show it | not configurable (`guardrail.hook_fail_mode` does not apply) |
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (built-in copy) | `--block-message "<text>"` |
 | Redaction | v8 bucket and profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles` ([Redaction](/docs/reference/observability/redaction/)) |
