@@ -6951,6 +6951,17 @@ function Get-DefenseClawStateFileHolders {
     foreach ($holder in $found) {
         $id = [int]$holder.ProcessId
         $process = $images[$id]
+        # GAP-2265: a holder that is no longer running holds nothing. Under
+        # agent load the installed hook's own short-lived processes, which
+        # the install-folder rule below does not count, often exited between
+        # the Restart Manager query and the process list, were reported
+        # unnamed ("a program") or by their description and deferred every
+        # upgrade with hook_in_use. The process list holds every running
+        # process, a protected one (an antivirus scan) included; an empty
+        # list (the query failed) keeps every holder.
+        if ($null -eq $process -and $images.Count -gt 0) {
+            continue
+        }
         $image = ''
         $account = ''
         $parent = ''
