@@ -56,7 +56,8 @@ var enterpriseHookLocalAccounts = unixidentity.LocalAccounts
 var enterpriseHookAccountDatabasePoll = 2 * time.Second
 
 // enterpriseHookAccountDatabaseChanges receives after the local account
-// database changes (useradd, userdel, usermod): the watch loop then
+// database changes (useradd, userdel, usermod), or a directory that holds a
+// listed account's home does (enterpriseHookHomeRootsStamp): the watch loop then
 // reconciles, so the guardian spools a new account's identity record before
 // its first hook. At the one-minute tick a fresh local account's first
 // Codex turn came first and was refused "group membership is unconfirmed"
@@ -67,7 +68,16 @@ func enterpriseHookAccountDatabaseChanges(ctx context.Context) <-chan struct{} {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return nil
 	}
-	stamp, poll := enterpriseHookLocalAccountsStamp, enterpriseHookAccountDatabasePoll
+	poll, accountsStamp, homeRootsStamp := enterpriseHookAccountDatabasePoll, enterpriseHookLocalAccountsStamp, enterpriseHookHomeRootsStamp
+	// The directories that hold the listed homes count too: a directory
+	// account recreated under the same name, uid and home path changes no
+	// account database file (GAP-2028).
+	stamp := func() string {
+		if accounts := accountsStamp(); accounts != "" {
+			return accounts + homeRootsStamp()
+		}
+		return ""
+	}
 	last := stamp()
 	if last == "" || poll <= 0 {
 		return nil
@@ -1099,9 +1109,11 @@ func enterpriseHookIdentitySpoolDirForConfig() string {
 // stamp. A change of the database (useradd, userdel) makes the next tick
 // rewrite the records, whose home proofs the gateway does not take for the
 // uid's holder while they carry an earlier stamp (GAP-0422, GAP-1876,
-// GAP-2026).
+// GAP-2026). So does a change of a directory that holds a listed home: a
+// home removed and created again can get the same inode number, and a
+// directory account recreated with it changes no key (GAP-2028).
 func enterpriseHookIdentitySpoolFingerprint(keys []string) string {
-	return strings.Join(keys, ";") + "|" + enterpriseHookLocalAccountsStamp()
+	return strings.Join(keys, ";") + "|" + enterpriseHookLocalAccountsStamp() + enterpriseHookHomeRootsStamp()
 }
 
 // enterpriseHookIdentitySpoolPassDue reports whether a pass of the identity
@@ -1159,6 +1171,7 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	// gateway does on reload (GAP-1255).
 	useridentity.SetTrustedADChildDomains(cfg.AIDiscovery.TrustedADChildDomains)
 	accounts, keys, withdraw := enterpriseHookIdentitySpoolAccounts(ctx, stderr, dir, run)
+	enterpriseHookNoteHomeRoots(run.Rows)
 	enrolled := slices.DeleteFunc(slices.Clone(accounts), func(a enterprisehooks.IdentitySpoolAccount) bool { return a.Left })
 	startEnterpriseHookDirectoryReturnWatch(ctx, stderr, dir, enrolled)
 	startEnterpriseHookDirectoryReachWatch(ctx, stderr, dir, enrolled)

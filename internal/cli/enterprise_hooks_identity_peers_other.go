@@ -20,3 +20,10 @@ var enterpriseHookGatewayPeerAccounts = func(string) []enterpriseHookPeerAccount
 // enterpriseHookLocalAccountsStamp is "" on macOS: the gateway compares no
 // record with the account database there (guardianHomeProofCurrent).
 var enterpriseHookLocalAccountsStamp = func() string { return "" }
+
+// enterpriseHookNoteHomeRoots records nothing on macOS, which keeps no
+// account database stamp (enterpriseHookLocalAccountsStamp).
+func enterpriseHookNoteHomeRoots([]enterpriseHookReconcileRow) {}
+
+// enterpriseHookHomeRootsStamp is "" on macOS. Tests replace it.
+var enterpriseHookHomeRootsStamp = func() string { return "" }
