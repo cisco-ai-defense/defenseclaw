@@ -688,14 +688,27 @@ func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, fail
 // removeHookScriptLink removes a link put in place of a generated hook script,
 // so the render writes a regular file in the hook folder again instead of
 // writing through the link, and doctor --fix converges (GAP-2022). The link's
-// target is left as it is.
+// target is left as it is. An entry this account cannot even look at is
+// removed too: on Windows a link another account (SYSTEM) made in the
+// account's hook folder carries no entry for the account, so Lstat is
+// refused, but the account's full control of the folder lets it delete the
+// entry, and the render then writes its own file. Left there, every render
+// failed and the gateway did not start.
 func removeHookScriptLink(path string) error {
 	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+	switch {
+	case err == nil && info.Mode()&os.ModeSymlink == 0:
+		return nil
+	case err != nil && !errors.Is(err, os.ErrPermission):
 		return nil
 	}
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("remove the link in place of hook script %s: %w", path, err)
+	if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+		what := "is a link"
+		if err != nil {
+			what = "cannot be read by this account"
+		}
+		return fmt.Errorf("hook script %s %s and could not be removed so DefenseClaw can write its own copy (%v); "+
+			"remove it (as an administrator if this account cannot), then run the setup again", path, what, rmErr)
 	}
 	return nil
 }
