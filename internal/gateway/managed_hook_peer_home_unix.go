@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -417,6 +418,19 @@ var managedHookPeerLastHooks = func() map[int]int64 {
 // observability.local.retention_days, the window the agent ledger's prune
 // keeps a uid's rows for (GAP-2106). Tests replace it.
 var managedHookPeerLedgerRetentionDays = func() int { return sharedAgentIdentities.ledgerRetentionDays() }
+
+// ledgerRetentionDays (unix: only the managed peer homes read it) is the window the ledger's prune keeps rows for (the
+// retentionDays setStoreSource wired), or the default local retention
+// before one is wired.
+func (r *agentIdentityRecorder) ledgerRetentionDays() int {
+	r.storeMu.Lock()
+	days := r.retentionDays
+	r.storeMu.Unlock()
+	if days == nil {
+		return config.ObservabilityV8DefaultRetentionDays
+	}
+	return days()
+}
 
 // saveHomesLocked writes homes and names to the store. c.mu is held; it
 // runs only when a uid's home or name changes, which is rare.

@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -566,19 +565,6 @@ func (r *agentIdentityRecorder) sweepOwnStore(ctx context.Context) {
 		}
 	}
 	r.ownSweep.SweepIfDue(ctx, own, days())
-}
-
-// ledgerRetentionDays is the window the ledger's prune keeps rows for (the
-// retentionDays setStoreSource wired), or the default local retention
-// before one is wired.
-func (r *agentIdentityRecorder) ledgerRetentionDays() int {
-	r.storeMu.Lock()
-	days := r.retentionDays
-	r.storeMu.Unlock()
-	if days == nil {
-		return config.ObservabilityV8DefaultRetentionDays
-	}
-	return days()
 }
 
 func (r *agentIdentityRecorder) pendingCount() int {
