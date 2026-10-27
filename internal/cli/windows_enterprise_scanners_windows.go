@@ -314,7 +314,7 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			}
 		}
 	case "uninstall":
-		if len(result.Errors) != 0 {
+		if len(result.Errors) != 0 && !windowsScannerRuntimeUninstallRemovedTheDeployment(result, opts) {
 			return
 		}
 		// Under the scanner runtime lock, and only while no deployment is
@@ -935,6 +935,30 @@ func checkWindowsScannerRuntimeRootForRemoval(root string) error {
 		return fmt.Errorf("refusing to remove %s", root)
 	}
 	return nil
+}
+
+// windowsScannerRuntimeUninstallRemovedTheDeployment reports whether a failed
+// elevated uninstall left no installed deployment record. The runtime then
+// has no owner left, so it is retired as a clean uninstall's is; before, a
+// purge that removed the machine deployment and then failed on per-user state
+// (another program held a file in a user's .defenseclaw, or GAP-2231's
+// signed-out Path entry) left the 26,000-file runtime behind with no warning
+// (GAP-2230). A failed run reports no changes, so the record decides: one
+// that left the deployment installed, or a record that cannot be read, keeps
+// the runtime as before, and retireWindowsScannerRuntime reads the record
+// again under the scanner runtime lock. A standard account cannot remove it
+// and is not told it could not; a run deferred as busy (another lifecycle
+// run, or hook calls, still going) leaves it to that run and does not wait
+// for the scanner runtime lock.
+func windowsScannerRuntimeUninstallRemovedTheDeployment(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) bool {
+	if !windowsEnterpriseIsElevated() || windowsEnterpriseFailureCodeFor(result) == enterprisestatus.WindowsExitBusy {
+		return false
+	}
+	deployment, err := windowsScannerRuntimeDeployment(opts)
+	if err != nil {
+		return false
+	}
+	return deployment.State == winpath.EnterpriseDeploymentAbsent || deployment.State == winpath.EnterpriseDeploymentTombstone
 }
 
 // retireWindowsScannerRuntime removes the runtime root once no deployment is
