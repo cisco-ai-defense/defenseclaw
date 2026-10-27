@@ -3707,15 +3707,24 @@ function Restore-Slot([string]$Slot) {
     $planPath = Join-Path $Slot "RESTORE.json"
     $failed = ""
     $guardSHA256 = ""
+    # Schema 2 plans prove a moved tree by each file's path, size and write
+    # time, and a single file by its SHA-256. Schema 1 (1.0.4) hashed every
+    # file of both venvs up to four times in PowerShell, so a failed upgrade
+    # restored for 12-25 minutes with every agent hook closed (GAP-2127). A
+    # same-volume rename keeps all three; a write in between changes them.
+    # The restored programs are still proven by their SHA-256 (Assert-BinDirRestored).
+    $planSchema = 2
     $digest = {
-        param([string]$Path)
+        param([string]$Path, [int]$Schema)
         $root = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
         $items = @($root)
         if ($root.PSIsContainer) { $items += @(Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop | Sort-Object FullName) }
         $lines = foreach ($item in $items) {
             if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Cannot prove restored contents through $($item.FullName)" }
             $name = $item.FullName.Substring($root.FullName.Length)
-            if ($item.PSIsContainer) { "directory:$name" } else { "file:$name`:$(Get-Sha256 $item.FullName)" }
+            if ($item.PSIsContainer) { "directory:$name" }
+            elseif ($Schema -ge 2 -and $root.PSIsContainer) { "file:$name`:$($item.Length):$($item.LastWriteTimeUtc.Ticks)" }
+            else { "file:$name`:$(Get-Sha256 $item.FullName)" }
         }
         $hash = [Security.Cryptography.SHA256]::Create()
         try { return ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))))).Replace("-", "").ToLowerInvariant() }
@@ -3742,7 +3751,9 @@ function Restore-Slot([string]$Slot) {
         Restore-BinDir (Join-Path $Slot "bin") $guardSHA256
         if (Test-Path -LiteralPath $planPath) {
             $plan = [IO.File]::ReadAllText($planPath) | ConvertFrom-Json -ErrorAction Stop
-            if ($plan.Schema -ne 1 -or $plan.FailedName -notmatch '^\.failed-[A-Za-z0-9-]+$') { throw "Invalid restore plan at $planPath" }
+            if ($plan.Schema -notin @(1, 2) -or $plan.FailedName -notmatch '^\.failed-[A-Za-z0-9-]+$') { throw "Invalid restore plan at $planPath" }
+            # A plan an earlier run wrote keeps the proof it was written with.
+            $planSchema = [int]$plan.Schema
             $failed = Join-Path $DataDir $plan.FailedName
         } else {
             $failed = New-FailedInstallDirectory
@@ -3750,7 +3761,7 @@ function Restore-Slot([string]$Slot) {
             $moves = New-Object System.Collections.Generic.List[object]
             $add = {
                 param([string]$From, [string]$To)
-                if (Test-Path -LiteralPath $From) { $moves.Add(@{ From = $From; To = $To; Digest = (& $digest $From); Done = $false }) }
+                if (Test-Path -LiteralPath $From) { $moves.Add(@{ From = $From; To = $To; Digest = (& $digest $From $planSchema); Done = $false }) }
             }
             $liveData = @(Get-DataEntries)
             $savedData = @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force -ErrorAction Stop)
@@ -3772,7 +3783,7 @@ function Restore-Slot([string]$Slot) {
             foreach ($entry in @($savedData | Where-Object { -not (Test-ConnectorRecoveryArtifactName $_.Name) })) {
                 & $add $entry.FullName (Join-Path $DataDir $entry.Name)
             }
-            $plan = @{ Schema = 1; FailedName = (Split-Path -Leaf $failed); Moves = @($moves.ToArray()) }
+            $plan = @{ Schema = $planSchema; FailedName = (Split-Path -Leaf $failed); Moves = @($moves.ToArray()) }
             & $save
         }
         $parent = Get-Item -LiteralPath $failed -Force -ErrorAction Stop
@@ -3784,18 +3795,18 @@ function Restore-Slot([string]$Slot) {
             }
             if ($move.Done) { continue }
             if ((Test-Path -LiteralPath $move.From) -and -not (Test-Path -LiteralPath $move.To)) {
-                if ((& $digest $move.From) -cne $move.Digest) { throw "Restore source changed: $($move.From)" }
+                if ((& $digest $move.From $planSchema) -cne $move.Digest) { throw "Restore source changed: $($move.From)" }
                 Move-Path $move.From $move.To 60
             }
             if ((Test-Path -LiteralPath $move.From) -or -not (Test-Path -LiteralPath $move.To) -or
-                (& $digest $move.To) -cne $move.Digest) { throw "Could not prove the restore move from $($move.From) to $($move.To)" }
+                (& $digest $move.To $planSchema) -cne $move.Digest) { throw "Could not prove the restore move from $($move.From) to $($move.To)" }
             $move.Done = $true
             & $save
         }
         Restore-ExternalConfig $Slot
         Assert-BinDirRestored (Join-Path $Slot "bin") $guardSHA256
         foreach ($move in $plan.Moves) {
-            if ((& $digest $move.To) -cne $move.Digest) { throw "Restored contents changed: $($move.To)" }
+            if ((& $digest $move.To $planSchema) -cne $move.Digest) { throw "Restored contents changed: $($move.To)" }
         }
         # Retire COMPLETE only after all data and environment proofs pass.
         # Partial cleanup can then never masquerade as a restorable snapshot.

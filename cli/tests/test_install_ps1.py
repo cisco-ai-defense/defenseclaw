@@ -7882,3 +7882,81 @@ def test_convert_hooks_for_restore_goes_back_only_to_an_older_release(
     assert result.returncode == 0 and "END" in result.stdout and "WARN" not in out, out
     lines = [line for line in result.stdout.splitlines() if line.startswith("CONVERTED=")]
     assert lines == ([f"CONVERTED={converted}"] if converted else []), out
+
+
+# GAP-2127: a failed Windows upgrade restored for 12-25 minutes with every
+# agent hook closed: Restore-Slot's move plan hashed every file of the live
+# and the saved venv (thousands) up to four times. Schema 2 plans prove a
+# moved tree by path, size and write time and hash only single files; a
+# write to a moved tree still fails the proof, and a Schema 1 plan an earlier
+# run wrote is still resumed with the proof it was written with.
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("tamper", [False, True], ids=["restores", "write-between-moves"])
+def test_a_restore_does_not_hash_every_venv_file(tmp_path: Path, tamper: bool) -> None:
+    data = tmp_path / "data"
+    slot = data / "previous.new"
+    files = {data / "config.yaml": "new data", slot / "data" / "config.yaml": "old data", slot / "COMPLETE": ""}
+    for i in range(40):
+        files[data / ".venv" / "Lib" / f"m{i}.py"] = f"new {i}"
+        files[slot / "venv" / "Lib" / f"m{i}.py"] = f"old {i}"
+    for path, body in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="ascii")
+    sha = _ps1_function("Get-Sha256").replace("function Get-Sha256(", "function Get-Sha256Real(", 1)
+    move = _ps1_function("Move-Path").replace("function Move-Path(", "function Move-PathReal(", 1)
+    functions = "\n".join(
+        _ps1_function(name)
+        for name in (
+            "Get-DataEntries", "Read-Text", "Restore-ExternalConfig", "Test-ConnectorRecoveryArtifactName",
+            "Restore-Slot", "Invoke-Quietly", "Get-LifecycleNextStep", "Convert-HooksForRestore", "Test-Version",
+            "Get-NativeOutput",
+        )
+    )
+    script = f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$Slot = '{slot}'
+$BinDir = Join-Path $DataDir 'bin'
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+$NotData = @('.venv', 'installer', 'previous.new', '.failed-*')
+$Ver = '1.0.5'
+$Local = ''
+$script:hashes = 0
+$script:tamper = ${'true' if tamper else 'false'}
+function Write-Warn([string]$Message) {{ Write-Host $Message }}
+function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
+function Remove-FailedInstall([string]$Path) {{ Remove-Tree $Path }}
+function Restore-BinDir {{ }}
+function Assert-BinDirRestored {{ }}
+function New-FailedInstallDirectory {{
+    $path = Join-Path $DataDir ('.failed-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $path | Out-Null
+    return $path
+}}
+{sha}
+function Get-Sha256([string]$Path) {{ $script:hashes++; Get-Sha256Real $Path }}
+{move}
+function Move-Path([string]$From, [string]$To, [int]$Seconds = 0) {{
+    Move-PathReal $From $To 0
+    if ($script:tamper -and $To -eq $Venv) {{ [IO.File]::AppendAllText((Join-Path $Venv 'Lib/m7.py'), ' changed') }}
+}}
+{functions}
+try {{ Restore-Slot $Slot | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output "REFUSED: $($_.Exception.Message)" }}
+Write-Output "HASHES=$($script:hashes)"
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    hashes = int(re.search(r"HASHES=(\d+)", out).group(1))
+    if tamper:
+        assert "REFUSED: Could not prove the restore move" in out, out
+        return
+    assert "RESTORED" in out, out
+    assert (data / ".venv" / "Lib" / "m7.py").read_text(encoding="ascii") == "old 7"
+    # config.yaml is hashed by plan, before and after its move and at the end; no venv file is.
+    assert hashes <= 8, out
+    restore = _ps1_function("Restore-Slot")
+    assert "$plan.Schema -notin @(1, 2)" in restore and "$planSchema = [int]$plan.Schema" in restore
