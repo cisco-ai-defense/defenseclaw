@@ -60,7 +60,7 @@ The sequence of a model call and a tool call, with approvals, is on the [OpenCla
 | Detection strategy | `regex_judge` if the judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
 | HITL | off | `--human-approval` plus `--hilt-min-severity` |
 | HITL minimum severity | `HIGH` when `--human-approval` is on | `--hilt-min-severity low\|medium\|high\|critical` |
-| Hook fail mode | current config; `closed` on a fresh install | `defenseclaw guardrail fail-mode <open\|closed>` |
+| Gateway outage | `closed`: no hooks, so a call is blocked while the gateway is down; `status`, the setup summary and `guardrail fail-mode` all show it | not configurable (`guardrail.hook_fail_mode` does not apply) |
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (built-in copy) | `--block-message "<text>"` |
 | Redaction | v8 bucket and profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles` ([Redaction](/docs/observability/redaction)) |
@@ -78,6 +78,8 @@ defenseclaw setup openclaw --mode action --human-approval --hilt-min-severity hi
 defenseclaw policy activate strict
 defenseclaw setup openclaw --mode action --rule-pack strict --restart
 ```
+
+Human approval needs OpenClaw 2026.3.28 or later. The OpenClaw that `install.sh` installs (2026.3.24) has no plugin approvals, so setup refuses `--human-approval` there and changes nothing. Upgrade OpenClaw first (`npm install -g openclaw@2026.3.28` or later), or set up without human approval.
 
 For a second-pass LLM judge, export a key and add `--detection-strategy regex_judge --judge-model <model> --judge-api-key-env DEFENSECLAW_LLM_KEY`. Latency and cost depend on the model.
 
@@ -148,7 +150,7 @@ Proxy connector: not gated by a hook contract version.
 ### What it can block or ask
 
 - The proxy can block a checked request, a checked response and a tool call.
-- OpenClaw is the connector with plugin-mediated approval. In action mode a confirm verdict on `before_tool_call` becomes OpenClaw's own approval request, which denies on timeout. You answer inside OpenClaw.
+- OpenClaw is the connector with plugin-mediated approval. In action mode a confirm verdict on `before_tool_call` becomes OpenClaw's own approval request, which denies on timeout. Answer it in the OpenClaw Control UI (`openclaw dashboard`) or with `/approve` on a chat channel that forwards approvals. `openclaw tui` and local `openclaw chat` do not show the request, so the call there is denied when it times out, and the OpenClaw gateway log says where to answer.
 - Only recognized model traffic is redirected. Other requests pass through unchecked.
 
 ### Verdict mapping
@@ -171,6 +173,7 @@ OpenClaw does not run in an OpenShell sandbox. The legacy standalone sandbox tha
 - Raw sockets, custom transports and libraries that bypass every patched entry point are outside the boundary. They are not inspected.
 - The shims inspect those six commands only. They give no syscall, filesystem or network isolation.
 - If a Bedrock endpoint resolves to a private VPC address, the proxy refuses it. Allow it with `defenseclaw guardrail allow-private-upstream <host>`.
+- OpenClaw 2026.5.12 and later load Amazon Bedrock from the external plugin `@openclaw/amazon-bedrock-provider`. Without it every model call fails with `No API provider registered for api: bedrock-converse-stream`, and setup warns. Run `openclaw plugins install @openclaw/amazon-bedrock-provider`, then `openclaw gateway restart`.
 - If you move OpenClaw's gateway port, run `defenseclaw setup openclaw` again.
 - OpenClaw does not run in an OpenShell sandbox. OpenShell support is pending in the [capability matrix](/docs/connectors/capability-matrix).
 

@@ -1226,7 +1226,7 @@ func TestOpenClaw_Uninstall_RemovesAllDefenseClawLoadPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := uninstallOpenClawExtension(ocHome); err != nil {
+	if err := uninstallOpenClawExtension(ocHome, false); err != nil {
 		t.Fatalf("uninstallOpenClawExtension: %v", err)
 	}
 
@@ -1308,6 +1308,122 @@ func TestOpenClaw_Setup_HILTEnablesPluginApprovalForwarding(t *testing.T) {
 	}
 	if targets, _ := pluginApprovals["targets"].([]interface{}); len(targets) != 1 {
 		t.Fatalf("approvals.plugin.targets clobbered: %v", pluginApprovals["targets"])
+	}
+}
+
+// GAP-1956: OpenClaw 2026.3.24 (the install.sh pin) rejects approvals.plugin,
+// so human approval on it is refused before openclaw.json is touched. The
+// refusal precedes the extension-bundle check, so it needs no bundle.
+func TestOpenClaw_Setup_HILTRefusedOnOpenClawWithoutPluginApprovals(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenClaw requires the guardrail proxy and is intentionally unsupported by the native Windows hook-only build")
+	}
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	if err := os.MkdirAll(ocHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	before := []byte(`{"gateway":{"mode":"local"}}`)
+	if err := os.WriteFile(configPath, before, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970",
+		HILTEnabled: true, AgentVersion: "OpenClaw 2026.3.24 (cff6dc9)"}
+	err := c.Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "2026.3.28") || !strings.Contains(err.Error(), "2026.3.24") {
+		t.Fatalf("Setup err = %v, want the human approval refusal naming both versions", err)
+	}
+	after, _ := os.ReadFile(configPath)
+	if string(after) != string(before) {
+		t.Fatalf("openclaw.json changed by a refused setup: %s", after)
+	}
+	if _, err := os.Stat(filepath.Join(ocHome, "extensions", "defenseclaw")); !os.IsNotExist(err) {
+		t.Fatalf("extension written by a refused setup: %v", err)
+	}
+	for _, v := range []string{"OpenClaw 2026.3.28 (abc1234)", "2026.6.8", ""} {
+		if OpenClawLacksPluginApprovals(v) {
+			t.Fatalf("OpenClawLacksPluginApprovals(%q) = true", v)
+		}
+	}
+	if !OpenClawLacksPluginApprovals("2026.3.24") {
+		t.Fatal("OpenClawLacksPluginApprovals(2026.3.24) = false")
+	}
+}
+
+// GAP-2109: an approvals.plugin block an earlier setup --human-approval wrote
+// keeps an OpenClaw without plugin approvals from starting. Setup without
+// human approval and teardown take it back out on such an OpenClaw, and keep
+// every other approvals setting and any block of another shape.
+func TestOpenClaw_SetupAndTeardownDropTheRejectedPluginApprovalsBlock(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
+	const written = `{"approvals":{"exec":{"enabled":true},"plugin":{"enabled":true,"mode":"session"}},"gateway":{"mode":"local"}}`
+	readApprovals := func(t *testing.T, path string) map[string]interface{} {
+		t.Helper()
+		var cfg map[string]interface{}
+		data, _ := os.ReadFile(path)
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatalf("openclaw.json not valid JSON: %v (%s)", err, data)
+		}
+		approvals, _ := cfg["approvals"].(map[string]interface{})
+		return approvals
+	}
+	for _, tc := range []struct {
+		name, version, config string
+		wantPlugin            bool
+	}{
+		{"old OpenClaw drops the written block", "OpenClaw 2026.3.24 (cff6dc9)", written, false},
+		{"plugin approvals supported keeps it", "OpenClaw 2026.6.8 (844f405)", written, true},
+		{"unknown version keeps it", "", written, true},
+		{"another shape is the operator's", "OpenClaw 2026.3.24 (cff6dc9)",
+			`{"approvals":{"exec":{"enabled":true},"plugin":{"enabled":true,"mode":"session","agentFilter":["main"]}}}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ocHome := filepath.Join(dir, "openclaw-home")
+			if err := os.MkdirAll(ocHome, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(ocHome, "openclaw.json")
+			if err := os.WriteFile(configPath, []byte(tc.config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			OpenClawHomeOverride = ocHome
+			defer func() { OpenClawHomeOverride = "" }()
+
+			c := NewOpenClawConnector()
+			opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", AgentVersion: tc.version}
+			if err := c.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			approvals := readApprovals(t, configPath)
+			if _, ok := approvals["plugin"]; ok != tc.wantPlugin {
+				t.Fatalf("after Setup approvals.plugin present = %v, want %v (%v)", ok, tc.wantPlugin, approvals)
+			}
+			if _, ok := approvals["exec"]; !ok {
+				t.Fatalf("Setup dropped the operator's approvals.exec: %v", approvals)
+			}
+
+			// Teardown after an earlier release wrote it again.
+			if err := os.WriteFile(configPath, []byte(tc.config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			approvals = readApprovals(t, configPath)
+			if _, ok := approvals["plugin"]; ok != tc.wantPlugin {
+				t.Fatalf("after Teardown approvals.plugin present = %v, want %v (%v)", ok, tc.wantPlugin, approvals)
+			}
+			if _, ok := approvals["exec"]; !ok {
+				t.Fatalf("Teardown dropped the operator's approvals.exec: %v", approvals)
+			}
+		})
 	}
 }
 
@@ -10980,7 +11096,7 @@ func TestPatchOpenClawConfig_Concurrent(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			errs[idx] = patchOpenClawConfig(configPath, "/tmp/ext-"+strings.Repeat("x", idx), false)
+			errs[idx] = patchOpenClawConfig(configPath, "/tmp/ext-"+strings.Repeat("x", idx), false, false)
 		}(i)
 	}
 	wg.Wait()

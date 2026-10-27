@@ -2433,6 +2433,37 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
         self.assertEqual([c for c in clean.checks if c["label"] == "Codex hooks of another install"], [])
 
     @unittest.skipIf(os.name == "nt", "POSIX hook paths in a TOML basic string")
+    def test_codex_hooks_under_a_custom_data_dir_count_as_registered(self):
+        # GAP-1882: DEFENSECLAW_HOME=~/dchome setup registers
+        # ~/dchome/hooks/codex-hook.sh; doctor looked for "defenseclaw" in the
+        # hook table and failed "DefenseClaw hooks are missing".
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            own_home = os.path.join(tmp, "home", "dchome")
+            cfg = self._make_cfg(own_home)
+            self._write_hook(own_home, "codex-hook.sh", "#!/bin/sh\n# defenseclaw-managed-hook v6\n")
+            own = os.path.join(own_home, "hooks", "codex-hook.sh")
+            config_toml = os.path.join(tmp, "codex", "config.toml")
+            os.makedirs(os.path.dirname(config_toml))
+            lines = []
+            for event in ("PreToolUse", "PermissionRequest"):
+                lines += [
+                    f"[[hooks.{event}]]",
+                    f"[[hooks.{event}.hooks]]",
+                    'type = "command"',
+                    f'command = "{own} --event {event} --hook-contract codex-hooks-v4"',
+                    "timeout = 30",
+                ]
+            with open(config_toml, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+            result = _DoctorResult()
+            cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix", config_path=config_toml)
+        rows = [c for c in result.checks if c["label"] == "Codex hooks"]
+        self.assertTrue(rows, result.checks)
+        self.assertNotIn("DefenseClaw hooks are missing", " ".join(c["detail"] for c in rows))
+
+    @unittest.skipIf(os.name == "nt", "POSIX hook paths in a TOML basic string")
     def test_codex_hook_check_warns_when_notify_is_not_defenseclaw(self):
         # GAP-1248: a renamed notify program left Codex launching a missing
         # program on every turn while doctor said the hooks were healthy.

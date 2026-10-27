@@ -311,6 +311,12 @@ def _refuse_unverified_plugin_teardown(app: AppContext, connectors: list[str]) -
             raise SystemExit(1)
 
 
+# Connectors whose version floor setup applies in every mode (a kiro-cli below
+# 2.27.1 loads no hooks in a headless run, GAP-0828): guardrail mode applies it
+# to an observe switch too (GAP-1638).
+_EVERY_MODE_VERSION_FLOOR = frozenset({"kiro"})
+
+
 def _toggle_connector_guardrail(
     app: AppContext, requested: str, *, enable: bool, restart: bool, yes: bool
 ) -> None:
@@ -415,6 +421,18 @@ def _toggle_connector_guardrail(
         # with --no-restart, so its agent proof must exist before the save.
         _verify_agents_before_enable(app, [key])
 
+    if enable:
+        # The checks setup runs before it saves: the agent's own settings and
+        # the shared hooks/.hookcfg every hook closes on. Enabling over a
+        # malformed one saved the flag and returned 0 (GAP-1816).
+        from defenseclaw.commands import cmd_setup
+
+        if refusal := cmd_setup._agent_settings_refusal(
+            app.cfg, key, will_restart=restart, changed="Nothing was changed", rerun="guardrail enable command"
+        ):
+            ux.err(refusal, indent="  ")
+            raise SystemExit(1)
+
     # Mutate the per-connector entry, preserving its other policy fields.
     from defenseclaw.config import PerConnectorGuardrailConfig
 
@@ -445,17 +463,38 @@ def _toggle_connector_guardrail(
             if enable
             else None
         )
-        cmd_setup._restart_services(
-            app.cfg.data_dir,
-            app.cfg.gateway.host,
-            app.cfg.gateway.port,
-            connector=key,
-            connectors=roster,
-            teardown=not enable,
-            # Report "setup complete" only once the gateway admitted the
-            # connector (GAP-0069).
-            wait_for_connector_ready=enable,
-        )
+        try:
+            cmd_setup._restart_services(
+                app.cfg.data_dir,
+                app.cfg.gateway.host,
+                app.cfg.gateway.port,
+                connector=key,
+                connectors=roster,
+                teardown=not enable,
+                # Report "setup complete" only once the gateway admitted the
+                # connector (GAP-0069).
+                wait_for_connector_ready=enable,
+            )
+        except (click.ClickException, SystemExit):
+            if not enable:
+                raise
+            # The gateway could not set the connector up, so its hooks are
+            # still the disabled ones: put the flag back, or the connector
+            # read 'enabled' with no hooks and a retry said 'already enabled'
+            # (GAP-1534).
+            entry.enabled = False
+            try:
+                app.cfg.save()
+            except OSError as exc:
+                ux.err(f"{label} could not be set up, and putting it back to disabled failed: {exc}", indent="  ")
+                raise
+            ux.err(
+                f"{label} stays disabled: the gateway could not set it up (see above), so "
+                f"guardrail.connectors.{key}.enabled is false again. Fix that error, then run: "
+                f"defenseclaw guardrail enable --connector {key}",
+                indent="  ",
+            )
+            raise
         ux.ok(f"{label} connector {action} complete", indent="  ")
         click.echo()
 
@@ -5619,6 +5658,39 @@ def mode_cmd(
                     "Fix what the check above reports (see: defenseclaw agent discover --refresh), "
                     f"then run: defenseclaw guardrail mode action{f' --connector {scope}' if connector_key else ''}"
                 ],
+            )
+    elif _EVERY_MODE_VERSION_FLOOR.intersection(affected):
+        # Setup refuses a kiro-cli below its hook floor in observe and action
+        # mode alike. The switch to observe skipped that check, so the
+        # switch back to action was refused and the CLI could not undo its
+        # own change (GAP-1638): the observe switch now applies it too.
+        from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
+
+        refused: list[str] = []
+        for c in sorted(_EVERY_MODE_VERSION_FLOOR.intersection(affected)):
+            scope_record: dict[str, object] = {}
+            if not _check_connector_version_supported_for_setup(
+                c,
+                mode="observe",
+                emit=not json_out,
+                data_dir=app.cfg.data_dir,
+                _allow_prompt=False,
+                _refusal_scope=scope_record,
+            ) and scope_record.get("observe_admitted") is False:
+                refused.append(c)
+        if refused:
+            names = ", ".join(_connector_label(c) for c in refused)
+            _finish(
+                ok=False,
+                exit_code=1,
+                new_mode=previous,
+                previous=previous,
+                message=(
+                    f"Nothing was changed: setup refuses {names} in observe and action mode at this version "
+                    "(see the check above), so this switch is refused the same way."
+                ),
+                notes=["Update it to a supported version, then run: defenseclaw guardrail mode "
+                       f"{mode}{f' --connector {scope}' if connector_key else ''}"],
             )
     _preflight_config_write(app)
     if connector_key is None:

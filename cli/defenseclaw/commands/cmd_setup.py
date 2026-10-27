@@ -98,6 +98,9 @@ from defenseclaw.config import (
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACTS,
     KIRO_CLI_HOOK_FLOOR,
+    OPENCLAW_APPROVAL_SURFACES,
+    OPENCLAW_BEDROCK_PLUGIN_PACKAGE,
+    OPENCLAW_PLUGIN_APPROVALS_SINCE,
     PROXY_CONNECTORS,
     STATUS_KNOWN,
     STATUS_NOT_GATED,
@@ -109,6 +112,8 @@ from defenseclaw.connector_contracts import (
     known_broken_entry,
     normalize_agent_version,
     normalize_connector,
+    openclaw_bedrock_plugin_missing,
+    openclaw_lacks_plugin_approvals,
     openclaw_needs_interception_advisory,
     resolve_connector_contract,
     stable_agent_version,
@@ -4936,11 +4941,36 @@ def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
+class _PortNumber(click.ParamType):
+    """A TCP port, 1-65535, refused at parse time like a config.yaml port.
+
+    An out-of-range --api-port reached the free-port probe, whose bind raised
+    OverflowError as a traceback (GAP-1650).
+    """
+
+    name = "port"
+
+    def convert(self, value, param, ctx):
+        if isinstance(value, int) and not isinstance(value, bool):
+            number = value
+        else:
+            try:
+                number = int(str(value).strip(), 10)
+            except ValueError:
+                self.fail("use a number between 1 and 65535", param, ctx)
+        if not 1 <= number <= 65535:
+            self.fail("use a number between 1 and 65535", param, ctx)
+        return number
+
+
+_PORT_NUMBER = _PortNumber()
+
+
 @setup.command("gateway")
 @click.option("--remote", is_flag=True, help="Configure for a remote OpenClaw gateway (requires auth token)")
 @click.option("--host", default=None, help="Gateway host")
-@click.option("--port", type=int, default=None, help="Gateway WebSocket port")
-@click.option("--api-port", type=int, default=None, help="Sidecar REST API port")
+@click.option("--port", type=_PORT_NUMBER, default=None, help="Gateway WebSocket port")
+@click.option("--api-port", type=_PORT_NUMBER, default=None, help="Sidecar REST API port")
 @click.option(
     "--token",
     default=None,
@@ -5141,8 +5171,8 @@ def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str, *, 
     click.echo()
 
     gw.host = click.prompt("  Gateway host", default=gw.host)
-    gw.port = click.prompt("  Gateway port", default=gw.port, type=int)
-    gw.api_port = click.prompt("  Sidecar API port", default=gw.api_port, type=int)
+    gw.port = click.prompt("  Gateway port", default=gw.port, type=_PORT_NUMBER)
+    gw.api_port = click.prompt("  Sidecar API port", default=gw.api_port, type=_PORT_NUMBER)
     gw.token = ""
     detected = _detect_openclaw_gateway_token(openclaw_config_file)
     if detected:
@@ -5164,8 +5194,8 @@ def _interactive_gateway_remote(gw, data_dir: str) -> None:
     click.echo()
 
     gw.host = click.prompt("  Gateway host", default=gw.host)
-    gw.port = click.prompt("  Gateway port", default=gw.port, type=int)
-    gw.api_port = click.prompt("  Sidecar API port", default=gw.api_port, type=int)
+    gw.port = click.prompt("  Gateway port", default=gw.port, type=_PORT_NUMBER)
+    gw.api_port = click.prompt("  Sidecar API port", default=gw.api_port, type=_PORT_NUMBER)
 
     click.echo()
     use_ssm = click.confirm("  Fetch token from AWS SSM Parameter Store?", default=True)
@@ -5912,6 +5942,8 @@ def _check_connector_version_supported_for_setup(
     _trusted_prompt_cache: dict[str, bool] | None = None,
     _discovery: Any = None,
     _refusal_scope: dict[str, Any] | None = None,
+    human_approval: bool = False,
+    openclaw_config_file: str | None = None,
 ) -> bool:
     """Verify the selected connector's installed version before setup.
 
@@ -6059,6 +6091,20 @@ def _check_connector_version_supported_for_setup(
         return True
 
     if compatibility.status == STATUS_NOT_GATED:
+        if connector == "openclaw" and human_approval and openclaw_lacks_plugin_approvals(raw_version):
+            # OpenClaw before 2026.3.28 rejects approvals.plugin, so its
+            # gateway would no longer start (GAP-1956).
+            if emit:
+                ux.err(
+                    f"{label} {normalize_agent_version(raw_version)}: human approval needs OpenClaw "
+                    f"{OPENCLAW_PLUGIN_APPROVALS_SINCE} or later; this version has no plugin approvals and "
+                    "rejects approvals.plugin in openclaw.json. No changes made."
+                )
+                ux.subhead(
+                    f"Upgrade OpenClaw (npm install -g openclaw@{OPENCLAW_PLUGIN_APPROVALS_SINCE} or later), "
+                    "or run setup with --no-human-approval."
+                )
+            return False
         if emit:
             ux.ok(f"{label}: version {version_display}; connector has no hook contract gate.")
             if connector == "openclaw" and openclaw_needs_interception_advisory(raw_version):
@@ -6067,6 +6113,8 @@ def _check_connector_version_supported_for_setup(
                     "A live guardrail proxy port is not proof that agent LLM traffic is intercepted — "
                     "run `defenseclaw doctor` and confirm the OpenClaw interception check."
                 )
+            if connector == "openclaw":
+                _warn_openclaw_setup_advisories(raw_version, human_approval, openclaw_config_file)
         return True
 
     if compatibility.status == STATUS_UNVERSIONED:
@@ -6447,6 +6495,15 @@ def _guardrail_setup_check_targets(app: AppContext, gc, explicit_connector: str 
     return targets
 
 
+def _guardrail_hilt_enabled_for(gc, connector: str) -> bool:
+    """Effective human approval for *connector* in this setup run."""
+    try:
+        hilt = gc.effective_hilt(connector) if hasattr(gc, "effective_hilt") else getattr(gc, "hilt", None)
+    except Exception:  # noqa: BLE001 - SimpleNamespace test stubs.
+        hilt = getattr(gc, "hilt", None)
+    return bool(getattr(hilt, "enabled", False))
+
+
 def _check_guardrail_setup_connector_versions(
     app: AppContext,
     gc,
@@ -6475,7 +6532,10 @@ def _check_guardrail_setup_connector_versions(
             "mode": mode or "observe",
             "data_dir": getattr(app.cfg, "data_dir", None),
             "_allow_prompt": allow_prompt,
+            "human_approval": _guardrail_hilt_enabled_for(gc, connector),
         }
+        if connector == "openclaw":
+            version_check_kwargs["openclaw_config_file"] = getattr(getattr(app.cfg, "claw", None), "config_file", None)
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
@@ -6514,10 +6574,37 @@ def _check_guardrail_setup_connector_versions(
     return True
 
 
+def _warn_openclaw_setup_advisories(
+    raw_version: str | None, human_approval: bool, openclaw_config_file: str | None
+) -> None:
+    """Name where OpenClaw shows approvals (GAP-1958) and a missing Bedrock
+    provider plugin (GAP-1959). Both only warn; setup goes on."""
+    label = f"OpenClaw {normalize_agent_version(raw_version or '') or ''}".strip()
+    if human_approval:
+        ux.warn(f"{OPENCLAW_APPROVAL_SURFACES}.")
+    if not openclaw_config_file:
+        return
+    try:
+        with open(os.path.expanduser(openclaw_config_file), encoding="utf-8") as fh:
+            openclaw_config = _json.load(fh)
+    except (OSError, ValueError):
+        return
+    if openclaw_bedrock_plugin_missing(raw_version, openclaw_config):
+        ux.warn(
+            f"{label} loads Amazon Bedrock from the external plugin {OPENCLAW_BEDROCK_PLUGIN_PACKAGE}, "
+            "and openclaw.json names a Bedrock model without it, so OpenClaw model calls fail with "
+            '"No API provider registered for api: bedrock-converse-stream".'
+        )
+        ux.subhead(
+            f"Run: openclaw plugins install {OPENCLAW_BEDROCK_PLUGIN_PACKAGE} "
+            "(it adds amazon-bedrock to plugins.allow), then openclaw gateway restart."
+        )
+
+
 def _hilt_support_note(connector: str) -> str:
     """Return the operator-facing HILT support note for a connector."""
     if connector == "openclaw":
-        return "OpenClaw supports DefenseClaw approval prompts for tool actions."
+        return f"OpenClaw supports DefenseClaw approval prompts for tool actions. {OPENCLAW_APPROVAL_SURFACES}."
     if connector == "claudecode":
         return "Claude Code supports native PreToolUse ask prompts."
     if connector == "codex":
@@ -7587,7 +7674,7 @@ def setup_guardrail(
             raise _GuardrailSecretFailure("validation-refused-rollback-incomplete") from None
         raise click.ClickException(
             "guardrail setup did not pass connector preflight; prior settings were restored. "
-            "Resolve the error above, then rerun: defenseclaw setup guardrail"
+            f"Resolve the error above, then rerun: {_guardrail_setup_command_name()}"
         )
     if non_interactive and judge_on_before_versions and not gc.judge.enabled and not judge_gate_was_all:
         # GAP-2175: the judge was requested, but every connector in scope is
@@ -7671,7 +7758,10 @@ def setup_guardrail(
             )
         rows.append(("guardrail.port", str(gc.port)))
         rows += _legacy_guardrail_llm_rows(gc)
-        rows.append(("guardrail.detection_strategy", gc.detection_strategy))
+        # The strategy that runs, as guardrail status shows it: regex_only
+        # while the judge is off (GAP-1647).
+        for c in _actives:
+            rows.append((f"  [{c}] detection_strategy", _effective_detection_strategy(gc, c)))
         if gc.api_base:
             rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
     else:
@@ -7681,7 +7771,7 @@ def setup_guardrail(
             ("guardrail.mode", gc.mode),
             ("guardrail.port", str(gc.port)),
             *_legacy_guardrail_llm_rows(gc),
-            ("guardrail.detection_strategy", gc.detection_strategy),
+            ("guardrail.detection_strategy", _effective_detection_strategy(gc, gc.connector)),
             ("guardrail.rule_pack", gc.effective_rule_pack() or "default"),
         ]
         if gc.api_base:
@@ -9989,6 +10079,19 @@ _ROLLBACK_RESTART_TITLE = "Restoring the previous configuration"
 _CONFIG_WRITE_REMEDY_KEY = "defenseclaw.setup.config_write_remedy"
 
 
+def _guardrail_setup_command_name() -> str:
+    """The setup command the operator ran (GAP-2110).
+
+    ``setup openclaw`` and the other connector aliases run ``setup guardrail``
+    through ``ctx.invoke``, so the alias is the parent command, not the group.
+    """
+    ctx = click.get_current_context(silent=True)
+    parent = ctx.parent if ctx is not None else None
+    if parent is not None and not isinstance(parent.command, click.Group):
+        return parent.command_path
+    return "defenseclaw setup guardrail"
+
+
 def _setup_rerun_command() -> str:
     """Name the active setup command and the options needed to repeat it."""
     ctx = click.get_current_context(silent=True)
@@ -10705,7 +10808,7 @@ def _apply_hook_connector_setup(
     if connector == "opencode":
         _preflight_opencode_plugin_folder()
 
-    if refusal := _agent_settings_refusal(app.cfg, connector, workspace_dir=workspace_dir):
+    if refusal := _agent_settings_refusal(app.cfg, connector, workspace_dir=workspace_dir, will_restart=restart):
         ux.echo(f"  ✗ {refusal}", err=True)
         return False
 
@@ -11287,7 +11390,7 @@ def _print_observability_summary(
         enforcement_label = (
             "enabled (user-hook native deny; failClosed=true; no native ask)"
             if mode == "action"
-            else "disabled (observe-only; failClosed=false)"
+            else "disabled (observe-only; failClosed=true: a gateway outage follows the hook fail mode)"
         )
     else:
         enforcement_label = "enabled (hook-driven)" if mode == "action" else "disabled (observe-only)"
@@ -12240,7 +12343,7 @@ def _apply_setup_batch(
     if "opencode" in connectors:
         _preflight_opencode_plugin_folder()
     for connector_name in connectors:
-        if refusal := _agent_settings_refusal(app.cfg, connector_name, workspace_dir=""):
+        if refusal := _agent_settings_refusal(app.cfg, connector_name, workspace_dir="", will_restart=restart):
             _restore_setup_config_snapshot(app, setup_snapshot)
             raise click.ClickException(refusal)
 
@@ -13065,7 +13168,15 @@ def _warn_leftover_copilot_managed_plugin_key(path: str | None = None) -> bool:
 _GATEWAY_RESTART_STEP_RE = re.compile(r",? then run: defenseclaw-gateway restart\.?$")
 
 
-def _agent_settings_refusal(cfg, connector: str, *, workspace_dir: str | None = None) -> str:
+def _agent_settings_refusal(
+    cfg,
+    connector: str,
+    *,
+    workspace_dir: str | None = None,
+    will_restart: bool = False,
+    changed: str = "Setup changed nothing",
+    rerun: str = "setup command",
+) -> str:
     """Why the gateway would refuse *connector*'s agent settings, or "".
 
     The agent's own settings can refuse DefenseClaw hooks: a Codex
@@ -13078,7 +13189,10 @@ def _agent_settings_refusal(cfg, connector: str, *, workspace_dir: str | None = 
     fix. When the check cannot run, the gateway start still refuses those
     settings and setup's readiness wait reports that reason. Every connector
     is asked: the check also refuses a malformed shared hook config
-    (hooks/.hookcfg) that every connector's hooks close on (GAP-1325).
+    (hooks/.hookcfg) that every connector's hooks close on (GAP-1325),
+    except one the gateway's own writer repairs when *will_restart*: a null
+    fail_modes map its flat records rebuild (GAP-1815). *rerun* names the
+    command to run again after the fix, *changed* what the caller did.
     """
     executable = _gateway_lifecycle_executable()
     if not executable:
@@ -13110,13 +13224,15 @@ def _agent_settings_refusal(cfg, connector: str, *, workspace_dir: str | None = 
         payload = None
     if not isinstance(payload, dict) or payload.get("refused") is not True:
         return ""
+    if will_restart and payload.get("repaired_by_restart") is True:
+        return ""
     reason = str(payload.get("reason") or "").strip()
     if not reason:
         return ""
     label = _CONNECTOR_META.get(connector, {}).get("label", connector)
     return (
-        f"{label}: {_GATEWAY_RESTART_STEP_RE.sub('', reason)}. Setup changed nothing and the gateway keeps "
-        "running as it was; after the fix, run the same setup command again."
+        f"{label}: {_GATEWAY_RESTART_STEP_RE.sub('', reason)}. {changed} and the gateway keeps "
+        f"running as it was; after the fix, run the same {rerun} again."
     )
 
 
@@ -13388,6 +13504,10 @@ def _remove_connector(
             )
             return False
 
+    # The gateway applies a connector-set change on its config reload, but a
+    # new primary (guardrail.connector, claw.mode) waits for a restart.
+    previous_primary = (str(getattr(gc, "connector", "") or ""), str(getattr(cfg.claw, "mode", "") or ""))
+
     # Drop from the multi-connector map (case-insensitive key match).
     if getattr(gc, "connectors", None):
         for key in [k for k in gc.connectors if k.lower() == match.lower()]:
@@ -13463,7 +13583,9 @@ def _remove_connector(
             _warn_leftover_copilot_managed_plugin_key()
     else:
         # Suppress the group's auto-restart result callback so --no-restart
-        # is honored; warn that teardown is deferred until the next boot.
+        # is honored. A running gateway tears a removed non-primary connector
+        # down on its config reload, within seconds; a new primary waits for a
+        # restart, and a stopped gateway does it at its next start (GAP-2125).
         ctx = click.get_current_context(silent=True)
         if ctx is not None:
             ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
@@ -13472,6 +13594,12 @@ def _remove_connector(
             click.echo(
                 "  --no-restart: config updated; restart defenseclaw-gateway so it drops "
                 "the removed connector's DefenseClaw state."
+            )
+        elif previous_primary == (str(gc.connector or ""), str(cfg.claw.mode or "")):
+            click.echo(
+                "  --no-restart: config updated. A running defenseclaw-gateway removes the "
+                "connector's hooks when it reloads the config (within seconds); a stopped "
+                "one removes them when it next starts."
             )
         else:
             click.echo(
@@ -14749,6 +14877,18 @@ def execute_guardrail_setup(
             warnings.append("Config not saved — settings will be lost on next run")
 
     return True, warnings
+
+
+def _effective_detection_strategy(gc, connector: str) -> str:
+    """The detection strategy that runs for *connector*, as guardrail status shows it.
+
+    A judge strategy runs as regex_only while the judge is off (or not
+    selected for the connector); the summary printed the configured
+    regex_judge instead (GAP-1647).
+    """
+    from defenseclaw.commands.cmd_guardrail import _scan_value
+
+    return _scan_value(gc, connector)
 
 
 def _prompt_hook_fail_mode(gc) -> None:

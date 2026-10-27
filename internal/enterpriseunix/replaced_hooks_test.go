@@ -327,6 +327,51 @@ func TestFencedReplacedShellHookAnswersClosedWhileTheLifecycleRuns(t *testing.T)
 // while the gateway still answers them; a call still running at the end of
 // the wait is reported. A process that started after the fence, or of
 // another account, or that runs no hook of the folder, is not waited for.
+// GAP-1710: a managed 1.0.2 -> 1.0.4 upgrade left the 1.0.2 generic shell
+// hook set (its _hardening.sh and inspect-*.sh) in the managed data
+// directory, neither refreshed nor removed. The upgrade removes a replaced
+// release's set and keeps the folder's sidecars and tokens; a current set
+// (its _hardening.sh reads the lifecycle marker) stays.
+func TestUpgradeRetiresTheReplacedMachineShellHookSet(t *testing.T) {
+	for name, current := range map[string]bool{"replaced 1.0.2 set": false, "current set": true} {
+		t.Run(name, func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.2")}))
+			dir := filepath.Join(h.env.Layout.DataDir, "hooks")
+			hardening := replacedHardening103
+			if current {
+				hardening += "\n" + lifecycleMarkerReader + " { return 1; }\n"
+			}
+			for _, file := range replacedMachineShellHooks {
+				body := "#!/bin/sh\nexit 0\n"
+				if file == hardeningFile {
+					body = hardening
+				}
+				writeHostFile(t, h, filepath.Join(dir, file), body)
+			}
+			keep := []string{".hookcfg", ".hookcfg.openclaw", ".hook-openclaw.token"}
+			for _, file := range keep {
+				writeHostFile(t, h, filepath.Join(dir, file), "kept\n")
+			}
+			requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.4"), ProductVersion: "1.0.4"}))
+			for _, file := range replacedMachineShellHooks {
+				_, err := os.Lstat(h.env.P(filepath.Join(dir, file)))
+				if current && err != nil {
+					t.Fatalf("the current %s was removed: %v", file, err)
+				}
+				if !current && !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("the replaced %s was kept (err %v)", file, err)
+				}
+			}
+			for _, file := range keep {
+				if _, err := os.Lstat(h.env.P(filepath.Join(dir, file))); err != nil {
+					t.Fatalf("%s was removed: %v", file, err)
+				}
+			}
+		})
+	}
+}
+
 func TestLifecycleFencesReplacedShellHooksBeforeItStopsTheGateway(t *testing.T) {
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("no /bin/bash")

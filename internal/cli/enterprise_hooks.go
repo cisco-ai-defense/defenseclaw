@@ -842,7 +842,7 @@ func enterpriseHookVerifyOrRepairTarget(
 	}
 	result, verifyErr := enterpriseHookReconcileVerifier(ctx, opts)
 	if verifyErr == nil {
-		return result, false, nil
+		return enterpriseHookRetryNativeOTLPTakeBack(ctx, target, opts, result), false, nil
 	}
 	return enterpriseHookRepairAfterVerifyFailure(ctx, target, opts, verifyErr)
 }
@@ -2882,9 +2882,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					row.UserHome = result.UserHome
 					row.Connector = result.Connector
 					row.Result = &result
+					result.AgentConfig = enterpriseHookAgentConfigNotice(result)
 					if result.AgentConfig != "" {
 						// A Hermes or Devin config put back or recreated
-						// (GAP-0588).
+						// (GAP-0588), or a native OTLP exporter the managed
+						// install could not take back (GAP-1839).
 						notices = append(notices, enterpriseHookGuardianNotice{User: firstNonEmptyString(row.User, row.SID), Connector: row.Connector, AgentConfig: result.AgentConfig})
 					}
 					recheck = recheckWindow > 0 && previousProtection.PreviouslyProtected && !repaired

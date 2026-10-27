@@ -38,6 +38,13 @@ _GATEWAY_HERMES_LOCKED_SCRIPTS = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _contained_probe_available(monkeypatch):
+    """These tests decide the probe outcome themselves; the host's user-namespace
+    setting (GAP-1525) must not skip it."""
+    monkeypatch.setattr(cmd_doctor, "_hermes_execution_proof_unavailable", lambda: "")
+
+
 def _registered_unix_hermes(tmp_path, monkeypatch):
     """Register a sealed Unix Hermes hook; return it and a reseal-and-check call."""
     data_dir = tmp_path / "dc"
@@ -835,6 +842,25 @@ def test_hermes_fail_mode_freshness_does_not_need_the_execution_probe(tmp_path, 
         # Doctor still runs the probe and reports that it did not prove the hook.
         assert cmd_doctor._hermes_registered_execution_problem(cfg, str(tmp_path / "hermes" / "config.yaml"))
         assert len(calls) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_doctor_warns_execution_proof_unavailable_where_user_namespaces_are_off(tmp_path, monkeypatch):
+    """GAP-1525: with user.max_user_namespaces=0 doctor failed 'Hermes hooks - Hermes
+    registered hook execution probe could not run' for a sealed, current
+    registration. The probe is not run there; the row is a warning that names why."""
+    _hook, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    reason = "unprivileged user namespaces are disabled (user.max_user_namespaces=0)"
+    monkeypatch.setattr(cmd_doctor, "_hermes_execution_proof_unavailable", lambda: reason)
+
+    def must_not_run(argv):
+        raise AssertionError(f"probe ran without containment: {argv}")
+
+    monkeypatch.setattr(cmd_doctor, "_run_hermes_execution_probe", must_not_run)
+    cfg = SimpleNamespace(data_dir=str(tmp_path / "dc"))
+    assert cmd_doctor._hermes_registered_execution_problem(cfg, str(tmp_path / "hermes" / "config.yaml")) == ""
+    row = check()
+    assert row["status"] == "warn" and "execution proof unavailable" in row["detail"] and reason in row["detail"], row
 
 
 @pytest.mark.skipif(not _LINUX, reason="Linux probe supervisor")

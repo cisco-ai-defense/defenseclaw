@@ -729,6 +729,25 @@ def connector_fail_mode_report(
                 {"name": f"{name}-upstream", "mode": "open"},
             ],
         }
+    from defenseclaw.platform_support import is_proxy_connector
+
+    if is_proxy_connector(name):
+        # The proxy connectors (OpenClaw, ZeptoClaw) have no hooks: while the
+        # gateway is down their model and tool calls are refused whatever
+        # guardrail.hook_fail_mode says, as `guardrail fail-mode` lists them
+        # (GAP-1957).
+        return {
+            "effective": "closed",
+            "provenance": "proxy-backed",
+            "note": "no hooks: blocked while the gateway is down",
+            "configured": configured,
+            "desired": "closed",
+            "runtime": None,
+            "current": False if unguarded else None,
+            "runtime_verified": None,
+            "drift": unguarded,
+            "sources": [{"name": "proxy", "mode": "closed"}],
+        }
     if name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
         # Outside Secure Client, Copilot CLI, Antigravity and Hermes follow the
         # configured mode and are resolved from their rendered hooks.

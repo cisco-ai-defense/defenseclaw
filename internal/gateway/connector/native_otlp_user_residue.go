@@ -4,6 +4,8 @@
 package connector
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 )
 
 // A native OTLP exporter sends to whatever process holds the port named in its
@@ -103,6 +106,15 @@ func UserNativeOTLPResidueIn(connectorName string, config, backup []byte, opts S
 		return removed, err
 	}
 	return nil, nil
+}
+
+// UserNativeOTLPTakeBackResidueIn is UserNativeOTLPResidueIn for a
+// take-back: an exporter whose credential an earlier take-back revoked is
+// still known as DefenseClaw's by the digest its pending marker keeps
+// (GAP-1839). Verify never uses it: with the credential revoked the managed
+// gateway serves none, and the marker is reported instead.
+func UserNativeOTLPTakeBackResidueIn(connectorName string, config, backup []byte, opts SetupOpts) ([]string, error) {
+	return UserNativeOTLPResidueIn(connectorName, config, backup, withNativeOTLPTakeBackCredential(opts, connectorName, config))
 }
 
 // UserNativeOTLPBackupName is the setup backup a per-user install kept in its
@@ -338,6 +350,7 @@ func codexUserNativeOTLP(configPath string, opts SetupOpts, apply bool) ([]strin
 		}
 		return nil, fmt.Errorf("read Codex config: %w", err)
 	}
+	opts = withNativeOTLPTakeBackCredential(opts, "codex", raw)
 	_, removed, err := codexWithoutUserNativeOTLP(raw, backup, opts)
 	if err != nil || !apply || len(removed) == 0 {
 		return removed, err
@@ -437,6 +450,7 @@ func claudeCodeUserNativeOTLP(settingsPath string, opts SetupOpts, apply bool) (
 		}
 		return nil, fmt.Errorf("read Claude Code settings: %w", err)
 	}
+	opts = withNativeOTLPTakeBackCredential(opts, "claudecode", raw)
 	_, removed, err := claudeCodeWithoutUserNativeOTLP(raw, backup, opts)
 	if err != nil || !apply || len(removed) == 0 {
 		return removed, err
@@ -733,4 +747,212 @@ func claudeCodeAuthorizationValues(value string) []string {
 		values = append(values, decoded)
 	}
 	return values
+}
+
+// A take-back that could not clean the account's agent config (a .codex on a
+// network share a signed-out account's S4U token cannot read, a path through
+// a reparse point) leaves this marker in the account's managed data
+// directory, beside the hook runtime it protects (GAP-1839, GAP-1840). The
+// exporter may still send the agent's prompts to a port no DefenseClaw
+// process holds, so the guardian reports the account and connector in status
+// and verify (AgentConfigNativeOTLPTakeBackPending) until a later install or
+// repair removes the exporter and the marker; it never fails the install.
+// The take-back revokes the scoped credential, which was the proof that the
+// exporter is DefenseClaw's, so the marker keeps its SHA-256 (never the
+// value): a later take-back finds the credential in the config by that digest
+// and still removes the exporter.
+const nativeOTLPTakeBackPendingPrefix = "native-otlp-take-back-pending-"
+
+// nativeOTLPTakeBackPendingMaxBytes bounds the marker read.
+const nativeOTLPTakeBackPendingMaxBytes = 4 << 10
+
+type nativeOTLPTakeBackPendingRecord struct {
+	Connector        string `json:"connector"`
+	At               string `json:"at"`
+	CredentialSHA256 string `json:"credential_sha256,omitempty"`
+	CredentialLength int    `json:"credential_length,omitempty"`
+}
+
+func nativeOTLPTakeBackPendingPath(dataDir, connectorName string) (string, OTLPPathTokenScope, bool) {
+	if strings.TrimSpace(dataDir) == "" {
+		return "", "", false
+	}
+	scope, ok := OTLPPathTokenScopeForConnector(connectorName)
+	if !ok {
+		return "", "", false
+	}
+	return filepath.Join(dataDir, nativeOTLPTakeBackPendingPrefix+strings.ToLower(strings.TrimSpace(connectorName))+".json"), scope, true
+}
+
+// nativeOTLPTakeBackPendingBeforeRead runs between the marker's checks and
+// its read. Tests replace it.
+var nativeOTLPTakeBackPendingBeforeRead = func(string) {}
+
+// readNativeOTLPTakeBackPending reads the marker in the account's data
+// directory, which the SYSTEM guardian does every pass (GAP-2021): only a
+// regular file the account (or a trusted principal) owns counts, and it is
+// read without following a link or blocking on a FIFO, at most
+// nativeOTLPTakeBackPendingMaxBytes, and only while it is still the file
+// that was checked. Anything else is no marker. The type, size and owner are
+// read from the opened handle and the bytes from that same handle, so a file
+// swapped in after the check is never trusted (GAP-2065: on Windows the
+// owner was read by path and os.SameFile of two Lstat results reloads both
+// file IDs by path, so the swap check always passed there).
+func readNativeOTLPTakeBackPending(path string) (nativeOTLPTakeBackPendingRecord, bool) {
+	var record nativeOTLPTakeBackPendingRecord
+	file, err := openNativeOTLPTakeBackMarker(path)
+	if err != nil {
+		return record, false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > nativeOTLPTakeBackPendingMaxBytes ||
+		nativeOTLPTakeBackMarkerOwnerTrusted(path, file, info) != nil {
+		return record, false
+	}
+	nativeOTLPTakeBackPendingBeforeRead(path)
+	data, err := io.ReadAll(io.LimitReader(file, nativeOTLPTakeBackPendingMaxBytes+1))
+	if err != nil || int64(len(data)) > nativeOTLPTakeBackPendingMaxBytes {
+		return record, false
+	}
+	if after, err := os.Lstat(path); err != nil || !os.SameFile(info, after) {
+		return record, false
+	}
+	if json.Unmarshal(data, &record) != nil {
+		return nativeOTLPTakeBackPendingRecord{}, true
+	}
+	return record, true
+}
+
+// RecordNativeOTLPTakeBackPending leaves the take-back-pending marker for
+// connectorName in dataDir. Call it before the scoped credential is revoked:
+// it keeps the credential's digest (or the digest an earlier marker kept).
+func RecordNativeOTLPTakeBackPending(dataDir, connectorName string) error {
+	path, scope, ok := nativeOTLPTakeBackPendingPath(dataDir, connectorName)
+	if !ok {
+		return fmt.Errorf("native OTLP take-back marker: no exporter for connector %q", connectorName)
+	}
+	record, _ := readNativeOTLPTakeBackPending(path)
+	record.Connector = strings.ToLower(strings.TrimSpace(connectorName))
+	record.At = time.Now().UTC().Format(time.RFC3339)
+	if token, err := LoadOTLPPathToken(dataDir, scope); err == nil && len(token) >= otlpMinKnownTokenLen {
+		sum := sha256.Sum256([]byte(token))
+		record.CredentialSHA256, record.CredentialLength = hex.EncodeToString(sum[:]), len(token)
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o600)
+}
+
+// ClearNativeOTLPTakeBackPending removes the marker once the take-back found
+// nothing left to remove; an absent marker is not an error.
+func ClearNativeOTLPTakeBackPending(dataDir, connectorName string) error {
+	path, _, ok := nativeOTLPTakeBackPendingPath(dataDir, connectorName)
+	if !ok {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// NativeOTLPTakeBackPending reports a take-back-pending marker for
+// connectorName in dataDir (a regular file, read without following a link).
+func NativeOTLPTakeBackPending(dataDir, connectorName string) bool {
+	path, _, ok := nativeOTLPTakeBackPendingPath(dataDir, connectorName)
+	if !ok {
+		return false
+	}
+	_, ok = readNativeOTLPTakeBackPending(path)
+	return ok
+}
+
+// UserNativeOTLPPathUnreachable names the link on the path to an agent
+// configuration file whose target cannot be reached (a symlink to a share
+// whose server is off the network or whose name does not resolve, a junction
+// to a removed folder), else "". Go reports such a config as os.ErrNotExist
+// (Windows maps ERROR_BAD_NETPATH to it), the same as an account with no
+// config, so the residue check alone would read "no exporter". A take-back
+// must treat it as a config it cannot read, never as a clean one (GAP-2095).
+func UserNativeOTLPPathUnreachable(path string) string {
+	return unresolvedLinkOnPath(path)
+}
+
+// unresolvedLinkOnPath returns the link on path that does not resolve: the
+// config file itself when it is a link (symlink or other reparse point) whose
+// target cannot be reached (a config.toml linked to a share whose server is
+// off the network), else the nearest existing ancestor of a missing path when
+// that ancestor is such a link, else "".
+func unresolvedLinkOnPath(path string) string {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+			return ""
+		}
+		if _, err := os.Stat(path); err != nil {
+			return path
+		}
+		return ""
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	for dir := filepath.Dir(path); ; {
+		info, err := os.Lstat(dir)
+		if err == nil {
+			if info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+				return ""
+			}
+			if _, err := os.Stat(dir); err != nil {
+				return dir
+			}
+			return ""
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return ""
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// withNativeOTLPTakeBackCredential gives opts the revoked credential that a
+// pending marker's digest finds in raw (the account's agent config), so the
+// take-back can still prove the exporter is DefenseClaw's.
+func withNativeOTLPTakeBackCredential(opts SetupOpts, connectorName string, raw []byte) SetupOpts {
+	if strings.TrimSpace(opts.OTLPPathToken) != "" {
+		return opts
+	}
+	path, _, ok := nativeOTLPTakeBackPendingPath(opts.DataDir, connectorName)
+	if !ok {
+		return opts
+	}
+	record, ok := readNativeOTLPTakeBackPending(path)
+	if !ok || record.CredentialLength < otlpMinKnownTokenLen || len(record.CredentialSHA256) != hex.EncodedLen(sha256.Size) {
+		return opts
+	}
+	isHex := func(c byte) bool { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') }
+	for start := 0; start < len(raw); {
+		if !isHex(raw[start]) {
+			start++
+			continue
+		}
+		end := start
+		for end < len(raw) && isHex(raw[end]) {
+			end++
+		}
+		for i := start; i+record.CredentialLength <= end; i++ {
+			sum := sha256.Sum256(raw[i : i+record.CredentialLength])
+			if hex.EncodeToString(sum[:]) == record.CredentialSHA256 {
+				opts.OTLPPathToken = string(raw[i : i+record.CredentialLength])
+				return opts
+			}
+		}
+		start = end
+	}
+	return opts
 }

@@ -36,12 +36,27 @@ func SharedHookSidecarRefusal(opts SetupOpts) error {
 	if reason == nil {
 		return nil
 	}
+	if errors.Is(reason, ErrSharedHookSidecarRestartRepairs) {
+		return refuseForAgentConfig(fmt.Errorf(
+			"the shared hook config %s has a null fail_modes map (%w), so every DefenseClaw hook of this data directory closes on it; "+
+				"a gateway restart rebuilds the map from the flat hook records: run the same setup command without --no-restart, "+
+				"or run defenseclaw-gateway restart first",
+			path, reason,
+		))
+	}
 	return refuseForAgentConfig(fmt.Errorf(
 		"the shared hook config %s is malformed (%v), so every DefenseClaw hook of this data directory closes on it; "+
 			"move the file aside and restart the gateway (defenseclaw-gateway restart), which writes it again from config.yaml",
 		path, reason,
 	))
 }
+
+// ErrSharedHookSidecarRestartRepairs marks a malformed shared hook config
+// the gateway's own writer repairs when setup restarts it: a v2 sidecar
+// whose fail_modes is null and whose flat records rebuild the map
+// (writeHookConfigSidecarLocked, GAP-0512). Setup with a restart goes ahead;
+// only a setup that will not restart is refused (GAP-1815).
+var ErrSharedHookSidecarRestartRepairs = errors.New("a gateway restart rebuilds it from the flat hook records")
 
 // sharedHookSidecarMalformed returns why the sidecar at path is state a
 // writer refuses to rewrite, or nil when it is absent or carryable.
@@ -68,6 +83,12 @@ func sharedHookSidecarMalformed(path string) error {
 	if len(data) > HookSidecarMaxBytes {
 		return errors.New("parse hook config sidecar: larger than 64 KiB")
 	}
-	_, err = carryableHookConfigSidecar(data)
+	prior, err := carryableHookConfigSidecar(data)
+	if errors.Is(err, errHookSidecarNullFailModes) {
+		if _, recoverErr := recoverFlatHookFailModes(filepath.Dir(path), prior.FailModeSources); recoverErr != nil {
+			return fmt.Errorf("%w, and its flat records cannot rebuild it: %v", err, recoverErr)
+		}
+		return fmt.Errorf("%w; %w", err, ErrSharedHookSidecarRestartRepairs)
+	}
 	return err
 }

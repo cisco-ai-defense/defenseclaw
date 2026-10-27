@@ -2234,7 +2234,13 @@ def _check_hilt_support(
         return
 
     if connector == "openclaw":
-        _emit("pass", "Human approval", f"OpenClaw prompts supported at {min_sev}+", r=r)
+        _emit(
+            "pass",
+            "Human approval",
+            f"OpenClaw prompts supported at {min_sev}+ (Control UI and chat channels that "
+            "forward /approve; openclaw tui and local chat do not show them)",
+            r=r,
+        )
     elif connector == "claudecode":
         _emit("pass", "Human approval", f"Claude Code PreToolUse ask supported at {min_sev}+", r=r)
     elif connector == "copilot":
@@ -7781,8 +7787,12 @@ def _check_codex_hooks(
         try:
             with open(config_path, "rb") as stream:
                 document = codex_toml.loads(stream.read(1024 * 1024 + 1))
-            hooks = document.get("hooks", {})
-            wired = isinstance(hooks, dict) and "defenseclaw" in str(hooks).lower()
+            # The hook command runs a script in this data directory's hooks
+            # folder, wherever DEFENSECLAW_HOME puts it: a custom home has no
+            # "defenseclaw" in its path (GAP-1882).
+            from defenseclaw.hook_integrity import registers_defenseclaw_hooks
+
+            wired = registers_defenseclaw_hooks(cfg, "codex", config_path)
         except (OSError, UnicodeError, ValueError):
             wired = False
         if not wired:
@@ -10294,6 +10304,17 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     _emit("fail", label, problem, r=r,
                           remediation="run 'defenseclaw setup hermes --yes --restart', then rerun 'defenseclaw doctor'")
                     return
+                if unavailable := _hermes_execution_proof_unavailable():
+                    _emit(
+                        "warn",
+                        label,
+                        f"registered at {path}; {_HERMES_PROOF_UNAVAILABLE}: {unavailable}, so the "
+                        "registered hook is read back without running it",
+                        r=r,
+                        remediation="enable unprivileged user namespaces (sysctl user.max_user_namespaces) "
+                        "for the execution proof",
+                    )
+                    return
                 if r.list_processes and _hermes_host_running() is False:
                     _emit(
                         "pass",
@@ -10347,11 +10368,40 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     )
 
 
+def _hermes_execution_proof_unavailable() -> str:
+    """Why this host cannot run the contained Hermes probe, or "" (GAP-1525).
+
+    On Linux an account without CAP_SYS_ADMIN needs an unprivileged user
+    namespace for the probe's PID namespace; ``user.max_user_namespaces=0`` (or
+    ``kernel.unprivileged_userns_clone=0``) refuses it. The gateway reads the
+    sealed registration back without running it there
+    (hermesExecutionContainmentUnavailable), and doctor says so as a warning,
+    not as a registration that is gone.
+    """
+    if not sys.platform.startswith("linux") or os.geteuid() == 0:
+        return ""
+    for path, name in (
+        ("/proc/sys/user/max_user_namespaces", "user.max_user_namespaces"),
+        ("/proc/sys/kernel/unprivileged_userns_clone", "kernel.unprivileged_userns_clone"),
+    ):
+        try:
+            with open(path, encoding="ascii") as handle:
+                value = handle.read().strip()
+        except OSError:
+            continue
+        if value == "0":
+            return f"unprivileged user namespaces are disabled ({name}=0)"
+    return ""
+
+
 def _hermes_registered_execution_problem(cfg, config_path: str) -> str:
     """Read Hermes' active matrix and execute its sealed command as a bounded probe."""
     problem = _hermes_registration_problem(cfg, config_path)
     if problem:
         return problem
+    if _hermes_execution_proof_unavailable():
+        # The caller reports the unavailable proof as a warning.
+        return ""
     expected = os.path.normpath(os.path.join(str(getattr(cfg, "data_dir", "") or ""), "hooks", "hermes-hook.sh"))
     probe_argv = [expected, "--defenseclaw-execution-probe"]
     if sys.platform == "darwin":
@@ -10622,6 +10672,11 @@ class ConnectorSetupReadiness:
         return self.ready
 
 
+# The Hermes hooks row where this host cannot run the contained execution
+# proof (GAP-1525): the sealed registration is current, so it is a warning
+# that the proof did not run, and setup is ready (GAP-1994).
+_HERMES_PROOF_UNAVAILABLE = "execution proof unavailable"
+
 _SETUP_READINESS_PRIMARY_LABELS = {
     "codex": "Codex hooks",
     "claudecode": "Claude Code hooks",
@@ -10744,6 +10799,8 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
         for row in rows:
             status = str(row.get("status") or "")
             detail = str(row.get("detail") or "")
+            if status == "warn" and name == "hermes" and label == primary_label and _HERMES_PROOF_UNAVAILABLE in detail:
+                continue
             if status != "pass":
                 return ConnectorSetupReadiness(
                     False,

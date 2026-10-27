@@ -40,6 +40,7 @@ from defenseclaw.connector_contracts import (
     has_native_approval_prompt,
     known_broken_entry,
     known_warning_entry,
+    openclaw_lacks_plugin_approvals,
     openclaw_needs_interception_advisory,
     resolve_connector_contract,
 )
@@ -134,6 +135,12 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertTrue(openclaw_needs_interception_advisory("2026.6.8"))
         self.assertTrue(openclaw_needs_interception_advisory("2026.6.11"))
         self.assertFalse(openclaw_needs_interception_advisory(""))
+
+    def test_openclaw_plugin_approvals_start_at_2026_3_28(self) -> None:
+        self.assertTrue(openclaw_lacks_plugin_approvals("OpenClaw 2026.3.24 (cff6dc9)"))
+        self.assertFalse(openclaw_lacks_plugin_approvals("2026.3.28"))
+        self.assertFalse(openclaw_lacks_plugin_approvals("2026.6.8"))
+        self.assertFalse(openclaw_lacks_plugin_approvals(""))
 
     def test_codex_version_range_matches_contract(self) -> None:
         expected = (
@@ -565,12 +572,17 @@ class TestConnectorContractManifest(unittest.TestCase):
             "2026.9.24",
             "Hermes Agent vgit.5bba024 (2026.9.24)",
             "Hermes Agent vgit.5bba024",
+            "Hermes Agent vunknown (2026.9.24)",
         ):
             compat = resolve_connector_contract("hermes", raw)
             self.assertEqual(compat.status, STATUS_KNOWN, raw)
             self.assertEqual(compat.contract.contract_id, "hermes-hooks-v2", raw)
             self.assertEqual(compat.warning, "", raw)
             self.assertEqual(known_broken_entry("hermes", raw), (None, ""), raw)
+        # GAP-2052: a git install release date resolves like the bare date,
+        # and only in the Hermes form (mirrors Go hermesGitReleaseRE).
+        for raw in ("Hermes Agent vunknown (2026.6.1)", "Other Agent vunknown (2026.9.24)"):
+            self.assertNotEqual(resolve_connector_contract("hermes", raw).status, STATUS_KNOWN, raw)
         # Below the first reviewed release keeps its own "upgrade" answer.
         self.assertNotIn("known broken", resolve_connector_contract("hermes", "0.18.2").reason)
 

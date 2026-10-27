@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -17,6 +18,65 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
 )
+
+// GAP-1396: run as LocalSystem (the native suite's account on the managed
+// hosts), two fixtures failed for prerequisites of the fixture, not of the
+// code: the cleanup impersonates the running account as the target, which
+// enterprise hooks refuse for LocalSystem (as
+// TestWindowsClaudeManagedVerifyAndRepairStalePerUserNativeOTLP skips), and
+// assigning another account (Guest) as a file owner needs a privilege the
+// token may not hold. Each now skips with its prerequisite.
+func skipNativeOTLPFixtureAsLocalSystem(t *testing.T, sid *windows.SID) {
+	t.Helper()
+	if sid.IsWellKnown(windows.WinLocalSystemSid) {
+		t.Skip("skipped as LocalSystem: the fixture targets the running account, and enterprise hooks refuse LocalSystem as a target; run the package as an interactive administrator")
+	}
+}
+
+func assignNativeOTLPFixtureOwnerOrSkip(t *testing.T, path string, owner *windows.SID) {
+	t.Helper()
+	set := func() error {
+		return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil)
+	}
+	err := RunWithWindowsAdministratorOwnerRestorePrivilege(set)
+	if errors.Is(err, windows.ERROR_INVALID_OWNER) {
+		err = RunWithWindowsOwnerRestorePrivilege(set)
+	}
+	if errors.Is(err, windows.ERROR_INVALID_OWNER) {
+		// Outside LocalSystem the helper above runs set unchanged, so an
+		// interactive administrator (the dcw-preflight account) enables its
+		// own SeRestorePrivilege on this thread (GAP-1943).
+		var held bool
+		err, held = runWithFixtureRestorePrivilege(set)
+		if !held {
+			t.Skipf("this token does not hold SeRestorePrivilege, which assigning another account as the owner of a fixture file needs: %v", err)
+		}
+	}
+	if err != nil {
+		t.Fatalf("assign test owner on %s: %v", path, err)
+	}
+}
+
+// runWithFixtureRestorePrivilege runs fn on a locked thread impersonating
+// this process with SeRestorePrivilege enabled; held is false when the token
+// does not hold the privilege.
+func runWithFixtureRestorePrivilege(fn func() error) (err error, held bool) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := windows.ImpersonateSelf(windows.SecurityImpersonation); err != nil {
+		return err, false
+	}
+	defer func() { _ = windows.RevertToSelf() }()
+	var token windows.Token
+	if err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, false, &token); err != nil {
+		return err, false
+	}
+	defer token.Close()
+	if err := enableWindowsThreadPrivilege(token, "SeRestorePrivilege"); err != nil {
+		return err, false
+	}
+	return fn(), true
+}
 
 // A managed profile directory gives the target write access but reserves
 // WRITE_DAC for SYSTEM. The native exporter edit must not try to replace that
@@ -27,6 +87,7 @@ func TestWindowsManagedNativeOTLPCleanupKeepsProtectedDataDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	sid := user.User.Sid
+	skipNativeOTLPFixtureAsLocalSystem(t, sid)
 	home := t.TempDir()
 	dataDir := filepath.Join(home, ".defenseclaw")
 	if err := os.Mkdir(dataDir, 0o700); err != nil {
@@ -249,7 +310,7 @@ func TestWindowsManagedNativeOTLPVerifyIgnoresOtherUserToken(t *testing.T) {
 	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 64)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	setWindowsTestPathExactOwner(t, tokenPath, target)
+	assignNativeOTLPFixtureOwnerOrSkip(t, tokenPath, target)
 	if _, err := connector.LoadOTLPPathToken(dataDir, connector.OTLPScopeClaude); err == nil {
 		t.Fatal("foreign-owned token unexpectedly passed the gateway trust check")
 	}
@@ -511,10 +572,80 @@ func gap1170Fixture(t *testing.T, tc gap1170Case) (home, dataDir, config, tokenP
 	return home, dataDir, config, tokenPath
 }
 
+// GAP-1839, GAP-1840: a take-back that could not read a linked config left
+// nothing that status, verify or a later install could act on. It now leaves
+// the take-back-pending marker (Verify still passes: the credential is
+// revoked), and the next take-back that reads the config removes the
+// exporter, known by the digest the marker keeps, and the marker.
+func TestWindowsManagedNativeOTLPTakeBackPendingUntilTheExporterIsGone(t *testing.T) {
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range gap1170Cases() {
+		t.Run(tc.name, func(t *testing.T) {
+			home, dataDir, config, tokenPath := gap1170Fixture(t, tc)
+			restore := denyWindowsTestPathReadForTest(t, config, user.User.Sid)
+			var warnings []string
+			previousWarn := windowsNativeOTLPWarn
+			windowsNativeOTLPWarn = func(message string) { warnings = append(warnings, message) }
+			t.Cleanup(func() { windowsNativeOTLPWarn = previousWarn })
+			takeBack := func() string {
+				t.Helper()
+				warnings = nil
+				if err := connector.WithUserHomeDir(home, func() error {
+					removeWindowsManagedUserNativeOTLPAsTarget(tc.name, user.User.Sid, home, dataDir)
+					return nil
+				}); err != nil {
+					t.Fatalf("take-back failed the install: %v", err)
+				}
+				return strings.Join(warnings, "\n")
+			}
+			marker := filepath.Join(dataDir, "native-otlp-take-back-pending-"+tc.name+".json")
+			report := takeBack()
+			if _, err := os.Lstat(marker); err != nil {
+				t.Fatalf("take-back left no pending marker for a linked config it could not read: %v (report %q)", err, report)
+			}
+			if !strings.Contains(report, "status and verify report it") {
+				t.Fatalf("take-back report = %q", report)
+			}
+			if _, err := os.Lstat(tokenPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("take-back kept the scoped credential: %v", err)
+			}
+			if strings.Contains(report, "e7e7") || strings.Contains(report, "19010") {
+				t.Fatalf("take-back report carries a value: %q", report)
+			}
+			if err := windowsManagedUserNativeOTLPAbsent(tc.name, home, dataDir, user.User.Sid); err != nil {
+				t.Fatalf("verify fails the install on a pending take-back whose credential is revoked: %v", err)
+			}
+			// Readable again (the account signed in): the take-back knows the
+			// exporter by the marker's digest, removes it at the file the link
+			// reaches, and clears the marker.
+			restore()
+			report = takeBack()
+			if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("take-back kept the pending marker after it removed the exporter: %v (report %q)", err, report)
+			}
+			data, err := os.ReadFile(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "19010") {
+				t.Fatalf("take-back left the exporter in the linked config: %q", data)
+			}
+			if err := windowsManagedUserNativeOTLPAbsent(tc.name, home, dataDir, user.User.Sid); err != nil {
+				t.Fatalf("verify after the exporter was removed: %v", err)
+			}
+		})
+	}
+}
+
 // denyWindowsTestPathReadForTest denies sid read access to path, as an S4U
 // token meets a share it has no credentials for, and puts the DACL back on
 // cleanup so the temporary directory can be removed.
-func denyWindowsTestPathReadForTest(t *testing.T, path string, sid *windows.SID) {
+func denyWindowsTestPathReadForTest(t *testing.T, path string, sid *windows.SID) func() {
 	t.Helper()
 	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -540,7 +671,9 @@ func denyWindowsTestPathReadForTest(t *testing.T, path string, sid *windows.SID)
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, denied, nil); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
+	restore := func() {
 		_ = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
-	})
+	}
+	t.Cleanup(restore)
+	return restore
 }
