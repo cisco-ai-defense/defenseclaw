@@ -120,6 +120,22 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		}
 		switch redirect.Op {
 		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+		case syntax.DplOut:
+			// bash writes the file of >&word and 1>&word when word is not a
+			// descriptor number or "-" (GAP-2143); 2>&1, >&$fd stay copies.
+			if redirect.N != nil && redirect.N.Value != "1" {
+				return true
+			}
+			name, static := staticShellWord(redirect.Word, env, home != "")
+			if !static {
+				dynamic = dynamic || shellWordHasSlash(redirect.Word)
+				return true
+			}
+			if name == "" || name == "-" || strings.Trim(name, "0123456789") == "" {
+				return true
+			}
+			operands = append(operands, OperandPath(name, cwd))
+			return true
 		default:
 			return true
 		}
@@ -135,6 +151,22 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		return true
 	})
 	return operands, true, dynamic
+}
+
+// shellWordHasSlash reports a literal "/" anywhere in word, quoted or not: a
+// >& word holding one names a file whatever its expansions are.
+func shellWordHasSlash(word *syntax.Word) bool {
+	slash := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.Lit:
+			slash = slash || strings.Contains(typed.Value, "/")
+		case *syntax.SglQuoted:
+			slash = slash || strings.Contains(typed.Value, "/")
+		}
+		return !slash
+	})
+	return slash
 }
 
 // calledFunctions walks executable top-level calls, then reachable bodies.
