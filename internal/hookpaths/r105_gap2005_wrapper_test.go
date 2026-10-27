@@ -39,6 +39,7 @@ func TestActionInterpreterKeyPathThroughWrapperOrOption(t *testing.T) {
 		"python3 -X utf8 -c " + py,
 		"python3 -W ignore -c " + py,
 		"python3 -Ic " + py,
+		"python3 --check-hash-based-pycs never -c " + py,
 		"node --no-warnings -e " + node,
 		"node -r fs -e " + node,
 		"node --require fs -e " + node,
@@ -61,6 +62,7 @@ func TestActionInterpreterKeyPathThroughWrapperOrOption(t *testing.T) {
 		`env python3 -c 'open("notes.txt","a").write("x")'`,
 		`timeout 5 python3 -c 'print("see .ssh/authorized_keys")'`,
 		`nice -n 10 python3 -m pytest -q`,
+		`python3 --check-hash-based-pycs never -c 'open("notes.txt","a").write("x")'`,
 		`perl -w -e 'print "x"'`,
 		`perl -I lib -e 'open(my $f, ">>", "notes.txt"); print $f "x"'`,
 		`node --no-warnings -e "console.log(1)"`,
@@ -100,6 +102,7 @@ func TestActionWindowsInterpreterKeyPathThroughOption(t *testing.T) {
 	for _, command := range []string{
 		"python -X utf8 -c " + py,
 		"python -W ignore -c " + py,
+		"python --check-hash-based-pycs never -c " + py,
 		"node -r fs -e " + node,
 		"node --require fs -e " + node,
 		`perl -I lib -e "open(my $f, '>>', $ENV{USERPROFILE}.'/.ssh/'.'authorized_keys'); print $f 'x'"`,

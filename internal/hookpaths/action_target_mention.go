@@ -376,7 +376,8 @@ func actionInterpreterInlineCode(words []string, at int) (string, bool) {
 func actionInterpreterOptionTakesValue(kind, option string) bool {
 	switch kind {
 	case "python":
-		return option == "-X" || option == "-W" || option == "-Q"
+		// --check-hash-based-pycs is the one long python option with a value.
+		return option == "-X" || option == "-W" || option == "-Q" || option == "--check-hash-based-pycs"
 	case "node":
 		switch option {
 		case "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions",
