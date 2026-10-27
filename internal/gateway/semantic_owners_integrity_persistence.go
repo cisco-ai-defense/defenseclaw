@@ -195,7 +195,7 @@ func activeStateMutationOwner() semanticOwner {
 			// changes the state it starts from (GAP-2122).
 			if command.Effect == actionfacts.EffectExecute &&
 				candidate.Access == actionfacts.PathAccessWrite &&
-				findHandsEntriesToWriter(command) {
+				(findHandsEntriesToWriter(command) || findCopiesOutTo(command, candidate)) {
 				return true
 			}
 			// A chmod that gives group or other write to state hands it
@@ -2626,6 +2626,10 @@ func stateTreeEntryChanged(
 			// The same order-aware cleanup exemption as -delete.
 			return !findDeletesOnlyUnprotectedNames(command, state)
 		}
+		if findCopiesOutTo(command, candidate) {
+			// A copy-out onto a tree name lands in it.
+			return true
+		}
 		if !hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove) {
 			return false
 		}
@@ -2791,6 +2795,21 @@ func findHandsEntriesToWriter(command actionfacts.CommandFact) bool {
 		actionfacts.FindEmbeddedCommandMayChange(command.Argv)
 }
 
+// findCopiesOutTo reports a written candidate that is the output of a
+// find's copy-out (-exec cp {} DEST, tar -cf ARCHIVE {}, ...): the found
+// entries are only read and the output is written (pod check8).
+func findCopiesOutTo(command actionfacts.CommandFact, candidate actionfacts.PathFact) bool {
+	if !strings.EqualFold(command.Program, "find") || candidate.Access != actionfacts.PathAccessWrite {
+		return false
+	}
+	for _, output := range actionfacts.FindHandedEntries(command.Argv).Outputs {
+		if output == candidate.Value {
+			return true
+		}
+	}
+	return false
+}
+
 // provenPartialFindHandOff proves a state change by a find that hands what
 // it finds to a program that may write or remove it (sh -c, a sudo or env
 // wrapper, truncate, cp, ...; GAP-2122). The embedded program is not read,
@@ -2802,7 +2821,8 @@ func provenPartialFindHandOff(
 	projected actionfacts.CommandFact,
 	candidate actionfacts.PathFact,
 ) bool {
-	handsOff := candidate.Access == actionfacts.PathAccessWrite && findHandsEntriesToWriter(projected) ||
+	handsOff := candidate.Access == actionfacts.PathAccessWrite &&
+		(findHandsEntriesToWriter(projected) || findCopiesOutTo(projected, candidate)) ||
 		candidate.Access == actionfacts.PathAccessRead && findPipedToWriter(facts, projected)
 	if !handsOff {
 		return false
@@ -2812,7 +2832,9 @@ func provenPartialFindHandOff(
 }
 
 // findPipedToWriter reports a find with no -exec of its own whose output a
-// later xargs of its pipeline hands to a program that may change it
+// later xargs of its pipeline (through pass-through stages such as tee,
+// and behind a wrapper such as sudo) hands to a program that may change
+// it, or copies it into DefenseClaw state
 // (`find ~/.defenseclaw/hooks | xargs rm -f`, GAP-2122).
 func findPipedToWriter(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
 	if !strings.EqualFold(command.Program, "find") || command.PipelineID == 0 ||
@@ -2820,9 +2842,62 @@ func findPipedToWriter(facts actionfacts.Facts, command actionfacts.CommandFact)
 		return false
 	}
 	for _, other := range facts.Commands {
-		if other.ID > command.ID && other.PipelineID == command.PipelineID &&
-			strings.EqualFold(other.Program, "xargs") && xargsProgramMayChange(other.Argv) {
+		if other.ID <= command.ID || !strings.EqualFold(other.Program, "xargs") ||
+			!commandInPipeline(facts, other, command.PipelineID) {
+			continue
+		}
+		handed := xargsHandedEntries(other.Argv)
+		if handed.MayChange {
 			return true
+		}
+		for _, output := range handed.Outputs {
+			if handOffOutputInState(facts, output) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// commandInPipeline reports a command of the pipeline, or one a wrapper
+// of the pipeline runs (`find ... | sudo xargs rm`: the xargs is the
+// child of the sudo stage).
+func commandInPipeline(facts actionfacts.Facts, command actionfacts.CommandFact, pipeline int64) bool {
+	for depth := 0; depth < 8; depth++ {
+		if command.PipelineID == pipeline {
+			return true
+		}
+		parent, ok := integrityCommandByID(facts, command.ParentCommandID)
+		if command.ParentCommandID == 0 || !ok {
+			return false
+		}
+		command = parent
+	}
+	return false
+}
+
+// handOffOutputInState reports a copy-out output (relative to the hook's
+// working directory) inside the active DefenseClaw state.
+func handOffOutputInState(facts actionfacts.Facts, output string) bool {
+	if !path.IsAbs(output) {
+		if facts.CWD == "" {
+			return true
+		}
+		output = path.Join(facts.CWD, output)
+	}
+	output = path.Clean(output)
+	candidate := actionfacts.PathFact{
+		Access: actionfacts.PathAccessWrite, Flavor: actionfacts.PathFlavorPOSIX,
+		Value: output, Normalized: output, Absolute: true, Resolved: output,
+	}
+	for _, relative := range []func(actionfacts.Facts, actionfacts.PathFact) (string, bool){
+		activeHomeRelative, exactActiveDefenseClawRelative,
+	} {
+		if value, ok := relative(facts, candidate); ok {
+			value = strings.TrimRight(value, "/")
+			if value == ".defenseclaw" || strings.HasPrefix(value, ".defenseclaw/") {
+				return true
+			}
 		}
 	}
 	return false
@@ -2838,49 +2913,70 @@ func findHasExecAction(argv []string) bool {
 	return false
 }
 
-// xargsProgramMayChange reports an xargs argv whose program may change the
+// xargsHandedEntries reads what the program of an xargs argv does with the
 // names it is handed. With no program xargs runs echo; an option it does
 // not know may hide the program, so it counts as a change.
-func xargsProgramMayChange(argv []string) bool {
+func xargsHandedEntries(argv []string) actionfacts.HandedEntries {
+	mayChange := actionfacts.HandedEntries{MayChange: true}
+	replace := ""
 	for index := 1; index < len(argv); index++ {
 		argument := argv[index]
 		switch {
 		case argument == "--":
-			return index+1 < len(argv) && actionfacts.HandedEntriesProgramMayChange(argv[index+1])
+			return actionfacts.XargsHandedEntries(argv[index+1:], replace)
 		case !strings.HasPrefix(argument, "-") || argument == "-":
-			return actionfacts.HandedEntriesProgramMayChange(argument)
+			return actionfacts.XargsHandedEntries(argv[index:], replace)
 		case strings.HasPrefix(argument, "--"):
-			name, _, attached := strings.Cut(argument, "=")
+			name, value, attached := strings.Cut(argument, "=")
 			switch name {
 			case "--null", "--no-run-if-empty", "--verbose", "--interactive", "--exit", "--open-tty",
-				"--replace", "--eof", "--max-lines":
+				"--eof", "--max-lines":
+			case "--replace":
+				replace = "{}"
+				if attached {
+					replace = value
+				}
 			case "--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars", "--process-slot-var":
 				if !attached {
 					index++
 				}
 			default:
-				return true
+				return mayChange
 			}
 		default:
 			letters := argument[1:]
 			for at := 0; at < len(letters); at++ {
 				switch letters[at] {
 				case '0', 'r', 't', 'p', 'x', 'o':
-				case 'e', 'i', 'l':
+				case 'i':
 					// The value is optional and only attached.
+					replace = "{}"
+					if letters[at+1:] != "" {
+						replace = letters[at+1:]
+					}
 					at = len(letters)
-				case 'a', 'd', 'E', 'I', 'L', 'n', 'P', 's':
+				case 'e', 'l':
+					at = len(letters)
+				case 'I':
+					if letters[at+1:] != "" {
+						replace = letters[at+1:]
+					} else if index+1 < len(argv) {
+						index++
+						replace = argv[index]
+					}
+					at = len(letters)
+				case 'a', 'd', 'E', 'L', 'n', 'P', 's':
 					if at == len(letters)-1 {
 						index++
 					}
 					at = len(letters)
 				default:
-					return true
+					return mayChange
 				}
 			}
 		}
 	}
-	return false
+	return actionfacts.HandedEntries{}
 }
 
 // factsHaveFindHandOff reports a find that hands what it finds to a
@@ -2889,7 +2985,8 @@ func xargsProgramMayChange(argv []string) bool {
 // not count, so the proof below decides (GAP-2122).
 func factsHaveFindHandOff(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
-		if findHandsEntriesToWriter(command) || findPipedToWriter(facts, command) {
+		if findHandsEntriesToWriter(command) || findPipedToWriter(facts, command) ||
+			strings.EqualFold(command.Program, "find") && len(actionfacts.FindHandedEntries(command.Argv).Outputs) != 0 {
 			return true
 		}
 	}

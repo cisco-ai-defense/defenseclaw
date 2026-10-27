@@ -58,6 +58,42 @@ func TestR105GAP2122FindExecDeleteOfActiveState(t *testing.T) {
 		{"xargs sha256sum hooks", "find ~/.defenseclaw/hooks -type f | xargs sha256sum", false, ""},
 		{"xargs grep root", "find ~/.defenseclaw -type f | xargs grep -l fixture", false, ""},
 		{"xargs rm project pyc", "find . -name '*.pyc' | xargs rm -f", false, ""},
+		// pod check8: residual forms, a wrapped xargs and pass-through
+		// stages between find and xargs.
+		{"sudo xargs rm hooks", "find ~/.defenseclaw/hooks -type f | sudo xargs rm -f", true, ""},
+		{"tee devnull xargs rm hooks", "find ~/.defenseclaw/hooks -type f | tee /dev/null | xargs rm", true, ""},
+		{"tee log xargs rm hooks", "find ~/.defenseclaw/hooks -type f | tee /tmp/l | xargs rm", true, ""},
+		{"grep xargs rm hooks", "find ~/.defenseclaw/hooks -type f | grep -v zz | xargs rm -f", true, ""},
+		{"xargs cp into hooks", "find ~/.defenseclaw/policies -type f | xargs cp -t ~/.defenseclaw/hooks", true, ""},
+		// pod check8: writers that stay writers.
+		{"exec sort o config", `find ~/.defenseclaw/config.yaml -exec sort -o {} {} \;`, true, ""},
+		{"exec dd of hooks", `find ~/.defenseclaw/hooks -type f -exec dd if=/dev/null of={} \;`, true, ""},
+		{"exec perl pi hooks", "find ~/.defenseclaw/hooks -type f -exec perl -pi -e s/a/b/ {} +", true, ""},
+		{"exec sed w root", `find ~/.defenseclaw -type f -exec sed -n 'w /tmp/x' {} \;`, true, ""},
+		{"exec awk print to file", `find ~/.defenseclaw/hooks -type f -exec awk '{print > FILENAME}' {} \;`, true, ""},
+		{"exec awk system", `find ~/.defenseclaw/hooks -type f -exec awk 'BEGIN{system("rm -f " ARGV[1])}' {} \;`, true, ""},
+		{"exec cp into hooks", `find ~/.defenseclaw/policies -type f -exec cp {} ~/.defenseclaw/hooks/ \;`, true, ""},
+		{"execdir cp beside", `find ~/.defenseclaw/hooks -type f -execdir cp {} backup \;`, true, ""},
+		{"exec tar extract hooks", `find ~/.defenseclaw/hooks -name '*.tar' -execdir tar -xf {} \;`, true, ""},
+		{"exec zip move hooks", "find ~/.defenseclaw/hooks -type f -exec zip -m /tmp/h.zip {} +", true, ""},
+		{"exec json tool onto itself", `find ~/.defenseclaw -name '*.json' -exec python3 -m json.tool {} {} \;`, true, ""},
+		// pod check8 P2 regression: reads and copies out of state stay
+		// allowed through find -exec and xargs.
+		{"exec awk end root", `find ~/.defenseclaw -type f -exec awk 'END{print FILENAME, NR}' {} +`, false, ""},
+		{"exec sort root", "find ~/.defenseclaw -type f -exec sort {} +", false, ""},
+		{"exec jq root", `find ~/.defenseclaw -type f -exec jq . {} \;`, false, ""},
+		{"exec jq json", `find ~/.defenseclaw -name '*.json' -exec jq . {} \;`, false, ""},
+		{"exec sed n 1p", `find ~/.defenseclaw -name '*.json' -exec sed -n 1p {} \;`, false, ""},
+		{"exec json tool", `find ~/.defenseclaw -name '*.json' -exec python3 -m json.tool {} \;`, false, ""},
+		{"exec cp out tmp", `find ~/.defenseclaw -type f -exec cp {} /tmp/dc-backup/ \;`, false, ""},
+		{"exec cp policies to project", `find ~/.defenseclaw/policies -type f -exec cp {} ~/proj/policies-copy/ \;`, false, ""},
+		{"exec cp config out", `find ~/.defenseclaw/config.yaml -exec cp {} /tmp/cfg.bak \;`, false, ""},
+		{"exec cut root", "find ~/.defenseclaw -type f -exec cut -c1-20 {} +", false, ""},
+		{"exec tar create out", "find ~/.defenseclaw/policies -type f -exec tar -cf /tmp/policies.tar {} +", false, ""},
+		{"xargs cp t out", "find ~/.defenseclaw -type f -print0 | xargs -0 cp -t /tmp/dc-backup", false, ""},
+		{"xargs jq root", "find ~/.defenseclaw -name '*.json' | xargs jq .", false, ""},
+		{"tee xargs sha256sum", "find ~/.defenseclaw/hooks -type f | tee /tmp/l | xargs sha256sum", false, ""},
+		{"sudo xargs ls hooks", "find ~/.defenseclaw/hooks -type f | sudo xargs ls -l", false, ""},
 	}
 	for _, mode := range []string{"observe", "action"} {
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)

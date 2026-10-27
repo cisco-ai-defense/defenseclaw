@@ -2236,7 +2236,11 @@ func findRewriteKeepsOnlyEmbeddedPartial(resolved parseOutput) bool {
 		switch command.Program {
 		case "find":
 			finds++
-		case "xargs":
+		case "xargs",
+			// pass-through stages between find and xargs and the
+			// wrappers of an xargs (pod check8)
+			"tee", "cat", "grep", "sort", "head", "tail",
+			"sudo", "doas", "env", "nice", "nohup", "command", "stdbuf", "ionice":
 		default:
 			return false
 		}
