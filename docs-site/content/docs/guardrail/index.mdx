@@ -730,7 +730,7 @@ The message reads `<connector>'s agent changed`.
 
 **Fix.** `defenseclaw guardrail validate-pack <dir>`; if the change was intended, pin the `files digest` value it prints (the guardrail.custom_packs pin, not the `digest` line): `defenseclaw config set guardrail.custom_packs.<name>.digest sha256:<files digest>`. That works for a pack already registered; register a new pack with `defenseclaw guardrail use-pack <name>`, or set both its `path` and `digest`.
 
-**Check.** `defenseclaw doctor` shows `Config validation` and `Rule pack` as `[PASS]`, and `Policy` is no longer skipped.
+**Check.** `defenseclaw doctor` shows `Config file` (`canonical schema valid`) and `Rule pack` as `[PASS]`, and `Policy` is no longer skipped. `Config validation` appears only as a failure or warning.
 
 ### Human approval never asks
 
