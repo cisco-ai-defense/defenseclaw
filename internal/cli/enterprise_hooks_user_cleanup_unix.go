@@ -244,6 +244,11 @@ func reconcileEnterpriseHookStandaloneUnixCleanups(
 // Nothing was removed, and nothing is left to remove.
 var errEnterpriseHookCleanupHomeGone = errors.New("the recorded home no longer exists")
 
+// enterpriseHookCleanupAccountGone confirms, outside this long-running
+// process, that an account a lookup still found has no directory record
+// (unixidentity.AccountRecordGone). Tests replace it.
+var enterpriseHookCleanupAccountGone = unixidentity.AccountRecordGone
+
 // enterpriseHookRecordedHomeGone reports a recorded home that definitively
 // does not exist: its parent directory answers and the home itself is not
 // there. A home that does not answer in time, or whose parent is missing
@@ -513,6 +518,17 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 	}
 	switch check.State {
 	case enterprisehooks.HomePending:
+		if filepath.Clean(account.Home) == home && enterpriseHookRecordedHomeGone(home) &&
+			enterpriseHookCleanupAccountGone(ctx, account.User) {
+			// This process's lookup found the account, but a fresh directory
+			// read has no record of it and its home is gone: it was deleted,
+			// and the lookup answered from a stale per-process cache (macOS,
+			// rel-1-0-5 GAP-0029). Waiting for the home to come back would
+			// keep the cleanup open forever.
+			fmt.Fprintf(log, "[hook-guardian] %s: no such account (a fresh directory read has no record of %s, and its recorded home %s is gone); nothing to remove as that user\n",
+				enterpriseHookUserCleanupLabel(entry), account.User, home)
+			return enterpriseHookUserCleanupDone, nil
+		}
 		return enterpriseHookUserCleanupPending, nil
 	case enterprisehooks.HomeUntrusted:
 		return enterpriseHookUserCleanupFailed, errors.New("enterprise hooks: " + check.Reason)

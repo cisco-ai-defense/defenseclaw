@@ -173,6 +173,19 @@ func platformLocalAccountRecord(ctx context.Context, name string) (LocalAccountR
 	return LocalAccountRecord{UID: uid, RecordID: read["GeneratedUID"], Home: read["NFSHomeDirectory"], PrimaryGID: read["PrimaryGroupID"]}, true, nil
 }
 
+// platformAccountRecordGone asks Open Directory in a fresh dscl process
+// for the account's record across the search policy (local and bound
+// directory nodes). Only "record not found" while no bound directory node
+// is offline counts: an offline Active Directory node does not know its
+// accounts.
+func platformAccountRecordGone(ctx context.Context, name string) bool {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return false
+	}
+	result, err := runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-read", "/Users/" + name, "UniqueID"})
+	return dsclRecordNotFound(result, err) && !OpenDirectoryOffline(ctx)
+}
+
 // platformMobileAccounts lists the local node's mobile accounts with the
 // directory node each came from.
 func platformMobileAccounts(ctx context.Context) (map[string]string, error) {
