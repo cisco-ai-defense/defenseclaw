@@ -768,6 +768,99 @@ try {
                 $failures.Add('fresh-install rollback removed a root with a different identity')
             }
 
+            # GAP-1844 / GAP-1988: Restart Manager can lag a fresh handle.
+            # (a) It names no holder on the first query and the holder on a
+            # later one: the rollback still waits the hook out. (b) Every
+            # delete added between those queries re-checks the recorded
+            # root first, and stops when that root is no longer the one the
+            # transaction created.
+            if ($rollbackOptions.Count -gt 0) {
+                $savedHolders = ${function:Get-DefenseClawInstallRootHolders}
+                $savedRetryRoot = ${function:Test-DefenseClawManagedTreeRetryRoot}
+                $priorStrict = [Environment]::GetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', 'Process')
+                try {
+                    [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', '1', 'Process')
+                    foreach ($case in 'lag', 'swapped') {
+                        $lag = New-TestLayout ('rollback-' + $case)
+                        $lagHook = [IO.Path]::Combine($lag.BinDirectory, 'defenseclaw-hook.exe')
+                        [IO.File]::WriteAllText($lagHook, 'stand-in')
+                        $lagSnapshot = $security::GetDirectorySecuritySnapshotNoFollowIfExists($lag.InstallRoot)
+                        $lagReady = [IO.Path]::Combine($Root, 'rollback-' + $case + '-held')
+                        $script:SmokeHolderQueries = 0
+                        $script:SmokeRootChecks = 0
+                        $script:SmokeRootCase = $case
+                        function script:Get-DefenseClawInstallRootHolders {
+                            param($InstallRoot, $SelfUninstallCallerPID, $ExcludedProcessIds,
+                                [switch]$FailOnQueryError, [switch]$IncludeProcessId)
+                            $script:SmokeHolderQueries++
+                            if ($script:SmokeRootCase -eq 'lag' -and $script:SmokeHolderQueries -ge 2) {
+                                return [pscustomobject]@{ Id = 4545; Description = 'defenseclaw-hook.exe (pid 4545)' }
+                            }
+                            return @()
+                        }
+                        function script:Test-DefenseClawManagedTreeRetryRoot {
+                            param($Path, $ExpectedIdentity, $ExpectedSecurityDescriptor)
+                            $script:SmokeRootChecks++
+                            if ($script:SmokeRootCase -eq 'swapped' -and $script:SmokeRootChecks -gt 1) {
+                                return $false
+                            }
+                            return $true
+                        }
+                        $lagHolder = Start-Job -ScriptBlock {
+                            param([string]$Hook, [string]$Ready, [int]$Seconds)
+                            $stream = [IO.File]::Open($Hook, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                            try {
+                                [IO.File]::WriteAllText($Ready, 'held')
+                                Start-Sleep -Seconds $Seconds
+                            }
+                            finally { $stream.Dispose() }
+                        } -ArgumentList $lagHook, $lagReady, $(if ($case -eq 'lag') { 9 } else { 20 })
+                        try {
+                            $clock = [Diagnostics.Stopwatch]::StartNew()
+                            while (-not [IO.File]::Exists($lagReady) -and $clock.ElapsedMilliseconds -lt 10000) {
+                                Start-Sleep -Milliseconds 100
+                            }
+                            if (-not [IO.File]::Exists($lagReady)) {
+                                $failures.Add("the $case rollback hook holder did not start")
+                                continue
+                            }
+                            $lagError = $null
+                            try {
+                                Remove-DefenseClawManagedTree `
+                                    -Path $lag.InstallRoot `
+                                    -RequiredBase $Root `
+                                    -Label 'InstallRoot' `
+                                    -RetryHeldFileMilliseconds 15000 `
+                                    -ExpectedRootIdentity ([string]$lagSnapshot.Identity) `
+                                    -ExpectedRootSecurityDescriptor ([byte[]]$lagSnapshot.SecurityDescriptor)
+                            }
+                            catch { $lagError = $_ }
+                            if ($case -eq 'lag') {
+                                if ($null -ne $lagError -or [IO.Directory]::Exists($lag.InstallRoot)) {
+                                    $failures.Add("fresh-install rollback gave up before Restart Manager named the holder (queries $script:SmokeHolderQueries): $lagError")
+                                }
+                            }
+                            else {
+                                if ($null -ne $lagError -or $script:SmokeRootChecks -ne 2 -or $script:SmokeHolderQueries -ne 1 -or
+                                    -not [IO.File]::Exists($lagHook)) {
+                                    $failures.Add("an added rollback delete ran without re-checking the recorded root (root checks $script:SmokeRootChecks, holder queries $script:SmokeHolderQueries, error $lagError)")
+                                }
+                            }
+                        }
+                        finally {
+                            [void](Wait-Job -Job $lagHolder -Timeout 30)
+                            if ($lagHolder.State -eq 'Running') { Stop-Job -Job $lagHolder }
+                            Remove-Job -Job $lagHolder -Force
+                            Microsoft.PowerShell.Management\Set-Item -Path function:script:Get-DefenseClawInstallRootHolders -Value $savedHolders
+                            Microsoft.PowerShell.Management\Set-Item -Path function:script:Test-DefenseClawManagedTreeRetryRoot -Value $savedRetryRoot
+                        }
+                    }
+                }
+                finally {
+                    [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', $priorStrict, 'Process')
+                }
+            }
+
             # GAP-0942: an editor's ACP thread that runs defenseclaw-acp.exe
             # from the install folder refuses the uninstall before it changes
             # anything and names the program, account and parent; a process

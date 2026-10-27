@@ -28134,6 +28134,14 @@ function Remove-DefenseClawManagedTree {
         for ($query = 1; $query -le 4 -and $holders.Count -eq 0; $query++) {
             if ($query -gt 1) {
                 Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 750
+                # Each added delete re-checks the recorded root first, as
+                # the held-file loop below does (GAP-1988).
+                if (-not (Test-DefenseClawManagedTreeRetryRoot `
+                    -Path $safe `
+                    -ExpectedIdentity $ExpectedRootIdentity `
+                    -ExpectedSecurityDescriptor $ExpectedRootSecurityDescriptor)) {
+                    return
+                }
                 try {
                     Microsoft.PowerShell.Management\Remove-Item `
                         -LiteralPath $target `
