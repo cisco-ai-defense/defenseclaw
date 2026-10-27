@@ -1178,6 +1178,22 @@ describe('Windows AD UPN outage wording', () => {
   });
 });
 
+describe('per-user install window refusal (GAP-2173)', () => {
+  it('every per-user hook refusal during an install says what the upgrade page says', () => {
+    const upgrade = page('get-started/upgrade.mdx');
+    assert.ok(upgrade.includes('DefenseClaw is being installed or upgraded for this account and to try again in a moment'));
+    for (const [file, pattern] of [
+      ['internal/gateway/connector/hooks/_hardening.sh', /DefenseClaw is being installed or upgraded for this account[^']*try again in a moment/],
+      ['internal/gateway/connector/hooks/copilot-hook.sh', /DefenseClaw is being installed or upgraded for this account; try again in a moment/],
+      ['internal/gateway/connector/hooks/copilot-hook.ps1', /DefenseClaw is being installed or upgraded for this account; try again in a moment/],
+      ['internal/gateway/connector/hooks/codex-hook.sh', /DefenseClaw is being installed or upgraded for this account/],
+      ['internal/gateway/connector/subprocess.go', /DefenseClaw is being installed or upgraded for this account[^"]*try again in a moment/],
+    ] as const) {
+      assert.match(source(file), pattern, `${file} no longer gives the install-window refusal the upgrade page describes`);
+    }
+  });
+});
+
 describe('managed launcher refusal on every page (GAP-1387, GAP-1569)', () => {
   it('quotes launcherRefusal wherever a page quotes the refusal', () => {
     const refusal = /launcherRefusal = "([^"]+)"/.exec(source('internal/cli/launcher.go'))?.[1];
@@ -1407,6 +1423,8 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-2173", page: "get-started/upgrade.mdx", section: "Upgrade", has: ["While the installer has your gateway stopped for the swap, DefenseClaw refuses every agent tool call.", "with a saved `open` too: an install or upgrade is not a gateway outage", "DefenseClaw is being installed or upgraded for this account and to try again in a moment", "The installer waits up to 3 minutes for a slow gateway start, and the refusals end when it exits, also if it fails."] },
+  { gap: "GAP-2173", page: "reference/fail-modes.mdx", section: "Per-user installs", has: ["while the installer has the gateway stopped: every call blocks in every tier, a saved `open` included"], lacks: ["Per-user default and permissive calls that receive a usable gateway allow may proceed"] },
   { gap: "GAP-1795", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["fails with Conflict and leaves it starting", "keep the VM while you need what it holds"], lacks: ["can use `defenseclaw sandbox start NAME --end-vm`, then stop it"] },
   { gap: "GAP-1795", page: "sandboxes/guide.mdx", has: ["fails with Conflict and leaves it starting"], lacks: ["`start NAME --end-vm` starts it", "or on 0.1.5 start it with `--end-vm`", "can refuse the recovery above", "ends the lingering VM without a flush", "(which ends its VM without a flush)"] },
   { gap: "GAP-1795", page: "sandboxes/guide.mdx", section: "A sandbox is in OpenShell's error state", has: ["fails with Conflict and leaves it starting"], lacks: ["run `defenseclaw sandbox stop NAME` once it is ready"] },
