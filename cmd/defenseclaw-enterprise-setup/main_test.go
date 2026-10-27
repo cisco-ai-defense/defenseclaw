@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -885,5 +886,54 @@ func TestStandaloneSetupTimeoutReportsTheRecoveredDeployment(t *testing.T) {
 	// limit, not a bare "retry".
 	if want := `as LocalSystem with a longer limit: /ensure CONFIG=C:\stage\config.yaml JSON=1 TIMEOUTSECONDS=7200`; !strings.Contains(result.Errors[0].Message, want) {
 		t.Fatalf("recovered timeout does not name the longer retry %q: %s", want, result.Errors[0].Message)
+	}
+}
+
+// GAP-2114: the recovered-timeout retry repeats the request as it was given,
+// every property it had and none it did not, with the longest limit.
+func TestStandaloneSetupRetryRepeatsTheRequestAsGiven(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"/ensure", `CONFIG=C:\stage\config.yaml`, "JSON=1", "TIMEOUTSECONDS=60"}, `/ensure CONFIG=C:\stage\config.yaml JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/ensure", `BUNDLE=C:\stage\policy.dcbundle`, "REFUSECAPABILITYLOSS=1", "TIMEOUTSECONDS=60"}, `/ensure BUNDLE=C:\stage\policy.dcbundle REFUSECAPABILITYLOSS=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/upgrade", "JSON=1", "TIMEOUTSECONDS=90"}, `/upgrade JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/upgrade", "NOSTART=1", "ALLOWEDSIGNERS=" + strings.Repeat("ab", 32), "JSON=1"}, `/upgrade NOSTART=1 ALLOWEDSIGNERS=` + strings.Repeat("ab", 32) + ` JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/install", `CONFIG=C:\s\config.yaml`, `MANIFEST=C:\s\targets.yaml`, "JSON=1"}, `/install CONFIG=C:\s\config.yaml MANIFEST=C:\s\targets.yaml JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/repair", "ATTESTCLAUDEEFFECTIVEPOLICY=1", "JSON=1"}, `/repair ATTESTCLAUDEEFFECTIVEPOLICY=1 JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/uninstall", "PURGE=1", "JSON=1"}, `/uninstall PURGE=1 JSON=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/uninstall", "FORCE=1", "TIMEOUTSECONDS=120"}, `/uninstall FORCE=1 TIMEOUTSECONDS=7200`},
+		{[]string{"/ensure", `CONFIG=C:\Program Data\config.yaml`}, `/ensure CONFIG="C:\Program Data\config.yaml" TIMEOUTSECONDS=7200`},
+	} {
+		opts, _, err := parseStandaloneEnterpriseSetupOptions(tc.args)
+		if err != nil {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+		if got := standaloneSetupRetryCommand(opts, 7200); got != tc.want {
+			t.Fatalf("%v: retry = %q, want %q", tc.args, got, tc.want)
+		}
+		if strings.Contains(tc.want, `"`) {
+			continue
+		}
+		again, _, err := parseStandaloneEnterpriseSetupOptions(strings.Fields(tc.want))
+		if err != nil {
+			t.Fatalf("printed retry %q does not parse: %v", tc.want, err)
+		}
+		opts.LifecycleTimeout, again.LifecycleTimeout = 0, 0
+		if !reflect.DeepEqual(opts, again) {
+			t.Fatalf("printed retry %q is another request:\n got %+v\nwant %+v", tc.want, again, opts)
+		}
+	}
+	opts, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/uninstall", "PURGE=1", "JSON=1", "TIMEOUTSECONDS=60"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered := enterprisestatus.New("recover", "standalone", "windows", "1.0.2")
+	recovered.Installed = true
+	recovered.Finish("windows", enterpriseFailureExitCode)
+	message := standaloneEnterpriseSetupTimeoutWithRecovery(opts, context.DeadlineExceeded, recovered).Error()
+	if !strings.Contains(message, "with a longer limit: /uninstall PURGE=1 JSON=1 TIMEOUTSECONDS=7200") || strings.Contains(message, "CONFIG=") {
+		t.Fatalf("recovered uninstall timeout does not repeat PURGE=1: %s", message)
 	}
 }

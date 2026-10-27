@@ -938,12 +938,9 @@ func standaloneEnterpriseSetupTimeoutWithRecovery(opts enterpriseSetupOptions, c
 	maximum := int(maximumLifecycleTimeout / time.Second)
 	if report != nil {
 		// The deployment is back as it was; what is left is the requested
-		// action, which needs a longer limit than the one it hit (GAP-1709).
-		retry := "/" + opts.Action
-		if opts.Action != "uninstall" {
-			retry += " CONFIG=" + config
-		}
-		retry += fmt.Sprintf(" JSON=1 TIMEOUTSECONDS=%d", maximum)
+		// action as it was given, which needs a longer limit than the one it
+		// hit (GAP-1709, GAP-2114).
+		retry := standaloneSetupRetryCommand(opts, maximum)
 		longer := "with a longer limit"
 		if limit >= maximum {
 			longer = fmt.Sprintf("again (%d seconds is the longest limit)", maximum)
@@ -965,6 +962,52 @@ func standaloneEnterpriseSetupTimeoutWithRecovery(opts enterpriseSetupOptions, c
 			"run %s /status JSON=1 to check, then run Setup as LocalSystem with %s",
 		opts.Action, limit, cause, standaloneSetupArtifactName, recovery,
 	)}
+}
+
+// standaloneSetupRetryCommand repeats a standalone Setup request as it was
+// given, with TIMEOUTSECONDS at timeoutSeconds: the action and every property
+// the run had, and no property it did not have (a BUNDLE= ensure stays a
+// bundle ensure, an uninstall keeps PURGE=1 and FORCE=1). GAP-2114.
+func standaloneSetupRetryCommand(opts enterpriseSetupOptions, timeoutSeconds int) string {
+	parts := []string{"/" + opts.Action}
+	value := func(name, v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if strings.ContainsAny(v, " \t") {
+			v = `"` + v + `"`
+		}
+		parts = append(parts, name+"="+v)
+	}
+	flag := func(name string, on bool) {
+		if on {
+			parts = append(parts, name+"=1")
+		}
+	}
+	value("CONFIG", opts.Config)
+	value("MANIFEST", opts.Manifest)
+	value("BUNDLE", opts.Bundle)
+	value("TRUSTANCHORS", opts.TrustAnchors)
+	value("MODE", opts.Mode)
+	value("CONNECTOR", opts.Connector)
+	flag("REFUSECAPABILITYLOSS", opts.RefuseCapabilityLoss)
+	flag("NOSTART", opts.NoStart)
+	flag("PURGE", opts.Purge)
+	flag("FORCE", opts.Force)
+	value("ALLOWEDSIGNERS", opts.AllowedSigners)
+	flag("ATTESTCLAUDEEFFECTIVEPOLICY", opts.AttestClaudeEffectivePolicy)
+	flag("ATTESTAGENTAPPLICATIONCONTROL", opts.AttestAgentApplicationControl)
+	value("INSTALLROOT", opts.InstallRoot)
+	value("STATEROOT", opts.StateRoot)
+	value("GATEWAYSERVICENAME", opts.GatewayServiceName)
+	value("GUARDIANSERVICENAME", opts.GuardianServiceName)
+	value("CERTIFICATIONCODEXHOME", opts.CertificationCodexHome)
+	flag("ALLOWUNSIGNED", opts.AllowUnsigned)
+	flag("COREHARDENINGCERTIFICATION", opts.CoreHardeningCertification)
+	flag("JSON", opts.JSON)
+	parts = append(parts, fmt.Sprintf("TIMEOUTSECONDS=%d", timeoutSeconds))
+	return strings.Join(parts, " ")
 }
 
 // writeEnterpriseSetupUsage prints the Secure Client Setup usage.
