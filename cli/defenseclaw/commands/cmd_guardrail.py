@@ -949,6 +949,12 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 runtime_drift_rows.append(f"{_connector_label(name)} ({name}){fail_drift}")
             if cfm == "closed":
                 runtime_limit_rows.append(f"{_connector_label(name)} ({name}) is closed: {runtime_state.limit}")
+        if _is_proxy_connector(name):
+            # A proxy connector has no hooks: its proxy refuses every call
+            # while the gateway is down, whatever hook_fail_mode says. Show
+            # what `guardrail fail-mode` shows (GAP-1646), so neither the
+            # Fail column nor a hooks-allow warning over-states the risk.
+            cfm = "closed"
         # Per-connector on/off: a connector turned off via
         # `guardrail disable --connector X` is reported as disabled so the
         # roster never implies it is enforcing when its hooks have been torn
