@@ -1246,6 +1246,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
+		if cannotResolveLocally && clientTargets != nil && hookpaths.AWKReadsProgramFile(input.Command) {
+			// An awk program file in the user's home this gateway cannot
+			// read: the user's hook read it and listed each print target,
+			// resolved (GAP-2178, GAP-0508). Facts keys start with NUL.
+			for operand, resolved := range clientTargets {
+				if !strings.HasPrefix(operand, "\x00") && (isProtected(operand) || isProtected(resolved)) {
+					return true
+				}
+			}
+		}
 		for _, operand := range hookpaths.AdjacentAssignedWriteOperands(input.Command, input.CWD, input.ActiveHome) {
 			if writeTarget(operand, false, false) {
 				return true

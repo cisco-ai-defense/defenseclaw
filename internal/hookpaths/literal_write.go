@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -51,6 +52,23 @@ func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands [
 		operands = append(operands, OperandPath(name, cwd))
 	}
 	boundName, boundValue := boundedProgramAssignment(file, home)
+	// The values the command assigns before each top-level statement, so an
+	// awk word built from them is read as the shell expands it (GAP-2197,
+	// GAP-0509): out=alias; awk "BEGIN {print 1 >> \"$out\"}".
+	before := make([]actionValues, len(file.Stmts))
+	values := actionValues{"HOME": home, "PWD": cwd}
+	for i, stmt := range file.Stmts {
+		before[i] = maps.Clone(values)
+		actionUpdateValues(stmt, values, cwd, home)
+	}
+	valuesAt := func(node syntax.Node) actionValues {
+		for i, stmt := range file.Stmts {
+			if node.Pos().Offset() >= stmt.Pos().Offset() && node.End().Offset() <= stmt.End().Offset() {
+				return before[i]
+			}
+		}
+		return nil
+	}
 	// A definition runs nothing. A body is read once, where it is defined,
 	// when the command may call it, so an uncalled body stays inert.
 	called := calledFunctions(file, home)
@@ -72,6 +90,16 @@ func literalWriteOperandsDepth(command, cwd, home string, depth int) (operands [
 			words[i], static = StaticWord(arg, home)
 			if i == 0 && !static && simpleShellParameter(arg) == boundName {
 				words[i], static = boundValue, true
+			}
+			if !static && i > 0 && awkProgramName(words[0]) {
+				// An awk word the command assigned (GAP-2197). A generated
+				// basename has no fixed spelling and stays dynamic.
+				if known := valuesAt(stmt); known != nil {
+					if value, fixed := actionWordValue(shellUnescapedWord(arg), known, cwd, home); fixed &&
+						!strings.Contains(value, actionGeneratedMarker) {
+						words[i], static = value, true
+					}
+				}
 			}
 			if !static {
 				// Interpreter arguments after fixed code do not change that
@@ -683,4 +711,60 @@ func literalCommentStart(code string, i int, language string) bool {
 		// JavaScript uses # in private names, not for comments.
 		return false
 	}
+}
+
+// shellUnescapedWord is word with the backslashes the shell removes taken
+// out of its literal parts: any escaped byte outside quotes, and an escaped
+// $, `, ", \ or newline inside double quotes. Single-quoted text is kept.
+// The word itself is not changed.
+func shellUnescapedWord(word *syntax.Word) *syntax.Word {
+	if word == nil {
+		return nil
+	}
+	var convert func(parts []syntax.WordPart, quoted bool) []syntax.WordPart
+	convert = func(parts []syntax.WordPart, quoted bool) []syntax.WordPart {
+		out := make([]syntax.WordPart, 0, len(parts))
+		for _, part := range parts {
+			switch part := part.(type) {
+			case *syntax.Lit:
+				if !strings.Contains(part.Value, "\\") {
+					out = append(out, part)
+					continue
+				}
+				var value strings.Builder
+				for i := 0; i < len(part.Value); i++ {
+					c := part.Value[i]
+					if c == '\\' && i+1 < len(part.Value) && (!quoted || strings.IndexByte("$`\"\\\n", part.Value[i+1]) >= 0) {
+						i++
+						if part.Value[i] == '\n' {
+							continue // a line continuation
+						}
+						c = part.Value[i]
+					}
+					value.WriteByte(c)
+				}
+				copied := *part
+				copied.Value = value.String()
+				out = append(out, &copied)
+			case *syntax.DblQuoted:
+				copied := *part
+				copied.Parts = convert(part.Parts, true)
+				out = append(out, &copied)
+			default:
+				out = append(out, part)
+			}
+		}
+		return out
+	}
+	copied := *word
+	copied.Parts = convert(word.Parts, false)
+	return &copied
+}
+
+func awkProgramName(word string) bool {
+	switch programBase(word) {
+	case "awk", "gawk", "mawk", "nawk":
+		return true
+	}
+	return false
 }

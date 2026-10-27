@@ -382,6 +382,20 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 // scanner. A -f file is separate code; the literal extractor examines only
 // program text present in the tool call.
 func awkInlineProgramText(words []string) []string {
+	programs, _ := awkProgramWords(words)
+	return programs
+}
+
+// awkProgramSupplied reports an awk argv whose words already hold the whole
+// program: an inline program operand, or a -f / -e option. A later word is
+// then an input operand, an assignment or another -f program, none of which
+// changes the program text already read (GAP-2172, GAP-0498).
+func awkProgramSupplied(words []string) bool {
+	_, supplied := awkProgramWords(words)
+	return supplied
+}
+
+func awkProgramWords(words []string) ([]string, bool) {
 	options, supplied := true, false
 	var programs []string
 	for i := 1; i < len(words); i++ {
@@ -396,12 +410,12 @@ func awkInlineProgramText(words []string) []string {
 				if slicesContainsString(awkHarmlessFlags, word) {
 					continue
 				}
-				return nil
+				return nil, false
 			}
 			if !attached {
 				i++
 				if i >= len(words) {
-					return nil
+					return nil, false
 				}
 				value = words[i]
 			}
@@ -419,7 +433,52 @@ func awkInlineProgramText(words []string) []string {
 		}
 		options = false
 	}
-	return programs
+	return programs, supplied
+}
+
+// AWKReadsProgramFile reports a shell command with an awk call that reads its
+// program from a file (-f FILE, -fFILE, --file=FILE). The user's hook reads
+// that file and lists its print targets; a gateway that cannot read it
+// (ProtectHome) judges the hook's list (GAP-2178, GAP-0508).
+func AWKReadsProgramFile(command string) bool {
+	if command == "" || len(command) > MaxPayloadBytes || !strings.Contains(command, "awk") {
+		return false
+	}
+	file, ok := parseShell(command)
+	if !ok {
+		return false
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if found || !ok || len(call.Args) < 2 {
+			return !found
+		}
+		program, static := StaticWord(call.Args[0], "")
+		if !static {
+			return true
+		}
+		switch programBase(program) {
+		case "awk", "gawk", "mawk", "nawk":
+		default:
+			return true
+		}
+		for _, arg := range call.Args[1:] {
+			word, static := StaticWord(arg, "")
+			if !static {
+				continue
+			}
+			if word == "--" {
+				break
+			}
+			if name, _, _ := awkOptionValue(word); name == "f" {
+				found = true
+				break
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // pythonLiteralCode accepts only fixed no-argument switches before -c.
@@ -440,6 +499,12 @@ func pythonLiteralCode(words []string) (string, bool) {
 }
 
 func fixedInterpreterCodePrefix(words []string) bool {
+	if len(words) >= 2 {
+		switch programBase(words[0]) {
+		case "awk", "gawk", "mawk", "nawk":
+			return awkProgramSupplied(words)
+		}
+	}
 	if len(words) < 3 {
 		return false
 	}
