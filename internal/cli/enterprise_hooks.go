@@ -3060,6 +3060,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// left it. A Write or Chmod that the writer policy or the settle window
 	// drops still counts when the file no longer matches it.
 	ownedSnapshot := map[string]string{}
+	// foundSnapshot is each owned file's fingerprint as the last reconcile
+	// found it (the snapshot before ownedSnapshot was retaken), so a pass
+	// that made and then dropped a file can be told from a change (GAP-0030).
+	foundSnapshot := map[string]string{}
 	// Post-reconcile guards against the self-trigger loop. Every
 	// reconcile writes into watched dirs (chmod on hook configs and
 	// hook scripts inside hardenInstallFootprint, plus writing
@@ -3130,6 +3134,12 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		}
 		for _, f := range run.WatchSharedFiles {
 			sharedOwned[filepath.Clean(f)] = struct{}{}
+		}
+		for k := range foundSnapshot {
+			delete(foundSnapshot, k)
+		}
+		for k, v := range ownedSnapshot {
+			foundSnapshot[k] = v
 		}
 		takeEnterpriseHookOwnedSnapshot(ownedSnapshot, exclusiveOwned, sharedOwned, enterpriseHookOwnedFileFingerprint)
 		status := "ok"
@@ -3333,6 +3343,14 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// there: an in-place overwrite of the scoped token right after
 			// a pass waited for the interval pass (GAP-0044), as did an
 			// in-place rewrite of a shared agent config (GAP-0045).
+			// A Create, Remove or Rename of an exclusive-writer file in the
+			// settle window that left the file as the pass found it and as
+			// it left it is the pass's own make-and-drop tail (a backup
+			// receipt a failed repair rolled back): it does not arm another
+			// pass, so the repair backoff applies (GAP-0030).
+			if !settling && actionable && enterpriseHookWatchExclusiveTailUnchanged(time.Now(), settleUntil, event, exclusiveOwned, foundSnapshot, ownedSnapshot, enterpriseHookOwnedFileFingerprint) {
+				settling = true
+			}
 			if (!actionable || settling) &&
 				!enterpriseHookWatchOwnedFileChanged(event.Name, exclusiveOwned, sharedOwned, ownedSnapshot, enterpriseHookOwnedFileFingerprint) {
 				if settling {
@@ -3638,6 +3656,37 @@ func enterpriseHookWatchEventInSettleWindow(now, settleUntil time.Time, op fsnot
 		return false
 	}
 	return now.Before(settleUntil)
+}
+
+// enterpriseHookWatchExclusiveTailUnchanged reports whether a Create, Remove
+// or Rename of an exclusive-writer file, seen before settleUntil, left the
+// file exactly as the last reconcile found it (found) and as it left it
+// (left). Such an event is that reconcile's own tail: it made the file and
+// dropped it again, as a failed repair does when it rolls back the backup
+// receipt it just wrote (GAP-0030). A change made by anyone during the pass
+// leaves the file unlike what the pass found, and a file with no fingerprint
+// in either snapshot is not judged, so both still reconcile. Shared-writer
+// files (agent configs) are never judged here.
+func enterpriseHookWatchExclusiveTailUnchanged(now, settleUntil time.Time, event fsnotify.Event, exclusiveOwned map[string]struct{}, found, left map[string]string, fingerprint func(string) string) bool {
+	if settleUntil.IsZero() || !now.Before(settleUntil) {
+		return false
+	}
+	if event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
+		return false
+	}
+	cleaned := filepath.Clean(event.Name)
+	if _, ok := exclusiveOwned[cleaned]; !ok {
+		return false
+	}
+	before, ok := found[cleaned]
+	if !ok {
+		return false
+	}
+	after, ok := left[cleaned]
+	if !ok || after != before {
+		return false
+	}
+	return fingerprint(cleaned) == after
 }
 
 // enterpriseHookReconcileRowsHash is a content fingerprint over the
