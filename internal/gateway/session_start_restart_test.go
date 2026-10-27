@@ -5,9 +5,81 @@ package gateway
 
 import (
 	"context"
+	"errors"
+	"slices"
 	"testing"
 	"time"
 )
+
+// GAP-1459: a session that was running when the gateway restarted will not
+// send its SessionStart again. Its first call after the restart must not
+// wait the whole arrival window for it: the saved record shows an earlier
+// process recorded its start, so the call judges that start in its place at
+// once (the GAP-1448 check still runs and still blocks). A session with no
+// record keeps the wait.
+func TestSessionStartRecordedBeforeRestartDoesNotWait(t *testing.T) {
+	saved := sessionStartArrivalWait
+	sessionStartArrivalWait = 5 * time.Second
+	t.Cleanup(func() { sessionStartArrivalWait = saved })
+	h := newSessionStartGateHarness(t)
+	cwd := t.TempDir()
+
+	for _, session := range []string{"running-allowed", "running-blocked"} {
+		startDone := make(chan int, 1)
+		go func() {
+			code, _ := h.post("SessionStart", session, map[string]interface{}{"source": "startup", "cwd": cwd})
+			startDone <- code
+		}()
+		<-h.started
+		h.repair <- nil
+		if code := <-startDone; code != 200 {
+			t.Fatalf("%s: SessionStart status %d", session, code)
+		}
+		if !h.api.sessionStartRecordedEarlier(withAuthenticatedHookConnector(context.Background(), "codex"), "codex", session) {
+			t.Fatalf("%s: the start left no saved record", session)
+		}
+	}
+	// The gateway restarts: this process has seen no start.
+	h.api.sessionStartGate = sessionStartGate{}
+
+	call := func(session string, repair error) (string, []string, time.Duration) {
+		t.Helper()
+		type answer struct {
+			action   string
+			findings []string
+		}
+		done := make(chan answer, 1)
+		begin := time.Now()
+		go func() {
+			action, findings := h.toolCall(session)
+			done <- answer{action, findings}
+		}()
+		select {
+		case <-h.started:
+			h.repair <- repair
+		case got := <-done:
+			t.Fatalf("%s: the call ran without judging the start in its place: %+v", session, got)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s: no answer", session)
+		}
+		got := <-done
+		return got.action, got.findings, time.Since(begin)
+	}
+	action, findings, took := call("running-allowed", nil)
+	if action == guardrailActionBlock {
+		t.Fatalf("running session after a restart: %s %v", action, findings)
+	}
+	if took >= sessionStartArrivalWait {
+		t.Fatalf("running session after a restart waited the arrival window: %s", took)
+	}
+	action, findings, took = call("running-blocked", errors.New("registration missing"))
+	if action != guardrailActionBlock || !slices.Contains(findings, "SESSION-START-BLOCKED") {
+		t.Fatalf("running session whose judged start blocks: %s %v", action, findings)
+	}
+	if took >= sessionStartArrivalWait {
+		t.Fatalf("running blocked session after a restart waited the arrival window: %s", took)
+	}
+}
 
 // GAP-1822: the arrival wait uses no gateway CPU, so the call gives its
 // caller's run slot up for the window and takes it back after.
