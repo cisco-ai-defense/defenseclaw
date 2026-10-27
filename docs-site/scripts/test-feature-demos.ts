@@ -334,7 +334,8 @@ describe('feature demo catalog', () => {
     assert.match(cursorStory, /defenseclaw setup cursor --yes --mode action --rule-pack default --no-human-approval --restart/);
     assert.match(cursorStory, /✓ cursor rule pack: default \(per-connector override\)/);
     assert.match(cursorStory, /✓ cursor mode=action/);
-    assert.match(cursorStory, /✓ cursor hook failures=closed \(failClosed=true\)/);
+    assert.match(cursorStory, /✓ cursor gateway outage=open \(failClosed=true\)/);
+    assert.doesNotMatch(cursorStory, /cursor hook failures=/);
     assert.match(cursorStory, /ℹ Cursor runs all matching hooks/);
   });
 });
