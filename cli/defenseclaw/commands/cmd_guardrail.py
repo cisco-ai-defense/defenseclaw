@@ -1715,6 +1715,13 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     )
 
 
+def _put_back_global_fail_mode(gc: object, value: str, saved: bool) -> None:
+    """Restore the global hook fail mode and whether the user had saved one."""
+
+    gc.hook_fail_mode = value
+    object.__setattr__(gc, "_hook_fail_mode_saved", saved)
+
+
 def _apply_global_fail_mode_transaction(
     app: AppContext,
     *,
@@ -1741,6 +1748,9 @@ def _apply_global_fail_mode_transaction(
             raise click.Abort() from exc
 
         old_global = gc.hook_fail_mode
+        # An unset global reads as the in-memory "closed" placeholder; a
+        # rollback must put it back unset, not save it as a choice (GAP-2208).
+        old_global_saved = bool(getattr(gc, "_hook_fail_mode_saved", True))
         old_entries: dict[str, tuple[object, str]] = {}
         gc.hook_fail_mode = mode
         if fail_mode_targets:
@@ -1780,7 +1790,7 @@ def _apply_global_fail_mode_transaction(
         except OSError as exc:
             # A failed writer commit leaves config.yaml as it was, and no
             # registration file has been touched yet.
-            gc.hook_fail_mode = old_global
+            _put_back_global_fail_mode(gc, old_global, old_global_saved)
             for name, (old_entry, old_mode) in old_entries.items():
                 old_entry.hook_fail_mode = old_mode
             ux.err(
@@ -1839,7 +1849,7 @@ def _apply_global_fail_mode_transaction(
                                 + ". Run `defenseclaw doctor`, then retry the fail-mode command."
                             )
             except (OSError, RuntimeError, click.ClickException) as exc:
-                gc.hook_fail_mode = old_global
+                _put_back_global_fail_mode(gc, old_global, old_global_saved)
                 for name, (old_entry, old_mode) in old_entries.items():
                     old_entry.hook_fail_mode = old_mode
                 try:
