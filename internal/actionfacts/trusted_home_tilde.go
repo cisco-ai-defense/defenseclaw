@@ -195,6 +195,137 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 	return rewrite, true
 }
 
+// HomeRedirectTargetsAsAbsolute returns the command with the home spelling
+// of every output redirect target replaced by the trusted ActiveHome (see
+// rewriteTrustedPOSIXHomeRedirectTargets). The action analysis keeps such a
+// target dynamic; a state-write owner judges this twin, as it judges the
+// Bash reading of an all-output redirect.
+func HomeRedirectTargetsAsAbsolute(command, activeHome string) (string, bool) {
+	home, _ := normalizeActiveHome(activeHome)
+	rewrite, ok := rewriteTrustedPOSIXHomeRedirectTargets(command, home)
+	return rewrite.source, ok
+}
+
+// rewriteTrustedPOSIXHomeRedirectTargets replaces every home spelling of an
+// output redirect target (~/..., $HOME/..., ${HOME}/..., "$HOME"/...,
+// /home/$USER/...) with the trusted ActiveHome, in any statement shape: a
+// list, a pipeline member, a wrapped or relative-path program, a command
+// with dynamic arguments. The shell expands the target from HOME and opens
+// it before it runs the program, whatever the program is or its other words
+// expand to, so the target names the same file as its absolute spelling
+// (GAP-2225, GAP-2268, GAP-2298). Only targets are rewritten (no input
+// redirect), and the analysis of the command as sent is not changed by it.
+// It is refused when anything in the input
+// could change HOME, USER or LOGNAME first: another mention of them, a
+// function, or a builtin that sets variables by computed name or runs code
+// from text or a file. The other words of the command are left as they are.
+func rewriteTrustedPOSIXHomeRedirectTargets(source, activeHome string) (trustedPOSIXHomeRewrite, bool) {
+	if !strings.HasPrefix(activeHome, "/") || !trustedPOSIXHomeLiteral.MatchString(activeHome) ||
+		(!strings.Contains(source, "~") && !strings.Contains(source, "HOME") &&
+			!strings.Contains(source, "USER") && !strings.Contains(source, "LOGNAME")) {
+		return trustedPOSIXHomeRewrite{}, false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
+		Parse(strings.NewReader(source), "")
+	if err != nil || len(file.Stmts) == 0 {
+		return trustedPOSIXHomeRewrite{}, false
+	}
+	type target struct {
+		word   *syntax.Word
+		suffix string
+	}
+	var targets []target
+	refused := false
+	// A builtin that may change HOME matters only once its statement has
+	// run: its own redirects expand before it runs.
+	changedAfter := -1
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if refused {
+			return false
+		}
+		switch typed := node.(type) {
+		case *syntax.FuncDecl:
+			refused = true
+		case *syntax.DeclClause:
+			refused = true
+		case *syntax.Stmt:
+			call, ok := typed.Cmd.(*syntax.CallExpr)
+			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			program := projectPOSIXWord(call.Args[0])
+			if program.Expands || redirectHomeChangingBuiltin(program.Value, call.Args[1:]) {
+				if end := int(typed.End().Offset()); changedAfter < 0 || end < changedAfter {
+					changedAfter = end
+				}
+			}
+		case *syntax.Redirect:
+			switch typed.Op {
+			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.AppClob,
+				syntax.RdrAll, syntax.RdrAllClob, syntax.AppAll, syntax.AppAllClob,
+				syntax.DplOut:
+			default:
+				return true
+			}
+			if suffix, user := userHomeRewriteWord(typed.Word, activeHome); user {
+				targets = append(targets, target{typed.Word, suffix})
+			} else if suffix, anchored := homeAnchoredLiteralWord(typed.Word); anchored &&
+				(plainHomeRewriteWord(typed.Word) || quotedPlainHomeRewriteWord(typed.Word)) &&
+				strings.HasPrefix(suffix, "/") && trustedPOSIXHomeLiteral.MatchString(suffix) {
+				targets = append(targets, target{typed.Word, suffix})
+			}
+		}
+		return true
+	})
+	if refused || len(targets) == 0 {
+		return trustedPOSIXHomeRewrite{}, false
+	}
+	for _, item := range targets {
+		if changedAfter >= 0 && int(item.word.Pos().Offset()) >= changedAfter {
+			return trustedPOSIXHomeRewrite{}, false
+		}
+	}
+	sort.Slice(targets, func(i, j int) bool { return targets[i].word.Pos().Offset() < targets[j].word.Pos().Offset() })
+	var out strings.Builder
+	last := 0
+	rewrite := trustedPOSIXHomeRewrite{tildeOperands: map[string]string{}}
+	for _, item := range targets {
+		start, end := int(item.word.Pos().Offset()), int(item.word.End().Offset())
+		if start < last || end > len(source) || end <= start {
+			return trustedPOSIXHomeRewrite{}, false
+		}
+		out.WriteString(source[last:start])
+		out.WriteString(activeHome + item.suffix)
+		last = end
+		rewrite.tildeOperands[activeHome+item.suffix] = source[start:end]
+	}
+	out.WriteString(source[last:])
+	if strings.Contains(out.String(), "HOME") || strings.Contains(out.String(), "USER") ||
+		strings.Contains(out.String(), "LOGNAME") {
+		return trustedPOSIXHomeRewrite{}, false
+	}
+	rewrite.source = out.String()
+	return rewrite, true
+}
+
+// redirectHomeChangingBuiltin reports a builtin that can set a variable by a
+// computed name, or run code from text or a file, so HOME may differ by the
+// time a later redirect expands.
+func redirectHomeChangingBuiltin(program string, args []*syntax.Word) bool {
+	switch program {
+	case "eval", "source", ".", "read", "mapfile", "readarray", "getopts", "unset", "set",
+		"export", "readonly", "declare", "typeset", "local", "enable", "builtin", "alias", "trap":
+		return true
+	case "printf":
+		for _, arg := range args {
+			if value := projectPOSIXWord(arg); value.Expands || strings.HasPrefix(value.Value, "-v") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Only the GAP-0651 shapes count as inert list members: a bare ":" with no
 // arguments, optionally with a static ">" or ">>" redirect, which stays in the
 // normalized source so its write is still analyzed. "true" and every other
