@@ -4,9 +4,11 @@
 package audit
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func sparseIndexDefinition(t *testing.T, store *Store, name string) string {
@@ -145,29 +147,75 @@ func TestSparseKeyIndexesServeTheirQueries(t *testing.T) {
 			t.Errorf("%s does not use %s: %s", query, index.name, got)
 		}
 	}
-	for _, reader := range []struct{ index, query string }{
-		// The correlation graph anchors (CorrelationRepository.anchorEventIDs).
-		{"idx_correlation_observations_turn", `SELECT DISTINCT event.semantic_event_id, event.received_time_unix_nano
-			FROM correlation_events AS event JOIN correlation_observations AS observation
-			ON observation.semantic_event_id=event.semantic_event_id WHERE observation.turn_id=?`},
-		{"idx_correlation_observations_trace", `SELECT DISTINCT event.semantic_event_id
-			FROM correlation_events AS event JOIN correlation_observations AS observation
-			ON observation.semantic_event_id=event.semantic_event_id WHERE observation.trace_id=? AND observation.span_id=?`},
-		// The TUI audit panel by run (cli/defenseclaw/tui/panels/audit.py).
-		{"idx_audit_run_id", `SELECT id FROM audit_events WHERE run_id = ? ORDER BY timestamp DESC LIMIT 50`},
-		// The finding-to-hook join (cli/defenseclaw/db.py).
-		{"idx_audit_request_id", `SELECT f.id, h.id FROM audit_events AS f
+	// The production statements themselves (GAP-1793): a drift in their SQL
+	// that loses the index fails here.
+	anchor := func(set func(*CorrelationAnchor)) (string, []any) {
+		var value CorrelationAnchor
+		set(&value)
+		return correlationAnchorStatement(value, CorrelationPageRequest{}, 10)
+	}
+	type reader struct {
+		index, name string
+		query       string
+		args        []any
+	}
+	readers := []reader{}
+	add := func(index, name string, query string, args []any) {
+		readers = append(readers, reader{index: index, name: name, query: query, args: args})
+	}
+	for _, c := range []struct {
+		index string
+		set   func(*CorrelationAnchor)
+	}{
+		{"idx_correlation_observations_turn", func(a *CorrelationAnchor) { a.TurnID = "x" }},
+		{"idx_correlation_observations_agent", func(a *CorrelationAnchor) { a.AgentID = "x" }},
+		{"idx_correlation_observations_lifecycle", func(a *CorrelationAnchor) { a.LifecycleID = "x" }},
+		{"idx_correlation_observations_execution", func(a *CorrelationAnchor) { a.ExecutionID = "x" }},
+		{"idx_correlation_observations_model_request", func(a *CorrelationAnchor) { a.ModelRequestID = "x" }},
+		{"idx_correlation_observations_model_response", func(a *CorrelationAnchor) { a.ModelResponseID = "x" }},
+		{"idx_correlation_observations_trace", func(a *CorrelationAnchor) { a.TraceID, a.SpanID = "x", "y" }},
+	} {
+		query, args := anchor(c.set)
+		add(c.index, "anchorEventIDs", query, args)
+	}
+	add("idx_correlation_observations_trace", "matchTraceSpan", correlationTraceSpanMatchSQL, []any{"c", "x", "y"})
+	similarity, similarityArgs := correlationSimilarityMatchStatement("c", CorrelationSimilarityHint{
+		EventName: "e", AgentID: "x", Around: time.Unix(1, 0), Window: time.Second,
+	})
+	// matchSimilarity seeks the connector time window; agent_id only filters it.
+	add("idx_correlation_events_connector", "matchSimilarity", similarity, similarityArgs)
+	add("idx_audit_evaluation_id", "enforcementBlockCompatibility", enforcementBlockEvaluationSQL, []any{"x", "y"})
+	for _, r := range readers {
+		if got := plan(r.query, r.args...); !strings.Contains(got, r.index) {
+			t.Errorf("%s does not use %s: %s\n%s", r.name, r.index, got, r.query)
+		}
+	}
+	// The Python readers (cli/defenseclaw/db.py, tui/panels/audit.py) are run
+	// here as written there; the predicate each relies on must still be in
+	// that source, so a drift there fails this test too.
+	for _, py := range []struct{ index, file, predicate, query string }{
+		{"idx_audit_run_id", "../../cli/defenseclaw/tui/panels/audit.py", "WHERE run_id = ?",
+			`SELECT id FROM audit_events WHERE run_id = ? ORDER BY timestamp DESC LIMIT 50`},
+		{"idx_audit_request_id", "../../cli/defenseclaw/db.py",
+			"LEFT JOIN audit_events AS h ON COALESCE(f.request_id, '') <> '' AND h.request_id = f.request_id",
+			`SELECT f.id, h.id FROM audit_events AS f
 			LEFT JOIN audit_events AS h ON COALESCE(f.request_id, '') <> '' AND h.request_id = f.request_id
 			WHERE f.id IN (?, ?)`},
-		// The quarantine target join (cli/defenseclaw/db.py).
-		{"idx_audit_enforcement_action_id", `SELECT f.id FROM audit_events AS f
+		{"idx_audit_enforcement_action_id", "../../cli/defenseclaw/db.py",
+			"ON a.enforcement_action_id = f.enforcement_action_id AND a.id <> f.id",
+			`SELECT f.id FROM audit_events AS f
 			JOIN audit_events AS a ON a.enforcement_action_id = f.enforcement_action_id AND a.id <> f.id
 			WHERE f.id = ?`},
-		// The enforcement block compatibility lookup (event_history_v8.go).
-		{"idx_audit_evaluation_id", `SELECT target FROM audit_events WHERE evaluation_id = ? AND event_name = ?`},
 	} {
-		if got := plan(reader.query, "x", "y"); !strings.Contains(got, reader.index) {
-			t.Errorf("reader does not use %s: %s\n%s", reader.index, got, reader.query)
+		source, err := os.ReadFile(py.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(source), py.predicate) {
+			t.Errorf("%s no longer has %q: update this reader", py.file, py.predicate)
+		}
+		if got := plan(py.query, "x", "y"); !strings.Contains(got, py.index) {
+			t.Errorf("%s reader does not use %s: %s", py.file, py.index, got)
 		}
 	}
 }
