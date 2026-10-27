@@ -25,18 +25,24 @@ import (
 )
 
 // derivedHookHeader is the first comment of every per-user (unmanaged)
-// connector hook script: the digest of the config values rendered into it
-// and the hook fail mode it bakes for other failures, so doctor can tell a
-// script rendered from another config apart from the current one (spec section 6). Managed
-// installs compare the whole render instead (HookScriptRenderDrift).
+// connector hook script: the digest of the config values rendered into it, so
+// doctor can tell a script an older build rendered apart from the current one
+// (spec section 6). Managed installs compare the whole render instead
+// (HookScriptRenderDrift).
+//
+// The line names no fail mode. A per-user script reads its outage mode from
+// the config when a call fails; the closed it bakes for every other failure
+// is not a config value. Doctor compared a baked fail_mode=closed with the
+// config's outage mode (open on the default tier) and called every fresh
+// script stale (GAP-1347). Scripts from 1.0.3 and older, which did bake the
+// config's mode, still carry the field, so doctor still finds those.
 const derivedHookHeader = "# defenseclaw-derived:"
 
 // derivedHookLine is the header line for a connector script rendered from data.
 func derivedHookLine(data templateData) string {
-	mode := data.FailMode
 	sum := sha256.Sum256([]byte(fmt.Sprintf("defenseclaw-hook-render-v1\nconnector=%s\nfail_mode=%s\napi_addr=%s\n",
-		data.ConnectorName, mode, data.APIAddr)))
-	return fmt.Sprintf("%s sha256=%s fail_mode=%s\n", derivedHookHeader, hex.EncodeToString(sum[:]), mode)
+		data.ConnectorName, data.FailMode, data.APIAddr)))
+	return fmt.Sprintf("%s sha256=%s\n", derivedHookHeader, hex.EncodeToString(sum[:]))
 }
 
 // withDerivedHeader inserts the derived-from line after the shebang and the

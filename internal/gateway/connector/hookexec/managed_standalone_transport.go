@@ -80,8 +80,16 @@ func managedStandaloneHTTPClient(
 				conn, err := dialer.DialContext(ctx, "unix", socketPath)
 				if err != nil {
 					if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) {
-						// The path existed before dialing. A refused listener or a
-						// race that removed it cannot prove a stopped service.
+						// The path existed when the client was built. A refused
+						// listener proves nothing, but a socket now missing in
+						// its trusted folder is the same proof the build
+						// takes: a socket unit that failed activation (masked
+						// or failing service) resets the call it queued and
+						// removes the socket, so a resend of that call finds
+						// it gone (GAP-0807).
+						if verr := validateStandaloneHookSocketPath(socketPath, serviceUID); errors.Is(verr, errStandaloneSocketMissing) {
+							return nil, standaloneGatewayStoppedError(verr)
+						}
 						return nil, standalonePeerError("hook socket stopped answering after verification: %v", err)
 					}
 					if errors.Is(err, syscall.EACCES) && selinuxActive() {

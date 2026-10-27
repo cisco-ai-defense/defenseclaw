@@ -42,6 +42,16 @@ func TestPerUserHookHomeUnavailableFollowsTheInstalledMode(t *testing.T) {
 	} {
 		home := t.TempDir()
 		hookDir := filepath.Join(home, "hooks")
+		// A DEFENSECLAW_HOME that names no folder no longer takes this exit
+		// (GAP-1256, TestPerUserHookKeepsItsFolderWhenTheInheritedHomeIsMissing):
+		// a disabled one does.
+		retired := filepath.Join(home, "retired")
+		if err := os.MkdirAll(retired, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(retired, ".disabled"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
 		opts := SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "scoped-test-token", HookFailMode: "open"}
 		if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, agent.conn); err != nil {
 			t.Fatal(err)
@@ -60,7 +70,7 @@ func TestPerUserHookHomeUnavailableFollowsTheInstalledMode(t *testing.T) {
 				cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, agent.script)}, agent.args...)...)
 				cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}`)
 				cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + home,
-					"DEFENSECLAW_HOME=" + filepath.Join(home, "missing"), "DEFENSECLAW_GATEWAY_AUTOSTART=0"}, tc.env...)
+					"DEFENSECLAW_HOME=" + retired, "DEFENSECLAW_GATEWAY_AUTOSTART=0"}, tc.env...)
 				out, err := cmd.CombinedOutput()
 				text := string(out)
 				blocked := err != nil || strings.Contains(text, `"decision":"deny"`) || strings.Contains(text, `"permissionDecision":"deny"`) ||

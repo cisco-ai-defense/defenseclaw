@@ -1492,14 +1492,35 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 // ~/.local/bin gateway install.sh and install.ps1 put there; managed and
 // Secure Client plugins never use it.
 func perUserPluginGatewayBinary(opts SetupOpts) string {
-	if runtime.GOOS != "windows" || opts.ManagedEnterprise || pluginSecureClientProfile(opts) {
+	if opts.ManagedEnterprise || pluginSecureClientProfile(opts) {
 		return ""
+	}
+	if runtime.GOOS != "windows" {
+		return perUserPluginUnixGatewayBinary(userHomeDir(), defenseclawGatewayBinary())
 	}
 	launcher := canonicalNativeWindowsHookBinary()
 	if launcher == "" || !sameWindowsInstallPath(defenseclawHookBinary(), launcher) {
 		return ""
 	}
 	return canonicalNativeWindowsInstalledGatewayBinary()
+}
+
+// perUserPluginUnixGatewayBinary is the gateway a per-user OpenCode or Amp
+// plugin on Linux or macOS runs for hook-post: the gateway that renders the
+// plugin, the one the install uses, when it is not the ~/.local/bin gateway
+// the .gateway-helper record names (an install in another supported folder,
+// GAP-1881; the Windows Setup leg is GAP-1847). Empty keeps the record. The
+// plugin checks the folder, its parent and the binary belong to this account
+// and no other account can write them before it runs it.
+func perUserPluginUnixGatewayBinary(home, gateway string) string {
+	gateway = filepath.Clean(strings.TrimSpace(gateway))
+	if !filepath.IsAbs(gateway) || filepath.Base(gateway) != "defenseclaw-gateway" {
+		return ""
+	}
+	if home = strings.TrimSpace(home); home != "" && gateway == filepath.Join(filepath.Clean(home), ".local", "bin", "defenseclaw-gateway") {
+		return ""
+	}
+	return gateway
 }
 
 func secureClientPluginNativePostBinary(opts SetupOpts) string {

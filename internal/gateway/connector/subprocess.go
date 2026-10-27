@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -250,13 +251,20 @@ func WriteShimScripts(shimDir, apiAddr string) error {
 // persists a .token sidecar so each shim can authenticate inspection
 // calls. See F-2029 / F-3397 for the security rationale.
 func WriteShimScriptsWithToken(shimDir, apiAddr, token string) error {
-	return writeShimScriptsWithMode(shimDir, apiAddr, token, defaultHookFailMode)
+	return writeShimScriptsWithMode(shimDir, apiAddr, token, defaultHookFailMode, "openclaw")
 }
 
 // writeShimScriptsWithMode records the installed outage choice in the shim.
 // A reachable gateway's block or malformed answer is handled by the shim
-// itself and is never opened by this mode.
-func writeShimScriptsWithMode(shimDir, apiAddr, token, failMode string) error {
+// itself and is never opened by this mode. connectorName is the connector
+// that installs the shims: at call time a shim asks the outage mode the
+// config gives that connector (its per-connector choice, else the global
+// one), never a connector named "subprocess" (GAP-1989).
+func writeShimScriptsWithMode(shimDir, apiAddr, token, failMode, connectorName string) error {
+	connectorName = normalizeConnectorName(connectorName)
+	if !shimConnectorNameRE.MatchString(connectorName) {
+		return fmt.Errorf("shim scripts: connector name %q is not a plain connector name", connectorName)
+	}
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
 		return fmt.Errorf("create shim dir: %w", err)
 	}
@@ -274,7 +282,7 @@ func writeShimScriptsWithMode(shimDir, apiAddr, token, failMode string) error {
 		return fmt.Errorf("write shim token file: %w", err)
 	}
 
-	data := templateData{APIAddr: apiAddr, FailMode: normalizeHookFailMode(failMode), TokenFile: ".token"}
+	data := templateData{APIAddr: apiAddr, FailMode: normalizeHookFailMode(failMode), TokenFile: ".token", ConnectorName: connectorName}
 	peerHelper, err := shimFS.ReadFile("shims/peer.inc")
 	if err != nil {
 		return fmt.Errorf("read shim peer helper: %w", err)
@@ -539,8 +547,13 @@ func writePerUserGatewayHelperRecord(hookDir string) error {
 	// Resolve that path once during setup, from the installed hook location;
 	// the hook never derives an executable from its caller's environment.
 	if dataDir != home && filepath.Base(dataDir) != ".defenseclaw" {
-		if info, err := os.Lstat(filepath.Join(dataDir, ".local", "bin", name)); err == nil && info.Mode().IsRegular() {
-			home = dataDir
+		// The gateway or the hook-post helper the shell hooks run beside it
+		// (GAP-1755) marks the data root that carries the installation.
+		for _, installed := range []string{name, "defenseclaw-hook-post"} {
+			if info, err := os.Lstat(filepath.Join(dataDir, ".local", "bin", installed)); err == nil && info.Mode().IsRegular() {
+				home = dataDir
+				break
+			}
 		}
 	}
 	binary := filepath.Join(home, ".local", "bin", name)
@@ -1501,7 +1514,100 @@ func refreshHookFailModesLocked(hookDir string, mode func(connector string) stri
 			}
 		}
 	}
+	named, err := nameInstallInLegacyHardening(hookDir)
+	if err != nil {
+		return out, err
+	}
+	if named {
+		out.Scripts = append(out.Scripts, legacyHardeningScript)
+	}
 	return out, nil
+}
+
+// legacyHardeningScript is the shared shell helper file every released
+// per-user hook sources from its own folder.
+const legacyHardeningScript = "_hardening.sh"
+
+// legacyInstallWindowMarker opens the block nameInstallInLegacyHardening
+// appends; it makes the append happen once.
+const legacyInstallWindowMarker = "# defenseclaw-legacy-install-window-text-v1"
+
+// legacyInstallWindowText is the sentence this release's _hardening.sh
+// (defenseclaw_unreachable_next_step) gives while an install holds the lock.
+const legacyInstallWindowText = "DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done; try again in a moment, or run the installer again if it has stopped (`defenseclaw-gateway status` shows its state)"
+
+// nameInstallInLegacyHardening makes a released _hardening.sh that predates
+// the install-lock text (1.0.2 and older) name the install while the lock is
+// held (GAP-1899). Those hooks say "this account's gateway is not running;
+// run `defenseclaw-gateway start`" for every refused connection, also while
+// the installer has stopped the gateway on purpose. The appended block wraps
+// that release's own defenseclaw_unreachable_next_step: with the lock held
+// in the hook's data folder it prints this release's install sentence,
+// otherwise it answers as before. Only the text changes: the block, the
+// fail modes and the outage table stay the same. The gateway of this release
+// writes its own _hardening.sh when it starts, which drops the block. A
+// 1.0.3 or later file already names the install and is left as it is.
+// Remove with the 1.0.2 upgrade path.
+func nameInstallInLegacyHardening(hookDir string) (bool, error) {
+	path := filepath.Join(hookDir, legacyHardeningScript)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect hook %s: %w", legacyHardeningScript, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > hookScriptMaxBytes {
+		return false, nil
+	}
+	body, err := readConnectorStateFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read hook %s: %w", legacyHardeningScript, err)
+	}
+	text := string(body)
+	if strings.Contains(text, "being installed or upgraded") ||
+		!strings.Contains(text, "defenseclaw_unreachable_next_step()") {
+		return false, nil
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	text += legacyInstallWindowBlock(filepath.Dir(hookDir))
+	if err := atomicWriteFile(path, []byte(text), info.Mode().Perm()); err != nil {
+		return false, fmt.Errorf("update hook %s: %w", legacyHardeningScript, err)
+	}
+	return true, nil
+}
+
+// legacyInstallWindowBlock is the shell appended to a released
+// _hardening.sh. dataDir is the hook folder's data directory; the hook's own
+// DEFENSECLAW_HOME is read too, as that release reads it.
+func legacyInstallWindowBlock(dataDir string) string {
+	return legacyInstallWindowMarker + ` (GAP-1899): written by the upgrade's fail-mode refresh;
+# the new gateway replaces this file when it starts.
+if declare -F defenseclaw_unreachable_next_step >/dev/null 2>&1 && ! declare -F _dc_legacy_unreachable_next_step >/dev/null 2>&1; then
+  _dc_legacy_src="$(declare -f defenseclaw_unreachable_next_step)"
+  eval "_dc_legacy_unreachable_next_step ${_dc_legacy_src#defenseclaw_unreachable_next_step}"
+  unset _dc_legacy_src
+  defenseclaw_unreachable_next_step() {
+    local _dc_lock_data
+    if [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ]; then
+      case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+        1|true|TRUE|yes|YES) ;;
+        *)
+          for _dc_lock_data in ` + shellSingleQuote(dataDir) + ` "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"; do
+            if [ -e "${_dc_lock_data}/.install.lock" ] || [ -L "${_dc_lock_data}/.install.lock" ]; then
+              printf '%s' ` + shellSingleQuote(legacyInstallWindowText) + `
+              return 0
+            fi
+          done
+          ;;
+      esac
+    fi
+    _dc_legacy_unreachable_next_step "$@"
+  }
+fi
+`
 }
 
 // connectorHookAdapters are the Windows PowerShell adapters a per-user Cursor
@@ -2343,9 +2449,13 @@ func ResolveSubprocessPolicy(preferred SubprocessPolicy) SubprocessPolicy {
 	return preferred
 }
 
+// shimConnectorNameRE is a connector name a shim can carry unquoted.
+var shimConnectorNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+
 // SetupSubprocessEnforcement wires the appropriate subprocess enforcement
-// tier based on the resolved policy.
-func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
+// tier based on the resolved policy. connectorName is the installing
+// connector, whose outage mode the shims follow.
+func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts, connectorName string) error {
 	switch ResolveSubprocessPolicy(policy) {
 	case SubprocessShims:
 		shimDir := filepath.Join(opts.DataDir, "shims")
@@ -2353,7 +2463,7 @@ func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 		// the shim scripts so every inspection call carries an
 		// Authorization header. Pre-fix the shim had no auth token
 		// available and silently downgraded a 401 to "allow".
-		if err := writeShimScriptsWithMode(shimDir, opts.APIAddr, opts.APIToken, opts.HookFailMode); err != nil {
+		if err := writeShimScriptsWithMode(shimDir, opts.APIAddr, opts.APIToken, opts.HookFailMode, connectorName); err != nil {
 			return fmt.Errorf("shim scripts: %w", err)
 		}
 

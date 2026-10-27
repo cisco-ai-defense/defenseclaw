@@ -135,6 +135,21 @@ func withPerUserPeerCheck(ctx context.Context) (context.Context, *perUserPeerChe
 // not running.
 const PerUserPostOutageExit = 7
 
+// PerUserPostPeerUnverifiedExit is the exit status of `hook-post` when the
+// connected-listener proof failed (PerUserPostPeerUnverified): the check runs
+// on the connected socket before net/http writes a byte, so the gateway never
+// saw the call and the OpenCode and Amp plugins may send it once more (a
+// proof that raced a gateway restart, GAP-1236). Every other failure exits 1
+// and is never sent again: the gateway may already have evaluated the call
+// (GAP-2083).
+const PerUserPostPeerUnverifiedExit = 8
+
+// PerUserPostPeerUnverified reports whether err, from PostPerUserHook, is a
+// failed connected-listener proof: nothing of the call was sent.
+func PerUserPostPeerUnverified(err error) bool {
+	return errors.Is(err, errPerUserPeerUnverified)
+}
+
 // PerUserPostOutage reports whether err, from PostPerUserHook, is a gateway
 // outage: this account's gateway refused or dropped the connection before it
 // sent any status. A status line followed by a cut-off body, a listener

@@ -651,10 +651,25 @@ async function defenseclawFetch(path, init, token) {
   if (!DC_HOOK_SOCKET) {
     if (DC_PER_USER_NATIVE_POST) {
       const binary = defenseclawPerUserHookPostBinary();
-      const output = execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
+      const post = () => execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
         input: JSON.stringify({ path, headers: init.headers || {}, body: String(init.body || "") }),
-        timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8",
+        // The helper's diagnostics (a refused connection during an outage)
+        // stay in the error the caller classifies; inherited, they reached
+        // the agent's screen over the one outage warning (GAP-1314).
+        timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
       });
+      let output;
+      try {
+        output = post();
+      } catch (err) {
+        // Only a connected-peer proof that failed (exit 8: nothing was sent,
+        // a proof that raced a gateway restart) gets one more try; a second
+        // failure blocks with its cause (GAP-1236). Any other failure may
+        // come after the gateway took the call and is not sent twice
+        // (GAP-2083).
+        if (!err || err.status !== 8 || err.signal) throw err;
+        output = post();
+      }
       const reply = JSON.parse(output);
       if (!Number.isInteger(reply.status) || reply.status < 100 || reply.status > 599 || typeof reply.body !== "string") {
         throw new Error("invalid native gateway response");
@@ -732,7 +747,9 @@ function defenseclawForeignHookCheck(event, cwd) {
             return;
           }
           if (verdict && verdict.deny === false) {
-            resolve({ reason: "", retryable: false });
+            // foreign_hooks report names the unapproved plugin's file and
+            // digest for the user (GAP-0697).
+            resolve({ reason: "", retryable: false, warnings: Array.isArray(verdict.warnings) ? verdict.warnings.map(String) : [] });
             return;
           }
           resolve({
@@ -822,7 +839,18 @@ async function defenseclawShowNotice(client, message, variant) {
 // that holds the hook credential). The gateway's fail-open report reads it,
 // so such a call is never silent (rel-1-0-2 GAP-0446). Best effort: a log
 // that cannot be written never changes the verdict.
-async function defenseclawLogFailOpen(reason, category, context) {
+// defenseclawPerUserFailureCause is the cause of a failed per-user check, for
+// the block text: the helper's last stderr line without its program prefix,
+// else the plugin's own error (an answer it refused), bounded and on one line.
+function defenseclawPerUserFailureCause(err) {
+  const lines = String(err && err.stderr || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  let cause = lines.length ? lines[lines.length - 1].replace(/^defenseclaw-(gateway|hook-post)( hook-post)?: /, "") : "";
+  if (!cause && err && !Number.isInteger(err.status) && err.message) cause = String(err.message);
+  cause = cause.replace(/[\u0000-\u001f]+/g, " ").slice(0, 240);
+  return cause || "per-user gateway peer unverified";
+}
+
+async function defenseclawLogFailOpen(reason, category, context, closed) {
   try {
     const dir = join(dirname(dirname(DC_TOKEN_FILE)), "logs");
     await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -834,10 +862,10 @@ async function defenseclawLogFailOpen(reason, category, context) {
         hook: "opencode-plugin",
         reason: String(reason || "unknown"),
         category,
-        fail_mode: "open",
+        fail_mode: closed ? "closed" : "open",
 		session_id: String(context && (context.sessionID || context.sessionId) || "").slice(0, 256),
 		call_id: String(context && (context.callID || context.callId) || randomBytes(16).toString("hex")).slice(0, 256),
-        outcome: "fail_open",
+        outcome: closed ? "fail_closed" : "fail_open",
       }) + "\n");
     } finally {
       await file.close();
@@ -862,11 +890,6 @@ const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw 
 function defenseclawInstallLockDirs() {
   return [dirname(dirname(DC_TOKEN_FILE)), String(process.env.DEFENSECLAW_HOME || "") || join(homedir(), ".defenseclaw")];
 }
-
-// An interrupted install keeps its lock on purpose, next to one of these,
-// until the installer runs again and finishes or undoes it
-// (hookexec.InstallLockRecoveryRecords).
-const DC_INSTALL_RECOVERY_RECORDS = ["previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"];
 
 // defenseclawInstallLockNumber reads the lock's pid file: "absent" (missing,
 // empty or not a positive number), "valid", or "unreadable" (not a small
@@ -913,6 +936,30 @@ function defenseclawProcessIdentity(pid) {
     }
   } catch (_) {
     // Fall through: the system does not say.
+  }
+  return null;
+}
+
+// defenseclawProcessStartMs is when process pid started (ms since the epoch),
+// from the identity the system keeps (defenseclawProcessIdentity), or null.
+function defenseclawProcessStartMs(pid) {
+  const identity = defenseclawProcessIdentity(pid);
+  if (identity === null) return null;
+  try {
+    if (process.platform === "linux") {
+      const line = String(readFileSync("/proc/stat", "utf8")).split("\n").find((entry) => entry.startsWith("btime "));
+      const boot = line ? Number(line.slice(6).trim()) : NaN;
+      const ticks = Number(identity.split(" ")[1]);
+      return Number.isFinite(boot) && Number.isFinite(ticks) ? boot * 1000 + ticks * 10 : null;
+    }
+    if (process.platform === "darwin") {
+      const [, month, day, time, year] = identity.split(" ");
+      const started = Date.parse(month + " " + day + ", " + year + " " + time + " UTC");
+      return Number.isFinite(started) ? started : null;
+    }
+    if (process.platform === "win32") return Number(BigInt(identity) / 10000n - 11644473600000n);
+  } catch (_) {
+    // The system does not say.
   }
   return null;
 }
@@ -986,14 +1033,6 @@ async function defenseclawInstallLockState(dir) {
     return "none";
   }
   if (!info.isDirectory()) return "held";
-  for (const name of DC_INSTALL_RECOVERY_RECORDS) {
-    try {
-      await lstat(join(dir, name));
-      return "held";
-    } catch (err) {
-      if (!missing(err)) return "held";
-    }
-  }
   const owner = await defenseclawInstallLockNumber(join(lock, "pid"));
   if (owner.state !== "valid" || owner.value > 2147483647) return "held";
   // A live installer's pid names no other process: this one is reused.
@@ -1005,6 +1044,12 @@ async function defenseclawInstallLockState(dir) {
   }
   if (defenseclawProcessEnded(owner.value)) return "stale";
   const identity = await defenseclawInstallLockRecord(join(lock, "proc-start"));
+  if (identity.state === "absent") {
+    // A 1.0.2/1.0.3 lock has no identity record: its pid names a later
+    // process when that process started after the lock (GAP-1465).
+    const started = defenseclawProcessStartMs(owner.value);
+    return started !== null && started > info.mtimeMs + 2000 ? "stale" : "held";
+  }
   if (identity.state !== "valid") return "held";
   const current = defenseclawProcessIdentity(owner.value);
   return current !== null && current !== identity.value ? "stale" : "held";
@@ -1234,7 +1279,12 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
         return { reason: "", outage_notice: actionable ? await defenseclawPerUserOutageNotice() : "" };
       }
       if (err && err.status === 7) return { reason: await defenseclawPerUserGatewayDownText(err, 0) };
-      return { reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" };
+      // Name the cause (the helper's own line, or the answer the plugin
+      // refused, such as a repeated key) and record the call (GAP-1898,
+      // GAP-1236).
+      const cause = defenseclawPerUserFailureCause(err);
+      if (actionable) await defenseclawLogFailOpen(cause, "response", context, true);
+      return { reason: "DefenseClaw hook failed closed (" + cause + ")" };
     }
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
@@ -1330,7 +1380,7 @@ async function defenseclawPerUserGatewayDownText(err, status) {
     text = "this account's DefenseClaw gateway is not running (fail mode closed). " +
       "Start it with `defenseclaw-gateway start`, then try again.";
   } else if (err && (err.name === "AbortError" || err.name === "TimeoutError")) {
-    text = "this account's DefenseClaw gateway did not answer in time (fail mode closed); it may be restarting or busy. " +
+    text = "this account's DefenseClaw gateway did not answer in time (a call the gateway took and did not answer is blocked in every fail mode); it may be restarting or busy. " +
       "Try again in a moment.";
   } else {
     text = "the DefenseClaw gateway is not running or not answering (fail mode closed). " +
@@ -1438,6 +1488,7 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
   // keeps running for this process even if its file is deleted later, so a
   // block found at load holds for the whole process.
   let defenseclawStartupGuard = defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
+  let defenseclawForeignWarned = false;
   return {
     config: async (config) => {
       defenseclawConfigure(config);
@@ -1469,9 +1520,14 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
       }
       const startup = await defenseclawStartupGuard;
       if (startup.retryable) defenseclawStartupGuard = null;
-      const callBlock = (await defenseclawForeignHookCheck("tool.execute.before", cwd)).reason;
-      const blocked = startup.reason || callBlock;
+      const callCheck = await defenseclawForeignHookCheck("tool.execute.before", cwd);
+      const blocked = startup.reason || callCheck.reason;
       if (blocked) throw defenseclawBlock(client, blocked);
+      const warnings = (callCheck.warnings && callCheck.warnings.length ? callCheck.warnings : startup.warnings) || [];
+      if (!defenseclawForeignWarned && warnings.length) {
+        defenseclawForeignWarned = true;
+        void defenseclawShowNotice(client, "DefenseClaw warning: " + warnings.join("; "), "warning");
+      }
       const mcpIdentity = defenseclawResolveMCPServer(input && input.tool);
       const verdict = await defenseclawPost(
         "tool.execute.before",
