@@ -13,7 +13,7 @@ After the [install](/docs/get-started/download), DefenseClaw is on disk but not 
 
 ## Path A: interactive (`defenseclaw init`)
 
-On a terminal, `init` runs local agent discovery, pre-selects every installed hook connector and configures them all in `observe` mode. It then shows one checklist, **Select connector(s) for action enforcement**; tick the agents that should block. The action-only settings (hook fail mode and human approval with its minimum severity) are asked once and shared by every agent you promote. On a new install the fail mode prompt offers `closed`. The wizard asks **Start gateway after setup?** (default yes).
+On a terminal, `init` runs local agent discovery, pre-selects every installed hook connector and configures them all in `observe` mode. It then shows one checklist, **Select connector(s) for action enforcement**; tick the agents that should block. Human approval and its minimum severity are asked once and shared by every agent you promote. `init` does not ask for an outage mode and saves none: while the gateway is not running, the default and permissive policies let a call run with a warning and strict blocks it. Pass `--fail-mode` to save a choice; a saved choice wins over the policy. The wizard asks **Start gateway after setup?** (default yes).
 
 Proxy connectors are detected but left out of the observe-all set, because they own the single LLM proxy port. Use `defenseclaw setup <proxy>` for them.
 
@@ -123,7 +123,7 @@ In CI, check the `status` field of `--json-summary`, because `partial` also exit
     },
     "--fail-mode": {
       type: "open|closed",
-      description: "Hook fail mode. Omitted, it keeps the current setting, which is closed on a new install.",
+      description: "Saves your choice for a gateway outage; a saved choice wins over the policy. Omitted, nothing is saved: the default and permissive policies let a call run with a warning, strict blocks it.",
     },
     "--human-approval / --no-human-approval": {
       type: "flag",
