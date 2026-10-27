@@ -1932,7 +1932,7 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline b
 				// the home folder). Other native programs (the MSYS tools
 				// of Git for Windows) expand a quoted word of their own
 				// argv, so it stays a path pattern (GAP-1984).
-				if actionWindowsTextStatement(words[start:i]) || j == pattern {
+				if (actionWindowsTextStatement(words[start:i]) && !actionWindowsGitPathspecWord(words[start:i], j-start)) || j == pattern {
 					words[j] = actionWindowsLiteralPattern.Replace(words[j])
 				}
 			}
@@ -2104,21 +2104,10 @@ func actionWindowsTextProgram(word string) bool {
 	return false
 }
 
-// actionWindowsTextStatement reports a statement that only prints its words
-// or gives them to a git command that keeps them as text (a message, a
-// pathspec, a search pattern). git runs a configuration value as shell code
-// (an alias, the pager, the editor, a hook path), so a git statement with an
-// option before its subcommand (-c, --config-env, --exec-path ...), the
-// config subcommand, an alias or a subcommand that runs a command it is
-// given (rebase --exec, bisect run, submodule foreach ...) is not text
-// (GAP-2090).
-func actionWindowsTextStatement(words []string) bool {
-	if len(words) == 0 || !actionWindowsTextProgram(words[0]) {
-		return false
-	}
-	if strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(words[0], `\`, "/"))), ".exe") != "git" {
-		return true
-	}
+// actionWindowsGitSubcommand returns the index of the subcommand of a git
+// statement. It reports false for a statement with no subcommand or with a
+// global option that changes what git runs.
+func actionWindowsGitSubcommand(words []string) (int, bool) {
 	// Global options that only place the command (-C dir, --git-dir,
 	// --work-tree) or change its output do not change what git runs; -c,
 	// --config-env, --exec-path and any other option do (RV5-4).
@@ -2135,11 +2124,76 @@ func actionWindowsTextStatement(words []string) bool {
 			option == "--literal-pathspecs" || option == "--glob-pathspecs" || option == "--noglob-pathspecs" ||
 			option == "--icase-pathspecs" || option == "--no-replace-objects" || option == "--no-advice":
 		default:
-			return false
+			return 0, false
 		}
 		sub++
 	}
 	if sub >= len(words) {
+		return 0, false
+	}
+	return sub, true
+}
+
+// actionWindowsGitPathspecWord reports a word of a git text statement that
+// git reads as a pathspec of files it rewrites: git stash push (and its
+// short form git stash -- ...) saves and then REVERTS the working-tree files
+// a pathspec selects, and git expands a pathspec glob itself. Such a word
+// stays a path pattern; the -m message stays text (RV6-2).
+func actionWindowsGitPathspecWord(words []string, k int) bool {
+	sub, ok := actionWindowsGitSubcommand(words)
+	if !ok || k <= sub || strings.ToLower(words[sub]) != "stash" {
+		return false
+	}
+	i := sub + 1
+	if i < len(words) {
+		switch strings.ToLower(words[i]) {
+		case "push":
+			i++
+		case "list", "show", "drop", "pop", "apply", "branch", "clear", "save", "create", "store":
+			return false
+		}
+	}
+	for ; i < len(words); i++ {
+		word := words[i]
+		switch {
+		case word == "--":
+			return k > i
+		case word == "-m" || word == "--message" || word == "--pathspec-from-file":
+			if i+1 == k {
+				return word == "--pathspec-from-file"
+			}
+			i++
+		case strings.HasPrefix(word, "--pathspec-from-file="):
+			if i == k {
+				return true
+			}
+		case strings.HasPrefix(word, "-"):
+		default:
+			if i == k {
+				return true // a pathspec without --
+			}
+		}
+	}
+	return false
+}
+
+// actionWindowsTextStatement reports a statement that only prints its words
+// or gives them to a git command that keeps them as text (a message, a
+// pathspec, a search pattern). git runs a configuration value as shell code
+// (an alias, the pager, the editor, a hook path), so a git statement with an
+// option before its subcommand (-c, --config-env, --exec-path ...), the
+// config subcommand, an alias or a subcommand that runs a command it is
+// given (rebase --exec, bisect run, submodule foreach ...) is not text
+// (GAP-2090).
+func actionWindowsTextStatement(words []string) bool {
+	if len(words) == 0 || !actionWindowsTextProgram(words[0]) {
+		return false
+	}
+	if strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(words[0], `\`, "/"))), ".exe") != "git" {
+		return true
+	}
+	sub, ok := actionWindowsGitSubcommand(words)
+	if !ok {
 		return false
 	}
 	switch strings.ToLower(words[sub]) {

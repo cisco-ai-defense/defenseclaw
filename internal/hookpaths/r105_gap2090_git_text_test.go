@@ -3,7 +3,10 @@
 
 package hookpaths
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // GAP-2090 (review RV4-2, regression of the GAP-1473 printed-tilde rule):
 // git runs a configuration value as shell code (an alias, the pager), so a
@@ -30,10 +33,23 @@ func TestActionWindowsGitConfigValueIsNotText(t *testing.T) {
 		{"GAP-1473 git message", "git commit -m 'Document ~/.ssh/authorized_keys'", ""},
 		{"GAP-1473 git log search", "git log --grep '~/.ssh/authorized_keys'", ""},
 		{"GAP-1473 printed quoted tilde path", "Write-Output '~/.ssh/authorized_keys'", ""},
+		// git stash push reverts the files its pathspec selects, and git
+		// expands a pathspec glob itself (RV6-2). Run from the home.
+		{"RV6-2 stash pathspec glob from home", "git stash push -- '.ssh/authorized_k*'", "protected-target@home"},
+		{"RV6-2 -C stash pathspec glob from home", "git -C proj stash push -- '.ssh/authorized_k*'", "protected-target@home"},
+		{"RV6-2 stash pathspec glob without --", "git stash push -m wip '.ssh/authorized_k*'", "protected-target@home"},
+		{"RV6-2 stash literal pathspec from home", "git stash push -- '.ssh/authorized_keys'", "protected-target@home"},
+		{"RV6-2 stash message stays text", "git stash push -m 'Document ~/.ssh/authorized_keys'", "@home"},
+		{"RV6-2 stash list stays text", "git stash list --grep '*.md'", "@home"},
+		{"RV6-2 stash project pathspec", "git stash push -- 'src/*.go'", "@home"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ActionCommandDecision(tc.command, cwd, home); got != tc.want {
-				t.Fatalf("ActionCommandDecision(%q) = %q, want %q", tc.command, got, tc.want)
+			dir, want := cwd, tc.want
+			if strings.HasSuffix(want, "@home") {
+				dir, want = home, strings.TrimSuffix(want, "@home")
+			}
+			if got := ActionCommandDecision(tc.command, dir, home); got != want {
+				t.Fatalf("ActionCommandDecision(%q) = %q, want %q", tc.command, got, want)
 			}
 		})
 	}
