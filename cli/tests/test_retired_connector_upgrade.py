@@ -7,6 +7,16 @@ import yaml
 from defenseclaw import config
 
 
+@pytest.fixture(autouse=True)
+def _fresh_retired_settings_warning():
+    warned = getattr(config, "_retired_settings_warned", None)
+    if warned is not None:
+        warned.clear()
+    yield
+    if warned is not None:
+        warned.clear()
+
+
 @pytest.mark.parametrize("version", (8, 9))
 def test_retired_connector_roster_loads_with_remaining_peer(tmp_path, caplog, version):
     (tmp_path / "config.yaml").write_text(
@@ -26,7 +36,7 @@ def test_retired_connector_roster_loads_with_remaining_peer(tmp_path, caplog, ve
     assert loaded.active_connectors() == ["codex"]
     assert loaded.guardrail.connector == "codex"
     assert loaded.claw.mode == ""
-    assert "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it." in caplog.text
+    assert f"{tmp_path / 'config.yaml'} still names OpenHands/OmniGent" in caplog.text
     loaded.save()
     persisted = (tmp_path / "config.yaml").read_text(encoding="utf-8").lower()
     assert "openhands" not in persisted
@@ -233,3 +243,30 @@ def test_retired_connector_only_sandbox_lists_are_omitted_and_stay_restrictive(t
     assert closed["allowed"] is False
     assert "allowed_harnesses" not in closed
     assert "required_for" not in closed
+
+
+def test_retired_connector_load_warning_is_once_named_and_not_the_installer_notice(tmp_path, monkeypatch):
+    """GAP-2043: a config the upgrade could not migrate (its folder is not the
+    user's) is loaded by later installer steps. The load says once, through
+    the module logger (no raw "WARNING:root:" line), which file still names
+    them; it does not repeat the installers' removal notice or send the user
+    to the migrate that just ran."""
+    import subprocess
+    import sys
+
+    outside = tmp_path / "outside.yaml"
+    outside.write_text(
+        "config_version: 9\nguardrail:\n  connectors:\n    openhands: {}\n    codex: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(outside))
+    script = f"from defenseclaw import config\nfor _ in range(3):\n    config.load(data_dir={str(tmp_path)!r})\n"
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True)
+    lines = [line for line in out.stderr.splitlines() if "OpenHands/OmniGent" in line]
+    assert lines == [
+        f"{outside} still names OpenHands/OmniGent, which DefenseClaw no longer supports; "
+        "they are ignored. Delete them from that file."
+    ], out.stderr
+    assert "WARNING:root" not in out.stderr
+    assert "removed in 1.0.5" not in out.stderr
+    assert "run defenseclaw migrate" not in out.stderr
