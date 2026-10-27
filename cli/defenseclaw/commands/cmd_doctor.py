@@ -2923,15 +2923,18 @@ def _install_lock_state(folder: str, held: _HeldInstallLock | None = None) -> tu
     """("none" | "stale" | "recovery" | "held", detail) of the lock in folder.
 
     The one rule of every per-user hook (hookexec installLockStale). It reads
-    no clock: "stale" when the lock is a folder, no interrupted-install
-    record sits beside it and its installer is gone: its pid names no
-    process or one that has ended (a zombie), or doctor's own (no reader writes a lock), or another process
-    than its proc-start record names (a reused pid). A live installer keeps
-    its lock for as long as it runs; so do a lock without a valid pid, a
-    lock without a proc-start record whose pid names a process (1.0.2,
-    1.0.3) and an owner whose identity cannot be read. With held, the owner
-    files are read in the folder doctor holds open, whatever the path names
-    now (_fix_stale_install_lock).
+    no clock: the installer is gone when the lock is a folder and its pid
+    names no process or one that has ended (a zombie), or doctor's own (no
+    reader writes a lock), or another process than its proc-start record
+    names (a reused pid). Such a lock is "stale", or "recovery" when an
+    interrupted-install record sits beside it (hookexec
+    InstallRecoveryPending: the next installer run finishes or undoes that
+    install, so doctor --fix leaves it). A live installer keeps its lock
+    ("held") for as long as it runs, records or not; so do a lock without a
+    valid pid, a lock without a proc-start record whose pid names a process
+    (1.0.2, 1.0.3) and an owner whose identity cannot be read. With held,
+    the owner files are read in the folder doctor holds open, whatever the
+    path names now (_fix_stale_install_lock).
     """
     lock = os.path.join(folder, ".install.lock")
     if held is None:
@@ -2943,6 +2946,7 @@ def _install_lock_state(folder: str, held: _HeldInstallLock | None = None) -> tu
             return ("held", f"{lock} cannot be inspected ({exc.strerror or exc})")
         if not stat.S_ISDIR(info.st_mode):
             return ("held", f"{lock} is not a folder")
+    recovery = ""
     for record in _INSTALL_RECOVERY_RECORDS:
         path = os.path.join(folder, record)
         try:
@@ -2951,7 +2955,14 @@ def _install_lock_state(folder: str, held: _HeldInstallLock | None = None) -> tu
             continue
         except OSError:
             return ("held", f"{path} cannot be inspected")
-        return ("recovery", f"{lock} is kept by an interrupted install ({path})")
+        recovery = path
+        break
+
+    def gone(detail: str) -> tuple[str, str]:
+        if recovery:
+            return ("recovery", f"{lock} is kept by an interrupted install ({recovery}); its installer is gone")
+        return ("stale", detail)
+
     pid_file = os.path.join(lock, "pid")
     pid_state, text = _install_lock_file(lock, "pid", 64, held)
     if pid_state == "invalid":
@@ -2965,16 +2976,15 @@ def _install_lock_state(folder: str, held: _HeldInstallLock | None = None) -> tu
             f"{lock} names no installer pid yet; if no install is running, run the installer again to clear it",
         )
     if pid == os.getpid():
-        return ("stale", f"{lock} names pid {pid}, this process; its installer is gone")
+        return gone(f"{lock} names pid {pid}, this process; its installer is gone")
     if not _pid_running(pid):
-        return ("stale", f"{lock} names installer pid {pid}, which is no longer running")
+        return gone(f"{lock} names installer pid {pid}, which is no longer running")
     record_state, record = _install_lock_file(lock, _INSTALL_LOCK_IDENTITY_NAME, 128, held)
     if record_state == "valid" and record:
         current = _process_identity(pid)
         if current is not None and current != record:
-            return (
-                "stale",
-                f"{lock} names pid {pid}, another process than the installer that wrote it; its installer is gone",
+            return gone(
+                f"{lock} names pid {pid}, another process than the installer that wrote it; its installer is gone"
             )
     return ("held", f"an installer (pid {pid}) holds {lock}")
 
@@ -3006,8 +3016,10 @@ def _check_install_lock(cfg, r: _DoctorResult) -> None:
     Hooks close outages, and OpenCode and Amp in the strict tier hold answered
     calls, while an install may be running; a stale lock (its installer
     proven gone) is no lock to them and is removed by
-    doctor.install.stale-lock.clear. One an interrupted install keeps waits
-    for the installer to run again.
+    doctor.install.stale-lock.clear. The lock of an interrupted install whose
+    installer is gone holds no tool call either (GAP-1024): calls follow the
+    outage rule, the strict tier blocks them, and no hook or watchdog starts
+    the gateway until the installer runs again (GAP-2082, GAP-2092).
     """
     if _doctor_managed(cfg):
         return
@@ -3029,7 +3041,8 @@ def _check_install_lock(cfg, r: _DoctorResult) -> None:
             _emit(
                 "warn",
                 "Install lock",
-                f"{detail}; hooks wait for the installer to finish it",
+                f"{detail}; hooks hold no tool call for it (the strict tier blocks them), "
+                "and no hook starts the gateway until the installer runs again",
                 r=r,
                 check_id="doctor.install.lock",
                 reason_code="install-lock-interrupted-install",
