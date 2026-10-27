@@ -19,7 +19,9 @@ package config
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/url"
@@ -2821,6 +2823,17 @@ func applyRuntimeV8DataDirDefaultsForPlatform(candidate *Config, document *V8YAM
 		candidate.Guardrail.RulePackDir = join(dataDir, "policies", "guardrail", "default")
 		if candidate.StandaloneEnterprise() {
 			standaloneRulePackDefault(candidate, dataDir, goos)
+		} else if policyDir := strings.TrimSpace(candidate.PolicyDir); policyDir != "" &&
+			join(policyDir) != join(dataDir, "policies") {
+			// The implicit default pack is the default preset under the
+			// policy_dir config.yaml names, where the CLI seeds and reads
+			// it and where a named "default" resolves (GAP-2126). A file
+			// from before that whose policy_dir has no such folder keeps
+			// the data_dir pack it started with.
+			policyPack := join(policyDir, "guardrail", "default")
+			if _, err := os.Stat(policyPack); err == nil || !errors.Is(err, fs.ErrNotExist) {
+				candidate.Guardrail.RulePackDir = policyPack
+			}
 		}
 	}
 	if !has("openshell", "pack_dir") {

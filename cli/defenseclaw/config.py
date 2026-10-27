@@ -7465,6 +7465,11 @@ def load(
     ss_raw = scanners_raw.get("skill_scanner", {})
     gw_raw = raw.get("gateway", {})
     source_config_version = _exact_config_version(raw.get("config_version"))
+    # config.yaml stays in the install home; the stores and folders the file
+    # leaves out are under the data_dir it names, as the gateway resolves them
+    # (GAP-2126: the CLI seeded and read <home>/policies after config set
+    # data_dir while the gateway read <data_dir>/policies).
+    data_dir = _configured_data_dir(raw, data_dir)
     audit_db = _audit_database_path(raw, data_dir)
 
     cfg = Config(
@@ -7635,6 +7640,15 @@ def _exact_config_version(value: Any) -> int:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     return 0
+
+
+def _configured_data_dir(raw: dict[str, Any], home: str) -> str:
+    """The data_dir config.yaml sets (``~/`` expanded, made absolute like the
+    Go compiler), else ``home``: the folder the omitted paths are under."""
+    configured = raw.get("data_dir")
+    if not isinstance(configured, str) or not configured.strip():
+        return home
+    return os.path.abspath(os.path.normpath(_expand_store_home(configured.strip())))
 
 
 def _audit_database_path(raw: dict[str, Any], data_dir: str) -> str:
