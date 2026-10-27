@@ -245,6 +245,13 @@ func TestR105GAP2075FindDeleteOfProtectedStateNames(t *testing.T) {
 		{"find HOME delete before iname LOG", "find $HOME/.defenseclaw -delete -iname '*.LOG'", true, ""},
 		{"find root depth delete before name jsonl", "find ~/.defenseclaw -depth -delete -name '*.jsonl'", true, ""},
 		{"find root mtime delete before name log", "find ~/.defenseclaw -mtime +7 -delete -name '*.log'", true, ""},
+		// A primary that takes arguments swallows the words after it: GNU
+		// -fprintf takes FILE=-name FORMAT=*.log, so the -delete removes
+		// every entry (pod check 4). An unknown primary is not cleanup.
+		{"find root fprintf swallows name", "find ~/.defenseclaw -fprintf -name '*.log' -delete", true, ""},
+		{"find HOME type fprintf swallows iname", "find $HOME/.defenseclaw -type f -fprintf -iname '*.LOG' -delete", true, ""},
+		{"find root fprint swallows name", "find ~/.defenseclaw -fprint -name '*.log' -delete", true, ""},
+		{"find root unknown primary", "find ~/.defenseclaw -frobnicate -name '*.log' -delete", true, ""},
 		// Log cleanup from the root stays allowed with no state finding.
 		{"find root log cleanup", "find ~/.defenseclaw -name '*.log' -mtime +7 -delete", false, ""},
 		{"find root tmp cleanup", "find ~/.defenseclaw -type f -name '*.tmp' -delete", false, ""},
@@ -256,6 +263,9 @@ func TestR105GAP2075FindDeleteOfProtectedStateNames(t *testing.T) {
 		{"find logs tree", "find ~/.defenseclaw/logs -mtime +7 -delete", false, ""},
 		{"find root log cleanup delete twice", "find ~/.defenseclaw -name '*.log' -delete -delete", false, ""},
 		{"find root log cleanup then mtime", "find ~/.defenseclaw -name '*.log' -delete -mtime +7", false, ""},
+		{"find root log cleanup fprintf record", `find ~/.defenseclaw -name '*.log' -fprintf /tmp/removed.txt '%p\n' -delete`, false, ""},
+		{"find root log cleanup print", "find ~/.defenseclaw -name '*.log' -print -delete", false, ""},
+		{"find root maxdepth log cleanup", "find ~/.defenseclaw -maxdepth 2 -name '*.log' -mmin +60 -delete", false, ""},
 	}
 	for _, mode := range []string{"observe", "action"} {
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)

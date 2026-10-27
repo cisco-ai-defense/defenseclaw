@@ -2649,7 +2649,8 @@ func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state stri
 		return false
 	}
 	named, acted := false, false
-	for index := 1; index < len(command.Argv); index++ {
+	index := findExpressionStart(command.Argv)
+	for ; index < len(command.Argv); index++ {
 		argument := strings.ToLower(command.Argv[index])
 		switch argument {
 		case "-o", "-or", "!", "-not", ",":
@@ -2679,9 +2680,70 @@ func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state stri
 				index++
 			}
 			index++
+		default:
+			// Every other primary is skipped with its arguments, so an
+			// argument is never read as a test (`-fprintf -name '*.log'`
+			// takes the file "-name" and the format "*.log", and the
+			// -delete after it removes every entry). A word find does not
+			// know is not cleanup (fail closed).
+			arity, known := findPrimaryArity[argument]
+			if !known && !strings.HasPrefix(argument, "-newer") {
+				return false
+			}
+			if !known {
+				arity = 1
+			}
+			if index+arity >= len(command.Argv) {
+				return false
+			}
+			index += arity
 		}
 	}
 	return named && acted
+}
+
+// findExpressionStart returns the index of the first expression word of a
+// find argv: after the -H/-L/-P/-D/-O options and the starting points.
+func findExpressionStart(argv []string) int {
+	index := 1
+	for index < len(argv) {
+		argument := argv[index]
+		switch {
+		case argument == "-H" || argument == "-L" || argument == "-P":
+			index++
+		case argument == "-D":
+			index += 2
+		case strings.HasPrefix(argument, "-O") && len(argument) > 2:
+			index++
+		default:
+			for index < len(argv) && !strings.HasPrefix(argv[index], "-") &&
+				argv[index] != "(" && argv[index] != ")" && argv[index] != "!" && argv[index] != "," {
+				index++
+			}
+			return index
+		}
+	}
+	return index
+}
+
+// findPrimaryArity is the number of arguments each GNU/BSD find primary
+// other than -name/-iname/-delete/-exec* takes (GAP-2075). Primaries not in
+// the table (and not -newerXY) make a find not cleanup.
+var findPrimaryArity = map[string]int{
+	"(": 0, ")": 0, "-a": 0, "-and": 0,
+	"-depth": 0, "-d": 0, "-xdev": 0, "-mount": 0, "-x": 0, "-noleaf": 0, "-follow": 0,
+	"-daystart": 0, "-ignore_readdir_race": 0, "-noignore_readdir_race": 0,
+	"-warn": 0, "-nowarn": 0, "-empty": 0, "-true": 0, "-false": 0,
+	"-readable": 0, "-writable": 0, "-executable": 0, "-nouser": 0, "-nogroup": 0,
+	"-print": 0, "-print0": 0, "-ls": 0, "-prune": 0, "-quit": 0,
+	"-type": 1, "-xtype": 1, "-path": 1, "-ipath": 1, "-wholename": 1, "-iwholename": 1,
+	"-regex": 1, "-iregex": 1, "-regextype": 1, "-lname": 1, "-ilname": 1,
+	"-perm": 1, "-user": 1, "-group": 1, "-uid": 1, "-gid": 1, "-size": 1,
+	"-mtime": 1, "-atime": 1, "-ctime": 1, "-btime": 1, "-mmin": 1, "-amin": 1, "-cmin": 1, "-bmin": 1,
+	"-links": 1, "-inum": 1, "-samefile": 1, "-maxdepth": 1, "-mindepth": 1, "-used": 1,
+	"-fstype": 1, "-context": 1, "-files0-from": 1, "-flags": 1,
+	"-fprint": 1, "-fprint0": 1, "-fls": 1, "-printf": 1,
+	"-fprintf": 2,
 }
 
 // protectedStateNameSamples are names a file of the active state can have:
