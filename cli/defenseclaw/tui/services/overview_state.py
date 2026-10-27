@@ -990,6 +990,7 @@ class OverviewPanelModel:
 
         # A stopped gateway leaves its last /health payload behind; notices
         # read from it ("since the gateway started 3m ago") would be stale.
+        idle_notice: OverviewNotice | None = None
         live_health = self.health is not None and not self.gateway_down()
         if live_health and self.health.connector is not None and self.cfg is not None:
             live = normalize_connector(self.health.connector.name)
@@ -1009,12 +1010,15 @@ class OverviewPanelModel:
                     )
                 )
             uptime = timedelta(milliseconds=self.health.uptime_ms)
+            # The idle-connector notice is informational and only true until
+            # the first hook event, so it goes last: at 80x24 it pushed the
+            # Runtime notice and its N key below the fold (GAP-2104).
             if uptime > timedelta(minutes=1):
                 if self._is_multi_connector() and self.health.connectors:
                     # One idle connector out of several is normal; only say
                     # something when none of them has seen a hook event.
                     if not any(_connector_saw_traffic(conn) for conn in self.health.connectors):
-                        notices.append(
+                        idle_notice = (
                             OverviewNotice(
                                 "info",
                                 # One line at 80 columns: the wrapped rest fell
@@ -1024,7 +1028,7 @@ class OverviewPanelModel:
                             )
                         )
                 elif not _connector_saw_traffic(self.health.connector):
-                    notices.append(OverviewNotice("info", zero_connector_requests_notice(live, uptime)))
+                    idle_notice = OverviewNotice("info", zero_connector_requests_notice(live, uptime))
 
         probe_detail = gateway_availability.last_error.strip().lower()
         if not gateway_broken and "elevated sidecar" in probe_detail:
@@ -1055,6 +1059,8 @@ class OverviewPanelModel:
                     f"{runtime.connections} connections, no findings above the reporting floor"
                 )
             notices.append(OverviewNotice("info", message))
+        if idle_notice is not None:
+            notices.append(idle_notice)
 
         return tuple(notices)
 
