@@ -64,6 +64,28 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 		}
 	}
 	var words []*syntax.Word
+	// Redirect targets may also be one quoted "$HOME/..." word; arguments
+	// keep the plain spellings only.
+	quotedTargets := map[*syntax.Word]bool{}
+	collectRedirects := func(stmt *syntax.Stmt) bool {
+		for _, redirect := range stmt.Redirs {
+			switch redirect.Op {
+			case syntax.RdrOut, syntax.AppOut, syntax.RdrIn, syntax.RdrClob:
+				if literal, ok := firstLiteral(redirect.Word); ok && strings.HasPrefix(literal.Value, "~/") {
+					words = append(words, redirect.Word)
+				} else if _, anchored := homeAnchoredLiteralWord(redirect.Word); anchored &&
+					(plainHomeRewriteWord(redirect.Word) || quotedPlainHomeRewriteWord(redirect.Word)) {
+					// bash expands $HOME/${HOME} in a redirect target from
+					// the same HOME as ~, as for the arguments (GAP-1773).
+					words = append(words, redirect.Word)
+					quotedTargets[redirect.Word] = true
+				}
+			default:
+				return false
+			}
+		}
+		return true
+	}
 	var collect func(*syntax.Stmt, bool) bool
 	collect = func(stmt *syntax.Stmt, compound bool) bool {
 		if stmt.Negated || stmt.Background || stmt.Coprocess {
@@ -86,17 +108,7 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 				}
 			}
 			words = append(words, cmd.Args[1:]...)
-			for _, redirect := range stmt.Redirs {
-				switch redirect.Op {
-				case syntax.RdrOut, syntax.AppOut, syntax.RdrIn, syntax.ClbOut:
-					if literal, ok := firstLiteral(redirect.Word); ok && strings.HasPrefix(literal.Value, "~/") {
-						words = append(words, redirect.Word)
-					}
-				default:
-					return false
-				}
-			}
-			return true
+			return collectRedirects(stmt)
 		default:
 			return false
 		}
@@ -122,7 +134,7 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 		literal, ok := firstLiteral(word)
 		if !ok || (literal.Value != "~" && !strings.HasPrefix(literal.Value, "~/")) {
 			if suffix, anchored := homeAnchoredLiteralWord(word); anchored &&
-				plainHomeRewriteWord(word) {
+				(plainHomeRewriteWord(word) || quotedTargets[word] && quotedPlainHomeRewriteWord(word)) {
 				start, end := int(word.Pos().Offset()), int(word.End().Offset())
 				if start < last || end > len(source) {
 					return trustedPOSIXHomeRewrite{}, false
@@ -293,6 +305,20 @@ func plainHomeRewriteWord(word *syntax.Word) bool {
 		}
 	}
 	return true
+}
+
+// quotedPlainHomeRewriteWord reports one double-quoted "$HOME/..." word
+// whose path needs no quoting, so the unquoted ActiveHome spelling of the
+// rewrite names exactly the same path (GAP-1773).
+func quotedPlainHomeRewriteWord(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) != 1 {
+		return false
+	}
+	if _, quoted := word.Parts[0].(*syntax.DblQuoted); !quoted {
+		return false
+	}
+	suffix, anchored := homeAnchoredLiteralWord(word)
+	return anchored && trustedPOSIXHomeLiteral.MatchString(suffix)
 }
 
 func firstLiteral(word *syntax.Word) (*syntax.Lit, bool) {
