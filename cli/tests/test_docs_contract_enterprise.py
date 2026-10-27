@@ -632,7 +632,7 @@ def test_windows_docs_say_how_to_leave_bundle_mode() -> None:
     source = (ROOT / "internal/cli/windows_enterprise_bundle.go").read_text(encoding="utf-8")
     mode = source.split("func windowsBundleMode(", 1)[1].split("\n}\n", 1)[0]
     assert "state.Current != nil" in mode
-    lifecycle = _flat("enterprise/operate/lifecycle.mdx")
+    lifecycle = _flat("enterprise/lifecycle.mdx")
     section = lifecycle.split("**Leave bundle mode on Windows.**", 1)[1].split("A change is applied by the apply trigger", 1)[0]
     for phrase in (
         "`/repair`, a new `CONFIG=` and moving the anchor file away do not turn bundle mode off",
@@ -642,8 +642,11 @@ def test_windows_docs_say_how_to_leave_bundle_mode() -> None:
         "`user_registrations_pending`",
         "A user who is signed out, or whose session is disconnected, keeps an inert registration",
         "needs no `/repair`",
+        "except the Claude Code registration of the account running Setup, which is removed",
         "`/ensure CONFIG=<file> JSON=1`",
         "a signed-out user at their next sign-in",
     ):
         assert phrase in section, phrase
-    assert "## Remove" in (DOCS / "enterprise/install/reference/windows.mdx").read_text(encoding="utf-8")
+    windows = (DOCS / "enterprise/windows.mdx").read_text(encoding="utf-8")
+    assert "\n## Remove\n" in windows
+    assert "\n### Run Setup as LocalSystem\n" in windows
