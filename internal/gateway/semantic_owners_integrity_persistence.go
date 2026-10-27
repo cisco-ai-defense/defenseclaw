@@ -2636,16 +2636,19 @@ func stateTreeEntryChanged(
 // entries no protected state name can be (log cleanup such as
 // `find ~/.defenseclaw -name '*.log' -mtime +7 -delete`), not the tree it
 // starts from (GAP-2075). It holds only for a find from the state root
-// (state ""), whose tests are all joined by AND, with at least one -name or
-// -iname and every such pattern a cleanup pattern (findPatternIsCleanupOnly).
-// A start at a protected tree, a time, size or path test alone, and an OR
-// or a negation never exempt, because each can still reach config.yaml, a
-// hook, a rule pack file or the saved installer.
+// (state ""), whose tests are all joined by AND, with every -name or -iname
+// pattern a cleanup pattern (findPatternIsCleanupOnly) and one of them before
+// the first action. find evaluates its expression left to right, so an
+// action placed before the name test (`find ~/.defenseclaw -delete -name
+// '*.log'`) runs on every entry (GAP-2075). A start at a protected tree, a
+// time, size or path test alone, and an OR or a negation never exempt,
+// because each can still reach config.yaml, a hook, a rule pack file or the
+// saved installer.
 func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state string) bool {
 	if state != "" || !strings.EqualFold(command.Program, "find") || len(command.Argv) < 2 {
 		return false
 	}
-	named := false
+	named, acted := false, false
 	for index := 1; index < len(command.Argv); index++ {
 		argument := strings.ToLower(command.Argv[index])
 		switch argument {
@@ -2659,10 +2662,26 @@ func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state stri
 			if !findPatternIsCleanupOnly(command.Argv[index], argument == "-iname") {
 				return false
 			}
-			named = true
+			named = named || !acted
+		case "-delete":
+			if !named {
+				return false
+			}
+			acted = true
+		case "-exec", "-execdir", "-ok", "-okdir":
+			if !named {
+				return false
+			}
+			acted = true
+			// The command of the action ends at ';' or '+'; its words are
+			// not find tests.
+			for index+1 < len(command.Argv) && command.Argv[index+1] != ";" && command.Argv[index+1] != "+" {
+				index++
+			}
+			index++
 		}
 	}
-	return named
+	return named && acted
 }
 
 // protectedStateNameSamples are names a file of the active state can have:

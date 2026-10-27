@@ -238,6 +238,13 @@ func TestR105GAP2075FindDeleteOfProtectedStateNames(t *testing.T) {
 		{"find root iname codex bracket log", "find ~/.defenseclaw -iname 'CODEX*[.LOG]*' -delete", true, ""},
 		{"find HOME suppress bracket tmp", "find $HOME/.defenseclaw -name 'suppress*[.tmp]*' -delete", true, ""},
 		{"find root unterminated bracket", "find ~/.defenseclaw -name 'codex*[.log' -delete", true, ""},
+		// find runs its expression left to right: an action before the
+		// name test removes every entry (pod check 3).
+		{"find root delete before name log", "find ~/.defenseclaw -delete -name '*.log'", true, ""},
+		{"find root type delete before name tmp", "find ~/.defenseclaw -type f -delete -name '*.tmp'", true, ""},
+		{"find HOME delete before iname LOG", "find $HOME/.defenseclaw -delete -iname '*.LOG'", true, ""},
+		{"find root depth delete before name jsonl", "find ~/.defenseclaw -depth -delete -name '*.jsonl'", true, ""},
+		{"find root mtime delete before name log", "find ~/.defenseclaw -mtime +7 -delete -name '*.log'", true, ""},
 		// Log cleanup from the root stays allowed with no state finding.
 		{"find root log cleanup", "find ~/.defenseclaw -name '*.log' -mtime +7 -delete", false, ""},
 		{"find root tmp cleanup", "find ~/.defenseclaw -type f -name '*.tmp' -delete", false, ""},
@@ -247,6 +254,8 @@ func TestR105GAP2075FindDeleteOfProtectedStateNames(t *testing.T) {
 		{"find root escaped log", `find ~/.defenseclaw -name '*\.log' -delete`, false, ""},
 		{"find root rotated digit logs", "find ~/.defenseclaw -name 'gateway.log.[0-9]*' -delete", false, ""},
 		{"find logs tree", "find ~/.defenseclaw/logs -mtime +7 -delete", false, ""},
+		{"find root log cleanup delete twice", "find ~/.defenseclaw -name '*.log' -delete -delete", false, ""},
+		{"find root log cleanup then mtime", "find ~/.defenseclaw -name '*.log' -delete -mtime +7", false, ""},
 	}
 	for _, mode := range []string{"observe", "action"} {
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)
