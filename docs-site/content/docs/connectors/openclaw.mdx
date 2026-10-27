@@ -163,7 +163,7 @@ OpenClaw is a proxy connector with no hooks. While the gateway is down, requests
 
 ## Subprocess policy
 
-The policy is `shims` on every platform. Setup installs PATH shims for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` that send each invocation to the gateway's tool-inspection endpoint before running the real binary. They inspect those command paths only and give no syscall, filesystem or network isolation.
+The policy is `shims` on every platform. Setup installs PATH shims for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` that send each invocation to the gateway's tool-inspection endpoint before running the real binary. They inspect those command paths only and give no syscall, filesystem or network isolation. While the gateway is not running, the shims follow the policy: the default and permissive policies print `DefenseClaw warning: gateway peer is unverified or unavailable; running <tool> without inspection`, write a `hook-failures.jsonl` record and run the real tool; the strict policy refuses it (`DefenseClaw: gateway peer is unverified or unavailable — refusing to exec <tool>`, exit 1).
 
 OpenClaw does not run in an OpenShell sandbox. The legacy standalone sandbox that ran it as a separate Linux user was removed. A host that still carries it removes what it left by hand ([remove a retired standalone sandbox](/docs/sandboxes/first-session)). OpenShell support for OpenClaw is pending in the [capability matrix](/docs/connectors/capability-matrix).
 
