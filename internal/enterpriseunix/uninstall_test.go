@@ -521,6 +521,10 @@ func TestUninstallPurgeNamesOnlyWhatEachAccountHad(t *testing.T) {
 	if got := purgedUserChange("erin", purgedUserDetail{UVCache: true}); got != "removed DefenseClaw's entries in the uv cache (~/.cache/uv) of user erin" {
 		t.Fatalf("an account with only uv cache entries: %q", got)
 	}
+	// GAP-2015: where the purge kept the OpenHands/OmniGent backups.
+	if got := purgedUserChange("frank", purgedUserDetail{Data: true, RemovedConnectorBackups: "/home/frank/.defenseclaw-removed-connector-backups/omnigent"}); !strings.Contains(got, "were kept in /home/frank/.defenseclaw-removed-connector-backups/omnigent") {
+		t.Fatalf("an account with kept removed-connector backups: %q", got)
+	}
 }
 
 // GAP-1186: an account enrolled only for machine-policy connectors (Claude

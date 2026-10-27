@@ -4188,6 +4188,9 @@ type purgedUserDetail struct {
 	Binaries bool `json:"binaries"`
 	Gateway  bool `json:"gateway"`
 	UVCache  bool `json:"uv_cache"`
+	// RemovedConnectorBackups names the folders the OpenHands/OmniGent
+	// backups were moved to instead of being deleted (GAP-2015).
+	RemovedConnectorBackups string `json:"removed_connector_backups"`
 }
 
 // purgedUserChange names what the purge removed for user: only what it
@@ -4216,6 +4219,9 @@ func purgedUserChange(user string, detail purgedUserDetail) string {
 	}
 	if detail.Gateway {
 		text += ", after stopping its per-user gateway"
+	}
+	if detail.RemovedConnectorBackups != "" {
+		text += "; the copies DefenseClaw saved of its OpenHands/OmniGent files were kept in " + detail.RemovedConnectorBackups + " (copy back what you need, then delete them)"
 	}
 	if detail.Backup {
 		text += "; the data of its own DefenseClaw install from before the managed deployment (config, secrets, audit history, policies) was moved to ~/.defenseclaw-backup-<UTC time> in its home first, with a DEFENSECLAW-BACKUP.txt that says how to restore it"

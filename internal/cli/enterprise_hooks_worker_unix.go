@@ -261,6 +261,9 @@ type enterpriseHookPurgeDetail struct {
 	Binaries bool `json:"binaries,omitempty"`
 	Gateway  bool `json:"gateway,omitempty"`
 	UVCache  bool `json:"uv_cache,omitempty"`
+	// RemovedConnectorBackups names the folders the OpenHands/OmniGent
+	// backups were moved to, comma separated (GAP-2015).
+	RemovedConnectorBackups string `json:"removed_connector_backups,omitempty"`
 }
 
 type enterpriseHookWorkerResponse struct {
@@ -669,7 +672,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 			var summary enterprisehooks.PurgeSummary
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
-				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Backup: summary.Backup, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache}
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Backup: summary.Backup, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", ")}
 			}
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)
