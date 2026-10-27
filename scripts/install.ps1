@@ -3726,15 +3726,24 @@ function Restore-Slot([string]$Slot) {
     $planPath = Join-Path $Slot "RESTORE.json"
     $failed = ""
     $guardSHA256 = ""
+    # Schema 2 plans prove a moved tree by each file's path, size and write
+    # time, and a single file by its SHA-256. Schema 1 (1.0.4) hashed every
+    # file of both venvs up to four times in PowerShell, so a failed upgrade
+    # restored for 12-25 minutes with every agent hook closed (GAP-2127). A
+    # same-volume rename keeps all three; a write in between changes them.
+    # The restored programs are still proven by their SHA-256 (Assert-BinDirRestored).
+    $planSchema = 2
     $digest = {
-        param([string]$Path)
+        param([string]$Path, [int]$Schema)
         $root = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
         $items = @($root)
         if ($root.PSIsContainer) { $items += @(Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop | Sort-Object FullName) }
         $lines = foreach ($item in $items) {
             if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Cannot prove restored contents through $($item.FullName)" }
             $name = $item.FullName.Substring($root.FullName.Length)
-            if ($item.PSIsContainer) { "directory:$name" } else { "file:$name`:$(Get-Sha256 $item.FullName)" }
+            if ($item.PSIsContainer) { "directory:$name" }
+            elseif ($Schema -ge 2 -and $root.PSIsContainer) { "file:$name`:$($item.Length):$($item.LastWriteTimeUtc.Ticks)" }
+            else { "file:$name`:$(Get-Sha256 $item.FullName)" }
         }
         $hash = [Security.Cryptography.SHA256]::Create()
         try { return ([BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))))).Replace("-", "").ToLowerInvariant() }
@@ -3757,10 +3766,13 @@ function Restore-Slot([string]$Slot) {
         # restore before any data or environment moves, with the slot and its
         # COMPLETE marker kept. Restore-BinDir is idempotent, so a resumed
         # restore runs it again and proves the bytes.
+        Convert-HooksForRestore $Slot
         Restore-BinDir (Join-Path $Slot "bin") $guardSHA256
         if (Test-Path -LiteralPath $planPath) {
             $plan = [IO.File]::ReadAllText($planPath) | ConvertFrom-Json -ErrorAction Stop
-            if ($plan.Schema -ne 1 -or $plan.FailedName -notmatch '^\.failed-[A-Za-z0-9-]+$') { throw "Invalid restore plan at $planPath" }
+            if ($plan.Schema -notin @(1, 2) -or $plan.FailedName -notmatch '^\.failed-[A-Za-z0-9-]+$') { throw "Invalid restore plan at $planPath" }
+            # A plan an earlier run wrote keeps the proof it was written with.
+            $planSchema = [int]$plan.Schema
             $failed = Join-Path $DataDir $plan.FailedName
         } else {
             $failed = New-FailedInstallDirectory
@@ -3768,7 +3780,7 @@ function Restore-Slot([string]$Slot) {
             $moves = New-Object System.Collections.Generic.List[object]
             $add = {
                 param([string]$From, [string]$To)
-                if (Test-Path -LiteralPath $From) { $moves.Add(@{ From = $From; To = $To; Digest = (& $digest $From); Done = $false }) }
+                if (Test-Path -LiteralPath $From) { $moves.Add(@{ From = $From; To = $To; Digest = (& $digest $From $planSchema); Done = $false }) }
             }
             $liveData = @(Get-DataEntries)
             $savedData = @(Get-ChildItem -LiteralPath (Join-Path $Slot "data") -Force -ErrorAction Stop)
@@ -3790,7 +3802,7 @@ function Restore-Slot([string]$Slot) {
             foreach ($entry in @($savedData | Where-Object { -not (Test-ConnectorRecoveryArtifactName $_.Name) })) {
                 & $add $entry.FullName (Join-Path $DataDir $entry.Name)
             }
-            $plan = @{ Schema = 1; FailedName = (Split-Path -Leaf $failed); Moves = @($moves.ToArray()) }
+            $plan = @{ Schema = $planSchema; FailedName = (Split-Path -Leaf $failed); Moves = @($moves.ToArray()) }
             & $save
         }
         $parent = Get-Item -LiteralPath $failed -Force -ErrorAction Stop
@@ -3802,18 +3814,18 @@ function Restore-Slot([string]$Slot) {
             }
             if ($move.Done) { continue }
             if ((Test-Path -LiteralPath $move.From) -and -not (Test-Path -LiteralPath $move.To)) {
-                if ((& $digest $move.From) -cne $move.Digest) { throw "Restore source changed: $($move.From)" }
+                if ((& $digest $move.From $planSchema) -cne $move.Digest) { throw "Restore source changed: $($move.From)" }
                 Move-Path $move.From $move.To 60
             }
             if ((Test-Path -LiteralPath $move.From) -or -not (Test-Path -LiteralPath $move.To) -or
-                (& $digest $move.To) -cne $move.Digest) { throw "Could not prove the restore move from $($move.From) to $($move.To)" }
+                (& $digest $move.To $planSchema) -cne $move.Digest) { throw "Could not prove the restore move from $($move.From) to $($move.To)" }
             $move.Done = $true
             & $save
         }
         Restore-ExternalConfig $Slot
         Assert-BinDirRestored (Join-Path $Slot "bin") $guardSHA256
         foreach ($move in $plan.Moves) {
-            if ((& $digest $move.To) -cne $move.Digest) { throw "Restored contents changed: $($move.To)" }
+            if ((& $digest $move.To $planSchema) -cne $move.Digest) { throw "Restored contents changed: $($move.To)" }
         }
         # Retire COMPLETE only after all data and environment proofs pass.
         # Partial cleanup can then never masquerade as a restorable snapshot.
@@ -4390,9 +4402,10 @@ function Complete-StoppedConnectorReconcile {
 }
 
 $OutageOpenNoticePython = @'
-# GAP-1885: "notice" when this config saves no hook fail mode (global or for
-# an active connector) and a per-user connector now lets a gateway outage
-# run (the default and permissive tiers); 1.0.2 and 1.0.3 closed it.
+# GAP-1885: "notice" when an active per-user connector whose hook fail mode
+# this config does not save (for it, or globally) now lets a gateway outage
+# run (the default and permissive tiers); 1.0.2 and 1.0.3 closed it. A mode
+# saved for one connector says nothing about another one.
 try:
     from defenseclaw import config as dc_config
     cfg = dc_config.load()
@@ -4403,9 +4416,10 @@ try:
         for name in names:
             override = guard._connector_override(name)
             if override is not None and str(override.hook_fail_mode or "").strip():
-                saved = True
-        if not saved and any(guard.effective_hook_fail_mode(name) == "open" for name in names):
-            print("notice")
+                continue
+            if not saved and guard.effective_hook_fail_mode(name) == "open":
+                print("notice")
+                break
 except Exception:
     pass
 '@
@@ -4717,6 +4731,26 @@ function Convert-HooksForRollback([string]$From, [string]$BackTo) {
             "After the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as " +
             "the cmd.exe entries that run defenseclaw-hook.exe in %USERPROFILE%\.claude\settings.json; remove them by hand")
     }
+}
+
+function Convert-HooksForRestore([string]$Slot) {
+    # A failed upgrade's gateway already wrote its hook entries, and the one-
+    # line Claude Code handler (`<bin>\defenseclaw-gateway.exe launcher-guard
+    # ...`) is a subcommand no release before 1.0.5 has. Restoring 1.0.2-1.0.4
+    # kept it: the older gateway exits 2 ("unknown flag: --connector"), so
+    # Claude Code blocked every tool call, and starting that gateway added its
+    # own handler beside it (rel-1-0-5 GAP-0020). The live gateway is still
+    # the newer one here, so it rewrites those entries
+    # in the form the restored release reads, as 'defenseclaw rollback' does.
+    # A resumed restore runs it again (idempotent) until the programs go back.
+    $back = Read-Text (Join-Path $Slot "VERSION")
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not (Test-Version $back) -or -not (Test-Path -LiteralPath $gateway -PathType Leaf)) { return }
+    if ((Get-NativeOutput $gateway @("--version")) -notmatch '\d+\.\d+\.\d+') { return }
+    $live = $Matches[0]
+    if ([version]$live -le [version]$back) { return }
+    if ((Get-NativeOutput $gateway @("connector", "prepare-rollback", "--help")) -notmatch 'prepare-rollback') { return }
+    Invoke-Quietly { Convert-HooksForRollback $live $back }
 }
 
 function Restore-HooksAfterAbortedRollback {

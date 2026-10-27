@@ -3551,6 +3551,7 @@ def test_snapshot_restore_preserves_failed_moves_and_can_resume(tmp_path: Path, 
         if name in {
             "Get-Sha256", "Get-DataEntries", "Read-Text", "Restore-ExternalConfig",
             "Test-ConnectorRecoveryArtifactName", "Restore-Slot", "Invoke-Quietly", "Get-LifecycleNextStep",
+            "Convert-HooksForRestore", "Test-Version", "Get-NativeOutput",
         }
     )
     script = f"""
@@ -3558,6 +3559,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $DataDir = '{data}'
 $Slot = '{slot}'
+$BinDir = Join-Path $DataDir 'bin'
 $Venv = Join-Path $DataDir '.venv'
 $InstallerDir = Join-Path $DataDir 'installer'
 $NotData = @('.venv', 'installer', 'previous.new', '.failed-*')
@@ -5513,7 +5515,7 @@ def _restore_case_functions() -> str:
     names = (
         "Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace", "Copy-BinDir", "Clear-AsideCopies", "Restore-BinDir",
         "Assert-BinDirRestored", "Move-Path", "Get-DataEntries", "Test-ConnectorRecoveryArtifactName",
-        "Restore-Slot", "Invoke-Quietly",
+        "Restore-Slot", "Invoke-Quietly", "Convert-HooksForRestore", "Test-Version", "Get-NativeOutput",
         "Read-Text", "Restore-ExternalConfig", "Undo-HookFirst", "Undo-Snapshot",
         "Install-HookFirst", "Save-HookCloser", "Clear-StagedRelease", "Resume-InterruptedRun", "Publish-PreviousSlot",
         "Remove-Hold", "Restore-Live", "Restore-LiveTree", "Move-LiveTo", "Set-RecoveryPending",
@@ -7624,10 +7626,13 @@ def test_the_outage_notice_runs_under_the_installers_readonly_home(tmp_path: Pat
         ("  connectors:\n    claudecode: {}\n    codex: {}\n", True),
         ("  hook_fail_mode: closed\n  connectors:\n    claudecode: {}\n", False),
         ("  hook_fail_mode: open\n  connectors:\n    claudecode: {}\n", False),
-        ("  connectors:\n    claudecode:\n      hook_fail_mode: closed\n    codex: {}\n", False),
+        ("  connectors:\n    claudecode:\n      hook_fail_mode: closed\n", False),
+        ("  connectors:\n    claudecode:\n      hook_fail_mode: closed\n    codex: {}\n", True),
+        ("  connectors:\n    claudecode: {}\n    codex:\n      hook_fail_mode: closed\n    copilot:\n      hook_fail_mode: closed\n", True),
+        ("  connectors:\n    claudecode:\n      hook_fail_mode: open\n    codex:\n      hook_fail_mode: closed\n", False),
         ("  rule_pack: strict\n  connectors:\n    claudecode: {}\n", False),
     ],
-    ids=["unset", "saved-closed", "saved-open", "connector-closed", "strict"],
+    ids=["unset", "saved-closed", "saved-open", "connector-closed", "other-connector-unset", "t2-codex-copilot-closed", "every-connector-saved", "strict"],
 )
 def test_an_upgrade_from_1_0_3_says_once_that_outages_now_run(tmp_path: Path, guardrail: str, notice: bool) -> None:
     # GAP-1885 (lead 13:58, failmode's exact sentence): a 1.0.2 or 1.0.3
@@ -7635,7 +7640,9 @@ def test_an_upgrade_from_1_0_3_says_once_that_outages_now_run(tmp_path: Path, gu
     # outage; after the upgrade the default and permissive tiers let them
     # run with a warning (owner decision 2026-10-23). Both installers say so
     # once, after "Upgraded from"; a saved mode (which now wins), the strict
-    # tier, a managed install or an upgrade from 1.0.4 say nothing.
+    # tier, a managed install or an upgrade from 1.0.4 say nothing. A mode
+    # saved for Codex and Copilot only still leaves an unsaved Claude Code
+    # open, so the notice is said (T2 TST-34170).
     sh_py, ps_py = _outage_notice_python()
     assert sh_py == ps_py
     home = tmp_path / ".defenseclaw"
@@ -7869,3 +7876,141 @@ if (-not $r) {{ throw 'no report' }}
         body = _ps1_function(name)
         parsed = [line for line in body.splitlines() if "$probe = Get-NativeProbe" in line and "--help" not in line]
         assert parsed and all(line.rstrip().endswith("-Json") for line in parsed), (name, parsed)
+
+
+# A failed upgrade to 1.0.5 that restored 1.0.2-1.0.4 kept the Claude Code
+# PreToolUse handler the 1.0.5 gateway had written,
+# "<bin>\\defenseclaw-gateway.exe launcher-guard <bin>\\defenseclaw-hook.exe hook
+# --connector claudecode": no earlier release has that subcommand, so every
+# Claude Code tool call was blocked (rel-1-0-5 GAP-0020). Restore-Slot
+# asks the still-live newer gateway to rewrite its entries in the form the
+# restored release reads (prepare-rollback, as `defenseclaw rollback` does),
+# before the programs go back, and only when it really goes back a release.
+def test_a_restore_rewrites_the_newer_hook_entries_before_the_programs_go_back() -> None:
+    restore = _ps1_function("Restore-Slot")
+    assert "Convert-HooksForRestore $Slot" in restore
+    assert restore.index("Convert-HooksForRestore $Slot") < restore.index("Restore-BinDir (Join-Path $Slot")
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("back", "live", "has_command", "converted"),
+    [
+        ("1.0.2", "1.0.5", True, "1.0.5>1.0.2"),
+        ("1.0.4", "1.0.5", True, "1.0.5>1.0.4"),
+        ("1.0.5", "1.0.5", True, ""),
+        ("1.0.2", "1.0.2", True, ""),
+        ("", "1.0.5", True, ""),
+        ("1.0.2", "1.0.5", False, ""),
+    ],
+    ids=["from-1.0.2", "from-1.0.4", "same-version", "old-gateway-still-live", "first-install", "no-command"],
+)
+def test_convert_hooks_for_restore_goes_back_only_to_an_older_release(
+    tmp_path: Path, back: str, live: str, has_command: bool, converted: str
+) -> None:
+    slot = tmp_path / "previous.new"
+    slot.mkdir()
+    if back:
+        (slot / "VERSION").write_text(back + "\n", encoding="ascii")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "defenseclaw-gateway.exe").write_bytes(b"")
+    help_text = "Usage:\n  defenseclaw-gateway connector prepare-rollback [flags]\n" if has_command else "Available Commands:\n  setup\n"
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        + f"$BinDir = '{bindir}'\n"
+        + "function Write-Warn([string]$m) { Write-Output \"WARN $m\" }\n"
+        + "function Get-NativeOutput([string]$FilePath, [string[]]$Arguments = @()) {\n"
+        + f"    if ($Arguments[0] -eq '--version') {{ return 'defenseclaw-gateway version {live} (commit=abc)' }}\n"
+        + f"    return @'\n{help_text}'@\n}}\n"
+        + "function Convert-HooksForRollback([string]$From, [string]$BackTo) { Write-Output \"CONVERTED=$From>$BackTo\" }\n"
+        + _ps1_function("Read-Text")
+        + _ps1_function("Test-Version")
+        + _ps1_function("Invoke-Quietly")
+        + _ps1_function("Convert-HooksForRestore")
+        + f"\nConvert-HooksForRestore '{slot}'\nWrite-Output 'END'\n"
+    )
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "END" in result.stdout and "WARN" not in out, out
+    lines = [line for line in result.stdout.splitlines() if line.startswith("CONVERTED=")]
+    assert lines == ([f"CONVERTED={converted}"] if converted else []), out
+
+
+# GAP-2127: a failed Windows upgrade restored for 12-25 minutes with every
+# agent hook closed: Restore-Slot's move plan hashed every file of the live
+# and the saved venv (thousands) up to four times. Schema 2 plans prove a
+# moved tree by path, size and write time and hash only single files; a
+# write to a moved tree still fails the proof, and a Schema 1 plan an earlier
+# run wrote is still resumed with the proof it was written with.
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("tamper", [False, True], ids=["restores", "write-between-moves"])
+def test_a_restore_does_not_hash_every_venv_file(tmp_path: Path, tamper: bool) -> None:
+    data = tmp_path / "data"
+    slot = data / "previous.new"
+    files = {data / "config.yaml": "new data", slot / "data" / "config.yaml": "old data", slot / "COMPLETE": ""}
+    for i in range(40):
+        files[data / ".venv" / "Lib" / f"m{i}.py"] = f"new {i}"
+        files[slot / "venv" / "Lib" / f"m{i}.py"] = f"old {i}"
+    for path, body in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="ascii")
+    sha = _ps1_function("Get-Sha256").replace("function Get-Sha256(", "function Get-Sha256Real(", 1)
+    move = _ps1_function("Move-Path").replace("function Move-Path(", "function Move-PathReal(", 1)
+    functions = "\n".join(
+        _ps1_function(name)
+        for name in (
+            "Get-DataEntries", "Read-Text", "Restore-ExternalConfig", "Test-ConnectorRecoveryArtifactName",
+            "Restore-Slot", "Invoke-Quietly", "Get-LifecycleNextStep", "Convert-HooksForRestore", "Test-Version",
+            "Get-NativeOutput",
+        )
+    )
+    script = f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$Slot = '{slot}'
+$BinDir = Join-Path $DataDir 'bin'
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+$NotData = @('.venv', 'installer', 'previous.new', '.failed-*')
+$Ver = '1.0.5'
+$Local = ''
+$script:hashes = 0
+$script:tamper = ${'true' if tamper else 'false'}
+function Write-Warn([string]$Message) {{ Write-Host $Message }}
+function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
+function Remove-FailedInstall([string]$Path) {{ Remove-Tree $Path }}
+function Restore-BinDir {{ }}
+function Assert-BinDirRestored {{ }}
+function New-FailedInstallDirectory {{
+    $path = Join-Path $DataDir ('.failed-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $path | Out-Null
+    return $path
+}}
+{sha}
+function Get-Sha256([string]$Path) {{ $script:hashes++; Get-Sha256Real $Path }}
+{move}
+function Move-Path([string]$From, [string]$To, [int]$Seconds = 0) {{
+    Move-PathReal $From $To 0
+    if ($script:tamper -and $To -eq $Venv) {{ [IO.File]::AppendAllText((Join-Path $Venv 'Lib/m7.py'), ' changed') }}
+}}
+{functions}
+try {{ Restore-Slot $Slot | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output "REFUSED: $($_.Exception.Message)" }}
+Write-Output "HASHES=$($script:hashes)"
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    hashes = int(re.search(r"HASHES=(\d+)", out).group(1))
+    if tamper:
+        assert "REFUSED: Could not prove the restore move" in out, out
+        return
+    assert "RESTORED" in out, out
+    assert (data / ".venv" / "Lib" / "m7.py").read_text(encoding="ascii") == "old 7"
+    # config.yaml is hashed by plan, before and after its move and at the end; no venv file is.
+    assert hashes <= 8, out
+    restore = _ps1_function("Restore-Slot")
+    assert "$plan.Schema -notin @(1, 2)" in restore and "$planSchema = [int]$plan.Schema" in restore
