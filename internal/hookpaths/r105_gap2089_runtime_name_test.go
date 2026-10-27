@@ -33,6 +33,14 @@ func TestActionRuntimeEvaluatedNameKeepsFunctionBodyChecked(t *testing.T) {
 		`x='a[$(f""oo)]'; b[x]=1`,
 		`builtin mapfile -C f""oo -c 1 arr <<< x`,
 		`for ((i='a[$(f""oo)]'; i < 1; i++)); do :; done`,
+		// zsh (the macOS agent shell) calls the function from a glob
+		// qualifier, prompt expansion or a zstyle -e value (RV5-1).
+		`print -l *(e:f""oo:)`,
+		`print -l *(+f""oo)`,
+		`setopt promptsubst; print -P '$(f""oo)'`,
+		`print -rP -- 'x'`,
+		`zstyle -e ':x:*' y 'reply=(f""oo)'`,
+		`PROMPT='$(f""oo)'`,
 	} {
 		command := body + call
 		if got := ActionCommandDecision(command, cwd, home); got == "" {
@@ -44,6 +52,8 @@ func TestActionRuntimeEvaluatedNameKeepsFunctionBodyChecked(t *testing.T) {
 		`n=3; echo "$n" "${n:-0}" "$@"`,
 		`printf '%s\n' done; echo "${PWD}"`,
 		`for f in a b; do echo "$f"; done`,
+		`print -l -- a b`,
+		`print -r -- done`,
 	} {
 		if got := ActionCommandDecision(body+call, cwd, home); got != "" {
 			t.Errorf("ActionCommandDecision(%q) = %q, want allow", body+call, got)

@@ -356,7 +356,8 @@ func actionEvaluatesRuntimeNames(file *syntax.File, uncalled map[*syntax.FuncDec
 				found = true
 			} else if node.Name != nil {
 				switch node.Name.Value {
-				case "PS0", "PS1", "PS2", "PS3", "PS4", "PROMPT_COMMAND":
+				case "PS0", "PS1", "PS2", "PS3", "PS4", "PROMPT_COMMAND",
+					"PROMPT", "PROMPT2", "PROMPT3", "PROMPT4", "RPROMPT", "RPROMPT2", "RPS1", "RPS2", "SPROMPT":
 					found = true
 				}
 			} else if node.Value != nil {
@@ -366,6 +367,17 @@ func actionEvaluatesRuntimeNames(file *syntax.File, uncalled map[*syntax.FuncDec
 			}
 		case *syntax.ArrayElem:
 			found = !actionPlainSubscript(node.Index)
+		case *syntax.ExtGlob:
+			// zsh reads *(e:code:) and *(+name) as glob qualifiers that
+			// run code for every file (RV5-1).
+			found = true
+		case *syntax.Word:
+			// A static word that holds a command substitution is code
+			// for whatever evaluates it: zsh print -P with promptsubst,
+			// ${(e)...}, zstyle -e, a later eval (RV5-1).
+			if value, fixed := StaticWord(node, ""); fixed && (strings.Contains(value, "$(") || strings.Contains(value, "`")) {
+				found = true
+			}
 		case *syntax.DeclClause:
 			found = node.Variant != nil && node.Variant.Value == "nameref"
 		case *syntax.CallExpr:
@@ -414,13 +426,28 @@ func actionCallEvaluatesNames(args []*syntax.Word) bool {
 				i++
 			}
 			continue
-		case "mapfile", "readarray", "let", "read", "unset", "getopts", "wait", "fc",
+		case "mapfile", "readarray", "let", "read", "unset", "getopts", "wait", "fc", "sched", "zstyle", "zle",
 			"declare", "typeset", "local", "export", "readonly":
 			return true
 		case "printf":
 			if i+1 < len(args) {
 				option, fixed := StaticWord(args[i+1], "")
 				return !fixed || strings.HasPrefix(option, "-v")
+			}
+		case "print":
+			// zsh print -P expands prompt escapes (with promptsubst, a
+			// command substitution) and print -v assigns a name (RV5-1).
+			for _, arg := range args[i+1:] {
+				option, fixed := StaticWord(arg, "")
+				if !fixed {
+					return true
+				}
+				if option == "--" || option == "-" || !strings.HasPrefix(option, "-") {
+					break
+				}
+				if strings.ContainsAny(option, "Pv") {
+					return true
+				}
 			}
 		case "test", "[":
 			for _, arg := range args[i+1:] {
