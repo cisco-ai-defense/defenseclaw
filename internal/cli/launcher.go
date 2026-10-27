@@ -211,7 +211,7 @@ var launcherClient *sandboxapi.Client
 // host. The policy comes from the user's own sandbox daemon, which the
 // managed gateway feeds, so a per-user config.yaml is never read; the daemon
 // is started when it is not running.
-func launcherSandboxPreRun(cmd *cobra.Command, _ []string) error {
+func launcherSandboxPreRun(cmd *cobra.Command, args []string) error {
 	cleanup := cmd.Annotations[sandboxConfigOptional] == "true"
 	if err := sandboxHostRefusal(runtime.GOOS, runtime.GOARCH, cleanup); err != nil {
 		return withExitCode(err, 3)
@@ -226,7 +226,9 @@ func launcherSandboxPreRun(cmd *cobra.Command, _ []string) error {
 		return withExitCode(err, 3)
 	}
 	launcherClient = client
-	if !cleanup {
+	// A run the organization does not allow the account at all starts no
+	// sandbox daemon: the run refuses it in the daemon's words (GAP-0534).
+	if !cleanup && !launcherRunForbidden(cmd, args) {
 		status, err := launcherEnsureDaemon(cmd.Context(), client, runtime.GOOS, os.Getuid(), cmd.ErrOrStderr())
 		if err != nil {
 			// The command that follows reports the unreachable daemon in its
@@ -238,6 +240,33 @@ func launcherSandboxPreRun(cmd *cobra.Command, _ []string) error {
 		cfg = launcherManagedConfig(cfg, status)
 	}
 	return nil
+}
+
+// launcherAccountPolicy is the managed gateway's own policy view of the
+// caller's new run of a harness, asked without the account's sandbox daemon
+// (sandboxManagedAccountPolicy); a seam for tests.
+var launcherAccountPolicy = sandboxManagedAccountPolicy
+
+// launcherRunForbidden reports a `sandbox run` (args: its harness first) of
+// an account whose organization does not allow it sandboxes, by the managed
+// gateway's settled view: probing the daemon's socket would start it, which
+// then stayed running and wrote its state for an account that can run no
+// sandbox (GAP-0534). A provisional view, an allowed one and a gateway that
+// does not answer leave it to the daemon, as before.
+func launcherRunForbidden(cmd *cobra.Command, args []string) bool {
+	if cmd == nil || cmd.Name() != "run" || cmd.Parent() == nil || cmd.Parent().Name() != "sandbox" || len(args) == 0 {
+		return false
+	}
+	spec, err := sandboxcli.ResolveHarness(args[0])
+	if err != nil {
+		return false
+	}
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	view, err := launcherAccountPolicy(ctx, spec.Name)
+	return err == nil && view != nil && !view.Provisional && !view.Allowed
 }
 
 // launcherManagedConfig overlays the settings the user's sandbox daemon runs
