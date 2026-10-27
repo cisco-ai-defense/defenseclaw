@@ -38,6 +38,8 @@ import (
 type claudeCodeHookRequest struct {
 	watchHome            string
 	managedWatch         bool
+	reportedCWD          string                 // cwd as sent, before hookCWDForContext; names watch paths only (GAP-0066)
+	reportedNewCWD       string                 // new_cwd as sent, same use
 	HookEventName        string                 `json:"hook_event_name"`
 	SessionID            string                 `json:"session_id,omitempty"`
 	TurnID               string                 `json:"turn_id,omitempty"`
@@ -339,6 +341,26 @@ func (req claudeCodeHookRequest) withWatchHome(ctx context.Context) claudeCodeHo
 	return req
 }
 
+// managedWatchRoot is the project a managed caller's Claude Code watches when
+// the gateway service account cannot resolve it (sanitizeHookCWD returns ""
+// for a directory in another user's home on Linux and macOS). The reported
+// directory is kept lexically only inside the verified caller's home, as the
+// unified pipeline's managedWatchCWD does. It names watch paths only; policy
+// reads still use the resolved CWD (GAP-0066).
+func (req claudeCodeHookRequest) managedWatchRoot() string {
+	if !req.managedWatch || req.sandboxView != nil || req.watchHome == "" || req.watchHome == unresolvedCallerHome {
+		return ""
+	}
+	cwd := req.reportedNewCWD
+	if cwd == "" {
+		cwd = req.reportedCWD
+	}
+	if !insideHome(req.watchHome, cwd) {
+		return ""
+	}
+	return filepath.Clean(cwd)
+}
+
 // managedCallerWatchContext reports a request served on behalf of another
 // account: a call on the managed hook socket (the verified peer; that
 // server's base context carries no service-account mark) or a call to a
@@ -580,6 +602,9 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 	watchRoot := strings.TrimSpace(req.NewCWD)
 	if watchRoot == "" {
 		watchRoot = req.CWD
+	}
+	if watchRoot == "" {
+		watchRoot = req.managedWatchRoot()
 	}
 	if event == "SessionStart" {
 		output := map[string]interface{}{

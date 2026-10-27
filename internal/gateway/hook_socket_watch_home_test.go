@@ -4,7 +4,10 @@
 package gateway
 
 import (
+	"encoding/json"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -42,5 +45,61 @@ func TestHookSocketCallWatchesTheVerifiedPeerHome(t *testing.T) {
 	own := (claudeCodeHookRequest{HookEventName: "SessionStart", CWD: project}).withWatchHome(t.Context())
 	if own.managedWatch {
 		t.Fatal("a per-user gateway request was treated as managed")
+	}
+}
+
+// GAP-0066 live shape (managed RHEL, real Claude Code SessionStart on the
+// hook socket): the caller's project is in its own home, which the gateway
+// service account cannot resolve, so the evaluator's CWD is empty. Its
+// answer still watches the caller's project, never the service account's.
+func TestHookSocketEvaluatorWatchesTheUnresolvableCallerProject(t *testing.T) {
+	callerHome := t.TempDir()
+	serviceHome := t.TempDir()
+	project := filepath.Join(callerHome, "not-resolvable", "work") // does not exist: sanitizeHookCWD returns ""
+	t.Setenv("HOME", serviceHome)
+	t.Setenv("USERPROFILE", serviceHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(serviceHome, ".claude"))
+	ctx := withManagedHookPeer(t.Context(), managedHookPeer{UID: 1001, Home: callerHome})
+	for _, tc := range []struct {
+		name  string
+		event string
+		body  string
+		root  string
+	}{
+		{"session start", "SessionStart", `{"hook_event_name":"SessionStart","cwd":` + strconv.Quote(project) + `}`, project},
+		{"cwd changed", "CwdChanged", `{"hook_event_name":"CwdChanged","cwd":` + strconv.Quote(callerHome) + `,"new_cwd":` + strconv.Quote(project) + `}`, project},
+		{"outside the caller home", "SessionStart", `{"hook_event_name":"SessionStart","cwd":` + strconv.Quote(filepath.Join(serviceHome, "x")) + `}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var payload map[string]interface{}
+			if err := json.Unmarshal([]byte(tc.body), &payload); err != nil {
+				t.Fatal(err)
+			}
+			req := decodeClaudeCodeRequestForContext(ctx, []byte(tc.body), payload)
+			out := claudeCodeOutput(req, "allow", "allow", "", "")
+			var paths []string
+			if specific, ok := out["hookSpecificOutput"].(map[string]interface{}); ok {
+				paths, _ = specific["watchPaths"].([]string)
+			} else {
+				paths, _ = out["watchPaths"].([]string)
+			}
+			if containsString(paths, filepath.Join(serviceHome, ".claude", "settings.json")) {
+				t.Fatalf("service account watch path leaked: %v", paths)
+			}
+			if !containsString(paths, filepath.Join(callerHome, ".claude", "settings.json")) {
+				t.Fatalf("caller home watch path missing: %v", paths)
+			}
+			if tc.root == "" {
+				for _, p := range paths {
+					if strings.HasPrefix(p, serviceHome) {
+						t.Fatalf("a path outside the caller home was watched: %v", paths)
+					}
+				}
+				return
+			}
+			if !containsString(paths, filepath.Join(tc.root, ".mcp.json")) {
+				t.Fatalf("caller project watch path missing: %v", paths)
+			}
+		})
 	}
 }

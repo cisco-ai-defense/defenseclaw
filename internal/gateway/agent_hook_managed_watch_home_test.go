@@ -49,22 +49,22 @@ func TestManagedProfileAnswerWatchesTheVerifiedCallerHome(t *testing.T) {
 					ctx = withManagedHookPeer(t.Context(), managedHookPeer{UID: 1001, Home: tc.home})
 				}
 				req := (agentHookRequest{ConnectorName: "claudecode", HookEventName: "SessionStart", CWD: tc.cwd, ReportedCWD: project}).withManagedWatchHome(ctx)
-			resp := agentHookResponseForProfile(profile, req, "allow", "allow", "NONE", "", nil, "action", false, profile.Capabilities)
-			specific, _ := resp.HookOutput["hookSpecificOutput"].(map[string]interface{})
-			paths, ok := specific["watchPaths"].([]string)
-			if !ok {
-				t.Fatalf("SessionStart answer has no watchPaths list: %#v", resp.HookOutput)
-			}
-			if containsString(paths, filepath.Join(serviceHome, ".claude", "settings.json")) {
-				t.Fatalf("service account watch path leaked: %v", paths)
-			}
-			if got := containsString(paths, filepath.Join(callerHome, ".claude", "settings.json")); got != tc.wantCaller {
-				t.Fatalf("caller watch path present=%v, want %v: %v", got, tc.wantCaller, paths)
-			}
-			if wantProject := tc.cwd != "" || tc.wantCaller; containsString(paths, filepath.Join(project, ".mcp.json")) != wantProject {
-				t.Fatalf("caller project watch path present=%v, want %v: %v", !wantProject, wantProject, paths)
-			}
-		})
+				resp := agentHookResponseForProfile(profile, req, "allow", "allow", "NONE", "", nil, "action", false, profile.Capabilities)
+				specific, _ := resp.HookOutput["hookSpecificOutput"].(map[string]interface{})
+				paths, ok := specific["watchPaths"].([]string)
+				if !ok {
+					t.Fatalf("SessionStart answer has no watchPaths list: %#v", resp.HookOutput)
+				}
+				if containsString(paths, filepath.Join(serviceHome, ".claude", "settings.json")) {
+					t.Fatalf("service account watch path leaked: %v", paths)
+				}
+				if got := containsString(paths, filepath.Join(callerHome, ".claude", "settings.json")); got != tc.wantCaller {
+					t.Fatalf("caller watch path present=%v, want %v: %v", got, tc.wantCaller, paths)
+				}
+				if wantProject := tc.cwd != "" || tc.wantCaller; containsString(paths, filepath.Join(project, ".mcp.json")) != wantProject {
+					t.Fatalf("caller project watch path present=%v, want %v: %v", !wantProject, wantProject, paths)
+				}
+			})
 		}
 	}
 }
