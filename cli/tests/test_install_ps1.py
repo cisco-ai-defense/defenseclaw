@@ -7668,3 +7668,116 @@ Stop-Watchdog
         assert "Stopping the watchdog" not in out and "KILLED=\n" in out + "\n", out
     if case == "watchdog":
         assert "INFO Stopping the watchdog" in out and "KILLED=70" in out, out
+
+
+# GAP-2056 (install-window round 3 review): the GAP-1465 lock rule of
+# Get-InstallLockLiveOwner runs in PowerShell, not only as source text. A lock
+# without a proc-start record (1.0.2, 1.0.3, released 1.0.4) whose pid names a
+# PowerShell that started after the lock folder was made is a reused pid (""),
+# one made after its PowerShell started keeps it, and a proc-start record
+# decides however old the folder is. On Windows the folder's real
+# CreationTime is set; where it cannot be set (Linux) Get-Item is stubbed.
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("case", "want"),
+    [("lock-older-than-its-powershell", "stale"), ("lock-made-after-its-powershell", "held"), ("recorded-old-lock", "held")],
+)
+def test_get_install_lock_live_owner_takes_over_a_record_less_lock_whose_powershell_started_later(
+    tmp_path: Path, case: str, want: str
+) -> None:
+    lock = tmp_path / ".install.lock"
+    script = (
+        _ps1_function("Get-InstallLockLiveOwner")
+        + f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$Lock = '{lock}'
+$case = '{case}'
+New-Item -ItemType Directory -Path $Lock | Out-Null
+$engine = (Get-Process -Id $PID).Path
+$owner = Start-Process -FilePath $engine -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 90' -PassThru
+try {{
+    $started = (Get-Process -Id $owner.Id).StartTime.ToUniversalTime()
+    Set-Content -LiteralPath (Join-Path $Lock 'pid') -Value $owner.Id -Encoding Ascii
+    if ($case -eq 'recorded-old-lock') {{
+        Set-Content -LiteralPath (Join-Path $Lock 'proc-start') -Value ([string](Get-Process -Id $owner.Id).StartTime.ToFileTimeUtc()) -Encoding Ascii
+    }}
+    $created = if ($case -eq 'lock-made-after-its-powershell') {{ $started.AddSeconds(30) }} else {{ $started.AddHours(-1) }}
+    try {{ (Get-Item -LiteralPath $Lock -Force).CreationTimeUtc = $created }} catch {{ }}
+    if ([Math]::Abs(((Get-Item -LiteralPath $Lock -Force).CreationTimeUtc - $created).TotalSeconds) -gt 1) {{
+        $script:fakeCreated = $created
+        function Get-Item {{ param([string]$LiteralPath, [switch]$Force) [pscustomobject]@{{ CreationTimeUtc = $script:fakeCreated }} }}
+        Write-Output 'creation:stub'
+    }} else {{
+        Write-Output 'creation:real'
+    }}
+    $holder = Get-InstallLockLiveOwner $Lock
+    $result = if ($holder -eq [string]$owner.Id) {{ 'held' }} elseif ($holder -eq '') {{ 'stale' }} else {{ "other:$holder" }}
+    Write-Output "result:$result"
+}} finally {{
+    Stop-Process -Id $owner.Id -Force -ErrorAction SilentlyContinue
+}}
+"""
+    )
+    result = _run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = result.stdout.split()
+    if os.name == "nt":
+        assert "creation:real" in lines, result.stdout
+    assert f"result:{want}" in lines, result.stdout + result.stderr
+
+
+# GAP-2056: Test-OutageOpenNotice (GAP-1885) runs in PowerShell under the
+# installer's StrictMode and ErrorActionPreference Stop, with the notice
+# Python fed to a python.exe in $Venv\\Scripts. A Python that also writes to
+# stderr (a warning) must not lose the notice: Windows PowerShell 5.1 turns a
+# native stderr line into an error record under Stop.
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("guardrail", "stderr", "notice"),
+    [
+        ("  connectors:\n    claudecode: {}\n", False, True),
+        ("  connectors:\n    claudecode: {}\n", True, True),
+        ("  hook_fail_mode: closed\n  connectors:\n    claudecode: {}\n", True, False),
+    ],
+    ids=["unset", "unset-with-stderr", "saved-closed-with-stderr"],
+)
+def test_test_outage_open_notice_runs_in_powershell(tmp_path: Path, guardrail: str, stderr: bool, notice: bool) -> None:
+    _, ps_py = _outage_notice_python()
+    if stderr:
+        ps_py += 'import sys as _gap2056_sys\n_gap2056_sys.stderr.write("DeprecationWarning: a warning on stderr\\n")\n'
+    home = tmp_path / ".defenseclaw"
+    home.mkdir()
+    (home / "config.yaml").write_text("guardrail:\n  enabled: true\n  mode: action\n" + guardrail, encoding="utf-8")
+    if os.name == "nt":
+        venv = Path(sys.executable).parent.parent
+        assert (venv / "Scripts" / "python.exe").is_file(), sys.executable
+    else:
+        venv = tmp_path / "venv"
+        stub = venv / "Scripts" / "python.exe"
+        stub.parent.mkdir(parents=True)
+        stub.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+        stub.chmod(0o755)
+    py_file = tmp_path / "notice.py"
+    py_file.write_text(ps_py, encoding="utf-8")
+    script = (
+        _ps1_function("Test-OutageOpenNotice")
+        + f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
+Remove-Item Env:DEFENSECLAW_CONFIG -ErrorAction SilentlyContinue
+$Venv = '{venv}'
+$DataDir = '{home}'
+$OutageOpenNoticePython = [IO.File]::ReadAllText('{py_file}')
+Write-Output "notice:$(Test-OutageOpenNotice)"
+Write-Output "home-after:$([bool]$env:DEFENSECLAW_HOME)"
+"""
+    )
+    result = _run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = result.stdout.split()
+    assert f"notice:{notice}" in lines, result.stdout + result.stderr
+    assert "home-after:False" in lines, result.stdout
