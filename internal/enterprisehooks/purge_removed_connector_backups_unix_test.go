@@ -61,9 +61,9 @@ func TestPurgeUserStateKeepsTheRemovedConnectorBackups(t *testing.T) {
 	if got, err := os.ReadFile(earlier); err != nil || string(got) != "earlier\n" {
 		t.Fatalf("the earlier kept folder changed: %q %v", got, err)
 	}
-	for _, backup := range purgeTestBackups(t, home) {
-		if _, err := os.Lstat(filepath.Join(backup, "connector_backups")); !os.IsNotExist(err) {
-			t.Fatalf("the per-user backup holds connector_backups: %v", err)
-		}
+	// A machine purge makes no per-user backup (GAP-0727), so the copies
+	// above are the only place the removed-connector backups go.
+	if backups, _ := filepath.Glob(filepath.Join(home, ".defenseclaw-backup-*")); len(backups) != 0 {
+		t.Fatalf("the purge made a per-user backup: %v", backups)
 	}
 }
