@@ -48,8 +48,10 @@ const enterpriseHookIdentitySpoolRetryInterval = time.Minute
 var enterpriseHookLoadIdentityAccounts = enterprisehooks.LoadUnixIdentityAccounts
 
 // The guardian lists local accounts under its root identity, independently
-// of whether an agent's per-user files produced an enrollment row.
-var enterpriseHookLocalAccounts = unixidentity.LocalAccounts
+// of whether an agent's per-user files produced an enrollment row: those of
+// every local account database, so a systemd-userdb account is warmed up as
+// an /etc/passwd one is (GAP-0026).
+var enterpriseHookLocalAccounts = unixidentity.LocalDatabaseAccounts
 
 // enterpriseHookAccountDatabasePoll is how often the watch loop reads the
 // local account database's stamp (enterpriseHookLocalAccountsStamp).

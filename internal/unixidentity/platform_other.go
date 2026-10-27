@@ -40,6 +40,11 @@ func platformLocalAccounts(context.Context) (map[string]int, error) {
 	return nil, errors.New("unixidentity: no local account reader on this platform")
 }
 
+// platformLocalDatabaseAccounts has no other local account database here.
+func platformLocalDatabaseAccounts(ctx context.Context) (map[string]int, error) {
+	return platformLocalAccounts(ctx)
+}
+
 func platformLocalAccountRecords(context.Context) (map[string]LocalAccountRecord, error) {
 	return nil, errors.New("unixidentity: local account records are listed only on macOS")
 }

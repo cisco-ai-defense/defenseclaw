@@ -14,10 +14,13 @@ package unixidentity
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -68,6 +71,56 @@ func platformLocalAccounts(context.Context) (map[string]int, error) {
 		return nil, err
 	}
 	return parseLocalPasswd(string(data)), nil
+}
+
+// platformLocalDatabaseAccounts adds the systemd-userdb drop-in records and
+// the nss-altfiles passwd files to /etc/passwd. A fresh account created as a
+// userdb record is in no /etc/passwd line, so the guardian's warm-up never
+// spooled its identity record and its first managed Codex turn was refused
+// "the account holder is unconfirmed" (GAP-0026, the userdb leg of GAP-0677).
+func platformLocalDatabaseAccounts(ctx context.Context) (map[string]int, error) {
+	out, err := platformLocalAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	add := func(name string, uid int) {
+		if _, dup := out[name]; !dup && validName(name) == nil && uid >= 0 {
+			out[name] = uid
+		}
+	}
+	for _, dir := range UserdbRecordDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".user") {
+				continue
+			}
+			data, err := readSmallFile(filepath.Join(dir, entry.Name()), 1<<20)
+			if err != nil {
+				continue
+			}
+			var record struct {
+				UserName string `json:"userName"`
+				UID      *int   `json:"uid"`
+			}
+			if json.Unmarshal(data, &record) != nil || record.UID == nil {
+				continue
+			}
+			add(record.UserName, *record.UID)
+		}
+	}
+	for _, path := range AltfilesPasswdFiles {
+		data, err := readSmallFile(path, 16<<20)
+		if err != nil {
+			continue
+		}
+		for name, uid := range parseLocalPasswd(string(data)) {
+			add(name, uid)
+		}
+	}
+	return out, nil
 }
 
 func platformLocalAccountRecords(context.Context) (map[string]LocalAccountRecord, error) {

@@ -106,6 +106,11 @@ func platformLocalAccounts(ctx context.Context) (map[string]int, error) {
 // platformLocalAccountRecords lists the local node's accounts with the
 // attributes that change when an account is replaced or moved: uid,
 // GeneratedUID, home and primary group. Any account may list them.
+// platformLocalDatabaseAccounts has no other local account database here.
+func platformLocalDatabaseAccounts(ctx context.Context) (map[string]int, error) {
+	return platformLocalAccounts(ctx)
+}
+
 func platformLocalAccountRecords(ctx context.Context) (map[string]LocalAccountRecord, error) {
 	if err := validateTrustedTool(darwinDSCL); err != nil {
 		return nil, err
