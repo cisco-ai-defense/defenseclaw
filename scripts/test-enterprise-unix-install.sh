@@ -635,13 +635,16 @@ if [ "$platform" = linux ]; then
     esac
     echo "expected policy-view warnings: ${kernel_views[*]:-none}"
 fi
-# The previous release reports the kernel's open policy-view routes as its
-# version does: 1.0.3 on its config steps only, 1.0.4 on every step from its
-# package install on. So its steps allow them; the new release's steps
-# require them (kernel_views).
-previous_views=()
+# The previous release reports what its version reports: 1.0.3 the kernel's
+# open policy-view routes on its config steps only; 1.0.4 those routes from
+# its package install on, and on its config steps the hook residual
+# (hook_process_fail_open) and a first install scan still running
+# (agent_install_scan_incomplete), as the new release's ensure does. So its
+# steps allow them; the new release's steps require the kernel views
+# (kernel_views).
+previous_views=(--allow-warning hook_process_fail_open --allow-warning agent_install_scan_incomplete)
 [ "$platform" != linux ] ||
-    previous_views=(--allow-warning unprivileged_user_namespaces --allow-warning unprivileged_ptrace)
+    previous_views+=(--allow-warning unprivileged_user_namespaces --allow-warning unprivileged_ptrace)
 echo "package: $package"
 echo "version: $version"
 
@@ -702,12 +705,14 @@ upgrade_lane() {
     # The new release reports the restored previous install truthfully
     # (GAP-1412): its hook residual (hook_process_fail_open), a previous
     # release's connectors without a trusted policy-view digest
-    # (machine_policy_incomplete); the host's own policy-view sysctls are
-    # required where the host has them (kernel_views).
+    # (machine_policy_incomplete), its first install scan after the restart
+    # (agent_install_scan_incomplete, T2 run 40440985412); the host's own
+    # policy-view sysctls are required where the host has them (kernel_views).
     "$python" "$checker" "$results/05-upgrade-fault.json" --label upgrade-fault --platform "$platform" \
         --action ensure --expect-error lifecycle_test_fault --ready ${held[@]+"${held[@]}"} \
         --allow-warning lifecycle_test_fault --allow-warning rolled_back ${kernel_views[@]+"${kernel_views[@]}"} \
-        --allow-warning machine_policy_incomplete --allow-warning hook_process_fail_open
+        --allow-warning machine_policy_incomplete --allow-warning hook_process_fail_open \
+        --allow-warning agent_install_scan_incomplete
     services_running
     if [ "$platform" = linux ]; then
         systemctl is-active --quiet defenseclaw-enterprise-apply.path ||
