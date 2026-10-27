@@ -197,11 +197,21 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
         "defenseclaw-acp-windows-amd64",
         "defenseclaw-hook-posix",
         "defenseclaw-sensor-helper-posix",
+        # The managed Linux and macOS packages' scanner launcher (GAP-1527);
+        # no archive carries it (the payload archive has no scanners).
+        "defenseclaw-scanners-posix",
     }
     assert builds["defenseclaw"]["binary"] == "defenseclaw-gateway"
     assert builds["defenseclaw-windows-amd64"]["binary"] == "defenseclaw-gateway"
     assert builds["defenseclaw-hook-post"]["binary"] == "defenseclaw-hook-post"
-    for posix in ("defenseclaw", "defenseclaw-hook-post", "defenseclaw-acp-posix", "defenseclaw-hook-posix", "defenseclaw-sensor-helper-posix"):
+    for posix in (
+        "defenseclaw",
+        "defenseclaw-hook-post",
+        "defenseclaw-acp-posix",
+        "defenseclaw-hook-posix",
+        "defenseclaw-sensor-helper-posix",
+        "defenseclaw-scanners-posix",
+    ):
         assert builds[posix]["goos"] == ["linux", "darwin"]
         assert builds[posix]["goarch"] == ["amd64", "arm64"]
         assert {"goos": "darwin", "goarch": "amd64"} in builds[posix]["ignore"]
