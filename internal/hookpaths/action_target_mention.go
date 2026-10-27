@@ -251,7 +251,9 @@ func actionInterpreterCodeWrites(code, language string) bool {
 }
 
 // actionInterpreterBuildsKeyPath reports a python -c, perl/ruby/node -e call
-// whose code names an authorized-keys path and has a write.
+// whose code names an authorized-keys path and has a write. The interpreter
+// may be run through a wrapper program (env, command, nice, timeout, ...)
+// and may have other options before its code option (GAP-2005 RV9-1).
 func actionInterpreterBuildsKeyPath(file *syntax.File, cwd, home string) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -263,15 +265,114 @@ func actionInterpreterBuildsKeyPath(file *syntax.File, cwd, home string) bool {
 		if !known {
 			return true
 		}
-		language := programBase(program)
-		if code, _, ok := interpreterCodeOperand(call, language, home); ok &&
-			actionInterpreterSSHName.MatchString(code) && actionInterpreterKeysName.MatchString(code) &&
-			actionInterpreterCodeWrites(code, language) && !actionInterpreterHomeWriteProved(code, language, cwd, home) {
+		// A word the hook cannot spell stays "": never an option, never code.
+		words := []string{program}
+		for _, word := range call.Args[1:] {
+			value, _ := StaticWord(word, home)
+			words = append(words, value)
+		}
+		at := actionInterpreterProgramIndex(words)
+		if at < 0 {
+			return true
+		}
+		if code, ok := actionInterpreterInlineCode(words, at); ok &&
+			actionInterpreterKeyPathCode(code, actionInterpreterKind(words[at]), cwd, home) {
 			found = true
 		}
 		return !found
 	})
 	return found
+}
+
+// actionInterpreterKeyPathCode reports inline code that names both
+// authorized-keys path parts and has an executable writer, unless the
+// binding rules place every write of home-call code on an ordinary path.
+func actionInterpreterKeyPathCode(code, language, cwd, home string) bool {
+	return actionInterpreterSSHName.MatchString(code) && actionInterpreterKeysName.MatchString(code) &&
+		actionInterpreterCodeWrites(code, language) && !actionInterpreterHomeWriteProved(code, language, cwd, home)
+}
+
+// actionInterpreterKind names the interpreter family of a program word:
+// python (python, python3*, py), node (node, nodejs), perl or ruby; ""
+// for any other program.
+func actionInterpreterKind(word string) string {
+	switch base := programBase(strings.ReplaceAll(word, `\`, "/")); {
+	case base == "py" || base == "python" || strings.HasPrefix(base, "python3"):
+		return "python"
+	case base == "node" || base == "nodejs":
+		return "node"
+	case base == "perl" || base == "ruby":
+		return base
+	}
+	return ""
+}
+
+// actionInterpreterWrappers run their operand words as a command.
+var actionInterpreterWrappers = map[string]bool{
+	"env": true, "command": true, "exec": true, "builtin": true, "nice": true, "timeout": true,
+	"nohup": true, "stdbuf": true, "xargs": true, "time": true, "ionice": true, "setsid": true,
+	"chrt": true, "taskset": true, "unbuffer": true, "sudo": true, "doas": true, "caffeinate": true,
+}
+
+// actionInterpreterProgramIndex returns the index of the interpreter a POSIX
+// call runs: the program word itself, or the first interpreter word after a
+// wrapper program and its options, NAME=value words and option values; -1
+// when the call runs no interpreter.
+func actionInterpreterProgramIndex(words []string) int {
+	if actionInterpreterKind(words[0]) != "" {
+		return 0
+	}
+	if !actionInterpreterWrappers[programBase(words[0])] {
+		return -1
+	}
+	for i := 1; i < len(words); i++ {
+		if actionInterpreterKind(words[i]) != "" {
+			return i
+		}
+	}
+	return -1
+}
+
+// actionInterpreterInlineCode returns the inline code of the interpreter at
+// words[at]: the word after its code option, past the interpreter's other
+// options and the values of the options that take one (python -X/-W, node
+// -r/--require/--import/--loader, perl -I/-M/-m, ruby -I/-r), so an extra
+// option before the code does not hide it (GAP-2005 RV9-1).
+func actionInterpreterInlineCode(words []string, at int) (string, bool) {
+	kind := actionInterpreterKind(words[at])
+	for j := at + 1; j+1 < len(words); j++ {
+		option := words[j]
+		if !strings.HasPrefix(option, "-") || option == "-" || option == "--" || kind == "python" && option == "-m" {
+			return "", false
+		}
+		if actionWindowsInterpreterCodeOption(kind, option) {
+			return words[j+1], true
+		}
+		if actionInterpreterOptionTakesValue(kind, option) {
+			j++
+		}
+	}
+	return "", false
+}
+
+// actionInterpreterOptionTakesValue reports an interpreter option whose
+// value is the next word.
+func actionInterpreterOptionTakesValue(kind, option string) bool {
+	switch kind {
+	case "python":
+		return option == "-X" || option == "-W" || option == "-Q"
+	case "node":
+		switch option {
+		case "-r", "--require", "--import", "--loader", "--experimental-loader", "-C", "--conditions",
+			"--input-type", "--env-file", "--title":
+			return true
+		}
+	case "perl":
+		return option == "-I" || option == "-M" || option == "-m"
+	case "ruby":
+		return option == "-I" || option == "-r" || option == "-C" || option == "-E"
+	}
+	return false
 }
 
 // actionInterpreterHomeWriteProved reports home-call code whose every write
@@ -1948,28 +2049,13 @@ func actionWindowsPOSIXShellMention(words []string, cwd, home string, depth int,
 // were allowed (GAP-2005 RV8-2).
 func actionWindowsInterpreterBuildsKeyPath(words []string, cwd, home string) bool {
 	for i := 0; i+2 < len(words); i++ {
-		language := programBase(strings.ReplaceAll(words[i], `\`, "/"))
-		switch {
-		case language == "py" || language == "python" || strings.HasPrefix(language, "python3"):
-			language = "python"
-		case language == "node" || language == "nodejs" || language == "perl" || language == "ruby":
-		default:
+		language := actionInterpreterKind(words[i])
+		if language == "" {
 			continue
 		}
-		for j := i + 1; j+1 < len(words); j++ {
-			option := words[j]
-			if !strings.HasPrefix(option, "-") || option == "-" || option == "--" || option == "-m" {
-				break
-			}
-			if !actionWindowsInterpreterCodeOption(language, option) {
-				continue
-			}
-			code := words[j+1]
-			if actionInterpreterSSHName.MatchString(code) && actionInterpreterKeysName.MatchString(code) &&
-				actionInterpreterCodeWrites(code, language) && !actionInterpreterHomeWriteProved(code, language, cwd, home) {
-				return true
-			}
-			break
+		if code, ok := actionInterpreterInlineCode(words, i); ok &&
+			actionInterpreterKeyPathCode(code, language, cwd, home) {
+			return true
 		}
 	}
 	return false
@@ -1979,16 +2065,20 @@ func actionWindowsInterpreterBuildsKeyPath(words []string, cwd, home string) boo
 // the inline code: python -c (or a flag cluster ending in c), node -e,
 // --eval, -p, --print, perl -e/-E (or a cluster ending in e/E), ruby -e.
 func actionWindowsInterpreterCodeOption(language, option string) bool {
-	cluster := len(option) > 2 && !strings.HasPrefix(option, "--") && !strings.ContainsAny(option, "=/")
+	// A flag cluster (-Ic, -we, -ne) ends in the code option; a cluster that
+	// starts with a value option (-Wstatic, -Iinclude, -rjson) does not.
+	cluster := len(option) > 2 && !strings.HasPrefix(option, "--") && strings.Trim(option[1:],
+		"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") == ""
 	switch language {
 	case "python":
-		return option == "-c" || cluster && strings.HasSuffix(option, "c")
+		return option == "-c" || cluster && strings.HasSuffix(option, "c") && !strings.ContainsAny(option[1:2], "XWQ")
 	case "node", "nodejs":
 		return option == "-e" || option == "--eval" || option == "-p" || option == "--print" || option == "-pe"
 	case "perl":
-		return option == "-e" || option == "-E" || cluster && (strings.HasSuffix(option, "e") || strings.HasSuffix(option, "E"))
+		return option == "-e" || option == "-E" || cluster && (strings.HasSuffix(option, "e") || strings.HasSuffix(option, "E")) &&
+			!strings.ContainsAny(option[1:2], "IMmxCdD")
 	case "ruby":
-		return option == "-e" || cluster && strings.HasSuffix(option, "e")
+		return option == "-e" || cluster && strings.HasSuffix(option, "e") && !strings.ContainsAny(option[1:2], "IrCExFK")
 	}
 	return false
 }
