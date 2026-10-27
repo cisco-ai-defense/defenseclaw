@@ -10686,8 +10686,8 @@ def _apply_hook_connector_setup(
          ``<data_dir>/picked_connector`` hint.
       5. When ``restart`` is true, bounces the gateway so its
          ``Connector.Setup()`` wires the hooks against the running
-         sidecar (under Secure Client also the native OTel exporter
-         and, for codex, the notify bridge).
+         sidecar (for codex under Secure Client also the notify
+         bridge; a host install never writes a native OTel exporter).
 
     Returns True on success, False on any persistence error.
     """
@@ -12820,7 +12820,8 @@ def setup_codex(
 
     A host install registers no native OTel exporter and no notify
     bridge (setup removes the OTel entries older releases wrote).
-    Only Secure Client and OpenShell sandboxes add them.
+    An OpenShell sandbox adds both; Secure Client adds only the
+    notify bridge.
 
     Default mode is ``observe`` (record only); re-running setup keeps
     the current mode. Pass ``--mode action``
@@ -12959,7 +12960,8 @@ def setup_claude_code(
                 >=2.1.219, including observational DirectoryAdded
 
     A host install registers no native OTel exporter (setup removes
-    the OTEL_* entries older releases wrote). Only Secure Client adds it.
+    the OTEL_* entries older releases wrote). Only an OpenShell
+    sandbox adds it.
 
     Default mode is ``observe`` (record only); re-running setup keeps
     the current mode. Pass ``--mode action``
