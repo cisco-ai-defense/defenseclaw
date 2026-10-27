@@ -30,6 +30,7 @@ from defenseclaw.config import default_config
 from defenseclaw.enforce.admission import evaluate_admission
 from defenseclaw.models import Finding, ScanResult
 from defenseclaw.scanner.plugin_scanner import scan_plugin
+from defenseclaw.scanner.plugin_scanner.scanner import _first_executable_file
 from defenseclaw.scanner.plugin_scanner.types import PluginScanOptions
 
 from tests.helpers import make_temp_store
@@ -192,15 +193,58 @@ def test_gap2036_a_runnable_file_under_git_keeps_the_judge_high(tmp_path, monkey
     assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}, name
 
 
+# GAP-2140: the git checkout rows passed on dev and failed only on the GitHub
+# runner (git 2.55). Each git call gets its own HOME, no inherited GIT_*
+# variable or system/global config, and a template that holds what git's stock
+# template does (0755 #! hook samples, info/exclude, description), so the
+# checkout is the same on every host. The walk names the path that counted.
+_HOOK_SAMPLES = ("pre-commit.sample", "pre-push.sample", "fsmonitor-watchman.sample")
+
+
+def _git_env(tmp_path: Path) -> dict[str, str]:
+    home = tmp_path / "git-home"
+    template = tmp_path / "git-template"
+    if not template.is_dir():
+        (template / "hooks").mkdir(parents=True)
+        (template / "info").mkdir()
+        (template / "info" / "exclude").write_text("# git ls-files --others --exclude-from=.git/info/exclude\n")
+        (template / "description").write_text("Unnamed repository; edit this file to name the repository.\n")
+        for name in _HOOK_SAMPLES:
+            (template / "hooks" / name).write_bytes(b"#!/bin/sh\n# git hook sample, never run\nexit 0\n")
+            (template / "hooks" / name).chmod(0o755)
+        home.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({
+        "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"), "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_TEMPLATE_DIR": str(template),
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+    })
+    return env
+
+
+def _git(tmp_path: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "protocol.file.allow=always", "-c", "init.defaultBranch=main",
+         "-c", "init.defaultRefFormat=files", "-c", "core.fsmonitor=false", *args],
+        check=True, env=_git_env(tmp_path), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _assert_no_executable_file(plugin: Path) -> None:
+    reason = _first_executable_file(str(plugin), SimpleNamespace(source_files=[]))
+    assert reason is None, reason
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 def test_gap2036_a_real_git_checkout_of_a_skill_only_plugin_keeps_the_cap(tmp_path, monkeypatch) -> None:
     # git init writes 0755 #! hook samples under .git/hooks; git add writes
     # zlib objects and a DIRC index. None of them runs, so the cap stays.
     plugin = _plugin(tmp_path, dict(_SKILL))
-    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
-    subprocess.run(["git", "init", "-q", str(plugin)], check=True, env=env)
-    subprocess.run(["git", "-C", str(plugin), "add", "-A"], check=True, env=env)
+    _git(tmp_path, "init", "-q", str(plugin))
+    _git(tmp_path, "-C", str(plugin), "add", "-A")
     assert any(p.name.endswith(".sample") for p in (plugin / ".git" / "hooks").iterdir())
+    _assert_no_executable_file(plugin)
     result = _scan(plugin, monkeypatch)
     found = {(f.rule_id, f.severity) for f in result.findings}
     assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
@@ -234,14 +278,6 @@ def test_gap2039_an_interpreter_script_build_file_or_archive_keeps_the_judge_hig
     assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}, name
 
 
-def _git(*args: str) -> None:
-    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
-           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
-    subprocess.run(["git", "-c", "protocol.file.allow=always", *args], check=True, env=env,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 def test_gap2100_a_skill_only_plugin_with_a_submodule_keeps_the_cap(tmp_path, monkeypatch) -> None:
     # git submodule add writes the submodule's git dir, with its own 0755
@@ -249,14 +285,15 @@ def test_gap2100_a_skill_only_plugin_with_a_submodule_keeps_the_cap(tmp_path, mo
     sub = tmp_path / "notes"
     sub.mkdir()
     (sub / "README.md").write_text("notes\n")
-    _git("init", "-q", str(sub))
-    _git("-C", str(sub), "add", "-A")
-    _git("-C", str(sub), "commit", "-qm", "init")
+    _git(tmp_path, "init", "-q", str(sub))
+    _git(tmp_path, "-C", str(sub), "add", "-A")
+    _git(tmp_path, "-C", str(sub), "commit", "-qm", "init")
     plugin = _plugin(tmp_path, dict(_SKILL))
-    _git("init", "-q", str(plugin))
-    _git("-C", str(plugin), "submodule", "add", "-q", str(sub), "notes")
+    _git(tmp_path, "init", "-q", str(plugin))
+    _git(tmp_path, "-C", str(plugin), "submodule", "add", "-q", str(sub), "notes")
     hooks = plugin / ".git" / "modules" / "notes" / "hooks"
     assert any(p.name.endswith(".sample") for p in hooks.iterdir())
+    _assert_no_executable_file(plugin)
     result = _scan(plugin, monkeypatch)
     found = {(f.rule_id, f.severity) for f in result.findings}
     assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
@@ -269,14 +306,15 @@ def test_gap2100_a_submodule_at_a_nested_path_keeps_the_cap(tmp_path, monkeypatc
     sub = tmp_path / "lib-src"
     sub.mkdir()
     (sub / "README.md").write_text("lib\n")
-    _git("init", "-q", str(sub))
-    _git("-C", str(sub), "add", "-A")
-    _git("-C", str(sub), "commit", "-qm", "init")
+    _git(tmp_path, "init", "-q", str(sub))
+    _git(tmp_path, "-C", str(sub), "add", "-A")
+    _git(tmp_path, "-C", str(sub), "commit", "-qm", "init")
     plugin = _plugin(tmp_path, dict(_SKILL))
-    _git("init", "-q", str(plugin))
-    _git("-C", str(plugin), "submodule", "add", "-q", str(sub), "vendor/lib")
+    _git(tmp_path, "init", "-q", str(plugin))
+    _git(tmp_path, "-C", str(plugin), "submodule", "add", "-q", str(sub), "vendor/lib")
     hooks = plugin / ".git" / "modules" / "vendor" / "lib" / "hooks"
     assert any(p.name.endswith(".sample") for p in hooks.iterdir())
+    _assert_no_executable_file(plugin)
     result = _scan(plugin, monkeypatch)
     found = {(f.rule_id, f.severity) for f in result.findings}
     assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
