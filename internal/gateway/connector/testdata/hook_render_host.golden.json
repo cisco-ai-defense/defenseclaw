@@ -3,7 +3,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hook-antigravity.token": {
       "mode": "-rw-------",
@@ -102,7 +102,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hookcfg": {
       "mode": "-rw-------",
@@ -154,7 +154,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hookcfg": {
       "mode": "-rw-------",
@@ -206,7 +206,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hook-claudecode.token": {
       "mode": "-rw-------",
@@ -258,7 +258,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hook-claudecode.token": {
       "mode": "-rw-------",
@@ -498,7 +498,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hookcfg": {
       "mode": "-rw-------",
@@ -550,7 +550,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hookcfg": {
       "mode": "-rw-------",
@@ -602,7 +602,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hook-codex.token": {
       "mode": "-rw-------",
@@ -654,7 +654,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hook-codex.token": {
       "mode": "-rw-------",
@@ -894,7 +894,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hook-copilot.token": {
       "mode": "-rw-------",
@@ -993,7 +993,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hook-cursor.token": {
       "mode": "-rw-------",
@@ -1092,7 +1092,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hook-devin.token": {
       "mode": "-rw-------",
@@ -1191,7 +1191,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hookcfg": {
       "mode": "-rw-------",
@@ -1245,7 +1245,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     "_hardening.sh": {
       "mode": "-rw-------",
@@ -1257,7 +1257,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hook-hermes.token": {
       "mode": "-rw-------",
@@ -1356,7 +1356,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hook-kiro.token": {
       "mode": "-rw-------",
@@ -1455,7 +1455,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hookcfg": {
       "mode": "-rw-------",
@@ -1542,7 +1542,7 @@
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
-      "sha256": "a4f216a6cdc15f657eb609e975a88441adb566a1dae75d41fe16b6b02bc83e92"
+      "sha256": "36fc6b3661d2488618eb8eb9ed915b68c699193c3b1f7c19bbd37fcff64bb9b8"
     },
     ".hookcfg": {
       "mode": "-rw-------",
