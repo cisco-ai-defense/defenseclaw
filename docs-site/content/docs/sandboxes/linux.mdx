@@ -40,6 +40,7 @@ Install and configure OpenShell sandboxes on Linux with `defenseclaw sandbox set
 | Kernel | Landlock ABI 3 or newer in `cat /sys/kernel/security/lsm`. |
 | Docker | Rootful Docker Engine 28 or newer with buildx, and your user in the `docker` group. Rootless Docker is not supported. |
 | Disk | 5 GiB free for Docker (10 GiB recommended). The first image build downloads about 3 GB. |
+| Git | Git 2.29 or newer (`sudo dnf install git` or `sudo apt-get install git`). Every run copies your project, and keeps its pre-session snapshot, with it. `defenseclaw sandbox doctor` checks it (**Host Git**). |
 | OpenShell | 0.1.5 or newer. Setup installs it, or upgrades an older one, after asking. |
 
 Turn on linger so the gateway keeps running after you log out: `sudo loginctl enable-linger $USER`.

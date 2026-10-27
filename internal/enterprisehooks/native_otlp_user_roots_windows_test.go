@@ -370,6 +370,9 @@ func TestWindowsManagedRowResolvesLinkedAgentConfigurations(t *testing.T) {
 			if err := f.verify(tc.name); err != nil {
 				t.Fatalf("verify after repair through the junction: %v", err)
 			}
+			if report, err := windowsManagedUserNativeOTLPCheck(tc.name, f.home, f.dataDir, f.sid); err != nil || report != "" {
+				t.Fatalf("an account-owned linked config = %q, %v; want nothing to report", report, err)
+			}
 			f.requireClean(t, filepath.Join(target, tc.file))
 			if err := rejectWindowsReparseChain(filepath.Join(link, tc.file)); err == nil {
 				t.Fatal("repair replaced the account's junction")
@@ -404,6 +407,12 @@ func TestWindowsManagedRowResolvesLinkedAgentConfigurations(t *testing.T) {
 				t.Fatalf("verify after repair = %v, want a warning, not a failed row", err)
 			}
 			f.requireWarning(t, tc.name, "does not own")
+			// The status and verify name it, not only the guardian log
+			// (GAP-0929 reopened): the row reports the code they word.
+			if report, err := windowsManagedUserNativeOTLPCheck(tc.name, f.home, f.dataDir, f.sid); err != nil ||
+				report != connector.AgentConfigNativeOTLPUnchecked {
+				t.Fatalf("a linked config another owner holds = %q, %v; want %q", report, err, connector.AgentConfigNativeOTLPUnchecked)
+			}
 		})
 	}
 }

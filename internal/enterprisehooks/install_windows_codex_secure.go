@@ -327,7 +327,8 @@ func verifyWindowsCodexManagedResult(
 	if err := verifyWindowsCodexUserRuntime(target, machineOpts.RequirementsPath); err != nil {
 		return InstallResult{}, err
 	}
-	if err := windowsManagedUserNativeOTLPAbsent("codex", target.home, target.dataDir, target.sid); err != nil {
+	otlpReport, err := windowsManagedUserNativeOTLPCheck("codex", target.home, target.dataDir, target.sid)
+	if err != nil {
 		return InstallResult{}, err
 	}
 	lock, err := connector.LoadHookContractLockEntryForMode(
@@ -373,6 +374,7 @@ func verifyWindowsCodexManagedResult(
 		CreatedDirs:     []string{target.dataDir, filepath.Join(target.dataDir, "hooks")},
 		AgentVersion:    lock.RawAgentVersion,
 		HookContractID:  lock.ContractID,
+		AgentConfig:     otlpReport,
 	}, nil
 }
 

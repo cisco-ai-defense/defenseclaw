@@ -445,7 +445,8 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	force bool, cond *audit.SandboxCondition, exit *int32) {
 	release := m.gatewayRelease()
 	m.mu.Lock()
-	heardLocked(b, m.lastGw.Load())
+	here := m.lastGw.Load()
+	heardLocked(b, here)
 	if b.phase == phase && !force {
 		m.mu.Unlock()
 		return
@@ -502,6 +503,9 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		b.rec.SessionYolo = nil
 	}
 	b.rec.Phase = string(phase)
+	if atConnectedPlace(b, here) {
+		b.rec.PlacePhase, b.rec.PlacePhaseOf = string(phase), recordPlace(b.rec)
+	}
 	// A republished error phase (a restarted daemon's reconcile) says
 	// nothing new of why: the record's reason stays.
 	if phase != audit.SandboxPhaseError || cond != nil || previous != phase {

@@ -190,6 +190,16 @@ type record struct {
 	// why it is in the error phase, in words (errorPhaseReason).
 	Phase       string `json:"phase,omitempty"`
 	PhaseReason string `json:"phase_reason,omitempty"`
+	// PlacePhase is the last phase the sandbox's own place said of it, and
+	// PlacePhaseOf that place (its recordPlace then): a phase given while
+	// DefenseClaw was connected there, or a read of it (proveGuests). It
+	// outlives a daemon restart and a later read that failed: a guest
+	// whose place's last word is that it holds no compute (stopped,
+	// deleted, missing) stays released while that place cannot be read
+	// (provenPhase, GAP-1176). A start there later is a new word, read
+	// once the place answers.
+	PlacePhase   string `json:"place_phase,omitempty"`
+	PlacePhaseOf string `json:"place_phase_of,omitempty"`
 	// ReadyAt is when DefenseClaw saw the sandbox become ready (zero while
 	// it is not): a restarted daemon that finds it still ready reports its
 	// uptime from then. OpenShell 0.1.1 reports no transition times.

@@ -3414,6 +3414,7 @@ def _swap_decision(tmp_path: Path, version: str, prev: str, installed: str | Non
         "set -euo pipefail\n"
         'info() { echo "info: $*"; }\nask_yes_no() { echo "ask: $1"; }\ndie() { echo "die: $*"; exit 1; }\n'
         "warn_running_sandboxes() { :; }\n"
+        "refuse_legacy_sandboxes() { :; }\n"
         + _install_sh_functions("other_build_installed")
         + f'VERSION={version} PREV_VERSION={prev} BIN_DIR="{bin_dir}" STAGING="{staging}"\n'
         + f'DEFENSECLAW_HOME="{tmp_path}/dc" PREVIOUS="{tmp_path}/dc/previous"\n'

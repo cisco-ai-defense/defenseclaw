@@ -100,7 +100,10 @@ func atConnectedPlace(b *box, here *Gateway) bool {
 // outrank), else its lookups' phase; elsewhere only such a read proves
 // anything (one a lookup or phase of that place came after is stale, and
 // is read again: proveGuests), and the phase returned unproven is the last
-// known one. The caller holds m.mu.
+// known one: the last word of its place (record.PlacePhase) when that word
+// is that it holds no compute, which a read of the place that failed since
+// or a daemon restart does not take back (GAP-1176), else the box's phase.
+// The caller holds m.mu.
 func provenPhase(b *box, here *Gateway) (audit.SandboxPhase, bool) {
 	if b.gone {
 		return phaseMissing, true
@@ -114,12 +117,27 @@ func provenPhase(b *box, here *Gateway) (audit.SandboxPhase, bool) {
 		case b.phase != "":
 			return b.phase, true
 		}
-		return "", false
+		return releasedWord(b), false
 	}
 	if read && r.word == b.word {
 		return r.found(), true
 	}
+	if w := releasedWord(b); w != "" {
+		return w, false
+	}
 	return b.phase, false
+}
+
+// releasedWord is the last word of b's own place (record.PlacePhase) when
+// it is that b holds no compute there (stopped, deleted, missing), else "":
+// a guest last said running, or never said anything of, stays held while
+// its place cannot be read. The caller holds m.mu.
+func releasedWord(b *box) audit.SandboxPhase {
+	w := audit.SandboxPhase(b.rec.PlacePhase)
+	if w == "" || b.rec.PlacePhaseOf != recordPlace(b.rec) || holdsCompute(w, b.rec.Driver, b.rec.PhaseReason) {
+		return ""
+	}
+	return w
 }
 
 // proveGuests reads, at the place its record names, every guest that may
@@ -192,14 +210,25 @@ func (m *Manager) proveGuests(ctx context.Context) {
 		}
 		cancel()
 	}
+	var said []*box
+	var names []string
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for b, r := range reads {
 		if recordPlace(b.rec) != r.place || b.word != r.word {
 			continue // the record moved meanwhile, or its place said something since
 		}
 		b.read = r
 		b.gone = b.gone || r.gone
+		if r.err == "" && (b.rec.PlacePhase != string(r.found()) || b.rec.PlacePhaseOf != r.place) {
+			b.rec.PlacePhase, b.rec.PlacePhaseOf = string(r.found()), r.place
+			said, names = append(said, b), append(names, b.rec.Name)
+		}
+	}
+	m.mu.Unlock()
+	for i, b := range said {
+		if err := m.saveRecord(b); err != nil {
+			m.logf("sandbox %s: keeping what its gateway said of it: %v", names[i], err)
+		}
 	}
 }
 

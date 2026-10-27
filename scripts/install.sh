@@ -1274,6 +1274,57 @@ PY
     esac
 }
 
+# refuse_legacy_sandboxes PREVIOUS: an upgrade from DefenseClaw 1.0.0 to
+# 1.0.3 refuses, and changes nothing, while that release's gateway runs a
+# sandbox that may hold compute (GAP-0901). Each such session keeps the
+# supervisor it started with, an OpenShell release whose network broker can
+# let connections bypass sandbox policy (NVIDIA/OpenShell#4494), and the new
+# gateway can only report it unprotected: DefenseClaw stops no sandbox for
+# its user, who saves the work and ends it first. The phases are those the
+# package preinstall counts (legacy-sandbox-guard.sh dc_guard_holds). A
+# gateway that is not running, or that cannot list sandboxes (sandboxes off),
+# has none to name.
+refuse_legacy_sandboxes() {
+    local prev="${1:-}" gateway="${BIN_DIR}/defenseclaw-gateway" held name phase
+    is_version "${prev}" && ! version_lt "${prev}" 1.0.0 && version_lt "${prev}" 1.0.4 || return 0
+    ! is_version "${VERSION}" || ! version_lt "${VERSION}" 1.0.4 || return 0
+    [[ -x "${gateway}" && -x "${VENV}/bin/python" && -n "$(gateway_pid || true)" ]] || return 0
+    held="$("${VENV}/bin/python" -I - "${gateway}" <<'PY' 2>/dev/null
+import json, re, subprocess, sys
+try:
+    out = subprocess.run([sys.argv[1], "sandbox", "list", "--output", "json"], capture_output=True, text=True, timeout=10).stdout
+    rows = json.loads(out or "{}").get("sandboxes") or []
+except Exception:
+    rows = []
+for r in rows:
+    if not isinstance(r, dict) or not isinstance(r.get("name"), str):
+        continue
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", r["name"]):
+        continue
+    phase = r.get("phase") if isinstance(r.get("phase"), str) else ""
+    driver = r.get("driver") if isinstance(r.get("driver"), str) and r.get("driver") else "docker"
+    reason = r.get("phase_reason") if isinstance(r.get("phase_reason"), str) else ""
+    if phase in ("stopped", "deleting", "deleted", "missing"):
+        continue
+    if phase == "completed" and driver == "docker":
+        continue
+    if phase == "error" and (driver == "docker" or reason.startswith("ProcessExited")):
+        continue
+    print(r["name"] + " " + (phase if re.fullmatch(r"[a-z_]{1,32}", phase) else "unknown"))
+PY
+)" || return 0
+    [[ -n "${held}" ]] || return 0
+    err "Sandboxes of DefenseClaw ${prev} are running; nothing was changed. Their sessions keep the network broker of the OpenShell release they started with, which can let connections bypass sandbox policy, and DefenseClaw ${VERSION} cannot contain it: it would only report them unprotected and run no new sandbox until they are gone. DefenseClaw stops no sandbox for you. End each one, then run this upgrade again:"
+    while read -r name phase; do
+        [[ -n "${name}" ]] || continue
+        case "${phase}" in
+            completed|error) printf '    %s (%s MicroVM, which OpenShell does not stop): defenseclaw sandbox delete %s (it deletes the sandbox with its work)\n' "${name}" "${phase}" "${name}" >&2 ;;
+            *) printf '    %s (%s): save the work you need, then defenseclaw sandbox stop %s\n' "${name}" "${phase}" "${name}" >&2 ;;
+        esac
+    done <<<"${held}"
+    exit 1
+}
+
 # other_build_installed: the installed gateway reports another build of this
 # version (its commit or build date) than the staged one (GAP-1063). An
 # installed gateway that does not answer is repaired, as before. Sets
@@ -1622,6 +1673,7 @@ REPAIR=false
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]] && ! other_build_installed; then
     REPAIR=true
 fi
+refuse_legacy_sandboxes "${PREV_VERSION}"
 warn_running_sandboxes
 if [[ "${REPAIR}" == true ]]; then
     ask_yes_no "Reinstall DefenseClaw ${VERSION}?" || die "Cancelled; nothing was changed"
