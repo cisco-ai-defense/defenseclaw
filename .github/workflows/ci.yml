@@ -484,8 +484,9 @@ jobs:
               "urllib3": ">=2.8.0",
               "idna": ">=3.15",
               "pydantic-settings": ">=2.14.2",
-              "aiohttp": ">=3.14.3,<4",
+              "aiohttp": ">=3.14.4,<4",
               "pyjwt": ">=2.15.1",
+              "certifi": ">=2026.10.19",
               "starlette": ">=1.3.1,<1.4",
               "fastapi": ">=0.137.1,<0.138",
               # Keep the portable LiteLLM line in wheel metadata. A tool.uv
@@ -606,8 +607,25 @@ jobs:
           PY
           )
           "$tmp/venv/bin/python" -c 'from defenseclaw.envvars import load_registry; assert load_registry().entries'
+          # TODO: Remove the Python 3.10 filelock ignores once filelock ships a
+          # 3.10-compatible fix or 3.10 support is dropped. 4.2.1 fixes
+          # CVE-2026-112906/112907/112913/112914/112937/112940 but requires
+          # Python >= 3.11, and pyproject.toml floors it there. filelock is a
+          # LiteLLM -> tokenizers -> huggingface-hub transitive; DefenseClaw
+          # never imports it, and huggingface-hub uses the flock-based
+          # FileLock (SoftFileLock only where flock is unsupported) and never
+          # ReadWriteLock. The advisories are local multi-user races on a
+          # shared lock directory.
+          audit_ignores=()
+          if [ "${{ matrix.python-version }}" = "3.10" ]; then
+            for id in CVE-2026-112906 CVE-2026-112907 CVE-2026-112913 \
+                      CVE-2026-112914 CVE-2026-112937 CVE-2026-112940; do
+              audit_ignores+=(--ignore-vuln "$id")
+            done
+          fi
           uvx --from pip-audit pip-audit \
             --vulnerability-service osv \
+            "${audit_ignores[@]}" \
             --path "$tmp/venv/lib/python${{ matrix.python-version }}/site-packages"
 
   upgrade-smoke:
@@ -958,7 +976,8 @@ jobs:
       # pyproject.toml:
       #   - PYSEC-2026-161 (GHSA-86qp-5c8j-p5mr, starlette host-header)
       #   - CVE-2026-28684 (python-dotenv arbitrary file read)
-      # aiohttp>=3.14.3 and pyjwt>=2.15.1 are pinned in pyproject.toml.
+      # aiohttp>=3.14.4, pyjwt>=2.15.1 and certifi>=2026.10.19 are pinned in
+      # pyproject.toml.
       # Use OSV for the vulnerability database so an outage in PyPI's
       # package-metadata JSON API does not turn the audit red before
       # pip-audit can evaluate the installed environment.
@@ -970,9 +989,6 @@ jobs:
       # DefenseClaw's gateway is pure Go and does not use aiohttp at runtime.
       # TODO: Remove python-multipart ignores once >= 0.0.31 is available
       # and pinned. Same skill-scanner transitive; not in the gateway.
-      # TODO: Remove --ignore-vuln CVE-2026-104874 once uv.lock upgrades
-      # multidict from 6.7.1 to >= 6.9.1. Transitive dep; OSV published
-      # this CVE 2026-10-06 (passed on 2026-10-05 with identical lockfile).
       # NOTE: comments must NOT appear inside the `>` folded scalar below
       # - YAML keeps `#` as literal text there and bash then consumes
       # everything after the `#` as an inline shell comment, dropping any
@@ -1002,7 +1018,6 @@ jobs:
           --ignore-vuln GHSA-537c-gmf6-5ccf
           --ignore-vuln GHSA-6v7p-g79w-8964
           --ignore-vuln GHSA-4xgf-cpjx-pc3j
-          --ignore-vuln CVE-2026-104874
 
   ts-build-test:
     name: TypeScript Build & Test
