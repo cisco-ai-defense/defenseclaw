@@ -42,6 +42,28 @@ func LocalAccounts(ctx context.Context) (map[string]int, error) {
 	return platformLocalAccounts(ctx)
 }
 
+// UserdbRecordDirs are the systemd-userdb drop-in record directories that
+// nss-systemd reads on Linux (userdb(5)): <name>.user holds a JSON user
+// record and <uid>.user links to it. Tests replace it.
+var UserdbRecordDirs = []string{"/etc/userdb", "/run/userdb", "/usr/lib/userdb"}
+
+// AltfilesPasswdFiles are the passwd(5) files that nss-altfiles reads on
+// Linux. Tests replace it.
+var AltfilesPasswdFiles = []string{"/usr/lib/passwd", "/lib/passwd"}
+
+// LocalDatabaseAccounts returns the accounts of every local account
+// database NSS reads, by name: LocalAccounts, and on Linux also the
+// systemd-userdb drop-in records (UserdbRecordDirs) and the nss-altfiles
+// passwd files (AltfilesPasswdFiles). A name LocalAccounts lists keeps its
+// uid there. A drop-in record or file that cannot be read adds nothing.
+// Directory and dynamic accounts are not in it.
+func LocalDatabaseAccounts(ctx context.Context) (map[string]int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return platformLocalDatabaseAccounts(ctx)
+}
+
 // LocalGroups returns the groups of the local group database by name (Linux
 // /etc/group, the macOS local directory node). A directory group of the same
 // name is another group: a bare group entry of a guardrail profile matches
