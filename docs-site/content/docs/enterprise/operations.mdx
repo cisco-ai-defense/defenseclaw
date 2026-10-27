@@ -706,7 +706,7 @@ event log.
 | Config changes applied | `journalctl -u defenseclaw-enterprise-apply.service` |
 | Daily verify | `journalctl -u defenseclaw-enterprise-verify.service` |
 | `/var/log/defenseclaw` | Empty by default: the services write to the journal. The gateway may write only there and in `/var/lib/defenseclaw`, so it is the place for a `jsonl` file destination (see [Audit records and SIEM forwarding](#audit-records-and-siem-forwarding)) |
-| Package install result | `/var/lib/defenseclaw-enterprise/last-package-result.json` (the package's postinstall moves its log away, so no `.log` stays beside it after an upgrade) |
+| Package install result | `/var/lib/defenseclaw-enterprise/last-package-result.json`, and `last-package-result.log` beside it with the standard error of the same run (often empty, `0` bytes). Every rpm or deb install and upgrade writes both. A later `ensure` that recovers a host after a failed package run removes both |
 | MDM wrapper log | `/var/log/defenseclaw-enterprise-mdm.log` |
 | Kernel sensor records | With Tetragon and Plane C, the sensor helper's records reach your destinations as `ai.runtime.plane_health`, `ai.runtime.kernel_policy`, `ai.runtime.kernel_event` and `enforcement.block.applied` with the initiator `kernel`. See [Tetragon on a Linux fleet](/docs/enterprise/tetragon) |
 
