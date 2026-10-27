@@ -1272,8 +1272,19 @@ def _codex_registration_current(workspace: str = "", data_dir: str = "") -> bool
         return False
     if "defenseclaw" in data.lower():
         return True
-    hook_dir = os.path.join(os.path.expanduser(data_dir), "hooks") if data_dir.strip() else ""
-    return bool(hook_dir) and os.path.join(hook_dir, "codex-hook.sh") in data
+    if not data_dir.strip():
+        return False
+    hook = os.path.join(os.path.expanduser(data_dir), "hooks", "codex-hook.sh")
+    return _comparable_path_text(hook) in _comparable_path_text(data)
+
+
+def _comparable_path_text(text: str) -> str:
+    """Path text in one spelling, so a hook command matches its install path.
+
+    A TOML basic string doubles each backslash, a Windows path may use either
+    separator, and Windows paths ignore case (GAP-2275).
+    """
+    return os.path.normcase(text.replace("\\\\", "\\")).replace("\\", "/")
 
 
 def _registration_lock_state(

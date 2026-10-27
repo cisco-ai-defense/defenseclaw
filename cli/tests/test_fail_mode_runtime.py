@@ -2677,3 +2677,24 @@ def test_codex_registration_under_a_custom_home_is_current(monkeypatch, tmp_path
         encoding="utf-8",
     )
     assert not fail_mode_runtime._codex_registration_current("", str(data_dir))
+
+
+def test_codex_registration_matches_every_spelling_of_the_hook_path(monkeypatch, tmp_path) -> None:
+    """GAP-2275: the registration names the install's hook whatever the
+    separator, a TOML basic string's doubled backslashes, or (on Windows) the
+    case; a hook under another directory is still not DefenseClaw's."""
+    data_dir = tmp_path / "dchome"
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    monkeypatch.setattr(fail_mode_runtime, "connector_config_files", lambda *_a, **_k: [str(config)])
+    hook = os.path.join(str(data_dir), "hooks", "codex-hook.sh")
+    spellings = [
+        "'" + hook.replace("\\", "/") + " --event PreToolUse'",
+        '"' + hook.replace("\\", "\\\\") + ' --event PreToolUse"',
+    ]
+    if os.name == "nt":
+        spellings.append("'" + hook.replace("/", "\\").upper() + " --event PreToolUse'")
+    for command in spellings:
+        config.write_text(f"[hooks]\n[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ncommand = {command}\n", encoding="utf-8")
+        assert fail_mode_runtime._codex_registration_current("", str(data_dir)), command
+        assert not fail_mode_runtime._codex_registration_current("", str(tmp_path / "other")), command
