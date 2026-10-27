@@ -336,6 +336,18 @@ var enterpriseHookHomeRootsStamp = func() string {
 	return stamp.String()
 }
 
+// enterpriseHookAccountIncarnationLookup names the account that holds a uid
+// now, by unixidentity's AccountIncarnation (the SID SSSD or winbind holds
+// for a directory account), for one reconcile tick; nil when NSS cannot be
+// read. Tests replace it.
+var enterpriseHookAccountIncarnationLookup = func(ctx context.Context) func(uid int, user string) (string, bool) {
+	resolver, err := unixidentity.NewNSSResolver(ctx)
+	if err != nil {
+		return nil
+	}
+	return resolver.AccountIncarnation
+}
+
 // enterpriseHookLocalAccountsStamp is enterprisehooks.LocalAccountsStamp.
 // Tests replace it.
 var enterpriseHookLocalAccountsStamp = func() string { return enterprisehooks.LocalAccountsStamp() }

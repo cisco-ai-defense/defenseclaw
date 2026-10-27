@@ -258,12 +258,21 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 	// another home, and its record, whose home proof tells the gateway it is
 	// another account (GAP-0422), is rewritten at the next tick instead of
 	// after the interval.
+	// It names the SID the directory holds for the uid too: an Active
+	// Directory account deleted and created again under the same name, uid
+	// and home changes no other part of its key, and its record kept the
+	// earlier SID until the interval, so the gateway refused every call of
+	// the new account as "UPN unconfirmed" for up to 15 minutes (GAP-2133).
+	incarnation := enterpriseHookAccountIncarnationLookup(ctx)
 	list := func(uid int, user string, homeInode uint64) {
 		seen[uid] = true
 		accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: uid, User: user})
 		key := strconv.Itoa(uid) + ":" + user
 		if homeInode != 0 {
 			key += ":" + strconv.FormatUint(homeInode, 10)
+		}
+		if sid := enterpriseHookKeySID(incarnation, uid, user); sid != "" {
+			key += ":" + sid
 		}
 		keys = append(keys, key)
 	}
@@ -1093,6 +1102,45 @@ func (l *enterpriseHookLeftOutAccounts) resolve() {
 		}
 	}
 	l.unresolved = nil
+}
+
+// enterpriseHookKeySIDs is the SID part of the last key of each uid
+// (enterpriseHookKeySID).
+var enterpriseHookKeySIDs struct {
+	sync.Mutex
+	byUID map[int]enterpriseHookKeySIDEntry
+}
+
+type enterpriseHookKeySIDEntry struct{ user, sid string }
+
+// enterpriseHookKeySID is the SID part of an identity spool key: the
+// incarnation lookup's "sid:..." answer for a directory account, "" for a
+// local account or another service (their changes show in the account
+// database stamp). A lookup that does not answer keeps the uid's last SID
+// for the same name, so an unanswered lookup does not start a pass.
+func enterpriseHookKeySID(lookup func(uid int, user string) (string, bool), uid int, user string) string {
+	if lookup == nil || user == "" {
+		return ""
+	}
+	state := &enterpriseHookKeySIDs
+	incarnation, known := lookup(uid, user)
+	state.Lock()
+	defer state.Unlock()
+	if !known {
+		if last, ok := state.byUID[uid]; ok && last.user == user {
+			return last.sid
+		}
+		return ""
+	}
+	sid := ""
+	if strings.HasPrefix(incarnation, "sid:") {
+		sid = incarnation
+	}
+	if state.byUID == nil {
+		state.byUID = map[int]enterpriseHookKeySIDEntry{}
+	}
+	state.byUID[uid] = enterpriseHookKeySIDEntry{user: user, sid: sid}
+	return sid
 }
 
 // enterpriseHookIdentitySpoolDirForConfig is the identity spool of the

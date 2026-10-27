@@ -12,6 +12,8 @@
 
 package cli
 
+import "context"
+
 // enterpriseHookGatewayPeerAccounts lists none on macOS: the gateway tells a
 // local account deleted and created again from the one before it by its
 // listed record (GAP-0669). Tests replace it.
@@ -27,3 +29,7 @@ func enterpriseHookNoteHomeRoots([]enterpriseHookReconcileRow) {}
 
 // enterpriseHookHomeRootsStamp is "" on macOS. Tests replace it.
 var enterpriseHookHomeRootsStamp = func() string { return "" }
+
+// enterpriseHookAccountIncarnationLookup is nil on macOS: Open Directory
+// names no SID the guardian keys records on. Tests replace it.
+var enterpriseHookAccountIncarnationLookup = func(context.Context) func(uid int, user string) (string, bool) { return nil }
