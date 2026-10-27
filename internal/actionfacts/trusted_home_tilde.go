@@ -109,6 +109,10 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 			}
 			words = append(words, cmd.Args[1:]...)
 			return collectRedirects(stmt)
+		case nil:
+			// A command-less redirect (`> ~/f`) is the ":" builtin with that
+			// redirect (GAP-2076).
+			return !compound && len(stmt.Redirs) != 0 && collectRedirects(stmt)
 		default:
 			return false
 		}

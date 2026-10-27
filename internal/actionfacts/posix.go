@@ -299,6 +299,28 @@ func projectPOSIXStatement(
 
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
 	if !ok {
+		if stmt.Cmd == nil && len(stmt.Redirs) > 0 && posixOutputRedirectsOnly(stmt.Redirs) {
+			// A command-less redirect (`> f`, `>> f`) opens its targets and
+			// runs nothing: it is the ":" builtin with the same redirects, so
+			// its targets are write path facts like any other (GAP-2076).
+			command := CommandFact{
+				ID:                   out.nextCommandID(),
+				ParentCommandID:      parentID,
+				PipelineID:           pipelineID,
+				ControlFlowUncertain: posixControlFlowUncertain(stmt, stack),
+				ControlFlowOperator:  posixControlFlowOperator(stmt, stack),
+				Background:           stmt.Background,
+				Dialect:              DialectPOSIX,
+				Effect:               EffectExecute,
+				ArgvComplete:         true,
+				Executable:           ":",
+				Program:              ":",
+				Argv:                 []string{":"},
+				Arguments:            []ArgumentFact{{Value: ":", Quote: QuoteNone}},
+			}
+			projectPOSIXRedirects(stmt.Redirs, &command, out)
+			return command, true
+		}
 		if stmt.Cmd == nil && len(stmt.Redirs) > 0 {
 			command := CommandFact{
 				ID:              out.nextCommandID(),
@@ -382,6 +404,20 @@ func projectPOSIXStatement(
 	projectPOSIXRedirects(stmt.Redirs, &command, out)
 	classifyPOSIXGitConfigEnvironmentOutput(out, &command, call.Assigns)
 	return command, true
+}
+
+// posixOutputRedirectsOnly reports redirects that only open files for
+// output (>, >>, >|); a command-less heredoc or input redirect keeps its
+// partial reading.
+func posixOutputRedirectsOnly(redirects []*syntax.Redirect) bool {
+	for _, redirect := range redirects {
+		switch redirect.Op {
+		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Git uses GIT_CONFIG_GLOBAL as the output file for a command-local

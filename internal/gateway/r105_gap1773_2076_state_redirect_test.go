@@ -13,8 +13,9 @@ import (
 )
 
 // GAP-1773: a write redirect to $HOME/, ${HOME}/ or "$HOME/..." active state
-// got no path fact, so the state owner never saw it. It is a write of the
-// redirect target, as the ~/ spelling already was.
+// got no path fact, so the state owner never saw it. GAP-2076: neither did
+// the redirect of the ":" builtin or of a command-less redirect (`> f`).
+// All of them are writes of the redirect target, as `true > f` already was.
 func TestR105StateRedirectSpellingsAreWrites(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX command matrix")
@@ -37,6 +38,13 @@ func TestR105StateRedirectSpellingsAreWrites(t *testing.T) {
 		{"${HOME} config", "printf x >> ${HOME}/.defenseclaw/config.yaml", true},
 		{"quoted $HOME config", `printf x >> "$HOME/.defenseclaw/config.yaml"`, true},
 		{"$HOME overwrite hook", "echo x > $HOME/.defenseclaw/hooks/claude-code-hook.sh", true},
+		{"colon truncate", ": > ~/.defenseclaw/config.yaml", true},
+		{"colon append", ": >> ~/.defenseclaw/config.yaml", true},
+		{"bare truncate", "> ~/.defenseclaw/config.yaml", true},
+		{"colon hook", ": > ~/.defenseclaw/hooks/claude-code-hook.sh", true},
+		{"colon $HOME", ": > $HOME/.defenseclaw/config.yaml", true},
+		{"colon notes", ": > notes.txt", false},
+		{"bare build log", "> build.log", false},
 		{"read $HOME config", "cat $HOME/.defenseclaw/config.yaml", false},
 		{"mention $HOME path", `printf '%s\n' "$HOME/.defenseclaw/config.yaml" > notes.txt`, false},
 		{"$HOMEX look-alike", "printf x >> $HOMEX/.defenseclaw/config.yaml", false},
