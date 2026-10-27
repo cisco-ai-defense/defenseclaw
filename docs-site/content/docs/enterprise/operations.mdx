@@ -437,8 +437,10 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show --jso
 
 - `policy show` prints the effective policy line after its header, for example
   `Effective policy sha256:7b38f1df3862, config generation 3`, and adds a `policy`
-  object (`effective_digest`, `config_generation`) to `--json`. It is the only way to
-  read the digest on Windows; `policy verify` does not print it.
+  object (`effective_digest`, `config_generation`) to `--json`. The lifecycle
+  `status --json` and `verify --json` results carry the same digest as
+  `policy.effective_digest` on every OS ([Health fields](#health-fields));
+  `policy verify` does not print it.
 - `policy verify` exits `1` when coverage is incomplete.
 - Add `--connector <name>` to check one connector, and `--user <name>` to also check
   that user's own agent config for hooks DefenseClaw has not approved.

@@ -1407,6 +1407,10 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-2175", page: "enterprise/operations.mdx", has: ["The lifecycle `status --json` and `verify --json` results carry the same digest as `policy.effective_digest` on every OS", "`policy verify` does not print it."], lacks: ["It is the only way to"] },
+  { gap: "GAP-2182", page: "reference/migrate-v9.mdx", has: ["[Moving from the 0.8.x Setup package](/docs/get-started/upgrade#windows-moving-from-the-setup-package)"], lacks: ["[Moving from the 0.8.x Setup package](/docs/get-started/windows)"] },
+  { gap: "GAP-2182", page: "get-started/upgrade.mdx", has: ["### Windows: moving from the Setup package"] },
+  { gap: "GAP-2198", page: "enterprise/mdm/intune-tenant.mdx", has: ["[The helper](#the-helper)", "[Troubleshooting](#troubleshooting)", "[Guardrail profiles and Entra groups](#guardrail-profiles-and-entra-groups)", "## The helper", "## Troubleshooting"], lacks: ["](/docs/enterprise/mdm/intune-tenant)", "[tenant reference]"] },
   { gap: "GAP-1795", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["fails with Conflict and leaves it starting", "keep the VM while you need what it holds"], lacks: ["can use `defenseclaw sandbox start NAME --end-vm`, then stop it"] },
   { gap: "GAP-1795", page: "sandboxes/guide.mdx", has: ["fails with Conflict and leaves it starting"], lacks: ["`start NAME --end-vm` starts it", "or on 0.1.5 start it with `--end-vm`", "can refuse the recovery above", "ends the lingering VM without a flush", "(which ends its VM without a flush)"] },
   { gap: "GAP-1795", page: "sandboxes/guide.mdx", section: "A sandbox is in OpenShell's error state", has: ["fails with Conflict and leaves it starting"], lacks: ["run `defenseclaw sandbox stop NAME` once it is ready"] },
