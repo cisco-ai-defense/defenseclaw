@@ -1679,7 +1679,14 @@ describe('1.0.5 docs rows', () => {
 describe('saved installer protection matches the rule packs (GAP-1922)', () => {
   it('names installer/ and previous/installer/ in tamper.detector_state_write of every pack, for writes and deletes', () => {
     const text = page('policies/deterministic-detection.mdx');
-    assert.ok(text.includes('DefenseClaw also protects its saved installer (`~/.defenseclaw/installer/` and `~/.defenseclaw/previous/installer/`): an agent that writes, truncates or deletes it is blocked in every mode, like `config.yaml`. Reading or running the saved installer stays allowed.'));
+    assert.ok(text.includes('DefenseClaw also protects its saved installer (`~/.defenseclaw/installer/` and `~/.defenseclaw/previous/installer/`): with the default and strict rule packs, an agent that writes, truncates or deletes it is blocked in every mode, like `config.yaml`. The permissive pack rates this rule HIGH and blocks only CRITICAL, so with it such a write to the saved installer or `config.yaml` is reported, not blocked, in both modes. Reading or running the saved installer stays allowed.'));
+    assert.ok(!text.includes('`~/.defenseclaw/previous/installer/`): an agent that writes, truncates or deletes it is blocked in every mode'), 'GAP-0046: unqualified every-mode claim is back');
+    assert.ok(page('policies/recipes.mdx').includes('DefenseClaw protects its own files; with the permissive pack it only reports it).'), 'GAP-0046: recipes step 2 lost the pack qualifier');
+    // GAP-0046: the page's per-pack split is the shipped severity against the
+    // posture thresholds (default and strict block it, permissive reports it).
+    const thresholds = source('internal/gateway/decision.go');
+    assert.match(thresholds, /case "strict":\n\t\treturn severityMedium, severityLow\n\tcase "permissive":\n\t\treturn severityCritical, severityHigh\n\tdefault:\n\t\treturn severityCritical, severityMedium/, 'GAP-0046: posture thresholds changed; re-check the per-pack sentence');
+    const packSeverity: Record<string, string> = { default: 'CRITICAL', strict: 'HIGH', permissive: 'HIGH' };
     for (const pack of ['default', 'permissive', 'strict']) {
       const yaml = source(`policies/guardrail/${pack}/rules/cognitive.yaml`);
       const rule = yaml.split('- id: tamper.detector_state_write\n')[1]?.split(/\n {2}- id: /)[0] ?? '';
@@ -1687,7 +1694,7 @@ describe('saved installer protection matches the rule packs (GAP-1922)', () => {
       const pattern = rule.match(/^ {4}pattern: '(.*)'$/m)?.[1] ?? '';
       assert.ok(pattern.includes('|installer|'), `${pack}: pattern does not name installer/`);
       assert.ok(pattern.includes('previous[/\\\\]installer'), `${pack}: pattern does not name previous/installer/`);
-      if (pack === "default") assert.match(rule, /^ {4}severity: CRITICAL$/m, "default: not CRITICAL");
+      assert.match(rule, new RegExp(`^ {4}severity: ${packSeverity[pack]}$`, "m"), `${pack}: not ${packSeverity[pack]} (GAP-0046 per-pack sentence)`);
       for (const access of ['PATH_ACCESS_WRITE', 'PATH_ACCESS_APPEND', 'PATH_ACCESS_DELETE']) {
         assert.ok(rule.includes(access), `${pack}: ${access} missing`);
       }
