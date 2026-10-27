@@ -138,7 +138,10 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		return checkValue(value, tilde, base) && !globs.recording()
 	}
 	if parsed {
-		values := actionValues{"HOME": home, "PWD": cwd}
+		// $USER and $LOGNAME name the home's own directory, as
+		// actionfacts reads /home/$USER/... (GAP-2269).
+		user := filepath.Base(home)
+		values := actionValues{"HOME": home, "PWD": cwd, "USER": user, "LOGNAME": user}
 		found := false
 		effectiveCWD := cwd
 		var directoryStack []string

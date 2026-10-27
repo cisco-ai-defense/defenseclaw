@@ -17,7 +17,7 @@ import (
 // the redirect of the ":" builtin or of a command-less redirect (`> f`).
 // All of them are writes of the redirect target, as `true > f` already was.
 // GAP-2225 and GAP-2268: so is the redirect of a wrapped program or of a
-// program named by a relative path.
+// program named by a relative path, and GAP-2269: of a /home/$USER/... target.
 func TestR105StateRedirectSpellingsAreWrites(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX command matrix")
@@ -32,6 +32,7 @@ func TestR105StateRedirectSpellingsAreWrites(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	userHome := filepath.Dir(home) + "/"
 	tests := []struct {
 		name, command string
 		block         bool
@@ -124,6 +125,16 @@ func TestR105StateRedirectSpellingsAreWrites(t *testing.T) {
 		{"relative script build log", "./build.sh > build.log", false},
 		{"relative subdir script output", "scripts/gen.sh > out.txt", false},
 		{"relative script reads config", "./build.sh ~/.defenseclaw/config.yaml > build.log", false},
+		// GAP-2269: the home spelled through the user name.
+		{"$USER home config", "printf x >> " + userHome + "$USER/.defenseclaw/config.yaml", true},
+		{"${USER} home config", "printf x >> " + userHome + "${USER}/.defenseclaw/config.yaml", true},
+		{"quoted $USER home config", `printf x >> "` + userHome + `$USER/.defenseclaw/config.yaml"`, true},
+		{"$LOGNAME home hook", "echo x > " + userHome + "$LOGNAME/.defenseclaw/hooks/claude-code-hook.sh", true},
+		{"$USER home rm argument", "rm -f " + userHome + "$USER/.defenseclaw/config.yaml", true},
+		{"relative script $USER home redirect", "./build.sh > " + userHome + "$USER/.defenseclaw/config.yaml", true},
+		{"$USER home project write", "printf x > " + userHome + "$USER/proj/notes.txt", false},
+		{"$USER home config read", "cat " + userHome + "$USER/.defenseclaw/config.yaml", false},
+		{"$USER other parent", "printf x >> /srv/$USER/.defenseclaw/config.yaml", false},
 	}
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connectorName)

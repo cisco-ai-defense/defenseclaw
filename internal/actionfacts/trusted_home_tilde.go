@@ -5,6 +5,7 @@ package actionfacts
 
 import (
 	"bytes"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -41,7 +42,8 @@ type trustedPOSIXHomeRewrite struct {
 // keeps the rewrite only when its parse is complete.
 func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRewrite, bool) {
 	if !trustedPOSIXHomeLiteral.MatchString(activeHome) ||
-		(!strings.Contains(source, "~") && !strings.Contains(source, "HOME")) {
+		(!strings.Contains(source, "~") && !strings.Contains(source, "HOME") &&
+			!strings.Contains(source, "USER") && !strings.Contains(source, "LOGNAME")) {
 		return trustedPOSIXHomeRewrite{}, false
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
@@ -75,6 +77,8 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 					// bash expands $HOME/${HOME} in a redirect target from
 					// the same HOME as ~, as for the arguments (GAP-1773).
 					words = append(words, redirect.Word)
+				} else if _, user := userHomeRewriteWord(redirect.Word, activeHome); user {
+					words = append(words, redirect.Word)
 				}
 			case syntax.DplOut, syntax.DplIn:
 				// A descriptor copy or close (2>&1, >&-) names no file and
@@ -106,7 +110,7 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 				return false
 			}
 			for _, word := range cmd.Args {
-				if !staticHomeRewriteWord(word) {
+				if _, user := userHomeRewriteWord(word, activeHome); !user && !staticHomeRewriteWord(word) {
 					return false
 				}
 			}
@@ -138,6 +142,17 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 	last := 0
 	rewrite := trustedPOSIXHomeRewrite{tildeOperands: map[string]string{}}
 	for _, word := range words {
+		if suffix, user := userHomeRewriteWord(word, activeHome); user {
+			start, end := int(word.Pos().Offset()), int(word.End().Offset())
+			if start < last || end > len(source) {
+				return trustedPOSIXHomeRewrite{}, false
+			}
+			out.WriteString(source[last:start])
+			out.WriteString(activeHome + suffix)
+			last = end
+			rewrite.tildeOperands[activeHome+suffix] = source[start:end]
+			continue
+		}
 		literal, ok := firstLiteral(word)
 		if !ok || (literal.Value != "~" && !strings.HasPrefix(literal.Value, "~/")) {
 			if suffix, anchored := homeAnchoredLiteralWord(word); anchored &&
@@ -170,8 +185,10 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 		return trustedPOSIXHomeRewrite{}, false
 	}
 	out.WriteString(source[last:])
-	// A separate HOME mention can change what the rewritten operands name.
-	if strings.Contains(out.String(), "HOME") {
+	// A separate HOME, USER or LOGNAME mention can change what the rewritten
+	// operands name.
+	if strings.Contains(out.String(), "HOME") || strings.Contains(out.String(), "USER") ||
+		strings.Contains(out.String(), "LOGNAME") {
 		return trustedPOSIXHomeRewrite{}, false
 	}
 	rewrite.source = out.String()
@@ -342,6 +359,75 @@ func quotedPlainHomeRewriteWord(word *syntax.Word) bool {
 	}
 	suffix, anchored := homeAnchoredLiteralWord(word)
 	return anchored && trustedPOSIXHomeLiteral.MatchString(suffix)
+}
+
+// userHomeRewriteWord reports a word that names a path below the home
+// through the user name, /home/$USER/... or "/Users/${LOGNAME}/..." (quoted
+// or not), when the literal parent directory plus the ActiveHome base name
+// is ActiveHome, and returns that path below the home. bash expands $USER
+// from the same login as HOME; when the two disagree the word names another
+// user's home, so reading it as ActiveHome errs only toward a write fact of
+// the active home, never away from one (GAP-2269).
+func userHomeRewriteWord(word *syntax.Word, activeHome string) (string, bool) {
+	if word == nil || len(word.Parts) == 0 || !strings.HasPrefix(activeHome, "/") {
+		return "", false
+	}
+	var prefix, suffix strings.Builder
+	params := 0
+	text := func(value string) {
+		if params == 0 {
+			prefix.WriteString(value)
+		} else {
+			suffix.WriteString(value)
+		}
+	}
+	param := func(part syntax.WordPart) bool {
+		if !plainNamedParameter(part, "USER") && !plainNamedParameter(part, "LOGNAME") {
+			return false
+		}
+		params++
+		return true
+	}
+	for _, part := range word.Parts {
+		switch typed := part.(type) {
+		case *syntax.Lit:
+			text(typed.Value)
+		case *syntax.SglQuoted:
+			if typed.Dollar {
+				return "", false
+			}
+			text(typed.Value)
+		case *syntax.ParamExp:
+			if !param(typed) {
+				return "", false
+			}
+		case *syntax.DblQuoted:
+			if typed.Dollar {
+				return "", false
+			}
+			for _, quoted := range typed.Parts {
+				switch value := quoted.(type) {
+				case *syntax.Lit:
+					text(value.Value)
+				case *syntax.ParamExp:
+					if !param(value) {
+						return "", false
+					}
+				default:
+					return "", false
+				}
+			}
+		default:
+			return "", false
+		}
+	}
+	parent, below := prefix.String(), suffix.String()
+	if params != 1 || !strings.HasSuffix(parent, "/") || parent+path.Base(activeHome) != activeHome ||
+		!trustedPOSIXHomeLiteral.MatchString(parent) || !strings.HasPrefix(below, "/") || below == "/" ||
+		!trustedPOSIXHomeLiteral.MatchString(below) {
+		return "", false
+	}
+	return below, true
 }
 
 func firstLiteral(word *syntax.Word) (*syntax.Lit, bool) {
