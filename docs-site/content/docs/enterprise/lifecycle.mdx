@@ -523,6 +523,15 @@ commands below to restart the managed gateway.
 | macOS | `sudo launchctl kickstart -k system/com.cisco.defenseclaw.gateway` | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --json` |
 | Windows | Run the installed release's Setup with `/repair JSON=1` | The same |
 
+To stop the managed gateway, for example to see what your users get while it is down, and to start it again:
+
+| OS | Stop the gateway | Start it again |
+| --- | --- | --- |
+| Linux | `sudo systemctl stop defenseclaw-gateway-hook.socket defenseclaw-gateway-api.socket defenseclaw-gateway.service` | `sudo systemctl start defenseclaw-gateway-hook.socket defenseclaw-gateway-api.socket defenseclaw-gateway.service` |
+| macOS | `sudo launchctl bootout system/com.cisco.defenseclaw.gateway` | `sudo launchctl bootstrap system /Library/LaunchDaemons/com.cisco.defenseclaw.gateway.plist` |
+
+On Linux stop the two sockets with the service: a socket that still listens starts the gateway again at the next hook. While the gateway is stopped, hooks answer `enterprise_managed_gateway_not_running` and block the call (allow it under the administrator's `hook_fail_mode: open`, see below), and `status` exits `1` with `verify_failed` errors that name the gateway as not active. The gateway stays stopped until you start it again or run `repair`.
+
 A managed hook that meets a restarting gateway retries for about 3 seconds, so a quick restart is not visible to the agent. With the default closed fail mode, a longer restart blocks each call. Tool-call hooks wait at most about 3.5 seconds for the gateway, then block with `enterprise_managed_gateway_no_answer`. The administrator's `hook_fail_mode: open` allows a call only while the hook proves the gateway service is stopped (no gateway took the call); a restart the hook cannot prove stopped, no answer in time, integrity, peer-verification, credential and rate-limit refusals still block. Connectors whose foreign-hook guard checks the session with the gateway (`foreign_hooks: remove`, the default) block outages too. `DEFENSECLAW_STRICT_AVAILABILITY=1` closes outages too. `ensure` applies most config changes in the running gateway without a restart; a change to a process-level key (`gateway.*`, `enterprise.network`, the other `enterprise` keys) restarts it and takes two to six minutes.
 
 ### Gateway restarts and hook timing

@@ -682,7 +682,7 @@ When a sandbox can't run for a person, the refusal says why in words and the rec
 | `os_unsupported` | Windows, WSL2, an unsupported operating system, or an Intel Mac | Give the people on it a profile without `required_for`, or `alert` in the floor and the profile |
 | `sandboxes_off` | `openshell.enabled` is off on this computer | Turn it on and run `ensure` |
 | `root_account` | The account is root | Run as a standard user |
-| `account_unverified` | DefenseClaw could not verify the account behind the call | `profile-explain --user NAME`; check the identity source |
+| `account_unverified` | DefenseClaw could not verify the account behind the call | `enterprise <os> profile-explain --user NAME`; check the identity source |
 | `no_docker` | Docker is not running (Docker driver) | Start Docker for the person |
 | `no_docker_access`, `no_docker_group` | The Docker socket isn't read-write for the account, or the account is not in the group that can use it | Add the person to the group the message names (`docker`) |
 | `no_kvm_group`, `no_kvm_access` | `driver_fallback: none` and the account can't open `/dev/kvm` | Add the person to the group the message names (`kvm`), or allow the Docker fallback |
@@ -754,7 +754,7 @@ The text column quotes stable fragments; the complete notice adds the sandbox na
 | Registration ended by the organization (a new connection) | "your organization's policy no longer covers this sandbox; delete it and start it again with defenseclaw sandbox run" |
 | Access request exceeds the profile | "You can't approve this."; the notice gives the request-access contact and the caller's profile, rule, host and sandbox to quote |
 
-A user's policy that differs from what you expect may reflect group membership the host has confirmed. If a lookup fails, a request whose assignment needs the missing fact is refused and names that fact. When no assignment needs it, the proven or default profile applies. Run `profile-explain --user` and `sandbox explain`; see [Troubleshooting identity](/docs/enterprise/identity-sources).
+A user's policy that differs from what you expect may reflect group membership the host has confirmed. If a lookup fails, a request whose assignment needs the missing fact is refused and names that fact. When no assignment needs it, the proven or default profile applies. Run `enterprise <os> profile-explain --user` and `sandbox explain`; see [Troubleshooting identity](/docs/enterprise/identity-sources).
 
 ### An agent reports `Operation not permitted` on a Linux computer that runs Tetragon
 

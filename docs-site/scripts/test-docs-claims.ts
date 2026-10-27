@@ -1558,6 +1558,10 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1503", page: "policies/deterministic-detection.mdx", has: ["instruction-file writes are HIGH, so they are reported, not blocked"] },
   { gap: "GAP-1254", page: "connectors/copilot.mdx", has: ["removes the `enabledPlugins` entry `defenseclaw@defenseclaw`"] },
   { gap: "GAP-1795", page: "reference/sandbox-cli.mdx", has: ["OpenShell 0.1.5 refuses `--end-vm` for a MicroVM whose workload completed or failed while its VM still runs"] },
+  { gap: "GAP-2255", page: "enterprise/enrollment.mdx", has: ["`enterprise <os> profile-explain --user <account>` prints", "enterprise macos profile-explain --user <account>", "The gateway has no top-level `profile-explain`."], lacks: ["runs. `profile-explain --user <account>` prints"] },
+  { gap: "GAP-2255", page: "enterprise/sandboxes.mdx", has: ["| `enterprise <os> profile-explain --user NAME`; check the identity source |", "Run `enterprise <os> profile-explain --user` and `sandbox explain`"], lacks: ["| `profile-explain --user NAME`;", "Run `profile-explain --user` and"] },
+  { gap: "GAP-2212", page: "enterprise/ai-defense-key.mdx", has: ["On a host whose status has warnings the output starts with `! secret set: done with N warnings` and the warning lines (for example `openshell_prerequisite_missing`,", "`secret remove` prints the same header."], lacks: ["restarts the gateway so it reads the key. The output starts with `✓ secret set: done` and `- stored credential ai-defense-api-key`. </Tab>"] },
+  { gap: "GAP-2204", page: "enterprise/lifecycle.mdx", section: "Restart the managed gateway", has: ["| macOS | `sudo launchctl bootout system/com.cisco.defenseclaw.gateway` | `sudo launchctl bootstrap system /Library/LaunchDaemons/com.cisco.defenseclaw.gateway.plist` |", "| Linux | `sudo systemctl stop defenseclaw-gateway-hook.socket defenseclaw-gateway-api.socket defenseclaw-gateway.service` |", "a socket that still listens starts the gateway again at the next hook", "`enterprise_managed_gateway_not_running`"] },
   // r105-rows-end
 ];
 
