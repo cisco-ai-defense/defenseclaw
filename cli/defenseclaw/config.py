@@ -35,6 +35,7 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 import urllib.parse
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -4596,7 +4597,7 @@ class Config:
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
-        _drop_retired_connector_settings(existing)
+        _drop_retired_connector_settings(existing, path)
         merged = _merge_v8_modeled_changes(
             existing,
             dataclass_data,
@@ -7337,7 +7338,13 @@ def _is_retired_connector_name(name: Any) -> bool:
     return isinstance(name, str) and name.strip().lower() in _RETIRED_CONNECTOR_NAMES
 
 
-def _drop_retired_connector_settings(raw: dict[str, Any], *, emit_warning: bool = True) -> None:
+# Set once _drop_retired_connector_settings has warned in this process.
+_retired_settings_warned = threading.Event()
+
+
+def _drop_retired_connector_settings(
+    raw: dict[str, Any], source: str | os.PathLike[str] | None = None, *, emit_warning: bool = True
+) -> None:
     """Until 1.1, accept old rosters and discard removed connector settings.
 
     Only connector fields are touched (mirrors ``dropRetiredConnectorSettings``
@@ -7449,10 +7456,16 @@ def _drop_retired_connector_settings(raw: dict[str, Any], *, emit_warning: bool 
     if isinstance(claw, dict) and _is_retired_connector_name(claw.get("mode")):
         claw["mode"] = ""
         changed = True
-    if changed and emit_warning:
-        logging.warning(
-            "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it. "
-            "Their settings were dropped; run defenseclaw migrate"
+    if changed and emit_warning and not _retired_settings_warned.is_set():
+        # Once per process, through this module's logger: the root logger's
+        # implicit basicConfig printed a raw "WARNING:root:" line into the
+        # installer's output, and that line repeated the installers' one
+        # removal notice (GAP-2043). It names the file, which is what to fix.
+        _retired_settings_warned.set()
+        _log.warning(
+            "%s still names OpenHands/OmniGent, which DefenseClaw no longer supports; "
+            "they are ignored. Delete them from that file.",
+            os.fspath(source) if source else "config.yaml",
         )
 
 
@@ -7498,7 +7511,7 @@ def load(
     # is normalized or checked for duplicates. The Go loader applies the same
     # rule; `defenseclaw migrate` persists it (see migrations.py).
     legacy_connector.migrate_raw_config(raw, cfg_file)
-    _drop_retired_connector_settings(raw)
+    _drop_retired_connector_settings(raw, cfg_file)
     if without_guardrail_profiles:
         raw = _without_guardrail_profiles(raw)
 

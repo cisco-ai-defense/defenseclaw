@@ -89,6 +89,24 @@ $Repo = if ($env:DEFENSECLAW_REPO) { $env:DEFENSECLAW_REPO } else { $DefaultRepo
 $ReleaseBase = if ($Repo -like "https://*") { $Repo.TrimEnd("/") } else { "https://github.com/$Repo" }
 $OfficialReleaseBase = "https://github.com/$DefaultRepo"
 $ReleaseSigner = '^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
+function Resolve-DcPathVariables {
+    # A quoted "~\..." DEFENSECLAW_HOME or DEFENSECLAW_CONFIG (the shell did
+    # not expand it) names the caller's home, and a relative one names a
+    # folder from the caller's directory. PowerShell resolves both, but the
+    # CLI and the gateway this installer runs do not: the upgrade read no
+    # config and stopped (GAP-2113). Record the absolute path once, here, as
+    # install.sh does.
+    foreach ($name in @("DEFENSECLAW_HOME", "DEFENSECLAW_CONFIG")) {
+        $value = [Environment]::GetEnvironmentVariable($name, "Process")
+        if (-not $value) { continue }
+        if ($value -eq "~") { $value = $env:USERPROFILE }
+        elseif ($value -match '^~[\\/]') { $value = Join-Path $env:USERPROFILE $value.Substring(2) }
+        elseif (-not [IO.Path]::IsPathRooted($value)) { $value = Join-Path (Get-Location -PSProvider FileSystem).ProviderPath $value }
+        else { continue }
+        [Environment]::SetEnvironmentVariable($name, $value, "Process")
+    }
+}
+Resolve-DcPathVariables
 $DataDir = if ($env:DEFENSECLAW_HOME) { $env:DEFENSECLAW_HOME } else { Join-Path $env:USERPROFILE ".defenseclaw" }
 $Venv = Join-Path $DataDir ".venv"
 $BinDir = Join-Path $env:USERPROFILE ".local\bin"

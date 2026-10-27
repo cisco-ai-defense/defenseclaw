@@ -4994,6 +4994,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 }
 
 func (s *Sidecar) waitForConnectorSetup(ctx context.Context) error {
+	// A host with no connector configured is a boot path too: a 1.0.4 host
+	// whose last connector was dropped can still hold the OpenHands/OmniGent
+	// lock entries and stubs (GAP-2018). Their teardown needs no registry.
+	s.removeRemovedConnectorLeftovers(ctx, nil)
 	if err := s.reconcileUnconfiguredConnectors(ctx, nil); err != nil {
 		if s.health != nil {
 			s.health.SetGuardrail(StateError, err.Error(), nil)
@@ -7502,10 +7506,11 @@ func retiredConnectorOpts(dataDir, workspaceDir string) connector.SetupOpts {
 }
 
 // removeRemovedConnectorLeftovers runs the OpenHands/OmniGent teardown on
-// every boot path, single- and multi-connector alike, when a lock entry or a
-// leftover of theirs is there: a 1.0.4 host that dropped them from the roster
-// kept both, and the single-connector boot has no orphan reconcile
-// (GAP-1843, GAP-1926). It runs before any connector transaction captures
+// every boot path, single- and multi-connector alike and with no connector
+// configured, when a lock entry or a leftover of theirs is there: a 1.0.4
+// host that dropped them from the roster kept both, and the single-connector
+// and zero-connector boots have no orphan reconcile (GAP-1843, GAP-1926,
+// GAP-2018). registry may be nil: a removed connector's teardown never uses it. It runs before any connector transaction captures
 // state and never fails a boot. A managed install leaves it to the hook
 // guardian, which runs it as each account. until 1.1.
 func (s *Sidecar) removeRemovedConnectorLeftovers(ctx context.Context, registry *connector.Registry) {

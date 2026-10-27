@@ -176,7 +176,7 @@ func (c removedOnlyConnector) Teardown(_ context.Context, opts SetupOpts) error 
 	configs := c.configPaths(opts)
 	names := c.namesFor(opts)
 	for _, path := range configs {
-		_ = c.removeEntries(path, names)
+		_ = c.removeEntries(path, names, opts.DataDir)
 	}
 	hooks := filepath.Join(opts.DataDir, "hooks")
 	_ = RemoveHookAPIToken(opts.DataDir, c.name)
@@ -409,7 +409,9 @@ func (c removedOnlyConnector) decode(data []byte) (any, error) {
 // removeEntries removes DefenseClaw's entries from one agent config. A file
 // that cannot be read or parsed is left as it is (the agent cannot load it
 // either); the file keeps its mode and, where the platform allows, its owner.
-func (c removedOnlyConnector) removeEntries(path string, names func(string) bool) error {
+// A file the setup made (its receipt says it did not exist before) and that
+// holds nothing else goes, so no empty "{}" config is left behind.
+func (c removedOnlyConnector) removeEntries(path string, names func(string) bool, dataDir string) error {
 	data, err := readRemovedConfig(path)
 	if err != nil || len(data) > removedConfigReadLimit {
 		return err
@@ -427,6 +429,9 @@ func (c removedOnlyConnector) removeEntries(path string, names func(string) bool
 	if err != nil || !changed {
 		return err
 	}
+	if removedEmptyConfig(updated) && c.setupMadeConfig(dataDir, path) {
+		return removeRegularFile(path)
+	}
 	// The agent reads its config through links; the file it reads is the
 	// one changed.
 	target, err := filepath.EvalSymlinks(path)
@@ -441,6 +446,27 @@ func (c removedOnlyConnector) removeEntries(path string, names func(string) bool
 		return err
 	}
 	return removedKeepOwner(target, info)
+}
+
+// removedEmptyConfig reports whether a rewritten agent config holds nothing:
+// an empty mapping with no comment.
+func removedEmptyConfig(data []byte) bool {
+	return strings.TrimSpace(string(data)) == "{}"
+}
+
+// setupMadeConfig reports whether the setup receipt names path as a file
+// that did not exist before the setup, and path is still a regular file (not
+// a link someone put there since).
+func (c removedOnlyConnector) setupMadeConfig(dataDir, path string) bool {
+	if strings.TrimSpace(dataDir) == "" {
+		return false
+	}
+	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, c.name, "config"))
+	if err != nil || b.Existed || b.Connector != c.name || !sameManagedTargetPath(b.Path, path) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // liveRegistrations are the valid agent configs that still run or import the
