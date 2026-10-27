@@ -70,6 +70,10 @@ def tool_rule_entries(cfg: Any | None, store: Store | None) -> list[ActionEntry]
 # scan --action). Operator commands write their own reasons.
 CLI_SCAN_REASON_PREFIXES = ("post-install scan:", "post-scan:")
 
+# The reasons the gateway install watcher writes on its own records
+# (internal/watcher/watcher.go autoBlockReasonPrefix, scanFailureReason).
+WATCHER_REASON_PREFIXES = ("auto-block: watch detected ", "scanner failure (fail-closed): ")
+
 
 class PolicyEngine:
     def __init__(self, store: Store | None, cfg: Any | None = None) -> None:
@@ -320,6 +324,27 @@ class PolicyEngine:
         if entry is None or not entry.reason.startswith(CLI_SCAN_REASON_PREFIXES):
             return None
         return entry
+
+    def unscoped_runtime_disable(self, target_type: str, name: str) -> ActionEntry | None:
+        """The connector-less row of this asset when it holds a runtime
+        disable (it applies to every connector), or None."""
+        if not self.store:
+            return None
+        entry = self.store.get_action(target_type, name, "")
+        if entry is None or entry.actions.runtime != "disable":
+            return None
+        return entry
+
+    def is_openclaw_watcher_record(self, entry: ActionEntry) -> bool:
+        """Whether a connector-less row is the install watcher's own record
+        for OpenClaw: the watcher journals OpenClaw assets without a
+        connector (watcher.go journalScope), so that row is OpenClaw's.
+        Secure Client journals every connector there and keeps its rows."""
+        return (
+            not entry.connector
+            and not asset_lists.is_secure_client(self.cfg)
+            and entry.reason.startswith(WATCHER_REASON_PREFIXES)
+        )
 
     def release_scan_decision(
         self, target_type: str, name: str, connector: str = "", *, keep: tuple[str, ...] = (),

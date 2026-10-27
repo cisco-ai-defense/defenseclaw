@@ -3636,6 +3636,52 @@ class TestSkillDisableHonesty(SkillCommandTestBase):
         )
         mock_client.assert_not_called()
 
+    def test_gap0024_openclaw_enable_clears_the_watchers_connector_less_disable(self):
+        """GAP-0024: the watcher journals an OpenClaw auto-block without a
+        connector; `skill enable <n> --connector openclaw` re-enabled the skill
+        in OpenClaw but left that row, so skill info and skill list still said
+        disabled. The scoped enable clears the watcher's own OpenClaw row."""
+        from defenseclaw.commands.cmd_skill import _build_actions_map
+
+        self.app.cfg.active_connectors = lambda: ["openclaw", "hermes"]  # type: ignore[method-assign]
+        PolicyEngine(self.app.store, self.app.cfg).disable(
+            "skill", "fxoc1", "auto-block: watch detected INFO findings",
+        )
+        with patch("defenseclaw.commands.cmd_skill._sidecar_client") as mock_client:
+            mock_client.return_value.enable_skill.return_value = {"status": "enabled"}
+            result = self.invoke(["enable", "fxoc1", "--connector", "openclaw"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_client.return_value.enable_skill.assert_called_once_with("fxoc1")
+        self.assertIn("watcher runtime disable cleared (connector=openclaw)", result.output)
+        self.assertFalse(self.app.store.has_action("skill", "fxoc1", "runtime", "disable"))
+        entry = _build_actions_map(self.app.store, "openclaw", self.app.cfg).get("fxoc1")
+        self.assertFalse(entry is not None and entry.actions.runtime == "disable", entry)
+
+    def test_gap0024_an_operator_connector_wide_disable_stays_and_is_named(self):
+        """GAP-0024 control: a connector-wide disable that is not the
+        watcher's OpenClaw record (an operator's, or any for another
+        connector) stays, and the scoped enable says which record still
+        disables the skill and how to clear it."""
+        self.app.cfg.active_connectors = lambda: ["openclaw", "hermes"]  # type: ignore[method-assign]
+        pe = PolicyEngine(self.app.store, self.app.cfg)
+        cases = {
+            "operator-openclaw": ("manual hold", "openclaw"),
+            "watcher-hermes": ("auto-block: watch detected HIGH findings", "hermes"),
+        }
+        for label, (reason, connector) in cases.items():
+            with self.subTest(label):
+                name = f"keep-{label}"
+                pe.disable("skill", name, reason)
+                with patch("defenseclaw.commands.cmd_skill._sidecar_client") as mock_client:
+                    mock_client.return_value.enable_skill.return_value = {"status": "enabled"}
+                    result = self.invoke(["enable", name, "--connector", connector])
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertTrue(self.app.store.has_action("skill", name, "runtime", "disable"), result.output)
+                self.assertIn("still has a runtime disable for every connector", result.output)
+                self.assertIn(reason, result.output)
+                self.assertIn(f"defenseclaw skill enable {name}", result.output)
+
     def test_disable_bare_name_records_every_matching_connector_copy(self):
         self.app.cfg.active_connectors = lambda: ["hermes", "codex"]  # type: ignore[method-assign]
         hermes_root = os.path.join(self.tmp_dir, "hermes", "skills")
