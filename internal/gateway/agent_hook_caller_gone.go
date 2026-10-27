@@ -22,6 +22,56 @@ import (
 // its body is whatever the socket already holds.
 const hookCallerGoneReadWait = 250 * time.Millisecond
 
+// hookCallerLeftKey marks a request admitHookCaller did not admit because
+// its client had left.
+type hookCallerLeftKey struct{}
+
+func withHookCallerLeft(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), hookCallerLeftKey{}, true))
+}
+
+// hookCallerLeft reports a request whose client left before admission.
+func hookCallerLeft(r *http.Request) bool {
+	left, _ := r.Context().Value(hookCallerLeftKey{}).(bool)
+	return left
+}
+
+// recordManagedPeerCallerGone audits a hook-socket call whose client left
+// before admission only when the socket would have served it as an enrolled
+// account's hook call: a refused process context, a call decide refuses and
+// an exempt account's call (which has its own row type) get no
+// connector-hook row. The kernel-verified peer in the context attributes it.
+func (a *APIServer) recordManagedPeerCallerGone(w http.ResponseWriter, r *http.Request, authorizer *managedHookAuthorizer, peer managedHookPeer) {
+	if authorizer == nil || hookexec.IsManagedProcessContextReason(r.Header.Get(hookexec.ClientRefusalHeader)) {
+		return
+	}
+	connectorName, inspect := a.managedHookRouteScope(r)
+	if inspect || connectorName == "" {
+		return
+	}
+	if decision := authorizer.decide(peer, connectorName, r.Header.Get(hookexec.AgentSurfaceHeader)); !decision.Allow || decision.Exempt {
+		return
+	}
+	a.recordHookCallerGone(w, r)
+}
+
+// recordUserScopedCallerGone audits a call authenticated by a per-user
+// credential whose client left before admission under the identity the
+// credential is bound to, never the X-DefenseClaw-User-* headers: a call
+// whose headers name another account would have been refused, so it gets
+// no row (bindUserScopedIdentity, GAP-0702).
+func (a *APIServer) recordUserScopedCallerGone(w http.ResponseWriter, r *http.Request, identity string, mark func(context.Context) context.Context) {
+	ctx := context.WithValue(r.Context(), verifiedUserScopedIdentityContextKey{}, identity)
+	if mark != nil {
+		ctx = mark(ctx)
+	}
+	bound, ok := bindUserScopedIdentity(r.WithContext(ctx), identity)
+	if !ok {
+		return
+	}
+	a.recordHookCallerGone(w, bound)
+}
+
 // recordHookCallerGone audits a managed hook call whose client left before
 // the gateway admitted it (GAP-0286). During a gateway stall the calls queue
 // on the hook socket; the native hook gives up at its answer deadline and

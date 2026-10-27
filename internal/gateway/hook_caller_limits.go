@@ -235,16 +235,15 @@ func hookCallerBudgetKey(identity, path string) string {
 // waits for one of the caller's run slots. It returns the request to serve,
 // which carries the slot, and the release function to defer; the release
 // function is nil after answering 429 or when the client went away while it
-// waited.
+// waited; hookCallerLeft reports the second.
 func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, identity, route string) (*http.Request, func()) {
 	release, run, refusal, logNow := a.hookCallerLimits.acquire(hookCallerBudgetKey(identity, r.URL.Path))
 	if refusal == "" {
 		if r.Context().Err() != nil {
-			// The client left before it had a slot: nothing to serve, but
-			// a managed call still gets its audit row (GAP-0286).
+			// The client left before it had a slot: nothing to serve. The
+			// caller audits a managed call it would have served (GAP-0286).
 			release()
-			a.recordHookCallerGone(w, r)
-			return r, nil
+			return withHookCallerLeft(r), nil
 		}
 		// Advertise the receipt protocol as soon as a managed hook is
 		// admitted. Waiting for this caller's run slot can exceed the native
@@ -267,8 +266,7 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 			}
 		case <-r.Context().Done():
 			release()
-			a.recordHookCallerGone(w, r)
-			return r, nil
+			return withHookCallerLeft(r), nil
 		}
 	}
 	if logNow {
