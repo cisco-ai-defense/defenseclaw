@@ -77,12 +77,8 @@ func TestHookSocketEvaluatorWatchesTheUnresolvableCallerProject(t *testing.T) {
 			}
 			req := decodeClaudeCodeRequestForContext(ctx, []byte(tc.body), payload)
 			out := claudeCodeOutput(req, "allow", "allow", "", "")
-			var paths []string
-			if specific, ok := out["hookSpecificOutput"].(map[string]interface{}); ok {
-				paths, _ = specific["watchPaths"].([]string)
-			} else {
-				paths, _ = out["watchPaths"].([]string)
-			}
+			specific, _ := out["hookSpecificOutput"].(map[string]interface{})
+			paths, _ := specific["watchPaths"].([]string)
 			if containsString(paths, filepath.Join(serviceHome, ".claude", "settings.json")) {
 				t.Fatalf("service account watch path leaked: %v", paths)
 			}

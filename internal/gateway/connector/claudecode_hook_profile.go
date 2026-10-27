@@ -277,7 +277,12 @@ func claudeCodeOutputForProfile(req HookProfileRequest, action, rawAction, reaso
 		return map[string]interface{}{"hookSpecificOutput": output}
 	}
 	if event == "CwdChanged" || event == "FileChanged" {
-		output := map[string]interface{}{"watchPaths": claudeCodeProfileWatchPaths(req, watchRoot)}
+		// Claude Code reads watchPaths of these events only inside
+		// hookSpecificOutput; a top-level key is ignored (GAP-2288).
+		output := map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
+			"hookEventName": event,
+			"watchPaths":    claudeCodeProfileWatchPaths(req, watchRoot),
+		}}
 		if additional != "" {
 			output["systemMessage"] = additional
 		}
@@ -293,8 +298,6 @@ func claudeCodeOutputForProfile(req HookProfileRequest, action, rawAction, reaso
 			"hookEventName":     event,
 			"additionalContext": additional,
 		}}
-	case "CwdChanged":
-		return map[string]interface{}{"watchPaths": []string{}}
 	default:
 		return map[string]interface{}{"systemMessage": additional}
 	}

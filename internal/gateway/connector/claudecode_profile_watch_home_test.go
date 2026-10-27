@@ -43,9 +43,14 @@ func TestClaudeCodeProfileWatchPathsFollowTheVerifiedCaller(t *testing.T) {
 					req.CWD, req.WatchCWD = "", project
 				}
 				out := claudeCodeOutputForProfile(req, "allow", "allow", "", "")
-				if event == "SessionStart" {
-					out = out["hookSpecificOutput"].(map[string]interface{})
+				specific, ok := out["hookSpecificOutput"].(map[string]interface{})
+				if !ok || specific["hookEventName"] != event {
+					t.Fatalf("%s answer = %#v, want watchPaths in hookSpecificOutput (GAP-2288)", event, out)
 				}
+				if _, top := out["watchPaths"]; top {
+					t.Fatalf("%s answer has a top-level watchPaths, which Claude Code ignores: %#v", event, out)
+				}
+				out = specific
 				paths, ok := out["watchPaths"].([]string)
 				if !ok || paths == nil {
 					t.Fatalf("watchPaths = %#v, want a list", out["watchPaths"])
