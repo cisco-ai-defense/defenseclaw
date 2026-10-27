@@ -735,11 +735,21 @@ func UserNativeOTLPConfigUnreachable(connectorName string) string {
 	return unresolvedLinkOnPath(path)
 }
 
-// unresolvedLinkOnPath returns the nearest existing ancestor of a missing
-// path when that ancestor is a link (symlink or other reparse point) that
-// does not resolve, else "".
+// unresolvedLinkOnPath returns the link on path that does not resolve: the
+// config file itself when it is a link (symlink or other reparse point) whose
+// target cannot be reached (a config.toml linked to a share whose server is
+// off the network), else the nearest existing ancestor of a missing path when
+// that ancestor is such a link, else "".
 func unresolvedLinkOnPath(path string) string {
-	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+			return ""
+		}
+		if _, err := os.Stat(path); err != nil {
+			return path
+		}
+		return ""
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return ""
 	}
 	for dir := filepath.Dir(path); ; {

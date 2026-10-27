@@ -109,6 +109,32 @@ func TestWindowsManagedNativeOTLPTakeBackKeepsThePendingMarkerWhenTheLinkedConfi
 		t.Fatalf("verify fails the install on the pending take-back: %v", err)
 	}
 
+	// The config FILE itself is a symlink to the share (.codex is a real
+	// folder): the first take-back refuses the reparse component and records
+	// the marker; a retry while the share cannot be reached keeps it.
+	fileLinked := newAccount(true)
+	if err := os.Remove(filepath.Join(fileLinked.home, ".codex")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(fileLinked.home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(fileLinked.share, "config.toml"), filepath.Join(fileLinked.home, ".codex", "config.toml")); err != nil {
+		t.Fatalf("file symlink (needs SeCreateSymbolicLinkPrivilege): %v", err)
+	}
+	report = takeBack(fileLinked)
+	if _, err := os.Lstat(fileLinked.marker); err != nil {
+		t.Fatalf("no pending marker for a config.toml linked to a share: %v (report %q)", err, report)
+	}
+	unreachable(fileLinked)
+	report = takeBack(fileLinked)
+	if _, err := os.Lstat(fileLinked.marker); err != nil {
+		t.Fatalf("take-back cleared the pending marker while the linked config.toml cannot be reached: %v (report %q)", err, report)
+	}
+	if !strings.Contains(report, "cannot be reached") {
+		t.Fatalf("file-link take-back report = %q, want the unreachable link named", report)
+	}
+
 	// No earlier per-user install (no credential, no marker): nothing to report.
 	never := newAccount(false)
 	unreachable(never)

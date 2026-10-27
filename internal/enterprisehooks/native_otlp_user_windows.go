@@ -165,7 +165,7 @@ func removeWindowsManagedUserNativeOTLPAsTarget(connectorName, dataDir string) e
 		if connector.NativeOTLPTakeBackPending(dataDir, connectorName) ||
 			windowsManagedUserNativeOTLPCredential(connectorName, dataDir) != "" {
 			keepWindowsManagedNativeOTLPTakeBackPending(connectorName, dataDir,
-				fmt.Errorf("its config folder %s is a link whose target cannot be reached", link))
+				fmt.Errorf("its config path %s is a link whose target cannot be reached", link))
 		}
 		return nil
 	}
