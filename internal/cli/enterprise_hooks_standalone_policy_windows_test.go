@@ -554,6 +554,30 @@ func TestWindowsCopilotVerifyNamesClaudeSettingsTheMigrationCannotFinish(t *test
 	if err := windowsCopilotVSCodeUser(home, true, false); err == nil || !strings.Contains(err.Error(), "cannot check "+settings) {
 		t.Fatalf("LocalSystem must fail the row on a file it cannot read: %v", err)
 	}
+	// GAP-0031: with the DefenseClaw hook file and plugin in place the
+	// settings file is the row's only fault, and verify says so (the
+	// protected records are then compared with the row as protected); any
+	// other fault of the row is not excused by it.
+	windowsManagedClaudeRegistrationProbe = func(string, string) (bool, []string, error) { return false, nil, nil }
+	if err := windowsCopilotVSCodeUser(home, false, false); err != nil {
+		t.Fatalf("place the Copilot hook file: %v", err)
+	}
+	windowsManagedClaudeRegistrationProbe = func(string, string) (bool, []string, error) {
+		return false, nil, errors.New("the Claude settings must be a JSON object: invalid character")
+	}
+	var userFile enterpriseHookUserFileFault
+	err := windowsCopilotVSCodeUser(home, true, false)
+	if !errors.As(err, &userFile) || !strings.Contains(err.Error(), "cannot check "+settings) {
+		t.Fatalf("the settings file is the only fault and must be reported as one: %v", err)
+	}
+	hookFile := enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)
+	if err := os.Remove(hookFile); err != nil {
+		t.Fatal(err)
+	}
+	err = windowsCopilotVSCodeUser(home, true, false)
+	if err == nil || errors.As(err, &userFile) || !strings.Contains(err.Error(), "cannot check "+settings) {
+		t.Fatalf("a missing hook file is a second fault: verify must name both and not report a user-file-only fault: %v", err)
+	}
 }
 
 // GAP-1970: a verify or readiness run lists the eligible profiles once for

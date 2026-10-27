@@ -72,15 +72,33 @@ func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
 	if err != nil || !ok {
 		return err
 	}
+	var settingsErr error
 	if verify && !remove && !enterpriseHookGuardianWatching.Load() {
 		if err := windowsClaudeUserSettingsMigrated(home); err != nil {
 			notes := enterpriseHookReadinessNotes.Load()
 			if notes == nil {
-				return err
+				settingsErr = err
+			} else {
+				notes.add(err.Error())
 			}
-			notes.add(err.Error())
 		}
 	}
+	err = windowsCopilotVSCodeUserFiles(opts, home, verify, remove)
+	switch {
+	case settingsErr == nil:
+		return err
+	case err != nil:
+		return fmt.Errorf("%v; %w", settingsErr, err)
+	}
+	// The row's only fault is the account's own Claude settings file: its
+	// DefenseClaw hooks are in place, so verify compares the guardian's
+	// protected records with it as protected (GAP-0031).
+	return enterpriseHookUserFileFault{err: settingsErr}
+}
+
+// windowsCopilotVSCodeUserFiles places, checks (verify) or removes the VS
+// Code Local hook file and Copilot plugin themselves.
+func windowsCopilotVSCodeUserFiles(opts enterprisepolicy.Options, home string, verify, remove bool) error {
 	hookFile, plugin := enterprisepolicy.CopilotVSCodeUserWant(opts)
 	if remove {
 		hookFile, plugin = false, false
