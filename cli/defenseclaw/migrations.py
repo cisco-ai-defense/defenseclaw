@@ -3822,7 +3822,9 @@ def migrate(
     # the writer's version decides too: no 0.x release recorded the agents.
     if version < _FIRST_V8_CONFIG_VERSION or _version_before(from_version or "", (1, 0, 0)):
         _select_windows_agents(data_dir)
-        _seal_windows_hook_credentials(data_dir)
+    # Every upgrade: 1.0.2-1.0.4 also wrote some hook credentials with an
+    # inherited DACL (GAP-2207), not only 0.x. Sealing is idempotent.
+    _seal_windows_hook_credentials(data_dir)
     return MigrateResult(version, target, names, changed=bool(names))
 
 
@@ -3890,10 +3892,11 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
 
 
 def _seal_windows_hook_credentials(data_dir: str) -> None:
-    """Give the hook credentials a 0.x Windows install wrote a private DACL.
+    """Give the hook credentials an older Windows install wrote a private DACL.
 
-    0.8.x left ``hooks\\.hook-<scope>.token`` and ``.otlp-<scope>.token``
-    with the DACL they inherit from the folder. 1.x keeps those files, and
+    0.8.x, and 1.0.2-1.0.4 for some connectors (GAP-2207), left
+    ``hooks\\.hook-<scope>.token`` and ``.otlp-<scope>.token``
+    with the DACL they inherit from the folder. Later releases keep those files, and
     ``defenseclaw setup rotate-token`` refuses a hook credential whose DACL is
     inheritable (GAP-0364). A file that only trusted principals can read gets
     the owner-only DACL 1.x writes; any other is left as it is: the gateway

@@ -532,6 +532,24 @@ def test_only_a_0x_import_selects_the_windows_agents(data_dir: Path, recorded: l
     assert calls == [str(data_dir)]
 
 
+def test_every_upgrade_seals_the_windows_hook_credentials(data_dir: Path, recorded: list[str], monkeypatch) -> None:
+    # GAP-2207: 1.0.2 left .hook-amp/.hook-opencode/... tokens with an
+    # inherited DACL; after a 1.0.2 -> 1.0.5 upgrade setup rotate-token
+    # refused them, because only a 0.x import sealed them. A check changes
+    # nothing.
+    calls: list[str] = []
+    monkeypatch.setattr(migrations, "_seal_windows_hook_credentials", calls.append)
+    _write_config(data_dir, f"config_version: {migrations._FIRST_V8_CONFIG_VERSION}\n")
+
+    migrate(str(data_dir), from_version="1.0.2", check=True)
+    assert calls == []
+    migrate(str(data_dir), from_version="1.0.2")
+    migrate(str(data_dir), from_version="1.0.4")
+    migrate(str(data_dir))
+
+    assert calls == [str(data_dir)] * 3
+
+
 def test_a_0x_import_with_a_v8_config_selects_the_windows_agents(
     data_dir: Path, recorded: list[str], monkeypatch
 ) -> None:
