@@ -1055,3 +1055,50 @@ def test_hermes_doctor_ends_hook_child_in_new_session(tmp_path, monkeypatch):
         assert row["status"] == "pass", row
     finally:
         _kill_quietly(descendant)
+
+
+_REAL_HERMES_PROBE_SUPERVISOR = cmd_doctor._HERMES_PROBE_SUPERVISOR
+
+
+def _supervisor_with_unshare_refused(errno_value: int) -> str:
+    supervisor = _REAL_HERMES_PROBE_SUPERVISOR
+    assert supervisor.count("if libc.unshare(flags) != 0:") == 1
+    # The kernel answers unshare with errno_value, as under a container seccomp
+    # profile that refuses user namespaces (EPERM) while the sysctls allow them.
+    return supervisor.replace(
+        "if libc.unshare(flags) != 0:", f"if ctypes.set_errno({errno_value}) is not None:"
+    )
+
+
+@pytest.mark.skipif(not _LINUX, reason="Linux probe supervisor")
+def test_hermes_probe_supervisor_names_a_refused_namespace_and_never_runs_the_hook(tmp_path, monkeypatch):
+    """GAP-1945: a seccomp refusal (EPERM) is its own exit code; the hook never runs."""
+    monkeypatch.setattr(cmd_doctor, "_HERMES_PROBE_SUPERVISOR", _supervisor_with_unshare_refused(1))
+    monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_PIPE_WAIT", 0.5)
+    ran = tmp_path / "ran"
+    returncode, _stdout = cmd_doctor._run_hermes_execution_probe(
+        [str(_probe_stub(tmp_path, f": > '{ran}'\n" + _PROOF))],
+    )
+    assert returncode == cmd_doctor._HERMES_PROBE_NAMESPACE_REFUSED
+    assert not ran.exists(), "the hook ran outside a namespace of its own"
+
+
+@pytest.mark.skipif(not _LINUX, reason="Linux probe supervisor")
+def test_hermes_doctor_warns_proof_unavailable_where_a_seccomp_profile_refuses_the_namespace(tmp_path, monkeypatch):
+    """GAP-1945: the sysctls allow user namespaces, but a container seccomp profile
+    refuses them. Doctor failed 'execution probe could not run' for a sealed,
+    current registration; it is the GAP-1525 warning, and the hook never runs."""
+    script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    ran = tmp_path / "ran"
+    script.write_text(f"#!/bin/sh\n: > '{ran}'\n" + _PROOF, encoding="utf-8")
+    monkeypatch.setattr(cmd_doctor, "_hermes_execution_proof_unavailable", lambda: "")
+    monkeypatch.setattr(cmd_doctor, "_HERMES_PROBE_SUPERVISOR", _supervisor_with_unshare_refused(1))
+    monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_PIPE_WAIT", 0.5)
+    row = check()  # seals the edited hook, then Doctor probes it
+    assert row["status"] == "warn", row
+    assert "execution proof unavailable" in row["detail"] and "refuses the user namespace" in row["detail"], row
+    assert not ran.exists(), "the hook ran outside a namespace of its own"
+    # Any other unshare failure still fails closed.
+    monkeypatch.setattr(cmd_doctor, "_HERMES_PROBE_SUPERVISOR", _supervisor_with_unshare_refused(22))
+    row = check()
+    assert row["status"] == "fail" and "could not run" in row["detail"], row
