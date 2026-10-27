@@ -21,6 +21,7 @@ A gateway that refuses the event still fails the command.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from defenseclaw import ux
@@ -71,12 +72,31 @@ def saved_change_audit(logger: Any, *, unavailable_warning: str | None = None) -
 
 def release_superseded_scan_decision(
     logger: Any, pe: Any, target_type: str, name: str, connector: str,
+    *, enable_runtime: Callable[[], bool] | None = None,
 ) -> None:
     """An install that stands replaces the runtime disable or install block
     an earlier CLI scan of that asset recorded for this connector, says so
     and audits it (GAP-0021). Operator records stay
-    (PolicyEngine.release_scan_decision)."""
-    cleared = pe.release_scan_decision(target_type, name, connector)
+    (PolicyEngine.release_scan_decision).
+
+    Where the disable also lives in the agent (OpenClaw: the refused install
+    called the gateway's disable), *enable_runtime* re-enables it there first,
+    as ``skill enable`` / ``plugin enable`` do. If that fails the runtime
+    record stays and the user is told how to enable it, so DefenseClaw's
+    record, its message and the agent agree (GAP-0023)."""
+    entry = pe.scan_decision(target_type, name, connector)
+    if entry is None:
+        return
+    keep: tuple[str, ...] = ()
+    if enable_runtime is not None and entry.actions.runtime == "disable" and not enable_runtime():
+        keep = ("runtime",)
+        ux.echo(
+            f"[install] {name!r}: the earlier scan's runtime=disable stays (connector={connector}): "
+            f"the agent could not re-enable it. Enable it with: "
+            f"defenseclaw {target_type} enable {name} --connector {connector}",
+            err=True,
+        )
+    cleared = pe.release_scan_decision(target_type, name, connector, keep=keep)
     if not cleared:
         return
     ux.echo(f"[install] {name!r}: the earlier scan's {', '.join(cleared)} no longer applies (connector={connector})")

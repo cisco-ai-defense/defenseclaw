@@ -310,7 +310,20 @@ class PolicyEngine:
         if self.store:
             self.store.clear_action_field(target_type, name, "runtime", connector)
 
-    def release_scan_decision(self, target_type: str, name: str, connector: str = "") -> list[str]:
+    def scan_decision(self, target_type: str, name: str, connector: str = "") -> ActionEntry | None:
+        """The record a CLI scan of this asset decided for exactly this
+        connector (its reason starts with a CLI scan prefix), or None.
+        Secure Client rows are never a CLI scan decision to release."""
+        if not self.store or asset_lists.is_secure_client(self.cfg):
+            return None
+        entry = self.store.get_action(target_type, name, connector)
+        if entry is None or not entry.reason.startswith(CLI_SCAN_REASON_PREFIXES):
+            return None
+        return entry
+
+    def release_scan_decision(
+        self, target_type: str, name: str, connector: str = "", *, keep: tuple[str, ...] = (),
+    ) -> list[str]:
         """Lift the runtime disable and install block that a CLI scan of this
         asset recorded for exactly this connector (``skill install --action``,
         ``plugin install --action``, ``skill scan --action``), once an install
@@ -318,15 +331,14 @@ class PolicyEngine:
         admitted install replaces it, as the watcher lifts its own superseded
         rejection (GAP-1911, GAP-0021). An operator disable or block carries
         its own reason and stays, a quarantine keeps its provenance, and
-        Secure Client keeps every row. Returns the cleared fields."""
-        if not self.store or asset_lists.is_secure_client(self.cfg):
-            return []
-        entry = self.store.get_action(target_type, name, connector)
-        if entry is None or not entry.reason.startswith(CLI_SCAN_REASON_PREFIXES):
+        Secure Client keeps every row. A field in *keep* stays (the agent
+        still holds that disable, GAP-0023). Returns the cleared fields."""
+        entry = self.scan_decision(target_type, name, connector)
+        if entry is None:
             return []
         cleared: list[str] = []
         for field_name, value in (("runtime", entry.actions.runtime), ("install", entry.actions.install)):
-            if value in ("disable", "block"):
+            if value in ("disable", "block") and field_name not in keep:
                 self.store.clear_action_field(target_type, name, field_name, connector)
                 cleared.append(f"{field_name}={value}")
         return cleared

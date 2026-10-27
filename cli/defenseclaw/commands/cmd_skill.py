@@ -6157,7 +6157,13 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                     f"[install] installed {skill_name!r} -> {stages[key][2]} "
                     f"(connector={connector})"
                 )
-                release_superseded_scan_decision(app.logger, pe, "skill", skill_name, connector)
+                release_superseded_scan_decision(
+                    app.logger, pe, "skill", skill_name, connector,
+                    enable_runtime=(
+                        (lambda: _enable_skill_via_gateway(app, skill_name))
+                        if _normalize_runtime_connector(connector) == "openclaw" else None
+                    ),
+                )
         if refused:
             raise SystemExit(1)
     finally:

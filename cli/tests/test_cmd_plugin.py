@@ -24,7 +24,7 @@ import tempfile
 import unittest
 import uuid
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -3824,6 +3824,36 @@ class TestPluginInstallQuarantineNeverWarns(PluginCommandTestBase):
                     self.assertTrue(disabled, "the operator disable was lifted")
                 else:
                     self.assertEqual(disabled, [], "the refused install's disable still applies")
+
+    def test_gap0023_the_release_re_enables_the_plugin_in_openclaw(self):
+        """GAP-0023 (plugin twin): for OpenClaw the release re-enables the
+        plugin through the gateway before it clears the record; a failed
+        enable keeps the record and names plugin enable."""
+        warn = {"install": "none", "file": "none", "runtime": "enable"}
+        for enable_ok in (True, False):
+            with self.subTest(enable_ok=enable_ok):
+                name = f"oc-allow-{int(enable_ok)}"
+                client = MagicMock()
+                client.disable_plugin.return_value = {"status": "disabled"}
+                if enable_ok:
+                    client.enable_plugin.return_value = {"status": "enabled"}
+                else:
+                    client.enable_plugin.side_effect = Exception("gateway not connected")
+                with patch("defenseclaw.commands.cmd_plugin._normalize_runtime_connector", return_value="openclaw"), \
+                        patch("defenseclaw.commands.cmd_plugin._sidecar_client", return_value=client):
+                    result, _ = self._install(name, ["--action"], self.RUNTIME_ONLY)
+                    self.assertEqual(result.exit_code, 1, result.output)
+                    client.disable_plugin.assert_called_with(name)
+                    result, scanned = self._install(name, [], warn)
+                self.assertEqual(result.exit_code, 0, result.output)
+                client.enable_plugin.assert_called_with(name)
+                rows = [e for e in self.app.store.list_actions_by_type("plugin") if e.target_name == name]
+                disabled = [r.connector for r in rows if r.actions.runtime == "disable"]
+                if enable_ok:
+                    self.assertEqual(disabled, [], "the refused install's disable still applies")
+                else:
+                    self.assertTrue(disabled, "the record was cleared although OpenClaw keeps the plugin disabled")
+                    self.assertIn(f"defenseclaw plugin enable {name} --connector", result.output)
 
     def _two_connectors(self, order):
         roots = {c: os.path.join(self.tmp_dir, f"{c}-plugins") for c in order}

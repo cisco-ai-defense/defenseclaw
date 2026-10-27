@@ -4327,6 +4327,45 @@ class TestSkillInstallQuarantineNeverWarns(SkillCommandTestBase):
         self.assertTrue(rows and all(r.actions.runtime == "disable" for r in rows.values()), rows)
         self.assertNotIn("no longer applies", result.output)
 
+    def _refuse_then_allow_openclaw(self, name, client):
+        with patch("defenseclaw.commands.cmd_skill._normalize_runtime_connector", return_value="openclaw"), \
+                patch("defenseclaw.commands.cmd_skill._sidecar_client", return_value=client):
+            result, _ = self._install(name, ["--action"], self.RUNTIME_ONLY)
+            self.assertEqual(result.exit_code, 1, result.output)
+            client.disable_skill.assert_called_with(name)
+            rows = self._runtime_rows(name)
+            self.assertTrue(rows and all(r.actions.runtime == "disable" for r in rows.values()), rows)
+            result, scanned = self._install(name, [], self.WARN)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(scanned and os.path.isdir(scanned[0]), result.output)
+        return result
+
+    def test_gap0023_the_release_re_enables_the_skill_in_openclaw(self):
+        """GAP-0023: for OpenClaw the refused install also disabled the skill
+        in the agent through the gateway, so the release re-enables it there
+        (as skill enable does) before it clears the record."""
+        client = MagicMock()
+        client.enable_skill.return_value = {"status": "enabled"}
+        name = "oc-then-allow"
+        result = self._refuse_then_allow_openclaw(name, client)
+        client.enable_skill.assert_called_with(name)
+        for connector, row in self._runtime_rows(name).items():
+            self.assertNotEqual(row.actions.runtime, "disable", f"{connector}: still disabled by the refused install")
+        self.assertIn("no longer applies", result.output)
+
+    def test_gap0023_a_failed_openclaw_enable_keeps_the_record_and_says_so(self):
+        """GAP-0023 control: when OpenClaw cannot re-enable the skill, the
+        record stays disabled and the user is told how to enable it, so the
+        record, the message and OpenClaw agree."""
+        client = MagicMock()
+        client.enable_skill.side_effect = Exception("gateway not connected")
+        name = "oc-enable-fails"
+        result = self._refuse_then_allow_openclaw(name, client)
+        rows = self._runtime_rows(name)
+        self.assertTrue(rows and all(r.actions.runtime == "disable" for r in rows.values()), rows)
+        self.assertNotIn("no longer applies", result.output)
+        self.assertIn(f"defenseclaw skill enable {name} --connector", result.output)
+
     def _connector_roots(self, hermes_root=None):
         roots = {
             "openclaw": os.path.join(self.tmp_dir, "openclaw-skills"),
