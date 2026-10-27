@@ -799,7 +799,7 @@ func withActiveStateTargetMention(
 	if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
 		return findings
 	}
-	if !provenStateMutationPath(facts, request) {
+	if !provenStateMutationPath(facts, request) && !provenBashAggregateStateWrite(request) {
 		return findings
 	}
 	const ruleID = "tamper.detector_state_write"
@@ -834,6 +834,31 @@ func withActiveStateTargetMention(
 		return findings
 	}
 	return append(findings, finding)
+}
+
+// provenBashAggregateStateWrite judges the Bash reading of an all-output
+// redirect (true &> ~/.defenseclaw/config.yaml, echo x &>> f, : >& f):
+// bash and zsh write f, while the POSIX facts read "cmd &" and "> f" and
+// tie no write of f to a command (GAP-2143). The command is analyzed again
+// with the redirects spelled > f 2> f, which proves the write as it does
+// for the ordinary redirect.
+func provenBashAggregateStateWrite(request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return false
+	}
+	spelled, ok := actionfacts.BashAggregateRedirectsAsPOSIX(command)
+	if !ok {
+		return false
+	}
+	input := request.Input
+	input.Command, input.Args, input.Argv = spelled, nil, nil
+	twin := request
+	twin.Input = input
+	return provenStateMutationPath(actionfacts.Analyze(input), twin)
 }
 
 // ActionFacts' executing mutation role plus the physical active target

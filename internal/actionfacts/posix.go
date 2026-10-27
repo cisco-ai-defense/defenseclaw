@@ -52,7 +52,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	parsedSource := source
 	file, err := parser.Parse(strings.NewReader(source), "")
 	if err != nil {
-		normalized, valid := normalizePOSIXNullAggregateRedirects(source)
+		normalized, valid := normalizePOSIXAggregateRedirects(source, true)
 		if !valid {
 			out.markInvalid(IssueInvalidSyntax)
 			return out
@@ -180,13 +180,20 @@ func collectExactPOSIXAbsoluteCDFallback(
 		!target.Expands && strings.HasPrefix(target.Value, "/")
 }
 
-// normalizePOSIXNullAggregateRedirects recognizes the one Bash-only redirect
-// extension whose complete effect can be represented without broadening the
-// POSIX grammar: an exact, nonexpanding &>/dev/null (or append/clobber sibling).
-// It rewrites that redirect into separate stdout and stderr null redirects,
-// then the ordinary POSIX parser validates every other byte. Bash-only syntax
-// elsewhere therefore remains invalid.
-func normalizePOSIXNullAggregateRedirects(source string) (string, bool) {
+// normalizePOSIXAggregateRedirects rewrites the Bash and zsh redirects of
+// stdout and stderr to one file (&> f, &>> f, &>| f, and >& f with a file
+// word) into separate stdout and stderr redirects of the same word (> f 2> f,
+// >> f 2>> f); the rest of the source is kept byte for byte, so Bash-only
+// syntax elsewhere stays invalid.
+//
+// nullOnly is the parse of a command the POSIX grammar rejects: only an
+// exact, nonexpanding &>/dev/null (or its append/clobber sibling) is
+// represented there, so every other all-output redirect fails closed.
+// Without nullOnly (BashAggregateRedirectsAsPOSIX) any static target is
+// kept. A target with a command, process or arithmetic substitution, a >&
+// word that may be a descriptor and a >& with a descriptor number are never
+// rewritten.
+func normalizePOSIXAggregateRedirects(source string, nullOnly bool) (string, bool) {
 	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
 	file, err := parser.Parse(strings.NewReader(source), "")
 	if err != nil {
@@ -204,34 +211,63 @@ func normalizePOSIXNullAggregateRedirects(source string) (string, bool) {
 		if !ok {
 			return valid
 		}
-		appendMode := false
+		stderr := " 2>"
 		switch redirect.Op {
 		case syntax.RdrAll, syntax.RdrAllClob:
 		case syntax.AppAll, syntax.AppAllClob:
-			appendMode = true
+			stderr = " 2>>"
+		case syntax.DplOut:
+			// A word with a literal / names a file whatever it expands to;
+			// another expanding word may still be a descriptor number.
+			target := projectPOSIXWord(redirect.Word)
+			slash := false
+			for _, part := range redirect.Word.Parts {
+				if literal, ok := part.(*syntax.Lit); ok && strings.Contains(literal.Value, "/") {
+					slash = true
+				}
+			}
+			if nullOnly || redirect.N != nil || target.Expands && !slash ||
+				!target.Expands && (target.Value == "-" || strings.Trim(target.Value, "0123456789") == "") {
+				return valid // a descriptor copy or close
+			}
 		default:
 			return valid
 		}
 		target := projectPOSIXWord(redirect.Word)
-		if target.Expands || target.Value != "/dev/null" {
+		if nullOnly && (target.Expands || target.Value != "/dev/null") {
 			valid = false
 			return false
 		}
+		substituted := false
+		syntax.Walk(redirect.Word, func(inner syntax.Node) bool {
+			switch inner.(type) {
+			case *syntax.CmdSubst, *syntax.ProcSubst, *syntax.ArithmExp:
+				substituted = true
+			}
+			return !substituted
+		})
 		start := int(redirect.OpPos.Offset())
+		wordStart := int(redirect.Word.Pos().Offset())
 		end := int(redirect.End().Offset())
-		if start < 0 || end <= start || end > len(source) || source[start] != '&' {
+		if substituted || start < 0 || wordStart <= start || end <= wordStart || end > len(source) {
 			valid = false
 			return false
 		}
-		segment := source[start:end]
-		stderr := " 2>/dev/null"
-		if appendMode {
-			stderr = " 2>>/dev/null"
+		operator := source[start:wordStart]
+		switch {
+		case strings.HasPrefix(operator, "&"):
+			operator = operator[1:]
+		case strings.HasPrefix(operator, ">&"):
+			operator = ">" + operator[2:]
+		default:
+			valid = false
+			return false
 		}
+		word := source[wordStart:end]
 		replacements = append(replacements, replacement{
 			start: start,
 			end:   end,
-			value: segment[1:] + stderr,
+			value: operator + word + stderr + word,
 		})
 		return valid
 	})
@@ -246,6 +282,16 @@ func normalizePOSIXNullAggregateRedirects(source string) (string, bool) {
 		result = result[:edit.start] + edit.value + result[edit.end:]
 	}
 	return result, true
+}
+
+// BashAggregateRedirectsAsPOSIX returns the command with its Bash and zsh
+// all-output redirects (&> f, &>> f, >& f) spelled as the POSIX redirects
+// of the same file (> f 2> f), and false when it has none. POSIX sh reads
+// "cmd &> f" as "cmd &" and "> f", so the facts of the command as sent do
+// not tie the write of f to it; a write owner that must judge the file a
+// Bash shell writes analyzes this spelling as well (GAP-2143).
+func BashAggregateRedirectsAsPOSIX(command string) (string, bool) {
+	return normalizePOSIXAggregateRedirects(command, false)
 }
 
 func checkPOSIXBounds(root syntax.Node, out *parseOutput) bool {
