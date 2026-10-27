@@ -527,7 +527,9 @@ func (l *lifecycle) describeGuardianCleanups() {
 		if account == "" {
 			account = strings.TrimSpace(entry.UserHome)
 		}
-		if home := strings.TrimSpace(entry.UserHome); home != "" {
+		// A home that does not answer a bounded lookup keeps the cleanup
+		// reported as pending (GAP-1751).
+		if home := strings.TrimSpace(entry.UserHome); home != "" && env.homeAnswers(env.P(home)) {
 			if _, err := os.Lstat(env.P(home)); errors.Is(err, os.ErrNotExist) {
 				// The account may have moved. Keep the guardian's current-home
 				// failure visible instead of calling a missing recorded home
@@ -572,6 +574,11 @@ func (l *lifecycle) describeUnavailableEnrolledHomes() {
 		if home == "" || (target.Enabled != nil && !*target.Enabled) {
 			continue
 		}
+		// A home that does not answer a bounded lookup is not looked up in
+		// this process; describeUnansweredHomes names it (GAP-1751).
+		if !env.homeAnswers(env.P(home)) {
+			continue
+		}
 		if _, err := os.Lstat(env.P(home)); !errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -589,6 +596,19 @@ func (l *lifecycle) describeUnavailableEnrolledHomes() {
 		r.AddWarning(codeEnrolledHomeUnavailable, fmt.Sprintf(
 			"user %s: home is unavailable; enrollment for %s is retained and retried on the next hook enumerator pass",
 			account, strings.Join(names, ", ")))
+	}
+}
+
+// describeUnansweredHomes names each home whose bounded lookup did not
+// answer in this status or verify run. Nothing in it was read: the
+// DefenseClaw files, sandboxes and agent settings there are not confirmed,
+// so security_complete is false (GAP-1751).
+func (l *lifecycle) describeUnansweredHomes() {
+	for _, home := range l.env.unansweredHomes() {
+		l.result.MarkSecurityIncomplete(codeEnrolledHomeUnavailable)
+		l.result.AddWarning(codeEnrolledHomeUnavailable, fmt.Sprintf(
+			"home %s did not answer a lookup within %s (a stalled home mount?), so the DefenseClaw files, sandboxes and agent settings in it are not checked in this run; enrollment is retained",
+			boundedGuardianReason(home), enterprisestatus.LaunchPathLookupTimeout()))
 	}
 }
 

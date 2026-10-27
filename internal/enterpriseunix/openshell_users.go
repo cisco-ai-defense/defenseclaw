@@ -36,6 +36,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -1268,9 +1269,67 @@ func (e *Env) removesInstalledOpenShell(from, to *openshellApplied) bool {
 // ---------------------------------------------------------------------------
 // Files in an account's home, as root, without following links.
 
+// errHomeNotAnswering is the openHome error of a status or verify run for a
+// home that did not answer a bounded lookup: it is not opened in process.
+var errHomeNotAnswering = errors.New("the home did not answer a lookup in time (a stalled home mount?), so it is not read")
+
+// homeLookupAnswers looks a home up in a bounded stat(1) child. Tests
+// replace it.
+var homeLookupAnswers = enterprisestatus.PathAnswers
+
+// homeAnswers reports whether a home may be looked up in this process. In
+// status and verify the home's file system is asked first, in a bounded
+// child, for a name that does not exist below the home: a lookup of a home
+// on a stalled FUSE or NFS mount blocks a thread in the kernel, and status
+// and verify never answered (GAP-1751). The home itself is no probe: its
+// attributes can come from a cache while every lookup below it stalls. The
+// answer is kept for the run; describeUnansweredHomes reports the homes
+// that did not answer.
+func (e *Env) homeAnswers(path string) bool {
+	if !e.boundedHomeLookups {
+		return true
+	}
+	path = filepath.Clean(path)
+	e.homeLookups.Lock()
+	defer e.homeLookups.Unlock()
+	if answered, ok := e.homeLookups.answered[path]; ok {
+		return answered
+	}
+	answered := homeLookupAnswers(filepath.Join(path, homeLookupProbeName()))
+	if e.homeLookups.answered == nil {
+		e.homeLookups.answered = map[string]bool{}
+	}
+	e.homeLookups.answered[path] = answered
+	return answered
+}
+
+// unansweredHomes are the homes whose lookup did not answer in this run.
+func (e *Env) unansweredHomes() []string {
+	e.homeLookups.Lock()
+	defer e.homeLookups.Unlock()
+	var homes []string
+	for home, answered := range e.homeLookups.answered {
+		if !answered {
+			homes = append(homes, home)
+		}
+	}
+	sort.Strings(homes)
+	return homes
+}
+
+// homeLookupProbeName is a name no home holds, new for each lookup, so no
+// cached answer stands in for the file system's.
+func homeLookupProbeName() string {
+	return fmt.Sprintf(".defenseclaw-lookup-%d-%d", os.Getpid(), time.Now().UnixNano())
+}
+
 // openHome opens the account's home directory, which must be owned by it.
 func (e *Env) openHome(a SandboxAccount) (int, error) {
-	fd, err := openOwnedDir(unix.AT_FDCWD, e.P(filepath.Clean(a.Home)), a.UID)
+	path := e.P(filepath.Clean(a.Home))
+	if !e.homeAnswers(path) {
+		return -1, fmt.Errorf("account home %s: %w", path, errHomeNotAnswering)
+	}
+	fd, err := openOwnedDir(unix.AT_FDCWD, path, a.UID)
 	if err != nil {
 		return -1, err
 	}

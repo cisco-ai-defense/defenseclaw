@@ -131,6 +131,11 @@ func platformLocalAccountRecord(context.Context, string) (LocalAccountRecord, bo
 	return LocalAccountRecord{}, false, errors.New("unixidentity: local account records are listed only on macOS")
 }
 
+// platformAccountRecordGone is false: these lookups already run in a
+// fresh process (getent) or read the files backend, so a found account is
+// current.
+func platformAccountRecordGone(context.Context, string) bool { return false }
+
 // platformLocalGroups reads /etc/group, the files backend itself.
 func platformLocalGroups(context.Context) (map[string]int, error) {
 	data, err := readSmallFile(localGroupPath, 16<<20)

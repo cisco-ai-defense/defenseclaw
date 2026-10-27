@@ -199,6 +199,38 @@ func LocalAccountRecordByName(ctx context.Context, name string) (LocalAccountRec
 	return platformLocalAccountRecord(ctx, name)
 }
 
+// AccountRecordGone reports whether a fresh directory read, in its own
+// process, has no record of the account name. On macOS a long-running
+// process keeps answering os/user lookups of a deleted account from
+// libSystem's per-process cache (the hook guardian found a deleted local
+// account minutes after `sysadminctl -deleteUser`, rel-1-0-5 GAP-0029),
+// so a "found" from such a process is confirmed here before it keeps a
+// decision open. It is true only for Open Directory's definitive "record
+// not found" while no bound directory node is offline; any other answer,
+// and every other platform (whose lookups already run in a fresh getent
+// process), is false.
+func AccountRecordGone(ctx context.Context, name string) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if validName(name) != nil {
+		return false
+	}
+	return platformAccountRecordGone(ctx, name)
+}
+
+// dsclRecordNotFoundExit is dscl's exit status for eDSRecordNotFound
+// (DS Error -14136).
+const dsclRecordNotFoundExit = 56
+
+// dsclRecordNotFound reads the result of `dscl /Search -read /Users/<name>
+// UniqueID`: only Open Directory's own "record not found" with no output
+// says the account is gone; a timeout, a run error or any other exit says
+// nothing.
+func dsclRecordNotFound(result commandResult, err error) bool {
+	return err == nil && result.exitCode == dsclRecordNotFoundExit && len(strings.TrimSpace(string(result.stdout))) == 0
+}
+
 // parseDSCLAttribute parses `dscl . -list /Users <attribute>` rows ("name
 // value"; a home may hold spaces, and a record without the attribute is
 // listed with no value) into name -> value.
