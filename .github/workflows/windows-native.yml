@@ -498,7 +498,10 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.pwsh != 'false' }}
     runs-on: windows-latest
-    timeout-minutes: 15
+    # test_install_ps1.py alone takes 9-10 minutes on the hosted runner; the
+    # whole job ran 14.7-15.3 minutes from 1.0.5 rc.3 on and was cancelled
+    # at 15 before the connector harness tests ran.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
