@@ -531,9 +531,14 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// a permission callback bound to an earlier call (below) is proven
 		// again the same way.
 		writeProofCWD := req.CWD
-		if structuredToolRoute && connectorName == "copilot" &&
-			copilotWriteCallUnproven(req.ToolName, req.ToolArgs, writeProofCWD, hookActiveHome(r.Context()), copilotManagedPatchEvidence(r.Context())) {
-			req.ToolCallUnparsed = true
+		// A native Copilot preToolUse can carry a model's parallel tool
+		// calls; every call is proven and judged (copilotNativeToolCalls).
+		var nativeCalls []copilotargs.NativeCall
+		if structuredToolRoute && connectorName == "copilot" {
+			nativeCalls = copilotNativeToolCalls(req)
+			if copilotCallsUnproven(req, nativeCalls, writeProofCWD, hookActiveHome(r.Context()), copilotManagedPatchEvidence(r.Context())) {
+				req.ToolCallUnparsed = true
+			}
 		}
 		a.hermesTasks.fill(&req)
 		if req.HookEventName == "" {
@@ -593,7 +598,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if deduped && a.copilotDedupeReplayable(r.Context(), connectorName, req, requireSandboxSurface(r.Context(), r.Header), earlier) {
 			dedupedResp := copilotDedupedResponse(profile, req, earlier)
 			startVerdictBlocked, startVerdictReason = sessionStartVerdictBlocks(dedupedResp), dedupedResp.Reason
-			writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, dedupedResp))
+			writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, dedupedResp, ""))
 			return
 		}
 		// From here on the hook is accepted. A managed native hook confirms
@@ -648,6 +653,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// finalizeAgentHookAnswer, doubling audit rows, hook-outcome metrics,
 		// and the connector telemetry log for a single request.
 		finalized := false
+		// wireResp is the answer the hook is given; once the decision is
+		// finalized, a later panic answers with it (GAP-1096).
+		var wireResp agentHookResponse
 		// pending is the journal row of a receipt-capable call
 		// (agent_hook_pending.go); its records carry its IDs.
 		var pending *pendingHookOccurrence
@@ -708,8 +716,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					// the HTTP server's serving goroutine.
 					func() {
 						defer func() { _ = recover() }()
+						body := a.hookAnswerBody(ctx, profile, connectorName, req, resp, "")
 						attemptedWrite = true
-						writeHookAnswer(w, a.hookAnswerBody(ctx, profile, connectorName, req, resp))
+						writeHookAnswer(w, body)
 					}()
 				}
 			}
@@ -799,9 +808,14 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// that cannot be bound, or whose bound call cannot be proven now (a
 		// private managed home the user-side hook did not prove for this
 		// callback), keeps its own unparsed decision.
-		if tool, args, bound := a.copilotPermission.match(ctx, req, rawBody); bound {
-			req.ToolName, req.ToolArgs, req.ToolArgsProjectionUncertain = tool, args, false
-			req.ToolCallUnparsed = copilotWriteCallUnproven(tool, args, writeProofCWD,
+		// A callback after a parallel envelope is bound to each of its
+		// calls it can stand for and decided on all of them (GAP-1831).
+		if bound, ok := a.copilotPermission.bind(ctx, req, rawBody); ok {
+			req.ToolName, req.ToolArgs, req.ToolArgsProjectionUncertain = bound[0].Name, bound[0].Args, false
+			if len(bound) > 1 {
+				nativeCalls = bound
+			}
+			req.ToolCallUnparsed = copilotCallsUnproven(req, nativeCalls, writeProofCWD,
 				hookActiveHome(r.Context()), copilotManagedPatchEvidence(r.Context()))
 		}
 		// An uncertain identity refuses before any profile-specific gate can
@@ -844,7 +858,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		panicked := false
 		if !gated {
-			resp, panicked = a.safeEvaluateHook(evaluationCtx, connectorName, req, b, payload, runtime)
+			resp, panicked, req = a.safeEvaluateHookCalls(evaluationCtx, connectorName, req, nativeCalls, b, payload, runtime)
 		}
 		var chainFinalization toolChainHookFinalization
 		if !panicked && !gated {
@@ -904,7 +918,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// A managed answer is only an evaluated proposal until the hook
 		// commits it to its agent: the audit row, hook_decision and
 		// dedupe get the decision the agent was given (GAP-0286).
-		wireResp := resp
+		wireResp = resp
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
 		auditExtra = mergeHookEnvelopeExtra(auditExtra, hookActionCommandAuditExtra(req, hookActiveHome(ctx)))
 		if payload["bounded_prefix_review"] == true {
@@ -948,28 +962,31 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				fmt.Fprintf(os.Stderr, "[gateway] sandbox tool-call chain finalization failed connector=%s event=%s: %v\n",
 					connectorName, req.HookEventName, err)
 			}
-			wire := renderAgentHookResponseForProfile(profile, wireResp)
-			wire["delivery_receipt"] = pending.ID
+			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, pending.ID)
 			a.scheduleSandboxHookReceiptRecovery(pending.ID)
 			// The first request is done; a later authenticated receipt owns
 			// this journal row. The bounded recovery pass may now inspect it.
 			pendingHooksInFlight.Delete(pending.ID)
 			finalized = true
 			attemptedWrite = true
-			a.writeJSON(w, http.StatusOK, wire)
+			writeHookAnswer(w, body)
 			return
 		}
 		// Reading or closing the answer can cancel the HTTP request before
 		// offer returns. Only a hang-up observed before the answer was sent
 		// can establish that an unreceipted hook missed that answer.
 		hungUpBeforeAnswer := r.Context().Err() != nil
+		var preKey preToolDecisionKey
+		preNoted := false
 		if delivery != nil {
+			preKey, preNoted = a.notePreToolDecision(ctx, req, wireResp)
+			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, "")
 			attemptedWrite = true
 			receipt := func() string {
 				resume := pauseHookRunSlot(ctx)
 				defer resume()
 				return delivery.offer(w, func() {
-					writeHookAnswer(w, a.hookAnswerBody(ctx, profile, connectorName, req, wireResp))
+					writeHookAnswer(w, body)
 				})
 			}()
 			if receipt == hookexec.HookDeliveryReleased {
@@ -1000,6 +1017,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// a degraded-audit alert or a closed answer. The agent and accounting
 		// must receive the same final verdict.
 		resp = finalization.Response
+		if preNoted && (!finalization.AuditPersisted || panicked || resp.Action == hookActionUnconfirmed) {
+			a.preToolDecisions.forget(preKey)
+		}
 		a.copilotPermission.record(persistCtx, req, finalization.AuditPersisted && !panicked && resp.Action == "allow")
 		if delivery == nil && !finalization.AuditPersisted {
 			wireResp = resp
@@ -1029,9 +1049,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			}
 		}
 		a.settlePendingHook(persistCtx, pending, finalization)
-		a.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
+		// The decision is persisted: a panic in the notifier must not
+		// finalize it again (GAP-1096).
 		finalized = true
 		hookStageForTest(ctx, "finalized")
+		a.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
 		a.recordManagedAIDFailOpenForSelectedNativeHookResult(
 			accountingCtx, managedAIDFailOpenGate, resp.Action, panicked,
 		)
@@ -1046,7 +1068,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// connector → field-name mapping. hookAnswerBody cannot
 		// panic, so the native hook always gets the finalized answer.
 		if delivery == nil {
-			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp)
+			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, "")
 			// Mark the write attempt BEFORE writing. A panic from the
 			// writer then signals "do not retry from the defer"; the
 			// response stream may already be partially written, and a
@@ -1066,7 +1088,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 // in defenseclaw.panics.total and logged with its stack, once per answer; it
 // does not change the answer, which may already be finalized. It cannot
 // panic.
-func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookProfile, connectorName string, req agentHookRequest, resp agentHookResponse) []byte {
+func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookProfile, connectorName string, req agentHookRequest, resp agentHookResponse, receiptID string) []byte {
 	counted := false
 	onPanic := func(recovered any) {
 		defer func() { _ = recover() }()
@@ -1075,7 +1097,7 @@ func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookPr
 			a.recordHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("hook answer render panic: %v", recovered))
 		}
 	}
-	body, err := encodeHookAnswer(profile, resp, onPanic)
+	body, err := encodeHookAnswer(profile, resp, receiptID, onPanic)
 	if err == nil {
 		return body
 	}
@@ -1094,25 +1116,30 @@ func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookPr
 		}()
 		return failedCheckFallbackOutput(profile, req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext)
 	}()
-	if body, err = encodeHookAnswer(profile, fallback, onPanic); err == nil {
+	if body, err = encodeHookAnswer(profile, fallback, receiptID, onPanic); err == nil {
 		return body
 	}
 	fallback.HookOutput = nil
-	body, _ = encodeHookAnswer(profile, fallback, onPanic)
+	body, _ = encodeHookAnswer(profile, fallback, receiptID, onPanic)
 	return body
 }
 
 // encodeHookAnswer renders and encodes resp as writeJSON did (HTML-escaped
-// JSON and a newline). A render panic is reported to onPanic, in the
+// JSON and a newline), with the delivery receipt ID of a sandbox receipt
+// channel when there is one. A render panic is reported to onPanic, in the
 // recovery, and returned as an error.
-func encodeHookAnswer(profile connector.HookProfile, resp agentHookResponse, onPanic func(any)) (body []byte, err error) {
+func encodeHookAnswer(profile connector.HookProfile, resp agentHookResponse, receiptID string, onPanic func(any)) (body []byte, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			onPanic(recovered)
 			body, err = nil, fmt.Errorf("render panic: %v", recovered)
 		}
 	}()
-	if body, err = json.Marshal(renderAgentHookResponseForProfile(profile, resp)); err != nil {
+	wire := renderAgentHookResponseForProfile(profile, resp)
+	if receiptID != "" {
+		wire["delivery_receipt"] = receiptID
+	}
+	if body, err = json.Marshal(wire); err != nil {
 		return nil, err
 	}
 	return append(body, '\n'), nil
@@ -1227,6 +1254,7 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		Result:       "ok",
 		Action:       resp.Action,
 		RawAction:    resp.RawAction,
+		Enforced:     resp.Action == "block",
 		Severity:     resp.Severity,
 		Mode:         resp.Mode,
 		Reason:       hookSourceReason(resp),
@@ -3425,7 +3453,8 @@ func unparsedToolCallReason(connectorName string) string {
 // connector name, nothing from the payload, so the agent is shown it as
 // written.
 func trustedUnparsedToolCallReason(reason string) bool {
-	if reason == oversizeUninspectedReason {
+	if reason == oversizeUninspectedReason || reason == copilotObserveUnparsedReason ||
+		reason == copilotObserveProtectedUnparsedReason {
 		return true
 	}
 	name, ok := strings.CutPrefix(reason, unparsedToolCallReasonPrefix)
@@ -4147,6 +4176,9 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 	case "antigravity":
 		if action == "block" && canonicalEvent(req.HookEventName) == "pretooluse" {
 			return map[string]interface{}{"decision": "deny", "reason": reason}
+		}
+		if action == "confirm" && canonicalEvent(req.HookEventName) == "pretooluse" {
+			return map[string]interface{}{"decision": "force_ask", "reason": reason}
 		}
 	case "kiro":
 		if action == "block" {

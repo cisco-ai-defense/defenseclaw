@@ -61,9 +61,8 @@ func TestCopilotNativeBenignCorpus(t *testing.T) {
 				t.Fatal(err)
 			}
 			if item.OS != runtime.GOOS || item.Fixture == "managed-private-home" {
-				name, args, ok := copilotargs.NativeSingleCall(item.Input["toolCalls"])
-				if !ok || name != "apply_patch" && name != "powershell" || len(copilotargs.CLIToolArgs(name, args)) == 0 {
-					t.Fatalf("%s native patch did not project", item.OS)
+				if _, ok := copilotargs.NativeCalls(item.Input["toolCalls"]); !ok {
+					t.Fatalf("%s native tool calls did not project", item.OS)
 				}
 				return
 			}
@@ -90,8 +89,8 @@ func TestCopilotNativeBenignCorpus(t *testing.T) {
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if count != 12 {
-		t.Fatalf("native benign corpus has %d cases, want 12", count)
+	if count != 15 {
+		t.Fatalf("native benign corpus has %d cases, want 15", count)
 	}
 }
 
@@ -157,12 +156,13 @@ func TestCopilotPermissionJoinCapacityStillInvalidatesPrior(t *testing.T) {
 	ctx := context.Background()
 	pre := agentHookRequest{ConnectorName: "copilot", HookEventName: "preToolUse", SessionID: "native",
 		CWD: "/tmp/native", ToolName: "apply_patch"}
-	key := copilotPermissionKey(ctx, pre)
-	if key == "" {
+	scope := copilotPermissionKey(ctx, pre)
+	if scope == "" {
 		t.Fatal("expected verified per-user scope")
 	}
 	join := copilotPermissionJoin{entries: map[string]copilotPermissionEntry{
-		key: {tool: "apply_patch", args: json.RawMessage(`"*** Begin Patch\n*** Add File: README.md\n+x\n*** End Patch\n"`), at: time.Now()},
+		copilotPermissionToolKey(scope, "apply_patch"): {calls: []copilotargs.NativeCall{{Name: "apply_patch",
+			Args: json.RawMessage(`"*** Begin Patch\n*** Add File: README.md\n+x\n*** End Patch\n"`)}}, uses: 1, at: time.Now()},
 	}}
 	for i := 1; i < copilotPermissionJoinMax; i++ {
 		join.entries["other"+strconv.Itoa(i)] = copilotPermissionEntry{at: time.Now()}

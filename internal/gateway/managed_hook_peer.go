@@ -577,6 +577,9 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 		}
 		r, release := a.admitHookCaller(w, r, strconv.Itoa(peer.UID), route)
 		if release == nil {
+			if hookCallerLeft(r) {
+				a.recordManagedPeerCallerGone(w, r, authorizer, peer)
+			}
 			return
 		}
 		defer release()
