@@ -361,7 +361,6 @@ fail_response() {
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token hermes hermes-hook "hermes tool" "${HOOK_DIR}/{{.TokenFile}}"
 fi
-_DC_BOOTSTRAP=0
 
 # hermes_block_message is the message of a block this hook makes itself.
 # Hermes shows it as the reason the tool call did not run, so it says why
