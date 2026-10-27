@@ -7640,7 +7640,7 @@ def setup_guardrail(
             raise _GuardrailSecretFailure("validation-refused-rollback-incomplete") from None
         raise click.ClickException(
             "guardrail setup did not pass connector preflight; prior settings were restored. "
-            "Resolve the error above, then rerun: defenseclaw setup guardrail"
+            f"Resolve the error above, then rerun: {_guardrail_setup_command_name()}"
         )
     if non_interactive and judge_on_before_versions and not gc.judge.enabled and not judge_gate_was_all:
         # GAP-2175: the judge was requested, but every connector in scope is
@@ -7745,7 +7745,7 @@ def setup_guardrail(
         if gc.block_message:
             truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
             rows.append(("guardrail.block_message", truncated))
-        rows.append(("guardrail.hook_fail_mode", gc.hook_fail_mode or "open"))
+        rows.append(("guardrail.hook_fail_mode", _summary_hook_fail_mode(gc, gc.connector)))
         rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
         rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
     if gc.judge.enabled:
@@ -10043,6 +10043,19 @@ def _restore_setup_config_in_memory(app: AppContext, snapshot: _SetupConfigSnaps
 
 _ROLLBACK_RESTART_TITLE = "Restoring the previous configuration"
 _CONFIG_WRITE_REMEDY_KEY = "defenseclaw.setup.config_write_remedy"
+
+
+def _guardrail_setup_command_name() -> str:
+    """The setup command the operator ran (GAP-2110).
+
+    ``setup openclaw`` and the other connector aliases run ``setup guardrail``
+    through ``ctx.invoke``, so the alias is the parent command, not the group.
+    """
+    ctx = click.get_current_context(silent=True)
+    parent = ctx.parent if ctx is not None else None
+    if parent is not None and not isinstance(parent.command, click.Group):
+        return parent.command_path
+    return "defenseclaw setup guardrail"
 
 
 def _setup_rerun_command() -> str:
@@ -13976,6 +13989,20 @@ def _refuse_proxy_next_to_hook_connectors(gc, connector: str) -> None:
         f"to {label} and remove them, run 'defenseclaw setup {connector} --replace' (or remove "
         "them one at a time with 'defenseclaw setup remove <connector>')."
     )
+
+
+def _summary_hook_fail_mode(gc, connector: str) -> str:
+    """The outage behaviour the setup summary shows: the one status reports (GAP-1957).
+
+    A proxy connector has no hooks and is blocked while the gateway is down,
+    whatever ``guardrail.hook_fail_mode`` holds; a hook connector runs its
+    effective mode, not the raw global value.
+    """
+    from defenseclaw.platform_support import is_proxy_connector
+
+    if is_proxy_connector(connector_paths.normalize(connector)):
+        return "closed (proxy-backed, no hooks: blocked while the gateway is down)"
+    return gc.effective_hook_fail_mode(connector) or "open"
 
 
 def _guarded_proxy_connector(gc) -> str:
