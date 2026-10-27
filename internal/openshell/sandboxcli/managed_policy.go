@@ -935,11 +935,23 @@ func (a *App) managedPolicyCheck(ctx context.Context, m *sandboxapi.ManagedStatu
 			return c
 		}
 	}
+	if !allowed && len(denied) == 0 && m.PolicyLimited {
+		// The account's request limit refused the policy read in a burst of
+		// sandbox commands: no policy verdict, and it passes on its own
+		// (GAP-2203, the GAP-1693 words).
+		c.Status = openshell.StatusWarn
+		c.Detail += ": not read just now: " + callerLimitText
+		c.Fix = &openshell.Fix{Summary: "wait a few seconds, then run " + CommandName + " doctor again"}
+		return c
+	}
 	if !allowed {
 		c.Status = openshell.StatusFail
-		if len(denied) > 0 {
+		switch {
+		case len(denied) > 0:
 			c.Detail += ": your organization doesn't allow sandboxes for " + strings.Join(sandboxapi.DisplayTexts(denied), ", ")
-		} else {
+		case strings.TrimSpace(m.PolicyUnread) != "":
+			c.Detail += ": sandbox authorization could not be confirmed for your account: " + sandboxapi.DisplayText(m.PolicyUnread)
+		default:
 			c.Detail += ": sandbox authorization could not be confirmed for your account"
 		}
 		c.Fix = &openshell.Fix{Summary: sandboxapi.AccessContact(m.RequestAccess)}

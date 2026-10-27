@@ -228,6 +228,12 @@ type ManagedStatus struct {
 	// DeniedHarnesses names configured harnesses whose profile forbids a
 	// sandbox. Empty with Allowed false means the policy could not be read.
 	DeniedHarnesses []string `json:"denied_harnesses,omitempty"`
+	// PolicyUnread is why the managed gateway gave no policy answer when
+	// Allowed is false and DeniedHarnesses is empty ("" from an older
+	// daemon), and PolicyLimited says the caller's request limit refused
+	// it: that passes on its own and is not a policy verdict (GAP-2203).
+	PolicyUnread  string `json:"policy_unread,omitempty"`
+	PolicyLimited bool   `json:"policy_limited,omitempty"`
 	// HostRunGate, when present, is the caller's gateway decision carried
 	// from a managed explain into a launch banner.
 	HostRunGate string `json:"host_run_gate,omitempty"`

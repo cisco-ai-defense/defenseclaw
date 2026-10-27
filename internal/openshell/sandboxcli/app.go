@@ -614,6 +614,12 @@ func sandboxRuntimeMissing() string {
 // daemon relays it.
 const callerLimitReason = "rate_limited"
 
+// callerLimitText says, in a command's error and in doctor's Organization
+// policy row, that the account's request limit answered a burst of sandbox
+// commands (GAP-1693, GAP-2203).
+const callerLimitText = "DefenseClaw is limiting how many requests this account makes in a short time, and a burst of " +
+	"sandbox commands reached that limit; nothing was changed, run the command again in a few seconds"
+
 // apiError explains a daemon error for people. Admin refusals start with
 // "blocked by your organization's DefenseClaw policy".
 func apiError(err error) error {
@@ -630,8 +636,7 @@ func apiError(err error) error {
 		// (GAP-1693). Only its answer: the daemon's own 429 (too many
 		// activity streams open) keeps its words, which name the cause
 		// (GAP-1808).
-		return errors.New("DefenseClaw is limiting how many requests this account makes in a short time, and a burst of " +
-			"sandbox commands reached that limit; nothing was changed, run the command again in a few seconds")
+		return errors.New(callerLimitText)
 	}
 	switch e.Code {
 	case sandboxapi.CodeUnavailable:

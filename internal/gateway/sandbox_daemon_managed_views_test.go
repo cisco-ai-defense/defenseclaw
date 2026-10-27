@@ -421,3 +421,31 @@ func TestManagedExplainCountsTheProjectsMCPServers(t *testing.T) {
 		t.Fatalf("explain without a project: %+v, %v", ex, err)
 	}
 }
+
+// A status whose managed explain the account's request limit refused says
+// so, apart from an unreachable gateway; neither is a denial (GAP-2203).
+func TestManagedStatusSaysTheRequestLimitRefusedThePolicyRead(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{}, &sandboxrelay.Error{Status: http.StatusTooManyRequests, Reason: "rate_limited",
+			Message: "DefenseClaw is limiting the hook requests of this account; retry shortly"}
+	}
+	f.run(t)
+	client := sandboxapi.NewUnixClient(f.socket)
+	st, err := client.Status(context.Background())
+	if err != nil || st.Managed == nil {
+		t.Fatalf("status = %+v, %v", st, err)
+	}
+	if m := st.Managed; m.Allowed || len(m.DeniedHarnesses) != 0 || !m.PolicyLimited ||
+		!strings.Contains(m.PolicyUnread, "limiting the hook requests") {
+		t.Fatalf("limited managed status = %+v", m)
+	}
+	f.relay.explain = func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+		return sandboxapi.ManagedExplain{}, sandboxrelay.ErrGatewayUnreachable
+	}
+	st, err = client.Status(context.Background())
+	if err != nil || st.Managed == nil || st.Managed.Allowed || st.Managed.PolicyLimited ||
+		!strings.Contains(st.Managed.PolicyUnread, "not reachable") {
+		t.Fatalf("unreachable managed status = %+v, %v", st, err)
+	}
+}
