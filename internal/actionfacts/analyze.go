@@ -227,7 +227,8 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			// exact; the rewrite is kept only when nothing else is dynamic.
 			home, _ := normalizeActiveHome(input.ActiveHome)
 			if rewrite, ok := rewriteTrustedPOSIXHomeTilde(command, home); ok {
-				if resolved := parse(rewrite.source); resolved.status == StatusComplete {
+				if resolved := parse(rewrite.source); resolved.status == StatusComplete ||
+					findRewriteKeepsOnlyEmbeddedPartial(resolved) {
 					parsed = resolved
 					// A Windows drive home (GAP-0912) keeps its rewritten
 					// spelling: the POSIX parse cannot resolve a drive path,
@@ -2213,4 +2214,32 @@ func safeToolName(value string) string {
 		return ""
 	}
 	return value
+}
+
+// findRewriteKeepsOnlyEmbeddedPartial reports a home rewrite whose parse is
+// find commands, alone or piped into xargs, left partial only by the
+// command find or xargs runs (GAP-2122). The shell expands the starting
+// points before find runs, so they are exact even though that command is
+// not read, and the rewrite gives the "~" and $HOME spellings the facts of
+// the absolute spelling.
+func findRewriteKeepsOnlyEmbeddedPartial(resolved parseOutput) bool {
+	if resolved.status != StatusPartial || len(resolved.commands) == 0 {
+		return false
+	}
+	for _, issue := range resolved.issues {
+		if issue != IssueUnsupportedConstruct && issue != IssueUnknownOperandGrammar {
+			return false
+		}
+	}
+	finds := 0
+	for _, command := range resolved.commands {
+		switch command.Program {
+		case "find":
+			finds++
+		case "xargs":
+		default:
+			return false
+		}
+	}
+	return finds != 0
 }

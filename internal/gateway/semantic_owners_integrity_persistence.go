@@ -190,6 +190,14 @@ func activeStateMutationOwner() semanticOwner {
 					hasOperation(command, actionfacts.OperationMove) {
 				return true
 			}
+			// A find that hands what it finds to a program that may
+			// change it (sh -c, sudo/env wrappers, truncate, cp, ...)
+			// changes the state it starts from (GAP-2122).
+			if command.Effect == actionfacts.EffectExecute &&
+				candidate.Access == actionfacts.PathAccessWrite &&
+				findHandsEntriesToWriter(command) {
+				return true
+			}
 			// A chmod that gives group or other write to state hands it
 			// to another account (GAP-2077); tightening is not a change.
 			if command.Effect == actionfacts.EffectExecute &&
@@ -2605,7 +2613,19 @@ func stateTreeEntryChanged(
 		// hooks/ makes every hook fail closed (GAP-2077). Tightening
 		// modes and chown/chgrp are judged by the file reached.
 		return strings.EqualFold(command.Program, "chmod") && chmodAddsGroupOrOtherWrite(command)
+	case actionfacts.PathAccessRead:
+		// What a find prints into xargs rm (or another writer) is removed
+		// or changed as if find had acted after its last test (GAP-2122).
+		if findPipedToWriter(facts, command) {
+			acted := command
+			acted.Argv = append(append([]string(nil), command.Argv...), "-delete")
+			return !findDeletesOnlyUnprotectedNames(acted, state)
+		}
 	case actionfacts.PathAccessWrite:
+		if findHandsEntriesToWriter(command) {
+			// The same order-aware cleanup exemption as -delete.
+			return !findDeletesOnlyUnprotectedNames(command, state)
+		}
 		if !hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove) {
 			return false
 		}
@@ -2761,6 +2781,119 @@ func findAttachedPathOption(word string) bool {
 	at := strings.IndexByte(word, 'f')
 	return len(word) > 2 && word[0] == '-' && at > 0 && at < len(word)-1 &&
 		strings.Trim(word[1:at], "EHLPXdsx") == ""
+}
+
+// findHandsEntriesToWriter reports a find whose -exec/-execdir/-ok/-okdir
+// program may change the entries it is handed (GAP-2122): its starting
+// points carry a written path fact with no proven operation.
+func findHandsEntriesToWriter(command actionfacts.CommandFact) bool {
+	return strings.EqualFold(command.Program, "find") &&
+		actionfacts.FindEmbeddedCommandMayChange(command.Argv)
+}
+
+// provenPartialFindHandOff proves a state change by a find that hands what
+// it finds to a program that may write or remove it (sh -c, a sudo or env
+// wrapper, truncate, cp, ...; GAP-2122). The embedded program is not read,
+// so the action stays partial, but the starting points are exact: the
+// shell expands them before find runs. The cleanup exemption of -delete
+// still applies (stateTreeEntryChanged).
+func provenPartialFindHandOff(
+	facts actionfacts.Facts,
+	projected actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	handsOff := candidate.Access == actionfacts.PathAccessWrite && findHandsEntriesToWriter(projected) ||
+		candidate.Access == actionfacts.PathAccessRead && findPipedToWriter(facts, projected)
+	if !handsOff {
+		return false
+	}
+	original, ok := integrityCommandByID(facts, projected.ID)
+	return ok && original.Effect == actionfacts.EffectExecute && !original.ControlFlowUncertain
+}
+
+// findPipedToWriter reports a find with no -exec of its own whose output a
+// later xargs of its pipeline hands to a program that may change it
+// (`find ~/.defenseclaw/hooks | xargs rm -f`, GAP-2122).
+func findPipedToWriter(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	if !strings.EqualFold(command.Program, "find") || command.PipelineID == 0 ||
+		findHasExecAction(command.Argv) {
+		return false
+	}
+	for _, other := range facts.Commands {
+		if other.ID > command.ID && other.PipelineID == command.PipelineID &&
+			strings.EqualFold(other.Program, "xargs") && xargsProgramMayChange(other.Argv) {
+			return true
+		}
+	}
+	return false
+}
+
+func findHasExecAction(argv []string) bool {
+	for _, argument := range argv[1:] {
+		switch argument {
+		case "-exec", "-execdir", "-ok", "-okdir":
+			return true
+		}
+	}
+	return false
+}
+
+// xargsProgramMayChange reports an xargs argv whose program may change the
+// names it is handed. With no program xargs runs echo; an option it does
+// not know may hide the program, so it counts as a change.
+func xargsProgramMayChange(argv []string) bool {
+	for index := 1; index < len(argv); index++ {
+		argument := argv[index]
+		switch {
+		case argument == "--":
+			return index+1 < len(argv) && actionfacts.HandedEntriesProgramMayChange(argv[index+1])
+		case !strings.HasPrefix(argument, "-") || argument == "-":
+			return actionfacts.HandedEntriesProgramMayChange(argument)
+		case strings.HasPrefix(argument, "--"):
+			name, _, attached := strings.Cut(argument, "=")
+			switch name {
+			case "--null", "--no-run-if-empty", "--verbose", "--interactive", "--exit", "--open-tty",
+				"--replace", "--eof", "--max-lines":
+			case "--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars", "--process-slot-var":
+				if !attached {
+					index++
+				}
+			default:
+				return true
+			}
+		default:
+			letters := argument[1:]
+			for at := 0; at < len(letters); at++ {
+				switch letters[at] {
+				case '0', 'r', 't', 'p', 'x', 'o':
+				case 'e', 'i', 'l':
+					// The value is optional and only attached.
+					at = len(letters)
+				case 'a', 'd', 'E', 'I', 'L', 'n', 'P', 's':
+					if at == len(letters)-1 {
+						index++
+					}
+					at = len(letters)
+				default:
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// factsHaveFindHandOff reports a find that hands what it finds to a
+// program that may change it. Such a find can name the state root or a
+// protected tree with no file under it, which the state mention scan does
+// not count, so the proof below decides (GAP-2122).
+func factsHaveFindHandOff(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if findHandsEntriesToWriter(command) || findPipedToWriter(facts, command) {
+			return true
+		}
+	}
+	return false
 }
 
 // findPrimaryArity is the number of arguments each GNU/BSD find primary

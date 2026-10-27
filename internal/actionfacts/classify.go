@@ -2894,6 +2894,17 @@ func classifySearchPaths(out *parseOutput, command *CommandFact, program string)
 			addOperation(command, OperationExecute)
 			if !embedded.exact {
 				out.markPartial(IssueUnsupportedConstruct)
+				// Any other embedded program but a reader or a mode or
+				// owner change (sh -c, sudo/env wrappers, truncate, cp,
+				// sed -i, ...) is handed the found entries and may write
+				// or remove them, so the starting points are written
+				// paths with no proven operation (GAP-2122): owners that
+				// guard a tree can judge them; the find stays partial.
+				if FindEmbeddedCommandMayChange(command.Argv) {
+					for _, operand := range startingPaths {
+						appendPath(out, command.ID, PathAccessWrite, operand)
+					}
+				}
 			}
 		}
 		classifyFindOutputOperands(out, command)
@@ -3201,6 +3212,50 @@ func findExactEmbeddedCommands(argv []string) findEmbeddedCommandFacts {
 		i = end
 	}
 	return result
+}
+
+// findEmbeddedReaders are programs a find -exec/-execdir/-ok/-okdir can
+// run on the found entries without changing them, and findEmbeddedMetadata
+// those that change only modes, owners or times.
+var findEmbeddedReaders = map[string]struct{}{
+	"basename": {}, "b2sum": {}, "cat": {}, "cksum": {}, "cmp": {}, "diff": {},
+	"dirname": {}, "du": {}, "echo": {}, "egrep": {}, "fgrep": {}, "file": {},
+	"grep": {}, "head": {}, "less": {}, "ls": {}, "md5": {}, "md5sum": {},
+	"more": {}, "od": {}, "printf": {}, "readlink": {}, "realpath": {},
+	"rg": {}, "sha1sum": {}, "sha224sum": {}, "sha256sum": {}, "sha384sum": {},
+	"sha512sum": {}, "shasum": {}, "stat": {}, "strings": {}, "tail": {},
+	"test": {}, "[": {}, "true": {}, "false": {}, "wc": {}, "xxd": {},
+	"chmod": {}, "chown": {}, "chgrp": {}, "touch": {},
+}
+
+// FindEmbeddedCommandMayChange reports a find argv with an -exec, -execdir,
+// -ok or -okdir program that is not a reader or a mode, owner or time
+// change: a shell, a wrapper such as sudo or env, or a writer such as
+// truncate, cp or sed, handed every found entry (GAP-2122).
+func FindEmbeddedCommandMayChange(argv []string) bool {
+	for i := 1; i+1 < len(argv); i++ {
+		switch argv[i] {
+		case "-exec", "-execdir", "-ok", "-okdir":
+		default:
+			continue
+		}
+		if HandedEntriesProgramMayChange(argv[i+1]) {
+			return true
+		}
+		for i+1 < len(argv) && argv[i+1] != ";" && argv[i+1] != "+" {
+			i++
+		}
+	}
+	return false
+}
+
+// HandedEntriesProgramMayChange reports a program that, handed file names
+// by find -exec or xargs, may write or remove them: anything but a reader
+// or a mode, owner or time change (GAP-2122).
+func HandedEntriesProgramMayChange(program string) bool {
+	program = strings.ToLower(program[strings.LastIndex(program, "/")+1:])
+	_, reader := findEmbeddedReaders[program]
+	return !reader
 }
 
 func findExpressionStart(value string) bool {

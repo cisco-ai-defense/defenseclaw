@@ -796,7 +796,8 @@ func withActiveStateTargetMention(
 	findings []RuleFinding,
 ) []RuleFinding {
 	command, known := trustedBashCommandInput(request.Input)
-	if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
+	if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
+		!factsHaveFindHandOff(facts) {
 		return findings
 	}
 	if !provenStateMutationPath(facts, request) {
@@ -855,6 +856,9 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		provenMutation := wholeActionProven && stateCommandMutatesPath(command, candidate)
 		if !provenMutation {
 			provenMutation = provenPartialStateRedirect(facts, command, candidate)
+		}
+		if !provenMutation {
+			provenMutation = provenPartialFindHandOff(facts, command, candidate)
 		}
 		if !provenMutation {
 			continue

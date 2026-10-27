@@ -85,6 +85,38 @@ func TestR105GAP2135FindAttachedHomePath(t *testing.T) {
 	}
 }
 
+// GAP-2122 (pod check7): a find that hands what it finds to a program that
+// may change it gives its starting points a written path fact, with the
+// trusted home resolved, while readers and mode changes add none.
+func TestR105GAP2122FindHandsEntriesToWriter(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		write   bool
+	}{
+		{`find ~/.defenseclaw/hooks -exec sh -c 'rm -f "$1"' _ {} \;`, true},
+		{"find ~/.defenseclaw/hooks -type f -exec truncate -s 0 {} +", true},
+		{"find $HOME/.defenseclaw/hooks -exec sudo rm -f {} +", true},
+		{"find ~/.defenseclaw/hooks -exec env rm -f {} +", true},
+		{`find ~/.defenseclaw/hooks -type f -exec cp /dev/null {} \;`, true},
+		{"find ~/.defenseclaw/hooks -type f -exec ls -l {} +", false},
+		{"find ~/.defenseclaw/hooks -type f -exec sha256sum {} +", false},
+		{"find ~/.defenseclaw/hooks -exec chmod 700 {} +", false},
+	} {
+		facts := Analyze(Input{Tool: "Bash", Command: tc.command, CWD: "/home/u/p", ActiveHome: "/home/u"})
+		if got := hasPathFact(facts, PathAccessWrite, "/home/u/.defenseclaw/hooks"); got != tc.write {
+			t.Errorf("%q: written start point %t, want %t: %+v", tc.command, got, tc.write, facts.Paths)
+		}
+		if !hasPathFact(facts, PathAccessRead, "/home/u/.defenseclaw/hooks") {
+			t.Errorf("%q: the home start point is not resolved: %+v (%+v)", tc.command, facts.Paths, facts.Parse)
+		}
+	}
+	// find piped into xargs keeps its resolved starting point.
+	facts := Analyze(Input{Tool: "Bash", Command: "find ~/.defenseclaw/hooks -type f | xargs rm -f", CWD: "/home/u/p", ActiveHome: "/home/u"})
+	if !hasPathFact(facts, PathAccessRead, "/home/u/.defenseclaw/hooks") {
+		t.Errorf("find | xargs: the home start point is not resolved: %+v (%+v)", facts.Paths, facts.Parse)
+	}
+}
+
 func hasPathFact(facts Facts, access PathAccess, resolved string) bool {
 	for _, path := range facts.Paths {
 		if path.Access == access && path.Resolved == resolved {
