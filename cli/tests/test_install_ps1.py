@@ -1265,7 +1265,7 @@ def test_a_room_refusal_runs_before_the_uv_folder_or_uv_is_created() -> None:
 def _bin_dir_functions() -> str:
     text = _text()
     out = []
-    for name in ("Copy-BinDir", "Restore-BinDir", "Assert-BinDirRestored", "Get-Sha256"):
+    for name in ("Copy-BinDir", "Clear-AsideCopies", "Restore-BinDir", "Assert-BinDirRestored", "Get-Sha256"):
         start = text.index(f"function {name}(")
         out.append(text[start : text.index("\n}\n", start) + 3])
     return "\n".join(out)
@@ -3929,6 +3929,7 @@ def test_windows_rollback_holds_checked_hook_until_prior_gateway_is_proven(tmp_p
     )
     body = (
         _ps1_function("Read-Text")
+        + _ps1_function("Clear-AsideCopies")
         + _ps1_function("Restore-BinDir")
         + _ps1_function("Assert-BinDirRestored")
         + _ps1_function("Undo-HookFirst")
@@ -4068,6 +4069,7 @@ def test_windows_rollback_finishes_for_a_previously_stopped_gateway(tmp_path: Pa
     # and closed hooks must be proven before the old hook and lock return.
     body = (
         _ps1_function("Read-Text")
+        + _ps1_function("Clear-AsideCopies")
         + _ps1_function("Restore-BinDir")
         + _ps1_function("Assert-BinDirRestored")
         + "\n".join(_ps1_function(name) for name in (
@@ -4439,6 +4441,7 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         + _ps1_function("Read-Text")
         + _ps1_function("Get-Sha256")
         + _ps1_function("Write-DurableText")
+        + _ps1_function("Clear-AsideCopies")
         + _ps1_function("Install-HookFirst")
         + _ps1_function("Save-HookCloser")
         + _ps1_function("Undo-HookFirst")
@@ -4515,7 +4518,7 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
         _ps1_function(name)
         for name in (
             "Invoke-Quietly", "Start-SwapHookFailModes", "Save-HookFiles", "Restore-HookFiles", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
-            "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
+            "Undo-HookFirst", "Clear-AsideCopies", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
             "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote", "Resume-InterruptedRun", "Publish-PreviousSlot",
             "Start-AcceptedReplacement", "Finish-EarlySnapshotRestore",
         )
@@ -4665,7 +4668,7 @@ def test_a_step_that_throws_after_the_hook_swap_restores_the_old_install(
         _ps1_function(name)
         for name in (
             "Invoke-Quietly", "Start-SwapHookFailModes", "Save-HookFiles", "Restore-HookFiles", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
-            "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
+            "Undo-HookFirst", "Clear-AsideCopies", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
             "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote",
             "Start-AcceptedReplacement", "Finish-EarlySnapshotRestore",
         )
@@ -5130,12 +5133,10 @@ def test_a_restore_and_the_hook_drain_take_the_aside_copies_away(tmp_path: Path)
     # until a later install. The restore (both branches) and the drain after
     # the hook swap remove every aside copy nothing runs any more.
     restore = _ps_functions("Restore-BinDir")
-    sweep = 'Get-ChildItem -LiteralPath $BinDir -Filter "$name.old-*" -Force -ErrorAction SilentlyContinue | Remove-Item'
+    sweep = "Clear-AsideCopies -Restored"
     assert restore.count(sweep) == 2
     assert restore.rindex(sweep) < restore.rindex("Assert-BinDirRestored $From $GuardSHA256")
-    assert re.search(
-        r"Wait-PreviousHookExit \(\[DateTime\]::UtcNow\)\n(?:\s*#.*\n)*\s*Get-ChildItem -LiteralPath \$BinDir "
-        r"-Filter \"defenseclaw-hook\.exe\.old-\*\"", _text())
+    assert re.search(r"Wait-PreviousHookExit \(\[DateTime\]::UtcNow\)\n(?:\s*#.*\n)*\s*Clear-AsideCopies\n", _text())
     bin_dir, saved = tmp_path / "bin", tmp_path / "saved"
     bin_dir.mkdir()
     saved.mkdir()
@@ -5148,12 +5149,75 @@ def test_a_restore_and_the_hook_drain_take_the_aside_copies_away(tmp_path: Path)
         + "function Install-File([string]$Source, [string]$Destination) { Copy-Item -LiteralPath $Source -Destination $Destination -Force }\n"
         + "function Remove-Aside([string]$Path) { Remove-Item -LiteralPath $Path -Force }\n"
         + "function Get-Sha256([string]$Path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash }\n"
-        + _ps_functions("Restore-BinDir", "Assert-BinDirRestored")
+        + _ps_functions("Clear-AsideCopies", "Restore-BinDir", "Assert-BinDirRestored")
         + f"\nRestore-BinDir '{saved}'\n'OK'\n"
     )
     result = _run_powershell(script)
     assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
     assert sorted(path.name for path in bin_dir.iterdir()) == ["claude.exe.old-20261026T103423125", "defenseclaw-hook.exe"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_refused_drain_takes_the_aside_copies_and_names_a_busy_one_for_every_uninstall(tmp_path: Path) -> None:
+    # GAP-1760 (np-ow1 C04, live): a refused drain ("Previous hook calls did not
+    # finish within 30 seconds") is undone by Undo-HookFirst, not Restore-BinDir,
+    # so two free .old-* copies and the still-running 1.0.2 hook image stayed in
+    # .local\bin, and the restored 1.0.2 `defenseclaw uninstall` took none of
+    # them. Undo-HookFirst (and Restore-BinDir) now remove the free copies and
+    # rename a busy one to the source-install name every release's uninstall removes.
+    undo = _ps_functions("Undo-HookFirst")
+    assert undo.count("Clear-AsideCopies -Restored") == 2, undo
+    assert undo.rstrip().endswith("Clear-AsideCopies -Restored\n}"), undo
+    # The refused drain of a hook-first swap is undone through the hook transition.
+    install = _ps1_function("Invoke-Install")
+    early = install[install.index("try { Save-BinarySnapshot } catch {") :]
+    early = early[: early.index("throw $failure")]
+    assert early.index("Finish-EarlySnapshotRestore $Manifest") < early.index("Clear-AsideCopies -Restored"), early
+    prior = _ps_functions("Restore-PriorHookAfterProof")
+    assert prior.rstrip().endswith("Clear-AsideCopies -Restored\n}"), prior
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    free = [
+        "defenseclaw-hook.exe.old-20261026T200103881",
+        "defenseclaw-gateway.exe.old-20261026T200103395",
+        ".defenseclaw-hook.exe.source-install-old-0a1b2c3d4e5f",
+    ]
+    busy = "defenseclaw-hook.exe.old-20261026T200351322"
+    for name in free + [busy, "claude.exe.old-20261026T103423125", "defenseclaw-hook.exe"]:
+        (bin_dir / name).write_text("x", encoding="ascii")
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        + f"$BinDir = '{bin_dir}'\n$ManagedFiles = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe')\n"
+        # A running image cannot be deleted: the stand-in refuses that one path.
+        + "function Remove-Item { param([string]$LiteralPath, [switch]$Force, $ErrorAction)\n"
+        + f"  if ($LiteralPath -like '*{busy}') {{ throw 'Access to the path is denied' }}\n"
+        + "  Microsoft.PowerShell.Management\\Remove-Item -LiteralPath $LiteralPath -Force }\n"
+        + _ps_functions("Clear-AsideCopies")
+        + "\nClear-AsideCopies -Restored\n'OK'\n"
+    )
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+    left = sorted(path.name for path in bin_dir.iterdir())
+    assert [n for n in left if not n.startswith(".")] == ["claude.exe.old-20261026T103423125", "defenseclaw-hook.exe"], left
+    renamed = [n for n in left if n.startswith(".")]
+    assert len(renamed) == 1, left
+    # The 1.0.2-1.0.4 cmd_uninstall matcher, verbatim; its owned Windows names include defenseclaw-hook.exe.
+    legacy = re.compile(r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+", re.IGNORECASE)
+    match = legacy.fullmatch(renamed[0])
+    assert match and match.group("name") == "defenseclaw-hook.exe", renamed
+    # Without -Restored (the new release stays and its uninstall takes .old-*) a busy copy keeps its name.
+    (bin_dir / renamed[0]).unlink()
+    (bin_dir / busy).write_text("x", encoding="ascii")
+    result = _run_powershell(script.replace("Clear-AsideCopies -Restored\n'OK'", "Clear-AsideCopies\n'OK'"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (bin_dir / busy).exists()
+
+
+def test_a_process_running_a_renamed_copy_is_still_under_its_program_prefix() -> None:
+    # GAP-1760: the copy Clear-AsideCopies renames keeps counting for the drain and the gateway checks.
+    body = _ps_functions("Get-ProcessesUnder")
+    assert '(Split-Path -Parent $_) + "\\." + (Split-Path -Leaf $_)' in body, body
+    assert '-not $_.EndsWith("\\")' in body, body
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -5427,7 +5491,7 @@ def test_the_fail_mode_hold_outlasts_the_installers_own_steps() -> None:
 
 def _restore_case_functions() -> str:
     names = (
-        "Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace", "Copy-BinDir", "Restore-BinDir",
+        "Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace", "Copy-BinDir", "Clear-AsideCopies", "Restore-BinDir",
         "Assert-BinDirRestored", "Move-Path", "Get-DataEntries", "Test-ConnectorRecoveryArtifactName",
         "Restore-Slot", "Invoke-Quietly",
         "Read-Text", "Restore-ExternalConfig", "Undo-HookFirst", "Undo-Snapshot",

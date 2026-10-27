@@ -1377,9 +1377,14 @@ function Get-ProcessesUnder([string[]]$Prefixes) {
             [pscustomobject]@{ ProcessId = $_.Id; Name = "$($_.ProcessName).exe"; ExecutablePath = $_.Path }
         })
     }
+    # A program prefix (bin\defenseclaw-hook.exe) also takes the copy a
+    # restore renamed to .defenseclaw-hook.exe.source-install-old-<hex>
+    # (Clear-AsideCopies), so a call still running it is still seen.
+    $all_prefixes = @($Prefixes) + @($Prefixes | Where-Object { $_ -and -not $_.EndsWith("\") } |
+        ForEach-Object { (Split-Path -Parent $_) + "\." + (Split-Path -Leaf $_) })
     return @($all | Where-Object {
         $image = $_.ExecutablePath
-        $image -and @($Prefixes | Where-Object { $image.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count
+        $image -and @($all_prefixes | Where-Object { $image.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count
     })
 }
 
@@ -1828,6 +1833,27 @@ function Remove-Aside([string]$Path) {
     Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
 }
 
+function Clear-AsideCopies([switch]$Restored) {
+    # Programs renamed aside while they ran (<name>.old-<time>): each copy
+    # nothing runs any more is removed. After a restore (-Restored) the older
+    # release is back, and its `defenseclaw uninstall` (1.0.2 to 1.0.4) takes
+    # only `.<name>.source-install-old-<hex>`: a copy a call still runs is
+    # renamed to that, which Windows allows for a running image, so every
+    # release's uninstall removes it once it is free (GAP-1760). The next
+    # install removes either name.
+    foreach ($name in $ManagedFiles) {
+        $copies = @(Get-ChildItem -LiteralPath $BinDir -Force -File -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name.StartsWith("$name.old-", [StringComparison]::OrdinalIgnoreCase) -or
+            $_.Name.StartsWith(".$name.source-install-old-", [StringComparison]::OrdinalIgnoreCase) })
+        foreach ($copy in $copies) {
+            try { Remove-Item -LiteralPath $copy.FullName -Force -ErrorAction Stop; continue } catch { }
+            if (-not $Restored -or $copy.Name.StartsWith(".")) { continue }
+            $legacy = Join-Path $BinDir (".$name.source-install-old-" + [guid]::NewGuid().ToString("N").Substring(0, 12))
+            try { [IO.File]::Move($copy.FullName, $legacy) } catch { }
+        }
+    }
+}
+
 function Remove-DeveloperFiles {
     # The source ownership marker proves the files came from `make all`.
     if (-not (Test-Path -LiteralPath (Join-Path $BinDir ".defenseclaw-source-root") -PathType Leaf)) { return }
@@ -2050,10 +2076,7 @@ function Restore-BinDir([string]$From, [string]$GuardSHA256 = "") {
                 Remove-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
             }
         }
-        # Programs renamed aside while they ran (.old-*), once nothing runs them (GAP-1760).
-        foreach ($name in $ManagedFiles) {
-            Get-ChildItem -LiteralPath $BinDir -Filter "$name.old-*" -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-        }
+        Clear-AsideCopies -Restored
         Assert-BinDirRestored $From
         return
     }
@@ -2085,10 +2108,7 @@ function Restore-BinDir([string]$From, [string]$GuardSHA256 = "") {
         } catch { $refused += $_.Exception.Message }
     }
     if ($refused.Count) { throw "Could not put back every program in ${BinDir}: $($refused -join '; ')" }
-    # Programs renamed aside while they ran (.old-*), once nothing runs them (GAP-1760).
-    foreach ($name in $ManagedFiles) {
-        Get-ChildItem -LiteralPath $BinDir -Filter "$name.old-*" -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-    }
+    Clear-AsideCopies -Restored
     Assert-BinDirRestored $From $GuardSHA256
 }
 
@@ -2536,6 +2556,9 @@ function Restore-PriorHookAfterProof($Manifest) {
     if ((Get-Sha256 $live) -ne $transition.PriorSHA256) {
         throw "The prior hook was not published after the restored gateway was proven"
     }
+    # The prior hook is back: so are the aside copies of the swap, as a refused
+    # drain (Wait-PreviousHookExit) leaves them (GAP-1760).
+    Clear-AsideCopies -Restored
 }
 
 function Ensure-LifecycleHookGuard($Transition) {
@@ -3059,7 +3082,7 @@ function Install-HookFirst([string]$Slot) {
     Install-File $staged $live
     Wait-PreviousHookExit ([DateTime]::UtcNow)
     # The calls that ran the previous hook are done: its aside copy is free (GAP-1760).
-    Get-ChildItem -LiteralPath $BinDir -Filter "defenseclaw-hook.exe.old-*" -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Clear-AsideCopies
 }
 
 function Wait-PreviousHookExit([DateTime]$PublishedAt) {
@@ -3270,7 +3293,9 @@ function Undo-HookFirst([string]$Slot) {
     if (-not $old) { $old = $copy }
     # Only the old hook's bytes in place are a restore.
     $back = { $old -and (Test-Path -LiteralPath $live -PathType Leaf) -and (Get-Sha256 $live) -eq $old }
-    if (& $back) { return }
+    # A refused drain (Wait-PreviousHookExit) is undone here, not by
+    # Restore-BinDir: the aside copies of the swap go too (GAP-1760).
+    if (& $back) { Clear-AsideCopies -Restored; return }
     # A rollback copy that is gone or changed restores nothing: the new hook
     # stays live, so the slot and .install.lock stay too (Undo-EarlySnapshot).
     if (-not $copy -or $copy -ne $old) {
@@ -3278,6 +3303,7 @@ function Undo-HookFirst([string]$Slot) {
     }
     Install-File $saved $live
     if (-not (& $back)) { throw "The previous defenseclaw-hook.exe is not back in $BinDir" }
+    Clear-AsideCopies -Restored
 }
 
 function Undo-Snapshot([string]$Slot) {
@@ -3350,9 +3376,7 @@ function Install-New {
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     Protect-BinDir
     # Binaries an earlier run renamed aside while they were running.
-    foreach ($name in $ManagedFiles) {
-        Get-ChildItem -LiteralPath $BinDir -Filter "$name.old-*" -Force | Remove-Item -Force -ErrorAction SilentlyContinue
-    }
+    Clear-AsideCopies
     foreach ($name in $ManagedBinaries) {
         $staged = Join-Path $Staging "bin\$name"
         if (Test-Path -LiteralPath $staged) { Install-File $staged (Join-Path $BinDir $name) }
@@ -5330,6 +5354,8 @@ function Invoke-Install {
         # prior unproven baseline stays locked without claiming the current
         # attempt changed binaries. An unfinished undo keeps it and the lock.
         Finish-EarlySnapshotRestore $Manifest
+        # A refused drain renamed the running hook aside (GAP-1760).
+        Clear-AsideCopies -Restored
         throw $failure
     }
     # From here to the rollback copy the new hook is live while the old
