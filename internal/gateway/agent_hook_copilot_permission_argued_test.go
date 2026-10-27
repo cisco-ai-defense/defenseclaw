@@ -50,7 +50,9 @@ func TestCopilotArguedCallbackCallsLeaveTheNextPatchPairBound(t *testing.T) {
 				a, body := postCopilotHook(t, api, "preToolUse", head+`"toolCalls":[`+first+`]}`)
 				check("first preToolUse", a, body)
 				if shape == "create-cb" {
-					g := filepath.ToSlash(cpath)
+					// Copilot names the file in git form with one leading
+					// slash on every OS (a/C:/Users/... on Windows).
+					g := "/" + strings.TrimPrefix(filepath.ToSlash(cpath), "/")
 					d := "\ndiff --git a" + g + " b" + g + "\ncreate file mode 100644\nindex 0000000..0000000\n--- a/dev/null\n+++ b" + g + "\n@@ -1,0 +1,1 @@\n+ordinary c\n\n"
 					a, body = postCopilotHook(t, api, "permissionRequest", perm(`{"file_path":`+jsonQuote(cpath)+`,"diff":`+jsonQuote(d)+`}`))
 					check("create callback", a, body)
