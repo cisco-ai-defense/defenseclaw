@@ -208,6 +208,13 @@ type App struct {
 	// TLSTrust is what the Sandbox TLS trust doctor row reads (defaults:
 	// the network, the distribution's public roots, the system's trust).
 	TLSTrust TLSTrust
+	// ManagedAccountPolicy asks the managed gateway itself, not the
+	// account's sandbox daemon, for the caller's policy view of a new run of
+	// the agent harness (nil, or an error, when this is no managed computer
+	// or the gateway does not answer). A run reads it before it reaches the
+	// daemon, whose socket would start it: an account the organization does
+	// not allow sandboxes is refused with nothing started (GAP-0534).
+	ManagedAccountPolicy func(ctx context.Context, harness string) (*sandboxapi.ManagedExplain, error)
 	// ManagedAccountHome is the home path the managed gateway exec shim
 	// resolves for this account, including directory accounts.
 	ManagedAccountHome func() (string, error)

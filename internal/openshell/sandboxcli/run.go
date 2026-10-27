@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"slices"
 	"sort"
@@ -142,6 +143,9 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	}
 	project, err := a.project()
 	if err != nil {
+		return err
+	}
+	if err := a.refuseForbiddenAccount(ctx, spec.Name); err != nil {
 		return err
 	}
 	api, err := a.api()
@@ -793,6 +797,28 @@ func policyRefusal(err error) bool {
 		return true
 	}
 	return strings.HasPrefix(e.Detail, sandboxrelay.ReasonPolicyUnloadable)
+}
+
+// refuseForbiddenAccount refuses the run of an account whose organization
+// does not allow it sandboxes, by the managed gateway's own settled view
+// (ManagedAccountPolicy), before the run reaches the account's sandbox
+// daemon: its socket starts the daemon, which then held the sandbox ports
+// and wrote its state for an account that can run no sandbox (GAP-0534).
+// The words are the daemon's ready refusal. A view that is provisional (the
+// directory has not answered yet), that allows the account, or that the
+// gateway did not give leaves the decision to the daemon, as before; an
+// agent or pack refusal is the daemon's too.
+func (a *App) refuseForbiddenAccount(ctx context.Context, harness string) error {
+	if a.ManagedAccountPolicy == nil {
+		return nil
+	}
+	view, err := a.ManagedAccountPolicy(ctx, harness)
+	if err != nil || view == nil || view.Provisional || view.Allowed {
+		return nil
+	}
+	a.managedSeen = managedStatusOfExplain(view)
+	return apiError(&sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
+		Message: "Your organization doesn't allow sandboxes for your account.", Detail: sandboxrelay.ReasonNotAllowed})
 }
 
 // readyCheck judges a run before its ready installs or starts anything
