@@ -8,9 +8,9 @@ prepares the provider and the hosts.
 
 | Folder | Provider | Hosts | Guide |
 | --- | --- | --- | --- |
-| [`okta/`](okta/README.md) | Okta LDAP Interface, read by SSSD | Linux (tested on RHEL 9.8) | [Okta on Linux](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/identity/okta/) |
-| [`ad/`](ad/README.md) | Active Directory (SSSD and Kerberos on Linux, a directory binding on macOS): OpenShell sandbox policy by AD group | Linux, macOS | [Sandboxes on managed computers](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/runtime/sandboxes/) |
-| [`entra/`](entra/README.md) | Microsoft Entra ID | Entra-joined Windows, Linux with Entra ID SSH sign-in | [Deploy with Microsoft Entra ID](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/identity/entra-id/) |
+| [`okta/`](okta/README.md) | Okta LDAP Interface, read by SSSD | Linux (tested on RHEL 9.8) | [Okta on Linux](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/identity-okta/) |
+| [`ad/`](ad/README.md) | Active Directory (SSSD and Kerberos on Linux, a directory binding on macOS): OpenShell sandbox policy by AD group | Linux, macOS | [Sandboxes on managed computers](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/sandboxes/) |
+| [`entra/`](entra/README.md) | Microsoft Entra ID | Entra-joined Windows, Linux with Entra ID SSH sign-in | [Deploy with Microsoft Entra ID](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/identity-entra-id/) |
 
 The Intune tenant helper is in [`../mdm/intune/tenant/`](../mdm/intune/tenant/README.md).
 

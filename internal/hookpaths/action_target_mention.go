@@ -19,8 +19,11 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -35,6 +38,12 @@ func ActionStateTargetMention(command, cwd, home string) bool {
 // action decision; commands with no such path continue through the existing
 // proof. globs carries the hook client's pattern answers (actionGlobs).
 func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) bool {
+	return actionProtectedTargetMentionIn(command, cwd, home, depth, stateOnly, globs, "")
+}
+
+// actionProtectedTargetMentionIn is actionProtectedTargetMentionDepth with
+// the gateway's shell dialect hint (actionWindowsTargetMention).
+func actionProtectedTargetMentionIn(command, cwd, home string, depth int, stateOnly bool, globs *actionGlobs, dialect actionfacts.Dialect) bool {
 	if command == "" || home == "" || len(command) > MaxPayloadBytes || depth >= 8 {
 		return false
 	}
@@ -42,16 +51,20 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 		globs = globs.forCommand(command)
 	}
 	if actionWindowsHome(home) {
-		return actionWindowsTargetMention(command, cwd, home, depth, stateOnly)
+		return actionWindowsTargetMention(command, cwd, home, depth, stateOnly, dialect)
 	}
 	return actionPosixTargetMention(command, cwd, home, depth, stateOnly, globs)
 }
 
 // actionPosixTargetMention is the POSIX-grammar target scan. On a native
 // Windows host it also reads a POSIX shell's command (Git Bash, MSYS) under
-// a Windows home, on the Windows file system (ActionCommandDecisionInShell).
+// a Windows home, on the Windows file system (ActionCommandDecisionWithDialectAndGlobFacts).
 func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) bool {
-	if !filepath.IsAbs(cwd) && (!actionPosixWindowsHome(home) || !path.IsAbs(cwd)) {
+	// spelledWindows: a Windows home this host cannot open (the gateway is
+	// not on Windows). Its paths are judged by their spelling
+	// (actionWindowsPath), as the Windows reading judges them (GAP-1504).
+	spelledWindows := runtime.GOOS != "windows" && actionWindowsHome(home)
+	if !spelledWindows && !filepath.IsAbs(cwd) && (!actionPosixWindowsHome(home) || !path.IsAbs(cwd)) {
 		return false
 	}
 	file, parsed := parseShell(command)
@@ -87,6 +100,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		}
 		if windowsHost {
 			value = actionMSYSDrivePath(value)
+		}
+		if spelledWindows {
+			return actionSpelledWindowsTarget(value, tilde, base, home, stateOnly)
 		}
 		if tilde && strings.HasPrefix(value, "~/") {
 			if actionPosixWindowsHome(home) {
@@ -1902,9 +1918,86 @@ func actionLessWritesFile(option string) bool {
 // reading of the command (actionWindowsPlainGrammar: Git Bash and cmd do not
 // read PowerShell comments, smart quotes or the backtick) names a protected
 // target (GAP-1500 refix 2).
-func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool) bool {
-	return actionWindowsTargetMentionAs(command, cwd, home, depth, stateOnly, 0) ||
-		actionWindowsTargetMentionAs(command, cwd, home, depth, stateOnly, actionWindowsPlainGrammar)
+//
+// A dialect hint never drops a reading that may write a protected target
+// (lead decision on GAP-1504). It names the reading the shell makes: the
+// PowerShell grammar for a PowerShell hint, the POSIX grammar for a POSIX
+// hint (ActionCommandDecisionWithDialectAndGlobFacts), whose mention rules
+// (TGT-0194) hold as they are. Another reading counts unless it only prints
+// or reads and redirects into no protected target
+// (actionWindowsReadingWritesNothing): a path that is only printed there is
+// not a write, so Git Bash echo \$HOME/.ssh/authorized_keys and a PowerShell
+// comment are not blocked by the reading of a shell that does not run them.
+func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly bool, dialect actionfacts.Dialect) bool {
+	for _, grammar := range []actionWindowsGrammar{0, actionWindowsPlainGrammar} {
+		if !actionWindowsTargetMentionAs(command, cwd, home, depth, stateOnly, grammar) {
+			continue
+		}
+		hinted := dialect == actionfacts.DialectPOSIX || dialect == actionfacts.DialectPowerShell && grammar != 0
+		if !hinted || !actionWindowsReadingWritesNothing(command, cwd, home, grammar, dialect) {
+			return true
+		}
+	}
+	return false
+}
+
+// actionWindowsReadingWritesNothing holds when, in this reading, every
+// statement prints or reads (actionWindowsTextStatement,
+// actionKnownReadOnlyWindowsStatement) with no nested command or script
+// block, and every output redirect names no protected target.
+func actionWindowsReadingWritesNothing(command, cwd, home string, grammar actionWindowsGrammar, dialect actionfacts.Dialect) bool {
+	scan := actionWindowsScan(actionWindowsBlankPatchText(command), grammar|actionWindowsLiteralDollar)
+	if !scan.ok || len(scan.words) == 0 {
+		// A POSIX-hinted command that the POSIX grammar reads completely
+		// runs in that shell; a Windows reading the scanner cannot read is
+		// then not a shell that runs it (the GAP-1500 fallback is for
+		// commands PowerShell runs).
+		if dialect != actionfacts.DialectPOSIX {
+			return false
+		}
+		_, parsed := parseShell(command)
+		return parsed
+	}
+	words := scan.words
+	var statement []string
+	end := func() bool {
+		if len(statement) == 0 {
+			return true
+		}
+		for _, word := range statement {
+			// ( and { open a subexpression, subshell or script block. A
+			// PowerShell backtick only escapes; in the plain reading a pair
+			// of backticks is a Git Bash command substitution.
+			if strings.ContainsAny(word, "({") || grammar&actionWindowsPlainGrammar != 0 && strings.Count(word, "`") >= 2 {
+				return false
+			}
+		}
+		ok := actionWindowsTextStatement(statement) || actionKnownReadOnlyWindowsStatement(statement)
+		statement = statement[:0]
+		return ok
+	}
+	for i := 0; i < len(words); i++ {
+		word := words[i]
+		switch word {
+		case ";", "|", "||", "&", "&&":
+			if !end() {
+				return false
+			}
+			continue
+		}
+		if operator := actionWindowsRedirectOperator(word); operator != "" {
+			if i+1 >= len(words) {
+				break // A redirect with no target writes no file.
+			}
+			i++
+			if operator[0] == '>' && actionWindowsWordMentionsTarget(words[i], cwd, home, false) {
+				return false
+			}
+			continue
+		}
+		statement = append(statement, word)
+	}
+	return end()
 }
 
 func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnly bool, grammar actionWindowsGrammar) bool {
@@ -1928,7 +2021,7 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 						break
 					}
 					if (rawWords[j] == "-S" || rawWords[j] == "--split-string") &&
-						actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly) {
+						actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly, "") {
 						return true
 					}
 				}
@@ -1947,7 +2040,7 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 					break
 				}
 				if strings.EqualFold(rawWords[j], "-command") || strings.EqualFold(rawWords[j], "-c") {
-					if actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly) {
+					if actionWindowsTargetMention(rawWords[j+1], cwd, home, depth+1, stateOnly, actionfacts.DialectPowerShell) {
 						return true
 					}
 					break
@@ -1983,7 +2076,7 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 		for j := range letters {
 			letters[j] = uint16(encoded[2*j]) | uint16(encoded[2*j+1])<<8
 		}
-		if actionWindowsTargetMention(string(utf16.Decode(letters)), cwd, home, depth+1, stateOnly) {
+		if actionWindowsTargetMention(string(utf16.Decode(letters)), cwd, home, depth+1, stateOnly, actionfacts.DialectPowerShell) {
 			return true
 		}
 	}
@@ -2010,7 +2103,7 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 
 // actionWindowsPOSIXShellMention reads the script that a POSIX shell (Git
 // Bash, MSYS sh) runs with -c as that shell reads it, on the Windows file
-// system (ActionCommandDecisionInShell): quote removal, ~, $HOME and
+// system (ActionCommandDecisionWithDialectAndGlobFacts): quote removal, ~, $HOME and
 // ${HOME}, cd tracking and the MSYS /c/ drive spelling. The Windows reading
 // keeps the script's own quotes and operators inside its words, so a key
 // target spelled "$HOME"/.ssh/authorized_k*, k>/c/Users/u/.ssh/... or
@@ -2111,14 +2204,14 @@ func actionWindowsInvokedTextMention(words []string, cwd, home string, depth int
 				if strings.HasPrefix(words[j], "-") {
 					continue
 				}
-				if actionWindowsTargetMention(body(words[j]), cwd, home, depth+1, stateOnly) {
+				if actionWindowsTargetMention(body(words[j]), cwd, home, depth+1, stateOnly, actionfacts.DialectPowerShell) {
 					return true
 				}
 				break
 			}
 		}
 		if i+2 < len(words) && words[i+1] == "|" && invoke(words[i+2]) &&
-			actionWindowsTargetMention(body(word), cwd, home, depth+1, stateOnly) {
+			actionWindowsTargetMention(body(word), cwd, home, depth+1, stateOnly, actionfacts.DialectPowerShell) {
 			return true
 		}
 	}
@@ -2749,4 +2842,89 @@ func actionWindowsUnresolvedUnderSSH(value, cwd, home string) bool {
 	}
 	root := strings.ToLower(path.Clean(strings.ReplaceAll(home, `\`, "/"))) + "/.ssh/"
 	return strings.HasPrefix(strings.ToLower(path.Clean(value)), root)
+}
+
+// actionWindowsLiteralHereDocumentTarget reads the literal body of a POSIX
+// here-document under a Windows home. Git Bash passes that body through
+// unchanged, backslashes of an absolute Windows path included, while the
+// POSIX text scan reads those backslashes as escapes (GAP-1504).
+func actionWindowsLiteralHereDocumentTarget(command, home string) bool {
+	file, ok := parseShell(command)
+	if !ok {
+		return false
+	}
+	var targets []string
+	for _, target := range ProtectedAuthorizedKeysPaths(home) {
+		targets = append(targets, strings.ToLower(strings.ReplaceAll(target, "\\", "/")))
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		redirect, ok := node.(*syntax.Redirect)
+		if !ok || redirect.Hdoc == nil || redirect.Op != syntax.Hdoc && redirect.Op != syntax.DashHdoc {
+			return true
+		}
+		for _, part := range redirect.Hdoc.Parts {
+			literal, ok := part.(*syntax.Lit)
+			if !ok {
+				continue
+			}
+			body := strings.ToLower(strings.ReplaceAll(literal.Value, "\\", "/"))
+			for _, target := range targets {
+				for start := 0; start < len(body); {
+					index := strings.Index(body[start:], target)
+					if index < 0 {
+						break
+					}
+					index += start
+					end := index + len(target)
+					before, _ := utf8.DecodeLastRuneInString(body[:index])
+					after, _ := utf8.DecodeRuneInString(body[end:])
+					singleQuoted := before == '\'' && after == '\''
+					if (index == 0 || actionWindowsHereDocDelimiter(before) || singleQuoted) &&
+						(end == len(body) || actionWindowsHereDocDelimiter(after) || singleQuoted) {
+						found = true
+						return false
+					}
+					start = index + 1
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// actionWindowsHereDocDelimiter: a Windows file name may hold punctuation and
+// Unicode, so only white space and the characters a name cannot hold end an
+// unquoted path in a here-document body.
+func actionWindowsHereDocDelimiter(value rune) bool {
+	return unicode.IsSpace(value) || strings.ContainsRune("\"<>|?*", value)
+}
+
+// actionSpelledWindowsTarget judges a POSIX-reading value under a Windows
+// home by its spelling. The POSIX parser has already expanded HOME and the
+// unquoted tildes: a value that still holds $, % or a backtick, or a quoted
+// ~, is literal text in the POSIX shell, and the Windows expansion of it
+// would name a protected path the shell never reaches (GAP-1504).
+func actionSpelledWindowsTarget(value string, tilde bool, base, home string, stateOnly bool) bool {
+	if strings.ContainsAny(value, "$%`") || !tilde && (value == "~" || strings.HasPrefix(value, "~/")) {
+		return false
+	}
+	if strings.ContainsAny(value, "*?[]") {
+		return !stateOnly && actionWindowsProtectedGlobReach(value, base, home)
+	}
+	resolved, ok := actionWindowsPath(value, base, home)
+	if !ok {
+		return false
+	}
+	root, ok := actionWindowsPath(home, base, home)
+	if !ok {
+		return false
+	}
+	if stateOnly {
+		return strings.HasPrefix(resolved, root+"/") &&
+			actionProtectedStateRelative(strings.TrimPrefix(resolved, root+"/"))
+	}
+	protected, _ := actionWindowsProtected(value, base, home, false)
+	return resolved == root+"/.ssh" || protected
 }

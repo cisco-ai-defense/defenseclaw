@@ -36,21 +36,27 @@ func TestInstalledScannerRuntimeRefusesAnUnprovenAdmission(t *testing.T) {
 	t.Cleanup(func() { scannerRuntimeRoot = oldRoot })
 	legacy := []byte(`{"schema_version":1,"sha256":"` + digest + `","admitted_at":"2026-10-01T00:00:00Z"}`)
 	record := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeAdmissionName)
-	if err := os.WriteFile(record, legacy, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testenv.AsAdministratorsOwner(t, func() {
+		if err := os.WriteFile(record, legacy, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
 	if got, err := installedScannerRuntime(); got != "" || !errors.Is(err, managed.ErrScannerRuntimeAdmissionUnproven) {
 		t.Fatalf("installedScannerRuntime() = %q, %v; want the unproven record refused", got, err)
 	}
-	if err := managed.WriteScannerRuntimeAdmission(root, digest, managed.ScannerRuntimeTrustAuthenticode); err != nil {
-		t.Fatal(err)
-	}
+	testenv.AsAdministratorsOwner(t, func() {
+		if err := managed.WriteScannerRuntimeAdmission(root, digest, managed.ScannerRuntimeTrustAuthenticode); err != nil {
+			t.Fatal(err)
+		}
+	})
 	if got, err := installedScannerRuntime(); err != nil || got != path {
 		t.Fatalf("a production admission was refused: %q, %v", got, err)
 	}
-	if err := os.WriteFile(record, legacy, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	testenv.AsAdministratorsOwner(t, func() {
+		if err := os.WriteFile(record, legacy, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
 	if got, err := installedScannerRuntime(); got != "" || err == nil {
 		t.Fatalf("the cached admission outlived its record: %q, %v", got, err)
 	}

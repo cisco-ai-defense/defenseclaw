@@ -75,6 +75,14 @@ func TestMachinePolicyWarmsFreshLocalAccountIdentityWithoutEnrollmentRow(t *test
 		!slices.Contains(keys, "1006:fresh") || !slices.Contains(keys, "49201:numeric") {
 		t.Fatalf("fresh machine-policy callers: accounts %+v keys %v", accounts, keys)
 	}
+	// They are listed for their facts only: no gateway served them, so
+	// their records do not write the first migration map as a pre-upgrade
+	// holder's (GAP-2069 class, found live while proving GAP-2106).
+	for _, account := range accounts {
+		if (account.UID == 1006 || account.UID == 49201) && (!account.Peer || account.PreTokenHolder) {
+			t.Fatalf("warm-up account %+v writes the first migration map", account)
+		}
+	}
 }
 
 // GAP-0399: an exempt account calls the managed hook socket although the

@@ -67,6 +67,11 @@ const DC_PER_USER_NATIVE_POST: string = "1"
 // resolves the system directory with GetSystemDirectoryW, so a Windows
 // installed outside C:\Windows runs its own copy.
 const DC_WINDOWS_POWERSHELL: string = "{{.WindowsPowerShellJS}}"
+// The gateway binary of the install that rendered this plugin, which a
+// per-user plugin runs for hook-post and session facts: native Windows Setup
+// renders the one in its install root's bin folder (GAP-1847). Empty keeps the
+// .gateway-helper record that install.sh and install.ps1 write for ~/.local/bin.
+const DC_GATEWAY_BINARY: string = "{{.GatewayBinaryJS}}"
 const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
@@ -114,8 +119,8 @@ async function identityHeaders(): Promise<Record<string, string>> {
 // it: `hook session-facts` prints the whole X-DefenseClaw-Session-Facts value,
 // the principal included, and keeps its own five-minute cache in
 // ~/.defenseclaw. A managed install runs its administrator-owned hook binary
-// (DC_FOREIGN_GUARD); a per-user install runs the gateway binary the installer
-// puts in ~/.local/bin. No answer is a supported outcome: the SSH and logind
+// (DC_FOREIGN_GUARD); a per-user install runs its install's gateway binary
+// (DC_GATEWAY_BINARY, or ~/.local/bin). No answer is a supported outcome: the SSH and logind
 // variables alone follow.
 const DC_SESSION_FACTS_TTL_MS = 300000
 const DC_SESSION_FACTS_RETRY_MS = 30000
@@ -447,6 +452,18 @@ async function provenTCPRequest(path: string, init: RequestInit, token: string):
 
 function perUserNativePostBinary(): string {
 	const account = userInfo()
+	if (DC_GATEWAY_BINARY) {
+		// Windows Setup (GAP-1847): its install root has no ~/.local/bin and no
+		// .gateway-helper record; the rendered gateway's folders are checked as 1.0.4 does.
+		const directory = dirname(DC_GATEWAY_BINARY)
+		const setupPaths = [dirname(directory), directory, DC_GATEWAY_BINARY]
+		for (let index = 0; index < setupPaths.length; index++) {
+			const info = lstatSync(setupPaths[index])
+			if (info.isSymbolicLink() || (index === setupPaths.length - 1 ? !info.isFile() : !info.isDirectory())) throw new Error("per-user gateway helper path is untrusted")
+			if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) throw new Error("per-user gateway helper path is writable by another account")
+		}
+		return DC_GATEWAY_BINARY
+	}
 	const hookDir = dirname(DC_TOKEN_FILE)
 	const record = join(hookDir, ".gateway-helper")
 	const recordInfo = lstatSync(record)
@@ -473,7 +490,7 @@ function perUserNativePostBinary(): string {
 }
 
 // perUserHookPostBinary picks the small hook-post helper the POSIX installer
-// puts beside the gateway, so a hook event does not start the full gateway
+// puts beside the gateway (in the same folder), so a hook event does not start the full gateway
 // CLI; both read the same JSON request and run the same connected-peer check.
 // An install without it (Windows, or an older installer's roll-forward) keeps
 // the verified gateway CLI. A present but untrusted helper is refused, never
@@ -502,6 +519,9 @@ function checkWindowsHelperACL(paths: string[]): void {
 	// write grants before the bearer-bearing native helper is launched: the
 	// owner is this account, SYSTEM, Administrators (an elevated install) or
 	// TrustedInstaller, and no other principal may write the path. An
+	// OWNER RIGHTS (S-1-3-4) entry, which the DefenseClaw CLI and installer
+	// write on the data folder, grants only that trusted owner, so it is
+	// not another writer (GAP-2042). An
 	// inherit-only entry does not apply to the path itself; its children
 	// carry it. execFileSync opens the helper by this path, so every folder
 	// above a checked path, up to its volume root, must not let another
@@ -531,6 +551,7 @@ function checkWindowsHelperACL(paths: string[]): void {
 		"$ErrorActionPreference='Stop'",
 		"$current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
 		"$trusted=@($current,'S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')",
+		"$writers=$trusted+@('S-1-3-4')",
 		"$inheritOnly=[int][System.Security.AccessControl.PropagationFlags]::InheritOnly",
 		"$sid=[System.Security.Principal.SecurityIdentifier]",
 		"$count=0",
@@ -542,7 +563,7 @@ function checkWindowsHelperACL(paths: string[]): void {
 		"  if([System.IO.Directory]::Exists($p)) { $acl=[System.IO.Directory]::GetAccessControl($p) } elseif([System.IO.File]::Exists($p)) { $acl=[System.IO.File]::GetAccessControl($p) } else { throw 'missing' }",
 		"  if($trusted -notcontains $acl.GetOwner($sid).Value) { throw 'owner' }",
 		"  foreach($ace in $acl.GetAccessRules($true,$true,$sid)) {",
-		"    if($ace.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and (([int]$ace.PropagationFlags -band $inheritOnly) -eq 0) -and $trusted -notcontains $ace.IdentityReference.Value -and (([int64]$ace.FileSystemRights -band $writeMask) -ne 0)) { throw 'writable' }",
+		"    if($ace.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and (([int]$ace.PropagationFlags -band $inheritOnly) -eq 0) -and $writers -notcontains $ace.IdentityReference.Value -and (([int64]$ace.FileSystemRights -band $writeMask) -ne 0)) { throw 'writable' }",
 		"  }",
 		"  $count++",
 		"}",

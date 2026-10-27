@@ -923,9 +923,27 @@ func ClaudeCodeProjectAgentDirs(cwd string) []string {
 // The canonical FileChanged matcher below therefore matches every dynamic path;
 // this helper supplies the actual user/project files DefenseClaw needs.
 func ClaudeCodeWatchPaths(cwd string) []string {
+	return claudeCodeWatchPaths(cwd, claudeCodeConfigDir(), claudeCodeMCPStatePath())
+}
+
+// ClaudeCodeWatchPathsForHome uses the verified caller's home on a standalone
+// gateway. The service account's environment belongs to another user and
+// cannot select the paths watched by the caller's Claude Code process. A
+// caller whose home is unverified ("", relative or "/") gets no home entries
+// but keeps every project entry under cwd.
+func ClaudeCodeWatchPathsForHome(cwd, home string) []string {
+	// A home that is only separators (a slash, or two backslashes, which
+	// Windows reads as a UNC root) names no account: it is unverified.
+	if !filepath.IsAbs(home) || strings.Trim(home, `/\`) == "" {
+		return claudeCodeWatchPaths(cwd, "", "")
+	}
+	return claudeCodeWatchPaths(cwd, filepath.Join(home, ".claude"), filepath.Join(home, ".claude.json"))
+}
+
+func claudeCodeWatchPaths(cwd, configDir, mcpState string) []string {
 	root := claudeCodeAbsoluteWatchPath(cwd)
-	userDir := claudeCodeAbsoluteWatchPath(claudeCodeConfigDir())
-	userMCP := claudeCodeAbsoluteWatchPath(claudeCodeMCPStatePath())
+	userDir := claudeCodeAbsoluteWatchPath(configDir)
+	userMCP := claudeCodeAbsoluteWatchPath(mcpState)
 
 	candidates := make([]string, 0, 12)
 	rulesDirs := make([]string, 0, 2)
@@ -957,7 +975,15 @@ func ClaudeCodeWatchPaths(cwd string) []string {
 		)
 		rulesDirs = append(rulesDirs, filepath.Join(root, ".claude", "rules"))
 	}
-	skillRoots := []string{filepath.Join(userDir, "skills")}
+	var skillRoots, commandRoots, agentRoots []string
+	if userDir != "" {
+		skillRoots = append(skillRoots, filepath.Join(userDir, "skills"))
+		commandRoots = append(commandRoots, filepath.Join(userDir, "commands"))
+		agentRoots = append(agentRoots, filepath.Join(userDir, "agents"))
+	}
+	if root != "" {
+		commandRoots = append(commandRoots, filepath.Join(root, ".claude", "commands"))
+	}
 	skillRoots = append(skillRoots, claudecodepath.ProjectSkillDirs(root)...)
 	for _, skillRoot := range skillRoots {
 		for _, skillDir := range claudecodepath.SkillDirs(skillRoot) {
@@ -967,10 +993,7 @@ func ClaudeCodeWatchPaths(cwd string) []string {
 			}
 		}
 	}
-	for _, commandRoot := range []string{
-		filepath.Join(userDir, "commands"),
-		filepath.Join(root, ".claude", "commands"),
-	} {
+	for _, commandRoot := range commandRoots {
 		entries, err := os.ReadDir(commandRoot)
 		if err != nil {
 			continue
@@ -985,15 +1008,17 @@ func ClaudeCodeWatchPaths(cwd string) []string {
 			}
 		}
 	}
-	agentRoots := []string{filepath.Join(userDir, "agents")}
 	agentRoots = append(agentRoots, claudecodepath.ProjectAgentDirs(root)...)
 	for _, agentRoot := range agentRoots {
 		candidates = append(candidates, claudecodepath.AgentFiles(agentRoot)...)
 	}
-	memory := claudecodepath.ResolveAutoMemory(userDir, root, nil)
-	if memory.Path != "" {
-		candidates = append(candidates, filepath.Join(memory.Path, "MEMORY.md"))
-		candidates = append(candidates, claudecodepath.AutoMemoryFiles(memory)...)
+	// Auto-memory resolves from the user's settings and lives under the
+	// user's Claude home by default: none without a user directory.
+	if userDir != "" {
+		if memory := claudecodepath.ResolveAutoMemory(userDir, root, nil); memory.Path != "" {
+			candidates = append(candidates, filepath.Join(memory.Path, "MEMORY.md"))
+			candidates = append(candidates, claudecodepath.AutoMemoryFiles(memory)...)
+		}
 	}
 	for _, rulesDir := range rulesDirs {
 		_ = filepath.WalkDir(rulesDir, func(path string, entry os.DirEntry, err error) error {
@@ -1865,6 +1890,14 @@ func claudeCodeOperatorOtelSettings(existing map[string]interface{}, previous ma
 	}
 	if len(keep) == 0 {
 		return keep
+	}
+	// The generic OTEL_EXPORTER_OTLP_PROTOCOL also sets the protocol of a
+	// signal endpoint that has no protocol of its own (OTel spec), so an
+	// operator route keeps it unless host Setup wrote that exact value
+	// (GAP-1871: a traces-only collector lost its http/protobuf).
+	if protocol, _ := existing["OTEL_EXPORTER_OTLP_PROTOCOL"].(string); protocol != "" &&
+		protocol != previous["OTEL_EXPORTER_OTLP_PROTOCOL"] {
+		keep["OTEL_EXPORTER_OTLP_PROTOCOL"] = true
 	}
 	keep["CLAUDE_CODE_ENABLE_TELEMETRY"] = true
 	for key, value := range existing {
@@ -3435,6 +3468,23 @@ func parseLegacyClaudeCodeNativeHookCommand(command string) (string, bool) {
 		return "", false
 	}
 	return executable, true
+}
+
+// IsLegacyClaudeCodeUserHookCommand identifies a released Windows user
+// registration for retirement only. This does not prove that the executable
+// is trusted, and must never be used to allow a hook past an enterprise guard.
+func IsLegacyClaudeCodeUserHookCommand(command, home string) bool {
+	executable, ok := parseLegacyClaudeCodeNativeHookCommand(command)
+	if !ok || !filepath.IsAbs(home) {
+		return false
+	}
+	for _, name := range []string{windowsHookBinaryName, windowsGatewayBinaryName} {
+		want := filepath.Join(home, ".local", "bin", name)
+		if strings.EqualFold(normalizeWindowsHookExecutable(executable), normalizeWindowsHookExecutable(want)) {
+			return true
+		}
+	}
+	return false
 }
 
 func hookUsesTrackedClaudeCodeCommand(rawHook interface{}, commands []string) bool {

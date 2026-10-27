@@ -71,9 +71,9 @@ Pages workflow before the static export.
 
 Every "what works where" table on the site renders from one typed file, `data/support-matrix.ts`:
 
-- the connector-by-OS table on `/docs/get-started/support-matrix`, the "Platform support" section of the connectors index, and the one-line `<ConnectorSupport id="...">` strip on each connector page;
-- the feature-by-edition table (`/docs/get-started/support-matrix#features`);
-- the enterprise route table (`/docs/get-started/support-matrix#enterprise`).
+- the connector-by-OS table on `/docs/support-matrix/`, the "Platform support" section of the connectors index, and the one-line `<ConnectorSupport id="...">` strip on each connector page;
+- the feature-by-edition table (`/docs/support-matrix/#features`);
+- the enterprise route table (`/docs/support-matrix/#enterprise`).
 
 The renderers live in `components/support-matrix/`. Edit the data file, never the tables in MDX.
 
@@ -93,7 +93,7 @@ Regenerating before a release:
 
 1. Run the maintainers' matrix generator against the current certification results. It is kept outside this repository with the rest of the certification tooling. Its preview mode prints the changes, and its write mode rewrites the `BEGIN GENERATED` block in `data/support-matrix.ts` in place.
 2. The generator also sets `asOf` to the date of the snapshot, which the table footers print. Don't edit the generated block by hand.
-3. Run `npm run build` and look over `/docs/get-started/support-matrix`. The diff in `support-matrix.ts` should only touch statuses and `asOf`, unless a connector or platform was added in code.
+3. Run `npm run build` and look over `/docs/support-matrix/`. The diff in `support-matrix.ts` should only touch statuses and `asOf`, unless a connector or platform was added in code.
 
 OpenClaw, ZeptoClaw (proxy mode) and the Copilot VS Code extension are left out of these tables on purpose. Their own pages are unchanged.
 

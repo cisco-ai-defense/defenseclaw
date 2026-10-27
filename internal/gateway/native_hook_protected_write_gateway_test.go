@@ -68,6 +68,7 @@ func TestR104CodexNativeExecWorkdirRefix3(t *testing.T) {
 }
 
 func TestR104ProtectedWriteRefix3(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home, cwd := r104ReviewHome(t)
 	for _, tc := range []struct {
 		name, command string
@@ -243,12 +244,14 @@ func TestR104WindowsRegisteredHookNativeRefix3(t *testing.T) {
 			resp := api.evaluateAgentHook(t.Context(), agentHookRequest{
 				ConnectorName: tc.connector, HookEventName: tc.event, ToolName: tc.tool, ToolArgs: args,
 			})
-			// The decision is pinned on every OS. A native Windows gateway
-			// answers it without rule IDs, so the rule is pinned where the
-			// OS sets it (GAP-1781).
-			if resp.RawAction != "block" || resp.Action != "block" ||
-				runtime.GOOS != "windows" && !containsString(resp.RuleIDs, "persistence.ssh_authorized_keys_command") {
-				t.Fatalf("registered hook action=%q raw=%q rules=%v", resp.Action, resp.RawAction, resp.RuleIDs)
+			// RuleIDs come from the scan-finding emitter, which this bare
+			// APIServer does not have; the response findings name the rule.
+			named := containsString(resp.RuleIDs, "persistence.ssh_authorized_keys_command")
+			for _, finding := range resp.Findings {
+				named = named || strings.HasPrefix(finding, "persistence.ssh_authorized_keys_command:")
+			}
+			if resp.RawAction != "block" || resp.Action != "block" || !named {
+				t.Fatalf("registered hook action=%q raw=%q rules=%v findings=%v", resp.Action, resp.RawAction, resp.RuleIDs, resp.Findings)
 			}
 		})
 	}

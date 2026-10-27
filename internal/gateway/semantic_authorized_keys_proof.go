@@ -1206,8 +1206,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
-	if hookpaths.ActionCommandDecisionInShell(input.Command, input.CWD, facts.ActiveHome, globFacts,
-		trustedPOSIXShellCall(input, facts)) != "" {
+	decision := hookpaths.ActionCommandDecisionInShell(input.Command, input.CWD, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
+	if input.DialectHint != "" {
+		decision = hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
+	}
+	if decision != "" {
 		return true
 	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {

@@ -32,6 +32,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/procboot"
 )
 
 // maxCmdlineBytes bounds a single /proc/<pid>/cmdline read. A process can set
@@ -244,9 +246,19 @@ func stableBootInstant() time.Time {
 //
 // Returns the zero time on any failure. The caller leaves StartedAt unset in
 // that case rather than substituting a plausible value.
-func bootInstant() time.Time {
-	raw, err := os.ReadFile("/proc/stat")
+func bootInstant() time.Time { return bootInstantFrom("/proc", procboot.FromClock) }
+
+// bootInstantFrom reads btime under procDir. A /proc mounted with subset=pid
+// has no stat file but still serves the process table; there the instant
+// comes from the clocks, the way the kernel computes btime (GAP-2101).
+func bootInstantFrom(procDir string, clock func() (int64, bool)) time.Time {
+	raw, err := os.ReadFile(filepath.Join(procDir, "stat"))
 	if err != nil {
+		if procboot.SubsetPID(procDir) {
+			if seconds, ok := clock(); ok && seconds > 0 {
+				return time.Unix(seconds, 0)
+			}
+		}
 		return time.Time{}
 	}
 	for _, line := range strings.Split(string(raw), "\n") {

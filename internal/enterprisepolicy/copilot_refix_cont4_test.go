@@ -129,7 +129,7 @@ func TestCopilotPublishedCorruptionDoesNotReplaceRemovalPreimage(t *testing.T) {
 				opts.CopilotCLIPolicyOnly = true
 				path := copilotDropIn(t, opts)
 				if original != "" {
-					writeFile(t, path, original)
+					writeAdministratorPolicy(t, path, original)
 				}
 				target := copilotTarget{}
 				if state, err := target.Reconcile(opts); err != nil || !state.Covered {
@@ -227,7 +227,7 @@ func TestCopilotBinaryChangeReplacesRecordedHandlerOnly(t *testing.T) {
 				t.Fatal(err)
 			}
 			independent := string(initial)
-			writeFile(t, path, independent)
+			writeAdministratorPolicy(t, path, independent)
 			target := copilotTarget{}
 			if state, err := target.Reconcile(opts); err != nil || !state.Covered {
 				t.Fatalf("initial publication: %+v, %v", state, err)

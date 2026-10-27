@@ -97,7 +97,11 @@ def test_protection_enable_and_disable_write_rules_keys(env) -> None:
     app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(rules=GuardrailRulesConfig(protections=[K8S]))}
     result = _run(app, "protection", "disable", K8S, "--connector", "codex")
     assert result.exit_code == 0, result.output
-    assert writes[-1][0] == [config_writer.Change("guardrail.connectors.codex.rules.protections", unset=True, prune_empty_to="guardrail.connectors.codex")]
+    # guardrail.connector already puts codex on the roster, so an entry its
+    # last override leaves empty goes too (GAP-1894).
+    assert writes[-1][0] == [
+        config_writer.Change("guardrail.connectors.codex.rules.protections", unset=True, prune_empty_to="guardrail")
+    ]
     assert "next reload" in result.output or "isn't running" in result.output
 
 

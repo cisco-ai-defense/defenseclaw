@@ -259,15 +259,19 @@ func setWindowsTestPathExactOwner(
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := windows.SetNamedSecurityInfo(
-			extended,
-			windows.SE_FILE_OBJECT,
-			windows.OWNER_SECURITY_INFORMATION,
-			target,
-			nil,
-			nil,
-			nil,
-		); err != nil {
+		// Another account as owner needs SeRestorePrivilege, which an
+		// elevated token holds disabled (a GitHub runner's does).
+		if err := RunWithWindowsAdministratorOwnerRestorePrivilege(func() error {
+			return windows.SetNamedSecurityInfo(
+				extended,
+				windows.SE_FILE_OBJECT,
+				windows.OWNER_SECURITY_INFORMATION,
+				target,
+				nil,
+				nil,
+				nil,
+			)
+		}); err != nil {
 			t.Fatalf("assign exact test path owner on %s: %v", path, err)
 		}
 	}

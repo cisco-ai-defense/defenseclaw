@@ -35,7 +35,7 @@ func (a *APIServer) recordInspectMetricsV8(
 		return
 	}
 	connectorName = hookDecisionMetricConnector(connectorName)
-	tool = telemetry.NormalizeMetricTextLabel(tool)
+	tool = inspectMetricTool(connectorName, tool)
 	action = normalizeInspectMetricAction(action)
 	severity := observability.NormalizeSeverity(firstNonEmpty(rawSeverity, "NONE"))
 	if !severity.Valid || !severity.Present {
@@ -84,6 +84,23 @@ func (a *APIServer) recordInspectMetricsV8(
 	}
 
 	_, _ = runtime.RecordGeneratedMetricBatch(ctx, items)
+}
+
+// inspectMetricTool admits only code-defined metric labels. Sanitizing a
+// caller's tool name still discloses it and creates unbounded series.
+func inspectMetricTool(connectorName, tool string) string {
+	name := strings.TrimPrefix(telemetry.NormalizeMetricTextLabel(tool), connectorName+":")
+	prefix := ""
+	if after, post := strings.CutPrefix(name, "post-tool-"); post {
+		prefix, name = "post-tool-", after
+	}
+	switch name {
+	case "pre-request", "post-response", "message", "shell", "bash", "exec_command",
+		"read_file", "write_file", "edit_file", "apply_patch", "tool_call":
+	default:
+		name = "other"
+	}
+	return connectorName + ":" + prefix + name
 }
 
 func (a *APIServer) recordGuardrailMetricsV8(

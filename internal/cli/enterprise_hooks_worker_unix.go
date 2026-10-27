@@ -79,8 +79,12 @@ const (
 	// ownership: "off" before it kept Claude Code off every route). It
 	// changes nothing unless the user's hook contract lock records such a
 	// registration.
-	enterpriseHookWorkerModeRemoveLeftover            = "remove_leftover"
-	enterpriseHookWorkerModeBlockPersonalClaude       = "block_personal_claude"
+	enterpriseHookWorkerModeRemoveLeftover      = "remove_leftover"
+	enterpriseHookWorkerModeBlockPersonalClaude = "block_personal_claude"
+	// enterpriseHookWorkerModeUnblockPersonalClaude removes the
+	// enrollment's Claude Code blocker (standalone uninstall, every
+	// account; enterprisehooks.RemovePersonalClaudeHookBlocker).
+	enterpriseHookWorkerModeUnblockPersonalClaude     = "unblock_personal_claude"
 	enterpriseHookWorkerModeRepairManagedCodexFeature = "repair_managed_codex_feature"
 	// enterpriseHookWorkerModePurge removes the user's DefenseClaw per-user
 	// state (standalone uninstall --purge). It runs after the request's
@@ -88,6 +92,17 @@ const (
 	// the backups a failed removal needs when it is retried.
 	enterpriseHookWorkerModePurge = "purge"
 )
+
+// enterpriseHookWorkerForeignCleanupModes are the target modes a
+// foreign_cleanup worker takes: every mode the guardian's foreign cleanup
+// gives an account's job (runEnterpriseHookStandaloneForeignCleanup). A mode
+// missing here refuses the whole job, its foreign-hook removals and VS Code
+// Local files included (R3-1).
+var enterpriseHookWorkerForeignCleanupModes = map[string]bool{
+	enterpriseHookWorkerModeRemoveLeftover:        true,
+	enterpriseHookWorkerModeBlockPersonalClaude:   true,
+	enterpriseHookWorkerModeUnblockPersonalClaude: true,
+}
 
 // enterpriseHookWorkerTimeout bounds one worker process.
 var enterpriseHookWorkerTimeout = 60 * time.Second
@@ -155,6 +170,10 @@ type enterpriseHookWorkerRequest struct {
 	// user's own home before an apply, so an enrolled user cannot stop
 	// repair of their hooks by loosening their home's mode.
 	TightenHome bool `json:"tighten_home,omitempty"`
+	// RecheckMillis keeps the verify_or_repair targets that verified under
+	// check for this long, all at the same time
+	// (recheckEnterpriseHookTargetsOverWindow).
+	RecheckMillis int `json:"recheck_ms,omitempty"`
 	// StaticDiscovery restricts the discover operation to package metadata
 	// and the presence of the agent CLIs, executing nothing: the parent
 	// asks for it in a home other users may have written to.
@@ -253,11 +272,11 @@ type enterpriseHookWorkerTargetResult struct {
 // enterpriseHookPurgeDetail is what uninstall --purge removed for one
 // account: its ~/.defenseclaw, its per-user binaries and launcher links in
 // ~/.local/bin, and whether it stopped a running per-user gateway first.
-// Backup says the data of the account's own per-user install was moved to a
-// ~/.defenseclaw-backup-<UTC time> folder before the purge.
+// Kept says ~/.defenseclaw holds the account's own per-user install, which
+// the purge left as it is (GAP-0727).
 type enterpriseHookPurgeDetail struct {
 	Data     bool `json:"data,omitempty"`
-	Backup   bool `json:"backup,omitempty"`
+	Kept     bool `json:"kept,omitempty"`
 	Binaries bool `json:"binaries,omitempty"`
 	Gateway  bool `json:"gateway,omitempty"`
 	UVCache  bool `json:"uv_cache,omitempty"`
@@ -417,7 +436,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		return respond(enterpriseHookWorkerDiscoverWithin(scanCtx, request), 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {
-			if target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModeBlockPersonalClaude {
+			if !enterpriseHookWorkerForeignCleanupModes[target.Mode] {
 				return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("the foreign cleanup does not take mode %q", target.Mode)}, 3)
 			}
 		}
@@ -436,6 +455,8 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		}
 		if len(request.Targets) > 0 {
 			response.Targets = runEnterpriseHookWorkerApply(ctx, request).Targets
+		} else {
+			removeRetiredConnectorsForAccount(ctx, request)
 		}
 		blocks, dropped, err := enterprisepolicy.CollectForeignHookBlocks(filepath.Clean(request.Home), now)
 		response.Blocks, response.BlocksDropped = blocks, dropped
@@ -561,11 +582,27 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 	// still loads, or could not be checked. The purge deletes the backups and
 	// receipts a later cleanup needs to restore those files (GAP-0632).
 	purgeBlocked := ""
+	recheckWindow := time.Duration(request.RecheckMillis) * time.Millisecond
+	var rechecks []enterpriseHookWorkerRecheck
+	var recheckedAt []time.Time
+	removeRetiredConnectorsForAccount(ctx, request)
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
 		outcome := enterpriseHookWorkerTargetResult{Index: target.Index}
+		if request.Standalone && connector.IsRemovedConnector(opts.ConnectorName) &&
+			(target.Mode == enterpriseHookWorkerModeRemove || target.Mode == enterpriseHookWorkerModeRemoveLeftover) {
+			// until 1.1: removeRetiredConnectorsForAccount above already ran
+			// this connector's teardown for the account, and the registry no
+			// longer resolves it, so its removal is done here and never keeps
+			// the purge back (GAP-1915).
+			outcome.OK = true
+			outcome.PathsReported = target.Mode == enterpriseHookWorkerModeRemove
+			results = append(results, outcome)
+			continue
+		}
 		var result enterprisehooks.InstallResult
 		var err error
+		recheck := false
 		switch target.Mode {
 		case enterpriseHookWorkerModeInstall:
 			result, err = enterpriseHookWorkerInstaller(ctx, opts)
@@ -577,6 +614,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				break
 			}
 			result, err = enterpriseHookWorkerVerifier(ctx, opts)
+			recheck = err == nil && recheckWindow > 0
 			if err != nil {
 				result, err = enterpriseHookWorkerInstaller(ctx, opts)
 				outcome.Repaired = err == nil
@@ -637,6 +675,12 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		case enterpriseHookWorkerModeBlockPersonalClaude:
 			err = blockPersonalClaudeHook(opts)
 			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
+		case enterpriseHookWorkerModeUnblockPersonalClaude:
+			dataDir := strings.TrimSpace(opts.DataDir)
+			if dataDir == "" {
+				dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+			}
+			outcome.Removed, err = enterprisehooks.RemovePersonalClaudeHookBlocker(dataDir)
 		case enterpriseHookWorkerModeRepairManagedCodexFeature:
 			if !request.Standalone {
 				err = errors.New("managed Codex feature repair requires the standalone guardian")
@@ -655,7 +699,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 			var summary enterprisehooks.PurgeSummary
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
-				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Backup: summary.Backup, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache}
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache}
 			}
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)
@@ -673,14 +717,47 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 		} else {
 			outcome.OK = true
-			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModePurge {
+			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover &&
+				target.Mode != enterpriseHookWorkerModePurge && target.Mode != enterpriseHookWorkerModeUnblockPersonalClaude {
 				outcome.Result = &result
 				outcome.AgentConfig = result.AgentConfig
 			}
 		}
 		results = append(results, outcome)
+		if recheck {
+			rechecks = append(rechecks, enterpriseHookWorkerRecheck{result: len(results) - 1, opts: opts})
+			recheckedAt = append(recheckedAt, time.Now())
+		}
 	}
+	recheckEnterpriseHookTargetsOverWindow(ctx, recheckWindow, recheckedAt,
+		func(index int) error {
+			_, err := enterpriseHookWorkerVerifier(ctx, rechecks[index].opts)
+			return err
+		},
+		func(index int, _ error) {
+			outcome := &results[rechecks[index].result]
+			result, err := enterpriseHookWorkerInstaller(ctx, rechecks[index].opts)
+			if err != nil {
+				outcome.OK, outcome.Result, outcome.AgentConfig = false, nil, ""
+				outcome.Pending = enterprisehooks.PendingTargetError(err) &&
+					enterprisehooks.CheckUnixTargetHome(request.Home, request.UID).State == enterprisehooks.HomePending
+				if !outcome.Pending {
+					outcome.Error = err.Error()
+				}
+				return
+			}
+			outcome.Repaired = true
+			outcome.Result = &result
+			outcome.AgentConfig = result.AgentConfig
+		})
 	return enterpriseHookWorkerResponse{Targets: results}
+}
+
+// enterpriseHookWorkerRecheck is a verify_or_repair target that verified and
+// is checked again over the request's recheck window.
+type enterpriseHookWorkerRecheck struct {
+	result int
+	opts   enterprisehooks.InstallOptions
 }
 
 // repairManagedCodexUserFeature runs with the target user's uid. The machine
@@ -772,11 +849,10 @@ func blockPersonalClaudeHook(opts enterprisehooks.InstallOptions) error {
 	if !bytes.Contains(body[:min(len(body), 160)], []byte("# defenseclaw-managed-hook v")) {
 		return fmt.Errorf("personal Claude Code hook %s is not DefenseClaw-owned", path)
 	}
-	const blocked = "#!/bin/sh\n# defenseclaw-managed-hook v0\necho 'defenseclaw: this computer is managed; the personal Claude Code hook cannot approve this call' >&2\nexit 2\n"
-	if string(body) == blocked {
+	if string(body) == enterprisehooks.PersonalClaudeHookBlocker {
 		return nil
 	}
-	return configwrite.WriteFileDurable(path, []byte(blocked), 0o700)
+	return configwrite.WriteFileDurable(path, []byte(enterprisehooks.PersonalClaudeHookBlocker), 0o700)
 }
 
 // enterpriseHookWorkerRemoveSetup resolves the same SetupOpts as
@@ -1251,12 +1327,18 @@ func runEnterpriseHookWorker(
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = 2 * time.Second
+	if enterpriseHookWorkersStuck.has(account.UID) {
+		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w: its previous worker was killed but has not exited yet (a file system call in the account's home may be stuck)", account.UID, context.DeadlineExceeded)
+	}
 	stopFence, err := attachEnterpriseHookWorkerFence(ctx, cmd, request)
 	if err != nil {
 		return enterpriseHookWorkerResponse{}, err
 	}
-	runErr := cmd.Run()
+	abandoned, runErr := runEnterpriseHookWorkerProcess(ctx, cmd, account.UID)
 	stopFence()
+	if abandoned {
+		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w: it was killed but did not exit (a file system call in the account's home may be stuck)", account.UID, ctx.Err())
+	}
 	forwardEnterpriseHookWorkerStderr(account, stderr)
 	if ctx.Err() != nil {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w", account.UID, ctx.Err())
@@ -1283,6 +1365,88 @@ func runEnterpriseHookWorker(
 		return response, fmt.Errorf("worker for uid %d failed: %w", account.UID, runErr)
 	}
 	return response, nil
+}
+
+// enterpriseHookWorkerWait waits for a started worker. Tests replace it to
+// stand for a worker the kernel cannot reap.
+var enterpriseHookWorkerWait = (*exec.Cmd).Wait
+
+// enterpriseHookWorkerAbandonGrace is how long a worker whose context ended
+// may take to exit after it is killed (and its output pipes are closed,
+// cmd.WaitDelay) before the caller stops waiting for it.
+var enterpriseHookWorkerAbandonGrace = 3 * time.Second
+
+// enterpriseHookWorkersStuck holds the uids whose last worker was killed but
+// has not exited. A worker blocked in an uninterruptible file system call
+// (a stalled FUSE or NFS mount in the home) cannot be reaped, and waiting
+// for it held the enumerator's cycle for good (GAP-1468, GAP-1470). The
+// caller stops waiting, the account is reported not inspected, and no new
+// worker starts for it until the stuck one exits.
+var enterpriseHookWorkersStuck = stuckEnterpriseHookWorkers{uids: map[int]bool{}}
+
+type stuckEnterpriseHookWorkers struct {
+	mu   sync.Mutex
+	uids map[int]bool
+}
+
+func (s *stuckEnterpriseHookWorkers) has(uid int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.uids[uid]
+}
+
+func (s *stuckEnterpriseHookWorkers) set(uid int, stuck bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if stuck {
+		s.uids[uid] = true
+	} else {
+		delete(s.uids, uid)
+	}
+}
+
+// runEnterpriseHookWorkerProcess runs cmd and waits for it. Once ctx ends
+// (cmd.Cancel kills the worker's group) it waits at most
+// enterpriseHookWorkerAbandonGrace more; abandoned is true when the worker
+// still has not exited, and uid stays stuck until it does.
+func runEnterpriseHookWorkerProcess(ctx context.Context, cmd *exec.Cmd, uid int) (abandoned bool, err error) {
+	if err := cmd.Start(); err != nil {
+		return false, err
+	}
+	done := make(chan error, 1)
+	var settled sync.Mutex
+	gaveUp := false
+	go func() {
+		err := enterpriseHookWorkerWait(cmd)
+		settled.Lock()
+		if gaveUp {
+			enterpriseHookWorkersStuck.set(uid, false)
+		}
+		settled.Unlock()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return false, err
+	case <-ctx.Done():
+	}
+	grace := time.NewTimer(enterpriseHookWorkerAbandonGrace)
+	defer grace.Stop()
+	select {
+	case err := <-done:
+		return false, err
+	case <-grace.C:
+	}
+	settled.Lock()
+	defer settled.Unlock()
+	select {
+	case err := <-done:
+		return false, err
+	default:
+	}
+	gaveUp = true
+	enterpriseHookWorkersStuck.set(uid, true)
+	return true, nil
 }
 
 // enterpriseHookWorkerGroupIDs resolves the account's primary and

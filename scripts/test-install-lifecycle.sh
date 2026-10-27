@@ -225,6 +225,12 @@ assert_healthy() {
     curl -fsS -o /dev/null "http://127.0.0.1:${port}/health" || fail "gateway on port ${port} is not healthy"
 }
 
+assert_stopped() {
+    local port
+    port="$("${DC_HOME}/.venv/bin/python" -I -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["gateway"]["api_port"])' "${DC_HOME}/config.yaml")"
+    ! curl -fsS -o /dev/null "http://127.0.0.1:${port}/health" 2>/dev/null || fail "gateway on port ${port} is running, want it kept stopped"
+}
+
 assert_data_kept() {
     [[ "$(cat "${DC_HOME}/lifecycle-marker.txt" 2>/dev/null)" == lifecycle-marker ]] || fail "data dir lost the marker file"
     [[ -f "${DC_HOME}/config.yaml" ]] || fail "config.yaml is missing"
@@ -550,10 +556,18 @@ lane_drills() {
     chmod 755 "${stage}/defenseclaw-gateway"
     COPYFILE_DISABLE=1 tar -czf "${broken}/${archive}" -C "${stage}" .
     rechecksum "${broken}"
-    if bash "${broken}/install.sh" --local "${broken}" --yes; then
+    local unhealthy_log="${ROOT}/unhealthy-install.log"
+    if bash "${broken}/install.sh" --local "${broken}" --yes 2>&1 | tee "${unhealthy_log}"; then
         fail "a release whose gateway cannot start was reported as installed"
     fi
     assert_versions "${TARGET}"
+    # The restored gateway stays stopped so an older setup that meets the
+    # same startup error cannot remove the working hooks (GAP-0407); the
+    # installer says how to start it once the cause is fixed.
+    grep -q "with its gateway kept stopped to preserve its hook registration" "${unhealthy_log}" \
+        || fail "the installer did not say that it kept the restored gateway stopped"
+    assert_stopped
+    "${HOME}/.local/bin/defenseclaw-gateway" start >/dev/null || fail "the restored gateway did not start"
     assert_healthy
     assert_data_kept
     # By content: the real gateway embeds shell snippets, so grepping it for

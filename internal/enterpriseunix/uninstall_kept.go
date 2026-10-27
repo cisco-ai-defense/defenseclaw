@@ -36,10 +36,10 @@ type perUserKept struct {
 // eligible-accounts record, read before the uninstall removes it) with
 // what each has: ~/.defenseclaw, and the per-user install's binaries or
 // launcher in ~/.local/bin. ok is false when the record is unreadable.
-func (env *Env) perUserLeftovers() ([]perUserKept, bool) {
+func (env *Env) perUserLeftovers() (kept []perUserKept, enrolled map[string]bool, ok bool) {
 	data, err := readBounded(env.P(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)), maxInputBytes)
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
 	var record struct {
 		Accounts []struct {
@@ -48,19 +48,40 @@ func (env *Env) perUserLeftovers() ([]perUserKept, bool) {
 		} `json:"accounts"`
 	}
 	if json.Unmarshal(data, &record) != nil {
-		return nil, false
+		return nil, nil, false
 	}
-	var kept []perUserKept
+	enrolled = map[string]bool{}
 	for _, account := range record.Accounts {
 		user, home := strings.TrimSpace(account.User), strings.TrimSpace(account.Home)
 		if user == "" || home == "" {
 			continue
 		}
+		enrolled[filepath.Clean(env.P(home))] = true
 		if entry := perUserFilesOf(user, env.P(home)); entry.data || entry.binaries {
 			kept = append(kept, entry)
 		}
 	}
-	return kept, true
+	return kept, enrolled, true
+}
+
+// reportUnenrolledUserData names, after a purge, the accounts the deployment
+// never enrolled whose home still holds DefenseClaw per-user files (an
+// earlier per-user install, or hooks a former enrollment left): a purge
+// removes only enrolled accounts' data, and reported nothing for these
+// (GAP-1654). It never deletes them.
+func (l *lifecycle) reportUnenrolledUserData(ctx context.Context) {
+	if !l.keptKnown {
+		return
+	}
+	var others []perUserKept
+	for _, entry := range l.env.perUserFilesOnHost(ctx) {
+		if !l.enrolledHomes[filepath.Clean(entry.home)] {
+			others = append(others, entry)
+		}
+	}
+	if files := describePerUserFiles(others); files != "" {
+		l.result.AddWarning(codePerUserState, "kept: "+files+", accounts this deployment did not enroll; a purge removes only the DefenseClaw data of enrolled accounts. Each account's owner can delete these files, or an administrator can if DefenseClaw left them")
+	}
 }
 
 // reportRetainedEnrolledUserData makes a successful Unix purge account for
@@ -92,10 +113,13 @@ func perUserFilesOf(user, home string) perUserKept {
 	return entry
 }
 
-// perUserFilesOnHost lists the local accounts (getent passwd, Linux only)
-// whose home holds DefenseClaw per-user files. It is for a purge that has
-// no enrollment record left to name the enrolled accounts by.
+// perUserFilesOnHost lists the accounts whose home holds DefenseClaw
+// per-user files: the local accounts (getent passwd) on Linux, the homes in
+// /Users on macOS (local and mobile directory accounts alike).
 func (env *Env) perUserFilesOnHost(ctx context.Context) []perUserKept {
+	if env.GOOS == "darwin" {
+		return env.perUserFilesInMacHomes()
+	}
 	if env.GOOS != "linux" {
 		return nil
 	}
@@ -117,6 +141,27 @@ func (env *Env) perUserFilesOnHost(ctx context.Context) []perUserKept {
 		seen[user] = true
 		if entry := perUserFilesOf(user, env.P(home)); entry.data || entry.binaries {
 			found = append(found, entry)
+		}
+	}
+	sort.Slice(found, func(i, j int) bool { return found[i].user < found[j].user })
+	return found
+}
+
+// perUserFilesInMacHomes is perUserFilesOnHost on macOS: each folder in
+// /Users but Shared, named by its folder.
+func (env *Env) perUserFilesInMacHomes() []perUserKept {
+	entries, err := os.ReadDir(env.P("/Users"))
+	if err != nil {
+		return nil
+	}
+	var found []perUserKept
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || name == "Shared" || strings.HasPrefix(name, ".") {
+			continue
+		}
+		if files := perUserFilesOf(name, env.P(filepath.Join("/Users", name))); files.data || files.binaries {
+			found = append(found, files)
 		}
 	}
 	sort.Slice(found, func(i, j int) bool { return found[i].user < found[j].user })

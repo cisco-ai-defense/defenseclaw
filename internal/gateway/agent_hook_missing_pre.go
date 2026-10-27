@@ -18,11 +18,16 @@ const missingPreToolRuleID = "HOOK-PRE-TOOL-MISSING"
 // it does not claim to prevent a tool that the agent already ran.
 const maxPendingPreToolDecisions = 4096
 
+// preToolDecisionKey names one tool call of one caller. The caller is the
+// verified hook caller (copilotDedupeScope), never the correlation-minted
+// connector instance: concurrent hooks of one session can leave one of a
+// call's two deliveries without its correlation, and a key that differed
+// between them reported the audited PreToolUse as missing (GAP-1228).
 type preToolDecisionKey struct {
-	connectorInstance string
-	connector         string
-	session           string
-	toolUse           string
+	caller    string
+	connector string
+	session   string
+	toolUse   string
 }
 
 type preToolDecisionSlot struct {
@@ -43,6 +48,9 @@ func (tracker *preToolDecisionTracker) record(key preToolDecisionKey) {
 	if tracker.seen == nil {
 		tracker.seen = make(map[preToolDecisionKey]uint64)
 	}
+	if tracker.seen[key] != 0 {
+		return
+	}
 	tracker.sequence++
 	index := tracker.sequence % maxPendingPreToolDecisions
 	previous := tracker.slots[index]
@@ -53,30 +61,61 @@ func (tracker *preToolDecisionTracker) record(key preToolDecisionKey) {
 	tracker.seen[key] = tracker.sequence
 }
 
+func (tracker *preToolDecisionTracker) forget(key preToolDecisionKey) {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	delete(tracker.seen, key)
+}
+
 func (tracker *preToolDecisionTracker) contains(key preToolDecisionKey) bool {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
 	return tracker.seen[key] != 0
 }
 
-func (a *APIServer) auditMissingPreToolDecision(ctx context.Context, req agentHookRequest, resp agentHookResponse) {
+// preToolDecisionKeyFor is the key of a tracked hook call and its event, or
+// false for a call the tracker does not follow.
+func (a *APIServer) preToolDecisionKeyFor(ctx context.Context, req agentHookRequest) (preToolDecisionKey, string, bool) {
 	if a == nil || a.logger == nil || (a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration()) {
-		return
+		return preToolDecisionKey{}, "", false
 	}
 	connector := connName(req.ConnectorName)
 	if connector != "claudecode" && connector != "codex" {
-		return
+		return preToolDecisionKey{}, "", false
 	}
 	event := strings.TrimSpace(req.HookEventName)
 	if event != "PreToolUse" && event != "PostToolUse" && event != "PostToolUseFailure" {
+		return preToolDecisionKey{}, "", false
+	}
+	return preToolDecisionKey{
+		caller:    copilotDedupeScope(ctx),
+		connector: connector,
+		session:   strings.TrimSpace(req.SessionID),
+		toolUse:   strings.TrimSpace(req.ToolInvocationID),
+	}, event, true
+}
+
+// notePreToolDecision records a PreToolUse whose verdict is final before its
+// answer is offered: the agent can run the tool and its PostToolUse can be
+// finalized before this call's audit commit, which reported the audited
+// PreToolUse as missing (GAP-1228). The caller forgets the key when the
+// answer is unconfirmed or its audit row is not written.
+func (a *APIServer) notePreToolDecision(ctx context.Context, req agentHookRequest, resp agentHookResponse) (preToolDecisionKey, bool) {
+	key, event, ok := a.preToolDecisionKeyFor(ctx, req)
+	if !ok || event != "PreToolUse" || key.session == "" || key.toolUse == "" ||
+		resp.Action == hookActionUnconfirmed || a.preToolDecisions.contains(key) {
+		return preToolDecisionKey{}, false
+	}
+	a.preToolDecisions.record(key)
+	return key, true
+}
+
+func (a *APIServer) auditMissingPreToolDecision(ctx context.Context, req agentHookRequest, resp agentHookResponse) {
+	key, event, ok := a.preToolDecisionKeyFor(ctx, req)
+	if !ok {
 		return
 	}
-	key := preToolDecisionKey{
-		connectorInstance: strings.TrimSpace(req.ConnectorInstanceID),
-		connector:         connector,
-		session:           strings.TrimSpace(req.SessionID),
-		toolUse:           strings.TrimSpace(req.ToolInvocationID),
-	}
+	connector := key.connector
 	if event == "PreToolUse" {
 		if key.session != "" && key.toolUse != "" && resp.Action != hookActionUnconfirmed {
 			a.preToolDecisions.record(key)

@@ -132,7 +132,7 @@ func TestR104ChangedDirectoryLinkNeedsProvenDirectory(t *testing.T) {
 		{`cd ./sub/../sub && ln -s ../authorized_keys b && echo marker > b`, false},
 		{`cd sub && ln -s ../a b && echo marker > out.txt`, false},
 		{`cd ./sub && ln -s ../authorized_keys b && echo marker > b`, true},
-		{`cd ` + filepath.Join(cwd, "sub") + ` && ln -s ../authorized_keys b && echo marker > b`, true},
+		{`cd ` + filepath.ToSlash(filepath.Join(cwd, "sub")) + ` && ln -s ../authorized_keys b && echo marker > b`, true},
 	} {
 		file, ok := parseShell(tc.command)
 		if !ok {

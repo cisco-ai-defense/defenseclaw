@@ -113,6 +113,7 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "Gateway Watchdog",
         "Observability",
         "Webhooks",
+        "Admission Defaults",
         "Skill Admission",
         "MCP Admission",
         "Plugin Admission",
@@ -2603,7 +2604,10 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     # codex pins its own overrides — the editor shows the *effective* value.
     assert fields["guardrail.connectors.codex.enabled"].value == "false"
     assert fields["guardrail.connectors.codex.enabled"].kind == "bool"
-    assert fields["guardrail.connectors.codex.hook_fail_mode"].value.startswith("closed (provenance: config; status:")
+    # No installed hook names a mode: the native Windows hook then fails
+    # closed on its own (no-installed-mode); a POSIX hook falls back to config.
+    provenance = "no-installed-mode" if os.name == "nt" else "config"
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value.startswith(f"closed (provenance: {provenance}; status:")
     policy_status = fields["guardrail.connectors.codex.hook_fail_mode"].value
     if os.name == "nt":
         assert "policy-unverified" in policy_status
@@ -2881,3 +2885,28 @@ def test_multi_action_wizards_clear_their_running_badge() -> None:
     model.wizard_status[SetupWizard.LLM] = "running..."
     model.mark_wizard_complete(("setup", "splunk", "dashboards", "destroy"), success=True)
     assert model.wizard_status[SetupWizard.LLM] == "running..."
+
+
+def test_admission_defaults_has_the_allow_list_bypass_row() -> None:
+    # GAP-1870: quarantine-strict needs admission.defaults.allow_list_bypass_scan
+    # in the Config editor; the retired watch row left no way to set it.
+    section = _section(build_setup_sections({}), "Admission Defaults")
+    [row] = section.fields
+    assert (row.key, row.kind, row.label) == ("admission.defaults.allow_list_bypass_scan", "bool", "Allow List Bypass")
+    assert "bypass" in row.label.lower()
+
+
+def test_allow_list_bypass_row_shows_its_value_and_toggles_off_first() -> None:
+    # GAP-1870 (round 5 verify): unset left the Value column blank at 80x24 and
+    # the first toggle wrote the default (true) again.
+    [unset] = _section(build_setup_sections({}), "Admission Defaults").fields
+    assert unset.value == "true"
+    model = SetupPanelModel({}, os_name="linux")
+    model.mode = "config"
+    model.active_section = [section.name for section in model.sections].index("Admission Defaults")
+    model.active_line = 0
+    assert model.cycle_current_field()
+    assert model.current_field().value == "false"
+    cfg = {"admission": {"defaults": {"allow_list_bypass_scan": False}}}
+    [explicit] = _section(build_setup_sections(cfg), "Admission Defaults").fields
+    assert explicit.value == "false"

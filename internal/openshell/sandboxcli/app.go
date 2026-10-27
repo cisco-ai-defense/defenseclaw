@@ -47,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
 
 // CommandName is how messages refer to the CLI.
@@ -64,6 +65,9 @@ type API interface {
 	Create(ctx context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error)
 	Delete(ctx context.Context, name string, req sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error)
 	Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
+	// StopWith is Stop with a request: the stop the user accepted the loss
+	// of what a MicroVM has not synced for.
+	StopWith(ctx context.Context, name string, req sandboxapi.StopRequest) (*sandboxapi.Sandbox, error)
 	Start(ctx context.Context, name string, req sandboxapi.StartRequest) (*sandboxapi.Sandbox, error)
 	Undo(ctx context.Context, name string, req sandboxapi.UndoRequest) (*sandboxapi.UndoResponse, error)
 	Review(ctx context.Context, name string, req sandboxapi.ReviewRequest) (*sandboxapi.ReviewResponse, error)
@@ -180,11 +184,14 @@ type App struct {
 	// Host integrations, replaceable in tests. HostDoctor runs the host
 	// checks of d (default d.Run).
 	HostDoctor func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport
-	Images     ImageService
-	Workspace  CopyWorkspace
-	Gateway    GatewayService
-	Installer  func(consent func(*openshell.InstallPlan) (bool, error)) Installer
-	OpenShell  func(ctx context.Context) (openshell.Client, *openshell.Registration, error)
+	// HostGit is the host git's version, or why DefenseClaw cannot drive
+	// it (default workspace.HostGit).
+	HostGit   func(ctx context.Context) (string, error)
+	Images    ImageService
+	Workspace CopyWorkspace
+	Gateway   GatewayService
+	Installer func(consent func(*openshell.InstallPlan) (bool, error)) Installer
+	OpenShell func(ctx context.Context) (openshell.Client, *openshell.Registration, error)
 	// OpenShellCLI is the openshell CLI a managed computer's sandbox daemon
 	// installed for the account in setup mode ("" for none), read again
 	// after the daemon readied OpenShell for a first run.
@@ -371,6 +378,9 @@ func (a *App) defaults() {
 		}
 		if a.GitConfig == nil {
 			a.GitConfig = a.hostGitConfig
+		}
+		if a.HostGit == nil {
+			a.HostGit = workspace.HostGit
 		}
 		a.reader = bufio.NewReader(a.IO.In)
 		// The ssh shim every openshell invocation runs with falls back to
@@ -603,13 +613,20 @@ func apiError(err error) error {
 	switch e.Code {
 	case sandboxapi.CodeUnavailable:
 		if daemonUnreachable(e) {
-			// The HTTP client's error, with the loopback API port, is no
-			// news to the user (GAP-0336); `sandbox doctor` has the detail.
+			// Keep the transport cause: a verified peer failure and a refused
+			// dial need different repairs, even if the gateway reports ready.
+			detail := strings.TrimSpace(e.Detail)
 			if onManagedHost() {
 				// A managed computer disables per-user gateways: the way on
 				// is the organization's service, never a gateway command
 				// (GAP-0451).
+				if detail != "" {
+					return fmt.Errorf("your sandbox service does not answer (%s); %s", detail, managedServiceFix)
+				}
 				return errors.New("your sandbox service does not answer; " + managedServiceFix)
+			}
+			if detail != "" {
+				return fmt.Errorf("the DefenseClaw daemon did not answer or could not be verified (%s); run `defenseclaw sandbox doctor`, and if it is stopped, start it with `defenseclaw-gateway start`", detail)
 			}
 			return errors.New("the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)")
 		}

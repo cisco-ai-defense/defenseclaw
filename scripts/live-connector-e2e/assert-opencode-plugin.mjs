@@ -1,8 +1,12 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { copyFile, rm } from "node:fs/promises";
-import { basename } from "node:path";
+import { createRequire, syncBuiltinESMExports } from "node:module";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const [pluginPath, scratchPath, expected, command] = process.argv.slice(2);
@@ -36,6 +40,24 @@ globalThis.fetch = async (url, init) => {
   }
   return nativeFetch(url, init);
 };
+// A per-user plugin posts through its gateway's hook-post (execFileSync, the
+// JSON request on stdin) rather than fetch: capture the after payload there
+// too. The plugin imports execFileSync by name, so the patched CommonJS export
+// is synced into the ESM binding before the plugin loads.
+const childProcess = createRequire(import.meta.url)("node:child_process");
+const nativeExecFileSync = childProcess.execFileSync;
+childProcess.execFileSync = function (file, args, options) {
+  if (Array.isArray(args) && args[0] === "hook-post" && typeof options?.input === "string") {
+    const request = JSON.parse(options.input);
+    const payload = JSON.parse(request.body || "{}");
+    if (payload.hook_event_name === "tool.execute.after") {
+      observedAfterPayload = payload;
+      return JSON.stringify({ status: 200, body: JSON.stringify({ hook_output: { decision: "allow" } }) });
+    }
+  }
+  return nativeExecFileSync.apply(this, arguments);
+};
+syncBuiltinESMExports();
 try {
   const module = await import(moduleURL);
   if (typeof module.DefenseClaw !== "function") {
@@ -81,6 +103,7 @@ try {
     });
   } else {
     let blocked = false;
+    let reason = "";
     try {
       await hooks["tool.execute.before"](
         {
@@ -92,12 +115,13 @@ try {
       );
     } catch (error) {
       blocked = true;
+      reason = error instanceof Error ? error.message : String(error);
       if (!(error instanceof Error) || !error.message) {
         throw new Error("OpenCode block path did not throw an Error with a reason");
       }
     }
     if ((expected === "block") !== blocked) {
-      throw new Error(`OpenCode plugin verdict mismatch: expected=${expected} blocked=${blocked}`);
+      throw new Error(`OpenCode plugin verdict mismatch: expected=${expected} blocked=${blocked}${reason ? ` reason=${reason.slice(0, 600)}` : ""}${perUserPostDiagnostic(reason)}`);
     }
 
     // This hook is intentionally observe-only. Awaiting its returned promise
@@ -129,5 +153,29 @@ try {
   }
 } finally {
   globalThis.fetch = nativeFetch;
+  childProcess.execFileSync = nativeExecFileSync;
+  syncBuiltinESMExports();
   await rm(scratchPath, { force: true });
+}
+
+// perUserPostDiagnostic says why a per-user plugin's post through the native
+// gateway helper failed: the home the plugin resolves, whether the helper is
+// there, and the helper's own error for a bare request (no credential).
+function perUserPostDiagnostic(reason) {
+  if (!/per-user gateway peer unverified/.test(reason || "")) return "";
+  const plugin = readFileSync(pluginPath, "utf8");
+  const rendered = (/const DC_GATEWAY_BINARY = "((?:[^"\\]|\\.)*)";/.exec(plugin) || [])[1] || "";
+  const gateway = rendered ? JSON.parse(`"${rendered}"`) : join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
+  const address = (/const DC_API_ADDR = "([^"]*)"/.exec(plugin) || [])[1] || "";
+  let detail = ` home=${homedir()} gateway=${gateway} exists=${existsSync(gateway)} api=${address}`;
+  try {
+    execFileSync(gateway, ["hook-post", "--api-addr", address], {
+      input: JSON.stringify({ path: "/health", headers: {}, body: "" }),
+      timeout: 15000, encoding: "utf8", windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+    });
+    detail += " hook-post=ok";
+  } catch (error) {
+    detail += ` hook-post=${String((error && (error.stderr || error.message)) || error).trim().slice(0, 400)}`;
+  }
+  return detail;
 }

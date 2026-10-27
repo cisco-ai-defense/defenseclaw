@@ -4,7 +4,8 @@ project_name: defenseclaw
 
 # The Linux package's preinstall refuses a downgrade before any file is
 # replaced: it compares the deployed release with this build's version, which
-# is stamped into the copy nfpm packages (packaging/linux/preinstall.sh).
+# is stamped into the copy nfpm packages (packaging/linux/preinstall.sh), with
+# the legacy sandbox guard (scripts/stamp-package-script.sh).
 #
 # The archives copy each file's mode from the checkout, so a checkout made
 # under umask 0002 shipped group-writable scripts and docs; dropping the
@@ -12,7 +13,7 @@ project_name: defenseclaw
 # checkout has (GAP-0108). The nfpm entries pin their own modes.
 before:
   hooks:
-    - sh -c 'mkdir -p build/packaging/linux && sed "s|@DC_PKG_VERSION@|{{ .Version }}|" packaging/linux/preinstall.sh >build/packaging/linux/preinstall.sh'
+    - sh -c 'mkdir -p build/packaging/linux && sh scripts/stamp-package-script.sh "{{ .Version }}" packaging/linux/preinstall.sh build/packaging/linux/preinstall.sh'
     - chmod -R go-w packaging edge-connector LICENSE NOTICE THIRD_PARTY_LICENSES.txt README.md CHANGELOG.md
 
 builds:

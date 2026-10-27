@@ -539,6 +539,12 @@ func syncHookAPITokenParent(tokenPath string) error {
 // Removal shares the publication lock so rotation and teardown cannot race
 // across guardian processes.
 func RemoveHookAPIToken(dataDir, connectorName string) error {
+	return removeHookAPIToken(dataDir, connectorName, "")
+}
+
+// removeHookAPIToken is RemoveHookAPIToken; a non-empty issued keeps a
+// credential that is not issued (checked under the publication lock).
+func removeHookAPIToken(dataDir, connectorName, issued string) error {
 	if dataDir == "" {
 		return fmt.Errorf("RemoveHookAPIToken: empty dataDir")
 	}
@@ -564,6 +570,11 @@ func RemoveHookAPIToken(dataDir, connectorName string) error {
 		if err := validateHookAPITokenLocation(dataDir, tokenPath); err != nil {
 			return err
 		}
+		if issued != "" {
+			if current, err := readSecureHookAPITokenFile(dataDir, tokenPath); err == nil && current != issued {
+				return nil
+			}
+		}
 		for _, path := range []string{tokenPath + ".tmp", tokenPath} {
 			if err := removeOwnedOTLPPathTokenFile(path); err != nil {
 				return fmt.Errorf("remove hook API token %s: %w", path, err)
@@ -585,7 +596,14 @@ func revokePerUserHookAPIToken(opts SetupOpts, connectorName string) error {
 	} else if err != nil {
 		return fmt.Errorf("%s inspect hook credential data dir: %w", connectorName, err)
 	}
-	if err := RemoveHookAPIToken(opts.DataDir, connectorName); err != nil {
+	// The teardown revokes the credential of the registration it removes. A
+	// stale teardown that runs after the connector was set up again keeps
+	// the newer registration's own credential (GAP-1728).
+	issued := ""
+	if opts.HookAPITokenScoped {
+		issued = strings.TrimSpace(opts.HookAPIToken)
+	}
+	if err := removeHookAPIToken(opts.DataDir, connectorName, issued); err != nil {
 		return fmt.Errorf("%s revoke removed hook credential: %w", connectorName, err)
 	}
 	return nil
@@ -595,8 +613,9 @@ func revokePerUserHookAPIToken(opts SetupOpts, connectorName string) error {
 // credential that is still on disk (or its temporary copy) after a teardown:
 // its revocation did not finish, and the credential still authenticates to
 // the connector's hook route. Managed deployments revoke credentials at the
-// machine lifecycle boundary, and a connector 1.0.4 removed keeps its token
-// on purpose (removed.go keepHookToken), so neither is pending here.
+// machine lifecycle boundary, and the OpenHands/OmniGent teardown removes
+// their tokens itself and never fails on one (removed.go), so neither is
+// pending here.
 func HookAPITokenRevocationPending(opts SetupOpts, connectorName string) error {
 	if opts.ManagedEnterprise || strings.TrimSpace(opts.DataDir) == "" || IsRemovedConnector(connectorName) {
 		return nil
@@ -616,10 +635,9 @@ func HookAPITokenRevocationPending(opts SetupOpts, connectorName string) error {
 }
 
 // LoadHookAPITokens loads connector-scoped hook API tokens for known connector
-// names. Missing tokens are omitted, and so are the tokens of the connectors
-// 1.0.4 removed: an upgraded host keeps the OpenHands one only so old hooks
-// reach the route that blocks them (removed.go keepHookToken); it
-// authenticates nothing.
+// names. Missing tokens are omitted, and so is a token OpenHands or OmniGent
+// left that their teardown has not removed yet (removed.go): it authenticates
+// nothing.
 func LoadHookAPITokens(dataDir string, connectorNames []string) (map[string]string, error) {
 	out := map[string]string{}
 	for _, name := range connectorNames {

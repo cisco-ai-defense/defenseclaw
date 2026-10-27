@@ -100,8 +100,8 @@ func (r *Result) SetBundleSessions(status SessionRestartStatus) {
 	}
 	r.Bundle.SessionsRestartRequired = &status
 	if status.Count > 0 || status.State == "unknown" {
-		r.CoverageComplete, r.SecurityComplete = false, false
 		code, message := SessionWarning(status)
+		r.MarkCoverageIncomplete(code)
 		for _, warning := range r.Warnings {
 			if warning.Code == code {
 				return

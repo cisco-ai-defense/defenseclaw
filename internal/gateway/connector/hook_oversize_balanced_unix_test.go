@@ -16,18 +16,21 @@ import (
 )
 
 func TestCodexDeepWikiResultOverOneMiBUsesInstalledTier(t *testing.T) {
+	// The hook reads its tier at call time from the data directory's config
+	// (fix/r104-oss-outage-open, hook-outage-mode), not from the render.
 	for _, tc := range []struct {
-		name, mode, event string
-		allow             bool
+		name, mode, event, config string
+		allow                     bool
 	}{
-		{"balanced post-tool result", "open", "PostToolUse", true},
-		{"balanced pre-tool action", "open", "PreToolUse", true},
-		{"strict post-tool result", "closed", "PostToolUse", false},
+		{"balanced post-tool result", "open", "PostToolUse", outageDefaultTierConfig, true},
+		{"balanced pre-tool action", "open", "PreToolUse", outageDefaultTierConfig, true},
+		{"strict post-tool result", "closed", "PostToolUse", outageStrictTierConfig, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			installNativeHookPostForHookTest(t, home)
 			installNativeGatewayForHookTest(t, home)
+			writeOutageTierConfig(t, home, tc.config)
 			hooks := filepath.Join(home, "hooks")
 			if err := WriteHookScriptsForConnectorObjectWithOpts(hooks,
 				SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", HookFailMode: tc.mode}, NewCodexConnector()); err != nil {
@@ -40,12 +43,16 @@ func TestCodexDeepWikiResultOverOneMiBUsesInstalledTier(t *testing.T) {
 			}
 			cmd := exec.Command("bash", filepath.Join(hooks, "codex-hook.sh"), "--event", tc.event, "--hook-contract", "codex-hooks-v4")
 			cmd.Stdin = strings.NewReader(payload)
-			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home)
+			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
 			err := cmd.Run()
 			if tc.allow {
-				if err != nil || !strings.Contains(stderr.String(), "gateway unreachable") ||
+				// Codex shows no stderr of a hook that exits 0; the carry's
+				// outage warning is the systemMessage Codex shows for PreToolUse
+				// (fix/r104-oss-outage-open defenseclaw_unreachable_notice_json).
+				warned := tc.event != "PreToolUse" || strings.Contains(stdout.String(), "DefenseClaw is not checking this session")
+				if err != nil || !warned ||
 					strings.Contains(stdout.String(), `"decision":"block"`) || strings.Contains(stdout.String(), `"permissionDecision":"deny"`) {
 					t.Fatalf("balanced DeepWiki read: err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 				}

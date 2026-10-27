@@ -251,6 +251,22 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("action mode with fail mode open", result.output)
         self.assertIn("defenseclaw guardrail use-pack strict", result.output)
 
+    def test_status_shows_a_proxy_connector_closed_whatever_hook_fail_mode_says(self):
+        # GAP-1646: ZeptoClaw and OpenClaw are proxy-backed, so their proxy
+        # refuses calls while the gateway is down; status said Fail=open and
+        # warned that "its hooks allow calls that policy blocks".
+        for connector in ("zeptoclaw", "openclaw"):
+            app = make_ctx(enabled=True, connector=connector, hook_fail_mode="open")
+            app.cfg.guardrail.mode = "action"
+            result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertNotIn("with fail mode open", result.output)
+            self.assertNotIn("hooks allow calls", result.output)
+            result = CliRunner().invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn('"fail_mode": "closed"', result.output)
+            self.assertNotIn('"fail_mode": "open"', result.output)
+
     def test_status_flags_fail_open_connector_an_action_profile_enforces(self):
         # GAP-1282: base mode observe, a guardrail profile puts the connector
         # in action mode for its accounts, fail mode open.
@@ -772,14 +788,15 @@ def test_amp_open_preview_and_help_scope_failure_rows_to_per_user_outages() -> N
     assert help_result.exit_code == 0, help_result.output
     assert "Amp" in help_result.output and "per-user" in help_result.output
     assert "hook-failures.jsonl" in help_result.output
-    page = (Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/configuration/fail-modes.mdx")
+    page = (Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/fail-modes.mdx")
     page_text = page.read_text(encoding="utf-8")
     reporting = page_text.split("## Reporting and diagnosis", 1)[1]
     assert "Amp plugin writes a record only for a call an outage let run" in reporting
     assert "guardrail-degraded" in reporting
     assert "managed and sandbox Amp plugins write no record" in reporting
     for prefix in (
-        "On a per-user install the outage behavior",
+        # fix/r104-oss-outage-open wording: an explicit saved mode wins, else the tier.
+        "On a per-user install, an explicit saved `guardrail.hook_fail_mode` selects the outage mode",
         "| `default` (balanced",
         "| Gateway service not running",
     ):
@@ -787,7 +804,7 @@ def test_amp_open_preview_and_help_scope_failure_rows_to_per_user_outages() -> N
         assert "hook-failures.jsonl" in line, line
         assert "except for Amp" not in line and "Amp has no such writer" not in line, line
     stop_events = page_text.split("### Stop and session-end events", 1)[1].split("### ", 1)[0]
-    assert "[gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)" in stop_events
+    assert "[gateway outage table](/docs/connectors/capability-matrix#gateway-outage)" in stop_events
 
 
 def test_per_user_amp_outage_open_template_records_an_actionable_call() -> None:
@@ -795,7 +812,8 @@ def test_per_user_amp_outage_open_template_records_an_actionable_call() -> None:
         encoding="utf-8"
     )
     branch = source.split("if (await perUserOutageOpen(error)) {", 1)[1].split("\n\t\t\t\t}", 1)[0]
-    assert branch.index('if (actionable) await logFailOpen("gateway unreachable")') < branch.index(
+    # logFailOpen takes the call's payload (session and call ids) (fix/r104-oss-outage-open signature).
+    assert branch.index('if (actionable) await logFailOpen("gateway unreachable", payload)') < branch.index(
         'return { action: "allow"'
     )
     writer = source.split("async function logFailOpen(", 1)[1].split("async function perUserGatewayDownText", 1)[0]
@@ -1242,7 +1260,14 @@ class PerConnectorFailModeTests(unittest.TestCase):
             cmd_guardrail.fail_mode_cmd, ["--connector", "codex"], obj=app
         )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("unknown", result.output)
+        if os.name == "nt":
+            # The native Windows hook reads its mode from hooks/.hookcfg alone
+            # and fails closed without it (readHookSidecar), so that is the
+            # installed mode, reported with the missing sidecar as drift.
+            self.assertIn("hook_fail_mode: closed", result.output)
+            self.assertIn("windows-sidecar-missing", result.output)
+        else:
+            self.assertIn("unknown", result.output)
         self.assertIn("desired closed", result.output)
         self.assertIn("override", result.output)
         app.cfg.save.assert_not_called()
@@ -1672,7 +1697,9 @@ class HILTCommandTests(unittest.TestCase):
         out = " ".join(result.output.split())
         self.assertIn("Claude Code will prompt for approval on supported confirmable actions at/above MEDIUM", out)
         self.assertNotIn("does not pause", out)
-        self.assertEqual(calls, [("claudecode", True, "MEDIUM", os.path.join("/tmp/dc", "config.yaml"))])
+        # The command passes the normalized path (backslashes on Windows).
+        config_path = os.path.normpath(os.path.join("/tmp/dc", "config.yaml"))
+        self.assertEqual(calls, [("claudecode", True, "MEDIUM", config_path)])
         app.cfg.save.assert_not_called()
 
         self.hilt_preview.side_effect = _fake_hilt_preview("action")
@@ -1994,7 +2021,7 @@ class HILTCommandTests(unittest.TestCase):
         from defenseclaw import config as dcconfig
         from defenseclaw.commands import cmd_setup
 
-        page = Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/policy/defaults.mdx"
+        page = Path(__file__).resolve().parents[2] / "docs-site/content/docs/policies/defaults.mdx"
         block = re.search(r"go back to the defaults:\n\n```bash\n(.*?)```", page.read_text(), re.S)
         self.assertIsNotNone(block)
         app = make_multi_ctx({"claudecode": None})
@@ -2019,7 +2046,7 @@ class HILTCommandTests(unittest.TestCase):
                 # `policy activate` does not copy a preset's hilt section.
                 self.assertEqual(args[:2], ["policy", "activate"], msg=line)
         self.assertFalse(gc.effective_hilt("claudecode").enabled)
-        flag_doc = page.parents[1] / "commands/guardrail-setup.mdx"
+        flag_doc = page.parents[1] / "guardrail/index.mdx"
         self.assertIn("Without --connector it changes only the global guardrail.hilt", flag_doc.read_text())
 
 

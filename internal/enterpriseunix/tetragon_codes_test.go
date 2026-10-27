@@ -236,7 +236,7 @@ func TestUnknownTetragonCodePrintsAsWritten(t *testing.T) {
 // Every code, and the doctor spelling of each that doctor reports, is on the
 // troubleshooting page an administrator reads.
 func TestEveryTetragonCodeIsDocumented(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "troubleshooting", "enterprise", "index.mdx"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "enterprise", "troubleshooting.mdx"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,6 +252,6 @@ func TestEveryTetragonCodeIsDocumented(t *testing.T) {
 	}
 	sort.Strings(missing)
 	if len(missing) > 0 {
-		t.Fatalf("troubleshooting/enterprise/index.mdx does not list:\n  %s", strings.Join(missing, "\n  "))
+		t.Fatalf("enterprise/troubleshooting.mdx does not list:\n  %s", strings.Join(missing, "\n  "))
 	}
 }

@@ -52,6 +52,27 @@ func TestAPIBeforeGatewaySetupNamesNextStep(t *testing.T) {
 	}
 }
 
+func TestAPIErrorKeepsUnreachableTransportCause(t *testing.T) {
+	previous := onManagedHost
+	t.Cleanup(func() { onManagedHost = previous })
+	transport := &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+		Message: "the DefenseClaw daemon is not reachable",
+		Detail:  "connected gateway socket belongs to another account"}
+	for _, managed := range []bool{false, true} {
+		onManagedHost = func() bool { return managed }
+		got := apiError(transport).Error()
+		if !strings.Contains(got, transport.Detail) {
+			t.Errorf("managed=%t: lost transport cause: %q", managed, got)
+		}
+		if strings.Contains(got, "daemon is not running") {
+			t.Errorf("managed=%t: guessed a stopped daemon despite peer error: %q", managed, got)
+		}
+		if managed && strings.Contains(got, "defenseclaw-gateway start") {
+			t.Errorf("managed host offered a per-user gateway command: %q", got)
+		}
+	}
+}
+
 // r103 GAP-0332: on a Linux computer without Docker or KVM, `sandbox run`
 // said only that sandboxes are off and to run setup; the doctor alone named
 // the missing Docker. The refusal names it too.

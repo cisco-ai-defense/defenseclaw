@@ -71,20 +71,20 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 # bridge_host), and the copy the Secure Client profile renders
 # (internal/gateway/connector/hooks/*-secure-client.*), which its release pins.
 _BRIDGE_STANDALONE_TEMPLATE_DIGESTS = {
-    "amp": "f20d4ccd9d2eba4436f6a8a07ffbe49d4d009bb64729b1d420b030be1117c3ec",
-    "opencode": "e3aa5791756f9cf2ce5eeed3164e62279794ace348d1531879920a270cf09bd2",
+    "amp": "e18b57604916c1d1c6c40b6255e4af9d0422e3e1b8943179727099eeb86b0d47",
+    "opencode": "0f02212caf86f4c5293ee796dab0c0befdacc2d74cc3ce28d1ab162b5cb6f81b",
 }
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "14c35301516952830e472a8fcba2b4458ebaa59868a69a631887b615f3745c32",  # amp-plugin.ts
+            "7b6f3f534ac2b2a1aea7b26cead29788ea85c19ed9de0d8b8fa2b04928290c47",  # amp-plugin.ts
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["amp"],
             "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "97cdf6cbbe1ebab4ed67e4d503e3f652982b063976e9e6aa4af7f5c9b34e2fd5",  # opencode-plugin.js
+            "fa4f5910a9aa89e3c5b0fe28db9bd37da96c3c68675a19a1615ee2350cf58c1e",  # opencode-plugin.js
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["opencode"],
             "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
         }
@@ -170,6 +170,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'const DC_WINDOWS_POWERSHELL: string = "{{.WindowsPowerShellJS}}"\n',
             "powershell",
         ),
+        (
+            b'const DC_GATEWAY_BINARY: string = "',
+            b'"\n',
+            b'const DC_GATEWAY_BINARY: string = "{{.GatewayBinaryJS}}"\n',
+            "gateway",
+        ),
     ),
     "opencode": (
         (
@@ -237,6 +243,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'";\n',
             b'const DC_WINDOWS_POWERSHELL = "{{.WindowsPowerShellJS}}";\n',
             "powershell",
+        ),
+        (
+            b'const DC_GATEWAY_BINARY = "',
+            b'";\n',
+            b'const DC_GATEWAY_BINARY = "{{.GatewayBinaryJS}}";\n',
+            "gateway",
         ),
     ),
 }
@@ -497,6 +509,29 @@ def _valid_bridge_powershell(value: bytes) -> bool:
     )
 
 
+def _valid_bridge_gateway_binary(value: bytes) -> bool:
+    """Accept the gateway binary a per-user bridge runs (Go
+    perUserPluginGatewayBinary): unset (the ~/.local/bin gateway) or the
+    absolute path of a defenseclaw-gateway binary in a bin folder, as native
+    Windows Setup renders it. The account owns that install, as it owns
+    ~/.local/bin, so no ownership check applies.
+    """
+
+    if value == b"":
+        return True
+    try:
+        path = json.loads('"' + value.decode("utf-8", errors="strict") + '"')
+    except (UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(path, str) or not os.path.isabs(path) or any(ord(char) < 0x20 for char in path):
+        return False
+    name = "defenseclaw-gateway.exe" if os.name == "nt" else "defenseclaw-gateway"
+    return (
+        os.path.normcase(os.path.basename(path)) == os.path.normcase(name)
+        and os.path.normcase(os.path.basename(os.path.dirname(path))) == "bin"
+    )
+
+
 def _valid_bridge_dynamic_value(
     kind: str,
     value: bytes,
@@ -517,6 +552,8 @@ def _valid_bridge_dynamic_value(
         return _valid_bridge_powershell(value)
     if kind in {"socket", "guard", "marker", "native", "lifecycle"}:
         return _valid_bridge_managed_path(kind, value)
+    if kind == "gateway":
+        return _valid_bridge_gateway_binary(value)
     if kind != "token":
         return False
     try:
@@ -551,7 +588,7 @@ def _matches_immutable_bridge_template(
             for index, line in enumerate(lines)
             if line.startswith(prefix) and line.endswith(suffix)
         ]
-        if not matches and kind in {"native", "proof", "mode", "lifecycle", "powershell"}:
+        if not matches and kind in {"native", "proof", "mode", "lifecycle", "powershell", "gateway"}:
             # Current and Secure Client templates have distinct fields, each
             # still covered by its exact pinned digest.
             continue

@@ -134,6 +134,32 @@ def test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode(app, restart
     assert app.cfg.guardrail.effective_hook_fail_mode("codex") == "closed"
 
 
+@pytest.mark.parametrize("scope", ["global", "connector", "clear"])
+@pytest.mark.parametrize("fail_mode", ["closed", "open"])
+def test_observe_message_scopes_policy_findings_and_closed_outages(app, monkeypatch, scope, fail_mode) -> None:
+    gc = app.cfg.guardrail
+    monkeypatch.setattr(type(gc), "effective_hook_fail_mode", lambda _self, _connector: fail_mode)
+    if scope == "global":
+        gc.mode = "action"
+        args = ("observe", "--json")
+    elif scope == "connector":
+        gc.mode = "action"
+        args = ("observe", "--connector", "codex", "--json")
+    else:
+        gc.connectors = {"codex": PerConnectorGuardrailConfig(mode="action")}
+        args = ("--clear", "--connector", "codex", "--json")
+
+    result, payload = _run(app, *args)
+    assert result.exit_code == 0, result.output
+    message = payload["message"]
+    assert "policy findings" in message
+    assert "blocks nothing" not in message
+    if fail_mode == "closed":
+        assert "gateway outage" in message and "deny" in message
+    else:
+        assert "gateway outage" not in message
+
+
 def test_connector_override_created_on_a_single_install(app, restarts, rerenders) -> None:
     result, payload = _run(app, "action", "--connector", "codex", "--json")
     assert result.exit_code == 0, result.output
@@ -152,7 +178,9 @@ def test_connector_override_created_on_a_single_install(app, restarts, rerenders
     assert payload["changed"] is False  # already there
     _, payload = _run(app, "--clear", "--connector", "codex", "--no-restart", "--json")
     assert (payload["mode"], payload["mode_source"], payload["gateway"]) == ("observe", "global", "live")
-    assert gc.connectors["codex"].mode == ""
+    # guardrail.connector already lists codex, so its emptied entry goes (GAP-1954).
+    assert "codex" not in gc.connectors
+    assert app.cfg.active_connectors() == ["codex"]
 
 
 def test_connector_scope_leaves_peers_alone_and_global_names_overrides(app) -> None:

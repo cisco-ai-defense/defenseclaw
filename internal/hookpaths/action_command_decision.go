@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -33,12 +34,45 @@ func ActionCommandDecision(command, cwd, home string) string {
 // facts is the managed hook client's evidence map; its GlobFactPrefix
 // answers stand in only for a pattern the gateway cannot expand itself.
 func ActionCommandDecisionWithGlobFacts(command, cwd, home string, facts map[string]string) string {
+	return ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, "", facts)
+}
+
+// ActionCommandDecisionWithDialectAndGlobFacts is
+// ActionCommandDecisionWithGlobFacts with the gateway's shell dialect hint.
+// A hint only adds a reading, it never drops one (lead decision on GAP-1504):
+// a native Windows home is always read with the Windows grammars, and a
+// POSIX hint (Claude Code's Bash tool, Git Bash, MSYS) also reads the
+// command with the POSIX grammar on the Windows file system, which is how
+// Git Bash runs it. A protected target any reading finds is the decision
+// (GAP-1717, the route 0 cases of TestR104ProtectedWriteRefix3 natively on
+// Windows; TestR104WindowsActionExplicitDialect).
+//
+// dialect is an explicit hint, set by the tool that runs the command.
+func ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) string {
+	return actionTargetDecision(command, cwd, home, dialect, dialect == actionfacts.DialectPOSIX, facts)
+}
+
+// ActionCommandDecisionInShell is ActionCommandDecisionWithGlobFacts for a
+// call with no dialect hint that the gateway's parse reads as POSIX
+// (posixShell). That guess adds the POSIX reading and drops none.
+func ActionCommandDecisionInShell(command, cwd, home string, facts map[string]string, posixShell bool) string {
+	return actionTargetDecision(command, cwd, home, "", posixShell, facts)
+}
+
+func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string) string {
 	var globs *actionGlobs
 	if facts != nil {
 		globs = &actionGlobs{facts: facts}
 	}
-	if actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs) {
+	if actionProtectedTargetMentionIn(command, cwd, home, 0, false, globs, dialect) {
 		return "protected-target"
+	}
+	if posixShell && actionWindowsHome(home) && command != "" && len(command) <= MaxPayloadBytes {
+		if actionWindowsLiteralHereDocumentTarget(command, home) ||
+			actionPosixTargetMention(command, cwd, home, 0, false, globs.forCommand(command)) ||
+			runtime.GOOS == "windows" && actionConcreteProtectedWriteOn(command, cwd, home, true) {
+			return "protected-target"
+		}
 	}
 	if actionPureMake(command, home) {
 		if actionMakeProtectedRecipe(command, cwd, home) {
@@ -53,30 +87,6 @@ func ActionCommandDecisionWithGlobFacts(command, cwd, home string, facts map[str
 		return "protected-target"
 	}
 	return ""
-}
-
-// ActionCommandDecisionInShell is ActionCommandDecisionWithGlobFacts for a
-// call the gateway knows a POSIX shell runs (posixShell: Claude Code's Bash
-// tool, Git Bash, MSYS). On a native Windows host with a Windows home the
-// command is read with the Windows grammar and, as well, with the POSIX
-// grammar on the Windows file system, which is how Git Bash runs it: a
-// protected target either reading finds is the decision (GAP-1717, the
-// route 0 cases of TestR104ProtectedWriteRefix3 natively on Windows).
-func ActionCommandDecisionInShell(command, cwd, home string, facts map[string]string, posixShell bool) string {
-	decision := ActionCommandDecisionWithGlobFacts(command, cwd, home, facts)
-	if decision != "" || !posixShell || runtime.GOOS != "windows" || !actionWindowsHome(home) ||
-		command == "" || len(command) > MaxPayloadBytes {
-		return decision
-	}
-	var globs *actionGlobs
-	if facts != nil {
-		globs = &actionGlobs{facts: facts}
-	}
-	if actionPosixTargetMention(command, cwd, home, 0, false, globs.forCommand(command)) ||
-		actionConcreteProtectedWriteOn(command, cwd, home, true) {
-		return "protected-target"
-	}
-	return decision
 }
 
 func actionConcreteProtectedWrite(command, cwd, home string) bool {

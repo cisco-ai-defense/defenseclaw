@@ -8,21 +8,22 @@ The shard scripts (go_test_shards.py, python_test_shards.py) read these
 files; a test, module or package missing from them still runs, it just
 weighs an estimate. Refresh after a large test change:
 
-  go     go test -json output (CI flags: -race, coverage) of the sharded
-         packages and the remaining packages -> scripts/test-timings/go-linux.json
-           go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -json ./... > go.json
-           scripts/update_test_timings.py go go.json
+  go     go test -json events -> scripts/test-timings/go-linux.json. Every
+         Linux Go race shard of CI uploads its events as a go-test-timings-*
+         artifact (scripts/go_test_report.py --timings), so a refresh reads
+         what the hosted runners measured:
+           gh run download <run> --pattern 'go-test-timings-*' --dir t
+           scripts/update_test_timings.py go t/*/*.json
+         A local run works too (go test -race ... -json ./... > go.json).
   python pytest --junitxml reports of the Python suite -> python-linux.json
            pytest cli/tests --junitxml=py.xml ...; scripts/update_test_timings.py python py.xml
          Windows Native CI uploads windows-python-junit-<n> reports:
            scripts/update_test_timings.py python junit-windows-*.xml --out scripts/test-timings/python-windows.json
-  go-ci-log  CI job logs of the Go race shards ("ok <package> <seconds>s"
-         lines): replaces the package times in go-linux.json with what the
-         hosted runners measured and keeps the per-test times
-           gh run view <run> --log > ci.log; scripts/update_test_timings.py go-ci-log ci.log
-  windows-go  Windows Native CI job logs of the windows-go packages parts,
-         which print "[go-package-time] <package> <result> <seconds>" ->
-         go-windows.json (gh run view --log > win.log)
+  windows-go  Windows Native CI job logs of the windows-go parts -> go-windows.json:
+         package times from the packages parts ("[go-package-time] <package>
+         <result> <seconds>") and the gateway and connector test times from
+         the go test -json events the gw parts print
+           gh run view <run> --log > win.log; scripts/update_test_timings.py windows-go win.log
 """
 
 from __future__ import annotations
@@ -51,10 +52,13 @@ def go_timings(files: list[Path], module: str) -> dict:
     packages: dict[str, float] = {}
     for file in files:
         for line in file.read_text(encoding="utf-8", errors="replace").splitlines():
-            if not line.startswith("{"):
+            # A CI log puts a timestamp (and gh run view the job and step
+            # names) before each event.
+            start = line.find('{"')
+            if start < 0:
                 continue
             try:
-                event = json.loads(line)
+                event = json.loads(line[start:])
             except json.JSONDecodeError:
                 continue
             if event.get("Action") not in ("pass", "fail"):
@@ -102,76 +106,34 @@ def python_timings(files: list[Path]) -> dict:
 # The Windows parts run one package at a time (-p=1), so every package also
 # pays for linking its test binary, which its reported elapsed time leaves out.
 WINDOWS_LINK_SECONDS = 6.0
+# The packages Windows Native CI splits by test (go_test_shards.py test mode).
+WINDOWS_TEST_SHARDED = ("internal/gateway", "internal/gateway/connector")
 
 
-# A Go result line ("ok  <package>\t<seconds>s" or "FAIL\t<package>\t<seconds>s"),
-# optionally after the runner's timestamp.
-GO_RESULT = re.compile(r"^(?:\S+\s+)?(?:ok|FAIL)\s+(\S+)\s+([0-9.]+)s\b")
-# `gh run view --log` puts "<job name>\t<step name>\t" before every line, and
-# both names may contain spaces.
-GH_LOG_PREFIX = re.compile(r"^[^\t]*\t[^\t]*\t")
-
-
-def go_ci_log_results(text: str) -> list[tuple[str, str]]:
-    """Return the (package, seconds) of every Go result line in a CI log.
-
-    Reads a raw job log (a timestamp before each line) and the output of
-    `gh run view --log` (job and step name columns before the timestamp).
-    """
-
-    results = []
-    for line in text.splitlines():
-        match = GO_RESULT.match(line)
-        if match is None:
-            # Strip the gh columns only when the line does not match as it is:
-            # Go's own result line holds tabs too.
-            match = GO_RESULT.match(GH_LOG_PREFIX.sub("", line, count=1))
-        if match is not None:
-            results.append((match.group(1), match.group(2)))
-    return results
-
-
-def go_ci_log_timings(files: list[Path], current: Path) -> dict:
-    # A package split into -run parts reports once per part: sum them.
-    measured: dict[str, float] = {}
-    for file in files:
-        seen: set[tuple[str, str]] = set()
-        for package, seconds in go_ci_log_results(file.read_text(encoding="utf-8", errors="replace")):
-            if (package, seconds) in seen:
-                continue
-            seen.add((package, seconds))
-            measured[package] = measured.get(package, 0.0) + float(seconds)
-    data = json.loads(current.read_text(encoding="utf-8")) if current.is_file() else {"packages": {}, "tests": {}}
-    data["packages"].update({package: round(seconds, 1) for package, seconds in measured.items()})
-    data["packages"] = dict(sorted(data["packages"].items()))
-    return data
-
-
-def windows_go_timings(files: list[Path]) -> dict:
+def windows_go_timings(files: list[Path], module: str) -> dict:
     pattern = re.compile(r"\[go-package-time\] (\S+) (?:pass|fail|skip) ([0-9.]+)")
     packages: dict[str, float] = {}
     for file in files:
         for match in pattern.finditer(file.read_text(encoding="utf-8", errors="replace")):
             packages[match.group(1)] = float(match.group(2)) + WINDOWS_LINK_SECONDS
-    return {"packages": {package: round(value, 1) for package, value in sorted(packages.items())}}
+    # The gateway and connector shards balance on their test times.
+    tests = {rel: names for rel, names in go_timings(files, module)["tests"].items() if rel in WINDOWS_TEST_SHARDED}
+    return {"packages": {package: round(value, 1) for package, value in sorted(packages.items())}, "tests": tests}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("kind", choices=("go", "go-ci-log", "python", "windows-go"))
+    parser.add_argument("kind", choices=("go", "python", "windows-go"))
     parser.add_argument("inputs", nargs="+", type=Path)
     parser.add_argument("--out", type=Path, help="output file (default: scripts/test-timings/<kind>.json)")
     args = parser.parse_args()
     module = re.search(r"^module\s+(\S+)", (ROOT / "go.mod").read_text(encoding="utf-8"), re.MULTILINE).group(1)
     if args.kind == "go":
         data, default = go_timings(args.inputs, module), "go-linux.json"
-    elif args.kind == "go-ci-log":
-        default = "go-linux.json"
-        data = go_ci_log_timings(args.inputs, args.out or OUT_DIR / default)
     elif args.kind == "python":
         data, default = python_timings(args.inputs), "python-linux.json"
     else:
-        data, default = windows_go_timings(args.inputs), "go-windows.json"
+        data, default = windows_go_timings(args.inputs, module), "go-windows.json"
     _write(args.out or OUT_DIR / default, data)
     return 0
 

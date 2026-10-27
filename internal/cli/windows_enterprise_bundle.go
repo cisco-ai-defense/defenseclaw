@@ -755,7 +755,9 @@ func recordWindowsEarlyAnchorsRefusal(cmd *cobra.Command, opts *windowsEnterpris
 	// Only an elevated caller on an installed computer records into the
 	// administrator-only change spool (r104 W5b: a fresh or unelevated run
 	// creates no installed-host audit).
-	if opts.trustAnchors == "" || !opts.installedBeforeRun || !windowsSecretIsElevated() {
+	if opts.trustAnchors == "" || !opts.installedBeforeRun || !windowsSecretIsElevated() ||
+		opts.profile == managed.ProfileSecureClient {
+		// A Secure Client profile has no standalone change spool (GAP-0447).
 		return
 	}
 	layout, err := windowsBundleLayout()

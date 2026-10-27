@@ -169,8 +169,13 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 		}
 		return actionWindowsQuote(command, i)
 	}
-	// escaped writes the backtick at i and the character after it.
+	// escaped writes the backtick at i and the character after it. With
+	// literalDollar a backtick-escaped $ is literal text (GAP-1504).
 	escaped := func(i int) int {
+		if literalDollar && command[i+1] == '$' {
+			word.WriteByte('@')
+			return i + 1
+		}
 		_, size := utf8.DecodeRuneInString(command[i+1:])
 		word.WriteString(command[i : i+1+size])
 		return i + size

@@ -66,7 +66,12 @@ func TestPerUserInstallLockClosesNativeHookFailures(t *testing.T) {
 	}
 }
 
-func TestPerUserInstallLockIsBoundedByOwnerAndAge(t *testing.T) {
+// The carry keeps the fix/r104-oss-outage-open identity rule
+// (installLockStale): the lock is stale only when its installer is proven
+// gone, and no clock is read. The live owner is another running process
+// (this test's parent): a lock naming the reader's own pid is a reused pid.
+func TestPerUserInstallLockIsBoundedByItsOwnerNotItsAge(t *testing.T) {
+	live := strconv.Itoa(os.Getppid())
 	for _, tc := range []struct {
 		name, pid string
 		age       time.Duration
@@ -74,9 +79,10 @@ func TestPerUserInstallLockIsBoundedByOwnerAndAge(t *testing.T) {
 	}{
 		{"new lock without pid", "", 0, true},
 		{"dead owner", "99999999", 0, false},
-		{"live owner", strconv.Itoa(os.Getpid()), 0, true},
-		{"aged live owner", strconv.Itoa(os.Getpid()), 11 * time.Minute, false},
-		{"aged lock without pid", "", 11 * time.Minute, false},
+		{"live owner", live, 0, true},
+		{"aged live owner", live, 11 * time.Minute, true},
+		{"aged lock without pid", "", 11 * time.Minute, true},
+		{"pid reused by the reader", strconv.Itoa(os.Getpid()), 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()

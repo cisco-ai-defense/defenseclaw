@@ -169,11 +169,11 @@ func TestDriverRetryOfAPendingBundleKeepsItsCommittedConfig(t *testing.T) {
 	}
 }
 
-// Another signed bundle can render the bytes a pending receipt committed (a
-// version bump that changed no setting). The generation record already names
-// the pending bundle, so its attribution stays; with no record the delivery
-// this process installs owns the bytes, and without one the overlap is
-// refused.
+// Another signed bundle C can render the bytes a pending receipt B committed
+// (a version bump that changed no setting). The delivery being installed
+// owns those bytes, also in the installer child process, which does not
+// know it (no CurrentReceiptID) and also while the generation record names
+// the pending B: C can take over during the outage (GAP-1187).
 func TestDriverGenerationOwnerOfBytesTwoBundlesRender(t *testing.T) {
 	r := newPendingRun(t, enterprisebundle.StateStaged)
 	bump := r.f.variant(t, settingsOnly(t, "action"), func(in *enterprisebundle.ComposeInput) { in.Version, in.ChangeSummary = 7, "bump" })
@@ -182,18 +182,61 @@ func TestDriverGenerationOwnerOfBytesTwoBundlesRender(t *testing.T) {
 		t.Fatalf("setup: %+v, %v", c, err)
 	}
 	opt, ok, err := r.d.ConfigGenerationOptions(c.Config)
-	if err != nil || !ok || opt.Bundle.Version != r.b.Receipt.Version {
-		t.Fatalf("attribution with the pending commit recorded = %+v, %v, %v", opt, ok, err)
+	if err != nil || !ok || opt.Bundle.Version != c.Receipt.Version {
+		t.Fatalf("attribution in the installer child with the pending commit recorded = %+v, %v, %v", opt, ok, err)
 	}
 	if err := os.Remove(configwrite.GenerationPath(r.d.ConfigPath)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.d.ConfigGenerationOptions(c.Config); err == nil {
-		t.Fatal("an ambiguous attribution with no record and no delivery was accepted")
+	if opt, ok, err := r.d.ConfigGenerationOptions(c.Config); err != nil || !ok || opt.Bundle.Version != c.Receipt.Version {
+		t.Fatalf("attribution with no record = %+v, %v, %v", opt, ok, err)
 	}
 	r.d.CurrentReceiptID = c.Receipt.ReceiptID
 	if opt, ok, err := r.d.ConfigGenerationOptions(c.Config); err != nil || !ok || opt.Bundle.Version != c.Receipt.Version {
 		t.Fatalf("attribution bound to the current delivery = %+v, %v, %v", opt, ok, err)
+	}
+}
+
+// A pending bundle B whose rendered bytes a higher bundle C committed during
+// the outage (GAP-1187) settles superseded once C confirms: B is never
+// failed not_confirmed and never named for a rollback, because C's config is
+// the installed one (GAP-2088).
+func TestDriverPendingBundleWhoseBytesAHigherBundleCommittedIsSuperseded(t *testing.T) {
+	for _, pendingState := range []string{enterprisebundle.StateStaged, enterprisebundle.StateApplied} {
+		t.Run(pendingState, func(t *testing.T) {
+			r := newPendingRun(t, pendingState)
+			bump := r.f.variant(t, settingsOnly(t, "action"), func(in *enterprisebundle.ComposeInput) { in.Version, in.ChangeSummary = 7, "bump" })
+			c, err := r.d.Prepare(t.Context(), bump, nil)
+			if err != nil || c.Receipt == nil || !bytes.Equal(c.Config, r.b.Config) {
+				t.Fatalf("setup: %+v, %v", c, err)
+			}
+			// C committed the bytes and its run was killed; the gateway is back.
+			cPolicy := installPreparedBundle(t, r.d, c)
+			report, toRollBack, err := r.d.SettleRun(c.Config, &cPolicy)
+			if err != nil || len(toRollBack) != 0 || !slices.Contains(report.Completed, c.Receipt.ReceiptID) {
+				t.Fatalf("settle: report=%+v rollback=%+v error=%v", report, toRollBack, err)
+			}
+			receipts, err := r.d.Store.Receipts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var b *enterprisebundle.Receipt
+			for _, rc := range receipts {
+				if rc.ReceiptID == r.b.Receipt.ReceiptID {
+					b = rc
+				}
+			}
+			if b == nil || b.State != enterprisebundle.StateFailed || b.ErrorCode != enterprisebundle.CodeSuperseded || b.RolledBack ||
+				!strings.Contains(b.ErrorMessage, "version 7") || !strings.Contains(b.ErrorMessage, "nothing was rolled back") {
+				t.Fatalf("B after C took its bytes over = %+v", b)
+			}
+			if slices.Contains(report.Pending, b.ReceiptID) || slices.Contains(report.Interrupted, b.ReceiptID) {
+				t.Fatalf("B reported pending or interrupted: %+v", report)
+			}
+			if state, err := r.d.Store.LoadState(); err != nil || state.Current == nil || state.Current.Version != c.Receipt.Version {
+				t.Fatalf("current after settle: %+v, %v", state, err)
+			}
+		})
 	}
 }
 
@@ -208,6 +251,9 @@ func TestDriverFailedDeliveryRecordsOnlyAProvenRollback(t *testing.T) {
 		pendingState string
 		policy       func(r *pendingRun) enterprisebundle.GatewayPolicy
 		rolledBack   bool
+		// pending: the gateway was down and the run's own base config is
+		// installed: the delivery stays open (GAP-0751).
+		pending bool
 	}{
 		{name: "pending applied predecessor put back, gateway unavailable", pendingState: enterprisebundle.StateApplied,
 			policy: func(*pendingRun) enterprisebundle.GatewayPolicy { return enterprisebundle.GatewayPolicy{} }},
@@ -218,7 +264,7 @@ func TestDriverFailedDeliveryRecordsOnlyAProvenRollback(t *testing.T) {
 		{name: "last good put back, gateway proves it",
 			policy: func(r *pendingRun) enterprisebundle.GatewayPolicy { return r.aPolicy }, rolledBack: true},
 		{name: "last good put back, gateway unavailable",
-			policy: func(*pendingRun) enterprisebundle.GatewayPolicy { return enterprisebundle.GatewayPolicy{} }},
+			policy: func(*pendingRun) enterprisebundle.GatewayPolicy { return enterprisebundle.GatewayPolicy{} }, pending: true},
 		{name: "last good put back, gateway rejected the reload",
 			policy: func(r *pendingRun) enterprisebundle.GatewayPolicy {
 				p := r.aPolicy
@@ -252,6 +298,12 @@ func TestDriverFailedDeliveryRecordsOnlyAProvenRollback(t *testing.T) {
 			putBack := false
 			_, err = r.d.Finish(c, predecessor.ConfigSHA256, []string{"service_start_failed"}, tc.policy(r), false,
 				func() (string, bool) { putBack = true; return "", true })
+			if tc.pending {
+				if enterprisebundle.CodeOf(err) != enterprisebundle.CodeNotConfirmed || enterprisebundle.Finished(c.Receipt.State) || c.Receipt.RolledBack || putBack {
+					t.Fatalf("outage: finish = %v, receipt %+v, put back %v; want it pending", err, c.Receipt, putBack)
+				}
+				return
+			}
 			if enterprisebundle.CodeOf(err) != enterprisebundle.CodeApplyFailed || c.Receipt.State != enterprisebundle.StateFailed {
 				t.Fatalf("finish = %v, receipt %+v", err, c.Receipt)
 			}

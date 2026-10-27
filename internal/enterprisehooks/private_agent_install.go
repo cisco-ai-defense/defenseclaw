@@ -53,8 +53,9 @@ const privateAgentInstallMaxVersionDirs = 64
 // privateInstallWalkMaxEntries bounds the directory entries the scan lists
 // below one home while it looks for npm prefixes at any depth (GAP-0988).
 // Inside a node_modules tree it lists package names only, never package
-// contents. Tests lower it.
-var privateInstallWalkMaxEntries = 1 << 19
+// contents. Each OS sets its default (privateInstallWalkDefaultMaxEntries).
+// Tests lower it.
+var privateInstallWalkMaxEntries = privateInstallWalkDefaultMaxEntries
 
 // privateInstallWalk is one bounded walk of a home (walkPrivateNPMPrefixes).
 // open opens a directory to list; unreachable reports a listing error that
@@ -280,6 +281,10 @@ func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWa
 	return prefixes, complete
 }
 
+// privateInstallWalkReadDir lists one batch of an opened folder. Tests
+// replace it to stall a listing.
+var privateInstallWalkReadDir = (*os.File).ReadDir
+
 // list reads dir's entries in batches, charging each to the walk's bound.
 func (w *privateInstallWalk) list(f *os.File, dir string) []fs.DirEntry {
 	if w.stopped() {
@@ -290,7 +295,7 @@ func (w *privateInstallWalk) list(f *os.File, dir string) []fs.DirEntry {
 		if w.stopped() {
 			return out
 		}
-		batch, err := f.ReadDir(256)
+		batch, err := privateInstallWalkReadDir(f, 256)
 		if !w.charge(len(batch)) {
 			return nil
 		}

@@ -14,7 +14,7 @@ import (
 // operator guide must use persisted config for its closed posture, rather
 // than promise that an ambient strictness flag reaches the hook (GAP-0782).
 func TestFailModeGuideUsesPersistentConfigForCodexTUI(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "configuration", "fail-modes.mdx")
+	path := filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "fail-modes.mdx")
 	guide, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -29,7 +29,7 @@ func TestFailModeGuideUsesPersistentConfigForCodexTUI(t *testing.T) {
 }
 
 func TestFailModeGuideHonorsExplicitSavedOSSOutageMode(t *testing.T) {
-	path := filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "configuration", "fail-modes.mdx")
+	path := filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "fail-modes.mdx")
 	guide, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

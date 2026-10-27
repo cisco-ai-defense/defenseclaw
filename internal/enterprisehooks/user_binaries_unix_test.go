@@ -58,7 +58,8 @@ func TestPurgeUserStateRemovesPerUserBinariesAndLinks(t *testing.T) {
 	for _, name := range []string{"defenseclaw", "skill-scanner", "mcp-scanner"} {
 		write(filepath.Join(dataDir, ".venv", "bin", name), "#!/bin/sh\n", 0o700)
 	}
-	write(filepath.Join(dataDir, "config.yaml"), "gateway: {}\n", 0o600)
+	// No config.yaml, .env, audit.db or previous/: an install the account
+	// made of its own is kept as it is (GAP-0727, purge_backup_unix_test.go).
 	write(filepath.Join(dataDir, "hooks", "claude-code-hook.sh"), "#!/bin/bash\n# defenseclaw-managed-hook v5\n", 0o700)
 	write(filepath.Join(dataDir, "foreign-hooks-backup", "cursor", "hooks.json"), "{}", 0o600)
 

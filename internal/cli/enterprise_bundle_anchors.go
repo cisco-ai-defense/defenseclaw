@@ -82,7 +82,6 @@ written. The result also carries sha256, previous_sha256 and key_ids. Exit codes
 (errors[].code names the refusal), 2 usage, 75 busy. On Windows, use enterprise windows ensure --profile standalone
 --trust-anchors <file>.`,
 		Example:      `  defenseclaw-gateway enterprise bundle anchors install --file /var/lib/acme-agent/trust/bundle-anchors.json --lock-wait 10m --json`,
-		Args:         bundleNoArgs,
 		SilenceUsage: true,
 		Annotations:  map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -93,7 +92,19 @@ written. The result also carries sha256, previous_sha256 and key_ids. Exit codes
 	f.StringVar(&opts.file, "file", "", "the bundle-anchors.json to install, in a root-only folder")
 	addLockWaitFlag(f, &opts.lockWait)
 	f.BoolVar(&opts.json, "json", false, "print the result as JSON")
-	install.SetFlagErrorFunc(lifecycleFlagError)
+	flagError := func(c *cobra.Command, err error) error {
+		if ev, ok := anchorsFailureEvent("invalid_arguments", false, nil); ok {
+			recordUnixChangeRefusal(c, ev)
+		}
+		return lifecycleFlagError(c, err)
+	}
+	install.SetFlagErrorFunc(flagError)
+	install.Args = func(c *cobra.Command, args []string) error {
+		if err := strayArgumentError(c, args); err != nil {
+			return flagError(c, err)
+		}
+		return nil
+	}
 	group.AddCommand(install)
 	return group
 }
@@ -133,19 +144,29 @@ func bundleAnchorsInstall(ctx context.Context, cmd *cobra.Command, opts *bundleA
 		return &enterprisebundle.Error{Code: enterprisebundle.CodeNotManaged,
 			Detail: "this computer is not a standalone managed device; install the enterprise profile first"}
 	}
+	refuse := func(err error) error {
+		code := string(enterprisebundle.CodeStateInvalid)
+		if commandExitCode(err) == enterprisestatus.UnixExitInvalidArgs {
+			code = "invalid_arguments"
+		}
+		if ev, ok := anchorsFailureEvent(code, false, nil); ok {
+			recordUnixChangeRefusal(cmd, ev)
+		}
+		return err
+	}
 	if opts.file == "" {
-		return bundleUsage("--file is required")
+		return refuse(bundleUsage("--file is required"))
 	}
 	if err := checkLockWait(cmd, opts.lockWait); err != nil {
-		return err
+		return refuse(err)
 	}
 	src, err := filepath.Abs(opts.file)
 	if err != nil {
-		return bundleUsage("--file: %v", err)
+		return refuse(bundleUsage("--file: %v", err))
 	}
 	env, err := newUnixLifecycleEnv(runtime.GOOS)
 	if err != nil {
-		return &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+		return refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()})
 	}
 	if opts.lockWait > 0 {
 		env.LockTimeout = opts.lockWait

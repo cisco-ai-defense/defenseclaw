@@ -298,6 +298,17 @@ const (
 	minGitMinor = 29
 )
 
+// HostGit is the version of the host's git when DefenseClaw can drive it
+// (requireGit), else why not: a sandbox run copies its project with it, and
+// keeps the project's pre-session snapshot with it, in either workdir mode.
+func HostGit(ctx context.Context) (string, error) {
+	v, err := requireGit(ctx, os.TempDir())
+	if err != nil {
+		return "", err
+	}
+	return v.String(), nil
+}
+
 func requireGit(ctx context.Context, dir string) (gitVersion, error) {
 	v, err := hostGitVersion(ctx, dir)
 	if err != nil {

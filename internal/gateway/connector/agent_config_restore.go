@@ -370,13 +370,21 @@ const (
 	// DefenseClaw saw settings of the account in it that it could not put
 	// back; reported until the account has settings in the file again.
 	AgentConfigSettingsLost = "settings_lost"
+	// AgentConfigNativeOTLPUnchecked (Codex, Claude Code on standalone
+	// Windows): a configuration the account's agent reads reaches, through
+	// a link or outside the profile, a file the account does not own, so
+	// the guardian could not check it for an earlier per-user native OTLP
+	// exporter (GAP-0929). Its hooks are in place: a warning, not a failed
+	// row.
+	AgentConfigNativeOTLPUnchecked = "native_otlp_unchecked"
 )
 
 // ValidAgentConfigStatus reports whether code is one AgentConfigStatus
 // returns ("" included).
 func ValidAgentConfigStatus(code string) bool {
 	switch code {
-	case "", AgentConfigRestoredLastGood, AgentConfigRestoredPristine, AgentConfigRecreatedHooksOnly, AgentConfigSettingsLost:
+	case "", AgentConfigRestoredLastGood, AgentConfigRestoredPristine, AgentConfigRecreatedHooksOnly, AgentConfigSettingsLost,
+		AgentConfigNativeOTLPUnchecked:
 		return true
 	}
 	return false
@@ -430,6 +438,25 @@ func AgentConfigStatus(connectorName string, opts SetupOpts, since time.Time, re
 	return status
 }
 
+// nativeOTLPConfigFiles names, per connector, the agent configuration an
+// AgentConfigNativeOTLPUnchecked notice is about.
+var nativeOTLPConfigFiles = map[string]string{"codex": "a Codex config.toml", "claudecode": "a Claude Code settings.json"}
+
+// nativeOTLPUncheckedNotice words AgentConfigNativeOTLPUnchecked for the
+// administrator's status and verify (warning native_otlp_config_unchecked):
+// which configuration of which account the guardian could not check, and
+// the remedy, never its path or values.
+func nativeOTLPUncheckedNotice(connectorName, user string) (string, bool) {
+	file, ok := nativeOTLPConfigFiles[connectorName]
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf("%s for user %s: %s that the agent reads reaches a file the account does not own, through a link or "+
+		"outside the profile, so DefenseClaw cannot check it for a native OTLP exporter from an earlier per-user install, "+
+		"and repair leaves it as it is (it revokes that install's DefenseClaw credential): replace it with the account's "+
+		"own file, or remove the link, and the next repair checks it", connectorName, user, file), true
+}
+
 // agentConfigFiles names, per connector, the agent config a notice is about.
 var agentConfigFiles = map[string]string{"hermes": "Hermes config.yaml", "devin": "Devin config.json"}
 
@@ -439,6 +466,9 @@ var agentConfigFiles = map[string]string{"hermes": "Hermes config.yaml", "devin"
 // AgentConfigStatus code). False for a code or connector it does not word,
 // which the per-user side may have written: only the known ones are.
 func AgentConfigNotice(connectorName, user, code string) (string, bool) {
+	if code == AgentConfigNativeOTLPUnchecked {
+		return nativeOTLPUncheckedNotice(connectorName, user)
+	}
 	file, ok := agentConfigFiles[connectorName]
 	if !ok {
 		return "", false

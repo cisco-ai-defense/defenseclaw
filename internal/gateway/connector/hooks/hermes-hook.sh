@@ -9,7 +9,8 @@ set -euo pipefail
 if [ "${1:-}" = "--defenseclaw-execution-probe" ] && [ "${2:-}" = "--forkless" ]; then
   case "${BASH_SOURCE[0]}" in /*) ;; *) exit 125 ;; esac
   _DC_PROBE_HOOK_DIR="${BASH_SOURCE[0]%/*}"
-  . "${_DC_PROBE_HOOK_DIR}/_hardening.sh"
+  # command: bash 3.2 (macOS /bin/bash) exits 0 when a sourced helper is missing or unreadable.
+  command . "${_DC_PROBE_HOOK_DIR}/_hardening.sh" || exit "$?"
   declare -F defenseclaw_harden_resources >/dev/null || exit 125
   declare -F defenseclaw_harden_env >/dev/null || exit 125
   _DC_FORKLESS_PROBE=1
@@ -208,6 +209,17 @@ hermes_bootstrap_failure() {
   exit 0
 }
 trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_closed; then hermes_bootstrap_failure; fi' EXIT
+{{else if and .Managed (not .Sandbox) (not .SecureClientDelivery)}}# A managed hook that fails before its helpers load (a missing or broken
+# _hardening.sh, a set -e error) is a local failure, not a gateway outage:
+# it answers Hermes' block whatever the administrator's outage mode
+# (GAP-0340). defenseclaw_harden_env replaces this trap with the hook's own.
+hermes_bootstrap_failure() {
+  echo "defenseclaw: hermes hook could not start; blocking (fail mode closed)" >&2
+  # Hermes acts on a synchronous JSON block, not on process status.
+  printf '%s\n' '{"action":"block","message":"DefenseClaw hook failed closed"}'
+  exit 0
+}
+trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ]; then hermes_bootstrap_failure; fi' EXIT
 {{end}}# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
@@ -278,7 +290,8 @@ fi
 # controls (HOME, PATH, locale, GIT_*); none of the subsequent
 # token-resolution logic depends on the operator's original PATH or
 # HOME.
-. "${HOOK_DIR}/_hardening.sh"
+# command: bash 3.2 (macOS /bin/bash) exits 0 when a sourced helper is missing or unreadable.
+command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
 {{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call.
@@ -506,9 +519,10 @@ fi
 
 # W3C trace propagation: forward validated traceparent / tracestate via _hardening.sh v6.
 TRACE_HEADER_ARGS=()
-if command -v mapfile >/dev/null 2>&1; then
-  mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
-fi
+# A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
+while IFS= read -r trace_header_arg; do
+  TRACE_HEADER_ARGS+=("$trace_header_arg")
+done < <(defenseclaw_extract_trace_context)
 
 # Per-user attribution: the gateway cannot read the real user's identity from
 # its own service-account process, so the hook reports it.

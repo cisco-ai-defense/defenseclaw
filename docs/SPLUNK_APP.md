@@ -2,7 +2,7 @@
 
 Splunk setup, data flow, dashboards, and investigation workflows are maintained
 on the
-[published Splunk guide](https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/send-to-splunk/).
+[published Splunk guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/splunk/).
 
 Repository-local implementation notes remain beside the artifacts:
 

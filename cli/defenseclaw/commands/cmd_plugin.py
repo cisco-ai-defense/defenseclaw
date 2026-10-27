@@ -45,6 +45,7 @@ from defenseclaw.inventory.plugin_directories import (
     PluginRegistryCache,
     PluginRegistryProbe,
     PluginRegistryState,
+    discover_claude_cache_copies,
     discover_plugin_directories,
     plugin_directory_entries,
     probe_claude_plugin_registry,
@@ -2259,6 +2260,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     _build_plugin_scan_map_for_connector(app, connector),
                     _build_plugin_actions_map(app.store, connector, app.cfg),
                     connector=connector,
+                    verdict=_plugin_list_verdict_for(app, connector),
                 )
                 _report_host_plugin_list_error(connector)
                 total_plugins += len(items)
@@ -2281,6 +2283,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 _build_plugin_scan_map_for_connector(app, connectors[0]),
                 _build_plugin_actions_map(app.store, connectors[0], app.cfg),
                 connector=connectors[0],
+                verdict=_plugin_list_verdict_for(app, connectors[0]),
             )
             click.echo(json.dumps(items, indent=2, default=str))
             if _report_host_plugin_list_error(connectors[0]) and not items:
@@ -2323,7 +2326,9 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
             continue
         actions_map = _build_plugin_actions_map(app.store, connector, app.cfg)
         connector_scan_map = _build_plugin_scan_map_for_connector(app, connector)
-        _print_plugin_list_table(plugins, connector_scan_map, actions_map, connector)
+        _print_plugin_list_table(
+            plugins, connector_scan_map, actions_map, connector, verdict=_plugin_list_verdict_for(app, connector),
+        )
         shown_any = True
 
     if not shown_any:
@@ -2611,6 +2616,7 @@ def _plugin_list_json_items(
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
     connector: str = "",
+    verdict: Any = None,
 ) -> list[dict[str, Any]]:
     items = []
     for p in plugins:
@@ -2640,11 +2646,11 @@ def _plugin_list_json_items(
             if value not in (None, "", False):
                 item[field] = value
         if pid in scan_map:
-            item["scan"] = scan_map[pid]
+            item["scan"] = _public_scan_entry(scan_map[pid])
         ae = _row_action(p, actions_map)
         if ae is not None and not ae.actions.is_empty():
             item["actions"] = ae.actions.to_dict()
-        verdict_label, _ = _compute_verdict(ae, scan_map.get(pid))
+        verdict_label, _ = (verdict or _compute_verdict)(ae, scan_map.get(pid))
         item["verdict"] = verdict_label
         items.append(item)
     return items
@@ -2655,6 +2661,7 @@ def _print_plugin_list_table(
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
     connector: str = "",
+    verdict: Any = None,
 ) -> None:
     from rich.console import Console
 
@@ -2700,7 +2707,7 @@ def _print_plugin_list_table(
             if state.file == "quarantine" or (state.install == "block" and state.runtime != "disable"):
                 verdict_action = None
 
-        verdict_label, verdict_style = _compute_verdict(
+        verdict_label, verdict_style = (verdict or _compute_verdict)(
             verdict_action,
             scan_map.get(pid),
         )
@@ -3158,11 +3165,11 @@ def _echo_claudecode_install_note(source_path: str, plugin_name: str, *, only_cl
 
     Claude Code loads only plugins it installed from a marketplace (listed in
     installed_plugins.json), so the copy in its plugin cache is scanned but
-    neither loaded nor shown by plugin list.
+    not loaded; plugin list shows it as disabled (GAP-0017).
     """
     click.secho(
         "  Claude Code loads only plugins installed from a marketplace, so it will not load "
-        "this copy and plugin list will not show it.",
+        "this copy; plugin list shows it as disabled.",
         fg="yellow",
     )
     if not os.path.isfile(os.path.join(source_path, ".claude-plugin", "plugin.json")):
@@ -3211,6 +3218,36 @@ def _list_hermes_plugins() -> list[dict[str, Any]]:
                 "host_path": source if is_path else "",
             }
         )
+    return rows
+
+
+def _claude_cache_copy_rows(dirs: list[str], claimed: PluginInstallClaims) -> list[dict[str, Any]]:
+    """Rows for plugins ``plugin install`` copied into a Claude cache (GAP-0017).
+
+    Claude Code does not load such a copy, so the row is disabled and its
+    origin says so; the scan and actions maps give it its install verdict.
+    """
+    rows: list[dict[str, Any]] = []
+    for d in dirs:
+        if os.path.basename(os.path.normpath(d)).casefold() != "cache":
+            continue
+        for copy in discover_claude_cache_copies(d):
+            if not claimed.add(copy.id, copy.path, d):
+                continue
+            row: dict[str, Any] = {
+                "id": copy.id,
+                "name": copy.name,
+                "description": copy.description,
+                "version": copy.version,
+                "origin": "copy, not loaded by Claude Code",
+                "enabled": False,
+                "source": "host:claudecode",
+                "host_path": copy.path,
+                "cached": True,
+            }
+            if copy.manifest:
+                row["manifest"] = copy.manifest
+            rows.append(row)
     return rows
 
 
@@ -3280,6 +3317,8 @@ def _list_host_plugins(
             ):
                 continue
             out.append(entry)
+    if name in ("claudecode", "claude"):
+        out.extend(_claude_cache_copy_rows(dirs, claimed))
     if name == "opencode":
         from defenseclaw.inventory.claw_inventory import _opencode_config_plugin_rows
 
@@ -4080,6 +4119,31 @@ def _plugin_only_allow_entry(app: AppContext, pe, plugin_name: str, connector: s
     return allowed and not restrictive
 
 
+def _marketplace_plugin_keys(app: AppContext, plugin_name: str, connector: str | None) -> list[str]:
+    """The ``name@marketplace`` keys that hold enforcement state for a bare plugin name.
+
+    The install watcher keys a Claude Code marketplace plugin as
+    ``<name>@<marketplace>``, while ``plugin list`` shows ``<name>``, so
+    ``plugin unblock <name>`` found nothing to clear (GAP-1911).
+    """
+    if app.store is None or "@" in plugin_name:
+        return []
+    rows = app.store.list_actions_by_type("plugin", connector)
+    return sorted({
+        row.target_name for row in rows
+        if row.target_name.startswith(plugin_name + "@") and not row.actions.is_empty()
+    })
+
+
+def _unblock_marketplace_copies(app: AppContext, plugin_name: str, connector_flag: str, connector: str | None) -> bool:
+    """Unblock every ``name@marketplace`` key of a bare name (GAP-1911); False when there is none."""
+    keys = _marketplace_plugin_keys(app, plugin_name, connector)
+    ctx = click.get_current_context()
+    for key in keys:
+        ctx.invoke(unblock, name=key, connector_flag=connector_flag)
+    return bool(keys)
+
+
 def _plugin_unblock_line(plugin_name: str, connector: str, only_allow: bool) -> str:
     # GAP-2273: same wording as mcp unblock (GAP-2225).
     scope = f" ({connector})" if connector else " (every connector)"
@@ -4130,6 +4194,8 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             or app.store.has_action("plugin", plugin_name, "runtime", "disable", connector)
         )
         if not has_state:
+            if _unblock_marketplace_copies(app, plugin_name, connector_flag, connector):
+                return
             click.echo(f"[plugin] {plugin_name!r} has no enforcement state to clear for {connector}")
             return
         only_allow = _plugin_only_allow_entry(app, pe, plugin_name, connector)
@@ -4193,6 +4259,8 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         or app.store.has_action("plugin", plugin_name, "runtime", "disable")
     )
     if not has_state:
+        if _unblock_marketplace_copies(app, plugin_name, connector_flag, None):
+            return
         click.echo(f"[plugin] {plugin_name!r} has no enforcement state to clear")
         return
 
@@ -5163,7 +5231,80 @@ def _plugin_scan_payload_from_latest(ls: dict[str, Any]) -> dict[str, Any]:
     scanned_at = _format_scan_time(ls.get("timestamp"))
     if scanned_at:
         payload["scanned_at"] = scanned_at
+    findings = _scan_rule_findings(ls.get("raw_json"))
+    if findings is not None:
+        payload["_findings"] = findings
     return payload
+
+
+def _scan_rule_findings(raw_json: Any) -> list[tuple[str, str]] | None:
+    """(rule_id, severity) of each finding of a stored scan, or None when unreadable."""
+    try:
+        data = json.loads(raw_json) if isinstance(raw_json, str) and raw_json else None
+    except (TypeError, ValueError):
+        return None
+    findings = data.get("findings") if isinstance(data, dict) else None
+    if not isinstance(findings, list):
+        return None
+    return [
+        (str(f.get("rule_id") or ""), str(f.get("severity") or ""))
+        for f in findings if isinstance(f, dict)
+    ]
+
+
+def _public_scan_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in entry.items() if not k.startswith("_")}
+
+
+def _plugin_list_verdict_for(app: AppContext, connector: str):
+    """The verdict plugin list shows (GAP-2116, the plugin form of GAP-1429).
+
+    An enforcement action wins; otherwise what admission does with the scan:
+    the plugin admission policy's action for its severity, after the GAP-1389
+    judge-only pre-step the watcher and plugin install apply. A plugin the
+    watcher admitted with a judge-only HIGH warning reads "warning", not
+    "rejected"; a severity the policy refuses still reads "rejected".
+    """
+    from datetime import datetime, timezone
+
+    from defenseclaw.enforce.admission import (
+        _judge_only_plugin_high,
+        action_blocks,
+        compile_admission,
+        effective_action_for,
+    )
+    from defenseclaw.models import Finding, ScanResult
+
+    try:
+        policy = compile_admission(app.cfg, "plugin")
+    except Exception:  # noqa: BLE001 - the list falls back to severity labels
+        policy = None
+
+    def verdict(action_entry: Any, scan_entry: dict[str, Any] | None) -> tuple[str, str]:
+        label, style = _compute_verdict(action_entry, scan_entry)
+        if policy is None or not scan_entry or (action_entry is not None and not action_entry.actions.is_empty()):
+            return label, style
+        severity = str(scan_entry.get("max_severity") or "").upper()
+        if severity not in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+            return label, style
+        findings = scan_entry.get("_findings")
+        if severity == "HIGH" and isinstance(findings, list):
+            result = ScanResult(
+                scanner="plugin-scanner", target=str(scan_entry.get("target") or ""),
+                timestamp=datetime.now(timezone.utc),
+                findings=[Finding(id=f"f{i}", severity=sev, title=rule, scanner="plugin-scanner", rule_id=rule)
+                          for i, (rule, sev) in enumerate(findings)],
+            )
+            if _judge_only_plugin_high(app.cfg, policy, "plugin", connector, result, severity):
+                return "warning", "yellow"
+        action, allow = effective_action_for(policy, severity=severity, scanner="plugin-scanner")
+        if action_blocks(action):
+            return "rejected", "red"
+        if allow:
+            return "allowed", "green"
+        return "warning", "yellow"
+
+    return verdict
 
 
 def _format_scan_time(ts: Any) -> str:

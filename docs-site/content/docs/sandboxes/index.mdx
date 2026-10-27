@@ -1,0 +1,149 @@
+---
+title: OpenShell sandboxes
+description: Run Claude Code, Codex and other coding agents in skip-permissions mode inside NVIDIA OpenShell sandboxes on Linux and Apple-silicon Macs, with DefenseClaw judging every tool call and every site.
+keywords:
+  - DefenseClaw sandbox
+  - NVIDIA OpenShell
+  - OpenShell sandbox
+  - Claude Code sandbox
+  - Codex sandbox
+  - skip permissions
+  - OpenShell MicroVM
+  - Landlock
+---
+
+`defenseclaw sandbox run` runs a coding agent in its skip-permissions mode inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbox. The agent sees only your project folder. DefenseClaw still checks every tool call and every site its web traffic reaches; model calls go straight to the model provider. At the end you review what changed and keep it, undo it or pull it back.
+
+```bash
+cd ~/code/myapp
+defenseclaw sandbox run claude
+```
+
+Use it when you want an agent to work without stopping to ask. Claude Code's skip-permissions flag is `--dangerously-skip-permissions`, Codex's is `--dangerously-bypass-approvals-and-sandbox`. On your own machine that lets a bad guess touch everything you can touch. In a sandbox it touches only the project.
+
+## The mental model
+
+The sandbox is a locked room that holds only your project folder. Two layers build it.
+
+- **OpenShell builds the room.** A container on Linux by default, a MicroVM on a Mac. The workload has no network of its own, runs as your uid with no capabilities, and is held in by Landlock and seccomp. Its only way out is OpenShell's supervisor.
+- **DefenseClaw adds the judgment.** Hooks inside the sandbox send every tool call to the DefenseClaw daemon, which applies the same rule packs, guardrails and judge as outside. The egress proxy decides and logs every site the web traffic reaches. Model calls bypass it: OpenShell sends them straight to the provider and adds the real key ([Sandbox network](/docs/sandboxes/network)). DefenseClaw also hides secret files, protects git internals, snapshots the folder and reviews what changed.
+
+| Inside the room, the agent can | Outside the room, it cannot |
+| --- | --- |
+| Edit your project, run tests, build and install packages. | See your home directory, `~/.ssh`, `~/.aws`, other repositories or the rest of the system. |
+| Browse the web through DefenseClaw's egress proxy. | Reach paste sites, file drops, webhook catchers, tunnels and anonymizers on the blocklist. |
+| Use your model credential through a placeholder. | Read the real key: OpenShell adds it only on requests to the model provider. |
+| Reach a port on your machine you name with `--host-port`, once you approve it. | Reach DefenseClaw's own API or the OpenShell gateway, ever. Reach your local network unless you approve it. |
+
+The sandbox reaches your machine only at `host.openshell.internal`, through a hook ingress port and the egress proxy port. The main API is never reachable. With the default API port 18970, the hook ingress is 18971 and the egress proxy 18972. [Agent segmentation](/docs/segmentation) shows which layer enforces what.
+
+## See it in action
+
+### What OpenShell protects
+
+<Video
+  src="openshell-isolation"
+  aspect="16/10"
+  caption="OpenShell isolation: a .env secret that reads as empty inside the sandbox, an environment with only a placeholder model key, and host files the agent cannot see. Recorded on an earlier build, so the launch banner differs slightly from 1.0.4."
+/>
+
+### What DefenseClaw adds
+
+<Video
+  src="openshell-defenseclaw"
+  aspect="16/10"
+  caption="DefenseClaw inside OpenShell: a malicious prompt is blocked, a tool call to the cloud metadata endpoint is blocked, and the egress proxy allows github.com but refuses a request-inspection site. The block messages in this recording use older wording; 1.0.4 says “DefenseClaw policy blocked this action (rule ID: title). Do not retry it in another form.”"
+/>
+
+## Linux and macOS at a glance
+
+The driver decides these rows, not the operating system. A Linux host with KVM can run the MicroVM driver too and then behaves like the macOS column.
+
+| Topic | Linux (Docker driver, the default) | macOS (Apple silicon, MicroVM driver) |
+| --- | --- | --- |
+| OpenShell driver | One container per sandbox. | One virtual machine per sandbox, on Apple's Hypervisor. OpenShell calls the driver experimental. |
+| Isolation | Linux namespaces, Landlock (ABI 3 or newer), seccomp, your uid | The same, inside a MicroVM with its own Linux kernel |
+| OpenShell gateway | `openshell-gateway` systemd user service | Homebrew's `nvidia/openshell/openshell` service |
+| Your project folder | Mounted live at `/work/<folder>`. `--copy` works on a copy. | Always a copy, at `/sandbox/work/<folder>`. A MicroVM mounts no host folders. |
+| Secret files | Appear empty inside | Held back from the copy |
+| Git internals | `.git/hooks` and `.git/config` are read-only | The agent's work comes back as git objects |
+| End of session | Keep the changes, or undo them | Bring the changes back (apply, branch or patch), or leave them in the sandbox |
+| Undo | `sandbox undo` restores the pre-session snapshot | `sandbox undo` reverts the last `sandbox pull --apply` |
+| First start of an image | A few seconds | About a minute, to prepare a MicroVM disk of about 5 GB |
+| Harness images | Built in Docker | Built in Docker Desktop, then booted as MicroVMs |
+
+<Callout type="info" title="Why not Docker Desktop on a Mac?">
+OpenShell's supervisor needs Landlock. Docker Desktop's Linux VM kernel does not run it, so a sandbox on OpenShell's Docker driver fails to start there. DefenseClaw refuses that combination and sets the Mac's gateway to the MicroVM driver instead. Docker Desktop still builds the harness images.
+</Callout>
+
+Linux (amd64 or arm64) with Docker Engine 28 and a Landlock kernel, or an Apple-silicon Mac with Docker Desktop and Homebrew, as your own user. Not on Windows, WSL2, Intel Macs or as root. Setup installs OpenShell 0.1.5 or later. On Linux with Docker your folder is mounted live; on a Mac, or with any MicroVM, the agent works on a copy.
+
+Claude Code, Codex, GitHub Copilot CLI, OpenCode, Kiro CLI, Hermes Agent and Antigravity run. Amp, Cursor Agent and Devin CLI cannot run yet.
+
+### Requirements
+
+DefenseClaw drives OpenShell 0.1.1 and later 0.1 releases, not 0.2, and runs sandboxes only on 0.1.5 or later: before 0.1.5 OpenShell's network broker could let a sandbox's connections bypass its policy (NVIDIA/OpenShell#4494). Setup installs OpenShell 0.1.5 with NVIDIA's installer, and on 0.1.1 to 0.1.4 it offers the upgrade to 0.1.5 in place. On those releases DefenseClaw still lists, stops, deletes and pulls from sandboxes, but creates and starts none. Setup is the only place that installs it.
+
+The full lists are on [Set up on Linux](/docs/sandboxes/linux#before-you-start) and [Set up on macOS](/docs/sandboxes/macos#before-you-start). In short: run DefenseClaw as your own user (not root), with its daemon running, plus rootful Docker Engine 28 or newer and a Landlock kernel on Linux, or Docker Desktop and Homebrew on an Apple-silicon Mac. Allow at least 5 GiB of free disk for the images.
+
+## Choose your path
+
+Start with [Set up on Linux](/docs/sandboxes/linux) or [Set up on macOS](/docs/sandboxes/macos), then [Run an agent](/docs/sandboxes/first-session) and [Review, undo or pull](/docs/sandboxes/guide).
+
+## The session lifecycle
+
+<Flow direction="TB" caption="A sandbox's life, one stage per list item below, with review and keep shared in step 4. Setup is once per machine. Every run after it repeats steps 2 to 5.">
+  <Node id="setup" kind="operator">{`Set up the machine\nonce: defenseclaw sandbox setup`}</Node>
+  <Node id="run" kind="operator">{`Start or resume a sandbox\nsandbox run · sandbox connect`}</Node>
+  <Node id="session" kind="agent">{`The agent works\ntool calls and web traffic checked`}</Node>
+  <Node id="review" kind="decision">{`Review what changed\nfiles that can run code flagged`}</Node>
+  <Node id="keep" kind="operator">{`Decide what to keep\nLinux: keep or undo · Mac: bring back`}</Node>
+  <Node id="stop" kind="generic">{`Sandbox stopped and kept\nresume it later, or delete it`}</Node>
+  <Edge from="setup" to="run" />
+  <Edge from="run" to="session" />
+  <Edge from="session" to="review" />
+  <Edge from="review" to="keep" />
+  <Edge from="keep" to="stop" />
+</Flow>
+
+1. **Setup** checks the machine, installs OpenShell when you agree and builds the harness images.
+2. **Run** creates a sandbox for the folder you are in, or resumes the one that holds it.
+3. **During the session** every tool call, and every site reached through the egress proxy, is checked. Blocks and asks appear in the activity feed.
+4. **At the end** you review the changed files that could run code on your machine, then keep, undo or pull them. On Linux with Docker you keep or undo the changes. On a Mac, a MicroVM or with `--copy`, you apply them, put them on a branch, write a patch, or leave them in the sandbox.
+5. **Stop or delete.** The sandbox is kept: `defenseclaw sandbox connect NAME` resumes it, `defenseclaw sandbox delete NAME` removes it.
+
+## What you can see, and how far to trust it
+
+Some of what DefenseClaw reports about a sandbox it measures itself, and some is what OpenShell or the sandboxed program says about itself. [Sandbox telemetry](/docs/observability/sandbox-telemetry) says which is which, signal by signal.
+
+### What it does not do
+
+- It does not stop a program from using the model credential through the harness's own program, because OpenShell opens the model host around the egress proxy.
+- It does not inspect HTTPS paths or bodies.
+
+## Which agents can run
+
+Claude Code and Codex are set up by default. GitHub Copilot CLI, OpenCode, Kiro CLI, Hermes Agent and Antigravity also run. DefenseClaw uses a harness image only after it proves that its hooks fire and block in it. Amp, Cursor Agent and Devin CLI cannot run yet because the unverified images need an account no test could stand in for.
+
+| Agent | `sandbox run` name | Hook tier | Status |
+| --- | --- | --- | --- |
+| Claude Code | `claude` | managed | Verified |
+| Codex | `codex` | managed | Verified |
+| GitHub Copilot CLI | `copilot` | managed | Verified through bring-your-own-provider mode |
+| OpenCode | `opencode` | user | Verified |
+| Kiro CLI | `kiro` | user | Verified in scripted mode |
+| Hermes Agent | `hermes` | user | Verified with a mock model |
+| Antigravity | `antigravity` (or `agy`) | user | Verified with a mock Gemini API |
+| Cursor Agent | `cursor-agent` | managed | Unverified |
+| Amp | `amp` | user | Unverified |
+| Devin CLI | `devin` | user | Unverified |
+
+The hook tier says whether the agent could switch DefenseClaw's hooks off. **Managed**: the hook configuration is a root-owned file that user and project settings cannot override. **User**: the configuration lives where the agent could edit it, so the run banner says so and DefenseClaw watches for hooks that go silent. The [capability matrix](/docs/connectors/capability-matrix) lists each harness's hook file and version. Add another agent with `defenseclaw sandbox setup --harness NAME`.
+
+## What is in the image
+
+Each harness image is NVIDIA's OpenShell community base image (Ubuntu 24.04, pinned by digest) with the harness and DefenseClaw's hooks on top. The agent finds `gcc`, `g++` and `make`, Python 3.14 (`python3`, `python`, `pip` using `/sandbox/.venv`, plus `uv`), Node.js 22 with `npm`, and `git`, `gh`, `curl`, `jq` and `ssh`. `make` is a DefenseClaw wrapper around GNU make, because OpenShell's seccomp filter refuses a call make issues for every recipe. There is no Go, Rust or Java toolchain, and the agent has no root, so it cannot `apt-get install` one. For another system tool, build a base image of your own `FROM` the pinned base, push it, and set `openshell.image.base` in `config.yaml` to its digest (`<image>@sha256:…`; [configuration](/docs/reference/configuration)). The next run builds the harness images on it.
+
+## Where to go next
+
+Reference: [Sandbox CLI](/docs/reference/sandbox-cli), [policy](/docs/sandboxes/policy-packs), [network](/docs/sandboxes/network), [telemetry](/docs/observability/sandbox-telemetry). Problems: [Sandbox troubleshooting](/docs/sandboxes/guide).

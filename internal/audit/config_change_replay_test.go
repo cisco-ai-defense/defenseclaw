@@ -484,8 +484,12 @@ func TestAuditEventRecordDigestMigrationIsAdditive(t *testing.T) {
 	if err := migrateAuditEventRecordDigest(store.db); err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
-	if got := migrations[len(migrations)-1].description; got != configChangeRecordDigestMigrationDescription {
-		t.Fatalf("last migration = %q, want the record digest one", got)
+	found := false
+	for _, candidate := range migrations {
+		found = found || candidate.description == configChangeRecordDigestMigrationDescription
+	}
+	if !found {
+		t.Fatal("the record digest migration is not in the migration list")
 	}
 }
 

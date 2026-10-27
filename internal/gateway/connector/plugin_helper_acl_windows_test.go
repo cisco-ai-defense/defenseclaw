@@ -53,6 +53,7 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 		system         = "*S-1-5-18"
 		administrators = "*S-1-5-32-544"
 		trustedInstall = "NT SERVICE\\TrustedInstaller"
+		ownerRights    = "*S-1-3-4"
 	)
 	type layout struct{ grand, parent, home, nest, data, hooks, record, binDir, binary string }
 	for _, asset := range []struct{ source, file, function string }{
@@ -77,6 +78,17 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 			{name: "inherit-only grant on the bin directory", trusted: true,
 				changes: func(l layout) [][]string { return [][]string{{l.binDir, "/grant", users + ":(CI)(IO)W"}} }},
 			{name: "nested data directory", nested: true, trusted: true},
+			// The CLI and install.ps1 write the data folder private: no inherited
+			// entries, OWNER RIGHTS and SYSTEM full control (GAP-2042). OWNER
+			// RIGHTS grants only the owner, which must itself be trusted.
+			{name: "CLI private data folder: OWNER RIGHTS full control", trusted: true,
+				changes: func(l layout) [][]string {
+					return [][]string{{l.data, "/inheritance:r", "/grant:r", ownerRights + ":(OI)(CI)F", system + ":(OI)(CI)F"}}
+				}},
+			{name: "OWNER RIGHTS full control on a hook directory owned by another user",
+				changes: func(l layout) [][]string {
+					return [][]string{{l.hooks, "/grant", ownerRights + ":F"}, {l.hooks, "/setowner", "*" + otherUser}}
+				}},
 			{name: "record writable by Users",
 				changes: func(l layout) [][]string { return [][]string{{l.record, "/grant", users + ":W"}} }},
 			{name: "hook directory writable by Users",

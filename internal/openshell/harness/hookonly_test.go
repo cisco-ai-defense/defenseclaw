@@ -53,7 +53,7 @@ func writeFile(t *testing.T, path string, data []byte) {
 // server key on one line, as the real check does for the parsed document.
 // The Hermes .env assignment check (FILE then a pattern) runs on the system
 // Python: it needs nothing but the standard library.
-const yamlCheckStub = "#!/bin/sh\n[ $# -eq 5 ] && exec /usr/bin/python3 \"$@\"\n/usr/bin/grep -qE '^secrets: *[^ ]|^server: *[^ l]' \"$4\" && exit 3\nexit 0\n"
+const yamlCheckStub = "#!/bin/sh\n[ $# -ge 5 ] && exec /usr/bin/python3 \"$@\"\n/usr/bin/grep -qE '^secrets: *[^ ]|^server: *[^ l]' \"$4\" && exit 3\nexit 0\n"
 
 // launcher's pinned interpreter, which runs its YAML checks, replaced by py
 // (yamlCheckStub when empty). Other launchers are left as they are.
@@ -128,27 +128,33 @@ func TestHermesLauncherRefusesHomeCode(t *testing.T) {
 		// refusal is what the launcher must say; empty: it must start.
 		refusal string
 	}{
-		"env safe mode":       {".env", []byte("HERMES_SAFE_MODE=1\n"), ".env sets HERMES_SAFE_MODE"},
-		"env managed dir":     {".env", []byte("export HERMES_MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
-		"env home":            {".env", []byte("HERMES_HOME=/tmp/x\n"), "sets HERMES_HOME"},
-		"env project plugins": {".env", []byte("HERMES_ENABLE_PROJECT_PLUGINS=true\n"), "sets HERMES_ENABLE_PROJECT_PLUGINS"},
-		"env python path":     {".env", []byte("PYTHONPATH=/tmp/x\n"), "sets PYTHONPATH"},
-		"env glued pair":      {".env", []byte("OPENAI_API_KEY=sk-xHERMES_SAFE_MODE=1\n"), "sets HERMES_SAFE_MODE"},
-		"env nul padded":      {".env", []byte("HERMES_\x00MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
-		"env utf-16":          {".env", utf16LE("HERMES_MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
-		"op env":              {".op.env", []byte("HERMES_MANAGED_DIR=/tmp/x\n"), ".op.env sets HERMES_MANAGED_DIR"},
-		"profile env":         {"profiles/work/.env", []byte("HERMES_SAFE_MODE=1\n"), "profiles/work/.env sets HERMES_SAFE_MODE"},
-		"env directory":       {".env/", nil, ".env is not a readable regular file"},
+		"env safe mode":                 {".env", []byte("HERMES_SAFE_MODE=1\n"), ".env sets HERMES_SAFE_MODE"},
+		"env managed dir":               {".env", []byte("export HERMES_MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
+		"env quoted safe mode":          {".env", []byte("'HERMES_SAFE_MODE'=1\n"), "sets HERMES_SAFE_MODE"},
+		"env export quoted managed dir": {".op.env", []byte("export 'HERMES_MANAGED_DIR'=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
+		"env home":                      {".env", []byte("HERMES_HOME=/tmp/x\n"), "sets HERMES_HOME"},
+		"env project plugins":           {".env", []byte("HERMES_ENABLE_PROJECT_PLUGINS=true\n"), "sets HERMES_ENABLE_PROJECT_PLUGINS"},
+		"env python path":               {".env", []byte("PYTHONPATH=/tmp/x\n"), "sets PYTHONPATH"},
+		"env glued pair":                {".env", []byte("OPENAI_API_KEY=sk-xHERMES_SAFE_MODE=1\n"), "sets HERMES_SAFE_MODE"},
+		"env nul padded":                {".env", []byte("HERMES_\x00MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
+		"env utf-16":                    {".env", utf16LE("HERMES_MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
+		"op env":                        {".op.env", []byte("HERMES_MANAGED_DIR=/tmp/x\n"), ".op.env sets HERMES_MANAGED_DIR"},
+		"profile env":                   {"profiles/work/.env", []byte("HERMES_SAFE_MODE=1\n"), "profiles/work/.env sets HERMES_SAFE_MODE"},
+		"env directory":                 {".env/", nil, ".env is not a readable regular file"},
 		// Hermes drops /etc/hermes under PYTEST_CURRENT_TEST only while
 		// HERMES_MANAGED_DIR is unset, and the launcher sets it, so no file
 		// that names the variable is refused (GAP-1122, 1.0.4 review).
-		"env pytest switch":           {".env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
-		"env empty pytest switch":     {".env", []byte("export PYTEST_CURRENT_TEST=\n"), ""},
-		"env quoted pytest switch":    {".env", []byte("'PYTEST_CURRENT_TEST'=x\n"), ""},
-		"env utf-16 pytest switch":    {".env", utf16LE("PYTEST_CURRENT_TEST=x\n"), ""},
-		"op env pytest switch":        {".op.env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
-		"profile env pytest switch":   {"profiles/work/.env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
-		"env commented pytest switch": {".env", []byte("# PYTEST_CURRENT_TEST=1\n"), ""},
+		"env pytest switch":                {".env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
+		"env empty pytest switch":          {".env", []byte("export PYTEST_CURRENT_TEST=\n"), ""},
+		"env quoted pytest switch":         {".env", []byte("'PYTEST_CURRENT_TEST'=x\n"), ""},
+		"env utf-16 pytest switch":         {".env", utf16LE("PYTEST_CURRENT_TEST=x\n"), ""},
+		"op env pytest switch":             {".op.env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
+		"profile env pytest switch":        {"profiles/work/.env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
+		"env commented pytest switch":      {".env", []byte("# PYTEST_CURRENT_TEST=1\n"), ""},
+		"env commented managed dir":        {".env", []byte("# HERMES_MANAGED_DIR=/tmp/old\n"), ""},
+		"env indented managed dir comment": {".env", []byte("  # HERMES_MANAGED_DIR=/tmp/old\n"), ""},
+		"env utf-16 managed dir comment":   {".env", utf16LE("# HERMES_MANAGED_DIR=/tmp/old\n"), ""},
+		"env managed dir after comment":    {".env", []byte("# HERMES_MANAGED_DIR=/tmp/old\nHERMES_MANAGED_DIR=/tmp/new\n"), "sets HERMES_MANAGED_DIR"},
 		// Only a real assignment, as python-dotenv reads it, sets a loader,
 		// interpreter or Tirith variable; a comment or a value that only
 		// mentions one does not (1.0.4 review).

@@ -166,6 +166,24 @@ class TestBridgeReadinessContract(unittest.TestCase):
 
 
 class TestManagedNoWaitSecurityGate(unittest.TestCase):
+    def test_invalid_signals_do_not_touch_the_stack_or_config(self):
+        from defenseclaw.commands.cmd_setup_local_observability import local_observability
+
+        app = AppContext()
+        app.cfg = SimpleNamespace(data_dir="/tmp/defenseclaw-test")
+        with (
+            patch("defenseclaw.commands.cmd_setup_local_observability._resolve_controller") as resolve,
+            patch("defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config") as apply,
+        ):
+            for flags in ([], ["--no-config"], ["--no-wait"]):
+                result = CliRunner().invoke(
+                    local_observability, ["up", "--signals", "metrics,banana", *flags], obj=app
+                )
+                self.assertEqual(result.exit_code, 2, result.output)
+                self.assertIn("banana", result.output)
+            resolve.assert_not_called()
+            apply.assert_not_called()
+
     def test_password_flags_propagate_exact_selected_mode(self):
         from defenseclaw.commands.cmd_setup_local_observability import local_observability
 

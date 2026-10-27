@@ -4,73 +4,61 @@
 import json
 from pathlib import Path
 
-from scripts.update_test_timings import go_ci_log_results, go_ci_log_timings
+from scripts.update_test_timings import go_timings, windows_go_timings
 
 STAMP = "2026-10-19T12:00:00.1234567Z"
+MODULE = "github.com/example"
 
 
-def test_go_ci_log_reads_raw_job_logs() -> None:
-    text = "\n".join(
-        [
-            f"{STAMP} ok  \tgithub.com/example/pkg/a\t12.5s\tcoverage: 80.0% of statements",
-            f"{STAMP} FAIL\tgithub.com/example/pkg/b\t3.25s",
-            f"{STAMP} FAIL",
-            f"{STAMP} ok  \tgithub.com/example/pkg/c\t(cached)",
-            "ok  \tgithub.com/example/pkg/d\t1.0s",
-        ]
-    )
-
-    assert go_ci_log_results(text) == [
-        ("github.com/example/pkg/a", "12.5"),
-        ("github.com/example/pkg/b", "3.25"),
-        ("github.com/example/pkg/d", "1.0"),
-    ]
+def _event(action: str, package: str, elapsed: float, test: str | None = None) -> str:
+    event = {"Action": action, "Package": f"{MODULE}/{package}", "Elapsed": elapsed}
+    if test is not None:
+        event["Test"] = test
+    return json.dumps(event)
 
 
-def test_go_ci_log_strips_gh_run_view_job_and_step_columns() -> None:
-    # gh run view --log writes "<job name>\t<step name>\t<timestamp> <line>",
-    # and this repository's job and step names contain spaces.
-    prefix = "Go Test (gateway race 1/3)\tRun the gateway race shard\t"
-    text = "\n".join(
-        [
-            f"{prefix}{STAMP} ok  \tgithub.com/example/pkg/a\t12.5s",
-            f"{prefix}{STAMP} FAIL\tgithub.com/example/pkg/b\t3.25s",
-            f"{prefix}{STAMP} === RUN   TestOk",
-            f"{prefix}{STAMP} --- PASS: TestOk (0.00s)",
-        ]
-    )
-
-    assert go_ci_log_results(text) == [
-        ("github.com/example/pkg/a", "12.5"),
-        ("github.com/example/pkg/b", "3.25"),
-    ]
-
-
-def test_go_ci_log_timings_sums_split_parts_and_keeps_test_times(tmp_path: Path) -> None:
-    current = tmp_path / "go-linux.json"
-    current.write_text(
-        json.dumps(
-            {
-                "packages": {"github.com/example/pkg/a": 99.0, "github.com/example/pkg/z": 4.0},
-                "tests": {"pkg/a": {"*": 0.1}},
-            }
+def test_go_timings_sums_shards_and_keeps_slow_top_level_tests(tmp_path: Path) -> None:
+    # Two CI shards of one package (go_test_report.py --timings files).
+    (tmp_path / "a.json").write_text(
+        "\n".join(
+            [
+                _event("pass", "pkg/a", 30.0, "TestSlow"),
+                _event("pass", "pkg/a", 0.5, "TestFast"),
+                _event("pass", "pkg/a", 0.1, "TestSlow/sub"),
+                _event("pass", "pkg/a", 40.0),
+            ]
         ),
         encoding="utf-8",
     )
-    log = tmp_path / "ci.log"
+    (tmp_path / "b.json").write_text(
+        "\n".join([_event("fail", "pkg/a", 25.0, "TestOther"), _event("fail", "pkg/a", 30.0), "not json"]),
+        encoding="utf-8",
+    )
+
+    data = go_timings([tmp_path / "a.json", tmp_path / "b.json"], MODULE)
+
+    assert data["packages"] == {f"{MODULE}/pkg/a": 70.0}
+    assert data["tests"] == {"pkg/a": {"TestOther": 25.0, "TestSlow": 30.0, "*": 0.5}}
+
+
+def test_go_timings_reads_events_after_a_log_prefix(tmp_path: Path) -> None:
+    # A Windows job log (gh run view --log) puts the job and step names and a
+    # timestamp before every event the go test -json run printed.
+    prefix = f"Windows x64 Go suite / shard gw3\tFull native Windows Go test\t{STAMP} "
+    log = tmp_path / "win.log"
     log.write_text(
         "\n".join(
             [
-                f"Go Test (part 1)\tRun tests\t{STAMP} ok  \tgithub.com/example/pkg/a\t10.0s",
-                f"Go Test (part 2)\tRun tests\t{STAMP} ok  \tgithub.com/example/pkg/a\t5.0s",
-                # The same result line twice in one log counts once.
-                f"Go Test (part 2)\tRun tests\t{STAMP} ok  \tgithub.com/example/pkg/a\t5.0s",
+                prefix + _event("pass", "internal/gateway", 61.0, "TestSlow"),
+                prefix + _event("pass", "internal/gateway", 62.0),
+                f"{prefix}[go-package-time] {MODULE}/internal/cli pass 40.5",
+                prefix + "=== RUN   TestSlow",
             ]
         ),
         encoding="utf-8",
     )
 
-    data = go_ci_log_timings([log], current)
-
-    assert data["packages"] == {"github.com/example/pkg/a": 15.0, "github.com/example/pkg/z": 4.0}
-    assert data["tests"] == {"pkg/a": {"*": 0.1}}
+    assert go_timings([log], MODULE)["tests"] == {"internal/gateway": {"TestSlow": 61.0, "*": 0.1}}
+    windows = windows_go_timings([log], MODULE)
+    assert windows["packages"] == {f"{MODULE}/internal/cli": 46.5}
+    assert windows["tests"] == {"internal/gateway": {"TestSlow": 61.0, "*": 0.1}}

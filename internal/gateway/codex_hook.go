@@ -145,7 +145,7 @@ type codexHookResponse struct {
 	RuleIDs      []string `json:"rule_ids,omitempty"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive back through the unified dispatch so
-	// finalizeAgentHook can honor it on the hook_decision event +
+	// finalizeAgentHookAnswer can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
 	RedactionEnabled     *bool  `json:"-"`
 	SourceReason         string `json:"-"`
@@ -556,7 +556,7 @@ func (a *APIServer) codexEnabled() bool {
 	if cfg.Guardrail.HasConnector("codex") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "codex")
+	return cfg.Guardrail.NamesConnector("codex")
 }
 
 func (a *APIServer) codexMode(ctx context.Context) string {

@@ -13,10 +13,10 @@ DOCS = Path(__file__).resolve().parents[2] / 'docs-site/content/docs'
 
 
 def flat(name):
-    return ' '.join((DOCS / name).read_text().split())
+    return ' '.join((DOCS / name).read_text(encoding='utf-8').split())
 
 
-@pytest.mark.parametrize('name', ['reference/configuration/index.mdx', 'reference/configuration/paths.mdx'])
+@pytest.mark.parametrize('name', ['reference/configuration.mdx', 'reference/configuration.mdx'])
 def test_windows_layout_distinguishes_setup_from_powershell_install(name):
     text = flat(name)
     assert 'install.ps1' in text and '`.venv`' in text
@@ -24,7 +24,7 @@ def test_windows_layout_distinguishes_setup_from_powershell_install(name):
 
 
 def test_status_json_modes_distinguish_user_and_enterprise_shapes():
-    text = flat('reference/configuration/fail-modes.mdx')
+    text = flat('reference/fail-modes.mdx')
     assert '`connectors[].fail_mode.effective`' in text
     assert '`name`' in text
     assert '`connectors.<id>.effective_hook_fail_mode`' in text
@@ -32,12 +32,12 @@ def test_status_json_modes_distinguish_user_and_enterprise_shapes():
 
 
 def test_ancestor_strictness_has_no_windows_only_qualifier():
-    text = flat('enterprise/plan/threat-model.mdx')
+    text = flat('enterprise/threat-model.mdx')
     assert '`DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS` (Windows)' not in text
     assert 'strict ancestor checks on Linux, macOS and Windows' in text
 
 
-@pytest.mark.parametrize('name', ['enterprise/identity/authentication.mdx', 'enterprise/identity/reference.mdx'])
+@pytest.mark.parametrize('name', ['enterprise/identity-and-authentication.mdx', 'enterprise/identity-and-authentication.mdx'])
 def test_managed_windows_validation_names_the_machine_config(name):
     text = flat(name)
     assert 'config validate --config' in text
@@ -45,7 +45,7 @@ def test_managed_windows_validation_names_the_machine_config(name):
     assert 'ensure' in text
 
 
-@pytest.mark.parametrize('name', ['enterprise/configure/reference.mdx', 'enterprise/configure/ai-defense-key.mdx'])
+@pytest.mark.parametrize('name', ['enterprise/ai-defense-key.mdx', 'enterprise/ai-defense-key.mdx'])
 def test_disabled_ai_defense_reference_allows_key_removal(name):
     text = flat(name).split('Remove the key', 1)[1]
     assert 'enabled AI Defense inspection' in text
@@ -53,7 +53,7 @@ def test_disabled_ai_defense_reference_allows_key_removal(name):
 
 
 def test_manual_downgrade_regenerates_connectors_before_start():
-    text = flat('appendix/migrate-v9.mdx').split('go back by hand', 1)[1].split('If you do not have a matching', 1)[0]
+    text = flat('reference/migrate-v9.mdx').split('go back by hand', 1)[1].split('If you do not have a matching', 1)[0]
     regenerate = text.index('Regenerate every connector')
     start = text.index('Start the 0.8.x gateway')
     assert regenerate < start
@@ -66,7 +66,7 @@ def test_manual_downgrade_regenerates_connectors_before_start():
 def test_manual_downgrade_keeps_the_restored_config():
     # 0.8.x quickstart and init keep only the named connector and reset the
     # scanner mode and the judge, so they must not run on a restored config.
-    raw = (DOCS / 'appendix/migrate-v9.mdx').read_text()
+    raw = (DOCS / 'reference/migrate-v9.mdx').read_text(encoding='utf-8')
     section = raw.split('go back by hand', 1)[1].split('If you do not have a matching', 1)[0]
     commands = ' '.join(re.findall(r'```(?:bash|sh|powershell)?\n(.*?)```', section, re.S))
     assert 'agent discover --refresh' in commands
@@ -79,12 +79,12 @@ def test_manual_downgrade_keeps_the_restored_config():
 
 
 def test_manual_downgrade_sends_windows_codex_to_rollback():
-    text = flat('appendix/migrate-v9.mdx').split('go back by hand', 1)[1][:600]
+    text = flat('reference/migrate-v9.mdx').split('go back by hand', 1)[1][:600]
     assert 'Windows with the Codex connector' in text and '`defenseclaw rollback`' in text
 
 
 def test_windows_enrollment_wait_starts_after_agent_first_start():
-    text = flat("enterprise/configure/enrollment.mdx")
+    text = flat("enterprise/enrollment.mdx")
     assert "account is signed in and the agent is installed" in text
     assert "Claude Code must also start once" in text
     assert "five-minute wait starts then" in text
@@ -93,7 +93,7 @@ def test_windows_enrollment_wait_starts_after_agent_first_start():
 def test_windows_setup_result_lists_changes_only_when_it_wrote_something():
     # GAP-0536: a hot config apply, a migration and other writes add a
     # Windows `changes` list; a run that wrote nothing has none.
-    text = flat("enterprise/operate/reference.mdx")
+    text = flat("enterprise/lifecycle.mdx")
     assert "On Linux and macOS the result's `changes` list" in text
     assert "a `changes` list when the run wrote something" in text
     assert "A run that wrote nothing has no `changes` key" in text
@@ -127,7 +127,7 @@ def _config_change_pages():
         # Secure Client computers do not take signed bundles.
         if 'secure-client' in rel:
             continue
-        if CONFIG_CHANGE_RECIPE.search(page.read_text()):
+        if CONFIG_CHANGE_RECIPE.search(page.read_text(encoding='utf-8')):
             yield rel
 
 
@@ -136,10 +136,10 @@ def test_no_docs_page_or_navigation_entry_for_signed_bundles():
              if p.is_file() and 'bundle' in p.name.lower()]
     assert not files
     for meta in sorted(CONTENT.rglob('meta.json')):
-        entries = json.loads(meta.read_text()).get('pages', [])
+        entries = json.loads(meta.read_text(encoding='utf-8')).get('pages', [])
         assert not [e for e in entries if 'bundle' in e.lower()], meta.relative_to(CONTENT)
     for page in sorted(CONTENT.rglob('*.mdx')):
-        text = page.read_text()
+        text = page.read_text(encoding='utf-8')
         front = text.split('\n---', 1)[0] if text.startswith('---') else ''
         assert not BUNDLE_DEPLOYMENT.search(front), page.relative_to(CONTENT)
 
@@ -148,7 +148,7 @@ def test_no_docs_heading_or_link_sends_readers_to_deploy_bundles():
     offenders = []
     for page in sorted(CONTENT.rglob('*.mdx')):
         rel = page.relative_to(CONTENT).as_posix()
-        text = page.read_text()
+        text = page.read_text(encoding='utf-8')
         offenders += [f'{rel}: {line}' for line in text.splitlines()
                       if re.match(r'#{1,6} ', line) and BUNDLE_DEPLOYMENT.search(line)]
         for match in LINK.finditer(text):
@@ -161,16 +161,16 @@ def test_no_docs_heading_or_link_sends_readers_to_deploy_bundles():
 
 def test_config_change_recipes_are_found():
     found = set(_config_change_pages())
-    for name in ('enterprise/mdm/intune/windows.mdx', 'enterprise/mdm/intune/linux.mdx',
-                 'enterprise/mdm/intune/macos.mdx', 'enterprise/mdm/reference.mdx',
-                 'enterprise/operate/lifecycle.mdx', 'enterprise/mdm/configmgr.mdx',
+    for name in ('enterprise/mdm/intune-windows.mdx', 'enterprise/mdm/intune-linux.mdx',
+                 'enterprise/mdm/intune-macos.mdx', 'enterprise/mdm/index.mdx',
+                 'enterprise/lifecycle.mdx', 'enterprise/mdm/configmgr.mdx',
                  'enterprise/mdm/jamf.mdx', 'enterprise/mdm/kandji.mdx'):
         assert name in found
 
 
 @pytest.mark.parametrize('name', sorted(set(_config_change_pages()) | {
-    'enterprise/configure/configuration.mdx',
-    'enterprise/operate/reference.mdx',
+    'enterprise/configuration.mdx',
+    'enterprise/lifecycle.mdx',
 }))
 def test_config_change_recipes_are_qualified_for_bundle_mode(name):
     # Bundle mode refuses a plain config (`bundle_required`) or reverts an edit
@@ -181,9 +181,9 @@ def test_config_change_recipes_are_qualified_for_bundle_mode(name):
 
 
 def test_windows_bundle_mode_upgrade_leaves_the_config_out():
-    text = flat('enterprise/mdm/intune/windows.mdx').split('**Upgrade.**', 1)[1].split('**Roll back.**', 1)[0]
+    text = flat('enterprise/mdm/intune-windows.mdx').split('**Upgrade.**', 1)[1].split('**Roll back.**', 1)[0]
     assert 'without `-ConfigPath`' in text
-    row = next(line for line in (DOCS / 'enterprise/mdm/intune/windows-reference.mdx').read_text().splitlines()
+    row = next(line for line in (DOCS / 'enterprise/mdm/intune-windows.mdx').read_text(encoding='utf-8').splitlines()
                if line.startswith('| `-ConfigPath`'))
     assert 'bundle_required' in row
 
@@ -206,7 +206,7 @@ def _doc_blocks(text):
 def test_unix_wrapper_runs_package_and_credential_before_the_bundle_mode_check(wrapper):
     # The MDM reference discloses this order; if the wrapper ever refuses
     # first, the disclosure must change with it.
-    main = (DOCS.parents[2] / wrapper).read_text().split('\ndc_main() {', 1)[1]
+    main = (DOCS.parents[2] / wrapper).read_text(encoding='utf-8').split('\ndc_main() {', 1)[1]
     package = main.index('dc_install_package')
     secret = main.index('dc_store_secret "$gateway"')
     ensure = main.index('"--config=$ensure_config"')
@@ -214,7 +214,7 @@ def test_unix_wrapper_runs_package_and_credential_before_the_bundle_mode_check(w
 
 
 def test_bundle_required_refusal_discloses_the_wrapper_steps_that_already_ran():
-    text = (DOCS / 'enterprise/mdm/reference.mdx').read_text()
+    text = (DOCS / 'enterprise/mdm/index.mdx').read_text(encoding='utf-8')
     section = ' '.join(text.split('**Change the config.**', 1)[1].split('\n## ', 1)[0].split())
     assert 'bundle_required' in section
     assert 'the config is not applied' in section
@@ -225,7 +225,7 @@ def test_bundle_required_refusal_discloses_the_wrapper_steps_that_already_ran():
 def test_no_page_promises_a_bundle_required_refusal_changes_nothing():
     offenders = []
     for page in sorted(DOCS.rglob('*.mdx')):
-        for block in _doc_blocks(page.read_text()):
+        for block in _doc_blocks(page.read_text(encoding='utf-8')):
             if 'bundle_required' in block and NO_CHANGE_CLAIM.search(block):
                 offenders.append(f'{page.relative_to(DOCS)}: {" ".join(block.split())[:160]}')
     assert not offenders, '\n'.join(offenders)
@@ -252,7 +252,7 @@ WINDOWS_RESTORE = DOCS.parents[2] / 'internal/cli/windows_enterprise_bundle_rest
 def _bundle_edit_blocks():
     for page in sorted(DOCS.rglob('*.mdx')):
         rel = page.relative_to(DOCS).as_posix()
-        for block in _doc_blocks(page.read_text()):
+        for block in _doc_blocks(page.read_text(encoding='utf-8')):
             flat_block = ' '.join(block.split())
             if BUNDLE_MODE_CONTEXT.search(flat_block) and EDIT_PUT_BACK.search(flat_block):
                 yield rel, flat_block
@@ -260,8 +260,8 @@ def _bundle_edit_blocks():
 
 def test_bundle_mode_edit_reversion_is_found():
     found = {rel for rel, _ in _bundle_edit_blocks()}
-    for name in ('enterprise/operate/reference.mdx', 'enterprise/operate/lifecycle.mdx',
-                 'enterprise/configure/configuration.mdx', 'enterprise/mdm/reference.mdx'):
+    for name in ('enterprise/lifecycle.mdx', 'enterprise/lifecycle.mdx',
+                 'enterprise/configuration.mdx', 'enterprise/mdm/index.mdx'):
         assert name in found, name
 
 
@@ -286,12 +286,12 @@ def test_windows_bundle_mode_edit_is_restored_by_a_later_ensure_or_repair():
     # The code: Setup /ensure or /repair without CONFIG= (or BUNDLE=,
     # TRUSTANCHORS=, MODE=) on an installed device restores the confirmed
     # bundle config over an edited config.yaml.
-    src = WINDOWS_RESTORE.read_text()
+    src = WINDOWS_RESTORE.read_text(encoding='utf-8')
     body = src.split('func windowsBundleRestoreRequested(', 1)[1].split('\n}\n', 1)[0]
     assert '(action == "ensure" || action == "repair")' in body
     assert 'strings.TrimSpace(opts.configPath) == ""' in body
     assert 'opts.installedBeforeRun' in body
-    blocks = [b for rel, b in _bundle_edit_blocks() if rel == 'enterprise/operate/reference.mdx']
+    blocks = [b for rel, b in _bundle_edit_blocks() if rel == 'enterprise/lifecycle.mdx']
     assert any(WINDOWS_NOT_WATCHED.search(b) and 'Setup `/ensure` or `/repair` without `CONFIG=`' in b
                for b in blocks), blocks
 
@@ -304,17 +304,17 @@ def test_observability_reference_header_version_is_explained(monkeypatch):
     from defenseclaw.config import CURRENT_CONFIG_VERSION
 
     root = DOCS.parents[2]
-    embedded = (root / 'schemas/config/v8/reference/observability.yaml').read_text()
+    embedded = (root / 'schemas/config/v8/reference/observability.yaml').read_text(encoding='utf-8')
     monkeypatch.setattr(cmd_config, 'config_v8_reference', lambda fmt, section: embedded)
     res = CliRunner().invoke(cmd_config.config_reference, ['observability'])
     assert res.exit_code == 0, res.output
     family = re.match(r'# (DEFENSECLAW CONFIGURATION v(\d+))', res.output)
     assert family, res.output.splitlines()[0]
     assert int(family[2]) == CURRENT_CONFIG_VERSION
-    schema = json.loads((root / 'schemas/config/v8/defenseclaw-config.schema.json').read_text())
+    schema = json.loads((root / 'schemas/config/v8/defenseclaw-config.schema.json').read_text(encoding='utf-8'))
     versions = schema['properties']['config_version']['enum']
     assert CURRENT_CONFIG_VERSION in versions
-    text = flat('reference/observability/index.mdx')
+    text = flat('observability/index.mdx')
     assert f'`{family[1]}`' in text
     covers = ' and '.join(str(v) for v in versions)
     assert f'schema family `v8`, which covers `config_version` {covers}' in text

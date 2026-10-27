@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -351,7 +352,17 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 			message = fmt.Sprintf("the ensure transaction failed (%s)", joinCodes(failure))
 		}
 		rc.RolledBack = false
-		switch owner := d.installedPendingOwner(rc, installed); {
+		owner := d.installedPendingOwner(rc, installed)
+		if owner == nil && policy.Unavailable() && d.installedIsRunBase(rc, installed) {
+			// The gateway was down (held down, stopped): the transaction
+			// installed nothing and the config the run found stays. An
+			// outage proves nothing about the bundle, so its receipt stays
+			// open (pending) instead of failed: a retry applies it, and the
+			// next run that does not settles it as interrupted (GAP-0751).
+			return State{}, &Error{Code: CodeNotConfirmed, Detail: message +
+				"; the gateway was unavailable, so this bundle stays pending: the config the run started with keeps enforcing, and the next lifecycle run retries or settles it"}
+		}
+		switch {
 		case owner != nil:
 			// The installed config is another receipt's pending commit (a
 			// retry that failed before its own commit, or a transaction that
@@ -492,6 +503,14 @@ func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (repor
 			continue
 		}
 		if holds && !committed {
+			if owner, err := d.supersedingCommit(rc, installed); err != nil {
+				return report, rollback, err
+			} else if owner != nil {
+				if err := d.Store.Fail(rc, CodeSuperseded, supersededByMessage(owner)); err != nil {
+					return report, rollback, err
+				}
+				continue
+			}
 			// The applied state records a previous successful transaction.
 			// Lost generation evidence cannot disprove that apply.
 			report.addPending(rc.ReceiptID, "the signed bundle's committed generation cannot be verified")
@@ -675,6 +694,14 @@ func (d *Driver) settleCommitted(installedConfig []byte, installed string, polic
 			continue
 		}
 		if _, committed := d.committedGeneration(rc, installed); !committed {
+			if owner, err := d.supersedingCommit(rc, installed); err != nil {
+				return completed, interrupted, pending, rollback, err
+			} else if owner != nil {
+				if err := d.Store.Fail(rc, CodeSuperseded, supersededByMessage(owner)); err != nil {
+					return completed, interrupted, pending, rollback, err
+				}
+				continue
+			}
 			if d.installedBeforeRun(rc, installedConfig, installed) {
 				if err := d.Store.Fail(rc, CodeInterrupted, "the run that received this bundle ended before its transaction installed it; the installed config kept enforcing"); err != nil {
 					return completed, interrupted, pending, rollback, err
@@ -750,12 +777,58 @@ func (d *Driver) settleCommitted(installedConfig []byte, installed string, polic
 	return completed, interrupted, pending, rollback, nil
 }
 
+// supersedingCommit returns the receipt of a higher bundle whose lifecycle
+// commit (config.generation.json) owns the installed bytes, which rc renders
+// too: that delivery took the config over before rc's run finished
+// (GAP-1187). rc was replaced, so it ends superseded: it is never confirmed,
+// never "not confirmed", and nothing is rolled back for it (GAP-2088).
+func (d *Driver) supersedingCommit(rc *Receipt, installed string) (*Receipt, error) {
+	if rc == nil || installed == "" || installed != rc.ConfigSHA256 {
+		return nil, nil
+	}
+	receipts, err := d.Store.Receipts()
+	if err != nil {
+		return nil, err
+	}
+	for _, other := range receipts {
+		if other.ReceiptID == rc.ReceiptID || other.Version <= rc.Version || other.State == StateFailed {
+			continue
+		}
+		if _, committed := d.committedGeneration(other, installed); committed {
+			return other, nil
+		}
+	}
+	return nil, nil
+}
+
+func supersededByMessage(owner *Receipt) string {
+	return fmt.Sprintf("policy bundle %s version %d renders the same config and committed it before this bundle's run finished; "+
+		"nothing was rolled back, and that bundle's config is the installed one", owner.BundleID, owner.Version)
+}
+
 // installedBeforeRun reports whether the installed config, whose bytes are
 // rc's rendered config, was already installed when the run that staged rc
 // started. The receipt's base record decides; a receipt written before that
 // record existed falls back to the version directories the installed
 // config's YAML values (never its comments) name: only rc's own config can
 // point into rc's directory.
+// installedIsRunBase reports whether the installed config is the one rc's
+// run started from: the same bytes, or still no config at all.
+func (d *Driver) installedIsRunBase(rc *Receipt, installed string) bool {
+	switch rc.BaseConfigSHA256 {
+	case "":
+		return false
+	case NoBaseConfig:
+		if installed != "" || d.ConfigPath == "" {
+			return false
+		}
+		_, err := os.Lstat(d.ConfigPath)
+		return errors.Is(err, fs.ErrNotExist)
+	default:
+		return installed != "" && rc.BaseConfigSHA256 == installed
+	}
+}
+
 func (d *Driver) installedBeforeRun(rc *Receipt, installedConfig []byte, installed string) bool {
 	switch rc.BaseConfigSHA256 {
 	case "":
@@ -838,7 +911,7 @@ func (d *Driver) lastGoodEnforced(rc *Receipt, installed string, policy *Gateway
 		}
 		id, version, signer = ref.BundleID, ref.Version, ref.SignerKeyID
 	} else if rc.BaseConfigSHA256 == NoBaseConfig {
-		return installed == ""
+		return d.noConfigEnforced(rc, installed, policy)
 	} else if rc.BaseConfigSHA256 == "" || rc.BaseConfigSHA256 != installed {
 		return false
 	}
@@ -850,6 +923,24 @@ func (d *Driver) lastGoodEnforced(rc *Receipt, installed string, policy *Gateway
 	record, err := configwrite.ReadGenerationState(d.ConfigPath)
 	return err == nil && record.Generation > 0 && record.ConfigSHA256 == installed && policy.Generation == record.Generation &&
 		record.BundleID == id && record.BundleVersion == version && record.SignerKeyID == signer
+}
+
+// noConfigEnforced proves the last good state of a run that started with no
+// config (GAP-1206): the config file is absent, not merely unreadable (an
+// unreadable file also hashes to ""), and the gateway answers and does not
+// report the candidate's policy or bundle identity. A gateway that does not
+// answer proves nothing, as on Linux and macOS (GAP-1617).
+func (d *Driver) noConfigEnforced(rc *Receipt, installed string, policy *GatewayPolicy) bool {
+	if installed != "" || d.ConfigPath == "" || policy.Unavailable() {
+		return false
+	}
+	if _, err := os.Lstat(d.ConfigPath); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if policy.BundleID != "" && policy.BundleID == rc.BundleID && policy.BundleVersion == rc.Version {
+		return false
+	}
+	return policy.Digest == "" || (policy.Digest != rc.ExpectedDigest && policy.Digest != rc.EffectivePolicyDigest)
 }
 
 func (d *Driver) fail(rc *Receipt, code Code, message string) error {

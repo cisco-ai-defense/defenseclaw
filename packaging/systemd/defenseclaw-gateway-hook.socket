@@ -8,7 +8,7 @@
 
 [Unit]
 Description=DefenseClaw gateway hook socket
-Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/install/linux/
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
 
 [Socket]
 ListenStream=/run/defenseclaw-hook/hook.sock

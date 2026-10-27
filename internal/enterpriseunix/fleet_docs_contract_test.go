@@ -21,7 +21,7 @@ import (
 
 func edgeConfigurationPage(t *testing.T) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "edge-connector", "configuration.mdx"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "edge-connector", "install.mdx"))
 	if err != nil {
 		t.Fatal(err)
 	}

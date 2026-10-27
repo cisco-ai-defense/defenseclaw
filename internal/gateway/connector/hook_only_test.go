@@ -2203,6 +2203,7 @@ func TestHermesSetupAdoptsConsentRecordedUnder08x(t *testing.T) {
 	t.Cleanup(func() { HermesConfigPathOverride = previous })
 	conn := NewHermesConnector()
 	opts := SetupOpts{DataDir: filepath.Join(root, "dc"), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	useHermesDataDirAsDefenseClawHome(t, opts)
 	hookScript := filepath.Join(opts.DataDir, "hooks", "hermes-hook.sh")
 	command := shellWord(hookScript)
 	scriptBody := []byte("#!/bin/bash\n# defenseclaw-managed-hook v6\n")
@@ -2290,6 +2291,21 @@ func TestHermesSetupAdoptsConsentRecordedUnder08x(t *testing.T) {
 	}
 	if err := conn.VerifyClean(opts); err != nil {
 		t.Fatalf("VerifyClean: %v", err)
+	}
+	// A managed uninstall removes approvals of the product's own command,
+	// including consent retained in the pristine 0.8.x backup.
+	managed := opts
+	managed.ManagedEnterprise = true
+	managed.ManagedHookSocket = filepath.Join(root, "hook.sock")
+	if err := teardownHermesAllowlist(managed, configPath, command); err != nil {
+		t.Fatal(err)
+	}
+	cleaned, err := readHermesAllowlist(allowlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cleaned["approvals"].([]interface{})) != 0 {
+		t.Fatal("managed uninstall retained DefenseClaw hook approvals")
 	}
 }
 

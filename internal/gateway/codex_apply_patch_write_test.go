@@ -112,6 +112,12 @@ func TestCodexApplyPatchWriteTargets(t *testing.T) {
 			if row.alias == symlink && !symlinks {
 				t.Skip("no symlink privilege")
 			}
+			if runtime.GOOS == "windows" && !row.block && row.tool != "apply_patch" {
+				// The Windows grammar reads this shell text; its * is a glob
+				// that reaches hard.cfg, the hard link to authorized_keys in
+				// this project (GAP-1717).
+				t.Skip("shell text beside a protected hard link on Windows: GAP-1717")
+			}
 			body := string(mustJSON(t, map[string]any{"session_id": "patch-session", "hook_event_name": "PreToolUse",
 				"tool_name": row.tool, "cwd": project, "tool_input": row.input}))
 			header := hookpaths.Resolve([]byte(body))

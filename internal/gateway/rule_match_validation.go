@@ -112,11 +112,20 @@ func firstAcceptedRegexMatchAt(pattern *regexp.Regexp, text string, accept func(
 	if pattern == nil || text == "" {
 		return nil
 	}
+	// The first candidate is usually decisive: accept it without enumerating
+	// every later candidate of a large document.
+	first := pattern.FindStringIndex(text)
+	if first == nil {
+		return nil
+	}
+	if accept(text[first[0]:first[1]], first[0], first[1]) {
+		return first
+	}
 	// Enumerate against the complete input once. Restarting a regex on
 	// text[offset:] changes the meaning of ^ and word-boundary assertions after
 	// a rejected candidate, allowing a non-match in the original text to become
 	// a match solely because the validation cursor moved.
-	for _, loc := range pattern.FindAllStringIndex(text, -1) {
+	for _, loc := range pattern.FindAllStringIndex(text, -1)[1:] {
 		start, end := loc[0], loc[1]
 		if accept(text[start:end], start, end) {
 			return []int{start, end}
@@ -205,12 +214,18 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 			return validUSSSN(match) && credibleSSNContext(text, start, end)
 		}
 	case "ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER":
-		return func(_, match string, _, _ int) bool { return validPaymentCardCandidate(match) }
+		return func(text, match string, start, _ int) bool {
+			return validPaymentCardCandidate(match) && !decimalFractionAt(text, start)
+		}
 	case "ENT-IBAN":
 		return func(_, match string, _, _ int) bool { return validIBAN(match) }
 	case "ENT-EMAIL-BULK":
 		return func(text, match string, start, end int) bool {
 			return credibleEmailContext(text, match, start, end)
+		}
+	case "ENT-PHONE-E164":
+		return func(text, match string, start, _ int) bool {
+			return credibleE164Context(text, match, start)
 		}
 	case "ENT-BULK-CSV-PII":
 		return func(text, _ string, start, end int) bool {
@@ -419,6 +434,9 @@ func credibleEmailContext(text, match string, start, end int) bool {
 		emailDomainLooksLikeNumericHost(matchLower) {
 		return false
 	}
+	if emailIsPathSegment(text, start, end) {
+		return false
+	}
 	if start >= 0 && end >= start && end <= len(text) {
 		if gitUserEmailPlaceholder(text[:start], matchLower) {
 			return false
@@ -463,6 +481,161 @@ func gitUserEmailPlaceholder(before, email string) bool {
 		return true
 	}
 	return strings.HasSuffix(domain, ".example")
+}
+
+// emailIsPathSegment reports an address-shaped match that is one folder or
+// file name of a local path, such as the home folder of a directory account
+// (/home/user@corp.example/project): a path, not someone's address
+// (GAP-1286). Only a token that starts like a local path counts; a URL with
+// or without a scheme, an scp host:path and a UNC \\host\share path go to
+// another host, so the address still alerts (GAP-1934, GAP-1973).
+func emailIsPathSegment(text string, start, end int) bool {
+	if start <= 0 || start > len(text) || end > len(text) || (text[start-1] != '/' && text[start-1] != '\\') {
+		return false
+	}
+	if end != len(text) && strings.IndexByte("/\\ \t\r\n\"'`:;,)", text[end]) < 0 {
+		return false
+	}
+	return tokenIsLocalPath(text[:start])
+}
+
+// tokenIsLocalPath reports a path whose token starts like a local path: "/"
+// (not "//"), "~/", "./", "../", a drive "X:\" or "X:/", or "file:///". The
+// word (after whitespace or a quote) is read first: a URL to another host
+// ("://" with a scheme other than file, or a leading "//") is remote, also
+// when a query value in it starts with "/" (GAP-2037). Only then is the
+// word cut at "=" and at the shell operators < > ( | & ; , so a path after
+// a redirect, an open paren or an option value is read on its own, and a
+// glued short option ("-C/home/...") or a leading $NAME/, ${NAME}/ or
+// $NAME: (a PATH list) is dropped before the shape test (GAP-2011).
+func tokenIsLocalPath(before string) bool {
+	word := before[strings.LastIndexAny(before, " \t\r\n\"'`")+1:]
+	if strings.HasPrefix(word, "//") || wordHoldsRemoteURL(word) {
+		return false
+	}
+	token := trimShellPathPrefix(word[strings.LastIndexAny(word, "=<>(|&;,")+1:])
+	switch {
+	case strings.HasPrefix(token, "//"):
+		return false
+	case strings.HasPrefix(token, "/"), strings.HasPrefix(token, "~/"), strings.HasPrefix(token, "~\\"),
+		strings.HasPrefix(token, "./"), strings.HasPrefix(token, "../"),
+		strings.HasPrefix(token, ".\\"), strings.HasPrefix(token, "..\\"):
+		return true
+	case len(token) >= 3 && token[1] == ':' && (token[2] == '\\' || token[2] == '/') &&
+		(token[0]|0x20 >= 'a' && token[0]|0x20 <= 'z'):
+		return true
+	}
+	scheme, rest, isURL := strings.Cut(token, "://")
+	return isURL && strings.EqualFold(scheme, "file") && strings.HasPrefix(rest, "/")
+}
+
+// trimShellPathPrefix drops what the shell puts before a local path in one
+// word: a glued short option ("-C/home/x" -> "/home/x"), shell variables
+// that expand to a folder or a PATH list ("$HOME/../x", "${HOME}/x",
+// "$PATH:/home/x" -> "/../x", "/x", "/home/x"), and the leading ":" of a PATH
+// list whose variable the shell-obfuscation view already removed
+// (normalizeShell turns "PATH=$PATH:/home/x" into "PATH=:/home/x"). A
+// host:/path keeps its host, so it stays remote.
+func trimShellPathPrefix(token string) string {
+	return strings.TrimLeft(trimShellVariables(token), ":")
+}
+
+func trimShellVariables(token string) string {
+	if len(token) > 2 && token[0] == '-' && (token[1]|0x20 >= 'a' && token[1]|0x20 <= 'z') &&
+		strings.IndexByte("/~.", token[2]) >= 0 {
+		token = token[2:]
+	}
+	for strings.HasPrefix(token, "$") {
+		rest := token[1:]
+		if strings.HasPrefix(rest, "{") {
+			closing := strings.IndexByte(rest, '}')
+			if closing < 2 || !shellVariableName(rest[1:closing]) {
+				return token
+			}
+			rest = rest[closing+1:]
+		} else {
+			n := 0
+			for n < len(rest) && shellNameByte(rest[n], n == 0) {
+				n++
+			}
+			if n == 0 {
+				return token
+			}
+			rest = rest[n:]
+		}
+		switch {
+		case strings.HasPrefix(rest, "/"):
+			return rest
+		case strings.HasPrefix(rest, ":"):
+			token = rest[1:]
+		default:
+			return token
+		}
+	}
+	return token
+}
+
+func shellVariableName(name string) bool {
+	for i := 0; i < len(name); i++ {
+		if !shellNameByte(name[i], i == 0) {
+			return false
+		}
+	}
+	return name != ""
+}
+
+// shellNameByte reports a byte of a shell variable name (a digit only after
+// the first byte).
+func shellNameByte(c byte, first bool) bool {
+	return c == '_' || c|0x20 >= 'a' && c|0x20 <= 'z' || !first && c >= '0' && c <= '9'
+}
+
+// urlSchemeByte reports a byte of a URL scheme (RFC 3986: ALPHA DIGIT + - .).
+func urlSchemeByte(c byte) bool {
+	return c|0x20 >= 'a' && c|0x20 <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '.' || c == '-'
+}
+
+// wordHoldsRemoteURL reports a word that holds a URL with a scheme other than
+// file ("https://host/...", "--url=https://host/..."): it goes to another host.
+func wordHoldsRemoteURL(word string) bool {
+	at := strings.Index(word, "://")
+	if at <= 0 {
+		return false
+	}
+	start := at
+	for start > 0 {
+		if !urlSchemeByte(word[start-1]) {
+			break
+		}
+		start--
+	}
+	scheme := word[start:at]
+	return scheme != "" && !strings.EqualFold(scheme, "file")
+}
+
+// isoDatePlus is "+YYYY-MM-DD": a date after a plus sign (a diff's added
+// line, a UTC offset), not a country code.
+var isoDatePlus = regexp.MustCompile(`^\+\d{4}-\d{2}-\d{2}`)
+
+// credibleE164Context rejects the two plus signs that are not a phone
+// number's (GAP-1284): a date right after the plus, and the "+" that starts
+// an added line of a unified diff ("+1761377703126", "+2026-10-02 07:35").
+func credibleE164Context(text, match string, start int) bool {
+	plus := strings.IndexByte(match, '+')
+	if plus < 0 {
+		return true
+	}
+	if isoDatePlus.MatchString(match[plus:]) {
+		return false
+	}
+	at := start + plus
+	lineStart := at == 0 || (at > 0 && at <= len(text) && text[at-1] == '\n')
+	return !lineStart || !looksLikeUnifiedDiff(text)
+}
+
+// looksLikeUnifiedDiff reports text that holds a unified diff hunk header.
+func looksLikeUnifiedDiff(text string) bool {
+	return strings.HasPrefix(text, "@@ -") || strings.Contains(text, "\n@@ -")
 }
 
 func emailDomainLooksLikeNumericHost(email string) bool {
@@ -515,7 +688,18 @@ func acceptedLocalPIIMatchAt(text, match string, start, end int) bool {
 	if len(digits) == 9 && strings.Count(match, "-") == 2 {
 		return credibleSSNContext(text, start, end)
 	}
+	if len(digits) >= 13 && len(digits) <= 19 && decimalFractionAt(text, start) {
+		return false
+	}
 	return true
+}
+
+// decimalFractionAt reports a match that starts right after the decimal
+// point of a number ("9.371449635398431"): the digits of a float, not a card
+// number. Claude Code's ~/.claude.json holds such floats (GAP-2062).
+func decimalFractionAt(text string, start int) bool {
+	return start >= 2 && start <= len(text) && text[start-1] == '.' &&
+		text[start-2] >= '0' && text[start-2] <= '9'
 }
 
 func credibleSSNContext(text string, start, end int) bool {

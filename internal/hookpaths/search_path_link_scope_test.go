@@ -70,7 +70,7 @@ func TestR104Loop3SearchPathCDKeepsLinkScopeOpaque(t *testing.T) {
 		{`cd ./sub && ln -s ../a b && echo marker > out.txt`, false, false},
 		{`cd ./sub/deeper && ln -s ../../a b && echo marker > out.txt`, false, false},
 		{`cd . && ln -s a b && echo marker > out.txt`, false, false},
-		{`cd ` + filepath.Join(cwd, "sub") + ` && ln -s ../a b && echo marker > out.txt`, false, false},
+		{`cd ` + filepath.ToSlash(filepath.Join(cwd, "sub")) + ` && ln -s ../a b && echo marker > out.txt`, false, false},
 	} {
 		file, ok := parseShell(tc.command)
 		if !ok {

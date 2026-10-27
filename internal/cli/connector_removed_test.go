@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -52,12 +53,12 @@ func writeRemovedSetupRecord(t *testing.T, dataDir, path string) {
 	}
 }
 
-// until 1.1: native Setup and uninstall tear down a removed connector with an
-// explicit config home. The teardown changes only the policy module (the stub
-// that denies every request) and the tokens; config.yaml stays as it is,
-// whether or not it was edited, and the teardown lists it, with the module and
-// the backups, as left for the user (JSON for Setup, text for a person).
-// Teardown and verify succeed so uninstall and Setup go on.
+// until 1.1: native Setup, the installers and uninstall tear down OmniGent
+// with an explicit config home. The teardown removes what DefenseClaw wrote:
+// its policy_modules entry and policy in config.yaml (the operator's own
+// entries stay, edited or not), the policy module and the setup receipts. It
+// prints the one removal notice, lists nothing when nothing is left, and
+// teardown and verify succeed.
 func TestConnectorTeardownRemovedOmnigentHonoursConfigHome(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -69,10 +70,8 @@ func TestConnectorTeardownRemovedOmnigentHonoursConfigHome(t *testing.T) {
 			configHome := filepath.Join(testenv.PrivateTempDir(t), ".omnigent")
 			configPath := filepath.Join(configHome, "config.yaml")
 			writeRemovedSetupRecord(t, dataDir, configPath)
-			want := removedOmnigentPatchedConfig
 			if tc.edited {
-				want = removedOmnigentPatchedConfig + "model: local\n"
-				if err := os.WriteFile(configPath, []byte(want), 0o600); err != nil {
+				if err := os.WriteFile(configPath, []byte(removedOmnigentPatchedConfig+"model: local\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -95,34 +94,30 @@ func TestConnectorTeardownRemovedOmnigentHonoursConfigHome(t *testing.T) {
 			}
 			if tc.json {
 				var payload struct {
-					OK        bool `json:"ok"`
+					OK        bool   `json:"ok"`
+					Notice    string `json:"notice"`
 					Leftovers []struct{ Path, What, Step string }
 				}
 				if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &payload); err != nil || !payload.OK {
 					t.Fatalf("teardown JSON = %q, %v", stdout, err)
 				}
-				var paths []string
-				for _, item := range payload.Leftovers {
-					paths = append(paths, item.Path)
+				if payload.Notice != connector.RemovedConnectorNotice || len(payload.Leftovers) != 0 {
+					t.Fatalf("teardown JSON = %q, want the notice and no leftovers", stdout)
 				}
-				for _, path := range []string{configPath, module, filepath.Join(dataDir, "connector_backups", "omnigent")} {
-					if !strings.Contains(strings.Join(paths, "\n"), path) {
-						t.Fatalf("leftovers %v do not name %s", paths, path)
-					}
-				}
-			} else if !strings.Contains(stdout, "OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:") ||
-				!strings.Contains(stdout, "  - "+configPath+": ") {
-				t.Fatalf("teardown output = %q, want the leftovers with config.yaml", stdout)
+			} else if !strings.Contains(stdout, connector.RemovedConnectorNotice) {
+				t.Fatalf("teardown output = %q, want the removal notice", stdout)
 			}
 			data, err := os.ReadFile(configPath)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(data) != want {
-				t.Fatalf("config.yaml after teardown = %q, want it untouched: %q", data, want)
+			text := string(data)
+			if strings.Contains(text, "defenseclaw_omnigent_policy") || !strings.Contains(text, "corp_policy") ||
+				tc.edited != strings.Contains(text, "model: local") {
+				t.Fatalf("config.yaml after teardown = %q, want only the operator's entries", text)
 			}
-			if body, err := os.ReadFile(module); err != nil || !strings.Contains(string(body), `"DENY"`) {
-				t.Fatalf("policy module after teardown = %q, %v; want the stub", body, err)
+			if _, err := os.Lstat(module); err == nil {
+				t.Fatalf("policy module %s is still there", module)
 			}
 			if _, stderr, code := runConnectorCmd(t, "verify", "--connector", "omnigent", "--config-home", configHome); code != 0 {
 				t.Fatalf("verify exit=%d stderr=%s", code, stderr)

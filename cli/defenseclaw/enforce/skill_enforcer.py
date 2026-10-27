@@ -124,7 +124,13 @@ def is_bundled_skill_path(path: str) -> bool:
 class SkillEnforcer:
     def __init__(self, quarantine_dir: str) -> None:
         self.quarantine_dir = os.path.abspath(os.path.join(quarantine_dir, "skills"))
-        make_private_directory(self.quarantine_dir)
+        try:
+            make_private_directory(self.quarantine_dir)
+        except OSError:
+            # An unwritable quarantine folder fails the quarantine itself,
+            # where the install reports it and rolls back (GAP-1740), not
+            # every command that only reads quarantine paths.
+            pass
 
     @staticmethod
     def _is_link_or_reparse(path: str) -> bool:
@@ -372,6 +378,7 @@ class SkillEnforcer:
         dest = self._quarantine_path(skill_name, connector)
         if dest is None:
             return None
+        make_private_directory(self.quarantine_dir)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         if os.path.lexists(dest):
             return None

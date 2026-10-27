@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -150,6 +151,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     all_connectors = resolve_list_connectors(app, "")
     connectors = explicit if explicit is not None else all_connectors
     allow_legacy_plain_scans = len(all_connectors) == 1
+    policy = _mcp_list_admission_policy(app)
 
     if as_json:
         undiscoverable: list[str] = []
@@ -176,6 +178,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     "connector": c,
                     "mcp_servers": _mcp_list_json_items(
                         servers, scan_map, actions_map, connector=c, failed_map=failed_map,
+                        policy=policy,
                     ),
                 })
             click.echo(json.dumps(groups, indent=2, default=str))
@@ -203,6 +206,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             # automation never has to remember argv to know the scope.
             items = _mcp_list_json_items(
                 servers, scan_map, actions_map, connector=connectors[0], failed_map=failed_map,
+                policy=policy,
             )
             payload = (
                 {"connector": connectors[0], "mcp_servers": items}
@@ -219,6 +223,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     undiscoverable: list[str] = []
     source_diagnostics: list[tuple[str, connector_paths.MCPSourceDiagnostic]] = []
     failed_rows: list[tuple[str, str, str, MCPServerEntry | None]] = []
+    held_after_failed_scan: list[tuple[str, str]] = []
     not_loaded: list[tuple[str, MCPServerEntry]] = []
     # GAP-1907: on a fan-out listing, a connector with no MCP servers is a
     # normal state. Collect those into one short line instead of a warning
@@ -260,12 +265,18 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             app.store, servers, connector,
             allow_legacy_plain=allow_legacy_plain_scans,
         )
-        _print_mcp_list_table(servers, scan_map, actions_map, connector, failed_map)
+        _print_mcp_list_table(servers, scan_map, actions_map, connector, failed_map, policy=policy)
         _echo_legacy_mcp_locations(servers)
         not_loaded.extend((connector, s) for s in servers if s.load_problem)
         by_name = {s.name: s for s in servers}
+        held = [
+            name for name in by_name
+            if _blocked_after_failed_scan(actions_map.get(name))
+        ]
+        held_after_failed_scan.extend((connector, name) for name in held)
         failed_rows.extend(
-            (connector, name, row.get("error", ""), by_name.get(name)) for name, row in failed_map.items()
+            (connector, name, row.get("error", ""), by_name.get(name))
+            for name, row in failed_map.items() if name not in held
         )
         shown_any = True
 
@@ -290,6 +301,22 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             ux.subhead(
                 f"... and {len(failed_rows) - _FAILED_SCAN_HINT_LIMIT} more; "
                 "each server's last_scan_error is in: defenseclaw mcp list --json"
+            )
+    if held_after_failed_scan:
+        # GAP-1855: the gateway blocked these when their admission scan
+        # failed. A new "mcp scan" reports a verdict but does not release
+        # that block, so the hint names what does.
+        ux.warn(
+            f"{len(held_after_failed_scan)} MCP server(s) are blocked because their admission scan failed: "
+            + ", ".join(f"{name} ({connector})" for connector, name in held_after_failed_scan)
+        )
+        interval = getattr(getattr(app.cfg, "watch", None), "rescan_interval_min", 60)
+        for connector, name in held_after_failed_scan[:_FAILED_SCAN_HINT_LIMIT]:
+            ux.subhead(
+                f"{name} ({connector}): a new scan does not release this block. "
+                f"Release it now: defenseclaw mcp unblock {shlex.quote(name)} --connector {connector}; "
+                f"otherwise the gateway admits it again at its next rescan "
+                f"(watch.rescan_interval_min, every {interval} min) once the scan succeeds"
             )
     if not_loaded:
         # GAP-2514: the agent skips these entries, so they are not live.
@@ -435,6 +462,52 @@ def _has_enforcement_action(action_entry) -> bool:
     return bool(action_entry and not action_entry.actions.is_empty())
 
 
+# The journal reason of a block the gateway watcher applied because an
+# admission scan failed (internal/watcher scanFailureReason).
+_SCAN_FAILURE_BLOCK_REASON = "scanner failure (fail-closed): "
+
+
+def _blocked_after_failed_scan(action_entry) -> bool:
+    """A block or runtime disable the watcher applied when a scan failed (GAP-1855)."""
+    if not _has_enforcement_action(action_entry):
+        return False
+    actions = action_entry.actions
+    return (actions.install == "block" or actions.runtime == "disable") and str(
+        getattr(action_entry, "reason", "") or ""
+    ).startswith(_SCAN_FAILURE_BLOCK_REASON)
+
+
+def _mcp_list_admission_policy(app: AppContext):
+    """The compiled MCP admission policy the list labels scans with, or None."""
+    try:
+        from defenseclaw.enforce.admission import compile_admission
+
+        return compile_admission(app.cfg, "mcp")
+    except Exception:  # noqa: BLE001 - the list falls back to severity labels
+        return None
+
+
+def _mcp_list_verdict(action_entry, scan_entry, policy) -> tuple[str, str]:
+    """The verdict mcp list shows: an enforcement action, else what the
+    admission policy does with the scan's severity (GAP-1429). Balanced MCP
+    admission warns on HIGH, so a warned server reads "warning", not
+    "rejected"; a severity the policy refuses still reads "rejected"."""
+    label, style = _compute_verdict(action_entry, scan_entry)
+    if policy is None or _has_enforcement_action(action_entry) or not scan_entry:
+        return label, style
+    severity = str(scan_entry.get("max_severity") or "").upper()
+    if severity not in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+        return label, style
+    from defenseclaw.enforce.admission import action_blocks, effective_action_for
+
+    action, allow = effective_action_for(policy, severity=severity, scanner="mcp-scanner")
+    if action_blocks(action):
+        return "rejected", "red"
+    if allow:
+        return "allowed", "green"
+    return "warning", "yellow"
+
+
 def _mcp_list_json_items(
     servers: list[MCPServerEntry],
     scan_map: dict[str, dict],
@@ -442,6 +515,7 @@ def _mcp_list_json_items(
     *,
     connector: str = "",
     failed_map: dict[str, dict] | None = None,
+    policy=None,
 ) -> list[dict]:
     """Build the flat JSON item list for one connector's MCP servers.
 
@@ -477,8 +551,8 @@ def _mcp_list_json_items(
             ae = actions_map[s.name]
             if not ae.actions.is_empty():
                 entry["actions"] = ae.actions.to_dict()
-        verdict_label, _ = _compute_verdict(
-            actions_map.get(s.name), scan_map.get(s.name),
+        verdict_label, _ = _mcp_list_verdict(
+            actions_map.get(s.name), scan_map.get(s.name), policy,
         )
         if failed_map and s.name in failed_map:
             entry["last_scan_error"] = failed_map[s.name]["error"]
@@ -523,6 +597,8 @@ def _print_mcp_list_table(
     actions_map: dict,
     connector: str,
     failed_map: dict[str, dict] | None = None,
+    *,
+    policy=None,
 ) -> None:
     """Render one connector-tagged MCP server table."""
     from rich.console import Console
@@ -558,8 +634,8 @@ def _print_mcp_list_table(
         if s.name in actions_map:
             actions_str = actions_map[s.name].actions.summary()
 
-        verdict_label, verdict_style = _compute_verdict(
-            actions_map.get(s.name), scan_map.get(s.name),
+        verdict_label, verdict_style = _mcp_list_verdict(
+            actions_map.get(s.name), scan_map.get(s.name), policy,
         )
         if failed_map and s.name in failed_map and not _has_enforcement_action(actions_map.get(s.name)):
             verdict_label, verdict_style = "scan failed", "yellow"

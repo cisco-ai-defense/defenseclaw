@@ -39,6 +39,41 @@ class _Recorder:
         self.closed = True
 
 
+def test_config_audit_uses_live_listener_through_coalesced_port_edits(tmp_path, monkeypatch) -> None:
+    import json
+
+    from defenseclaw.logger import _GatewayConfigRecorder
+
+    (tmp_path / "gateway.pid").write_text(str(os.getpid()), encoding="utf-8")
+    record = tmp_path / "gateway-api.json"
+    record.write_text(json.dumps({"pid": os.getpid(), "host": "127.0.0.1", "port": 19080}), encoding="utf-8")
+    record.chmod(0o600)
+    ports = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            ports.append(kwargs["port"])
+
+        def emit_cli_observability(self, _payload):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("defenseclaw.logger.OrchestratorClient", Client)
+    cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=SimpleNamespace(
+        host="127.0.0.1", api_port=19080, resolved_token=lambda: "test runtime credential"))
+    for port in (19081, 19082, 19080):
+        cfg.gateway.api_port = port
+        Logger(_GatewayConfigRecorder(cfg)).log_config_change("config-set", "gateway.api_port=(set)")
+    assert ports == [19080, 19080, 19080]
+    # A prior process's runtime record never redirects a new gateway's facts.
+    record.write_text(json.dumps({"pid": os.getpid() + 1, "host": "127.0.0.1", "port": 19080}), encoding="utf-8")
+    cfg.gateway.api_port = 19083
+    Logger(_GatewayConfigRecorder(cfg)).log_config_change("config-set", "gateway.api_port=(set)")
+    assert ports[-1] == 19083
+
+
 @pytest.mark.parametrize(
     ("document", "expected"),
     [

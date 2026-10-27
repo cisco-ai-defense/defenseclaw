@@ -133,7 +133,17 @@ var configValidateLayout = func() (managed.StandaloneLayout, error) {
 // layout when its administrator-owned runtime descriptor is present.
 func configValidateManagedHostLayout() (managed.StandaloneLayout, bool) {
 	layout, err := configValidateLayout()
-	if err != nil || layout.DescriptorPath == "" {
+	if err != nil {
+		return managed.StandaloneLayout{}, false
+	}
+	// A Windows standalone computer is named by its protected registration
+	// marker, as every other managed-host check there reads it; without it
+	// validate with no file read the per-user config the administrator has
+	// none of (GAP-1625, the Windows half of GAP-0602).
+	if _, present := managedHostWindowsStandalone(); present {
+		return layout, true
+	}
+	if layout.DescriptorPath == "" {
 		return managed.StandaloneLayout{}, false
 	}
 	if _, err := os.Stat(layout.DescriptorPath); err != nil {

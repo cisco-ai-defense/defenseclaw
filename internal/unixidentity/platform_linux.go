@@ -42,6 +42,11 @@ func platformMobileAccounts(context.Context) (map[string]string, error) {
 	return map[string]string{}, nil
 }
 
+// platformSSOLinkedAccounts finds none on Linux, which has no Platform SSO.
+func platformSSOLinkedAccounts(context.Context) (map[string]bool, error) {
+	return map[string]bool{}, nil
+}
+
 // platformOpenDirectoryNodeStates has no Open Directory to read on Linux.
 func platformOpenDirectoryNodeStates(context.Context) (string, error) {
 	return "", errors.New("unixidentity: no Open Directory on this platform")

@@ -1580,9 +1580,10 @@ func (d *SandboxDaemon) notePolicyStop(r daemonRegistration) {
 const sandboxPolicyStopReason = "policy_stop"
 
 // stopRevoked stops a sandbox whose registration the managed gateway
-// revoked; it never starts again from this registration.
+// revoked; it never starts again from this registration. A MicroVM whose
+// disk cannot be synced first is contained instead (GAP-0902).
 func (d *SandboxDaemon) stopRevoked(ctx context.Context, r daemonRegistration) {
-	if _, err := d.rt.manager.Stop(ctx, r.Sandbox); err != nil {
+	if _, err := d.rt.manager.Stop(manager.WithEmergencyStop(ctx, "its managed registration was revoked"), r.Sandbox); err != nil {
 		d.logf("stop %s after its registration was revoked: %v", r.Sandbox, err)
 		return
 	}
