@@ -836,3 +836,18 @@ func TestRunContainedCommandThatRanIsNotContainmentUnavailable(t *testing.T) {
 		t.Fatalf("RunContained = %v, want the command's own failure", err)
 	}
 }
+
+// GAP-1945: 123 is the launcher's code for a refused namespace. A command
+// that ran and exited 123 is a plain failure, not a host without namespaces.
+func TestRunContainedCommandThatRanAndExitedWithTheNoNamespaceCodeIsAPlainFailure(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	err := RunContained(CommandContext(context.Background(), "/bin/sh", "-c", ": > \"$1\"; exit 123", "sh", marker))
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Skipf("the contained command did not run on this host: %v (%v)", err, statErr)
+	}
+	var exitErr *exec.ExitError
+	if err == nil || errors.Is(err, ErrContainmentUnavailable) || errors.Is(err, ErrNotContained) ||
+		!errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("RunContained(exit 123) = %v, want the command's plain failure (exit 1)", err)
+	}
+}

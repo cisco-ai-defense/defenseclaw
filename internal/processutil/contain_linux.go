@@ -78,7 +78,8 @@ const (
 	// containExitNotStarted: the command could not start.
 	containExitNotStarted = 127
 	// containExitNoNamespace: the launcher could not create the runner's
-	// namespaces, so the command never ran (ErrContainmentUnavailable).
+	// namespaces, so the command never ran (ErrContainmentUnavailable). A
+	// command that ran and exited 123 is reported by the launcher as 1.
 	containExitNoNamespace = 123
 )
 
@@ -272,6 +273,11 @@ func launchContained(argv []string) int {
 		return containExitTerminated
 	case err == nil:
 		return 0
+	case errors.As(err, &exitErr) && exitErr.ExitCode() == containExitNoNamespace:
+		// The command ran and ended with the code this launcher keeps for
+		// a refused namespace: report it as a plain failure, so a command
+		// that ran is never read as one that could not (GAP-1945).
+		return 1
 	case errors.As(err, &exitErr) && exitErr.ExitCode() >= 0:
 		return exitErr.ExitCode()
 	case errors.Is(err, ErrContainmentUnavailable):
