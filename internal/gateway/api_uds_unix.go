@@ -94,7 +94,7 @@ func (a *APIServer) newManagedHookSocketServer(ctx context.Context, base func(ht
 	a.startManagedPolicyView(ctx, runtime.GOOS)
 	server := &http.Server{
 		Handler:     a.managedHookSocketHandler(authorizer, base),
-		BaseContext: func(net.Listener) context.Context { return ctx },
+		BaseContext: apiRequestBaseContext(ctx),
 		ConnContext: managedHookConnContext,
 	}
 	return server, listener, nil

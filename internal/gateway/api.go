@@ -1357,11 +1357,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 		baseCtx = withServiceAccountGateway(ctx)
 	}
 	srv := &http.Server{
-		Addr:    a.addr,
-		Handler: handler,
-		BaseContext: func(_ net.Listener) context.Context {
-			return baseCtx
-		},
+		Addr:        a.addr,
+		Handler:     handler,
+		BaseContext: apiRequestBaseContext(baseCtx),
 		ConnContext: acpPeerConnContext,
 	}
 
@@ -1490,16 +1488,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	go systemd.RunWatchdog(watchdogCtx, nil)
 
 	shutdown := func() error {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		var hookShutdownErr error
-		if hookSrv != nil {
-			hookShutdownErr = hookSrv.Shutdown(shutdownCtx)
-		}
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return err
-		}
-		return hookShutdownErr
+		return shutdownAPIServers(apiShutdownGrace, srv, hookSrv)
 	}
 
 	for {
@@ -1519,6 +1508,54 @@ func (a *APIServer) Run(ctx context.Context) error {
 			return shutdown()
 		}
 	}
+}
+
+// apiShutdownGrace bounds how long a stop waits for the requests the
+// gateway listeners already accepted.
+const apiShutdownGrace = 5 * time.Second
+
+// apiRequestBaseContext is the base context of every request on a gateway
+// listener: ctx's values without its cancellation. A stop cancels the run
+// context first; requests built on it were cancelled with it, so a hook call
+// the gateway had accepted was read as the client going away, audited as a
+// block and never answered (GAP-1459). The listeners close on Shutdown
+// instead, and accepted calls answer inside the grace, as the sandbox
+// ingress already does.
+func apiRequestBaseContext(ctx context.Context) func(net.Listener) context.Context {
+	base := context.WithoutCancel(ctx)
+	return func(net.Listener) context.Context { return base }
+}
+
+// shutdownAPIServers stops the servers together and waits, up to grace, for
+// the requests they accepted. A request still running after the grace (a
+// follow stream) ends with its connection, which is closed; that is still a
+// clean stop.
+func shutdownAPIServers(grace time.Duration, servers ...*http.Server) error {
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	errs := make([]error, len(servers))
+	var wg sync.WaitGroup
+	for i, srv := range servers {
+		if srv == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := srv.Shutdown(ctx)
+			if err == nil {
+				return
+			}
+			_ = srv.Close()
+			if errors.Is(err, context.DeadlineExceeded) {
+				fmt.Fprintf(os.Stderr, "[sidecar-api] requests still running %s after the stop were closed\n", grace)
+				return
+			}
+			errs[i] = err
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 // handleTelemetryCanary exercises the real runtime trace pipeline. The global
