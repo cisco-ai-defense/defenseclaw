@@ -159,6 +159,12 @@ class FakeRunner:
         return CommandResult(command, 0, "", "")
 
 
+@pytest.fixture(autouse=True)
+def _no_host_port_listeners(monkeypatch) -> None:
+    """Keep the port preflight off the test host's real loopback listeners."""
+    monkeypatch.setattr(LocalStackController, "_port_in_use", staticmethod(lambda _port: False))
+
+
 @pytest.fixture
 def stack(tmp_path: Path) -> Path:
     root = tmp_path / "stack with spaces Ω"
@@ -1466,3 +1472,90 @@ def test_cli_url_and_env_warn_when_docker_is_missing() -> None:
         assert "Docker CLI was not found" in result.stderr
         assert "Docker" not in result.stdout
     assert "deployment.environment.name=local-dev" in env.stdout
+
+
+def _running_ps_prefix(subject: LocalStackController) -> tuple[str, ...]:
+    return (subject.docker_path, "ps", "--filter", f"label=com.docker.compose.project={COMPOSE_PROJECT}")
+
+
+def test_status_does_not_call_another_process_on_a_stopped_service_port_ready(controller) -> None:
+    """GAP-2073: Grafana is stopped and another account answers on 3000."""
+    subject, runner = controller
+    running = [name for name, service in SERVICE_CONTAINERS.items() if service != "grafana"]
+    runner.add(_running_ps_prefix(subject), stdout="".join(f"{name}\t{subject.stack_dir}\n" for name in running))
+    with (
+        patch.object(LocalStackController, "_tcp_probe", return_value=True),
+        patch.object(LocalStackController, "_http_probe", return_value=True),
+    ):
+        status = subject.status()
+    lines = {line.split()[0]: line for line in status.splitlines() if line.startswith("  ")}
+    assert "fail" in lines["grafana"] and "not running (port held by another process)" in lines["grafana"]
+    assert "ready" in lines["loki"] and "not running" not in lines["loki"]
+    assert "ready" in lines["otlp-grpc"]
+    assert subject.status_ready is False
+
+
+def test_status_counts_another_copy_of_the_stack_as_another_process(controller) -> None:
+    """Containers started from another directory hold the ports for another account."""
+    subject, runner = controller
+    runner.add(
+        _running_ps_prefix(subject),
+        stdout="".join(f"{name}\t/opt/dc-demo/observability\n" for name in SERVICE_CONTAINERS),
+    )
+    with (
+        patch.object(LocalStackController, "_tcp_probe", return_value=True),
+        patch.object(LocalStackController, "_http_probe", return_value=True),
+    ):
+        status = subject.status()
+    readiness = [line for line in status.splitlines() if line.startswith("  ")]
+    assert len(readiness) == 6
+    assert all("fail" in line and "port held by another process" in line for line in readiness)
+    assert subject.status_ready is False
+
+
+def test_status_says_not_running_when_the_stopped_service_port_is_free(controller) -> None:
+    subject, runner = controller
+    runner.add(_running_ps_prefix(subject), stdout="")
+    with (
+        patch.object(LocalStackController, "_tcp_probe", return_value=False),
+        patch.object(LocalStackController, "_http_probe", return_value=False),
+    ):
+        status = subject.status()
+    grafana = next(line for line in status.splitlines() if line.strip().startswith("grafana"))
+    assert grafana.rstrip().endswith("not running") and "port held" not in grafana
+
+
+def test_up_refuses_a_port_held_by_another_process_before_compose(controller, monkeypatch) -> None:
+    """GAP-2074: name the held port, start nothing and send no Grafana credential."""
+    subject, runner = controller
+    runner.add(_running_ps_prefix(subject), stdout=f"defenseclaw-loki\t{subject.stack_dir}\n")
+    monkeypatch.setattr(LocalStackController, "_port_in_use", staticmethod(lambda port: port in {3000, 3100}))
+    sent: list[str] = []
+    subject._verify_grafana_authentication = lambda password: sent.append(password)
+    with pytest.raises(LocalStackError) as raised:
+        subject.up(wait=False, grafana_access_mode=GRAFANA_ACCESS_PASSWORD)
+    message = str(raised.value)
+    assert "port 3000 (grafana) is in use by another process" in message
+    assert "3100" not in message  # loki's own running container holds it
+    assert "nothing was started" in message and "Grafana admin credential was not sent" in message
+    assert not sent
+    flattened = [call[0] for call in runner.calls]
+    assert not any("up" in call[2:] for call in flattened if len(call) > 2 and call[1] == "compose")
+    assert not any("reset-admin-password" in call for call in flattened)
+
+
+def test_compose_failure_names_the_error_line_not_a_progress_line(controller) -> None:
+    subject, runner = controller
+    runner.add(
+        (subject.docker_path, "compose", "--project-directory"),
+        returncode=1,
+        stderr=(
+            " Container defenseclaw-prometheus  Creating\n"
+            " Container defenseclaw-grafana  Starting\n"
+            "Error response from daemon: failed to bind host port 127.0.0.1:3000/tcp: address already in use\n"
+        ),
+    )
+    with pytest.raises(LocalStackError) as raised:
+        subject.up(wait=False)
+    assert "address already in use" in str(raised.value)
+    assert "Creating" not in str(raised.value)
