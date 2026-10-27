@@ -1895,13 +1895,14 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline b
 				if actionWindowsTextProgram(words[start]) && textOnly {
 					words[j] = strings.ReplaceAll(words[j], "~", "tilde-text")
 				}
-				// A quoted pattern that is printed, given to git or is the
-				// pattern of a search tool is text: nothing expands it
+				// A quoted pattern that is printed, given to a git command
+				// that keeps it as text (not a -c or config value, RV5-2)
+				// or is the pattern of a search tool is text: nothing expands it
 				// (GAP-1717: echo "*" and grep -rn "*** Begin Patch" . from
 				// the home folder). Other native programs (the MSYS tools
 				// of Git for Windows) expand a quoted word of their own
 				// argv, so it stays a path pattern (GAP-1984).
-				if actionWindowsTextProgram(words[start]) || j == pattern {
+				if actionWindowsTextStatement(words[start:i]) || j == pattern {
 					words[j] = actionWindowsLiteralPattern.Replace(words[j])
 				}
 			}
@@ -2043,14 +2044,34 @@ func actionWindowsTextStatement(words []string) bool {
 	if strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(words[0], `\`, "/"))), ".exe") != "git" {
 		return true
 	}
-	if len(words) < 2 || strings.HasPrefix(words[1], "-") {
+	// Global options that only place the command (-C dir, --git-dir,
+	// --work-tree) or change its output do not change what git runs; -c,
+	// --config-env, --exec-path and any other option do (RV5-4).
+	sub := 1
+	for sub < len(words) && strings.HasPrefix(words[sub], "-") {
+		option := words[sub]
+		switch {
+		case option == "-C" || option == "--git-dir" || option == "--work-tree" || option == "--namespace":
+			sub += 2
+			continue
+		case strings.HasPrefix(option, "--git-dir=") || strings.HasPrefix(option, "--work-tree=") ||
+			strings.HasPrefix(option, "--namespace="):
+		case option == "--no-pager" || option == "-P" || option == "--no-optional-locks" || option == "--bare" ||
+			option == "--literal-pathspecs" || option == "--glob-pathspecs" || option == "--noglob-pathspecs" ||
+			option == "--icase-pathspecs" || option == "--no-replace-objects" || option == "--no-advice":
+		default:
+			return false
+		}
+		sub++
+	}
+	if sub >= len(words) {
 		return false
 	}
-	switch strings.ToLower(words[1]) {
+	switch strings.ToLower(words[sub]) {
 	case "commit", "tag", "notes", "stash", "log", "show", "status", "diff", "blame", "add":
 		return true
 	case "grep":
-		for _, word := range words[2:] {
+		for _, word := range words[sub+1:] {
 			if strings.HasPrefix(word, "-O") || strings.HasPrefix(word, "--open-files-in-pager") {
 				return false
 			}
