@@ -1838,6 +1838,22 @@ def test_setup_continues_when_the_agent_settings_let_hooks_run(monkeypatch, tmp_
     assert cmd_setup._agent_settings_refusal(_config(tmp_path), "claudecode") == ""
 
 
+def test_setup_refusal_drops_a_restart_step_after_a_semicolon(monkeypatch, tmp_path: Path) -> None:
+    """GAP-0034: the gateway's settings-path refusals end '; then run:
+    defenseclaw-gateway restart'. Setup prints its own next step, so the
+    restart step goes, and no stray ';.' is left behind."""
+    reason = (
+        "Claude Code user settings C:\\Users\\u\\.claude\\settings.json: C:\\Users\\u\\.claude\\settings.json is a "
+        "symbolic link or junction to D:\\dotfiles\\settings.json; on Windows setup changes only a regular settings "
+        "file: replace the link with the file it points to; then run: defenseclaw-gateway restart"
+    )
+    _gateway_check_agent_settings(monkeypatch, {"connector": "claudecode", "refused": True, "reason": reason})
+    message = cmd_setup._agent_settings_refusal(_config(tmp_path), "claudecode")
+    assert "replace the link with the file it points to. Setup changed nothing" in message
+    assert ";." not in message
+    assert "defenseclaw-gateway restart" not in message
+
+
 def test_setup_that_restarts_goes_ahead_over_a_sidecar_the_restart_repairs(monkeypatch, tmp_path: Path) -> None:
     """GAP-1815: the gateway's writer rebuilds a null fail_modes map from the
     flat hook records when it restarts (GAP-0512), so setup with its default

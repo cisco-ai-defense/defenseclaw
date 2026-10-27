@@ -13165,7 +13165,7 @@ def _warn_leftover_copilot_managed_plugin_key(path: str | None = None) -> bool:
 
 # The connectors whose gateway Setup refuses the agent's own settings before it
 # changes anything (connector.CheckAgentSettings).
-_GATEWAY_RESTART_STEP_RE = re.compile(r",? then run: defenseclaw-gateway restart\.?$")
+_GATEWAY_RESTART_STEP_RE = re.compile(r"[,;]? then run: defenseclaw-gateway restart\.?$")
 
 
 def _agent_settings_refusal(
