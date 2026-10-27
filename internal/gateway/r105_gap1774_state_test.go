@@ -258,6 +258,17 @@ func TestR105GAP2077ChmodGroupOtherWriteOfStateTree(t *testing.T) {
 		{"chmod o+w policies", "chmod o+w ~/.defenseclaw/policies", true, ""},
 		{"chmod g=rwx installer", "chmod g=rwx ~/.defenseclaw/installer", true, ""},
 		{"chmod a+w root", "chmod a+w ~/.defenseclaw", true, ""},
+		// BSD/macOS symlink options come before the mode (pod check 1); the
+		// state owner skips them, the shell grammar seam gives the path fact.
+		{"chmod -h 777 hooks", "chmod -h 777 ~/.defenseclaw/hooks", true, "classifier seam GAP-2077: actionfacts chmod grammar does not know the BSD/macOS -h -H -L -P options, so the call gets no path fact"},
+		{"chmod -RH 777 root", "chmod -RH 777 ~/.defenseclaw", true, "classifier seam GAP-2077: actionfacts chmod grammar does not know the BSD/macOS -h -H -L -P options, so the call gets no path fact"},
+		{"chmod -R -L o+w root", "chmod -R -L o+w ~/.defenseclaw", true, "classifier seam GAP-2077: actionfacts chmod grammar does not know the BSD/macOS -h -H -L -P options, so the call gets no path fact"},
+		{"chmod -P g+w hooks", "chmod -R -P g+w ~/.defenseclaw/hooks", true, "classifier seam GAP-2077: actionfacts chmod grammar does not know the BSD/macOS -h -H -L -P options, so the call gets no path fact"},
+		// macOS ACL grants of write to another principal.
+		{"chmod +a everyone write hooks", `chmod +a "everyone allow write,append" ~/.defenseclaw/hooks`, true, ""},
+		{"chmod +a# staff add_file root", `chmod +a# 0 "group:staff allow add_file" ~/.defenseclaw`, true, ""},
+		{"chmod +a deny write hooks", `chmod +a "everyone deny write" ~/.defenseclaw/hooks`, false, ""},
+
 		{"chmod 700 hooks", "chmod 700 ~/.defenseclaw/hooks", false, ""},
 		{"chmod -R go-rwx root", "chmod -R go-rwx ~/.defenseclaw", false, ""},
 		{"chmod u+x hooks", "chmod u+x ~/.defenseclaw/hooks", false, ""},

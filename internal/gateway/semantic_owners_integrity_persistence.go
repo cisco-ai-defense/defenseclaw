@@ -2721,10 +2721,14 @@ func findPatternIsCleanupOnly(pattern string, fold bool) bool {
 
 // chmodAddsGroupOrOtherWrite reports a chmod whose mode gives group or
 // other write: an octal mode with 0o022 bits, or a symbolic clause naming
-// g, o or a with + or = and w. A mode with no who letters is filtered by the
-// umask and is not counted.
+// g, o or a with + or = and w, or a macOS ACL entry (+a, =a, +ai and their
+// # forms) that allows a write permission. A mode with no who letters is
+// filtered by the umask and is not counted. GNU (-R -c -f -v) and BSD/macOS
+// (-h -H -L -P) options before the mode are skipped.
 func chmodAddsGroupOrOtherWrite(command actionfacts.CommandFact) bool {
-	for _, argument := range command.Argv[1:] {
+	argv := command.Argv
+	for index := 1; index < len(argv); index++ {
+		argument := argv[index]
 		switch {
 		case argument == "--":
 			continue
@@ -2733,10 +2737,36 @@ func chmodAddsGroupOrOtherWrite(command actionfacts.CommandFact) bool {
 				return false
 			}
 			continue
-		case len(argument) > 1 && argument[0] == '-' && strings.Trim(argument[1:], "Rcfv") == "":
+		case len(argument) > 1 && argument[0] == '-' && strings.Trim(argument[1:], "RcfvhHLP") == "":
 			continue
+		case argument == "+a" || argument == "=a" || argument == "+ai":
+			return index+1 < len(argv) && chmodACLAllowsWrite(argv[index+1])
+		case argument == "+a#" || argument == "=a#" || argument == "+ai#":
+			return index+2 < len(argv) && chmodACLAllowsWrite(argv[index+2])
 		}
 		return chmodModeAddsGroupOrOtherWrite(argument)
+	}
+	return false
+}
+
+// chmodACLAllowsWrite reports a macOS ACL entry ("everyone allow write")
+// that grants a permission which changes a file or a directory's entries.
+func chmodACLAllowsWrite(entry string) bool {
+	fields := strings.FieldsFunc(strings.ToLower(entry), func(r rune) bool {
+		return r == ' ' || r == ',' || r == '\t'
+	})
+	allow := false
+	for _, field := range fields {
+		switch field {
+		case "allow":
+			allow = true
+		case "deny":
+			return false
+		case "write", "append", "add_file", "add_subdirectory", "delete", "delete_child", "writesecurity", "chown":
+			if allow {
+				return true
+			}
+		}
 	}
 	return false
 }
