@@ -34,6 +34,7 @@ declare module 'node:fs/promises' {
     uid: number
     mode: number
     size: number
+    mtimeMs: number
     isFile(): boolean
     isDirectory(): boolean
     isSocket(): boolean
