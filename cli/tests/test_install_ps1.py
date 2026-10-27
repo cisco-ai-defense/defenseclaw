@@ -4167,12 +4167,12 @@ def test_hook_fail_modes_are_held_from_before_the_gateway_stops_until_it_exits()
     assert after.index("Clear-StagedRelease") < after.index("Restart-Old") < after.index("$(Get-RestoredNote)"), after
     start = _ps1_function("Start-HookFailModeHold")
     assert '--hold-until-exit $GatewayId' in start and 'Contains("Holding the hook fail modes")' in start, start
-    assert 'Join-Path $DataDir "hooks\\.hookcfg"' in start, start
+    assert 'Join-Path $DataDir "hooks") -PathType Container' in start and "hooks\\.hookcfg" not in start, start
     assert "Stop-HookFailModeHold" in start and start.rstrip().endswith("return $false\n}"), start
     assert "$hold.Process.ExitCode -eq 0" in _ps1_function("Complete-HookFailModeHold")
     update = _ps1_function("Update-HookFailModes")
     assert '@("connector", "refresh-fail-modes", "--data-dir", $DataDir)) -eq 0' in update, update
-    assert 'Join-Path $DataDir "hooks\\.hookcfg"' in update, update
+    assert 'Join-Path $DataDir "hooks") -PathType Container' in update and 'hooks\\.hookcfg") -PathType Leaf' not in update, update
     # A downgrade's older gateway prints the connector help instead; any other
     # probe answer refuses the swap.
     probe = _ps1_function("Test-HookFailModeRefresh")
@@ -4359,6 +4359,40 @@ def test_hook_fail_mode_refresh_refuses_a_probe_that_fails(tmp_path: Path) -> No
         assert f"refresh={str(want).lower()}" in completed.stdout, (name, completed.stdout, completed.stderr)
     ran = [line for line in calls.read_text(encoding="utf-8").splitlines() if "--data-dir" in line]
     assert ran == [f"newer connector refresh-fail-modes --data-dir {data_dir}"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_installed_hooks_are_refreshed_without_the_json_sidecar(tmp_path: Path) -> None:
+    # GAP-0365: with hooks\.hookcfg gone, the refresh (and the hold for a
+    # running gateway) was skipped, so a 1.0.2 copilot-hook.ps1 kept its baked
+    # open while the gateway was down for the install. Live red on
+    # dc-fc-r103-a4-win1: 556 of 586 gateway-down samples had the open adapter.
+    data_dir = tmp_path / "data"
+    (data_dir / "hooks").mkdir(parents=True)
+    (data_dir / "hooks" / "copilot-hook.ps1").write_text("baked open adapter", encoding="utf-8")
+    calls = tmp_path / "calls.txt"
+    gateway = tmp_path / "gateway.ps1"
+    gateway.write_text(
+        f"Add-Content -LiteralPath '{calls}' -Value ($args -join ' ')\n"
+        "if ($args -contains '--help') { Write-Output '  defenseclaw-gateway connector refresh-fail-modes [flags]' }\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data_dir}'\nfunction Write-Warn([string]$m) {{ [Console]::Error.WriteLine('warn: ' + $m) }}\n"
+        f"{_ps1_function('Invoke-Native')}\n{_ps1_function('Get-NativeProbe')}\n{_ps1_function('Test-HookFailModeRefresh')}\n"
+        f"{_ps1_function('Update-HookFailModes')}\n"
+        f"if (Update-HookFailModes '{gateway}') {{ 'ok=true' }} else {{ 'ok=false' }}\n"
+    )
+    completed = _run_powershell(script)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "ok=true" in completed.stdout, completed.stdout + completed.stderr
+    ran = [line for line in calls.read_text(encoding="utf-8").splitlines() if "--help" not in line]
+    assert ran == [f"connector refresh-fail-modes --data-dir {data_dir}"], ran
+    # The hold for a running gateway takes the same folder test, not the sidecar.
+    hold = _ps1_function("Start-HookFailModeHold")
+    assert "hooks\\.hookcfg" not in hold, hold
 
 
 @pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
