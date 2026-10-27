@@ -1474,6 +1474,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1618", page: "enterprise/macos.mdx", has: ["`enterprise macos status --json` and `enterprise macos verify` report `tetragon_not_applicable`"] },
   { gap: "GAP-1618", page: "enterprise/configuration.mdx", has: ["on macOS `status --json` and `verify` report `tetragon_not_applicable`"] },
   { gap: "GAP-1591", page: "policies/cel/engine.mdx", has: ["`exists`, `all`, `map` and `filter` comprehensions; nesting is limited to two levels"] },
+  { gap: "GAP-2250", page: "support-matrix.mdx", section: "Hook floods on Windows", has: ["every hook decision adds about 40 KiB to the account's audit database (`audit.db`)", "can also pass its 256 MiB alarm and hook answers can take seconds", "A call the gateway took but did not answer in time is blocked in every policy tier, never let through", "This is a Windows disk-write limit."] },
+  { gap: "GAP-2250", page: "get-started/windows/paths-troubleshooting.mdx", has: ["audit.db grows fast or hook answers are slow during a tool-call flood", "/docs/support-matrix#hook-floods-on-windows"] },
   { gap: "GAP-1587", page: "guardrail/index.mdx", has: ["fails the **Config validation** and **Rule pack** rows and skips **Policy**"], lacks: ["fails the Policy row until you pin the new digest"] },
   { gap: "GAP-1656", page: "policies/rules.mdx", has: ["`live state was not checked while config.yaml is invalid`"], lacks: ["fails the **Policy** row: `generation 2"] },
   { gap: "GAP-1652", page: "guardrail/index.mdx", has: ["pin the `files digest` value it prints (the guardrail.custom_packs pin, not the `digest` line)", "set both its `path` and `digest`"] },

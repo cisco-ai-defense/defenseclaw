@@ -151,6 +151,14 @@ defenseclaw doctor
 
 <Accordions>
 
+<Accordion title="audit.db grows fast or hook answers are slow during a tool-call flood">
+
+**Fix.** An agent loop or script that makes several tool calls a second grows `audit.db` by about 40 KiB per call, and on a slow disk hook answers can take seconds. Slow the loop down or batch its work and keep enough free disk. A call the gateway does not answer in time is blocked (`this account's gateway did not answer in time`); run it again. See [Hook floods on Windows](/docs/support-matrix#hook-floods-on-windows).
+
+**Check.** After the flood ends, `defenseclaw-gateway status` is healthy and an ordinary tool call is answered within a second or two. Retention (`observability.local.retention_days`, default 7) frees the space of older events.
+
+</Accordion>
+
 <Accordion title="The command is not recognized or the wrong version runs">
 
 **Fix.** Open a new terminal so the updated user `PATH` is loaded. Run `Get-Command defenseclaw -All` (PowerShell) or `where defenseclaw` (cmd). Run the install command again if the launcher is missing. Do not prepend an unpacked source checkout as a permanent workaround.
