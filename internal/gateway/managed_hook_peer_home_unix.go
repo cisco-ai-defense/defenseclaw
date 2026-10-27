@@ -58,6 +58,53 @@ const managedHookPeerLookupRetry = 15 * time.Second
 // through an outage) until managedHookPeerLookupRetry.
 const managedHookPeerAccountRecheck = time.Second
 
+// managedHookPeerAccountBudget bounds how long requests wait for the account
+// database to name their caller: from the start of the first lookup of a
+// uid, or of a recheck of it, so the name, home and holder reads of one
+// request and the requests that arrive while it runs share the one budget
+// and do not add up. The lookup goes on in the
+// background and its answer serves the requests after it. A request it does
+// not answer in time is served as a failed lookup is: no account for a first
+// lookup, the last account for a recheck. Without the bound a stalled SSSD
+// responder held the request for the account lookup (getent, up to 5 s) and
+// the SID of its incarnation (up to sssdNSSRequestDeadline, 8 s), past the
+// managed hook's 3.5 s answer watchdog, which then denied a benign call the
+// gateway allowed seconds later (GAP-0397). 250 ms leaves room for the
+// directory-facts budget (identityDirectoryBudget) and the verdict inside
+// that watchdog. Secure Client keeps its lookups in the request (#1092).
+var managedHookPeerAccountBudget = 250 * time.Millisecond
+
+// awaitManagedHookAccount waits for done (an account lookup or recheck of
+// one uid that started at started) until managedHookPeerAccountBudget after
+// started outside Secure Client, and reports whether it ended. A nil done
+// has nothing to wait for.
+func awaitManagedHookAccount(done <-chan struct{}, started time.Time) bool {
+	if done == nil {
+		return true
+	}
+	if ManagedEnterpriseActive() {
+		<-done
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	default:
+	}
+	wait := time.Until(started.Add(managedHookPeerAccountBudget))
+	if wait <= 0 {
+		return false
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
 var errManagedHookPeerNoResolver = errors.New("no account resolver")
 
 // managedHookPeerAccountsStamp identifies the state of the local account
@@ -384,6 +431,9 @@ type managedHookPeerAccount struct {
 	// and so are account and the incarnation once a recheck may run.
 	checked time.Time
 	recheck chan struct{}
+	// started is when the first lookup began and recheckStarted when the
+	// last recheck a request started began (managedHookPeerAccountBudget).
+	started, recheckStarted time.Time
 }
 
 // rechecksAccounts reports whether account answers are rechecked every
@@ -397,6 +447,8 @@ func rechecksAccounts() bool {
 // account is unknown, the lookup failed, or the answer names a different
 // uid. A definitive answer is reused for managedHookPeerHomeTTL, a failed
 // lookup for managedHookPeerLookupRetry.
+// Outside Secure Client a lookup runs in the background and a request waits
+// for it only up to managedHookPeerAccountBudget from its start (GAP-0397).
 func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool) {
 	if uid < 0 {
 		return unixidentity.Account{}, false
@@ -420,9 +472,16 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 		case <-entry.ready:
 			if now.Before(entry.expires) {
 				if entry.ok && rechecksAccounts() && !now.Before(entry.checked.Add(managedHookPeerAccountRecheck)) {
-					resolver := c.resolver
+					// A recheck past the budget serves the last account,
+					// as one the directory cannot answer does.
+					if entry.recheck == nil {
+						done := make(chan struct{})
+						entry.recheck, entry.recheckStarted = done, time.Now()
+						go c.runRecheck(uid, entry, c.resolver, done)
+					}
+					wait, started := entry.recheck, entry.recheckStarted
 					c.mu.Unlock()
-					c.recheckAccount(uid, entry, resolver)
+					awaitManagedHookAccount(wait, started)
 					c.mu.Lock()
 				}
 				account, ok := entry.account, entry.ok
@@ -430,15 +489,18 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 				return account, ok
 			}
 		default:
+			started := entry.started
 			c.mu.Unlock()
-			<-entry.ready
+			if !awaitManagedHookAccount(entry.ready, started) {
+				return unixidentity.Account{}, false
+			}
 			c.mu.Lock()
 			account, ok := entry.account, entry.ok
 			c.mu.Unlock()
 			return account, ok
 		}
 	}
-	entry := &managedHookPeerAccount{ready: make(chan struct{})}
+	entry := &managedHookPeerAccount{ready: make(chan struct{}), started: time.Now()}
 	if c.accounts == nil {
 		c.accounts = make(map[int]*managedHookPeerAccount)
 	}
@@ -446,6 +508,22 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 	resolver := c.resolver
 	c.mu.Unlock()
 
+	if ManagedEnterpriseActive() {
+		c.resolveAccount(uid, entry, resolver)
+	} else {
+		go c.resolveAccount(uid, entry, resolver)
+		if !awaitManagedHookAccount(entry.ready, entry.started) {
+			return unixidentity.Account{}, false
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return entry.account, entry.ok
+}
+
+// resolveAccount runs the first account lookup of uid for entry, records
+// its answer and closes entry.ready.
+func (c *managedHookPeerHomeCache) resolveAccount(uid int, entry *managedHookPeerAccount, resolver unixidentity.Resolver) {
 	account, err := unixidentity.Account{}, errManagedHookPeerNoResolver
 	if resolver != nil {
 		account, err = resolver.LookupUID(uid)
@@ -474,14 +552,15 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 	entry.checked = c.now()
 	c.mu.Unlock()
 	close(entry.ready)
-	return account, ok
 }
 
 // recheckAccount asks the account database again for the account of uid
 // that entry holds (managedHookPeerAccountRecheck), and records its answer:
 // another name, home or incarnation then makes noteHolder drop the facts
 // cached for the former account before they are served. Concurrent
-// requests of the uid wait for the one recheck. An answer the directory
+// requests of the uid share the one recheck and wait for it only up to
+// managedHookPeerAccountBudget from its start (they are then served the
+// last account). An answer the directory
 // cannot give (a failed lookup, an incarnation it cannot name) keeps the
 // last one and is asked again after managedHookPeerLookupRetry.
 func (c *managedHookPeerHomeCache) recheckAccount(uid int, entry *managedHookPeerAccount, resolver unixidentity.Resolver) {
@@ -498,6 +577,12 @@ func (c *managedHookPeerHomeCache) recheckAccount(uid int, entry *managedHookPee
 	done := make(chan struct{})
 	entry.recheck = done
 	c.mu.Unlock()
+	c.runRecheck(uid, entry, resolver, done)
+}
+
+// runRecheck is the recheck of recheckAccount that set entry.recheck to
+// done; it closes done when it ends.
+func (c *managedHookPeerHomeCache) runRecheck(uid int, entry *managedHookPeerAccount, resolver unixidentity.Resolver, done chan struct{}) {
 	defer close(done)
 
 	account, err := unixidentity.Account{}, errManagedHookPeerNoResolver
