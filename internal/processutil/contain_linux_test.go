@@ -123,8 +123,8 @@ func TestRunContainedLauncherFailsClosedWithoutANamespace(t *testing.T) {
 	t.Setenv("DC_PROCESSUTIL_TEST_FAIL_NAMESPACE", "1")
 	ran := filepath.Join(t.TempDir(), "ran")
 	err := RunContained(CommandContext(context.Background(), "/bin/sh", "-c", `: > "$1"`, "sh", ran))
-	if !errors.Is(err, ErrNotContained) {
-		t.Fatalf("RunContained = %v, want ErrNotContained", err)
+	if !errors.Is(err, ErrNotContained) || !errors.Is(err, ErrContainmentUnavailable) {
+		t.Fatalf("RunContained = %v, want ErrNotContained and ErrContainmentUnavailable", err)
 	}
 	if _, statErr := os.Stat(ran); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("command executed without containment: %v", statErr)
@@ -825,5 +825,14 @@ sleep 60`, "sh", pidFile, supervisorFile)
 	}
 	if !helperRunning(unrelated.Process.Pid) {
 		t.Fatalf("unrelated filtered gateway child %d was killed", unrelated.Process.Pid)
+	}
+}
+
+// GAP-1945: a command that ran and failed is never reported as a host that
+// refused the namespaces, also when its own exit code is the launcher's.
+func TestRunContainedCommandThatRanIsNotContainmentUnavailable(t *testing.T) {
+	err := RunContained(CommandContext(context.Background(), "/bin/sh", "-c", "exit 1"))
+	if err == nil || errors.Is(err, ErrContainmentUnavailable) {
+		t.Fatalf("RunContained = %v, want the command's own failure", err)
 	}
 }

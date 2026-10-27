@@ -13,7 +13,6 @@
 package enterpriseunix
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -66,13 +65,9 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 	}
 	var schemaErr *config.V8SchemaError
 	if errors.As(err, &schemaErr) && schemaErr.Keyword == "enum" && strings.HasPrefix(schemaErr.Expected, "one of ") {
-		var choices []any
-		if json.Unmarshal([]byte(strings.TrimPrefix(schemaErr.Expected, "one of ")), &choices) != nil || len(choices) == 0 {
+		names, ok := schemaErr.EnumChoices()
+		if !ok {
 			return "", false
-		}
-		names := make([]string, len(choices))
-		for i, choice := range choices {
-			names[i] = fmt.Sprint(choice)
 		}
 		if schemaErr.Path == "$.deployment_mode" {
 			names = []string{"managed_enterprise"}

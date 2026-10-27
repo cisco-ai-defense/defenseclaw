@@ -10492,12 +10492,25 @@ def _resolve_connector_workspace(workspace_dir: str | None) -> str:
 
 
 def _configure_connector_workspace(cfg, workspace_dir: str | None = None) -> str:
-    """Persist an explicit workspace, or clear it for global/user scope."""
+    """Persist an explicit workspace, or clear it for global/user scope.
+
+    Setup without ``--workspace`` selects global scope. A workspace pinned
+    earlier (``config set claw.workspace_dir`` or an earlier ``--workspace``)
+    is then cleared, and setup says so and names the flag that keeps it
+    (GAP-0201): before, the pin vanished without a word.
+    """
     workspace = _resolve_connector_workspace(workspace_dir)
     try:
+        previous = str(getattr(cfg.claw, "workspace_dir", "") or "").strip()
         cfg.claw.workspace_dir = workspace
     except AttributeError:
-        pass
+        return workspace
+    if previous and not workspace:
+        ux.warn(
+            f"Workspace pin {previous} cleared: setup without --workspace selects global scope. "
+            f"To keep it, pass --workspace {previous} (with more than one connector: "
+            f"defenseclaw setup guardrail --workspace {previous})."
+        )
     return workspace
 
 

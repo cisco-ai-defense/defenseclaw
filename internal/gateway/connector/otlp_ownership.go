@@ -173,12 +173,14 @@ func otlpUnhex(c byte) (byte, bool) {
 }
 
 // otlpKnownProductTokens returns the credentials this install can name: the
-// scoped and hook tokens Setup was given and the scope's token sidecar. A
+// scoped and hook tokens Setup was given, the gateway master token (an
+// exporter that sends it is never an operator's, GAP-0035) and the scope's
+// token sidecar. A
 // sidecar that cannot be read (missing, or another account's on Windows) adds
 // nothing, and a value then needs another known credential to be the
 // product's.
 func otlpKnownProductTokens(opts SetupOpts, scope OTLPPathTokenScope) []string {
-	known := []string{strings.TrimSpace(opts.OTLPPathToken), strings.TrimSpace(opts.APIToken)}
+	known := []string{strings.TrimSpace(opts.OTLPPathToken), strings.TrimSpace(opts.APIToken), strings.TrimSpace(opts.GatewayToken)}
 	if opts.DataDir != "" {
 		if token, err := LoadOTLPPathToken(opts.DataDir, scope); err == nil {
 			known = append(known, token)
