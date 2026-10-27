@@ -138,6 +138,12 @@ The managed config is administrator-owned. For what it contains, see
 
 **Bundle mode.** On a device whose MDM installed bundle trust anchors, the config comes only from signed bundles. `ensure --config`, Setup `CONFIG=` or a wrapper run with a config that is not the current bundle's is refused with `bundle_required`, and on Linux and macOS an edit of the installed file is reverted to the bundle's config. Deliver a new bundle instead. The rest of this section is for devices without bundle trust anchors.
 
+**Leave bundle mode on Windows.** `/repair`, a new `CONFIG=` and moving the anchor file away do not turn bundle mode off: while a signed bundle is current, Setup still refuses `CONFIG=` with `bundle_required`. To go back to a local admin config:
+
+1. Stop delivering bundles to the computer in your MDM (remove the bundle app or package assignment). A later `BUNDLE=` with `TRUSTANCHORS=` puts it back in bundle mode.
+2. Run Setup as LocalSystem with `/uninstall JSON=1`, without `PURGE=1`, so each user's `%USERPROFILE%\.defenseclaw` stays. It removes the trust anchors, the bundle state and the rest of the machine state ([Remove](/docs/enterprise/install/reference/windows#remove)). From an elevated prompt instead of LocalSystem it reports `user_registrations_pending`.
+3. Run Setup as LocalSystem with `/ensure CONFIG=<file> JSON=1`. It installs again from that config and enrolls the users again. Later changes go through `/ensure CONFIG=` as on any device without anchors.
+
 A change is applied by the apply trigger on Linux and macOS. While it runs, `status` and `verify` report `lifecycle_busy` and exit `75`; that is not a failure, so run them again. A hand edit of the config as root is applied, not reported as drift. Details: [Lifecycle detail](/docs/enterprise/operate/reference#applying-a-config-change).
 
 On Linux and macOS you can also hand the new file to `ensure`. It validates the file,
