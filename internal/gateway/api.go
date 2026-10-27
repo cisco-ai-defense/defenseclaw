@@ -673,6 +673,12 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	}
 
 	dataDir := a.configDataDir()
+	// A removed connector whose token file its teardown could not delete:
+	// the hook registration is gone, so the credential is refused while the
+	// removal is retried (GAP-0858).
+	if connector.HookAPITokenRevoked(dataDir, name) {
+		return false
+	}
 	if dataDir == "" {
 		a.hookAPITokenMu.RLock()
 		cached := ""
