@@ -24,9 +24,11 @@ The rule on Windows: only a hook or plugin that waits for DefenseClaw's answer
 can block. OTLP and other telemetry add detail to the audit log and
 dashboards, but cannot block an action after the fact.
 
-Host setup disables Codex and Claude Code native OTLP and revokes credentials
-from earlier releases because those exporters cannot verify who holds a
-stopped gateway's port. Hook and plugin
+Host setup removes the Codex and Claude Code native OTLP exporters that
+DefenseClaw wrote (a value with a DefenseClaw credential, or an endpoint its
+setup recorded) and revokes credentials from earlier releases, because those
+exporters cannot verify who holds a stopped gateway's port. An exporter you set
+yourself stays, also one that points at an old local port. Hook and plugin
 credentials are also connector-scoped and remain distinct from the gateway
 master token. Connector pages identify which channels exist and where their
 managed settings live.

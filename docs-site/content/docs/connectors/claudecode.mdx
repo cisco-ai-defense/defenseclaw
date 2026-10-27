@@ -79,7 +79,7 @@ Setup changes only the files above. DefenseClaw also reads, without changing the
 | `disableAllHooks: true` in `~/.claude/settings.json` | Every hook off. | Guardrail-degraded alert, DEGRADED in `defenseclaw status`, **Claude Code hooks** row fails in `defenseclaw doctor`. Remove the key and restart Claude Code. |
 | Same key in `.claude/settings.local.json`, `.claude/settings.json` or a `claude --settings` file | Hooks off for that project or file. DefenseClaw records nothing for those sessions. | `status` and `doctor` check the current folder's project settings. A `--settings` file is invisible. |
 | `settings.json` keeps other DefenseClaw hooks but not `PreToolUse` | Tool calls uninspected. | `doctor` fails the **Claude Code hooks** row. Run `defenseclaw setup claude-code --yes`. |
-| `settings.json` is a symlink | Works when the link ends at a file you own in your home folder. A link anywhere else is refused before any hook is written. | n/a |
+| `settings.json` is a symlink | Works. On a per-user install setup writes the hooks through a link to a file you own, also when that file is outside your home folder. A link or target that another account owns is refused, and setup changes nothing. On a managed install a link that leads out of your home folder is refused too. | The refusal names the link and its target. Point the link at a file you own, or replace it with the file, then run setup again. |
 
 ## Enterprise (standalone profile)
 
@@ -118,7 +118,7 @@ The administrator manages Claude Code in the managed `config.yaml`. `guardrail.c
 | Hook script | `claude-code-hook.sh` |
 | Hook config paths | `~/.claude/settings.json` |
 | Response field | `claude_code_output` |
-| Native OTLP | isolated OpenShell only; host upgrades remove old exporters |
+| Native OTLP | isolated OpenShell only; host setup removes only exporters DefenseClaw wrote; your own exporters stay |
 | W3C traceparent | yes |
 | Fail closed | yes |
 
@@ -169,7 +169,7 @@ Protection for active `AGENTS.md` and `MEMORY.md` files is bound to context. Def
 
 ## How Claude Code reaches the gateway
 
-On every host install, setup sets Claude Code telemetry and all OTLP exporters off, removes earlier DefenseClaw native endpoints and `otelHeadersHelper`, and revokes the scoped token. Quit and reopen Claude Code after an upgrade so an existing process stops using its old exporter settings. Isolated OpenShell images retain native logs and metrics; native traces and content-bearing telemetry gates stay off. Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/observability/redaction).
+On every host install, setup removes the native exporter settings it can prove DefenseClaw wrote (a value that carries a DefenseClaw credential, an endpoint or header its setup backup recorded, or the earlier `otelHeadersHelper`) and revokes the scoped token. With no other exporter left, it sets Claude Code telemetry and the OTLP exporters off. An exporter you set yourself, such as your own collector in `OTEL_EXPORTER_OTLP_ENDPOINT`, stays with the settings that turn it on; the content settings (`OTEL_LOG_USER_PROMPTS` and the other `OTEL_LOG_*` keys) stay `0`. Quit and reopen Claude Code after an upgrade so an existing process stops using its old exporter settings. Isolated OpenShell images retain native logs and metrics; native traces and content-bearing telemetry gates stay off. Redaction follows the v8 bucket and profile policy: edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`, then follow [Redaction](/docs/observability/redaction).
 
 <Flow
   direction="TB"
@@ -187,7 +187,7 @@ On every host install, setup sets Claude Code telemetry and all OTLP exporters o
 
 **Behind an HTTP proxy.** Host hooks reach the gateway on 127.0.0.1 and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Host setup does not enable native OTLP. DefenseClaw does not add `NO_PROXY` to the `env` block in `~/.claude/settings.json`, because a value there would replace your shell's `NO_PROXY` for all Claude Code traffic. If your proxy log still shows `POST http://127.0.0.1:<port>/...` requests from Claude Code, set `NO_PROXY=127.0.0.1,localhost` (and `no_proxy`) in the shell that starts it, for example in `~/.bashrc` or `~/.zshrc`. On Windows run `setx NO_PROXY 127.0.0.1,localhost` once and open a new terminal.
 
-**Another account on the gateway port.** Host hooks verify the listener before sending an event. Native exporters cannot make that check, so host setup disables them and removes their old credentials on Linux, macOS and Windows. `defenseclaw status` and `defenseclaw doctor` name a peer-held API port and suggest a free one. To give this account its own port, run `defenseclaw setup gateway --api-port <port>`. Keep the gateway running while Claude Code runs. A Claude Code process started before the upgrade must be restarted to discard its old settings.
+**Another account on the gateway port.** Host hooks verify the listener before sending an event. Native exporters cannot make that check, so host setup removes the exporters DefenseClaw wrote and their old credentials on Linux, macOS and Windows. An exporter you added yourself is yours and stays. `defenseclaw status` and `defenseclaw doctor` name a peer-held API port and suggest a free one. To give this account its own port, run `defenseclaw setup gateway --api-port <port>`. Keep the gateway running while Claude Code runs. A Claude Code process started before the upgrade must be restarted to discard its old settings.
 
 ## In an OpenShell sandbox
 

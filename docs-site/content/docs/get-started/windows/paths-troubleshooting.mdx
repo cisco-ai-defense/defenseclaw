@@ -231,7 +231,7 @@ Disabling stops only what the agent loads by that exact name (Codex `$skill` sel
 
 <Accordion title="Native OTLP authentication fails">
 
-**Fix.** Host Codex and Claude Code setups remove native OTLP settings and tokens because their exporters cannot verify the local listener. Run the connector's setup again, then restart the agent to drop settings already loaded by its process. Native OTLP remains available inside isolated OpenShell. Never print, copy or replace token files or OTLP headers by hand. Hermes and Amp have no native OTLP export; for Amp run `defenseclaw setup amp --yes` again and relaunch Amp. Omitting `--mode` keeps Amp's saved mode.
+**Fix.** Host Codex and Claude Code setups remove the native OTLP settings and tokens that DefenseClaw wrote, because those exporters cannot verify the local listener. An exporter you set yourself stays. Run the connector's setup again, then restart the agent to drop settings already loaded by its process. Native OTLP remains available inside isolated OpenShell. Never print, copy or replace token files or OTLP headers by hand. Hermes and Amp have no native OTLP export; for Amp run `defenseclaw setup amp --yes` again and relaunch Amp. Omitting `--mode` keeps Amp's saved mode.
 
 **Check.** The doctor authentication row is `[PASS]`.
 
