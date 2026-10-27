@@ -236,3 +236,55 @@ func TestManagedUnixGuardianLogsTheRemovalNoticeOnce(t *testing.T) {
 		t.Fatalf("the saved copy went: %v", err)
 	}
 }
+
+// Only the copy the teardown keeps by design is left (the state a 1.0.4
+// upgrade of an edited OmniGent module leaves). The first job logs it under
+// the notice; later jobs log nothing again; a new leftover is logged
+// (GAP-2016, GAP-1917).
+func TestManagedUnixGuardianLogsAKeptCopyOnTheFirstJobOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OMNIGENT_CONFIG", "")
+	t.Setenv("OMNIGENT_CONFIG_HOME", "")
+	dataDir := filepath.Join(home, ".defenseclaw")
+	saved := filepath.Join(dataDir, "connector_backups", "omnigent", "defenseclaw_omnigent_policy.py.edited-ae793da7fbcd2b16")
+	if err := os.MkdirAll(filepath.Dir(saved), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(saved, []byte("# the user's edit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousLog := enterpriseHookWorkerRemovedLog
+	t.Cleanup(func() { enterpriseHookWorkerRemovedLog = previousLog })
+	request := enterpriseHookWorkerRequest{Home: home, UID: os.Getuid(), GID: os.Getgid(), Standalone: true}
+	for job, want := range []int{1, 0, 0} {
+		var log bytes.Buffer
+		enterpriseHookWorkerRemovedLog = &log
+		removeRetiredConnectorsForAccount(context.Background(), request)
+		if got := strings.Count(log.String(), connector.RemovedConnectorNotice); got != want {
+			t.Errorf("job %d logged the notice %d times, want %d:\n%s", job+1, got, want, log.String())
+		}
+		if want == 1 && !strings.Contains(log.String(), filepath.Dir(saved)+": files DefenseClaw saved") {
+			t.Errorf("job %d does not name the kept copy:\n%s", job+1, log.String())
+		}
+		if want == 0 && log.Len() != 0 {
+			t.Errorf("job %d logged again:\n%s", job+1, log.String())
+		}
+	}
+	if data, err := os.ReadFile(saved); err != nil || string(data) != "# the user's edit\n" {
+		t.Fatalf("the saved copy changed: %q %v", data, err)
+	}
+	token := filepath.Join(dataDir, "hooks", ".hookcfg.openhands")
+	if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "elsewhere"), token); err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	enterpriseHookWorkerRemovedLog = &log
+	removeRetiredConnectorsForAccount(context.Background(), request)
+	if !strings.Contains(log.String(), token) {
+		t.Errorf("a new leftover is not logged:\n%s", log.String())
+	}
+}

@@ -3064,9 +3064,15 @@ undo_rollback() {
 # those entries in the shape the older release removes; rolling forward runs
 # setup, which writes the current shape again.
 convert_hooks_for_rollback() {
-    local gateway="${BIN_DIR}/defenseclaw-gateway"
+    local gateway="${BIN_DIR}/defenseclaw-gateway" help
     [[ -x "${gateway}" ]] || return 0
-    "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" 2>>"${LOG}" \
+    # until 1.1: back to a release before 1.0.5, the OpenHands and OmniGent
+    # files this release's teardown changed outside the data folder come back
+    # with it (GAP-2136).
+    local to=()
+    help="$("${gateway}" connector prepare-rollback --help 2>/dev/null || true)"
+    [[ "${help}" != *--to-version* || -z "${back_to:-}" ]] || to=(--to-version "${back_to}")
+    "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" ${to[@]+"${to[@]}"} 2>>"${LOG}" \
         || warn "Could not rewrite the agent hook entries of DefenseClaw ${current:-?} in the form ${back_to} reads (see ${LOG}); after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
 }
 
