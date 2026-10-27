@@ -77,7 +77,7 @@ func TestUncertainProfileObservingTheRequestsPathDoesNotRefuseIt(t *testing.T) {
 				subject := identityTestSubject(p, p.providers[0], stateProven, true)
 				subject.holderUnproven = true
 				api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
-				api.guardrailProfiles.set.Store(set)
+				api.setGuardrailProfiles(set)
 				base := context.WithValue(t.Context(), testVerifiedSubjectKey{}, subject)
 
 				refused := func(decision profileDecision) bool {
