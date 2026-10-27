@@ -361,13 +361,21 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 				uidMax = cfg.Enterprise.Enrollment.UIDMax
 			}
 			for user, uid := range local {
-				if uid < uidMin || uid > uidMax || seen[uid] {
+				if uid < uidMin || uid > uidMax || seen[uid] || left[uid] {
 					continue
 				}
 				if canonical := canonicalUser(uid); canonical != "" {
 					user = canonical
 				}
 				list(uid, user, 0)
+				// Listed only so the gateway can confirm its facts: no
+				// gateway served it (a served account is a peer above), so
+				// it held no pre-upgrade agent identity, and an account
+				// created again under an earlier holder's uid and name must
+				// not write the first migration map as that holder (GAP-2069
+				// class; GAP-2106 live check). An enrollment's left-out
+				// account stays withdrawn (GAP-0755).
+				accounts[len(accounts)-1].Peer = true
 			}
 		}
 	}
