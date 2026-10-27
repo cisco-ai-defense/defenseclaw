@@ -712,10 +712,15 @@ the binaries, so stage the payload again and run its `ensure --payload <dir> --c
   moved-aside hooks back.
 - **A user's own install from before the enrollment (Linux and macOS).** If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db` or `previous/`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. No `~/.defenseclaw-backup-*` folder is made.
 - **A user whose home is gone (Linux and macOS).** When an enrolled user's home folder no longer
-  exists, the hooks and `~/.defenseclaw` went with it. The uninstall warns
-  (`per_user_hooks_remaining`) with the home and goes on. A home that does not answer, or whose
-  parent folder is missing too (an unmounted volume), is not available rather than gone: the result
-  names it so you can rerun the purge once it is mounted.
+  exists and its parent folder still holds other entries, the hooks and `~/.defenseclaw` went with
+  it. The uninstall warns (`per_user_hooks_remaining`) with the home and goes on. A home that does
+  not answer, or whose parent folder is missing or empty (the mount point of an unmounted volume),
+  is not available rather than gone. For an account that still exists, the uninstall then stops
+  (`uninstall_incomplete`), keeps the binaries, the deployment record and the services, and names
+  the home: mount it and run the uninstall again. A per-domain home layout (SSSD
+  `fallback_homedir = /home/%d/%u`) looks the same when the only account of a domain had its home
+  folder deleted: recreate that folder as a folder the account owns, then run the uninstall again.
+  Removing the account does not end the stop while a `targets.yaml` row names it (see Manifest rows).
 - **Sandboxes (Linux and macOS).** The uninstall stops the sandbox daemon and OpenShell gateway of
   each account. On Linux, `apt remove`, `dnf remove` and `rpm -e` also stop the sandbox user units
   in the user manager of every signed-in account before the package's files go. When a user manager

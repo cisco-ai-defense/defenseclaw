@@ -4248,9 +4248,10 @@ func cutPerUserEntry(entry string) (user, connector, reason string, ok bool) {
 // removePerUserRegistrations runs `enterprise hooks remove-all` (with
 // --purge on a purge) and reports what it could not do, one message per
 // account and connector: an error for a registration that is still in
-// place, a warning for an account whose home is unavailable, that was
-// removed (with the reason remove-all gives), or whose per-user state
-// stayed, and for a check that names no registration. It
+// place or in a home that is not available (GAP-0443), a warning for an
+// account that was removed (with the reason remove-all gives) or whose
+// per-user state stayed, and an error for a check that names no
+// registration. It
 // returns whether any registration is left.
 func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	env, r := l.env, l.result
@@ -4308,7 +4309,14 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 			r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s", connector, user, reason))
 			continue
 		}
-		r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available; once it is, remove DefenseClaw's entries from that account's %s config", connector, user, connector))
+		// The home of a live account is not available (an unmounted
+		// volume, a home that did not answer): its registrations may still
+		// be there and call the hook binary when it returns. They are kept
+		// as registrations: the binaries, the deployment record and the
+		// services stay, and a rerun once the home is back removes them
+		// (GAP-0443; lead decision 2026-10-26 18:57).
+		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available, so a DefenseClaw registration may remain in it and call the hook binary; make that home available (mount its volume) and rerun %s; if that home folder was deleted, recreate it as a folder the account owns and rerun %s", connector, user, rerun, rerun))
+		left = true
 	}
 	for _, entry := range report.StateFailed {
 		user, reason, _ := strings.Cut(entry, ": ")

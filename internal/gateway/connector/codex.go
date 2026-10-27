@@ -155,6 +155,9 @@ func snapshotCodexSetupRuntime(opts SetupOpts, connector *CodexConnector) (codex
 	}
 	for _, path := range []string{
 		filepath.Join(hookDir, ".token"),
+		// The per-user hook writer records the gateway helper path here; a
+		// failed Setup puts it back as found like every other runtime file.
+		filepath.Join(hookDir, ".gateway-helper"),
 		filepath.Join(hookDir, hookConfigSidecarName),
 		filepath.Join(hookDir, hookConfigSidecarName+".lock"),
 		filepath.Join(hookDir, hookConfigSidecarName+".codex"),

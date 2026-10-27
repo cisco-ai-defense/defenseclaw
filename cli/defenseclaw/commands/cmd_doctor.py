@@ -5903,10 +5903,15 @@ def _trusted_gateway_listener(
     *,
     evidence: GatewayEvidence | None = None,
     platform_name: str | None = None,
+    api_port: int | None = None,
 ) -> _GatewayTrust:
-    """Prove an exact local API target before sending a master token."""
+    """Prove an exact local API target before sending a master token.
+
+    *api_port* names the running gateway's own listener when a saved port
+    edit has not been applied yet; the proof is the same.
+    """
     host = _gateway_api_host(cfg)
-    api_port = _gateway_api_port(cfg)
+    api_port = api_port if api_port is not None and 1 <= api_port <= 65_535 else _gateway_api_port(cfg)
     if not api_port:
         return _GatewayTrust("unavailable", "configured API port is invalid")
 

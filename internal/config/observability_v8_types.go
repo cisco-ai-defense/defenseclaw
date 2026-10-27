@@ -238,7 +238,9 @@ type ObservabilityV8DestinationSource struct {
 // ObservabilityV8LocalStackSource is the record DefenseClaw's local Splunk
 // setup stores in the sink it creates: the ID of the container it started and
 // DefenseClaw's own marker. The CLI tells that sink from every other (remote)
-// Splunk destination by this record alone. Delivery never depends on it.
+// Splunk destination by this record alone. Delivery uses it for one thing:
+// the exporter sends the HEC token only to a listener of this account
+// (GAP-2115).
 type ObservabilityV8LocalStackSource struct {
 	Marker      string `json:"marker" mapstructure:"marker" yaml:"marker"`
 	ContainerID string `json:"container_id" mapstructure:"container_id" yaml:"container_id"`

@@ -19077,6 +19077,72 @@ def _verified_legacy_local_splunk_destination(
     data_dir: str, preferred: str, *, native_windows: bool, gateway_token_env: str,
 ) -> tuple[dict[str, Any], str] | None:
     """Identify a pre-record sink only with its bridge contract and exact Docker ownership."""
+    verified = _verified_legacy_local_splunk_container(
+        data_dir, preferred, native_windows=native_windows, gateway_token_env=gateway_token_env,
+    )
+    return None if verified is None else (verified[0], verified[1])
+
+
+def record_legacy_local_splunk_sink(data_dir: str, *, gateway_token_env: str = "") -> str | None:
+    """Store the local setup record in a Splunk sink 1.0.3 or earlier local setup created (GAP-2128).
+
+    Those releases wrote no record, so 1.0.4 and later count that sink as
+    remote, and its exporter sends the HEC token to whatever account listens
+    on its loopback address once the stack is stopped (GAP-2115 checks only a
+    recorded sink). The upgrade records the sink only when the bridge contract
+    and the exact Docker ownership prove it is this account's local stack, the
+    same proof a rerun of local setup uses; every other destination stays
+    remote and unchanged. Returns the name of the recorded destination, or
+    None when there is nothing to record.
+    """
+    from defenseclaw import config_writer
+    from defenseclaw.commands.cmd_setup_observability import _v8_authored_destination_snapshot
+    from defenseclaw.observability.v8_presets import (
+        NATIVE_LOCAL_SPLUNK_DESTINATION,
+        local_splunk_destination_name,
+        local_splunk_record,
+    )
+    from defenseclaw.observability.v8_writer import mutate_v8_config
+    from defenseclaw.observability.v8_yaml import V8YAMLMutation
+
+    if not (Path(data_dir) / "splunk-bridge").is_dir():
+        return None
+    native_windows = _native_windows_local_splunk()
+    preferred = (
+        NATIVE_LOCAL_SPLUNK_DESTINATION if native_windows
+        else local_splunk_destination_name(_planned_local_splunk_hec_url(data_dir))
+    )
+    verified = _verified_legacy_local_splunk_container(
+        data_dir, preferred, native_windows=native_windows, gateway_token_env=gateway_token_env,
+    )
+    if verified is None:
+        return None
+    _, proven_sha256, container_id = verified
+    config_path = config_path_for_data_dir(data_dir)
+    with config_writer.hold_lock(config_path, timeout_s=None):
+        authored, source_sha256 = _v8_authored_destination_snapshot(data_dir)
+        if source_sha256 != proven_sha256:
+            return None
+        index = next(index for index, item in enumerate(authored) if item.get("name") == preferred)
+        # One mutation per record key, as local setup writes it: the
+        # observability path allowlist names the record's keys, not the block.
+        mutate_v8_config(
+            config_path,
+            [
+                V8YAMLMutation.set(("observability", "destinations", index, "local_stack", key), value)
+                for key, value in local_splunk_record(container_id).items()
+            ],
+            data_dir=data_dir,
+            expected_before_sha256=source_sha256,
+            actor=config_writer.ACTOR_MIGRATION,
+        )
+    return preferred
+
+
+def _verified_legacy_local_splunk_container(
+    data_dir: str, preferred: str, *, native_windows: bool, gateway_token_env: str,
+) -> tuple[dict[str, Any], str, str] | None:
+    """The pre-record sink, its config digest and the ID of the container that proves it."""
     from defenseclaw.commands.cmd_setup_observability import _stored_secret, _v8_authored_destination_snapshot
     from defenseclaw.observability.local_splunk import COMPOSE_PROJECT, LOCAL_TOKEN_ENV
     from defenseclaw.observability.local_stack import CommandRunner, LocalStackError
@@ -19157,7 +19223,7 @@ def _verified_legacy_local_splunk_destination(
             return None
     except (OSError, ValueError, LocalStackError):
         return None
-    return masked_existing, source_sha256
+    return masked_existing, source_sha256, ids[0]
 
 
 def _local_splunk_container_id(gateway_token_env: str) -> str:
