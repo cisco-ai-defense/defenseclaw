@@ -54,22 +54,17 @@ defenseclaw_install_lock_held() {
   return 1
 }
 # defenseclaw_install_lock_stale DATA returns 0 (true) when DATA/.install.lock
-# is a folder whose installer is proven gone and no interrupted-install
-# record sits beside it: its pid names no process, or this hook's own (no
+# is a folder whose installer is proven gone (an interrupted-install record
+# beside it does not hold it, GAP-1024): its pid names no process, or this hook's own (no
 # hook writes a lock), or another process than its proc-start record names
 # (a reused pid). It reads no clock (hookexec installLockStale, the one
 # rule): a live owner keeps the lock for as long as it runs, and so do a
 # lock without a valid pid, a lock without a proc-start record whose pid
 # names a process (1.0.2, 1.0.3) and an owner whose identity cannot be read.
 defenseclaw_install_lock_stale() {
-  local data="${1:-}" lock rc pid name recorded current
+  local data="${1:-}" lock rc pid recorded current
   lock="${data}/.install.lock"
   [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
-  for name in previous.new .repair .rollback-hold .lifecycle-txn.json; do
-    if [ -e "${data}/${name}" ] || [ -L "${data}/${name}" ]; then
-      return 1
-    fi
-  done
   rc=0
   pid="$(defenseclaw_install_lock_number "${lock}/pid")" || rc=$?
   [ "$rc" = 0 ] || return 1
@@ -84,7 +79,10 @@ defenseclaw_install_lock_stale() {
   # An installer that exited but is not reaped (a zombie) keeps its pid and
   # its start, but runs nothing.
   defenseclaw_process_ended "$pid" && return 0
-  [ -e "${lock}/proc-start" ] || [ -L "${lock}/proc-start" ] || return 1
+  if [ ! -e "${lock}/proc-start" ] && [ ! -L "${lock}/proc-start" ]; then
+    defenseclaw_process_started_after_lock "$pid" "$lock"
+    return
+  fi
   recorded="$(defenseclaw_install_lock_record "${lock}/proc-start")" || return 1
   current="$(defenseclaw_process_identity "$pid")" || return 1
   [ "$recorded" != "$current" ] && return 0
@@ -137,6 +135,36 @@ defenseclaw_process_ended() {
   set -- $stat
   case "${1:-}" in Z*) return 0 ;; esac
   return 1
+}
+# defenseclaw_process_started_after_lock PID LOCK returns 0 when process PID
+# started more than 2 s after LOCK was last changed: a 1.0.2/1.0.3 lock
+# without a proc-start record whose pid a later process got (GAP-1465, the
+# hookexec rule). It returns 1 when it started earlier or the system does not
+# say.
+defenseclaw_process_started_after_lock() {
+  local locked="" started="" boot="" stat="" line="" out="" IFS=' '
+  locked="$(stat -c %Y "${2:-}" 2>/dev/null || stat -f %m "${2:-}" 2>/dev/null)" || return 1
+  case "$locked" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -e /proc/self/stat ]; then
+    while IFS= read -r line; do
+      case "$line" in "btime "*) boot="${line#btime }"; break ;; esac
+    done < /proc/stat
+    case "$boot" in ''|*[!0-9]*) return 1 ;; esac
+    stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
+    case "$stat" in *[\)]*) ;; *) return 1 ;; esac
+    stat="${stat##*[\)]}"
+    set -- $stat
+    [ "$#" -ge 20 ] || return 1
+    shift 19
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    started=$((boot + $1 / 100))
+  else
+    [ "$(uname -s 2>/dev/null)" = Darwin ] && [ -x /bin/ps ] || return 1
+    out="$(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p "${1:-}" 2>/dev/null)" || return 1
+    started="$(LC_ALL=C TZ=UTC date -j -u -f "%a %b %e %T %Y" "$out" +%s 2>/dev/null)" || return 1
+    case "$started" in ''|*[!0-9]*) return 1 ;; esac
+  fi
+  [ "$started" -gt $((locked + 2)) ]
 }
 # defenseclaw_install_lock_record FILE prints the trimmed text of a small
 # owner record (proc-start); it returns 1 when FILE is not a small regular
@@ -262,9 +290,18 @@ export DEFENSECLAW_HOME
 # agent's environment, where they would change how the per-user hook answers
 # a missing token.
 unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
-DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-{{if not .Sandbox}}# The hook path is resolved: this is the data directory it was installed in.
+{{if .Sandbox}}DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+{{else}}# Without DEFENSECLAW_HOME the hook's home is the data directory it was
+# installed in, not ~/.defenseclaw: a custom-home install keeps its own
+# config, lock and gateway when the agent does not pass the variable
+# (GAP-1854).
+DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-$(cd "${HOOK_DIR}/.." && pwd -P)}"
+{{end}}{{if not .Sandbox}}# The hook path is resolved: this is the data directory it was installed in.
 _DC_HOOK_DATA_DIR="${HOOK_DIR}/.."
+# An inherited DEFENSECLAW_HOME that names no folder does not retire the
+# hook installed here, and does not block it: the hook keeps the data
+# directory it was installed in and asks its gateway (GAP-1256).
+[ -d "${DEFENSECLAW_HOME}" ] || DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 {{end}}if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
   # The installed mode decides; strict availability tightens this exit as it
@@ -295,7 +332,7 @@ command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
 {{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call.
-. "${HOOK_DIR}/_sandbox.sh"
+command . "${HOOK_DIR}/_sandbox.sh" || exit 2
 {{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
 # Doctor and Verify execute the exact command Hermes has registered. The
@@ -438,7 +475,7 @@ if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
   fi
 elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   # shellcheck source=/dev/null
-  . "${HOOK_DIR}/{{.TokenFile}}"
+  {{if .SecureClient}}. "${HOOK_DIR}/{{.TokenFile}}"{{else}}command . "${HOOK_DIR}/{{.TokenFile}}" || DEFENSECLAW_GATEWAY_TOKEN={{end}}
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 # Only the private copy is used from here on: no child process (curl, jq, the

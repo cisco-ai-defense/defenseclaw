@@ -307,3 +307,61 @@ def test_windows_listener_owner(tmp_path, recorded_pid, process_status, expected
     ):
         assert gateway._windows_foreign_listener("127.0.0.1", 19000) == expected
     read.assert_called_once_with(os.path.join(str(tmp_path), "gateway.pid"))
+
+
+def test_saved_port_edit_keeps_the_running_listener_provable_until_restart(tmp_path, monkeypatch) -> None:
+    """GAP-0441: `config set gateway.api_port` saved a port the gateway applies at restart.
+
+    The audit fact goes to the running listener (its gateway-api.json bound to
+    gateway.pid); the ownership check accepted only the saved port, so every
+    such fact was refused before a byte was sent. The running listener is
+    accepted with the same listener proof; any other port still is not.
+    """
+    import json
+    import os
+
+    from defenseclaw import config
+    from defenseclaw.commands import cmd_doctor
+
+    (tmp_path / "gateway.pid").write_text(str(os.getpid()), encoding="utf-8")
+    record = tmp_path / "gateway-api.json"
+    record.write_text(json.dumps({"pid": os.getpid(), "host": "127.0.0.1", "port": 19080}), encoding="utf-8")
+    record.chmod(0o600)
+    cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=SimpleNamespace(host="127.0.0.1", api_port=19082))
+    proven: list[int] = []
+
+    def trusted(_cfg, *, api_port=None, **_kwargs):
+        proven.append(api_port)
+        return SimpleNamespace(trusted=True, code="trusted", detail="")
+
+    monkeypatch.setattr(gateway, "_managed_connected_verifier_spec", lambda: None)
+    monkeypatch.setattr(config, "load", lambda **_kwargs: cfg)
+    monkeypatch.setattr(gateway, "gateway_api_client_host", lambda _cfg: "127.0.0.1")
+    monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", trusted)
+
+    assert gateway._unproven_per_user_gateway_target("127.0.0.1", 19080) == ""
+    assert proven == [19080]
+    assert gateway._unproven_per_user_gateway_target("127.0.0.1", 19082) == ""
+    assert proven == [19080, 19082]
+    assert "not the configured gateway endpoint" in gateway._unproven_per_user_gateway_target("127.0.0.1", 19081)
+    # A descriptor of another process never vouches for a port.
+    record.write_text(json.dumps({"pid": os.getpid() + 1, "host": "127.0.0.1", "port": 19080}), encoding="utf-8")
+    assert "not the configured gateway endpoint" in gateway._unproven_per_user_gateway_target("127.0.0.1", 19080)
+    assert proven == [19080, 19082]
+
+
+def test_listener_proof_checks_the_named_running_port(monkeypatch) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    seen: list[int] = []
+    process = SimpleNamespace(trusted=True)
+    monkeypatch.setattr(cmd_doctor, "_gateway_api_host", lambda _cfg: "127.0.0.1")
+    monkeypatch.setattr(cmd_doctor, "_managed_gateway_process_trust", lambda *_a, **_k: process)
+    monkeypatch.setattr(
+        cmd_doctor, "_managed_gateway_listener_evidence", lambda port, **_k: seen.append(port) or "listener"
+    )
+    monkeypatch.setattr(cmd_doctor, "_gateway_listener_trust", lambda proc, listener: (proc, listener))
+    cfg = SimpleNamespace(gateway=SimpleNamespace(api_port=19082))
+    cmd_doctor._trusted_gateway_listener(cfg, evidence=object(), platform_name="linux", api_port=19080)
+    cmd_doctor._trusted_gateway_listener(cfg, evidence=object(), platform_name="linux")
+    assert seen == [19080, 19082]

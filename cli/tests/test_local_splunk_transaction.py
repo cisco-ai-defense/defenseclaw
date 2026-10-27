@@ -765,6 +765,86 @@ def test_legacy_local_sink_migrates_only_with_bridge_and_container_proof(
             assert _destinations(data_dir)[name] == legacy
 
 
+@pytest.mark.parametrize("proof", ["owned", "wrong-token", "wrong-compose", "multiple-containers"])
+def test_upgrade_records_only_the_proven_legacy_local_sink(tmp_path: Path, monkeypatch, proof: str) -> None:
+    """GAP-2128: the sink 1.0.3 local setup created gets the record on upgrade.
+
+    Without it the exporter counts the sink as remote and sends the HEC token
+    to any account on 127.0.0.1:8088 (GAP-2115 checks only a recorded sink).
+    Only the bridge contract and the exact container prove it; any other
+    destination, and a sink that is not proven, keep their bytes.
+    """
+    from defenseclaw import migrations
+
+    data_dir = tmp_path / "home/alice" / ".defenseclaw"
+    _app(data_dir)
+    name = "splunk-hec-127-0-0-1"
+    credential = "older local fixture credential"
+    legacy = _hec(name, _DEFAULT_HEC, _SHARED)
+    # A remote destination keeps its own reference: the shared name, an
+    # underscore and the destination name in capitals.
+    remote = _hec("splunk-hec-remote", _REMOTE_HEC, f"{_SHARED}_SPLUNK_HEC_REMOTE")
+    _write_state(data_dir, [legacy, remote], {"KEEP_ME": "unchanged", _SHARED: credential})
+    _write_bridge_contract(data_dir, credential if proof != "wrong-token" else "other bridge credential")
+    bridge = data_dir / "splunk-bridge"
+    (bridge / "bin").mkdir()
+    (bridge / "bin" / "splunk-claw-bridge").write_text("bridge fixture", encoding="utf-8")
+    (bridge / "compose").mkdir()
+    compose = bridge / "compose" / "docker-compose.local.yml"
+    compose.write_text("name: defenseclaw-splunk-local\n", encoding="utf-8")
+    labels = {
+        "com.docker.compose.project": "defenseclaw-splunk-local",
+        "com.docker.compose.service": "splunk",
+        "com.docker.compose.project.working_dir": str(compose.parent),
+        "com.docker.compose.project.config_files": str(compose if proof != "wrong-compose" else tmp_path / "other.yml"),
+    }
+
+    class DockerEvidence:
+        def run(self, argv, *, timeout, env=None):
+            command = tuple(argv)
+            if command[1] == "ps":
+                ids = _FULL_ID + "\n" + ("f" * 64 + "\n" if proof == "multiple-containers" else "")
+                return CommandResult(command, 0, stdout=ids)
+            if command[1] == "inspect":
+                return CommandResult(command, 0, stdout=json.dumps(labels))
+            raise AssertionError(command)
+
+    monkeypatch.setattr(cmd_setup.shutil, "which", lambda name: "docker" if name == "docker" else None)
+    _, validate = _v8_writer_patches()
+    before = (data_dir / "config.yaml").read_bytes()
+    with (
+        validate,
+        patch("defenseclaw.observability.local_stack.CommandRunner", return_value=DockerEvidence()),
+        patch.object(cmd_setup, "_native_windows_local_splunk", return_value=False),
+        patch("defenseclaw.config_writer.refuse_when_managed"),
+        patch("defenseclaw.observability.v8_writer._assert_config_write_allowed"),
+        patch("defenseclaw.config_writer.managed_refuses", return_value=False),
+    ):
+        migrations._record_legacy_local_splunk_sink(str(data_dir), str(data_dir / "config.yaml"))
+        sinks = _destinations(data_dir)
+        if proof == "owned":
+            assert sinks[name] == {**legacy, "local_stack": _RECORD}
+            assert sinks["splunk-hec-remote"] == remote
+            # A second upgrade finds a recorded sink and changes nothing.
+            recorded = (data_dir / "config.yaml").read_bytes()
+            assert cmd_setup.record_legacy_local_splunk_sink(str(data_dir)) is None
+            assert (data_dir / "config.yaml").read_bytes() == recorded
+        else:
+            assert (data_dir / "config.yaml").read_bytes() == before
+            assert "local_stack" not in sinks[name]
+
+
+def test_upgrade_names_the_setup_rerun_when_the_local_sink_cannot_be_recorded(tmp_path: Path, capsys) -> None:
+    from defenseclaw import migrations
+
+    (tmp_path / "splunk-bridge").mkdir()
+    (tmp_path / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    with patch.object(cmd_setup, "record_legacy_local_splunk_sink", side_effect=OSError("busy")):
+        migrations._record_legacy_local_splunk_sink(str(tmp_path), str(tmp_path / "config.yaml"))
+    captured = capsys.readouterr()
+    assert "defenseclaw setup splunk --logs" in " ".join((captured.out + captured.err).split())
+
+
 def test_legacy_local_proof_expires_if_destination_changes_before_commit(tmp_path: Path) -> None:
     from defenseclaw.commands.cmd_setup_observability import _v8_authored_destination_snapshot
 

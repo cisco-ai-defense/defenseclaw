@@ -80,7 +80,9 @@ func TestPerUserInstallLockIsBoundedByItsOwnerNotItsAge(t *testing.T) {
 		{"new lock without pid", "", 0, true},
 		{"dead owner", "99999999", 0, false},
 		{"live owner", live, 0, true},
-		{"aged live owner", live, 11 * time.Minute, true},
+		// GAP-1465: a lock without a proc-start record that is older than its
+		// pid's process names a reused pid.
+		{"record-less lock older than its pid's process", live, 7 * 24 * time.Hour, false},
 		{"aged lock without pid", "", 11 * time.Minute, true},
 		{"pid reused by the reader", strconv.Itoa(os.Getpid()), 0, false},
 	} {

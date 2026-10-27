@@ -257,8 +257,13 @@ func TestConnectorCheckAgentSettingsRefusesMalformedSharedHookSidecar(t *testing
 				t.Fatalf("stdout is not JSON: %q (%v)", stdout, err)
 			}
 			reason, _ := payload["reason"].(string)
-			if payload["refused"] != true || !strings.Contains(reason, sidecar) || !strings.Contains(reason, "malformed") {
+			if payload["refused"] != true || !strings.Contains(reason, sidecar) || !strings.Contains(reason, "fail_modes") {
 				t.Fatalf("payload = %v; want a refusal naming %s", payload, sidecar)
+			}
+			// GAP-1815: no flat record can rebuild this null map, so a
+			// restart does not repair it either.
+			if payload["repaired_by_restart"] != false {
+				t.Fatalf("payload = %v; want repaired_by_restart false", payload)
 			}
 			if after, err := os.ReadFile(sidecar); err != nil || string(after) != malformed {
 				t.Fatalf("the check changed the sidecar: %q (%v)", after, err)

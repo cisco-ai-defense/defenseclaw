@@ -468,13 +468,20 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 
 // windowsSecretLastChange is when credential name last changed in the
 // store: its file's last write for a stored value, the store folder's for an
-// absent one (a removal writes the folder). The zero time when unknown.
+// absent one (a removal writes the folder), and the folder that holds the
+// store when no store folder exists (nothing was ever stored, or removing
+// the store folder wrote its parent): every remove of an absent credential
+// on a computer with no credentials restarted the gateway (GAP-1690). The
+// zero time when unknown.
 func windowsSecretLastChange(layout managed.StandaloneLayout, name, action string) time.Time {
 	path := layout.SecretsDir
 	if action == "set" {
 		path = filepath.Join(layout.SecretsDir, name)
 	}
 	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) && action != "set" {
+		info, err = os.Lstat(filepath.Dir(filepath.Clean(layout.SecretsDir)))
+	}
 	if err != nil {
 		return time.Time{}
 	}

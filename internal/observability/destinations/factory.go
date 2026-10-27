@@ -421,7 +421,7 @@ func (factory *Factory) prepareSplunk(
 		Destination: destination.Name, Endpoint: destination.Transport.Endpoint,
 		Token: token, Index: destination.Transport.Index, Source: destination.Transport.Source,
 		SourceType: destination.Transport.SourceType, SourceTypeOverrides: overrides,
-		TLS: tlsOptions,
+		TLS: tlsOptions, LocalStack: config.ObservabilityV8LocalStackSink(destination),
 		Network: push.NetworkOptions{
 			AllowPrivateNetworks: network.AllowPrivateNetworks,
 			AllowCGNAT:           network.AllowCGNAT,

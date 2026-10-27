@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 // GAP-2024 (RV5-1): after 1.0.3 -> 1.0.4 -> 1.0.5, an account recreated
@@ -240,5 +241,112 @@ func TestIdentitySpoolTickRunsAPassInsideTheIntervalOnlyWhenTheAccountDatabaseCh
 	}
 	if tick() {
 		t.Fatal("the pass for the new account database did not record its stamp")
+	}
+}
+
+// GAP-2133: an Active Directory account deleted and created again under the
+// same name, uid and home (a POSIX uidNumber domain, or an id override) has
+// a new SID and nothing else of its key changes. The guardian's tick runs a
+// spool pass inside the interval once the directory names another SID for
+// the uid, so the record is rewritten at the next one-minute tick instead of
+// the 15-minute interval; a lookup that does not answer starts no pass.
+func TestIdentitySpoolTickRunsAPassWhenTheDirectoryNamesAnotherSIDForTheUID(t *testing.T) {
+	identityCallerTestConfig(t)
+	cfg.DataDir = t.TempDir()
+	const uid = 94404140
+	const name = "macnone@dclab.test"
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		name: {Name: name, UID: uid, GID: 94400513},
+	}})
+	previousLookup, previousWrite := enterpriseHookAccountIncarnationLookup, enterpriseHookWriteIdentitySpool
+	previousStamp, previousRoots := enterpriseHookLocalAccountsStamp, enterpriseHookHomeRootsStamp
+	previousOwner, previousTrust := enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck
+	state := &enterpriseHookIdentitySpoolState
+	state.Lock()
+	saved := struct {
+		running, failed bool
+		last            time.Time
+		fingerprint     string
+	}{state.running, state.failed, state.last, state.fingerprint}
+	state.running, state.failed, state.last, state.fingerprint = false, false, time.Time{}, ""
+	state.Unlock()
+	enterpriseHookKeySIDs.Lock()
+	savedSIDs := enterpriseHookKeySIDs.byUID
+	enterpriseHookKeySIDs.byUID = nil
+	enterpriseHookKeySIDs.Unlock()
+	t.Cleanup(func() {
+		enterpriseHookAccountIncarnationLookup, enterpriseHookWriteIdentitySpool = previousLookup, previousWrite
+		enterpriseHookLocalAccountsStamp, enterpriseHookHomeRootsStamp = previousStamp, previousRoots
+		enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck = previousOwner, previousTrust
+		state.Lock()
+		state.running, state.failed, state.last, state.fingerprint = saved.running, saved.failed, saved.last, saved.fingerprint
+		state.Unlock()
+		enterpriseHookKeySIDs.Lock()
+		enterpriseHookKeySIDs.byUID = savedSIDs
+		enterpriseHookKeySIDs.Unlock()
+	})
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	enterpriseHookAuthorizationDirTrustCheck = func(string) error { return nil }
+	enterpriseHookLocalAccountsStamp = func() string { return "1/100/7" }
+	enterpriseHookHomeRootsStamp = func() string { return ";5/9" }
+	var lookupMu sync.Mutex
+	incarnation, known := "sid:S-1-5-21-1-2-3-4140", true
+	enterpriseHookAccountIncarnationLookup = func(context.Context) func(int, string) (string, bool) {
+		return func(gotUID int, gotUser string) (string, bool) {
+			lookupMu.Lock()
+			defer lookupMu.Unlock()
+			if gotUID != uid || gotUser != name {
+				return "", false
+			}
+			return incarnation, known
+		}
+	}
+	set := func(sid string, answers bool) {
+		lookupMu.Lock()
+		incarnation, known = sid, answers
+		lookupMu.Unlock()
+	}
+	passes := make(chan struct{}, 4)
+	enterpriseHookWriteIdentitySpool = func(context.Context, string, []enterprisehooks.IdentitySpoolAccount, func(string) error,
+		func(string, ...any), enterprisehooks.IdentitySpoolWithdraw) error {
+		passes <- struct{}{}
+		return nil
+	}
+	run := enterpriseHookReconcileRun{Rows: []enterpriseHookReconcileRow{{User: name, UID: uid, Connector: "codex", OK: true}}}
+	tick := func() bool {
+		t.Helper()
+		startEnterpriseHookIdentitySpool(context.Background(), io.Discard, run)
+		select {
+		case <-passes:
+		case <-time.After(2 * time.Second):
+			return false
+		}
+		for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			state.Lock()
+			running := state.running
+			state.Unlock()
+			if !running {
+				return true
+			}
+		}
+		t.Fatal("the spool pass did not end")
+		return true
+	}
+	if !tick() {
+		t.Fatal("the first tick ran no spool pass")
+	}
+	if tick() {
+		t.Fatal("a tick inside the interval with the same SID ran a spool pass")
+	}
+	set("", false)
+	if tick() {
+		t.Fatal("a tick whose SID lookup did not answer ran a spool pass")
+	}
+	set("sid:S-1-5-21-1-2-3-5979", true)
+	if !tick() {
+		t.Fatal("a tick inside the interval after the directory named another SID for the uid ran no spool pass (GAP-2133)")
+	}
+	if tick() {
+		t.Fatal("the pass for the new SID did not record it")
 	}
 }

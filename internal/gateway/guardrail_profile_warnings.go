@@ -1057,6 +1057,13 @@ func explainCacheOutcome(live profileDecision) string {
 // old they are, and the profile requests currently get from them. warning is
 // non-empty when that profile differs from the explained one.
 func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decision profileDecision, connectorName, agent string, now time.Time) (view map[string]any, warning string) {
+	return explainCacheViewOf(set, explained, decision, connectorName, agent, nil, now)
+}
+
+// explainCacheViewOf is explainCacheView for the agent explain matched and
+// its 1.0.3 claim (explainAgent), so the live view decides an agent as the
+// hook does (GAP-0019).
+func explainCacheViewOf(set *guardrailProfileSet, explained *profileSubject, decision profileDecision, connectorName, agent string, legacy profileAgentLegacy, now time.Time) (view map[string]any, warning string) {
 	if set == nil || explained == nil || explained.UserID == "" || explained.LookupFailed {
 		return nil, ""
 	}
@@ -1070,7 +1077,7 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 			return nil, ""
 		}
 		failed := profileSubject{UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, LookupFailed: identityLookupBlocking.Load()}
-		live, sandboxRefused := set.explainLiveDecision(&failed, connectorName, agent)
+		live, sandboxRefused := set.explainLiveDecision(&failed, connectorName, agent, legacy)
 		differs := live.Name != decision.Name || live.Match != decision.Match || live.Refused != decision.Refused
 		view = map[string]any{
 			"failing_since": since.UTC().Format(time.RFC3339),
@@ -1102,7 +1109,7 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 	cached := profileSubjectFromVerified(VerifiedSubject{
 		UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, Directory: facts,
 	}, identityLookupBlocking.Load())
-	live, sandboxRefused := set.explainLiveDecision(&cached, connectorName, agent)
+	live, sandboxRefused := set.explainLiveDecision(&cached, connectorName, agent, legacy)
 	differs := live.Name != decision.Name || live.Match != decision.Match || live.MatchedGroup != decision.MatchedGroup ||
 		live.Refused != decision.Refused
 	view = map[string]any{

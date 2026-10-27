@@ -311,6 +311,12 @@ def _refuse_unverified_plugin_teardown(app: AppContext, connectors: list[str]) -
             raise SystemExit(1)
 
 
+# Connectors whose version floor setup applies in every mode (a kiro-cli below
+# 2.27.1 loads no hooks in a headless run, GAP-0828): guardrail mode applies it
+# to an observe switch too (GAP-1638).
+_EVERY_MODE_VERSION_FLOOR = frozenset({"kiro"})
+
+
 def _toggle_connector_guardrail(
     app: AppContext, requested: str, *, enable: bool, restart: bool, yes: bool
 ) -> None:
@@ -415,6 +421,18 @@ def _toggle_connector_guardrail(
         # with --no-restart, so its agent proof must exist before the save.
         _verify_agents_before_enable(app, [key])
 
+    if enable:
+        # The checks setup runs before it saves: the agent's own settings and
+        # the shared hooks/.hookcfg every hook closes on. Enabling over a
+        # malformed one saved the flag and returned 0 (GAP-1816).
+        from defenseclaw.commands import cmd_setup
+
+        if refusal := cmd_setup._agent_settings_refusal(
+            app.cfg, key, will_restart=restart, changed="Nothing was changed", rerun="guardrail enable command"
+        ):
+            ux.err(refusal, indent="  ")
+            raise SystemExit(1)
+
     # Mutate the per-connector entry, preserving its other policy fields.
     from defenseclaw.config import PerConnectorGuardrailConfig
 
@@ -445,17 +463,38 @@ def _toggle_connector_guardrail(
             if enable
             else None
         )
-        cmd_setup._restart_services(
-            app.cfg.data_dir,
-            app.cfg.gateway.host,
-            app.cfg.gateway.port,
-            connector=key,
-            connectors=roster,
-            teardown=not enable,
-            # Report "setup complete" only once the gateway admitted the
-            # connector (GAP-0069).
-            wait_for_connector_ready=enable,
-        )
+        try:
+            cmd_setup._restart_services(
+                app.cfg.data_dir,
+                app.cfg.gateway.host,
+                app.cfg.gateway.port,
+                connector=key,
+                connectors=roster,
+                teardown=not enable,
+                # Report "setup complete" only once the gateway admitted the
+                # connector (GAP-0069).
+                wait_for_connector_ready=enable,
+            )
+        except (click.ClickException, SystemExit):
+            if not enable:
+                raise
+            # The gateway could not set the connector up, so its hooks are
+            # still the disabled ones: put the flag back, or the connector
+            # read 'enabled' with no hooks and a retry said 'already enabled'
+            # (GAP-1534).
+            entry.enabled = False
+            try:
+                app.cfg.save()
+            except OSError as exc:
+                ux.err(f"{label} could not be set up, and putting it back to disabled failed: {exc}", indent="  ")
+                raise
+            ux.err(
+                f"{label} stays disabled: the gateway could not set it up (see above), so "
+                f"guardrail.connectors.{key}.enabled is false again. Fix that error, then run: "
+                f"defenseclaw guardrail enable --connector {key}",
+                indent="  ",
+            )
+            raise
         ux.ok(f"{label} connector {action} complete", indent="  ")
         click.echo()
 
@@ -918,7 +957,12 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         configured_cfm = gc.effective_hook_fail_mode(name) if hasattr(gc, "effective_hook_fail_mode") else fail_mode
         cfm = configured_cfm
         fail_drift = ""
-        if normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS:
+        if _is_proxy_connector(name):
+            # A proxy-backed connector has no hooks: its model calls fail
+            # while the gateway is down, as `guardrail fail-mode` shows
+            # (GAP-1963 R6-F1). The hook outage mode does not apply.
+            cfm = "closed"
+        elif normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS:
             runtime_state = resolve_connector_fail_mode(app.cfg, name)
             if runtime_state.runtime is not None:
                 cfm = runtime_state.runtime
@@ -1676,6 +1720,22 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     )
 
 
+def _restore_global_hook_fail_mode(gc: object, value: str, saved: bool) -> None:
+    """Put the global hook_fail_mode back as it was before a failed change.
+
+    An unset global reads as "closed" in memory (GuardrailConfig keeps that
+    public default) but is not a saved choice. Assigning that value back would
+    mark it saved, so a rollback wrote ``hook_fail_mode: closed`` that the
+    user never chose (GAP-2019). An unset value goes back unset.
+    """
+
+    if saved:
+        gc.hook_fail_mode = value
+        return
+    gc.hook_fail_mode = ""
+    object.__setattr__(gc, "hook_fail_mode", value)
+
+
 def _apply_global_fail_mode_transaction(
     app: AppContext,
     *,
@@ -1702,6 +1762,7 @@ def _apply_global_fail_mode_transaction(
             raise click.Abort() from exc
 
         old_global = gc.hook_fail_mode
+        old_global_saved = bool(getattr(gc, "_hook_fail_mode_saved", True))
         old_entries: dict[str, tuple[object, str]] = {}
         gc.hook_fail_mode = mode
         if fail_mode_targets:
@@ -1741,7 +1802,7 @@ def _apply_global_fail_mode_transaction(
         except OSError as exc:
             # A failed writer commit leaves config.yaml as it was, and no
             # registration file has been touched yet.
-            gc.hook_fail_mode = old_global
+            _restore_global_hook_fail_mode(gc, old_global, old_global_saved)
             for name, (old_entry, old_mode) in old_entries.items():
                 old_entry.hook_fail_mode = old_mode
             ux.err(
@@ -1800,7 +1861,7 @@ def _apply_global_fail_mode_transaction(
                                 + ". Run `defenseclaw doctor`, then retry the fail-mode command."
                             )
             except (OSError, RuntimeError, click.ClickException) as exc:
-                gc.hook_fail_mode = old_global
+                _restore_global_hook_fail_mode(gc, old_global, old_global_saved)
                 for name, (old_entry, old_mode) in old_entries.items():
                     old_entry.hook_fail_mode = old_mode
                 try:
@@ -5597,6 +5658,39 @@ def mode_cmd(
                     "Fix what the check above reports (see: defenseclaw agent discover --refresh), "
                     f"then run: defenseclaw guardrail mode action{f' --connector {scope}' if connector_key else ''}"
                 ],
+            )
+    elif _EVERY_MODE_VERSION_FLOOR.intersection(affected):
+        # Setup refuses a kiro-cli below its hook floor in observe and action
+        # mode alike. The switch to observe skipped that check, so the
+        # switch back to action was refused and the CLI could not undo its
+        # own change (GAP-1638): the observe switch now applies it too.
+        from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
+
+        refused: list[str] = []
+        for c in sorted(_EVERY_MODE_VERSION_FLOOR.intersection(affected)):
+            scope_record: dict[str, object] = {}
+            if not _check_connector_version_supported_for_setup(
+                c,
+                mode="observe",
+                emit=not json_out,
+                data_dir=app.cfg.data_dir,
+                _allow_prompt=False,
+                _refusal_scope=scope_record,
+            ) and scope_record.get("observe_admitted") is False:
+                refused.append(c)
+        if refused:
+            names = ", ".join(_connector_label(c) for c in refused)
+            _finish(
+                ok=False,
+                exit_code=1,
+                new_mode=previous,
+                previous=previous,
+                message=(
+                    f"Nothing was changed: setup refuses {names} in observe and action mode at this version "
+                    "(see the check above), so this switch is refused the same way."
+                ),
+                notes=["Update it to a supported version, then run: defenseclaw guardrail mode "
+                       f"{mode}{f' --connector {scope}' if connector_key else ''}"],
             )
     _preflight_config_write(app)
     if connector_key is None:

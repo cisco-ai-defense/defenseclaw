@@ -1008,6 +1008,52 @@ def test_scoped_reconcile_failure_rolls_back_config_and_registration(
     assert config_yaml.read_bytes() == concurrent
 
 
+def test_global_rollback_keeps_an_unset_global_fail_mode_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-2019: a default-tier install has no saved global hook_fail_mode
+    # (it reads "closed" in memory). A failed `guardrail fail-mode closed
+    # --yes` must not roll back to a saved "closed" the user never chose.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": ""})
+    cfg.guardrail = dcconfig.GuardrailConfig()
+    cfg.guardrail.enabled = True
+    cfg.guardrail.connectors = {
+        name: dcconfig.PerConnectorGuardrailConfig(hook_fail_mode="") for name in ("claudecode", "codex")
+    }
+    assert not cfg.guardrail._hook_fail_mode_saved
+    _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
+    saves: list[tuple[str, bool, dict[str, str]]] = []
+    cfg.save = MagicMock(
+        side_effect=lambda **_kw: saves.append(
+            (
+                cfg.guardrail.hook_fail_mode,
+                cfg.guardrail._hook_fail_mode_saved,
+                {name: entry.hook_fail_mode for name, entry in cfg.guardrail.connectors.items()},
+            )
+        )
+    )
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    refused = OSError("copilot: cannot repair event preToolUse: an independent or unrecognized handler is present")
+    with (
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration", side_effect=refused),
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True),
+        patch("defenseclaw.commands.cmd_setup._restart_services", side_effect=refused),
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code != 0, result.output
+    assert "restored" in result.output
+    assert len(saves) == 2, saves
+    assert saves[0][0] == "closed" and saves[0][1]
+    # The rollback save writes the global back unset, not as a saved closed.
+    assert saves[1][1] is False, saves
+    assert saves[1][2] == {"claudecode": "", "codex": ""}
+    assert cfg.guardrail.hook_fail_mode == "closed"
+    assert not cfg.guardrail._hook_fail_mode_saved
+
+
 def test_truthful_noop_requires_current_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
@@ -2577,3 +2623,25 @@ def test_a_claude_settings_carrier_is_still_an_input_of_a_render_that_reads_it(
         assert "claude-env-open" in state.drift, state.drift
     else:
         assert "agent-env-unverified" in state.drift, state.drift
+
+
+def test_codex_registration_under_a_custom_home_is_current(monkeypatch, tmp_path) -> None:
+    """GAP-1882: hooks rendered under a custom DEFENSECLAW_HOME (~/dchome)
+    name no "defenseclaw" in their command path and are still DefenseClaw's
+    registration; another program's hooks are not."""
+    data_dir = tmp_path / "dchome"
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    monkeypatch.setattr(fail_mode_runtime, "connector_config_files", lambda *_a, **_k: [str(config)])
+    config.write_text(
+        "[hooks]\n[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\n"
+        f"command = '{data_dir}/hooks/codex-hook.sh --event PreToolUse --hook-contract codex-hooks-v4'\n",
+        encoding="utf-8",
+    )
+    assert fail_mode_runtime._codex_registration_current("", str(data_dir))
+    assert not fail_mode_runtime._codex_registration_current("", str(tmp_path / "other"))
+    config.write_text(
+        "[hooks]\n[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ncommand = '/usr/local/bin/other-hook.sh'\n",
+        encoding="utf-8",
+    )
+    assert not fail_mode_runtime._codex_registration_current("", str(data_dir))

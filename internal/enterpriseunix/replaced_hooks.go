@@ -145,6 +145,7 @@ func (l *lifecycle) fenceReplacedHooks(ctx context.Context) {
 		return
 	}
 	l.replacedHooksFenced = true
+	l.retireReplacedMachineShellHooks()
 	targets := l.replacedHookTargets(ctx)
 	if len(targets) == 0 {
 		return
@@ -172,6 +173,57 @@ func (l *lifecycle) fenceReplacedHooks(ctx context.Context) {
 	l.result.AddWarning(codeReplacedHookCalls, fmt.Sprintf("hook calls of the replaced release were still running %s after their hooks were fenced, and the gateway was stopped: %s; "+
 		"a call such a hook sends before the new gateway answers follows the replaced release's fail mode",
 		env.ReplacedHookCallsTimeout, strings.Join(running, ", ")))
+}
+
+// codeReplacedMachineHooks names a generic shell hook set of a replaced
+// release in the managed data directory that the run could not remove.
+const codeReplacedMachineHooks = "replaced_machine_hooks_kept"
+
+// replacedMachineShellHooks are the generic shell hooks a 1.0.2 or 1.0.3
+// managed gateway rendered in its own data directory, _hardening.sh last.
+var replacedMachineShellHooks = []string{
+	"inspect-request.sh", "inspect-response.sh", "inspect-tool.sh", "inspect-tool-response.sh", hardeningFile,
+}
+
+// retireReplacedMachineShellHooks removes the generic shell hook set a
+// replaced release left in the managed data directory's hooks folder
+// (GAP-1710). No managed hook of this release runs it (they are the native
+// defenseclaw-hook commands), and nothing renders it again, so the 1.0.2
+// helpers stayed on disk after the upgrade. A set whose _hardening.sh reads
+// the lifecycle marker (1.0.4 and later) is this release's and stays; the
+// folder's sidecars and tokens are not touched.
+func (l *lifecycle) retireReplacedMachineShellHooks() {
+	env := l.env
+	if strings.TrimSpace(env.Layout.DataDir) == "" {
+		return
+	}
+	dir := env.P(filepath.Join(env.Layout.DataDir, "hooks"))
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		return
+	}
+	hardening := filepath.Join(dir, hardeningFile)
+	info, err := os.Lstat(hardening)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > hardeningMaxBytes {
+		return
+	}
+	data, err := os.ReadFile(hardening)
+	if err != nil || bytes.Contains(data, []byte(lifecycleMarkerReader)) {
+		return
+	}
+	var kept []string
+	for _, name := range replacedMachineShellHooks {
+		path := filepath.Join(dir, name)
+		if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			kept = append(kept, name+" ("+err.Error()+")")
+		}
+	}
+	if len(kept) > 0 {
+		l.result.AddWarning(codeReplacedMachineHooks, "the replaced release's shell hooks in "+filepath.Join(env.Layout.DataDir, "hooks")+
+			" were not removed: "+strings.Join(kept, ", ")+"; no managed hook runs them")
+	}
 }
 
 // replacedHookTarget is one hook folder of an enrolled account, below its

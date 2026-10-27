@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Command defenseclaw-scanners runs the Python scanners the standalone
-// Windows enterprise payload ships: skill-scanner, the MCP scan and
+// enterprise deployments ship (on Linux and macOS the package installs the
+// runtime tree; see installed_other.go). On Windows the payload ships: skill-scanner, the MCP scan and
 // DefenseClaw's plugin scanner. The CPython runtime and the locked
 // site-packages tree (the same pins the per-user Windows install resolves)
 // are embedded in this executable, so the payload stays one signed file per
@@ -166,6 +167,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: defenseclaw-scanners skill-scanner|mcp-scan|plugin-scan|versions|prepare [arguments]")
 		return 2
 	}
+	if runtime.GOOS != "windows" {
+		// Linux and macOS run the runtime the managed package installed.
+		return runInstalled(args, stdout, stderr)
+	}
 	manifest, err := loadManifest()
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw-scanners: %v\n", err)
@@ -193,10 +198,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "--version":
 		fmt.Fprintln(stdout, versionLine(manifest))
 		return 0
-	}
-	if runtime.GOOS != "windows" {
-		fmt.Fprintln(stderr, "defenseclaw-scanners: the embedded scanner runtime runs only on Windows")
-		return 1
 	}
 	var script string
 	var scriptArgs []string

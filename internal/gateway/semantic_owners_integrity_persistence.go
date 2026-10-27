@@ -2636,17 +2636,21 @@ func stateTreeEntryChanged(
 // entries no protected state name can be (log cleanup such as
 // `find ~/.defenseclaw -name '*.log' -mtime +7 -delete`), not the tree it
 // starts from (GAP-2075). It holds only for a find from the state root
-// (state ""), whose tests are all joined by AND, with at least one -name or
-// -iname and every such pattern a cleanup pattern (findPatternIsCleanupOnly).
-// A start at a protected tree, a time, size or path test alone, and an OR
-// or a negation never exempt, because each can still reach config.yaml, a
-// hook, a rule pack file or the saved installer.
+// (state ""), whose tests are all joined by AND, with every -name or -iname
+// pattern a cleanup pattern (findPatternIsCleanupOnly) and one of them before
+// the first action. find evaluates its expression left to right, so an
+// action placed before the name test (`find ~/.defenseclaw -delete -name
+// '*.log'`) runs on every entry (GAP-2075). A start at a protected tree, a
+// time, size or path test alone, and an OR or a negation never exempt,
+// because each can still reach config.yaml, a hook, a rule pack file or the
+// saved installer.
 func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state string) bool {
 	if state != "" || !strings.EqualFold(command.Program, "find") || len(command.Argv) < 2 {
 		return false
 	}
-	named := false
-	for index := 1; index < len(command.Argv); index++ {
+	named, acted := false, false
+	index := findExpressionStart(command.Argv)
+	for ; index < len(command.Argv); index++ {
 		argument := strings.ToLower(command.Argv[index])
 		switch argument {
 		case "-o", "-or", "!", "-not", ",":
@@ -2659,10 +2663,113 @@ func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state stri
 			if !findPatternIsCleanupOnly(command.Argv[index], argument == "-iname") {
 				return false
 			}
-			named = true
+			named = named || !acted
+		case "-delete":
+			if !named {
+				return false
+			}
+			acted = true
+		case "-exec", "-execdir", "-ok", "-okdir":
+			if !named {
+				return false
+			}
+			acted = true
+			// The command of the action ends at ';' or '+'; its words are
+			// not find tests.
+			for index+1 < len(command.Argv) && command.Argv[index+1] != ";" && command.Argv[index+1] != "+" {
+				index++
+			}
+			index++
+		default:
+			// Every other primary is skipped with its arguments, so an
+			// argument is never read as a test (`-fprintf -name '*.log'`
+			// takes the file "-name" and the format "*.log", and the
+			// -delete after it removes every entry). A word find does not
+			// know is not cleanup (fail closed).
+			arity, known := findPrimaryArity[argument]
+			if !known && !strings.HasPrefix(argument, "-newer") {
+				return false
+			}
+			if !known {
+				arity = 1
+			}
+			// BSD find has a -depth n primary next to the -depth option;
+			// a number after -depth is its argument.
+			if (argument == "-depth" || argument == "-d") && index+1 < len(command.Argv) &&
+				findNumericArgument(command.Argv[index+1]) {
+				arity = 1
+			}
+			if index+arity >= len(command.Argv) {
+				return false
+			}
+			index += arity
 		}
 	}
-	return named
+	return named && acted
+}
+
+// findExpressionStart returns the index of the first expression word of a
+// find argv: after the -H/-L/-P/-D/-O options and the starting points.
+func findExpressionStart(argv []string) int {
+	index := 1
+	for index < len(argv) {
+		argument := argv[index]
+		switch {
+		case argument == "-H" || argument == "-L" || argument == "-P":
+			index++
+		case argument == "-D":
+			index += 2
+		case strings.HasPrefix(argument, "-O") && len(argument) > 2:
+			index++
+		default:
+			for index < len(argv) && !strings.HasPrefix(argv[index], "-") &&
+				argv[index] != "(" && argv[index] != ")" && argv[index] != "!" && argv[index] != "," {
+				index++
+			}
+			return index
+		}
+	}
+	return index
+}
+
+// findPrimaryArity is the number of arguments each GNU/BSD find primary
+// other than -name/-iname/-delete/-exec* takes (GAP-2075). Primaries not in
+// the table (and not -newerXY) make a find not cleanup.
+var findPrimaryArity = map[string]int{
+	"(": 0, ")": 0, "-a": 0, "-and": 0,
+	"-depth": 0, "-d": 0, "-xdev": 0, "-mount": 0, "-x": 0, "-noleaf": 0, "-follow": 0,
+	"-daystart": 0, "-ignore_readdir_race": 0, "-noignore_readdir_race": 0,
+	"-warn": 0, "-nowarn": 0, "-empty": 0, "-true": 0, "-false": 0,
+	"-readable": 0, "-writable": 0, "-executable": 0, "-nouser": 0, "-nogroup": 0,
+	"-print": 0, "-print0": 0, "-ls": 0, "-prune": 0, "-quit": 0,
+	"-type": 1, "-xtype": 1, "-path": 1, "-ipath": 1, "-wholename": 1, "-iwholename": 1,
+	"-regex": 1, "-iregex": 1, "-regextype": 1, "-lname": 1, "-ilname": 1,
+	"-perm": 1, "-user": 1, "-group": 1, "-uid": 1, "-gid": 1, "-size": 1,
+	"-mtime": 1, "-atime": 1, "-ctime": 1, "-btime": 1, "-mmin": 1, "-amin": 1, "-cmin": 1, "-bmin": 1,
+	"-links": 1, "-inum": 1, "-samefile": 1, "-maxdepth": 1, "-mindepth": 1, "-used": 1,
+	"-fstype": 1, "-context": 1, "-files0-from": 1, "-flags": 1,
+	"-fprint": 1, "-fprint0": 1, "-fls": 1, "-printf": 1,
+	"-fprintf": 2,
+	// -anewer/-cnewer (GNU) and -Bnewer (BSD) compare with a reference
+	// file; the macOS primaries -acl, -sparse, -xattr take none and
+	// -xattrname takes a name.
+	"-anewer": 1, "-cnewer": 1, "-bnewer": 1,
+	"-acl": 0, "-sparse": 0, "-xattr": 0, "-xattrname": 1,
+}
+
+// findNumericArgument reports a find numeric argument: digits with an
+// optional leading + or -.
+func findNumericArgument(word string) bool {
+	word = strings.TrimLeft(word, "+-")
+	if word == "" {
+		return false
+	}
+	for _, r := range word {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // protectedStateNameSamples are names a file of the active state can have:

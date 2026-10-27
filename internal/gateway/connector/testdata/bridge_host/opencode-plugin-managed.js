@@ -651,10 +651,25 @@ async function defenseclawFetch(path, init, token) {
   if (!DC_HOOK_SOCKET) {
     if (DC_PER_USER_NATIVE_POST) {
       const binary = defenseclawPerUserHookPostBinary();
-      const output = execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
+      const post = () => execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR], {
         input: JSON.stringify({ path, headers: init.headers || {}, body: String(init.body || "") }),
-        timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8",
+        // The helper's diagnostics (a refused connection during an outage)
+        // stay in the error the caller classifies; inherited, they reached
+        // the agent's screen over the one outage warning (GAP-1314).
+        timeout: DC_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024, windowsHide: true, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
       });
+      let output;
+      try {
+        output = post();
+      } catch (err) {
+        // Only a connected-peer proof that failed (exit 8: nothing was sent,
+        // a proof that raced a gateway restart) gets one more try; a second
+        // failure blocks with its cause (GAP-1236). Any other failure may
+        // come after the gateway took the call and is not sent twice
+        // (GAP-2083).
+        if (!err || err.status !== 8 || err.signal) throw err;
+        output = post();
+      }
       const reply = JSON.parse(output);
       if (!Number.isInteger(reply.status) || reply.status < 100 || reply.status > 599 || typeof reply.body !== "string") {
         throw new Error("invalid native gateway response");
@@ -732,7 +747,9 @@ function defenseclawForeignHookCheck(event, cwd) {
             return;
           }
           if (verdict && verdict.deny === false) {
-            resolve({ reason: "", retryable: false });
+            // foreign_hooks report names the unapproved plugin's file and
+            // digest for the user (GAP-0697).
+            resolve({ reason: "", retryable: false, warnings: Array.isArray(verdict.warnings) ? verdict.warnings.map(String) : [] });
             return;
           }
           resolve({
@@ -822,7 +839,18 @@ async function defenseclawShowNotice(client, message, variant) {
 // that holds the hook credential). The gateway's fail-open report reads it,
 // so such a call is never silent (rel-1-0-2 GAP-0446). Best effort: a log
 // that cannot be written never changes the verdict.
-async function defenseclawLogFailOpen(reason, category, context) {
+// defenseclawPerUserFailureCause is the cause of a failed per-user check, for
+// the block text: the helper's last stderr line without its program prefix,
+// else the plugin's own error (an answer it refused), bounded and on one line.
+function defenseclawPerUserFailureCause(err) {
+  const lines = String(err && err.stderr || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  let cause = lines.length ? lines[lines.length - 1].replace(/^defenseclaw-(gateway|hook-post)( hook-post)?: /, "") : "";
+  if (!cause && err && !Number.isInteger(err.status) && err.message) cause = String(err.message);
+  cause = cause.replace(/[\u0000-\u001f]+/g, " ").slice(0, 240);
+  return cause || "per-user gateway peer unverified";
+}
+
+async function defenseclawLogFailOpen(reason, category, context, closed) {
   try {
     const dir = join(dirname(dirname(DC_TOKEN_FILE)), "logs");
     await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -834,10 +862,10 @@ async function defenseclawLogFailOpen(reason, category, context) {
         hook: "opencode-plugin",
         reason: String(reason || "unknown"),
         category,
-        fail_mode: "open",
+        fail_mode: closed ? "closed" : "open",
 		session_id: String(context && (context.sessionID || context.sessionId) || "").slice(0, 256),
 		call_id: String(context && (context.callID || context.callId) || randomBytes(16).toString("hex")).slice(0, 256),
-        outcome: "fail_open",
+        outcome: closed ? "fail_closed" : "fail_open",
       }) + "\n");
     } finally {
       await file.close();
@@ -1044,6 +1072,7 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
   // keeps running for this process even if its file is deleted later, so a
   // block found at load holds for the whole process.
   let defenseclawStartupGuard = defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
+  let defenseclawForeignWarned = false;
   return {
     config: async (config) => {
       defenseclawConfigure(config);
@@ -1075,9 +1104,14 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
       }
       const startup = await defenseclawStartupGuard;
       if (startup.retryable) defenseclawStartupGuard = null;
-      const callBlock = (await defenseclawForeignHookCheck("tool.execute.before", cwd)).reason;
-      const blocked = startup.reason || callBlock;
+      const callCheck = await defenseclawForeignHookCheck("tool.execute.before", cwd);
+      const blocked = startup.reason || callCheck.reason;
       if (blocked) throw defenseclawBlock(client, blocked);
+      const warnings = (callCheck.warnings && callCheck.warnings.length ? callCheck.warnings : startup.warnings) || [];
+      if (!defenseclawForeignWarned && warnings.length) {
+        defenseclawForeignWarned = true;
+        void defenseclawShowNotice(client, "DefenseClaw warning: " + warnings.join("; "), "warning");
+      }
       const mcpIdentity = defenseclawResolveMCPServer(input && input.tool);
       const verdict = await defenseclawPost(
         "tool.execute.before",

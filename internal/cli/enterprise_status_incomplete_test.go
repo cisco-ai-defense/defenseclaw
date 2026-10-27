@@ -136,3 +136,32 @@ func TestEnterpriseSecurityIncompleteIgnoresInformationalWarnings(t *testing.T) 
 		t.Fatalf("an explaining warning did not suppress the reason: %+v", result.Warnings)
 	}
 }
+
+// GAP-2038: on a managed host with Hermes enabled, the warnings every such
+// result carries after an upgrade (Hermes session-only coverage, an account
+// waiting for sign-in, a signed-out account's unreadable Claude state, the
+// missing judge) did not let the stale Claude attestation be named; an
+// explaining warning still suppresses it.
+func TestEnterpriseSecurityIncompleteNamesTheAttestationBesideTheHermesResiduals(t *testing.T) {
+	result := &enterprisestatus.Result{
+		Readiness: enterprisestatus.Readiness{Guardian: true},
+		MachinePolicy: map[string]enterprisestatus.MachinePolicyState{
+			"claudecode": {Ownership: "merge", Lock: "enforce"},
+		},
+	}
+	for _, code := range []string{"guardian_repair_pending", "status_detail_unavailable", enterprisestatus.CodeHookProcessFailOpen,
+		"claude_state_unreadable", "scanner_judge_missing"} {
+		result.AddWarning(code, code)
+	}
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 6 || result.Warnings[5].Code != "security_incomplete" ||
+		!strings.Contains(result.Warnings[5].Message, "ATTESTCLAUDEEFFECTIVEPOLICY=1") {
+		t.Fatalf("the Hermes residuals hid the attestation reason: %+v", result.Warnings)
+	}
+	result.Warnings = result.Warnings[:5]
+	result.AddWarning("user_registrations_pending", "pending")
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 6 {
+		t.Fatalf("an explaining warning did not suppress the reason: %+v", result.Warnings)
+	}
+}

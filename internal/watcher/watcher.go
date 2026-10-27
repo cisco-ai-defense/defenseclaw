@@ -1357,13 +1357,16 @@ func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 		if discover == nil || !watcherPathAtOrBelow(path, root) {
 			continue
 		}
+		if w.inSkillInstallStaging(root, path, 0) {
+			return nil
+		}
 		entries, err := discover(root, hermesskills.DefaultDirectoryLimit)
 		if err != nil {
 			return []InstallEvent{fallback}
 		}
 		out := make([]InstallEvent, 0, len(entries))
 		for _, entry := range entries {
-			if !watcherPathAtOrBelow(entry.Path, path) {
+			if !watcherPathAtOrBelow(entry.Path, path) || w.inSkillInstallStaging(root, entry.Path, 0) {
 				continue
 			}
 			out = append(out, InstallEvent{
@@ -1848,6 +1851,17 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		w.logFailedMCPScan(ctx, evt, s.Name(), target, result, err)
 		if w.keepsUnverifiedMCPServer(evt, targetType, connector, result, err) {
 			return w.keepUnverifiedMCPServer(ctx, evt, targetType, s.Name(), err)
+		}
+		if assetPathGone(evt) && !w.secureClientActive() {
+			// The folder went away before or during its scan (a removed
+			// copy, an installer's staging folder): nothing is there to
+			// load or move, and a block on the name would keep a later
+			// install of the same name disabled (GAP-2118).
+			fmt.Fprintf(os.Stderr, "[watch] %s %s: %s is gone; nothing to admit\n", evt.Type, evt.Name, evt.Path)
+			w.recordAdmission(ctx, "scan-error", targetType)
+			res = AdmissionResult{Event: evt, Verdict: VerdictScanError,
+				Reason: fmt.Sprintf("%s is gone; nothing to admit", evt.Path)}
+			return res
 		}
 		// Avarice F-3187: a scanner error must NOT leave the
 		// freshly-detected install in place. The legacy code
@@ -2646,12 +2660,20 @@ func (w *InstallWatcher) releaseScanFailureBlock(evt InstallEvent, targetType st
 	scope := w.journalScope(w.eventConnector(evt))
 	entry, err := w.store.GetActionForConnector(targetType, journalName(evt), scope)
 	if err != nil || entry == nil || !strings.HasPrefix(entry.Reason, scanFailureReason) ||
-		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
+		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path) && !blockedPathGone(entry.SourcePath)) {
 		return
 	}
 	for _, field := range []string{"runtime", "install"} {
 		_ = w.store.ClearActionFieldForConnector(targetType, journalName(evt), scope, field)
 	}
+}
+
+// blockedPathGone reports a scan-failure block recorded for a folder that no
+// longer exists (an installer's staging copy, a removed copy): a successful
+// scan of the same name at its real place lifts it (GAP-2118).
+func blockedPathGone(path string) bool {
+	_, err := os.Lstat(path)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // journalFailedQuarantine records on the journal that the quarantine of a
@@ -3303,6 +3325,59 @@ func isPluginStagingFolder(name string) bool {
 		}
 	}
 	return false
+}
+
+// inSkillInstallStaging reports a path at or below a ".dclaw-stage-<name>-*"
+// folder directly in the skill root root: "defenseclaw skill install" copies
+// a skill there, scans and decides it for each connector, then moves it into
+// place or removes it. Hermes discovery walks hidden folders, so the watcher
+// scanned that private copy under ~/.hermes/skills (the other roots skip
+// hidden folders), found it gone and left a fail-closed block on the skill
+// name that kept a later admitted install disabled (GAP-2118). grace, when
+// set, is how long the folder is left alone; one that stays longer is
+// scanned. The Secure Client profile keeps the earlier behaviour.
+func (w *InstallWatcher) inSkillInstallStaging(root, path string, grace time.Duration) bool {
+	if w.secureClientActive() {
+		return false
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil || relative == "." || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return false
+	}
+	first := strings.FieldsFunc(relative, func(r rune) bool { return r == '/' || r == '\\' })[0]
+	lower := strings.ToLower(first)
+	if !strings.HasPrefix(lower, skillStagePrefix) || len(lower) == len(skillStagePrefix) {
+		return false
+	}
+	if grace <= 0 {
+		return true
+	}
+	info, statErr := os.Lstat(filepath.Join(rootAbs, first))
+	return statErr == nil && time.Since(info.ModTime()) < grace
+}
+
+// skillStagePrefix leads the private staging folder of "defenseclaw skill
+// install" (cli/defenseclaw/commands/cmd_skill.py _stage_skill_install).
+const skillStagePrefix = ".dclaw-stage-"
+
+// assetPathGone reports a skill or plugin whose folder no longer exists:
+// there is nothing an agent can load, so a failed scan of it is no verdict
+// on the name (GAP-2118).
+func assetPathGone(evt InstallEvent) bool {
+	if evt.Type != InstallSkill && evt.Type != InstallPlugin {
+		return false
+	}
+	_, err := os.Lstat(evt.Path)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // isCachePluginCopy reports a folder directly in a plugin cache that holds a

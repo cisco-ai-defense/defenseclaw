@@ -48,6 +48,18 @@ import (
 // unprotected and its hooks closed). Repair always revokes the credential,
 // so an exporter the guardian could not remove sends no DefenseClaw
 // credential to the holder of its port.
+//
+// An exporter repair could not remove (on a share, or in a configuration it
+// could not read or edit as the account) leaves the take-back-pending marker
+// in the account's data directory before the credential is revoked; the
+// marker keeps the credential's digest, so a later take-back still knows the
+// exporter as DefenseClaw's. Status and verify report the account while the
+// marker is there (connector.AgentConfigNativeOTLPTakeBackPending), the
+// guardian runs the take-back again, and the take-back clears the marker only
+// once it read every configuration and found no exporter (GAP-1839,
+// GAP-1840, GAP-1170). A configuration behind a link whose target cannot be
+// reached reads as absent, but it was not read, so it never clears the marker
+// (GAP-2095).
 
 // windowsNativeOTLPConfig is one configuration file the check reads and how
 // messages name it (never by the account's path or its values).
@@ -96,7 +108,7 @@ func windowsManagedUserNativeOTLPCheck(connectorName, home, dataDir string, sid 
 	}
 	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
 	var residue, onShare []string
-	founds, notOwned := windowsManagedUserNativeOTLPResidue(connectorName, sid, home, dataDir, readWindowsAccountConfig)
+	founds, notOwned, _ := windowsManagedUserNativeOTLPResidue(connectorName, sid, home, dataDir, readWindowsAccountConfig, false)
 	report := ""
 	if notOwned {
 		report = connector.AgentConfigNativeOTLPUnchecked
@@ -141,17 +153,24 @@ type windowsNativeOTLPFound struct {
 
 // windowsManagedUserNativeOTLPResidue resolves the account's configurations
 // once and returns those that keep a DefenseClaw exporter, read with read,
-// and whether one reaches a file the account does not own. What it cannot
-// resolve or read is a warning.
+// whether one reaches a file the account does not own, and whether any
+// configuration could not be checked. What it cannot resolve or read is a
+// warning. The take-back (takeBack) also knows an exporter by the revoked
+// credential's digest a pending marker keeps, and counts a configuration
+// behind a link whose target cannot be reached as unchecked; the reason is
+// returned in unreachable, not warned, since an account with nothing to take
+// back has nothing to report.
 func windowsManagedUserNativeOTLPResidue(
 	connectorName string,
 	sid *windows.SID,
 	home, dataDir string,
 	read func(string, *windows.SID, string) ([]byte, string, error),
-) (found []windowsNativeOTLPFound, notOwned bool) {
+	takeBack bool,
+) (found []windowsNativeOTLPFound, notOwned bool, unchecked []string) {
 	configs, problems := windowsManagedUserNativeOTLPConfigs(connectorName, sid, home, dataDir)
 	for _, problem := range problems {
 		windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: inspect %s native OTLP settings: %v", connectorName, problem))
+		unchecked = append(unchecked, "a configuration folder could not be resolved")
 	}
 	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
 	backup, err := readWindowsAccountFile(filepath.Join(dataDir, connector.UserNativeOTLPBackupName(connectorName)), sid, home)
@@ -159,28 +178,37 @@ func windowsManagedUserNativeOTLPResidue(
 		// Without the backup an operator entry cannot be told from
 		// DefenseClaw's, so no configuration is judged.
 		windowsNativeOTLPWarn(windowsNativeOTLPUncheckable(connectorName, "the setup backup", err))
-		return nil, false
+		return nil, false, append(unchecked, "the setup backup could not be read")
+	}
+	residueIn := connector.UserNativeOTLPResidueIn
+	if takeBack {
+		residueIn = connector.UserNativeOTLPTakeBackResidueIn
 	}
 	for _, config := range configs {
 		data, final, err := read(config.path, sid, home)
 		if errors.Is(err, os.ErrNotExist) {
+			if takeBack && connector.UserNativeOTLPPathUnreachable(config.path) != "" {
+				unchecked = append(unchecked, config.label+" is behind a link whose target cannot be reached")
+			}
 			continue
 		}
 		if err != nil {
 			notOwned = notOwned || errors.Is(err, errWindowsAccountFileNotOwned)
 			windowsNativeOTLPWarn(windowsNativeOTLPUncheckable(connectorName, config.label, err))
+			unchecked = append(unchecked, config.label+" could not be read")
 			continue
 		}
-		names, err := connector.UserNativeOTLPResidueIn(connectorName, data, backup, opts)
+		names, err := residueIn(connectorName, data, backup, opts)
 		if err != nil {
 			windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: inspect %s native OTLP settings (%s): %v", connectorName, config.label, err))
+			unchecked = append(unchecked, config.label+" could not be parsed")
 			continue
 		}
 		if len(names) > 0 {
 			found = append(found, windowsNativeOTLPFound{label: config.label, final: final, names: names})
 		}
 	}
-	return found, notOwned
+	return found, notOwned, unchecked
 }
 
 // windowsNativeOTLPUncheckable is the warning for a configuration the check
@@ -605,22 +633,49 @@ func windowsHandleFinalPath(handle windows.Handle) (string, error) {
 // owner's file, a share the compare-and-swap edit refuses, an unavailable
 // folder) is left as it is with a warning, and the credential is revoked in
 // every case, so no exporter the guardian left sends it to another account.
+// An exporter it left, or a configuration it could not check for an account
+// with an earlier per-user install to take back, keeps the take-back-pending
+// marker; it is cleared only once every configuration was checked and none
+// keeps an exporter (GAP-1839, GAP-1840, GAP-2095).
 func removeWindowsManagedUserNativeOTLPAsTarget(connectorName string, sid *windows.SID, home, dataDir string) {
 	if _, ok := windowsNativeOTLPRoots[connectorName]; !ok {
 		return
 	}
 	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
-	founds, _ := windowsManagedUserNativeOTLPResidue(connectorName, sid, home, dataDir, openWindowsAccountFile)
+	founds, _, unchecked := windowsManagedUserNativeOTLPResidue(connectorName, sid, home, dataDir, openWindowsAccountFile, true)
+	var kept []string
 	for _, found := range founds {
 		if windowsShareFinalPath(found.final) {
 			windowsNativeOTLPWarn(fmt.Sprintf(
 				"enterprise hooks: %s: %s on a network share keeps a native OTLP exporter from an earlier per-user install; "+
 					"repair cannot edit a share durably, so remove the exporter there by hand", connectorName, found.label))
+			kept = append(kept, found.label+" is on a network share")
 			continue
 		}
 		if _, err := connector.RemoveUserNativeOTLPAt(connectorName, found.final, opts); err != nil {
 			windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: remove %s native OTLP exporter from an earlier per-user install (%s): %v",
 				connectorName, found.label, err))
+			kept = append(kept, found.label+" could not be edited")
+		}
+	}
+	credential, _ := connector.UserNativeOTLPCredentialResidue(connectorName, opts)
+	earlier := len(credential) > 0 || connector.NativeOTLPTakeBackPending(dataDir, connectorName)
+	switch {
+	case len(kept) > 0 || (len(unchecked) > 0 && earlier):
+		// The marker keeps the credential's digest, so it is written before
+		// the credential is revoked.
+		reasons := strings.Join(append(kept, unchecked...), "; ")
+		if err := connector.RecordNativeOTLPTakeBackPending(dataDir, connectorName); err != nil {
+			windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: %s native OTLP take-back is not finished (%s), and it could not be recorded for status and verify: %v",
+				connectorName, reasons, err))
+		} else {
+			windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: %s native OTLP take-back is not finished (%s); status and verify report it until a later repair finds no exporter",
+				connectorName, reasons))
+		}
+	case len(unchecked) == 0:
+		if err := connector.ClearNativeOTLPTakeBackPending(dataDir, connectorName); err != nil {
+			windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: %s native OTLP exporter is gone, but its take-back-pending marker could not be removed (%v); status keeps reporting it until repair removes it",
+				connectorName, err))
 		}
 	}
 	if _, err := connector.RevokeUserNativeOTLPCredential(connectorName, opts); err != nil {

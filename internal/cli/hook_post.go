@@ -83,6 +83,12 @@ func init() {
 				fmt.Fprintf(cmd.ErrOrStderr(), "defenseclaw-gateway hook-post: %v\n", err)
 				hookProcessExit(hookexec.PerUserPostOutageExit)
 			}
+			if hookexec.PerUserPostPeerUnverified(err) {
+				// Nothing of the call was sent: the one failure the plugins
+				// may send again (GAP-2083).
+				fmt.Fprintf(cmd.ErrOrStderr(), "defenseclaw-gateway hook-post: %v\n", err)
+				hookProcessExit(hookexec.PerUserPostPeerUnverifiedExit)
+			}
 			return err
 		},
 	}

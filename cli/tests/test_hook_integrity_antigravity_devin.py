@@ -148,6 +148,25 @@ def test_defenseclaw_entries_emptied_by_hand_are_unregistered(tmp_path, monkeypa
     assert hook_registration_problems(cfg, connector) == _unregistered(config)
 
 
+@pytest.mark.parametrize("name", ["devin_workspace_linux", "devin_workspace_windows"])
+def test_a_devin_project_file_with_a_foreign_hooks_key_is_guarded(tmp_path, monkeypatch, name):
+    # GAP-1720: a project hooks.v1.json that already held a foreign hook set
+    # under a "hooks" key made the tool-guard check read that key as the event
+    # map, so the readiness wait failed "PreToolUse hook is not registered"
+    # and setup rolled back. Setup writes the events at the root beside it.
+    monkeypatch.chdir(tmp_path)
+    windows = name.endswith("windows")
+    if not windows and sys.platform == "win32":
+        pytest.skip("POSIX hook layouts")
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: windows)
+    cfg, config, connector = _install(tmp_path, name, "healthy")
+    document = json.loads(config.read_text(encoding="utf-8"))
+    document["hooks"] = {"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "/bin/true"}]}]}
+    config.write_text(json.dumps(document), encoding="utf-8")
+    assert hook_integrity.unguarded_tool_call_hooks(cfg, connector) == []
+    assert hook_registration_problems(cfg, connector) == []
+
+
 @posix_only
 def test_a_devin_user_config_still_reads_its_hooks_key(tmp_path, monkeypatch):
     # Only the project hooks.v1.json is a bare event map; config.json keeps

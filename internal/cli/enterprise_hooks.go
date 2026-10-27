@@ -842,7 +842,7 @@ func enterpriseHookVerifyOrRepairTarget(
 	}
 	result, verifyErr := enterpriseHookReconcileVerifier(ctx, opts)
 	if verifyErr == nil {
-		return result, false, nil
+		return enterpriseHookRetryNativeOTLPTakeBack(ctx, target, opts, result), false, nil
 	}
 	return enterpriseHookRepairAfterVerifyFailure(ctx, target, opts, verifyErr)
 }
@@ -1841,13 +1841,23 @@ func enterpriseHookVerifyAwaitingSignIn(
 		return false
 	}
 	available, err := enterpriseHookReconcileSessionAvailable(target)
-	if err != nil && enterpriseHookReconcileSecureClient() && enterpriseHookSessionCheckNotLocalSystem(err) {
-		// Setup's own verify runs as the elevated administrator, which
-		// cannot query another account's session. On Secure Client the
-		// guardian's fresh protected record of the wait stands, as status
-		// reads it: the LocalSystem guardian proved the session absent when
-		// it wrote the row, and repairs the target once the account signs in.
-		return true
+	if err != nil && enterpriseHookSessionCheckNotLocalSystem(err) {
+		// Setup's own verify, and an administrator's verify or signed
+		// bundle apply, run as the elevated administrator, which cannot
+		// query another account's session. On Secure Client the guardian's
+		// fresh protected record of the wait stands, as status reads it:
+		// the LocalSystem guardian proved the session absent when it wrote
+		// the row, and repairs the target once the account signs in.
+		if enterpriseHookReconcileSecureClient() {
+			return true
+		}
+		// Standalone reads the session list instead, as the Hermes wait
+		// does: refusing every wait there failed verify 1603, and the
+		// hot-config proof of a signed bundle, after a hook fail mode change
+		// while an enrolled account was signed out or disconnected
+		// (GAP-2044, GAP-1719).
+		noSession, listErr := enterpriseHookTargetHasNoSession(target)
+		return listErr == nil && noSession
 	}
 	return err == nil && !available
 }
@@ -2882,9 +2892,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					row.UserHome = result.UserHome
 					row.Connector = result.Connector
 					row.Result = &result
+					result.AgentConfig = enterpriseHookAgentConfigNotice(result)
 					if result.AgentConfig != "" {
 						// A Hermes or Devin config put back or recreated
-						// (GAP-0588).
+						// (GAP-0588), or a native OTLP exporter the managed
+						// install could not take back (GAP-1839).
 						notices = append(notices, enterpriseHookGuardianNotice{User: firstNonEmptyString(row.User, row.SID), Connector: row.Connector, AgentConfig: result.AgentConfig})
 					}
 					recheck = recheckWindow > 0 && previousProtection.PreviouslyProtected && !repaired

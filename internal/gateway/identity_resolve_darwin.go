@@ -23,6 +23,10 @@ import (
 // account.
 var managedHookPeerAccountIncarnation = func(unixidentity.Account) (string, bool) { return "", false }
 
+// managedHookPeerGuardianIncarnation names nothing on macOS either
+// (managedHookPeerAccountIncarnation).
+var managedHookPeerGuardianIncarnation = func(unixidentity.Account) (string, bool) { return "", false }
+
 // resolvePeerDirectoryFacts returns a verified uid's directory facts: the
 // account's own facts from the system account database, which on macOS
 // answers through Open Directory (groups; directory local for an account of the local node), with the root

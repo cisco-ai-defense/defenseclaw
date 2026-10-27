@@ -38,7 +38,11 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
-from defenseclaw.commands._audit_notice import note_asset_policy_observed, saved_change_audit
+from defenseclaw.commands._audit_notice import (
+    note_asset_policy_observed,
+    release_superseded_scan_decision,
+    saved_change_audit,
+)
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.enforce import asset_lists
@@ -5056,6 +5060,7 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
 
     if connector:
         pe.enable_for_connector("skill", skill_name, target_connector)
+        _clear_or_name_unscoped_skill_disable(pe, skill_name, target_connector)
     else:
         pe.enable("skill", skill_name)
 
@@ -5063,6 +5068,31 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
         saved_change_audit(app.logger).log_action(
             "skill-enable", skill_name, f"re-enabled via CLI connector={connector}",
         )
+
+
+def _clear_or_name_unscoped_skill_disable(pe: Any, skill_name: str, connector: str) -> None:
+    """A scoped enable also reads the connector-less row, which disables the
+    skill for every connector: skill info and skill list kept saying
+    disabled after ``skill enable <n> --connector openclaw`` re-enabled it in
+    OpenClaw (GAP-0024). The watcher journals OpenClaw assets without a
+    connector, so for OpenClaw its own record there is cleared; any other
+    connector-wide disable stays and the CLI names it and the command that
+    clears it."""
+    entry = pe.unscoped_runtime_disable("skill", skill_name)
+    if entry is None:
+        return
+    if connector == "openclaw" and pe.is_openclaw_watcher_record(entry):
+        pe.enable("skill", skill_name)
+        click.echo(
+            f"[skill] {skill_name!r} watcher runtime disable cleared (connector=openclaw)"
+        )
+        return
+    click.secho(
+        f"note: {skill_name!r} still has a runtime disable for every connector "
+        f"(reason: {entry.reason or 'none recorded'}); "
+        f"clear it with: defenseclaw skill enable {skill_name}",
+        fg="yellow",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -6152,6 +6182,13 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                 click.echo(
                     f"[install] installed {skill_name!r} -> {stages[key][2]} "
                     f"(connector={connector})"
+                )
+                release_superseded_scan_decision(
+                    app.logger, pe, "skill", skill_name, connector,
+                    enable_runtime=(
+                        (lambda: _enable_skill_via_gateway(app, skill_name))
+                        if _normalize_runtime_connector(connector) == "openclaw" else None
+                    ),
                 )
         if refused:
             raise SystemExit(1)

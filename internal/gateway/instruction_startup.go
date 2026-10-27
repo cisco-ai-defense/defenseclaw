@@ -635,12 +635,15 @@ func (a *APIServer) applyInstructionStartup(ctx context.Context, connector, sess
 func (a *APIServer) startInstructionSession(ctx context.Context, key activeAgentContextKey, event, source, cwd string) {
 	a.restoreInstructionLoads(key)
 	newGeneration := canonicalEvent(event) == "onsessionreset"
+	fresh := false
 	switch strings.ToLower(strings.TrimSpace(source)) {
 	case "resume", "clear", "compact":
 		newGeneration = true
+	case "startup":
+		fresh = true
 	}
 	files, dirs, identities := instructionStartupFiles(ctx, key.connector, cwd)
-	a.activeAgentContext.startKey(key, newGeneration, files, dirs, identities)
+	a.activeAgentContext.startKey(key, newGeneration, fresh, files, dirs, identities)
 	a.saveInstructionLoads(key)
 	a.clearInstructionSightingLoss(key)
 }

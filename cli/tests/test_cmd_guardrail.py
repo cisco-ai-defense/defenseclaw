@@ -817,7 +817,8 @@ def test_per_user_amp_outage_open_template_records_an_actionable_call() -> None:
         'return { action: "allow"'
     )
     writer = source.split("async function logFailOpen(", 1)[1].split("async function perUserGatewayDownText", 1)[0]
-    for field in ('"hook-failures.jsonl"', 'connector: "amp"', 'fail_mode: "open"', 'outcome: "fail_open"'):
+    # A call the plugin blocks is recorded closed (GAP-1236); an outage call is open.
+    for field in ('"hook-failures.jsonl"', 'connector: "amp"', 'fail_mode: closed ? "closed" : "open"', 'outcome: closed ? "fail_closed" : "fail_open"'):
         assert field in writer
 
 
@@ -878,6 +879,46 @@ class PerConnectorToggleTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertTrue(app.cfg.guardrail.effective_enabled("codex"))
         app.cfg.save.assert_called_once()
+
+    def test_enable_one_connector_that_the_gateway_cannot_set_up_stays_disabled(self):
+        """GAP-1534: a readiness failure left the flag enabled with the hooks torn
+        down, and the retry said 'already enabled'. The flag goes back to
+        disabled, and the retry runs the setup again."""
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        failure = click.ClickException("gateway restart/readiness failed for: connector runtime readiness")
+        with patch("defenseclaw.commands.cmd_setup._restart_services", side_effect=failure):
+            result = runner.invoke(cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes"], obj=app)
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
+        self.assertIn("stays disabled", " ".join(result.output.split()))
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart:
+            result = runner.invoke(cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("already enabled", result.output)
+        restart.assert_called_once()
+        self.assertTrue(app.cfg.guardrail.effective_enabled("codex"))
+
+    def test_enable_one_connector_refuses_a_malformed_shared_hook_sidecar(self):
+        """GAP-1816: enable saved the flag and returned 0 over a malformed
+        hooks/.hookcfg; it now runs setup's check first and changes nothing."""
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        refusal = "Codex: the shared hook config is malformed. Nothing was changed"
+        with (
+            patch("defenseclaw.commands.cmd_setup._agent_settings_refusal", return_value=refusal) as check,
+            patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+        ):
+            result = runner.invoke(
+                cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes", "--no-restart"], obj=app
+            )
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("malformed", result.output)
+        self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
+        app.cfg.save.assert_not_called()
+        restart.assert_not_called()
+        self.assertEqual(check.call_args.args[1], "codex")
+        self.assertFalse(check.call_args.kwargs["will_restart"])
 
     def test_enable_one_connector_verifies_its_agent_first_and_waits_for_the_gateway(self):
         """Windows refuses a connector it holds no verified agent executable for, and

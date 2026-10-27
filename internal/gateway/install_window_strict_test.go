@@ -429,3 +429,30 @@ func TestStrictInstallWindowBlocksPreRequestPrompts(t *testing.T) {
 		}
 	}
 }
+
+// GAP-2082: an interrupted install whose installer is gone (dead pid) and
+// whose recovery record waits beside the lock is still an install window for
+// the strict tier: a gateway an operator started meanwhile blocks the call
+// with the install reason. The default tier keeps the gateway's answer.
+func TestStrictInstallWindowHoldsAPendingRecovery(t *testing.T) {
+	call := installWindowCalls[0]
+	for _, tier := range []string{"strict", "default"} {
+		t.Run(tier, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+			dataDir := t.TempDir()
+			api := installWindowServer(t, call.connector, tier, "action", dataDir, nil)
+			holdInstallLock(t, dataDir)
+			if err := os.WriteFile(filepath.Join(dataDir, ".install.lock", "pid"), []byte("99999999\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dataDir, "previous.new"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, body := sendInstallWindowCall(t, api, call)
+			blocked := strings.Contains(body, hookInstallWindowStrictRuleID)
+			if blocked != (tier == "strict") {
+				t.Fatalf("%s tier with a pending recovery: install-window block=%v body=%s", tier, blocked, body)
+			}
+		})
+	}
+}

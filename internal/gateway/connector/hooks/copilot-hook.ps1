@@ -103,8 +103,6 @@ function Test-DefenseClawInstallLockCurrent([string]$lock) {
     }
     try { $item = Get-Item -LiteralPath $lock -Force -ErrorAction Stop }
     catch { return $true }
-    $age = ([DateTime]::UtcNow - $item.LastWriteTimeUtc).TotalSeconds
-    if ($age -gt 600 -or $age -lt -60) { return $false }
     if (-not $item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $true }
     $pidPath = Join-Path $lock 'pid'
     try {
@@ -113,9 +111,21 @@ function Test-DefenseClawInstallLockCurrent([string]$lock) {
         $holder = [System.IO.File]::ReadAllText($pidPath).Trim()
         [int]$holderId = 0
         if ($holder -notmatch '^[1-9][0-9]*$' -or -not [int]::TryParse($holder, [ref]$holderId)) { return $true }
-        try { return (-not [System.Diagnostics.Process]::GetProcessById($holderId).HasExited) }
+        # The one stale-lock rule (hookexec installLockStale): no clock is
+        # read for a lock with an identity record; a 1.0.2/1.0.3 lock without
+        # one is stale when its pid's process started after the lock
+        # (GAP-1025, GAP-1465).
+        try { $holderProcess = [System.Diagnostics.Process]::GetProcessById($holderId) }
         catch [System.ArgumentException] { return $false }
         catch { return $true }
+        if ($holderProcess.HasExited) { return $false }
+        try { $started = $holderProcess.StartTime.ToUniversalTime() } catch { return $true }
+        $recordPath = Join-Path $lock 'proc-start'
+        if (Test-Path -LiteralPath $recordPath) {
+            try { $recorded = [System.IO.File]::ReadAllText($recordPath).Trim() } catch { return $true }
+            return ($recorded -eq [string]$started.ToFileTimeUtc())
+        }
+        return ($started -le $item.LastWriteTimeUtc.AddSeconds(2))
     }
     catch { return $true }
 }
@@ -186,12 +196,14 @@ $installGuard = $false
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
     # The native hook answers a tool boundary on stdout with exit 0, a failed
-    # check too; a launcher that exits non-zero without an answer crashed.
-    if ($stdout.Length -eq 0 -and $process.ExitCode -ne 0) {
+    # check too; a launcher that exits non-zero crashed. Its output reaches
+    # Copilot only when it is one whole native deny, so a crash never turns
+    # a deny into an allow and a partial answer is never forwarded (GAP-0364).
+    if ($process.ExitCode -ne 0 -and -not ($stdout -cmatch '^\{"(permissionDecision":"deny","permissionDecisionReason|behavior":"deny","message)":"(?:[^"\\\r\n]|\\.)*"\}\r?\n?$')) {
         if ($stderr.Length -gt 0) {
             [Console]::Error.Write($stderr)
         }
-        throw "DefenseClaw hook launcher exited $($process.ExitCode) without an answer"
+        throw "DefenseClaw hook launcher exited $($process.ExitCode) without a complete answer"
     }
     if ($stdout.Length -gt 0) {
         [Console]::Out.Write($stdout)

@@ -457,3 +457,73 @@ def test_cursor_lock_fail_mode_keeps_the_managed_reading() -> None:
             assert _cursor_lock_fail_mode(per_user) == "closed"
             managed = SimpleNamespace(deployment_mode="managed_enterprise", guardrail=gc)
             assert _cursor_lock_fail_mode(managed) == ("closed" if mode == "action" else "open")
+
+
+@pytest.mark.parametrize("tier", list(TIERS))
+@pytest.mark.parametrize("install", ["oss", "managed"])
+@pytest.mark.parametrize("saved", ["unset", "open", "closed", "connector-open"])
+def test_setup_guardrail_summary_shows_the_outage_mode_the_hooks_use(app, tier, install, saved) -> None:
+    # GAP-1963: the summary printed the raw global field, which reads
+    # "closed" in memory when nothing is saved, beside a status that said open.
+    cfg = app.cfg
+    gc = cfg.guardrail
+    if install == "managed":
+        cfg.deployment_mode = "managed_enterprise"
+        cfg.enterprise_profile = "standalone"
+    if saved in ("open", "closed"):
+        gc.hook_fail_mode = saved
+    elif saved == "connector-open":
+        gc.connectors["cursor"] = PerConnectorGuardrailConfig(hook_fail_mode="open")
+    gc.rule_pack = tier
+    row = cmd_setup._guardrail_summary_hook_fail_mode(cfg, "cursor")
+    want = gc.effective_hook_fail_mode("cursor")
+    if install == "oss" and saved == "unset":
+        assert row == f"{TIERS[tier]} (not saved; the {tier} policy tier decides)"
+    else:
+        assert row == want
+    assert row.split()[0] == want
+
+
+@pytest.mark.parametrize("tier", list(TIERS))
+@pytest.mark.parametrize("install", ["oss", "managed"])
+@pytest.mark.parametrize("connector", ["openclaw", "zeptoclaw"])
+def test_setup_guardrail_summary_shows_proxy_connectors_as_guardrail_status_does(app, tier, install, connector) -> None:
+    # GAP-1963 R6-F1: a proxy connector has no hooks and is blocked while the
+    # gateway is down; the summary must not print the hook tier mode for it.
+    cfg = app.cfg
+    gc = cfg.guardrail
+    if install == "managed":
+        cfg.deployment_mode = "managed_enterprise"
+        cfg.enterprise_profile = "standalone"
+    gc.rule_pack = tier
+    gc.enabled = True
+    row = cmd_setup._guardrail_summary_hook_fail_mode(cfg, connector)
+    assert row == "closed (proxy-backed, no hooks: blocked while the gateway is down)"
+
+
+def test_setup_guardrail_summary_shows_a_disabled_connector_has_no_hooks(app) -> None:
+    gc = app.cfg.guardrail
+    gc.enabled = True
+    gc.connectors["cursor"] = PerConnectorGuardrailConfig(enabled=False)
+    assert cmd_setup._guardrail_summary_hook_fail_mode(app.cfg, "cursor") == "disabled (no hooks)"
+    gc.enabled = False
+    assert cmd_setup._guardrail_summary_hook_fail_mode(app.cfg, "codex") == "disabled (no hooks)"
+
+
+@pytest.mark.parametrize("tier", list(TIERS))
+@pytest.mark.parametrize("connector", ["openclaw", "zeptoclaw"])
+def test_guardrail_status_shows_a_proxy_connector_closed_like_the_fail_mode_view(app, tier, connector) -> None:
+    # GAP-1963 R6-F1: the status table printed the hook tier mode ("open")
+    # for a proxy connector, whose model calls fail while the gateway is down.
+    cfg = app.cfg
+    cfg.claw.mode = connector
+    cfg.guardrail.connector = connector
+    cfg.guardrail.mode = "action"
+    cfg.guardrail.rule_pack = tier
+    result = CliRunner().invoke(cmd_guardrail.status_cmd, ["--json"], obj=app, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    rows = {row["connector"]: row for row in json.loads(result.output)["connectors"]}
+    assert rows[connector]["fail_mode"] == "closed"
+    text = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app, catch_exceptions=False).output
+    assert "while the gateway is down its hooks allow calls" not in text
+    assert cmd_setup._guardrail_summary_hook_fail_mode(cfg, connector).startswith("closed (proxy-backed")

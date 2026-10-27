@@ -43,6 +43,11 @@ type SplunkHECConfig struct {
 	TLS                 TLSOptions
 	Network             NetworkOptions
 	Observer            WarningObserver
+	// LocalStack marks the sink local Splunk setup recorded. Its listener
+	// is DefenseClaw's own container on loopback with a certificate nobody
+	// verifies, so a connection is closed before any byte unless the
+	// listener is this account's or the system's (GAP-2115).
+	LocalStack bool
 }
 
 type SplunkHEC struct {
@@ -83,6 +88,7 @@ func NewSplunkHEC(ctx context.Context, config SplunkHECConfig) (*SplunkHEC, erro
 		network:     config.Network,
 		observer:    config.Observer,
 		credentials: true,
+		localStack:  config.LocalStack,
 	})
 	if err != nil {
 		return nil, err

@@ -3636,6 +3636,52 @@ class TestSkillDisableHonesty(SkillCommandTestBase):
         )
         mock_client.assert_not_called()
 
+    def test_gap0024_openclaw_enable_clears_the_watchers_connector_less_disable(self):
+        """GAP-0024: the watcher journals an OpenClaw auto-block without a
+        connector; `skill enable <n> --connector openclaw` re-enabled the skill
+        in OpenClaw but left that row, so skill info and skill list still said
+        disabled. The scoped enable clears the watcher's own OpenClaw row."""
+        from defenseclaw.commands.cmd_skill import _build_actions_map
+
+        self.app.cfg.active_connectors = lambda: ["openclaw", "hermes"]  # type: ignore[method-assign]
+        PolicyEngine(self.app.store, self.app.cfg).disable(
+            "skill", "fxoc1", "auto-block: watch detected INFO findings",
+        )
+        with patch("defenseclaw.commands.cmd_skill._sidecar_client") as mock_client:
+            mock_client.return_value.enable_skill.return_value = {"status": "enabled"}
+            result = self.invoke(["enable", "fxoc1", "--connector", "openclaw"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_client.return_value.enable_skill.assert_called_once_with("fxoc1")
+        self.assertIn("watcher runtime disable cleared (connector=openclaw)", result.output)
+        self.assertFalse(self.app.store.has_action("skill", "fxoc1", "runtime", "disable"))
+        entry = _build_actions_map(self.app.store, "openclaw", self.app.cfg).get("fxoc1")
+        self.assertFalse(entry is not None and entry.actions.runtime == "disable", entry)
+
+    def test_gap0024_an_operator_connector_wide_disable_stays_and_is_named(self):
+        """GAP-0024 control: a connector-wide disable that is not the
+        watcher's OpenClaw record (an operator's, or any for another
+        connector) stays, and the scoped enable says which record still
+        disables the skill and how to clear it."""
+        self.app.cfg.active_connectors = lambda: ["openclaw", "hermes"]  # type: ignore[method-assign]
+        pe = PolicyEngine(self.app.store, self.app.cfg)
+        cases = {
+            "operator-openclaw": ("manual hold", "openclaw"),
+            "watcher-hermes": ("auto-block: watch detected HIGH findings", "hermes"),
+        }
+        for label, (reason, connector) in cases.items():
+            with self.subTest(label):
+                name = f"keep-{label}"
+                pe.disable("skill", name, reason)
+                with patch("defenseclaw.commands.cmd_skill._sidecar_client") as mock_client:
+                    mock_client.return_value.enable_skill.return_value = {"status": "enabled"}
+                    result = self.invoke(["enable", name, "--connector", connector])
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertTrue(self.app.store.has_action("skill", name, "runtime", "disable"), result.output)
+                self.assertIn("still has a runtime disable for every connector", result.output)
+                self.assertIn(reason, result.output)
+                self.assertIn(f"defenseclaw skill enable {name}", result.output)
+
     def test_disable_bare_name_records_every_matching_connector_copy(self):
         self.app.cfg.active_connectors = lambda: ["hermes", "codex"]  # type: ignore[method-assign]
         hermes_root = os.path.join(self.tmp_dir, "hermes", "skills")
@@ -4285,6 +4331,86 @@ class TestSkillInstallQuarantineNeverWarns(SkillCommandTestBase):
         self.assertTrue([e for e in self.app.store.list_events(50) if e.action == "install-warning"])
 
     WARN = {"install": "none", "file": "none", "runtime": "enable"}
+
+    def _runtime_rows(self, name):
+        return {e.connector: e for e in self.app.store.list_actions_by_type("skill") if e.target_name == name}
+
+    def _refuse_then_allow(self, name, *, operator_reason=""):
+        with patch("defenseclaw.commands.cmd_skill._normalize_runtime_connector", return_value="hermes"):
+            result, _ = self._install(name, ["--action"], self.RUNTIME_ONLY)
+            self.assertEqual(result.exit_code, 1, result.output)
+            rows = self._runtime_rows(name)
+            self.assertTrue(rows and all(r.actions.runtime == "disable" for r in rows.values()), rows)
+            self.assertTrue(all(r.reason.startswith("post-install scan:") for r in rows.values()), rows)
+            if operator_reason:
+                pe = PolicyEngine(self.app.store, self.app.cfg)
+                for connector in rows:
+                    pe.disable_for_connector("skill", name, connector, operator_reason)
+            result, scanned = self._install(name, [], self.WARN)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(scanned and os.path.isdir(scanned[0]), result.output)
+        return result
+
+    def test_gap0021_an_allowed_install_replaces_the_disable_an_earlier_refused_install_recorded(self):
+        """GAP-0021: a runtime-only disable refuses the install and records
+        the disable for each connector. Once admission allows the skill, the
+        next install stands and that scan-decided record no longer keeps it
+        disabled, said on screen and audited."""
+        name = "rd-then-allow"
+        result = self._refuse_then_allow(name)
+        for connector, row in self._runtime_rows(name).items():
+            self.assertNotEqual(row.actions.runtime, "disable", f"{connector}: still disabled by the refused install")
+        self.assertIn("no longer applies", result.output)
+        released = [e for e in self.app.store.list_events(50) if e.action == "enable" and "released" in e.details]
+        self.assertTrue(released, [e.action for e in self.app.store.list_events(50)])
+
+    def test_gap0021_an_operator_disable_stays_after_an_allowed_install(self):
+        """GAP-0021 control: an operator's own disable is not the CLI's scan
+        record, so an allowed install keeps it."""
+        name = "op-disabled"
+        result = self._refuse_then_allow(name, operator_reason="operator: hold for review")
+        rows = self._runtime_rows(name)
+        self.assertTrue(rows and all(r.actions.runtime == "disable" for r in rows.values()), rows)
+        self.assertNotIn("no longer applies", result.output)
+
+    def _refuse_then_allow_openclaw(self, name, client):
+        with patch("defenseclaw.commands.cmd_skill._normalize_runtime_connector", return_value="openclaw"), \
+                patch("defenseclaw.commands.cmd_skill._sidecar_client", return_value=client):
+            result, _ = self._install(name, ["--action"], self.RUNTIME_ONLY)
+            self.assertEqual(result.exit_code, 1, result.output)
+            client.disable_skill.assert_called_with(name)
+            rows = self._runtime_rows(name)
+            self.assertTrue(rows and all(r.actions.runtime == "disable" for r in rows.values()), rows)
+            result, scanned = self._install(name, [], self.WARN)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(scanned and os.path.isdir(scanned[0]), result.output)
+        return result
+
+    def test_gap0023_the_release_re_enables_the_skill_in_openclaw(self):
+        """GAP-0023: for OpenClaw the refused install also disabled the skill
+        in the agent through the gateway, so the release re-enables it there
+        (as skill enable does) before it clears the record."""
+        client = MagicMock()
+        client.enable_skill.return_value = {"status": "enabled"}
+        name = "oc-then-allow"
+        result = self._refuse_then_allow_openclaw(name, client)
+        client.enable_skill.assert_called_with(name)
+        for connector, row in self._runtime_rows(name).items():
+            self.assertNotEqual(row.actions.runtime, "disable", f"{connector}: still disabled by the refused install")
+        self.assertIn("no longer applies", result.output)
+
+    def test_gap0023_a_failed_openclaw_enable_keeps_the_record_and_says_so(self):
+        """GAP-0023 control: when OpenClaw cannot re-enable the skill, the
+        record stays disabled and the user is told how to enable it, so the
+        record, the message and OpenClaw agree."""
+        client = MagicMock()
+        client.enable_skill.side_effect = Exception("gateway not connected")
+        name = "oc-enable-fails"
+        result = self._refuse_then_allow_openclaw(name, client)
+        rows = self._runtime_rows(name)
+        self.assertTrue(rows and all(r.actions.runtime == "disable" for r in rows.values()), rows)
+        self.assertNotIn("no longer applies", result.output)
+        self.assertIn(f"defenseclaw skill enable {name} --connector", result.output)
 
     def _connector_roots(self, hermes_root=None):
         roots = {

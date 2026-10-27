@@ -247,16 +247,26 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 				g.arrivals[key] = arrived
 			}
 			g.mu.Unlock()
+			// The wait uses no gateway CPU: the call gives up its caller's
+			// run slot for it, so unseen sessions of one account do not
+			// queue behind each other's windows (GAP-1822).
+			resume := pauseHookRunSlot(ctx)
 			window := time.NewTimer(min(arrival, wait))
+			timedOut := false
 			select {
 			case <-arrived:
 			case <-window.C:
-				g.judgeMissingStart(ctx, key, startCheck)
+				timedOut = true
 			case <-ctx.Done():
 				window.Stop()
+				resume()
 				return sessionStartPendingReason, true
 			}
 			window.Stop()
+			resume()
+			if timedOut {
+				g.judgeMissingStart(ctx, key, startCheck)
+			}
 			arrival = 0
 			continue
 		}
@@ -313,6 +323,13 @@ func (g *sessionStartGate) judgeMissingStart(ctx context.Context, key string, st
 // sessionStartArrival is how long a call of a session whose start the gate
 // has not seen waits for it: only where a start verdict can block, in action
 // mode (sessionStartVerdictBlocks), for a connector that sends a start.
+//
+// A session whose start an earlier gateway process recorded (its saved
+// instruction record knows its startup) will not send that start again: it
+// was running when this gateway started or upgraded. Waiting for it would
+// only delay the call by the whole window (GAP-1459), so its start is judged
+// in its place at once, as a start that does not arrive is (GAP-1448), and
+// the call goes on with that verdict.
 func (a *APIServer) sessionStartArrival(ctx context.Context, profile connector.HookProfile, connectorName string) time.Duration {
 	if sandboxHookMode(ctx, connectorName, a.agentHookMode(ctx, connectorName)) != "action" ||
 		!slices.ContainsFunc(profile.SupportedEvents, func(event string) bool {
@@ -320,7 +337,36 @@ func (a *APIServer) sessionStartArrival(ctx context.Context, profile connector.H
 		}) {
 		return 0
 	}
+	sessionID := strings.TrimSpace(SessionIDFromContext(ctx))
+	if key := sessionStartGateKey(ctx, connectorName, sessionID); key != "" &&
+		!a.sessionStartGate.known(key) && a.sessionStartRecordedEarlier(ctx, connectorName, sessionID) {
+		a.sessionStartGate.judgeMissingStart(ctx, key, a.sessionStartCheck(connectorName))
+	}
 	return sessionStartArrivalWait
+}
+
+// known reports a session whose start this process has seen, judged or is
+// judging.
+func (g *sessionStartGate) known(key string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, seen := g.started[key]
+	return seen || g.entries[key] != nil
+}
+
+// sessionStartRecordedEarlier reports a session whose saved instruction
+// record holds a startup an earlier gateway process recorded.
+func (a *APIServer) sessionStartRecordedEarlier(ctx context.Context, connectorName, sessionID string) bool {
+	dir := a.instructionLoadDir()
+	if dir == "" {
+		return false
+	}
+	key, ok := instructionStartupKey(ctx, connectorName, sessionID)
+	if !ok {
+		return false
+	}
+	record, ok := readInstructionLoadRecord(instructionLoadRecordPath(dir, key), key)
+	return ok && record.StartupKnown
 }
 
 // codexStartRegistrationUnavailable is the start verdict of a Codex session

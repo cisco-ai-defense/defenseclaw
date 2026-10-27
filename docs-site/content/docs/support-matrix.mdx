@@ -140,7 +140,12 @@ The local Splunk bridge works only with an x86_64 Docker engine, because the Spl
 
 ## Managed Linux and macOS scans
 
-The managed Linux and macOS packages include no skill, MCP or plugin scanner; only the managed Windows package does. On those computers `defenseclaw-gateway scan skill`, `scan mcp` and `scan plugin` say so and scan nothing. An administrator checks a skill's or plugin's files with `sudo /opt/defenseclaw/bin/defenseclaw-gateway scan code PATH` on Linux or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan code PATH` on macOS. Users add MCP servers through the agent's own MCP configuration. The full scans run on a per-user installation or a managed Windows computer. See [Scan a skill](/docs/scanning/skill-scanner#before-you-start).
+The managed Linux and macOS packages (rpm, deb and pkg) install the skill, MCP and plugin scanners. An administrator runs them through the managed gateway, for example `sudo /opt/defenseclaw/bin/defenseclaw-gateway scan skill PATH` on Linux or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway scan skill PATH` on macOS. Two limits apply:
+
+- The gateway service cannot read home folders or temporary folders (on Linux `/home`, `/root`, `/tmp` and `/var/tmp`; on macOS `/Users`). Copy the folder somewhere every account can read, such as `/opt/defenseclaw-scan`, and scan the copy. The command names the folder it refuses.
+- A deployment installed from the payload archive (`enterprise linux install --payload` or `enterprise macos install --payload`) has no scanners. There, `scan skill`, `scan mcp` and `scan plugin` exit 3 and scan nothing. Install the package instead.
+
+Standard users add MCP servers through the agent's own MCP configuration. See [Scan a skill](/docs/scanning/skill-scanner#before-you-start).
 
 ## Managed macOS private agent scan
 

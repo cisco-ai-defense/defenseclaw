@@ -420,7 +420,11 @@ def resolve_connector_fail_mode(
     # Windows Codex registration is a structured event matrix whose native
     # validator below checks the exact command, launcher, contract, policy,
     # trust, and file identities, so the text probe is not used there.
-    elif name == "codex" and not _is_windows() and not _codex_registration_current(workspace):
+    elif (
+        name == "codex"
+        and not _is_windows()
+        and not _codex_registration_current(workspace, str(getattr(cfg, "data_dir", "") or ""))
+    ):
         drift.append("registration-missing")
 
     drift.extend(registration_integrity_drift(cfg, name))
@@ -725,6 +729,25 @@ def connector_fail_mode_report(
                 {"name": f"{name}-upstream", "mode": "open"},
             ],
         }
+    from defenseclaw.platform_support import is_proxy_connector
+
+    if is_proxy_connector(name):
+        # The proxy connectors (OpenClaw, ZeptoClaw) have no hooks: while the
+        # gateway is down their model and tool calls are refused whatever
+        # guardrail.hook_fail_mode says, as `guardrail fail-mode` lists them
+        # (GAP-1957).
+        return {
+            "effective": "closed",
+            "provenance": "proxy-backed",
+            "note": "no hooks: blocked while the gateway is down",
+            "configured": configured,
+            "desired": "closed",
+            "runtime": None,
+            "current": False if unguarded else None,
+            "runtime_verified": None,
+            "drift": unguarded,
+            "sources": [{"name": "proxy", "mode": "closed"}],
+        }
     if name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
         # Outside Secure Client, Copilot CLI, Antigravity and Hermes follow the
         # configured mode and are resolved from their rendered hooks.
@@ -776,9 +799,7 @@ def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]
         # call time; older scripts still read their runtime record.
         helper = _read_small_file(hook_dir / "_hardening.sh")
         if helper and "defenseclaw-call-time-outage-v1" in helper:
-            resolver = getattr(cfg.guardrail, "effective_hook_outage_fail_mode", None)
-            if callable(resolver):
-                return "hook-script", normalize_fail_mode(resolver(connector))
+            return "hook-script", normalize_fail_mode(cfg.guardrail.effective_hook_outage_fail_mode(connector))
         return "hook-script", _read_flat_hook_record_mode(hook_dir, connector)
     return ("hook-script-env" if reads_env else "hook-script"), mode
 
@@ -1154,8 +1175,7 @@ def _read_opencode_plugin_mode(cfg: Any) -> str | None:
         if plugin is None:
             continue
         if "defenseclaw-call-time-outage-v1" in plugin:
-            resolver = getattr(cfg.guardrail, "effective_hook_outage_fail_mode", None)
-            return normalize_fail_mode(resolver("opencode")) if callable(resolver) else None
+            return normalize_fail_mode(cfg.guardrail.effective_hook_outage_fail_mode("opencode"))
         match = _OPENCODE_OUTAGE_PATTERN.search(plugin) or _OPENCODE_FAIL_MODE_PATTERN.search(plugin)
         if match:
             return match.group(1)
@@ -1167,8 +1187,7 @@ def _read_amp_plugin_mode(path: Path, cfg: Any) -> str | None:
     if data is None:
         return None
     if "defenseclaw-call-time-outage-v1" in data:
-        resolver = getattr(cfg.guardrail, "effective_hook_outage_fail_mode", None)
-        return normalize_fail_mode(resolver("amp")) if callable(resolver) else None
+        return normalize_fail_mode(cfg.guardrail.effective_hook_outage_fail_mode("amp"))
     match = _AMP_OUTAGE_PATTERN.search(data) or _AMP_FAIL_MODE_PATTERN.search(data)
     return match.group(1) if match else None
 
@@ -1237,15 +1256,25 @@ def codex_windows_hook_config_path(cfg: Any) -> str:
     return str(Path(codex_home()) / ("managed_config.toml" if managed else "config.toml"))
 
 
-def _codex_registration_current(workspace: str = "") -> bool:
+def _codex_registration_current(workspace: str = "", data_dir: str = "") -> bool:
+    """Whether Codex's config.toml registers DefenseClaw's hooks.
+
+    The hook commands run the scripts in this install's data directory, so a
+    custom DEFENSECLAW_HOME (``~/dchome/hooks/codex-hook.sh``) names no
+    "defenseclaw" in the path and still is DefenseClaw's registration
+    (GAP-1882).
+    """
     paths = connector_config_files("codex", workspace_dir=workspace)
     if not paths:
         return False
     config_path = Path(paths[0])
     data = _read_small_file(config_path)
-    if data is None:
+    if data is None or "[hooks]" not in data:
         return False
-    return "[hooks]" in data and "defenseclaw" in data.lower()
+    if "defenseclaw" in data.lower():
+        return True
+    hook_dir = os.path.join(os.path.expanduser(data_dir), "hooks") if data_dir.strip() else ""
+    return bool(hook_dir) and os.path.join(hook_dir, "codex-hook.sh") in data
 
 
 def _registration_lock_state(
