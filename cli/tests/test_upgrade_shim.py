@@ -118,6 +118,16 @@ def test_parse_rejects_bad_input(args: list[str]) -> None:
         upgrade_shim._parse("upgrade", args)
 
 
+@pytest.mark.parametrize("args", [["--version"], ["--version", "--yes"], ["-y", "--version"], ["--version="]])
+def test_a_version_flag_without_a_value_says_it_needs_one(args: list[str]) -> None:
+    # GAP-2258: the flag is valid, so the error must not call it unknown.
+    with pytest.raises(upgrade_shim.ShimUsageError) as excinfo:
+        upgrade_shim._parse("upgrade", args)
+    assert "unknown option" not in str(excinfo.value)
+    assert "--version needs a release number" in str(excinfo.value)
+    assert excinfo.value.exit_code == 2
+
+
 def test_rollback_does_not_take_a_version() -> None:
     with pytest.raises(upgrade_shim.ShimError):
         upgrade_shim._parse("rollback", ["--version", "1.0.0"])

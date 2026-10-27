@@ -38,6 +38,28 @@ def test_namespace_hides_owner_reads_overflowuid_and_uid_map(monkeypatch, uid_ma
     assert file_permissions.namespace_hides_owner(info) is hidden
 
 
+@pytest.mark.parametrize(
+    ("platform", "uid_map", "child"),
+    [
+        ("linux", "         0          0 4294967295\n", False),  # the initial namespace
+        ("linux", "      1001       1001          1\n", True),  # Codex workspace sandbox
+        ("linux", "", False),  # unreadable map: no claim
+        ("darwin", "      1001       1001          1\n", False),
+    ],
+)
+def test_in_child_user_namespace_reads_uid_map(monkeypatch, platform, uid_map, child) -> None:
+    # GAP-2206: status uses it to stop calling a hidden gateway stopped.
+    import io
+
+    from defenseclaw import file_permissions
+
+    monkeypatch.setattr(file_permissions.sys, "platform", platform)
+    monkeypatch.setattr(
+        file_permissions, "open", lambda path, *a, **k: io.StringIO({"/proc/self/uid_map": uid_map}[path]), raising=False
+    )
+    assert file_permissions.in_child_user_namespace() is child
+
+
 def test_disable_all_hooks_shows_degraded_in_status(tmp_path: Path, monkeypatch) -> None:
     # GAP-1634: the alert and doctor said so; the status connector line did not.
     settings = tmp_path / "home" / ".claude" / "settings.json"

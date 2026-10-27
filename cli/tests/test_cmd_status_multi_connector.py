@@ -1092,6 +1092,40 @@ class TestStatusJson(unittest.TestCase):
             self.assertIn("state is unconfirmed", uncertain_text.output)
             self.assertNotIn("not running; start it", uncertain_text.output)
 
+    def test_status_inside_a_sandbox_does_not_call_the_hidden_gateway_stopped(self):
+        # GAP-2206: Codex's workspace sandbox (another user namespace) hides the
+        # host's gateway process and listener; status said "not running".
+        from defenseclaw import file_permissions
+
+        for sandboxed in (True, False):
+            with (
+                patch.object(cmd_status, "sys", SimpleNamespace(platform="linux"), create=True),
+                patch.object(file_permissions, "in_child_user_namespace", return_value=sandboxed, create=True),
+                patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+                patch.object(cmd_status, "_live_gateway_pid", return_value=0),
+                patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=""),
+                patch(
+                    "defenseclaw.commands.cmd_doctor._managed_gateway_listener_evidence",
+                    return_value=MagicMock(status="missing", pid=0, reason=""),
+                ),
+            ):
+                runner = CliRunner()
+                as_json = runner.invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+                as_text = runner.invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+
+            self.assertEqual(as_json.exit_code, 0, msg=as_json.output)
+            sidecar = json.loads(as_json.output)["sidecar"]
+            if sandboxed:
+                self.assertIsNone(sidecar["running"])
+                self.assertIn("not visible from this sandbox", sidecar["reason"])
+                self.assertIn("not visible from this sandbox", as_text.output)
+                self.assertIn("outside the sandbox", as_text.output)
+                self.assertNotIn("not running; start it", as_text.output)
+                self.assertNotIn("not enforced while the sidecar is stopped", as_text.output)
+            else:
+                self.assertIs(sidecar["running"], False)
+                self.assertIn("not running; start it", as_text.output)
+
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))
         result = self._invoke_json()

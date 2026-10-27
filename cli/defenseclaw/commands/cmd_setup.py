@@ -10799,8 +10799,9 @@ def _apply_hook_connector_setup(
       4. Persists config.yaml and writes the
          ``<data_dir>/picked_connector`` hint.
       5. When ``restart`` is true, bounces the gateway so its
-         ``Connector.Setup()`` wires hooks + native OTel exporter +
-         (codex only) the notify bridge against the running sidecar.
+         ``Connector.Setup()`` wires the hooks against the running
+         sidecar (for codex under Secure Client also the notify
+         bridge; a host install never writes a native OTel exporter).
 
     Returns True on success, False on any persistence error.
     """
@@ -12847,7 +12848,7 @@ def _hook_guardrail_options(fn):
     show_default=True,
     help=(
         "Restart defenseclaw-gateway after applying changes "
-        "(needed so the connector's hook scripts + OTel block are wired)."
+        "(needed so the connector's hooks are wired)."
     ),
 )
 @click.option(
@@ -12925,18 +12926,18 @@ def setup_codex(
     so inventory follows Codex's current ``.agents`` asset layouts and
     user/project ``.codex/config.toml`` layers.
 
-    Wires three telemetry channels at gateway boot:
+    Wires Codex's lifecycle hooks at gateway boot:
 
     \b
       • Hooks   — version-selected lifecycle contract: six events on
                   0.124-0.128, eight on 0.129-0.132, ten on
                   0.133-0.144, and eleven from 0.145 (with SessionEnd
                   advisory-only)
-      • OTel    — native Codex logs, metrics, and traces using a
-                  connector-scoped bearer and X-DefenseClaw-Source
-                  header on the loopback /v1/<signal> routes
-      • Notify  — agent-turn-complete webhooks via the bundled
-                  native notification bridge
+
+    A host install registers no native OTel exporter and no notify
+    bridge (setup removes the OTel entries older releases wrote).
+    An OpenShell sandbox adds both; Secure Client adds only the
+    notify bridge.
 
     Default mode is ``observe`` (record only); re-running setup keeps
     the current mode. Pass ``--mode action``
@@ -12989,7 +12990,7 @@ def setup_codex(
     show_default=True,
     help=(
         "Restart defenseclaw-gateway after applying changes "
-        "(needed so the connector's hook scripts + OTel env vars are wired)."
+        "(needed so the connector's hooks are wired)."
     ),
 )
 @click.option(
@@ -13067,14 +13068,16 @@ def setup_claude_code(
     connector set so the TUI, skill scanner, MCP scanner, and plugin
     scanner read from ``~/.claude/`` for Claude-scoped surfaces.
 
-    Wires two telemetry channels at gateway boot:
+    Wires Claude Code's lifecycle hooks at gateway boot:
 
     \b
       • Hooks — the exact version-selected Claude Code contract: 28
                 events for >=2.1.154,<2.1.219 or 29 events for
                 >=2.1.219, including observational DirectoryAdded
-      • OTel  — native Claude Code OTel exporter (env-driven) pointing
-                at the gateway's /v1/logs and /v1/metrics
+
+    A host install registers no native OTel exporter (setup removes
+    the OTEL_* entries older releases wrote). Only an OpenShell
+    sandbox adds it.
 
     Default mode is ``observe`` (record only); re-running setup keeps
     the current mode. Pass ``--mode action``

@@ -434,14 +434,9 @@ func compileObservabilityV8Destination(
 			Policy: ObservabilityV8LiveReloadable, Transport: ObservabilityV8LiveReloadable,
 		},
 	}
-	// A Prometheus destination owns an in-process listener. The current runtime
-	// cannot prepare a replacement generation on the same binding while the
-	// active generation is still serving, so neither its listener policy nor
-	// transport may be represented as generally live-reloadable.
-	if source.Kind == ObservabilityV8DestinationPrometheus {
-		result.ReloadApplicability.Policy = ObservabilityV8RestartRequired
-		result.ReloadApplicability.Transport = ObservabilityV8RestartRequired
-	}
+	// A Prometheus destination is live-reloadable too: a replacement generation
+	// on the same listen address joins the socket the active generation holds
+	// (GAP-2072).
 	if source.Preset == "galileo" {
 		result.PresetProfile = galileoCompatibilityProfile
 	}

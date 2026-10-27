@@ -99,17 +99,31 @@ def namespace_hides_owner(info: os.stat_result) -> bool:
     map, root included, shows as the kernel's overflow UID. Such an owner is
     unknown, not another account (GAP-1395).
     """
-    if sys.platform != "linux":
+    if not in_child_user_namespace():
         return False
     try:
         with open("/proc/sys/kernel/overflowuid", encoding="ascii") as handle:
             overflow = int(handle.read().strip())
-        with open("/proc/self/uid_map", encoding="ascii") as handle:
-            uid_map = handle.read().split()
     except (OSError, ValueError):
         return False
+    return info.st_uid == overflow
+
+
+def in_child_user_namespace() -> bool:
+    """True when this process runs in a user namespace other than the host's.
+
+    That is the workspace sandbox an agent such as Codex runs its tools in: it
+    hides host accounts, and usually the host's processes and network too.
+    """
+    if sys.platform != "linux":
+        return False
+    try:
+        with open("/proc/self/uid_map", encoding="ascii") as handle:
+            uid_map = handle.read().split()
+    except OSError:
+        return False
     # The initial namespace maps every UID onto itself in one range.
-    return info.st_uid == overflow and uid_map != ["0", "0", "4294967295"]
+    return bool(uid_map) and uid_map != ["0", "0", "4294967295"]
 
 
 def _namespace_view_error(path: Path | str, resolved: str) -> UnsafePathError:

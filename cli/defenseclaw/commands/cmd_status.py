@@ -606,6 +606,8 @@ def status(app: AppContext, as_json: bool) -> None:
             first_hint = "Check access:   defenseclaw doctor"
         elif hung_pid:
             first_hint = "Check sidecar:  defenseclaw-gateway status (restart it if it stays this way)"
+        elif listener_reason == SANDBOX_HIDES_GATEWAY:
+            first_hint = "Check sidecar:  run defenseclaw status outside the sandbox"
         elif unconfirmed:
             first_hint = "Check sidecar:  defenseclaw doctor"
         else:
@@ -613,6 +615,13 @@ def status(app: AppContext, as_json: bool) -> None:
         hint(first_hint, "Subsystems:    defenseclaw-gateway status")
     if config_problems:
         raise SystemExit(1)
+
+
+SANDBOX_HIDES_GATEWAY = (
+    "not visible from this sandbox: this command runs inside a sandbox (a user namespace) "
+    "that hides the gateway's process and port, so it cannot tell whether the gateway runs; "
+    "run defenseclaw status outside the sandbox to check"
+)
 
 
 def _sidecar_listener_state(port: int, host: str) -> tuple[bool | None, str]:
@@ -632,7 +641,15 @@ def _sidecar_listener_state(port: int, host: str) -> tuple[bool | None, str]:
         return None, reason
 
     stopped_reason = "no gateway process or API listener; start it: defenseclaw-gateway start"
-    if sys.platform.startswith("linux") or sys.platform == "win32":
+    if sys.platform.startswith("linux"):
+        from defenseclaw.file_permissions import in_child_user_namespace
+
+        # A sandbox (another user namespace, as Codex runs its tools in)
+        # hides the host's gateway process and its listener (GAP-2206).
+        if in_child_user_namespace():
+            return None, SANDBOX_HIDES_GATEWAY
+        return False, stopped_reason
+    if sys.platform == "win32":
         return False, stopped_reason
 
     target = host.strip("[]")
