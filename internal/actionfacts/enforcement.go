@@ -16,6 +16,8 @@
 
 package actionfacts
 
+import "strings"
+
 // EnforcementProjection returns an independent view containing only commands
 // and effects that are statically proven to execute.
 //
@@ -90,12 +92,13 @@ func (f Facts) EnforcementProjection() Facts {
 		if command.Effect == EffectExecute {
 			executing[command.ID] = struct{}{}
 			retainedHierarchy[command.ID] = struct{}{}
-		} else if (command.Effect == EffectPreview || command.Effect == EffectUncertain) &&
+		} else if (command.Effect == EffectPreview || opaqueProgramPath(command)) &&
 			hasStaticRedirect(command.Redirects) {
 			// The shell opens a static redirect target before it runs the
-			// program, whatever the program is: a program named by a
-			// relative path (./build.sh > f) has an uncertain effect, yet
-			// its redirect writes f (GAP-2268).
+			// program: a program named by a relative or untrusted path
+			// (./build.sh > f) has an uncertain effect, yet its redirect
+			// writes f (GAP-2268). Any other uncertain command (unparsed
+			// construct, dynamic word) is still not projected.
 			redirecting[command.ID] = struct{}{}
 			retainedHierarchy[command.ID] = struct{}{}
 		}
@@ -291,6 +294,18 @@ func markProjectionFactLimit(projected *Facts) {
 			len(projected.Network) > 0 ||
 			len(projected.DataFlows) > 0,
 	)
+}
+
+// opaqueProgramPath reports a command whose only uncertainty is its
+// program: a complete, static argv whose executable is a path the
+// classifier does not name (./build.sh, scripts/gen.sh, /opt/x/tool).
+func opaqueProgramPath(command CommandFact) bool {
+	return command.Effect == EffectUncertain &&
+		command.ArgvComplete &&
+		!command.ControlFlowUncertain &&
+		command.Program == "" &&
+		command.Executable != "" &&
+		strings.Contains(strings.ReplaceAll(command.Executable, `\`, "/"), "/")
 }
 
 func hasStaticRedirect(redirects []RedirectFact) bool {
