@@ -45,6 +45,7 @@ from defenseclaw.inventory.plugin_directories import (
     PluginRegistryCache,
     PluginRegistryProbe,
     PluginRegistryState,
+    discover_claude_cache_copies,
     discover_plugin_directories,
     plugin_directory_entries,
     probe_claude_plugin_registry,
@@ -3158,11 +3159,11 @@ def _echo_claudecode_install_note(source_path: str, plugin_name: str, *, only_cl
 
     Claude Code loads only plugins it installed from a marketplace (listed in
     installed_plugins.json), so the copy in its plugin cache is scanned but
-    neither loaded nor shown by plugin list.
+    not loaded; plugin list shows it as disabled (GAP-0017).
     """
     click.secho(
         "  Claude Code loads only plugins installed from a marketplace, so it will not load "
-        "this copy and plugin list will not show it.",
+        "this copy; plugin list shows it as disabled.",
         fg="yellow",
     )
     if not os.path.isfile(os.path.join(source_path, ".claude-plugin", "plugin.json")):
@@ -3211,6 +3212,36 @@ def _list_hermes_plugins() -> list[dict[str, Any]]:
                 "host_path": source if is_path else "",
             }
         )
+    return rows
+
+
+def _claude_cache_copy_rows(dirs: list[str], claimed: PluginInstallClaims) -> list[dict[str, Any]]:
+    """Rows for plugins ``plugin install`` copied into a Claude cache (GAP-0017).
+
+    Claude Code does not load such a copy, so the row is disabled and its
+    origin says so; the scan and actions maps give it its install verdict.
+    """
+    rows: list[dict[str, Any]] = []
+    for d in dirs:
+        if os.path.basename(os.path.normpath(d)).casefold() != "cache":
+            continue
+        for copy in discover_claude_cache_copies(d):
+            if not claimed.add(copy.id, copy.path, d):
+                continue
+            row: dict[str, Any] = {
+                "id": copy.id,
+                "name": copy.name,
+                "description": copy.description,
+                "version": copy.version,
+                "origin": "copy, not loaded by Claude Code",
+                "enabled": False,
+                "source": "host:claudecode",
+                "host_path": copy.path,
+                "cached": True,
+            }
+            if copy.manifest:
+                row["manifest"] = copy.manifest
+            rows.append(row)
     return rows
 
 
@@ -3280,6 +3311,8 @@ def _list_host_plugins(
             ):
                 continue
             out.append(entry)
+    if name in ("claudecode", "claude"):
+        out.extend(_claude_cache_copy_rows(dirs, claimed))
     if name == "opencode":
         from defenseclaw.inventory.claw_inventory import _opencode_config_plugin_rows
 

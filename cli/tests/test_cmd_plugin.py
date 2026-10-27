@@ -422,7 +422,12 @@ class TestPluginInstall(PluginCommandTestBase):
         # GAP-0017: <cache>/<name>/skills/helper was read as a
         # <marketplace>/<plugin>/<version> plugin (skills@<name>), so plugin
         # list showed it and remove skipped the copy as a marketplace folder.
-        mock_scan.return_value = self._clean_result()
+        def scan_at(*args, **_kwargs):
+            result = self._clean_result()
+            result.target = str(args[-1])
+            return result
+
+        mock_scan.side_effect = scan_at
         cache = os.path.join(self.tmp_dir, "claude-plugins", "cache")
         self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
         self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
@@ -441,6 +446,16 @@ class TestPluginInstall(PluginCommandTestBase):
         self.assertIn("other@mkt", found)
         listed = self.invoke(["list", "--connector", "claudecode", "--json"])
         self.assertNotIn("skills@r105sub", listed.output)
+        # The filed expected: plugin list shows the copy with its install
+        # verdict, disabled because Claude Code does not load it.
+        rows = {row["id"]: row for row in json.loads(listed.output)}
+        self.assertIn("r105sub", rows, listed.output)
+        self.assertFalse(rows["r105sub"]["enabled"])
+        self.assertEqual(rows["r105sub"]["origin"], "copy, not loaded by Claude Code")
+        self.assertIn("scan", rows["r105sub"])
+        table = self.invoke(["list", "--connector", "claudecode"])
+        self.assertIn("r105sub", table.output)
+        self.assertNotIn("has no installed plugins", table.output)
         removed = self.invoke(["remove", "r105sub", "--connector", "claudecode"])
         self.assertEqual(removed.exit_code, 0, removed.output)
         self.assertFalse(os.path.exists(os.path.join(cache, "r105sub")))
