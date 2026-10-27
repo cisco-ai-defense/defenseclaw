@@ -367,6 +367,10 @@ def test_a_missing_account_folder_is_made_held_and_removed(tmp_path: Path) -> No
     assert not folder.exists()
 
 
+# A quoted "~/..." DEFENSECLAW_CONFIG (the shell did not expand it) named
+# a folder called "~" under the caller's directory: the upgrade found no
+# config, printed no OpenHands/OmniGent notice and rolled back (P3 row,
+# remove-openhands review4).
 def test_relative_home_and_config_are_recorded_as_absolute_paths() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
     start = text.index("for dc_path_var in DEFENSECLAW_HOME DEFENSECLAW_CONFIG; do")
@@ -375,7 +379,9 @@ def test_relative_home_and_config_are_recorded_as_absolute_paths() -> None:
     for home, config, want in (
         ("rel-home", "rel/config.yaml", "{cwd}/rel-home|{cwd}/rel/config.yaml"),
         ("/abs/home", "", "/abs/home|"),
-        ("~/x", "/abs/c.yaml", "~/x|/abs/c.yaml"),
+        ("~/x", "/abs/c.yaml", "{home}/x|/abs/c.yaml"),
+        ("/abs/home", "~/c.yaml", "/abs/home|{home}/c.yaml"),
+        ("~", "", "{home}|"),
     ):
         cwd = Path(tempfile.mkdtemp()).resolve()
         proc = subprocess.run(
@@ -387,12 +393,13 @@ def test_relative_home_and_config_are_recorded_as_absolute_paths() -> None:
             timeout=30,
             env={
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": "/home/u",
                 "DEFENSECLAW_HOME": home,
                 "DEFENSECLAW_CONFIG": config,
             },
         )
         assert proc.returncode == 0, proc.stderr
-        assert proc.stdout.strip() == want.format(cwd=cwd)
+        assert proc.stdout.strip() == want.format(cwd=cwd, home="/home/u")
 
 
 # oss-outage-open round i loop 2: an install acts under, and gives back,

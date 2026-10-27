@@ -58,13 +58,17 @@ readonly RELEASE_BASE
 readonly OFFICIAL_RELEASE_BASE="https://github.com/${DEFAULT_REPO}"
 readonly RELEASE_SIGNER='^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
 # A relative DEFENSECLAW_HOME or DEFENSECLAW_CONFIG names a folder from the
-# caller's directory. Record the absolute path once, here, so the locks this
-# installer takes, the folder hook-data-dir names and the gateway it starts
-# from its own runtime directory all see the same one.
+# caller's directory, and a quoted "~/..." one (the shell did not expand it)
+# names the caller's home. Record the absolute path once, here, so the locks
+# this installer takes, the folder hook-data-dir names, the removal notice
+# check and the gateway it starts from its own runtime directory all see the
+# same one.
 for dc_path_var in DEFENSECLAW_HOME DEFENSECLAW_CONFIG; do
     dc_path_value="${!dc_path_var:-}"
     case "${dc_path_value}" in
-        ""|/*|"~"|"~/"*) ;;
+        ""|/*) ;;
+        "~") export "${dc_path_var}=${HOME}" ;;
+        "~/"*) export "${dc_path_var}=${HOME}/${dc_path_value#"~/"}" ;;
         *) export "${dc_path_var}=$(pwd -P)/${dc_path_value}" ;;
     esac
 done
