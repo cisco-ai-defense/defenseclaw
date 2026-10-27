@@ -14,7 +14,7 @@ import (
 // below the /var -> /private/var link, and compare their own spelling of the
 // home with resolved targets (GAP-0975), so they get the physical directory.
 // A home below a link is a product case of its own (GAP-1725,
-// r105_gap1725_linked_home_test.go).
+// gap1725_linked_home_test.go).
 func TestMain(m *testing.M) {
 	if runtime.GOOS != "windows" {
 		if dir, err := filepath.EvalSymlinks(os.TempDir()); err == nil {
