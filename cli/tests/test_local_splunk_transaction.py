@@ -781,7 +781,9 @@ def test_upgrade_records_only_the_proven_legacy_local_sink(tmp_path: Path, monke
     name = "splunk-hec-127-0-0-1"
     credential = "older local fixture credential"
     legacy = _hec(name, _DEFAULT_HEC, _SHARED)
-    remote = _hec("splunk-hec-remote", _REMOTE_HEC, "DEFENSECLAW_SPLUNK_HEC_TOKEN_SPLUNK_HEC_REMOTE")
+    # A remote destination keeps its own reference: the shared name, an
+    # underscore and the destination name in capitals.
+    remote = _hec("splunk-hec-remote", _REMOTE_HEC, f"{_SHARED}_SPLUNK_HEC_REMOTE")
     _write_state(data_dir, [legacy, remote], {"KEEP_ME": "unchanged", _SHARED: credential})
     _write_bridge_contract(data_dir, credential if proof != "wrong-token" else "other bridge credential")
     bridge = data_dir / "splunk-bridge"
