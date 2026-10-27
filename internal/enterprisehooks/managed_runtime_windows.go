@@ -19,6 +19,12 @@ import (
 
 const WindowsManagedSIDUnregisteredReason = "enterprise_managed_sid_unregistered"
 
+// ErrWindowsManagedSIDUnregistered is wrapped only by resolver failures whose
+// cause is that the current SID is absent from the protected target set.
+// Classify with errors.Is, never by message text: other errors can carry
+// target-owned paths.
+var ErrWindowsManagedSIDUnregistered = errors.New(WindowsManagedSIDUnregisteredReason)
+
 // WindowsManagedHookRuntime is the administrator-authorized runtime selected
 // for the current process token. PolicyActive distinguishes a clean
 // post-uninstall absence from a damaged or unregistered active global policy.
@@ -101,8 +107,8 @@ func resolveWindowsCursorManagedHookRuntime(
 			sid = target.targetSID.String()
 		}
 		return result, fmt.Errorf(
-			"%s: connector cursor current SID %s is absent from the protected target set",
-			WindowsManagedSIDUnregisteredReason,
+			"%w: connector cursor current SID %s is absent from the protected target set",
+			ErrWindowsManagedSIDUnregistered,
 			sid,
 		)
 	}
@@ -251,8 +257,8 @@ func resolveWindowsClaudeManagedHookRuntime(
 			sid = target.targetSID.String()
 		}
 		return result, fmt.Errorf(
-			"%s: connector claudecode current SID %s is absent from the protected target set",
-			WindowsManagedSIDUnregisteredReason,
+			"%w: connector claudecode current SID %s is absent from the protected target set",
+			ErrWindowsManagedSIDUnregistered,
 			sid,
 		)
 	}
@@ -320,8 +326,8 @@ func resolveWindowsCodexManagedHookRuntime(
 	}
 	if selected == nil {
 		return result, fmt.Errorf(
-			"%s: connector codex current SID %s is absent from the protected target set",
-			WindowsManagedSIDUnregisteredReason,
+			"%w: connector codex current SID %s is absent from the protected target set",
+			ErrWindowsManagedSIDUnregistered,
 			currentSID,
 		)
 	}

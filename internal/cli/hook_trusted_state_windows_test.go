@@ -8,11 +8,13 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 )
 
@@ -266,22 +268,60 @@ func TestBuildHookOptionsEnterpriseManagedFailsClosedOnOwnershipError(t *testing
 	}
 }
 
-func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T) {
+func TestManagedSIDUnregisteredReasonMatchesEnterpriseHooks(t *testing.T) {
+	if hookexec.ManagedSIDUnregisteredReason != enterprisehooks.WindowsManagedSIDUnregisteredReason {
+		t.Fatalf("hookexec reason %q != enterprisehooks reason %q",
+			hookexec.ManagedSIDUnregisteredReason, enterprisehooks.WindowsManagedSIDUnregisteredReason)
+	}
+}
+
+// An account that is not enrolled yet takes the managed open default;
+// strict availability in the agent's environment still closes it.
+func TestEnterpriseManagedHookRuntimeFailsOpenForUnregisteredSID(t *testing.T) {
 	_, _ = stageTrustedNativeHookForTest(t, "closed")
+	t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", "")
 	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
 		return enterprisehooks.WindowsManagedHookRuntime{
 			Connector:    "claudecode",
 			DataDir:      filepath.Join(t.TempDir(), ".defenseclaw"),
 			PolicyActive: true,
-		}, errors.New(enterprisehooks.WindowsManagedSIDUnregisteredReason)
+		}, fmt.Errorf("%w: connector claudecode current SID S-1-5-21-1 is absent", enterprisehooks.ErrWindowsManagedSIDUnregistered)
 	})
 	if enterpriseManagedHookRuntimeNoop("claudecode") {
 		t.Fatal("unregistered SID was incorrectly treated as a no-op")
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
-	if opts.FailMode != "closed" || !opts.StrictAvailability || !opts.ManagedEnterprise ||
+	if opts.FailMode != "open" || opts.StrictAvailability || !opts.ManagedEnterprise ||
 		opts.ManagedRuntimeFailure != enterprisehooks.WindowsManagedSIDUnregisteredReason {
-		t.Fatalf("unregistered managed SID did not force closed options: %+v", opts)
+		t.Fatalf("unregistered managed SID did not take the open default: %+v", opts)
+	}
+	t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", "1")
+	if opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true); !opts.StrictAvailability {
+		t.Fatalf("strict availability override was lost for an unregistered SID: %+v", opts)
+	}
+}
+
+// Only the typed sentinel selects the unregistered outcome. A resolver error
+// that merely carries the reason text, for example in a target-owned path,
+// stays an invalid runtime and fails closed.
+func TestEnterpriseManagedHookRuntimeUnregisteredTextWithoutSentinelFailsClosed(t *testing.T) {
+	_, _ = stageTrustedNativeHookForTest(t, "closed")
+	t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", "")
+	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+		return enterprisehooks.WindowsManagedHookRuntime{
+				Connector:    "claudecode",
+				DataDir:      filepath.Join(t.TempDir(), ".defenseclaw"),
+				PolicyActive: true,
+			}, fmt.Errorf("open C:\\Users\\x\\.defenseclaw\\%s: access denied",
+				enterprisehooks.WindowsManagedSIDUnregisteredReason)
+	})
+	if enterpriseManagedHookRuntimeNoop("claudecode") {
+		t.Fatal("invalid runtime was incorrectly treated as a no-op")
+	}
+	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
+	if opts.ManagedRuntimeFailure != "enterprise_managed_runtime_state_invalid" ||
+		opts.FailMode != "closed" || !opts.StrictAvailability {
+		t.Fatalf("reason text without the sentinel did not fail closed: %+v", opts)
 	}
 }
 
@@ -351,8 +391,8 @@ func TestRetainedActiveRuntimeFailsAsUnregisteredBeforeGatewayLookup(t *testing.
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
 	if opts.ManagedRuntimeFailure != enterprisehooks.WindowsManagedSIDUnregisteredReason ||
-		opts.APIAddr != "" || opts.FailMode != "closed" || !opts.StrictAvailability {
-		t.Fatalf("de-enrolled runtime was not rejected before gateway lookup: %+v", opts)
+		opts.APIAddr != "" || opts.FailMode != "open" {
+		t.Fatalf("de-enrolled runtime was not stopped before gateway lookup: %+v", opts)
 	}
 }
 

@@ -314,7 +314,17 @@ def resolve_version(
     """Resolve a dispatch version, or the next patch after live GitHub stable."""
 
     source_tuple = _version_tuple(source_version, "source version")
-    published = _published_versions(published_releases)
+    # Certify against the source's own major line. A newer major published
+    # from another branch (1.x from main) would otherwise turn this 0.x
+    # source into a 1.x candidate whose baselines this branch cannot
+    # authenticate; downgrades from that line are not an upgrade path.
+    published = [
+        version
+        for version in _published_versions(published_releases)
+        if _version_tuple(version, "published version")[0] <= source_tuple[0]
+    ]
+    if not published:
+        raise CertificationError(f"published releases contain no stable version in the {source_tuple[0]}.x line")
     latest = published[0]
     if requested:
         _version_tuple(requested, "requested version")

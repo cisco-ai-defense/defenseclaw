@@ -6,10 +6,17 @@
 package hookexec
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"io"
+	"math/bits"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -42,8 +49,161 @@ func TestManagedEnterpriseTransportRejectsForeignListenerBeforeHTTPBytes(t *test
 	if err == nil || !strings.Contains(err.Error(), errManagedGatewayPeerUnverified.Error()) {
 		t.Fatalf("foreign listener error = %v", err)
 	}
+	if got := managedPeerFailureReason(err); got != managedGatewayPortHeldReason {
+		t.Fatalf("foreign listener reason = %q, want %q", got, managedGatewayPortHeldReason)
+	}
 	if got := <-bytesRead; len(got) != 0 {
 		t.Fatalf("foreign listener received %d request bytes: %q", len(got), got)
+	}
+}
+
+func TestTCP6TableListensOnPortAtAnyAddress(t *testing.T) {
+	port := uint32(bits.ReverseBytes16(18970))
+	rows := []mibTCP6RowOwnerPID{{State: mibTCPStateEstab, LocalPort: port}}
+	if tcp6TableListensOn(rows, 18970) {
+		t.Fatal("established IPv6 row counted as a listener")
+	}
+	rows = append(rows, mibTCP6RowOwnerPID{State: mibTCPStateListen, LocalPort: port})
+	if !tcp6TableListensOn(rows, 18970) {
+		t.Fatal("IPv6 listener on the gateway port was missed")
+	}
+	if tcp6TableListensOn(rows, 18971) {
+		t.Fatal("IPv6 listener matched another port")
+	}
+}
+
+// A real IPv6 listener on the port is seen through the live owner-PID table.
+func TestManagedGatewayPortListeningSeesIPv6Listener(t *testing.T) {
+	listener, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable: %v", err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	listening, known := managedGatewayPortListening(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if !known || !listening {
+		t.Fatalf("IPv6 listener on port %d: listening=%t known=%t", port, listening, known)
+	}
+}
+
+func stubManagedTransportListening(t *testing.T, listening, known bool) {
+	t.Helper()
+	old := managedEnterpriseListening
+	managedEnterpriseListening = func(string) (bool, bool) { return listening, known }
+	t.Cleanup(func() {
+		managedTransportTestMu.Lock()
+		defer managedTransportTestMu.Unlock()
+		managedEnterpriseListening = old
+	})
+}
+
+func stoppedManagedGatewaySeams(t *testing.T) *bool {
+	t.Helper()
+	dialed := false
+	restoreManagedTransportSeams(t,
+		func(string) (uint32, error) {
+			return 0, fmt.Errorf("%w (state=1 pid=0)", errManagedGatewayNotRunning)
+		},
+		func(net.Conn) (uint32, error) { return 0, errors.New("must not resolve a connection") },
+	)
+	originalDial := managedEnterpriseDialContext
+	managedEnterpriseDialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		dialed = true
+		return originalDial(ctx, network, address)
+	}
+	t.Cleanup(func() {
+		managedTransportTestMu.Lock()
+		defer managedTransportTestMu.Unlock()
+		managedEnterpriseDialContext = originalDial
+	})
+	return &dialed
+}
+
+// A stopped gateway service is "not running" only when nothing listens on
+// its port. Another listener, or a listen table the hook cannot read, keeps
+// the peer failure closed.
+func TestManagedEnterpriseTransportStoppedServiceClassifiesListenerBeforeDial(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		listening, known bool
+		wantReason       string
+		wantNotRunning   bool
+	}{
+		{name: "port free", known: true, wantReason: managedGatewayNotRunningReason, wantNotRunning: true},
+		{name: "port held", listening: true, known: true, wantReason: managedGatewayPortHeldReason},
+		{name: "table unreadable", wantReason: managedGatewayPeerUnverifiedReason},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			managedTransportTestMu.Lock()
+			defer managedTransportTestMu.Unlock()
+			dialed := stoppedManagedGatewaySeams(t)
+			stubManagedTransportListening(t, tc.listening, tc.known)
+
+			client, err := managedEnterpriseHTTPClient(time.Second, "127.0.0.1:18970", "DefenseClawGateway")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.Post("http://127.0.0.1:18970/api/v1/hook", "application/json", strings.NewReader(`{}`))
+			if !errors.Is(err, errManagedGatewayPeerUnverified) {
+				t.Fatalf("stopped service error = %v, want a peer failure", err)
+			}
+			if got := managedPeerFailureReason(err); got != tc.wantReason {
+				t.Fatalf("reason = %q, want %q (err=%v)", got, tc.wantReason, err)
+			}
+			if got := managedPeerFailMode("open", err) == "open"; got != tc.wantNotRunning {
+				t.Fatalf("open mode allowed = %t, want %t (err=%v)", got, tc.wantNotRunning, err)
+			}
+			if *dialed {
+				t.Fatal("stopped service still dialed the gateway port")
+			}
+		})
+	}
+}
+
+// A managed hook whose gateway service is stopped, with nothing else on its
+// port, follows its fail mode: the Secure Client default allows and an
+// explicit closed mode blocks. Another process on the port blocks in both.
+func TestManagedEnterpriseRunStoppedGatewayFollowsFailMode(t *testing.T) {
+	for _, tc := range []struct {
+		failMode   string
+		listening  bool
+		wantCode   int
+		wantReason string
+	}{
+		{failMode: "open", wantCode: 0, wantReason: managedGatewayNotRunningReason},
+		{failMode: "closed", wantCode: blockExit, wantReason: managedGatewayNotRunningReason},
+		{failMode: "open", listening: true, wantCode: blockExit, wantReason: managedGatewayPortHeldReason},
+	} {
+		t.Run(fmt.Sprintf("%s/listening=%t", tc.failMode, tc.listening), func(t *testing.T) {
+			managedTransportTestMu.Lock()
+			defer managedTransportTestMu.Unlock()
+			stoppedManagedGatewaySeams(t)
+			stubManagedTransportListening(t, tc.listening, true)
+
+			home := t.TempDir()
+			token := "authenticated-token"
+			var out, errb bytes.Buffer
+			code := Run(context.Background(), Options{
+				Connector:                 "claudecode",
+				Event:                     "PreToolUse",
+				APIAddr:                   "127.0.0.1:18970",
+				Home:                      home,
+				HookDir:                   filepath.Join(home, "hooks"),
+				FailMode:                  tc.failMode,
+				ManagedEnterprise:         true,
+				ManagedGatewayServiceName: "DefenseClawGateway",
+				AuthenticatedManagedToken: &token,
+				Stdin:                     strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash"}`),
+				Stdout:                    &out,
+				Stderr:                    &errb,
+			})
+			if code != tc.wantCode {
+				t.Fatalf("code = %d, want %d; stdout=%q stderr=%q", code, tc.wantCode, out.String(), errb.String())
+			}
+			if !strings.Contains(errb.String(), tc.wantReason) {
+				t.Fatalf("stderr = %q, want %q", errb.String(), tc.wantReason)
+			}
+		})
 	}
 }
 

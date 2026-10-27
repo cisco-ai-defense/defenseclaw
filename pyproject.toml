@@ -21,9 +21,21 @@ dependencies = [
     "urllib3>=2.8.0",
     "idna>=3.15",
     "pydantic-settings>=2.14.2",
-    # CVE-2026-59881 and CVE-2026-69243/69244 are fixed by 3.14.3.
-    "aiohttp>=3.14.3,<4",
+    # CVE-2026-59881 and CVE-2026-69243/69244 are fixed by 3.14.3;
+    # GHSA-2g87-pp6c-29x5, CVE-2026-111063..111066 and
+    # CVE-2026-111748..111750 by 3.14.4.
+    "aiohttp>=3.14.4,<4",
     "pyjwt>=2.15.1",
+    # PYSEC-2026-4320 is fixed in certifi 2026.10.19.
+    "certifi>=2026.10.19",
+    # CVE-2026-112906/112907/112913/112914/112937/112940 are fixed in
+    # filelock 4.2.1, which requires Python >= 3.11; 3.10 has no fixed
+    # release (see the Python 3.10 wheel audit in ci.yml). It is a LiteLLM ->
+    # tokenizers -> huggingface-hub transitive, so this floor is marked and
+    # sits outside the unmarked wheel security contract. Keep it out of
+    # [tool.uv] overrides: an override replaces huggingface-hub's own filelock
+    # requirement and would drop filelock on Python 3.10.
+    "filelock>=4.2.1; python_version >= '3.11'",
     "starlette>=1.3.1,<1.4",
     "fastapi>=0.137.1,<0.138",
     # The scanner/TUI runtime is one dependency set. DefenseClaw uses the
@@ -60,10 +72,11 @@ dependencies = [
     # LiteLLM floor. Pin its PyPI-attested wheel and hash until upstream ships
     # a release compatible with LiteLLM >=1.84.0.
     "cisco-ai-mcp-scanner @ https://files.pythonhosted.org/packages/af/40/d42943f9e3da40ee9b5f00439fda38b62fc379034383f85a6e06d7825796/cisco_ai_mcp_scanner-4.3.0-py3-none-any.whl#sha256=ea1a30d6bc282f2b4081bc4eced4287a20326891588624d5b2e07b388710b812 ; python_version>='3.11'",
-    # CVE-2026-52869, CVE-2026-52870, and CVE-2026-59950 affect older MCP
-    # SDK releases. DefenseClaw imports the SDK directly for stdio scanning,
-    # so keep the fixed floor in published-wheel metadata as well as uv.lock.
-    "mcp>=1.28.1,<2",
+    # CVE-2026-52869, CVE-2026-52870, CVE-2026-59950 and CVE-2026-59951
+    # affect older MCP SDK releases (59951 is fixed in 1.30.0 on the 1.x
+    # line). DefenseClaw imports the SDK directly for stdio scanning, so
+    # keep the fixed floor in published-wheel metadata as well as uv.lock.
+    "mcp>=1.30.0,<2",
     # Declare MCP Scanner's YARA engine directly so uv can select the local,
     # Native Setup substitutes the repository-owned, YARA-X-backed compatibility
     # wheel and validates the exact MCP Scanner API; source installs use
@@ -110,8 +123,9 @@ dev = [
     "freezegun==1.5.5",
     "jsonschema>=4.23.0",
     "ruff==0.15.7",
-    "opentelemetry-api>=1.28.0",
-    "opentelemetry-sdk>=1.28.0",
+    # CVE-2026-114603 is fixed in opentelemetry-api 1.45.1.
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
 ]
 
 [project.scripts]
@@ -218,9 +232,12 @@ override-dependencies = [
     # CVE-2026-34513..34520, CVE-2026-34525); 3.14.0 additionally fixes
     # CVE-2026-34993 and CVE-2026-47265; 3.14.1 fixes CVE-2026-54273..54280;
     # 3.14.2 fixes PYSEC-2026-3546 and PYSEC-2026-3547; 3.14.3 fixes
-    # CVE-2026-59881, CVE-2026-69243/69244, and PYSEC-2026-3545.
+    # CVE-2026-59881, CVE-2026-69243/69244, and PYSEC-2026-3545; 3.14.4
+    # fixes GHSA-2g87-pp6c-29x5, CVE-2026-111063..111066 and
+    # CVE-2026-111748..111750.
     # LiteLLM's transitive pin floats aiohttp downward without this override.
-    "aiohttp>=3.14.3,<4",
+    "aiohttp>=3.14.4,<4",
+    "certifi>=2026.10.19",   # PYSEC-2026-4320 fixed in 2026.10.19
     # PyJWT 2.15.1 includes the 2.14/2.15 security fixes and the 2.15.1
     # padding compatibility fix. Keep the floor in wheel metadata.
     "pyjwt>=2.15.1",

@@ -254,11 +254,16 @@ func TestCursorMappedAdapterUsesCurrentSIDNotPeerPolicy(t *testing.T) {
 		t.Fatal("test peer is current SID")
 	}
 	for _, failure := range []string{"missing", "timeout", "block"} {
-		for _, mode := range []string{"open", "closed", "unenrolled"} {
+		for _, mode := range []string{"open", "closed", "unenrolled", "unenrolled-strict"} {
 			t.Run(failure+"/"+mode, func(t *testing.T) {
 				modes := map[string]string{peer: "open"}
-				if mode != "unenrolled" {
+				if !strings.HasPrefix(mode, "unenrolled") {
 					modes[sid] = mode
+				}
+				if mode == "unenrolled-strict" {
+					t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", "1")
+				} else {
+					t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", "")
 				}
 				if mode == "open" {
 					modes[peer] = "closed"
@@ -281,16 +286,18 @@ func TestCursorMappedAdapterUsesCurrentSIDNotPeerPolicy(t *testing.T) {
 					t.Fatal(err)
 				}
 				stdout, stderr, code := runCursorAdapterTest(t, adapter, `{"source":"cursor-adapter-probe"}`)
-				if mode == "open" && failure != "block" {
+				// An unenrolled SID follows the managed open default unless
+				// strict availability is set.
+				if (mode == "open" || mode == "unenrolled") && failure != "block" {
 					if code != 0 {
-						t.Fatalf("open user blocked: code=%d stderr=%q", code, stderr)
+						t.Fatalf("open or unenrolled user blocked: code=%d stderr=%q", code, stderr)
 					}
 					assertCursorAllowJSON(t, stdout)
 					if !strings.Contains(stderr, "WARNING hook fail-open; inspection bypassed connector=cursor") {
 						t.Fatal("missing fail-open diagnostic")
 					}
 				} else if code != 2 || !strings.Contains(stdout, `"permission":"deny"`) {
-					t.Fatalf("closed/unenrolled user or valid denial allowed: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+					t.Fatalf("closed user or valid denial allowed: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 				}
 			})
 		}

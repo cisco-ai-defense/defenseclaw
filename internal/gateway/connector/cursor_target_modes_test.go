@@ -55,7 +55,7 @@ func TestWindowsCursorTargetModesCanonicalAdapter(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(decoded, modes) {
 		t.Fatalf("decoded=%v err=%v", decoded, err)
 	}
-	for _, marker := range []string{"$failMode = 'closed'", "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value", "$targetModes.PSObject.Properties[$currentSID]", "if ($failMode -ceq 'open')", "WARNING hook fail-open; inspection bypassed connector=cursor", `{"continue":true}`, `"permission":"deny"`} {
+	for _, marker := range []string{"$failMode = 'closed'", "if ($null -eq $targetMode)", "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value", "$targetModes.PSObject.Properties[$currentSID]", "if ($failMode -ceq 'open')", "WARNING hook fail-open; inspection bypassed connector=cursor", `{"continue":true}`, `"permission":"deny"`} {
 		if !bytes.Contains(adapter, []byte(marker)) {
 			t.Errorf("missing %q", marker)
 		}
