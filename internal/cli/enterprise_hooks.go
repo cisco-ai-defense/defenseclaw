@@ -1803,11 +1803,23 @@ type enterpriseHookVerifyRun struct {
 	// sign-in to the error of the guardian row that records the wait.
 	AwaitingSignIn map[string]string
 	// RecordedProtected names the excused signed-out Hermes rows
-	// (enterpriseHookHermesSignedOutRow) the guardian last recorded as
+	// (enterpriseHookHermesSignedOutRow) and the rows failed only by an
+	// enterpriseHookUserFileFault that the guardian last recorded as
 	// protected; the protected records are compared with them as protected.
 	RecordedProtected map[string]bool
 	AuthorizationErr  error
 }
+
+// enterpriseHookUserFileFault is a verify row error whose only cause is a
+// file in the target account's own profile that DefenseClaw reads but the
+// guardian's pass and Setup readiness report as a warning (on Windows, the
+// Claude Code user settings the migration cannot finish): the row fails, but
+// the guardian's protected records, which recorded the row protected, are no
+// second fault (GAP-0031).
+type enterpriseHookUserFileFault struct{ err error }
+
+func (f enterpriseHookUserFileFault) Error() string { return f.err.Error() }
+func (f enterpriseHookUserFileFault) Unwrap() error { return f.err }
 
 // enterpriseHookVerifyExcusedNote is the note of one of run.Excused: for a
 // row that waits for its signed-out account's next sign-in, why, from the
@@ -2423,6 +2435,17 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 			row.OK = false
 			row.Error = targetErr.Error()
 			run.Failures++
+			var userFile enterpriseHookUserFileFault
+			if errors.As(targetErr, &userFile) && recorded[enterpriseHookProtectedTargetKey(row)].OK {
+				// The row fails on a file in the account's own profile
+				// only, and the guardian, whose readiness reports that
+				// file as a warning, recorded it protected: the records
+				// still describe it, so they are not a second fault.
+				if run.RecordedProtected == nil {
+					run.RecordedProtected = map[string]bool{}
+				}
+				run.RecordedProtected[enterpriseHookProtectedTargetKey(row)] = true
+			}
 			if excused > 0 && enterpriseHookRemovedAccountRow(row) {
 				run.Excused = append(run.Excused, row)
 			} else if excused > 0 && enterpriseHookVerifyAwaitingSignIn(awaitingSignIn, target, row) {
