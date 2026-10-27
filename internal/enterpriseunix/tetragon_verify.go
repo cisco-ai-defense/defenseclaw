@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -422,13 +423,11 @@ type gatewayPlaneC struct {
 
 // planeCFromHealth reads ai_runtime.details.planes.c from a /health body.
 func planeCFromHealth(body []byte) gatewayPlaneC {
+	const notReported = "the gateway has not reported Plane C yet; it does after its first poll"
 	var document struct {
 		AIRuntime *struct {
 			Details struct {
-				Planes map[string]struct {
-					Running bool   `json:"running"`
-					Reason  string `json:"reason"`
-				} `json:"planes"`
+				Planes json.RawMessage `json:"planes"`
 			} `json:"details"`
 		} `json:"ai_runtime"`
 	}
@@ -438,9 +437,23 @@ func planeCFromHealth(body []byte) gatewayPlaneC {
 	if document.AIRuntime == nil {
 		return gatewayPlaneC{Err: "the gateway's /health has no ai_runtime section"}
 	}
-	c, ok := document.AIRuntime.Details.Planes["c"]
+	// Until its first poll a starting AI runtime publishes planes as the list
+	// of configured planes, not the per-plane map: Plane C is not reported yet,
+	// and /health is not malformed (GAP-1964: verify right after ensure).
+	raw := bytes.TrimSpace(document.AIRuntime.Details.Planes)
+	if len(raw) == 0 || raw[0] == '[' || bytes.Equal(raw, []byte("null")) {
+		return gatewayPlaneC{Err: notReported}
+	}
+	var planes map[string]struct {
+		Running bool   `json:"running"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.Unmarshal(raw, &planes); err != nil {
+		return gatewayPlaneC{Err: "the gateway's /health does not parse: " + err.Error()}
+	}
+	c, ok := planes["c"]
 	if !ok {
-		return gatewayPlaneC{Err: "the gateway has not reported Plane C yet; it does after its first poll"}
+		return gatewayPlaneC{Err: notReported}
 	}
 	return gatewayPlaneC{Read: true, Running: c.Running, Reason: c.Reason}
 }
@@ -747,12 +760,12 @@ func setAgentsCheck(set func(id, status, message string, fix ...string), in tetr
 		if len(missing) > 0 {
 			detail += "; no enrolled user has a row for " + strings.Join(missing, ", ")
 		}
-		set(checkAgents, failing, "no enrolled user has an anchored command-line agent ("+detail+"); install a command-line agent for an enrolled user, or enroll a user who runs one")
+		set(checkAgents, failing, "no enrolled user has an anchored command-line agent ("+detail+"); install a command-line agent for an enrolled user, or enroll a user who runs one; "+agentInstallRule)
 		return
 	}
 	message := fmt.Sprintf("%d enrolled %s an agent (%s)", len(with), plural(len(with), "user has", "users have"), strings.Join(with, ", "))
 	if len(without) > 0 {
-		message += "; none seen yet for " + strings.Join(without, ", ")
+		message += "; none seen yet for " + strings.Join(without, ", ") + " (" + agentInstallRule + ")"
 	}
 	if len(missing) > 0 {
 		message += "; no row for " + strings.Join(missing, ", ")
@@ -805,6 +818,15 @@ func (t tetragonIntent) helperModeLoadsPolicies() bool {
 	mode := t.helperMode()
 	return mode == config.TetragonModeObserve || mode == config.TetragonModeEnforce
 }
+
+// agentInstallRule says where the sensor helper looks for an enrolled
+// user's agent (kernelpolicy searchDirs and trustedExecutable): the user's
+// home, the machine prefixes /usr/local/bin and /usr/bin, and the bin
+// folder of each enterprise.enrollment.agent_prefixes prefix, outside the
+// home only on a path that only root or that user can change. A shared
+// install elsewhere (for example an npm prefix in /opt) is not seen until
+// the administrator lists its prefix (GAP-1965).
+const agentInstallRule = "an agent counts when it is installed in the user's home (for example ~/.local/bin/claude), in /usr/local/bin or /usr/bin, or in the bin folder of a prefix listed in enterprise.enrollment.agent_prefixes, on a path only root or that user can change; a shared install anywhere else, or on a path other accounts can write, is not seen"
 
 // hasAnchoredAgent reports whether a user's agent was anchored: a live root
 // now, covered burn-in time, a hit, or enforcement.

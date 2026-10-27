@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,15 @@ type fakeBundleReceiptSink struct {
 	// offers is every change offered, the refused offers included.
 	offers    []audit.ConfigChange
 	changeErr error
+	// receiptOffers is every receipt offered, the refused offers included.
+	receiptOffers []receiptOffer
+	receiptErr    error
+}
+
+type receiptOffer struct {
+	receipt  audit.PolicyBundleReceipt
+	delivery *observability.RemoteDelivery
+	pins     *audit.ConfigChangePins
 }
 
 func (f *fakeBundleReceiptSink) LogConfigChange(
@@ -57,7 +67,13 @@ func (f *fakeBundleReceiptSink) LogConfigChange(
 	return nil
 }
 
-func (f *fakeBundleReceiptSink) LogPolicyBundleReceipt(principal string, b audit.PolicyBundle, r audit.PolicyBundleReceipt) error {
+func (f *fakeBundleReceiptSink) LogPolicyBundleReceipt(principal string, b audit.PolicyBundle, r audit.PolicyBundleReceipt,
+	delivery *observability.RemoteDelivery, pins *audit.ConfigChangePins,
+) error {
+	f.receiptOffers = append(f.receiptOffers, receiptOffer{r, delivery, pins})
+	if f.receiptErr != nil {
+		return f.receiptErr
+	}
 	f.bundles, f.receipts = append(f.bundles, b), append(f.receipts, r)
 	f.principals = append(f.principals, principal)
 	return nil
@@ -322,5 +338,51 @@ func TestBundleReceiptReporterMakesItsMarkerFolderDurably(t *testing.T) {
 	mkdirMarkers = func(string) error { return os.ErrPermission }
 	if r.markSeen(other) || r.reportedOnDisk(other) {
 		t.Fatal("a marker was written although its folder could not be made durably")
+	}
+}
+
+// GAP-0376: a spooled receipt the audit store refused (SQLITE_BUSY) is
+// offered again at every poll as the same occurrence: with its record pins
+// and one remote delivery state, so the destinations that have it do not
+// get it again, and it is marked reported only once the store keeps it.
+// Its first offer is a first offer (it entered the spool while the
+// reporter ran); none after it is.
+func TestBundleReceiptReporterOffersARefusedReceiptAgainAsTheSameOccurrence(t *testing.T) {
+	dir := t.TempDir()
+	path := enterprisestatus.PublicReceiptPath(dir)
+	sink := &fakeBundleReceiptSink{receiptErr: errors.New("database is locked (SQLITE_BUSY)")}
+	pins := audit.NewConfigChangePins(filepath.Join(dir, changeRecordPinsDirName))
+	r := &bundleReceiptReporter{receiptPath: path, markerPath: filepath.Join(dir, bundleReceiptMarkerName),
+		sink: sink, enforcedVersion: func() uint64 { return 0 }, pins: pins}
+	spool := filepath.Join(filepath.Dir(path), enterprisestatus.PublicReceiptEventsDirName)
+	if err := os.MkdirAll(spool, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.poll(context.Background()) // the spools are read at start: empty
+	writeTestPublicReceipt(t, filepath.Join(spool, testBundleID+".json"), enterprisestatus.PublicReceipt{
+		SchemaVersion: 1, ReceiptID: testBundleID, BundleID: testBundleID, Version: 2,
+		State: enterprisestatus.BundleConfirmed, FinishedAt: "2026-10-26T20:00:00.123Z", CurrentVersion: 2})
+	for poll := 0; poll < 3; poll++ {
+		r.poll(context.Background())
+	}
+	if r.reportedOnDisk(testBundleID) {
+		t.Fatal("a receipt the store refused is marked reported")
+	}
+	sink.receiptErr = nil
+	r.poll(context.Background())
+	r.poll(context.Background())
+	if len(sink.receiptOffers) != 4 || len(sink.receipts) != 1 {
+		t.Fatalf("offers = %d, stored = %d, want 3 refused offers and one stored", len(sink.receiptOffers), len(sink.receipts))
+	}
+	for i, offer := range sink.receiptOffers {
+		if offer.delivery == nil || offer.delivery != sink.receiptOffers[0].delivery || offer.pins != pins {
+			t.Fatalf("offer %d has another delivery state or no record pins", i)
+		}
+		if offer.receipt.FirstOffer != (i == 0) || offer.receipt.FinishedAt != "2026-10-26T20:00:00.123Z" {
+			t.Fatalf("offer %d = %+v, want a first offer only once and the receipt's time", i, offer.receipt)
+		}
+	}
+	if !r.reportedOnDisk(testBundleID) {
+		t.Fatal("the stored receipt is not marked reported")
 	}
 }

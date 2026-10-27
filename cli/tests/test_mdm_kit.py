@@ -1044,6 +1044,44 @@ def test_windows_wrapper_exit_puts_back_a_credential_rotated_before_the_lifecycl
     assert len(entries) == journal, entries
 
 
+# GAP-2093: the installed CLI refuses a rotation on stdout (--json) with an
+# empty stderr. The wrapper result and log name that refusal and its next
+# step, and say what is installed (not installed:false).
+@pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
+@pytest.mark.parametrize("setup", [False, True])
+def test_windows_wrapper_names_the_cli_refusal_and_the_installed_deployment(tmp_path: Path, setup: bool) -> None:
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    shared = text[text.index(SHARED_BEGIN): text.index(SHARED_END)]
+    refusal = {"schema_version": 1, "ok": False, "action": "set", "name": "ai-defense-api-key", "gateway_restarted": False,
+               "errors": [{"code": "secret_ref_unbound", "message": "bundle secret_ref_unbound: first apply a bundle signed with --secret-file for the value stored now"}],
+               "exit_code": 1603}
+    probe = tmp_path / "refusal-probe.ps1"
+    probe.write_text(
+        "$ErrorActionPreference = 'Stop'\n" + shared + "\n"
+        + _rotation_functions("Get-WrapperSecretErrorCode", "Get-WrapperSecretErrorMessage", "Set-WrapperSecret", "Exit-Wrapper")
+        + "\nfunction Get-DefenseClawInstalledDeployment { return [pscustomobject]@{ Cli = 'defenseclaw.exe'; Version = '1.0.5-rc.1' } }\n"
+        + "function Invoke-DefenseClawNative { param($FilePath, $StandardInputPath, $ArgumentList)\n"
+        + "    return [pscustomobject]@{ ExitCode = 1603; StdErr = ''; StdOut = '" + json.dumps(refusal).replace("'", "''") + "' } }\n"
+        + "function Write-WrapperLog { param($Message) Add-Content -LiteralPath '" + str(tmp_path / "wrapper.log").replace("'", "''") + "' -Value $Message }\n"
+        + "function Remove-WrapperStaging { }\n"
+        + "$script:ResultAction = 'ensure'; $script:RotationCli = ''; $SecretName = 'ai-defense-api-key'; $secret = 'staged'\n"
+        + ("$SetupPath = 'C:\\stage\\Setup.exe'\n" if setup else "$SetupPath = ''\n")
+        + "$failure = Set-WrapperSecret -Extra @('--bundle', 'b')\n"
+        + "Exit-Wrapper 1603 'mdm_secret_failed' $failure.Message\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run([_any_pwsh7(), "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe)],
+                            capture_output=True, text=True, timeout=60, check=False)
+    assert result.returncode in (1603, 1603 % 256), result.stdout + result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    message = out["errors"][0]["message"]
+    assert out["errors"][0]["code"] == "mdm_secret_failed", out
+    assert "secret_ref_unbound: bundle secret_ref_unbound: first apply a bundle signed with --secret-file" in message, message
+    assert out["installed"] is True and out["installed_version"] == "1.0.5-rc.1", out
+    assert out["product_version"] == ("" if setup else "1.0.5-rc.1"), out
+    assert "secret_ref_unbound" in (tmp_path / "wrapper.log").read_text(encoding="utf-8")
+
+
 # Loop round 1 (rc.7), finding 1: two wrapper runs shared the journal with
 # no lock. Run A journaled the old value; run B's resume put that value back
 # (still stored, so the CLI took it) and deleted the entry; A then stored the
@@ -3996,6 +4034,11 @@ def test_unix_wrapper_settles_only_under_the_rotation_lock(tmp_path: Path, os_di
     settle = [i for i, call in enumerate(calls) if " enterprise secret set " in f" {call} "]
     assert "released" in calls and settle and settle[0] > calls.index("released"), calls
     assert not (journal / "ai-key.entry").exists(), out
+    # GAP-2098: the run says that it waits for the lock, and for how long.
+    log = (tmp_path / "kit.log").read_text(encoding="utf-8")
+    lock = str(tmp_path / "journal" / ".lock")
+    assert f"waiting for the credential rotation journal lock {lock}, which another wrapper run holds" in log, log
+    assert f"took the credential rotation journal lock {lock} after waiting" in log, log
 
 
 # GAP-1585: a completed Windows uninstall removes the wrapper's credential

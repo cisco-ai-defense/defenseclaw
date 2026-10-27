@@ -197,6 +197,49 @@ func TestDriverGenerationOwnerOfBytesTwoBundlesRender(t *testing.T) {
 	}
 }
 
+// A pending bundle B whose rendered bytes a higher bundle C committed during
+// the outage (GAP-1187) settles superseded once C confirms: B is never
+// failed not_confirmed and never named for a rollback, because C's config is
+// the installed one (GAP-2088).
+func TestDriverPendingBundleWhoseBytesAHigherBundleCommittedIsSuperseded(t *testing.T) {
+	for _, pendingState := range []string{enterprisebundle.StateStaged, enterprisebundle.StateApplied} {
+		t.Run(pendingState, func(t *testing.T) {
+			r := newPendingRun(t, pendingState)
+			bump := r.f.variant(t, settingsOnly(t, "action"), func(in *enterprisebundle.ComposeInput) { in.Version, in.ChangeSummary = 7, "bump" })
+			c, err := r.d.Prepare(t.Context(), bump, nil)
+			if err != nil || c.Receipt == nil || !bytes.Equal(c.Config, r.b.Config) {
+				t.Fatalf("setup: %+v, %v", c, err)
+			}
+			// C committed the bytes and its run was killed; the gateway is back.
+			cPolicy := installPreparedBundle(t, r.d, c)
+			report, toRollBack, err := r.d.SettleRun(c.Config, &cPolicy)
+			if err != nil || len(toRollBack) != 0 || !slices.Contains(report.Completed, c.Receipt.ReceiptID) {
+				t.Fatalf("settle: report=%+v rollback=%+v error=%v", report, toRollBack, err)
+			}
+			receipts, err := r.d.Store.Receipts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var b *enterprisebundle.Receipt
+			for _, rc := range receipts {
+				if rc.ReceiptID == r.b.Receipt.ReceiptID {
+					b = rc
+				}
+			}
+			if b == nil || b.State != enterprisebundle.StateFailed || b.ErrorCode != enterprisebundle.CodeSuperseded || b.RolledBack ||
+				!strings.Contains(b.ErrorMessage, "version 7") || !strings.Contains(b.ErrorMessage, "nothing was rolled back") {
+				t.Fatalf("B after C took its bytes over = %+v", b)
+			}
+			if slices.Contains(report.Pending, b.ReceiptID) || slices.Contains(report.Interrupted, b.ReceiptID) {
+				t.Fatalf("B reported pending or interrupted: %+v", report)
+			}
+			if state, err := r.d.Store.LoadState(); err != nil || state.Current == nil || state.Current.Version != c.Receipt.Version {
+				t.Fatalf("current after settle: %+v, %v", state, err)
+			}
+		})
+	}
+}
+
 // A failed delivery records rolled_back only when the installed config, its
 // generation record and the live gateway prove the last good bundle enforces
 // again. A transaction that put back an unconfirmed predecessor (a pending

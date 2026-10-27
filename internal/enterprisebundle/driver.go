@@ -503,6 +503,14 @@ func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (repor
 			continue
 		}
 		if holds && !committed {
+			if owner, err := d.supersedingCommit(rc, installed); err != nil {
+				return report, rollback, err
+			} else if owner != nil {
+				if err := d.Store.Fail(rc, CodeSuperseded, supersededByMessage(owner)); err != nil {
+					return report, rollback, err
+				}
+				continue
+			}
 			// The applied state records a previous successful transaction.
 			// Lost generation evidence cannot disprove that apply.
 			report.addPending(rc.ReceiptID, "the signed bundle's committed generation cannot be verified")
@@ -686,6 +694,14 @@ func (d *Driver) settleCommitted(installedConfig []byte, installed string, polic
 			continue
 		}
 		if _, committed := d.committedGeneration(rc, installed); !committed {
+			if owner, err := d.supersedingCommit(rc, installed); err != nil {
+				return completed, interrupted, pending, rollback, err
+			} else if owner != nil {
+				if err := d.Store.Fail(rc, CodeSuperseded, supersededByMessage(owner)); err != nil {
+					return completed, interrupted, pending, rollback, err
+				}
+				continue
+			}
 			if d.installedBeforeRun(rc, installedConfig, installed) {
 				if err := d.Store.Fail(rc, CodeInterrupted, "the run that received this bundle ended before its transaction installed it; the installed config kept enforcing"); err != nil {
 					return completed, interrupted, pending, rollback, err
@@ -759,6 +775,35 @@ func (d *Driver) settleCommitted(installedConfig []byte, installed string, polic
 		rollback = append(rollback, rc)
 	}
 	return completed, interrupted, pending, rollback, nil
+}
+
+// supersedingCommit returns the receipt of a higher bundle whose lifecycle
+// commit (config.generation.json) owns the installed bytes, which rc renders
+// too: that delivery took the config over before rc's run finished
+// (GAP-1187). rc was replaced, so it ends superseded: it is never confirmed,
+// never "not confirmed", and nothing is rolled back for it (GAP-2088).
+func (d *Driver) supersedingCommit(rc *Receipt, installed string) (*Receipt, error) {
+	if rc == nil || installed == "" || installed != rc.ConfigSHA256 {
+		return nil, nil
+	}
+	receipts, err := d.Store.Receipts()
+	if err != nil {
+		return nil, err
+	}
+	for _, other := range receipts {
+		if other.ReceiptID == rc.ReceiptID || other.Version <= rc.Version || other.State == StateFailed {
+			continue
+		}
+		if _, committed := d.committedGeneration(other, installed); committed {
+			return other, nil
+		}
+	}
+	return nil, nil
+}
+
+func supersededByMessage(owner *Receipt) string {
+	return fmt.Sprintf("policy bundle %s version %d renders the same config and committed it before this bundle's run finished; "+
+		"nothing was rolled back, and that bundle's config is the installed one", owner.BundleID, owner.Version)
 }
 
 // installedBeforeRun reports whether the installed config, whose bytes are
