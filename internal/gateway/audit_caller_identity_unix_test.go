@@ -65,6 +65,10 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 	}
 	t.Cleanup(func() { hookSocketPeerCredentials = restoreCredentials })
 	socket, api, store := startTestHookSocketServer(t, hookSocketTestServer{ledger: `{"version":1,"ok":true,"protected_targets":[{"user":"user7101","uid":7101,"connector":"claudecode","ok":true}]}`})
+	// The rows, not the latency, are under test: the 200 ms inspect answer
+	// deadline (inspectScanTimeout) is hit by a CPU-starved first inspect
+	// under -race, which answered 504 (GAP-0001).
+	api.inspectToolScanTimeout = 5 * time.Second
 	client := hookSocketClient(socket, 10*time.Second)
 	post := func(path, connectorName string, body any) int {
 		t.Helper()
