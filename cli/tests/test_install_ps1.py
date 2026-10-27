@@ -3551,6 +3551,7 @@ def test_snapshot_restore_preserves_failed_moves_and_can_resume(tmp_path: Path, 
         if name in {
             "Get-Sha256", "Get-DataEntries", "Read-Text", "Restore-ExternalConfig",
             "Test-ConnectorRecoveryArtifactName", "Restore-Slot", "Invoke-Quietly", "Get-LifecycleNextStep",
+            "Convert-HooksForRestore", "Test-Version", "Get-NativeOutput",
         }
     )
     script = f"""
@@ -3558,6 +3559,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $DataDir = '{data}'
 $Slot = '{slot}'
+$BinDir = Join-Path $DataDir 'bin'
 $Venv = Join-Path $DataDir '.venv'
 $InstallerDir = Join-Path $DataDir 'installer'
 $NotData = @('.venv', 'installer', 'previous.new', '.failed-*')
@@ -5493,7 +5495,7 @@ def _restore_case_functions() -> str:
     names = (
         "Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace", "Copy-BinDir", "Clear-AsideCopies", "Restore-BinDir",
         "Assert-BinDirRestored", "Move-Path", "Get-DataEntries", "Test-ConnectorRecoveryArtifactName",
-        "Restore-Slot", "Invoke-Quietly",
+        "Restore-Slot", "Invoke-Quietly", "Convert-HooksForRestore", "Test-Version", "Get-NativeOutput",
         "Read-Text", "Restore-ExternalConfig", "Undo-HookFirst", "Undo-Snapshot",
         "Install-HookFirst", "Save-HookCloser", "Clear-StagedRelease", "Resume-InterruptedRun", "Publish-PreviousSlot",
         "Remove-Hold", "Restore-Live", "Restore-LiveTree", "Move-LiveTo", "Set-RecoveryPending",
@@ -7820,3 +7822,63 @@ if (-not $r) {{ throw 'no report' }}
         body = _ps1_function(name)
         parsed = [line for line in body.splitlines() if "$probe = Get-NativeProbe" in line and "--help" not in line]
         assert parsed and all(line.rstrip().endswith("-Json") for line in parsed), (name, parsed)
+
+
+# A failed upgrade to 1.0.5 that restored 1.0.2-1.0.4 kept the Claude Code
+# PreToolUse handler the 1.0.5 gateway had written,
+# "<bin>\\defenseclaw-gateway.exe launcher-guard <bin>\\defenseclaw-hook.exe hook
+# --connector claudecode": no earlier release has that subcommand, so every
+# Claude Code tool call was blocked (rel-1-0-5 GAP-0020). Restore-Slot
+# asks the still-live newer gateway to rewrite its entries in the form the
+# restored release reads (prepare-rollback, as `defenseclaw rollback` does),
+# before the programs go back, and only when it really goes back a release.
+def test_a_restore_rewrites_the_newer_hook_entries_before_the_programs_go_back() -> None:
+    restore = _ps1_function("Restore-Slot")
+    assert "Convert-HooksForRestore $Slot" in restore
+    assert restore.index("Convert-HooksForRestore $Slot") < restore.index("Restore-BinDir (Join-Path $Slot")
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("back", "live", "has_command", "converted"),
+    [
+        ("1.0.2", "1.0.5", True, "1.0.5>1.0.2"),
+        ("1.0.4", "1.0.5", True, "1.0.5>1.0.4"),
+        ("1.0.5", "1.0.5", True, ""),
+        ("1.0.2", "1.0.2", True, ""),
+        ("", "1.0.5", True, ""),
+        ("1.0.2", "1.0.5", False, ""),
+    ],
+    ids=["from-1.0.2", "from-1.0.4", "same-version", "old-gateway-still-live", "first-install", "no-command"],
+)
+def test_convert_hooks_for_restore_goes_back_only_to_an_older_release(
+    tmp_path: Path, back: str, live: str, has_command: bool, converted: str
+) -> None:
+    slot = tmp_path / "previous.new"
+    slot.mkdir()
+    if back:
+        (slot / "VERSION").write_text(back + "\n", encoding="ascii")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "defenseclaw-gateway.exe").write_bytes(b"")
+    help_text = "Usage:\n  defenseclaw-gateway connector prepare-rollback [flags]\n" if has_command else "Available Commands:\n  setup\n"
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        + f"$BinDir = '{bindir}'\n"
+        + "function Write-Warn([string]$m) { Write-Output \"WARN $m\" }\n"
+        + "function Get-NativeOutput([string]$FilePath, [string[]]$Arguments = @()) {\n"
+        + f"    if ($Arguments[0] -eq '--version') {{ return 'defenseclaw-gateway version {live} (commit=abc)' }}\n"
+        + f"    return @'\n{help_text}'@\n}}\n"
+        + "function Convert-HooksForRollback([string]$From, [string]$BackTo) { Write-Output \"CONVERTED=$From>$BackTo\" }\n"
+        + _ps1_function("Read-Text")
+        + _ps1_function("Test-Version")
+        + _ps1_function("Invoke-Quietly")
+        + _ps1_function("Convert-HooksForRestore")
+        + f"\nConvert-HooksForRestore '{slot}'\nWrite-Output 'END'\n"
+    )
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "END" in result.stdout and "WARN" not in out, out
+    lines = [line for line in result.stdout.splitlines() if line.startswith("CONVERTED=")]
+    assert lines == ([f"CONVERTED={converted}"] if converted else []), out

@@ -3738,6 +3738,7 @@ function Restore-Slot([string]$Slot) {
         # restore before any data or environment moves, with the slot and its
         # COMPLETE marker kept. Restore-BinDir is idempotent, so a resumed
         # restore runs it again and proves the bytes.
+        Convert-HooksForRestore $Slot
         Restore-BinDir (Join-Path $Slot "bin") $guardSHA256
         if (Test-Path -LiteralPath $planPath) {
             $plan = [IO.File]::ReadAllText($planPath) | ConvertFrom-Json -ErrorAction Stop
@@ -4694,6 +4695,26 @@ function Convert-HooksForRollback([string]$From, [string]$BackTo) {
             "After the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as " +
             "the cmd.exe entries that run defenseclaw-hook.exe in %USERPROFILE%\.claude\settings.json; remove them by hand")
     }
+}
+
+function Convert-HooksForRestore([string]$Slot) {
+    # A failed upgrade's gateway already wrote its hook entries, and the one-
+    # line Claude Code handler (`<bin>\defenseclaw-gateway.exe launcher-guard
+    # ...`) is a subcommand no release before 1.0.5 has. Restoring 1.0.2-1.0.4
+    # kept it: the older gateway exits 2 ("unknown flag: --connector"), so
+    # Claude Code blocked every tool call, and starting that gateway added its
+    # own handler beside it (rel-1-0-5 GAP-0020). The live gateway is still
+    # the newer one here, so it rewrites those entries
+    # in the form the restored release reads, as 'defenseclaw rollback' does.
+    # A resumed restore runs it again (idempotent) until the programs go back.
+    $back = Read-Text (Join-Path $Slot "VERSION")
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not (Test-Version $back) -or -not (Test-Path -LiteralPath $gateway -PathType Leaf)) { return }
+    if ((Get-NativeOutput $gateway @("--version")) -notmatch '\d+\.\d+\.\d+') { return }
+    $live = $Matches[0]
+    if ([version]$live -le [version]$back) { return }
+    if ((Get-NativeOutput $gateway @("connector", "prepare-rollback", "--help")) -notmatch 'prepare-rollback') { return }
+    Invoke-Quietly { Convert-HooksForRollback $live $back }
 }
 
 function Restore-HooksAfterAbortedRollback {
