@@ -1886,6 +1886,9 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 			return true
 		}
 	}
+	if !stateOnly && actionWindowsInterpreterBuildsKeyPath(words, cwd, home) {
+		return true
+	}
 	effectiveCWD := cwd
 	var directoryStack []string
 	for _, span := range actionWindowsResolvedSpans(words, cwd, home) {
@@ -1932,6 +1935,60 @@ func actionWindowsPOSIXShellMention(words []string, cwd, home string, depth int,
 			return actionPosixTargetMention(script, cwd, home, depth+1, stateOnly, (*actionGlobs)(nil).forCommand(script)) ||
 				!stateOnly && actionConcreteProtectedWriteOn(script, cwd, home, true)
 		}
+	}
+	return false
+}
+
+// actionWindowsInterpreterBuildsKeyPath is actionInterpreterBuildsKeyPath
+// for the Windows readings: python -c, node -e/-p, perl -e/-E and ruby -e
+// code that names both key-path parts and has an executable writer is a
+// protected target however it joins them, unless the binding rules place
+// every write of home-call code on an ordinary path. The class rule ran
+// only in the POSIX grammar, so PowerShell python -c/node -e key writes
+// were allowed (GAP-2005 RV8-2).
+func actionWindowsInterpreterBuildsKeyPath(words []string, cwd, home string) bool {
+	for i := 0; i+2 < len(words); i++ {
+		language := programBase(strings.ReplaceAll(words[i], `\`, "/"))
+		switch {
+		case language == "py" || language == "python" || strings.HasPrefix(language, "python3"):
+			language = "python"
+		case language == "node" || language == "nodejs" || language == "perl" || language == "ruby":
+		default:
+			continue
+		}
+		for j := i + 1; j+1 < len(words); j++ {
+			option := words[j]
+			if !strings.HasPrefix(option, "-") || option == "-" || option == "--" || option == "-m" {
+				break
+			}
+			if !actionWindowsInterpreterCodeOption(language, option) {
+				continue
+			}
+			code := words[j+1]
+			if actionInterpreterSSHName.MatchString(code) && actionInterpreterKeysName.MatchString(code) &&
+				actionInterpreterCodeWrites(code, language) && !actionInterpreterHomeWriteProved(code, language, cwd, home) {
+				return true
+			}
+			break
+		}
+	}
+	return false
+}
+
+// actionWindowsInterpreterCodeOption reports the option whose next word is
+// the inline code: python -c (or a flag cluster ending in c), node -e,
+// --eval, -p, --print, perl -e/-E (or a cluster ending in e/E), ruby -e.
+func actionWindowsInterpreterCodeOption(language, option string) bool {
+	cluster := len(option) > 2 && !strings.HasPrefix(option, "--") && !strings.ContainsAny(option, "=/")
+	switch language {
+	case "python":
+		return option == "-c" || cluster && strings.HasSuffix(option, "c")
+	case "node", "nodejs":
+		return option == "-e" || option == "--eval" || option == "-p" || option == "--print" || option == "-pe"
+	case "perl":
+		return option == "-e" || option == "-E" || cluster && (strings.HasSuffix(option, "e") || strings.HasSuffix(option, "E"))
+	case "ruby":
+		return option == "-e" || cluster && strings.HasSuffix(option, "e")
 	}
 	return false
 }
