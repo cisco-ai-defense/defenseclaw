@@ -2891,6 +2891,71 @@ def _process_identity(pid: int) -> str | None:
     return None
 
 
+# How much later than its pid file was written a record-less lock's process
+# may have started and still be its installer (every release writes the pid
+# right after it makes the folder; times have a coarse resolution): hookexec
+# installLockLegacySlack, install.sh lock_owner_live.
+_INSTALL_LOCK_LEGACY_SLACK = 2.0
+
+
+def _process_started(pid: int) -> float | None:
+    """The epoch second process pid started (hookexec procidentity.StartTime), or None.
+
+    Linux: boot time (btime of /proc/stat) plus field 22 of /proc/<pid>/stat
+    in clock ticks; macOS: its creation second (_process_identity); Windows:
+    its creation FILETIME (_process_identity).
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/stat", encoding="ascii", errors="replace") as handle:
+                btime = next((line.split()[1] for line in handle if line.startswith("btime ")), "")
+            with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+                line = handle.read()
+            hz = os.sysconf("SC_CLK_TCK")
+        except (OSError, ValueError, IndexError):
+            return None
+        end = line.rfind(")")
+        fields = line[end + 1 :].split()
+        if end < 0 or len(fields) < 20 or not fields[19].isdigit() or not btime.isdigit() or hz <= 0:
+            return None
+        return int(btime) + int(fields[19]) / hz
+    identity = _process_identity(pid)
+    if identity is None:
+        return None
+    if sys.platform == "darwin":
+        try:
+            started = datetime.strptime(identity, "%a %b %d %H:%M:%S %Y")
+        except ValueError:
+            return None
+        return started.replace(tzinfo=timezone.utc).timestamp()
+    if os.name == "nt" and identity.isdigit():  # pragma: no cover - Windows only
+        return (int(identity) - 116_444_736_000_000_000) / 10_000_000
+    return None
+
+
+def _legacy_install_lock_pid_reused(lock: str, pid: int, held: _HeldInstallLock | None = None) -> bool:
+    """A lock without a proc-start record (1.0.2-1.0.4) whose pid a later process got.
+
+    Its pid names a process that started more than the slack after the pid
+    file was written, so the installer that wrote it is gone and the lock is
+    stale (lead decision 2026-10-26 13:58, GAP-1465 and GAP-2057; the rule of
+    hookexec legacyInstallLockPIDReused and install.sh lock_owner_live). The
+    pid file's time, not the folder's: doctor's own takeover claim
+    (_claim_install_lock) changes the folder before it checks again. A live
+    installer started before its lock. A time that cannot be read keeps the
+    lock.
+    """
+    try:
+        if held is not None and held.dir_fd is not None:
+            info = os.stat("pid", dir_fd=held.dir_fd, follow_symlinks=False)
+        else:
+            info = os.lstat(os.path.join(lock, "pid"))
+    except OSError:
+        return False
+    started = _process_started(pid)
+    return started is not None and started > info.st_mtime + _INSTALL_LOCK_LEGACY_SLACK
+
+
 def _install_lock_file(lock: str, name: str, limit: int, held: _HeldInstallLock | None = None) -> tuple[str, str]:
     """("absent" | "valid" | "invalid" | "unreadable", text) of a small owner file in the lock.
 
@@ -2923,13 +2988,15 @@ def _install_lock_state(folder: str, held: _HeldInstallLock | None = None) -> tu
     """("none" | "stale" | "recovery" | "held", detail) of the lock in folder.
 
     The one rule of every per-user hook (hookexec installLockStale). It reads
-    no clock: "stale" when the lock is a folder, no interrupted-install
+    no clock but the lock's own time: "stale" when the lock is a folder, no interrupted-install
     record sits beside it and its installer is gone: its pid names no
     process or one that has ended (a zombie), or doctor's own (no reader writes a lock), or another process
     than its proc-start record names (a reused pid). A live installer keeps
     its lock for as long as it runs; so do a lock without a valid pid, a
-    lock without a proc-start record whose pid names a process (1.0.2,
-    1.0.3) and an owner whose identity cannot be read. With held, the owner
+    lock without a proc-start record (1.0.2-1.0.4) whose pid names a process
+    that started before its pid file was written (a later one is a
+    reused pid: _legacy_install_lock_pid_reused) and an owner whose identity
+    or start cannot be read. With held, the owner
     files are read in the folder doctor holds open, whatever the path names
     now (_fix_stale_install_lock).
     """
@@ -2976,6 +3043,11 @@ def _install_lock_state(folder: str, held: _HeldInstallLock | None = None) -> tu
                 "stale",
                 f"{lock} names pid {pid}, another process than the installer that wrote it; its installer is gone",
             )
+    elif record_state == "absent" and _legacy_install_lock_pid_reused(lock, pid, held):
+        return (
+            "stale",
+            f"{lock} names pid {pid}, a process that started after the lock was made; its installer is gone",
+        )
     return ("held", f"an installer (pid {pid}) holds {lock}")
 
 
