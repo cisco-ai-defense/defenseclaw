@@ -76,7 +76,8 @@ type Reader struct {
 	failed    atomic.Uint64
 }
 
-// Prepare binds the exact configured loopback listener and creates a private
+// Prepare binds the exact configured loopback listener (or joins the socket a
+// previous generation of this process already holds) and creates a private
 // official OTel Prometheus exporter for one generation.
 func (factory *Factory) Prepare(
 	generation uint64,
@@ -112,7 +113,12 @@ func (factory *Factory) PrepareContext(
 		})
 		return nil, newError(ErrorExporterInit, nil)
 	}
-	listener, err := factory.listenFunc(ctx, "tcp", factory.listen)
+	var listener net.Listener
+	if factory.shared {
+		listener, err = processListeners.acquire(ctx, factory.listenFunc, factory.listen, generation)
+	} else {
+		listener, err = factory.listenFunc(ctx, "tcp", factory.listen)
+	}
 	if err != nil {
 		_ = exporter.Shutdown(context.Background())
 		factory.safeObserve(HealthTransition{
