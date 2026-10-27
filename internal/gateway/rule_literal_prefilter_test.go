@@ -9,7 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
@@ -68,21 +72,81 @@ func TestRuleLiteralPrefilterNeverSkipsAMatch(t *testing.T) {
 		})
 	}
 	texts = append(texts, "ſecret_key = 'ſſſſſſſſſſſſſſſſſſ'", "Key", "cat /etc/ſhadow", "rm -rf /")
-	matched := 0
-	for name, pattern := range shippedRulePatterns(t, false) {
-		for _, text := range texts {
-			if !pattern.MatchString(text) {
-				continue
-			}
-			matched++
-			if !(&ruleScanText{text: text}).mayMatch(pattern) {
-				t.Fatalf("%s: prefilter %q skipped a text the rule matches: %q", name, ruleRequiredLiterals(pattern), text)
-			}
+
+	// The three profiles share most rules: a regexp with the same source
+	// gives the same answers, so each distinct source is checked once (under
+	// the first profile/rule name that has it). Every text is folded once,
+	// before the workers start, so the workers only read it.
+	byName := shippedRulePatterns(t, false)
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var checks []ruleSoundnessCheck
+	sources := make(map[string]bool)
+	for _, name := range names {
+		pattern := byName[name]
+		if !sources[pattern.String()] {
+			sources[pattern.String()] = true
+			checks = append(checks, ruleSoundnessCheck{name: name, pattern: pattern})
 		}
 	}
-	if matched == 0 {
+	scan := make([]ruleScanText, len(texts))
+	for i, text := range texts {
+		scan[i] = ruleScanText{text: text, folded: foldRuleText(text), ready: true}
+	}
+
+	// The cross product (every distinct rule x every text) is the proof and
+	// stays whole; it is split over GOMAXPROCS workers (serial, CI's -race
+	// run took about 9 minutes).
+	workers := min(runtime.GOMAXPROCS(0), len(checks))
+	var (
+		next    atomic.Int64
+		matched atomic.Int64
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		skipped []string
+	)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(checks) {
+					return
+				}
+				check := checks[i]
+				for j := range scan {
+					if !check.pattern.MatchString(scan[j].text) {
+						continue
+					}
+					matched.Add(1)
+					if !scan[j].mayMatch(check.pattern) {
+						mu.Lock()
+						skipped = append(skipped, fmt.Sprintf("%s: prefilter %q skipped a text the rule matches: %q", check.name, ruleRequiredLiterals(check.pattern), scan[j].text))
+						mu.Unlock()
+						break
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	sort.Strings(skipped)
+	for _, msg := range skipped {
+		t.Error(msg)
+	}
+	if matched.Load() == 0 {
 		t.Fatal("fixture: no sample text matched a shipped rule")
 	}
+	t.Logf("%d distinct rule regexps (%d shipped) x %d texts, %d matches, %d workers", len(checks), len(byName), len(scan), matched.Load(), workers)
+}
+
+type ruleSoundnessCheck struct {
+	name    string
+	pattern *regexp.Regexp
 }
 
 func TestRuleRequiredLiteralsFoldCase(t *testing.T) {
