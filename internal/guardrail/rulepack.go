@@ -1660,7 +1660,7 @@ func semanticCompileReason(label string, code semantic.CompileCode) string {
 	switch code {
 	case semantic.CompileStaticCost:
 		return fmt.Sprintf("%s expression's estimated worst-case evaluation cost is above the per-rule limit of %d "+
-			"(lists and strings are costed at their maximum sizes); a list macro (exists, all, map, filter) nested inside "+
+			"(lists and strings are costed at their maximum sizes); an exists() or all() nested inside "+
 			"another multiplies the cost, so test one list, prefer ==, in or startsWith over contains or matches inside "+
 			"a nested macro, or split the check into separate rules", label, semanticRuleStaticCostLimit)
 	case semantic.CompileStaticCostUnbounded:

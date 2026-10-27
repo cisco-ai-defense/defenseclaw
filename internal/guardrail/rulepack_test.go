@@ -931,6 +931,18 @@ func TestLoadRulePackExplainsTheSemanticCostLimits(t *testing.T) {
 	if !strings.Contains(packErr.Reason, strconv.FormatUint(semanticRuleStaticCostLimit, 10)) {
 		t.Errorf("reason = %q, want the per-rule limit", packErr.Reason)
 	}
+	// GAP-0049: the surface check refuses map(), filter() and exists_one()
+	// before the cost estimate runs, so a cost refusal only ever involves
+	// exists() and all(); the reason names only those (as GAP-0036 does for
+	// the depth refusal).
+	if !strings.Contains(packErr.Reason, "exists() or all()") {
+		t.Errorf("reason = %q, want it to name exists() and all()", packErr.Reason)
+	}
+	for _, refusedMacro := range []string{"map", "filter", "exists_one"} {
+		if strings.Contains(packErr.Reason, refusedMacro) {
+			t.Errorf("reason = %q names %s, which the surface check refuses at any depth", packErr.Reason, refusedMacro)
+		}
+	}
 
 	var rules strings.Builder
 	rules.WriteString("version: 1\ncategory: custom\nrules:\n")
