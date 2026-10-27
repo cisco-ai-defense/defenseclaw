@@ -49,6 +49,24 @@ var enterpriseInformationalWarningCodes = map[string]bool{
 	enterprisestatus.CodeSandboxAdvisory:       true,
 }
 
+// enterpriseResidualWarningCodes are warnings a Windows standalone result
+// carries on every run of a common setup, with no administrator step that
+// clears them: the agents' own hook-process residual (hook_process_fail_open,
+// GAP-1900), the session-only HERMES_HOME note while Hermes is enabled
+// (status_detail_unavailable), an account waiting for sign-in
+// (guardian_repair_pending), a signed-out account's unreadable Claude Code
+// state (claude_state_unreadable) and the missing LLM judge
+// (scanner_judge_missing). Each may explain part of security_complete, but
+// they hid the actionable reasons, such as a stale Claude attestation after
+// an upgrade, on every managed host with Hermes (GAP-2038).
+var enterpriseResidualWarningCodes = map[string]bool{
+	enterprisestatus.CodeHookProcessFailOpen: true,
+	"status_detail_unavailable":              true,
+	"guardian_repair_pending":                true,
+	"claude_state_unreadable":                true,
+	"scanner_judge_missing":                  true,
+}
+
 // addEnterpriseSecurityIncompleteReasons names why security is not complete
 // when nothing else in the result does. Windows standalone status and verify
 // reported security_complete:false with empty errors and warnings, so an
@@ -60,14 +78,13 @@ func addEnterpriseSecurityIncompleteReasons(result *enterprisestatus.Result, tra
 	if result == nil || result.SecurityComplete || len(result.Errors) > 0 {
 		return
 	}
-	// hook_process_fail_open is the agent's own residual, with no
-	// administrator remedy, and every Windows standalone result with Claude
-	// Code or Codex carries it since 1.0.4: it explains security_complete but
-	// must not hide the actionable reasons (a stale Claude attestation after
-	// an upgrade, a pending account), which it did (GAP-1900).
+	// A residual (enterpriseResidualWarningCodes) explains part of
+	// security_complete but must not hide the actionable reasons (a stale
+	// Claude attestation after an upgrade, a pending account), which it did
+	// (GAP-1900, GAP-2038).
 	residual := false
 	for _, warning := range result.Warnings {
-		if warning.Code == enterprisestatus.CodeHookProcessFailOpen {
+		if enterpriseResidualWarningCodes[warning.Code] {
 			residual = true
 			continue
 		}
