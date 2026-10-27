@@ -281,7 +281,9 @@ func TestCopilotPatchAndCreateEnvelopeCallbacksBindInEveryOrder(t *testing.T) {
 					}
 				}
 				cpath := filepath.Join(project, "c.txt")
-				g := filepath.ToSlash(cpath)
+				// Copilot names the file in git form with one leading slash
+				// on every OS (a/C:/Users/... on Windows, a/home/... on Linux).
+				g := "/" + strings.TrimPrefix(filepath.ToSlash(cpath), "/")
 				diff := "\ndiff --git a" + g + " b" + g + "\ncreate file mode 100644\nindex 0000000..0000000\n--- a/dev/null\n+++ b" + g + "\n@@ -1,0 +1,1 @@\n+ordinary c\n\n"
 				permHead := `{"hookName":"permissionRequest","sessionId":"` + session + `","cwd":` + jsonQuote(project) + `,"toolName":"edit","toolInput":`
 				permCreate := permHead + `{"file_path":` + jsonQuote(cpath) + `,"diff":` + jsonQuote(diff) + `}}`
