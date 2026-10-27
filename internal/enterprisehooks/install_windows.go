@@ -382,7 +382,8 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err != nil {
 		return InstallResult{}, err
 	}
-	if err := windowsManagedUserNativeOTLPAbsent(conn.Name(), home, dataDir, targetSID); err != nil {
+	otlpReport, err := windowsManagedUserNativeOTLPCheck(conn.Name(), home, dataDir, targetSID)
+	if err != nil {
 		return InstallResult{}, err
 	}
 	lockUpdatedAt, entryUpdatedAt, err := connector.ManagedHookContractTimestamps(
@@ -422,6 +423,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		HookScripts:     sortedUnique(hookScripts),
 		AgentVersion:    lock.RawAgentVersion,
 		HookContractID:  lock.ContractID,
+		AgentConfig:     otlpReport,
 	}, nil
 }
 
