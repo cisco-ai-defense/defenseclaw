@@ -279,6 +279,31 @@ func TestRefreshClosesReleasedCopilotEarlyFailures(t *testing.T) {
 	}
 }
 
+// TestRefreshLeavesADisabledCopilotTombstoneAsItIs: a torn-down Copilot
+// leaves the v0 tombstone, which forwards nothing and has no failure path to
+// close. The refresh the upgrade runs stopped on it with "unrecognized
+// released hook layout", so the per-user upgrade failed (GAP-2282).
+func TestRefreshLeavesADisabledCopilotTombstoneAsItIs(t *testing.T) {
+	for _, body := range []string{disabledHookTombstone("copilot"), failedSetupHookPlaceholder("copilot")} {
+		for _, mode := range []string{"closed", "open"} {
+			hookDir := filepath.Join(t.TempDir(), ".defenseclaw", "hooks")
+			if err := os.MkdirAll(hookDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			hook := filepath.Join(hookDir, "copilot-hook.sh")
+			if err := os.WriteFile(hook, []byte(body), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := RefreshHookFailModes(hookDir, func(string) string { return mode }); err != nil {
+				t.Fatalf("%s: refresh of the tombstone failed: %v", mode, err)
+			}
+			if after, _ := os.ReadFile(hook); string(after) != body {
+				t.Fatalf("%s: the refresh changed the tombstone:\n%s", mode, after)
+			}
+		}
+	}
+}
+
 // TestRefreshedReleasedCopilotHookDeniesAnEarlyExitOfStatusZero: an early
 // exit of status 0 is a failure too. macOS /bin/bash 3.2 runs the EXIT trap
 // with $? 0 when the sourced helper is missing, so a trap that tested the
