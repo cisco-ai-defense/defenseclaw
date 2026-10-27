@@ -1,0 +1,47 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: Save the shared Go cache from main
+description: >-
+  Saves the Go module and build cache that ./.github/actions/setup-go
+  restores, under the same key. It saves only on a push to main and only
+  when that key is not stored yet, so one job per OS writes one entry per
+  go.sum.
+inputs:
+  cache-name:
+    description: >-
+      A job whose build shares little with the test jobs (a release
+      cross-compile) keeps its own entry under this name, saved by that job.
+      The test jobs share "shared".
+    default: shared
+  cache-files:
+    description: Files besides go.sum whose content is part of the key.
+    default: ""
+  cache-hit:
+    description: The cache-hit output of ./.github/actions/setup-go.
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: paths
+      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.cache-hit != 'true' }}
+      shell: bash
+      env:
+        CACHE_NAME: ${{ inputs.cache-name }}
+        CACHE_FILES: ${{ inputs.cache-files }}
+      run: |
+        prefix="go-$RUNNER_OS-$RUNNER_ARCH-$(go env GOVERSION)-$CACHE_NAME-"
+        # shellcheck disable=SC2086 # cache-files is a space-separated list
+        hash=$(cat go.sum $CACHE_FILES | sha256sum | cut -c1-64)
+        {
+          echo "key=$prefix$hash"
+          echo "modcache=$(go env GOMODCACHE)"
+          echo "buildcache=$(go env GOCACHE)"
+        } >> "$GITHUB_OUTPUT"
+    - if: ${{ steps.paths.outputs.key != '' }}
+      uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: |
+          ${{ steps.paths.outputs.modcache }}
+          ${{ steps.paths.outputs.buildcache }}
+        key: ${{ steps.paths.outputs.key }}

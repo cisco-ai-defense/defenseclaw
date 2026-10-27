@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-PAGE = ROOT / "docs-site/content/docs/how-to/agents/add-or-remove-an-agent.mdx"
+PAGE = ROOT / "docs-site/content/docs/guardrail/switching-connectors.mdx"
 SETUP_SOURCE = ROOT / "cli/defenseclaw/commands/cmd_setup.py"
 
 

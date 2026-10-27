@@ -66,6 +66,26 @@ class LifecycleResultTest(unittest.TestCase):
         open_view["warnings"] = [{"code": "unprivileged_user_namespaces", "message": "private view possible"}]
         self.assertEqual(self.check_result(open_view, *flags).returncode, 1)
 
+    def test_required_warning_must_be_reported_and_is_accepted(self):
+        # The lanes predict the kernel's policy-view warnings from the host
+        # settings they read: a predicted warning that is missing fails, a
+        # reported one passes, and any other warning still fails.
+        document = result([], False)
+        document["warnings"] = [{"code": "unprivileged_ptrace", "message": "ptrace scope 1"}]
+        flags = ("--security-incomplete", "--require-warning", "unprivileged_ptrace")
+        self.assertEqual(self.check_result(document, *flags).returncode, 0)
+        document["warnings"] = []
+        missing = self.check_result(document, *flags)
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn(b"warning unprivileged_ptrace was not reported", missing.stdout + missing.stderr)
+        document["warnings"] = [
+            {"code": "unprivileged_ptrace", "message": "ptrace scope 1"},
+            {"code": "unprivileged_user_namespaces", "message": "private view possible"},
+        ]
+        extra = self.check_result(document, *flags)
+        self.assertEqual(extra.returncode, 1)
+        self.assertIn(b"unexpected warning unprivileged_user_namespaces", extra.stdout + extra.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

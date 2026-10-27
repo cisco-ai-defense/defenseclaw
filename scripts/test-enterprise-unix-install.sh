@@ -287,7 +287,8 @@ wait_for_install_scan() {
         lifecycle 03-install-scan status
         retry_busy 03-install-scan status
         if "$python" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8-sig")); sys.exit(0 if r.get("coverage_complete") is True and not any(w.get("code") == "agent_install_scan_incomplete" for w in r.get("warnings", [])) else 1)' "$results/03-install-scan.json"; then
-            check "$results/03-install-scan.json" install-scan --action status --installed --ready --coverage-complete
+            check "$results/03-install-scan.json" install-scan --action status --installed --ready --coverage-complete \
+                --security-incomplete --allow-warning hook_process_fail_open ${kernel_views[@]+"${kernel_views[@]}"}
             return
         fi
         sleep 2
@@ -470,7 +471,7 @@ sandbox_files_gone() {
 # launcher_offers_only_sandbox: an unprivileged account that runs the launcher
 # is told the computer is managed, and sees the sandbox tree in its help.
 launcher_offers_only_sandbox() {
-    local output rc=0 text="This computer is managed; only \`defenseclaw sandbox\` commands are available here."
+    local output rc=0 text="This computer is managed; use \`defenseclaw sandbox status\` for your read-only status and \`defenseclaw sandbox policy explain\` for your policy. Other commands require an administrator."
     output=$(as_standard_user "$launcher" status 2>&1) || rc=$?
     [ "$rc" = 2 ] || die "defenseclaw status exited $rc as a standard user, want 2: $output"
     [ "$output" = "$text" ] || die "defenseclaw status printed '$output', want '$text'"
@@ -613,6 +614,37 @@ if [ "$platform" = linux ]; then
     found_ptrace=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)
     echo "kernel as found: user.max_user_namespaces=$found_userns kernel.yama.ptrace_scope=$found_ptrace"
 fi
+# Every 1.0.4 lifecycle action except uninstall reports the kernel's open
+# policy-view routes as it finds them (internal/enterpriseunix/userns.go).
+# They are facts about this runner's kernel (the container host's in a
+# container), not about the package, so each check requires exactly the
+# warnings this kernel calls for.
+kernel_views=()
+if [ "$platform" = linux ]; then
+    userns_open=1
+    [ "$found_userns" != 0 ] || userns_open=0
+    [ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || true)" != 0 ] || userns_open=0
+    if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || true)" = 1 ] &&
+        [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_unconfined 2>/dev/null || true)" = 1 ]; then
+        userns_open=0
+    fi
+    [ "$userns_open" = 0 ] || kernel_views+=(--require-warning unprivileged_user_namespaces)
+    case "$found_ptrace" in
+        2 | 3) ;;
+        *) kernel_views+=(--require-warning unprivileged_ptrace) ;;
+    esac
+    echo "expected policy-view warnings: ${kernel_views[*]:-none}"
+fi
+# The previous release reports what its version reports: 1.0.3 the kernel's
+# open policy-view routes on its config steps only; 1.0.4 those routes from
+# its package install on, and on its config steps the hook residual
+# (hook_process_fail_open) and a first install scan still running
+# (agent_install_scan_incomplete), as the new release's ensure does. So its
+# steps allow them; the new release's steps require the kernel views
+# (kernel_views).
+previous_views=(--allow-warning hook_process_fail_open --allow-warning agent_install_scan_incomplete)
+[ "$platform" != linux ] ||
+    previous_views+=(--allow-warning unprivileged_user_namespaces --allow-warning unprivileged_ptrace)
 echo "package: $package"
 echo "version: $version"
 
@@ -628,20 +660,24 @@ upgrade_lane() {
     # A bare install of a 1.x package enables no connector, like the fresh
     # install below; the next step applies the administrator config.
     "$python" "$checker" "$results/01-previous-install.json" --label previous-install --platform "$platform" \
-        --action ensure --installed --version "$previous_version" --allow-warning no_connectors_enabled
+        --action ensure --installed --version "$previous_version" --allow-warning no_connectors_enabled \
+        ${previous_views[@]+"${previous_views[@]}"}
 
     step "apply the administrator config on the previous release"
     write_admin_config
-    lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane
+    # On macOS the previous package's config write fires the launchd path job
+    # (ensure --reason path) right after its install, as the install lane's
+    # ensure-config step finds: wait for it instead of failing lifecycle_busy.
+    lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane --lock-wait 2m
     check "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
-        --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"
+        "${policy_checks[@]}" ${previous_views[@]+"${previous_views[@]}"}
     cp "$stage/config.yaml" "$results/config-before.yaml"
     step "store a protected credential on the previous release"
     seed_upgrade_secret 02-previous-secret
     lifecycle 03-previous-verify verify
     retry_busy 03-previous-verify verify
     check "$results/03-previous-verify.json" previous-verify --action verify --installed --version "$previous_version" --ready \
-        --allow-warning unprivileged_user_namespaces
+        ${previous_views[@]+"${previous_views[@]}"}
     lifecycle 04-previous-status status
     retry_busy 04-previous-status status
     previous_config_sha=$(sha256_of "$config")
@@ -666,9 +702,17 @@ upgrade_lane() {
     # it after it saved this result.
     held=()
     [ "$platform" != linux ] || held=(--held-service defenseclaw-enterprise-apply.path)
+    # The new release reports the restored previous install truthfully
+    # (GAP-1412): its hook residual (hook_process_fail_open), a previous
+    # release's connectors without a trusted policy-view digest
+    # (machine_policy_incomplete), its first install scan after the restart
+    # (agent_install_scan_incomplete, T2 run 40440985412); the host's own
+    # policy-view sysctls are required where the host has them (kernel_views).
     "$python" "$checker" "$results/05-upgrade-fault.json" --label upgrade-fault --platform "$platform" \
         --action ensure --expect-error lifecycle_test_fault --ready ${held[@]+"${held[@]}"} \
-        --allow-warning lifecycle_test_fault --allow-warning rolled_back --allow-warning unprivileged_user_namespaces
+        --allow-warning lifecycle_test_fault --allow-warning rolled_back ${kernel_views[@]+"${kernel_views[@]}"} \
+        --allow-warning machine_policy_incomplete --allow-warning hook_process_fail_open \
+        --allow-warning agent_install_scan_incomplete
     services_running
     if [ "$platform" = linux ]; then
         systemctl is-active --quiet defenseclaw-enterprise-apply.path ||
@@ -684,7 +728,8 @@ upgrade_lane() {
     # The version 9 config keeps its bytes, so its generation does not drop.
     check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready \
         --coverage-complete --security-incomplete --allow-warning hook_process_fail_open \
-        --allow-warning agent_install_scan_incomplete "${policy_checks[@]}" --policy-applied --config-generation-above "$((previous_generation - 1))"
+        --allow-warning agent_install_scan_incomplete "${policy_checks[@]}" ${kernel_views[@]+"${kernel_views[@]}"} \
+        --policy-applied --config-generation-above "$((previous_generation - 1))"
     sandbox_files_present
     launcher_offers_only_sandbox
     cp "$config" "$results/config-upgraded.yaml"
@@ -715,7 +760,7 @@ else
     # host with eligible users is honestly security-incomplete (GAP-0266); the
     # step after this one applies the config and checks the hook-process warning.
     check "$results/01-package-install.json" package-install --action ensure --changed --installed --version "$version" --ready \
-        --allow-warning no_connectors_enabled --allow-warning agent_install_scan_incomplete
+        --allow-warning no_connectors_enabled --allow-warning agent_install_scan_incomplete ${kernel_views[@]+"${kernel_views[@]}"}
     [ "$install_rc" -eq 0 ] || die "the package manager exited $install_rc"
     [ -x "$gateway" ] || die "$gateway was not installed"
     [ -f "$config" ] || die "the lifecycle did not write $config"
@@ -740,10 +785,13 @@ else
     # ---- reconfigure ---------------------------------------------------------------
     step "ensure with an administrator config that enables Claude Code and Codex"
     write_admin_config
-    lifecycle 02-ensure-config ensure --from-package --config "$stage/config.yaml" --reason ci-install-lane
+    # On macOS the package's config write fires the launchd path job
+    # (ensure --reason path) right after the install; it can still hold the
+    # lifecycle lock here, so wait for it instead of failing with lifecycle_busy.
+    lifecycle 02-ensure-config ensure --from-package --config "$stage/config.yaml" --reason ci-install-lane --lock-wait 2m
     check "$results/02-ensure-config.json" ensure-config --action ensure --changed --installed --version "$version" --ready \
         --coverage-complete --security-incomplete --allow-warning hook_process_fail_open \
-        --allow-warning agent_install_scan_incomplete "${policy_checks[@]}"
+        --allow-warning agent_install_scan_incomplete "${policy_checks[@]}" ${kernel_views[@]+"${kernel_views[@]}"}
     [ "$(cksum <"$stage/config.yaml")" = "$(cksum <"$config")" ] || die "$config is not the applied administrator config"
     [ -n "$(policy_entries)" ] || die "no DefenseClaw machine-policy entry was written under ${policy_dirs[*]}"
     echo "machine policy entries: $(policy_entries | tr '\n' ' ')"
@@ -760,30 +808,41 @@ step "ensure again (must be a no-op)"
 lifecycle 03-ensure-noop ensure --from-package --reason ci-install-lane --lock-wait 2m
 check "$results/03-ensure-noop.json" ensure-noop --action ensure --noop --installed --version "$version" --ready \
     --coverage-complete --security-incomplete --allow-warning hook_process_fail_open \
-    --allow-warning agent_install_scan_incomplete
+    --allow-warning agent_install_scan_incomplete ${kernel_views[@]+"${kernel_views[@]}"}
 
 wait_for_install_scan
 
 step "verify"
 lifecycle 04-verify verify
 retry_busy 04-verify verify
-# verify reports whether unprivileged user namespaces are open, a setting of
-# the host's kernel (the runner's, or the container host's), not of the package.
+# verify reports the kernel's open policy-view routes (kernel_views), a setting
+# of the host's kernel (the runner's, or the container host's), not of the package.
 check "$results/04-verify.json" verify --action verify --installed --version "$version" --ready \
     --coverage-complete --security-incomplete "${policy_checks[@]}" \
-    --allow-warning unprivileged_user_namespaces --allow-warning hook_process_fail_open
+    ${kernel_views[@]+"${kernel_views[@]}"} --allow-warning hook_process_fail_open
 
 step "status"
 lifecycle 05-status status
 retry_busy 05-status status
 check "$results/05-status.json" status --action status --installed --version "$version" \
-    --coverage-complete --security-incomplete "${policy_checks[@]}" --allow-warning hook_process_fail_open
+    --coverage-complete --security-incomplete "${policy_checks[@]}" --allow-warning hook_process_fail_open \
+    ${kernel_views[@]+"${kernel_views[@]}"}
 services_running
 
-step "MDM detection (detect.sh --require-healthy)"
-detected=$(detect_value --require-healthy --min-version "$version" || true)
+step "MDM detection (detect.sh)"
+detected=$(detect_value --min-version "$version" || true)
 [ "$detected" = "$version" ] || die "detect.sh printed '$detected', want '$version'"
 echo "detect.sh: $detected"
+# --require-healthy requires verify.ok and verify.security_complete
+# (packaging/mdm/contract/detection.md): with the hook-process limit of the
+# enabled Claude Code and Codex, and on a kernel with open policy-view routes,
+# verify is ok with incomplete security, so the device reports unhealthy.
+want_healthy=$version
+[ "$(json_field "$results/04-verify.json" ok)" = True ] && [ "$(json_field "$results/04-verify.json" security_complete)" = True ] ||
+    want_healthy=unhealthy
+detected=$(detect_value --require-healthy --min-version "$version" || true)
+[ "$detected" = "$want_healthy" ] || die "detect.sh --require-healthy printed '$detected', want '$want_healthy'"
+echo "detect.sh --require-healthy: $detected"
 
 # ---- uninstall ---------------------------------------------------------------
 step "uninstall (the machine config and state go too)"

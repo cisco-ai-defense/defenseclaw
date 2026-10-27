@@ -86,7 +86,9 @@ func TestPerUserHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 // after the budget, and is told that the gateway is restarting.
 func TestPerUserFailOpenHookNamesTheRestart(t *testing.T) {
 	fastRestartRetries(t)
+	// The default tier opens a per-user outage (its config, at call time).
 	result := run(t, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
+		opts.OutageFailModeNow = func() string { return "open" }
 		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 150*time.Millisecond)
 	})
 	var notice map[string]string
@@ -98,6 +100,7 @@ func TestPerUserFailOpenHookNamesTheRestart(t *testing.T) {
 	// GAP-0649: an install or upgrade (.install.lock) is not an outage, so
 	// the open hook blocks the call and names the install.
 	installing := run(t, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
+		opts.OutageFailModeNow = func() string { return "open" }
 		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 150*time.Millisecond)
 		if err := os.Mkdir(filepath.Join(opts.Home, ".install.lock"), 0o700); err != nil {
 			t.Fatal(err)
@@ -232,7 +235,7 @@ func TestPerUserInstallWindowKeepsTheGatewaysAnswer(t *testing.T) {
 							opts.Event = form.event
 							opts.HookSurface = form.surface
 							opts.FailMode = "closed"
-							opts.OutageFailMode = tier
+							opts.OutageFailModeNow = func() string { return tier }
 							opts.Stdin = strings.NewReader(payload)
 							if when == "before the call" {
 								mkdirInstallLock(t, opts.Home)

@@ -1,21 +1,31 @@
 ---
 title: Amp
-description: Guard Amp with a DefenseClaw policy plugin that can allow, reject or ask before a tool runs and before its result reaches the model.
+description: The Amp connector installs a TypeScript policy plugin in Amp's user plugin directory that gates tool execution and model-bound results, uses Amp's native confirmation UI, and records the five documented plugin lifecycle events.
 keywords:
-  - Amp connector
-  - Amp plugin
-  - tool.call
+  - DefenseClaw Amp connector
+  - Amp policy plugin
+  - Amp tool.call
+  - Amp Agent 360
+  - Amp Galileo
 ---
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-DefenseClaw installs a TypeScript policy plugin in Amp's user plugin directory. Amp waits for the plugin's verdict on each tool call and each tool result. Amp talks to its model provider directly and no proxy is involved.
+DefenseClaw installs a dependency-free TypeScript policy plugin into Amp's user plugin directory, `~/.config/amp/plugins`. Amp's docs call these system plugins, but they are per user, not machine-wide. The plugin sends `session.start`, `agent.start`, `tool.call`, `tool.result` and `agent.end` to the local gateway. Amp waits for `tool.call` before running the tool, and `tool.result` can replace unsafe output before the model sees it, so DefenseClaw can allow, reject or withhold, or ask through Amp's native UI. Result gating cannot undo side effects from a tool that already ran. The other three events provide lifecycle telemetry.
 
+Amp talks to its own model provider directly. No proxy is involved and DefenseClaw does not proxy Amp's model traffic. See Amp's [manual](https://ampcode.com/manual) and [plugin API](https://ampcode.com/manual/plugin-api).
+
+On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/fail-modes).
 ## Platform support
 
 <ConnectorSupport id="amp" />
 
-## Set up
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | The policy plugin is installed in Amp's user plugin directory, `~/.config/amp/plugins`. |
+| Native Windows x64 | **Supported** | `defenseclaw setup amp` installs the same plugin under `%USERPROFILE%\.config\amp\plugins` and limits it to your account with a user-only ACL. |
+
+## Setup
 
 On a new install, run `defenseclaw init --connector amp` first. Until DefenseClaw is initialized, `defenseclaw setup amp` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
 
@@ -25,12 +35,9 @@ defenseclaw setup amp --mode action                    # enforce calls and resul
 defenseclaw setup amp --workspace /path/to/repo        # also inventory the repository
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, use a Windows
-path. The plugin is per user in every case.
-`--workspace` sets the workspace for the whole DefenseClaw install, including
-Amp's project inventory. Use it on a single-Amp install: if it would move peer connectors
-from their current scope, setup refuses and changes nothing. On a multi-connector
-install, run `defenseclaw setup amp` without `--workspace` for global protection.
+A re-run without `--mode` keeps the current mode. On Windows, use a Windows path. The plugin is per user in every case.
+
+`--workspace` sets the workspace for the whole DefenseClaw install, including Amp's project inventory. It inventories that repository's `.amp/settings.json` or `.jsonc`, `.amp/plugins`, skills, checks, guidance, MCP servers and custom agents. Use it on a single-Amp install: if it would move configured peer connectors to a different scope, setup refuses and changes nothing. On a multi-connector install, run `defenseclaw setup amp` without `--workspace` for global protection. Global setup governs tool calls and inventories user and managed surfaces.
 
 For headless runs, give Amp time to load plugins:
 
@@ -38,7 +45,9 @@ For headless runs, give Amp time to load plugins:
 amp -x "your prompt" --plugin-ready-timeout 30
 ```
 
-## Check it
+Without the flag a turn can begin before plugins load. The flag is needed for complete session and agent lifecycle capture, and for tool call and result guard readiness in execute mode. The three session and agent callbacks stay observe-only, and `defenseclaw doctor` reports this caveat alongside the installed plugin contract.
+
+### Check it
 
 ```bash
 defenseclaw status
@@ -46,12 +55,41 @@ defenseclaw status
 
 The agent appears under **Agents** with its mode. `defenseclaw doctor` reports no failed check for it.
 
+### Files it changes
 
-## What it can block or ask
+| What | Where |
+| --- | --- |
+| Plugin | `~/.config/amp/plugins/defenseclaw.ts` (Windows `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`) |
 
-What a gateway outage does to an Amp call, per install and fail mode, is in the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
+The plugin holds a connector-scoped token. It is owner-only: private permissions, or the Windows user-only ACL. Setup keeps an existing file, teardown restores it, and a user-modified managed file is never silently removed. `guardrail disable` and connector removal refuse before saving while the bridge is modified. Preserve your edits, run `defenseclaw setup amp --yes --restart`, then retry.
 
-<HookEventsList connector="amp" />
+Plugin lists, scans and the AIBOM treat the file as connector configuration, not as an operator plugin. `defenseclaw plugin remove`, `disable`, `block` and `quarantine` refuse `defenseclaw --connector amp`, because Amp runs unguarded without it. To stop guarding Amp, run `defenseclaw setup remove amp`.
+
+The built-in `admission.plugin.first_party_allow_list` entry for `defenseclaw` matches the Amp bridge only at `.config/amp/plugins/defenseclaw.ts`. It does not trust sibling files or the whole Amp plugins directory. See [first-party assets](/docs/policies/admission).
+
+<Callout type="warning" title="Amp plugin trust boundary">
+Amp executes project and user plugin TypeScript, including top-level code, when each plugin loads. DefenseClaw does not sandbox, disable or govern that initialization. Amp does not define the order of handlers across plugins, so DefenseClaw cannot guarantee it sees another plugin's final input or that a sibling plugin cannot change the outcome.
+
+In action mode, `defenseclaw doctor` warns when it finds other direct project or user `.ts` plugins. The warning is informational. DefenseClaw never runs those files and never removes them.
+</Callout>
+
+## Lifecycle and enforcement
+
+The contract is `amp-plugin-v1`, plugin script `v2`. DefenseClaw pins the normalized Amp build `0.0.1785334225` as its contract snapshot and certification floor. Amp does not declare that build as the upstream minimum.
+
+| Amp event | DefenseClaw role | Enforcement |
+| --- | --- | --- |
+| `session.start` | Start thread and session correlation | Observe only |
+| `agent.start` | Record the turn and prompt context | Observe only |
+| `tool.call` | Inspect tool name and input before execution | Allow, reject or native confirm |
+| `tool.result` | Inspect status and output after execution, before model delivery | Preserve, withhold or replace, or native confirm |
+| `agent.end` | Close the turn and record its status | Observe only |
+
+Amp documents no `session.end` and no separate subagent events. Oracle, Task launchers, MCP tools and plugin-defined tools are governed at their parent `tool.call`. If Amp emits events from a child thread, DefenseClaw enforces that child's calls under its thread ID and invents no parent-child edge.
+
+### What it can block or ask
+
+What a gateway outage does to an Amp call, per install and fail mode, is in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage).
 
 - `tool.call` runs before the tool. DefenseClaw can allow it, reject it or ask through Amp's confirmation UI.
 - `tool.result` runs before the output reaches the model. DefenseClaw can keep it, withhold or replace it, or ask. It cannot undo a side effect.
@@ -59,33 +97,102 @@ What a gateway outage does to an Amp call, per install and fail mode, is in the 
 - A prompt has no hook, so a matching prompt reaches the model. Tool-call rules still block.
 - Ask works only for the active foreground thread. A background thread or missing UI rejects the call instead of allowing it.
 
+### Native ask
+
+Amp can ask in the active foreground thread during `tool.call` and before a `tool.result` reaches the model. For a `confirm` decision, the plugin calls Amp's confirmation UI only when the thread is active in the foreground. Denial, a background thread or unavailable plugin UI rejects a pending call or withholds a pending result rather than allowing it silently.
+
+### Fail mode
+
+Can fail closed: yes. On a per-user install a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning and a `hook-failures.jsonl` record, and the strict policy blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Every other per-user failure blocks the events that support a block response, and an unverified listener receives no bearer or event. Secure Client uses an administrator-owned native helper to verify the connected gateway service and blocks an unverified peer even when its outage mode is open. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes).
+
 ### Rejected command display
 
-In the tested Amp 0.0.1790798464 build, a policy-rejected shell call can still have
-a checked, collapsed **Ran 1 command** summary. This counts an attempted tool
-call; the command did not execute. Expand the tool result to see **Tool rejected
-by plugin** and the DefenseClaw policy reason. The matching DefenseClaw audit
-block and absent command output confirm the rejection. The plugin sends Amp
-`reject-and-continue` with that reason before execution; Amp's [plugin API](https://ampcode.com/docs/plugin-api)
-does not provide a field for changing the collapsed summary.
+In the tested Amp 0.0.1790798464 build, a policy-rejected shell call can still have a checked, collapsed **Ran 1 command** summary. This counts an attempted tool call; the command did not execute. Expand the tool result to see **Tool rejected by plugin** and the DefenseClaw policy reason. The matching DefenseClaw audit block and absent command output confirm the rejection. The plugin sends Amp `reject-and-continue` with that reason before execution. Amp's [plugin API](https://ampcode.com/docs/plugin-api) does not provide a field for changing the collapsed summary.
 
-## Files it changes
+## MCP, skills, checks, plugins, and agents
 
-| What | Where |
+Amp's local component surfaces are exposed without rewriting formats that DefenseClaw cannot preserve.
+
+| Surface | DefenseClaw support |
 | --- | --- |
-| Plugin | `~/.config/amp/plugins/defenseclaw.ts` (Windows `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`) |
+| MCP | Read-only discovery and scanning from `amp.mcpServers` in user and workspace JSON or JSONC settings, plus skill-bundled `mcp.json`. `defenseclaw mcp set ... --connector amp` is refused with a pointer to `amp mcp add`, to avoid lossy JSONC edits and bypass of Amp's workspace approval. |
+| Skills | List, scan and write AgentSkills under the documented roots. Custom `amp.skills.path` roots are found. Claude-compatible roots, including `~/.claude/plugins/cache/` skill components, only when `amp.skills.disableClaudeCodeSkills` is false. |
+| Guidance and checks | Read-only. Guidance from the working directory up through each parent to `$HOME` (never the filesystem root), where `AGENTS.md` wins, then `AGENT.md`, then `CLAUDE.md`. Subtree guidance on demand. Global `~/.config/amp/AGENTS.md` and `~/.config/AGENTS.md`. Administrator guidance in `/Library/Application Support/ampcode/AGENTS.md` (macOS), `/etc/ampcode/AGENTS.md` (Linux) or `%ProgramData%\ampcode\AGENTS.md` (Windows). Checks in project `.agents/checks`, `~/.config/amp/checks` and `~/.config/agents/checks`. |
+| Plugins | Discovery and scanning of project `.amp/plugins` and user `~/.config/amp/plugins`. Setup manages only `defenseclaw.ts`. |
+| Agents | Agents from `amp.createAgent(...)` and modes from `amp.registerAgentMode(...)` found in bounded literal plugin definitions, plus an optional `// @amp-agent-mode` annotation. No standalone agent file exists to change. |
+| CodeGuard | Opt-in as an Amp AgentSkill, never installed implicitly. |
+| Managed settings | Read-only, with Amp's higher-than-user precedence: `/Library/Application Support/ampcode/managed-settings.json` (macOS), `/etc/ampcode/managed-settings.json` (Linux), `%ProgramData%\ampcode\managed-settings.json` (Windows). DefenseClaw never rewrites an administrator-managed file. |
 
-It holds a connector-scoped token and is limited to your account. Setup keeps an existing file, and teardown restores it.
+## Agent 360, Galileo, and observability
+
+Amp has no documented customer native-OTLP exporter and its plugin API gives no W3C `traceparent`. DefenseClaw produces canonical hook logs, metrics and spans from the five events, authenticated with the connector-scoped token.
+
+Correlation uses only IDs Amp reports: the thread ID, the `agent.start` message ID, and `toolUseID`. Agent 360 discovers `connector=amp` and shows sessions, turns, tools, outcomes, approvals and enforcement attempts. Galileo receives only canonical spans that satisfy the `galileo-rich-v2` profile. The plugin reports a custom agent's name, display label and declared model, or a built-in agent's mode, when available. That is not a stable agent ID, model request ID, trace context or parent link. Where a view needs an agent identity, DefenseClaw derives a per-session root identity and marks its lineage inferred. It never invents provider or model identity, request IDs, a trace parent or a parent-subagent link.
+
+## Local and remote execution boundary
+
+Amp and DefenseClaw must run on the same host with the gateway reachable over loopback. Amp Orbs run remotely, do not load a local plugin and are not covered.
+
+## Hook capabilities
+
+<HookEventsList connector="amp" />
+
+| Contract | Agent versions | Hook script | Events | Can block | Can ask |
+| --- | --- | --- | --- | --- | --- |
+| `amp-plugin-v1` | `>=0.0.1785334225` | `v2` | 5 | 2 | 2 |
+
+| Contract | Events registered | Block events | Ask events |
+| --- | --- | --- | --- |
+| `amp-plugin-v1` | `session.start`, `agent.start`, `tool.call`, `tool.result`, `agent.end` | `tool.call`, `tool.result` | `tool.call`, `tool.result` |
+
+| Fact | Value |
+| --- | --- |
+| Hook script | `amp-plugin.ts` |
+| Hook config paths | `~/.config/amp/plugins/defenseclaw.ts`, `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` |
+| Response field | `` |
+| Native OTLP | no |
+| W3C traceparent | no |
+| Fail closed | yes |
+
+Amp has no hook that can stop a prompt, so a prompt rule doesn't block here: a matching prompt reaches the model. Tool-call rules still block ([capability matrix](/docs/connectors/capability-matrix)).
+
+## In an OpenShell sandbox
+
+<Callout type="warn" title="Amp cannot run in a sandbox yet">
+The Amp image is **unverified**, so `defenseclaw sandbox run amp` refuses it. Amp needs an account API key (`AMP_API_KEY`) for every run and stops at the account check before any agent turn. It has no local or bring-your-own model endpoint, so the mock-model check cannot pass. The unverified image stays: `defenseclaw sandbox image list` shows it with HOOKS VERIFIED `no`, and `defenseclaw sandbox image prune` keeps it because it is the newest Amp image. See the [Cursor note](/docs/connectors/cursor) on `image list` and `image prune`.
+</Callout>
+
+The [sandbox guide](/docs/sandboxes/guide) covers the `sandbox` commands. What the Amp image already holds:
+
+| Item | Detail |
+| --- | --- |
+| Tier | User. Amp loads plugins only from `~/.config/amp/plugins` and a project's `.amp/plugins`. The plugin lives in the image home (`/sandbox/.config/amp/plugins/defenseclaw.ts`), where the agent can edit it. The launcher points Amp at that home, drops variables that load other plugins or settings, and refuses `--settings-file`. DefenseClaw reports a sandbox whose hooks go silent. |
+| Skip permissions | Would start with `--dangerously-allow-all`. `--safe` keeps prompts and drops it. |
+| Sign-in | The account API key only. The `defenseclaw-amp` profile binds `AMP_API_KEY` to `ampcode.com` (not tested live). `sandbox run` has no `--llm` choice for Amp. |
+| Image | Amp 0.0.1785334225-g9abe75, with the npm registry integrity and the native binary's SHA-256 checked. The plugin loads before any server call and fails closed. Hooks reaching DefenseClaw and blocking still need a run with a key. |
+
+## Enterprise deployments
+
+In an [enterprise deployment](/docs/enterprise) the guardian writes the managed plugin into each enrolled user's `~/.config/amp/plugins/defenseclaw.ts` (or `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`) and repairs it when the user changes it. Amp has no machine-wide plugin location, so coverage is advisory against a user who sets out to avoid it.
+
+- **Another config directory.** Amp loads plugins from the `amp/plugins` folder under `XDG_CONFIG_HOME` (default `~/.config`). A session started with `XDG_CONFIG_HOME` or `HOME` pointing elsewhere does not load the plugin (`amp plugins list` shows only Amp's own). Its tool calls are not inspected, and the guardian cannot repair that session. Managed status and verify now report a running relocated or unverified launch as incomplete and audit the observation. `DEFENSECLAW_*` overrides do not turn the plugin off.
+- **Plugin order.** Amp does not define plugin order.
+
+To reduce this, prefer agents DefenseClaw governs through machine policy (Claude Code, Codex, Cursor, GitHub Copilot, OpenCode). Use application control (fapolicyd on Linux, Santa or similar on macOS, WDAC or AppLocker on Windows) so users start Amp only through an administrator-owned launcher that resets `XDG_CONFIG_HOME` and `HOME`. A plugin that loaded stays closed when its DefenseClaw check fails: a killed or stopped check blocks the call.
+
+See R1 and R3 in the [threat model](/docs/enterprise/threat-model).
 
 ## Limits
 
-- Amp runs plugin code, including top-level code, when it loads. DefenseClaw does not sandbox that code, and Amp does not define the order of several plugins' handlers. In action mode `defenseclaw doctor` warns about other `.ts` plugins.
+- Amp documents no `session.end` and no separate subagent events.
+- Amp runs plugin code, including top-level code, when it loads. DefenseClaw does not sandbox that code, and Amp does not define the order of several plugins' handlers, so DefenseClaw cannot guarantee it sees another plugin's final input.
 - Without `--plugin-ready-timeout`, a headless turn can start before the plugin loads, and no plugin can govern events before it loads.
 - The plugin is in a folder you own. A session started with another `XDG_CONFIG_HOME` or `HOME` does not load it.
-- Amp Orbs run remotely and are not covered.
+- Amp Orbs run remotely, load no local plugin and are not covered.
+- Amp has no machine-wide plugin location, so enterprise coverage is advisory against a user who sets out to avoid it.
 - Amp cannot run in an OpenShell sandbox yet.
 
-## Turn it off
+## Disable
 
 For a per-user, single-connector install:
 
@@ -93,17 +200,10 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-With the default gateway restart, disabling removes DefenseClaw's plugin file.
-This preserves your other Amp settings. `defenseclaw guardrail enable`
-reinstalls DefenseClaw's plugin. To remove the connector, run
-`defenseclaw setup remove amp --yes` (add `--force` if it is the last one). A
-modified bridge makes `guardrail disable` and `setup remove` refuse before
-saving configuration, and the gateway is left as it was; `defenseclaw doctor`
-reports the change. Preserve your edits, run
-`defenseclaw setup amp --yes --restart`, then retry. Relaunch Amp afterwards.
+With the default gateway restart, disabling removes DefenseClaw's plugin file. This preserves your other Amp settings. `defenseclaw guardrail enable` reinstalls DefenseClaw's plugin. To remove the connector, run `defenseclaw setup remove amp --yes` (add `--force` if it is the last one). A modified bridge makes `guardrail disable` and `setup remove` refuse before saving configuration, and the gateway is left as it was; `defenseclaw doctor` reports the change. Preserve your edits, run `defenseclaw setup amp --yes --restart`, then retry. Relaunch Amp afterwards so every new thread starts without the removed plugin.
 
-On a multi-connector install, add `--connector amp` to `guardrail disable` and `guardrail enable` to change only this agent.
+On a multi-connector install, add `--connector amp` to `guardrail disable` and `guardrail enable` to change only this agent:
 
-## Details
-
-The plugin contract, the other Amp surfaces DefenseClaw reads, observability, enterprise handling and the sandbox image are in the [Amp reference](/docs/reference/connectors/amp).
+```bash
+defenseclaw guardrail disable --connector amp --yes
+```

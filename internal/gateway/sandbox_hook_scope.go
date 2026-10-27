@@ -160,6 +160,33 @@ func serviceAccountCallerCWD(ctx context.Context, cwd string) string {
 	return filepath.Clean(strings.TrimSpace(cwd))
 }
 
+// managedClientCWD is the working directory of a managed POSIX hook call
+// that the gateway could not resolve (cwd is not absolute): the directory
+// the managed hook client ran the call in as the user (hookpaths.CWDKey of
+// its evidence). The gateway service runs with ProtectHome, so
+// sanitizeHookCWD returns "" for every home project; the session's startup
+// evidence then had no project, and an absolute, relative or alias write to
+// the AGENTS.md the session started with had no load location (GAP-1462).
+// The client's directory is kept lexically, as for a managed Windows caller
+// (serviceAccountCallerCWD, GAP-1356), only when it is the kernel-verified
+// hook-socket caller's home or lies in it; the client's evidence, not this
+// host, resolves what is below it. Any other cwd is returned unchanged.
+func managedClientCWD(ctx context.Context, cwd string, evidence map[string]string) string {
+	if filepath.IsAbs(cwd) || isSandboxHookRequest(ctx) {
+		return cwd
+	}
+	peer, ok := managedHookPeerFromContext(ctx)
+	if !ok || !filepath.IsAbs(peer.Home) {
+		return cwd
+	}
+	client := evidence[hookpaths.CWDKey]
+	if !filepath.IsAbs(client) || hasParentElement(client) || strings.ContainsRune(client, 0) ||
+		projectRootKey(client) != projectRootKey(peer.Home) && !insideHome(peer.Home, client) {
+		return cwd
+	}
+	return filepath.Clean(client)
+}
+
 // hookActiveHome is the directory "~" names in a request's tool calls: the
 // verified caller's home for host traffic (trustedActiveHome) and the fixed
 // sandbox HOME for a sandbox, whose agent has no access to the host home.
@@ -523,6 +550,15 @@ func sandboxStopTargets(ctx context.Context, view *sandboxauth.FSView, hostCWD s
 // host-only entries (the host user's Claude home) are dropped.
 func claudeCodeWatchPathsForRequest(req claudeCodeHookRequest, root string) []string {
 	if req.sandboxView == nil {
+		if req.managedWatch {
+			// An unresolved caller keeps its project entries; only the
+			// home entries it cannot prove are left out.
+			home := req.watchHome
+			if home == unresolvedCallerHome {
+				home = ""
+			}
+			return connector.ClaudeCodeWatchPathsForHome(root, home)
+		}
 		return connector.ClaudeCodeWatchPaths(root)
 	}
 	out := []string{}

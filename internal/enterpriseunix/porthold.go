@@ -84,12 +84,20 @@ var linuxListenAddrs = map[string]bool{
 	"0000000000000000FFFF00000100007F": true, // ::ffff:127.0.0.1
 }
 
-// linuxPortHolders reads the listening sockets from /proc/net/tcp and
+// linuxPortHolders reads the listening sockets from /proc/self/net/tcp and
 // tcp6 and finds the processes holding them through /proc/<pid>/fd.
+//
+// /proc/net is only a link to /proc/self/net, and a /proc mounted with
+// subset=pid has no /proc/net at all, so the lifecycle saw no holder there
+// (GAP-1955, as the daemon reader since GAP-1909). /proc/net stays the
+// fallback for a /proc without self.
 func (e *Env) linuxPortHolders(port int) []portHolder {
 	inodes := map[string]int{} // socket inode -> uid
-	for _, table := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
-		data, err := readBounded(e.P(table), 64<<20)
+	for _, table := range []string{"tcp", "tcp6"} {
+		data, err := readBounded(e.P("/proc/self/net/"+table), 64<<20)
+		if err != nil {
+			data, err = readBounded(e.P("/proc/net/"+table), 64<<20)
+		}
 		if err != nil {
 			continue
 		}

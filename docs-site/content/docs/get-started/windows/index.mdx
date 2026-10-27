@@ -1,0 +1,50 @@
+---
+title: Native Windows
+description: The support boundary for native Windows x64 installs, connectors, enforcement, telemetry, and operations.
+keywords:
+  - DefenseClaw native Windows
+  - DefenseClaw Windows support
+  - DefenseClaw Windows x64
+  - DefenseClaw Windows connectors
+  - DefenseClaw WSL
+---
+
+DefenseClaw runs natively on Windows x64 for the signed-in user: a local gateway, a hook runner, the CLI, the TUI, the scanners and a managed Python runtime. The agent keeps talking to its own model service; DefenseClaw adds a hook or plugin and does not proxy model traffic on Windows.
+
+<Callout type="warning" title="WSL is not supported">
+Run DefenseClaw and the agent in the same native Windows user session. Do not install DefenseClaw in WSL, point a native agent at a WSL installation, or mix native and WSL connector homes.
+</Callout>
+
+## Install
+
+Install with `install.ps1` in PowerShell, as the user who runs your agents. The commands, requirements, upgrade, repair and uninstall are on [Install and maintain](/docs/get-started/windows/install-lifecycle).
+
+## How it fits together
+
+- The gateway is a background process of your account, started by `defenseclaw quickstart`, `defenseclaw setup` or `defenseclaw-gateway start`, and by a hook if it is stopped. There is no Windows service, Scheduled Task or sign-in entry.
+- A hook sends each event to the gateway on loopback. In action mode the answer can block the step.
+- Every decision is written to `%USERPROFILE%\.defenseclaw\audit.db`.
+
+Details are in the [Windows security model](/docs/get-started/windows/telemetry-security) and [Paths](/docs/get-started/windows/paths-troubleshooting).
+
+## What is outside the support boundary
+
+- WSL, or a mix of native and WSL connectors.
+- Windows ARM64 and x86.
+- A machine-wide install, MSI or Windows service. Use [Enterprise](/docs/enterprise/windows); on a computer with a standalone enterprise deployment the per-user installer, `upgrade`, `rollback` and gateway refuse.
+- The proxy connectors (OpenClaw, ZeptoClaw): native Windows has no guardrail proxy.
+- OpenShell sandboxes. `defenseclaw sandbox` commands stop with "OpenShell sandboxes run on Linux and macOS only". Use [sandboxes](/docs/sandboxes) on Linux or an Apple-silicon Mac.
+- An agent on another computer sending hooks to this gateway: only the same computer, same user, over loopback is tested.
+
+## If you are migrating
+
+Coming from WSL, do a fresh native install; do not copy WSL data, hooks, tokens or connector configuration.
+
+## If something fails
+
+Run these before changing anything, then see [Paths and troubleshooting](/docs/get-started/windows/paths-troubleshooting):
+
+```powershell
+defenseclaw status
+defenseclaw doctor
+```

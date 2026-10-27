@@ -631,7 +631,11 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 	domains := adminViewAccountDomains(ids)
 	incarnation, holderChanged := adminViewAccountProvenance(ids, proof)
 	if len(ids) == 0 {
-		if holders := adminViewBareAccountIDs(user); len(holders) > 0 {
+		holders := adminViewBareAccountIDs(user)
+		if len(holders) == 0 {
+			holders = adminViewProvenAccountIDs(user, proof)
+		}
+		if len(holders) > 0 {
 			ids = holders
 			incarnation, holderChanged = adminViewBareHolderProvenance(holders, proof)
 		}
@@ -954,9 +958,12 @@ var adminViewAccountIDs = func(user string) []string {
 }
 
 // adminViewBareAccountIDs is the uid a bare --user name of the agent
-// identity view names now, as profile-explain resolves it, or none (a
-// qualified name, an id, a name no account or more than one account holds,
-// a SID). A bare name still selects the rows recorded with that name for
+// identity view names now, as profile-explain resolves it, or the uid the
+// filter is while an account holds it (a uid filter selects that uid's rows,
+// so the rows another holder of it left are kept out the same way,
+// GAP-1876; a uid nobody holds now lists every holder's rows, as before,
+// GAP-1949), or none (a qualified name, a SID, a name no account or more
+// than one account holds). A bare name still selects the rows recorded with that name for
 // every account of it; the uid only keeps the rows another holder of that
 // uid left from being listed as the account's own
 // (useridentity.AccountFilter.MatchesIn): a local account deleted and
@@ -964,6 +971,12 @@ var adminViewAccountIDs = func(user string) []string {
 // identities of the account before it (T8r, GAP-0422). Tests replace it.
 var adminViewBareAccountIDs = func(user string) []string {
 	user = strings.TrimSpace(user)
+	if useridentity.KindForID(user) == useridentity.KindPOSIXUID {
+		if strings.TrimSpace(userScopedIdentityName(user)) == "" {
+			return nil
+		}
+		return []string{user}
+	}
 	if user == "" || useridentity.QualifiedAccountName(user) || useridentity.KindForID(user) != "" {
 		return nil
 	}
@@ -972,6 +985,30 @@ var adminViewBareAccountIDs = func(user string) []string {
 		return nil
 	}
 	return []string{id}
+}
+
+// adminViewProvenAccountIDs is the uid of root's holder_proof
+// (<uid>:<home proof>) for a bare --user name the gateway could not resolve
+// itself (adminViewBareAccountIDs gave none), when the gateway names that
+// uid by the same name. The service cannot read every source the bare-name
+// lookup needs (sssd.conf is root's, so whether a directory account shares
+// the name is unknown and the name is refused, GAP-1131), which left the
+// first view after a local account was deleted and created again under the
+// same name and uid with no uid to keep the earlier holder's rows out
+// (FC-BLK-167-ER, GAP-1876). The uid only hides rows shown to be another
+// holder's (useridentity.AccountFilter.recordedForAnother); it selects none.
+func adminViewProvenAccountIDs(user, proof string) []string {
+	user = strings.TrimSpace(user)
+	uid, _, ok := strings.Cut(strings.TrimSpace(proof), ":")
+	if !ok || user == "" || useridentity.QualifiedAccountName(user) || useridentity.KindForID(user) != "" ||
+		useridentity.KindForID(uid) != useridentity.KindPOSIXUID {
+		return nil
+	}
+	name := strings.TrimSpace(userScopedIdentityName(uid))
+	if bare, _ := useridentity.SplitQualifiedName(name); name == "" || !useridentity.EqualFold(name, user) && !useridentity.EqualFold(bare, user) {
+		return nil
+	}
+	return []string{uid}
 }
 
 // adminViewProvenHolder is the account token of the uid id as proof, the

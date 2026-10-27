@@ -34,6 +34,24 @@ func run(args []string, input io.Reader, output io.Writer) error {
 		_, err := fmt.Fprintf(output, "defenseclaw-hook-post version %s (commit=%s, built=%s)\n", version, commit, date)
 		return err
 	}
+	if len(args) > 0 && args[0] == "prefix-review" {
+		flags := flag.NewFlagSet("prefix-review", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		event := flags.String("event", "", "registered hook event")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+			return fmt.Errorf("invalid bounded review arguments")
+		}
+		prefix, err := io.ReadAll(io.LimitReader(input, (1<<20)+2))
+		if err != nil || len(prefix) > (1<<20)+1 {
+			return fmt.Errorf("bounded review input is invalid or too large")
+		}
+		review := hookexec.OversizedReviewPayload(prefix, *event)
+		if review == nil {
+			return fmt.Errorf("bounded review input cannot be reviewed")
+		}
+		_, err = output.Write(review)
+		return err
+	}
 	if len(args) == 0 || args[0] != "hook-post" {
 		return fmt.Errorf("expected hook-post subcommand")
 	}
@@ -86,6 +104,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "defenseclaw-hook-post: %v\n", err)
 		if hookexec.PerUserPostOutage(err) {
 			os.Exit(hookexec.PerUserPostOutageExit)
+		}
+		if hookexec.PerUserPostPeerUnverified(err) {
+			// Nothing of the call was sent: the one failure the OpenCode and
+			// Amp plugins send again (GAP-2083).
+			os.Exit(hookexec.PerUserPostPeerUnverifiedExit)
 		}
 		os.Exit(1)
 	}

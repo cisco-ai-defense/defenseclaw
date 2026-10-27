@@ -5,6 +5,7 @@ package connector
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -409,9 +410,40 @@ func (s *tomlEditSyntax) visible(line string) string {
 }
 
 // ParseCodexTOML accepts the UTF-8 BOM emitted by Windows PowerShell 5.1.
-// Keep the original bytes for writers so they can preserve the BOM.
+// Keep the original bytes for writers so they can preserve the BOM. A syntax
+// error names its line and column (codexTOMLSyntaxError, GAP-0615), so every
+// refusal that quotes it points at the place to fix.
 func ParseCodexTOML(raw []byte, target interface{}) error {
-	return toml.Unmarshal(bytes.TrimPrefix(raw, []byte{0xef, 0xbb, 0xbf}), target)
+	err := toml.Unmarshal(bytes.TrimPrefix(raw, []byte{0xef, 0xbb, 0xbf}), target)
+	var decode *toml.DecodeError
+	if errors.As(err, &decode) {
+		line, column := decode.Position()
+		return &codexTOMLSyntaxError{Line: line, Column: column, err: err}
+	}
+	return err
+}
+
+// codexTOMLSyntaxError is a Codex config.toml syntax error with the 1-based
+// line and column the parser stopped at. It unwraps to the parser's error.
+type codexTOMLSyntaxError struct {
+	Line, Column int
+	err          error
+}
+
+func (e *codexTOMLSyntaxError) Error() string {
+	return fmt.Sprintf("line %d, column %d: %v", e.Line, e.Column, e.err)
+}
+
+func (e *codexTOMLSyntaxError) Unwrap() error { return e.err }
+
+// codexTOMLErrorLocation is path, followed by :line:column when err is a
+// syntax error ParseCodexTOML reported, the file:line:col form editors open.
+func codexTOMLErrorLocation(path string, err error) string {
+	var syntax *codexTOMLSyntaxError
+	if errors.As(err, &syntax) {
+		return fmt.Sprintf("%s:%d:%d", path, syntax.Line, syntax.Column)
+	}
+	return path
 }
 
 func parseCodexTOML(raw []byte, target interface{}) error { return ParseCodexTOML(raw, target) }

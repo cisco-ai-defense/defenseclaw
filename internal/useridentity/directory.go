@@ -166,6 +166,12 @@ type DirectoryFacts struct {
 	// or the absence of one, is what the guardian reported, not a fact still
 	// to come. Never emitted or stored.
 	GuardianRecord bool `json:"-"`
+	// UPNPending says the gateway's own answer proves the account local but
+	// could not show that it has no UPN to wait for (macOS: the local node's
+	// Platform SSO link listing failed). The account stays local for name
+	// matching, and a UPN or DOMAIN\name entry waits for the guardian's
+	// record. Never emitted or stored.
+	UPNPending bool `json:"-"`
 	// HolderUnproven says these facts do not show which account holds the
 	// uid (SourceProcessCredentials: the uid may be another account's too),
 	// so no users entry that names an account matches them for sure. Never

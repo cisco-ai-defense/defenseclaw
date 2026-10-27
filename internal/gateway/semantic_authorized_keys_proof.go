@@ -1206,7 +1206,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
-	if hookpaths.ActionCommandDecisionWithGlobFacts(input.Command, input.CWD, facts.ActiveHome, globFacts) != "" {
+	if hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) != "" {
 		return true
 	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
@@ -1336,6 +1336,23 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	patchTargets, patchKnown := hookpaths.ApplyPatchWriteTargets(
 		request.Input.Tool, request.Input.Args, input.Command, clientCWD, facts.ActiveHome,
 	)
+	if !patchKnown && request.parentPatch != nil {
+		// A pipeline stage that reads the envelope of its parent call
+		// (@'...'@ | apply_patch). Every directive of the parent is placed in
+		// this stage's directory and judged below; an apply_patch of the
+		// parent that reads no literal envelope keeps the targets unknown.
+		parent := *request.parentPatch
+		patchTargets, patchKnown = hookpaths.ApplyPatchWriteTargets(
+			parent.Tool, parent.Args, parent.Command, clientCWD, facts.ActiveHome,
+		)
+	}
+	if !patchKnown && request.Connector == "copilot" && request.ProtectedHomeHook && input.Command == "" {
+		// A managed gateway cannot traverse the user's private project, but
+		// the native hook resolved every path before it sent the request.
+		patchTargets, patchKnown = copilotClientProvedPatchTargets(
+			request.Input.Tool, request.Input.Args, clientCWD, facts.ActiveHome, request.ResolvedWriteTargets,
+		)
+	}
 	if !patchKnown {
 		return true
 	}

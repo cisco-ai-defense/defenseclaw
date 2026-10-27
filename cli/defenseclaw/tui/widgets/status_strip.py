@@ -176,21 +176,41 @@ def render_status_strip(
 
 
 def render_status_with_hint(model: StatusModel, hint: str, width: int) -> str:
-    """Reserve the narrow footer for health before fitting a transient hint."""
+    """Fit the current view and essential health into a narrow footer."""
     from rich.text import Text
 
     primary = status_segments(model)[: 4 if model.applied_policy else 3]
     # Details remain in Overview. The footer keeps each subsystem's label
     # and state, including the applied policy, even when the hint is long.
     primary = [StatusSegment(segment.label, segment.state) for segment in primary]
-    health = _SEPARATOR.join(segment.render() for segment in primary)
-    remaining = max(0, width - Text.from_markup(health).cell_len - _SEPARATOR_CELLS)
+    separator = " [#444444]│[/] "
     try:
         text = Text.from_markup(hint)
     except Exception:  # malformed operator text remains literal
         text = Text(hint)
+
+    def _health(segments: list[StatusSegment]) -> str:
+        return separator.join(segment.render() for segment in segments)
+
+    def _fits(rendered: str) -> bool:
+        return Text.from_markup(rendered).cell_len + 3 + text.cell_len <= width
+
+    health = _health(primary)
+    if model.applied_policy and not _fits(health):
+        # The whole action label is worth more than the applied policy: at
+        # 80 columns its digest goes first, then the "gen N" segment; the
+        # Gateway, Watchdog and Guardrail states always stay (GAP-0740,
+        # GAP-1361). Overview keeps the full policy.
+        short = model.applied_policy.split(" · ", 1)[0]
+        shorter = _health(
+            [StatusSegment(short, s.state) if s.label == model.applied_policy else s for s in primary]
+        )
+        bare = _health([s for s in primary if s.label != model.applied_policy])
+        # A hint too long to fit whole anyway keeps "gen N" and is cut.
+        health = shorter if _fits(shorter) or not _fits(bare) else bare
+    remaining = max(0, width - Text.from_markup(health).cell_len - 3)
     text.truncate(remaining, overflow="ellipsis")
-    return health + (_SEPARATOR + text.markup if remaining and text.plain else "")
+    return (text.markup + separator if remaining and text.plain else "") + health
 
 
 class StatusStrip(_Static):

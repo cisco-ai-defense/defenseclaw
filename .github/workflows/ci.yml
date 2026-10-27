@@ -76,16 +76,17 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
+        id: go
       # Syntax, expressions, job graph and runner labels (.github/actionlint.yaml).
       # Embedded scripts are not linted here.
       - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes=
+      - run: python3 -m unittest scripts.test_e2e_splunk_platform -q
 
   version-sync:
     name: Version Sync Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -104,6 +105,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -111,9 +113,8 @@ jobs:
           # base with the target branch, so the job needs that history (#1228).
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
+        id: go
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
@@ -134,21 +135,24 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    # Every Go test job stays under 15 minutes: about 4 minutes to set up
+    # and build the race test binary, and at most ~9 minutes of tests. A
+    # hung test hits go test's -timeout (11m) first, so the job fails with
+    # Go's goroutine dump and the name of the test, not a cancelled job.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        # Balanced on recorded test times (scripts/test-timings/go-linux.json);
-        # the slowest two tests take ~9 minutes each, so more shards would
-        # not shorten the slowest one.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        # Balanced on the test times the shards record
+        # (scripts/test-timings/go-linux.json); the slowest test takes about
+        # 6.5 minutes on a hosted runner.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
+        id: go
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
@@ -158,7 +162,7 @@ jobs:
       - name: Run gateway race/coverage shard
         env:
           GO_TEST_SHARD: ${{ matrix.shard }}
-          GO_TEST_SHARDS: 16
+          GO_TEST_SHARDS: 20
         run: |
           set -euo pipefail
           test_regex="$(python3 scripts/go_test_shards.py \
@@ -169,56 +173,55 @@ jobs:
           # -race also turns on checkptr in every package. In the transpiled
           # SQLite (modernc.org) that every audit store runs, checkptr alone
           # doubles the cost of a race shard; race detection stays on everywhere.
-          test_log="$(mktemp)"
-          trap 'rm -f "$test_log"' EXIT
+          # go_test_report.py prints the quiet go test log from -json (a
+          # failing or still-running test's output, package lines, a timeout's
+          # goroutine dump), annotates failed tests and keeps the test times.
           set +e
-          go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 45m \
+          go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 11m \
             -coverprofile="coverage-go-gateway-$GO_TEST_SHARD.out" \
             -run "$test_regex" \
-            ./internal/gateway 2>&1 | tee "$test_log"
+            ./internal/gateway 2>&1 |
+            python3 scripts/go_test_report.py --timings "go-test-timings-gateway-$GO_TEST_SHARD.json" \
+              --annotate "Gateway shard $GO_TEST_SHARD failed"
           test_status=${PIPESTATUS[0]}
           set -e
-          if (( test_status != 0 )); then
-            # Only test identifiers go into annotations; keep assertion output in
-            # the normal step log. Limit annotations in case many tests fail.
-            mapfile -t failed_tests < <(
-              awk '/^--- FAIL: / && $3 ~ /^[A-Za-z0-9_\/]+$/ { print $3 }' "$test_log" |
-                sort -u | head -n 20
-            )
-            if (( ${#failed_tests[@]} == 0 )); then
-              echo "::error title=Gateway shard $GO_TEST_SHARD failed::No named failing test was reported"
-            else
-              for failed_test in "${failed_tests[@]}"; do
-                echo "::error title=Gateway shard $GO_TEST_SHARD failed::$failed_test"
-              done
-            fi
-          fi
           exit "$test_status"
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: go-coverage-gateway-${{ matrix.shard }}
           path: coverage-go-gateway-${{ matrix.shard }}.out
           retention-days: 1
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        # The test times scripts/update_test_timings.py go reads.
+        if: ${{ !cancelled() }}
+        with:
+          name: go-test-timings-gateway-${{ matrix.shard }}
+          path: go-test-timings-gateway-${{ matrix.shard }}.json
+          retention-days: 14
+          if-no-files-found: ignore
+      - uses: ./.github/actions/go-cache-save
+        if: ${{ matrix.shard == 0 }}
+        with:
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   go-test-audit:
     name: Go Audit Test (shard ${{ matrix.shard }})
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    # The budget of Go Gateway Test.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        # ~23 minutes of tests in all: four time-balanced shards finish with
-        # the gateway shards.
+        # Four time-balanced shards finish with the gateway shards.
         shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
+        id: go
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
@@ -236,34 +239,48 @@ jobs:
             --timings scripts/test-timings/go-linux.json \
             --shard-count "$GO_TEST_SHARDS" \
             --shard-index "$GO_TEST_SHARD")"
-          # checkptr is off only in modernc.org: see Go Gateway Test.
-          go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 45m \
+          # checkptr is off only in modernc.org, and the log comes from
+          # go_test_report.py: see Go Gateway Test.
+          set +e
+          go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 11m \
             -coverprofile="coverage-go-audit-$GO_TEST_SHARD.out" \
             -run "$test_regex" \
-            ./internal/audit
+            ./internal/audit 2>&1 |
+            python3 scripts/go_test_report.py --timings "go-test-timings-audit-$GO_TEST_SHARD.json" \
+              --annotate "Audit shard $GO_TEST_SHARD failed"
+          test_status=${PIPESTATUS[0]}
+          set -e
+          exit "$test_status"
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: go-coverage-audit-${{ matrix.shard }}
           path: coverage-go-audit-${{ matrix.shard }}.out
           retention-days: 1
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        if: ${{ !cancelled() }}
+        with:
+          name: go-test-timings-audit-${{ matrix.shard }}
+          path: go-test-timings-audit-${{ matrix.shard }}.json
+          retention-days: 14
+          if-no-files-found: ignore
 
   go-test-other:
     name: Go Test (remaining packages / shard ${{ matrix.shard }})
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    # The budget of Go Gateway Test.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
+        id: go
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
@@ -273,7 +290,7 @@ jobs:
       - name: Run remaining Go race/coverage shard
         env:
           GO_PACKAGE_SHARD: ${{ matrix.shard }}
-          GO_PACKAGE_SHARDS: 8
+          GO_PACKAGE_SHARDS: 12
         run: |
           set -euo pipefail
           go list ./... > "$RUNNER_TEMP/go-packages.txt"
@@ -296,20 +313,27 @@ jobs:
           test "$(( ${#packages[@]} + ${#parts[@]} ))" -gt 0
           status=0
           profiles=()
-          # checkptr is off only in modernc.org: see Go Gateway Test.
+          timings="go-test-timings-other-$GO_PACKAGE_SHARD.json"
+          : > "$timings"
+          # checkptr is off only in modernc.org, and the log comes from
+          # go_test_report.py: see Go Gateway Test.
+          run_go() { # run_go <part> <go test arguments...>: go test's exit status
+            go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 11m "${@:2}" 2>&1 |
+              python3 scripts/go_test_report.py --timings "$RUNNER_TEMP/timings-$1.json" \
+                --annotate "Go shard $GO_PACKAGE_SHARD failed"
+            local go_status=${PIPESTATUS[0]}
+            cat "$RUNNER_TEMP/timings-$1.json" >> "$timings"
+            return "$go_status"
+          }
           if (( ${#packages[@]} > 0 )); then
-            go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 45m \
-              -coverprofile="$RUNNER_TEMP/cover-packages.out" \
-              "${packages[@]}" || status=1
+            run_go packages -coverprofile="$RUNNER_TEMP/cover-packages.out" "${packages[@]}" || status=1
             profiles+=("$RUNNER_TEMP/cover-packages.out")
           fi
           for index in "${!parts[@]}"; do
             package="${parts[index]%%$'\t'*}"
             pattern="${parts[index]#*$'\t'}"
             echo "::group::go test $package (part $((index + 1)) of ${#parts[@]} in this shard)"
-            go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 45m \
-              -coverprofile="$RUNNER_TEMP/cover-part-$index.out" \
-              -run "$pattern" "$package" || status=1
+            run_go "part-$index" -coverprofile="$RUNNER_TEMP/cover-part-$index.out" -run "$pattern" "$package" || status=1
             echo "::endgroup::"
             profiles+=("$RUNNER_TEMP/cover-part-$index.out")
           done
@@ -324,6 +348,13 @@ jobs:
           name: go-coverage-other-${{ matrix.shard }}
           path: coverage-go-other-${{ matrix.shard }}.out
           retention-days: 1
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        if: ${{ !cancelled() }}
+        with:
+          name: go-test-timings-other-${{ matrix.shard }}
+          path: go-test-timings-other-${{ matrix.shard }}.json
+          retention-days: 14
+          if-no-files-found: ignore
 
   go-pinned:
     # A pull request with no Go change still runs the Go tests that name a
@@ -332,14 +363,13 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go_pinned == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
+        id: go
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
@@ -354,7 +384,7 @@ jobs:
           status=0
           while IFS=$'\t' read -r package pattern; do
             echo "::group::go test -run '$pattern' $package"
-            go test -count=1 -timeout 25m -run "$pattern" "$package" || status=1
+            go test -count=1 -timeout 14m -run "$pattern" "$package" || status=1
             echo "::endgroup::"
           done < <(python3 -c 'import json, os; [print(t["package"] + "\t" + t["run"]) for t in json.loads(os.environ["GO_TESTS"])]')
           exit "$status"
@@ -368,6 +398,7 @@ jobs:
     needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Require every Go test partition
         env:
@@ -390,10 +421,9 @@ jobs:
         if: ${{ needs.changes.outputs.go != 'false' }}
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      - uses: ./.github/actions/setup-go
+        id: go
         if: ${{ needs.changes.outputs.go != 'false' }}
-        with:
-          go-version-file: go.mod
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: ${{ needs.changes.outputs.go != 'false' }}
         with:
@@ -407,8 +437,8 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 16 gateway + 4 audit + 8 remaining-package shards.
-          test "${#coverage_parts[@]}" -eq 28
+          # 20 gateway + 4 audit + 12 remaining-package shards.
+          test "${#coverage_parts[@]}" -eq 36
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"
@@ -427,6 +457,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         include:
@@ -445,10 +476,9 @@ jobs:
         if: ${{ needs.changes.outputs.go != 'false' }}
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      - uses: ./.github/actions/setup-go
+        id: go
         if: ${{ needs.changes.outputs.go != 'false' }}
-        with:
-          go-version-file: go.mod
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         if: ${{ needs.changes.outputs.go != 'false' }}
         with:
@@ -470,23 +500,28 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.python_tests != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        # Balanced on recorded module times (scripts/test-timings/python-linux.json).
-        shard: [0, 1, 2, 3, 4, 5]
+        # Balanced on recorded module times (scripts/test-timings/python-linux.json):
+        # about 8 minutes each.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: uv sync
       - run: make _bundle-data
       - name: Run Python coverage shard
         env:
           PYTHON_TEST_SHARD: ${{ matrix.shard }}
-          PYTHON_TEST_SHARDS: 6
+          PYTHON_TEST_SHARDS: 8
           # Empty for the full suite. Otherwise the only modules to run: the
           # TUI tests and the tests that name a changed file.
           PY_SELECT: ${{ needs.changes.outputs.py_select }}
@@ -529,11 +564,16 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.python_lint != 'false' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: uv sync
       - run: make py-lint
 
@@ -547,6 +587,7 @@ jobs:
     needs: [changes, python-test, python-lint]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Require lint and every Python test partition
         env:
@@ -570,6 +611,10 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         if: ${{ needs.changes.outputs.python != 'false' }}
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - if: ${{ needs.changes.outputs.python != 'false' }}
         run: uv sync
       - if: ${{ needs.changes.outputs.python != 'false' }}
@@ -587,7 +632,7 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-py-*' -print | sort
           )
-          test "${#coverage_parts[@]}" -eq 6
+          test "${#coverage_parts[@]}" -eq 8
           .venv/bin/coverage combine "${coverage_parts[@]}"
           .venv/bin/coverage xml -o coverage-py.xml
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
@@ -603,6 +648,7 @@ jobs:
     needs: [go-test, python-lint-test]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Require unified Go and Python test gates
         env:
@@ -618,15 +664,20 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.wheel != 'false' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: make dist-cli
       - shell: bash
         run: |
@@ -808,7 +859,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.install != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     env:
       # "|" falls back to direct on any proxy error; the default "," only
       # falls back on 404/410, so a proxy.golang.org stream reset
@@ -818,16 +869,13 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      - uses: ./.github/actions/setup-go
+        id: go
         with:
-          go-version-file: go.mod
-          # Every job shares the go.sum-only key, and the first job to save it
-          # stored a ~9 MB module cache, so this build downloaded most modules
-          # on every run. Adding this job's build script to the key gives it a
-          # cache with the full release module set.
-          cache-dependency-path: |
-            go.sum
-            scripts/build-release-assets.sh
+          # The release asset build shares little with the test jobs: its own
+          # entry, keyed on its build script too, written by this job on main.
+          cache-name: release-assets
+          cache-files: scripts/build-release-assets.sh
       - name: Download Go modules
         run: |
           for attempt in 1 2 3; do
@@ -844,6 +892,10 @@ jobs:
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: scripts/build-release-assets.sh 9.9.9 "$RUNNER_TEMP/assets" linux/amd64 windows/amd64
       - run: test -s "$RUNNER_TEMP/assets/defenseclaw-fleet-assets.tar.gz"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -852,6 +904,11 @@ jobs:
           path: ${{ runner.temp }}/assets/
           if-no-files-found: error
           retention-days: 3
+      - uses: ./.github/actions/go-cache-save
+        with:
+          cache-name: release-assets
+          cache-files: scripts/build-release-assets.sh
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   install-smoke:
     # Runs the real installer from the assets above through a fresh install,
@@ -860,12 +917,16 @@ jobs:
     name: Install and Upgrade Smoke
     needs: install-smoke-assets
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: install-smoke-assets
@@ -878,16 +939,20 @@ jobs:
     name: Install and Upgrade Smoke (Windows / ${{ matrix.lane }})
     needs: install-smoke-assets
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        lane: [fresh, fleet-opt-in, setup-import, files-in-use, failure-drill, policy]
+        lane: [fresh, fleet-opt-in, setup-import, files-in-use, failure-drill, failure-drill-exit3, policy]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: install-smoke-assets
@@ -902,19 +967,23 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.core != 'false' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
+        id: go
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: make plugin
       - run: make dev-pycli
       - run: make connector-matrix-test
@@ -931,14 +1000,13 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
+        id: go
       - name: Build enterprise gateway and ACP CLIs
         shell: bash
         run: |
@@ -974,13 +1042,21 @@ jobs:
     # the linux||darwin hook-socket, peer-home and trusted-state code) runs
     # here on its own OS, and the systemd units get a static systemd-analyze
     # check on Linux.
-    # On macOS the two Go test steps took ~7 minutes each back to back, so
-    # they run on two runners ("darwin paths" is the second one).
+    # On macOS the Go tests run on separate runners so that each stays under
+    # 15 minutes: the lifecycle packages, the darwin paths of the small
+    # connector packages (hookexec alone takes ~11 minutes), the unix and
+    # darwin tests of internal/gateway and internal/cli ("darwin gateway and
+    # cli"), and the connector package in three time-balanced parts
+    # ("darwin connector", scripts/test-timings/go-darwin.json).
     name: Unix Standalone Lifecycle (${{ matrix.label }})
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 20
+    env:
+      LIFECYCLE_PACKAGES: >-
+        ./internal/unixidentity/... ./internal/peercred/... ./internal/managed/...
+        ./internal/enterprisehooks/... ./internal/enterprisepolicy/... ./internal/ipc/...
     strategy:
       fail-fast: false
       matrix:
@@ -988,43 +1064,84 @@ jobs:
           - os: ubuntu-24.04
             label: ubuntu-24.04
             part: lifecycle
+            shards: 1
+            shard: 0
           - os: macos-latest
             label: macos-latest
             part: lifecycle
+            shards: 2
+            shard: 0
+          - os: macos-latest
+            label: macos-latest lifecycle 2 of 2
+            part: lifecycle
+            shards: 2
+            shard: 1
+          - os: macos-latest
+            label: macos-latest lifecycle packages
+            part: lifecycle-packages
           - os: macos-latest
             label: macos-latest darwin paths
             part: darwin
+          - os: macos-latest
+            label: macos-latest darwin gateway and cli
+            part: darwin-unix
+          - os: macos-latest
+            label: macos-latest darwin connector 1 of 3
+            part: darwin-connector
+            shard: 0
+          - os: macos-latest
+            label: macos-latest darwin connector 2 of 3
+            part: darwin-connector
+            shard: 1
+          - os: macos-latest
+            label: macos-latest darwin connector 3 of 3
+            part: darwin-connector
+            shard: 2
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
+        id: go
       - name: Go tests of the standalone lifecycle packages
         if: matrix.part == 'lifecycle'
         shell: bash
+        env:
+          GO_TEST_SHARDS: ${{ matrix.shards }}
+          GO_TEST_SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           # Keep the longest suite separate and name each test in the log.
           # A stalled hosted runner then shows the test or compile phase,
-          # rather than silently cancelling the whole job at 30 minutes.
-          go test -count=1 -timeout 20m -p 2 -v ./internal/enterpriseunix/...
-          go test -count=1 -timeout 20m -p 2 \
-            ./internal/unixidentity/... \
-            ./internal/peercred/... \
-            ./internal/managed/... \
-            ./internal/enterprisehooks/... \
-            ./internal/enterprisepolicy/... \
-            ./internal/ipc/...
-      - name: Go tests of the darwin paths in the agent-process, connector, gateway and CLI packages
+          # rather than silently cancelling the whole job.
+          if [ "$GO_TEST_SHARDS" -gt 1 ]; then
+            # On macOS internal/enterpriseunix alone took 11 to 12 minutes
+            # (672 s of tests), at its 12-minute -timeout, so it runs in
+            # time-balanced parts (scripts/test-timings/go-darwin.json);
+            # go_test_shards.py covers every test exactly once.
+            test_regex="$(python3 scripts/go_test_shards.py \
+              --package-dir internal/enterpriseunix \
+              --timings scripts/test-timings/go-darwin.json \
+              --shard-count "$GO_TEST_SHARDS" \
+              --shard-index "$GO_TEST_SHARD")"
+            go test -count=1 -timeout 12m -v -run "$test_regex" ./internal/enterpriseunix
+          else
+            go test -count=1 -timeout 12m -p 2 -v ./internal/enterpriseunix/...
+          fi
+          # On macOS the other packages run on their own runner (both took
+          # ~7 minutes there).
+          if [ "$RUNNER_OS" = Linux ]; then
+            go test -count=1 -timeout 12m -p 2 $LIFECYCLE_PACKAGES
+          fi
+      - name: Go tests of the other standalone lifecycle packages
+        if: matrix.part == 'lifecycle-packages'
+        shell: bash
+        run: go test -count=1 -timeout 12m -p 2 $LIFECYCLE_PACKAGES
+      - name: Go tests of the darwin paths in the agent-process and connector packages
         # The go-test jobs run these packages on Linux only. On macOS this runs
         # the kern.proc agent-process lookup, the gethostuuid machine id behind
-        # agt- IDs, every connector package
-        # (hookexec and the /etc/codex requirements path included) and, in
-        # internal/gateway and internal/cli, the tests of their darwin, unix,
-        # linux||darwin and !windows test files plus the foreign-hook guard,
-        # which keys sessions by the agent process.
+        # agt- IDs and every connector package below internal/gateway/connector
+        # (hookexec and the /etc/codex requirements path included).
         if: runner.os == 'macOS' && matrix.part == 'darwin'
         shell: bash
         run: |
@@ -1035,7 +1152,21 @@ jobs:
           mkdir -p "$RUNNER_TEMP/go-tmp"
           TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
           export TMPDIR
-          go test -count=1 -timeout 20m ./internal/agentprocess/... ./internal/agentidentity/... ./internal/gateway/connector/...
+          # The connector package itself runs in the darwin-connector parts.
+          go test -count=1 -timeout 14m ./internal/agentprocess/... ./internal/agentidentity/... \
+            $(go list ./internal/gateway/connector/... | grep -v '/internal/gateway/connector$')
+      - name: Go tests of the darwin paths in the gateway and CLI packages
+        # In internal/gateway and internal/cli, the tests of their darwin,
+        # unix, linux||darwin and !windows test files plus the foreign-hook
+        # guard, which keys sessions by the agent process.
+        if: runner.os == 'macOS' && matrix.part == 'darwin-unix'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A link-free TMPDIR, as in the darwin paths step.
+          mkdir -p "$RUNNER_TEMP/go-tmp"
+          TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
+          export TMPDIR
           unix_tests() { # unix_tests <test files...>: a -run pattern for their Test functions
             local file names=()
             for file in "$@"; do
@@ -1053,12 +1184,31 @@ jobs:
           for pkg in internal/gateway internal/cli; do
             pattern=$(unix_tests "$pkg"/*_test.go)
             echo "$pkg: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') unix and darwin tests"
-            go test -count=1 -timeout 20m -run "$pattern" "./$pkg"
+            go test -count=1 -timeout 10m -run "$pattern" "./$pkg"
           done
+      - name: Go tests of the darwin connector package, part ${{ matrix.shard }}
+        # One of three time-balanced parts of the connector package's tests
+        # (go_test_shards.py covers every test exactly once).
+        if: runner.os == 'macOS' && matrix.part == 'darwin-connector'
+        shell: bash
+        env:
+          GO_TEST_SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          # A link-free TMPDIR, as in the darwin paths step.
+          mkdir -p "$RUNNER_TEMP/go-tmp"
+          TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
+          export TMPDIR
+          test_regex="$(python3 scripts/go_test_shards.py \
+            --package-dir internal/gateway/connector \
+            --timings scripts/test-timings/go-darwin.json \
+            --shard-count 3 \
+            --shard-index "$GO_TEST_SHARD")"
+          go test -count=1 -timeout 14m -run "$test_regex" ./internal/gateway/connector
       - name: The shipped binaries start without stderr output
         # A dependency's start-up warning (for example sonic's Go-version
         # notice) would reach admin and MDM output and agent hook errors.
-        if: matrix.part == 'lifecycle'
+        if: matrix.part == 'lifecycle' && matrix.shard == 0
         shell: bash
         run: make check-quiet-startup
       - name: systemd-analyze verify the packaged units
@@ -1067,6 +1217,10 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: ./scripts/test-systemd-units.sh
+      - uses: ./.github/actions/go-cache-save
+        if: ${{ matrix.part == 'darwin-connector' && matrix.shard == 0 }}
+        with:
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   # Standalone managed-enterprise install lanes: each one installs the real
   # package on a disposable host with the real service manager, converges,
@@ -1081,22 +1235,20 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     outputs:
       linux-version: ${{ steps.linux.outputs.version }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      - uses: ./.github/actions/setup-go
+        id: go
         with:
-          go-version-file: go.mod
           # The snapshot cross-compiles every release target (~8 minutes with
-          # a cold build cache). The shared go.sum key holds whichever job
-          # saved it first, so this job keys its own cache on its config.
-          cache-dependency-path: |
-            go.sum
-            .goreleaser.yaml
+          # a cold build cache): its own entry, keyed on its config too.
+          cache-name: goreleaser-snapshot
+          cache-files: .goreleaser.yaml
       # GoReleaser comes straight from its GitHub release, pinned by version
       # and by the sha256 of goreleaser_Linux_x86_64.tar.gz in that release's
       # checksums.txt (cosign-verified against goreleaser's release workflow).
@@ -1118,6 +1270,16 @@ jobs:
           tar -xzf "$dir/goreleaser.tar.gz" -C "$dir" goreleaser
           "$dir/goreleaser" --version
           echo "$dir" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      # The managed Linux packages install the scanner runtime (GAP-1527);
+      # nfpm takes these trees, so they are built first.
+      - name: Build the managed Linux scanner runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in linux-amd64 linux-arm64; do
+            packaging/unix/build-scanner-runtime.sh --target "$target" --out-dir "scanner-runtime/$target"
+          done
       - name: Build the Linux packages with the release GoReleaser config
         env:
           # A snapshot needs no tag history; the version is 9.9.9-SNAPSHOT-<commit>.
@@ -1139,6 +1301,11 @@ jobs:
           path: ${{ runner.temp }}/enterprise-install-linux/
           if-no-files-found: error
           retention-days: 3
+      - uses: ./.github/actions/go-cache-save
+        with:
+          cache-name: goreleaser-snapshot
+          cache-files: .goreleaser.yaml
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   enterprise-install-assets-windows:
     # The Windows standalone Setup from the release's builder without a
@@ -1149,16 +1316,19 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
+        id: go
       # build-setup.sh builds the Python scanner runtime with uv.
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - name: Build the hash-pinned unsigned Windows standalone Setup
         shell: bash
         run: packaging/windows/standalone/build-setup.sh --version 9.9.9 --out-dir "$RUNNER_TEMP/enterprise-install-windows"
@@ -1212,7 +1382,7 @@ jobs:
     name: Enterprise Install Lane (${{ matrix.lane }})
     needs: enterprise-install-assets
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -1273,14 +1443,14 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
+        id: go
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Build the unsigned standalone pkg
         shell: bash
         env:
@@ -1310,7 +1480,7 @@ jobs:
     name: Enterprise Install Lane (Windows services)
     needs: enterprise-install-assets-windows
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -1361,7 +1531,7 @@ jobs:
     needs: [changes, enterprise-install-assets]
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' && needs.enterprise-install-assets.result == 'success' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -1382,6 +1552,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
         with:
           cosign-release: "v2.6.3"
@@ -1437,7 +1611,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     env:
       GH_TOKEN: ${{ github.token }}
       LANE_ASSET: darwin-arm64.pkg
@@ -1446,6 +1620,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
         with:
           cosign-release: "v2.6.3"
@@ -1453,10 +1631,9 @@ jobs:
         id: previous
         shell: bash
         run: bash scripts/fetch-previous-enterprise-package.sh --asset "$LANE_ASSET" --dir "$RUNNER_TEMP/previous" --github-output "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      - uses: ./.github/actions/setup-go
+        id: go
         if: steps.previous.outputs.version != ''
-        with:
-          go-version-file: go.mod
       - name: Build the unsigned standalone pkg
         if: steps.previous.outputs.version != ''
         shell: bash
@@ -1498,7 +1675,7 @@ jobs:
     needs: [changes, enterprise-install-assets-windows]
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' && needs.enterprise-install-assets-windows.result == 'success' }}
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     env:
       GH_TOKEN: ${{ github.token }}
       LANE_ASSET: setup
@@ -1507,6 +1684,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
         with:
           cosign-release: "v2.6.3"
@@ -1566,10 +1747,8 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-          cache: true
+      - uses: ./.github/actions/setup-go
+        id: go
       - name: Test the public installer contracts
         run: >-
           go test -count=1
@@ -1739,11 +1918,16 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.python != 'false' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: uv sync
       - run: uv pip install pip pip-audit
       # Use OSV for the vulnerability database so an outage in PyPI's
@@ -1758,6 +1942,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.ts != 'false' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -1775,6 +1960,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.ts != 'false' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: extensions/defenseclaw
@@ -1798,6 +1984,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.rego != 'false' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -1816,6 +2003,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.checks != 'false' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -1824,15 +2012,18 @@ jobs:
           # commits remain ancestors. Portable unit/source-archive validation
           # checks their documented SHAs without requiring Git history.
           fetch-depth: 0
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
+        id: go
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: make plugin
       - run: make dev-pycli
       # Keep the ordinary gate small: compile the real registry once and prove
@@ -1852,11 +2043,22 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
+      - uses: ./.github/actions/setup-go
+        id: go
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: make dev-pycli
+      - name: Build the gateway that verifies the Grafana peer
+        # The CLI sends the Grafana admin credential only after the account's
+        # gateway has verified the connected peer (GAP-1171); an installed
+        # host has that gateway, this checkout only the dev CLI.
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          go build -o "$RUNNER_TEMP/bin/defenseclaw-gateway" ./cmd/defenseclaw
+          echo "DEFENSECLAW_GATEWAY_BIN=$RUNNER_TEMP/bin/defenseclaw-gateway" >> "$GITHUB_ENV"
       - name: Start the local observability stack
         run: bundles/local_observability_stack/bin/openclaw-observability-bridge up --timeout 180
       - name: Emit and verify native v8 telemetry

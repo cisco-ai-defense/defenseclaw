@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -505,7 +506,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			entries, err := discover(dir, hermesskills.DefaultDirectoryLimit)
 			if err == nil {
 				for _, entry := range entries {
-					if entry.Bundled && trustBundled {
+					if (entry.Bundled && trustBundled) || w.inSkillInstallStaging(dir, entry.Path, claudeStagingGrace) {
 						continue
 					}
 					targets = append(targets, InstallEvent{
@@ -889,7 +890,7 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 		// <marketplace>/<plugin>/<version>; plugin.json is optional. Admit
 		// exactly that directory and never let a nested dependency manifest
 		// manufacture a second plugin identity.
-		if depth == 3 {
+		if depth == 3 || depth == 1 && isCachePluginCopy(path) {
 			out = append(out, path)
 			return filepath.SkipDir
 		}
@@ -1074,6 +1075,15 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		// A clean recovery scan must run admission so its completed verdict
 		// can release this watcher's earlier rejection or scanner-failure block.
 		// Drift-only scanning recorded the clean finding but left it disabled.
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
+	}
+
+	if !w.secureClientActive() && admissionPolicyChanged(baseline.ScannerFingerprint, fingerprint) {
+		// The admission actions changed since this unchanged target was
+		// admitted: its verdict is decided again and applied as for an
+		// install, so a severity tightened to quarantine or block refuses a
+		// skill, plugin or MCP server admitted with a warning. A drift-only
+		// scan recorded the finding and left it active (GAP-1458).
 		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
 	}
 
@@ -1575,7 +1585,54 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 	)
 
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]) + admissionDigestSuffix(cfg, evt.Type)
+}
+
+// admissionDigestMark leads, at the end of a scanner fingerprint, the digest
+// of the compiled admission a skill, plugin or MCP server was admitted
+// under. It is kept apart from the scanner hash so a rescan can tell an
+// admission change from a scanner change.
+const admissionDigestMark = "|admission:"
+
+// admissionDigestSuffix is the admission digest part of a scanner
+// fingerprint, or "" under Secure Client, whose admission is unchanged.
+func admissionDigestSuffix(cfg *config.Config, kind InstallType) string {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return ""
+	}
+	compiled, ok := policy.CompileAdmission(cfg)[string(kind)]
+	if !ok {
+		return ""
+	}
+	raw, err := json.Marshal(compiled)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return admissionDigestMark + hex.EncodeToString(sum[:8])
+}
+
+// admissionDigest is the admission digest a fingerprint carries, or "" for
+// one without (Secure Client, or a baseline recorded before 1.0.4).
+func admissionDigest(fingerprint string) string {
+	i := strings.Index(fingerprint, admissionDigestMark)
+	if i < 0 {
+		return ""
+	}
+	rest := fingerprint[i+len(admissionDigestMark):]
+	if j := strings.IndexByte(rest, '|'); j >= 0 {
+		rest = rest[:j]
+	}
+	return rest
+}
+
+// admissionPolicyChanged reports whether the admission changed since a
+// baseline that recorded it. A baseline written before 1.0.4 has no digest:
+// the first rescan after an upgrade records one without running install
+// admission on what was already installed.
+func admissionPolicyChanged(baseline, current string) bool {
+	old := admissionDigest(baseline)
+	return old != "" && old != admissionDigest(current)
 }
 
 // scannerVersionCache retains a version only while the resolved binary's

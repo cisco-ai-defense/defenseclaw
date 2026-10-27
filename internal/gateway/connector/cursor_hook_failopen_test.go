@@ -66,6 +66,11 @@ func runCursorHookWithInput(
 	if err := writeHookScriptsCommonWithFailMode(dir, apiAddr, "tok-test", failMode, []string{"cursor-hook.sh"}); err != nil {
 		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
 	}
+	for _, entry := range extraEnv {
+		if home, ok := strings.CutPrefix(entry, "HOME="); ok {
+			linkGatewayBinaryToHookDirForTest(t, dir, filepath.Join(home, ".local", "bin", "defenseclaw-gateway"))
+		}
+	}
 	if !tokenPresent {
 		if err := os.Remove(filepath.Join(dir, ".token")); err != nil {
 			t.Fatalf("remove .token: %v", err)

@@ -31,17 +31,23 @@ case "$_DC_HOOK_DATA_DIR" in
   */*) _DC_HOOK_DATA_DIR="${_DC_HOOK_DATA_DIR%/*}/.." ;;
   *) _DC_HOOK_DATA_DIR=".." ;;
 esac
+# _DC_HOOK_HOME is the data directory the gateway rendered this hook into,
+# written into the file: a hard link, a symlink or a copy of the hook, run
+# from any folder, still finds the installer's lock there.
+_DC_HOOK_HOME={{.HookHomeSH}}
 # defenseclaw_install_lock_held DATA returns 0 (true) while this account's
 # installer holds its data directory DATA: DATA/.install.lock exists as any
-# file type, or DATA exists but cannot be searched, so the lock cannot be
-# shown absent; no DATA to look in counts as held too. The native hook
-# (installLockHeld), the in-agent plugins and the Windows adapters apply the
-# same rule (GAP-0914). defenseclaw_install_held below, the one install check
-# of every shell hook, reads it.
+# file type and is not stale (defenseclaw_install_lock_stale), or DATA
+# exists but cannot be searched, so the lock cannot be shown absent; no DATA
+# to look in counts as held too. The native hook (installLockHeld), the
+# in-agent plugins and the Windows adapters apply the same rule (GAP-0914).
+# defenseclaw_install_held below, the one install check of every shell hook,
+# reads it.
 defenseclaw_install_lock_held() {
   local data="${1:-}"
   [ -n "$data" ] || return 0
   if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    defenseclaw_install_lock_stale "$data" && return 1
     return 0
   fi
   if [ -e "$data" ] || [ -L "$data" ]; then
@@ -52,6 +58,154 @@ defenseclaw_install_lock_held() {
   fi
   return 1
 }
+# defenseclaw_install_lock_stale DATA returns 0 (true) when DATA/.install.lock
+# is a folder whose installer is proven gone (an interrupted-install record
+# beside it does not hold it, GAP-1024): its pid names no process, or this hook's own (no
+# hook writes a lock), or another process than its proc-start record names
+# (a reused pid). It reads no clock (hookexec installLockStale, the one
+# rule): a live owner keeps the lock for as long as it runs, and so do a
+# lock without a valid pid, a lock without a proc-start record whose pid
+# names a process (1.0.2, 1.0.3) and an owner whose identity cannot be read.
+defenseclaw_install_lock_stale() {
+  local data="${1:-}" lock rc pid recorded current
+  lock="${data}/.install.lock"
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  rc=0
+  pid="$(defenseclaw_install_lock_number "${lock}/pid")" || rc=$?
+  [ "$rc" = 0 ] || return 1
+  [ "$pid" -le 2147483647 ] || return 1
+  # A live installer's pid names no other process: this one is reused.
+  [ "$pid" = "$$" ] && return 0
+  if ! kill -0 "$pid" 2>/dev/null; then
+    # A process of another account refuses the signal; only ps proves it gone.
+    command -v ps >/dev/null 2>&1 || return 1
+    ps -p "$pid" >/dev/null 2>&1 || return 0
+  fi
+  # An installer that exited but is not reaped (a zombie) keeps its pid and
+  # its start, but runs nothing.
+  defenseclaw_process_ended "$pid" && return 0
+  if [ ! -e "${lock}/proc-start" ] && [ ! -L "${lock}/proc-start" ]; then
+    defenseclaw_process_started_after_lock "$pid" "$lock"
+    return
+  fi
+  recorded="$(defenseclaw_install_lock_record "${lock}/proc-start")" || return 1
+  current="$(defenseclaw_process_identity "$pid")" || return 1
+  [ "$recorded" != "$current" ] && return 0
+  return 1
+}
+# defenseclaw_process_identity PID prints the identity of process PID as the
+# system keeps it from its creation, the record install.sh keeps of itself
+# in a lock (proc-start; hookexec procidentity): on Linux its boot id and
+# kernel start, "<boot_id> <starttime>" (field 22 of /proc/PID/stat); on
+# macOS its creation second as `LC_ALL=C TZ=UTC ps -o lstart=` prints it,
+# one space apart. No clock step moves either. It returns 1 when the system
+# does not say.
+defenseclaw_process_identity() {
+  local boot stat out IFS=' '
+  if [ -e /proc/self/stat ]; then
+    boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || return 1
+    stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
+    case "$stat" in *[\)]*) ;; *) return 1 ;; esac
+    stat="${stat##*[\)]}"
+    set -- $stat
+    [ "$#" -ge 20 ] || return 1
+    shift 19
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    case "$boot" in ''|*[!0-9a-f-]*) return 1 ;; esac
+    printf '%s %s' "$boot" "$1"
+    return 0
+  fi
+  [ "$(uname -s 2>/dev/null)" = Darwin ] && [ -x /bin/ps ] || return 1
+  out="$(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p "${1:-}" 2>/dev/null)" || return 1
+  set -- $out
+  [ "$#" -eq 5 ] || return 1
+  printf '%s %s %s %s %s' "$1" "$2" "$3" "$4" "$5"
+}
+# defenseclaw_process_ended PID returns 0 when process PID has exited but
+# keeps its pid: a zombie its parent has not reaped (hookexec
+# procidentity.Ended). It returns 1 while it runs or when the system does
+# not say.
+defenseclaw_process_ended() {
+  local stat IFS=' '
+  if [ -e /proc/self/stat ]; then
+    stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
+    case "$stat" in *[\)]*) ;; *) return 1 ;; esac
+    stat="${stat##*[\)]}"
+    set -- $stat
+    case "${1:-}" in Z|X|x) return 0 ;; esac
+    return 1
+  fi
+  [ -x /bin/ps ] || return 1
+  stat="$(LC_ALL=C /bin/ps -o stat= -p "${1:-}" 2>/dev/null)" || return 1
+  set -- $stat
+  case "${1:-}" in Z*) return 0 ;; esac
+  return 1
+}
+# defenseclaw_process_started_after_lock PID LOCK returns 0 when process PID
+# started more than 2 s after LOCK was last changed: a 1.0.2/1.0.3 lock
+# without a proc-start record whose pid a later process got (GAP-1465, the
+# hookexec rule). It returns 1 when it started earlier or the system does not
+# say.
+defenseclaw_process_started_after_lock() {
+  local locked="" started="" boot="" stat="" line="" out="" IFS=' '
+  locked="$(stat -c %Y "${2:-}" 2>/dev/null || stat -f %m "${2:-}" 2>/dev/null)" || return 1
+  case "$locked" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -e /proc/self/stat ]; then
+    while IFS= read -r line; do
+      case "$line" in "btime "*) boot="${line#btime }"; break ;; esac
+    done < /proc/stat
+    case "$boot" in ''|*[!0-9]*) return 1 ;; esac
+    stat="$(cat "/proc/${1:-}/stat" 2>/dev/null)" || return 1
+    case "$stat" in *[\)]*) ;; *) return 1 ;; esac
+    stat="${stat##*[\)]}"
+    set -- $stat
+    [ "$#" -ge 20 ] || return 1
+    shift 19
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    started=$((boot + $1 / 100))
+  else
+    [ "$(uname -s 2>/dev/null)" = Darwin ] && [ -x /bin/ps ] || return 1
+    out="$(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p "${1:-}" 2>/dev/null)" || return 1
+    started="$(LC_ALL=C TZ=UTC date -j -u -f "%a %b %e %T %Y" "$out" +%s 2>/dev/null)" || return 1
+    case "$started" in ''|*[!0-9]*) return 1 ;; esac
+  fi
+  [ "$started" -gt $((locked + 2)) ]
+}
+# defenseclaw_install_lock_record FILE prints the trimmed text of a small
+# owner record (proc-start); it returns 1 when FILE is not a small regular
+# file or is empty.
+defenseclaw_install_lock_record() {
+  local file="${1:-}" size text
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 1
+  size="$(wc -c < "$file" 2>/dev/null | tr -d ' ')" || return 1
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$size" -le 128 ] || return 1
+  text="$(cat "$file" 2>/dev/null)" || return 1
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  [ -n "$text" ] || return 1
+  printf '%s' "$text"
+}
+# defenseclaw_install_lock_number FILE prints the decimal number of the owner
+# record file (pid). It returns 1 when FILE is absent, empty or
+# not a positive number, and 2 when it cannot be read (not a small regular
+# file).
+defenseclaw_install_lock_number() {
+  local file="${1:-}" size text
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 1
+  fi
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 2
+  size="$(wc -c < "$file" 2>/dev/null | tr -d ' ')" || return 2
+  case "$size" in ''|*[!0-9]*) return 2 ;; esac
+  [ "$size" -le 64 ] || return 2
+  text="$(cat "$file" 2>/dev/null)" || return 2
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  case "$text" in ''|0*|*[!0-9]*) return 1 ;; esac
+  [ "${#text}" -le 12 ] || return 1
+  printf '%s' "$text"
+}
 # defenseclaw_install_held returns 0 (true) while an installer holds either
 # data directory of this account's hook: the one DEFENSECLAW_HOME names, else
 # ~/.defenseclaw, where install.sh and install.ps1 take the lock, and the one
@@ -59,7 +213,13 @@ defenseclaw_install_lock_held() {
 # folder), which the gateway rendered it into from its resolved data
 # directory. An agent that runs the hook without DEFENSECLAW_HOME, or a
 # data_dir apart from DEFENSECLAW_HOME, still finds the lock (GAP-0948).
+# A per-user render also checks the data directory the gateway rendered it
+# into (_DC_HOOK_HOME, written into the file), so a hard link, a symlink or a
+# copy of the hook, run from any folder, is held by that install's lock.
 defenseclaw_install_held() {
+  if [ -n "${_DC_HOOK_HOME:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_HOME}"; then
+    return 0
+  fi
   defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}" && return 0
   [ -n "${_DC_HOOK_DATA_DIR:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_DATA_DIR}"
 }
@@ -161,9 +321,18 @@ export DEFENSECLAW_HOME
 # agent's environment, where they would change how the per-user hook answers
 # a missing token.
 unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
-DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-{{if not .Sandbox}}# The hook path is resolved: this is the data directory it was installed in.
+{{if .Sandbox}}DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+{{else}}# Without DEFENSECLAW_HOME the hook's home is the data directory it was
+# installed in, not ~/.defenseclaw: a custom-home install keeps its own
+# config, lock and gateway when the agent does not pass the variable
+# (GAP-1854).
+DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-$(cd "${HOOK_DIR}/.." && pwd -P)}"
+{{end}}{{if not .Sandbox}}# The hook path is resolved: this is the data directory it was installed in.
 _DC_HOOK_DATA_DIR="${HOOK_DIR}/.."
+# An inherited DEFENSECLAW_HOME that names no folder does not retire the
+# hook installed here, and does not block it: the hook keeps the data
+# directory it was installed in and asks its gateway (GAP-1256).
+[ -d "${DEFENSECLAW_HOME}" ] || DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 {{end}}if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
   # The installed mode decides; strict availability tightens this exit as it
@@ -185,11 +354,12 @@ fi
 # downstream code controls (HOME, PATH, locale, GIT_*); none of the
 # subsequent token-resolution logic depends on the operator's
 # original PATH or HOME.
-. "${HOOK_DIR}/_hardening.sh"
+# command: bash 3.2 (macOS /bin/bash) exits 0 when a sourced helper is missing or unreadable.
+command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
 {{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call.
-. "${HOOK_DIR}/_sandbox.sh"
+command . "${HOOK_DIR}/_sandbox.sh" || exit 2
 {{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
 {{if and (not .Managed) (not .Sandbox)}}# defenseclaw_harden_env replaced the EXIT trap with its cleanup: keep it, and
@@ -274,7 +444,12 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
 # fail mode: the agent chooses the size.
 {{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+  _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+  if defenseclaw_prepare_oversized_stdin "$_DC_STDIN_RC"; then
+    : # the normal gateway path judges the bounded review payload
+  else
+    FAIL_MODE=closed
 {{end}}  [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" = "open" ] ||
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "stdin body exceeded cap" transport
   echo "defenseclaw: codex hook refusing oversized payload" >&2
@@ -284,6 +459,8 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 {{end}}    exit 2
   fi
   exit 0
+{{if and (not .Managed) (not .Sandbox)}}  fi
+{{end}}
 }
 
 PAYLOAD_EVENT="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || {
@@ -320,7 +497,7 @@ if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
   fi
 elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   # shellcheck source=/dev/null
-  . "${HOOK_DIR}/{{.TokenFile}}"
+  {{if .SecureClient}}. "${HOOK_DIR}/{{.TokenFile}}"{{else}}command . "${HOOK_DIR}/{{.TokenFile}}" || DEFENSECLAW_GATEWAY_TOKEN={{end}}
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"{{end}}
 # The hook needs only its private shell-local copy from this point forward.
@@ -334,6 +511,9 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 fail_unreachable() {
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
   _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because it could not reach its gateway ($1). Run defenseclaw-gateway status to check it."
+  if _dc_answer="$(defenseclaw_gateway_error_answer "$1")"; then
+    _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because its gateway answered with an error (${_dc_answer}). Run defenseclaw doctor to see what to fix."
+  fi
 {{end}}  # A blocked Stop only keeps Codex running the turn (#1140).
   if defenseclaw_should_fail_closed_on_unreachable; then
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "$1" transport
@@ -379,16 +559,14 @@ fail_response() {
   exit 2
 }
 
-# W3C trace propagation: mapfile fills
-# TRACE_HEADER_ARGS with a sequence of `-H "traceparent: …"` /
-# `-H "tracestate: …"` arguments; invalid env values are dropped
-# by defenseclaw_extract_trace_context. On bash<4 the array stays
-# empty (set -u-safe expansion below) so older shells degrade
-# gracefully.
+# W3C trace propagation: TRACE_HEADER_ARGS gets a sequence of
+# `-H "traceparent: …"` / `-H "tracestate: …"` arguments; invalid env
+# values are dropped by defenseclaw_extract_trace_context.
 TRACE_HEADER_ARGS=()
-if command -v mapfile >/dev/null 2>&1; then
-  mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
-fi
+# A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
+while IFS= read -r trace_header_arg; do
+  TRACE_HEADER_ARGS+=("$trace_header_arg")
+done < <(defenseclaw_extract_trace_context)
 
 # Per-user attribution: the gateway cannot read the real user's identity from
 # its own service-account process, so the hook reports it.
@@ -450,7 +628,17 @@ if [ -n "${API_TOKEN}" ]; then
 fi
 {{if and .Managed (not .SecureClient)}}# Resolve write operands in the user's hook process; the managed gateway
 # cannot inspect this home under ProtectHome. Keep the payload off argv.
-_DC_RESOLVED_WRITES="$(/opt/defenseclaw/bin/defenseclaw-gateway hook resolve-writes < <(printf '%s' "${PAYLOAD}"))" || _DC_RESOLVED_WRITES=
+# The standalone gateway of this OS (managed.StandaloneLayoutFor): a macOS
+# hook ran the Linux path, which is not there, and wrote its shell error to
+# the agent on every call.
+case "${OSTYPE:-}" in
+  darwin*) _DC_MANAGED_GATEWAY=/opt/cisco/defenseclaw/bin/defenseclaw-gateway ;;
+  *) _DC_MANAGED_GATEWAY=/opt/defenseclaw/bin/defenseclaw-gateway ;;
+esac
+_DC_RESOLVED_WRITES=
+if [ -x "$_DC_MANAGED_GATEWAY" ]; then
+  _DC_RESOLVED_WRITES="$("$_DC_MANAGED_GATEWAY" hook resolve-writes < <(printf '%s' "${PAYLOAD}"))" || _DC_RESOLVED_WRITES=
+fi
 RESOLVED_HEADER_ARGS=()
 if [ -n "${_DC_RESOLVED_WRITES}" ]; then
   RESOLVED_HEADER_ARGS=(-H "X-DefenseClaw-Resolved-Writes: ${_DC_RESOLVED_WRITES}")
@@ -501,14 +689,19 @@ if [ "$CURL_STATUS" -eq 0 ]; then
 {{else}}  defenseclaw_retry_busy codex_gateway_post_response || CURL_STATUS=$?
 {{end}}fi
 API_TOKEN=
-PAYLOAD=
-AUTH_HEADER_ARGS=()
-unset API_TOKEN PAYLOAD
+{{if .SecureClient}}PAYLOAD=
+{{end}}AUTH_HEADER_ARGS=()
+unset API_TOKEN{{if .SecureClient}} PAYLOAD{{end}}
+# fail_unreachable reads the session id from PAYLOAD for the one outage
+# warning per session and the per-call audit row, as in the Claude Code hook:
+# drop the event only after it (GAP-1350, GAP-1352).
 if [ "$CURL_STATUS" -ne 0 ]; then
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}  defenseclaw_split_response
   defenseclaw_managed_http_result "$HTTP_CODE" incomplete
 {{end}}  fail_unreachable "$(defenseclaw_gateway_unreachable_reason 2>/dev/null || printf 'gateway unreachable')"
-fi{{end}}
+fi
+{{if not .SecureClient}}PAYLOAD=
+unset PAYLOAD{{end}}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')

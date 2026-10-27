@@ -48,6 +48,9 @@ class AppContext:
         # Config validation problems that ``status`` reports after rendering
         # (GAP-1788); every other command exits before running instead.
         self.config_problems: list[str] = []
+        # Why the config check did not run here (a sandbox hides folder
+        # owners); status shows it instead of an invalid config (GAP-1395).
+        self.config_not_checked: str = ""
 
 
 pass_ctx = click.make_pass_decorator(AppContext, ensure=True)

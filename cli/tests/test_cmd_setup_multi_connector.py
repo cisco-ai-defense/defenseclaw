@@ -1394,10 +1394,8 @@ class TestWriteConnectorIdentityUnit(unittest.TestCase):
         gc.hook_fail_mode = "closed"
         _write_connector_identity(self.app.cfg, "codex", "add")
         self.assertEqual(gc.connectors["claudecode"].hook_fail_mode, "")
-        # A per-user outage follows the default tier, whatever is saved
-        # (oss-outage-open); Secure Client keeps the global closed in observe
-        # and action mode.
-        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "open")
+        # The saved global closed choice applies to the seeded connector.
+        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
         gc._secure_client = True
         self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
         gc.connectors["claudecode"].mode = "action"
@@ -1614,6 +1612,29 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertEqual(set(gc.connectors), {"codex", "cursor"})
         self.assertEqual(gc.connector, "codex")
         self.assertEqual(self.app.cfg.claw.mode, "codex")
+
+    # GAP-2125: a running gateway tears the connector down on its config
+    # reload, so --no-restart must not say the hooks stay until a restart.
+    def test_remove_no_restart_says_the_running_gateway_applies_it_on_reload(self):
+        self._seed_map("codex", "cursor", "devin")
+        with self._no_restart_bounce():
+            result = _invoke(["remove", "devin", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        text = " ".join(result.output.split())
+        self.assertNotIn("still installed until you restart", text)
+        self.assertIn("removes the connector's hooks when it reloads the config", text)
+        self.assertIn("a stopped one removes them when it next starts", text)
+
+    # GAP-2125: a new primary (here the last connector) waits for a restart,
+    # so the restart text stays true there.
+    def test_remove_no_restart_of_the_primary_says_a_restart_applies_it(self):
+        self._seed_single("codex")
+        with self._no_restart_bounce():
+            result = _invoke(["remove", "codex", "--force", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        text = " ".join(result.output.split())
+        self.assertIn("still installed until you restart defenseclaw-gateway", text)
+        self.assertNotIn("when it reloads the config", text)
 
     # Removing the next-to-last retains its map entry so overrides stay lossless.
     def test_remove_retains_one_entry_map(self):
@@ -4012,8 +4033,8 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
                 self.assertEqual(gc.connectors[connector].mode, "action")
                 self.assertEqual(gc.connectors[connector].hook_fail_mode, "closed")
                 self.assertEqual(gc.effective_mode(connector), "action")
-                # Saved, but a per-user outage follows the default tier.
-                self.assertEqual(gc.effective_hook_fail_mode(connector), "open")
+                # An explicit saved closed choice wins over the default tier.
+                self.assertEqual(gc.effective_hook_fail_mode(connector), "closed")
 
 
     def test_toggling_one_connector_mode_lands_per_connector(self):

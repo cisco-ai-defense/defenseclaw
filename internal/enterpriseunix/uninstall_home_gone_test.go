@@ -18,11 +18,13 @@ import (
 	"testing"
 )
 
-// GAP-0553: when remove-all reports a user's registrations as pending (the
-// user's home is not available, or is gone with a removed AD mobile
-// account), a managed uninstall without --purge warns per_user_hooks_remaining
-// for that user and agent and goes on: the binaries and the deployment go.
-func TestUninstallWarnsAndGoesOnForAPerUserHomeThatIsNotAvailable(t *testing.T) {
+// GAP-0443 (was GAP-0553's warn-and-go-on rule): when remove-all reports a
+// user's registrations as pending because that live account's home is not
+// available, a managed uninstall without --purge stops before the binaries
+// and the deployment go (uninstall_incomplete) and names the next step; a
+// removed account's pending entry, which carries its reason, still warns
+// and goes on (below).
+func TestUninstallKeepsTheDeploymentForAPerUserHomeThatIsNotAvailable(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
@@ -31,16 +33,37 @@ func TestUninstallWarnsAndGoesOnForAPerUserHomeThatIsNotAvailable(t *testing.T) 
 				return CommandResult{Stdout: []byte(`{"ok":true,"removed":0,"pending":["sample-user/hermes"]}`)}, nil
 			}}
 			done := h.run(Options{Action: ActionUninstall})
-			requireOK(t, done)
-			got := messagesOf(done.Warnings, codePerUserHooks)
-			if !strings.Contains(got, "hermes hooks for user sample-user were not removed because that account's home is not available") {
-				t.Fatalf("the uninstall does not warn for the user whose home is not available: %q", got)
+			// GAP-0443: the registrations in a home that is not available
+			// (an unmounted volume) are kept as registrations: they would
+			// call a deleted hook binary when the home returns. The
+			// binaries and the deployment record stay so a rerun finishes.
+			got := messagesOf(done.Errors, codePerUserHooks)
+			if !strings.Contains(got, "hermes hooks for user sample-user were not removed because that account's home is not available, so a DefenseClaw registration may remain in it") ||
+				!strings.Contains(got, "make that home available (mount its volume) and rerun") {
+				t.Fatalf("the uninstall does not name the registration that may remain and the next step: %q", got)
 			}
-			if messagesOf(done.Errors, codePerUserHooks) != "" || messagesOf(done.Errors, codeUninstallIncomplete) != "" {
-				t.Fatalf("a home that is not available must not stop the uninstall: %+v", done.Errors)
+			// GAP-2134: an empty parent is also a deleted home of a
+			// per-domain layout; recreating the folder is the step that
+			// works. Removing the account does not: a targets.yaml row of
+			// a removed account still stops the uninstall.
+			if !strings.Contains(got, "if that home folder was deleted, recreate it as a folder the account owns and rerun") ||
+				strings.Contains(got, "remove the account") {
+				t.Fatalf("the uninstall offers a step that does not finish it, or not the one that does: %q", got)
 			}
+			if messagesOf(done.Errors, codeUninstallIncomplete) == "" {
+				t.Fatalf("an uninstall that keeps the deployment must say it stopped: %+v", done.Errors)
+			}
+			if !exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) || !exists(h.env.deploymentPath()) {
+				t.Fatal("the uninstall removed the binaries or the deployment record while a home was not available")
+			}
+			// Once the home is back, the rerun removes the rest.
+			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+				return CommandResult{Stdout: []byte(`{"ok":true,"removed":1}`)}, nil
+			}}
+			rerun := h.run(Options{Action: ActionUninstall})
+			requireOK(t, rerun)
 			if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) || exists(h.env.deploymentPath()) {
-				t.Fatal("the uninstall did not remove the binaries and the deployment record")
+				t.Fatal("the rerun did not remove the binaries and the deployment record")
 			}
 		})
 	}

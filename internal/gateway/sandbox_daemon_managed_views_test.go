@@ -303,7 +303,18 @@ func TestManagedStatusIdleReleaseKeepsGatewayAvailable(t *testing.T) {
 }
 
 func TestManagedStatusKeepsBindFailureUntilListenersRecover(t *testing.T) {
-	f := newSandboxDaemonFixture(t)
+	// freePort releases the port it found, so another test's leftover
+	// listener or an outgoing loopback connection could take the egress
+	// port before the recovery below binds it (CI saw sandbox_account_busy
+	// there). Hold the egress port until just before the recovery.
+	egressHold, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer egressHold.Close()
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.Settings.Operational.EgressPort = egressHold.Addr().(*net.TCPAddr).Port
+	})
 	f.run(t)
 	addr := f.d.api.SandboxIngressAddr()
 	squatter, err := net.Listen("tcp", addr)
@@ -328,8 +339,25 @@ func TestManagedStatusKeepsBindFailureUntilListenersRecover(t *testing.T) {
 	if err := squatter.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.d.ensureListeners(); err != nil {
+	if err := egressHold.Close(); err != nil {
 		t.Fatal(err)
+	}
+	// A port taken for a moment by another program is retried; one that
+	// stays in use (a listener this daemon did not close) still fails.
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		err := f.d.ensureListeners()
+		if err == nil {
+			break
+		}
+		failure := f.d.listenFailed.Load()
+		if failure == nil || !isAddrInUse(failure.err) || time.Now().After(deadline) {
+			part := ""
+			if failure != nil {
+				part = failure.part
+			}
+			t.Fatalf("listeners did not recover (part %q): %v", part, err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	if st := status(); !st.Available || st.Reason != "" || st.IngressAddr == "" || st.EgressAddr == "" {
 		t.Fatalf("recovered listener still unavailable: %+v", st)

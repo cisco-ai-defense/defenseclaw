@@ -134,18 +134,23 @@ func TestHostHookDoesNotSendAfterASeparatePeerCheck(t *testing.T) {
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	binary := filepath.Join(binDir, "defenseclaw-gateway")
 	marker := filepath.Join(dir, "native-args")
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$DC_NATIVE_MARKER\"\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	recordGatewayHelperForTest(t, hookDir, binary)
 	// The earlier listener check passes, then that listener vanishes. The
 	// native post refuses its newly connected peer; curl must never run.
-	script := `set -euo pipefail; . "$1"; API_ADDR=127.0.0.1:18960
+	script := `set -euo pipefail; . "$1"; HOOK_DIR="$2"; API_ADDR=127.0.0.1:18960
 defenseclaw_api_listener_unproven() { return 1; }
 curl() { echo leaked; }
 if defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 'secret payload' -H 'Authorization: Bearer secret'; then echo sent; else echo blocked; fi`
-	cmd := exec.Command("bash", "-c", script, "bash", helper)
+	cmd := exec.Command("bash", "-c", script, "bash", helper, hookDir)
 	cmd.Env = append(os.Environ(), "HOME="+home, "DEFENSECLAW_AGENT_HOME="+home, "DC_NATIVE_MARKER="+marker)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -179,17 +184,22 @@ func TestHostHookNativePostCarriesHeadersAndBodyOnStdin(t *testing.T) {
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	inputPath := filepath.Join(dir, "native-input.json")
 	binary := filepath.Join(binDir, "defenseclaw-gateway")
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\ncat > \"$DC_NATIVE_INPUT\"\nprintf '{\"action\":\"allow\"}\\n200'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	script := `set -euo pipefail; . "$1"; API_ADDR=127.0.0.1:18960
+	recordGatewayHelperForTest(t, hookDir, binary)
+	script := `set -euo pipefail; . "$1"; HOOK_DIR="$2"; API_ADDR=127.0.0.1:18960
 defenseclaw_api_listener_unproven() { return 1; }
 curl() { echo leaked; }
 defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 '{"private":"tool event"}' \
   -H 'Content-Type: application/json' -H 'Authorization: Bearer private-token'`
-	cmd := exec.Command("bash", "-c", script, "bash", helper)
+	cmd := exec.Command("bash", "-c", script, "bash", helper, hookDir)
 	cmd.Env = append(os.Environ(), "HOME="+home, "DEFENSECLAW_AGENT_HOME="+home, "DC_NATIVE_INPUT="+inputPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil || string(out) != "{\"action\":\"allow\"}\n200" {

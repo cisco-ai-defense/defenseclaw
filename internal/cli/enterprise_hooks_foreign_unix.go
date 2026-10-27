@@ -341,7 +341,8 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		// earlier enrollment pass wrote over the account's own hook script
 		// blocks every Claude Code tool call with no managed hook deciding:
 		// it goes (GAP-1829).
-		if len(cleanups) == 0 && len(names) == 0 && vscode == nil && (claudeManaged || !claudeKnown) {
+		if len(cleanups) == 0 && len(names) == 0 && vscode == nil && (claudeManaged || !claudeKnown) &&
+			!accountHasRemovedConnectorFiles(account.Home) {
 			continue
 		}
 		for index, name := range names {

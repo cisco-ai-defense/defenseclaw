@@ -112,7 +112,7 @@ def test_global_switch_sets_only_guardrail_mode(app) -> None:
 
 def test_cursor_mode_switch_keeps_its_fail_mode(app, restarts, rerenders) -> None:
     # The guardrail mode no longer pins Cursor's fail mode: like every other
-    # connector its outage mode follows the policy tier (oss-outage-open), so
+    # connector it keeps the explicitly saved mode, so
     # a mode switch re-renders no hook and restarts nothing.
     app.cfg.claw.mode = "cursor"
     app.cfg.guardrail.connector = "cursor"
@@ -120,7 +120,7 @@ def test_cursor_mode_switch_keeps_its_fail_mode(app, restarts, rerenders) -> Non
     assert payload["gateway"] == "live" and restarts == [] and rerenders == []
     _run(app, "observe")
     assert restarts == [] and rerenders == []
-    assert app.cfg.guardrail.effective_hook_fail_mode("cursor") == "open"
+    assert app.cfg.guardrail.effective_hook_fail_mode("cursor") == "closed"
 
 
 def test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode(app, restarts, rerenders) -> None:
@@ -130,8 +130,34 @@ def test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode(app, restart
     assert payload["gateway"] == "live" and rerenders == [] and restarts == []
     _, payload = _run(app, "observe", "--json")
     assert rerenders == [] and restarts == []
-    # The default tier's outage mode (oss-outage-open).
-    assert app.cfg.guardrail.effective_hook_fail_mode("codex") == "open"
+    # The fixture has an explicit saved closed choice.
+    assert app.cfg.guardrail.effective_hook_fail_mode("codex") == "closed"
+
+
+@pytest.mark.parametrize("scope", ["global", "connector", "clear"])
+@pytest.mark.parametrize("fail_mode", ["closed", "open"])
+def test_observe_message_scopes_policy_findings_and_closed_outages(app, monkeypatch, scope, fail_mode) -> None:
+    gc = app.cfg.guardrail
+    monkeypatch.setattr(type(gc), "effective_hook_fail_mode", lambda _self, _connector: fail_mode)
+    if scope == "global":
+        gc.mode = "action"
+        args = ("observe", "--json")
+    elif scope == "connector":
+        gc.mode = "action"
+        args = ("observe", "--connector", "codex", "--json")
+    else:
+        gc.connectors = {"codex": PerConnectorGuardrailConfig(mode="action")}
+        args = ("--clear", "--connector", "codex", "--json")
+
+    result, payload = _run(app, *args)
+    assert result.exit_code == 0, result.output
+    message = payload["message"]
+    assert "policy findings" in message
+    assert "blocks nothing" not in message
+    if fail_mode == "closed":
+        assert "gateway outage" in message and "deny" in message
+    else:
+        assert "gateway outage" not in message
 
 
 def test_connector_override_created_on_a_single_install(app, restarts, rerenders) -> None:
@@ -152,7 +178,9 @@ def test_connector_override_created_on_a_single_install(app, restarts, rerenders
     assert payload["changed"] is False  # already there
     _, payload = _run(app, "--clear", "--connector", "codex", "--no-restart", "--json")
     assert (payload["mode"], payload["mode_source"], payload["gateway"]) == ("observe", "global", "live")
-    assert gc.connectors["codex"].mode == ""
+    # guardrail.connector already lists codex, so its emptied entry goes (GAP-1954).
+    assert "codex" not in gc.connectors
+    assert app.cfg.active_connectors() == ["codex"]
 
 
 def test_connector_scope_leaves_peers_alone_and_global_names_overrides(app) -> None:
@@ -208,6 +236,36 @@ def test_action_switch_probes_versions_and_refuses_an_unverified_connector(
     # Switching back to observe needs no probe.
     _run(app, "observe", "--json")
     assert calls == ["codex", "codex"]
+
+
+def test_kiro_below_its_floor_is_refused_in_observe_too_so_the_switch_can_be_undone(app, monkeypatch, restarts) -> None:
+    # GAP-1638: kiro-cli 2.26.1 enrolled in action; `guardrail mode observe
+    # --connector kiro` succeeded, then `guardrail mode action --connector kiro`
+    # was refused, so the CLI could not undo its own switch. Setup refuses that
+    # version in every mode, and so does the observe switch now.
+    app.cfg.guardrail.connectors = {"codex": None, "kiro": None}
+    app.cfg.guardrail.connector = "codex"
+    monkeypatch.setattr(app.cfg, "active_connectors", lambda: ["codex", "kiro"])
+    monkeypatch.setattr(app.cfg.guardrail, "effective_mode", lambda c="": "action")
+    seen: list[tuple[str, str]] = []
+
+    def check(connector, *, mode, _refusal_scope=None, **_k):
+        seen.append((connector, mode))
+        if connector == "kiro" and _refusal_scope is not None:
+            _refusal_scope["observe_admitted"] = False
+            return False
+        return True
+
+    monkeypatch.setattr(cmd_setup, "_check_connector_version_supported_for_setup", check)
+    result, payload = _run(app, "observe", "--connector", "kiro", "--json")
+    assert result.exit_code == 1 and payload["ok"] is False and payload["changed"] is False
+    assert "observe and action mode" in payload["message"]
+    assert seen == [("kiro", "observe")]
+    app.cfg.save.assert_not_called()
+    # Other connectors still switch to observe without a probe.
+    seen.clear()
+    result, payload = _run(app, "observe", "--connector", "codex", "--json")
+    assert result.exit_code == 0 and seen == []
 
 
 def test_copilot_mode_switch_keeps_its_fail_mode(app) -> None:

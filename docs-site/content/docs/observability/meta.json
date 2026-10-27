@@ -1,0 +1,14 @@
+{
+  "title": "Observability",
+  "pages": [
+    "end-user-identity",
+    "local-observability",
+    "grafana-dashboards",
+    "agent360",
+    "sandbox-telemetry",
+    "galileo",
+    "splunk",
+    "webhooks",
+    "redaction"
+  ]
+}

@@ -102,6 +102,10 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 	legacy := renderHookAuditLegacyDetails(env)
 	combined := fmt.Sprintf("connector=%s %s details_json=%s",
 		env.Connector, legacy, strconv.Quote(jsonDetails))
+	auditSeverity := "INFO"
+	if env.Extra["bounded_prefix_review"] == "true" && (env.Action == "allow" || env.Action == "alert") {
+		auditSeverity = "HIGH"
+	}
 	return a.logger.LogEventCtx(ctx, audit.Event{
 		ID:          env.occurrenceID,
 		Generation:  env.configGeneration,
@@ -110,7 +114,7 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		Target:      env.Event,
 		Actor:       "defenseclaw",
 		Details:     combined,
-		Severity:    "INFO",
+		Severity:    auditSeverity,
 		Structured:  structured,
 		// Mirror the structured-envelope identity fields onto the
 		// dedicated SQLite columns (migration 16) so the column data
@@ -125,7 +129,7 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		// column, as on main (issue #1092).
 		RulePackDirInEnvelope: env.SecureClientRulePackDir != "",
 		// Carry the cloud-controlled per-inspection redaction directive
-		// (re-injected onto ctx before finalizeAgentHook) so the audit
+		// (re-injected onto ctx before finalizeAgentHookAnswer) so the audit
 		// sanitize + webhook fan-out honor it on the Details surface.
 		RedactionEnabled: redactionDecisionFromContext(ctx),
 	})
@@ -347,7 +351,7 @@ func (a *APIServer) effectiveRulePackDir(ctx context.Context, connector string) 
 }
 
 // stampHookEnvelopeIdentity fills the multi-connector identity fields on
-// a HookAuditEnvelope before finalizeAgentHook logs it. connectorName is
+// a HookAuditEnvelope before finalizeAgentHookAnswer logs it. connectorName is
 // threaded explicitly from the request
 // entry point; StepIdx comes from the per-turn populator; Enforced
 // reflects an actual block; RulePackDir from the effective resolver.

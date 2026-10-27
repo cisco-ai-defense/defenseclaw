@@ -228,6 +228,10 @@ type Store struct {
 	// (WithSecureClientSchema).
 	secureClientSchema bool
 
+	// prepared holds the repeated hook-call inserts, prepared once the store
+	// is ready (prepareStatements).
+	prepared atomic.Pointer[map[string]*sql.Stmt]
+
 	// lifecycleMu serializes initialization/close and lets mandatory v8
 	// event-history transactions pin a ready store until commit or rollback.
 	lifecycleMu sync.RWMutex
@@ -258,6 +262,9 @@ type Store struct {
 	// plannerStatsRows is the history size at the last ANALYZE
 	// (RefreshPlannerStatistics).
 	plannerStatsRows atomic.Int64
+	// observationGroup groups concurrent correlation observation writes
+	// into one transaction (CorrelationRepository.RecordObservations).
+	observationGroup writeGroup
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
@@ -1927,6 +1934,10 @@ var migrations = []migration{
 		description: configChangeRecordDigestMigrationDescription,
 		apply:       migrateAuditEventRecordDigest,
 	},
+	{
+		description: sparseKeyIndexesMigrationDescription,
+		apply:       migrateSparseKeyIndexes,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -2050,6 +2061,9 @@ func (s *Store) Init() error {
 	if err := s.trimUnreadAuditIndexes(); err != nil {
 		return err
 	}
+	if err := s.keepSecureClientSparseKeyIndexes(); err != nil {
+		return err
+	}
 	if purgedHistory {
 		s.reclaimPurgedHistory()
 	}
@@ -2138,6 +2152,7 @@ func (s *Store) Init() error {
 		return fmt.Errorf("audit: revalidate database paths after initialization: %w", err)
 	}
 
+	s.prepareStatements(context.Background())
 	s.ready.Store(true)
 	return nil
 }

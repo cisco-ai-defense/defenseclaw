@@ -53,7 +53,7 @@ func TestManagedNativeHookIgnoresAnOpenFailMode(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("DEFENSECLAW_HOME", home)
 		t.Setenv("DEFENSECLAW_FAIL_MODE", "")
-		writeHookSidecarForTest(t, home, `{"version":2,"fail_modes":{"codex":"open"}}`)
+		writeHookSidecarForTest(t, home, `{"version":2,"managed_enterprise":true,"fail_modes":{"codex":"open","claudecode":"closed"},"fail_mode_sources":{"codex":"config"}}`)
 		previous := secureClientHost
 		secureClientHost = func() bool { return secureClient }
 		opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "open", true)

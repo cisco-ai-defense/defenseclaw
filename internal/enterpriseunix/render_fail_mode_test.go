@@ -39,3 +39,22 @@ func TestOpenHookConnectorsFollowTheAdministratorsConfig(t *testing.T) {
 		t.Fatalf("no config: %q", got)
 	}
 }
+
+// GAP-0362 (LEAD DECISION): an administrator's explicit per-connector open
+// for a connector outside the enrolled list (Hermes registered per user on a
+// managed host) reaches the descriptor, so the native managed hook honours
+// it during an outage; a closed peer stays closed.
+func TestOpenHookConnectorsKeepAnExplicitOpenOutsideTheEnrolledList(t *testing.T) {
+	loaded := &config.Config{DeploymentMode: "managed_enterprise"}
+	loaded.Enterprise.Profile = "standalone"
+	loaded.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":      {HookFailMode: "open"},
+		"claudecode": {HookFailMode: "closed"},
+		"hermes":     {HookFailMode: "open"},
+		"kiro":       {HookFailMode: "closed"},
+	}
+	cfg := &validatedConfig{Connectors: []string{"codex", "claudecode"}, Loaded: loaded}
+	if got := strings.Join(openHookConnectors(cfg, []string{"codex", "claudecode"}), ","); got != "codex,hermes" {
+		t.Fatalf("open hook connectors = %q, want codex,hermes", got)
+	}
+}

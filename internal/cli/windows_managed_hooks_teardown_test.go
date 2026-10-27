@@ -57,7 +57,7 @@ func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
 		}
 		actions = append(actions, child.Name())
 	}
-	if !slices.Equal(actions, []string{"capabilities", "finalize", "prepare", "rollback", "verify"}) {
+	if !slices.Equal(actions, []string{"capabilities", "finalize", "prepare", "purge-user-state", "rollback", "verify"}) {
 		t.Fatalf("actions = %v", actions)
 	}
 }

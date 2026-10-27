@@ -12,9 +12,11 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -41,10 +43,12 @@ var apiListenTCP = func(ctx context.Context, addr string) (net.Listener, error) 
 }
 
 // acquireAPIListener returns the API listener: the socket-activated "api"
-// descriptor when systemd passed one, otherwise a bound listener. An
-// inherited socket must be exactly the configured api_bind:api_port — a
-// mismatch fails closed rather than silently serving the API somewhere the
-// managed config did not name.
+// descriptor when systemd or launchd passed one, otherwise a bound listener.
+// An inherited socket must be exactly the configured api_bind:api_port — on
+// Linux a mismatch fails closed rather than silently serving the API
+// somewhere the managed config did not name. The macOS plist declares the
+// default address only. A standalone managed gateway must adopt that socket;
+// only other profiles may bind a configured address in its place.
 func (a *APIServer) acquireAPIListener(ctx context.Context) (net.Listener, error) {
 	listener, inherited, err := inheritedAPIListener()
 	if err != nil {
@@ -53,12 +57,31 @@ func (a *APIServer) acquireAPIListener(ctx context.Context) (net.Listener, error
 	if inherited {
 		if err := inheritedAddrMatches(listener.Addr(), a.addr); err != nil {
 			_ = listener.Close()
-			return nil, err
+			if !apiInheritedMismatchBinds || a.scannerCfg != nil && a.scannerCfg.StandaloneEnterprise() {
+				return nil, err
+			}
+			fmt.Fprintf(os.Stderr, "[sidecar-api] %v; binding the configured address instead\n", err)
+			return listenWithRetry(ctx, a.addr, apiListenRetryBudget)
 		}
 		return listener, nil
 	}
+	if apiInheritedMismatchBinds && a.scannerCfg != nil && a.scannerCfg.StandaloneEnterprise() {
+		// GAP-1086: launchd holds the managed API port across restarts only
+		// while its job declares the socket. Under an older job the gateway
+		// would bind the port itself, and every restart would free it for
+		// another account while native exporters keep sending to it.
+		return nil, errors.New("api: the managed gateway's launchd job holds no API socket, so the port " +
+			"would be free while the gateway restarts; reload the job: launchctl bootout " +
+			"system/com.cisco.defenseclaw.gateway, then launchctl bootstrap system " +
+			"/Library/LaunchDaemons/com.cisco.defenseclaw.gateway.plist")
+	}
 	return listenWithRetry(ctx, a.addr, apiListenRetryBudget)
 }
+
+// apiInheritedMismatchBinds is true where the inherited API socket's address
+// is fixed by the installed service definition rather than the config
+// (launchd). Replaceable in tests.
+var apiInheritedMismatchBinds = runtime.GOOS == "darwin"
 
 // retryAPIListenerBind keeps trying to bind the API address after the first
 // bind found it held, and hands the listener to Run through bound. It stops

@@ -792,7 +792,7 @@ def _any_pwsh7() -> str | None:
     return next((c for c in candidates if c and Path(c).is_file()), None)
 
 
-_ROTATION_FUNCTIONS = ("Get-WrapperSecretErrorCode", "Set-WrapperSecret", "Get-WrapperRotationJournal",
+_ROTATION_FUNCTIONS = ("Get-WrapperSecretErrorCode", "Get-WrapperSecretErrorMessage", "Set-WrapperSecret", "Get-WrapperRotationJournal",
                        "Get-WrapperConfirmedBundle", "Get-WrapperJournalEntryName", "Get-WrapperInstalledConfigIdentity",
                        "Get-WrapperRotatedValueDigest",
                        "Get-WrapperStoredSecretPath", "Initialize-WrapperRotationJournal", "Test-WrapperJournalEntry",
@@ -3292,7 +3292,7 @@ def test_intune_package_config_version_with_crlf(
 
 
 def test_intune_config_change_docs_explain_the_version_pin() -> None:
-    page = _text(ROOT / "docs-site/content/docs/enterprise/mdm/intune/windows.mdx")
+    page = _text(ROOT / "docs-site/content/docs/enterprise/mdm/intune-windows.mdx")
     section = page.split("**Change the config.**", 1)[1].split("**Roll back.**", 1)[0]
     assert "config_version: 9" in section
     assert "packager\nrefuses a missing or older version" in section

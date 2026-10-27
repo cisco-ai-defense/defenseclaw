@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -124,6 +125,39 @@ func TestSafeEvaluateHookManagedStandalonePanicReturnsNativeDeny(t *testing.T) {
 		agentHookRequest{HookEventName: "UserPromptSubmit"}, nil, nil)
 	if kiro.Action != "block" || kiro.WouldBlock {
 		t.Errorf("Kiro UserPromptSubmit panic = %+v, want native block", kiro)
+	}
+}
+
+func TestManagedClaudeSessionStartFailureWatchesOnlyTheVerifiedCallerHome(t *testing.T) {
+	serviceHome, callerHome := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", serviceHome)
+	t.Setenv("USERPROFILE", serviceHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(serviceHome, ".claude"))
+	cfg := config.DefaultConfig()
+	cfg.DeploymentMode, cfg.Enterprise.Profile = managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone
+	api := &APIServer{scannerCfg: cfg}
+	for _, home := range []string{callerHome, ""} {
+		ctx := withManagedHookPeer(withServiceAccountGateway(context.Background()), managedHookPeer{UID: 1001, Home: home})
+		req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "SessionStart"}
+		resp, panicked := api.safeEvaluateHook(ctx, "claudecode", req,
+			[]byte(`{"hook_event_name":"SessionStart"}`), map[string]interface{}{}, hookProfileRuntime{
+				Evaluate: func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+					panic("managed SessionStart evaluation failure")
+				},
+			})
+		if !panicked {
+			t.Fatal("evaluation did not fail")
+		}
+		output, _ := resp.HookOutput["hookSpecificOutput"].(map[string]interface{})
+		paths, _ := output["watchPaths"].([]string)
+		if home != "" && !slices.Contains(paths, filepath.Join(home, ".claude", "settings.json")) {
+			t.Fatalf("failure watch list omitted the verified caller: %v", paths)
+		}
+		for _, path := range paths {
+			if strings.HasPrefix(path, serviceHome+string(filepath.Separator)) {
+				t.Fatalf("failure watch list included the service home: %v", paths)
+			}
+		}
 	}
 }
 
@@ -544,7 +578,9 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 		{"claudecode", "PreToolUse", "observe", "closed", "block"},
 		{"codex", "PreToolUse", "observe", "closed", "block"},
 		{"hermes", "pre_tool_call", "observe", "closed", "block"},
-		{"claudecode", "PostToolUse", "action", "closed", "block"},
+		// PostToolUse is advisory in Claude Code's contract: its native
+		// answer cannot refuse the completed call.
+		{"claudecode", "PostToolUse", "action", "closed", "allow"},
 	} {
 		t.Run(strings.Join([]string{tc.connector, tc.event, tc.mode, tc.failMode}, "/"), func(t *testing.T) {
 			previous, had := hookProfileRuntimes[tc.connector]
@@ -593,8 +629,8 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 			if row.Structured["result"] != "panic" || row.Structured["action"] != tc.wantAction || row.Structured["would_block"] != wantWouldBlock {
 				t.Fatalf("audit=%v, want panic/%s/would_block=%v", row.Structured, tc.wantAction, wantWouldBlock)
 			}
-			if tc.event == "PostToolUse" && !decisionIsDenied(response["claude_code_output"]) {
-				t.Fatalf("post-tool output=%v, want a closed-failure denial", response["claude_code_output"])
+			if tc.event == "PostToolUse" && (decisionIsDenied(response["claude_code_output"]) || row.Enforced) {
+				t.Fatalf("post-tool output=%v enforced=%v, want the advisory answer", response["claude_code_output"], row.Enforced)
 			}
 			extra, _ := row.Structured["extra"].(map[string]any)
 			if extra["panic"] != "true" {
@@ -932,8 +968,11 @@ func TestHookEvaluatorPanicRuleForEveryRegisteredEvent(t *testing.T) {
 								t.Fatalf("panic response=%+v, want a neutral allow that does not repeat the hook", resp)
 							}
 						default:
-							if resp.Action != "block" || resp.Mode != "action" || resp.WouldBlock {
-								t.Fatalf("panic response=%+v, want closed block/action", resp)
+							// A certified block event blocks; an advisory event keeps
+							// the allow with would_block its native hook can carry
+							// (TestHookEvaluatorPanicActionFollowsNativeControl).
+							if want := panicNativeActionOracle(connectorName, event, profile); resp.Action != want || resp.Mode != "action" || resp.WouldBlock != (want == "allow") {
+								t.Fatalf("panic response=%+v, want %s in action mode", resp, want)
 							}
 						}
 					})

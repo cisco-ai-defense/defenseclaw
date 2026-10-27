@@ -401,7 +401,7 @@ func TestShellHooksForwardANativeObjectThatAgrees(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
 			t.Cleanup(server.Close)
 			hooks := renderPerUserShellHooksAt(t, row.tc, data, "open", strings.TrimPrefix(server.URL, "http://"))
-			installNativeGatewayForHookTest(t, data)
+			installNativeGatewayForHookTest(t, data, hooks)
 			var args []string
 			if row.tc.conn.Name() == "codex" {
 				args = codexBoundShellHookArgsForTest(t, "codex-hook.sh", row.event)[1:]

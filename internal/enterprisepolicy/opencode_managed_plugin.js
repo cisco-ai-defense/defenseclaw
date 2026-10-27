@@ -187,24 +187,36 @@ function defenseclawForeignHookCheck(event, cwd) {
 }
 
 // defenseclawStartupGuard asks the hook binary for the foreign-plugin
-// guard's decision once at load: a foreign plugin present now keeps running
-// for this process even if its file is deleted later. It resolves to a block
-// reason or "".
+// guard's decision at load: a foreign plugin present now keeps running for
+// this process even if its file is deleted later. It resolves to
+// { reason, retryable }. Only a confirmed decision holds for the process; a
+// check that could not run, or a deny the guard marks retryable (its gateway
+// could not answer and its scan found no unapproved plugin), is asked again
+// on the next tool call, so a session started during an outage runs again
+// once the gateway is back (GAP-1017, GAP-1180, GAP-1520).
 async function defenseclawStartupGuard(cwd) {
   const result = await defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
   if (!result.ok || result.code !== 0) {
-    if (await defenseclawDeploymentRemoved()) return "";
-    // OpenCode loads plugins once, so this block holds for the life of the
-    // process: say to restart the agent.
+    if (await defenseclawDeploymentRemoved()) return { reason: "", retryable: false };
     const detail = String(result.error || "exit " + result.code).split(/\r?\n/)[0].trim();
-    return "DefenseClaw could not check for unapproved plugins when the agent started (" + detail +
-      "), so this tool call is blocked. Restart the agent once DefenseClaw is available.";
+    return {
+      reason: "DefenseClaw could not check for unapproved plugins when the agent started (" + detail +
+        "), so this tool call is blocked. Try again once DefenseClaw is available.",
+      retryable: true,
+    };
   }
   const verdict = defenseclawLastJSON(result.stdout);
-  if (verdict && verdict.deny === false) return "";
-  return verdict && typeof verdict.reason === "string" && verdict.reason
-    ? verdict.reason
-    : "DefenseClaw blocked this tool call because an unapproved plugin is present.";
+  if (verdict && verdict.deny === false) {
+    // foreign_hooks report: the unapproved plugin runs, and the guard names
+    // its file and digest for the user (GAP-0697).
+    return { reason: "", retryable: false, warnings: Array.isArray(verdict.warnings) ? verdict.warnings.map(String) : [] };
+  }
+  return {
+    reason: verdict && typeof verdict.reason === "string" && verdict.reason
+      ? verdict.reason
+      : "DefenseClaw blocked this tool call because an unapproved plugin is present.",
+    retryable: Boolean(verdict && verdict.retryable === true),
+  };
 }
 
 // defenseclawBlockError is the error a blocked tool call fails with. OpenCode
@@ -284,6 +296,12 @@ async function defenseclawSend(event, payload) {
     return { reason: "DefenseClaw hook failed closed (empty response)", mode: "" };
   }
   if (result.code !== 0) {
+    // A fail-closed hook names why in its deny body (a stopped gateway and
+    // what to do, GAP-0850, GAP-1080); keep that text, not only the status.
+    const denied = data && data.hook_output;
+    if (denied && (denied.decision === "deny" || denied.decision === "block") && typeof denied.reason === "string" && denied.reason.trim()) {
+      return { reason: denied.reason.trim(), mode: "" };
+    }
     return { reason: "DefenseClaw hook failed closed (exit " + result.code + ")", mode: "" };
   }
   if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
@@ -343,7 +361,8 @@ function defenseclawLifecyclePayload(event, cwd) {
 
 export const DefenseClawManaged = async ({ client, directory, worktree }) => {
   const cwd = directory || worktree || "";
-  const startupGuard = defenseclawStartupGuard(cwd);
+  let startupGuard = defenseclawStartupGuard(cwd);
+  let warned = false;
   return {
     config: async (config) => {
       defenseclawConfigure(config);
@@ -368,12 +387,21 @@ export const DefenseClawManaged = async ({ client, directory, worktree }) => {
     },
     // Throwing aborts the tool. The decision is resolved before the throw.
     "tool.execute.before": async (input, output) => {
-      const blocked = await startupGuard;
-      if (blocked) {
-        // The load-time block holds for this process; checking again only
-        // lets the gateway record this denied call.
-        await defenseclawForeignHookCheck("tool.execute.before", cwd);
-        throw defenseclawBlock(client, blocked);
+      let startup = await startupGuard;
+      if (startup.retryable) {
+        // The load-time check could not get an answer: ask again now.
+        startupGuard = defenseclawStartupGuard(cwd);
+        startup = await startupGuard;
+      }
+      if (startup.reason) {
+        // A confirmed load-time block holds for this process; checking
+        // again only lets the gateway record this denied call.
+        if (!startup.retryable) await defenseclawForeignHookCheck("tool.execute.before", cwd);
+        throw defenseclawBlock(client, startup.reason);
+      }
+      if (!warned && startup.warnings && startup.warnings.length) {
+        warned = true;
+        defenseclawShowNotice(client, "DefenseClaw warning: " + startup.warnings.join("; "), "warning");
       }
       const mcpIdentity = defenseclawResolveMCPServer(input && input.tool);
       const verdict = await defenseclawSend(

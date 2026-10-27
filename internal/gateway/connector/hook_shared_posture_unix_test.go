@@ -501,9 +501,19 @@ func TestSharedInspectHooksNeverTakeAPeersOpenMode(t *testing.T) {
 							t.Fatalf("the upgrade did not keep the legacy open mode (%v):\n%s", err, body)
 						}
 					}
+					// A disabled DEFENSECLAW_HOME takes the early exit that reads
+					// the shared mode (a missing one keeps the installed folder,
+					// GAP-1256).
+					retired := filepath.Join(dataDir, "retired")
+					if err := os.MkdirAll(retired, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(retired, ".disabled"), nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
 					cmd := exec.Command("bash", filepath.Join(hookDir, invoke.script))
 					cmd.Stdin = strings.NewReader(invoke.stdin)
-					cmd.Env = append(sanitizedTestEnv(), "HOME="+dataDir, "DEFENSECLAW_HOME="+filepath.Join(dataDir, "missing"))
+					cmd.Env = append(sanitizedTestEnv(), "HOME="+dataDir, "DEFENSECLAW_HOME="+retired)
 					if selector != "" {
 						cmd.Env = append(cmd.Env, "DEFENSECLAW_CONNECTOR="+selector)
 					}

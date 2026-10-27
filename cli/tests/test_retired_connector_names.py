@@ -84,7 +84,7 @@ DESKTOP_ONLY_FILES = frozenset(
         "internal/legacyconnector/legacyconnector_test.go",
         # IDE inventory: legacy Desktop folders are reported as Devin Desktop,
         # and the page names the old product so admins can find it (GAP-0418).
-        "docs-site/content/docs/reference/scanning/ai-discovery.mdx",
+        "docs-site/content/docs/ai-discovery.mdx",
     }
 )
 # Third-party VS Code extension ids the IDE inventory flags as AI extensions
@@ -94,7 +94,7 @@ THIRD_PARTY_EXTENSION_IDS = ("google." + _GEMINI + "-" + _CLI + "-vscode-ide-com
 UNRESTRICTED_FILES = frozenset({"CHANGELOG.md"})
 # The full notes live in the appendix; the upgrade page keeps a short pointer
 # section of the same name.
-UPGRADE_GUIDE = "docs-site/content/docs/appendix/upgrade-from-0-8.mdx"
+UPGRADE_GUIDE = "docs-site/content/docs/get-started/upgrade.mdx"
 UPGRADE_GUIDES = frozenset({UPGRADE_GUIDE, "docs-site/content/docs/get-started/upgrade.mdx"})
 UPGRADE_SECTION = "## Renamed and removed connectors"
 # Released hook renders the upgrade tests run byte for byte, as they shipped.

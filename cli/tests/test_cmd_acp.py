@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,17 @@ from defenseclaw.commands.cmd_acp import _write_token, acp_cmd
 from defenseclaw.config import ACPBinding, ACPProfile
 
 from tests.helpers import cleanup_app, make_app_context
+
+
+def _repair_command(*args: str) -> str:
+    """The `defenseclaw` command line setup_repair_command prints for *args*.
+
+    On Windows every argument is a PowerShell single-quoted literal, so a
+    pasted path with spaces or quotes stays one argument.
+    """
+    if os.name == "nt":
+        return "defenseclaw " + " ".join("'" + value.replace("'", "''") + "'" for value in args)
+    return shlex.join(["defenseclaw", *args])
 
 
 def _binary(path: Path) -> str:
@@ -170,6 +182,32 @@ def test_setup_activate_and_remove_are_surgical(tmp_path, monkeypatch):
         cleanup_app(app, db_path, data_dir)
 
 
+def test_remove_takes_out_the_profiles_setup_wrote(tmp_path, monkeypatch):
+    # GAP-1589: setup --profile wrote acp.profiles.<name>; remove left it,
+    # and the acp section, in config.yaml.
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    agent = _binary(tmp_path / "kiro-cli")
+    try:
+        with patch("defenseclaw.commands.cmd_acp._agent_version", return_value="v"):
+            result = CliRunner().invoke(
+                acp_cmd,
+                ["setup", "--client", "zed", "--agent", "kiro", "--profile", "nosuchprof",
+                 "--guard-binary", guard, "--agent-binary", agent],
+                obj=app,
+            )
+        assert result.exit_code == 0, result.output
+        assert "new profile nosuchprof" in result.output
+        assert "nosuchprof" in app.cfg.acp.profiles
+        result = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert app.cfg.acp.profiles == {}
+        assert not app.cfg.acp.enabled
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
 def test_setup_rolls_back_client_token_and_lock_when_config_save_fails(tmp_path, monkeypatch):
     _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
@@ -266,7 +304,9 @@ def test_doctor_reports_acp_bindings_and_fails_on_drift(tmp_path, monkeypatch):
         [row] = drifted.checks
         assert row["status"] == "fail"
         assert "agent executable digest has drifted" in row["detail"]
-        assert row["remediation"].startswith("defenseclaw acp setup --client zed --agent kiro --profile default")
+        assert row["remediation"].startswith(
+            _repair_command("acp", "setup", "--client", "zed", "--agent", "kiro", "--profile", "default")
+        )
         assert "--activate" not in row["remediation"]
     finally:
         cleanup_app(app, db_path, data_dir)
@@ -285,6 +325,14 @@ def test_verify_detects_client_configuration_drift(tmp_path, monkeypatch):
         )
         assert result.exit_code == 0, result.output
         settings = _zed_settings(tmp_path)
+        # A lock from 1.0.4 or earlier pins the whole editor file (setup now
+        # pins the guarded entry, GAP-0504): any edit of that file is drift.
+        lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+        lock = json.loads(lock_path.read_text())
+        lock["client"]["config_sha256"] = hashlib.sha256(settings.read_bytes()).hexdigest()
+        cmd_acp_module.atomic_write_private_bytes(lock_path, json.dumps(lock).encode())
+        result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert result.exit_code == 0, result.output
         document = json.loads(settings.read_text())
         document["theme"] = "drifted"
         settings.write_text(json.dumps(document))
@@ -939,7 +987,8 @@ def test_source_install_and_doctor_fix_repin_only_defenseclaws_guard(tmp_path, m
         guard_path.write_bytes(b"upgraded-guard")
         agent_path.write_bytes(b"updated-agent")
         tag, plan = _fix_acp_guard_pins(app.cfg, assume_yes=True, plan_only=True)
-        assert tag == "plan" and "zed/kiro" in plan and "defenseclaw acp setup --client zed --agent kiro" in plan
+        repair = _repair_command("acp", "setup", "--client", "zed", "--agent", "kiro")
+        assert tag == "plan" and "zed/kiro" in plan and repair in plan
         assert _fix_acp_guard_pins(app.cfg, assume_yes=True)[0] == "pass"
         tag, detail = _fix_acp_guard_pins(app.cfg, assume_yes=True, plan_only=True)
         assert tag == "skip" and "pins are current" in detail

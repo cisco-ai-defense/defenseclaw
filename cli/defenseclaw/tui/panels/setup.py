@@ -1986,6 +1986,26 @@ def build_setup_sections(
             "Read-only effective plan; press E to manage destinations through setup observability.",
         ),
         ConfigSection("Webhooks", tuple(_webhook_summary_fields(cfg)), "Read-only notifier webhook summary."),
+        # The admission defaults had no row since the retired
+        # watch.allow_list_bypass_scan row went (GAP-1870).
+        ConfigSection(
+            "Admission Defaults",
+            (
+                # Unset inherits the built-in default, on: show it, so the
+                # Value column is not blank and the first toggle turns it off.
+                _field_with_original(
+                    _field(
+                        cfg,
+                        "Allow List Bypass",
+                        "admission.defaults.allow_list_bypass_scan",
+                        "bool",
+                        hint="On (default): a first-party allow-list entry installs without a scan; off: it is scanned.",
+                    ),
+                    _value(cfg, "admission.defaults.allow_list_bypass_scan") or "true",
+                ),
+            ),
+            "Admission defaults for skills, MCP servers and plugins.",
+        ),
         ConfigSection("Skill Admission", admission_action_fields("skill", cfg), "Skill admission action per severity."),
         ConfigSection("MCP Admission", admission_action_fields("mcp", cfg), "MCP admission action per severity."),
         ConfigSection("Plugin Admission", admission_action_fields("plugin", cfg), "Plugin admission action per severity."),
@@ -4393,7 +4413,9 @@ def _effective_strategy_text(cfg: object | Mapping[str, Any] | None, strategy: s
     return "regex_only (judge on for no active connector)"
 
 
-def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None) -> str:
+def wizard_state_summary(
+    wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None, observability: object | None = None
+) -> str:
     """One-line "here's what's configured today" string for the goal menu.
 
     Returns an empty string for wizards without a useful summary so the
@@ -4411,7 +4433,13 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         role = "judge+agent available" if _any_active_connector_is_proxy(cfg) else "judge only"
         return f"Main: {main}  ·  Judge: {judge}  ·  Connectors: {connector_summary} ({role})"
     if wizard == SetupWizard.REDACTION:
-        profile = _cfg_str(cfg, "observability.defaults.redaction_profile", "none") or "none"
+        # The loaded Config has no observability.defaults; the canonical
+        # status read from config.yaml does (GAP-1394).
+        profile = (
+            str(getattr(observability, "default_redaction_profile", "") or "")
+            or _cfg_str(cfg, "observability.defaults.redaction_profile", "none")
+            or "none"
+        )
         posture = "unredacted" if profile == "none" else "redacted"
         return f"Default profile: {profile} ({posture})  ·  Each observability destination can set its own profile"
     if wizard == SetupWizard.GUARDRAIL:

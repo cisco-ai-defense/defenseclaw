@@ -270,18 +270,15 @@ func TestWindowsCodexLifecycleKeepsAnAdministratorEditedDefenseClawGroup(t *test
 	}
 }
 
-// Loop round 5 review: an administrator who cuts the compact source from
-// this install's SessionStart matcher gets, byte for byte, the group a
-// release before the compact matcher rendered around the same command. The
-// uninstall took it as that release's group (its count-based removal and its
-// any-release sweep), so it deleted the administrator's edit. A removal now
-// takes this install's own command only in the group this install renders,
-// or in a group the recorded preimage holds (the earlier release's own
-// entry, GAP-0907); the edited group stays, no DefenseClaw content is
-// reported left, and its reference to the managed directory keeps the binary
-// removal unsafe. An upgrade still replaces the earlier release's group, and
-// the layout strip still takes it.
-func TestWindowsCodexUninstallKeepsAnAdministratorNarrowedSessionStart(t *testing.T) {
+// This install's command in the SessionStart group a release before the
+// compact matcher rendered (1.0.2, 1.0.3) is byte for byte what an
+// administrator who cuts the compact source from this install's matcher
+// gets. Nothing tells the two apart, and either runs the binary the
+// uninstall deletes, so a standalone removal takes it from any file: keeping
+// it stranded the uninstall on its managed-directory reference until
+// /uninstall FORCE=1 (GAP-0907). An upgrade still replaces the earlier
+// release's group, and the layout strip still takes it.
+func TestWindowsCodexUninstallTakesTheEarlierSessionStartShape(t *testing.T) {
 	contracts := KnownHookContracts("codex")
 	for _, contract := range contracts {
 		if !codexContractCertifiesCompactSessionStart(contract.ContractID) {
@@ -344,8 +341,8 @@ func TestWindowsCodexUninstallKeepsAnAdministratorNarrowedSessionStart(t *testin
 				if err != nil {
 					t.Fatalf("%s: %v", tc.name, err)
 				}
-				if got := windowsCodexTestCountGroup(t, cleaned, "SessionStart", wantNarrowed); got != 1 {
-					t.Errorf("%s: uninstall left %d copies of the administrator SessionStart group, want 1:\n%s", tc.name, got, cleaned)
+				if got := windowsCodexTestCountGroup(t, cleaned, "SessionStart", wantNarrowed); got != 0 {
+					t.Errorf("%s: uninstall left %d copies of the earlier SessionStart group, want 0:\n%s", tc.name, got, cleaned)
 					continue
 				}
 				if got := windowsCodexTestCountGroup(t, cleaned, "SessionStart", wantCompact); got != 0 {
@@ -357,8 +354,8 @@ func TestWindowsCodexUninstallKeepsAnAdministratorNarrowedSessionStart(t *testin
 				if exact, err := windowsCodexRequirementsContainExactManagedHook(cleaned, current); err != nil || exact {
 					t.Errorf("%s: an exact DefenseClaw group is reported left = %t, %v:\n%s", tc.name, exact, err, cleaned)
 				}
-				if references, err := windowsCodexOwnedPathReferenceCount(cleaned, current); err != nil || references == 0 {
-					t.Errorf("%s: references = %d, %v; the administrator group must keep the binary:\n%s", tc.name, references, err, cleaned)
+				if references, err := windowsCodexOwnedPathReferenceCount(cleaned, current); err != nil || references != 0 {
+					t.Errorf("%s: references = %d, %v; the uninstall would refuse:\n%s", tc.name, references, err, cleaned)
 				}
 			}
 

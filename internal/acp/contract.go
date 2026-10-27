@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
@@ -56,11 +58,18 @@ var editorOwnedEntryKeys = map[string]map[string]bool{
 	},
 }
 
-// ClientEntrySHA256 is the digest of agent's guarded entry in the editor
-// settings file at path: its JSON with sorted keys, so that the editor
-// rewriting the file around it, or reformatting it, leaves it unchanged. The
-// keys the editor owns for client are left out.
-func ClientEntrySHA256(path, clientID, agentID string) (string, error) {
+// ClientEntrySHA256 is the digest of the guarded entries in the editor
+// settings file at path: the entries that start the guard with the contract
+// lock at lockPath, as the editor starts them. Setup routes an adopted entry
+// (its own name) or a numbered one (the reserved name is taken) through the
+// guard, and those were pinned by the whole file, so a theme edit stopped
+// them (GAP-0504). With no such entry, or no lockPath, it is the entry under
+// agent's reserved name, as before. Each entry is its JSON with sorted keys,
+// so that the editor rewriting the file around it, or reformatting it, leaves
+// it unchanged; the keys the editor owns for client are left out. Several
+// entries (an adopted one next to the reserved one) are pinned together, as
+// one JSON object by name.
+func ClientEntrySHA256(path, clientID, agentID, lockPath string) (string, error) {
 	body, err := safefile.ReadRegularFileBounded(path, maxClientConfigBytes)
 	if err != nil {
 		return "", err
@@ -72,25 +81,187 @@ func ClientEntrySHA256(path, clientID, agentID string) (string, error) {
 		return "", err
 	}
 	servers, _ := document["agent_servers"].(map[string]any)
-	entry, ok := servers[ManagedEntryName(agentID)]
-	if !ok {
-		return "", fmt.Errorf("%s has no %s entry", path, ManagedEntryName(agentID))
-	}
-	if fields, isObject := entry.(map[string]any); isObject && len(editorOwnedEntryKeys[clientID]) > 0 {
-		pinned := make(map[string]any, len(fields))
-		for key, value := range fields {
-			if !editorOwnedEntryKeys[clientID][key] {
-				pinned[key] = value
-			}
+	guarded := map[string]any{}
+	for name, entry := range servers {
+		if lockPath != "" && entryStartsLock(entry, lockPath) {
+			guarded[name] = withoutEditorOwnedKeys(clientID, entry)
 		}
-		entry = pinned
 	}
-	canonical, err := json.Marshal(entry)
+	var pinned any
+	switch len(guarded) {
+	case 0:
+		entry, ok := servers[ManagedEntryName(agentID)]
+		if !ok {
+			return "", fmt.Errorf("%s has no %s entry", path, ManagedEntryName(agentID))
+		}
+		pinned = withoutEditorOwnedKeys(clientID, entry)
+	case 1:
+		for _, entry := range guarded {
+			pinned = entry
+		}
+	default:
+		pinned = guarded
+	}
+	canonical, err := json.Marshal(pinned)
 	if err != nil {
 		return "", err
 	}
 	digest := sha256.Sum256(canonical)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+// RecordedEntrySHA256 is the digest the per-user CLI keeps in its record of
+// the editor entries DefenseClaw wrote (cmd_acp._entry_digest, the
+// owned-entries.json record): the entry without the keys the editor owns, as
+// Python's json.dumps(sort_keys=True, separators=(",", ":"),
+// ensure_ascii=False) writes it. Enterprise setup records its entry with it,
+// so the CLI's verify and status know the entry is DefenseClaw's (GAP-2111).
+func RecordedEntrySHA256(clientID string, entry any) (string, error) {
+	var canonical strings.Builder
+	if err := writePythonJSON(&canonical, withoutEditorOwnedKeys(clientID, entry)); err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256([]byte(canonical.String()))
+	return hex.EncodeToString(digest[:]), nil
+}
+
+// writePythonJSON writes value as Python's compact, key-sorted json.dumps
+// with ensure_ascii=False. Map keys sort by code point, which for UTF-8 is
+// Go's byte order. Only the value kinds an editor entry holds are accepted.
+func writePythonJSON(out *strings.Builder, value any) error {
+	switch v := value.(type) {
+	case nil:
+		out.WriteString("null")
+	case bool:
+		out.WriteString(strconv.FormatBool(v))
+	case string:
+		writePythonJSONString(out, v)
+	case json.Number:
+		out.WriteString(v.String())
+	case []string:
+		items := make([]any, len(v))
+		for i, item := range v {
+			items[i] = item
+		}
+		return writePythonJSON(out, items)
+	case []any:
+		out.WriteByte('[')
+		for i, item := range v {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			if err := writePythonJSON(out, item); err != nil {
+				return err
+			}
+		}
+		out.WriteByte(']')
+	case map[string]any:
+		keys := make([]string, 0, len(v))
+		for key := range v {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		out.WriteByte('{')
+		for i, key := range keys {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			writePythonJSONString(out, key)
+			out.WriteByte(':')
+			if err := writePythonJSON(out, v[key]); err != nil {
+				return err
+			}
+		}
+		out.WriteByte('}')
+	default:
+		return fmt.Errorf("an editor entry value of type %T cannot be recorded", value)
+	}
+	return nil
+}
+
+// writePythonJSONString escapes as Python's json encoder with
+// ensure_ascii=False: the quote, the backslash, short forms for \b \f \n \r
+// \t, and \u00XX for the other control characters; everything else as is.
+func writePythonJSONString(out *strings.Builder, value string) {
+	out.WriteByte('"')
+	for _, r := range value {
+		switch r {
+		case '"':
+			out.WriteString(`\"`)
+		case '\\':
+			out.WriteString(`\\`)
+		case '\b':
+			out.WriteString(`\b`)
+		case '\f':
+			out.WriteString(`\f`)
+		case '\n':
+			out.WriteString(`\n`)
+		case '\r':
+			out.WriteString(`\r`)
+		case '\t':
+			out.WriteString(`\t`)
+		default:
+			if r < 0x20 {
+				fmt.Fprintf(out, `\u%04x`, r)
+			} else {
+				out.WriteRune(r)
+			}
+		}
+	}
+	out.WriteByte('"')
+}
+
+// withoutEditorOwnedKeys is entry without the keys the editor owns for client.
+func withoutEditorOwnedKeys(clientID string, entry any) any {
+	fields, isObject := entry.(map[string]any)
+	if !isObject || len(editorOwnedEntryKeys[clientID]) == 0 {
+		return entry
+	}
+	pinned := make(map[string]any, len(fields))
+	for key, value := range fields {
+		if !editorOwnedEntryKeys[clientID][key] {
+			pinned[key] = value
+		}
+	}
+	return pinned
+}
+
+// entryStartsLock reports whether an editor entry starts the guard with the
+// contract lock at lockPath: its guard options (flag and value pairs before
+// --, each once) carry --contract-lock with that path. cmd_acp._guard_options
+// reads the options the same way.
+func entryStartsLock(entry any, lockPath string) bool {
+	fields, _ := entry.(map[string]any)
+	args, _ := fields["args"].([]any)
+	end := -1
+	for i, arg := range args {
+		if arg == "--" {
+			end = i
+			break
+		}
+	}
+	if end < 0 || end%2 != 0 {
+		return false
+	}
+	options := make(map[string]string, end/2)
+	for i := 0; i < end; i += 2 {
+		flag, isFlag := args[i].(string)
+		value, isValue := args[i+1].(string)
+		if _, seen := options[flag]; !isFlag || !isValue || seen {
+			return false
+		}
+		options[flag] = value
+	}
+	value := options["--contract-lock"]
+	if value == "" {
+		return false
+	}
+	entryLock, err := filepath.Abs(value)
+	if err != nil {
+		return false
+	}
+	guardLock, err := filepath.Abs(lockPath)
+	return err == nil && samePath(entryLock, guardLock)
 }
 
 // ErrRuntimeContractMissing means the binding's contract lock file does not
@@ -183,7 +354,7 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 		{agentPath, lock.Agent.SHA256, "agent"},
 	} {
 		if pinned, entry := strings.CutPrefix(item.expected, EntryDigestPrefix); entry && item.label == "client configuration" && !secureClientHost() {
-			observed, digestErr := ClientEntrySHA256(item.path, clientID, agentID)
+			observed, digestErr := ClientEntrySHA256(item.path, clientID, agentID, path)
 			if digestErr != nil || !strings.EqualFold(observed, pinned) {
 				return fmt.Errorf("the %s entry in the editor settings file %s changed after setup (the contract lock pins it), "+
 					"so it must be set up again", ManagedEntryName(agentID), clientConfigPath)

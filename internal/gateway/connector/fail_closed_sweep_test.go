@@ -111,7 +111,7 @@ func TestInspectShellActionMatrixWithAndWithoutJQ(t *testing.T) {
 			for _, name := range []string{"inspect-request.sh", "inspect-tool.sh", "inspect-response.sh", "inspect-tool-response.sh"} {
 				t.Run(parser.name+"/"+verdict.name+"/"+name, func(t *testing.T) {
 					hookHome := t.TempDir()
-					installNativeGatewayForHookTest(t, hookHome)
+					installNativeGatewayForHookTest(t, hookHome, dir)
 					cmd := exec.Command("bash", filepath.Join(dir, name))
 					cmd.Env = append(os.Environ(), "PATH="+parser.path, "HOME="+hookHome, "DEFENSECLAW_HOME="+hookHome, "DEFENSECLAW_FAIL_MODE=closed")
 					cmd.Stdin = strings.NewReader(`{"tool":"Bash","input":"echo marker","content":"marker"}`)
@@ -258,7 +258,7 @@ func TestClosedShellHookRejectsMissingHome(t *testing.T) {
 		name, payload, decision string
 		args                    []string
 	}{
-		{"claude-code-hook.sh", `{"hook_event_name":"PreToolUse"}`, "", nil},
+		{"claude-code-hook.sh", `{"hook_event_name":"PreToolUse"}`, `"permissionDecision":"deny"`, nil},
 		{"copilot-hook.sh", `{}`, `"permissionDecision":"deny"`, []string{"--event", "preToolUse"}},
 		{"hermes-hook.sh", `{"event":"pre_tool_call"}`, `"action":"block"`, nil},
 		{"antigravity-hook.sh", `{}`, `"decision":"deny"`, []string{"PreToolUse"}},
@@ -268,11 +268,16 @@ func TestClosedShellHookRejectsMissingHome(t *testing.T) {
 			cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+filepath.Join(t.TempDir(), "missing"))
 			cmd.Stdin = strings.NewReader(tc.payload)
 			output, err := cmd.CombinedOutput()
-			if tc.decision != "" {
-				if err != nil || !strings.Contains(string(output), tc.decision) {
-					t.Fatalf("closed hook did not emit native denial: err=%v output=%q", err, output)
-				}
-			} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 2 {
+			// A missing DEFENSECLAW_HOME keeps the installed folder (GAP-1256),
+			// so the call reaches the absent gateway and the outage closes it
+			// with the connector's own denial, by exit 2 or a native answer.
+			exitTwo := false
+			if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 2 {
+				exitTwo = true
+			} else if err != nil {
+				t.Fatalf("closed hook failed: err=%v output=%q", err, output)
+			}
+			if !strings.Contains(string(output), tc.decision) || (!exitTwo && tc.decision == "") {
 				t.Fatalf("closed hook allowed missing home: err=%v output=%q", err, output)
 			}
 		})

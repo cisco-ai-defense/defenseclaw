@@ -155,6 +155,9 @@ func snapshotCodexSetupRuntime(opts SetupOpts, connector *CodexConnector) (codex
 	}
 	for _, path := range []string{
 		filepath.Join(hookDir, ".token"),
+		// The per-user hook writer records the gateway helper path here; a
+		// failed Setup puts it back as found like every other runtime file.
+		filepath.Join(hookDir, ".gateway-helper"),
 		filepath.Join(hookDir, hookConfigSidecarName),
 		filepath.Join(hookDir, hookConfigSidecarName+".lock"),
 		filepath.Join(hookDir, hookConfigSidecarName+".codex"),
@@ -405,7 +408,7 @@ func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
 	}
 	cfg := map[string]interface{}{}
 	if err := parseCodexTOML(data, &cfg); err != nil {
-		return refuseForAgentConfig(fmt.Errorf("Codex config %s does not parse (%v); fix the file, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+		return refuseForAgentConfig(fmt.Errorf("Codex config %s does not parse (%v); fix the file, then run: defenseclaw-gateway restart", codexTOMLErrorLocation(path, err), err)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if raw, exists := cfg["hooks"]; exists {
 		if _, ok := raw.(map[string]interface{}); !ok {

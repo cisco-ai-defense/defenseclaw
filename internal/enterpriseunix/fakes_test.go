@@ -341,9 +341,8 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (Comman
 		return CommandResult{Stdout: []byte(fmt.Sprintf(`{"effective_digest":%q,"config_generation":%d}`,
 			fakeAppliedPolicyDigest, state.Generation))}, nil
 	}
-	if len(args) > 0 && args[len(args)-1] == "--check" &&
-		strings.HasPrefix(strings.Join(args, " "), "enterprise hooks remove-all ") {
-		return CommandResult{Stdout: []byte(`{"ok":true}`)}, nil
+	if strings.HasPrefix(strings.Join(args, " "), "enterprise hooks remove-all ") {
+		return CommandResult{Stdout: []byte(`{"ok":true,"removed":0}`)}, nil
 	}
 	if len(args) == 1 && args[0] == "--version-json" {
 		version, ok := r.versions[name]
@@ -459,6 +458,16 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		PollInterval:   10 * time.Millisecond,
 		// No guardian runs in the fake host.
 		GuardianReportTimeout: 50 * time.Millisecond,
+	}
+	if goos == "darwin" {
+		// Nor its executable: kern.procargs2 and proc_pidpath of a live PID
+		// with a fake session's number named that process's image, so a
+		// supported npm Claude was judged by whatever ran under that PID on
+		// the macOS runner (TestManagedClaudeSupportedNPMScriptLaunchStaysCovered
+		// failed whenever PID 7181 was alive). Tests that model images set
+		// ProcessExecPath or ProcessImagePath after newTestHost.
+		env.ProcessExecPath = func(int) (string, error) { return "", errors.New("fake macOS host: no process executable") }
+		env.ProcessImagePath = func(int) (string, error) { return "", errors.New("fake macOS host: no process image") }
 	}
 	h.runner.installedGateway = filepath.Join(env.P(layout.BinDir), binGateway)
 	h.runner.policyState = func() configwrite.GenerationState {

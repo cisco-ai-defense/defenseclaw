@@ -295,6 +295,7 @@ type EventHistoryWriter struct {
 	generation         uint64
 	healthSequence     atomic.Uint64
 	appendCommitMu     sync.Mutex
+	group              writeGroup
 	healthMu           sync.Mutex
 	healthQueue        []EventHistoryHealthTransition
 	healthDraining     bool
@@ -386,8 +387,10 @@ func (writer *EventHistoryWriter) Append(
 
 // AppendContext validates that projection is the immutable local projection of
 // record, hashes and optionally signs its final serialization, then commits one
-// row atomically. It never falls back to record.Body or record.Bytes for stored
-// payload data.
+// row atomically. It never falls back to record.Body or record.Bytes for
+// stored payload data. Concurrent appends share one transaction (group
+// commit, writeGroup); each returns after its own row is
+// committed.
 func (writer *EventHistoryWriter) AppendContext(
 	ctx context.Context,
 	record observability.Record,
@@ -402,58 +405,7 @@ func (writer *EventHistoryWriter) AppendContext(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	release, err := writer.store.acquireReady()
-	if err != nil {
-		writer.reportHealthFailure(EventHistoryHealthWriteFailed, err, EventHistorySQLiteUnavailable)
-		return err
-	}
-	released := false
-	releaseReady := func() {
-		if !released {
-			release()
-			released = true
-		}
-	}
-	defer releaseReady()
-	err = retryBusyObserved(
-		ctx,
-		"v8_event_history_transaction",
-		writer.store.sqliteBusyObservabilityV8(),
-		func() error {
-			tx, beginErr := writer.store.db.BeginTx(ctx, nil)
-			if beginErr != nil {
-				return eventHistoryFailure(
-					EventHistoryHealthWriteFailed,
-					&eventHistoryWriteError{cause: beginErr},
-				)
-			}
-			outcome, appendErr := writer.appendContextTx(ctx, tx, record, projection)
-			if appendErr != nil {
-				_ = tx.Rollback()
-				return appendErr
-			}
-			if commitErr := writer.commitAppendTransactionContext(ctx, tx, outcome); commitErr != nil {
-				_ = tx.Rollback()
-				return eventHistoryFailure(
-					EventHistoryHealthWriteFailed,
-					&eventHistoryWriteError{cause: commitErr},
-				)
-			}
-			return nil
-		},
-	)
-	if err != nil {
-		// Health reporters may persist their own mandatory record through the
-		// same single-connection Store. Every failed attempt has ended before
-		// invoking external code so failure reporting cannot self-deadlock.
-		writer.stageAppendErrorClass(err, eventHistoryCallerGaveUpClass(ctx, err))
-		releaseReady()
-		writer.flushHealth()
-		return err
-	}
-	releaseReady()
-	writer.flushHealth()
-	return nil
+	return writer.appendGrouped(ctx, record, projection)
 }
 
 // AppendBatchContext commits records in one transaction, all or none, with
@@ -746,27 +698,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	if err != nil {
 		return eventHistoryAppendOutcome{}, eventHistoryFailure(EventHistoryHealthProjectionRejected, err)
 	}
-	_, err = txExecContextObserved(ctx, tx, "v8_event_history_insert", writer.store.sqliteBusyObservabilityV8(), `
-		INSERT INTO audit_events (
-			id, timestamp, action, target, actor, details, structured_json, severity,
-			run_id, trace_id, request_id, session_id, turn_id, agent_name, agent_instance_id,
-			policy_id, destination_app, tool_name, tool_id,
-			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id,
-			connector, step_idx, enforced, rule_pack_dir,
-			bucket, event_name, source, signal, bucket_catalog_version, payload_json, projected_record_json,
-			record_schema_version, projection_hash,
-			redaction_profile, mandatory, evaluation_id, scan_id, finding_id,
-			enforcement_action_id, payload_hmac, integrity_algorithm, integrity_key_id, record_sha256
-		) VALUES (
-			?, ?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?,
-			?, ?,
-			?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?
-		)`,
+	_, err = writer.store.txExecPrepared(ctx, tx, "v8_event_history_insert", eventHistoryInsertSQL,
 		record.RecordID(), record.Timestamp().Format(time.RFC3339Nano),
 		action, legacyTarget, legacyActor, legacyDetails, legacyStructured, legacySeverity,
 		nullStr(correlation.RunID), nullStr(correlation.TraceID), nullStr(correlation.RequestID),
@@ -821,6 +753,29 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	}
 	return outcome, nil
 }
+
+// eventHistoryInsertSQL inserts one v8 event-history row (txExecPrepared).
+const eventHistoryInsertSQL = `
+		INSERT INTO audit_events (
+			id, timestamp, action, target, actor, details, structured_json, severity,
+			run_id, trace_id, request_id, session_id, turn_id, agent_name, agent_instance_id,
+			policy_id, destination_app, tool_name, tool_id,
+			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id,
+			connector, step_idx, enforced, rule_pack_dir,
+			bucket, event_name, source, signal, bucket_catalog_version, payload_json, projected_record_json,
+			record_schema_version, projection_hash,
+			redaction_profile, mandatory, evaluation_id, scan_id, finding_id,
+			enforcement_action_id, payload_hmac, integrity_algorithm, integrity_key_id, record_sha256
+		) VALUES (
+			?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?,
+			?, ?,
+			?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?
+		)`
 
 // exactLogLifecycleAndExecution reads only the two registered canonical
 // lifecycle attributes. They are intentionally not generic Correlation fields,
@@ -1398,6 +1353,13 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 	return fallback
 }
 
+// enforcementBlockEvaluationSQL is enforcementBlockCompatibility's lookup;
+// the sparse-key index test runs EXPLAIN on it (GAP-1793).
+const enforcementBlockEvaluationSQL = `
+		SELECT COALESCE(payload_json, '') FROM audit_events
+		WHERE evaluation_id = ? AND event_name = ?
+		ORDER BY rowid DESC LIMIT 1`
+
 // enforcementBlockCompatibility names what a generated enforcement.block.applied
 // row blocked and why. That family carries only identifiers, so a guardrail
 // proxy prompt block was listed in alerts as "block | | enforcement.block.applied"
@@ -1405,10 +1367,7 @@ func projectedCompatibilityDetails(projection observabilityredaction.Projection,
 // projected into this table) holds the direction, rule ids and reason.
 func enforcementBlockCompatibility(ctx context.Context, tx *sql.Tx, evaluationID string) (string, string) {
 	var payload string
-	if err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(payload_json, '') FROM audit_events
-		WHERE evaluation_id = ? AND event_name = ?
-		ORDER BY rowid DESC LIMIT 1`,
+	if err := tx.QueryRowContext(ctx, enforcementBlockEvaluationSQL,
 		evaluationID, observability.TelemetryEventGuardrailEvaluationCompleted,
 	).Scan(&payload); err != nil {
 		return "", ""

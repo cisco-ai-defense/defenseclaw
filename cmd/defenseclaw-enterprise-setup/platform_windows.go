@@ -708,11 +708,41 @@ func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 	}
 	for name := range allowed {
 		path := filepath.Join(cleanStage, name)
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removeEnterpriseSetupStageEntry(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
-	return os.Remove(cleanStage)
+	return removeEnterpriseSetupStageEntry(cleanStage)
+}
+
+// enterpriseSetupStageRemoveWait bounds how long cleanup waits for a staged
+// file another process still holds. Tests lower it.
+var enterpriseSetupStageRemoveWait = 10 * time.Second
+
+// removeEnterpriseSetupStageFile is the removal cleanup makes. Tests
+// replace it.
+var removeEnterpriseSetupStageFile = os.Remove
+
+// removeEnterpriseSetupStageEntry removes one staged file or the empty
+// stage folder. Right after the lifecycle child exits, Windows can still
+// hold its image (defenseclaw.exe) for a moment, and an antivirus scan of a
+// new file opens it without delete sharing: the removal then fails with a
+// sharing violation or access denied although nothing is wrong. A refused
+// /ensure (exit 1639) became exit 1603 that way on a hosted runner. The
+// removal is retried until enterpriseSetupStageRemoveWait; a file still held
+// then fails the cleanup as before.
+func removeEnterpriseSetupStageEntry(path string) error {
+	deadline := time.Now().Add(enterpriseSetupStageRemoveWait)
+	delay := 25 * time.Millisecond
+	for {
+		err := removeEnterpriseSetupStageFile(path)
+		retryable := errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED)
+		if err == nil || !retryable || !time.Now().Add(delay).Before(deadline) {
+			return err
+		}
+		time.Sleep(delay)
+		delay = min(2*delay, 500*time.Millisecond)
+	}
 }
 
 // cleanupStaleEnterpriseSetupStage removes a renamed stale staging folder.

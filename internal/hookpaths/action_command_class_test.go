@@ -12,6 +12,7 @@ import (
 
 // These parser cases preserve audit classifications; enforcement requires a resolved protected target.
 func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -37,6 +38,7 @@ func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
 }
 
 func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -97,14 +99,27 @@ func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
 		{"ordinary redirect", `echo marker >> report.txt`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ActionCommandAuditReason(tc.command, cwd, home) != ""; got != tc.block {
-				t.Fatalf("unknown write = %t, want %t", got, tc.block)
+			want := tc.block
+			// A Windows home selects the PowerShell grammar. It records an
+			// unresolved path only for a write-capable program; cat only
+			// reads $source and its redirect target is an ordinary file.
+			if tc.name == "unknown read path in write statement" && actionWindowsHome(home) {
+				want = false
+			}
+			if got := ActionCommandAuditReason(tc.command, cwd, home) != ""; got != want {
+				t.Fatalf("unknown write = %t, want %t", got, want)
+			}
+			if tc.name == "unknown read path in write statement" {
+				if got := ActionCommandDecision(tc.command, cwd, home); got != "" {
+					t.Fatalf("ordinary redirect target decision = %q, want allow", got)
+				}
 			}
 		})
 	}
 }
 
 func TestR104ActionClassBoundedOrdinaryValues(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -155,6 +170,7 @@ func TestR104ActionClassBoundedOrdinaryValues(t *testing.T) {
 }
 
 func TestR104ActionClassWrapperRecursion(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {
@@ -203,6 +219,7 @@ func TestR104ActionClassWrapperRecursion(t *testing.T) {
 // Each lead gap is kept as a named row so a later parser change cannot
 // silently reopen one variant while the broader class tests stay green.
 func TestR104LeadGapCorpusPOSIX(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -224,10 +241,19 @@ func TestR104LeadGapCorpusPOSIX(t *testing.T) {
 			if reason := ActionCommandAuditReason(row.command, cwd, home); reason == "" {
 				t.Fatalf("missing audit reason for %q", row.command)
 			}
-			if row.gap != "GAP-0659 computed program" && ActionCommandDecision(row.command, cwd, home) == "" {
+			// The Windows grammar resolves paths lexically and does not follow
+			// the alias symlink to the key file, as for a plain
+			// `echo marker >> alias`; it keeps the audit reason above.
+			if row.gap != "GAP-0659 computed program" && !actionWindowsHome(home) &&
+				ActionCommandDecision(row.command, cwd, home) == "" {
 				t.Fatalf("resolved protected target allowed: %q", row.command)
 			}
 		})
+	}
+	// A child that names the key file is a protected target on every grammar.
+	child := `printf payload | xargs -I {} sh -c 'echo marker >> ~/.ssh/authorized_keys'`
+	if got := ActionCommandDecision(child, cwd, home); got != "protected-target" {
+		t.Errorf("xargs child naming the key file %q decision = %q", child, got)
 	}
 }
 
@@ -657,6 +683,7 @@ func TestR104ActionWindowsUninspectedScripts(t *testing.T) {
 }
 
 func TestR104ActionBoundedFunctionAndProcessInputs(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	if err := os.Mkdir(cwd, 0o700); err != nil {

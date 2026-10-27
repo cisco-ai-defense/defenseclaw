@@ -1509,7 +1509,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "probe received invalid exit code")
 		os.Exit(7)
 	}
-	fmt.Fprintln(os.Stdout, "probe stdout "+connector)
+	if answer, ok := os.LookupEnv("DC_TEST_STDOUT"); ok {
+		fmt.Fprintln(os.Stdout, answer)
+	} else {
+		fmt.Fprintln(os.Stdout, "probe stdout "+connector)
+	}
 	fmt.Fprintln(os.Stderr, "probe stderr "+connector)
 	time.Sleep(500 * time.Millisecond)
 	os.Exit(exitCode)
@@ -1539,19 +1543,38 @@ func main() {
 		t.Fatalf("write Copilot adapter: %v", err)
 	}
 
+	// GAP-0364: the Copilot adapter forwards a crashed launcher's output only
+	// when it is one whole native deny; a partial or other answer from a
+	// launcher that exited non-zero gets the adapter's own closed denial.
+	const adapterDeny = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}`
+	const wholeDeny = `{"permissionDecision":"deny","permissionDecisionReason":"blocked by policy \u003cr1\u003e"}`
+	str := func(s string) *string { return &s }
 	cases := []struct {
-		connector string
-		exitCode  int
+		name       string
+		connector  string
+		exitCode   int
+		stdout     *string
+		wantStdout string
 	}{
 		{connector: "codex", exitCode: 0},
 		{connector: "codex", exitCode: 1},
 		{connector: "codex", exitCode: 2},
 		{connector: "antigravity", exitCode: 2},
 		{connector: "copilot", exitCode: 0},
-		{connector: "copilot", exitCode: 2},
+		{connector: "copilot", exitCode: 2, wantStdout: adapterDeny},
+		{name: "copilot-exit-2-partial-deny", connector: "copilot", exitCode: 2,
+			stdout: str(`{"permissionDecision":"deny","permissionDecisionRea`), wantStdout: adapterDeny},
+		{name: "copilot-exit-1-whole-allow", connector: "copilot", exitCode: 1,
+			stdout: str(`{"permissionDecision":"allow"}`), wantStdout: adapterDeny},
+		{name: "copilot-exit-2-whole-deny", connector: "copilot", exitCode: 2,
+			stdout: str(wholeDeny), wantStdout: wholeDeny},
 	}
 	for _, testCase := range cases {
-		t.Run(fmt.Sprintf("%s-exit-%d", testCase.connector, testCase.exitCode), func(t *testing.T) {
+		name := testCase.name
+		if name == "" {
+			name = fmt.Sprintf("%s-exit-%d", testCase.connector, testCase.exitCode)
+		}
+		t.Run(name, func(t *testing.T) {
 			command := windowsNativePowerShellHookCommand(testCase.connector)
 			if testCase.connector == "copilot" {
 				command = copilotHookInvocationCommandForEvent(
@@ -1567,6 +1590,9 @@ func main() {
 					"DC_TEST_CONNECTOR="+testCase.connector,
 					fmt.Sprintf("DC_TEST_EXIT_CODE=%d", testCase.exitCode),
 				)
+				if testCase.stdout != nil {
+					cmd.Env = append(cmd.Env, "DC_TEST_STDOUT="+*testCase.stdout)
+				}
 				cmd.Stdin = strings.NewReader(`{"tool":"win-aud-069"}`)
 				var stdoutBuf, stderrBuf bytes.Buffer
 				cmd.Stdout = &stdoutBuf
@@ -1590,7 +1616,11 @@ func main() {
 				t.Fatalf("generated command exit = %d, want %d\ncommand: %s\nstdout: %s\nstderr: %s",
 					got, wantExitCode, command, stdout, stderr)
 			}
-			if got, want := strings.TrimSpace(stdout), "probe stdout "+testCase.connector; got != want {
+			want := testCase.wantStdout
+			if want == "" {
+				want = "probe stdout " + testCase.connector
+			}
+			if got := strings.TrimSpace(stdout); got != want {
 				t.Fatalf("generated command stdout = %q, want %q; stderr=%q", got, want, stderr)
 			}
 			if got, want := stderr, "probe stderr "+testCase.connector; !strings.Contains(got, want) {
@@ -2701,12 +2731,15 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 				t.Errorf("generated config survived teardown: %v", err)
 			}
-			// Connector teardown only unwires the agent config. Setup owns these
-			// managed sidecars until the enclosing lifecycle removes them.
-			for _, name := range []string{filepath.Base(tokenPath), hookConfigSidecarName} {
-				if _, err := os.Stat(filepath.Join(dataDir, "hooks", name)); err != nil {
-					t.Errorf("shared sidecar %s removed by connector teardown: %v", name, err)
-				}
+			// A per-user teardown revokes the connector's hook credential once
+			// VerifyClean proves the agent no longer registers it
+			// (revokePerUserHookAPIToken, 58ed56d79d); the shared hook config
+			// sidecar stays until the enclosing lifecycle removes it.
+			if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+				t.Errorf("hook credential %s survived a per-user teardown: %v", filepath.Base(tokenPath), err)
+			}
+			if _, err := os.Stat(filepath.Join(dataDir, "hooks", hookConfigSidecarName)); err != nil {
+				t.Errorf("shared sidecar %s removed by connector teardown: %v", hookConfigSidecarName, err)
 			}
 		})
 	}

@@ -18,6 +18,7 @@ import (
 // Parse uncertainty describes coverage. It does not prove a persistence
 // target. These rows exercise both the gateway-only and client-header routes.
 func TestBalancedActionOnlyResolvedProtectedTargets(t *testing.T) {
+	skipNativeWindowsHomeGrammar(t)
 	home, cwd := r104ReviewHome(t)
 	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "disklink")); err != nil {
 		t.Fatal(err)
@@ -158,6 +159,47 @@ func TestBalancedActionWindowsOrdinaryCommands(t *testing.T) {
 		t.Run(tc.command, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "exec_command", Command: tc.command,
 				CWD: "C:/work", ActiveHome: "C:/Users/alice", DialectHint: actionfacts.DialectPowerShell}
+			if got := trustedWindowsLocationAuthorizedKeysWrite(input); got != tc.blocked {
+				t.Fatalf("protected target = %t, want %t", got, tc.blocked)
+			}
+		})
+	}
+}
+
+func TestR104WindowsHomeHonorsExplicitPOSIXDialect(t *testing.T) {
+	input := actionfacts.Input{Tool: "exec_command", CWD: `C:\Users\alice\project`,
+		ActiveHome: `C:\Users\alice`, DialectHint: actionfacts.DialectPOSIX}
+	for _, tc := range []struct {
+		command string
+		blocked bool
+	}{
+		{`echo \$HOME/.ssh/authorized_keys`, false},
+		{`echo $HOME/.ssh/authorized_keys`, true},
+		{`echo marker > ~/.ssh/authorized_keys`, true},
+	} {
+		input.Command = tc.command
+		if got := trustedWindowsLocationAuthorizedKeysWrite(input); got != tc.blocked {
+			t.Errorf("%q: protected target = %t, want %t", tc.command, got, tc.blocked)
+		}
+	}
+}
+
+func TestR104WindowsPowerShellLiteralTargets(t *testing.T) {
+	input := actionfacts.Input{Tool: "exec_command", CWD: `C:\Users\alice\project`,
+		ActiveHome: `C:\Users\alice`, DialectHint: actionfacts.DialectPowerShell}
+	for _, tc := range []struct {
+		name, command string
+		blocked       bool
+	}{
+		{"escaped dollar", "Write-Output \"`$HOME/.ssh/authorized_keys\"", false},
+		{"line comment", `Write-Output ok # $HOME/.ssh/authorized_keys`, false},
+		{"block comment", `Write-Output ok <# $HOME/.ssh/authorized_keys #>`, false},
+		{"expanded dollar", `Write-Output $HOME/.ssh/authorized_keys`, true},
+		{"after block comment", `Write-Output ok <# $HOME/.ssh/authorized_keys #>; Write-Output $HOME/.ssh/authorized_keys`, true},
+		{"outer escape reaches nested PowerShell", "pwsh -Command \"Write-Output `$HOME/.ssh/authorized_keys\"", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input.Command = tc.command
 			if got := trustedWindowsLocationAuthorizedKeysWrite(input); got != tc.blocked {
 				t.Fatalf("protected target = %t, want %t", got, tc.blocked)
 			}

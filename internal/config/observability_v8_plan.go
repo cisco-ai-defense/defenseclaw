@@ -209,6 +209,18 @@ type ObservabilityV8EffectiveDestination struct {
 	// trace_policy.compatibility_aliases off. The switch is already part of
 	// the plan digest, so this needs no place in the reload identity.
 	managedAIDDeploymentAliasesOff bool
+	// localStack is set for the Splunk sink local Splunk setup recorded as
+	// its own (local_stack). Its exporter sends the HEC token only to a
+	// listener of this account (GAP-2115). Not part of any JSON or digest:
+	// the record is already in the source config.
+	localStack bool
+}
+
+// ObservabilityV8LocalStackSink reports whether destination is the Splunk
+// sink local Splunk setup recorded (local_stack). Only that record makes a
+// sink local; its name, address or credential never do.
+func ObservabilityV8LocalStackSink(destination ObservabilityV8EffectiveDestination) bool {
+	return destination.localStack
 }
 
 type ObservabilityV8Warning struct {

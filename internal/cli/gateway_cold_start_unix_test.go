@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func TestHookColdStartRefusesAfterStopDuringInstallAndAfterAFailure(t *testing.T
 		t.Fatalf("after start cleared the stop = %v", err)
 	}
 
-	lock := filepath.Join(dataDir, installLockName)
+	lock := filepath.Join(dataDir, ".install.lock")
 	if err := os.Mkdir(lock, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +58,57 @@ func TestHookColdStartRefusesAfterStopDuringInstallAndAfterAFailure(t *testing.T
 	}
 	if err := hookColdStartRefusal(dataDir, time.Now().Add(hookColdStartBackoff+time.Second)); err != nil {
 		t.Fatalf("after the backoff window = %v", err)
+	}
+}
+
+func TestHookColdStartIgnoresAbandonedInstallLock(t *testing.T) {
+	for _, tc := range []struct {
+		name, pid string
+		age       time.Duration
+	}{
+		{"dead installer", "99999999", 0},
+		// No clock (fix/r104-oss-outage-open identity rule): a pid no
+		// installer can have, the reader's own, is a reused pid.
+		{"pid reused by the reader", strconv.Itoa(os.Getpid()), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			lock := filepath.Join(dataDir, ".install.lock")
+			if err := os.Mkdir(lock, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if tc.pid != "" {
+				if err := os.WriteFile(filepath.Join(lock, "pid"), []byte(tc.pid+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.age != 0 {
+				then := time.Now().Add(-tc.age)
+				if err := os.Chtimes(lock, then, then); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := hookColdStartRefusal(dataDir, time.Now()); err != nil {
+				t.Fatalf("abandoned lock prevented cold start: %v", err)
+			}
+		})
+	}
+}
+
+// An old lock that names no installer pid yet is held: the identity rule
+// reads no clock, so the hooks do not start the gateway under it.
+func TestHookColdStartHoldsAnOldLockWithoutAnInstallerPid(t *testing.T) {
+	dataDir := t.TempDir()
+	lock := filepath.Join(dataDir, ".install.lock")
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	then := time.Now().Add(-11 * time.Minute)
+	if err := os.Chtimes(lock, then, then); err != nil {
+		t.Fatal(err)
+	}
+	if err := hookColdStartRefusal(dataDir, time.Now()); err == nil || !strings.Contains(err.Error(), "install") {
+		t.Fatalf("old lock without an installer pid = %v, want the install refusal", err)
 	}
 }
 
@@ -187,5 +239,50 @@ func TestHookColdStartEndsAtOnceWhileAnotherStartRuns(t *testing.T) {
 	}
 	if _, statErr := os.Stat(gatewayColdStartFailedPath(dataDir)); !os.IsNotExist(statErr) {
 		t.Fatalf("a hook start that ended beside another start recorded a failure: %v", statErr)
+	}
+}
+
+// GAP-2082: an upgrade that stopped between the binary swap and its finish
+// (power loss) leaves .install.lock with a dead installer and an
+// interrupted-install record beside it. The hooks no longer hold that lock
+// (GAP-1024), but neither a hook nor the watchdog may start the half-done
+// install: the cold start refuses with the install reason until the next
+// installer run finishes or undoes it. Without the record the dead
+// installer's lock is abandoned and the start goes ahead (control).
+func TestHookColdStartRefusesWhileAnInterruptedInstallWaitsForRecovery(t *testing.T) {
+	for _, record := range []string{"", "previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"} {
+		t.Run("record "+record, func(t *testing.T) {
+			dataDir := t.TempDir()
+			lock := filepath.Join(dataDir, ".install.lock")
+			if err := os.Mkdir(lock, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(lock, "pid"), []byte("99999999\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if record != "" {
+				if err := os.Mkdir(filepath.Join(dataDir, record), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := hookColdStartRefusal(dataDir, time.Now())
+			if record == "" {
+				if err != nil {
+					t.Fatalf("abandoned lock without a recovery record refused the start: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "install") {
+				t.Fatalf("pending recovery %s = %v, want the install refusal", record, err)
+			}
+			// A record without a lock is not an install: the installer
+			// removes the lock last only after it finished the recovery.
+			if err := os.RemoveAll(lock); err != nil {
+				t.Fatal(err)
+			}
+			if err := hookColdStartRefusal(dataDir, time.Now()); err != nil {
+				t.Fatalf("record %s without a lock refused the start: %v", record, err)
+			}
+		})
 	}
 }

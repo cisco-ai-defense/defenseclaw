@@ -25,16 +25,20 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// Payload binaries. The ACP mediator is optional.
+// Payload binaries. The ACP mediator is optional, and so is the scanner
+// runtime launcher: the packages install it with the runtime tree it runs
+// (<install root>/scanner-runtime, GAP-1527); 1.0.2 and 1.0.3 payloads and
+// the payload archive have neither.
 const (
 	binGateway      = "defenseclaw-gateway"
 	binHook         = "defenseclaw-hook"
 	binSensorHelper = "defenseclaw-sensor-helper"
 	binACP          = "defenseclaw-acp"
+	binScanners     = "defenseclaw-scanners"
 )
 
 var requiredBinaries = []string{binGateway, binHook, binSensorHelper}
-var optionalBinaries = []string{binACP}
+var optionalBinaries = []string{binACP, binScanners}
 
 // compilerInstallPath is shared by the package and payload channels so the
 // gateway finds its compiler under its own installation prefix.

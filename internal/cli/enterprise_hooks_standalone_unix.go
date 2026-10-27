@@ -148,6 +148,11 @@ func enterpriseHookCheckWorkerCapabilities(status string) error {
 	return errors.New("enterprise hooks: process capabilities are unavailable")
 }
 
+// enterpriseHookFilesystemPassGroupReuse is how old a worker group list a
+// pass armed by a file change may reuse: about the default one-minute interval
+// pass, which always resolves them again.
+var enterpriseHookFilesystemPassGroupReuse = 90 * time.Second
+
 // lockEnterpriseHookReconcile takes the exclusive reconcile lock inside the
 // root-owned authorization directory so the watcher and a manual
 // reconcile never interleave ledger writes.
@@ -528,6 +533,23 @@ func enterpriseHookWorkerPathWithin(home, path string) bool {
 		!strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// enterpriseHookRecheckTouches reports whether the running pass's trigger
+// paths name a file in one of dirs (an account's home, a target's watched
+// folders), so that account's pass gets the recheck window.
+func enterpriseHookRecheckTouches(dirs ...string) bool {
+	if enterpriseHookReconcileRecheckAll {
+		return true
+	}
+	for _, path := range enterpriseHookReconcileRecheckPaths {
+		for _, dir := range dirs {
+			if dir != "" && enterpriseHookWorkerPathWithin(filepath.Clean(dir), path) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // enterpriseHookStandaloneOutcome is one row's worker disposition.
 type enterpriseHookStandaloneOutcome struct {
 	ok       bool
@@ -633,7 +655,14 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	hookSocket, serviceUID, transportErr := enterpriseHookStandaloneHookTransport()
 	resolver := enterprisehooks.StandaloneResolver()
 	if caching, ok := resolver.(*unixidentity.CachingResolver); ok {
-		caching.Reset()
+		if enterpriseHookReconcileRecheckWindow > 0 {
+			// A pass a file change armed reuses the workers' recent group
+			// lists (ResetKeepingGroupIDs); interval, startup and retry
+			// passes ask the directory for everything again.
+			caching.ResetKeepingGroupIDs(enterpriseHookFilesystemPassGroupReuse)
+		} else {
+			caching.Reset()
+		}
 	}
 	registry := newEnterpriseHooksConnectorRegistry()
 	bindings := loadEnterpriseHookUnixBindings()
@@ -660,6 +689,9 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	// ownedByRow is each dispatched target's exclusive-writer files, which
 	// the pass records the fingerprints of for status (GAP-0044).
 	ownedByRow := map[int][]string{}
+	// recheckAccounts are the accounts this pass's filesystem events named
+	// (enterpriseHookRecheckTouches): only their jobs get the recheck window.
+	recheckAccounts := map[int]bool{}
 	for _, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
@@ -880,6 +912,9 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			job = &enterpriseHookWorkerJob{Account: account, Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true}}
 			jobs[account.UID] = job
 		}
+		if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil && enterpriseHookRecheckTouches(dirs...) {
+			recheckAccounts[account.UID] = true
+		}
 		job.Request.TightenHome = job.Request.TightenHome || tightenHome
 		job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{
 			Index:               index,
@@ -889,6 +924,17 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		})
 	}
 
+	// Every job of an account the events named gets the window, whichever
+	// target created it: a job a machine-policy Claude Code or Codex row
+	// created first had none, so the account's Hermes was checked once
+	// (GAP-1825 review R4-1).
+	if window := int(enterpriseHookReconcileRecheckWindow / time.Millisecond); window > 0 {
+		for uid, job := range jobs {
+			if recheckAccounts[uid] || enterpriseHookRecheckTouches(job.Account.Home) {
+				job.Request.RecheckMillis = window
+			}
+		}
+	}
 	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, jobs)
 	for _, index := range machineWorkerRows {
 		row := rows[index]

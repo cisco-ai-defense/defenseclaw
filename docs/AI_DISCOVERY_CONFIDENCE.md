@@ -1,7 +1,7 @@
 # AI discovery confidence implementation map
 
 The current operator explanation and workflows are maintained on the
-[published AI discovery page](https://cisco-ai-defense.github.io/defenseclaw/docs/features/ai-discovery/).
+[published AI discovery page](https://cisco-ai-defense.github.io/defenseclaw/docs/ai-discovery/).
 
 This file records code ownership only:
 

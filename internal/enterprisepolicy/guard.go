@@ -121,13 +121,20 @@ type Finding struct {
 	// key locates the entry inside its document for the cleanup (the
 	// entry's own canonical form, independent of what it references).
 	key string
+	// command is the full command; Command is shortened for reports, so
+	// cleanup decisions must use this one.
+	command string
 }
 
 // GuardRequest describes one scan.
 type GuardRequest struct {
-	Connector string
-	GOOS      string
-	Home      string
+	// RetireLegacyClaudeUserHooks is set only by managed cleanup after it
+	// verifies the replacement Claude machine policy. The guard never uses it
+	// to permit a user-owned executable.
+	RetireLegacyClaudeUserHooks bool
+	Connector                   string
+	GOOS                        string
+	Home                        string
 	// Homes are further homes the agent may read user config from (the
 	// home its environment names when that differs from the account's).
 	Homes      []string
@@ -799,6 +806,7 @@ func findingFor(req GuardRequest, source hookSource, event, command string, dige
 		Digest:    digest,
 		Reason:    reason,
 		key:       digest,
+		command:   command,
 	}
 	for _, allowed := range req.Policy.AllowedHooks {
 		if allowed == digest {

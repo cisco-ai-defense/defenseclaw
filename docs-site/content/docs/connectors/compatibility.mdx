@@ -1,0 +1,99 @@
+---
+title: Connector compatibility
+description: Versioned hook contracts, setup-time compatibility checks, and the runtime hook contract lock for DefenseClaw connectors.
+keywords:
+  - DefenseClaw hook contracts
+  - connector compatibility
+  - hook_contract_lock.json
+  - Codex hook version
+  - Claude Code hook version
+---
+
+DefenseClaw tracks hook connector compatibility in a packaged manifest, `cli/defenseclaw/inventory/hook_contracts.json`. It maps each agent version range to the hook contract DefenseClaw knows how to install, parse, evaluate and answer.
+
+<Callout type="info" title="Contracts and platform support are separate">
+A contract says DefenseClaw understands an agent version's hooks. It does not say the connector runs on every OS: see the [support matrix](/docs/support-matrix).
+</Callout>
+
+<Callout type="info" title="CEL policy and tool-call state contract">
+For pre/post tool-call pairing and outcome tiers per connector, see the [stateful connector lifecycle](/docs/policies/cel/tool-call-state).
+</Callout>
+
+## Current contracts
+
+| Connector | Supported versions | Contract / hook script | Events | Inspects |
+| --- | --- | --- | --- | --- |
+| <ConnectorLabel id="openclaw" /> | not gated (proxy) | n/a | n/a | proxy request/response |
+| <ConnectorLabel id="zeptoclaw" /> | not gated (proxy) | n/a | n/a | proxy request/response |
+| <ConnectorLabel id="codex" /> | `>=0.124.0, <0.129.0` | `codex-hooks-v1` / `v6` | 6 | prompt, tool_call, tool_result |
+| <ConnectorLabel id="codex" /> | `>=0.129.0, <0.133.0` | `codex-hooks-v2` / `v6` | 8 | prompt, tool_call, tool_result |
+| <ConnectorLabel id="codex" /> | `>=0.133.0, <0.135.0` | `codex-hooks-v3` / `v6` | 10 | prompt, tool_call, tool_result |
+| <ConnectorLabel id="codex" /> | `>=0.135.0, <0.145.0` | `codex-hooks-v3-generic` / `v6` | 10 | prompt, tool_call, tool_result |
+| <ConnectorLabel id="codex" /> | `>=0.145.0` | `codex-hooks-v4` / `v6` | 11 | prompt, tool_call, tool_result |
+| <ConnectorLabel id="claudecode" /> | `>=2.1.154, <2.1.219` | `claudecode-hooks-v1` / `v7` | 28 | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="claudecode" /> | `>=2.1.219` | `claudecode-hooks-v2` / `v7` | 29 | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="hermes" /> | `>=0.19.0, <0.21.0`; exact pins `2026.7.20`, `2026.7.30`, `2026.8.3`, `2026.8.13`, `2026.8.16`, `2026.8.16.2`, `2026.8.18`, `2026.8.19`, `2026.8.27` | `hermes-hooks-v1` / `v6` | 23 | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="hermes" /> | `>=0.21.0, <0.22.0`; exact pins `2026.8.31`, `2026.9.7`, `2026.9.11`, `2026.9.14`, `2026.9.21`, `2026.9.24` | `hermes-hooks-v2` / `v6` | 23 | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="cursor" /> | `>=2.4.0, <4.0.0`; exact pins `2026.07.23-e383d2b` | `cursor-hooks-v1` / `v8` | 21 | prompt, tool_call, tool_result |
+| <ConnectorLabel id="devin" /> | `3000.4.25`, `3000.11.3` | `devin-hooks-v1` / `v7` | 8 | prompt, tool_call, tool_result |
+| <ConnectorLabel id="copilot" /> | `>=1.0.18, <1.0.76` | `copilot-hooks-v1` / `v7` | 13 | prompt, tool_call, tool_result |
+| <ConnectorLabel id="copilot" /> | `>=1.0.76` | `copilot-hooks-v2` / `v7` | 14 | prompt, tool_call, tool_result |
+| <ConnectorLabel id="antigravity" /> | `>=1.1.8` | `antigravity-hooks-v2` / `v8` | 5 | tool_call, event_content |
+| <ConnectorLabel id="opencode" /> | `>=1.18.10, <1.19.0` | `opencode-hooks-v1` / `v7` | 10 | tool_call, tool_result |
+| <ConnectorLabel id="amp" /> | `>=0.0.1785334225` | `amp-plugin-v1` / `v2` | 5 | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="kiro" /> | kiro-cli `>=2.27.1`; Kiro IDE `>=1.0.182` | native hooks on both Kiro hook surfaces, plus the optional ACP contract | n/a | prompt, tool_call, tool_result; ACP adds permission, filesystem, terminal |
+
+- **Kiro.** Kiro IDE and `kiro-cli --v3` read `.kiro/hooks/*.json`, and bare `kiro-cli` (2.x) reads its agent config. Per-user installs have no hook contract, but kiro-cli must be 2.27.1 or later: before it, a non-interactive `kiro-cli chat --v3` run loads no hooks, so setup refuses an older kiro-cli in both modes when no supported IDE is present. An IDE before 1.0.182 cannot read global hooks: per-user and managed setup refuse an older IDE in both modes when it is the only Kiro installation. A Kiro form whose version could not be read is unknown and not protected: action setup refuses it unless a supported form is installed. With Kiro IDE 1.0.182 or later, setup installs the shared global hooks for the IDE and reports the CLI separately as unsupported. Managed Windows pins `kiro-cli-windows-managed-hooks-v1` (kiro-cli `>=2.24.1` for an earlier enrolled row; new rows require `>=2.27.1`) or `kiro-ide-windows-managed-hooks-v1` (Kiro IDE `>=1.0.182`). An earlier enrolled CLI below 2.27.1 keeps its interactive hook files, but `status` reports it as uncovered and `verify` fails because its headless V3 path sends no hooks.
+- **Cursor.** The range `>=2.4.0, <4.0.0` is the Cursor Desktop application version; from `4.0.0` on it runs as an untested newer version. The Agent CLI is covered only at the reviewed exact build `2026.07.23-e383d2b`. A later Agent build runs as an untested newer version, and a build with the same date but another build ID has no contract. The `cursor_version` field in hook payloads is the Desktop application version.
+- **Codex.** `0.133.0` to `0.134.x` use the ten-event `codex-hooks-v3` contract with selective local-function tool payloads. `0.135.0` to `0.144.x` keep the event matrix and expand to generic local function tools (`codex-hooks-v3-generic`). `0.145.0` adds `SessionEnd` (`codex-hooks-v4`). Per-user setup also needs Codex `0.136.0` or newer for its app-server command, and checks this before it changes anything.
+- **Claude Code.** v1 covers `>=2.1.154, <2.1.219` with 28 events. v2 starts at `2.1.219` with 29 events and adds the observation-only `DirectoryAdded`.
+- **Antigravity (`agy`).** The contract starts at `>=1.1.8`. The OpenShell sandbox image installs agy `1.2.12`.
+- **Amp.** `0.0.1785334225` is DefenseClaw's contract snapshot and certification floor for the five-event plugin API (`amp-plugin-v1`, plugin script `v2`). Amp does not declare it as the upstream minimum.
+- **Hermes.** A git install that prints only its release date, such as `Hermes Agent vunknown (2026.9.24)`, is matched by the date tags in the table. An earlier date has no contract and a later one is an untested newer version.
+- **Hermes 0.19.0 to 0.21.0 run their TUI without the hooks.** Their TUI (`hermes --tui`) and dashboard chat run tools without the shell hooks DefenseClaw registers, so a terminal call there is neither checked nor recorded ([upstream fix](https://github.com/NousResearch/hermes-agent/commit/3094cde5138bd2bc28134d060345081ab5099d25)). Their classic interface, cron, ACP and messaging gateway run the hooks, so DefenseClaw sets these releases up (also the release dates `2026.7.20` up to `2026.9.7`, and a git build that prints one of those dates), and setup, `defenseclaw doctor` and the gateway log warn about the TUI. Use the classic interface, or update Hermes to 0.21.1 or later (`hermes update`). The pinned Hermes in the OpenShell image is not refused either; the sandbox refuses its TUI, dashboard chat and `hermes serve` instead. See [Hermes](/docs/connectors/hermes).
+
+Open-ended contracts leave `max_exclusive` empty until an upstream release publishes a breaking hook change. A bounded contract records how far DefenseClaw tested a connector, not where it stops working.
+
+## Version policy
+
+DefenseClaw assumes a connector version works unless it knows otherwise.
+
+| Case | What happens |
+| --- | --- |
+| Untested newer version: above every tested range, or between two exact pins of one contract | Uses the newest contract. Setup keeps your mode. Doctor and setup print an informational "untested newer version" line. |
+| Below the lowest tested version, in a gap between ranges, or the same version as an exact-build pin with another build ID | No contract. Setup refuses the connector in observe and action mode and changes nothing. |
+| Known broken: listed in `known_broken_versions` with a reason and an issue link | Treated like a version below the floor, and the refusal names the reason. An entry with `warn_only` is not refused: the version keeps its contract, and setup and doctor warn with the reason. Today the list holds one warning: Hermes 0.19.0 to 0.21.0 on the host (see above). |
+| Compatible update after setup | Doctor reports information. `defenseclaw setup <connector>` or the next gateway start refreshes the lock. |
+| Enterprise standalone profile | Same rules. A version with no contract gets no hooks in any guardrail mode, and `status` and `verify` report `hook_contract_unverified` with `coverage_complete: false`. |
+
+## Setup-time checks
+
+Every `defenseclaw setup` path that chooses a connector refreshes agent discovery, reads the installed version and checks it against the manifest before it writes config.
+
+- A version with no contract is refused in observe and action mode before any change, with the version to upgrade to. `defenseclaw init` and `quickstart` leave such a connector out in both modes too. Upgrade the agent, then run `defenseclaw setup <connector>` again. `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` skips this check for exploratory testing only.
+- OpenCode is refused the same way. A detected version with no contract is below `1.18.10` or known broken; its plugin and contract lock must change together.
+- If the agent is not installed on the host, action mode accepts the harness image DefenseClaw built for it. The image must be the one a sandbox would run now: built by this release for this user from the current `openshell.image` settings, hook-fire verified, and with a harness version that resolves to a known contract. Run `defenseclaw sandbox image build <harness>` if it is refused.
+- If the version cannot be read because the binary is outside a trusted install prefix, interactive setup offers to trust the directory. Non-interactive runs print `defenseclaw setup trusted-paths add <dir>`. Trusting a path never bypasses the version gate.
+
+The gateway checks the version again when it starts. `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` skips both checks.
+
+- With one connector, a version with no contract is refused in observe and action mode for every hook connector, and the gateway does not start. A version that could not be read is refused in action mode. This check is skipped when the enterprise hook guardian owns the hooks (a managed enterprise computer).
+- With several connectors, a version with no contract is refused in action mode, and OpenCode in both modes. A version that could not be read is refused in action mode. The guardian does not skip this check. In observe mode a version with no contract gets a warning in the gateway log; Claude Code and Codex then fail their setup, because they build their hooks from the contract, and other connectors install their hooks.
+- A refused or failed connector that this gateway did not guard before is skipped, and the other connectors keep running. One it already guarded, as after an upgrade of DefenseClaw or of the agent, stops the start: the gateway restores the earlier connector state and does not start, except on a managed computer. If every connector is refused, the gateway does not start.
+
+Proxy connectors are recorded in the manifest as `not-gated`, because their enforcement surface is the proxy.
+
+## Runtime lock
+
+After gateway setup, DefenseClaw writes `hook_contract_lock.json` in the data directory.
+
+| Field | Purpose |
+| --- | --- |
+| `raw_agent_version` | The exact version string discovered locally. |
+| `normalized_agent_version` | The semver-like value used for range matching. |
+| `contract_id` | The contract selected for this connector. |
+| `hook_script_version` | The hook script generation installed on disk. |
+| `hook_script_digests` | Hashes of installed hook scripts, for drift detection. |
+| `defenseclaw_version` | The DefenseClaw build that wrote the lock. |
+
+`defenseclaw doctor` compares the lock with the current discovery cache, so upgrades, contract changes and script drift show up before action-mode enforcement depends on them.

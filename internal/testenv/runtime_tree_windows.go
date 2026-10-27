@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -105,4 +106,49 @@ func CurrentUserSID(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return user.User.Sid.String()
+}
+
+// AsAdministratorsOwner runs fn with BUILTIN\Administrators as the owner of
+// the files the process creates, as for an installer elevated through UAC.
+// The built-in Administrator account (a GitHub runner, an EC2 instance's
+// Administrator) owns them itself otherwise, which the runtime trust checks
+// refuse for an administrator-owned tree.
+func AsAdministratorsOwner(t *testing.T, fn func()) {
+	t.Helper()
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT, &token); err != nil {
+		t.Fatal(err)
+	}
+	defer token.Close()
+	var size uint32
+	_ = windows.GetTokenInformation(token, windows.TokenOwner, nil, 0, &size)
+	if size == 0 {
+		t.Fatal("token owner is unavailable")
+	}
+	buffer := make([]byte, size)
+	if err := windows.GetTokenInformation(token, windows.TokenOwner, &buffer[0], size, &size); err != nil {
+		t.Fatal(err)
+	}
+	type tokenOwner struct{ Owner *windows.SID }
+	previous, err := (*tokenOwner)(unsafe.Pointer(&buffer[0])).Owner.Copy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := func(owner *windows.SID) error {
+		value := tokenOwner{Owner: owner}
+		return windows.SetTokenInformation(token, windows.TokenOwner, (*byte)(unsafe.Pointer(&value)), uint32(unsafe.Sizeof(value)))
+	}
+	if err := set(admins); err != nil {
+		t.Fatalf("make Administrators the owner of new files: %v", err)
+	}
+	defer func() {
+		if err := set(previous); err != nil {
+			t.Errorf("restore the token owner: %v", err)
+		}
+	}()
+	fn()
 }

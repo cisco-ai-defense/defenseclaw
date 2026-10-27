@@ -57,6 +57,21 @@ esac
 readonly RELEASE_BASE
 readonly OFFICIAL_RELEASE_BASE="https://github.com/${DEFAULT_REPO}"
 readonly RELEASE_SIGNER='^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
+# A relative DEFENSECLAW_HOME or DEFENSECLAW_CONFIG names a folder from the
+# caller's directory, and a quoted "~/..." one (the shell did not expand it)
+# names the caller's home. Record the absolute path once, here, so the locks
+# this installer takes, the folder hook-data-dir names, the removal notice
+# check and the gateway it starts from its own runtime directory all see the
+# same one.
+for dc_path_var in DEFENSECLAW_HOME DEFENSECLAW_CONFIG; do
+    dc_path_value="${!dc_path_var:-}"
+    case "${dc_path_value}" in
+        ""|/*) ;;
+        "~") export "${dc_path_var}=${HOME}" ;;
+        "~/"*) export "${dc_path_var}=${HOME}/${dc_path_value#"~/"}" ;;
+        *) export "${dc_path_var}=$(pwd -P)/${dc_path_value}" ;;
+    esac
+done
 readonly DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 export DEFENSECLAW_HOME
 # until 1.1: a 0.8.x or 1.0.x OmniGent setup may have used a relative
@@ -465,18 +480,234 @@ LOCK_HINT="check the free space (df -h ${DEFENSECLAW_HOME%/*}) and that $(id -un
 mkdir -p "${DEFENSECLAW_HOME}" "${DEFENSECLAW_HOME}/logs" 2>/dev/null \
     || die "Could not create ${DEFENSECLAW_HOME}/logs: ${LOCK_HINT}"
 chmod 700 "${DEFENSECLAW_HOME}" 2>/dev/null || true
-if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
-    holder="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
-    if [[ -n "${holder}" ]] && kill -0 "${holder}" 2>/dev/null; then
-        die "Another DefenseClaw install is running (pid ${holder})"
+# The owner record of every lock this installer takes: its pid, the second
+# it took the lock (started, which tells this run's lock from another's) and
+# its process identity (proc-start, process_identity). Every hook and
+# `defenseclaw doctor` treat a lock as no lock only once its installer is
+# gone: its pid names no process, or another process than proc-start names
+# (a reused pid; hookexec installLockStale, the one rule). No clock decides
+# it: a live install keeps its locks for as long as it runs, however long it
+# waits at a prompt or the clock is stepped, and the next run takes over a
+# lock whose installer is gone.
+LOCK_STARTED="$(date +%s)"
+process_identity() {
+    # process_identity PID: the identity of process PID as the system keeps
+    # it from its creation (hookexec procidentity), which no clock step
+    # moves: on Linux "<boot_id> <starttime>" (field 22 of /proc/PID/stat),
+    # on macOS its creation second as `LC_ALL=C TZ=UTC ps -o lstart=` prints
+    # it, one space apart. Fails when the system does not say.
+    local boot stat fields
+    if [[ -e /proc/self/stat ]]; then
+        boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || return 1
+        stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+        [[ "${stat}" == *")"* ]] || return 1
+        read -r -a fields <<< "${stat##*)}"
+        (( ${#fields[@]} >= 20 )) || return 1
+        [[ "${fields[19]}" =~ ^[0-9]+$ && "${boot}" =~ ^[0-9a-f-]+$ ]] || return 1
+        echo "${boot} ${fields[19]}"
+        return 0
     fi
-    rm -rf "${LOCK_DIR}"
-    mkdir "${LOCK_DIR}" 2>/dev/null || die "Could not create the install lock ${LOCK_DIR}: ${LOCK_HINT}"
-fi
-if ! { echo $$ > "${LOCK_DIR}/pid"; } 2>/dev/null; then
-    rm -rf "${LOCK_DIR}"
-    die "Could not write the install lock ${LOCK_DIR}/pid: ${LOCK_HINT}"
-fi
+    [[ "$(uname -s 2>/dev/null)" == Darwin && -x /bin/ps ]] || return 1
+    read -r -a fields <<< "$(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p "$1" 2>/dev/null)"
+    (( ${#fields[@]} == 5 )) || return 1
+    echo "${fields[*]}"
+}
+LOCK_IDENTITY="$(process_identity $$ || true)"
+write_lock_owner() {
+    # The identity first and the pid last: a lock taken over in place never
+    # names this installer's pid beside the identity of the one before it.
+    {
+        if [[ -n "${LOCK_IDENTITY}" ]]; then
+            echo "${LOCK_IDENTITY}" > "$1/proc-start"
+        else
+            rm -f -- "$1/proc-start"
+        fi && echo "${LOCK_STARTED}" > "$1/started" && echo $$ > "$1/pid"
+    } 2>/dev/null
+}
+lock_is_ours() {
+    # lock_is_ours LOCK: LOCK still records this installer as its owner (its
+    # pid and start time); a lock another run took over is not ours.
+    [[ "$(cat "$1/pid" 2>/dev/null || true)" == "$$" \
+        && "$(cat "$1/started" 2>/dev/null || true)" == "${LOCK_STARTED}" ]]
+}
+assert_locks_ours() {
+    # Every lock this install holds is still its own before it stops the
+    # gateway or swaps a file; one another run took over stops this one.
+    local lock
+    for lock in "${LOCK_DIR}" ${DATA_LOCK_DIRS[@]+"${DATA_LOCK_DIRS[@]}"}; do
+        lock_is_ours "${lock}" \
+            || die "The install lock ${lock} is no longer this installer's (another run took it over); nothing more was changed"
+    done
+}
+release_locks() {
+    # The EXIT trap: give back every lock that is still this installer's; a
+    # lock another run took over stays with that run.
+    local lock
+    for lock in "${LOCK_DIR}" ${DATA_LOCK_DIRS[@]+"${DATA_LOCK_DIRS[@]}"}; do
+        if lock_is_ours "${lock}"; then
+            rm -rf "${lock:?}"
+        fi
+    done
+    # A data folder this install made only to hold its lock goes when empty.
+    for lock in ${MADE_DATA_DIRS[@]+"${MADE_DATA_DIRS[@]}"}; do
+        rmdir -- "${lock:?}" 2>/dev/null || true
+    done
+}
+process_started_epoch() {
+    # process_started_epoch PID: the second process PID started, from the
+    # system's record of it (Linux: boot time + field 22 of /proc/PID/stat;
+    # macOS: ps -o lstart). Fails when the system does not say.
+    local stat fields btime hz lstart
+    if [[ -e /proc/self/stat ]]; then
+        stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+        [[ "${stat}" == *")"* ]] || return 1
+        read -r -a fields <<< "${stat##*)}"
+        [[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 1
+        btime="$(awk '$1 == "btime" { print $2; exit }' /proc/stat 2>/dev/null)"
+        hz="$(getconf CLK_TCK 2>/dev/null)"
+        [[ "${btime}" =~ ^[0-9]+$ && "${hz}" =~ ^[1-9][0-9]*$ ]] || return 1
+        echo $(( btime + fields[19] / hz ))
+        return 0
+    fi
+    [[ "$(uname -s 2>/dev/null)" == Darwin && -x /bin/ps ]] || return 1
+    read -r -a fields <<< "$(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p "$1" 2>/dev/null)"
+    (( ${#fields[@]} == 5 )) || return 1
+    lstart="${fields[*]}"
+    LC_ALL=C TZ=UTC date -j -f "%a %b %d %T %Y" "${lstart}" +%s 2>/dev/null
+}
+lock_created_epoch() {
+    # lock_created_epoch LOCK: the second the lock folder was made (its birth
+    # time), else the second its pid file was written, which every release
+    # writes right after it makes the folder. Fails when neither can be read.
+    local t
+    if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
+        t="$(stat -f %B -- "$1" 2>/dev/null)" && [[ "${t}" =~ ^[1-9][0-9]*$ ]] && { echo "${t}"; return 0; }
+        t="$(stat -f %m -- "$1/pid" 2>/dev/null)" && [[ "${t}" =~ ^[0-9]+$ ]] && { echo "${t}"; return 0; }
+        return 1
+    fi
+    t="$(stat -c %W -- "$1" 2>/dev/null)" && [[ "${t}" =~ ^[1-9][0-9]*$ ]] && { echo "${t}"; return 0; }
+    t="$(stat -c %Y -- "$1/pid" 2>/dev/null)" && [[ "${t}" =~ ^[0-9]+$ ]] && { echo "${t}"; return 0; }
+    return 1
+}
+lock_owner_live() {
+    # lock_owner_live LOCK HOLDER: the installer HOLDER that wrote LOCK/pid
+    # still runs: its pid names a process that is not this one and, when
+    # LOCK/proc-start is there, is the process that record names. A lock
+    # without that record (1.0.2, 1.0.3) is kept while its pid names a
+    # process that started before the lock was made: one that started
+    # later got a reused pid, and the lock is stale (GAP-1465, lead decision
+    # 2026-10-26 13:58; 2 s for the whole-second readings). A record, an
+    # identity or a time that cannot be read keeps the lock.
+    local recorded current started created
+    [[ -n "$2" && "$2" != "$$" ]] && pid_running "$2" || return 1
+    if [[ ! -e "$1/proc-start" && ! -L "$1/proc-start" ]]; then
+        started="$(process_started_epoch "$2")" || return 0
+        created="$(lock_created_epoch "$1")" || return 0
+        (( started <= created + 2 ))
+        return
+    fi
+    recorded="$(lock_record "$1/proc-start")" || return 0
+    current="$(process_identity "$2")" || return 0
+    [[ "${recorded}" == "${current}" ]]
+}
+pid_running() {
+    # pid_running PID: PID names a process that has not ended. A zombie (an
+    # exited process its parent has not reaped) keeps its pid and its start,
+    # and kill -0 still reaches it, but it runs nothing: it is gone. When the
+    # system does not say, the process runs.
+    local stat fields
+    kill -0 "$1" 2>/dev/null || return 1
+    if [[ -e /proc/self/stat ]]; then
+        stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
+        [[ "${stat}" == *")"* ]] || return 0
+        read -r -a fields <<< "${stat##*)}"
+        [[ "${fields[0]:-}" != [ZXx] ]]
+        return
+    fi
+    [[ -x /bin/ps ]] || return 0
+    stat="$(LC_ALL=C /bin/ps -o stat= -p "$1" 2>/dev/null)" || return 0
+    stat="${stat#"${stat%%[![:space:]]*}"}"
+    [[ "${stat}" != Z* ]]
+}
+lock_claim_live() {
+    # lock_claim_live FILE: the run that left the takeover claim FILE in a
+    # lock (take_lock, or `defenseclaw doctor --fix`: its pid, then its
+    # process identity) still runs. A claim that names no other pid is none;
+    # one whose identity cannot be read holds.
+    local cpid="" cid="" current
+    [[ -f "$1" && ! -L "$1" ]] || return 1
+    { IFS= read -r cpid || true; IFS= read -r cid || true; } < "$1" 2>/dev/null || return 1
+    cpid="${cpid//[[:space:]]/}"
+    [[ "${cpid}" =~ ^[1-9][0-9]{0,9}$ && "${cpid}" != "$$" ]] || return 1
+    pid_running "${cpid}" || return 1
+    cid="${cid%$'\r'}"
+    [[ -n "${cid}" ]] || return 0
+    current="$(process_identity "${cpid}")" || return 0
+    [[ "${cid}" == "${current}" ]]
+}
+# How often take_lock looks again, a second apart, while another run's claim
+# is in the lock.
+LOCK_TAKE_TRIES=10
+take_lock() {
+    # take_lock LOCK HINT [WHAT]: make LOCK this installer's, or stop. A
+    # lock whose installer is gone is taken over in place: the folder stays
+    # at its path, so no hook sees a running install without it, and only
+    # its owner files change. Takeovers are serialized: a taker first puts
+    # its claim in the folder (claim-<pid>-<started>: its pid and process
+    # identity, put in place by one rename) and goes on only while no other
+    # run's claim there is live; `defenseclaw doctor --fix` claims the same
+    # way before it removes a stale lock. A claim made before another
+    # taker's check is seen by it, so two takers never both go on; one that
+    # sees a live claim takes its own back and looks again. An installer
+    # removes no lock it did not take.
+    local lock="$1" hint="$2" what="${3:-}" claim="claim-$$-${LOCK_STARTED}" holder entry busy try
+    for (( try = 1; try <= LOCK_TAKE_TRIES; try++ )); do
+        if ! mkdir "${lock}" 2>/dev/null; then
+            [[ -d "${lock}" && ! -L "${lock}" ]] || die "Could not create the install lock ${lock}: ${hint}"
+            holder="$(cat "${lock}/pid" 2>/dev/null || true)"
+            if lock_owner_live "${lock}" "${holder}"; then
+                die "Another DefenseClaw install is running (pid ${holder})${what}"
+            fi
+        fi
+        if ! { printf '%s\n%s\n' "$$" "${LOCK_IDENTITY}" > "${lock}/.${claim}" \
+                && mv -f -- "${lock}/.${claim}" "${lock}/${claim}"; } 2>/dev/null; then
+            rm -f -- "${lock}/.${claim}" 2>/dev/null || true
+            # The lock was given back meanwhile: make it again.
+            [[ -d "${lock}" ]] && die "Could not create the install lock ${lock}: ${hint}"
+            continue
+        fi
+        busy=""
+        for entry in "${lock}"/claim-*; do
+            if [[ "${entry}" != "${lock}/${claim}" ]] && lock_claim_live "${entry}"; then
+                busy=1
+                break
+            fi
+        done
+        if [[ -z "${busy}" ]]; then
+            holder="$(cat "${lock}/pid" 2>/dev/null || true)"
+            if lock_owner_live "${lock}" "${holder}"; then
+                rm -f -- "${lock}/${claim}"
+                die "Another DefenseClaw install is running (pid ${holder})${what}"
+            fi
+            write_lock_owner "${lock}" && return 0
+            rm -rf "${lock:?}"
+            die "Could not write the install lock ${lock}/pid: ${hint}"
+        fi
+        rm -f -- "${lock}/${claim}"
+        (( try < LOCK_TAKE_TRIES )) && sleep 1
+    done
+    die "Another DefenseClaw install or doctor run is taking over the install lock ${lock}; run the installer again once it is done"
+}
+lock_record() {
+    # lock_record FILE: the trimmed text of a small owner record (proc-start).
+    local text=""
+    [[ -f "$1" && ! -L "$1" ]] || return 1
+    (( $(wc -c < "$1") <= 128 )) || return 1
+    read -r text < "$1" || [[ -n "${text}" ]] || return 1
+    [[ -n "${text}" ]] || return 1
+    echo "${text}"
+}
+take_lock "${LOCK_DIR}" "${LOCK_HINT}"
 LOG="${DEFENSECLAW_HOME}/logs/install-$(date +%Y%m%dT%H%M%S).log"
 # tee ignores Ctrl+C: it went down with the installer's process group, and the
 # cancel message then died on a broken pipe (exit 141, GAP-1901).
@@ -484,8 +715,82 @@ exec > >(trap '' INT TERM; exec tee -a "${LOG}") 2>&1
 # A run that stops after it staged the release and before the swap (a
 # refusal, a failed check, a cancel) leaves nothing it staged or added for uv
 # (drop_unswapped_stage, GAP-1120).
-trap '[[ -z "${UNSWAPPED_STAGE:-}" ]] || drop_unswapped_stage; rm -rf "${LOCK_DIR}" ${SELF_TMP:+"${SELF_TMP}"}' EXIT
+# The hooks of a data_dir set apart from DEFENSECLAW_HOME live in that folder
+# and look for this lock there: the shell hooks, the OpenCode and Amp plugins
+# and hook-outage-mode, which alone lets a per-user outage through. This
+# install holds that folder too, until it exits, so a gateway it stops is
+# never an outage those hooks let tool calls through in. The folder is the
+# one the gateway renders the hooks into, as the runtime itself reads the
+# config (defenseclaw-gateway hook-data-dir): a line reader here missed a
+# quoted key and every other YAML form of data_dir. It is asked twice: of the
+# installed gateway now, before anything may stop it, and of the staged one
+# before the swap (an older installed release has no hook-data-dir; its hooks
+# do not open an unset outage). DATA_LOCK_DIRS are the locks
+# hold_hook_data_dir took; the EXIT trap gives back those still its own.
+DATA_LOCK_DIRS=()
+MADE_DATA_DIRS=()
+trap '[[ -z "${UNSWAPPED_STAGE:-}" ]] || drop_unswapped_stage; release_locks; rm -rf ${SELF_TMP:+"${SELF_TMP}"}' EXIT
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
+
+hook_data_dir_of() {
+    # hook_data_dir_of BINARY: the folders BINARY's hook-data-dir names, one
+    # per line, "" when it names no absolute folder. Returns 2 when BINARY is missing or
+    # has no hook-data-dir (an older release), 1 when it cannot read the
+    # config (it says why on stderr).
+    local binary="$1" help=""
+    [[ -x "${binary}" ]] || return 2
+    help="$("${binary}" hook-data-dir --help 2>/dev/null)" || return 2
+    [[ "${help}" == *"hook-data-dir"* ]] || return 2
+    "${binary}" hook-data-dir || return 1
+}
+
+hold_hook_data_dir() {
+    # hold_hook_data_dir BINARY [required]: hold every data folder BINARY
+    # names from the config as well (one per line). A BINARY that cannot read
+    # the config stops the install before anything changes; so does one
+    # without hook-data-dir when required (the staged gateway of this
+    # release always has it).
+    local binary="$1" required="${2:-}" answer="" rc=0 data
+    answer="$(hook_data_dir_of "${binary}")" || rc=$?
+    case ${rc} in
+        0) ;;
+        2)
+            [[ -z "${required}" ]] && return 0
+            die "${binary} cannot name the data folder of your configuration; nothing was changed" ;;
+        *) die "Could not read the data folder of your configuration (${DEFENSECLAW_CONFIG:-${DEFENSECLAW_HOME}/config.yaml}) with ${binary}, so its hooks could fail open while the gateway is down; fix the file, then run this installer again; nothing was changed" ;;
+    esac
+    while IFS= read -r data; do
+        hold_data_lock "${data}"
+    done <<< "${answer}"
+}
+
+hold_data_lock() {
+    # hold_data_lock DATA: take DATA/.install.lock unless DATA is no folder,
+    # is this install's home or is already held, by file identity (device
+    # and inode: a link, a bind mount or another spelling is that folder).
+    # Another missing DATA holds no hooks yet, but a missing .defenseclaw in
+    # a folder that is there (the account's own beside a custom home, which
+    # every per-user hook checks) is made first, so its lock is there to
+    # find while the gateway is down; the EXIT trap removes it again when it
+    # is still empty.
+    local data="$1" lock held
+    [[ -n "${data}" ]] || return 0
+    if [[ "${data##*/}" == .defenseclaw && ! -e "${data}" && ! -L "${data}" && -d "${data%/*}" ]] \
+        && mkdir -m 700 -- "${data}" 2>/dev/null; then
+        MADE_DATA_DIRS+=("${data}")
+    fi
+    [[ -d "${data}" ]] || return 0
+    data="$(cd -P -- "${data}" 2>/dev/null && pwd -P)" || return 0
+    [[ ! "${data}" -ef "${DEFENSECLAW_HOME}" ]] || return 0
+    lock="${data%/}/.install.lock"
+    for held in ${DATA_LOCK_DIRS[@]+"${DATA_LOCK_DIRS[@]}"}; do
+        [[ ! "${held}" -ef "${lock}" && "${held}" != "${lock}" ]] || return 0
+    done
+    take_lock "${lock}" "check the free space and that $(id -un) can write ${data}; nothing was changed" \
+        " for the data folder ${data}"
+    DATA_LOCK_DIRS+=("${lock}")
+}
+hold_hook_data_dir "${BIN_DIR}/defenseclaw-gateway"
 
 # ── Existing install ─────────────────────────────────────────────────────────
 
@@ -547,25 +852,69 @@ resolved_agent_path() {
     fi
 }
 
+# npm_config_prefixes prints the prefix each npm config names: the
+# environment, the user config (NPM_CONFIG_USERCONFIG, else ~/.npmrc) and
+# the global npmrc (NPM_CONFIG_GLOBALCONFIG, else <node prefix>/etc/npmrc).
+# npm expands ${VAR} and a leading ~ in a value, so this does too (GAP-1761).
+npm_config_prefixes() {
+    local file value name node expanded
+    local -a files
+    printf '%s\n' "${NPM_CONFIG_PREFIX:-${npm_config_prefix:-}}"
+    files=("${NPM_CONFIG_USERCONFIG:-${npm_config_userconfig:-${HOME}/.npmrc}}" "${HOME}/.npmrc")
+    if [[ -n "${NPM_CONFIG_GLOBALCONFIG:-${npm_config_globalconfig:-}}" ]]; then
+        files+=("${NPM_CONFIG_GLOBALCONFIG:-${npm_config_globalconfig:-}}")
+    elif node="$(command -v node 2>/dev/null)" && [[ "${node}" == /* ]]; then
+        node="$(resolved_agent_path "${node}" 2>/dev/null || printf '%s' "${node}")"
+        files+=("${node%/bin/node}/etc/npmrc")
+    fi
+    for file in "${files[@]}"; do
+        [[ -f "${file}" ]] || continue
+        value="$(sed -n 's/^[[:space:]]*prefix[[:space:]]*=[[:space:]]*//p' "${file}" 2>/dev/null | tail -n 1)" || value=""
+        value="${value%"${value##*[![:space:]]}"}"
+        value="${value%\"}"; value="${value#\"}"
+        expanded=0
+        while (( expanded++ < 8 )); do
+            [[ "${value}" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]] || break
+            name="${BASH_REMATCH[1]}"
+            value="${value//\$\{${name}\}/${!name:-}}"
+        done
+        printf '%s\n' "${value/#\~/${HOME}}"
+    done
+}
+
 # The installer's entry evidence: native fixed locations and npm/Bun
-# launcher symlinks to their exact Node entry. A folder name, manifest or
-# command on PATH is not an entry record.
+# launcher symlinks to their exact entry: the Node script, or the native
+# bin/opencode.exe that current opencode-ai links (GAP-1356). The links are
+# looked for in the usual prefixes, npm's configured prefix and each PATH
+# folder. A folder name, manifest or plain command on PATH is not an entry
+# record: only a launcher link to the package's own entry is.
 installed_agent_programs() {
-    local agent name path target base link
+    local agent name path target base link prefix seen=":"
+    local -a bases folders
     for agent in OpenCode:opencode Amp:amp; do
         name="${agent#*:}"
         path="${HOME}/.${name}/bin/${name}"
         target="$(resolved_agent_path "${path}")" || continue
         printf '%s\t%s\n' "${agent%%:*}" "${target}"
     done
-    for agent in OpenCode:opencode Amp:amp; do
-        name="${agent#*:}"
-        for base in "${HOME}/.npm-global/bin" "${HOME}/.local/bin" "${HOME}/.bun/bin" /usr/local/bin /opt/homebrew/bin; do
+    bases=("${HOME}/.npm-global/bin" "${HOME}/.local/bin" "${HOME}/.bun/bin" /usr/local/bin /opt/homebrew/bin)
+    while IFS= read -r prefix; do
+        prefix="${prefix/#\~/${HOME}}"
+        [[ "${prefix}" != /* ]] || bases+=("${prefix%/}/bin")
+    done < <(npm_config_prefixes)
+    IFS=: read -r -a folders <<< "${PATH:-}"
+    for base in ${folders[@]+"${folders[@]}"}; do [[ "${base}" != /* ]] || bases+=("${base%/}"); done
+    for base in "${bases[@]}"; do
+        [[ "${seen}" != *":${base}:"* ]] || continue
+        seen+="${base}:"
+        for agent in OpenCode:opencode Amp:amp; do
+            name="${agent#*:}"
             link="${base}/${name}"
             [[ -L "${link}" ]] || continue
             target="$(resolved_agent_path "${link}")" || continue
             case "${agent}:${target}" in
-                OpenCode:*/node_modules/opencode-ai/bin/opencode | Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
+                OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
+                    Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                     printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
             esac
         done
@@ -584,10 +933,44 @@ runtime_agent_programs() {
         [[ -L "${link}" ]] || continue
         target="$(resolved_agent_path "${link}")" || continue
         case "${agent}:${target}" in
-            OpenCode:*/node_modules/opencode-ai/bin/opencode | Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
+            OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
+                Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                 printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
         esac
     done
+}
+
+# An npm prefix that no config the installer can read names
+# (NPM_CONFIG_USERCONFIG or NPM_CONFIG_PREFIX set only in the agent's own
+# shell, npm --prefix): the running entry's own path names it,
+# <prefix>/lib/node_modules/<package>/... For Node it is the script argument.
+# Only the launcher npm put in <prefix>/bin, resolving to exactly that entry,
+# is evidence, as for a configured prefix (GAP-1761).
+entry_prefix_agent_programs() {
+    local pid="$1" entry="${2% (deleted)}" word agent prefix link target
+    local -a argv=()
+    case "${entry##*/}" in
+        node | nodejs)
+            while IFS= read -r -d '' word; do
+                argv+=("${word}")
+                [[ ${#argv[@]} -ge 2 ]] && break
+            done < <(process_argv "${pid}" 2>/dev/null)
+            [[ ${#argv[@]} -ge 2 && "${argv[1]}" == /* ]] || return 0
+            entry="$(resolved_agent_path "${argv[1]}")" || return 0
+            ;;
+    esac
+    case "${entry}" in
+        */lib/node_modules/opencode-ai/bin/opencode | */lib/node_modules/opencode-ai/bin/opencode.exe)
+            agent=OpenCode:opencode; prefix="${entry%/lib/node_modules/opencode-ai/bin/*}" ;;
+        */lib/node_modules/@sourcegraph/amp/dist/main.js)
+            agent=Amp:amp; prefix="${entry%/lib/node_modules/@sourcegraph/amp/dist/main.js}" ;;
+        *) return 0 ;;
+    esac
+    link="${prefix}/bin/${agent#*:}"
+    [[ -L "${link}" ]] || return 0
+    target="$(resolved_agent_path "${link}")" || return 0
+    [[ "${target}" == "${entry}" ]] && printf '%s\t%s\n' "${agent%%:*}" "${target}"
+    return 0
 }
 
 # One proc_pidpath call per PID in one interpreter on macOS. An absent old
@@ -667,7 +1050,8 @@ agent_of() {
     shift 3
     program="${program% (deleted)}"
     while IFS=$'\t' read -r agent path; do
-        [[ -n "${path}" && "${program}" == "${path}" ]] && { printf '%s' "${agent}"; return 0; }
+        [[ -n "${path}" ]] && { [[ "${program}" == "${path}" ]] || [[ "${program}" -ef "${path}" ]]; } &&
+            { printf '%s' "${agent}"; return 0; }
     done <<< "${installed}"
     case "${program##*/}" in node | nodejs) ;; *) return 0 ;; esac
     [[ $# -ge 2 && -n "$2" ]] || { agent_identity_audit "${pid}" 'Node script argument unavailable'; return 0; }
@@ -685,13 +1069,15 @@ agent_of() {
 }
 
 loaded_plugin_agents() {
-    local pids installed rows runtime pid program agent word fresh
+    local pids installed rows runtime prefixed pid program agent word fresh
     local -a argv
     installed="$(installed_agent_programs)"
     pids="$(ps -u "$(id -u)" -o pid= 2>/dev/null)" || { [[ -z "${installed}" ]] || agent_identity_audit 0 'process list unreadable'; return 0; }
     rows="$(process_programs "${pids}")"
     runtime="$(while IFS=$'\t' read -r pid program; do runtime_agent_programs "${program}"; done <<< "${rows}")"
     [[ -z "${runtime}" ]] || installed+="${installed:+$'\n'}${runtime}"
+    prefixed="$(while IFS=$'\t' read -r pid program; do [[ -z "${program}" ]] || entry_prefix_agent_programs "${pid}" "${program}"; done <<< "${rows}")"
+    [[ -z "${prefixed}" ]] || installed+="${installed:+$'\n'}${prefixed}"
     [[ -n "${installed}" ]] || return 0
     while IFS=$'\t' read -r pid program; do
         [[ "${pid}" =~ ^[0-9]+$ ]] || continue
@@ -700,7 +1086,8 @@ loaded_plugin_agents() {
             continue
         fi
         argv=()
-        case "${program##*/}" in
+        word="${program% (deleted)}"
+        case "${word##*/}" in
             node | nodejs)
                 while IFS= read -r -d '' word; do
                     argv+=("${word}")
@@ -776,11 +1163,10 @@ refresh_hook_fail_modes() {
     # the swap. An open the config sets stays open, from a DEFENSECLAW_CONFIG
     # outside the data directory too. Used when no gateway runs; a running
     # one gets hold_hook_fail_modes.
-    [[ -d "${DEFENSECLAW_HOME}/hooks" ]] || return 0
     local probe=0
     hook_fail_mode_refresh_probe || probe=$?
     case ${probe} in
-        0) "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --data-dir "${DEFENSECLAW_HOME}" ;;
+        0) "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes ;;
         1) return 0 ;;
         *) return 1 ;;
     esac
@@ -796,7 +1182,6 @@ hold_hook_fail_modes() {
     # runs or shuts down, and they would follow that open while it is down.
     # Returns once the first refresh is written and the lock held;
     # finish_hook_fail_mode_hold waits for the rest.
-    [[ -d "${DEFENSECLAW_HOME}/hooks" ]] || return 0
     local probe=0 waited=0
     hook_fail_mode_refresh_probe || probe=$?
     case ${probe} in
@@ -806,8 +1191,8 @@ hold_hook_fail_modes() {
     esac
     HOLD_LOG="${STAGING}/refresh-fail-modes.log"
     : >"${HOLD_LOG}"
-    "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes --data-dir "${DEFENSECLAW_HOME}" \
-        --hold-until-exit "$1" >"${HOLD_LOG}" 2>&1 &
+    "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes \
+        --hold-timeout 10m --hold-until-exit "$1" >"${HOLD_LOG}" 2>&1 &
     HOLD_PID=$!
     while ! grep -q "Holding the hook fail modes" "${HOLD_LOG}" 2>/dev/null; do
         if ! kill -0 "${HOLD_PID}" 2>/dev/null; then
@@ -889,6 +1274,57 @@ PY
     esac
 }
 
+# refuse_legacy_sandboxes PREVIOUS: an upgrade from DefenseClaw 1.0.0 to
+# 1.0.3 refuses, and changes nothing, while that release's gateway runs a
+# sandbox that may hold compute (GAP-0901). Each such session keeps the
+# supervisor it started with, an OpenShell release whose network broker can
+# let connections bypass sandbox policy (NVIDIA/OpenShell#4494), and the new
+# gateway can only report it unprotected: DefenseClaw stops no sandbox for
+# its user, who saves the work and ends it first. The phases are those the
+# package preinstall counts (legacy-sandbox-guard.sh dc_guard_holds). A
+# gateway that is not running, or that cannot list sandboxes (sandboxes off),
+# has none to name.
+refuse_legacy_sandboxes() {
+    local prev="${1:-}" gateway="${BIN_DIR}/defenseclaw-gateway" held name phase
+    is_version "${prev}" && ! version_lt "${prev}" 1.0.0 && version_lt "${prev}" 1.0.4 || return 0
+    ! is_version "${VERSION}" || ! version_lt "${VERSION}" 1.0.4 || return 0
+    [[ -x "${gateway}" && -x "${VENV}/bin/python" && -n "$(gateway_pid || true)" ]] || return 0
+    held="$("${VENV}/bin/python" -I - "${gateway}" <<'PY' 2>/dev/null
+import json, re, subprocess, sys
+try:
+    out = subprocess.run([sys.argv[1], "sandbox", "list", "--output", "json"], capture_output=True, text=True, timeout=10).stdout
+    rows = json.loads(out or "{}").get("sandboxes") or []
+except Exception:
+    rows = []
+for r in rows:
+    if not isinstance(r, dict) or not isinstance(r.get("name"), str):
+        continue
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", r["name"]):
+        continue
+    phase = r.get("phase") if isinstance(r.get("phase"), str) else ""
+    driver = r.get("driver") if isinstance(r.get("driver"), str) and r.get("driver") else "docker"
+    reason = r.get("phase_reason") if isinstance(r.get("phase_reason"), str) else ""
+    if phase in ("stopped", "deleting", "deleted", "missing"):
+        continue
+    if phase == "completed" and driver == "docker":
+        continue
+    if phase == "error" and (driver == "docker" or reason.startswith("ProcessExited")):
+        continue
+    print(r["name"] + " " + (phase if re.fullmatch(r"[a-z_]{1,32}", phase) else "unknown"))
+PY
+)" || return 0
+    [[ -n "${held}" ]] || return 0
+    err "Sandboxes of DefenseClaw ${prev} are running; nothing was changed. Their sessions keep the network broker of the OpenShell release they started with, which can let connections bypass sandbox policy, and DefenseClaw ${VERSION} cannot contain it: it would only report them unprotected and run no new sandbox until they are gone. DefenseClaw stops no sandbox for you. End each one, then run this upgrade again:"
+    while read -r name phase; do
+        [[ -n "${name}" ]] || continue
+        case "${phase}" in
+            completed|error) printf '    %s (%s MicroVM, which OpenShell does not stop): defenseclaw sandbox delete %s (it deletes the sandbox with its work)\n' "${name}" "${phase}" "${name}" >&2 ;;
+            *) printf '    %s (%s): save the work you need, then defenseclaw sandbox stop %s\n' "${name}" "${phase}" "${name}" >&2 ;;
+        esac
+    done <<<"${held}"
+    exit 1
+}
+
 # other_build_installed: the installed gateway reports another build of this
 # version (its commit or build date) than the staged one (GAP-1063). An
 # installed gateway that does not answer is repaired, as before. Sets
@@ -962,6 +1398,7 @@ if [[ "${ROLLBACK}" == true ]]; then
     saved_was_running="$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null || true)"
     restart="${was_running}"
     [[ "${saved_was_running}" == true ]] && restart=true
+    assert_locks_ours
     assert_no_loaded_plugin_agents
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
     if [[ -n "${current}" ]] && version_lt "${back_to}" 1.0.0 && ! version_lt "${current}" 1.0.0; then
@@ -1222,6 +1659,9 @@ case "${check_rc}" in
     *) die "Your configuration cannot be migrated to ${VERSION}; nothing was changed (see above)" ;;
 esac
 ok "DefenseClaw ${VERSION} is staged and checked"
+# Hold the data_dir the new gateway reads from the config (see
+# hold_hook_data_dir) before the swap stops or replaces anything.
+hold_hook_data_dir "${STAGING}/bin/defenseclaw-gateway" required
 
 # ── Swap ─────────────────────────────────────────────────────────────────────
 
@@ -1233,6 +1673,7 @@ REPAIR=false
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]] && ! other_build_installed; then
     REPAIR=true
 fi
+refuse_legacy_sandboxes "${PREV_VERSION}"
 warn_running_sandboxes
 if [[ "${REPAIR}" == true ]]; then
     ask_yes_no "Reinstall DefenseClaw ${VERSION}?" || die "Cancelled; nothing was changed"
@@ -1259,6 +1700,7 @@ if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" 
     pick_connector
 fi
 
+assert_locks_ours
 assert_no_loaded_plugin_agents
 WAS_RUNNING=false
 RESTORED_NOTE="Your previous install is back."
@@ -1293,6 +1735,7 @@ fi
 UNSWAPPED_STAGE=""
 trap 'warn "Interrupted; finishing or undoing the swap before exiting"' INT TERM
 trap '' HUP PIPE
+assert_locks_ours
 if ! snapshot; then
     undo_snapshot
     restart_old
@@ -1331,11 +1774,9 @@ if [[ "${WAS_RUNNING}" == true ]]; then
     rm -f "${SNAP}/GATEWAY_RESTART_UNPROVEN"
 fi
 finish_swap
-# until 1.1: an upgrade or repair never ends with a removed connector's hook
-# left unsealed, whether or not its gateway was running before it.
-if [[ -n "${PREV_VERSION}" ]] && ! finish_retired_connector_cleanup; then
-    START_RC=3
-fi
+# until 1.1: an upgrade or repair removes what an older setup wrote for
+# OpenHands and OmniGent, whether or not its gateway was running before it.
+[[ -z "${PREV_VERSION}" ]] || finish_retired_connector_cleanup
 report_retired_connector_leftovers
 if [[ -n "${PREV_VERSION}" && "${WAS_RUNNING}" != true ]] && ! reconcile_stopped_connectors; then
     START_RC=3
@@ -1380,12 +1821,46 @@ elif [[ "${RUN_QUICKSTART}" == true ]]; then
 fi
 rm -rf "${STAGING}"
 ensure_path_hint
+outage_open_notice() {
+    # An upgrade from 1.0.2 or 1.0.3 of a config that saves no hook fail
+    # mode: gateway outages now run with a warning in the default and
+    # permissive tiers (owner decision 2026-10-23), which those releases
+    # blocked. Said once, after the upgrade (GAP-1885).
+    [[ -x "${VENV}/bin/python" ]] || return 0
+    # DEFENSECLAW_HOME is readonly and already exported: a prefix assignment
+    # of it is an error (GAP-0016).
+    "${VENV}/bin/python" -I - <<'PY' 2>/dev/null || true
+# GAP-1885: "notice" when an active per-user connector whose hook fail mode
+# this config does not save (for it, or globally) now lets a gateway outage
+# run (the default and permissive tiers); 1.0.2 and 1.0.3 closed it. A mode
+# saved for one connector says nothing about another one.
+try:
+    from defenseclaw import config as dc_config
+    cfg = dc_config.load()
+    guard = cfg.guardrail
+    names = list(cfg.active_connectors())
+    if guard.enabled and names and not cfg.managed_outside_secure_client() and not guard.secure_client_hook_fail_modes():
+        saved = bool(getattr(guard, "_hook_fail_mode_saved", False) and str(guard.hook_fail_mode or "").strip())
+        for name in names:
+            override = guard._connector_override(name)
+            if override is not None and str(override.hook_fail_mode or "").strip():
+                continue
+            if not saved and guard.effective_hook_fail_mode(name) == "open":
+                print("notice")
+                break
+except Exception:
+    pass
+PY
+}
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
 if [[ -n "${PREV_VERSION}" && "${REPAIR}" != true ]]; then
     changed="Upgraded from ${PREV_VERSION}"
     version_lt "${VERSION}" "${PREV_VERSION}" && changed="Downgraded from ${PREV_VERSION}"
     [[ "${PREV_VERSION}" == "${VERSION}" ]] && changed="Replaced the other build of ${VERSION}"
     printf "  ${changed}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
+    if version_lt "${PREV_VERSION}" 1.0.4 && version_lt "${PREV_VERSION}" "${VERSION}" && [[ "$(outage_open_notice)" == notice ]]; then
+        printf '  %s\n' 'Gateway outages now let calls run with a warning (the default and permissive policies). Run `defenseclaw guardrail fail-mode closed` to keep blocking them.'
+    fi
     if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
         printf "  The audit history ${PREV_VERSION} recorded is not carried over to 1.0; a copy is in ${PREVIOUS}/data/audit.db\n"
     fi
@@ -1870,6 +2345,7 @@ swap_in() {
     fi
     if [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]]; then
         info "Migrating config and data"
+        note_retired_connectors
         local args=(migrate)
         [[ -n "${PREV_VERSION}" ]] && args+=(--from-version "${PREV_VERSION}")
         DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" || return 1
@@ -2205,31 +2681,21 @@ finish_swap() {
     ok "Installed DefenseClaw ${VERSION}"
 }
 
-# until 1.1: the gateway tears the removed connectors (OpenHands, OmniGent)
-# down when it starts, but a start that brings the other connectors up only
-# logs one it could not finish, and an upgrade of a stopped gateway does not
-# start it. Check each here: one not done is torn down again, and one still
-# not done (an agent config that runs a hook DefenseClaw could not put the
-# sealed stub under) is named with its cause and step, and the install exits
-# 3, not 0. Without a config nothing was set up and the gateway cannot read
-# one, so there is nothing to check.
+# until 1.1: the gateway removes what an older setup wrote for OpenHands and
+# OmniGent when it starts, but an upgrade of a stopped gateway does not start
+# it. When something of theirs is still here, run that teardown now. It never
+# fails and blocks nothing (DefenseClaw no longer guards them); what it cannot
+# remove is listed as information below. Without a config nothing was set up.
 finish_retired_connector_cleanup() {
-    local gateway="${BIN_DIR}/defenseclaw-gateway" name why failed=0
+    local gateway="${BIN_DIR}/defenseclaw-gateway" name
     [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]] || return 0
-    if [[ ! -x "${gateway}" ]]; then
-        err "DefenseClaw ${VERSION} could not check that the removed OpenHands and OmniGent connectors are blocked: ${gateway} is missing"
-        return 1
-    fi
+    [[ -x "${gateway}" ]] || return 0
+    "${VENV}/bin/python" -I -c 'import sys
+from defenseclaw.removed_connectors import leftovers
+sys.exit(0 if leftovers(sys.argv[1]) else 1)' "${DEFENSECLAW_HOME}" 2>>"${LOG}" || return 0
     for name in openhands omnigent; do
-        "${gateway}" connector verify --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" >>"${LOG}" 2>&1 && continue
         "${gateway}" connector teardown --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" >>"${LOG}" 2>&1 || true
-        why="$("${gateway}" connector verify --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" 2>&1)" && continue
-        printf '%s\n' "${why}" >>"${LOG}"
-        why="$(printf '%s' "${why}" | tr '\n' ' ' | sed -E 's/^[[:space:]]*(✗|X)[[:space:]]+//; s/[[:space:]]+$//')"
-        err "DefenseClaw ${VERSION} could not finish removing the ${name} connector, so its agent may not be blocked: ${why:-see ${LOG}}"
-        failed=1
     done
-    return "${failed}"
 }
 
 # record_saved_installer: the SHA-256 of the saved installer, which
@@ -2272,19 +2738,31 @@ reconcile_stopped_connectors() {
     return 1
 }
 
-# until 1.1: the removed connectors' teardown deliberately keeps vendor
-# configs and import paths for manual cleanup. The gateway may complete its
-# deny-only script replacement during start, but its daemon log is not the
-# installer's output. List the remaining paths and exact steps here too.
+# until 1.1: whether an older setup of OpenHands or OmniGent is here, asked
+# before the migration and the new gateway's first start remove it, so the
+# one removal notice is printed after the upgrade (GAP-1892).
+RETIRED_CONNECTORS_FOUND=0
+note_retired_connectors() {
+    [[ -n "${PREV_VERSION:-}" ]] || return 0
+    if "${VENV}/bin/python" -I -c 'import sys
+from defenseclaw.removed_connectors import found
+sys.exit(0 if found(sys.argv[1]) else 1)' "${DEFENSECLAW_HOME}" 2>>"${LOG}"; then
+        RETIRED_CONNECTORS_FOUND=1
+    fi
+    return 0
+}
+
+# until 1.1: the one removal notice when an older setup of OpenHands or
+# OmniGent was here, then what their teardown could not remove; the
+# gateway's daemon log is not the installer's output.
 report_retired_connector_leftovers() {
     local notes
-    if ! notes="$("${VENV}/bin/python" -I - "${DEFENSECLAW_HOME}" <<'PY'
+    if ! notes="$("${VENV}/bin/python" -I - "${DEFENSECLAW_HOME}" "${RETIRED_CONNECTORS_FOUND:-0}" <<'PY'
 import sys
-from defenseclaw.removed_connectors import leftovers
+from defenseclaw.removed_connectors import installer_lines
 
-for left in leftovers(sys.argv[1]):
-    for line in left.lines():
-        print(line)
+for line in installer_lines(sys.argv[1], sys.argv[2] == "1"):
+    print(line)
 PY
 )"; then
         warn "Could not check removed connector leftovers; run 'defenseclaw status' for manual cleanup steps"

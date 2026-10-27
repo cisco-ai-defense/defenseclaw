@@ -509,6 +509,17 @@ func TestHermesHookContractV019V020ClassifiesAllValidEventsWithoutInventingBlock
 	if got := ResolveHookContract("hermes", "Hermes Agent v0.21.3 (2026.9.14)").Contract.ContractID; got != "hermes-hooks-v2" {
 		t.Fatalf("Hermes 0.21.3 contract = %q, want hermes-hooks-v2", got)
 	}
+	if got := ResolveHookContractStrict("hermes", "Hermes Agent vunknown (2026.9.24)"); got.Status != HookCompatibilityKnown || got.Contract.ContractID != "hermes-hooks-v2" {
+		t.Fatalf("Hermes git-install release date = %+v, want pinned hermes-hooks-v2", got)
+	}
+	for _, raw := range []string{"Hermes Agent vunknown (2026.9.23)", "Hermes Agent vunknown (2026.9.25)", "Other Agent vunknown (2026.9.24)"} {
+		if got := ResolveHookContractStrict("hermes", raw); got.Status == HookCompatibilityKnown {
+			t.Fatalf("unreviewed Hermes version %q resolved as known: %+v", raw, got)
+		}
+	}
+	if exactAgentVersionMatch("devin", "Hermes Agent vunknown (2026.9.24)", []string{"2026.9.24"}) {
+		t.Fatal("a Hermes git release must not satisfy another connector's exact pin")
+	}
 	if got := ResolveHookContractStrict("hermes", "0.22.0").Status; got != HookCompatibilityUnknown {
 		t.Fatalf("Hermes 0.22 strict compatibility = %q, want unknown beyond source-reviewed ceiling", got)
 	}

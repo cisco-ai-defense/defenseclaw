@@ -189,6 +189,22 @@ func platformMobileAccounts(ctx context.Context) (map[string]string, error) {
 	return parseDSCLOriginalNodes(string(result.stdout)), nil
 }
 
+// platformSSOLinkedAccounts lists the local node's accounts registered with
+// Platform SSO.
+func platformSSOLinkedAccounts(ctx context.Context) (map[string]bool, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return nil, err
+	}
+	result, err := runTrustedCommand(ctx, darwinDSCL, []string{".", "-list", "/Users", "AltSecurityIdentities"})
+	if err != nil {
+		return nil, err
+	}
+	if result.exitCode != 0 {
+		return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
+	}
+	return parseDSCLPlatformSSOAccounts(string(result.stdout)), nil
+}
+
 // platformLocalGroups lists the local directory node's groups.
 func platformLocalGroups(ctx context.Context) (map[string]int, error) {
 	if err := validateTrustedTool(darwinDSCL); err != nil {

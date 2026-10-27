@@ -119,6 +119,13 @@ type APIServer struct {
 	// copilotDedupe answers the second delivery of one Copilot tool call
 	// with the first delivery's verdict.
 	copilotDedupe copilotHookDedupe
+	// copilotPermission binds an argumentless native permission callback to
+	// the call of one recently audited pre-tool allow from the same
+	// caller/session; the callback is then decided again, now.
+	copilotPermission copilotPermissionJoin
+	// sessionStartGate holds a session's calls until its start verdict
+	// (GAP-0806).
+	sessionStartGate sessionStartGate
 	// hermesTasks gives a Hermes hook that names only its task the session
 	// of that task.
 	hermesTasks hermesTaskSessions
@@ -286,9 +293,11 @@ type APIServer struct {
 
 	claudeCodeMu                sync.Mutex
 	claudeCodeLastComponentScan time.Time
-	// activeAgentContext is process-local, authenticated connector context. It
-	// is deliberately separate from hook payloads so tool arguments and generic
-	// request fields cannot assert which agent instruction files are active.
+	// activeAgentContext is authenticated connector context, kept in memory
+	// and recorded per session under the data directory so a restart keeps it
+	// (saveInstructionLoads). It is deliberately separate from hook payloads
+	// so tool arguments and generic request fields cannot assert which agent
+	// instruction files are active.
 	activeAgentContext     activeAgentContextCache
 	codexMu                sync.Mutex
 	codexLastComponentScan time.Time
@@ -664,6 +673,12 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	}
 
 	dataDir := a.configDataDir()
+	// A removed connector whose token file its teardown could not delete:
+	// the hook registration is gone, so the credential is refused while the
+	// removal is retried (GAP-0858).
+	if connector.HookAPITokenRevoked(dataDir, name) {
+		return false
+	}
 	if dataDir == "" {
 		a.hookAPITokenMu.RLock()
 		cached := ""
@@ -1348,11 +1363,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 		baseCtx = withServiceAccountGateway(ctx)
 	}
 	srv := &http.Server{
-		Addr:    a.addr,
-		Handler: handler,
-		BaseContext: func(_ net.Listener) context.Context {
-			return baseCtx
-		},
+		Addr:        a.addr,
+		Handler:     handler,
+		BaseContext: apiRequestBaseContext(baseCtx),
 		ConnContext: acpPeerConnContext,
 	}
 
@@ -1423,6 +1436,11 @@ func (a *APIServer) Run(ctx context.Context) error {
 	}
 
 	serveTCP := func(ln net.Listener) {
+		if err := a.recordRuntimeAPIAddress(ln); err != nil {
+			_ = ln.Close()
+			errCh <- fmt.Errorf("record the running gateway listener: %w; check data directory permissions and run defenseclaw-gateway start", err)
+			return
+		}
 		go func() {
 			fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -1481,16 +1499,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	go systemd.RunWatchdog(watchdogCtx, nil)
 
 	shutdown := func() error {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		var hookShutdownErr error
-		if hookSrv != nil {
-			hookShutdownErr = hookSrv.Shutdown(shutdownCtx)
-		}
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return err
-		}
-		return hookShutdownErr
+		return shutdownAPIServers(apiShutdownGrace, srv, hookSrv)
 	}
 
 	for {
@@ -1510,6 +1519,54 @@ func (a *APIServer) Run(ctx context.Context) error {
 			return shutdown()
 		}
 	}
+}
+
+// apiShutdownGrace bounds how long a stop waits for the requests the
+// gateway listeners already accepted.
+const apiShutdownGrace = 5 * time.Second
+
+// apiRequestBaseContext is the base context of every request on a gateway
+// listener: ctx's values without its cancellation. A stop cancels the run
+// context first; requests built on it were cancelled with it, so a hook call
+// the gateway had accepted was read as the client going away, audited as a
+// block and never answered (GAP-1459). The listeners close on Shutdown
+// instead, and accepted calls answer inside the grace, as the sandbox
+// ingress already does.
+func apiRequestBaseContext(ctx context.Context) func(net.Listener) context.Context {
+	base := context.WithoutCancel(ctx)
+	return func(net.Listener) context.Context { return base }
+}
+
+// shutdownAPIServers stops the servers together and waits, up to grace, for
+// the requests they accepted. A request still running after the grace (a
+// follow stream) ends with its connection, which is closed; that is still a
+// clean stop.
+func shutdownAPIServers(grace time.Duration, servers ...*http.Server) error {
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	errs := make([]error, len(servers))
+	var wg sync.WaitGroup
+	for i, srv := range servers {
+		if srv == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := srv.Shutdown(ctx)
+			if err == nil {
+				return
+			}
+			_ = srv.Close()
+			if errors.Is(err, context.DeadlineExceeded) {
+				fmt.Fprintf(os.Stderr, "[sidecar-api] requests still running %s after the stop were closed\n", grace)
+				return
+			}
+			errs[i] = err
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 // handleTelemetryCanary exercises the real runtime trace pipeline. The global
@@ -3941,12 +3998,6 @@ func requestGatewayToken(r *http.Request) string {
 // and never reaches next.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// until 1.1: a removed connector's hook route blocks every call
-		// before any credential check (retired_connector_hook.go): with a
-		// valid token, a revoked one, none or a sandbox credential.
-		if serveRetiredConnectorHook(w, r) {
-			return
-		}
 		if r.URL.Path == "/health" && r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
 			return
@@ -3972,7 +4023,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// reached with one, whatever header or path carries it.
 		if requestCarriesSandboxCredential(r) {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 		// Fleet API routes carry their own token auth (fleet.API's
@@ -3989,7 +4040,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
 			if !ok {
 				a.emitHTTPAuthFailure(a.withRevokedACPCredential(a.withACPCallerAccount(ctx, r), r), r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			if reason := a.acpCallerAccountRefusal(authenticated); reason != "" {
@@ -4001,7 +4052,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 					writeACPSignedOtherAccountRefusal(w, r, token, nonce)
 					return
 				}
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			// The ACP credential that signed the request names who sent it:
@@ -4014,7 +4065,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if r.URL.Path == "/api/v1/acp/challenge" || r.URL.Path == "/api/v1/acp/evaluate" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "missing_acp_authenticated_transport")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 
@@ -4031,7 +4082,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			// (503) rather than silently allowing loopback — the previous
 			// "no token, trust loopback" path was a local-IDOR risk.
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "no_token_configured")
-			http.Error(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
+			writeJSONRefusal(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
 			return
 		}
 		// Codex and Claude Code support arbitrary OTLP headers. Bind their
@@ -4066,7 +4117,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 						return
 					}
 					a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_scoped_header_token")
-					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
 			}
@@ -4082,7 +4133,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			if scoped != "" {
 				if token != "" {
 					a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "scoped_otlp_rejects_header_token")
-					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
 				if !userScoped && constantTimeStringMatch(pathToken, scoped) {
@@ -4090,7 +4141,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 					return
 				}
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_scoped_path_token")
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 			// Legacy compatibility only for deployments that have not
@@ -4151,12 +4202,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if token == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "missing_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 		if !constantTimeStringMatch(token, expected) && !a.matchesRefreshedGatewayToken(token) {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 
@@ -4271,7 +4322,7 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
 			if sfs != "same-origin" && sfs != "none" {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "sec_fetch_site_rejected")
-				http.Error(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
@@ -4291,12 +4342,12 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 			//      application/x-www-form-urlencoded.
 			if origin := r.Header.Get("Origin"); origin != "" && !isLocalhostOrigin(origin) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthOriginBlocked, "origin_blocked")
-				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
 				return
 			}
 			if !isOTLPContentType(r.Header.Get("Content-Type")) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
-				http.Error(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
+				writeJSONRefusal(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -4310,7 +4361,7 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		if r.Method == http.MethodOptions {
 			if r.Header.Get("X-DefenseClaw-Client") == "" {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch_options")
-				http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -4319,7 +4370,7 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 
 		if r.Header.Get("X-DefenseClaw-Client") == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch")
-			http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+			writeJSONRefusal(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 			return
 		}
 
@@ -4327,19 +4378,19 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		if isOTLPEndpointPath(r.URL.Path) || isSandboxRelayOTLPPath(r.URL.Path) {
 			if !isOTLPContentType(ct) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
-				http.Error(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
+				writeJSONRefusal(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
 				return
 			}
 		} else if !strings.Contains(ct, "application/json") {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
-			http.Error(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
+			writeJSONRefusal(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
 			return
 		}
 
 		if origin := r.Header.Get("Origin"); origin != "" {
 			if !isLocalhostOrigin(origin) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthOriginBlocked, "origin_blocked")
-				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
@@ -4400,31 +4451,41 @@ func csrfProtect(next http.Handler) http.Handler {
 
 		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
 			if sfs != "same-origin" && sfs != "none" {
-				http.Error(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
 
 		if r.Header.Get("X-DefenseClaw-Client") == "" {
-			http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+			writeJSONRefusal(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
 			return
 		}
 
 		ct := r.Header.Get("Content-Type")
 		if !strings.Contains(ct, "application/json") {
-			http.Error(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
+			writeJSONRefusal(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
 			return
 		}
 
 		if origin := r.Header.Get("Origin"); origin != "" {
 			if !isLocalhostOrigin(origin) {
-				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				writeJSONRefusal(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
 				return
 			}
 		}
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// writeJSONRefusal writes a CSRF gate refusal: its body is JSON, so it is
+// served as application/json like every other API error (GAP-0569), not as
+// http.Error's text/plain. Bodies and status codes are unchanged.
+func writeJSONRefusal(w http.ResponseWriter, body string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, body+"\n")
 }
 
 func isLocalhostOrigin(origin string) bool {

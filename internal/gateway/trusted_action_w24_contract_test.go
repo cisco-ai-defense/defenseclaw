@@ -30,6 +30,10 @@ func TestTrustedActionW24AdditiveContract(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cwd, "race.txt"), []byte("old\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The POSIX command text names the home with forward slashes: a native
+	// Windows path's backslashes are escapes to the shell (cd C:\Users\x
+	// is cd C:Usersx).
+	posixHome := filepath.ToSlash(home)
 	for _, tt := range []struct {
 		name, command, rule string
 		dialect             actionfacts.Dialect
@@ -52,8 +56,8 @@ func TestTrustedActionW24AdditiveContract(t *testing.T) {
 		{"declare export function", `f() { rm -rf /; }; declare -fx f; bash -c f`, "CMD-RM-RF", actionfacts.DialectPOSIX, true},
 		{"typeset export function", `f() { rm -rf /; }; typeset -fx f; bash -c f`, "CMD-RM-RF", actionfacts.DialectPOSIX, true},
 		{"declare trap function", `f() { rm -rf /; }; declare -fx f; trap f EXIT`, "CMD-RM-RF", actionfacts.DialectPOSIX, true},
-		{"builtin directory inner rule", `builtin cd ` + home + `; cat .ssh/id_rsa`, "PATH-SSH-KEY", actionfacts.DialectPOSIX, true},
-		{"command directory inner rule", `command cd ` + home + `; cat .ssh/id_rsa`, "PATH-SSH-KEY", actionfacts.DialectPOSIX, true},
+		{"builtin directory inner rule", `builtin cd ` + posixHome + `; cat .ssh/id_rsa`, "PATH-SSH-KEY", actionfacts.DialectPOSIX, true},
+		{"command directory inner rule", `command cd ` + posixHome + `; cat .ssh/id_rsa`, "PATH-SSH-KEY", actionfacts.DialectPOSIX, true},
 		{"loop bound destination", `for f in build/item.txt; do echo ok >> "$f"; done`, "", actionfacts.DialectPOSIX, false},
 		{"assignment bound destination", `out="$(mktemp -d)"; printf ok > "$out/probe.txt"`, "", actionfacts.DialectPOSIX, false},
 		{"export bound destination", `export OUTPUT_DIR=out; printf ready > "$OUTPUT_DIR/status.txt"`, "", actionfacts.DialectPOSIX, false},

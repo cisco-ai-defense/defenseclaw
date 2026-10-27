@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // A proven meet covers an uncertain assignment only with the rule packs it
@@ -87,7 +86,7 @@ func TestProvenMeetCoversAnUncertainProfileOnlyWithThePacksItScans(t *testing.T)
 				ctx = withGuardrailProfile(ctx, set, "codex")
 				api := &APIServer{}
 				api.guardrailProfiles.set.Store(set)
-				if response, refused := api.refuseProfileHook(ctx, connector.HookProfile{}, "codex",
+				if response, refused := api.refuseProfileHook(ctx, (&APIServer{scannerCfg: config.DefaultConfig()}).hookProfileForConnector("codex"), "codex",
 					agentHookRequest{ConnectorName: "codex", HookEventName: "pre_tool_use"}, nil, nil); !refused || response.Action != "block" {
 					t.Fatalf("hook did not refuse: %+v, refused=%v", response, refused)
 				}

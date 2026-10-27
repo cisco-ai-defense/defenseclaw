@@ -94,20 +94,16 @@ func (a *APIServer) newManagedHookSocketServer(ctx context.Context, base func(ht
 	a.startManagedPolicyView(ctx, runtime.GOOS)
 	server := &http.Server{
 		Handler:     a.managedHookSocketHandler(authorizer, base),
-		BaseContext: func(net.Listener) context.Context { return ctx },
+		BaseContext: apiRequestBaseContext(ctx),
 		ConnContext: managedHookConnContext,
 	}
 	return server, listener, nil
 }
 
-// managedHookSocketHandler is the hook socket's handler chain. Until 1.1, a
-// removed connector's hook route blocks every call after the informational
-// receipt hint and before the peer checks
-// (retired_connector_hook.go), so a caller the kernel names or not gets the
-// block, never the 403 an old hook in fail mode open allows on.
+// managedHookSocketHandler is the hook socket's handler chain.
 func (a *APIServer) managedHookSocketHandler(authorizer *managedHookAuthorizer, base func(http.Handler) http.Handler) http.Handler {
 	handler := base(managedHookSocketHealth(a.handleHealth, a.managedHookPeerAuth(authorizer, a.managedHookSocketMux())))
-	return managedHookEarlyReceipt(retiredConnectorHookFirst(managedHookPeerIdentityMiddleware(handler)))
+	return managedHookEarlyReceipt(managedHookPeerIdentityMiddleware(handler))
 }
 
 // managedHookEarlyReceipt advertises full duplex before the socket's first

@@ -415,7 +415,17 @@ func TestUninstallKeepsTheBinariesWhileMachinePolicyRemains(t *testing.T) {
 	}
 	fail := true
 	h.env.MachinePolicy = failingRemovePolicy{MachinePolicyManager: h.env.MachinePolicy, fail: &fail}
+	removedUsers := 0
+	h.env.Runner = observingRunner{Runner: h.runner, observe: func(_ string, args []string) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "hooks remove-all") && !strings.HasSuffix(joined, " --check") {
+			removedUsers++
+		}
+	}}
 	failed := h.run(Options{Action: ActionUninstall, Purge: true})
+	if removedUsers != 0 {
+		t.Fatalf("machine policy removal failed after %d per-user hook removals", removedUsers)
+	}
 	requireError(t, failed, codeUninstall)
 	// GAP-1519: the stop has its own code, which the package removal keeps
 	// the package files on.
@@ -888,12 +898,8 @@ func TestRefusedMacUninstallChecksRestoredGatewayAsServiceAccount(t *testing.T) 
 func TestUninstallKeepsTheBinariesWhenRegistrationsWereNotChecked(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	unchecked := true
 	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
-		if unchecked {
-			return CommandResult{ExitCode: 1, Stdout: []byte(`{"ok":false,"failed":["eligible accounts: open unix_eligible_accounts.json: permission denied"]}`)}, errors.New("exit 1")
-		}
-		return CommandResult{Stdout: []byte(`{"ok":true}`)}, nil
+		return CommandResult{ExitCode: 1, Stdout: []byte(`{"ok":false,"failed":["eligible accounts: open unix_eligible_accounts.json: permission denied"]}`)}, errors.New("exit 1")
 	}}
 	failed := h.run(Options{Action: ActionUninstall})
 	requireError(t, failed, codePerUserHooks)
@@ -905,7 +911,20 @@ func TestUninstallKeepsTheBinariesWhenRegistrationsWereNotChecked(t *testing.T) 
 	if !exists(gateway) || !exists(h.env.deploymentPath()) {
 		t.Fatal("the uninstall removed the binaries while registrations were not checked")
 	}
-	unchecked = false
+	for _, report := range []string{"invalid report", `{}`, `{"ok":false}`} {
+		h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+			return CommandResult{Stdout: []byte(report)}, nil
+		}}
+		refused := h.run(Options{Action: ActionUninstall})
+		requireError(t, refused, codeUninstallIncomplete)
+		if !exists(gateway) || !exists(h.env.deploymentPath()) ||
+			!strings.Contains(messagesOf(refused.Errors, codePerUserHooks), h.env.lifecycleCommand(ActionUninstall)) {
+			t.Fatalf("unconfirmed hook removal did not retain the deployment and name its retry: %+v", refused)
+		}
+	}
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true}`)}, nil
+	}}
 	requireOK(t, h.run(Options{Action: ActionUninstall}))
 	if exists(gateway) || exists(h.env.deploymentPath()) {
 		t.Fatal("the rerun did not finish the removal")

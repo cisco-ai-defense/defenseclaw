@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -477,6 +478,9 @@ func TestLifecycleLock(t *testing.T) {
 // creates and starts, keeps a restart out while it holds it, and gives up
 // with ErrGatewayBusy after the bounded wait.
 func TestSandboxCommandWaitsForGatewayRollbackLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenShell sandboxes are unsupported on Windows")
+	}
 	dir := t.TempDir()
 	unlock, err := openshell.LockGatewayLifecycle(context.Background(), dir)
 	if err != nil {

@@ -186,7 +186,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		}
 	}
 	if machinePolicyIncomplete(r) {
-		r.SecurityComplete = false
+		r.MarkSecurityIncomplete(codeMachinePolicyIncomplete)
 	}
 	// This is the observed host setting. The hook proves its managed policy
 	// view separately on each invocation.
@@ -201,7 +201,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// status reports them as warnings with security_complete false.
 		for _, warning := range r.Warnings {
 			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected ||
-				warning.Code == codeNoConnectorsEnabled || warning.Code == codeSandboxPackDir {
+				warning.Code == codeNoConnectorsEnabled || warning.Code == codeSandboxPackDir || warning.Code == codeLegacySandbox {
 				problems = append(problems, warning.Message)
 			}
 		}
@@ -778,7 +778,7 @@ func (e *Env) installedModeProblems(record *Deployment, skipConfig bool, skip st
 // which every account (the services, the agents running the hook) executes.
 func managedExecutable(name string) bool {
 	switch name {
-	case binGateway, binHook, binSensorHelper, binACP:
+	case binGateway, binHook, binSensorHelper, binACP, binScanners:
 		return true
 	}
 	return false
@@ -1124,7 +1124,15 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		// record, and ensure must stay a no-op until config.yaml changes.
 		r.AddWarning(codeConfigRejected, problem)
 	}
-	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
+	r.ResetCompleteness()
+	for _, service := range []struct {
+		ready bool
+		name  string
+	}{{r.Readiness.Gateway, "the gateway"}, {r.Readiness.Guardian, "the hook guardian"}, {r.Readiness.Enumerator, "the hook enumerator"}} {
+		if !service.ready {
+			r.MarkCoverageIncomplete(service.name + " is not ready")
+		}
+	}
 	if record != nil {
 		drift, unpinnable := l.policyViewPinProblems(record.MachinePolicyConnectors)
 		for _, problem := range drift {
@@ -1134,9 +1142,24 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 			r.AddWarning(codeMachinePolicyIncomplete, problem)
 		}
 	}
-	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 &&
-		!machinePolicyIncomplete(r) && !l.gatewayAuditFailure && reloadError == "" &&
-		r.Policy != nil && r.Policy.Applied
+	if !r.Readiness.SensorHelper {
+		r.MarkSecurityIncomplete("the sensor helper is not ready")
+	}
+	if len(r.Errors) > 0 {
+		r.SecurityComplete = false
+	}
+	if machinePolicyIncomplete(r) {
+		r.MarkSecurityIncomplete(codeMachinePolicyIncomplete)
+	}
+	if l.gatewayAuditFailure {
+		r.MarkSecurityIncomplete(codeAuditWriteFailed)
+	}
+	if reloadError != "" {
+		r.MarkSecurityIncomplete(codePolicyReloadRejected)
+	}
+	if r.Policy == nil || !r.Policy.Applied {
+		r.MarkSecurityIncomplete("the gateway does not report the installed policy as applied")
+	}
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeChangedGuardianFiles()
@@ -1265,6 +1288,7 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 				FailureSummary      string `json:"optional_destination_failure_summary"`
 				EventHistoryFailure string `json:"event_history_failure"`
 				LastSQLiteClass     string `json:"event_history_last_sqlite_class"`
+				LastFailureAt       string `json:"event_history_last_failure_at"`
 			} `json:"details"`
 		} `json:"telemetry"`
 		Inspection *struct {
@@ -1300,6 +1324,23 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			message += "; last SQLite failure class: " + class
 		}
 		l.result.AddWarning(codeAuditWriteFailed, message+"; inspect the gateway /health telemetry details")
+	} else if class := health.Telemetry.Details.LastSQLiteClass; class != "" && class != "busy_locked" && class != "deadline" &&
+		!auditWriteFailureRecovered(health.Telemetry.Details.LastFailureAt, l.env.Now()) {
+		// Any later record clears the active failure, so one that fails
+		// only some records (one agent's hook calls) showed as healthy
+		// while those calls were refused (GAP-0773). The gateway keeps the
+		// last class after it recovers, so a lock or a timed-out write,
+		// which the next commit clears (GAP-1537, GAP-1790), is not kept
+		// as a failure for the rest of the gateway's life.
+		switch class {
+		case "full", "io", "readonly_cantopen", "constraint_corrupt", "unavailable", "other":
+		default:
+			class = "other"
+		}
+		l.gatewayAuditFailure = true
+		l.result.AddWarning(codeAuditWriteFailed, "the gateway failed to write a mandatory audit record since it started (last SQLite failure class: "+class+
+			"); later records were written, but a failure that hits only some records can still refuse those calls; inspect the gateway /health telemetry details. The warning clears "+
+			auditWriteFailureWindow.String()+" after the last failed write")
 	}
 	// A judge that stops answering silently downgrades detection to the
 	// static rules; only /health and the journal said so (GAP-0626).
@@ -1446,4 +1487,24 @@ func (l *lifecycle) enrollmentCounts() enterprisestatus.Enrollment {
 		counts.Targets, counts.Failed, counts.Pending = ledger.TargetCount, ledger.FailureCount, ledger.PendingCount
 	}
 	return counts
+}
+
+// auditWriteFailureWindow is how long after the gateway's last failed audit
+// write status and verify keep reporting it once later records were
+// written: a failure that hits only some records still refuses those calls
+// (GAP-0773), but one fixed long ago (a full disk freed) does not keep the
+// host incomplete until the gateway restarts (GAP-1627). It is the window
+// of the coverage records, so a failure is seen by at least one enumerator
+// cycle and one status run.
+const auditWriteFailureWindow = 16 * time.Minute
+
+// auditWriteFailureRecovered reports a last failed write (RFC 3339, from
+// /health) older than auditWriteFailureWindow. A time that is missing or
+// unreadable is not proof of recovery.
+func auditWriteFailureRecovered(lastFailureAt string, now time.Time) bool {
+	at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(lastFailureAt))
+	if err != nil {
+		return false
+	}
+	return now.Sub(at) > auditWriteFailureWindow
 }

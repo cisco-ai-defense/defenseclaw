@@ -1262,46 +1262,6 @@ with locked_file_update(lock_base):
             with mock.patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value=None):
                 self.assertFalse(cmd_setup._rotate_token_hook_registration_clean(td, config_file, "codex"))
 
-    def test_removed_connector_kept_hook_token_survives_rotation(self) -> None:
-        from tempfile import TemporaryDirectory
-
-        with TemporaryDirectory() as td:
-            app = _make_rotate_ctx(td, ["codex"])
-            codex = Path(td, "hooks", ".hook-codex.token")
-            old_codex = codex.read_bytes()
-            kept = Path(td, "hooks", ".hook-openhands.token")
-            old_kept = b"3" * 64 + b"\r\n"
-            cmd_setup.atomic_write_private_bytes(kept, old_kept)
-            kept_mode = kept.stat().st_mode & 0o777
-            states: list[dict[str, object]] = []
-
-            def lifecycle(
-                _data_dir: str,
-                action: str,
-                *,
-                token: str,
-                config_file: str,
-                connector_state: str | None = None,
-                cleanup: bool = False,
-            ) -> None:
-                del token, config_file, cleanup
-                if action == "start":
-                    states.append(json.loads(str(connector_state)))
-
-            with (
-                mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", side_effect=lifecycle),
-                mock.patch.object(cmd_setup.secrets, "token_hex", return_value="b" * 64),
-                mock.patch.object(cmd_setup.secrets, "token_bytes", return_value=b"\x42" * 32),
-            ):
-                result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
-
-            self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertEqual(kept.read_bytes(), old_kept)
-            self.assertEqual(kept.stat().st_mode & 0o777, kept_mode)
-            self.assertNotEqual(codex.read_bytes(), old_codex)
-            self.assertEqual(len(states), 1)
-            self.assertEqual(set(states[0]["hook_token_fingerprints"]), {"codex"})
-
     def test_failed_b_restores_exact_orphan_and_recovery_state_omits_unverifiable_orphans(self) -> None:
         from tempfile import TemporaryDirectory
 

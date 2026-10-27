@@ -20,7 +20,7 @@ var releasedAdapterOpens = map[string][]string{
 }
 
 func TestPerUserCopilotAdapterLegacyOpenRendersFailureDeny(t *testing.T) {
-	scripts, err := renderHookScripts("127.0.0.1:18970", "open", ".token", []string{"copilot-hook.ps1"}, false, "copilot", true, "", "", false, false)
+	scripts, err := renderHookScripts("127.0.0.1:18970", "open", ".token", []string{"copilot-hook.ps1"}, false, "copilot", true, "", "", false, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}

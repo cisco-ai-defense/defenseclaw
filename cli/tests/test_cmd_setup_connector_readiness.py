@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import click
 import pytest
+from defenseclaw import config as dcconfig
 from defenseclaw import agent_selection, fail_mode, hook_integrity
 from defenseclaw.commands import cmd_doctor, cmd_setup
 from defenseclaw.connector_contracts import (
@@ -806,6 +807,13 @@ def test_upstream_fail_open_remains_distinct_from_configured_mode(monkeypatch, t
     monkeypatch.setattr(cmd_doctor, "hermes_profile_unsupported_reason", lambda *_args: "")
     monkeypatch.setattr(
         cmd_doctor,
+        "_check_hook_contract_lock",
+        lambda _cfg, _connector, result: cmd_doctor._emit(
+            "pass", "Hook contract", "registered", r=result
+        ),
+    )
+    monkeypatch.setattr(
+        cmd_doctor,
         "_windows_native_hook_check",
         lambda *_args, **_kwargs: WindowsHookCheck("healthy", "registered"),
     )
@@ -897,6 +905,40 @@ def test_readiness_rejects_lock_that_disagrees_with_mode_aware_desired_fail_mode
     assert readiness.detail == "lock=open configured=closed effective=open"
 
 
+@pytest.mark.parametrize("mode", ("observe", "action"))
+@pytest.mark.parametrize("outage_mode", ("open", "closed"))
+def test_cursor_readiness_uses_the_recorded_outage_mode_independent_of_guardrail_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str, outage_mode: str,
+) -> None:
+    cfg = _config(tmp_path)
+    cfg.guardrail = _guardrail(mode=mode, fail_mode=outage_mode)
+    monkeypatch.setattr(
+        fail_mode, "connector_registration_lock_state", lambda *_args: (outage_mode, None),
+    )
+    monkeypatch.setattr(
+        fail_mode, "connector_fail_mode_report", lambda *_args, **_kwargs: {
+            "configured": outage_mode, "desired": outage_mode, "effective": outage_mode,
+            "sources": [{"name": "hook-script", "mode": outage_mode}],
+        },
+    )
+    monkeypatch.setattr(
+        cmd_doctor, "_check_hook_contract_lock",
+        lambda _cfg, _name, result: result.record("pass", "Hook contract", "current"),
+    )
+    monkeypatch.setattr(
+        cmd_doctor, "_check_connector_hooks",
+        lambda _cfg, _name, result: result.record("pass", "Cursor hooks", "current"),
+    )
+
+    readiness = cmd_doctor.connector_setup_readiness(cfg, "cursor")
+    assert readiness.ready, readiness
+    assert readiness.detail == f"configured={outage_mode}; effective={outage_mode}"
+    other = "closed" if outage_mode == "open" else "open"
+    monkeypatch.setattr(fail_mode, "connector_registration_lock_state", lambda *_args: (other, None))
+    drift = cmd_doctor.connector_setup_readiness(cfg, "cursor")
+    assert not drift.ready and drift.invariant == "fail-mode", drift
+
+
 
 
 def test_copilot_stale_launcher_returns_executable_invariant(monkeypatch, tmp_path: Path) -> None:
@@ -962,6 +1004,30 @@ def test_readiness_requires_the_rendered_windows_mode_to_match_the_lock(
     if not ready:
         assert readiness.invariant == "fail-mode"
         assert f"rendered={rendered or 'missing'}" in readiness.detail
+
+
+def test_opencode_recovery_setup_uses_call_time_mode_without_rendered_mode(monkeypatch, tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    # The real GuardrailConfig: a stub with the method hid that the class had
+    # none, so the exemption never applied (GAP-1354).
+    cfg.guardrail = dcconfig.GuardrailConfig()
+    entry = _entry("opencode", tmp_path)
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": {"opencode": entry}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(fail_mode, "connector_registration_lock_state", lambda *_: ("open", ""))
+    monkeypatch.setattr(fail_mode, "connector_fail_mode_report", lambda *_a, **_kw: {
+        "configured": "open", "desired": "open", "effective": "open",
+        "sources": [{"name": "opencode-plugin", "mode": None}],
+    })
+
+    def passing(label: str):
+        return lambda _cfg, _name, r, *_args, **_kwargs: cmd_doctor._emit("pass", label, "ok", r=r)
+
+    monkeypatch.setattr(cmd_doctor, "_check_hook_contract_lock", passing("Hook contract"))
+    monkeypatch.setattr(cmd_doctor, "_check_connector_hooks", passing("OpenCode hooks"))
+    readiness = cmd_doctor.connector_setup_readiness(cfg, "opencode")
+    assert readiness, readiness
 
 
 def test_readiness_lock_reports_digest_drift(monkeypatch, tmp_path: Path) -> None:
@@ -1766,6 +1832,92 @@ def test_setup_continues_when_the_agent_settings_let_hooks_run(monkeypatch, tmp_
     calls = _gateway_check_agent_settings(monkeypatch, {})
     assert cmd_setup._agent_settings_refusal(_config(tmp_path), "codex") == ""
     assert cmd_setup._agent_settings_refusal(_config(tmp_path), "cursor") == ""
-    assert len(calls) == 1
+    # Every connector is asked: the shared hook config is checked for all (GAP-1325).
+    assert len(calls) == 2
     monkeypatch.setattr(cmd_setup, "_gateway_lifecycle_executable", lambda: "")
     assert cmd_setup._agent_settings_refusal(_config(tmp_path), "claudecode") == ""
+
+
+def test_setup_that_restarts_goes_ahead_over_a_sidecar_the_restart_repairs(monkeypatch, tmp_path: Path) -> None:
+    """GAP-1815: the gateway's writer rebuilds a null fail_modes map from the
+    flat hook records when it restarts (GAP-0512), so setup with its default
+    restart goes ahead; setup --no-restart is still refused."""
+    payload = {
+        "connector": "claudecode",
+        "refused": True,
+        "repaired_by_restart": True,
+        "reason": f"the shared hook config {tmp_path}/hooks/.hookcfg has a null fail_modes map",
+    }
+    _gateway_check_agent_settings(monkeypatch, payload)
+    assert cmd_setup._agent_settings_refusal(_config(tmp_path), "claudecode", will_restart=True) == ""
+    refusal = cmd_setup._agent_settings_refusal(_config(tmp_path), "claudecode", will_restart=False)
+    assert "null fail_modes map" in refusal
+    _gateway_check_agent_settings(monkeypatch, {**payload, "repaired_by_restart": False})
+    assert "null fail_modes map" in cmd_setup._agent_settings_refusal(_config(tmp_path), "claudecode", will_restart=True)
+
+
+@pytest.mark.parametrize("connector", ("claudecode", "hermes", "cursor", "opencode"))
+def test_setup_refuses_a_malformed_shared_hook_sidecar_for_every_connector(
+    monkeypatch, tmp_path: Path, connector: str
+) -> None:
+    """GAP-1325: `setup claude-code --no-restart` saved its change and said it
+    succeeded while hooks/.hookcfg was malformed (fail_modes null), which every
+    hook of the data directory closes on. The gateway's check now refuses it
+    for every connector, and setup stops before it changes anything."""
+    reason = (
+        f"the shared hook config {tmp_path}/hooks/.hookcfg is malformed (parse hook config sidecar: fail_modes "
+        "is not an object), so every DefenseClaw hook of this data directory closes on it; move the file aside "
+        "and restart the gateway (defenseclaw-gateway restart), which writes it again from config.yaml"
+    )
+    calls = _gateway_check_agent_settings(
+        monkeypatch, {"connector": connector, "action": "check-agent-settings", "refused": True, "reason": reason}
+    )
+    assert "is malformed" in cmd_setup._agent_settings_refusal(_config(tmp_path), connector)
+    assert calls and calls[0][1:5] == ["connector", "check-agent-settings", "--connector", connector]
+
+
+@pytest.mark.parametrize(
+    ("status", "detail", "ready"),
+    (
+        (
+            "warn",
+            "registered at /home/u/.hermes/config.yaml; execution proof unavailable: unprivileged user namespaces "
+            "are disabled (user.max_user_namespaces=0), so the registered hook is read back without running it",
+            True,
+        ),
+        ("warn", "registered at /home/u/.hermes/config.yaml; hooks_auto_accept is on", False),
+        ("fail", "Hermes registered hook execution probe could not run", False),
+    ),
+)
+def test_hermes_setup_is_ready_where_the_execution_proof_cannot_run(
+    monkeypatch, tmp_path: Path, status: str, detail: str, ready: bool
+) -> None:
+    """GAP-1994: with user.max_user_namespaces=0 doctor's Hermes hooks row is the
+    GAP-1525 warning (sealed registration, proof not run), and setup hermes still
+    rolled back and exited 1 on it. That warning is ready; any other warn is not."""
+    cfg = _config(tmp_path)
+    cfg.guardrail = _guardrail(fail_mode="closed")
+    cfg.deployment_mode = "managed_enterprise"
+    monkeypatch.setattr("defenseclaw.fail_mode._is_windows", lambda: True)
+    entry = _entry("hermes", tmp_path)
+    entry["hook_fail_mode"] = "closed"
+    _patch_registration_ready(monkeypatch, entry)
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": {"hermes": entry}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_selection, "setup_agent_lock_executable_invariant", lambda *_args: "")
+    monkeypatch.setattr(cmd_doctor, "hermes_profile_unsupported_reason", lambda *_args: "")
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_windows_native_hook_check",
+        lambda *_args, **_kwargs: WindowsHookCheck("healthy", "registered"),
+    )
+    monkeypatch.setattr(cmd_doctor, "_hermes_windows_execution_probe", lambda check: check)
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_check_hermes_hooks",
+        lambda _cfg, result: cmd_doctor._emit(status, cmd_doctor._HERMES_HOOKS_LABEL, detail, r=result),
+    )
+    readiness = cmd_doctor.connector_setup_readiness(cfg, "hermes")
+    assert bool(readiness) is ready, readiness

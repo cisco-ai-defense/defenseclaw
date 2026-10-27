@@ -589,7 +589,7 @@ func TestPowerShellPerUserHookStartsItsGateway(t *testing.T) {
 	// error, so the hook keeps retrying within the restart budget instead of
 	// failing at once with the operator-stop refusal.
 	started = nil
-	if err := os.Mkdir(filepath.Join(dataRoot, installLockName), 0o700); err != nil {
+	if err := os.Mkdir(filepath.Join(dataRoot, ".install.lock"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	markGatewayStopped(dataRoot)

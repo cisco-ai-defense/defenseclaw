@@ -18,6 +18,19 @@
 
 package enterprisepolicy
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
+)
 
 func copilotRefixOptions(t *testing.T) Options { return windowsTestOptions(t) }
+
+// writeAdministratorPolicy writes a policy file the way an elevated
+// administrator does under UAC: owned by Administrators. The policy file
+// trust rule refuses one the built-in Administrator account (a GitHub
+// runner) owns itself, and such a file is not administrator content.
+func writeAdministratorPolicy(t *testing.T, path, content string) {
+	t.Helper()
+	testenv.AsAdministratorsOwner(t, func() { writeFile(t, path, content) })
+}
