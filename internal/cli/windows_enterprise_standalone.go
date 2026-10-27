@@ -524,6 +524,43 @@ func refuseWindowsEnterpriseStandaloneDeferredState(action string, opts *windows
 	return nil
 }
 
+// refuseWindowsEnterpriseRepairFromAnotherRelease refuses an explicit
+// Setup /repair whose payload is another release than the installed one.
+// Repair copies the payload's files over the installed ones but records the
+// installed version, so a newer Setup left the newer hook program and Codex
+// requirements under installed_version of the older release, and a later
+// rollback snapshot took them as that release (GAP-2061). Repair stays the
+// installed release's Setup; this Setup's /ensure upgrades. The recovery of
+// a pending transaction (any release may finish it), the installed CLI
+// (no payload) and an unreadable version are left to the installer.
+func refuseWindowsEnterpriseRepairFromAnotherRelease(action string, opts *windowsEnterpriseLifecycleOptions) error {
+	if action != "repair" || !windowsEnterpriseStandalone(opts) || len(missingWindowsEnterpriseSources(opts)) != 0 {
+		return nil
+	}
+	deployment, err := windowsEnterpriseTargetDeployment(opts)
+	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled || windowsEnterpriseStandaloneRecoveryPending(opts) {
+		return nil
+	}
+	installed, setup := strings.TrimSpace(deployment.ProductVersion), strings.TrimSpace(opts.productVersion)
+	if _, _, ok := parseWindowsEnterpriseVersion(installed); !ok {
+		return nil
+	}
+	if _, _, ok := parseWindowsEnterpriseVersion(setup); !ok {
+		return nil
+	}
+	switch compareWindowsEnterpriseVersions(setup, installed) {
+	case 1:
+		return windowsEnterpriseInvalidArguments("this Setup is release %s and the installed release is %s: repair would put %s files "+
+			"under the installed %s. Run the %s Setup with /repair JSON=1, or this Setup with /ensure JSON=1 to upgrade (nothing was changed)",
+			setup, installed, setup, installed, installed)
+	case -1:
+		return windowsEnterpriseInvalidArguments("this Setup is release %s and the installed release is %s: repair would put %s files "+
+			"under the installed %s. Run the %s Setup with /repair JSON=1, or this Setup with /upgrade JSON=1 to downgrade (nothing was changed)",
+			setup, installed, setup, installed, installed)
+	}
+	return nil
+}
+
 // windowsEnterpriseInstallerAction is the -Action value of installer args.
 func windowsEnterpriseInstallerAction(args []string) string {
 	for i := 0; i+1 < len(args); i++ {
@@ -599,6 +636,9 @@ func runWindowsEnterpriseStandaloneAction(
 	// untrusted scanner runtime it cannot remove, before it changes
 	// anything: refused here, they come before this run's first change too.
 	if err := refuseWindowsEnterpriseStandaloneDeferredState(action, opts); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+	}
+	if err := refuseWindowsEnterpriseRepairFromAnotherRelease(action, opts); err != nil {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
 	if err := refuseUntrustedWindowsScannerRuntimeBeforeChange(canonicalWindowsEnterpriseAction(action), opts); err != nil {
@@ -1688,10 +1728,14 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStatePurged) {
 		result.Changes = append(result.Changes, windowsEnterprisePurgedUserStateChange(entry))
 	}
-	var notLocalSystem, remaining []string
+	var notLocalSystem, pathEntryKept, remaining []string
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStateRemaining) {
 		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksNotLocalSystemReason); found {
 			notLocalSystem = append(notLocalSystem, account)
+			continue
+		}
+		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksSignedOutPathEntryReason); found {
+			pathEntryKept = append(pathEntryKept, account)
 			continue
 		}
 		remaining = append(remaining, entry)
@@ -1707,6 +1751,15 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 			windowsEnterpriseLocalSystemRemedy("/uninstall PURGE=1"),
 			windowsEnterpriseBoundedLabels(notLocalSystem),
 		))
+	}
+	if len(pathEntryKept) > 0 {
+		// The documented signed-out case: the data and binaries went, the
+		// Path entry names a folder that is gone and runs nothing (GAP-2231).
+		result.AddWarning("per_user_state_remaining", fmt.Sprintf(
+			"--purge removed the DefenseClaw per-user data and binaries of %d signed-out enrolled account(s), but each keeps the user Path entry for %%USERPROFILE%%\\.local\\bin the install added: "+
+				"a signed-out account's registry hive is not loaded, so its Path cannot be changed. The entry names a folder that no longer exists and runs nothing; "+
+				"to remove it, delete it from that account's Path once it signs in. Accounts: %s",
+			len(pathEntryKept), windowsEnterpriseBoundedLabels(pathEntryKept)))
 	}
 	if len(remaining) > 0 {
 		result.AddError("per_user_state_remaining", windowsEnterpriseUserStateRemainingMessage(len(remaining), windowsEnterpriseBoundedLabels(remaining)))
@@ -3308,6 +3361,10 @@ func readWindowsEnterpriseBoundedFile(path string, limit int64) ([]byte, error) 
 
 var windowsEnterpriseEnsureTimeout = 12 * time.Minute
 
+// windowsEnterpriseEnsureMaximumTimeoutSeconds is the longest
+// --timeout-seconds, Setup's longest TIMEOUTSECONDS.
+const windowsEnterpriseEnsureMaximumTimeoutSeconds = 2 * 60 * 60
+
 // runWindowsEnterpriseStandaloneEnsure converges the host to the supplied
 // payload and config: a pending transaction is repaired, an absent
 // deployment is installed, an older one upgraded, drifted binaries or
@@ -3319,7 +3376,20 @@ func runWindowsEnterpriseStandaloneEnsure(
 	opts *windowsEnterpriseLifecycleOptions,
 	script string,
 ) error {
-	ctx, cancel := context.WithTimeout(ctx, windowsEnterpriseEnsureTimeout)
+	// GAP-2265: under Setup the deadline is Setup's TIMEOUTSECONDS budget
+	// (default 30 minutes), passed as --timeout-seconds; a fixed 12 minutes
+	// here failed an upgrade on a busy host long before the limit an
+	// administrator set or was told to raise.
+	timeout := windowsEnterpriseEnsureTimeout
+	if opts.timeoutSeconds != 0 {
+		if opts.timeoutSeconds < 60 || opts.timeoutSeconds > windowsEnterpriseEnsureMaximumTimeoutSeconds {
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			result.AddError("invalid_arguments", fmt.Sprintf("--timeout-seconds must be between 60 and %d", windowsEnterpriseEnsureMaximumTimeoutSeconds))
+			return finishWindowsEnterpriseStandalone(cmd, opts, result, enterprisestatus.WindowsExitInvalidArgs)
+		}
+		timeout = time.Duration(opts.timeoutSeconds) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if opts.bundle != nil {
 		// A failed bundle's nested rollback uses the remaining ensure budget.

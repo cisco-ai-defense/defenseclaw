@@ -462,3 +462,43 @@ func TestEnterpriseLifecycleForwardsTrustAnchorsItRefuses(t *testing.T) {
 		}
 	}
 }
+
+// GAP-2265: Setup hands the ensure child its TIMEOUTSECONDS budget less a
+// margin, so the documented limit bounds the run; other actions and an
+// unknown limit pass nothing.
+func TestEnterpriseLifecycleArgumentsHandEnsureTheSetupTimeout(t *testing.T) {
+	stage := `C:\ProgramData\DefenseClaw-Enterprise-Setup-0123456789abcdef0123456789abcdef`
+	value := func(args []string) string {
+		for index := 0; index < len(args)-1; index++ {
+			if args[index] == "--timeout-seconds" {
+				return args[index+1]
+			}
+		}
+		return ""
+	}
+	for _, tc := range []struct {
+		limit time.Duration
+		want  string
+	}{
+		{30 * time.Minute, "1680"},
+		{2 * time.Hour, "7080"},
+		{10 * time.Minute, "540"},
+		{60 * time.Second, "60"},
+		{0, ""},
+	} {
+		got := enterpriseLifecycleArguments(stage, enterpriseSetupOptions{Action: "ensure", Standalone: true, LifecycleTimeout: tc.limit})
+		if value(got) != tc.want {
+			t.Fatalf("limit %s: --timeout-seconds %q, want %q (%#v)", tc.limit, value(got), tc.want, got)
+		}
+	}
+	for _, opts := range []enterpriseSetupOptions{
+		{Action: "upgrade", Standalone: true, LifecycleTimeout: 30 * time.Minute},
+		{Action: "repair", Standalone: true, LifecycleTimeout: 30 * time.Minute},
+		{Action: "ensure", LifecycleTimeout: 30 * time.Minute},
+		standaloneRecoveryOptions(enterpriseSetupOptions{Action: "ensure", Standalone: true, LifecycleTimeout: 30 * time.Minute}),
+	} {
+		if got := enterpriseLifecycleArguments(stage, opts); value(got) != "" {
+			t.Fatalf("%s (standalone %v) passed --timeout-seconds: %#v", opts.Action, opts.Standalone, got)
+		}
+	}
+}
