@@ -337,7 +337,7 @@ def test_gap2040_a_judge_rule_id_without_the_llm_prefix_is_still_capped(tmp_path
     meta = _META.replace('"META-LLM-001"', '"MISSED-001"')
     result = _scan(_plugin(tmp_path, dict(_SKILL)), monkeypatch, judge=judge, meta=meta)
     found = {(f.rule_id, f.severity) for f in result.findings}
-    assert found >= {("OB-009-001", "MEDIUM"), ("MISSED-001", "MEDIUM")}, found
+    assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-MISSED-001", "MEDIUM")}, found
     assert result.max_severity() == "MEDIUM"
     pe.cfg.admission.plugin.actions.update(critical="block", high="block")
     assert _decide(pe, result).verdict == "warning"
@@ -346,7 +346,39 @@ def test_gap2040_a_judge_rule_id_without_the_llm_prefix_is_still_capped(tmp_path
 def test_gap2040_an_unprefixed_judge_high_on_a_runnable_plugin_stays_high(tmp_path, monkeypatch) -> None:
     judge = _JUDGE.replace('"LLM-OB-009-001"', '"OB-009-001"')
     result = _scan(_plugin(tmp_path, {**_SKILL, "scripts/run.sh": "echo hi\n"}), monkeypatch, judge=judge)
-    assert ("OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
+
+
+@pytest.mark.parametrize("judge_id,meta_id", [
+    ("OB-009-001", "MISSED-001"), ("LLM-OB-009-001", "META-LLM-001"), ("llm-ob-009-001", "META-LLM-002"),
+])
+def test_gap2107_an_unprefixed_judge_high_on_a_runnable_plugin_warns_like_its_prefixed_form(
+    tmp_path, monkeypatch, pe, judge_id, meta_id,
+) -> None:
+    # GAP-2107: the default-tier pre-step read the rule id the model writes,
+    # so "OB-009-001" / "MISSED-001" HIGH on a plugin with an executable file
+    # was refused under the built-in HIGH action, while LLM-OB-009-001 warned.
+    judge = _JUDGE.replace('"LLM-OB-009-001"', f'"{judge_id}"')
+    meta = _META.replace('"META-LLM-001"', f'"{meta_id}"')
+    result = _scan(_plugin(tmp_path, {**_SKILL, "scripts/run.sh": "echo hi\n"}), monkeypatch, judge=judge, meta=meta)
+    ids = {f.rule_id for f in result.findings if f.severity == "HIGH"}
+    assert ids and all(i.startswith(("LLM-OB-", "META-LLM-")) for i in ids), ids
+    assert _decide(pe, result).verdict == "warning"
+    pe.cfg.admission.plugin.actions.update(high="block")
+    assert _decide(pe, result).verdict == "rejected"
+
+
+@pytest.mark.parametrize("raw,prefix,want", [
+    ("OB-009-001", "LLM-", "LLM-OB-009-001"), ("LLM-OB-009-001", "LLM-", "LLM-OB-009-001"),
+    ("llm-ob-1", "LLM-", "LLM-OB-1"), ("", "LLM-", "LLM-UNKNOWN"), (None, "META-LLM-", "META-LLM-UNKNOWN"),
+    ("LLM-SCAN-ERROR", "LLM-", "LLM-UNKNOWN"), ("SCAN-ERROR", "LLM-", "LLM-UNKNOWN"),
+    ("CORR", "META-LLM-", "META-LLM-UNKNOWN"), ("FP-ADVISORY", "META-LLM-", "META-LLM-UNKNOWN"),
+    ("MISSED-001", "META-LLM-", "META-LLM-MISSED-001"), ("META-LLM-001", "META-LLM-", "META-LLM-001"),
+])
+def test_gap2107_judge_rule_ids_carry_the_judge_prefix(raw, prefix, want) -> None:
+    from defenseclaw.scanner.plugin_scanner.llm_analyzer import _judge_rule_id
+
+    assert _judge_rule_id(raw, prefix) == want
 
 
 def test_operator_severity_override_still_wins(tmp_path, monkeypatch) -> None:
@@ -398,6 +430,7 @@ def _judge_only(*extra: tuple[str, str]) -> ScanResult:
 @pytest.mark.parametrize("extra", [
     ("SRC-EXFIL-001", "HIGH"), ("SRC-NET-002", "MEDIUM"), ("META-EXFIL-CHAIN", "MEDIUM"), ("SRC-EVAL-001", "CRITICAL"),
     ("LLM-SCAN-ERROR", "MEDIUM"), ("LLM-UNKNOWN", "HIGH"), ("META-LLM-CORR", "HIGH"), ("LLM-OB-009-002", "SEVERE"),
+    ("META-LLM-UNKNOWN", "HIGH"), ("META-LLM-FP-ADVISORY", "HIGH"),
 ])
 def test_anything_beyond_judge_highs_and_static_low_keeps_the_block(pe, extra) -> None:
     assert _decide(pe, _judge_only(extra)).verdict == "rejected"
