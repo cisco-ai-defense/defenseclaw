@@ -653,6 +653,8 @@ jobs:
           retention-days: 3
       - uses: ./.github/actions/go-cache-save
         with:
+          cache-name: windows-package
+          cache-files: scripts/windows-native-ci.ps1
           cache-hit: ${{ steps.go.outputs.cache-hit }}
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}

@@ -235,3 +235,20 @@ def test_go_test_timeouts_stay_inside_the_job_budget() -> None:
         text = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
         for minutes in re.findall(r"-timeout[ =](\d+)m", text):
             assert int(minutes) <= 14, f"{name}: go test -timeout {minutes}m leaves no room in a 20-minute job"
+
+
+def test_every_go_cache_save_writes_the_entry_its_job_restores() -> None:
+    # A job with its own Go cache entry (a release cross-compile) must save
+    # under that entry; saving under "shared" would leave its own entry
+    # unwritten and fill the test jobs' entry with an unrelated build.
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job_id, job in (workflow.get("jobs") or {}).items():
+            steps = job.get("steps") or []
+            restores = [s.get("with") or {} for s in steps if s.get("uses") == "./.github/actions/setup-go"]
+            saves = [s.get("with") or {} for s in steps if s.get("uses") == "./.github/actions/go-cache-save"]
+            for save in saves:
+                assert len(restores) == 1, f"{path.name}:{job_id} saves a Go cache it does not restore once"
+                for key, default in (("cache-name", "shared"), ("cache-files", "")):
+                    restored, saved = restores[0].get(key, default), save.get(key, default)
+                    assert saved == restored, f"{path.name}:{job_id} restores {key}={restored!r} but saves {key}={saved!r}"

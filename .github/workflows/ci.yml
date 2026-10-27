@@ -922,6 +922,8 @@ jobs:
           retention-days: 3
       - uses: ./.github/actions/go-cache-save
         with:
+          cache-name: release-assets
+          cache-files: scripts/build-release-assets.sh
           cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   install-smoke:
@@ -1282,6 +1284,8 @@ jobs:
           retention-days: 3
       - uses: ./.github/actions/go-cache-save
         with:
+          cache-name: goreleaser-snapshot
+          cache-files: .goreleaser.yaml
           cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   enterprise-install-assets-windows:
