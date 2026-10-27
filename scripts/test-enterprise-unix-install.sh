@@ -635,6 +635,13 @@ if [ "$platform" = linux ]; then
     esac
     echo "expected policy-view warnings: ${kernel_views[*]:-none}"
 fi
+# The previous release reports the kernel's open policy-view routes as its
+# version does: 1.0.3 on its config steps only, 1.0.4 on every step from its
+# package install on. So its steps allow them; the new release's steps
+# require them (kernel_views).
+previous_views=()
+[ "$platform" != linux ] ||
+    previous_views=(--allow-warning unprivileged_user_namespaces --allow-warning unprivileged_ptrace)
 echo "package: $package"
 echo "version: $version"
 
@@ -650,20 +657,24 @@ upgrade_lane() {
     # A bare install of a 1.x package enables no connector, like the fresh
     # install below; the next step applies the administrator config.
     "$python" "$checker" "$results/01-previous-install.json" --label previous-install --platform "$platform" \
-        --action ensure --installed --version "$previous_version" --allow-warning no_connectors_enabled
+        --action ensure --installed --version "$previous_version" --allow-warning no_connectors_enabled \
+        ${previous_views[@]+"${previous_views[@]}"}
 
     step "apply the administrator config on the previous release"
     write_admin_config
-    lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane
+    # On macOS the previous package's config write fires the launchd path job
+    # (ensure --reason path) right after its install, as the install lane's
+    # ensure-config step finds: wait for it instead of failing lifecycle_busy.
+    lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane --lock-wait 2m
     check "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
-        --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"
+        "${policy_checks[@]}" ${previous_views[@]+"${previous_views[@]}"}
     cp "$stage/config.yaml" "$results/config-before.yaml"
     step "store a protected credential on the previous release"
     seed_upgrade_secret 02-previous-secret
     lifecycle 03-previous-verify verify
     retry_busy 03-previous-verify verify
     check "$results/03-previous-verify.json" previous-verify --action verify --installed --version "$previous_version" --ready \
-        --allow-warning unprivileged_user_namespaces
+        ${previous_views[@]+"${previous_views[@]}"}
     lifecycle 04-previous-status status
     retry_busy 04-previous-status status
     previous_config_sha=$(sha256_of "$config")
