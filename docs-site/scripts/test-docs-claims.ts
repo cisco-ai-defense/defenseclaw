@@ -1671,3 +1671,29 @@ describe('1.0.5 docs rows', () => {
     });
   }
 });
+
+// GAP-1922: the saved-installer protection the detection page promises is the
+// rule every shipped pack carries, and the every-mode claim is the observe test.
+describe('saved installer protection matches the rule packs (GAP-1922)', () => {
+  it('names installer/ and previous/installer/ in tamper.detector_state_write of every pack, for writes and deletes', () => {
+    const text = page('policies/deterministic-detection.mdx');
+    assert.ok(text.includes('DefenseClaw also protects its saved installer (`~/.defenseclaw/installer/` and `~/.defenseclaw/previous/installer/`): an agent that writes, truncates or deletes it is blocked in every mode, like `config.yaml`. Reading or running the saved installer stays allowed.'));
+    for (const pack of ['default', 'permissive', 'strict']) {
+      const yaml = source(`policies/guardrail/${pack}/rules/cognitive.yaml`);
+      const rule = yaml.split('- id: tamper.detector_state_write\n')[1]?.split(/\n {2}- id: /)[0] ?? '';
+      assert.ok(rule, `${pack}: no tamper.detector_state_write rule`);
+      const pattern = rule.match(/^ {4}pattern: '(.*)'$/m)?.[1] ?? '';
+      assert.ok(pattern.includes('|installer|'), `${pack}: pattern does not name installer/`);
+      assert.ok(pattern.includes('previous[/\\\\]installer'), `${pack}: pattern does not name previous/installer/`);
+      if (pack === "default") assert.match(rule, /^ {4}severity: CRITICAL$/m, "default: not CRITICAL");
+      for (const access of ['PATH_ACCESS_WRITE', 'PATH_ACCESS_APPEND', 'PATH_ACCESS_DELETE']) {
+        assert.ok(rule.includes(access), `${pack}: ${access} missing`);
+      }
+    }
+    const goTest = source('internal/gateway/action_saved_installer_state_test.go');
+    assert.ok(goTest.includes('instructionProtectionTestAPI(t, agent, "observe", "HIGH")'), 'the every-mode proof no longer runs in observe');
+    for (const row of ['{"append installer", ', '{"delete previous installer", ', '{"read installer", ', '{"run saved installer help", ']) {
+      assert.ok(goTest.includes(row), `Go test lost row ${row}`);
+    }
+  });
+});
