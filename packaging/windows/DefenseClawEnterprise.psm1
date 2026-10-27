@@ -32479,6 +32479,132 @@ function Complete-DefenseClawStatePurge {
     return $result
 }
 
+function Invoke-DefenseClawCommittedUserStatePurge {
+    <#
+        Runs "teardown-managed-hooks purge-user-state" with Setup's
+        authenticated gateway: over a committed standalone uninstall
+        tombstone whose hook teardown finalized, it removes each enrolled
+        account's per-user data and binaries as the finalize of a purge does,
+        and returns the same report (user_state_purged, user_state_remaining)
+        for the uninstall result (GAP-2094, GAP-0867).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][hashtable]$GatewaySource
+    )
+    $probe = Invoke-DefenseClawGatewayCommand `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GatewaySource $GatewaySource `
+        -Arguments @(
+            'enterprise',
+            'windows',
+            'teardown-managed-hooks',
+            'purge-user-state',
+            '--json'
+        ) `
+        -Capture `
+        -AllowFailure
+    $reports = [Collections.Generic.List[object]]::new()
+    foreach ($line in @($probe.output)) {
+        $text = ([string]$line).Trim()
+        if (-not $text.StartsWith('{', [StringComparison]::Ordinal)) {
+            continue
+        }
+        try {
+            $reports.Add(($text | Microsoft.PowerShell.Utility\ConvertFrom-Json))
+        }
+        catch {
+            throw "the per-user purge emitted malformed JSON: $text"
+        }
+    }
+    if ($reports.Count -ne 1) {
+        throw "the per-user purge emitted $($reports.Count) JSON reports; expected exactly one"
+    }
+    $report = $reports[0]
+    if ([int]$report.schema_version -ne 4 -or
+        [string]$report.action -cne 'purge-user-state') {
+        throw 'the per-user purge returned an unsupported report'
+    }
+    $reportOK = $report.PSObject.Properties['ok']
+    if ([int]$probe.exit_code -ne 0 -or
+        $null -eq $reportOK -or
+        $reportOK.Value -isnot [bool] -or
+        -not [bool]$reportOK.Value) {
+        $detail = if (-not [string]::IsNullOrWhiteSpace([string]$report.error)) {
+            [string]$report.error
+        }
+        else {
+            $probe.output
+        }
+        throw "the per-user purge failed: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $detail)"
+    }
+    $manifestPath = [IO.Path]::GetFullPath([string]$report.manifest_path).TrimEnd('\')
+    if (-not [string]::Equals(
+            $manifestPath,
+            [IO.Path]::GetFullPath([string]$Layout.ManifestPath).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "the per-user purge read a manifest outside the exact protected layout: $manifestPath"
+    }
+    return $report
+}
+
+function Invoke-DefenseClawTombstoneUserStatePurge {
+    <#
+        Over a committed standalone uninstall tombstone whose hook teardown
+        already finalized (a plain uninstall interrupted after its finalize,
+        or one whose InstallRoot is gone), only the finalize ever removed
+        each enrolled account's per-user data and binaries, and it no longer
+        runs. When this uninstall asks for that removal (PURGE=1), or the
+        tombstone recorded it, Setup's gateway removes them by the finalize's
+        rules, before the machine-state purge removes the target manifest
+        they are read from (GAP-2094, GAP-0867). Returns the helper report,
+        or $null when there is nothing to do here.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [hashtable]$GatewaySource
+    )
+    if ($null -eq $GatewaySource -or
+        -not (Test-DefenseClawStandaloneProfile) -or
+        (Test-DefenseClawMetadataInstalled -Metadata $Metadata) -or
+        -not ([bool]$script:DefenseClawUninstallPurgeUserState -or
+            (Get-DefenseClawTombstonePurgeUserStateRequested -Metadata $Metadata)) -or
+        -not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.ManifestPath `
+            -PathType Leaf)) {
+        return $null
+    }
+    if (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.ManagedHooksTeardownJournalPath `
+            -PathType Leaf) {
+        # An unfinished teardown is the finalize's own work.
+        $phase = Get-DefenseClawManagedHooksTeardownJournalPhase `
+            -Layout $Layout `
+            -Metadata $Metadata `
+            -GatewayServiceName $GatewayServiceName `
+            -AllowLegacyInactive
+        if ($phase -cne 'finalized') {
+            return $null
+        }
+    }
+    Write-DefenseClawLifecyclePhase -Stage 'per-user purge after a finalized uninstall teardown'
+    $callerPurgeUserState = $script:DefenseClawUninstallPurgeUserState
+    $script:DefenseClawUninstallPurgeUserState = $true
+    try {
+        return Invoke-DefenseClawCommittedUserStatePurge `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GatewaySource $GatewaySource
+    }
+    finally {
+        $script:DefenseClawUninstallPurgeUserState = $callerPurgeUserState
+    }
+}
+
 function Invoke-DefenseClawCommittedUninstallCleanup {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -32489,7 +32615,10 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
         # recomputes it from the authenticated service name and requires an
         # exact match whenever both forms are available.
         [string]$GatewayServiceSID,
-        [hashtable]$NativeCleanupSource
+        [hashtable]$NativeCleanupSource,
+        # Setup's own authenticated gateway, for the per-user purge an
+        # uninstall with purge asks for after the finalize already ran.
+        [hashtable]$UserStatePurgeSource
     )
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
     Assert-DefenseClawMetadataIdentity `
@@ -32611,6 +32740,16 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
                 -Label 'InstallRoot' `
                 -AllowAFUnixSocketAt (Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ManagedIPCSocketPath)
         }
+    }
+    # A purge over a tombstone whose hook teardown already finalized ran no
+    # finalize here; Setup's gateway removes the per-user state the
+    # finalize would have (GAP-2094, GAP-0867).
+    if ($Purge -and $null -eq $finalization) {
+        $finalization = Invoke-DefenseClawTombstoneUserStatePurge `
+            -Layout $Layout `
+            -Metadata $metadata `
+            -GatewayServiceName $GatewayServiceName `
+            -GatewaySource $UserStatePurgeSource
     }
     [void](Remove-DefenseClawCommittedManagedHooksTeardownJournal `
         -Layout $Layout `
@@ -34009,11 +34148,45 @@ function Invoke-DefenseClawPreLayoutRecovery {
     if (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.PurgeIntentPath) {
         if ($Action -eq 'Uninstall' -and $Purge) {
+            # A plain uninstall interrupted after it published its
+            # machine-state purge still keeps every enrolled account's
+            # per-user state; PURGE=1 removes it first (GAP-2094).
+            $userStatePurge = $null
+            if ((Test-DefenseClawStandaloneProfile) -and
+                (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Layout.MetadataPath `
+                    -PathType Leaf) -and
+                -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $Layout.PendingPath)) {
+                $intentMetadata = Get-DefenseClawDeploymentMetadata `
+                    -Layout $Layout `
+                    -Required
+                Assert-DefenseClawMetadataIdentity `
+                    -Metadata $intentMetadata `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName
+                $userStatePurge = Invoke-DefenseClawTombstoneUserStatePurge `
+                    -Layout $Layout `
+                    -Metadata $intentMetadata `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GatewaySource $(if ($Sources.ContainsKey('gateway')) {
+                        [hashtable]$Sources['gateway']
+                    }
+                    else {
+                        $nativeCleanupSource
+                    })
+            }
             $result = Complete-DefenseClawStatePurge `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
                 -NativeCleanupSource $nativeCleanupSource
+            if ($null -ne $userStatePurge) {
+                $result = Add-DefenseClawUserRegistrationCleanupResult `
+                    -Result $result `
+                    -Layout $Layout `
+                    -Finalization $userStatePurge
+            }
             $result = Add-DefenseClawUninstallContractResult -Result $result
             return [pscustomobject]@{
                 handled = $true
@@ -34170,12 +34343,19 @@ function Invoke-DefenseClawPreLayoutRecovery {
                 -GuardianServiceName $GuardianServiceName
             if (-not (Test-DefenseClawMetadataInstalled `
                     -Metadata $committedMetadata)) {
+                $userStatePurgeSource = if ($Sources.ContainsKey('gateway')) {
+                    [hashtable]$Sources['gateway']
+                }
+                else {
+                    $nativeCleanupSource
+                }
                 $result = Invoke-DefenseClawCommittedUninstallCleanup `
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName `
                     -GuardianServiceName $GuardianServiceName `
                     -Purge:$Purge `
-                    -NativeCleanupSource $nativeCleanupSource
+                    -NativeCleanupSource $nativeCleanupSource `
+                    -UserStatePurgeSource $userStatePurgeSource
                 return [pscustomobject]@{
                     handled = $true
                     result = $result
@@ -37056,12 +37236,21 @@ function Invoke-DefenseClawUninstallLifecycle {
         # Uninstall is idempotent after the durable tombstone. This also
         # finishes the only safe post-commit cleanup if the previous process
         # died after transaction completion but before journal retirement.
+        # A purge of the per-user state the finalize no longer does runs
+        # with Setup's gateway (GAP-2094).
+        $userStatePurgeSource = if ($null -ne $GatewaySource) {
+            $GatewaySource
+        }
+        else {
+            $NativeCleanupSource
+        }
         return Invoke-DefenseClawCommittedUninstallCleanup `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -Purge:$Purge `
-            -NativeCleanupSource $NativeCleanupSource
+            -NativeCleanupSource $NativeCleanupSource `
+            -UserStatePurgeSource $userStatePurgeSource
     }
     $managedHooksActivationProperty = $metadata.PSObject.Properties[
         'managed_hooks_activation'

@@ -541,6 +541,9 @@ jobs:
       - name: Committed uninstall finalized retry regression
         if: ${{ !cancelled() }}
         run: ./packaging/windows/tests/enterprise-uninstall-finalized-retry-smoke.ps1
+      - name: Committed uninstall tombstone per-user purge regression
+        if: ${{ !cancelled() }}
+        run: ./packaging/windows/tests/enterprise-uninstall-tombstone-user-state-purge-smoke.ps1
       - name: Committed uninstall postcommit recovery regression
         run: ./packaging/windows/tests/enterprise-uninstall-postcommit-recovery-smoke.ps1
       - name: Shared hook install scope preflight regression

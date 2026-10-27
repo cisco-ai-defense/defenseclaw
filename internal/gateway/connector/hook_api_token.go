@@ -81,7 +81,12 @@ func EnsureHookAPIToken(dataDir, connectorName string) (string, error) {
 	}
 	hookAPITokenMu.Lock()
 	defer hookAPITokenMu.Unlock()
-	return ensureHookAPITokenFileLocked(dataDir, tokenPath)
+	token, err := ensureHookAPITokenFileLocked(dataDir, tokenPath)
+	if err == nil {
+		// A setup that issues the credential again re-adds the connector.
+		clearHookAPITokenRevoked(dataDir, connectorName)
+	}
+	return token, err
 }
 
 // ensureHookAPITokenFileLocked returns the 64-character hex secret stored at
@@ -580,6 +585,7 @@ func removeHookAPIToken(dataDir, connectorName, issued string) error {
 				return fmt.Errorf("remove hook API token %s: %w", path, err)
 			}
 		}
+		clearHookAPITokenRevoked(dataDir, connectorName)
 		return syncHookAPITokenParent(tokenPath)
 	})
 }
@@ -611,12 +617,69 @@ func revokePerUserHookAPIToken(opts SetupOpts, connectorName string) error {
 
 // HookAPITokenRevocationPending reports a per-user connector-scoped hook API
 // credential that is still on disk (or its temporary copy) after a teardown:
-// its revocation did not finish, and the credential still authenticates to
-// the connector's hook route. Managed deployments revoke credentials at the
-// machine lifecycle boundary, and the OpenHands/OmniGent teardown removes
-// their tokens itself and never fails on one (removed.go), so neither is
-// pending here.
+// its revocation did not finish. The teardown already removed the hook
+// registration, so from then on the credential is refused at authentication
+// (HookAPITokenRevoked) until it is removed or issued again (GAP-0858).
+// Managed deployments revoke credentials at the machine lifecycle boundary,
+// and the OpenHands/OmniGent teardown removes their tokens itself and never
+// fails on one (removed.go), so neither is pending here.
 func HookAPITokenRevocationPending(opts SetupOpts, connectorName string) error {
+	err := hookAPITokenRevocationPending(opts, connectorName)
+	if err != nil {
+		markHookAPITokenRevoked(opts.DataDir, connectorName)
+	}
+	return err
+}
+
+// revokedHookAPITokens holds, per data dir and connector, the per-user hook
+// credentials a teardown could not delete. The token file still exists, so
+// tokenAuth would load it and accept it on the removed connector's hook
+// route; this set refuses it there instead.
+var (
+	revokedHookAPITokensMu sync.Mutex
+	revokedHookAPITokens   = map[string]struct{}{}
+)
+
+func revokedHookAPITokenKey(dataDir, connectorName string) (string, bool) {
+	scope, err := normalizeHookAPITokenScope(connectorName)
+	if err != nil || strings.TrimSpace(dataDir) == "" {
+		return "", false
+	}
+	return filepath.Clean(dataDir) + "\x00" + scope, true
+}
+
+func markHookAPITokenRevoked(dataDir, connectorName string) {
+	if key, ok := revokedHookAPITokenKey(dataDir, connectorName); ok {
+		revokedHookAPITokensMu.Lock()
+		revokedHookAPITokens[key] = struct{}{}
+		revokedHookAPITokensMu.Unlock()
+	}
+}
+
+func clearHookAPITokenRevoked(dataDir, connectorName string) {
+	if key, ok := revokedHookAPITokenKey(dataDir, connectorName); ok {
+		revokedHookAPITokensMu.Lock()
+		delete(revokedHookAPITokens, key)
+		revokedHookAPITokensMu.Unlock()
+	}
+}
+
+// HookAPITokenRevoked reports a connector-scoped hook credential whose
+// teardown removed the connector but could not delete the token file. It
+// authenticates nothing until RemoveHookAPIToken deletes it or a setup
+// issues it again with EnsureHookAPIToken.
+func HookAPITokenRevoked(dataDir, connectorName string) bool {
+	key, ok := revokedHookAPITokenKey(dataDir, connectorName)
+	if !ok {
+		return false
+	}
+	revokedHookAPITokensMu.Lock()
+	defer revokedHookAPITokensMu.Unlock()
+	_, revoked := revokedHookAPITokens[key]
+	return revoked
+}
+
+func hookAPITokenRevocationPending(opts SetupOpts, connectorName string) error {
 	if opts.ManagedEnterprise || strings.TrimSpace(opts.DataDir) == "" || IsRemovedConnector(connectorName) {
 		return nil
 	}

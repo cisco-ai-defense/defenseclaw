@@ -449,11 +449,15 @@ func TestWindowsSecretUnchangedCredentialRestartsOnlyAGatewayThatMayHoldAnotherV
 		startedAfter bool
 		wantRestart  bool
 		wantText     string
+		noStore      bool
 	}{
 		{name: "identical set, gateway loaded it", action: "set", startedAfter: true, wantText: "already holds this value; gateway restart not needed"},
 		{name: "identical set, older gateway", action: "set", wantRestart: true},
 		{name: "absent remove, gateway loaded the store", action: "remove", startedAfter: true, wantText: "was not stored; nothing to remove"},
 		{name: "absent remove, older gateway", action: "remove", wantRestart: true, wantText: "was not stored; nothing to remove; gateway restarted: true"},
+		// No credential was ever stored, so no store folder exists: the
+		// folder that would hold it dates the last change (GAP-1690).
+		{name: "absent remove, no store folder, gateway started after", action: "remove", noStore: true, startedAfter: true, wantText: "was not stored; nothing to remove"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			windowsSecretTestHarness(t)
@@ -462,8 +466,10 @@ func TestWindowsSecretUnchangedCredentialRestartsOnlyAGatewayThatMayHoldAnotherV
 			if tc.action == "set" {
 				name, stored = "ai-defense-api-key", "ai-defense-api-key"
 			}
-			if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: stored, fromStdin: true}, "same-value\n"); err != nil {
-				t.Fatal(err)
+			if !tc.noStore {
+				if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: stored, fromStdin: true}, "same-value\n"); err != nil {
+					t.Fatal(err)
+				}
 			}
 			saved := windowsSecretGatewayStartedAfter
 			t.Cleanup(func() { windowsSecretGatewayStartedAfter = saved })

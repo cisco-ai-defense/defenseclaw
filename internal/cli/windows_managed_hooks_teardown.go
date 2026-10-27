@@ -408,7 +408,130 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 		command.AddCommand(child)
 	}
 	command.AddCommand(newWindowsManagedHooksTeardownCapabilitiesCommand())
+	command.AddCommand(newWindowsManagedHooksUserStatePurgeCommand())
 	return command
+}
+
+// windowsManagedHooksUserStatePurgeAction is the teardown-managed-hooks
+// action a standalone Setup /uninstall PURGE=1 runs over a committed
+// uninstall tombstone whose hook teardown already finalized without the
+// per-user purge: a plain uninstall that was interrupted after its finalize,
+// or one whose InstallRoot is already gone (GAP-2094, GAP-0867). Nothing else
+// removes each enrolled account's per-user data and binaries then, and the
+// installed helper that ran the finalize may be gone, so Setup runs this
+// action with its own authenticated gateway.
+const windowsManagedHooksUserStatePurgeAction = "purge-user-state"
+
+func newWindowsManagedHooksUserStatePurgeCommand() *cobra.Command {
+	var jsonOutput bool
+	child := &cobra.Command{
+		Use:          windowsManagedHooksUserStatePurgeAction,
+		Short:        "remove enrolled accounts' per-user state after a committed standalone uninstall",
+		Hidden:       true,
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			report, err := runWindowsManagedHooksUserStatePurge()
+			if jsonOutput {
+				if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(report); encodeErr != nil && err == nil {
+					return encodeErr
+				}
+			} else if err == nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "per-user state purged: %d, remaining: %d\n",
+					len(report.UserStatePurged), len(report.UserStateRemaining))
+			}
+			if err != nil {
+				return fmt.Errorf("managed-hook teardown %s failed: %w", windowsManagedHooksUserStatePurgeAction, err)
+			}
+			return nil
+		},
+	}
+	child.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
+	return child
+}
+
+// runWindowsManagedHooksUserStatePurge does what the finalize of a purge
+// does for users: it removes the DefenseClaw registrations still in their
+// agent configurations and each enrolled account's per-user data and
+// binaries. It accepts only an authenticated standalone uninstall tombstone
+// with no pending transaction and no unfinished hook teardown (a prepared
+// journal is the finalize's own work), and only the target manifest that the
+// tombstone's preserved activation binds. It reports what went and what
+// stays as the finalize does.
+func runWindowsManagedHooksUserStatePurge() (windowsManagedHooksTeardownReport, error) {
+	report := windowsManagedHooksTeardownReport{
+		SchemaVersion: windowsManagedHooksTeardownSchema,
+		Action:        windowsManagedHooksUserStatePurgeAction,
+		Results:       []windowsManagedHooksTeardownResult{},
+	}
+	fail := func(err error) (windowsManagedHooksTeardownReport, error) {
+		report.OK = false
+		report.Error = err.Error()
+		return report, err
+	}
+	if !enterprisehooks.WindowsStandaloneProcess() {
+		return fail(errors.New("the per-user purge of a committed uninstall requires the standalone profile"))
+	}
+	if os.Getenv(windowsManagedHooksPurgeUserStateEnv) != "1" {
+		return fail(errors.New("the per-user purge of a committed uninstall requires an uninstall with purge"))
+	}
+	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+		return fail(err)
+	}
+	runtimeDir, err := exactWindowsCodexLayoutEnv("DEFENSECLAW_HOME")
+	if err != nil {
+		return fail(err)
+	}
+	stateRoot := filepath.Dir(runtimeDir)
+	if !strings.EqualFold(filepath.Base(runtimeDir), "runtime") || stateRoot == filepath.Dir(stateRoot) {
+		return fail(errors.New("the per-user purge received a noncanonical protected runtime directory"))
+	}
+	if err := managed.ValidateTrustedRuntimeDir(stateRoot, "Windows enterprise managed-hook teardown state root"); err != nil {
+		return fail(err)
+	}
+	installDir := filepath.Join(stateRoot, "install")
+	report.ManifestPath = filepath.Join(stateRoot, "hook-guardian", "targets.yaml")
+	report.JournalPath = filepath.Join(installDir, windowsManagedHooksTeardownJournalFile)
+	if err := managed.ValidateTrustedFilePath(report.ManifestPath, "Windows enterprise hook target manifest"); err != nil {
+		return fail(err)
+	}
+	manifest, manifestSHA256, err := enterprisehooks.LoadManifestWithSHA256(report.ManifestPath)
+	if err != nil {
+		return fail(err)
+	}
+	targets, _, _, _, err := windowsManagedHooksTeardownTargets(manifest)
+	if err != nil {
+		return fail(err)
+	}
+	metadata, exists, err := readWindowsCodexDeploymentMetadata(filepath.Join(installDir, "deployment.json"))
+	if err != nil {
+		return fail(err)
+	}
+	if !exists {
+		return fail(errors.New("the per-user purge requires protected deployment metadata"))
+	}
+	if _, err := os.Lstat(filepath.Join(installDir, "pending.json")); !errors.Is(err, os.ErrNotExist) {
+		if err == nil {
+			return fail(errors.New("the per-user purge requires transaction retirement"))
+		}
+		return fail(fmt.Errorf("inspect pending managed-hook transaction: %w", err))
+	}
+	// The finalize rule: an inactive tombstone whose preserved activation
+	// binds this manifest.
+	if _, err := validateWindowsManagedHooksTeardownDeployment(metadata, "finalize", manifestSHA256, len(targets)); err != nil {
+		return fail(err)
+	}
+	journal, err := readWindowsManagedHooksTeardownJournal(report.JournalPath)
+	switch {
+	case err == nil && journal.Phase != "finalized":
+		return fail(fmt.Errorf("the per-user purge refuses an unfinished managed-hook teardown (phase %s): its finalize removes the per-user state", journal.Phase))
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		return fail(err)
+	}
+	completeWindowsManagedHooksTeardownUserCleanup(&report, runtimeDir, manifest)
+	report.OK = true
+	report.FinalizationCompleted = true
+	return report, nil
 }
 
 // windowsManagedHooksTeardownCapabilities is the report of
