@@ -331,6 +331,13 @@ func RemovePersonalClaudeHookBlocker(dataDir string) (bool, error) {
 // own install from before the managed deployment enrolled it.
 var perUserInstallMarkers = []string{"config.yaml", ".env", "audit.db", "previous"}
 
+// HoldsPerUserInstall reports whether dataDir holds one of
+// perUserInstallMarkers: the account's own per-user install, which a purge
+// keeps as it is.
+func HoldsPerUserInstall(dataDir string) (bool, error) {
+	return holdsPerUserInstall(dataDir)
+}
+
 // holdsPerUserInstall reports whether dataDir holds one of
 // perUserInstallMarkers.
 func holdsPerUserInstall(dataDir string) (bool, error) {
