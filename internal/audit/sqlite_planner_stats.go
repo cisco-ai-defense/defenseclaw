@@ -75,12 +75,36 @@ func (s *Store) RefreshPlannerStatistics(ctx context.Context) (bool, error) {
 		}
 		s.plannerStatsRows.Store(last)
 	}
-	if rows < plannerStatsMinRows || (last > 0 && rows < plannerStatsGrowth*last) {
+	if rows < plannerStatsMinRows {
 		return false, nil
 	}
 	targets, err := s.plannerStatsTargets(ctx)
 	if err != nil {
 		return false, err
+	}
+	if last > 0 && rows < plannerStatsGrowth*last {
+		// The stored statistics are current, but an index the migrations
+		// rebuilt since they were taken has none: DROP INDEX deletes its
+		// sqlite_stat1 row (migrateSparseKeyIndexes on a store from 1.0.2,
+		// 1.0.3 or 1.0.4). Without one SQLite prefers it over the selective
+		// analyzed index (the GAP-0233 misplan), so the first complete pass
+		// of a process takes the statistics of just those targets.
+		if s.plannerStatsComplete.Load() {
+			return false, nil
+		}
+		if targets, err = s.plannerStatsMissingTargets(ctx, targets); err != nil {
+			return false, err
+		}
+		for _, target := range targets {
+			if s.walPressure.Load() {
+				return false, nil
+			}
+			if err := s.analyzeOne(ctx, target); err != nil {
+				return false, err
+			}
+		}
+		s.plannerStatsComplete.Store(true)
+		return len(targets) > 0, nil
 	}
 	for _, target := range targets {
 		if s.walPressure.Load() {
@@ -91,7 +115,44 @@ func (s *Store) RefreshPlannerStatistics(ctx context.Context) (bool, error) {
 		}
 	}
 	s.plannerStatsRows.Store(rows)
+	s.plannerStatsComplete.Store(true)
 	return true, nil
+}
+
+// plannerStatsMissingTargets are the targets that have no sqlite_stat1 row
+// where ANALYZE would write one: an index of a table with rows, a partial
+// index (ANALYZE records an empty one too), or an index-less table with rows.
+func (s *Store) plannerStatsMissingTargets(ctx context.Context, targets []string) ([]string, error) {
+	var missing []string
+	for _, target := range targets {
+		var absent int
+		row := s.db.QueryRowContext(ctx, `SELECT NOT EXISTS (SELECT 1 FROM sqlite_stat1
+			WHERE idx = ?1 OR (idx IS NULL AND tbl = ?1))`, target)
+		if err := s.scanRow(ctx, "audit_planner_stats_missing", row, &absent); err != nil {
+			return nil, fmt.Errorf("audit: read planner statistics of %s: %w", target, err)
+		}
+		if absent == 0 {
+			continue
+		}
+		var table, definition string
+		row = s.db.QueryRowContext(ctx, `SELECT tbl_name, COALESCE(sql, '') FROM sqlite_schema WHERE name = ?`, target)
+		if err := s.scanRow(ctx, "audit_planner_stats_target", row, &table, &definition); err != nil {
+			return nil, fmt.Errorf("audit: read the schema of %s: %w", target, err)
+		}
+		if table != target && strings.Contains(strings.ToUpper(definition), " WHERE ") {
+			missing = append(missing, target)
+			continue
+		}
+		var hasRows int
+		if err := s.scanRow(ctx, "audit_planner_stats_rows", s.db.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM "`+strings.ReplaceAll(table, `"`, `""`)+`")`), &hasRows); err != nil {
+			return nil, fmt.Errorf("audit: measure %s for planner statistics: %w", table, err)
+		}
+		if hasRows != 0 {
+			missing = append(missing, target)
+		}
+	}
+	return missing, nil
 }
 
 // plannerStatsSizeQuery measures the history as the rowid span of each

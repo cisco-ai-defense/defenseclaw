@@ -262,6 +262,9 @@ type Store struct {
 	// plannerStatsRows is the history size at the last ANALYZE
 	// (RefreshPlannerStatistics).
 	plannerStatsRows atomic.Int64
+	// plannerStatsComplete is set once this process has checked that every
+	// planner statistics target of the history has its statistics.
+	plannerStatsComplete atomic.Bool
 	// observationGroup groups concurrent correlation observation writes
 	// into one transaction (CorrelationRepository.RecordObservations).
 	observationGroup writeGroup
