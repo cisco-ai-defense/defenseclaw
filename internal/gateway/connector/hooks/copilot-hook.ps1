@@ -196,12 +196,14 @@ $installGuard = $false
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
     # The native hook answers a tool boundary on stdout with exit 0, a failed
-    # check too; a launcher that exits non-zero without an answer crashed.
-    if ($stdout.Length -eq 0 -and $process.ExitCode -ne 0) {
+    # check too; a launcher that exits non-zero crashed. Its output reaches
+    # Copilot only when it is one whole native deny, so a crash never turns
+    # a deny into an allow and a partial answer is never forwarded (GAP-0364).
+    if ($process.ExitCode -ne 0 -and -not ($stdout -cmatch '^\{"(permissionDecision":"deny","permissionDecisionReason|behavior":"deny","message)":"(?:[^"\\\r\n]|\\.)*"\}\r?\n?$')) {
         if ($stderr.Length -gt 0) {
             [Console]::Error.Write($stderr)
         }
-        throw "DefenseClaw hook launcher exited $($process.ExitCode) without an answer"
+        throw "DefenseClaw hook launcher exited $($process.ExitCode) without a complete answer"
     }
     if ($stdout.Length -gt 0) {
         [Console]::Out.Write($stdout)
