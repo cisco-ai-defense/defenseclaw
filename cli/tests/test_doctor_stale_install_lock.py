@@ -73,6 +73,7 @@ DEAD = _exited_pid()
         (f"{DEAD}\n", 0, ".rollback-hold", "recovery"),
         (f"{DEAD}\n", 0, ".lifecycle-txn.json", "recovery"),
     ],
+    ids=lambda value: _stable_id(value),
 )
 def test_install_lock_state_follows_the_plugin_rule(account, pid, age, record, want):
     _lock(account.data, pid, age)
@@ -82,6 +83,17 @@ def test_install_lock_state_follows_the_plugin_rule(account, pid, age, record, w
 
 
 PAST = str(int(time.time()) - 60)
+
+
+def _stable_id(value):
+    """Test ids that do not carry the clock or a pid (pytest-xdist workers collect the same ids)."""
+    if value == PAST:
+        return "past"
+    if value in (f"{DEAD}\n", f"{DEAD}\r\n"):
+        return "dead-crlf" if value.endswith("\r\n") else "dead"
+    if value in (str(os.getppid()), str(os.getpid())):
+        return "parent" if value == str(os.getppid()) else "self"
+    return None
 
 
 # oss-outage-open rounds j and k (one liveness rule): a live installer
@@ -98,6 +110,7 @@ PAST = str(int(time.time()) - 60)
         (f"{DEAD}\n", 0, PAST, 0, "previous.new", "recovery"),
         (str(os.getppid()), 0, "soon", 0, None, "held"),
     ],
+    ids=_stable_id,
 )
 def test_install_lock_state_holds_while_its_owner_runs(account, pid, age, deadline, pid_age, record, want):
     _lock(account.data, pid, age, deadline, pid_age)
@@ -136,6 +149,7 @@ def owner():
         (30 * 86400, None, False, "stale"),
         (30 * 86400, None, True, "held"),
     ],
+    ids=_stable_id,
 )
 def test_a_record_less_lock_older_than_its_pids_process_is_stale(account, owner, age, deadline, record, want):
     assert cmd_doctor._process_started(owner.pid) is not None
