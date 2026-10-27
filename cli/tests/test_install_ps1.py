@@ -5692,7 +5692,7 @@ $ErrorActionPreference = 'Stop'
     check = rollback.index("Get-StaleAgentEvidence (Join-Path $Previous \"data\")")
     assert check < rollback.index("Confirm-Step $question") < rollback.index("Stop-Gateway")
     assert check < rollback.index("Convert-HooksForRollback") and check < rollback.index("Switch-WithPrevious")
-    assert "Nothing was changed" in rollback[check : check + 600]
+    assert check < rollback.index("Nothing was changed", check) < rollback.index("Confirm-Step $question")
 
 
 def test_the_fail_mode_hold_outlasts_the_installers_own_steps() -> None:
@@ -6764,6 +6764,67 @@ def test_a_rollback_is_done_only_once_its_gateway_runs_and_is_proven(tmp_path: P
     else:
         assert "rc: 1 undone: 1 removed: 0" in out and "Now running" not in out, out
         assert ("did not start" in out) if case.startswith("start-fails") else ("not proven running" in out), out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("back_to", ["1.0.2", "1.0.3", "1.0.4"])
+def test_a_codex_update_refuses_only_a_rollback_whose_gateway_would_not_start(tmp_path: Path, back_to: str) -> None:
+    # GAP-2299 review: 1.0.4 does not start with a Codex program its setup
+    # did not record, so that rollback is refused before anything changes.
+    # 1.0.2 and 1.0.3 skip the failed Codex setup and start, so their
+    # rollback completes as before, with a warning that Codex is unguarded
+    # until setup codex runs; the refusal must not reach them.
+    previous = tmp_path / "previous"
+    (previous / "data").mkdir(parents=True)
+    (previous / "VERSION").write_text(back_to, encoding="ascii")
+    exe = tmp_path / "codex.exe"
+    exe.write_bytes(b"codex 0.164.0")
+    (previous / "data" / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 1, "connectors": {"codex": {
+            "raw_agent_version": "codex-cli 0.160.0", "agent_executable": str(exe),
+            "agent_executable_source": "setup-selected",
+            "agent_executable_sha256": hashlib.sha256(b"codex 0.160.0").hexdigest()}}}),
+        encoding="utf-8",
+    )
+    script = tmp_path / "rollback.ps1"
+    script.write_text(
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{tmp_path}'\n$Previous = '{previous}'\n$BinDir = '{tmp_path / 'bin'}'\n$ReleaseBase = 'https://example.invalid'\n"
+        "$Run = @{ Log = 'install.log'; RestorePending = $false }\n"
+        "$script:stops = 0; $script:removed = 0\n"
+        "function Write-Step([string]$m) {}\nfunction Write-Info([string]$m) { Write-Host \"info: $m\" }\n"
+        "function Write-Ok([string]$m) { Write-Host \"ok: $m\" }\nfunction Write-Warn([string]$m) { Write-Host \"warn: $m\" }\n"
+        "function Die([string]$m) { throw $m }\n"
+        "function Get-InstalledVersion { return '1.0.5' }\n"
+        "function Assert-NoLoadedPluginAgents { }\n"
+        "function Assert-NoActiveConnectorRecovery { }\nfunction Confirm-Step { return $true }\n"
+        "function Test-HookRollbackRestoreAvailable { return $false }\nfunction Wait-VenvFree { }\n"
+        "function Test-RollbackData { return $false }\nfunction Get-GatewayProcess { return $true }\n"
+        "function Stop-Gateway { $script:stops++; return $true }\nfunction Stop-Watchdog { }\nfunction Assert-GatewayQuiescent { }\n"
+        "function Switch-WithPrevious { return 0 }\nfunction Protect-UvDirectory { }\nfunction Invoke-PruneOrphanedHooks { }\n"
+        "function Write-LifecycleManifest { return [pscustomobject]@{ TargetBins = @{} } }\nfunction Get-BinariesState { return @{} }\n"
+        "function Remove-LifecycleManifest { $script:removed++ }\n"
+        "function Start-Gateway { return 0 }\nfunction Wait-LifecycleProof { return @() }\n"
+        "function Undo-Rollback { param($Reason) Write-Host \"undo: $Reason\"; return 1 }\n"
+        + _ps1_function("Get-Field") + _ps1_function("Get-StaleAgentEvidence") + _ps1_function("Read-Text")
+        + _ps1_function("Test-Version") + _ps1_function("Invoke-Rollback")
+        + "\ntry { $rc = Invoke-Rollback } catch { Write-Host \"refused: $($_.Exception.Message)\"; $rc = 'refused' }\n"
+        + "Write-Host \"rc: $rc stops: $script:stops removed: $script:removed\"\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [str(POWERSHELL), "-NoProfile", "-NonInteractive", "-File", str(script)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
+    )
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    if back_to == "1.0.4":
+        assert "rc: refused stops: 0 removed: 0" in out and "Nothing was changed" in out, out
+        assert "warn: Codex was updated" not in out, out
+    else:
+        assert "rc: 0 stops: 1 removed: 1" in out and f"ok: Now running DefenseClaw {back_to}" in out, out
+        assert "refused:" not in out, out
+        assert f"warn: Codex was updated after DefenseClaw set up Codex 0.160.0 ({exe} changed). DefenseClaw {back_to} starts without Codex hooks until you run 'defenseclaw setup codex' after the rollback" in out, out
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")

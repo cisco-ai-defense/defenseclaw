@@ -4934,7 +4934,13 @@ function Invoke-Rollback {
     }
     if (-not $rollForward) {
         $stale = @(Get-StaleAgentEvidence (Join-Path $Previous "data"))
-        if ($stale.Count) {
+        if ($stale.Count -and $backTo -match '^(?:0\.8\.10|1\.0\.[0-3])$') {
+            # Releases before 1.0.4 skip a connector whose setup fails and
+            # start without it, so this rollback completes as it always did;
+            # only Codex runs unguarded until its setup is redone (GAP-2299).
+            Write-Warn ("$($stale -join '; '). DefenseClaw $backTo starts without Codex hooks until you run " +
+                "'defenseclaw setup codex' after the rollback")
+        } elseif ($stale.Count) {
             Die ("$($stale -join '; '). DefenseClaw $backTo does not start with an agent program it did not set up, so the rollback would stop " +
                 "half-way. Nothing was changed. Put that version back and run 'defenseclaw rollback' again, or stay on DefenseClaw $currentLabel")
         }
