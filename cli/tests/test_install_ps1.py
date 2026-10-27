@@ -1336,6 +1336,9 @@ $ErrorActionPreference = 'Stop'
 function Invoke-Robocopy([string[]]$Arguments) {{
     [pscustomobject]@{{ Code = 8; Error = 'ERROR 5 (0x00000005) Copying NTFS Security to Destination File Access is denied.' }}
 }}
+$BinDir = '{tmp_path / "bin"}'
+$DataDir = '{source.parent}'
+{_ps1_function("Get-ProcessesUnder")}
 {_ps1_function("Copy-Kept")}
 Copy-Kept '{source}' '{slot}'
 try {{ Copy-Kept '{source}' '{tmp_path / "missing"}' }} catch {{ Write-Output $_.Exception.Message }}
@@ -1350,6 +1353,43 @@ try {{ Copy-Kept '{source}' '{tmp_path / "missing"}' }} catch {{ Write-Output $_
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert (slot / "audit.db").read_text(encoding="utf-8") == "db"
     assert "ERROR 5" in completed.stdout and "then run the installer again" in completed.stdout, completed.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_refused_copy_names_only_this_installs_programs(tmp_path: Path) -> None:
+    # GAP-2245: a locked hooks file stopped the rollback copy, and the message
+    # told the user to Stop-Process every defenseclaw* process on the computer,
+    # another account's gateway and watchdog included.
+    source = tmp_path / "data" / "hooks"
+    source.mkdir(parents=True)
+    bin_dir = tmp_path / "bin"
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$BinDir = '{bin_dir}'
+$DataDir = '{source.parent}'
+function Invoke-Robocopy([string[]]$Arguments) {{
+    [pscustomobject]@{{ Code = 8; Error = 'ERROR 32 (0x00000020) Copying File locked.txt The process cannot access the file.' }}
+}}
+function Get-ProcessesUnder([string[]]$Prefixes) {{
+    Write-Output ([pscustomobject]@{{ ProcessId = 4242; Name = 'defenseclaw-gateway.exe'; ExecutablePath = "$BinDir\\defenseclaw-gateway.exe"; Prefixes = ($Prefixes -join '|') }})
+}}
+{_ps1_function("Copy-Kept")}
+try {{ Copy-Kept '{source}' '{tmp_path / "slot"}' }} catch {{ Write-Output $_.Exception.Message }}
+"""
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    out = " ".join(completed.stdout.split())
+    assert "DefenseClaw programs still running: defenseclaw-gateway (PID 4242)" in out, out
+    assert "then run the installer again" in out, out
+    copy_kept = _ps1_function("Copy-Kept")
+    assert "Get-Process -ErrorAction" not in copy_kept
+    assert 'Get-ProcessesUnder @("$BinDir\\", "$DataDir\\")' in copy_kept
 
 
 def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:

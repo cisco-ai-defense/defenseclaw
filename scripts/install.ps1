@@ -420,8 +420,11 @@ function Copy-Kept([string]$Source, [string]$DestinationDir) {
             return
         } catch { if (-not $result.Error) { $why = $_.Exception.GetBaseException().Message } }
     }
-    # Name what may hold it: a gateway or hook a failed Setup left running.
-    $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like "defenseclaw*" } | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" })
+    # Name what may hold it: a gateway, watchdog or hook of this install that
+    # a failed Setup or an outside start left running. Only this account's
+    # own programs: another account's gateway cannot hold this data folder,
+    # and the advice to stop it sent the user after the wrong PIDs (GAP-2245).
+    $running = @(Get-ProcessesUnder @("$BinDir\", "$DataDir\") | ForEach-Object { "$($_.Name -replace '\.exe$', '') (PID $($_.ProcessId))" })
     $held = if ($running.Count) { "; DefenseClaw programs still running: $($running -join ', ') (stop them with Stop-Process -Id <PID>)" } else { "" }
     throw "Could not copy $Source ($why)$held. Check that this account can read it and that no program has it open (icacls `"$Source`"), then run the installer again"
 }
