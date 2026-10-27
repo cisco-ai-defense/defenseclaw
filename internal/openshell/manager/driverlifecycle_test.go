@@ -407,8 +407,8 @@ func TestDeleteOfAnotherDriversSandboxWhenTheGatewayFails(t *testing.T) {
 
 // On vm a stop flushes the sandbox's disk first, in the harness's exit
 // exec, after the harness exited: a MicroVM's stop loses what was not
-// synced. A user's stop the flush did not confirm is held, the sandbox
-// keeps running (GAP-1163). On docker the exec is what it always was.
+// synced. A stop the flush did not reach is reported. On docker the exec
+// is what it always was.
 func TestStopOnVMFlushesFirst(t *testing.T) {
 	e := newVMEnv(t, nil)
 	useOpenCode(t, e)
@@ -460,8 +460,6 @@ func TestStopOnVMFlushesFirst(t *testing.T) {
 	if got := e.events("flushbox", "", "stop_unflushed"); len(got) != 1 || !strings.Contains(got[0].Message, "may come back empty") {
 		t.Fatalf("feed = %+v", got)
 	}
-	answer = "exited\nsynced\n"
-	e.stopBox("flushbox")
 
 	// The exec failed: the flush is tried once more, on its own (after a
 	// look at the detached run, which the failed exec did not report).
@@ -478,7 +476,7 @@ func TestStopOnVMFlushesFirst(t *testing.T) {
 	if len(calls) != 3 || !slices.Contains(calls[1].Command, "defenseclaw-run-probe") || !slices.Equal(calls[2].Command, []string{"/bin/sync"}) {
 		t.Fatalf("exec calls = %+v", calls)
 	}
-	if got := e.events("flushbox", "", "stop_unflushed"); len(got) != 0 {
+	if got := e.events("flushbox", "", "stop_unflushed"); len(got) != 1 {
 		t.Fatalf("a flushed stop was reported: %+v", got)
 	}
 
