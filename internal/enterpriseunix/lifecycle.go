@@ -4189,7 +4189,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		// as registrations: the binaries, the deployment record and the
 		// services stay, and a rerun once the home is back removes them
 		// (GAP-0443; lead decision 2026-10-26 18:57).
-		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available, so a DefenseClaw registration may remain in it and call the hook binary; make that home available (mount its volume) and rerun %s, or remove the account first", connector, user, rerun))
+		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available, so a DefenseClaw registration may remain in it and call the hook binary; make that home available (mount its volume) and rerun %s; if that home folder was deleted, recreate it as a folder the account owns and rerun %s", connector, user, rerun, rerun))
 		left = true
 	}
 	for _, entry := range report.StateFailed {

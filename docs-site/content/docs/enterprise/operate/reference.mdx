@@ -415,7 +415,8 @@ the binaries, so stage the payload again and run its `ensure --payload <dir> --c
   (`uninstall_incomplete`), keeps the binaries, the deployment record and the services, and names
   the home: mount it and run the uninstall again. A per-domain home layout (SSSD
   `fallback_homedir = /home/%d/%u`) looks the same when the only account of a domain had its home
-  folder deleted: recreate that folder or remove the account, then run the uninstall again.
+  folder deleted: recreate that folder as a folder the account owns, then run the uninstall again.
+  Removing the account does not end the stop while a `targets.yaml` row names it (see Manifest rows).
 - **Sandboxes (Linux and macOS).** The uninstall stops the sandbox daemon and OpenShell gateway of
   each account. On Linux, `apt remove`, `dnf remove` and `rpm -e` also stop the sandbox user units
   in the user manager of every signed-in account before the package's files go. When a user manager

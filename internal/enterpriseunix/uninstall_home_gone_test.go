@@ -42,6 +42,14 @@ func TestUninstallKeepsTheDeploymentForAPerUserHomeThatIsNotAvailable(t *testing
 				!strings.Contains(got, "make that home available (mount its volume) and rerun") {
 				t.Fatalf("the uninstall does not name the registration that may remain and the next step: %q", got)
 			}
+			// GAP-2134: an empty parent is also a deleted home of a
+			// per-domain layout; recreating the folder is the step that
+			// works. Removing the account does not: a targets.yaml row of
+			// a removed account still stops the uninstall.
+			if !strings.Contains(got, "if that home folder was deleted, recreate it as a folder the account owns and rerun") ||
+				strings.Contains(got, "remove the account") {
+				t.Fatalf("the uninstall offers a step that does not finish it, or not the one that does: %q", got)
+			}
 			if messagesOf(done.Errors, codeUninstallIncomplete) == "" {
 				t.Fatalf("an uninstall that keeps the deployment must say it stopped: %+v", done.Errors)
 			}
