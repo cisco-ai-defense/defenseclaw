@@ -457,11 +457,16 @@ function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Q
     return $LASTEXITCODE
 }
 
-function Get-NativeProbe([string]$FilePath, [string[]]$Arguments = @()) {
+function Get-NativeProbe([string]$FilePath, [string[]]$Arguments = @(), [switch]$Json) {
     # A native command's output and exit code (-1 when it could not run).
+    # -Json: a command that prints JSON, read from stdout only. A warning it
+    # logs on stderr (the gateway's and the CLI's "llm.api_key contains a
+    # plain-text secret") is no JSON; merged in, it made the health report,
+    # the policy digest and the connector roster unreadable, so the upgrade
+    # restored the old release with every hook closed (rel-1-0-5 GAP-0018).
     $ErrorActionPreference = "Continue"
     try {
-        $output = ((& $FilePath @Arguments 2>&1) | Out-String)
+        $output = if ($Json) { ((& $FilePath @Arguments 2>$null) | Out-String) } else { ((& $FilePath @Arguments 2>&1) | Out-String) }
         return [pscustomobject]@{ Exit = $LASTEXITCODE; Output = $output }
     } catch { return [pscustomobject]@{ Exit = -1; Output = "" } }
 }
@@ -1736,7 +1741,7 @@ function Get-EffectiveConfigConnectors {
     # Windows PowerShell 5.1 strips embedded double quotes from native argv.
     # Keep Python's string literals single-quoted so -c receives valid code.
     $code = 'import json,sys,yaml; from defenseclaw.connector_paths import normalize; d=lambda v: v if isinstance(v,dict) else {}; c=d(yaml.safe_load(open(sys.argv[1],encoding=''utf-8''))); g=d(c.get(''guardrail'')); m=d(g.get(''connectors'')); e=d(c.get(''enterprise'')); off={normalize(n) for n,v in m.items() if isinstance(n,str) and isinstance(v,dict) and v.get(''enabled'') is False}; on=[n for n,v in m.items() if not (isinstance(v,dict) and v.get(''enabled'') is False)]; names=on+[g.get(''connector'') or ('''' if on else d(c.get(''claw'')).get(''mode''))]; standalone=str(c.get(''deployment_mode'') or '''').strip().lower()==''managed_enterprise'' and str(e.get(''profile'') or '''').strip().lower()==''standalone''; names+=list(d(d(e.get(''machine_policy'')).get(''connectors''))) if standalone else []; names=names if str(g.get(''enabled'')).strip().lower() in (''1'',''t'',''true'') else []; print(json.dumps(sorted({normalize(n) for n in names if isinstance(n,str) and n.strip()}-off)))'
-    $probe = Get-NativeProbe $python @("-I", "-c", $code, $path)
+    $probe = Get-NativeProbe $python @("-I", "-c", $code, $path) -Json
     if ($probe.Exit -ne 0) { throw "Cannot read the effective config's connectors: $path" }
     try {
         $decoded = $probe.Output | ConvertFrom-Json -ErrorAction Stop
@@ -2264,7 +2269,7 @@ function Get-GatewayHealthReport([string]$Gateway) {
     # status --json of $Gateway, or $null when it does not answer with JSON
     # (a release without --json, or no gateway).
     if (-not (Test-Path -LiteralPath $Gateway -PathType Leaf)) { return $null }
-    $probe = Get-NativeProbe $Gateway @("status", "--json")
+    $probe = Get-NativeProbe $Gateway @("status", "--json") -Json
     if (-not $probe.Output) { return $null }
     try { return ($probe.Output | ConvertFrom-Json -ErrorAction Stop) } catch { return $null }
 }
@@ -2311,7 +2316,7 @@ function Get-GatewayDigestProblem([string]$Gateway) {
     # "unsupported" when this gateway cannot say, else what is wrong.
     $help = Get-NativeProbe $Gateway @("policy", "digest", "--help")
     if ($help.Exit -ne 0 -or $help.Output -notmatch "check-gateway") { return "unsupported" }
-    $probe = Get-NativeProbe $Gateway @("policy", "digest", "--json", "--check-gateway")
+    $probe = Get-NativeProbe $Gateway @("policy", "digest", "--json", "--check-gateway") -Json
     $report = $null
     try { $report = $probe.Output | ConvertFrom-Json -ErrorAction Stop } catch { }
     if (-not $report) { return "the policy digest of the live config could not be read (exit $($probe.Exit))" }

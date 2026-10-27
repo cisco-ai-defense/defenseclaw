@@ -7781,3 +7781,42 @@ Write-Output "home-after:$([bool]$env:DEFENSECLAW_HOME)"
     lines = result.stdout.split()
     assert f"notice:{notice}" in lines, result.stdout + result.stderr
     assert "home-after:False" in lines, result.stdout
+
+
+# rel-1-0-5 GAP-0018: the gateway (and the CLI) log a warning on stderr for
+# a config that keeps llm.api_key in plain text. install.ps1 read status
+# --json, policy digest --json and the connector roster from stdout and
+# stderr merged, so no report parsed and every upgrade of such a config
+# restored the old release with all hooks closed. Every JSON probe reads
+# stdout only; the warning still reaches no parser.
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_json_reports_are_read_from_stdout_when_the_gateway_warns_on_stderr(tmp_path: Path) -> None:
+    warning = "WARNING: llm.api_key contains a plain-text secret in config.yaml"
+    report = '{"running": true, "health": {"connectors": [{"name": "claudecode", "state": "running"}]}}'
+    if os.name == "nt":
+        gateway = tmp_path / "defenseclaw-gateway.cmd"
+        gateway.write_text(f"@echo off\r\necho {warning} 1>&2\r\necho {report}\r\n", encoding="ascii")
+    else:
+        gateway = tmp_path / "defenseclaw-gateway"
+        gateway.write_text(f"#!/bin/sh\necho '{warning}' >&2\necho '{report}'\n", encoding="ascii")
+        gateway.chmod(0o755)
+    script = f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+{_ps1_function('Get-NativeProbe')}
+{_ps1_function('Get-GatewayHealthReport')}
+{_ps1_function('Get-Field')}
+{_ps1_function('Get-GuardedConnectors')}
+$r = Get-GatewayHealthReport '{gateway}'
+if (-not $r) {{ throw 'no report' }}
+"guarded:$((Get-GuardedConnectors $r) -join ',')"
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "guarded:claudecode" in result.stdout.split(), result.stdout + result.stderr
+    # Every probe whose output is parsed as JSON reads stdout only.
+    for name in ("Get-GatewayHealthReport", "Get-GatewayDigestProblem", "Get-EffectiveConfigConnectors"):
+        body = _ps1_function(name)
+        parsed = [line for line in body.splitlines() if "$probe = Get-NativeProbe" in line and "--help" not in line]
+        assert parsed and all(line.rstrip().endswith("-Json") for line in parsed), (name, parsed)
