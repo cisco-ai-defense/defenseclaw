@@ -509,6 +509,9 @@ func TestPolicyVerifySandboxRows(t *testing.T) {
 // mode, not the group alone) and the docker group, in which the agent
 // images are built; an account that can open /dev/kvm is no "cannot start".
 func TestPolicyVerifyJudgesKVMAccessNotOnlyTheGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/dev/kvm access is a Linux check, made with POSIX file modes Windows does not keep")
+	}
 	prevProfile, prevGroups, prevDevice := enterprisePolicySandboxProfile, enterpriseAccountGroups, enterpriseKVMDevice
 	t.Cleanup(func() {
 		enterprisePolicySandboxProfile, enterpriseAccountGroups, enterpriseKVMDevice = prevProfile, prevGroups, prevDevice
