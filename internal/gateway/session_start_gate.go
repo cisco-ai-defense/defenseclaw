@@ -247,16 +247,26 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 				g.arrivals[key] = arrived
 			}
 			g.mu.Unlock()
+			// The wait uses no gateway CPU: the call gives up its caller's
+			// run slot for it, so unseen sessions of one account do not
+			// queue behind each other's windows (GAP-1822).
+			resume := pauseHookRunSlot(ctx)
 			window := time.NewTimer(min(arrival, wait))
+			timedOut := false
 			select {
 			case <-arrived:
 			case <-window.C:
-				g.judgeMissingStart(ctx, key, startCheck)
+				timedOut = true
 			case <-ctx.Done():
 				window.Stop()
+				resume()
 				return sessionStartPendingReason, true
 			}
 			window.Stop()
+			resume()
+			if timedOut {
+				g.judgeMissingStart(ctx, key, startCheck)
+			}
 			arrival = 0
 			continue
 		}
