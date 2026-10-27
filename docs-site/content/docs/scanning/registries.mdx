@@ -339,15 +339,14 @@ The catalog publisher needs to compute and include the SHA-256 in their manifest
 
 The skill scanner is an unconditional runtime dependency. If it is missing,
 affected skill scans fail and those entries are marked `error`. The MCP scanner
-is declared only on Python 3.11 and newer; any Python 3.10 runtime, including a
-managed POSIX install that selected 3.10, legitimately omits it. When the MCP
-SDK is unavailable, MCP entries are fetched but remain `pending` because no
-verdict is computed.
+is a runtime dependency too: DefenseClaw needs Python 3.11 to 3.13, so every
+supported runtime includes it. When the MCP SDK is unavailable, MCP entries are
+fetched but remain `pending` because no verdict is computed.
 
 Do not repair a packaged runtime with `pip`. Use the
 [supported install or repair path](/docs/get-started/download), then rerun
 `defenseclaw registry sync --all`. Source contributors should run `uv sync`
-from the checkout. Use Python 3.11 or newer when MCP scanning is required.
+from the checkout.
 
 </Accordion>
 
