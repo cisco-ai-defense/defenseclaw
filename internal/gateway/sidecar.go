@@ -6735,6 +6735,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		APIToken:             setupTokens.connectorToken,
 		HookAPIToken:         setupTokens.hookToken,
 		HookAPITokenScoped:   setupTokens.hookTokenScoped,
+		GatewayToken:         strings.TrimSpace(apiToken),
 		WorkspaceDir:         s.currentConfig().ConnectorWorkspaceDir(),
 		// The hooks' outage mode (config.HookOutageFailMode); Secure Client
 		// renders the resolved mode as is (#1163).
