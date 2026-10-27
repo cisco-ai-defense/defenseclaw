@@ -66,7 +66,11 @@ type enterprisePolicySandboxRow struct {
 
 // enterprisePolicySandboxProfile asks the gateway which profile an account
 // gets and whether exempt_users exempts it, as its hooks are matched (the
-// same answer as profile-explain); replaceable in tests.
+// same answer as profile-explain); replaceable in tests. It sends the
+// account as root resolves it, as profile-explain does (GAP-0500): on an
+// SSSD-joined host the gateway service cannot resolve a local or bare name
+// itself, and the sandbox section said the profile "could not be resolved"
+// and showed the strictest candidate (GAP-2070).
 var enterprisePolicySandboxProfile = func(account string) (name, match, group string, exempt bool, err error) {
 	var answer struct {
 		Profile      string `json:"profile"`
@@ -77,7 +81,11 @@ var enterprisePolicySandboxProfile = func(account string) (name, match, group st
 			Exempt bool `json:"exempt"`
 		} `json:"enrollment"`
 	}
-	if _, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?user="+url.QueryEscape(account), &answer); err != nil {
+	query := url.Values{"user": {account}}
+	if facts := enterpriseExplainCallerFacts(account); facts != "" {
+		query.Set("caller_facts", facts)
+	}
+	if _, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?"+query.Encode(), &answer); err != nil {
 		return "", "", "", false, err
 	}
 	if answer.LookupError != "" {
