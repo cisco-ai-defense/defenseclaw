@@ -21,7 +21,9 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -101,5 +103,85 @@ func TestOneGenerationCannotUseOneListenAddressTwice(t *testing.T) {
 	}
 	if status, _ := scrape(t, reader); status != http.StatusOK {
 		t.Fatalf("refused duplicate disturbed the bound reader: status=%d", status)
+	}
+}
+
+// temporaryAcceptError is the shape of EMFILE/ENFILE from Accept under file
+// descriptor pressure: Temporary, not a Timeout.
+type temporaryAcceptError struct{}
+
+func (temporaryAcceptError) Error() string   { return "accept: too many open files" }
+func (temporaryAcceptError) Timeout() bool   { return false }
+func (temporaryAcceptError) Temporary() bool { return true }
+
+// flakyBaseListener returns failures temporary Accept errors, then serves
+// the real socket.
+type flakyBaseListener struct {
+	net.Listener
+	mu       sync.Mutex
+	failures int
+}
+
+func (listener *flakyBaseListener) Accept() (net.Conn, error) {
+	listener.mu.Lock()
+	if listener.failures > 0 {
+		listener.failures--
+		listener.mu.Unlock()
+		return nil, &net.OpError{Op: "accept", Net: "tcp", Err: temporaryAcceptError{}}
+	}
+	listener.mu.Unlock()
+	return listener.Listener.Accept()
+}
+
+// A burst of file descriptor exhaustion must not kill the shared socket for
+// this and every later generation: the hub retries a temporary Accept error
+// the way http.Server does and hands the next connection to the generation.
+func TestSharedListenerSurvivesATemporaryAcceptError(t *testing.T) {
+	set := &listenerSet{hubs: make(map[string]*listenerHub)}
+	address := freeAddress(t)
+	listen := func(ctx context.Context, network, address string) (net.Listener, error) {
+		base, err := (&net.ListenConfig{}).Listen(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return &flakyBaseListener{Listener: base, failures: 3}, nil
+	}
+	view, err := set.acquire(context.Background(), listen, address, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = view.Close() })
+
+	accepted := make(chan error, 1)
+	go func() {
+		conn, acceptErr := view.Accept()
+		if conn != nil {
+			_ = conn.Close()
+		}
+		accepted <- acceptErr
+	}()
+	client, err := net.DialTimeout("tcp", address, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	select {
+	case err := <-accepted:
+		if err != nil {
+			t.Fatalf("a temporary Accept error killed the shared socket: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the connection was never handed to the generation after a temporary Accept error")
+	}
+
+	successor, err := set.acquire(context.Background(), listen, address, 2)
+	if err != nil {
+		t.Fatalf("successor could not join the recovered socket: %v", err)
+	}
+	t.Cleanup(func() { _ = successor.Close() })
+	select {
+	case <-successor.(*sharedListener).hub.failed:
+		t.Fatal("successor joined a failed hub")
+	default:
 	}
 }

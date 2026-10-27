@@ -120,7 +120,21 @@ type listenerHub struct {
 	failErr  error
 }
 
+// retryableAcceptError is the check net/http.Server.Serve makes before it
+// retries Accept: a timeout or a temporary error such as EMFILE or ENFILE
+// under file descriptor pressure.
+type retryableAcceptError interface {
+	Timeout() bool
+	Temporary() bool
+}
+
+// acceptLoop serves the process socket until the last generation closes it.
+// It retries a temporary Accept error with the same backoff http.Server uses
+// (5 ms doubling to 1 s), so one burst of file descriptor exhaustion does not
+// leave the endpoint dead for every later generation until a restart. Only a
+// permanent error fails the hub.
 func (hub *listenerHub) acceptLoop() {
+	var delay time.Duration
 	for {
 		conn, err := hub.base.Accept()
 		if err != nil {
@@ -130,9 +144,14 @@ func (hub *listenerHub) acceptLoop() {
 			if closed {
 				return
 			}
-			var netErr net.Error
-			if errors.As(err, &netErr) && netErr.Timeout() {
-				time.Sleep(5 * time.Millisecond)
+			var retryable retryableAcceptError
+			if errors.As(err, &retryable) && (retryable.Timeout() || retryable.Temporary()) {
+				if delay == 0 {
+					delay = 5 * time.Millisecond
+				} else if delay *= 2; delay > time.Second {
+					delay = time.Second
+				}
+				time.Sleep(delay)
 				continue
 			}
 			hub.failOnce.Do(func() {
@@ -141,6 +160,7 @@ func (hub *listenerHub) acceptLoop() {
 			})
 			return
 		}
+		delay = 0
 		hub.deliver(conn)
 	}
 }
