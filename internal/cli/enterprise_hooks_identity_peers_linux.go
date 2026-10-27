@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -274,6 +275,77 @@ var enterpriseHookAgentLedgerRetentionDays = func() int {
 		return config.ObservabilityV8DefaultRetentionDays
 	}
 	return loaded.compiled.Plan.Snapshot().Local.RetentionDays
+}
+
+// enterpriseHookHomeRoots are the directories that hold the homes of the
+// accounts the last identity spool listed: the reconcile's rows and the
+// served accounts (enterpriseHookNoteHomeRoots).
+var enterpriseHookHomeRoots atomic.Pointer[[]string]
+
+// enterpriseHookNoteHomeRoots records the directories that hold the homes of
+// the reconcile's rows and of the served accounts the last listing named.
+func enterpriseHookNoteHomeRoots(rows []enterpriseHookReconcileRow) {
+	set := map[string]bool{}
+	note := func(home string) {
+		if filepath.IsAbs(home) && filepath.Clean(home) != "/" {
+			set[filepath.Dir(filepath.Clean(home))] = true
+		}
+	}
+	for _, row := range rows {
+		note(row.UserHome)
+	}
+	l := &enterpriseHookPeerListing
+	l.Lock()
+	for _, peer := range l.accounts {
+		note(peer.home)
+	}
+	l.Unlock()
+	roots := make([]string, 0, len(set))
+	for root := range set {
+		roots = append(roots, root)
+	}
+	sort.Strings(roots)
+	enterpriseHookHomeRoots.Store(&roots)
+}
+
+// enterpriseHookHomeRootsStamp is the modification time and inode of each
+// directory in enterpriseHookHomeRoots. A directory (SSSD, LDAP) account
+// without a SID deleted and created again under the same name, uid and home
+// path changes no file the gateway can read, and its earlier holder's home
+// proof stayed current until the guardian's next one-minute tick. Removing
+// and creating its home changes the directory that holds it, so the watch
+// loop reconciles within seconds and the pass rewrites the record with the
+// new home's proof (GAP-2028). Tests replace it.
+var enterpriseHookHomeRootsStamp = func() string {
+	roots := enterpriseHookHomeRoots.Load()
+	if roots == nil {
+		return ""
+	}
+	var stamp strings.Builder
+	for _, root := range *roots {
+		stamp.WriteString(";")
+		info, err := os.Stat(root)
+		if err != nil {
+			continue
+		}
+		stamp.WriteString(strconv.FormatInt(info.ModTime().UnixNano(), 10))
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			stamp.WriteString("/" + strconv.FormatUint(uint64(st.Ino), 10))
+		}
+	}
+	return stamp.String()
+}
+
+// enterpriseHookAccountIncarnationLookup names the account that holds a uid
+// now, by unixidentity's AccountIncarnation (the SID SSSD or winbind holds
+// for a directory account), for one reconcile tick; nil when NSS cannot be
+// read. Tests replace it.
+var enterpriseHookAccountIncarnationLookup = func(ctx context.Context) func(uid int, user string) (string, bool) {
+	resolver, err := unixidentity.NewNSSResolver(ctx)
+	if err != nil {
+		return nil
+	}
+	return resolver.AccountIncarnation
 }
 
 // enterpriseHookLocalAccountsStamp is enterprisehooks.LocalAccountsStamp.
