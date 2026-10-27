@@ -71,7 +71,9 @@ def test_windows_lifecycle_runs_the_hooks_status_and_verify():
     assert "$verb = if ($LiveVerify) {" in probe
     assert "if (Test-DefenseClawStandaloneProfile) { 'readiness' } else { 'verify' }" in probe
     assert "else { 'status' }" in probe
-    assert "-Arguments @('enterprise', 'hooks', $verb, '--manifest', $Layout.ManifestPath, '--json')" in module
+    assert "-Verb $verb" in probe
+    command = module.split("function Invoke-DefenseClawGuardianReadinessCommand", 1)[1].split("\nfunction ", 1)[0]
+    assert "-Arguments @('enterprise', 'hooks', $Verb, '--manifest', $Layout.ManifestPath, '--json')" in command
     status = module.split("function Get-DefenseClawLifecycleStatus", 1)[1].split("\nfunction ", 1)[0]
     assert "Get-DefenseClawGuardianStatusReport" in status
     report = module.split("function Get-DefenseClawGuardianStatusReport", 1)[1].split("\nfunction ", 1)[0]
