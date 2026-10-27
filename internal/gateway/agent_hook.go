@@ -90,6 +90,8 @@ type agentHookRequest struct {
 	pendingProvenance            *pendingHookProvenance
 	sandboxReceiptAcknowledgment bool
 	pendingSandboxCallRef        string
+	managedWatch                 bool   // managed gateway: watch paths follow the verified caller (GAP-0066)
+	watchHome                    string // that caller's home, empty when unresolved
 	ConnectorName                string
 	AgentID                      string
 	AgentName                    string
@@ -485,6 +487,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// request mints.
 		identityFacts := resolveHookAgentIdentity(r.Context(), agentHookRequest{ConnectorName: connectorName, Payload: payload})
 		req := normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, rawBody, profile, registeredEvent, identityFacts.ID)
+		req = req.withManagedWatchHome(r.Context())
 		r = r.WithContext(withHookIdentitySnapshot(r.Context(), identityFacts))
 		if len(profile.SupportedEvents) > 0 && !eventIn(req.HookEventName, profile.SupportedEvents) {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "event_outside_contract", int64(len(rawBody)))
@@ -4123,8 +4126,41 @@ func hookProfileRequestFromAgentHook(req agentHookRequest) connector.HookProfile
 		CorrelationIdentifiers:  req.CorrelationIdentifiers,
 		SuppressCorrelationEmit: req.SuppressCorrelationEmit,
 		CWD:                     req.CWD, ToolName: req.ToolName, Content: req.Content, Direction: req.Direction,
-		Payload: req.Payload,
+		Payload: req.Payload, ManagedWatch: req.managedWatch, WatchHome: req.watchHome, WatchCWD: req.managedWatchCWD(),
 	}
+}
+
+// withManagedWatchHome binds the watch paths of a managed (service-account)
+// gateway answer to the verified caller's home, as claudeCodeHookRequest
+// withWatchHome does for the Claude Code evaluator: the gateway's own
+// environment is the service account's (GAP-0066).
+func (req agentHookRequest) withManagedWatchHome(ctx context.Context) agentHookRequest {
+	if !managedCallerWatchContext(ctx) {
+		return req
+	}
+	req.managedWatch = true
+	if home := trustedActiveHome(ctx); home != unresolvedCallerHome {
+		req.watchHome = home
+	}
+	return req
+}
+
+// managedWatchCWD is the project a managed caller's Claude Code watches. The
+// gateway service account cannot resolve a directory in another user's home
+// (sanitizeHookCWD returns ""), so the reported directory is kept lexically
+// when it lies in the verified caller's home. It only names watch paths;
+// policy reads still use the resolved CWD (GAP-0066).
+func (req agentHookRequest) managedWatchCWD() string {
+	if !req.managedWatch || req.watchHome == "" {
+		return ""
+	}
+	if req.CWD != "" {
+		return req.CWD
+	}
+	if insideHome(req.watchHome, req.ReportedCWD) {
+		return filepath.Clean(strings.TrimSpace(req.ReportedCWD))
+	}
+	return ""
 }
 
 func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional string, caps connector.HookCapability) map[string]interface{} {

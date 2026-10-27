@@ -1886,7 +1886,14 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// path returns above and deliberately records nothing because installed
 	// hooks fail closed on an unreachable gateway.
 	a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
-	a.writeInspectVerdict(w, r, "/api/v1/inspect/tool", req.Tool, inspectToolResponseEvidence(verdict, req.Args))
+	response := verdict
+	// Secure Client answers stay byte-identical to origin/main (issue
+	// #1092, GAP-2137): the GAP-1602 evidence fill is for the other
+	// profiles only.
+	if cfg := a.decisionConfig(r.Context()); cfg == nil || !cfg.SecureClientIntegration() {
+		response = inspectToolResponseEvidence(verdict, req.Args)
+	}
+	a.writeInspectVerdict(w, r, "/api/v1/inspect/tool", req.Tool, response)
 }
 
 // inspectToolResponseEvidence gives each finding of the response that names

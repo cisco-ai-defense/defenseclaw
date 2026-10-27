@@ -1000,9 +1000,14 @@ func TestClaudeCodeOutput_LegacyMirrorReturnsDynamicWatchPaths(t *testing.T) {
 				CWD:           workspace,
 				NewCWD:        workspace,
 			}, "allow", "allow", "", "")
-			if event == "SessionStart" {
-				output = output["hookSpecificOutput"].(map[string]interface{})
+			specific, ok := output["hookSpecificOutput"].(map[string]interface{})
+			if !ok || specific["hookEventName"] != event {
+				t.Fatalf("%s answer = %#v, want watchPaths in hookSpecificOutput (GAP-2288)", event, output)
 			}
+			if _, top := output["watchPaths"]; top {
+				t.Fatalf("%s answer has a top-level watchPaths, which Claude Code ignores: %#v", event, output)
+			}
+			output = specific
 			watchPaths, ok := output["watchPaths"].([]string)
 			if !ok {
 				t.Fatalf("watchPaths = %#v, want []string", output["watchPaths"])
@@ -1058,12 +1063,8 @@ func TestManagedClaudeCodeWatchPathsUseVerifiedCallerHome(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := claudeCodeOutput(tc.req, "allow", "allow", "", "")
-			var paths []string
-			if specific, ok := out["hookSpecificOutput"].(map[string]interface{}); ok {
-				paths, _ = specific["watchPaths"].([]string)
-			} else {
-				paths, _ = out["watchPaths"].([]string)
-			}
+			specific, _ := out["hookSpecificOutput"].(map[string]interface{})
+			paths, _ := specific["watchPaths"].([]string)
 			for _, want := range projectEntries {
 				if !containsString(paths, want) {
 					t.Fatalf("project watch path %s missing: %v", want, paths)
