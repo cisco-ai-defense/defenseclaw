@@ -64,6 +64,23 @@ class WindowsHookDoctorTests(unittest.TestCase):
             self.assertTrue(doctor_hooks._read_config(str(path), "codex")["features"]["hooks"])
             self.assertTrue(_read_agent_config(path)["features"]["hooks"])
 
+    def test_linked_hook_registration_file_names_the_fix_before_setup(self) -> None:
+        # GAP-0034: setup refuses a linked settings file on Windows, so doctor's
+        # repair step must say to replace the link first.
+        with tempfile.TemporaryDirectory() as root:
+            target = Path(root, "real-settings.json")
+            target.write_text("{}\n", encoding="utf-8")
+            link = Path(root, "settings.json")
+            try:
+                os.symlink(target, link)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"cannot create a symlink here: {exc}")
+            with self.assertRaises(doctor_hooks._InspectionError) as raised:
+                doctor_hooks._read_config(str(link), "claudecode")
+            self.assertEqual(raised.exception.state, "foreign")
+            self.assertIn(str(link), raised.exception.detail)
+            self.assertIn("replace the link with the regular file it points to first", raised.exception.detail)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="doctor-win-hooks-")
         self.root = Path(self.temp.name)

@@ -75,6 +75,8 @@ Setup adds DefenseClaw's own marked entries to each agent's configuration and le
 
 The Amp and OpenCode plugin files carry a connector credential: never print or copy them. macOS and Linux paths are on each [connector page](/docs/connectors).
 
+Setup changes the Claude Code `settings.json` only as a regular file. If it is a symbolic link or junction, setup refuses, names the link and its target, and changes nothing. Replace the link with the file it points to, then run `defenseclaw setup claude-code --yes` again.
+
 ## Supported path overrides
 
 Claude Code, Codex, GitHub Copilot CLI, Hermes and OpenCode let you move their configuration folder with `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `HERMES_HOME` and `OPENCODE_CONFIG_DIR`. Set them to absolute native paths before you install DefenseClaw or set up the connector. Setup checks and remembers them and refuses a path through a symbolic link or junction. Amp, Antigravity, Cursor and Devin have no such variable.
