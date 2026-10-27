@@ -1202,7 +1202,7 @@ func collectWindowsManagedRuntimeGenerations(
 			// owner-private DACL behind. Restore the canonical DACL instead
 			// of refusing every lifecycle retire for this user; any other
 			// shape stays refused.
-			if windowsManagedRuntimeDirSetupRelaxed(hookDir, target) && !windowsSetupRelaxIsStale(hookDir) {
+			if windowsManagedRuntimeDirSetupRelaxed(hookDir, target) && !windowsSetupRelaxIsStale(hookDir, target) {
 				// A running guardian's own setup relax: skip the account
 				// rather than harden it under that setup (GAP-1765).
 				return fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
@@ -1841,7 +1841,7 @@ func windowsManagedRuntimeRootsSetupRelaxedByLiveGuardian(dataDir string, target
 	relaxed := false
 	for _, path := range []string{dataDir, filepath.Join(dataDir, "hooks")} {
 		if windowsManagedRuntimeDirSetupRelaxed(path, target) {
-			if !windowsSetupRelaxByLiveGuardian(path) {
+			if !windowsSetupRelaxByLiveGuardian(path, target) {
 				return false
 			}
 			relaxed = true
@@ -1873,7 +1873,7 @@ func recoverStaleWindowsSetupRelaxedDataDir(dataDir string, target *windows.SID)
 		// of this folder, which can last past the wait (GAP-1528):
 		// hardening it under that setup fails it. Only a relax older than
 		// the running guardian is stale (GAP-1765).
-		if !windowsSetupRelaxIsStale(dataDir) {
+		if !windowsSetupRelaxIsStale(dataDir, target) {
 			return false
 		}
 		if _, err := windowsRecoverSetupRelaxedDataDirectory(dataDir, target); err != nil {
@@ -1883,121 +1883,20 @@ func recoverStaleWindowsSetupRelaxedDataDir(dataDir string, target *windows.SID)
 	return validateWindowsUserPathElement(dataDir, target, true, true, true) == nil
 }
 
-// windowsHookGuardianServiceName is the standalone guardian service.
-const windowsHookGuardianServiceName = "DefenseClawHookGuardian"
-
 // windowsSetupRelaxIsStale reports whether the setup relax on path was left
-// by a guardian that no longer runs: no guardian process runs, or the
-// folder's security last changed before the running guardian process
-// started. When that cannot be read, the relax is not called stale and the
-// account is skipped as before the recovery existed. A seam for tests.
-var windowsSetupRelaxIsStale = func(path string) bool {
-	started, running, ok := windowsHookGuardianProcessStart()
-	if !ok {
-		return false
-	}
-	if !running {
-		return true
-	}
-	changed, ok := windowsDirectoryChangeTime(path)
-	return ok && changed.Before(started)
+// by a setup that no longer runs: no live setup relax record exists for the
+// account (GAP-1985). A seam for tests.
+var windowsSetupRelaxIsStale = func(path string, target *windows.SID) bool {
+	return !windowsSetupRelaxInProgress(target)
 }
 
 // windowsSetupRelaxByLiveGuardian reports, only on positive proof, that the
-// setup relax on path was made by the guardian that runs now: its process is
-// running and the folder's security changed after it started. Anything that
-// cannot be read is no proof. A seam for tests.
-var windowsSetupRelaxByLiveGuardian = func(path string) bool {
-	started, running, known := windowsHookGuardianProcessStart()
-	if !running {
-		return false
-	}
-	changed, ok := windowsDirectoryChangeTime(path)
-	if !ok {
-		return false
-	}
-	if known {
-		return !changed.Before(started)
-	}
-	// A standard account's hook may not read the guardian process's start
-	// time: a relax younger than one guardian setup, while the guardian
-	// runs, is that setup.
-	return time.Since(changed) < windowsGuardianSetupRelaxBound
-}
-
-// windowsGuardianSetupRelaxBound bounds one guardian connector setup that
-// holds a relax (a Hermes repair, GAP-1528).
-const windowsGuardianSetupRelaxBound = 10 * time.Minute
-
-// windowsHookGuardianProcessStart returns the creation time of the running
-// guardian service process; running is false when the service is not
-// running (or not installed), ok false when the start time cannot be read
-// (running then says whether the service runs).
-func windowsHookGuardianProcessStart() (started time.Time, running, ok bool) {
-	manager, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
-	if err != nil {
-		return time.Time{}, false, false
-	}
-	defer func() { _ = windows.CloseServiceHandle(manager) }()
-	name, err := windows.UTF16PtrFromString(windowsHookGuardianServiceName)
-	if err != nil {
-		return time.Time{}, false, false
-	}
-	service, err := windows.OpenService(manager, name, windows.SERVICE_QUERY_STATUS)
-	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
-		return time.Time{}, false, true
-	}
-	if err != nil {
-		return time.Time{}, false, false
-	}
-	defer func() { _ = windows.CloseServiceHandle(service) }()
-	var status windows.SERVICE_STATUS_PROCESS
-	var needed uint32
-	if err := windows.QueryServiceStatusEx(service, windows.SC_STATUS_PROCESS_INFO,
-		(*byte)(unsafe.Pointer(&status)), uint32(unsafe.Sizeof(status)), &needed); err != nil {
-		return time.Time{}, false, false
-	}
-	if status.CurrentState == windows.SERVICE_STOPPED {
-		return time.Time{}, false, true
-	}
-	if status.CurrentState != windows.SERVICE_RUNNING || status.ProcessId == 0 {
-		// Starting or stopping: it may still set up or harden the folder.
-		return time.Time{}, false, false
-	}
-	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, status.ProcessId)
-	if err != nil {
-		// Running, start time unknown.
-		return time.Time{}, true, false
-	}
-	defer func() { _ = windows.CloseHandle(process) }()
-	var created, exited, kernel, user windows.Filetime
-	if err := windows.GetProcessTimes(process, &created, &exited, &kernel, &user); err != nil {
-		return time.Time{}, true, false
-	}
-	return time.Unix(0, created.Nanoseconds()), true, true
-}
-
-// windowsDirectoryChangeTime is the NTFS change time of directory path,
-// which a DACL change updates.
-func windowsDirectoryChangeTime(path string) (time.Time, bool) {
-	name, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return time.Time{}, false
-	}
-	handle, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
-		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
-	if err != nil {
-		return time.Time{}, false
-	}
-	defer func() { _ = windows.CloseHandle(handle) }()
-	var basic windowsFileBasicInfo
-	if err := windows.GetFileInformationByHandleEx(handle, windows.FileBasicInfo,
-		(*byte)(unsafe.Pointer(&basic)), uint32(unsafe.Sizeof(basic))); err != nil {
-		return time.Time{}, false
-	}
-	changed := windows.Filetime{LowDateTime: uint32(basic.ChangeTime), HighDateTime: uint32(uint64(basic.ChangeTime) >> 32)}
-	return time.Unix(0, changed.Nanoseconds()), true
+// setup relax on path belongs to a connector setup that runs now: a live
+// setup relax record for the account (GAP-1985). The folder's change time is
+// no proof: it moves whenever an entry inside the folder changes. A seam for
+// tests.
+var windowsSetupRelaxByLiveGuardian = func(path string, target *windows.SID) bool {
+	return windowsSetupRelaxInProgress(target)
 }
 
 // windowsManagedRuntimeRootsSetupRelaxed reports whether <data dir> or its

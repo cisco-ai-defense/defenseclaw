@@ -901,11 +901,11 @@ func TestWindowsManagedRuntimeResolverAcceptsTheRunningGuardiansLongSetupRelax(t
 	})
 	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
 	createWindowsManagedRuntimeTestHooksWithDACL(t, filepath.Join(fixture.options.DataDir, "hooks"), fixture.target, windowsSetupRelaxedDirectorySDDL)
-	windowsSetupRelaxByLiveGuardian = func(string) bool { return false }
+	windowsSetupRelaxByLiveGuardian = func(string, *windows.SID) bool { return false }
 	if err := settledWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
 		t.Fatalf("a relax no running guardian made: err=%v, want untrusted", err)
 	}
-	windowsSetupRelaxByLiveGuardian = func(string) bool { return true }
+	windowsSetupRelaxByLiveGuardian = func(string, *windows.SID) bool { return true }
 	if err := settledWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err != nil {
 		t.Fatalf("the running guardian's long setup relax refused the route: %v", err)
 	}
@@ -957,14 +957,14 @@ func TestWindowsManagedRuntimeGenerationGCRecoversASetupRelaxedDataDirectory(t *
 	// last past the wait) is skipped, never hardened under it.
 	stale := windowsSetupRelaxIsStale
 	t.Cleanup(func() { windowsSetupRelaxIsStale = stale })
-	windowsSetupRelaxIsStale = func(string) bool { return false }
+	windowsSetupRelaxIsStale = func(string, *windows.SID) bool { return false }
 	if _, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options); !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
 		t.Fatalf("collect over a running guardian's relax: err=%v, want the account skipped as untrusted", err)
 	}
 	if err := validate(); err == nil {
 		t.Fatal("a running guardian's relax was hardened")
 	}
-	windowsSetupRelaxIsStale = func(string) bool { return true }
+	windowsSetupRelaxIsStale = func(string, *windows.SID) bool { return true }
 	if removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options); err != nil || removed != 0 {
 		t.Fatalf("collect with a relaxed data directory: removed=%d err=%v", removed, err)
 	}
