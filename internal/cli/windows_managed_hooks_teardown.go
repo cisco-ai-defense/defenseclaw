@@ -209,6 +209,23 @@ var windowsManagedHooksStandaloneCursorTombstonePurger = enterprisehooks.PurgeWi
 // lifecycle result fails on it.
 const windowsManagedHooksNotLocalSystemReason = "the uninstall did not run as LocalSystem"
 
+// windowsManagedHooksSignedOutPathEntryReason ends a user_state_remaining
+// entry of an account whose DefenseClaw data and binaries a purge removed
+// but whose user Path entry for %USERPROFILE%\.local\bin stays: the account
+// is signed out, so its registry hive is not loaded and its Path cannot be
+// changed. The docs call that a warning, so the lifecycle result warns and
+// the purge does not fail on it (GAP-2231).
+const windowsManagedHooksSignedOutPathEntryReason = "only its user Path entry for .local\\bin stays: the account is signed out, so its registry hive is not loaded"
+
+// windowsManagedHooksUserBinariesReason is the user_state_remaining reason of
+// a failed per-user binaries purge.
+func windowsManagedHooksUserBinariesReason(err error) string {
+	if errors.Is(err, enterprisehooks.ErrWindowsUserHiveNotLoaded) {
+		return windowsManagedHooksSignedOutPathEntryReason
+	}
+	return boundedEnterpriseHookUserCleanupText(err.Error())
+}
+
 // windowsManagedHooksPurgeUserStateEnv is set to 1 by the lifecycle for an
 // uninstall with purge (Setup PURGE=1, --purge). A flag would fail the
 // finalize of an installed helper from before it; that helper ignores the
@@ -295,7 +312,7 @@ func windowsManagedHooksStandaloneUserState(
 				if home != "" && !errors.Is(err, os.ErrNotExist) && identityErr == nil && !keepsRegistrations(sid) {
 					// The folder is gone; the binaries may still be there.
 					if _, err := windowsManagedHooksStandaloneUserBinariesPurger(home, sid); err != nil {
-						remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
+						remaining = append(remaining, label+": "+windowsManagedHooksUserBinariesReason(err))
 					}
 				}
 				continue
@@ -315,7 +332,12 @@ func windowsManagedHooksStandaloneUserState(
 				purged = append(purged, windowsManagedHooksPurgedLabel(label, binaries))
 				continue
 			}
-			reason = boundedEnterpriseHookUserCleanupText(err.Error())
+			if errors.Is(err, enterprisehooks.ErrWindowsUserHiveNotLoaded) {
+				// The data and binaries went; only the Path entry of a
+				// signed-out account stays (GAP-2231).
+				purged = append(purged, windowsManagedHooksPurgedLabel(label, binaries))
+			}
+			reason = windowsManagedHooksUserBinariesReason(err)
 		}
 		remaining = append(remaining, label+": "+reason)
 	}

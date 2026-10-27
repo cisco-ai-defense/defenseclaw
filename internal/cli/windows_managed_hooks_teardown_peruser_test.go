@@ -376,6 +376,19 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 		!strings.Contains(report.UserStateRemaining[0], "registry hive is not loaded") {
 		t.Fatalf("failed binaries purge: purged %v remaining %v", report.UserStatePurged, report.UserStateRemaining)
 	}
+	// GAP-2231: a signed-out account's data and binaries go, only its user
+	// Path entry stays (its hive is not loaded): the account is purged and
+	// the entry names the documented signed-out reason, not a failure.
+	windowsManagedHooksStandaloneUserBinariesPurger = func(home, _ string) ([]string, error) {
+		return []string{filepath.Join(home, ".local", "bin", "defenseclaw.cmd"), filepath.Join(home, ".local", "bin")},
+			errors.Join(errors.New(`enterprise hooks: the user Path entry stays`), enterprisehooks.ErrWindowsUserHiveNotLoaded)
+	}
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if len(report.UserStatePurged) != 1 || len(report.UserStateRemaining) != 1 ||
+		!strings.HasSuffix(report.UserStatePurged[0], windowsManagedHooksPurgedBinariesMarker+"defenseclaw.cmd, the emptied folder") ||
+		!strings.HasSuffix(report.UserStateRemaining[0], `\.defenseclaw: `+windowsManagedHooksSignedOutPathEntryReason) {
+		t.Fatalf("signed-out Path entry: purged %v remaining %v", report.UserStatePurged, report.UserStateRemaining)
+	}
 	windowsManagedHooksStandaloneUserBinariesPurger = func(string, string) ([]string, error) { return nil, nil }
 	purged = 1
 	// An account whose registrations stayed keeps the folder with its

@@ -1725,10 +1725,14 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStatePurged) {
 		result.Changes = append(result.Changes, windowsEnterprisePurgedUserStateChange(entry))
 	}
-	var notLocalSystem, remaining []string
+	var notLocalSystem, pathEntryKept, remaining []string
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStateRemaining) {
 		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksNotLocalSystemReason); found {
 			notLocalSystem = append(notLocalSystem, account)
+			continue
+		}
+		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksSignedOutPathEntryReason); found {
+			pathEntryKept = append(pathEntryKept, account)
 			continue
 		}
 		remaining = append(remaining, entry)
@@ -1744,6 +1748,15 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 			windowsEnterpriseLocalSystemRemedy("/uninstall PURGE=1"),
 			windowsEnterpriseBoundedLabels(notLocalSystem),
 		))
+	}
+	if len(pathEntryKept) > 0 {
+		// The documented signed-out case: the data and binaries went, the
+		// Path entry names a folder that is gone and runs nothing (GAP-2231).
+		result.AddWarning("per_user_state_remaining", fmt.Sprintf(
+			"--purge removed the DefenseClaw per-user data and binaries of %d signed-out enrolled account(s), but each keeps the user Path entry for %%USERPROFILE%%\\.local\\bin the install added: "+
+				"a signed-out account's registry hive is not loaded, so its Path cannot be changed. The entry names a folder that no longer exists and runs nothing; "+
+				"to remove it, delete it from that account's Path once it signs in. Accounts: %s",
+			len(pathEntryKept), windowsEnterpriseBoundedLabels(pathEntryKept)))
 	}
 	if len(remaining) > 0 {
 		result.AddError("per_user_state_remaining", windowsEnterpriseUserStateRemainingMessage(len(remaining), windowsEnterpriseBoundedLabels(remaining)))

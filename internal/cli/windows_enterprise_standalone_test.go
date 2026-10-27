@@ -2196,6 +2196,23 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	if code := failed.Finish("windows", windowsEnterpriseFailureCodeFor(failed)); failed.OK || code == 0 {
 		t.Fatalf("not-LocalSystem purge finished ok=%t exit %d", failed.OK, code)
 	}
+	// GAP-2231: a signed-out account whose data and binaries went keeps only
+	// its user Path entry: the documented warning, not a failed purge.
+	signedOutPath, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_state_purged":["` + sid + `: C:\\Users\\carol\\.defenseclaw"],` +
+		`"user_state_remaining":["` + sid + `: C:\\Users\\carol\\.defenseclaw: ` + strings.ReplaceAll(windowsManagedHooksSignedOutPathEntryReason, `\`, `\\`) + `"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathKept := enterprisestatus.New("uninstall", "standalone", "windows", "test")
+	applyWindowsEnterpriseInstallerReport(pathKept, &windowsEnterpriseLifecycleOptions{purge: true}, signedOutPath, windowsEnterpriseStandaloneRun{})
+	if len(pathKept.Errors) != 0 || len(pathKept.Warnings) != 1 || pathKept.Warnings[0].Code != "per_user_state_remaining" ||
+		!strings.Contains(pathKept.Warnings[0].Message, "signed-out enrolled account(s)") ||
+		!strings.HasSuffix(pathKept.Warnings[0].Message, `Accounts: `+sid+`: C:\Users\carol\.defenseclaw`) {
+		t.Fatalf("signed-out Path entry purge: errors %+v warnings %+v", pathKept.Errors, pathKept.Warnings)
+	}
+	if code := pathKept.Finish("windows", windowsEnterpriseFailureCodeFor(pathKept)); !pathKept.OK || code != 0 {
+		t.Fatalf("signed-out Path entry purge finished ok=%t exit %d", pathKept.OK, code)
+	}
 	// A purge names each account whose data and binaries went.
 	gone, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_state_purged":["bob (` + sid + `): C:\\Users\\bob\\.defenseclaw"]}`))
 	if err != nil {
