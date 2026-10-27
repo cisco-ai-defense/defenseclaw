@@ -165,7 +165,7 @@ Devin documents `session_id` and a per-turn `prompt_id` but no per-tool invocati
 | Project hooks (pinned workspace only) | `<workspace>/.devin/hooks.v1.json` | same |
 | Hook program | `~/.defenseclaw/hooks` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
-Setup reads JSONC and keeps other hooks and settings in those files, but writes a changed file back as JSON, so comments and formatting are removed. The pre-edit backup keeps the original bytes.
+Setup reads JSONC and keeps other hooks and settings in those files. It writes a changed user file back as JSON, so comments and formatting are removed there. In a project `.devin/hooks.v1.json` setup and teardown edit only DefenseClaw's event entries: your comments, formatting, other events and a UTF-8 BOM stay. The pre-edit backup keeps the original bytes.
 
 `defenseclaw setup remove devin --yes` removes DefenseClaw's Devin hook entries and, after the gateway restart verifies removal, revokes `hooks/.hook-devin.token` and removes an empty `connector_backups/devin` folder. The `hooks/devin-hook.sh` path remains as a blocking tombstone for Devin processes that cached it; restart Devin after removal. Devin's own `%APPDATA%/devin` or `~/.config/devin` directory and a credential lock file may remain. `--no-restart` defers hook and credential teardown until the next gateway start.
 
