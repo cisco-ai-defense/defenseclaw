@@ -377,15 +377,17 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 	// recorded before this gateway took over bounds it too, since an
 	// account created after that hook did not make it (GAP-1947). A uid
 	// with no row there ran no hook in the ledger's row window, so the
-	// window's start bounds it (GAP-2069).
+	// window's start bounds it (GAP-2069); the window is the configured
+	// retention the prune uses (GAP-2106).
 	if len(fromFile) > 0 {
 		if hooks := managedHookPeerLastHooks(); hooks != nil {
 			now := time.Now()
 			if c.now != nil {
 				now = c.now()
 			}
+			window := inventory.AgentLedgerRowWindow(managedHookPeerLedgerRetentionDays(), now)
 			for _, uid := range fromFile {
-				if at := inventory.AgentLedgerSightingBound(hooks, uid, now); at > 0 && at < c.firstSeen[uid] {
+				if at := inventory.AgentLedgerSightingBound(hooks, uid, now, window); at > 0 && at < c.firstSeen[uid] {
 					c.firstSeen[uid] = at
 				}
 			}
@@ -410,6 +412,11 @@ var managedHookPeerLastHooks = func() map[int]int64 {
 	}
 	return inventory.AgentLastHooksByUID(records)
 }
+
+// managedHookPeerLedgerRetentionDays is the effective
+// observability.local.retention_days, the window the agent ledger's prune
+// keeps a uid's rows for (GAP-2106). Tests replace it.
+var managedHookPeerLedgerRetentionDays = func() int { return sharedAgentIdentities.ledgerRetentionDays() }
 
 // saveHomesLocked writes homes and names to the store. c.mu is held; it
 // runs only when a uid's home or name changes, which is rare.

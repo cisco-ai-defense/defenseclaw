@@ -21,8 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // AgentLastHooksByUID is, per uid, the newest last_seen of records (Unix
@@ -43,25 +41,36 @@ func AgentLastHooksByUID(records []AgentIdentityRecord) map[int]int64 {
 }
 
 // AgentLedgerRowWindow is how long the agent ledger keeps the rows of a uid
-// that runs no hook: the default local retention window
-// (config.ObservabilityV8DefaultRetentionDays, PruneAgentIdentities). Tests
-// replace it.
-var AgentLedgerRowWindow = time.Duration(config.ObservabilityV8DefaultRetentionDays) * 24 * time.Hour
+// that runs no hook when the local retention is retentionDays: the prune
+// (PruneAgentIdentities) uses the configured
+// observability.local.retention_days, not the default (GAP-2106). 0 when
+// the ledger keeps every row (retentionDays 0) or the window starts before
+// the Unix epoch at now.
+func AgentLedgerRowWindow(retentionDays int, now time.Time) time.Duration {
+	if retentionDays <= 0 || int64(retentionDays) > now.UnixNano()/int64(24*time.Hour) {
+		return 0
+	}
+	return time.Duration(retentionDays) * 24 * time.Hour
+}
 
 // AgentLedgerSightingBound is the latest time, by the agent ledger's hooks
 // (AgentLastHooksByUID; nil while the ledger cannot be read), at which a
 // build before this one can have last seen uid's holder: its last hook, or,
 // when a readable ledger has no row of the uid, the start of the ledger's
-// row window, because the holder's rows were pruned for running no hook in
-// it (GAP-2069). 0 when the ledger cannot be read.
-func AgentLedgerSightingBound(hooks map[int]int64, uid int, now time.Time) int64 {
+// row window (AgentLedgerRowWindow), because the holder's rows were pruned
+// for running no hook in it (GAP-2069). 0 when the ledger cannot be read,
+// or has no row of the uid and keeps every row (window 0).
+func AgentLedgerSightingBound(hooks map[int]int64, uid int, now time.Time, window time.Duration) int64 {
 	if hooks == nil {
 		return 0
 	}
 	if at := hooks[uid]; at > 0 {
 		return at
 	}
-	return now.Add(-AgentLedgerRowWindow).UnixNano()
+	if window <= 0 {
+		return 0
+	}
+	return now.Add(-window).UnixNano()
 }
 
 // ReadAgentLastHooks is AgentLastHooksByUID of every row, live and retired,

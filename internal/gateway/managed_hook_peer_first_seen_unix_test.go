@@ -11,8 +11,6 @@ import (
 	"strconv"
 	"testing"
 	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
 // GAP-1947 (RV4-2): 1.0.4 saves the homes file whenever any uid's home or
@@ -49,23 +47,28 @@ func TestLegacyEntrySightingIsBoundedByTheUIDsLastHook(t *testing.T) {
 }
 
 // GAP-2069: the agent ledger prunes the rows of a uid that runs no hook in
-// its row window (7 days), so an earlier holder who stopped using the host
-// leaves no row and the homes file's mtime alone (moved by another
-// account's first hook) bounded the sighting. A readable ledger with no row
-// of the uid bounds it by the window's start: a home created after then is
-// another account's.
+// its row window, so an earlier holder who stopped using the host leaves no
+// row and the homes file's mtime alone (moved by another account's first
+// hook) bounded the sighting. A readable ledger with no row of the uid
+// bounds it by the window's start: a home created after then is another
+// account's. GAP-2106: the window is the configured
+// observability.local.retention_days the prune uses, not the 7-day default,
+// and a retention of 0 keeps every row, so it bounds nothing.
 func TestLegacyEntrySightingIsBoundedByTheLedgerWindowWhenTheUIDsRowsWerePruned(t *testing.T) {
 	now := time.Now()
-	previousHooks, previousWindow := managedHookPeerLastHooks, inventory.AgentLedgerRowWindow
-	t.Cleanup(func() { managedHookPeerLastHooks, inventory.AgentLedgerRowWindow = previousHooks, previousWindow })
-	inventory.AgentLedgerRowWindow = 7 * 24 * time.Hour
+	previousHooks, previousDays := managedHookPeerLastHooks, managedHookPeerLedgerRetentionDays
+	t.Cleanup(func() { managedHookPeerLastHooks, managedHookPeerLedgerRetentionDays = previousHooks, previousDays })
 	for _, tc := range []struct {
 		name   string
 		hooks  map[int]int64
+		days   int
 		pruned bool
 	}{
-		{"rows pruned", map[int]int64{1007: now.UnixNano()}, true},
-		{"ledger unreadable", nil, false},
+		{"rows pruned, default retention", map[int]int64{1007: now.UnixNano()}, 7, true},
+		{"rows pruned, retention 3 days", map[int]int64{1007: now.UnixNano()}, 3, true},
+		{"rows pruned, retention 30 days", map[int]int64{1007: now.UnixNano()}, 30, true},
+		{"retention 0 keeps every row", map[int]int64{1007: now.UnixNano()}, 0, false},
+		{"ledger unreadable", nil, 7, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := filepath.Join(t.TempDir(), "managed_peer_homes.json")
@@ -82,9 +85,10 @@ func TestLegacyEntrySightingIsBoundedByTheLedgerWindowWhenTheUIDsRowsWerePruned(
 			}
 			want := info.ModTime().UnixNano()
 			if tc.pruned {
-				want = now.Add(-7 * 24 * time.Hour).UnixNano()
+				want = now.Add(-time.Duration(tc.days) * 24 * time.Hour).UnixNano()
 			}
 			managedHookPeerLastHooks = func() map[int]int64 { return tc.hooks }
+			managedHookPeerLedgerRetentionDays = func() int { return tc.days }
 			c := &managedHookPeerHomeCache{now: func() time.Time { return now }}
 			c.setStore(store)
 			c.mu.Lock()

@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
-	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
 // GAP-2024 (RV5-1): after 1.0.3 -> 1.0.4 -> 1.0.5, an account recreated
@@ -47,34 +46,41 @@ func TestGuardianBoundsALegacyEntrysSightingByTheUIDsLastHook(t *testing.T) {
 		{"1.0.3 file", `{` + head + `}}`},
 	} {
 		age := time.Since(time.Unix(0, birth))
+		// GAP-2106: the row window is the configured retention in whole days.
+		younger := int(age/(24*time.Hour)) + 1
+		older := int(age / (24 * time.Hour))
 		for _, tc := range []struct {
 			name     string
 			lastHook int64
 			pruned   bool
-			window   time.Duration
+			days     int
 			pre      bool
 		}{
-			{"last hook before the home was created", birth - int64(time.Hour), false, 0, false},
-			{"last hook after the home was created", time.Now().Add(-time.Minute).UnixNano(), false, 0, true},
-			{"no ledger", 0, false, 0, true},
+			{"last hook before the home was created", birth - int64(time.Hour), false, 7, false},
+			{"last hook after the home was created", time.Now().Add(-time.Minute).UnixNano(), false, 7, true},
+			{"no ledger", 0, false, 7, true},
 			// GAP-2069: the ledger is read but has no row of the uid, so the
 			// holder ran no hook in the row window. A home younger than the
 			// window belongs to an account created after that holder; for
 			// both the first map and the existing map's join (PreTokenHolder).
-			{"pruned ledger, home younger than the row window", 0, true, age + time.Hour, false},
-			{"pruned ledger, home older than the row window", 0, true, age - time.Hour, true},
+			{"pruned ledger, home younger than the row window", 0, true, younger, false},
+			{"pruned ledger, home older than the row window", 0, true, older, true},
+			// GAP-2106: retention 0 keeps every row, so a missing row bounds
+			// nothing and the homes file's write time stays the sighting.
+			{"ledger that keeps every row, no row of the uid", 0, true, 0, true},
 		} {
 			t.Run(file.name+": "+tc.name, func(t *testing.T) {
+				if tc.name == "pruned ledger, home older than the row window" && older < 1 {
+					t.Skip("the home is younger than one day of retention")
+				}
 				dir := t.TempDir()
 				path := filepath.Join(dir, "managed_peer_homes.json")
 				if err := os.WriteFile(path, []byte(file.body), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				previous, previousWindow := enterpriseHookAgentLastHooks, inventory.AgentLedgerRowWindow
-				t.Cleanup(func() { enterpriseHookAgentLastHooks, inventory.AgentLedgerRowWindow = previous, previousWindow })
-				if tc.window > 0 {
-					inventory.AgentLedgerRowWindow = tc.window
-				}
+				previous, previousDays := enterpriseHookAgentLastHooks, enterpriseHookAgentLedgerRetentionDays
+				t.Cleanup(func() { enterpriseHookAgentLastHooks, enterpriseHookAgentLedgerRetentionDays = previous, previousDays })
+				enterpriseHookAgentLedgerRetentionDays = func() int { return tc.days }
 				enterpriseHookAgentLastHooks = func(dataDir string) map[int]int64 {
 					if dataDir != dir {
 						t.Errorf("ledger read from %q; want the homes file's data dir %q", dataDir, dir)

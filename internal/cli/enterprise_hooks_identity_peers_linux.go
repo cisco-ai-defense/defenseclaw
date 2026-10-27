@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -153,14 +154,20 @@ var enterpriseHookResolveGatewayPeers = func(path string, last map[int]enterpris
 	// account created after that hook did not make it, so it is no 1.0.3
 	// holder and the first map does not bind it (GAP-2024). Read once, and
 	// only when an entry needs it. A uid with no row there ran no hook in
-	// the ledger's row window, whose start then bounds it (GAP-2069).
+	// the ledger's row window, whose start then bounds it (GAP-2069); the
+	// window is the configured retention the prune uses (GAP-2106).
 	var lastHooks map[int]int64
+	var rowWindow time.Duration
 	lastHooksRead := false
 	lastHook := func(uid int) int64 {
+		now := time.Now()
 		if !lastHooksRead {
 			lastHooks, lastHooksRead = enterpriseHookAgentLastHooks(filepath.Dir(path)), true
+			if lastHooks != nil {
+				rowWindow = inventory.AgentLedgerRowWindow(enterpriseHookAgentLedgerRetentionDays(), now)
+			}
 		}
-		return inventory.AgentLedgerSightingBound(lastHooks, uid, time.Now())
+		return inventory.AgentLedgerSightingBound(lastHooks, uid, now, rowWindow)
 	}
 	// preToken reports whether the account that holds uid now, whose home
 	// is home, is the one a build before 1.0.4 saw hold it, with no 1.0.4
@@ -255,6 +262,18 @@ var enterpriseHookAgentLastHooks = func(dataDir string) map[int]int64 {
 		return nil
 	}
 	return hooks
+}
+
+// enterpriseHookAgentLedgerRetentionDays is the effective
+// observability.local.retention_days of the machine config, the window the
+// gateway's ledger prune keeps rows for (GAP-2106); the default when the
+// config cannot be compiled. Tests replace it.
+var enterpriseHookAgentLedgerRetentionDays = func() int {
+	loaded, err := loadConfigV8Source(config.ConfigPath(), config.DefaultDataPath(), "", true)
+	if err != nil || loaded == nil || loaded.compiled == nil || loaded.compiled.Plan == nil {
+		return config.ObservabilityV8DefaultRetentionDays
+	}
+	return loaded.compiled.Plan.Snapshot().Local.RetentionDays
 }
 
 // enterpriseHookLocalAccountsStamp is enterprisehooks.LocalAccountsStamp.
