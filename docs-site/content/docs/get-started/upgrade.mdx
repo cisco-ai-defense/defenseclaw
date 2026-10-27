@@ -133,7 +133,10 @@ defenseclaw rollback
 
 Rollback swaps the live install with the one the last upgrade replaced: programs, Python environment, configuration and data as they were at upgrade time. Anything written since moves into `~/.defenseclaw/previous` and returns when you roll forward. One previous install is kept, and rollback needs no network.
 
-Rollback needs a previous install that was initialized. If that install never ran `defenseclaw init`, rollback says `no config.yaml exists yet`, undoes itself and exits 1; the current install stays.
+A previous install that never ran `defenseclaw init` has no configuration, and what rollback does then depends on the gateway:
+
+- If the gateway is running, rollback must start the previous gateway, which refuses with `no config.yaml exists yet`. Rollback then undoes itself and exits 1; the current install stays, with its gateway. The installer also says the previous install's files are in `~/.defenseclaw/previous/data` and to fix the cause and run rollback again. There is nothing to fix there: stay on the current install, or stop the gateway with `defenseclaw-gateway stop` and roll back as below.
+- If the gateway is stopped, rollback completes and exits 0, and the previous install runs with no `config.yaml`. Run `defenseclaw init` to set it up, or run `defenseclaw rollback` again to roll forward to your current install and its configuration.
 
 - Between releases from 1.0.1 on, rollback also carries your sandbox setup: sandbox records, hook bindings and harness images. A release before 1.0.1 cannot take over that setup.
 - After rolling forward again, a retained sandbox can still run the older release's supervisor even when the restored gateway is healthy. If `sandbox connect NAME` says `legacy sandbox running`, save or pull accessible work first, then run `defenseclaw sandbox stop NAME`, `defenseclaw sandbox start NAME` and `defenseclaw sandbox connect NAME`. A MicroVM stop requests a disk sync; if the sync fails, changes since its last successful sync may be lost. Keep the gateway running until you have saved work you need.
