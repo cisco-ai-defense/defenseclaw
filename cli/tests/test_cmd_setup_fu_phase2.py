@@ -3361,6 +3361,19 @@ class TestHelpParity(unittest.TestCase):
         self.assertIn("SessionEnd", out)
         self.assertNotIn("ten on 0.133+", out)
 
+    def test_hook_connector_help_names_only_the_channels_a_host_setup_registers(self):
+        # GAP-2205: host setup wires only the hooks (the preview says so since
+        # GAP-0295); the help still listed a Notify bridge and native OTel.
+        for connector in ("codex", "claude-code"):
+            out = " ".join(self._help([connector, "--help"]).split())
+            self.assertIn("Hooks", out)
+            self.assertNotIn("Notify —", out)
+            self.assertNotIn("OTel —", out)
+            self.assertNotIn("telemetry channels", out)
+            self.assertIn("registers no native OTel exporter", out)
+            self.assertIn("Only Secure Client", out)
+            self.assertIn("needed so the connector's hooks are wired", out)
+
 
 # ---------------------------------------------------------------------------
 # SU-11 — bare `setup` picker + scripting flags
