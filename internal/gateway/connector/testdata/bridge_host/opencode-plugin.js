@@ -658,11 +658,12 @@ async function defenseclawFetch(path, init, token) {
       try {
         output = post();
       } catch (err) {
-        // A helper that ran and failed for another reason than an outage
-        // (exit 7) or the time limit, a connected-peer proof that raced the
-        // gateway for one, gets one more try; a second failure blocks with
-        // its cause (GAP-1236).
-        if (!err || !Number.isInteger(err.status) || err.status === 0 || err.status === 7 || err.signal) throw err;
+        // Only a connected-peer proof that failed (exit 8: nothing was sent,
+        // a proof that raced a gateway restart) gets one more try; a second
+        // failure blocks with its cause (GAP-1236). Any other failure may
+        // come after the gateway took the call and is not sent twice
+        // (GAP-2083).
+        if (!err || err.status !== 8 || err.signal) throw err;
         output = post();
       }
       const reply = JSON.parse(output);

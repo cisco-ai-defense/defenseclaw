@@ -537,10 +537,11 @@ async function gatewayFetch(path: string, init: RequestInit, token: string): Pro
 			try {
 				output = post()
 			} catch (error) {
-				// One more try for a helper that failed for another reason than an
-				// outage (exit 7) or the time limit (GAP-1236).
+				// One more try only for a connected-peer proof that failed (exit 8:
+				// nothing was sent, GAP-1236); any other failure may come after the
+				// gateway took the call and is not sent twice (GAP-2083).
 				const failed = error as { status?: unknown; signal?: unknown } | null
-				if (!failed || !Number.isInteger(failed.status) || failed.status === 0 || failed.status === 7 || failed.signal) throw error
+				if (!failed || failed.status !== 8 || failed.signal) throw error
 				output = post()
 			}
 			const reply = JSON.parse(output) as { status: number; body: string; retry_after?: string }

@@ -105,6 +105,11 @@ func main() {
 		if hookexec.PerUserPostOutage(err) {
 			os.Exit(hookexec.PerUserPostOutageExit)
 		}
+		if hookexec.PerUserPostPeerUnverified(err) {
+			// Nothing of the call was sent: the one failure the OpenCode and
+			// Amp plugins send again (GAP-2083).
+			os.Exit(hookexec.PerUserPostPeerUnverifiedExit)
+		}
 		os.Exit(1)
 	}
 }
