@@ -63,5 +63,36 @@ def test_windows_unreadable_adapter_is_not_reported_as_edited(tmp_path, monkeypa
     monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
     cfg, _ = _install(tmp_path)
     monkeypatch.setattr(fail_mode, "_sha256_regular_file", lambda _path: "")
+    monkeypatch.setattr(hook_integrity, "_opens_for_read", lambda _path: False)
     problems = hook_integrity.hook_runtime_problems(cfg, "copilot")
     assert len(problems) == 1 and "cannot be read" in problems[0] and "changed since setup" not in problems[0], problems
+
+
+def test_windows_link_in_place_of_adapter_is_drift_that_doctor_fix_renders(tmp_path, monkeypatch):
+    """GAP-2022: a symlink in place of copilot-hook.ps1 (no regular file to digest)
+    read as "cannot be read", so doctor --fix skipped it. It is drift."""
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    cfg, adapter = _install(tmp_path)
+    other = tmp_path / "other.ps1"
+    other.write_bytes(b"exit 0\\r\\n")
+    adapter.unlink()
+    adapter.symlink_to(other)
+    problems = hook_integrity.hook_runtime_problems(cfg, "copilot")
+    assert len(problems) == 1 and "changed since setup" in problems[0], problems
+    monkeypatch.setattr(cmd_doctor, "_doctor_active_connectors", lambda _cfg: ["copilot"])
+    assert cmd_doctor._drifted_hook_connectors(cfg) == ["copilot"]
+
+
+def test_windows_oversized_adapter_is_drift_not_unreadable(tmp_path, monkeypatch):
+    """GAP-2022: a readable file the digest helper refuses (oversized, or changed
+    during the read) is drift, not "cannot be read"."""
+    from defenseclaw import fail_mode
+
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    cfg, _ = _install(tmp_path)
+    monkeypatch.setattr(fail_mode, "_sha256_regular_file", lambda _path: "")
+    monkeypatch.setattr(hook_integrity, "_opens_for_read", lambda _path: True)
+    problems = hook_integrity.hook_runtime_problems(cfg, "copilot")
+    assert len(problems) == 1 and "changed since setup" in problems[0], problems

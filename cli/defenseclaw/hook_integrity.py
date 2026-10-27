@@ -254,6 +254,16 @@ def _untrusted_hook_file(connector: str, script: Path) -> HookProblem | str:
     return ""
 
 
+def _opens_for_read(path: Path) -> bool:
+    """Whether this account can open *path* for reading (a held file or a deny ACE cannot)."""
+
+    try:
+        with path.open("rb"):
+            return True
+    except OSError:
+        return False
+
+
 def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
     """Return short descriptions of drifted hook files for *connector*."""
 
@@ -273,8 +283,11 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
             if not expected or not script.is_file():
                 continue
             actual = _sha256_regular_file(script)
-            if not actual:
+            if not actual and not script.is_symlink() and not _opens_for_read(script):
                 # Defender holding the file, or a deny ACE: not an edit (GAP-0403).
+                # A link in place of the script, an oversized file or one that
+                # changed during the read is drift that doctor --fix renders
+                # again (GAP-2022).
                 return [
                     f"hook script {script} cannot be read, so the agent cannot run it and DefenseClaw is not "
                     "guarding its tool calls"
