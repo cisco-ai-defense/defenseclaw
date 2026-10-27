@@ -2807,7 +2807,7 @@ func findMoveActsOnEntryOnly(args []string, inEntryDir bool) bool {
 			operands = append(operands, word)
 		}
 	}
-	if len(operands) != 2 || !(operands[0] == "{}" || inEntryDir && operands[0] == "./{}") {
+	if len(operands) != 2 || operands[0] != "{}" && (!inEntryDir || operands[0] != "./{}") {
 		return false
 	}
 	destination := operands[1]
@@ -2905,8 +2905,8 @@ func findCommandStaysOffState(words []string, inEntryDir bool) bool {
 	if _, wrapper := findCommandWrappers[program]; wrapper {
 		return false
 	}
-	if _, inline := findInlineInterpreters[program]; inline &&
-		!(strings.HasPrefix(program, "python") && len(words) > 2 && words[1] == "-m") {
+	pythonModule := strings.HasPrefix(program, "python") && len(words) > 2 && words[1] == "-m"
+	if _, inline := findInlineInterpreters[program]; inline && !pythonModule {
 		return false
 	}
 	switch program {
