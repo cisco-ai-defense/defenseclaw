@@ -83,6 +83,34 @@ func TestFindCleanupNamesHoldOnlyForACommandOnTheEntry(t *testing.T) {
 			"GAP-2047: a quoted \"$HOME\" in a nested script gets no path fact (classifier resolver)"},
 		{"home zzz cp onto config", `find ~ -name '*.zzz' -exec cp {} <HOME>/.defenseclaw/config.yaml \;`, true, ""},
 		{"project execdir rm parent", `find ./build -name '*.o' -execdir rm -f ../stale.txt \;`, false, ""},
+		// pod check12 S rows: the shell removes quotes and escapes, so a
+		// -c script is judged by the words it runs, and awk, sed e/w and a
+		// nested find run code of their own.
+		{"S1 logs execdir sh cd escaped dotdot", `find ~/.defenseclaw/logs -name '*.log' -execdir sh -c 'cd .\.; rm -rf hooks' \;`, true, ""},
+		{"S10 logs execdir sh set escaped dotdot", `find ~/.defenseclaw/logs -name '*.log' -execdir sh -c 'set -- .\.; cd "$1"; rm -rf hooks' \;`, true, ""},
+		{"S2 logs sh empty quotes", `find ~/.defenseclaw/logs -name '*.log' -exec sh -c 'rm -rf ~/.defense""claw/hooks' \;`, true, ""},
+		{"S3 logs sh escaped name", `find ~/.defenseclaw/logs -name '*.log' -exec sh -c 'rm -rf ~/.defense\claw/hooks' \;`, true, ""},
+		{"S15 logs sh cd quoted name", `find ~/.defenseclaw/logs -name '*.log' -exec sh -c 'cd; rm -rf .defense"claw"/hooks' \;`, true, ""},
+		{"S6 logs execdir awk system", `find ~/.defenseclaw/logs -name '*.log' -execdir awk 'BEGIN{system("rm -rf \056\056/hooks")}' \;`, true, ""},
+		{"S4 home sh empty quotes", `find ~ -name '*.txt' -exec sh -c 'rm -rf ~/.defense""claw/hooks' \;`, true, ""},
+		{"S5 home sh cd quoted name", `find ~ -name '*.txt' -exec sh -c 'cd; rm -rf .defense"claw"/hooks' \;`, true, ""},
+		{"S7 home sh nested find", `find ~ -name '*.txt' -exec sh -c 'cd; find -path "*claw/hook*" -delete' \;`, true, ""},
+		{"home sed e command", `find ~ -name '*.txt' -exec sed -n 'e rm -rf .\./hooks' {} \;`, true, ""},
+		{"home sed s e flag", `find ~/.defenseclaw/logs -name '*.log' -execdir sed 's/.*/rm -rf .\.\/hooks/e' {} \;`, true, ""},
+		{"home env sh", `find ~ -name '*.txt' -exec env sh -c 'rm -rf ~/.defense""claw/hooks' \;`, true, ""},
+		{"home sh loop rm parent glob", `find ~ -name '*.txt' -exec sh -c 'for f; do rm -rf ~/.defense*/hooks; done' _ {} +`, true, ""},
+		// pod check12 N rows: entry idioms of a -c script name the entry
+		// only (BALANCED rule 4).
+		{"N1 home sh ffmpeg suffix strip", `find ~ -name '*.wav' -exec sh -c 'ffmpeg -i "$1" "${1%.wav}.mp3"' _ {} \;`, false, ""},
+		{"N2 home sh pandoc basename", `find ~ -name '*.md' -exec sh -c 'pandoc "$1" -o "$(basename "$1" .md).html"' _ {} \;`, false, ""},
+		{"N5 home sh for positionals", `find ~ -name '*.txt' -exec sh -c 'for f; do dos2unix "$f"; done' _ {} +`, false, ""},
+		{"N6 home sh for in all", `find ~ -name '*.png' -exec sh -c 'for f in "$@"; do optipng "$f"; done' _ {} +`, false, ""},
+		{"N10 home execdir sh sips", `find ~ -name '*.heic' -execdir sh -c 'sips -s format jpeg "$1" --out "${1%.heic}.jpg"' _ {} \;`, false, ""},
+		{"home sed in place", `find ~ -name '*.txt' -exec sed -i 's/foo/bar/g' {} +`, false, ""},
+		// Entry idioms that still reach past the entry block.
+		{"home sh for dirname", `find ~ -name '*.zzz' -exec sh -c 'for f; do rm -rf "$(dirname "$f")"; done' _ {} +`, true, ""},
+		{"home sh for param parent", `find ~ -name '*.zzz' -exec sh -c 'for f; do rm -rf "${f%/*}"; done' _ {} +`, true, ""},
+		{"home sh unknown var", `find ~ -name '*.zzz' -exec sh -c 'rm -rf "$D"' _ {} \;`, true, ""},
 	}
 	for index := range rows {
 		rows[index].command = strings.ReplaceAll(rows[index].command, "<HOME>", home)

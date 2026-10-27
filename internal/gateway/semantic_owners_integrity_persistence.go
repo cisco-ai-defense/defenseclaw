@@ -2835,6 +2835,10 @@ var (
 	}
 	findInlineInterpreters = map[string]struct{}{
 		"perl": {}, "ruby": {}, "node": {}, "php": {}, "python": {}, "python3": {}, "pwsh": {}, "osascript": {},
+		// awk's system() and print > file run what its program says
+		// (pod check12 S6); busybox runs any applet, a shell included.
+		"awk": {}, "gawk": {}, "mawk": {}, "nawk": {}, "busybox": {}, "lua": {}, "tclsh": {}, "expect": {},
+		"deno": {}, "bun": {},
 	}
 )
 
@@ -2906,6 +2910,20 @@ func findCommandStaysOffStateOf(home, root string) func(words []string, inEntryD
 		}
 		for index, word := range words {
 			program := findProgramName(word)
+			if _, shell := findShellPrograms[program]; shell {
+				// find hands a shell's -c script to the shell, which removes
+				// its quotes and escapes, so the script is judged by the
+				// words the shell runs (pod check12 S1-S5, S10, S15).
+				if index == 0 {
+					return findShellInvocationStaysOff(words, home, root, inEntryDir)
+				}
+				if findShellRunsAScript(words, index) {
+					return false
+				}
+			}
+			if findSedRunsOrWrites(words[index:]) {
+				return false
+			}
 			pythonModule := strings.HasPrefix(program, "python") && index+1 < len(words) && words[index+1] == "-m"
 			if _, inline := findInlineInterpreters[program]; inline && !pythonModule {
 				return false
@@ -2921,8 +2939,24 @@ func findCommandStaysOffStateOf(home, root string) func(words []string, inEntryD
 	}
 }
 
-// findWordReachesState reports a command word, or a word of a shell
-// script given as one, that can name DefenseClaw state on its own: the
+// findShellRunsAScript reports a shell word after the first that runs a
+// script: it follows a wrapper (`env sh -c`, `sudo bash x.sh`) or a -c
+// option follows it.
+func findShellRunsAScript(words []string, index int) bool {
+	if _, wrapper := findScriptRefusedPrograms[findProgramName(words[index-1])]; wrapper ||
+		strings.Contains(words[index-1], "=") {
+		return true
+	}
+	for _, word := range words[index+1:] {
+		if findPlainOption(word) && !strings.HasPrefix(word, "--") && strings.ContainsRune(word, 'c') {
+			return true
+		}
+	}
+	return false
+}
+
+// findWordReachesState reports a command word, or a rendered word of a
+// shell script (findShellScriptStaysOff), that can name DefenseClaw state on its own: the
 // state root name, {} followed by '/', a '..' component, '.', a command or
 // parameter substitution, dirname, a dot-name glob, another user's home or
 // an unknown variable, a path that is the state root, inside it or above
