@@ -338,24 +338,10 @@ func yieldHookRunSlot(ctx context.Context) (resume func()) {
 	// The hook bounds its wait for a local decision; this one waits on a
 	// remote scanner, so it reports progress first (hook_progress.go).
 	reportHookProgress(ctx)
-	return pauseHookRunSlot(ctx)
-}
-
-// pauseHookRunSlot frees the caller's run slot while this request waits for
-// an external answer. The request still counts toward its in-flight limits.
-// The caller resumes the slot before doing more gateway work.
-func pauseHookRunSlot(ctx context.Context) (resume func()) {
-	slot, _ := ctx.Value(hookRunSlotContextKey{}).(*hookRunSlot)
+	slot := giveUpHookRunSlot(ctx)
 	if slot == nil {
 		return func() {}
 	}
-	slot.mu.Lock()
-	defer slot.mu.Unlock()
-	if !slot.held {
-		return func() {}
-	}
-	<-slot.run
-	slot.held = false
 	return func() {
 		select {
 		case slot.run <- struct{}{}:
@@ -371,6 +357,39 @@ func pauseHookRunSlot(ctx context.Context) (resume func()) {
 		}
 		slot.held = true
 	}
+}
+
+// pauseHookRunSlot frees the caller's run slot once the request has offered
+// its answer to the hook. The request still counts toward its in-flight
+// limits, and the returned resume does not take a slot back: what is left
+// (waiting for the delivery receipt, then writing the call's audit rows) is
+// not answer work, and the audit writes queue on the store's single writer
+// anyway. Taking a run slot back for it made a caller's next hook wait behind
+// this call's audit writes: on a host of two or three processors a caller
+// has one slot, and with a cold page cache on a large audit store those
+// writes took long enough that a 10 calls a second load of one account
+// queued every new hook past the answer budget, and the hooks blocked them
+// as a gateway no-answer (GAP-1790).
+func pauseHookRunSlot(ctx context.Context) (resume func()) {
+	giveUpHookRunSlot(ctx)
+	return func() {}
+}
+
+// giveUpHookRunSlot returns the run slot the request on ctx holds and
+// reports that slot, or nil when the request holds none.
+func giveUpHookRunSlot(ctx context.Context) *hookRunSlot {
+	slot, _ := ctx.Value(hookRunSlotContextKey{}).(*hookRunSlot)
+	if slot == nil {
+		return nil
+	}
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+	if !slot.held {
+		return nil
+	}
+	<-slot.run
+	slot.held = false
+	return slot
 }
 
 // end gives back the slot when the request is done.
