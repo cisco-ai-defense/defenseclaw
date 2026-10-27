@@ -4033,3 +4033,55 @@ func TestWindowsRepairConfigRefusalRunsOnlyTheTransactionRecovery(t *testing.T) 
 		}
 	}
 }
+
+// GAP-2265: under Setup the ensure deadline is the --timeout-seconds Setup
+// passes (its TIMEOUTSECONDS budget), not the fixed default; a value outside
+// Setup's range is refused before anything runs.
+func TestWindowsEnterpriseEnsureDeadlineFollowsSetupTimeoutSeconds(t *testing.T) {
+	previousTimeout := windowsEnterpriseEnsureTimeout
+	windowsEnterpriseEnsureTimeout = 30 * time.Millisecond
+	t.Cleanup(func() { windowsEnterpriseEnsureTimeout = previousTimeout })
+	stub := &ensureStub{t: t}
+	stub.install(t)
+	var remaining time.Duration
+	windowsEnterpriseStandaloneRunner = func(ctx context.Context, _ *cobra.Command, _ string, _ []string) (windowsEnterpriseStandaloneRun, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("ensure ran its installer without a deadline")
+		}
+		remaining = time.Until(deadline)
+		return windowsEnterpriseStandaloneRun{}, errors.New("stop after the deadline check")
+	}
+	command := &cobra.Command{}
+	command.SetOut(&bytes.Buffer{})
+	command.SetErr(&bytes.Buffer{})
+	opts := ensureTestOptions()
+	opts.timeoutSeconds = 1680
+	_ = runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+	if remaining < 1670*time.Second || remaining > 1680*time.Second {
+		t.Fatalf("ensure deadline %s from now, want the 1680 s Setup passed", remaining)
+	}
+
+	for _, seconds := range []int{30, windowsEnterpriseEnsureMaximumTimeoutSeconds + 1} {
+		called := false
+		windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
+			called = true
+			return windowsEnterpriseStandaloneRun{}, errors.New("must not run")
+		}
+		var output bytes.Buffer
+		command.SetOut(&output)
+		opts := ensureTestOptions()
+		opts.timeoutSeconds = seconds
+		err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+		if called || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+			t.Fatalf("--timeout-seconds %d: ran=%v exit=%d (%v)", seconds, called, commandExitCode(err), err)
+		}
+		var result enterprisestatus.Result
+		if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" {
+			t.Fatalf("--timeout-seconds %d result %+v", seconds, result.Errors)
+		}
+	}
+}

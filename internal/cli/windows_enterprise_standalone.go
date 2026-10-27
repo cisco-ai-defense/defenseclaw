@@ -3358,6 +3358,10 @@ func readWindowsEnterpriseBoundedFile(path string, limit int64) ([]byte, error) 
 
 var windowsEnterpriseEnsureTimeout = 12 * time.Minute
 
+// windowsEnterpriseEnsureMaximumTimeoutSeconds is the longest
+// --timeout-seconds, Setup's longest TIMEOUTSECONDS.
+const windowsEnterpriseEnsureMaximumTimeoutSeconds = 2 * 60 * 60
+
 // runWindowsEnterpriseStandaloneEnsure converges the host to the supplied
 // payload and config: a pending transaction is repaired, an absent
 // deployment is installed, an older one upgraded, drifted binaries or
@@ -3369,7 +3373,20 @@ func runWindowsEnterpriseStandaloneEnsure(
 	opts *windowsEnterpriseLifecycleOptions,
 	script string,
 ) error {
-	ctx, cancel := context.WithTimeout(ctx, windowsEnterpriseEnsureTimeout)
+	// GAP-2265: under Setup the deadline is Setup's TIMEOUTSECONDS budget
+	// (default 30 minutes), passed as --timeout-seconds; a fixed 12 minutes
+	// here failed an upgrade on a busy host long before the limit an
+	// administrator set or was told to raise.
+	timeout := windowsEnterpriseEnsureTimeout
+	if opts.timeoutSeconds != 0 {
+		if opts.timeoutSeconds < 60 || opts.timeoutSeconds > windowsEnterpriseEnsureMaximumTimeoutSeconds {
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			result.AddError("invalid_arguments", fmt.Sprintf("--timeout-seconds must be between 60 and %d", windowsEnterpriseEnsureMaximumTimeoutSeconds))
+			return finishWindowsEnterpriseStandalone(cmd, opts, result, enterprisestatus.WindowsExitInvalidArgs)
+		}
+		timeout = time.Duration(opts.timeoutSeconds) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if opts.bundle != nil {
 		// A failed bundle's nested rollback uses the remaining ensure budget.
