@@ -806,6 +806,51 @@ def _rotation_functions(*names: str) -> str:
     return "\n".join(functions)
 
 
+def _detect_functions(*names: str) -> str:
+    text = _text(MDM / "windows" / "detect.ps1").replace("\r\n", "\n")
+    functions = []
+    for name in names:
+        start = text.find(f"function {name} {{")
+        if start >= 0:
+            functions.append(text[start : text.index("\n}\n", start) + 3])
+    return "\n".join(functions)
+
+
+@pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
+def test_windows_detect_orders_prereleases_by_identifier(tmp_path: Path) -> None:
+    # GAP-1987: -MinimumVersion compared prereleases as one ordinal string, so
+    # an installed rc.10 read older than a minimum rc.9 (Intune reinstall loop)
+    # and an installed rc.3 newer than a minimum rc.10.
+    cases = [
+        ("1.0.5-rc.10", "1.0.5-rc.9", True),
+        ("1.0.5-rc.9", "1.0.5-rc.10", False),
+        ("1.0.5-rc.3", "1.0.5-rc.10", False),
+        ("1.0.5-rc.10", "1.0.5-rc.2", True),
+        ("1.0.5-rc.10", "1.0.5-rc.10", True),
+        ("1.0.5", "1.0.5-rc.10", True),
+        ("1.0.5-rc.10", "1.0.5", False),
+        ("1.0.5-rc.1", "1.0.5-rc.beta", False),
+        ("1.0.5-alpha.1", "1.0.5-alpha", True),
+        ("1.0.5-beta", "1.0.5-alpha.9", True),
+        ("1.0.6-rc.1", "1.0.5", True),
+        ("1.0.4", "1.0.5-rc.1", False),
+    ]
+    probe = tmp_path / "detect-version.ps1"
+    probe.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + _detect_functions("ConvertTo-DefenseClawComparableVersion", "Compare-DefenseClawPrerelease",
+                            "Test-DefenseClawVersionAtLeast")
+        + "\n"
+        + "".join(f"'{{0}}' -f (Test-DefenseClawVersionAtLeast -Installed '{a}' -Minimum '{b}')\n" for a, b, _ in cases),
+        encoding="utf-8",
+    )
+    result = subprocess.run([_any_pwsh7(), "-NoProfile", "-NonInteractive", "-File", str(probe)],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    got = [line.strip() == "True" for line in result.stdout.splitlines() if line.strip()]
+    assert got == [want for _, _, want in cases], list(zip(cases, got))
+
+
 @pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
 @pytest.mark.parametrize(("raw", "stored"), [
     (b" \tnew-key\r\n", b"new-key"),
