@@ -174,6 +174,7 @@ def up_cmd(
     refresh_config: bool,
 ) -> None:
     """Start the stack, wait for readiness, and wire the gateway config."""
+    selected_signals = _parse_signals(signals)
     controller = _resolve_controller(app.cfg.data_dir)
     _run_native_controller(controller.preflight, "Docker preflight")
 
@@ -216,7 +217,6 @@ def up_cmd(
             "stack is ready to enable export."
         )
     elif not no_config:
-        selected_signals = _parse_signals(signals)
         try:
             _apply_local_otlp_config(
                 app,
