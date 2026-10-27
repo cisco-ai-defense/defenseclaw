@@ -123,7 +123,7 @@ func TestHookAnswerBodyKeepsTheAnswerOnEveryConnectorEvent(t *testing.T) {
 					t.Fatal(err)
 				}
 				before := panicsCounted()
-				if got := server.hookAnswerBody(t.Context(), profile, name, req, healthy); !bytes.Equal(got, encoded.Bytes()) {
+				if got := server.hookAnswerBody(t.Context(), profile, name, req, healthy, ""); !bytes.Equal(got, encoded.Bytes()) {
 					t.Errorf("%s/%s %s: body %q, want the writeJSON body %q", name, event, answer.Reason, got, encoded.Bytes())
 				}
 				if counted := panicsCounted() - before; counted != 0 {
@@ -136,7 +136,7 @@ func TestHookAnswerBodyKeepsTheAnswerOnEveryConnectorEvent(t *testing.T) {
 					resp.HookOutput = map[string]interface{}{"value": value}
 					var got map[string]interface{}
 					before := panicsCounted()
-					body := server.hookAnswerBody(t.Context(), profile, name, req, resp)
+					body := server.hookAnswerBody(t.Context(), profile, name, req, resp, "")
 					wantPanics := 0
 					if _, panics := value.(panickingJSONValue); panics {
 						wantPanics = 1
