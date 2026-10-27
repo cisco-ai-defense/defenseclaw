@@ -22318,7 +22318,10 @@ function Compare-DefenseClawRecoveryGatewayRelease {
     <#
         Orders two parsed releases like compareWindowsEnterpriseVersions:
         numerically with missing parts read as 0, then a prerelease before its
-        release, then prereleases by ordinal text. Returns -1, 0 or 1.
+        release, then prereleases by their dot-separated identifiers like
+        compareWindowsEnterprisePrerelease (semver: numeric identifiers as
+        numbers and below alphanumeric ones, others by ordinal text, a shorter
+        list first), so rc.10 follows rc.9 (GAP-1987). Returns -1, 0 or 1.
     #>
     param(
         [Parameter(Mandatory)]$Left,
@@ -22354,7 +22357,37 @@ function Compare-DefenseClawRecoveryGatewayRelease {
     if ($rightPrerelease -ceq '') {
         return -1
     }
-    return [Math]::Sign([string]::CompareOrdinal($leftPrerelease, $rightPrerelease))
+    $leftParts = $leftPrerelease.Split([char]'.')
+    $rightParts = $rightPrerelease.Split([char]'.')
+    $shared = [Math]::Min($leftParts.Count, $rightParts.Count)
+    for ($index = 0; $index -lt $shared; $index++) {
+        $leftNumber = [uint64]0
+        $rightNumber = [uint64]0
+        $leftNumeric = [uint64]::TryParse($leftParts[$index], [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$leftNumber)
+        $rightNumeric = [uint64]::TryParse($rightParts[$index], [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$rightNumber)
+        if ($leftNumeric -and $rightNumeric) {
+            if ($leftNumber -ne $rightNumber) {
+                if ($leftNumber -lt $rightNumber) {
+                    return -1
+                }
+                return 1
+            }
+            continue
+        }
+        if ($leftNumeric) {
+            return -1
+        }
+        if ($rightNumeric) {
+            return 1
+        }
+        $order = [Math]::Sign([string]::CompareOrdinal($leftParts[$index], $rightParts[$index]))
+        if ($order -ne 0) {
+            return $order
+        }
+    }
+    return [Math]::Sign($leftParts.Count - $rightParts.Count)
 }
 
 function Test-DefenseClawRecoveryActivationDeferral {
