@@ -2298,8 +2298,23 @@ func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) boo
 // actionWindowsWordNamesTarget reports a protected-named word; sshDirectory
 // also counts the bare .ssh directory.
 func actionWindowsWordNamesTarget(word, cwd, home string, stateOnly, sshDirectory bool) bool {
-	check := func(candidate string) bool {
+	var check func(candidate string) bool
+	check = func(candidate string) bool {
 		candidate = strings.ReplaceAll(candidate, "`", "")
+		if strings.ContainsAny(candidate, "\r\n") {
+			// A word of several lines (a here-string body, such as the
+			// script of bash -lc @'...'@) is no single path: Windows names
+			// hold no line break. Each line is read as a candidate. As one
+			// glob pattern, the whole body named a directory that does not
+			// exist, which counts as a possibly protected expansion, so any
+			// body with a / and a * was a protected target (GAP-0781).
+			for _, line := range strings.FieldsFunc(candidate, func(r rune) bool { return r == '\r' || r == '\n' }) {
+				if line = strings.TrimSpace(line); line != "" && check(line) {
+					return true
+				}
+			}
+			return false
+		}
 		if strings.ContainsAny(candidate, "*?[]") {
 			return !stateOnly && (actionWindowsProtectedGlobReach(candidate, cwd, home) ||
 				actionWindowsDynamicKeyPath(candidate))
