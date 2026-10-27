@@ -22,6 +22,13 @@ func TestActionInterpreterBuiltKeyPathIsProtected(t *testing.T) {
 		`h="` + home + `"; open(h + "/.ssh/authorized_keys","a").write("x")`,
 		`import os; h="` + home + `"; open(os.path.join(h, ".ssh", "authorized_keys"),"a").write("x")`,
 		`from pathlib import Path; (Path("` + home + `") / ".ssh" / "authorized_keys2").write_text("x")`,
+		// GAP-2005: every way of joining the two names, and a home call
+		// elsewhere in the code, keep the protected target.
+		`from pathlib import Path; Path.home(); h="` + home + `"; open(f"{h}/.ssh/authorized_keys","a").write("x")`,
+		`import os; os.path.expanduser("~/log"); h="` + home + `"; open(h + "/.ssh/authorized_keys","a").write("x")`,
+		`import os; h="` + home + `"; d=os.path.join(h, ".ssh"); open(os.path.join(d, "authorized_keys"),"a").write("x")`,
+		`h="` + home + `"; open("{}/.ssh/{}".format(h, "authorized_keys"),"a").write("x")`,
+		`h="` + home + `"; open("%s/.ssh/%s" % (h, "authorized_keys"),"a").write("x")`,
 	} {
 		for _, command := range []string{"python3 -c '" + code + "'", "python3 -c '" + code + "' one two"} {
 			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
@@ -32,6 +39,8 @@ func TestActionInterpreterBuiltKeyPathIsProtected(t *testing.T) {
 	for _, command := range []string{
 		`perl -e 'my $h = $ENV{HOME}; open(my $f, ">>", "$h/.ssh/authorized_keys")'`,
 		`node -e 'require("fs").appendFileSync(require("path").join(process.env.HOME, ".ssh", "authorized_keys"), "x")'`,
+		`perl -e 'my $h="` + home + `"; open(my $f, ">>", $h . "/.ssh/" . "authorized_keys"); print $f "x"'`,
+		`ruby -e 'h="` + home + `"; File.open(File.join(h, ".ssh", "authorized_keys"), "a") { |f| f.write("x") }'`,
 	} {
 		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
 			t.Errorf("ActionCommandDecision(%q) = %q, want protected-target", command, got)
@@ -40,6 +49,9 @@ func TestActionInterpreterBuiltKeyPathIsProtected(t *testing.T) {
 	for _, command := range []string{
 		`python3 -c 'open("notes.txt","a").write("x")'`,
 		`python3 -c 'import os; print(os.path.join("a", ".ssh_backup", "keys"))'`,
+		// The binding rules still prove a home-call read beside a write to
+		// an ordinary file.
+		`python3 -c 'from pathlib import Path; print((Path.home() / ".ssh" / "authorized_keys").read_text()); Path("notes.txt").write_text("x")'`,
 	} {
 		if got := ActionCommandDecision(command, cwd, home); got != "" {
 			t.Errorf("ActionCommandDecision(%q) = %q, want allow", command, got)

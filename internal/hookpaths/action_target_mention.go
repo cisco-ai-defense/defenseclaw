@@ -71,7 +71,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		if nestedFound {
 			return true
 		}
-		if !stateOnly && actionInterpreterBuildsKeyPath(file, home) {
+		if !stateOnly && actionInterpreterBuildsKeyPath(file, cwd, home) {
 			return true
 		}
 	}
@@ -211,17 +211,22 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	return false
 }
 
-// actionInterpreterKeyPath matches inline interpreter code that builds a
-// path to an authorized-keys file from parts: an f-string or concatenation
-// ({h}/.ssh/authorized_keys, h + "/.ssh/authorized_keys"), os.path.join(h,
-// ".ssh", "authorized_keys") or Path(h) / ".ssh" / "authorized_keys". The
-// .ssh and authorized_keys names are both in the code, a protected-named
-// word whatever builds the prefix (GAP-1732, the GAP-0475 class).
-var actionInterpreterKeyPath = regexp.MustCompile(`\.ssh(?:['"\s,/+)\\]|os\.sep|File::Spec|path\.sep){1,12}authorized_keys2?\b`)
+// actionInterpreterSSHName and actionInterpreterKeysName match the two
+// protected names of an authorized-keys path in inline interpreter code.
+// Code that names both and has an executable writer is a protected target
+// in action mode however it joins them: an f-string, +, os.path.join,
+// pathlib, str.format, % formatting, Perl's . operator or a .ssh directory
+// variable joined later (GAP-1732, GAP-2005, the GAP-0475 class).
+var (
+	actionInterpreterSSHName  = regexp.MustCompile(`\.ssh\b`)
+	actionInterpreterKeysName = regexp.MustCompile(`\bauthorized_keys2?\b`)
+)
 
-// actionInterpreterHomeCall matches the home spellings the interpreter-path
-// proof already judges with its binding rules (Path.home(), expanduser:
-// GAP-0475, a path bound again before the write, GAP-1299).
+// actionInterpreterHomeCall matches the home spellings that the
+// interpreter-path proof judges with its binding rules (Path.home(),
+// expanduser: GAP-0475, a path bound again before the write, GAP-1299).
+// Such code is allowed only when that proof places every write on an
+// ordinary path; a home call elsewhere in the code proves nothing (GAP-2005).
 var actionInterpreterHomeCall = regexp.MustCompile(`Path\.home\(\)|expanduser\(`)
 
 // actionInterpreterCodeWrites reports a writer call (open, write_text,
@@ -241,8 +246,8 @@ func actionInterpreterCodeWrites(code, language string) bool {
 }
 
 // actionInterpreterBuildsKeyPath reports a python -c, perl/ruby/node -e call
-// whose code builds a path to an authorized-keys file and has a write.
-func actionInterpreterBuildsKeyPath(file *syntax.File, home string) bool {
+// whose code names an authorized-keys path and has a write.
+func actionInterpreterBuildsKeyPath(file *syntax.File, cwd, home string) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
@@ -255,13 +260,23 @@ func actionInterpreterBuildsKeyPath(file *syntax.File, home string) bool {
 		}
 		language := programBase(program)
 		if code, _, ok := interpreterCodeOperand(call, language, home); ok &&
-			actionInterpreterKeyPath.MatchString(code) && actionInterpreterCodeWrites(code, language) &&
-			!actionInterpreterHomeCall.MatchString(code) {
+			actionInterpreterSSHName.MatchString(code) && actionInterpreterKeysName.MatchString(code) &&
+			actionInterpreterCodeWrites(code, language) && !actionInterpreterHomeWriteProved(code, language, cwd, home) {
 			found = true
 		}
 		return !found
 	})
 	return found
+}
+
+// actionInterpreterHomeWriteProved reports home-call code whose every write
+// the interpreter-path binding rules place on an ordinary path.
+func actionInterpreterHomeWriteProved(code, language, cwd, home string) bool {
+	if !actionInterpreterHomeCall.MatchString(code) {
+		return false
+	}
+	class, _ := unprovenInterpreterCode(code, language, cwd, home, true)
+	return class == ""
 }
 
 // actionUncalledFunctions lists the function definitions whose name the
