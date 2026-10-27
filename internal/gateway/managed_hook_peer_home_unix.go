@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"math/bits"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -27,7 +28,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -160,6 +163,20 @@ type managedHookPeerHomeCache struct {
 	// record reads for managedHookPeerAccountRecheck.
 	homeProofs map[int]string
 	proofReads map[int]managedHookPeerProofRead
+	// firstSeen keeps, per uid, when this gateway first asked for the token
+	// of its holder (holderToken, Unix nanoseconds), persisted with the
+	// homes: a home created after it is another account's (GAP-0422).
+	firstSeen map[int]int64
+	// preToken marks, per uid, an entry a build before 1.0.4 saw hold an
+	// account for which no 1.0.4 gateway adopted an account token: the file
+	// had no format entry (1.0.3 and older wrote it), or 1.0.4 kept it as a
+	// legacy holder with no base token (it never served the uid). It is
+	// persisted (pre_token_holder) and kept after this gateway adopts a
+	// token, so the guardian can tell that no 1.0.4 gateway served that
+	// uid (GAP-1865, GAP-1976). A uid this gateway sees first gets none,
+	// so an account created after the takeover never counts as a 1.0.3
+	// holder (GAP-1977).
+	preToken map[int]bool
 	// homesFile persists homes and names in the gateway's data directory,
 	// so a gateway that starts while the directory is away still has the
 	// last home and name of each uid and keeps its agent identity
@@ -258,6 +275,13 @@ type managedHookPeerLast struct {
 	// HomeProof is the first proof of the uid's holder's home this gateway
 	// read (managedHookPeerHomeCache.homeProofs). Other builds ignore it.
 	HomeProof string `json:"home_proof,omitempty"`
+	// FirstSeen is when this gateway first asked for the uid's holder token
+	// (managedHookPeerHomeCache.firstSeen), Unix nanoseconds. Other builds
+	// ignore it.
+	FirstSeen int64 `json:"first_seen,omitempty"`
+	// PreTokenHolder is managedHookPeerHomeCache.preToken; other builds
+	// ignore it.
+	PreTokenHolder bool `json:"pre_token_holder,omitempty"`
 	// Format is set on the managedHookPeerHomesFormatKey entry only.
 	Format int `json:"format,omitempty"`
 }
@@ -278,6 +302,15 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 		return
 	}
 	legacyFile := stored[managedHookPeerHomesFormatKey].Format < 1
+	// A uid an earlier build served and persisted keeps no first_seen (1.0.4
+	// writes none): that gateway saw it by the time it last wrote the file,
+	// so a home created after then is another account's (the upgrade
+	// variant of GAP-0422, GAP-1867).
+	var savedAt int64
+	if info, statErr := os.Stat(c.homesFile); statErr == nil {
+		savedAt = info.ModTime().UnixNano()
+	}
+	var fromFile []int
 	for key, last := range stored {
 		uid, err := strconv.Atoi(key)
 		if err != nil || uid < 0 {
@@ -289,6 +322,13 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 				c.legacy = make(map[int]bool)
 			}
 			c.legacy[uid] = true
+		}
+		if ((legacyFile || last.LegacyHolder) && !validAccountToken(last.BaseIncarnation) || last.PreTokenHolder) &&
+			len(c.preToken) < managedHookPeerHomesMax {
+			if c.preToken == nil {
+				c.preToken = make(map[int]bool)
+			}
+			c.preToken[uid] = true
 		}
 		if _, known := c.homes[uid]; !known && last.Home != "" &&
 			normalizeManagedHookPeerHome(last.Home) == last.Home && len(c.homes) < managedHookPeerHomesMax {
@@ -318,7 +358,78 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 			}
 			c.homeProofs[uid] = last.HomeProof
 		}
+		firstSeen := last.FirstSeen
+		if firstSeen <= 0 && (last.Name != "" || last.Home != "" || last.BaseIncarnation != "") {
+			firstSeen = savedAt
+		}
+		if _, known := c.firstSeen[uid]; !known && firstSeen > 0 && len(c.firstSeen) < managedHookPeerHomesMax {
+			if c.firstSeen == nil {
+				c.firstSeen = make(map[int]int64)
+			}
+			c.firstSeen[uid] = firstSeen
+			if last.FirstSeen <= 0 {
+				fromFile = append(fromFile, uid)
+			}
+		}
 	}
+	// The file's mtime is the last time the earlier build wrote it for any
+	// uid, which can come after an account was deleted and created again
+	// (another account's first hook): the uid's last hook the agent ledger
+	// recorded before this gateway took over bounds it too, since an
+	// account created after that hook did not make it (GAP-1947). A uid
+	// with no row there ran no hook in the ledger's row window, so the
+	// window's start bounds it (GAP-2069); the window is the configured
+	// retention the prune uses (GAP-2106).
+	if len(fromFile) > 0 {
+		if hooks := managedHookPeerLastHooks(); hooks != nil {
+			now := time.Now()
+			if c.now != nil {
+				now = c.now()
+			}
+			window := inventory.AgentLedgerRowWindow(managedHookPeerLedgerRetentionDays(), now)
+			for _, uid := range fromFile {
+				if at := inventory.AgentLedgerSightingBound(hooks, uid, now, window); at > 0 && at < c.firstSeen[uid] {
+					c.firstSeen[uid] = at
+				}
+			}
+			// The guardian reads these sightings from the file (first_seen).
+			// Written now, they are bounded before this gateway's own hooks
+			// reach the ledger, which can then name a later hook of the
+			// uid's new holder (GAP-2024). While the ledger cannot be read
+			// the guardian bounds them itself.
+			c.saveHomesLocked()
+		}
+	}
+}
+
+// managedHookPeerLastHooks is, per uid, the newest last_seen of the agent
+// ledger's rows (Unix nanoseconds, inventory.AgentLastHooksByUID, which the
+// guardian reads too); nil while the ledger cannot be read, empty when it
+// has no row. Tests replace it.
+var managedHookPeerLastHooks = func() map[int]int64 {
+	records, ok := profileAgentLedger(inventory.AgentIdentityFilter{Retired: true})
+	if !ok {
+		return nil
+	}
+	return inventory.AgentLastHooksByUID(records)
+}
+
+// managedHookPeerLedgerRetentionDays is the effective
+// observability.local.retention_days, the window the agent ledger's prune
+// keeps a uid's rows for (GAP-2106). Tests replace it.
+var managedHookPeerLedgerRetentionDays = func() int { return sharedAgentIdentities.ledgerRetentionDays() }
+
+// ledgerRetentionDays (unix: only the managed peer homes read it) is the window the ledger's prune keeps rows for (the
+// retentionDays setStoreSource wired), or the default local retention
+// before one is wired.
+func (r *agentIdentityRecorder) ledgerRetentionDays() int {
+	r.storeMu.Lock()
+	days := r.retentionDays
+	r.storeMu.Unlock()
+	if days == nil {
+		return config.ObservabilityV8DefaultRetentionDays
+	}
+	return days()
 }
 
 // saveHomesLocked writes homes and names to the store. c.mu is held; it
@@ -350,6 +461,17 @@ func (c *managedHookPeerHomeCache) saveHomesLocked() {
 		last := stored[strconv.Itoa(uid)]
 		last.HomeProof = proof
 		stored[strconv.Itoa(uid)] = last
+	}
+	for uid, at := range c.firstSeen {
+		last := stored[strconv.Itoa(uid)]
+		last.FirstSeen = at
+		stored[strconv.Itoa(uid)] = last
+	}
+	for uid := range c.preToken {
+		if last, ok := stored[strconv.Itoa(uid)]; ok {
+			last.PreTokenHolder = true
+			stored[strconv.Itoa(uid)] = last
+		}
 	}
 	stored[managedHookPeerHomesFormatKey] = managedHookPeerLast{Format: 1}
 	data, err := json.Marshal(stored)
@@ -1160,6 +1282,14 @@ func (c *managedHookPeerHomeCache) holderToken(uid int, name, incarnation string
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.loadHomesLocked()
+	firstSeen, sighted := c.firstSeen[uid]
+	if !sighted && len(c.firstSeen) < managedHookPeerHomesMax {
+		if c.firstSeen == nil {
+			c.firstSeen = make(map[int]int64)
+		}
+		c.firstSeen[uid] = c.now().UnixNano()
+		defer c.saveHomesLocked()
+	}
 	first, seen := c.homeProofs[uid]
 	switch {
 	case proof == "":
@@ -1168,16 +1298,38 @@ func (c *managedHookPeerHomeCache) holderToken(uid int, name, incarnation string
 		}
 		return incarnation
 	case !seen:
+		// The first proof read for the uid names its holder's home, unless
+		// that home was created after this gateway first saw the uid: an
+		// account the gateway saw before, whose home was never proven (no
+		// identity record yet), held the uid then (GAP-0422, FC-BLK-167-ER).
+		// That earlier holder keeps the plain token.
+		earlier := sighted && homeProofCreatedAfter(proof, firstSeen)
 		if len(c.homeProofs) < managedHookPeerHomesMax {
 			if c.homeProofs == nil {
 				c.homeProofs = make(map[int]string)
 			}
 			c.homeProofs[uid] = proof
+			if earlier {
+				c.homeProofs[uid] = unprovenEarlierHomeProof
+			}
 			c.saveHomesLocked()
+		}
+		if earlier {
+			// Another account than the one the older build saw holds the
+			// uid: it is no 1.0.3 holder (GAP-1977).
+			if c.preToken[uid] {
+				delete(c.preToken, uid)
+				c.saveHomesLocked()
+			}
+			return incarnation + "|" + proof
 		}
 		return incarnation
 	case sameHomeProof(proof, first):
 		return incarnation
+	}
+	if c.preToken[uid] {
+		delete(c.preToken, uid)
+		c.saveHomesLocked()
 	}
 	return incarnation + "|" + proof
 }
@@ -1236,14 +1388,20 @@ func (c *managedHookPeerHomeCache) adminHolderToken(uid int, proof string) (stri
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.loadHomesLocked()
-	if first, seen := c.homeProofs[uid]; seen {
+	first, seen := c.homeProofs[uid]
+	if seen {
 		reference = first
 	}
-	if reference == "" {
+	firstSeen, sighted := c.firstSeen[uid]
+	// A home created after this gateway first saw the uid is another
+	// account's than the one the hooks saw then, also before any proof of
+	// that account's home was read (GAP-0422, FC-BLK-167-ER).
+	newer := !seen && sighted && homeProofCreatedAfter(proof, firstSeen)
+	if reference == "" && !newer {
 		return "", false
 	}
 	token := incarnation
-	if !sameHomeProof(proof, reference) {
+	if newer || !sameHomeProof(proof, reference) {
 		token = incarnation + "|" + proof
 	}
 	if !validAccountToken(token) {
@@ -1255,7 +1413,8 @@ func (c *managedHookPeerHomeCache) adminHolderToken(uid int, proof string) (stri
 // managedHookPeerHomeProof is the root guardian's proof of the home
 // directory of the account named name, of account incarnation incarnation,
 // that holds uid: the LegacyOwnerToken of the uid's trusted identity record
-// when the record is current and names that account
+// when the record is current, newer than the last change of the local
+// account database (guardianHomeProofCurrent) and names that account
 // (normalizeHomeProof); "" otherwise. Tests replace it.
 var managedHookPeerHomeProof = func(uid int, name, incarnation string) string {
 	dir := currentIdentitySpoolDir()
@@ -1270,7 +1429,7 @@ var managedHookPeerHomeProof = func(uid int, name, incarnation string) string {
 	if record.UpdatedAt.After(now.Add(time.Minute)) || now.Sub(record.UpdatedAt) > enterprisehooks.IdentitySpoolMaxAge {
 		return ""
 	}
-	if record.AccountIncarnation != "" && record.AccountIncarnation != incarnation {
+	if record.AccountIncarnation != "" && record.AccountIncarnation != incarnation || !guardianHomeProofCurrent(record) {
 		return ""
 	}
 	return normalizeHomeProof(record.LegacyOwnerToken)
@@ -1320,6 +1479,29 @@ func homeProofParts(proof string) (inode, birth string, ok bool) {
 		return "", "", false
 	}
 	return inode, birth, true
+}
+
+// unprovenEarlierHomeProof is the first home proof of a uid whose first
+// holder this gateway saw was never proven: no home has inode 0, so every
+// proof read later names another account (holderToken).
+const unprovenEarlierHomeProof = "home:0"
+
+// homeProofCreatedSlack absorbs the clock steps between the file system's
+// creation time and the gateway's clock.
+const homeProofCreatedSlack = 2 * time.Second
+
+// homeProofCreatedAfter reports whether proof's home was created after at
+// (Unix nanoseconds) by more than homeProofCreatedSlack: a home created
+// after this gateway first saw the uid belongs to an account created after
+// it, since an agent runs in a home that exists. false when the file system
+// keeps no creation time.
+func homeProofCreatedAfter(proof string, at int64) bool {
+	_, birth, ok := homeProofParts(proof)
+	if !ok || birth == "" || at <= 0 {
+		return false
+	}
+	created, err := strconv.ParseInt(birth, 10, 64)
+	return err == nil && created > at+int64(homeProofCreatedSlack)
 }
 
 // sameHomeProof reports whether two proofs name one home directory: the
@@ -1397,8 +1579,16 @@ func (c *managedHookPeerHomeCache) agentIncarnation(uid int) string {
 // a mapped one, and an account that replaced the former holder kept its
 // agent IDs and match.agents profile (review of GAP-0947, loop 4). Any
 // other SID (an RFC 2307 uid, winbind, custom id-mapping ranges) or a
-// listed record (macOS) does not.
+// listed record (macOS) does not. Nor does a token that carries a home
+// proof (incarnation|proof, holderToken): the home is not the one the uid's
+// holder had when it was first seen, or was created after that sighting, so
+// another account holds the uid. Taking it for the older build's account
+// made it the base, no holder change was known, and root's view of a
+// recreated 1.0.3 account listed the earlier holder's rows (GAP-2086).
 func legacyContinuity(uid int, token string) bool {
+	if strings.Contains(token, "|") {
+		return false
+	}
 	sid, isSID := strings.CutPrefix(token, "sid:")
 	if !isSID {
 		return !strings.HasPrefix(token, "record:")

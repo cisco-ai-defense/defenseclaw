@@ -42,11 +42,15 @@ import (
 // upgrade, while the 1.0.x identities are still the ones in use, the root
 // guardian records the account that holds each uid it enrolls: its name as
 // the host gives it, and a token of the incarnation (LegacyAgentOwnerToken).
-// The file is written once, never changed, owned by the guardian
-// authorization and read by the gateway only after that trust check. A
-// legacy entry then keeps applying to the account the map records, and to
-// no other; a request of an account the map does not record is refused,
-// naming the unproven agent ownership (the gateway's selectProfile).
+// The file is written once, owned by the guardian authorization and read by
+// the gateway only after that trust check. A legacy entry then keeps
+// applying to the account the map records, and to no other; a request of an
+// account the map does not record is refused, naming the unproven agent
+// ownership (the gateway's selectProfile). It changes only after a rollback
+// to a release without the map: the accounts that release served, which
+// the map does not record yet, are added at the first pass after the
+// upgrade back, as the first upgrade recorded its accounts
+// (AddLegacyAgentOwners, GAP-0709). Entries already recorded never change.
 // Windows needs no map: 1.0.x keyed its identities on the SID, which is
 // what they are keyed on now. Remove with agentidentity.LegacyAgentID.
 //
@@ -259,6 +263,16 @@ type homeProof struct {
 	hasBirth bool
 }
 
+// HomeBirth is the creation time of the directory home, Unix nanoseconds,
+// as LegacyAgentOwnerToken names it; false where the file system keeps none.
+func HomeBirth(home string) (int64, bool) {
+	proof, ok := homeIdentity(home)
+	if !ok || !proof.hasBirth {
+		return 0, false
+	}
+	return proof.birth, true
+}
+
 // LegacyAgentOwnersRecorded reports whether dir holds the migration map.
 func LegacyAgentOwnersRecorded(dir string) bool {
 	if dir == "" {
@@ -340,6 +354,84 @@ func WriteLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, now tim
 	legacyAgentOwnersClosed.forget(dir)
 	if !docs[0].Open {
 		legacyAgentOwnersClosed.set(dir)
+	}
+	return true, nil
+}
+
+// AddLegacyAgentOwners adds to dir's migration map the owners (by uid) of
+// uids it records neither as owners nor as pending, and reports whether it
+// added any. Recorded and pending uids keep their entries, and each file
+// keeps when it was written (the pending rule reads it). The guardian
+// calls it only for a recorded map: at the passes after an upgrade from a
+// release that kept no map (a rollback window: a 1.0.3 guardian rewrote
+// every identity record without the account incarnation, so a 1.0.3 agent
+// identity of an account added then was derived for the account that holds
+// its uid now, as at the first upgrade, GAP-0709) and for the 1.0.3 holders
+// a 1.0.4 map left out (GAP-2085). New owners go to the last file of the
+// map, and to a new shard past maxLegacyAgentOwners. A map with a shard
+// that cannot be read is not rewritten. Shards are written before the main
+// file, which is always rewritten: it counts the shards, and its change
+// tells a running gateway to read the map again.
+func AddLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, setOwnership func(string) error) (bool, error) {
+	if dir == "" {
+		return false, nil
+	}
+	main, ok, err := readLegacyAgentOwnersFile(filepath.Join(dir, LegacyAgentOwnersFile), nil)
+	if err != nil || !ok {
+		return false, err
+	}
+	files := []legacyAgentOwnersFileDoc{main}
+	for i := 1; i <= main.shards; i++ {
+		shard, ok, err := readLegacyAgentOwnersFile(filepath.Join(dir, legacyAgentOwnersShardFile(i)), nil)
+		if err != nil || !ok {
+			return false, err
+		}
+		files = append(files, shard)
+	}
+	known := map[int]bool{}
+	for _, file := range files {
+		for uid := range file.owners {
+			known[uid] = true
+		}
+		for uid := range file.pending {
+			known[uid] = true
+		}
+	}
+	var uids []int
+	for uid, owner := range owners {
+		if uid >= 0 && !known[uid] && validLegacyAgentOwner(owner) {
+			uids = append(uids, uid)
+		}
+	}
+	if len(uids) == 0 {
+		return false, nil
+	}
+	slices.Sort(uids)
+	changed := make([]bool, len(files))
+	for _, uid := range uids {
+		last := len(files) - 1
+		if len(files[last].owners)+len(files[last].pending) >= maxLegacyAgentOwners {
+			if last >= maxLegacyAgentOwnerShards {
+				return false, fmt.Errorf("%d more accounts are more than the agent identity migration map holds", len(uids))
+			}
+			files = append(files, legacyAgentOwnersFileDoc{writtenAt: main.writtenAt, owners: map[int]LegacyAgentOwner{}, pending: map[int]string{}})
+			changed = append(changed, false)
+			last++
+		}
+		files[last].owners[uid] = owners[uid]
+		changed[last] = true
+	}
+	files[0].shards = len(files) - 1
+	for i := len(files) - 1; i >= 1; i-- {
+		if !changed[i] {
+			continue
+		}
+		if err := writeLegacyAgentOwnersDoc(dir, i, files[i].doc(), setOwnership); err != nil {
+			return false, err
+		}
+	}
+	if err := writeLegacyAgentOwnersDoc(dir, 0, files[0].doc(), setOwnership); err != nil {
+		return false, err
 	}
 	return true, nil
 }

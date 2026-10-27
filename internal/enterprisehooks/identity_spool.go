@@ -108,6 +108,13 @@ type IdentitySpoolRecord struct {
 	// private home under ProtectHome=yes. It lives in the extension so an
 	// older gateway can still read the first record object on rollback.
 	LegacyOwnerToken string `json:"-"`
+	// AccountsStamp is the LocalAccountsStamp the guardian read before the
+	// pass that wrote LegacyOwnerToken (Linux): the gateway takes the home
+	// proof for the uid's holder only while it is the current stamp, so a
+	// clock step or a change during the pass does not make it current or
+	// stale by wall-clock time (GAP-2025). In the extension; records 1.0.4
+	// wrote carry none.
+	AccountsStamp string `json:"-"`
 	// SSSDDomain is the SSSD domain that holds the uid by InfoPipe
 	// Users.FindByID (Linux): the gateway drops a domain, realm and
 	// principal of its own that name another domain (mergeSpoolFacts).
@@ -147,6 +154,7 @@ type IdentitySpoolRecord struct {
 type identitySpoolRecordExtension struct {
 	AccountSID       string `json:"account_sid,omitempty"`
 	LegacyOwnerToken string `json:"legacy_owner_token,omitempty"`
+	AccountsStamp    string `json:"accounts_stamp,omitempty"`
 }
 
 // identitySpoolClockSlack is how far in the future a record may be dated
@@ -297,6 +305,7 @@ func ParseIdentitySpoolRecord(data []byte, key string) (IdentitySpoolRecord, err
 		}
 		record.AccountSID = strings.TrimSpace(extension.AccountSID)
 		record.LegacyOwnerToken = strings.TrimSpace(extension.LegacyOwnerToken)
+		record.AccountsStamp = strings.TrimSpace(extension.AccountsStamp)
 	}
 	if record.Version != IdentitySpoolRecordVersion {
 		return record, fmt.Errorf("unsupported identity spool record version %d", record.Version)
@@ -598,7 +607,8 @@ func MarshalIdentitySpoolRecord(record IdentitySpoolRecord) ([]byte, error) {
 	if err != nil || record.AccountSID == "" && record.LegacyOwnerToken == "" {
 		return data, err
 	}
-	extension, err := json.Marshal(identitySpoolRecordExtension{AccountSID: record.AccountSID, LegacyOwnerToken: record.LegacyOwnerToken})
+	extension, err := json.Marshal(identitySpoolRecordExtension{AccountSID: record.AccountSID, LegacyOwnerToken: record.LegacyOwnerToken,
+		AccountsStamp: record.AccountsStamp})
 	if err != nil {
 		return nil, err
 	}

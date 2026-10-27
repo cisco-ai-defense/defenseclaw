@@ -15,6 +15,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,9 +84,10 @@ func legacyAgentOwnerSameAccount(recorded, account string) bool {
 // legacyAgentOwnerTokenNow is the LegacyAgentOwnerToken of the account that
 // holds uid now: its SID from the guardian's identity record of the uid when
 // that record names account, else from the gateway's own lookup; or its home
-// directory's, which the gateway reads itself only without such a record
-// (enterprisehooks.LegacyAgentOwnerTokenFor: the token the map recorded for a
-// symlinked home before the GAP-0939 fix, as the guardian gives it). Tests
+// directory's, from the record while it is newer than the last change of the
+// local account database (guardianHomeProofCurrent); the token the map
+// recorded for a symlinked home before the GAP-0939 fix is kept as the
+// guardian gives it (enterprisehooks.LegacyAgentOwnerTokenFor). Tests
 // replace it.
 var legacyAgentOwnerTokenNow = func(uid int, account string) string {
 	incarnation := ""
@@ -93,7 +95,7 @@ var legacyAgentOwnerTokenNow = func(uid int, account string) string {
 		if record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), validateManagedGuardianAuthorization); err == nil &&
 			legacyAgentOwnerSameAccount(record.User, account) && !record.UpdatedAt.IsZero() &&
 			!record.UpdatedAt.After(time.Now().Add(time.Minute)) && time.Since(record.UpdatedAt) <= enterprisehooks.IdentitySpoolMaxAge {
-			if record.LegacyOwnerToken != "" {
+			if record.LegacyOwnerToken != "" && (strings.HasPrefix(record.LegacyOwnerToken, "sid:") || guardianHomeProofCurrent(record)) {
 				return record.LegacyOwnerToken
 			}
 			if strings.HasPrefix(record.AccountIncarnation, "sid:") {
@@ -113,12 +115,54 @@ var legacyAgentOwnerTokenNow = func(uid int, account string) string {
 	})
 }
 
+// guardianHomeProofCurrent reports whether the home proof the root guardian
+// wrote into record can name the account that holds the record's uid now:
+// the local account database did not change since the guardian read it.
+// userdel and useradd rewrite /etc/passwd, so a record written before the
+// last change can name the home of an account deleted since, whose name and
+// uid a new account took over: the new account was bound to the earlier
+// holder's 1.0.3 agents entries and got its agent identity until the
+// guardian's next pass (GAP-0422, GAP-1876). The guardian writes the records
+// again at its next tick after such a change. A record with the stamp the
+// guardian read (enterprisehooks.LocalAccountsStamp) is current while that
+// stamp is; the wall clock does not decide, so a database dated in the
+// future (a useradd while the clock was ahead) does not keep every bound
+// account refused once the guardian rewrote the records (GAP-2025). A record
+// 1.0.4 wrote has no stamp: it is current when it is not older than the
+// database. A database the gateway cannot stat (macOS, where the listed
+// record tells a recreated account apart) tells nothing.
+func guardianHomeProofCurrent(record enterprisehooks.IdentitySpoolRecord) bool {
+	if record.AccountsStamp != "" {
+		now := localAccountsStamp()
+		return now == "" || now == record.AccountsStamp
+	}
+	changed := localAccountsChangedAt()
+	return changed.IsZero() || !record.UpdatedAt.Before(changed)
+}
+
+// localAccountsStamp is enterprisehooks.LocalAccountsStamp. Tests replace
+// it.
+var localAccountsStamp = func() string { return enterprisehooks.LocalAccountsStamp() }
+
+// localAccountsChangedAt is when /etc/passwd last changed on Linux, zero
+// when it cannot be read and on other systems. Tests replace it.
+var localAccountsChangedAt = func() time.Time {
+	if runtime.GOOS != "linux" {
+		return time.Time{}
+	}
+	info, err := os.Stat("/etc/passwd")
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
 // legacyAgentOwners is the migration map the gateway read. It is read until
-// it is found, at most every legacyAgentOwnersRetry. A map with an account
-// still pending (open) is read again when its main file changes, checked
-// at most every legacyAgentOwnersRetry, since the guardian adds a pending
-// account's owner once it proves it; a map with none pending never changes
-// and is kept.
+// it is found, at most every legacyAgentOwnersRetry, and read again when its
+// main file changes (checked as often): the guardian adds a pending
+// account's owner once it proves it, and the accounts a rollback window
+// served at its first pass after the upgrade back; a running gateway that
+// kept the first map refused them until a restart (GAP-0709).
 var legacyAgentOwners = &legacyAgentOwnerCache{}
 
 const legacyAgentOwnersRetry = 30 * time.Second
@@ -161,7 +205,7 @@ func (c *legacyAgentOwnerCache) get(uid int) (enterprisehooks.LegacyAgentOwner, 
 	if dir != c.dir {
 		c.dir, c.owners, c.writtenAt, c.loaded, c.open, c.stamp, c.nextTry = dir, nil, time.Time{}, false, false, "", time.Time{}
 	}
-	if (!c.loaded || c.open) && !time.Now().Before(c.nextTry) {
+	if !time.Now().Before(c.nextTry) {
 		c.nextTry = time.Now().Add(legacyAgentOwnersRetry)
 		if stamp := legacyAgentOwnersStamp(dir); !c.loaded || stamp != c.stamp {
 			// A map that cannot be read now (a shard being written, a

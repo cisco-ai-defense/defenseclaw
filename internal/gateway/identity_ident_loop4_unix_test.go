@@ -49,6 +49,7 @@ func TestLegacyContinuityNeedsTheUIDOfTheSIDsOwnSlice(t *testing.T) {
 		{"a local account", 1001, "files", true},
 		{"an SSSD account without a SID", 41501, "sss", true},
 		{"a macOS record", 501, "record:ABC", false},
+		{"a home newer than the older build's sighting (GAP-2086)", 1001, "files|home:3000:1793052449571507240", false},
 	} {
 		if got := legacyContinuity(tc.uid, tc.token); got != tc.want {
 			t.Errorf("%s: legacyContinuity(%d, %q) = %v, want %v", tc.name, tc.uid, tc.token, got, tc.want)

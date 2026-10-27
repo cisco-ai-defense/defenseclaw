@@ -14,6 +14,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -49,6 +50,49 @@ var enterpriseHookLoadIdentityAccounts = enterprisehooks.LoadUnixIdentityAccount
 // The guardian lists local accounts under its root identity, independently
 // of whether an agent's per-user files produced an enrollment row.
 var enterpriseHookLocalAccounts = unixidentity.LocalAccounts
+
+// enterpriseHookAccountDatabasePoll is how often the watch loop reads the
+// local account database's stamp (enterpriseHookLocalAccountsStamp).
+var enterpriseHookAccountDatabasePoll = 2 * time.Second
+
+// enterpriseHookAccountDatabaseChanges receives after the local account
+// database changes (useradd, userdel, usermod): the watch loop then
+// reconciles, so the guardian spools a new account's identity record before
+// its first hook. At the one-minute tick a fresh local account's first
+// Codex turn came first and was refused "group membership is unconfirmed"
+// although profile-explain placed it on its group's profile (GAP-2108). nil
+// outside the standalone enterprise guardian and where no stamp is kept
+// (macOS).
+func enterpriseHookAccountDatabaseChanges(ctx context.Context) <-chan struct{} {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	stamp, poll := enterpriseHookLocalAccountsStamp, enterpriseHookAccountDatabasePoll
+	last := stamp()
+	if last == "" || poll <= 0 {
+		return nil
+	}
+	changes := make(chan struct{}, 1)
+	go func() {
+		ticker := time.NewTicker(poll)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if now := stamp(); now != "" && now != last {
+				last = now
+				select {
+				case changes <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+	return changes
+}
 
 var enterpriseHookIdentitySpoolState struct {
 	sync.Mutex
@@ -283,8 +327,19 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 	// so a UPN assignment does not disappear at the record's one-hour limit
 	// while the gateway continues to inspect that caller (T7-07).
 	if accepted.everyone || accepted.unknown {
+		// The local accounts the gateway served get a record too, keyed on
+		// their home inode, so the gateway can tell an account deleted and
+		// created again under the same name and uid from the one before it
+		// at the next tick (enterpriseHookGatewayPeerAccounts, GAP-0422).
+		for _, peer := range enterpriseHookGatewayPeerAccounts(enterpriseHookIdentityDataDir()) {
+			if !seen[peer.UID] && !left[peer.UID] {
+				list(peer.UID, peer.User, peer.HomeInode)
+				accounts[len(accounts)-1].Peer = !peer.PreToken
+				accounts[len(accounts)-1].PreTokenHolder = peer.PreToken
+			}
+		}
 		for _, uid := range enterpriseHookRecordedCallerUIDs(dir) {
-			if !seen[uid] {
+			if !seen[uid] && !enterpriseHookLocalRecordLeft(dir, uid) {
 				list(uid, canonicalUser(uid), 0)
 			}
 		}
@@ -306,13 +361,21 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 				uidMax = cfg.Enterprise.Enrollment.UIDMax
 			}
 			for user, uid := range local {
-				if uid < uidMin || uid > uidMax || seen[uid] {
+				if uid < uidMin || uid > uidMax || seen[uid] || left[uid] {
 					continue
 				}
 				if canonical := canonicalUser(uid); canonical != "" {
 					user = canonical
 				}
 				list(uid, user, 0)
+				// Listed only so the gateway can confirm its facts: no
+				// gateway served it (a served account is a peer above), so
+				// it held no pre-upgrade agent identity, and an account
+				// created again under an earlier holder's uid and name must
+				// not write the first migration map as that holder (GAP-2069
+				// class; GAP-2106 live check). An enrollment's left-out
+				// account stays withdrawn (GAP-0755).
+				accounts[len(accounts)-1].Peer = true
 			}
 		}
 	}
@@ -560,6 +623,49 @@ func (a enterpriseHookAcceptedAccounts) listedUIDs() []int {
 // enterpriseHookRecordedCallerUIDs lists every existing uid record when the
 // authorization accepts callers without listing their uids. It reads names
 // only; WriteIdentitySpool resolves the uid again before publishing facts.
+// enterpriseHookPeerAccount is one account enterpriseHookGatewayPeerAccounts
+// lists.
+type enterpriseHookPeerAccount struct {
+	UID       int
+	User      string
+	HomeInode uint64
+	// PreToken reports that the homes file shows that a build before 1.0.4
+	// saw the account that holds the uid now and no 1.0.4 gateway served
+	// the uid since: a build before 1.0.4 wrote the file (no format entry),
+	// or the uid's entry is a legacy holder without a base token, or this
+	// release marks it so (pre_token_holder); and the account's home is
+	// not younger than the entry's last sighting. The account may then
+	// write the first migration map (IdentitySpoolAccount.Peer, GAP-1865,
+	// GAP-1976, GAP-1977).
+	PreToken bool
+}
+
+// enterpriseHookIdentityDataDir is the managed gateway's data directory of
+// the current settings, "" without settings.
+func enterpriseHookIdentityDataDir() string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.DataDir
+}
+
+// enterpriseHookLocalRecordLeft reports whether dir's record of uid is a
+// local account's and the account database answers that no account holds
+// the uid any more (unixidentity.ErrNotFound; a lookup error is no deletion
+// signal). Such a record is not refreshed as a recorded caller's: the pass
+// does not list it, so the cleanup removes it as any unlisted local record.
+// Refreshing it kept a deleted local account's record for good, and status
+// and verify warned identity_records_stale for it (GAP-1864). Tests replace
+// it.
+var enterpriseHookLocalRecordLeft = func(dir string, uid int) bool {
+	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), nil)
+	if err != nil || record.Facts.Directory != useridentity.DirectoryLocal {
+		return false
+	}
+	_, err = enterprisehooks.StandaloneResolver().LookupUID(uid)
+	return errors.Is(err, unixidentity.ErrNotFound)
+}
+
 func enterpriseHookRecordedCallerUIDs(dir string) []int {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -983,6 +1089,59 @@ func enterpriseHookIdentitySpoolDirForConfig() string {
 	return enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
 }
 
+// enterpriseHookIdentitySpoolFingerprint is what a pass of the identity
+// spool depends on: the sorted account keys and the local account database's
+// stamp. A change of the database (useradd, userdel) makes the next tick
+// rewrite the records, whose home proofs the gateway does not take for the
+// uid's holder while they carry an earlier stamp (GAP-0422, GAP-1876,
+// GAP-2026).
+func enterpriseHookIdentitySpoolFingerprint(keys []string) string {
+	return strings.Join(keys, ";") + "|" + enterpriseHookLocalAccountsStamp()
+}
+
+// enterpriseHookIdentitySpoolPassDue reports whether a pass of the identity
+// spool runs now for the account keys (sorted in place), and if so marks it
+// running; fingerprint is what the pass depends on
+// (enterpriseHookIdentitySpoolFingerprint). A pass runs when none is running
+// and the fingerprint changed (an account, its home, or the local account
+// database, GAP-2026), the interval passed, or the wall clock stepped.
+func enterpriseHookIdentitySpoolPassDue(dir string, keys []string, now time.Time) (fingerprint string, due bool) {
+	sort.Strings(keys)
+	fingerprint = enterpriseHookIdentitySpoolFingerprint(keys)
+	state := &enterpriseHookIdentitySpoolState
+	state.Lock()
+	defer state.Unlock()
+	interval := enterpriseHookIdentitySpoolInterval
+	if state.failed {
+		interval = enterpriseHookIdentitySpoolRetryInterval
+	}
+	// The interval runs on the monotonic clock, but the gateway trusts a
+	// record by its wall-clock age: after a clock step the records are
+	// rewritten at the next one-minute tick (GAP-0921).
+	_, _, stepped := enterprisehooks.IdentitySpoolStale(dir, now, enterpriseHookIdentitySpoolInterval+2*enterpriseHookIdentitySpoolRetryInterval)
+	due = !state.running && (fingerprint != state.fingerprint || now.Sub(state.last) >= interval || stepped)
+	if due {
+		state.running = true
+	}
+	return fingerprint, due
+}
+
+// enterpriseHookIdentitySpoolPassDone records the end of the pass
+// enterpriseHookIdentitySpoolPassDue started for fingerprint.
+func enterpriseHookIdentitySpoolPassDone(fingerprint string, passErr error) {
+	state := &enterpriseHookIdentitySpoolState
+	state.Lock()
+	defer state.Unlock()
+	state.running = false
+	state.last = time.Now()
+	state.fingerprint = fingerprint
+	state.failed = passErr != nil
+}
+
+// enterpriseHookWriteIdentitySpool is the identity spool pass; tests replace
+// it to count the passes a tick starts (GAP-2026).
+var enterpriseHookWriteIdentitySpool = enterprisehooks.WriteIdentitySpool
+
 func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return
@@ -998,44 +1157,20 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	enrolled := slices.DeleteFunc(slices.Clone(accounts), func(a enterprisehooks.IdentitySpoolAccount) bool { return a.Left })
 	startEnterpriseHookDirectoryReturnWatch(ctx, stderr, dir, enrolled)
 	startEnterpriseHookDirectoryReachWatch(ctx, stderr, dir, enrolled)
-	sort.Strings(keys)
-	fingerprint := strings.Join(keys, ";")
-	now := time.Now()
-	state := &enterpriseHookIdentitySpoolState
-	state.Lock()
-	interval := enterpriseHookIdentitySpoolInterval
-	if state.failed {
-		interval = enterpriseHookIdentitySpoolRetryInterval
-	}
-	// The interval runs on the monotonic clock, but the gateway trusts a
-	// record by its wall-clock age: after a clock step the records are
-	// rewritten at the next one-minute tick (GAP-0921).
-	_, _, stepped := enterprisehooks.IdentitySpoolStale(dir, now, enterpriseHookIdentitySpoolInterval+2*enterpriseHookIdentitySpoolRetryInterval)
-	due := !state.running && (fingerprint != state.fingerprint || now.Sub(state.last) >= interval || stepped)
-	if due {
-		state.running = true
-	}
-	state.Unlock()
+	fingerprint, due := enterpriseHookIdentitySpoolPassDue(dir, keys, time.Now())
 	if !due {
 		return
 	}
 	go func() {
 		var passErr error
-		defer func() {
-			state.Lock()
-			state.running = false
-			state.last = time.Now()
-			state.fingerprint = fingerprint
-			state.failed = passErr != nil
-			state.Unlock()
-		}()
+		defer func() { enterpriseHookIdentitySpoolPassDone(fingerprint, passErr) }()
 		if err := ensureEnterpriseHookStandaloneAuthDir(managed.HookGuardianAuthorizationDir(cfg.DataDir)); err != nil {
 			passErr = err
 			fmt.Fprintf(stderr, "[hook-guardian] identity spool: %v\n", err)
 			return
 		}
 		logf := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
-		passErr = enterprisehooks.WriteIdentitySpool(ctx, dir, accounts, enterpriseHookAuthorizationOwnershipSetter, logf, withdraw)
+		passErr = enterpriseHookWriteIdentitySpool(ctx, dir, accounts, enterpriseHookAuthorizationOwnershipSetter, logf, withdraw)
 		if passErr != nil {
 			fmt.Fprintf(stderr, "[hook-guardian] identity spool: %v\n", passErr)
 		}

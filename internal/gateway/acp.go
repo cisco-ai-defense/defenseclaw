@@ -225,6 +225,9 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		if mode != string(acp.ModeAction) && refused == "" {
 			verdict.Action, verdict.WouldBlock = "allow", true
 		}
+		// Identity uncertainty is refused in every mode, so an observe
+		// guard must not pass the frame on (GAP-2103).
+		verdict.Enforced = refused != ""
 		a.traceACPDecisionV8(ctx, agent.ConnectorID, req, &ToolInspectVerdict{
 			Action: verdict.Action, RawAction: verdict.RawAction, Severity: verdict.Severity,
 			Reason: verdict.Reason, Mode: mode, WouldBlock: verdict.WouldBlock,

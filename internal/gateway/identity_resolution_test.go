@@ -734,10 +734,11 @@ func TestMeetNamesNoMemberToTheAccount(t *testing.T) {
 }
 
 // GAP-0522, the rest of the class. A refusal names the facts the decision
-// needs and no other. The guardian's current record answers for the UPN, so
-// a managed Mac's local account, which has none, is not refused for a UPN
-// entry; a .\name entry never waits for a UPN. A Windows account without
-// current token groups is told why.
+// needs and no other. A managed Mac's local node account has no UPN, so it
+// is not refused for a UPN entry, with or without the guardian's record
+// (GAP-0532); an Open Directory answer without a directory still waits for
+// the record's UPN. A .\name entry never waits for a UPN. A Windows account
+// without current token groups is told why.
 func TestUncertainIdentityRefusalNamesOnlyWhatTheDecisionNeeds(t *testing.T) {
 	previous := currentIdentitySpoolDir()
 	setIdentitySpoolDir(t.TempDir())
@@ -751,9 +752,16 @@ func TestUncertainIdentityRefusalNamesOnlyWhatTheDecisionNeeds(t *testing.T) {
 	}
 	byUPN := config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{"alice@corp.example"}}}
 	set := identityTestSet(t, mac, "watch", byUPN)
-	awaiting := local(false)
+	unrecorded := local(false)
+	if got := set.match(&unrecorded, profileSubjectVerified, "codex", ""); got.Refused != "" || got.Name != "watch" {
+		t.Fatalf("local node account before the guardian's record: %+v; want watch, not refused", got)
+	}
+	awaiting := profileSubjectFromVerified(VerifiedSubject{UserID: "2027364327", IDKind: useridentity.KindPOSIXUID, UserName: "carol",
+		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory,
+			Groups: []string{"staff"}, ResolvedAt: time.Now(), Assurance: useridentity.AssuranceVerified},
+		Source: subjectSourcePeerCredentials}, true)
 	if got := set.match(&awaiting, profileSubjectVerified, "codex", ""); !strings.Contains(got.Refused, "UPN is unconfirmed") {
-		t.Fatalf("before the guardian's record: %+v; want a refusal naming the UPN", got)
+		t.Fatalf("directory account before the guardian's record: %+v; want a refusal naming the UPN", got)
 	}
 	recorded := local(true)
 	if got := set.match(&recorded, profileSubjectVerified, "codex", ""); got.Refused != "" || got.Name != "watch" {
