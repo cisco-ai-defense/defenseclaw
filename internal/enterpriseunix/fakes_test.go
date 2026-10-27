@@ -459,6 +459,16 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		// No guardian runs in the fake host.
 		GuardianReportTimeout: 50 * time.Millisecond,
 	}
+	if goos == "darwin" {
+		// Nor its executable: kern.procargs2 and proc_pidpath of a live PID
+		// with a fake session's number named that process's image, so a
+		// supported npm Claude was judged by whatever ran under that PID on
+		// the macOS runner (TestManagedClaudeSupportedNPMScriptLaunchStaysCovered
+		// failed whenever PID 7181 was alive). Tests that model images set
+		// ProcessExecPath or ProcessImagePath after newTestHost.
+		env.ProcessExecPath = func(int) (string, error) { return "", errors.New("fake macOS host: no process executable") }
+		env.ProcessImagePath = func(int) (string, error) { return "", errors.New("fake macOS host: no process image") }
+	}
 	h.runner.installedGateway = filepath.Join(env.P(layout.BinDir), binGateway)
 	h.runner.policyState = func() configwrite.GenerationState {
 		state, _ := configwrite.ReadGenerationState(env.P(layout.ConfigPath))

@@ -213,14 +213,16 @@ func unixEntryAbsent(err error) bool {
 }
 
 // unixPrivateWalkUnreachable reports a listing error of the home walk that
-// hides nothing the account can run: the folder is gone or is no folder, or
+// hides nothing the account can run: the folder is gone or is no folder, is
+// a tool-owned tree the walk prunes (unixPrivateWalkPruned), or
 // macOS privacy protection (EPERM) keeps the account's own tools out too,
 // a documented limit. A searchable folder the account cannot list still
 // lets it start a copy whose path it knows, regardless of the owner. An
 // unsearchable folder the account owns can be made searchable by that account.
 // Both leave the scan incomplete.
 func unixPrivateWalkUnreachable(dir string, err error) bool {
-	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EPERM) {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EPERM) ||
+		errors.Is(err, errPrivateWalkPruned) {
 		return true
 	}
 	if !errors.Is(err, syscall.EACCES) {

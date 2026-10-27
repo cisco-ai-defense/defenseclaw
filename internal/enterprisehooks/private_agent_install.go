@@ -53,8 +53,9 @@ const privateAgentInstallMaxVersionDirs = 64
 // privateInstallWalkMaxEntries bounds the directory entries the scan lists
 // below one home while it looks for npm prefixes at any depth (GAP-0988).
 // Inside a node_modules tree it lists package names only, never package
-// contents. Tests lower it.
-var privateInstallWalkMaxEntries = 1 << 19
+// contents. Each OS sets its default (privateInstallWalkDefaultMaxEntries).
+// Tests lower it.
+var privateInstallWalkMaxEntries = privateInstallWalkDefaultMaxEntries
 
 // privateInstallWalk is one bounded walk of a home (walkPrivateNPMPrefixes).
 // open opens a directory to list; unreachable reports a listing error that

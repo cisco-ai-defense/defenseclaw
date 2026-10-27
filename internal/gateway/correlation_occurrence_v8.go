@@ -60,6 +60,7 @@ func (a *APIServer) correlateHookOccurrence(
 		// cursor and receipt, not just repeat its failed INSERT. Give the
 		// competing writer a bounded chance to finish without extending the
 		// hook's answer deadline.
+		hookCorrelationBusyWait(attempt)
 		wait := min(10*time.Millisecond<<uint(attempt-1), 80*time.Millisecond)
 		select {
 		case <-ctx.Done():
@@ -71,6 +72,11 @@ func (a *APIServer) correlateHookOccurrence(
 
 // hookCorrelationAttempts bounds the attempts of one hook's correlation.
 const hookCorrelationAttempts = 8
+
+// hookCorrelationBusyWait runs when attempt failed on a competing SQLite
+// writer, before the wait for it. Tests replace it to let the writer commit
+// at that point instead of after a wall-clock delay.
+var hookCorrelationBusyWait = func(attempt int) {}
 
 // cloneHookCorrelationState copies the correlation maps and slices an
 // attempt adds to, so a stale attempt leaves the request as it arrived.
