@@ -2495,6 +2495,42 @@ class RetiredSourceInstallCopyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 windows_uninstall_helper._validate_plan(plan)
 
+    def test_windows_plan_takes_the_hook_install_ps1_renamed_aside(self):
+        # GAP-1760: a restore under hook traffic leaves the running hook as
+        # defenseclaw-hook.exe.old-<yyyyMMddTHHmmssfff>; uninstall takes it.
+        from defenseclaw.commands import windows_uninstall_helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            bin_dir = home / ".local" / "bin"
+            bin_dir.mkdir(parents=True)
+            aside = bin_dir / "defenseclaw-hook.exe.old-20261026T103423123"
+            aside.write_bytes(b"MZold")
+            (bin_dir / "claude.exe.old-20261026T103423123").write_bytes(b"not ours")
+            (bin_dir / "defenseclaw-hook.exe.old-1").write_bytes(b"not an installer name")
+            with patch.dict(os.environ, {"USERPROFILE": str(home)}):
+                install_root, targets = cmd_uninstall._owned_binary_targets("win32")
+            self.assertEqual([target for target in targets if ".old-" in target], [str(aside)])
+
+            managed_venv = home / ".defenseclaw" / ".venv"
+            managed_venv.mkdir(parents=True)
+            (bin_dir / "defenseclaw.cmd").write_text(
+                f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8"
+            )
+            plan = {
+                "install_root": install_root,
+                "data_dir": str(home / ".defenseclaw"),
+                "managed_venv": str(managed_venv),
+                "protected_paths": [],
+                "binary_targets": [str(aside)],
+                "remove_data_dir": False,
+            }
+            _root, _data, accepted = windows_uninstall_helper._validate_plan(plan)
+            self.assertEqual(accepted, [os.path.normcase(os.path.abspath(aside))])
+            plan["binary_targets"] = [str(bin_dir / "claude.exe.old-20261026T103423123")]
+            with self.assertRaises(ValueError):
+                windows_uninstall_helper._validate_plan(plan)
+
 
 if __name__ == "__main__":
     unittest.main()

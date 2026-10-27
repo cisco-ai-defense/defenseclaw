@@ -279,7 +279,7 @@ def test_windows_upgrade_says_it_is_cleaning_up_before_the_long_deletes() -> Non
     windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
     body = windows[windows.index("function Complete-Swap") :]
     body = body[: body.index("\n}\n")]
-    assert body.index('Write-Info "Cleaning up') < body.index("Remove-Tree $Previous")
+    assert body.index('Write-Info "Cleaning up') < body.index("Publish-PreviousSlot $Snap")
 
 
 def test_installer_never_uses_retired_asset_names() -> None:
@@ -1470,16 +1470,20 @@ def _install_sh_functions(*names: str) -> str:
 
 
 _AGENT_SCAN = ("loaded_plugin_agents", "process_argv", "process_cwd", "process_programs", "resolved_agent_path",
-               "agent_identity_audit", "installed_agent_programs", "runtime_agent_programs", "agent_of",
+               "agent_identity_audit", "npm_config_prefixes", "installed_agent_programs", "runtime_agent_programs", "entry_prefix_agent_programs", "agent_of",
                "assert_no_loaded_plugin_agents")
 
 
-def _agent_scan(home: Path, path: list[Path]) -> subprocess.CompletedProcess[str]:
+def _agent_scan(home: Path, path: list[Path], pids: list[int] | None = None,
+                **env: str) -> subprocess.CompletedProcess[str]:
     # The installer's agent check, as the upgrade runs it before the gateway stops.
+    # pids: the only processes it lists (GAP-1309): a real OpenCode or Amp the
+    # same account runs on the test host is not one of the test's processes.
+    listed = "" if pids is None else "ps() { printf '%s\\n' " + " ".join(map(str, pids)) + "; }\n"
     return subprocess.run(
         [BASH, "-c", 'set -euo pipefail\ndie() { printf "%s\\n" "$*" >&2; exit 1; }\n'
-         + _install_sh_functions(*_AGENT_SCAN) + "assert_no_loaded_plugin_agents\necho scan-passed\n"],
-        env={"HOME": str(home), "PATH": ":".join([*map(str, path), "/usr/bin", "/bin"])},
+         + _install_sh_functions(*_AGENT_SCAN) + listed + "assert_no_loaded_plugin_agents\necho scan-passed\n"],
+        env={"HOME": str(home), "PATH": ":".join([*map(str, path), "/usr/bin", "/bin"]), **env},
         capture_output=True, text=True, timeout=60, check=False,
     )
 
@@ -1571,6 +1575,27 @@ def _started(argv: list[str], program: Path, executable: str | None = None) -> s
         ("nvm launcher points to another script", None),
         ("pnpm shell shim", None),
         ("opencode replaced while running", "OpenCode"),
+        # GAP-1308: npm launcher beside a Node runtime replaced while it runs.
+        ("opencode npm launcher beside a replaced nvm node", "OpenCode"),
+        # GAP-1356: current npm opencode-ai links bin/opencode to its native
+        # bin/opencode.exe, in the usual, the configured and a PATH prefix.
+        ("opencode npm native exe in ~/.npm-global", "OpenCode"),
+        ("opencode npm native exe in the .npmrc prefix", "OpenCode"),
+        ("opencode npm native exe in NPM_CONFIG_PREFIX", "OpenCode"),
+        # GAP-1761: npm expands ${VAR} in a prefix and reads the user config
+        # NPM_CONFIG_USERCONFIG names and the global npmrc.
+        ("opencode npm native exe in a ${HOME} .npmrc prefix", "OpenCode"),
+        ("opencode npm native exe in the NPM_CONFIG_USERCONFIG prefix", "OpenCode"),
+        ("opencode npm native exe in the NPM_CONFIG_GLOBALCONFIG prefix", "OpenCode"),
+        ("opencode npm native exe in a PATH prefix", "OpenCode"),
+        ("opencode npm native exe run by its platform hard link", "OpenCode"),
+        # GAP-1761 case B: the prefix is named only in the agent's own shell
+        # (NPM_CONFIG_USERCONFIG there): the running entry names its prefix,
+        # and npm's launcher in <prefix>/bin must resolve to it.
+        ("opencode npm native exe in a prefix only the agent's shell names", "OpenCode"),
+        ("amp npm package in a prefix only the agent's shell names", "Amp"),
+        ("opencode npm native exe without its prefix launcher", None),
+        ("opencode.exe of another package in a PATH prefix", None),
         ("amp npm package", "Amp"),
         ("native installer amp", "Amp"),
     ],
@@ -1586,6 +1611,7 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
     assert upgrade_guard < source.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway"', upgrade_guard)
 
     sleep, home, path = shutil.which("sleep", path="/usr/bin:/bin"), tmp_path / "home", []
+    env: dict[str, str] = {}
     node = _program(tmp_path / "nodejs" / "bin" / "node", BASH)
     script_body = "sleep 60\n"
 
@@ -1659,8 +1685,62 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
         else:
             path.append(link.parent)
             program, argv = node, [str(node), str(link)]
+    elif case.endswith("only the agent's shell names") or case == "opencode npm native exe without its prefix launcher":
+        prefix = tmp_path / "agent prefix"
+        if case.startswith("amp"):
+            entry = prefix / "lib" / "node_modules" / "@sourcegraph" / "amp" / "dist" / "main.js"
+            entry.parent.mkdir(parents=True)
+            entry.write_text(script_body, encoding="utf-8")
+            link = prefix / "bin" / "amp"
+            link.parent.mkdir(parents=True)
+            link.symlink_to(entry)
+            program, argv = node, [str(node), str(link)]
+        else:
+            program = _program(prefix / "lib" / "node_modules" / "opencode-ai" / "bin" / "opencode.exe", sleep)
+            if not case.endswith("launcher"):
+                link = prefix / "bin" / "opencode"
+                link.parent.mkdir(parents=True)
+                link.symlink_to(program)
+            argv = [str(program), "60"]
+    elif case.startswith("opencode npm native exe") or case == "opencode.exe of another package in a PATH prefix":
+        prefix = {
+            "opencode npm native exe in ~/.npm-global": home / ".npm-global",
+            "opencode npm native exe in the .npmrc prefix": tmp_path / "opt agents",
+            "opencode npm native exe in NPM_CONFIG_PREFIX": tmp_path / "env-prefix",
+            "opencode npm native exe in a ${HOME} .npmrc prefix": home / ".npm-packages",
+            "opencode npm native exe in the NPM_CONFIG_USERCONFIG prefix": tmp_path / "user-prefix",
+            "opencode npm native exe in the NPM_CONFIG_GLOBALCONFIG prefix": tmp_path / "global-prefix",
+        }.get(case, tmp_path / "dc-agents")
+        package = "opencode-ai-fork" if case.startswith("opencode.exe of another") else "opencode-ai"
+        program = _program(prefix / "lib" / "node_modules" / package / "bin" / "opencode.exe", sleep)
+        _manifest(program.parents[1], package)
+        link = prefix / "bin" / "opencode"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(program)
+        if case.endswith(".npmrc prefix"):
+            home.mkdir(parents=True, exist_ok=True)
+            (home / ".npmrc").write_text(f"cache=/tmp/x\nprefix = {prefix}\n", encoding="utf-8")
+        elif case.endswith("NPM_CONFIG_PREFIX"):
+            env["NPM_CONFIG_PREFIX"] = str(prefix)
+        elif case.endswith("${HOME} .npmrc prefix"):
+            (home / ".npmrc").write_text("prefix=${HOME}/.npm-packages\n", encoding="utf-8")
+        elif case.endswith("CONFIG prefix"):
+            config = tmp_path / "npm-config" / ("user-npmrc" if "USERCONFIG" in case else "global-npmrc")
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(f'prefix="{prefix}"\n', encoding="utf-8")
+            env["NPM_CONFIG_USERCONFIG" if "USERCONFIG" in case else "NPM_CONFIG_GLOBALCONFIG"] = str(config)
+        elif not case.endswith("~/.npm-global"):
+            path.append(link.parent)
+        argv = [str(link), "60"]
+        if case.endswith("hard link"):
+            # npm's postinstall hard-links the platform package's binary.
+            platform = prefix / "lib" / "node_modules" / "opencode-linux-x64" / "bin" / "opencode"
+            platform.parent.mkdir(parents=True)
+            os.link(program, platform)
+            program, argv = platform, [str(platform), "60"]
     elif case in ("opencode npm launcher beside nvm node", "amp npm launcher beside fnm node",
-                  "nvm launcher points to another script", "pnpm shell shim"):
+                  "nvm launcher points to another script", "pnpm shell shim",
+                  "opencode npm launcher beside a replaced nvm node"):
         if case.startswith("opencode") or case.startswith("nvm"):
             agent_name, package = "opencode", "opencode-ai"
             entry_name = "bin/worker.js" if case.startswith("nvm") else "bin/opencode"
@@ -1700,10 +1780,10 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
 
     proc = _started(argv, program, executable=sleep if case == "argv0 opencode" else None)
     try:
-        if case == "opencode replaced while running":
+        if case in ("opencode replaced while running", "opencode npm launcher beside a replaced nvm node"):
             program.unlink()
             _program(program, sleep)
-        result = _agent_scan(home, path)
+        result = _agent_scan(home, path, [proc.pid], **env)
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
@@ -1760,6 +1840,33 @@ def test_live_agent_identity_uses_only_an_exact_entry(tmp_path: Path, case: str,
     assert result.stdout == want, (case, result.stdout, result.stderr)
 
 
+@pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="reads /proc/<pid>/exe")
+def test_agent_scan_tests_list_only_their_own_processes(tmp_path: Path) -> None:
+    # GAP-1309: the scan lists every process of the account, so a real nvm
+    # OpenCode this user runs on the test host failed expected-pass tests.
+    # Here such an agent runs beside an unrelated process: the scan the tests
+    # use sees only the process it is given.
+    home = tmp_path / "home"
+    runtime = home / ".nvm" / "versions" / "node" / "v22.0.0" / "bin"
+    entry = runtime.parent / "lib" / "node_modules" / "opencode-ai" / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("sleep 60\n", encoding="utf-8")
+    node = _program(runtime / "node", BASH)
+    (runtime / "opencode").symlink_to(entry)
+    agent = _started([str(node), str(entry)], node)
+    sleep = shutil.which("sleep", path="/usr/bin:/bin")
+    other = _started([sleep, "60"], Path(sleep))
+    try:
+        alone = _agent_scan(home, [], [other.pid])
+        seen = _agent_scan(home, [], [agent.pid])
+    finally:
+        for proc in (agent, other):
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+    assert alone.returncode == 0 and "scan-passed" in alone.stdout, (alone.stdout, alone.stderr)
+    assert seen.returncode == 1 and f"OpenCode (PID {agent.pid})" in seen.stderr, (seen.stdout, seen.stderr)
+
+
 @pytest.mark.skipif(shutil.which("node") is None or not Path("/proc/self/exe").exists(), reason="runs Node, reads /proc")
 @pytest.mark.parametrize("manifest", [
     '{"author":{"name":"opencode-ai"},"name":"innocent-tool"}',
@@ -1776,7 +1883,7 @@ def test_manifest_names_never_establish_a_live_entry(tmp_path: Path, manifest: s
     node = Path(shutil.which("node")).resolve()
     proc = _started([str(node), str(script)], node)
     try:
-        result = _agent_scan(home, [])
+        result = _agent_scan(home, [], [proc.pid])
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
@@ -1800,7 +1907,7 @@ def test_the_installed_agents_are_those_of_the_native_installers(tmp_path: Path)
     unrelated_link.parent.mkdir(parents=True)
     unrelated_link.symlink_to(tools / "opencode")
     result = subprocess.run(
-        [BASH, "-c", _install_sh_functions("resolved_agent_path", "installed_agent_programs") + "installed_agent_programs"],
+        [BASH, "-c", _install_sh_functions("resolved_agent_path", "npm_config_prefixes", "installed_agent_programs") + "installed_agent_programs"],
         env={"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin"}, capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -1840,7 +1947,7 @@ def test_a_real_node_option_value_naming_opencode_ai_does_not_refuse(tmp_path: P
     script = launcher if case.startswith("agent") else worker
     proc = _started([str(node), *options, str(script)], node)
     try:
-        result = _agent_scan(home, [])
+        result = _agent_scan(home, [], [proc.pid])
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
@@ -1873,7 +1980,7 @@ def test_only_the_installed_node_entry_is_a_live_agent(tmp_path: Path, script_na
     launcher.symlink_to(package / "bin" / "opencode")
     proc = _started([str(node), str(package / script_name)], node)
     try:
-        result = _agent_scan(home, [])
+        result = _agent_scan(home, [], [proc.pid])
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
@@ -2662,7 +2769,7 @@ def test_a_running_gateway_cannot_reopen_its_hooks_while_it_stops(tmp_path: Path
     assert result.returncode == 0, result.stdout + result.stderr
     lines = calls.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "connector refresh-fail-modes --help", lines
-    assert lines[1].startswith("connector refresh-fail-modes --hold-until-exit "), lines
+    assert lines[1].startswith("connector refresh-fail-modes --hold-timeout 10m --hold-until-exit "), lines
     assert lines[2:] == ["holding", "stopping", "second refresh", "finished"], lines
     assert "Hook fail modes set from the config: codex" in result.stdout
     assert "Holding the hook fail modes" not in result.stdout

@@ -55,6 +55,19 @@ def _text() -> str:
     return INSTALL_PS1.read_text(encoding="utf-8")
 
 
+@pytest.fixture(autouse=True)
+def _windows_powershell_module_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1143: run from PowerShell 7 (the dcw-preflight hosts and the
+    # Windows runners run each step under pwsh), PSModulePath names its
+    # module folders, and the Windows PowerShell 5.1 these tests start then
+    # cannot load its own Microsoft.PowerShell.Utility: Get-FileHash is not
+    # recognized and Get-Sha256 reports "Could not read" before any product
+    # step. Each PowerShell builds its default module path, as the CLI's
+    # installer handoff lets it (upgrade_shim._run_installer).
+    for name in [key for key in os.environ if key.upper() == "PSMODULEPATH"]:
+        monkeypatch.delenv(name)
+
+
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_lifecycle_proof_requires_json_connector_readback(tmp_path: Path) -> None:
     # rel-1-0-4:GAP-0745: a plain status answer cannot prove hook coverage.
@@ -751,7 +764,10 @@ def test_the_suggested_cleanup_removes_the_read_only_key_copy() -> None:
     # read-only redaction key copy refuses; rd /s /q deletes it through the folder.
     text = _text()
     assert "Remove-Item -Recurse -Force '" not in text
-    assert text.count('cmd /c rd /s /q `"') == 2
+    # Save-RolledBackData's kept data and Publish-PreviousSlot's set-aside
+    # copy (GAP-1860) are the user's to remove, and an old previous\\ another
+    # account owns is an administrator's (GAP-1860 round 3).
+    assert text.count('cmd /c rd /s /q `"') == 4
     # A failed install can own unresolved external connector transactions;
     # its troubleshooting copy must not be advertised as safe to delete.
     failed = _ps1_function("Restore-Snapshot")
@@ -807,7 +823,7 @@ def test_the_locked_package_install_is_retried_with_backoff() -> None:
     # GAP-1941: on a busy host one retry hit the same hold on the next
     # package, so it backs off several times, checks for a full disk before
     # each attempt, and the last failure says to run the command again.
-    helper = _text()[_text().index("function Invoke-UvPipInstall(") :][:1200]
+    helper = _ps1_function("Invoke-UvPipInstall")
     assert "$waits = @(5, 15, 30)" in helper
     assert helper.index("Test-DiskFull") > helper.index("for ($i = 0")
     assert "Start-Sleep -Seconds $waits[$i]" in helper
@@ -876,7 +892,7 @@ def test_failed_readiness_preserves_hooks_without_restarting_the_old_setup(tmp_p
     startup = install[install.index("    $startRc = 0") : install.index("    Complete-Swap")]
     functions = "\n".join(_ps1_function(name) for name in (
         "Restore-Snapshot", "Restart-Old", "Restore-SetupInstall", "Get-RestoredNote",
-        "Resume-InterruptedRun", "Read-Text",
+        "Resume-InterruptedRun", "Publish-PreviousSlot", "Read-Text",
     ))
     script = tmp_path / "failed-start.ps1"
     script.write_text(
@@ -1209,7 +1225,7 @@ def test_the_previous_watchdog_is_stopped_even_when_the_gateway_is_down() -> Non
     # renamed binary and held its ownership lock against the new one.
     body = _ps1_function("Stop-Watchdog")
     assert '$image = Join-Path $BinDir "defenseclaw-gateway.exe"' in body
-    assert "Get-ProcessesUnder @($image)" in body  # a prefix: .old-* too
+    assert "Get-GatewayProcessesUnder @($image)" in body  # a prefix: .old-* too
     assert 'Invoke-Native $image @("watchdog", "stop") -Quiet' in body
     assert "Stop-Process -Id $_.ProcessId -Force" in body
     # Rollback and recovery stop the gateway through Stop-Gateway, running or not.
@@ -1249,7 +1265,7 @@ def test_a_room_refusal_runs_before_the_uv_folder_or_uv_is_created() -> None:
 def _bin_dir_functions() -> str:
     text = _text()
     out = []
-    for name in ("Copy-BinDir", "Restore-BinDir", "Assert-BinDirRestored", "Get-Sha256"):
+    for name in ("Copy-BinDir", "Clear-AsideCopies", "Restore-BinDir", "Assert-BinDirRestored", "Get-Sha256"):
         start = text.index(f"function {name}(")
         out.append(text[start : text.index("\n}\n", start) + 3])
     return "\n".join(out)
@@ -2056,7 +2072,7 @@ function Invoke-Native {{
     if (($Arguments -join ' ') -like 'connector refresh-fail-modes --closed*') {{ $script:closes++; return 0 }}
     return 1
 }}
-{_resume_functions("Read-Text", "Get-InstallGatewayState", "Stop-UnprovenRecoveryGateway", "Test-RecoveryPending",
+{_resume_functions("Get-GatewayProcessesUnder", "Read-Text", "Get-InstallGatewayState", "Stop-UnprovenRecoveryGateway", "Test-RecoveryPending",
                    "Close-InstallLock", "Finish-InstallLock", "Close-UnfinishedInstallHooks", "Resume-InterruptedRun")}
 function Get-ProcessesUnder {{ return @() }}
 {_txn_real_functions()}
@@ -2168,7 +2184,7 @@ def test_a_failed_run_keeps_the_lock_only_on_proof_its_gateway_is_down_and_hooks
     # instead of cold-starting it. The lock now stays only when the run
     # closed every hook and, afterwards, no process of this install's
     # gateway image runs; an unknown state releases it, like a running one.
-    result = _txn_harness(tmp_path, _resume_functions("Get-InstallGatewayState", "Test-RecoveryPending", "Close-InstallLock",
+    result = _txn_harness(tmp_path, _resume_functions("Get-GatewayProcessesUnder", "Get-InstallGatewayState", "Test-RecoveryPending", "Close-InstallLock",
                                                       "Finish-InstallLock", "Close-UnfinishedInstallHooks") + f"""
 $Previous = Join-Path $DataDir 'previous'
 $Staging = Join-Path $DataDir '.staging'
@@ -2260,7 +2276,7 @@ def test_a_held_gateway_retry_keeps_the_lock_while_the_lifecycle_record_is_pendi
     # unfinished install. The lock now stays, retry after retry, until the
     # record is settled. Without a record, or with a gateway still running,
     # the lock goes as before.
-    result = _txn_harness(tmp_path, _resume_functions("Get-InstallGatewayState", "Test-RecoveryPending", "Close-InstallLock",
+    result = _txn_harness(tmp_path, _resume_functions("Get-GatewayProcessesUnder", "Get-InstallGatewayState", "Test-RecoveryPending", "Close-InstallLock",
                                                       "Finish-InstallLock", "Close-UnfinishedInstallHooks") + f"""
 $Previous = Join-Path $DataDir 'previous'
 $Staging = Join-Path $DataDir '.staging'
@@ -2829,6 +2845,7 @@ function Stop-Process {{ param($Id, [switch]$Force, $ErrorAction)
 function Start-Sleep {{ param($Seconds) }}
 function Invoke-Native {{ throw 'an unproven program was executed' }}
 function Get-LifecycleNextStep {{ param([switch]$Accept) return 'the retry with -AcceptCurrentInstall' }}
+{_ps1_function('Get-GatewayProcessesUnder')}
 {_ps1_function('Stop-UnprovenGateway')}
 try {{ $stopped = Stop-UnprovenGateway; "STOPPED=$stopped" }} catch {{ "THROWN=$($_.Exception.Message)" }}
 "LEFT=$(@($script:table.Keys | Sort-Object) -join ',')"
@@ -2852,7 +2869,7 @@ def test_a_renamed_watchdog_of_the_accepted_install_is_stopped_and_its_hooks_clo
     # retry and the recovery of an interrupted one) terminate it without
     # running it and verify nothing of the install runs. With no gateway.pid
     # there was no hold, so the hooks are closed once more after it exited.
-    result = _txn_harness(tmp_path, _resume_functions("Stop-UnprovenGateway", "Prepare-UnprovenReplacement",
+    result = _txn_harness(tmp_path, _resume_functions("Get-GatewayProcessesUnder", "Stop-UnprovenGateway", "Prepare-UnprovenReplacement",
                                                       "Stop-UnprovenRecoveryGateway") + f"""
 $Staging = Join-Path $DataDir '.staging'
 $Ver = '1.0.4'
@@ -3912,6 +3929,7 @@ def test_windows_rollback_holds_checked_hook_until_prior_gateway_is_proven(tmp_p
     )
     body = (
         _ps1_function("Read-Text")
+        + _ps1_function("Clear-AsideCopies")
         + _ps1_function("Restore-BinDir")
         + _ps1_function("Assert-BinDirRestored")
         + _ps1_function("Undo-HookFirst")
@@ -4051,6 +4069,7 @@ def test_windows_rollback_finishes_for_a_previously_stopped_gateway(tmp_path: Pa
     # and closed hooks must be proven before the old hook and lock return.
     body = (
         _ps1_function("Read-Text")
+        + _ps1_function("Clear-AsideCopies")
         + _ps1_function("Restore-BinDir")
         + _ps1_function("Assert-BinDirRestored")
         + "\n".join(_ps1_function(name) for name in (
@@ -4150,12 +4169,12 @@ def test_hook_fail_modes_are_held_from_before_the_gateway_stops_until_it_exits()
     assert after.index("Clear-StagedRelease") < after.index("Restart-Old") < after.index("$(Get-RestoredNote)"), after
     start = _ps1_function("Start-HookFailModeHold")
     assert '--hold-until-exit $GatewayId' in start and 'Contains("Holding the hook fail modes")' in start, start
-    assert "Test-InstalledHookRuntime" in start, start
+    assert 'Join-Path $DataDir "hooks") -PathType Container' in start and "hooks\\.hookcfg" not in start, start
     assert "Stop-HookFailModeHold" in start and start.rstrip().endswith("return $false\n}"), start
     assert "$hold.Process.ExitCode -eq 0" in _ps1_function("Complete-HookFailModeHold")
     update = _ps1_function("Update-HookFailModes")
     assert '@("connector", "refresh-fail-modes", "--data-dir", $DataDir)) -eq 0' in update, update
-    assert "Test-InstalledHookRuntime" in update, update
+    assert 'Join-Path $DataDir "hooks") -PathType Container' in update and 'hooks\\.hookcfg") -PathType Leaf' not in update, update
     # A downgrade's older gateway prints the connector help instead; any other
     # probe answer refuses the swap.
     probe = _ps1_function("Test-HookFailModeRefresh")
@@ -4275,6 +4294,8 @@ def test_setup_hook_launcher_answers_until_the_fail_mode_hold_is_ready(
         + _ps1_function("Enable-SetupHooks")
         + _ps1_function("Restore-SetupInstall")
         + _ps1_function("Start-SwapHookFailModes")
+        # The hook mode files' copy (GAP-0009) has its own test.
+        + "function Save-HookFiles { }\nfunction Restore-HookFiles { }\n"
         # This test exercises handoff timing; the publisher's byte and digest
         # contract has its own test below. Model a valid atomic publisher.
         + "function Publish-SetupLauncherTrampoline { [IO.File]::WriteAllText($SetupHookState, 'delegated'); return $true }\n"
@@ -4332,7 +4353,7 @@ def test_hook_fail_mode_refresh_refuses_a_probe_that_fails(tmp_path: Path) -> No
             "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
             f"$DataDir = '{data_dir}'\nfunction Write-Warn([string]$m) {{ [Console]::Error.WriteLine('warn: ' + $m) }}\n"
             f"{_ps1_function('Invoke-Native')}\n{_ps1_function('Get-NativeProbe')}\n"
-            f"{_ps1_function('Test-HookFailModeRefresh')}\n{_ps1_function('Test-InstalledHookRuntime')}\n{_ps1_function('Update-HookFailModes')}\n"
+            f"{_ps1_function('Test-HookFailModeRefresh')}\n{_ps1_function('Update-HookFailModes')}\n"
             f"if (Update-HookFailModes '{gateway}') {{ 'refresh=true' }} else {{ 'refresh=false' }}\n"
         )
         completed = _run_powershell(script)
@@ -4346,7 +4367,6 @@ def test_hook_fail_mode_refresh_refuses_a_probe_that_fails(tmp_path: Path) -> No
 def test_hook_fail_mode_refresh_runs_without_json_sidecar(tmp_path: Path) -> None:
     hooks = tmp_path / "hooks"
     hooks.mkdir()
-    helper = _ps1_function("Test-InstalledHookRuntime") if "function Test-InstalledHookRuntime " in _text() else ""
     for name in ("cursor-hook.ps1", ".hookcfg.cursor"):
         installed = hooks / name
         installed.write_text("retained open adapter or record", encoding="utf-8")
@@ -4355,13 +4375,46 @@ def test_hook_fail_mode_refresh_runs_without_json_sidecar(tmp_path: Path) -> Non
             f"$DataDir = '{tmp_path}'\n$script:refreshes = 0\n"
             "function Test-HookFailModeRefresh([string]$g) { return 0 }\n"
             "function Invoke-Native($g, $a) { $script:refreshes++; return 0 }\n"
-            + helper + "\n" + _ps1_function("Update-HookFailModes")
+            + _ps1_function("Update-HookFailModes")
             + "\nif (-not (Update-HookFailModes 'staged-gateway')) { throw 'refresh refused' }\n"
             + "if ($script:refreshes -ne 1) { throw 'installed hooks were not refreshed' }\n"
         )
         completed = _run_powershell(script)
         assert completed.returncode == 0, completed.stdout + completed.stderr
         installed.unlink()
+
+
+def test_installed_hooks_are_refreshed_without_the_json_sidecar(tmp_path: Path) -> None:
+    # GAP-0365: with hooks\.hookcfg gone, the refresh (and the hold for a
+    # running gateway) was skipped, so a 1.0.2 copilot-hook.ps1 kept its baked
+    # open while the gateway was down for the install. Live red on
+    # dc-fc-r103-a4-win1: 556 of 586 gateway-down samples had the open adapter.
+    data_dir = tmp_path / "data"
+    (data_dir / "hooks").mkdir(parents=True)
+    (data_dir / "hooks" / "copilot-hook.ps1").write_text("baked open adapter", encoding="utf-8")
+    calls = tmp_path / "calls.txt"
+    gateway = tmp_path / "gateway.ps1"
+    gateway.write_text(
+        f"Add-Content -LiteralPath '{calls}' -Value ($args -join ' ')\n"
+        "if ($args -contains '--help') { Write-Output '  defenseclaw-gateway connector refresh-fail-modes [flags]' }\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data_dir}'\nfunction Write-Warn([string]$m) {{ [Console]::Error.WriteLine('warn: ' + $m) }}\n"
+        f"{_ps1_function('Invoke-Native')}\n{_ps1_function('Get-NativeProbe')}\n{_ps1_function('Test-HookFailModeRefresh')}\n"
+        f"{_ps1_function('Update-HookFailModes')}\n"
+        f"if (Update-HookFailModes '{gateway}') {{ 'ok=true' }} else {{ 'ok=false' }}\n"
+    )
+    completed = _run_powershell(script)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "ok=true" in completed.stdout, completed.stdout + completed.stderr
+    ran = [line for line in calls.read_text(encoding="utf-8").splitlines() if "--help" not in line]
+    assert ran == [f"connector refresh-fail-modes --data-dir {data_dir}"], ran
+    # The hold for a running gateway takes the same folder test, not the sidecar.
+    hold = _ps1_function("Start-HookFailModeHold")
+    assert "hooks\\.hookcfg" not in hold, hold
 
 
 @pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
@@ -4408,6 +4461,7 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         + _ps1_function("Read-Text")
         + _ps1_function("Get-Sha256")
         + _ps1_function("Write-DurableText")
+        + _ps1_function("Clear-AsideCopies")
         + _ps1_function("Install-HookFirst")
         + _ps1_function("Save-HookCloser")
         + _ps1_function("Undo-HookFirst")
@@ -4483,9 +4537,9 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
     real = "".join(
         _ps1_function(name)
         for name in (
-            "Invoke-Quietly", "Start-SwapHookFailModes", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
-            "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
-            "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote", "Resume-InterruptedRun",
+            "Invoke-Quietly", "Start-SwapHookFailModes", "Save-HookFiles", "Restore-HookFiles", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
+            "Undo-HookFirst", "Clear-AsideCopies", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
+            "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote", "Resume-InterruptedRun", "Publish-PreviousSlot",
             "Start-AcceptedReplacement", "Finish-EarlySnapshotRestore",
         )
     )
@@ -4633,8 +4687,8 @@ def test_a_step_that_throws_after_the_hook_swap_restores_the_old_install(
     real = "".join(
         _ps1_function(name)
         for name in (
-            "Invoke-Quietly", "Start-SwapHookFailModes", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
-            "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
+            "Invoke-Quietly", "Start-SwapHookFailModes", "Save-HookFiles", "Restore-HookFiles", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
+            "Undo-HookFirst", "Clear-AsideCopies", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
             "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote",
             "Start-AcceptedReplacement", "Finish-EarlySnapshotRestore",
         )
@@ -4818,6 +4872,12 @@ def test_an_upgrade_replaces_an_installed_binary_in_place() -> None:
     switch = _ps_functions("Switch-InPlace")
     assert "Remove-Aside" not in switch and "Move-Path" not in switch
     assert "Invoke-AtomicReplace $New $Destination" in switch
+    # GAP-0311/0732: a running image is renamed aside, back to back with the
+    # new file's rename, by the native helper, after the atomic retries.
+    assert "Invoke-AsideReplace $New $Destination" in switch
+    aside = _ps_functions("Invoke-AsideReplace")
+    assert "[DefenseClawInstall.RenameAside]::Aside($New, $Destination, $aside)" in aside
+    assert '"$Destination.old-"' in aside
     assert "FileRenameInfoEx" in _ps_functions("Invoke-AtomicReplace")
     assert "FILE_RENAME_FLAG_POSIX_SEMANTICS" in _ps_functions("Invoke-AtomicReplace")
     assert "function Invoke-FileReplace" not in _text()
@@ -4836,7 +4896,7 @@ def test_atomic_replacement_native_helper_compiles() -> None:
         "$ErrorActionPreference = 'Stop'\n"
         + _ps1_function("Invoke-AtomicReplace")
         + "\ntry { Invoke-AtomicReplace 'missing.new' 'missing.exe' } catch { }\n"
-        + "if (-not ('DefenseClawInstall.Rename' -as [type])) { throw 'native helper did not compile' }\n"
+        + "if (-not ('DefenseClawInstall.RenameAside' -as [type])) { throw 'native helper did not compile' }\n"
         + "'OK'\n"
     )
     result = _run_powershell(script)
@@ -4997,16 +5057,465 @@ try {{ Switch-InPlace '{staged}' '{hook}'; 'SWAPPED' }} catch {{ 'REFUSED' }}
     assert hook.read_text(encoding="ascii") == "new" and not staged.exists()
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("aside", ["works", "refused"])
+def test_a_launcher_mapped_for_good_is_renamed_aside_or_left_whole(tmp_path: Path, aside: str) -> None:
+    # GAP-0311/0732: under steady registered traffic some hook call always
+    # maps the image, so the atomic replacement never finds a gap and the
+    # upgrade (or its restore) stopped with Access is denied. Windows lets a
+    # running image be renamed: after the retries it goes aside and the new
+    # file takes its name. A file that cannot be renamed either is left whole.
+    staged, hook = tmp_path / "staged.exe", tmp_path / "defenseclaw-hook.exe"
+    staged.write_text("new", encoding="ascii")
+    hook.write_text("old", encoding="ascii")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$script:atomic = 0
+$script:asides = 0
+function Start-Sleep {{ param([int]$Milliseconds) }}
+function Invoke-AtomicReplace([string]$New, [string]$Destination) {{ $script:atomic++; throw 'Access is denied.' }}
+function Invoke-AsideReplace([string]$New, [string]$Destination) {{
+    $script:asides++
+    {'throw "Access is denied."' if aside == "refused" else '[IO.File]::Move($Destination, "$Destination.old-1"); [IO.File]::Move($New, $Destination)'}
+}}
+{_ps1_function('Switch-InPlace')}
+try {{ Switch-InPlace '{staged}' '{hook}'; 'SWAPPED' }} catch {{ "REFUSED: $($_.Exception.Message)" }}
+"ATOMIC=$script:atomic ASIDES=$script:asides"
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    atomic = int(re.search(r"ATOMIC=(\d+)", out).group(1))
+    assert atomic == 80, out
+    if aside == "works":
+        assert "SWAPPED" in out and "ASIDES=1" in out, out
+        assert hook.read_text(encoding="ascii") == "new" and not staged.exists()
+        assert (tmp_path / "defenseclaw-hook.exe.old-1").read_text(encoding="ascii") == "old"
+    else:
+        assert "REFUSED: Could not replace" in out and "it was left as it was" in out, out
+        assert hook.read_text(encoding="ascii") == "old" and not staged.exists()
+        assert sorted(path.name for path in tmp_path.iterdir()) == ["defenseclaw-hook.exe"]
+
+
+@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="requires a running Windows executable")
+def test_native_running_hook_is_renamed_aside_and_replaced(tmp_path: Path) -> None:
+    # GAP-0311/0732 on Windows itself: the image a running hook maps refuses
+    # the atomic replacement, and the whole Switch-InPlace still publishes the
+    # new file while that process keeps running from the old image.
+    system32 = Path(os.environ["SystemRoot"]) / "System32"
+    hook = tmp_path / "defenseclaw-hook.exe"
+    staged = tmp_path / "defenseclaw-hook.exe.new"
+    shutil.copyfile(system32 / "cmd.exe", hook)
+    shutil.copyfile(system32 / "ping.exe", staged)
+    new = staged.read_bytes()
+    running = subprocess.Popen([str(hook), "/c", "ping -n 120 127.0.0.1 >nul"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        script = (
+            "$ErrorActionPreference = 'Stop'\n"
+            + _ps_functions("Invoke-AtomicReplace", "Invoke-AsideReplace", "Switch-InPlace")
+            + f"\nSwitch-InPlace '{staged}' '{hook}' 3\n'SWAPPED'\n"
+        )
+        result = _run_powershell(script)
+        assert result.returncode == 0 and "SWAPPED" in result.stdout, result.stdout + result.stderr
+        assert running.poll() is None
+        assert hook.read_bytes() == new and not staged.exists()
+        assert len(list(tmp_path.glob("defenseclaw-hook.exe.old-*"))) == 1
+    finally:
+        running.kill()
+        running.wait(timeout=30)
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_the_aside_helper_compiles_in_a_session_that_ran_the_1_0_4_installer() -> None:
+    # GAP-1758: the 1.0.4 installer loads DefenseClawInstall.Rename with
+    # Replace only. A later install in the same PowerShell session (`irm | iex`
+    # twice, or `& .\install.ps1` again) found that type, skipped Add-Type and
+    # every aside swap threw "method not found", so the upgrade under hook
+    # traffic was refused again. The helper the aside swap calls has Aside.
+    aside = _ps_functions("Invoke-AsideReplace")
+    type_name = re.search(r"\[(DefenseClawInstall\.\w+)\]::Aside\(", aside).group(1)
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        + "Add-Type -TypeDefinition 'namespace DefenseClawInstall { public static class Rename "
+        + "{ public static void Replace(string source, string destination) { } } }'\n"
+        + _ps1_function("Invoke-AtomicReplace")
+        + f"\nInvoke-AtomicReplace -Compile\nif (-not [{type_name}].GetMethod('Aside')) {{ throw 'no Aside' }}\n'OK'\n"
+    )
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_restore_and_the_hook_drain_take_the_aside_copies_away(tmp_path: Path) -> None:
+    # GAP-1760: an automatic restore under hook traffic renamed the running
+    # hook aside (defenseclaw-hook.exe.old-<time>) and left it in .local\\bin
+    # until a later install. The restore (both branches) and the drain after
+    # the hook swap remove every aside copy nothing runs any more.
+    restore = _ps_functions("Restore-BinDir")
+    sweep = "Clear-AsideCopies -Restored"
+    assert restore.count(sweep) == 2
+    assert restore.rindex(sweep) < restore.rindex("Assert-BinDirRestored $From $GuardSHA256")
+    assert re.search(r"Wait-PreviousHookExit \(\[DateTime\]::UtcNow\)\n(?:\s*#.*\n)*\s*Clear-AsideCopies\n", _text())
+    bin_dir, saved = tmp_path / "bin", tmp_path / "saved"
+    bin_dir.mkdir()
+    saved.mkdir()
+    (saved / "defenseclaw-hook.exe").write_text("old", encoding="ascii")
+    for name in ("defenseclaw-hook.exe.old-20261026T103423123", "claude.exe.old-20261026T103423125"):
+        (bin_dir / name).write_text("x", encoding="ascii")
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        + f"$BinDir = '{bin_dir}'\n$ManagedFiles = @('defenseclaw-hook.exe')\n"
+        + "function Install-File([string]$Source, [string]$Destination) { Copy-Item -LiteralPath $Source -Destination $Destination -Force }\n"
+        + "function Remove-Aside([string]$Path) { Remove-Item -LiteralPath $Path -Force }\n"
+        + "function Get-Sha256([string]$Path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash }\n"
+        + _ps_functions("Clear-AsideCopies", "Restore-BinDir", "Assert-BinDirRestored")
+        + f"\nRestore-BinDir '{saved}'\n'OK'\n"
+    )
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+    assert sorted(path.name for path in bin_dir.iterdir()) == ["claude.exe.old-20261026T103423125", "defenseclaw-hook.exe"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_refused_drain_takes_the_aside_copies_and_names_a_busy_one_for_every_uninstall(tmp_path: Path) -> None:
+    # GAP-1760 (np-ow1 C04, live): a refused drain ("Previous hook calls did not
+    # finish within 30 seconds") is undone by Undo-HookFirst, not Restore-BinDir,
+    # so two free .old-* copies and the still-running 1.0.2 hook image stayed in
+    # .local\bin, and the restored 1.0.2 `defenseclaw uninstall` took none of
+    # them. Undo-HookFirst (and Restore-BinDir) now remove the free copies and
+    # rename a busy one to the source-install name every release's uninstall removes.
+    undo = _ps_functions("Undo-HookFirst")
+    assert undo.count("Clear-AsideCopies -Restored") == 2, undo
+    assert undo.rstrip().endswith("Clear-AsideCopies -Restored\n}"), undo
+    # The refused drain of a hook-first swap is undone through the hook transition.
+    install = _ps1_function("Invoke-Install")
+    early = install[install.index("try { Save-BinarySnapshot } catch {") :]
+    early = early[: early.index("throw $failure")]
+    assert early.index("Finish-EarlySnapshotRestore $Manifest") < early.index("Clear-AsideCopies -Restored"), early
+    prior = _ps_functions("Restore-PriorHookAfterProof")
+    assert prior.rstrip().endswith("Clear-AsideCopies -Restored\n}"), prior
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    free = [
+        "defenseclaw-hook.exe.old-20261026T200103881",
+        "defenseclaw-gateway.exe.old-20261026T200103395",
+        ".defenseclaw-hook.exe.source-install-old-0a1b2c3d4e5f",
+    ]
+    busy = "defenseclaw-hook.exe.old-20261026T200351322"
+    for name in free + [busy, "claude.exe.old-20261026T103423125", "defenseclaw-hook.exe"]:
+        (bin_dir / name).write_text("x", encoding="ascii")
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        + f"$BinDir = '{bin_dir}'\n$ManagedFiles = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe')\n"
+        # A running image cannot be deleted: the stand-in refuses that one path.
+        + "function Remove-Item { param([string]$LiteralPath, [switch]$Force, $ErrorAction)\n"
+        + f"  if ($LiteralPath -like '*{busy}') {{ throw 'Access to the path is denied' }}\n"
+        + "  Microsoft.PowerShell.Management\\Remove-Item -LiteralPath $LiteralPath -Force }\n"
+        + _ps_functions("Clear-AsideCopies")
+        + "\nClear-AsideCopies -Restored\n'OK'\n"
+    )
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+    left = sorted(path.name for path in bin_dir.iterdir())
+    assert [n for n in left if not n.startswith(".")] == ["claude.exe.old-20261026T103423125", "defenseclaw-hook.exe"], left
+    renamed = [n for n in left if n.startswith(".")]
+    assert len(renamed) == 1, left
+    # The 1.0.2-1.0.4 cmd_uninstall matcher, verbatim; its owned Windows names include defenseclaw-hook.exe.
+    legacy = re.compile(r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+", re.IGNORECASE)
+    match = legacy.fullmatch(renamed[0])
+    assert match and match.group("name") == "defenseclaw-hook.exe", renamed
+    # Without -Restored (the new release stays and its uninstall takes .old-*) a busy copy keeps its name.
+    (bin_dir / renamed[0]).unlink()
+    (bin_dir / busy).write_text("x", encoding="ascii")
+    result = _run_powershell(script.replace("Clear-AsideCopies -Restored\n'OK'", "Clear-AsideCopies\n'OK'"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (bin_dir / busy).exists()
+
+
+def test_a_process_running_a_renamed_copy_is_still_under_its_program_prefix() -> None:
+    # GAP-1760: the copy Clear-AsideCopies renames keeps counting for the drain and the gateway checks.
+    body = _ps_functions("Get-ProcessesUnder")
+    assert '(Split-Path -Parent $_) + "\\." + (Split-Path -Leaf $_)' in body, body
+    assert '-not $_.EndsWith("\\")' in body, body
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_an_install_refused_before_its_data_copy_puts_the_hook_mode_files_back(tmp_path: Path) -> None:
+    # GAP-0009 (rel-1-0-5): the held-hook run was refused at the drain, before
+    # the rollback copy of the data folder. The fail-mode hold had rewritten
+    # .hookcfg and .hookcfg.claudecode, and they stayed rewritten under the
+    # restored 1.0.2. The installer keeps their bytes before the refresh and
+    # every refusal before the data copy puts them back.
+    hooks = tmp_path / "data" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / ".hookcfg").write_text("FAIL_MODE=open\n", encoding="ascii")
+    (hooks / ".hookcfg.claudecode").write_text("FAIL_MODE=open\n", encoding="ascii")
+    (hooks / ".hookcfg.lock").write_text("", encoding="ascii")
+    (hooks / ".hook-claudecode.token").write_text("secret", encoding="ascii")
+    # R2-2: a file the running gateway renames away meanwhile (or this
+    # account cannot read) and its atomic .tmp-* writes never stop the copy.
+    (hooks / ".hookcfg.tmp-1234").write_text("partial", encoding="ascii")
+    (hooks / "vanished.sh").write_text("x", encoding="ascii")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        + f"$DataDir = '{tmp_path / 'data'}'\n$Staging = '{staging}'\n"
+        + "function Copy-Item { param([string]$LiteralPath, [string]$Destination, [switch]$Force, $ErrorAction)"
+        + " if ($LiteralPath -like '*vanished.sh') { throw 'Could not find file' }"
+        + " Microsoft.PowerShell.Management\\Copy-Item -LiteralPath $LiteralPath -Destination $Destination -Force }\n"
+        + "function Install-File([string]$Source, [string]$Destination) { Copy-Item -LiteralPath $Source -Destination $Destination -Force }\n"
+        + "function Write-Warn([string]$m) { \"WARN $m\" }\n"
+        + _ps1_function("Save-HookFiles")
+        + _ps1_function("Restore-HookFiles")
+        + f"\nSave-HookFiles\n[IO.File]::WriteAllText('{hooks / '.hookcfg'}', 'FAIL_MODE=closed')\n"
+        + f"[IO.File]::WriteAllText('{hooks / '.hookcfg.claudecode'}', 'FAIL_MODE=closed')\nRestore-HookFiles\n'OK'\n"
+    )
+    result = _run_powershell(script)
+    assert result.returncode == 0 and "OK" in result.stdout and "WARN" not in result.stdout, result.stdout + result.stderr
+    for name in (".hookcfg", ".hookcfg.claudecode"):
+        assert (hooks / name).read_text(encoding="ascii") == "FAIL_MODE=open\n"
+    assert sorted(path.name for path in (staging / "hooks-before").iterdir()) == [".hookcfg", ".hookcfg.claudecode"]
+    text = _text()
+    assert _ps1_function("Start-SwapHookFailModes").index("Save-HookFiles") < _ps1_function("Start-SwapHookFailModes").index("Update-HookFailModes")
+    for refusal in ("try { $Manifest = Write-LifecycleManifest", "try { Save-BinarySnapshot } catch {",
+                    "# A stop that was refused or threw leaves the hold waiting for a"):
+        block = text[text.index(refusal) :][:600]
+        assert block.index("Stop-HookFailModeHold") < block.index("Restore-HookFiles"), refusal
+    # R2-3: the two refusals inside Start-SwapHookFailModes (refresh failed,
+    # hold not taken) put the files back too.
+    swap = _ps1_function("Start-SwapHookFailModes")
+    dies = [i for i in range(len(swap)) if swap.startswith('Die "Could not set the hooks', i)]
+    assert len(dies) == 2
+    for at in dies:
+        assert "Restore-HookFiles" in swap[max(0, at - 160) : at], swap[max(0, at - 160) : at]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_rollback_makes_the_backups_folder_private_before_the_hook_conversion(tmp_path: Path) -> None:
+    # GAP-1891: `defenseclaw rollback` from 1.0.5 to 1.0.2 left two Claude
+    # Code PreToolUse handlers. prepare-rollback refused to keep its settings
+    # copy in backups\ ("bound private compare-and-swap object has an
+    # inheritable DACL"): the CLI had made that folder with inherited
+    # permissions. The installer protects it (same access, explicit entries)
+    # before it asks the gateway to convert the hooks.
+    convert = _ps1_function("Convert-HooksForRollback")
+    assert convert.index("Protect-BackupsFolder") < convert.index('"prepare-rollback"')
+    backups = tmp_path / "data" / "backups"
+    backups.mkdir(parents=True)
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        + f"$DataDir = '{tmp_path / 'data'}'\n"
+        + "$script:set = @()\n"
+        + "function Write-Warn([string]$m) { \"WARN $m\" }\n"
+        + "function Get-Acl { param([string]$LiteralPath) [pscustomobject]@{ AreAccessRulesProtected = $false } |"
+        + " Add-Member -MemberType ScriptMethod -Name SetAccessRuleProtection -Value { param($a, $b) $script:set += \"$a,$b\" } -PassThru }\n"
+        + "function Set-DirectoryAcl([string]$Path, $Acl) { \"SET $Path\" }\n"
+        + _ps1_function("Protect-BackupsFolder")
+        + "\nProtect-BackupsFolder\n\"PROTECTION=$($script:set -join ';')\"\n"
+    )
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "WARN" not in out, out
+    assert f"SET {backups}" in out and "PROTECTION=True,True" in out, out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_uv_runs_below_normal_priority_so_hook_calls_keep_their_budget(tmp_path: Path) -> None:
+    # GAP-1150: while uv built and byte-compiled the environment on every
+    # core, registered Codex calls answered after 5-6 s. uv (and the workers
+    # it starts, which inherit it) runs below normal priority; the installer
+    # takes its own priority back before anything else starts.
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$Uv = 'uv.exe'
+$script:seen = @()
+function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Quiet) {{
+    $script:seen += [string][Diagnostics.Process]::GetCurrentProcess().PriorityClass
+    return 0
+}}
+function Test-DiskFull {{ return $false }}
+function Write-Warn([string]$m) {{ }}
+{_ps_functions("Invoke-BelowNormal", "Invoke-Uv", "Invoke-UvPipInstall")}
+$before = [string][Diagnostics.Process]::GetCurrentProcess().PriorityClass
+if (-not (Invoke-UvPipInstall @('pip', 'install'))) {{ throw 'install failed' }}
+[void](Invoke-Uv @('venv', 'x') -Quiet)
+"SEEN=$($script:seen -join ',')"
+"AFTER=$([Diagnostics.Process]::GetCurrentProcess().PriorityClass) BEFORE=$before"
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "SEEN=BelowNormal,BelowNormal" in out, out
+    if os.name == "nt":
+        # Only Windows lets a process raise its priority back unprivileged.
+        before = re.search(r"BEFORE=(\w+)", out).group(1)
+        assert f"AFTER={before}" in out, out
+    new_venv = _ps1_function("New-Venv")
+    assert "Invoke-Native $Uv" not in new_venv and "Invoke-Native $Uv" not in _ps1_function("Invoke-UvPipInstall")
+
+
+def test_the_staged_release_checks_run_below_normal_priority() -> None:
+    # GAP-0008: one registered call waited 9.97 s while the previous gateway
+    # still ran, in the window after uv when the staged CLI first starts and
+    # runs its migrate check (a fresh venv: thousands of first imports, each
+    # scanned). Those checks only read the staged release, so they yield to
+    # the running gateway as uv does.
+    text = _text()
+    staging = text[text.index('$stagedCli = Join-Path $Staging "venv\\Scripts\\defenseclaw.exe"') :]
+    staging = staging[: staging.index('Write-Ok "DefenseClaw $Ver is staged and checked"')]
+    assert 'Invoke-BelowNormal { Get-NativeOutput $stagedCli @("--version") }' in staging
+    assert "Invoke-BelowNormal { Invoke-Native $stagedCli $checkArgs }" in staging
+    assert "Invoke-Native $stagedCli" not in staging.replace("Invoke-BelowNormal { Invoke-Native $stagedCli", "")
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_retried_package_install_reinstalls_what_a_failed_attempt_half_copied() -> None:
+    # GAP-1555: attempts 1-3 of the final environment failed on a held
+    # wheel (os error 5) after copying typing_extensions' dist-info but not
+    # typing_extensions.py; attempt 4 saw the package as installed, returned
+    # 0, and the install said Installed with a broken CLI. Every retry
+    # reinstalls the step's packages from the cache.
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$script:calls = @()
+function Invoke-Uv([string[]]$UvArgs, [switch]$Quiet) {{ $script:calls += ($UvArgs -join ' '); if ($script:calls.Count -lt 3) {{ return 2 }}; return 0 }}
+function Test-DiskFull {{ return $false }}
+function Write-Warn([string]$m) {{ }}
+function Start-Sleep {{ param([int]$Seconds) }}
+{_ps1_function("Invoke-UvPipInstall")}
+if (-not (Invoke-UvPipInstall @('pip', 'install', '-r', 'req.txt'))) {{ throw 'install failed' }}
+$script:calls | ForEach-Object {{ "CALL=$_" }}
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    calls = re.findall(r"CALL=(.*)", out)
+    assert calls == ["pip install -r req.txt", "pip install -r req.txt --reinstall", "pip install -r req.txt --reinstall"], out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("old", ["deletable", "undeletable", "unmovable", "parked-data-stuck", "own-busy"])
+def test_a_finished_install_never_leaves_previous_new_behind(tmp_path: Path, old: str) -> None:
+    # GAP-1860 (and the residue half of GAP-1555): Complete-Swap deleted the
+    # old previous\ and renamed previous.new into it in one quiet step. An
+    # old previous\ this account cannot delete (SYSTEM-owned after an
+    # administrator's restore) stopped it with "Access is denied", left
+    # previous.new, and the next install refused ("not proven back") until
+    # -AcceptCurrentInstall. The old copy is set aside whole; one this account
+    # can neither delete nor rename (SYSTEM owner, no entry for the user: the
+    # verify round's i62/i63) stays, and this install's copy is kept beside
+    # it, with no raw exception. A previous.new that a finished install left
+    # (SWAPPED) is finished by the next run instead of undone. A set-aside
+    # copy is .failed-kept-previous-*: this restore's sweep keeps it (R2-1),
+    # and the .failed-* name is install machinery to the 1.0.2-1.0.4
+    # installers too, so an older installer never carries it as data
+    # (GAP-2055). This
+    # account's own previous\ that is only in use (a console's current folder
+    # inside it) is not another account's: the step stops, previous.new stays
+    # for the next run, and nothing is kept beside it (GAP-2054). A normal
+    # publish removes this account's superseded kept copies.
+    data = tmp_path / "data"
+    (data / "previous" / "bin").mkdir(parents=True)
+    (data / "previous" / "VERSION").write_text("1.0.2", encoding="ascii")
+    (data / "previous.new" / "bin").mkdir(parents=True)
+    (data / "previous.new" / "VERSION").write_text("1.0.4", encoding="ascii")
+    (data / ".failed-kept-previous-20261020T000000-new").mkdir()
+    remove = "Remove-Item -LiteralPath $Path -Recurse -Force"
+    if old != "deletable":
+        remove = "if ($Path -eq $Previous) { throw 'Access is denied.' }; " + remove
+    move_guard = "if ($From -eq $Previous) { throw 'Access to the path is denied.' }" if old in ("unmovable", "own-busy") else ""
+    if old == "own-busy":
+        remove = "if ($Path -eq $Previous) { throw 'The process cannot access the file because it is being used by another process.' }; " + "Remove-Item -LiteralPath $Path -Recurse -Force"
+    owned = "$true" if old == "own-busy" else "$false"
+    save = "throw 'data held'" if old == "parked-data-stuck" else ""
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$Previous = Join-Path $DataDir 'previous'
+function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ {remove} }} }}
+function Save-RolledBackData {{ {save} }}
+function Move-Path([string]$From, [string]$To, [int]$Seconds = 10) {{ "MOVE $From $Seconds"; {move_guard} Move-Item -LiteralPath $From -Destination $To }}
+function Test-OwnedByCurrentUser([string]$Path) {{ return {owned} }}
+function Write-Warn([string]$m) {{ "WARN $m" }}
+function Write-Info([string]$m) {{ "INFO $m" }}
+{_ps1_function("Remove-KeptNewCopies")}
+{_ps1_function("Publish-PreviousSlot")}
+try {{ Publish-PreviousSlot (Join-Path $DataDir 'previous.new') }} catch {{ "THROWN $($_.Exception.Message)" }}
+'OK'
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "OK" in out, out
+    if old == "own-busy":
+        assert f"MOVE {data / 'previous'} 10" in out, out
+        assert "THROWN Could not replace the older rollback copy" in out and "next install finishes this" in out, out
+        assert (data / "previous.new" / "VERSION").read_text(encoding="ascii") == "1.0.4", out
+        assert (data / ".failed-kept-previous-20261020T000000-new").exists() and "belongs to another account" not in out, out
+        assert sorted(path.name for path in data.glob(".failed-kept-previous-*")) == [".failed-kept-previous-20261020T000000-new"], out
+        return
+    assert "THROWN" not in out, out
+    assert not (data / "previous.new").exists()
+    assert not [path for path in data.glob(".failed-*") if not path.name.startswith(".failed-kept-previous-")], out
+    asides = sorted(path.name for path in data.glob(".failed-kept-previous-*") if not path.name.endswith("-new"))
+    if old == "unmovable":
+        assert (data / "previous" / "VERSION").read_text(encoding="ascii") == "1.0.2"
+        kept = sorted(path.name for path in data.glob(".failed-kept-previous-*-new"))
+        assert len(kept) == 1 and kept[0] != ".failed-kept-previous-20261020T000000-new", out
+        assert (data / kept[0] / "VERSION").read_text(encoding="ascii") == "1.0.4", out
+        assert asides == [] and "belongs to another account" in out and "Exception" not in out, out
+        return
+    assert (data / "previous" / "VERSION").read_text(encoding="ascii") == "1.0.4"
+    assert not (data / ".failed-kept-previous-20261020T000000-new").exists(), out
+    if old == "deletable":
+        assert asides == [] and "WARN" not in out, out
+    else:
+        assert len(asides) == 1 and (data / asides[0] / "VERSION").read_text(encoding="ascii") == "1.0.2", out
+        assert ("Access is denied." if old == "undeletable" else "data held") in out and "cmd /c rd /s /q" in out, out
+    swap = _ps1_function("Complete-Swap")
+    assert swap.index('"SWAPPED"') < swap.index('Join-Path $Snap "COMPLETE"')
+    assert "Publish-PreviousSlot $Snap" in swap and "Remove-Tree $Previous" not in swap
+    resume = _text()[_text().index("$swapped = @(@((Join-Path $DataDir \"previous.new\")") :][:2200]
+    assert '-or ($swapped.Count -and -not $manifest)' in resume and "Publish-PreviousSlot $slot" in resume
+    # A resume that stops again keeps SWAPPED (GAP-2054).
+    assert '"GATEWAY_RESTART_UNPROVEN", "SWAPPED")' not in resume, resume
+    assert 'Publish-PreviousSlot $slot\n                Remove-Item -LiteralPath (Join-Path $Previous "SWAPPED")' in resume, resume
+    # Neither is data, so no later snapshot carries it, and the restore's
+    # sweep of .failed-* folders does not take a kept rollback copy.
+    head = _text()[: _text().index("$NotData") + 200]
+    assert '".failed-*"' in head and "kept-previous" not in head
+    restore = _ps1_function("Restore-Slot")
+    assert '-Filter ".failed-*"' in restore and '-notlike ".failed-kept-*"' in restore
+    # Every name this installer sets aside is machinery to the released
+    # installers' data lists (1.0.2-1.0.4 list .failed-*, not .kept-*).
+    publish = _ps1_function("Publish-PreviousSlot")
+    names = re.findall(r'Join-Path \$DataDir "(\.[a-z-]+)', publish)
+    assert names and all(name.startswith(".failed-kept-previous-") for name in names), names
+
+
+def test_the_fail_mode_hold_outlasts_the_installers_own_steps() -> None:
+    # GAP-0311: the hold took the 2 minute default from its start, before the
+    # rollback copy, the hook swap and the drain of old calls; on a busy host
+    # it had run out by the time the gateway stopped ("the gateway was still
+    # running after 2m0s") and the upgrade was undone. The installers end or
+    # stop the hold themselves, so it is given their own bound.
+    hold = _ps1_function("Start-HookFailModeHold")
+    assert "--hold-timeout 10m --hold-until-exit $GatewayId" in hold
+    sh = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    assert '--hold-timeout 10m --hold-until-exit "$1"' in sh
+
+
 # ── 1.0.4 (W4b loop round 1) ────────────────────────────────────────────────
 
 
 def _restore_case_functions() -> str:
     names = (
-        "Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace", "Copy-BinDir", "Restore-BinDir",
+        "Get-Sha256", "Install-File", "Publish-File", "Switch-InPlace", "Copy-BinDir", "Clear-AsideCopies", "Restore-BinDir",
         "Assert-BinDirRestored", "Move-Path", "Get-DataEntries", "Test-ConnectorRecoveryArtifactName",
         "Restore-Slot", "Invoke-Quietly",
         "Read-Text", "Restore-ExternalConfig", "Undo-HookFirst", "Undo-Snapshot",
-        "Install-HookFirst", "Save-HookCloser", "Clear-StagedRelease", "Resume-InterruptedRun",
+        "Install-HookFirst", "Save-HookCloser", "Clear-StagedRelease", "Resume-InterruptedRun", "Publish-PreviousSlot",
         "Remove-Hold", "Restore-Live", "Restore-LiveTree", "Move-LiveTo", "Set-RecoveryPending",
     )
     return "\n".join(_ps1_function(name) for name in names)
@@ -5116,6 +5625,34 @@ def test_a_restore_a_running_hook_refuses_keeps_the_snapshot_and_never_claims_re
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_restore_under_steady_hook_traffic_finishes_in_one_run(tmp_path: Path) -> None:
+    # GAP-0311/0732: the automatic restore of the previous install could not
+    # put the old hook back while registered calls kept the new image mapped
+    # (Replace: Access is denied), so the install stayed locked with its
+    # hooks closed until a quiet rerun. The running image is renamed aside.
+    data, bin_dir, slot = tmp_path / "data", tmp_path / "bin", tmp_path / "data" / "previous.new"
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        _write(bin_dir / name, "new " + name)
+        _write(slot / "bin" / name, "old " + name)
+    _write(slot / "COMPLETE", "")
+    _write(data / "config.yaml", "new data")
+    _write(slot / "data" / "config.yaml", "old data")
+    out = _restore_case(
+        tmp_path,
+        "function Invoke-AsideReplace([string]$New, [string]$Destination) {\n"
+        "    $aside = \"$Destination.old-1\"; [IO.File]::Move($Destination, $aside); [IO.File]::Move($New, $Destination)\n}\n"
+        f"try {{ Restore-Slot '{slot}' | Out-Null; Write-Output 'RESTORED' }} catch {{ Write-Output \"REFUSED: $($_.Exception.Message)\" }}",
+    )
+    assert "RESTORED" in out and "REFUSED" not in out, out
+    assert not slot.exists()
+    for name in ("defenseclaw-gateway.exe", "defenseclaw-hook.exe"):
+        assert (bin_dir / name).read_text(encoding="ascii") == "old " + name
+    # The image renamed aside goes once nothing maps it; here nothing does (GAP-1760).
+    assert not (bin_dir / "defenseclaw-hook.exe.old-1").exists()
+    assert (data / "config.yaml").read_text(encoding="ascii") == "old data"
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 @pytest.mark.parametrize("case", ["switch-left-new-bytes", "extra-file-stays"])
 def test_restore_bin_dir_proves_the_saved_bytes_before_it_returns(tmp_path: Path, case: str) -> None:
     # A switch that reports success but leaves other bytes, or a file the
@@ -5199,7 +5736,7 @@ def _close_mocks(capable: str = "new ", close_rc: int = 0, running: bool = False
         "function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Quiet) {\n"
         "    Write-Host \"RAN: $FilePath $($Arguments -join ' ')\"\n"
         f"    return {close_rc}\n}}\n"
-        + _resume_functions("Get-InstallGatewayState")
+        + _resume_functions("Get-GatewayProcessesUnder", "Get-InstallGatewayState")
         + _ps1_function("Close-UnfinishedInstallHooks")
         + _ps1_function("Close-AllHooks")
     )
@@ -5324,7 +5861,7 @@ def test_a_failed_run_closes_unfinished_hooks_while_it_still_holds_the_lock() ->
     assert "if ($name -eq $gatewayName -and $refused.Count) { continue }" in restore
     assert "Save-HookCloser" not in _ps1_function("Restore-Snapshot")
     swap = _ps1_function("Complete-Swap")
-    assert swap.index('Remove-Tree (Join-Path $Snap "closer")') < swap.index("Move-Path $Snap $Previous")
+    assert swap.index('Remove-Tree (Join-Path $Snap "closer")') < swap.index("Publish-PreviousSlot $Snap")
 
 
 @pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="requires Windows executable replacement")
@@ -5647,7 +6184,7 @@ def _txn_harness(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
         "    return @($script:images | Where-Object { $image = $_.ExecutablePath\n"
         "        @($Prefixes | Where-Object { $image.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count })\n"
         "}\n"
-        + _resume_functions("Get-InstallGatewayState")
+        + _resume_functions("Get-GatewayProcessesUnder", "Get-InstallGatewayState")
         + "\n"
         + body,
         encoding="utf-8",
@@ -5800,6 +6337,7 @@ function Die { param($Message) throw $Message }
 function Invoke-Quietly { param([scriptblock]$Action) try { & $Action } catch { } }
 function Remove-Tree { param($Path) if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force } }
 function Move-Path { param($From, $To, $Seconds) Move-Item -LiteralPath $From -Destination $To }
+function Publish-PreviousSlot { param([string]$Slot, [switch]$KeepOld) Remove-Tree $Previous; Move-Path $Slot $Previous }
 function Find-SetupInstall { return $null }
 function Clear-SetupDataDir { param($Failed) }
 function Remove-FailedInstall { param($Failed) }
@@ -6748,6 +7286,37 @@ def test_windows_entry_resolution_follows_a_parent_link(tmp_path: Path) -> None:
     assert result.stdout.strip().lower() == str(entry.resolve()).lower(), result.stdout
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_windows_npm_opencode_exe_that_is_a_hard_link_is_the_recorded_entry(tmp_path: Path) -> None:
+    # GAP-1397: npm's opencode-ai installs bin\opencode.exe as a hard link to
+    # its platform package's binary. Get-Item reports LinkType HardLink with
+    # no Target, and Resolve-AgentPath took that for an unreadable link: the
+    # running OpenCode was never named and the upgrade swapped the gateway.
+    roaming, data = tmp_path / "roaming", tmp_path / "data"
+    data.mkdir()
+    platform = roaming / "npm" / "node_modules" / "opencode-windows-x64" / "bin" / "opencode.exe"
+    platform.parent.mkdir(parents=True)
+    platform.write_bytes(b"MZ native opencode")
+    native = roaming / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
+    native.parent.mkdir(parents=True)
+    os.link(platform, native)
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        + _ps1_function("Resolve-AgentPath") + _ps1_function("Get-InstalledAgentPrograms")
+        + f"$env:USERPROFILE = '{tmp_path / 'profile'}'\n$env:APPDATA = '{roaming}'\n"
+        + f"$env:LOCALAPPDATA = '{tmp_path / 'local'}'\n$DataDir = '{data}'\n"
+        + f"'link=' + (Get-Item -LiteralPath '{native}' -Force).LinkType\n"
+        + f"'resolved=' + (Resolve-AgentPath '{native}')\n"
+        + "$i = Get-InstalledAgentPrograms\nforeach ($k in @($i.Keys | Sort-Object)) { '{0}={1}' -f $k, $i[$k] }\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "link=HardLink" in result.stdout, result.stdout
+    assert f"resolved={native}".lower() in result.stdout.lower(), result.stdout
+    assert f"{str(native).lower()}=opencode" in result.stdout, result.stdout
+
+
 @pytest.mark.skipif(os.name != "nt" or POWERSHELL is None or shutil.which("node") is None, reason="native Windows Node required")
 @pytest.mark.allow_subprocess
 def test_windows_relative_node_entry_does_not_use_the_installers_cwd(tmp_path: Path) -> None:
@@ -6847,7 +7416,12 @@ def test_install_ps1_takes_over_a_lock_whose_pid_was_reused() -> None:
     assert "$process = $null" in owner
     # An exited installer whose process object a handle keeps is gone (round l).
     assert "$process.HasExited" in owner
-    assert "LastWriteTime" not in owner and "AddSeconds" not in owner
+    assert "LastWriteTime" not in owner
+    # GAP-1465 (lead decision 13:58): a record-less 1.0.2/1.0.3 lock whose pid
+    # names a process started after the lock folder was made is stale.
+    legacy = owner[owner.index("} elseif ($process) {") :]
+    assert "$process.StartTime.ToUniversalTime() -gt (Get-Item -LiteralPath $Lock -Force).CreationTimeUtc.AddSeconds(2)" in legacy
+    assert legacy.index("CreationTimeUtc") < legacy.index("$process = $null")
     write = text.index('Set-Content -LiteralPath (Join-Path $LockDir "pid") -Value $PID -Encoding Ascii')
     take = text.rindex("    $taken = $false\n", 0, write)
     block = text[take:write]
@@ -6937,3 +7511,361 @@ Resolve-DcPathVariables
     assert lines["HOME"] == want(want_home)
     assert lines["CONFIG"] == want(want_config)
     assert lines["ABS"] == absolute
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("tui", [False, True])
+def test_the_gateways_own_scans_do_not_hold_up_an_upgrade_or_rollback(tmp_path: Path, tui: bool) -> None:
+    # GAP-2000 (r105 install-window round 3, a4-win1): right after an upgrade
+    # the gateway rescans every plugin (scanner-fingerprint-changed), each scan
+    # a defenseclaw.exe -> venv python child of the gateway. The documented
+    # `install.ps1 -Rollback -Yes` then waited 60 s and refused: "DefenseClaw
+    # is in use by defenseclaw.exe (pid 12544), python.exe (pid 10772). Close
+    # it (for example the DefenseClaw TUI)". Those are the gateway's own
+    # processes, which Stop-Gateway ends; a program the user runs still stops it.
+    bin_dir = tmp_path / "bin"
+    venv = tmp_path / "data" / ".venv"
+    (venv / "Scripts").mkdir(parents=True)
+    bin_dir.mkdir()
+    rows = [
+        (10, 1, str(bin_dir / "defenseclaw-gateway.exe"), "defenseclaw-gateway.exe", 100),
+        (11, 10, str(bin_dir / "defenseclaw.exe"), "defenseclaw.exe", 200),
+        (12, 11, f"{venv}\\Scripts\\python.exe", "python.exe", 201),
+        # An older process whose parent pid the gateway reused: not a scan.
+        (13, 10, f"{venv}\\Scripts\\python.exe", "python.exe", 50) if tui else None,
+    ]
+    rows = [row for row in rows if row]
+    objects = ",".join(
+        f"[pscustomobject]@{{ ProcessId = {pid}; ParentProcessId = {ppid}; ExecutablePath = '{image}'; Name = '{name}';"
+        f" CreationDate = [datetime]::new(2026, 10, 26).AddSeconds({born}) }}"
+        for pid, ppid, image, name, born in rows
+    )
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$BinDir = '{bin_dir}'
+$Venv = '{venv}'
+$script:sleeps = 0
+function Get-CimInstance {{ param($ClassName, $ErrorAction, $ErrorVariable) @({objects}) }}
+function Move-Path([string]$From, [string]$To, [int]$Seconds = 10) {{ throw 'The process cannot access the file' }}
+function Start-Sleep {{ param([int]$Seconds) $script:sleeps++ }}
+function Write-Info([string]$m) {{ "INFO $m" }}
+function Die([string]$m) {{ throw "DIE $m" }}
+{_ps1_function("Get-ProcessesUnder")}
+{_ps1_function("Get-GatewayDescendants")}
+{_ps1_function("Wait-VenvFree")}
+"SCANS=$((Get-GatewayDescendants | ForEach-Object {{ $_.ProcessId }}) -join ',')"
+try {{ Wait-VenvFree; "FREE sleeps=$script:sleeps" }} catch {{ "$($_.Exception.Message)" }}
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "SCANS=11,12" in out, out
+    if tui:
+        assert "DIE DefenseClaw is in use by python.exe (pid 13)" in out, out
+        assert "pid 11" not in out and "pid 12" not in out, out
+    else:
+        assert "FREE sleeps=0" in out, out
+    stop = _ps1_function("Stop-Gateway")
+    assert stop.index("$scans = @(Get-GatewayDescendants)") < stop.index('@("stop")')
+    assert stop.index("Stop-Watchdog\n    foreach ($scan in $scans)") > stop.index('@("stop")')
+
+
+def _outage_notice_python() -> tuple[str, str]:
+    sh = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    body = sh[sh.index("outage_open_notice() {") :]
+    body = body[body.index("<<'PY' 2>/dev/null || true\n") + len("<<'PY' 2>/dev/null || true\n") :]
+    sh_py = body[: body.index("\nPY\n") + 1]
+    ps = _text()
+    ps_py = ps[ps.index("$OutageOpenNoticePython = @'\n") + len("$OutageOpenNoticePython = @'\n") :]
+    ps_py = ps_py[: ps_py.index("'@\n")]
+    return sh_py, ps_py
+
+
+@pytest.mark.allow_subprocess
+def test_the_outage_notice_runs_under_the_installers_readonly_home(tmp_path: Path) -> None:
+    # GAP-0016: install.sh declares DEFENSECLAW_HOME readonly (and exports
+    # it); outage_open_notice assigned it again as a command prefix, so every
+    # upgrade from 1.0.2/1.0.3 printed "DEFENSECLAW_HOME: readonly variable"
+    # (and bash versions that skip the command never printed the notice).
+    # Run the real function under the installer's own declarations.
+    sh = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    start = sh.index("outage_open_notice() {")
+    func = sh[start : sh.index("\nPY\n}\n", start) + len("\nPY\n}\n")]
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    stub = venv / "bin" / "python"
+    stub.write_text('#!/bin/sh\ncat >/dev/null\necho "notice home=$DEFENSECLAW_HOME"\n', encoding="utf-8")
+    stub.chmod(0o755)
+    home = tmp_path / "home"
+    script = (
+        "set -euo pipefail\n"
+        f"readonly DEFENSECLAW_HOME={str(home)!r}\nexport DEFENSECLAW_HOME\n"
+        f"readonly VENV={str(venv)!r}\n" + func + 'echo "got=[$(outage_open_notice)]"\n'
+    )
+    env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_HOME"}
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "readonly" not in result.stderr, result.stderr
+    assert result.stdout.strip() == f"got=[notice home={home}]", result.stdout + result.stderr
+    # No other assignment to a readonly installer variable (the class; the
+    # sed that reads a stamped installer quotes the declaration itself).
+    names = re.findall(r"^readonly ([A-Z_][A-Z0-9_]*)=", sh, flags=re.M)
+    for name in names:
+        decl = sh.index(f"readonly {name}=")
+        later = sh[decl + len(f"readonly {name}=") :]
+        hits = [m.group(0) for m in re.finditer(rf"(?m)(?:^|[\s;(&|])(?<!readonly ){name}=", later)]
+        assert not hits, (name, hits)
+
+
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("guardrail", "notice"),
+    [
+        ("  connectors:\n    claudecode: {}\n    codex: {}\n", True),
+        ("  hook_fail_mode: closed\n  connectors:\n    claudecode: {}\n", False),
+        ("  hook_fail_mode: open\n  connectors:\n    claudecode: {}\n", False),
+        ("  connectors:\n    claudecode:\n      hook_fail_mode: closed\n    codex: {}\n", False),
+        ("  rule_pack: strict\n  connectors:\n    claudecode: {}\n", False),
+    ],
+    ids=["unset", "saved-closed", "saved-open", "connector-closed", "strict"],
+)
+def test_an_upgrade_from_1_0_3_says_once_that_outages_now_run(tmp_path: Path, guardrail: str, notice: bool) -> None:
+    # GAP-1885 (lead 13:58, failmode's exact sentence): a 1.0.2 or 1.0.3
+    # config that saves no hook fail mode blocked calls during a gateway
+    # outage; after the upgrade the default and permissive tiers let them
+    # run with a warning (owner decision 2026-10-23). Both installers say so
+    # once, after "Upgraded from"; a saved mode (which now wins), the strict
+    # tier, a managed install or an upgrade from 1.0.4 say nothing.
+    sh_py, ps_py = _outage_notice_python()
+    assert sh_py == ps_py
+    home = tmp_path / ".defenseclaw"
+    home.mkdir()
+    (home / "config.yaml").write_text("guardrail:\n  enabled: true\n  mode: action\n" + guardrail, encoding="utf-8")
+    env = {**os.environ, "DEFENSECLAW_HOME": str(home)}
+    env.pop("DEFENSECLAW_CONFIG", None)
+    result = subprocess.run([sys.executable, "-I", "-"], input=sh_py, capture_output=True, text=True, env=env, timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert (result.stdout.strip() == "notice") is notice, result.stdout + result.stderr
+    sentence = (
+        "Gateway outages now let calls run with a warning (the default and permissive policies). "
+        "Run `defenseclaw guardrail fail-mode closed` to keep blocking them."
+    )
+    sh = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    summary = sh[sh.index('changed="Upgraded from ${PREV_VERSION}"') :][:1200]
+    assert 'version_lt "${PREV_VERSION}" 1.0.4 && version_lt "${PREV_VERSION}" "${VERSION}" && [[ "$(outage_open_notice)" == notice ]]' in summary
+    assert f"printf '  %s\\n' '{sentence}'" in summary
+    ps = _text()
+    summary = ps[ps.index('$changed = "Upgraded from $PrevVersion"') :][:900]
+    assert '[version]$PrevVersion -lt [version]"1.0.4" -and [version]$PrevVersion -lt [version]$Ver -and (Test-OutageOpenNotice)' in summary
+    assert f"Write-Host ('  ' + '{sentence}')" in summary
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    "case", ["launcher-guard", "refused-cold-start", "watchdog", "unreadable-command-line", "gateway-pid"]
+)
+def test_hook_calls_that_run_the_gateway_image_do_not_refuse_the_upgrade(case: str) -> None:
+    # GAP-2053: a one-line install's Claude Code PreToolUse handler runs
+    # <bin>\defenseclaw-gateway.exe launcher-guard for every tool call, and a
+    # 1.0.2-1.0.4 hook's refused cold start runs the gateway image for a
+    # moment. Under steady hook traffic one of them was often running when
+    # the installer checked, and the upgrade (or rollback) refused "the
+    # current gateway or watchdog is still running"; Stop-Watchdog killed the
+    # call. Only a process that stays (the gateway or its watchdog), or one
+    # whose command line cannot be read, still refuses.
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$BinDir = Join-Path ([IO.Path]::GetTempPath()) 'defenseclaw-2053-bin'
+$gateway = Join-Path $BinDir 'defenseclaw-gateway.exe'
+$script:look = 0
+$script:killed = @()
+$script:case = '{case}'
+function Start-Sleep {{ param($Seconds, $Milliseconds) $script:look++ }}
+function Get-GatewayProcess {{ if ($script:case -eq 'gateway-pid') {{ return [pscustomobject]@{{ Id = 9 }} }} }}
+function Get-ProcessesUnder {{ param([string[]]$Prefixes)
+    $rows = @()
+    switch ($script:case) {{
+        'launcher-guard' {{ $rows += [pscustomobject]@{{ ProcessId = 50; ExecutablePath = $gateway;
+            CommandLine = "`"$gateway`" launcher-guard C:\\Users\\u\\.local\\bin\\defenseclaw-hook.exe hook --connector claudecode" }} }}
+        'refused-cold-start' {{ if ($script:look -eq 0) {{ $rows += [pscustomobject]@{{ ProcessId = 60; ExecutablePath = $gateway;
+            CommandLine = "$gateway start --hook-cold-start" }} }} }}
+        'watchdog' {{ $rows += [pscustomobject]@{{ ProcessId = 70; ExecutablePath = $gateway; CommandLine = "$gateway watchdog run" }} }}
+        'unreadable-command-line' {{ $rows += [pscustomobject]@{{ ProcessId = 80; ExecutablePath = $gateway }} }}
+    }}
+    @($rows | Where-Object {{ $image = $_.ExecutablePath; @($Prefixes | Where-Object {{ $image.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }}).Count }})
+}}
+function Stop-Process {{ param($Id, [switch]$Force, $ErrorAction) $script:killed += [int]$Id }}
+function Invoke-Native {{ param($FilePath, $Arguments, [switch]$Quiet) return 0 }}
+function Write-Info([string]$m) {{ "INFO $m" }}
+function Write-Warn([string]$m) {{ "WARN $m" }}
+{_resume_functions("Get-GatewayProcessesUnder", "Stop-Watchdog", "Assert-GatewayQuiescent")}
+try {{ Assert-GatewayQuiescent 'Version change to 1.0.5'; 'QUIET' }} catch {{ "REFUSED $($_.Exception.Message)" }}
+$script:look = 0
+Stop-Watchdog
+"KILLED=$($script:killed -join ',')"
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    if case in ("launcher-guard", "refused-cold-start"):
+        assert "QUIET" in out and "REFUSED" not in out, out
+    else:
+        assert "REFUSED Version change to 1.0.5 refused: the current gateway or watchdog is still running" in out, out
+    if case == "launcher-guard":
+        # The guard is an agent's call in flight: never stopped or killed.
+        assert "Stopping the watchdog" not in out and "KILLED=\n" in out + "\n", out
+    if case == "watchdog":
+        assert "INFO Stopping the watchdog" in out and "KILLED=70" in out, out
+
+
+# GAP-2056 (install-window round 3 review): the GAP-1465 lock rule of
+# Get-InstallLockLiveOwner runs in PowerShell, not only as source text. A lock
+# without a proc-start record (1.0.2, 1.0.3, released 1.0.4) whose pid names a
+# PowerShell that started after the lock folder was made is a reused pid (""),
+# one made after its PowerShell started keeps it, and a proc-start record
+# decides however old the folder is. On Windows the folder's real
+# CreationTime is set; where it cannot be set (Linux) Get-Item is stubbed.
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("case", "want"),
+    [("lock-older-than-its-powershell", "stale"), ("lock-made-after-its-powershell", "held"), ("recorded-old-lock", "held")],
+)
+def test_get_install_lock_live_owner_takes_over_a_record_less_lock_whose_powershell_started_later(
+    tmp_path: Path, case: str, want: str
+) -> None:
+    lock = tmp_path / ".install.lock"
+    script = (
+        _ps1_function("Get-InstallLockLiveOwner")
+        + f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$Lock = '{lock}'
+$case = '{case}'
+New-Item -ItemType Directory -Path $Lock | Out-Null
+$engine = (Get-Process -Id $PID).Path
+$owner = Start-Process -FilePath $engine -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 90' -PassThru
+try {{
+    $started = (Get-Process -Id $owner.Id).StartTime.ToUniversalTime()
+    Set-Content -LiteralPath (Join-Path $Lock 'pid') -Value $owner.Id -Encoding Ascii
+    if ($case -eq 'recorded-old-lock') {{
+        Set-Content -LiteralPath (Join-Path $Lock 'proc-start') -Value ([string](Get-Process -Id $owner.Id).StartTime.ToFileTimeUtc()) -Encoding Ascii
+    }}
+    $created = if ($case -eq 'lock-made-after-its-powershell') {{ $started.AddSeconds(30) }} else {{ $started.AddHours(-1) }}
+    try {{ (Get-Item -LiteralPath $Lock -Force).CreationTimeUtc = $created }} catch {{ }}
+    if ([Math]::Abs(((Get-Item -LiteralPath $Lock -Force).CreationTimeUtc - $created).TotalSeconds) -gt 1) {{
+        $script:fakeCreated = $created
+        function Get-Item {{ param([string]$LiteralPath, [switch]$Force) [pscustomobject]@{{ CreationTimeUtc = $script:fakeCreated }} }}
+        Write-Output 'creation:stub'
+    }} else {{
+        Write-Output 'creation:real'
+    }}
+    $holder = Get-InstallLockLiveOwner $Lock
+    $result = if ($holder -eq [string]$owner.Id) {{ 'held' }} elseif ($holder -eq '') {{ 'stale' }} else {{ "other:$holder" }}
+    Write-Output "result:$result"
+}} finally {{
+    Stop-Process -Id $owner.Id -Force -ErrorAction SilentlyContinue
+}}
+"""
+    )
+    result = _run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = result.stdout.split()
+    if os.name == "nt":
+        assert "creation:real" in lines, result.stdout
+    assert f"result:{want}" in lines, result.stdout + result.stderr
+
+
+# GAP-2056: Test-OutageOpenNotice (GAP-1885) runs in PowerShell under the
+# installer's StrictMode and ErrorActionPreference Stop, with the notice
+# Python fed to a python.exe in $Venv\\Scripts. A Python that also writes to
+# stderr (a warning) must not lose the notice: Windows PowerShell 5.1 turns a
+# native stderr line into an error record under Stop.
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("guardrail", "stderr", "notice"),
+    [
+        ("  connectors:\n    claudecode: {}\n", False, True),
+        ("  connectors:\n    claudecode: {}\n", True, True),
+        ("  hook_fail_mode: closed\n  connectors:\n    claudecode: {}\n", True, False),
+    ],
+    ids=["unset", "unset-with-stderr", "saved-closed-with-stderr"],
+)
+def test_test_outage_open_notice_runs_in_powershell(tmp_path: Path, guardrail: str, stderr: bool, notice: bool) -> None:
+    _, ps_py = _outage_notice_python()
+    if stderr:
+        ps_py += 'import sys as _gap2056_sys\n_gap2056_sys.stderr.write("DeprecationWarning: a warning on stderr\\n")\n'
+    home = tmp_path / ".defenseclaw"
+    home.mkdir()
+    (home / "config.yaml").write_text("guardrail:\n  enabled: true\n  mode: action\n" + guardrail, encoding="utf-8")
+    if os.name == "nt":
+        venv = Path(sys.executable).parent.parent
+        assert (venv / "Scripts" / "python.exe").is_file(), sys.executable
+    else:
+        venv = tmp_path / "venv"
+        stub = venv / "Scripts" / "python.exe"
+        stub.parent.mkdir(parents=True)
+        stub.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+        stub.chmod(0o755)
+    py_file = tmp_path / "notice.py"
+    py_file.write_text(ps_py, encoding="utf-8")
+    script = (
+        _ps1_function("Test-OutageOpenNotice")
+        + f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
+Remove-Item Env:DEFENSECLAW_CONFIG -ErrorAction SilentlyContinue
+$Venv = '{venv}'
+$DataDir = '{home}'
+$OutageOpenNoticePython = [IO.File]::ReadAllText('{py_file}')
+Write-Output "notice:$(Test-OutageOpenNotice)"
+Write-Output "home-after:$([bool]$env:DEFENSECLAW_HOME)"
+"""
+    )
+    result = _run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = result.stdout.split()
+    assert f"notice:{notice}" in lines, result.stdout + result.stderr
+    assert "home-after:False" in lines, result.stdout
+
+
+# rel-1-0-5 GAP-0018: the gateway (and the CLI) log a warning on stderr for
+# a config that keeps llm.api_key in plain text. install.ps1 read status
+# --json, policy digest --json and the connector roster from stdout and
+# stderr merged, so no report parsed and every upgrade of such a config
+# restored the old release with all hooks closed. Every JSON probe reads
+# stdout only; the warning still reaches no parser.
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_json_reports_are_read_from_stdout_when_the_gateway_warns_on_stderr(tmp_path: Path) -> None:
+    warning = "WARNING: llm.api_key contains a plain-text secret in config.yaml"
+    report = '{"running": true, "health": {"connectors": [{"name": "claudecode", "state": "running"}]}}'
+    if os.name == "nt":
+        gateway = tmp_path / "defenseclaw-gateway.cmd"
+        gateway.write_text(f"@echo off\r\necho {warning} 1>&2\r\necho {report}\r\n", encoding="ascii")
+    else:
+        gateway = tmp_path / "defenseclaw-gateway"
+        gateway.write_text(f"#!/bin/sh\necho '{warning}' >&2\necho '{report}'\n", encoding="ascii")
+        gateway.chmod(0o755)
+    script = f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+{_ps1_function('Get-NativeProbe')}
+{_ps1_function('Get-GatewayHealthReport')}
+{_ps1_function('Get-Field')}
+{_ps1_function('Get-GuardedConnectors')}
+$r = Get-GatewayHealthReport '{gateway}'
+if (-not $r) {{ throw 'no report' }}
+"guarded:$((Get-GuardedConnectors $r) -join ',')"
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "guarded:claudecode" in result.stdout.split(), result.stdout + result.stderr
+    # Every probe whose output is parsed as JSON reads stdout only.
+    for name in ("Get-GatewayHealthReport", "Get-GatewayDigestProblem", "Get-EffectiveConfigConnectors"):
+        body = _ps1_function(name)
+        parsed = [line for line in body.splitlines() if "$probe = Get-NativeProbe" in line and "--help" not in line]
+        assert parsed and all(line.rstrip().endswith("-Json") for line in parsed), (name, parsed)

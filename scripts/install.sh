@@ -553,16 +553,59 @@ release_locks() {
         rmdir -- "${lock:?}" 2>/dev/null || true
     done
 }
+process_started_epoch() {
+    # process_started_epoch PID: the second process PID started, from the
+    # system's record of it (Linux: boot time + field 22 of /proc/PID/stat;
+    # macOS: ps -o lstart). Fails when the system does not say.
+    local stat fields btime hz lstart
+    if [[ -e /proc/self/stat ]]; then
+        stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+        [[ "${stat}" == *")"* ]] || return 1
+        read -r -a fields <<< "${stat##*)}"
+        [[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 1
+        btime="$(awk '$1 == "btime" { print $2; exit }' /proc/stat 2>/dev/null)"
+        hz="$(getconf CLK_TCK 2>/dev/null)"
+        [[ "${btime}" =~ ^[0-9]+$ && "${hz}" =~ ^[1-9][0-9]*$ ]] || return 1
+        echo $(( btime + fields[19] / hz ))
+        return 0
+    fi
+    [[ "$(uname -s 2>/dev/null)" == Darwin && -x /bin/ps ]] || return 1
+    read -r -a fields <<< "$(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p "$1" 2>/dev/null)"
+    (( ${#fields[@]} == 5 )) || return 1
+    lstart="${fields[*]}"
+    LC_ALL=C TZ=UTC date -j -f "%a %b %d %T %Y" "${lstart}" +%s 2>/dev/null
+}
+lock_created_epoch() {
+    # lock_created_epoch LOCK: the second the lock folder was made (its birth
+    # time), else the second its pid file was written, which every release
+    # writes right after it makes the folder. Fails when neither can be read.
+    local t
+    if [[ "$(uname -s 2>/dev/null)" == Darwin ]]; then
+        t="$(stat -f %B -- "$1" 2>/dev/null)" && [[ "${t}" =~ ^[1-9][0-9]*$ ]] && { echo "${t}"; return 0; }
+        t="$(stat -f %m -- "$1/pid" 2>/dev/null)" && [[ "${t}" =~ ^[0-9]+$ ]] && { echo "${t}"; return 0; }
+        return 1
+    fi
+    t="$(stat -c %W -- "$1" 2>/dev/null)" && [[ "${t}" =~ ^[1-9][0-9]*$ ]] && { echo "${t}"; return 0; }
+    t="$(stat -c %Y -- "$1/pid" 2>/dev/null)" && [[ "${t}" =~ ^[0-9]+$ ]] && { echo "${t}"; return 0; }
+    return 1
+}
 lock_owner_live() {
     # lock_owner_live LOCK HOLDER: the installer HOLDER that wrote LOCK/pid
     # still runs: its pid names a process that is not this one and, when
-    # LOCK/proc-start is there, is the process that record names. No clock
-    # is read. A lock without that record (1.0.2, 1.0.3) is kept while its
-    # pid names a process; so is one whose record or process identity cannot
-    # be read.
-    local recorded current
+    # LOCK/proc-start is there, is the process that record names. A lock
+    # without that record (1.0.2, 1.0.3) is kept while its pid names a
+    # process that started before the lock was made: one that started
+    # later got a reused pid, and the lock is stale (GAP-1465, lead decision
+    # 2026-10-26 13:58; 2 s for the whole-second readings). A record, an
+    # identity or a time that cannot be read keeps the lock.
+    local recorded current started created
     [[ -n "$2" && "$2" != "$$" ]] && pid_running "$2" || return 1
-    [[ -e "$1/proc-start" || -L "$1/proc-start" ]] || return 0
+    if [[ ! -e "$1/proc-start" && ! -L "$1/proc-start" ]]; then
+        started="$(process_started_epoch "$2")" || return 0
+        created="$(lock_created_epoch "$1")" || return 0
+        (( started <= created + 2 ))
+        return
+    fi
     recorded="$(lock_record "$1/proc-start")" || return 0
     current="$(process_identity "$2")" || return 0
     [[ "${recorded}" == "${current}" ]]
@@ -809,25 +852,69 @@ resolved_agent_path() {
     fi
 }
 
+# npm_config_prefixes prints the prefix each npm config names: the
+# environment, the user config (NPM_CONFIG_USERCONFIG, else ~/.npmrc) and
+# the global npmrc (NPM_CONFIG_GLOBALCONFIG, else <node prefix>/etc/npmrc).
+# npm expands ${VAR} and a leading ~ in a value, so this does too (GAP-1761).
+npm_config_prefixes() {
+    local file value name node expanded
+    local -a files
+    printf '%s\n' "${NPM_CONFIG_PREFIX:-${npm_config_prefix:-}}"
+    files=("${NPM_CONFIG_USERCONFIG:-${npm_config_userconfig:-${HOME}/.npmrc}}" "${HOME}/.npmrc")
+    if [[ -n "${NPM_CONFIG_GLOBALCONFIG:-${npm_config_globalconfig:-}}" ]]; then
+        files+=("${NPM_CONFIG_GLOBALCONFIG:-${npm_config_globalconfig:-}}")
+    elif node="$(command -v node 2>/dev/null)" && [[ "${node}" == /* ]]; then
+        node="$(resolved_agent_path "${node}" 2>/dev/null || printf '%s' "${node}")"
+        files+=("${node%/bin/node}/etc/npmrc")
+    fi
+    for file in "${files[@]}"; do
+        [[ -f "${file}" ]] || continue
+        value="$(sed -n 's/^[[:space:]]*prefix[[:space:]]*=[[:space:]]*//p' "${file}" 2>/dev/null | tail -n 1)" || value=""
+        value="${value%"${value##*[![:space:]]}"}"
+        value="${value%\"}"; value="${value#\"}"
+        expanded=0
+        while (( expanded++ < 8 )); do
+            [[ "${value}" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]] || break
+            name="${BASH_REMATCH[1]}"
+            value="${value//\$\{${name}\}/${!name:-}}"
+        done
+        printf '%s\n' "${value/#\~/${HOME}}"
+    done
+}
+
 # The installer's entry evidence: native fixed locations and npm/Bun
-# launcher symlinks to their exact Node entry. A folder name, manifest or
-# command on PATH is not an entry record.
+# launcher symlinks to their exact entry: the Node script, or the native
+# bin/opencode.exe that current opencode-ai links (GAP-1356). The links are
+# looked for in the usual prefixes, npm's configured prefix and each PATH
+# folder. A folder name, manifest or plain command on PATH is not an entry
+# record: only a launcher link to the package's own entry is.
 installed_agent_programs() {
-    local agent name path target base link
+    local agent name path target base link prefix seen=":"
+    local -a bases folders
     for agent in OpenCode:opencode Amp:amp; do
         name="${agent#*:}"
         path="${HOME}/.${name}/bin/${name}"
         target="$(resolved_agent_path "${path}")" || continue
         printf '%s\t%s\n' "${agent%%:*}" "${target}"
     done
-    for agent in OpenCode:opencode Amp:amp; do
-        name="${agent#*:}"
-        for base in "${HOME}/.npm-global/bin" "${HOME}/.local/bin" "${HOME}/.bun/bin" /usr/local/bin /opt/homebrew/bin; do
+    bases=("${HOME}/.npm-global/bin" "${HOME}/.local/bin" "${HOME}/.bun/bin" /usr/local/bin /opt/homebrew/bin)
+    while IFS= read -r prefix; do
+        prefix="${prefix/#\~/${HOME}}"
+        [[ "${prefix}" != /* ]] || bases+=("${prefix%/}/bin")
+    done < <(npm_config_prefixes)
+    IFS=: read -r -a folders <<< "${PATH:-}"
+    for base in ${folders[@]+"${folders[@]}"}; do [[ "${base}" != /* ]] || bases+=("${base%/}"); done
+    for base in "${bases[@]}"; do
+        [[ "${seen}" != *":${base}:"* ]] || continue
+        seen+="${base}:"
+        for agent in OpenCode:opencode Amp:amp; do
+            name="${agent#*:}"
             link="${base}/${name}"
             [[ -L "${link}" ]] || continue
             target="$(resolved_agent_path "${link}")" || continue
             case "${agent}:${target}" in
-                OpenCode:*/node_modules/opencode-ai/bin/opencode | Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
+                OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
+                    Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                     printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
             esac
         done
@@ -846,10 +933,44 @@ runtime_agent_programs() {
         [[ -L "${link}" ]] || continue
         target="$(resolved_agent_path "${link}")" || continue
         case "${agent}:${target}" in
-            OpenCode:*/node_modules/opencode-ai/bin/opencode | Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
+            OpenCode:*/node_modules/opencode-ai/bin/opencode | OpenCode:*/node_modules/opencode-ai/bin/opencode.exe | \
+                Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
                 printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
         esac
     done
+}
+
+# An npm prefix that no config the installer can read names
+# (NPM_CONFIG_USERCONFIG or NPM_CONFIG_PREFIX set only in the agent's own
+# shell, npm --prefix): the running entry's own path names it,
+# <prefix>/lib/node_modules/<package>/... For Node it is the script argument.
+# Only the launcher npm put in <prefix>/bin, resolving to exactly that entry,
+# is evidence, as for a configured prefix (GAP-1761).
+entry_prefix_agent_programs() {
+    local pid="$1" entry="${2% (deleted)}" word agent prefix link target
+    local -a argv=()
+    case "${entry##*/}" in
+        node | nodejs)
+            while IFS= read -r -d '' word; do
+                argv+=("${word}")
+                [[ ${#argv[@]} -ge 2 ]] && break
+            done < <(process_argv "${pid}" 2>/dev/null)
+            [[ ${#argv[@]} -ge 2 && "${argv[1]}" == /* ]] || return 0
+            entry="$(resolved_agent_path "${argv[1]}")" || return 0
+            ;;
+    esac
+    case "${entry}" in
+        */lib/node_modules/opencode-ai/bin/opencode | */lib/node_modules/opencode-ai/bin/opencode.exe)
+            agent=OpenCode:opencode; prefix="${entry%/lib/node_modules/opencode-ai/bin/*}" ;;
+        */lib/node_modules/@sourcegraph/amp/dist/main.js)
+            agent=Amp:amp; prefix="${entry%/lib/node_modules/@sourcegraph/amp/dist/main.js}" ;;
+        *) return 0 ;;
+    esac
+    link="${prefix}/bin/${agent#*:}"
+    [[ -L "${link}" ]] || return 0
+    target="$(resolved_agent_path "${link}")" || return 0
+    [[ "${target}" == "${entry}" ]] && printf '%s\t%s\n' "${agent%%:*}" "${target}"
+    return 0
 }
 
 # One proc_pidpath call per PID in one interpreter on macOS. An absent old
@@ -929,7 +1050,8 @@ agent_of() {
     shift 3
     program="${program% (deleted)}"
     while IFS=$'\t' read -r agent path; do
-        [[ -n "${path}" && "${program}" == "${path}" ]] && { printf '%s' "${agent}"; return 0; }
+        [[ -n "${path}" ]] && { [[ "${program}" == "${path}" ]] || [[ "${program}" -ef "${path}" ]]; } &&
+            { printf '%s' "${agent}"; return 0; }
     done <<< "${installed}"
     case "${program##*/}" in node | nodejs) ;; *) return 0 ;; esac
     [[ $# -ge 2 && -n "$2" ]] || { agent_identity_audit "${pid}" 'Node script argument unavailable'; return 0; }
@@ -947,13 +1069,15 @@ agent_of() {
 }
 
 loaded_plugin_agents() {
-    local pids installed rows runtime pid program agent word fresh
+    local pids installed rows runtime prefixed pid program agent word fresh
     local -a argv
     installed="$(installed_agent_programs)"
     pids="$(ps -u "$(id -u)" -o pid= 2>/dev/null)" || { [[ -z "${installed}" ]] || agent_identity_audit 0 'process list unreadable'; return 0; }
     rows="$(process_programs "${pids}")"
     runtime="$(while IFS=$'\t' read -r pid program; do runtime_agent_programs "${program}"; done <<< "${rows}")"
     [[ -z "${runtime}" ]] || installed+="${installed:+$'\n'}${runtime}"
+    prefixed="$(while IFS=$'\t' read -r pid program; do [[ -z "${program}" ]] || entry_prefix_agent_programs "${pid}" "${program}"; done <<< "${rows}")"
+    [[ -z "${prefixed}" ]] || installed+="${installed:+$'\n'}${prefixed}"
     [[ -n "${installed}" ]] || return 0
     while IFS=$'\t' read -r pid program; do
         [[ "${pid}" =~ ^[0-9]+$ ]] || continue
@@ -962,7 +1086,8 @@ loaded_plugin_agents() {
             continue
         fi
         argv=()
-        case "${program##*/}" in
+        word="${program% (deleted)}"
+        case "${word##*/}" in
             node | nodejs)
                 while IFS= read -r -d '' word; do
                     argv+=("${word}")
@@ -1067,7 +1192,7 @@ hold_hook_fail_modes() {
     HOLD_LOG="${STAGING}/refresh-fail-modes.log"
     : >"${HOLD_LOG}"
     "${STAGING}/bin/defenseclaw-gateway" connector refresh-fail-modes \
-        --hold-until-exit "$1" >"${HOLD_LOG}" 2>&1 &
+        --hold-timeout 10m --hold-until-exit "$1" >"${HOLD_LOG}" 2>&1 &
     HOLD_PID=$!
     while ! grep -q "Holding the hook fail modes" "${HOLD_LOG}" 2>/dev/null; do
         if ! kill -0 "${HOLD_PID}" 2>/dev/null; then
@@ -1644,12 +1769,44 @@ elif [[ "${RUN_QUICKSTART}" == true ]]; then
 fi
 rm -rf "${STAGING}"
 ensure_path_hint
+outage_open_notice() {
+    # An upgrade from 1.0.2 or 1.0.3 of a config that saves no hook fail
+    # mode: gateway outages now run with a warning in the default and
+    # permissive tiers (owner decision 2026-10-23), which those releases
+    # blocked. Said once, after the upgrade (GAP-1885).
+    [[ -x "${VENV}/bin/python" ]] || return 0
+    # DEFENSECLAW_HOME is readonly and already exported: a prefix assignment
+    # of it is an error (GAP-0016).
+    "${VENV}/bin/python" -I - <<'PY' 2>/dev/null || true
+# GAP-1885: "notice" when this config saves no hook fail mode (global or for
+# an active connector) and a per-user connector now lets a gateway outage
+# run (the default and permissive tiers); 1.0.2 and 1.0.3 closed it.
+try:
+    from defenseclaw import config as dc_config
+    cfg = dc_config.load()
+    guard = cfg.guardrail
+    names = list(cfg.active_connectors())
+    if guard.enabled and names and not cfg.managed_outside_secure_client() and not guard.secure_client_hook_fail_modes():
+        saved = bool(getattr(guard, "_hook_fail_mode_saved", False) and str(guard.hook_fail_mode or "").strip())
+        for name in names:
+            override = guard._connector_override(name)
+            if override is not None and str(override.hook_fail_mode or "").strip():
+                saved = True
+        if not saved and any(guard.effective_hook_fail_mode(name) == "open" for name in names):
+            print("notice")
+except Exception:
+    pass
+PY
+}
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
 if [[ -n "${PREV_VERSION}" && "${REPAIR}" != true ]]; then
     changed="Upgraded from ${PREV_VERSION}"
     version_lt "${VERSION}" "${PREV_VERSION}" && changed="Downgraded from ${PREV_VERSION}"
     [[ "${PREV_VERSION}" == "${VERSION}" ]] && changed="Replaced the other build of ${VERSION}"
     printf "  ${changed}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
+    if version_lt "${PREV_VERSION}" 1.0.4 && version_lt "${PREV_VERSION}" "${VERSION}" && [[ "$(outage_open_notice)" == notice ]]; then
+        printf '  %s\n' 'Gateway outages now let calls run with a warning (the default and permissive policies). Run `defenseclaw guardrail fail-mode closed` to keep blocking them.'
+    fi
     if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
         printf "  The audit history ${PREV_VERSION} recorded is not carried over to 1.0; a copy is in ${PREVIOUS}/data/audit.db\n"
     fi
