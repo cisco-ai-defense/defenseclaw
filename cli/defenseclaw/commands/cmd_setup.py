@@ -14759,9 +14759,15 @@ def _guardrail_summary_hook_fail_mode(cfg, connector: str) -> str:
     It is the mode the hooks use (:meth:`GuardrailConfig.effective_hook_outage_fail_mode`),
     never the raw ``hook_fail_mode`` field, which reads ``closed`` in memory
     when nothing is saved. On a per-user install with no saved choice the row
-    also says that the policy tier decides.
+    also says that the policy tier decides. A disabled connector and a
+    proxy-backed one (no hooks) read as ``guardrail status`` shows them
+    (GAP-1963 R6-F1).
     """
     gc = cfg.guardrail
+    if not (gc.enabled and gc.effective_enabled(connector)):
+        return "disabled (no hooks)"
+    if normalize_connector(connector) in PROXY_CONNECTORS:
+        return "closed (proxy-backed, no hooks: blocked while the gateway is down)"
     mode = gc.effective_hook_outage_fail_mode(connector)
     entry = (gc.connectors or {}).get(connector)
     saved = bool(entry is not None and str(entry.hook_fail_mode or "").strip()) or bool(

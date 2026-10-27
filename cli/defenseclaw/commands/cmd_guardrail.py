@@ -918,7 +918,12 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         configured_cfm = gc.effective_hook_fail_mode(name) if hasattr(gc, "effective_hook_fail_mode") else fail_mode
         cfm = configured_cfm
         fail_drift = ""
-        if normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS:
+        if _is_proxy_connector(name):
+            # A proxy-backed connector has no hooks: its model calls fail
+            # while the gateway is down, as `guardrail fail-mode` shows
+            # (GAP-1963 R6-F1). The hook outage mode does not apply.
+            cfm = "closed"
+        elif normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS:
             runtime_state = resolve_connector_fail_mode(app.cfg, name)
             if runtime_state.runtime is not None:
                 cfm = runtime_state.runtime
