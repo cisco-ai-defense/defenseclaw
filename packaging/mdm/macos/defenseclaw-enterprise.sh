@@ -1730,9 +1730,15 @@ dc_rotation_lock() {
             dc_rotation_unlock
             dc_fail_result "$DC_EXIT_BUSY" mdm_secret_failed "another wrapper run holds the credential rotation journal lock $DC_JOURNAL_DIR/.lock; nothing was rotated or put back: run ensure again"
         fi
+        # Say that this run waits, and then once a minute, so a wait of up
+        # to 10 minutes is not read as a hang (GAP-2098).
+        if [ "$dc_waited" -eq 2 ] || { [ "$dc_waited" -gt 2 ] && [ $((dc_waited % 60)) -eq 0 ]; }; then
+            dc_log "waiting for the credential rotation journal lock $DC_JOURNAL_DIR/.lock, which another wrapper run holds (${dc_waited}s of at most 600s)"
+        fi
         sleep 1
         dc_waited=$((dc_waited + 1))
     done
+    [ "$dc_waited" -le 2 ] || dc_log "took the credential rotation journal lock $DC_JOURNAL_DIR/.lock after waiting ${dc_waited}s"
 }
 
 # dc_rotation_unlock: release the rotation journal lock this run holds.

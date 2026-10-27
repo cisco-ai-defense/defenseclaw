@@ -4034,6 +4034,11 @@ def test_unix_wrapper_settles_only_under_the_rotation_lock(tmp_path: Path, os_di
     settle = [i for i, call in enumerate(calls) if " enterprise secret set " in f" {call} "]
     assert "released" in calls and settle and settle[0] > calls.index("released"), calls
     assert not (journal / "ai-key.entry").exists(), out
+    # GAP-2098: the run says that it waits for the lock, and for how long.
+    log = (tmp_path / "kit.log").read_text(encoding="utf-8")
+    lock = str(tmp_path / "journal" / ".lock")
+    assert f"waiting for the credential rotation journal lock {lock}, which another wrapper run holds" in log, log
+    assert f"took the credential rotation journal lock {lock} after waiting" in log, log
 
 
 # GAP-1585: a completed Windows uninstall removes the wrapper's credential
