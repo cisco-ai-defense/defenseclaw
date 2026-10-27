@@ -7663,7 +7663,7 @@ def setup_guardrail(
             rp_label = gc.effective_rule_pack(c) or "default"
             rows.append((f"  [{c}] mode", gc.effective_mode(c)))
             rows.append((f"  [{c}] rule_pack", rp_label))
-            rows.append((f"  [{c}] hook_fail_mode", gc.effective_hook_fail_mode(c) or "open"))
+            rows.append((f"  [{c}] hook_fail_mode", _guardrail_summary_hook_fail_mode(app.cfg, c)))
             rows.append(
                 (
                     f"  [{c}] hilt",
@@ -7690,7 +7690,7 @@ def setup_guardrail(
         if gc.block_message:
             truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
             rows.append(("guardrail.block_message", truncated))
-        rows.append(("guardrail.hook_fail_mode", gc.hook_fail_mode or "open"))
+        rows.append(("guardrail.hook_fail_mode", _guardrail_summary_hook_fail_mode(app.cfg, gc.connector)))
         rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
         rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
     if gc.judge.enabled:
@@ -14751,6 +14751,25 @@ def _judge_llm_credentials(resolved) -> str:
     if resolved.bedrock is not None:
         return f"AWS {resolved.bedrock.auth_mode}"
     return "none needed"
+
+
+def _guardrail_summary_hook_fail_mode(cfg, connector: str) -> str:
+    """The gateway-outage mode the setup summary shows for ``connector`` (GAP-1963).
+
+    It is the mode the hooks use (:meth:`GuardrailConfig.effective_hook_outage_fail_mode`),
+    never the raw ``hook_fail_mode`` field, which reads ``closed`` in memory
+    when nothing is saved. On a per-user install with no saved choice the row
+    also says that the policy tier decides.
+    """
+    gc = cfg.guardrail
+    mode = gc.effective_hook_outage_fail_mode(connector)
+    entry = (gc.connectors or {}).get(connector)
+    saved = bool(entry is not None and str(entry.hook_fail_mode or "").strip()) or bool(
+        getattr(gc, "_hook_fail_mode_saved", False) and str(gc.hook_fail_mode or "").strip()
+    )
+    if saved or cfg.managed_outside_secure_client() or gc.secure_client_hook_fail_modes():
+        return mode
+    return f"{mode} (not saved; the {gc.hook_policy_tier(connector)} policy tier decides)"
 
 
 def _legacy_guardrail_llm_rows(gc) -> list[tuple[str, str]]:

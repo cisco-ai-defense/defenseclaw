@@ -457,3 +457,28 @@ def test_cursor_lock_fail_mode_keeps_the_managed_reading() -> None:
             assert _cursor_lock_fail_mode(per_user) == "closed"
             managed = SimpleNamespace(deployment_mode="managed_enterprise", guardrail=gc)
             assert _cursor_lock_fail_mode(managed) == ("closed" if mode == "action" else "open")
+
+
+@pytest.mark.parametrize("tier", list(TIERS))
+@pytest.mark.parametrize("install", ["oss", "managed"])
+@pytest.mark.parametrize("saved", ["unset", "open", "closed", "connector-open"])
+def test_setup_guardrail_summary_shows_the_outage_mode_the_hooks_use(app, tier, install, saved) -> None:
+    # GAP-1963: the summary printed the raw global field, which reads
+    # "closed" in memory when nothing is saved, beside a status that said open.
+    cfg = app.cfg
+    gc = cfg.guardrail
+    if install == "managed":
+        cfg.deployment_mode = "managed_enterprise"
+        cfg.enterprise_profile = "standalone"
+    if saved in ("open", "closed"):
+        gc.hook_fail_mode = saved
+    elif saved == "connector-open":
+        gc.connectors["cursor"] = PerConnectorGuardrailConfig(hook_fail_mode="open")
+    gc.rule_pack = tier
+    row = cmd_setup._guardrail_summary_hook_fail_mode(cfg, "cursor")
+    want = gc.effective_hook_fail_mode("cursor")
+    if install == "oss" and saved == "unset":
+        assert row == f"{TIERS[tier]} (not saved; the {tier} policy tier decides)"
+    else:
+        assert row == want
+    assert row.split()[0] == want
