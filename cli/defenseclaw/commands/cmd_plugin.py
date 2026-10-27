@@ -2260,6 +2260,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     _build_plugin_scan_map_for_connector(app, connector),
                     _build_plugin_actions_map(app.store, connector, app.cfg),
                     connector=connector,
+                    verdict=_plugin_list_verdict_for(app, connector),
                 )
                 _report_host_plugin_list_error(connector)
                 total_plugins += len(items)
@@ -2282,6 +2283,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 _build_plugin_scan_map_for_connector(app, connectors[0]),
                 _build_plugin_actions_map(app.store, connectors[0], app.cfg),
                 connector=connectors[0],
+                verdict=_plugin_list_verdict_for(app, connectors[0]),
             )
             click.echo(json.dumps(items, indent=2, default=str))
             if _report_host_plugin_list_error(connectors[0]) and not items:
@@ -2324,7 +2326,9 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
             continue
         actions_map = _build_plugin_actions_map(app.store, connector, app.cfg)
         connector_scan_map = _build_plugin_scan_map_for_connector(app, connector)
-        _print_plugin_list_table(plugins, connector_scan_map, actions_map, connector)
+        _print_plugin_list_table(
+            plugins, connector_scan_map, actions_map, connector, verdict=_plugin_list_verdict_for(app, connector),
+        )
         shown_any = True
 
     if not shown_any:
@@ -2612,6 +2616,7 @@ def _plugin_list_json_items(
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
     connector: str = "",
+    verdict: Any = None,
 ) -> list[dict[str, Any]]:
     items = []
     for p in plugins:
@@ -2641,11 +2646,11 @@ def _plugin_list_json_items(
             if value not in (None, "", False):
                 item[field] = value
         if pid in scan_map:
-            item["scan"] = scan_map[pid]
+            item["scan"] = _public_scan_entry(scan_map[pid])
         ae = _row_action(p, actions_map)
         if ae is not None and not ae.actions.is_empty():
             item["actions"] = ae.actions.to_dict()
-        verdict_label, _ = _compute_verdict(ae, scan_map.get(pid))
+        verdict_label, _ = (verdict or _compute_verdict)(ae, scan_map.get(pid))
         item["verdict"] = verdict_label
         items.append(item)
     return items
@@ -2656,6 +2661,7 @@ def _print_plugin_list_table(
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
     connector: str = "",
+    verdict: Any = None,
 ) -> None:
     from rich.console import Console
 
@@ -2701,7 +2707,7 @@ def _print_plugin_list_table(
             if state.file == "quarantine" or (state.install == "block" and state.runtime != "disable"):
                 verdict_action = None
 
-        verdict_label, verdict_style = _compute_verdict(
+        verdict_label, verdict_style = (verdict or _compute_verdict)(
             verdict_action,
             scan_map.get(pid),
         )
@@ -5225,7 +5231,80 @@ def _plugin_scan_payload_from_latest(ls: dict[str, Any]) -> dict[str, Any]:
     scanned_at = _format_scan_time(ls.get("timestamp"))
     if scanned_at:
         payload["scanned_at"] = scanned_at
+    findings = _scan_rule_findings(ls.get("raw_json"))
+    if findings is not None:
+        payload["_findings"] = findings
     return payload
+
+
+def _scan_rule_findings(raw_json: Any) -> list[tuple[str, str]] | None:
+    """(rule_id, severity) of each finding of a stored scan, or None when unreadable."""
+    try:
+        data = json.loads(raw_json) if isinstance(raw_json, str) and raw_json else None
+    except (TypeError, ValueError):
+        return None
+    findings = data.get("findings") if isinstance(data, dict) else None
+    if not isinstance(findings, list):
+        return None
+    return [
+        (str(f.get("rule_id") or ""), str(f.get("severity") or ""))
+        for f in findings if isinstance(f, dict)
+    ]
+
+
+def _public_scan_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in entry.items() if not k.startswith("_")}
+
+
+def _plugin_list_verdict_for(app: AppContext, connector: str):
+    """The verdict plugin list shows (GAP-2116, the plugin form of GAP-1429).
+
+    An enforcement action wins; otherwise what admission does with the scan:
+    the plugin admission policy's action for its severity, after the GAP-1389
+    judge-only pre-step the watcher and plugin install apply. A plugin the
+    watcher admitted with a judge-only HIGH warning reads "warning", not
+    "rejected"; a severity the policy refuses still reads "rejected".
+    """
+    from datetime import datetime, timezone
+
+    from defenseclaw.enforce.admission import (
+        _judge_only_plugin_high,
+        action_blocks,
+        compile_admission,
+        effective_action_for,
+    )
+    from defenseclaw.models import Finding, ScanResult
+
+    try:
+        policy = compile_admission(app.cfg, "plugin")
+    except Exception:  # noqa: BLE001 - the list falls back to severity labels
+        policy = None
+
+    def verdict(action_entry: Any, scan_entry: dict[str, Any] | None) -> tuple[str, str]:
+        label, style = _compute_verdict(action_entry, scan_entry)
+        if policy is None or not scan_entry or (action_entry is not None and not action_entry.actions.is_empty()):
+            return label, style
+        severity = str(scan_entry.get("max_severity") or "").upper()
+        if severity not in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+            return label, style
+        findings = scan_entry.get("_findings")
+        if severity == "HIGH" and isinstance(findings, list):
+            result = ScanResult(
+                scanner="plugin-scanner", target=str(scan_entry.get("target") or ""),
+                timestamp=datetime.now(timezone.utc),
+                findings=[Finding(id=f"f{i}", severity=sev, title=rule, scanner="plugin-scanner", rule_id=rule)
+                          for i, (rule, sev) in enumerate(findings)],
+            )
+            if _judge_only_plugin_high(app.cfg, policy, "plugin", connector, result, severity):
+                return "warning", "yellow"
+        action, allow = effective_action_for(policy, severity=severity, scanner="plugin-scanner")
+        if action_blocks(action):
+            return "rejected", "red"
+        if allow:
+            return "allowed", "green"
+        return "warning", "yellow"
+
+    return verdict
 
 
 def _format_scan_time(ts: Any) -> str:

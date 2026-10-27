@@ -495,3 +495,50 @@ def test_scanner_override_at_high_skips_the_pre_step(pe, name, edit) -> None:
     edit(pe.cfg)
     decision = _decide(pe, _judge_only())
     assert decision.source != "scan-judge-warning", (name, decision)
+
+
+# --- GAP-2116: plugin list shows what admission does with the scan ---
+
+_G51_ROWS = [("LLM-OB-009-001", "HIGH"), ("META-LLM-001", "HIGH"), ("SCAN-LLM-NO-SOURCE", "MEDIUM"), ("PERM-NONE", "LOW")]
+
+
+def _list_verdict(cfg, rows, severity="HIGH", action=None):
+    from defenseclaw.commands.cmd_plugin import _plugin_list_verdict_for
+
+    entry = {"target": "/p/r105fx", "max_severity": severity, "total_findings": len(rows or []), "clean": False}
+    if rows is not None:
+        entry["_findings"] = list(rows)
+    return _plugin_list_verdict_for(SimpleNamespace(cfg=cfg), "claudecode")(action, entry)[0]
+
+
+def test_gap2116_list_reads_a_judge_only_high_the_watcher_warned_as_warning() -> None:
+    cfg = default_config()
+    assert _list_verdict(cfg, _G51_ROWS) == "warning"
+    assert _list_verdict(cfg, [*_G51_ROWS, ("SRC-EXFIL-001", "HIGH")]) == "rejected"
+    assert _list_verdict(cfg, None) == "rejected"
+    assert _list_verdict(cfg, [("PERM-NONE", "LOW"), ("SRC-NET-002", "MEDIUM")], severity="MEDIUM") == "warning"
+    assert _list_verdict(cfg, _G51_ROWS, severity="CRITICAL") == "rejected"
+    cfg.admission.plugin.actions.update(high="block")
+    assert _list_verdict(cfg, _G51_ROWS) == "rejected"
+
+
+def test_gap2116_an_enforcement_action_still_wins() -> None:
+    from defenseclaw.models import ActionEntry, ActionState
+
+    quarantined = ActionEntry(id="a", target_type="plugin", target_name="r105fx", actions=ActionState(file="quarantine"))
+    assert _list_verdict(default_config(), _G51_ROWS, action=quarantined) == "quarantined"
+
+
+def test_gap2116_stored_scan_rule_ids_are_read_and_never_printed() -> None:
+    import json as _json
+
+    from defenseclaw.commands.cmd_plugin import _plugin_scan_payload_from_latest, _public_scan_entry
+
+    raw = _json.dumps({"findings": [{"rule_id": "LLM-OB-009-001", "severity": "HIGH"}]})
+    payload = _plugin_scan_payload_from_latest(
+        {"target": "/p/r105fx", "finding_count": 1, "max_severity": "HIGH", "raw_json": raw, "timestamp": None})
+    assert payload["_findings"] == [("LLM-OB-009-001", "HIGH")]
+    assert "_findings" not in _public_scan_entry(payload)
+    bad = _plugin_scan_payload_from_latest(
+        {"target": "/p/x", "finding_count": 1, "max_severity": "HIGH", "raw_json": "not json", "timestamp": None})
+    assert "_findings" not in bad
