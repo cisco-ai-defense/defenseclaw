@@ -158,6 +158,10 @@ class ConnectorFailModeState:
     # Reporting context only; the resolver still decides the hook mode.
     deployment: str = ""
     policy_tier: str = ""
+    # False when config.yaml saves no hook fail mode for the connector (or
+    # globally): ``configured`` is then the normalized default, not a choice
+    # the user made, and the note must not name it as one.
+    configured_saved: bool = True
 
     @property
     def _managed_windows_runtime(self) -> bool:
@@ -226,9 +230,14 @@ class ConnectorFailModeState:
                 reason = f"this per-user deployment keeps hooks fail-{self.desired}"
             else:
                 reason = f"the effective policy selects hooks fail-{self.desired}"
-            notes.append(
-                f"{reason}; guardrail.hook_fail_mode={self.configured} does not control hook failures here"
-            )
+            if self.configured_saved:
+                notes.append(
+                    f"{reason}; guardrail.hook_fail_mode={self.configured} does not control hook failures here"
+                )
+            else:
+                # Nothing is saved: the normalized default (closed) is no
+                # value the user chose, so do not name one (GAP-2248).
+                notes.append(f"{reason}; guardrail.hook_fail_mode is not set")
         if not self.runtime_verified and self._managed_windows_runtime:
             notes.append(
                 "the managed native hook runs the mode of the runtime generation the guardian publishes, "
@@ -366,7 +375,14 @@ def resolve_connector_fail_mode(
         configured_entries = getattr(guardrail, "connectors", {}) or {}
         entry = configured_entries.get(name)
     raw = getattr(entry, "hook_fail_mode", "") if entry is not None else ""
-    configured = normalize_fail_mode(raw or getattr(guardrail, "hook_fail_mode", ""))
+    saved_value = raw or getattr(guardrail, "hook_fail_mode", "")
+    configured = normalize_fail_mode(saved_value)
+    # GuardrailConfig fills an unset global hook_fail_mode with closed and
+    # records whether config.yaml saved one (_hook_fail_mode_saved).
+    configured_saved = str(raw or "").strip().lower() in _VALID_MODES or (
+        bool(getattr(guardrail, "_hook_fail_mode_saved", True))
+        and str(getattr(guardrail, "hook_fail_mode", "") or "").strip().lower() in _VALID_MODES
+    )
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
     desired = normalize_fail_mode(resolver(name) if callable(resolver) else configured)
     deployment, policy_tier = _fail_mode_note_context(cfg, guardrail, name)
@@ -381,6 +397,7 @@ def resolve_connector_fail_mode(
             _resolve_native_deny_fail_mode(cfg, name, configured, desired),
             deployment=deployment,
             policy_tier=policy_tier,
+            configured_saved=configured_saved,
         )
         if sidecar_drift:
             return replace(state, drift=(*state.drift, sidecar_drift))
@@ -512,6 +529,7 @@ def resolve_connector_fail_mode(
         runtime_verified=runtime_verified,
         deployment=deployment,
         policy_tier=policy_tier,
+        configured_saved=configured_saved,
     )
 
 
