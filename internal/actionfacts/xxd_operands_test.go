@@ -23,6 +23,16 @@ func TestXxdOperandsNameTheOutputFile(t *testing.T) {
 		{[]string{"in"}, []string{"in"}, false},
 		{[]string{"in", "-"}, []string{"in", "-"}, true},
 		{[]string{"-s"}, nil, true},
+		// xxd matches options by prefix (pod check10): these take the
+		// next word as the value, so /dev/null is INFILE.
+		{[]string{"-skip", "0", "/dev/null", "hook.sh"}, []string{"/dev/null", "hook.sh"}, true},
+		{[]string{"-length", "4", "/dev/null", "hook.sh"}, []string{"/dev/null", "hook.sh"}, true},
+		{[]string{"-colsx", "4", "/dev/null", "config.yaml"}, []string{"/dev/null", "config.yaml"}, true},
+		{[]string{"-namex", "foo", "/dev/null", "config.yaml"}, []string{"/dev/null", "config.yaml"}, true},
+		{[]string{"-groupsizex", "2", "-offsetx", "0", "/dev/null", "t"}, []string{"/dev/null", "t"}, true},
+		{[]string{"--seek", "0", "--", "/dev/null", "t"}, []string{"/dev/null", "t"}, true},
+		{[]string{"-skip", "0", "in"}, []string{"in"}, false},
+		{[]string{"-cx", "in"}, []string{"in"}, false},
 	} {
 		got, _ := xxdPositionals(row.args)
 		if !slices.Equal(got, row.want) || xxdWritesOutput(row.args) != row.writes {

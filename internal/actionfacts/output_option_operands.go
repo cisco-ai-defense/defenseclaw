@@ -287,16 +287,56 @@ func classifyXxdOperands(out *parseOutput, command *CommandFact) {
 		appendCommandPath(out, command, PathAccessWrite, positionals[1])
 	}
 	if len(positionals) > 2 {
+		// xxd refuses more than two operands; if an option value was
+		// read as an operand, the last word is still the one xxd writes
+		// (fail closed).
 		out.markPartial(IssueUnknownOperandGrammar)
+		if last := positionals[len(positionals)-1]; last != "-" {
+			addOperation(command, OperationWrite)
+			appendCommandPath(out, command, PathAccessWrite, last)
+		}
 	}
 }
 
-// xxdValueOptions are the xxd options that take a value, by the short
-// letter and the long spellings xxd accepts (-c/-cols, -g/-groupsize,
-// -l/-len, -o/-offset, -s/-seek, -n/-name, -R).
-var xxdValueOptions = map[string]struct{}{
-	"-c": {}, "-cols": {}, "-g": {}, "-groupsize": {}, "-l": {}, "-len": {},
-	"-o": {}, "-offset": {}, "-s": {}, "-seek": {}, "-n": {}, "-name": {}, "-R": {},
+// xxdLongRest maps an xxd value option letter to the rest of its long
+// spelling. xxd matches options by prefix (xxd.c): after the letter, a word
+// that goes on with that rest (`-cols`, `-colsX`, `-length`, `-skip`,
+// `-namex`) takes the next word as its value, any other text is the value
+// attached (`-c8`, `-l64`, `-s+16`), and a bare letter takes the next word
+// (GAP-2302 pod check10).
+var xxdLongRest = map[byte][]string{
+	'c': {"ols"}, 'g': {"roupsize"}, 'l': {"en"}, 'o': {"ffset"},
+	's': {"eek", "kip"}, 'n': {"ame"},
+}
+
+// xxdOptionTakesNextWord reports an xxd option word whose value is the
+// next word.
+func xxdOptionTakesNextWord(arg string) bool {
+	option := arg[1:]
+	if strings.HasPrefix(arg, "--") && len(arg) > 2 {
+		option = arg[2:]
+	}
+	if option == "" {
+		return false
+	}
+	if option[0] == 'R' {
+		// -R takes the next word; -R with more text is a usage error.
+		return true
+	}
+	rests, takes := xxdLongRest[option[0]]
+	if !takes {
+		return false
+	}
+	rest := option[1:]
+	if rest == "" {
+		return true
+	}
+	for _, long := range rests {
+		if strings.HasPrefix(rest, long) {
+			return true
+		}
+	}
+	return false
 }
 
 // xxdPositionals returns the INFILE and OUTFILE operands of xxd's
@@ -306,8 +346,11 @@ func xxdPositionals(args []string) (positionals []string, ok bool) {
 	ok = true
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		if len(positionals) == 0 && arg == "--" {
+			return append(positionals, args[i+1:]...), ok
+		}
 		if len(positionals) == 0 && strings.HasPrefix(arg, "-") && arg != "-" {
-			if _, takes := xxdValueOptions[arg]; takes {
+			if xxdOptionTakesNextWord(arg) {
 				// The value may itself start with '-' (`-s -16`).
 				if i+1 >= len(args) {
 					return positionals, false

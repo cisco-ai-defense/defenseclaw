@@ -22,7 +22,16 @@ func TestXxdOutputOperandOfActiveState(t *testing.T) {
 		{"xxd cols into installer", "xxd -c 8 /dev/null ~/.defenseclaw/installer/install.sh", true, ""},
 		{"find exec xxd devnull hooks", `find ~/.defenseclaw/hooks -type f -exec xxd /dev/null {} \;`, true, ""},
 		{"xargs xxd devnull hooks", "find ~/.defenseclaw/hooks -type f | xargs -I{} xxd /dev/null {}", true, ""},
+		// xxd matches options by prefix: the value of -skip, -length,
+		// -colsX and -nameX is the next word (pod check10 X2-X5).
+		{"xxd skip devnull hook", "xxd -skip 0 /dev/null ~/.defenseclaw/hooks/claude-code-hook.sh", true, ""},
+		{"xxd length devnull hook", "xxd -length 4 /dev/null ~/.defenseclaw/hooks/claude-code-hook.sh", true, ""},
+		{"xxd colsx devnull config", "xxd -colsx 4 /dev/null ~/.defenseclaw/config.yaml", true, ""},
+		{"xxd namex devnull config", "xxd -namex foo /dev/null ~/.defenseclaw/config.yaml", true, ""},
+		{"find exec xxd skip devnull hooks", `find ~/.defenseclaw/hooks -type f -exec xxd -skip 0 /dev/null {} \;`, true, ""},
 		// Reads stay allowed.
+		{"xxd skip read config", "xxd -skip 16 -length 64 ~/.defenseclaw/config.yaml", false, ""},
+		{"xxd cols read hook to tmp", "xxd -cols 16 ~/.defenseclaw/hooks/claude-code-hook.sh /tmp/hook.hex", false, ""},
 		{"xxd config head", "xxd ~/.defenseclaw/config.yaml | head", false, ""},
 		{"xxd seek back config", "xxd -s -16 ~/.defenseclaw/config.yaml", false, ""},
 		{"xxd len to tmp", "xxd -l 64 ~/.defenseclaw/config.yaml /tmp/cfg.hex", false, ""},
