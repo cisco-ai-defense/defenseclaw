@@ -19,6 +19,7 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -365,4 +366,54 @@ func TestRemovedOpenHandsTeardownKeepsTheOperatorsHookOfTheSameName(t *testing.T
 			t.Fatalf("hooks.json commands = %q, want only the operator's hook", got)
 		}
 	})
+}
+
+// A config the 1.0.x setup made (its receipt says the file did not exist)
+// that holds only DefenseClaw's entries goes with them, for both connectors:
+// no empty "{}" file is left. A config the operator had before keeps its
+// own entries, and one that only held DefenseClaw's entries stays (empty).
+func TestRemovedConnectorTeardownRemovesTheConfigItsSetupMade(t *testing.T) {
+	for _, tc := range []struct {
+		name, rel, body string
+	}{
+		{removedOmnigentID, ".omnigent/config.yaml", "policies:\n    " + removedOmnigentPolicyKey + ":\n        handler: " +
+			removedOmnigentModuleName + ".defenseclaw_policy\n        type: function\npolicy_modules:\n    - " + removedOmnigentModuleName + "\n"},
+		{removedOpenHandsID, ".openhands/hooks.json", ""},
+	} {
+		for _, existed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/existed=%v", tc.name, existed), func(t *testing.T) {
+				home, dataDir := removedTestHome(t)
+				config := filepath.Join(home, filepath.FromSlash(tc.rel))
+				body := tc.body
+				if tc.name == removedOpenHandsID {
+					script := filepath.Join(dataDir, "hooks", "openhands-hook.sh")
+					removedTestWrite(t, script, removedTestHook, 0o700)
+					body = removedTestHooksJSON(t, script)
+				}
+				removedTestWrite(t, config, body, 0o600)
+				record, err := json.Marshal(map[string]any{"version": managedBackupVersion, "connector": tc.name,
+					"logical_name": "config", "path": config, "existed": existed})
+				if err != nil {
+					t.Fatal(err)
+				}
+				removedTestWrite(t, managedFileBackupPath(dataDir, tc.name, "config"), string(record), 0o600)
+
+				removedTestTeardown(t, tc.name, SetupOpts{DataDir: dataDir})
+
+				data, err := os.ReadFile(config)
+				if !existed {
+					if err == nil {
+						t.Fatalf("%s the setup made is still there after teardown:\n%s", config, data)
+					}
+					if _, err := os.Stat(filepath.Dir(config)); err != nil {
+						t.Fatalf("the agent's folder went too: %v", err)
+					}
+					return
+				}
+				if err != nil || strings.Contains(string(data), "defenseclaw") || strings.Contains(string(data), "openhands-hook") {
+					t.Fatalf("%s the operator had before = %q, %v; want it kept without DefenseClaw's entries", config, data, err)
+				}
+			})
+		}
+	}
 }
