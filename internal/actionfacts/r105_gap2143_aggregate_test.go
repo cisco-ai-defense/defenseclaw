@@ -24,6 +24,12 @@ func TestBashAggregateRedirectsAsPOSIX(t *testing.T) {
 		{"echo x >& $fd", "", false},
 		{"echo x &> $(mktemp)", "", false},
 		{"echo x > f", "", false},
+		{"true 1>& ~/f", "true 1> ~/f 2>~/f", true},
+		{"echo x 1>&$HOME/f", "echo x 1>$HOME/f 2>$HOME/f", true},
+		{`true >& "$HOME/f"`, `true > "$HOME/f" 2>"$HOME/f"`, true},
+		{"echo x 1>&2", "", false},
+		{"echo x >&\"$fd\"", "", false},
+		{"exec 3>&-", "", false},
 	} {
 		got, ok := BashAggregateRedirectsAsPOSIX(tc.command)
 		if ok != tc.ok || got != tc.want {

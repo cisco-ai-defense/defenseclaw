@@ -219,14 +219,19 @@ func normalizePOSIXAggregateRedirects(source string, nullOnly bool) (string, boo
 		case syntax.DplOut:
 			// A word with a literal / names a file whatever it expands to;
 			// another expanding word may still be a descriptor number.
+			// "1>&word" is ">&word" (GAP-2143); the / may sit in quotes.
 			target := projectPOSIXWord(redirect.Word)
 			slash := false
-			for _, part := range redirect.Word.Parts {
-				if literal, ok := part.(*syntax.Lit); ok && strings.Contains(literal.Value, "/") {
-					slash = true
+			syntax.Walk(redirect.Word, func(inner syntax.Node) bool {
+				switch typed := inner.(type) {
+				case *syntax.Lit:
+					slash = slash || strings.Contains(typed.Value, "/")
+				case *syntax.SglQuoted:
+					slash = slash || strings.Contains(typed.Value, "/")
 				}
-			}
-			if nullOnly || redirect.N != nil || target.Expands && !slash ||
+				return true
+			})
+			if nullOnly || redirect.N != nil && redirect.N.Value != "1" || target.Expands && !slash ||
 				!target.Expands && (target.Value == "-" || strings.Trim(target.Value, "0123456789") == "") {
 				return valid // a descriptor copy or close
 			}
