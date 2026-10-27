@@ -13,11 +13,12 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import shlex
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-from defenseclaw.commands.cmd_acp import acp_cmd
+from defenseclaw.commands.cmd_acp import acp_cmd, setup_repair_command
 
 from tests.helpers import cleanup_app
 from tests.test_acp_verify_guard_parity_r105 import _setup
@@ -73,5 +74,23 @@ def test_root_verify_reads_the_enrolled_users_entry_and_record(tmp_path, monkeyp
         status = CliRunner().invoke(acp_cmd, ["status", "--runtime-data-dir", data_dir, "--json"], obj=app)
         assert status.exit_code == 0, status.output
         assert json.loads(status.output)["clients"]["zed"] == str(settings)
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_managed_standalone_repair_names_the_enterprise_setup_the_user_can_run(tmp_path, monkeypatch):
+    """A managed standalone host has no per-user `acp setup`; verify names the gateway's enterprise setup."""
+    app, data_dir, db_path, _settings, guard, _agent, _lock = _setup(tmp_path, monkeypatch)
+    try:
+        app.cfg.deployment_mode = "managed_enterprise"
+        app.cfg.gateway.api_port = 18970
+        command = setup_repair_command(app.cfg, "zed", "kiro", data_dir)
+        gateway = str(Path(guard).with_name("defenseclaw-gateway"))
+        assert command == shlex.join([
+            gateway, "enterprise", "acp", "setup", "--client", "zed", "--agent", "kiro",
+            "--profile", app.cfg.acp.profile_for_pair("zed", "kiro"), "--data-dir", data_dir,
+            "--api-port", "18970", "--guard-binary", guard,
+        ]), command
+        assert "--managed" not in command
     finally:
         cleanup_app(app, db_path, data_dir)

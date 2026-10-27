@@ -1812,10 +1812,38 @@ def setup_repair_command(cfg: Any, client: str, agent: str, data_dir: str) -> st
         executable = item.get("path") if isinstance(item, dict) else None
         if isinstance(executable, str) and Path(executable).is_absolute() and Path(executable).is_file():
             command.extend([flag, executable])
+    if cfg.deployment_mode == "managed_enterprise" and not is_secure_client(cfg):
+        return _enterprise_setup_command(cfg, client, agent, profile, mode != "observe", data_dir, lock)
     if cfg.deployment_mode == "managed_enterprise":
         command.extend(["--managed", "--runtime-data-dir", data_dir])
     if os.name == "nt":
         return "defenseclaw " + " ".join("'" + value.replace("'", "''") + "'" for value in command[1:])
+    return shlex.join(command)
+
+
+def _enterprise_setup_command(
+    cfg: Any, client: str, agent: str, profile: str, activate: bool, data_dir: str, lock: dict[str, Any] | None
+) -> str:
+    """The user's setup step on a managed standalone host: the gateway's own `enterprise acp setup`.
+
+    That host has no per-user `defenseclaw acp setup` (the per-user CLI
+    refuses to run there), so verify named a command the user cannot run.
+    This is the command the enrollment reports and the guard prints. The
+    installed guard sits next to the gateway.
+    """
+    item = lock.get("guard") if lock else None
+    guard = item.get("path") if isinstance(item, dict) else None
+    if isinstance(guard, str) and Path(guard).is_absolute():
+        gateway = str(Path(guard).with_name("defenseclaw-gateway" + Path(guard).suffix))
+    else:
+        guard, gateway = "defenseclaw-acp", "defenseclaw-gateway"
+    command = [gateway, "enterprise", "acp", "setup", "--client", client, "--agent", agent, "--profile", profile]
+    if activate:
+        command.append("--activate")
+    port = getattr(getattr(cfg, "gateway", None), "api_port", None) or 18970
+    command.extend(["--data-dir", data_dir, "--api-port", str(port), "--guard-binary", guard])
+    if os.name == "nt":
+        return "& " + " ".join("'" + value.replace("'", "''") + "'" for value in command)
     return shlex.join(command)
 
 
