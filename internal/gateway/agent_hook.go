@@ -4135,7 +4135,7 @@ func hookProfileRequestFromAgentHook(req agentHookRequest) connector.HookProfile
 // withWatchHome does for the Claude Code evaluator: the gateway's own
 // environment is the service account's (GAP-0066).
 func (req agentHookRequest) withManagedWatchHome(ctx context.Context) agentHookRequest {
-	if !serviceAccountGatewayFromContext(ctx) {
+	if !managedCallerWatchContext(ctx) {
 		return req
 	}
 	req.managedWatch = true

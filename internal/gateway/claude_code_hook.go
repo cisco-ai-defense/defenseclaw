@@ -332,11 +332,23 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 }
 
 func (req claudeCodeHookRequest) withWatchHome(ctx context.Context) claudeCodeHookRequest {
-	if serviceAccountGatewayFromContext(ctx) {
+	if managedCallerWatchContext(ctx) {
 		req.watchHome = trustedActiveHome(ctx)
 		req.managedWatch = true
 	}
 	return req
+}
+
+// managedCallerWatchContext reports a request served on behalf of another
+// account: a call on the managed hook socket (the verified peer; that
+// server's base context carries no service-account mark) or a call to a
+// service-account gateway's TCP API. Its watch paths come from the verified
+// caller, never from the gateway's own environment (GAP-0066).
+func managedCallerWatchContext(ctx context.Context) bool {
+	if _, ok := managedHookPeerFromContext(ctx); ok {
+		return true
+	}
+	return serviceAccountGatewayFromContext(ctx)
 }
 
 // dispatchClaudeCodeHookNotification fires a user-session OS toast

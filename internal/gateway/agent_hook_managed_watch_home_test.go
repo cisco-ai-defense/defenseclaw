@@ -40,9 +40,15 @@ func TestManagedProfileAnswerWatchesTheVerifiedCallerHome(t *testing.T) {
 		// home, so hookCWDForContext leaves CWD empty on Linux and macOS.
 		{"known caller, project the service cannot resolve", callerHome, "", true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := withManagedHookPeer(withServiceAccountGateway(t.Context()), managedHookPeer{UID: 1001, Home: tc.home})
-			req := (agentHookRequest{ConnectorName: "claudecode", HookEventName: "SessionStart", CWD: tc.cwd, ReportedCWD: project}).withManagedWatchHome(ctx)
+		for _, route := range []string{"service-account TCP", "hook socket"} {
+			t.Run(tc.name+"/"+route, func(t *testing.T) {
+				ctx := withManagedHookPeer(withServiceAccountGateway(t.Context()), managedHookPeer{UID: 1001, Home: tc.home})
+				if route == "hook socket" {
+					// The managed hook socket's base context carries the
+					// verified peer and no service-account mark (api_uds_unix.go).
+					ctx = withManagedHookPeer(t.Context(), managedHookPeer{UID: 1001, Home: tc.home})
+				}
+				req := (agentHookRequest{ConnectorName: "claudecode", HookEventName: "SessionStart", CWD: tc.cwd, ReportedCWD: project}).withManagedWatchHome(ctx)
 			resp := agentHookResponseForProfile(profile, req, "allow", "allow", "NONE", "", nil, "action", false, profile.Capabilities)
 			specific, _ := resp.HookOutput["hookSpecificOutput"].(map[string]interface{})
 			paths, ok := specific["watchPaths"].([]string)
@@ -59,5 +65,6 @@ func TestManagedProfileAnswerWatchesTheVerifiedCallerHome(t *testing.T) {
 				t.Fatalf("caller project watch path present=%v, want %v: %v", !wantProject, wantProject, paths)
 			}
 		})
+		}
 	}
 }
