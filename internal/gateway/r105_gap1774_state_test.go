@@ -252,6 +252,10 @@ func TestR105GAP2075FindDeleteOfProtectedStateNames(t *testing.T) {
 		{"find HOME type fprintf swallows iname", "find $HOME/.defenseclaw -type f -fprintf -iname '*.LOG' -delete", true, ""},
 		{"find root fprint swallows name", "find ~/.defenseclaw -fprint -name '*.log' -delete", true, ""},
 		{"find root unknown primary", "find ~/.defenseclaw -frobnicate -name '*.log' -delete", true, ""},
+		// -cnewer and BSD -depth n take one argument: a name word after
+		// them is their argument, not a test.
+		{"find root cnewer swallows name", "find ~/.defenseclaw -cnewer -name '*.log' -delete", true, ""},
+		{"find root bsd depth n then delete", "find ~/.defenseclaw -depth 1 -delete -name '*.log'", true, ""},
 		// Log cleanup from the root stays allowed with no state finding.
 		{"find root log cleanup", "find ~/.defenseclaw -name '*.log' -mtime +7 -delete", false, ""},
 		{"find root tmp cleanup", "find ~/.defenseclaw -type f -name '*.tmp' -delete", false, ""},
@@ -266,6 +270,13 @@ func TestR105GAP2075FindDeleteOfProtectedStateNames(t *testing.T) {
 		{"find root log cleanup fprintf record", `find ~/.defenseclaw -name '*.log' -fprintf /tmp/removed.txt '%p\n' -delete`, false, ""},
 		{"find root log cleanup print", "find ~/.defenseclaw -name '*.log' -print -delete", false, ""},
 		{"find root maxdepth log cleanup", "find ~/.defenseclaw -maxdepth 2 -name '*.log' -mmin +60 -delete", false, ""},
+		// Reference-file and BSD numeric primaries are known, not unknown
+		// words: the cleanup stays allowed (pod check5 over-block).
+		{"find root log cleanup cnewer", "find ~/.defenseclaw -name '*.log' -cnewer /tmp/ref -delete", false, ""},
+		{"find root log cleanup anewer", "find ~/.defenseclaw -name '*.log' -anewer /tmp/ref -delete", false, ""},
+		{"find root log cleanup bsd depth n", "find ~/.defenseclaw -name '*.log' -depth 1 -delete", false, ""},
+		{"find root log cleanup bsd Bnewer", "find ~/.defenseclaw -name '*.log' -Bnewer /tmp/ref -delete", false, ""},
+		{"find root log cleanup depth option", "find ~/.defenseclaw -depth -name '*.log' -delete", false, ""},
 	}
 	for _, mode := range []string{"observe", "action"} {
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)

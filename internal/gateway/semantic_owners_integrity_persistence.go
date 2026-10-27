@@ -2693,6 +2693,12 @@ func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state stri
 			if !known {
 				arity = 1
 			}
+			// BSD find has a -depth n primary next to the -depth option;
+			// a number after -depth is its argument.
+			if (argument == "-depth" || argument == "-d") && index+1 < len(command.Argv) &&
+				findNumericArgument(command.Argv[index+1]) {
+				arity = 1
+			}
 			if index+arity >= len(command.Argv) {
 				return false
 			}
@@ -2744,6 +2750,26 @@ var findPrimaryArity = map[string]int{
 	"-fstype": 1, "-context": 1, "-files0-from": 1, "-flags": 1,
 	"-fprint": 1, "-fprint0": 1, "-fls": 1, "-printf": 1,
 	"-fprintf": 2,
+	// -anewer/-cnewer (GNU) and -Bnewer (BSD) compare with a reference
+	// file; the macOS primaries -acl, -sparse, -xattr take none and
+	// -xattrname takes a name.
+	"-anewer": 1, "-cnewer": 1, "-bnewer": 1,
+	"-acl": 0, "-sparse": 0, "-xattr": 0, "-xattrname": 1,
+}
+
+// findNumericArgument reports a find numeric argument: digits with an
+// optional leading + or -.
+func findNumericArgument(word string) bool {
+	word = strings.TrimLeft(word, "+-")
+	if word == "" {
+		return false
+	}
+	for _, r := range word {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // protectedStateNameSamples are names a file of the active state can have:
