@@ -57,11 +57,11 @@ func TestWindowsEnterpriseSetupRepairFromAnotherReleaseIsRefusedBeforeAnyChange(
 		}
 	}
 	for name, opts := range map[string]*windowsEnterpriseLifecycleOptions{
-		"same release":                setup("1.0.2"),
-		"same release, build suffix":  setup("1.0.2+abc"),
-		"installed CLI (no payload)":  {profile: "standalone", resolvedProfile: "standalone", productVersion: "1.0.5"},
-		"unreadable Setup version":    setup("dev"),
-		"Secure Client":               {profile: "secure_client", resolvedProfile: "secure_client", productVersion: "1.0.5"},
+		"same release":               setup("1.0.2"),
+		"same release, build suffix": setup("1.0.2+abc"),
+		"installed CLI (no payload)": {profile: "standalone", resolvedProfile: "standalone", productVersion: "1.0.5"},
+		"unreadable Setup version":   setup("dev"),
+		"Secure Client":              {profile: "secure_client", resolvedProfile: "secure_client", productVersion: "1.0.5"},
 	} {
 		if err := refuseWindowsEnterpriseRepairFromAnotherRelease("repair", opts); err != nil {
 			t.Fatalf("%s refused: %v", name, err)
