@@ -4113,6 +4113,31 @@ def _plugin_only_allow_entry(app: AppContext, pe, plugin_name: str, connector: s
     return allowed and not restrictive
 
 
+def _marketplace_plugin_keys(app: AppContext, plugin_name: str, connector: str | None) -> list[str]:
+    """The ``name@marketplace`` keys that hold enforcement state for a bare plugin name.
+
+    The install watcher keys a Claude Code marketplace plugin as
+    ``<name>@<marketplace>``, while ``plugin list`` shows ``<name>``, so
+    ``plugin unblock <name>`` found nothing to clear (GAP-1911).
+    """
+    if app.store is None or "@" in plugin_name:
+        return []
+    rows = app.store.list_actions_by_type("plugin", connector)
+    return sorted({
+        row.target_name for row in rows
+        if row.target_name.startswith(plugin_name + "@") and not row.actions.is_empty()
+    })
+
+
+def _unblock_marketplace_copies(app: AppContext, plugin_name: str, connector_flag: str, connector: str | None) -> bool:
+    """Unblock every ``name@marketplace`` key of a bare name (GAP-1911); False when there is none."""
+    keys = _marketplace_plugin_keys(app, plugin_name, connector)
+    ctx = click.get_current_context()
+    for key in keys:
+        ctx.invoke(unblock, name=key, connector_flag=connector_flag)
+    return bool(keys)
+
+
 def _plugin_unblock_line(plugin_name: str, connector: str, only_allow: bool) -> str:
     # GAP-2273: same wording as mcp unblock (GAP-2225).
     scope = f" ({connector})" if connector else " (every connector)"
@@ -4163,6 +4188,8 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             or app.store.has_action("plugin", plugin_name, "runtime", "disable", connector)
         )
         if not has_state:
+            if _unblock_marketplace_copies(app, plugin_name, connector_flag, connector):
+                return
             click.echo(f"[plugin] {plugin_name!r} has no enforcement state to clear for {connector}")
             return
         only_allow = _plugin_only_allow_entry(app, pe, plugin_name, connector)
@@ -4226,6 +4253,8 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         or app.store.has_action("plugin", plugin_name, "runtime", "disable")
     )
     if not has_state:
+        if _unblock_marketplace_copies(app, plugin_name, connector_flag, None):
+            return
         click.echo(f"[plugin] {plugin_name!r} has no enforcement state to clear")
         return
 

@@ -1962,6 +1962,14 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	w.applyPostScanEnforcement(ctx, out, evt, targetType, result, s.Name())
 	scanID := w.logScanID(ctx, evt, result, out.Verdict)
 	w.recordAdmission(ctx, out.Verdict, targetType)
+	if evt.Type != InstallMCP {
+		switch v := toVerdict(out.Verdict); v {
+		case VerdictClean, VerdictAllowed, VerdictWarning:
+			// A reinstall or rescan that admission now allows replaces
+			// this watcher's own earlier rejection of the asset (GAP-1911).
+			w.releaseSupersededRejection(evt, targetType, v)
+		}
+	}
 	res = AdmissionResult{
 		ScanID: scanID,
 		Event:  evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
@@ -2466,17 +2474,31 @@ func (w *InstallWatcher) hasRecoverableMCPBlock(evt InstallEvent) bool {
 // shares (a release there could free that server's rejection). Secure
 // Client never readmits a changed server (issue #1092).
 func (w *InstallWatcher) releaseSupersededMCPRejection(evt InstallEvent, verdict Verdict) {
-	if evt.Type != InstallMCP || w.store == nil || w.secureClientActive() {
+	if evt.Type != InstallMCP {
+		return
+	}
+	w.releaseSupersededRejection(evt, string(InstallMCP), verdict)
+}
+
+// releaseSupersededRejection is releaseSupersededMCPRejection for every
+// asset type. A skill or plugin the watcher rejected (for example under an
+// explicit admission high=block) kept that install block and runtime disable
+// after the administrator relaxed the setting and the user reinstalled it:
+// the new admission warned, but the old auto-block row still refused it
+// (GAP-1911). The same rule applies: only the watcher's own rejection of
+// this asset at this path is lifted when admission now allows it.
+func (w *InstallWatcher) releaseSupersededRejection(evt InstallEvent, targetType string, verdict Verdict) {
+	if w.store == nil || w.secureClientActive() {
 		return
 	}
 	name := journalName(evt)
 	scope := w.journalScope(w.eventConnector(evt))
-	entry, err := w.store.GetActionForConnector(string(InstallMCP), name, scope)
+	entry, err := w.store.GetActionForConnector(targetType, name, scope)
 	if err != nil || entry == nil || entry.Actions.IsEmpty() || !strings.HasPrefix(entry.Reason, autoBlockReasonPrefix) ||
 		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
 		return
 	}
-	if name != evt.Path && w.mcpNameSharedByAnotherServer(evt) {
+	if evt.Type == InstallMCP && name != evt.Path && w.mcpNameSharedByAnotherServer(evt) {
 		fmt.Fprintf(os.Stderr, "[watch] mcp %s: its changed definition was admitted (%s), but another server of that name shares its block, which stays\n",
 			evt.Name, verdict)
 		return
@@ -2488,17 +2510,24 @@ func (w *InstallWatcher) releaseSupersededMCPRejection(evt InstallEvent, verdict
 		if field.value == "" {
 			continue
 		}
-		if err := w.store.ClearActionFieldForConnector(string(InstallMCP), name, scope, field.name); err == nil {
+		if err := w.store.ClearActionFieldForConnector(targetType, name, scope, field.name); err == nil {
 			cleared = append(cleared, field.name+"="+field.value)
 		}
 	}
 	if len(cleared) == 0 {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[watch] mcp %s: admission allowed its changed definition (%s); its earlier rejection no longer applies\n", evt.Name, verdict)
+	if evt.Type == InstallMCP {
+		fmt.Fprintf(os.Stderr, "[watch] mcp %s: admission allowed its changed definition (%s); its earlier rejection no longer applies\n", evt.Name, verdict)
+		_ = w.logger.LogAction(string(audit.ActionEnable), evt.Path,
+			fmt.Sprintf("type=mcp released: admission allowed its changed definition (verdict=%s); cleared %s connector=%s",
+				verdict, strings.Join(cleared, " "), scope))
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[watch] %s %s: admission now allows it (%s); the watcher's earlier rejection no longer applies\n", targetType, evt.Name, verdict)
 	_ = w.logger.LogAction(string(audit.ActionEnable), evt.Path,
-		fmt.Sprintf("type=mcp released: admission allowed its changed definition (verdict=%s); cleared %s connector=%s",
-			verdict, strings.Join(cleared, " "), scope))
+		fmt.Sprintf("type=%s released: admission now allows it (verdict=%s); cleared %s connector=%s",
+			targetType, verdict, strings.Join(cleared, " "), scope))
 }
 
 // mcpNameSharedByAnotherServer reports whether another listed MCP server

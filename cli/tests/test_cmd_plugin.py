@@ -1396,6 +1396,31 @@ class TestPluginRemove(PluginCommandTestBase):
         self.assertIn("not configured", result.output)
 
 
+class TestPluginUnblockMarketplaceKey(PluginCommandTestBase):
+    """GAP-1911: plugin list shows <name>; the watcher keys <name>@<marketplace>."""
+
+    def _auto_block(self, key: str) -> None:
+        pe = PolicyEngine(self.app.store, self.app.cfg)
+        reason = "auto-block: watch detected HIGH findings (scanner=plugin-scanner)"
+        pe.block_for_connector("plugin", key, "claudecode", reason)
+        pe.disable_for_connector("plugin", key, "claudecode", reason)
+
+    def test_bare_unblock_clears_the_marketplace_key_of_that_plugin_only(self):
+        self._auto_block("r105fx@r105mkt")
+        self._auto_block("r105fxx@r105mkt")
+        result = self.invoke(["unblock", "r105fx"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Unblocked 'r105fx@r105mkt'", result.output)
+        self.assertNotIn("no enforcement state", result.output)
+        self.assertIsNone(self.app.store.get_action("plugin", "r105fx@r105mkt", "claudecode"))
+        self.assertIsNotNone(self.app.store.get_action("plugin", "r105fxx@r105mkt", "claudecode"))
+
+    def test_bare_unblock_without_any_state_still_says_so(self):
+        result = self.invoke(["unblock", "r105none"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("has no enforcement state to clear", result.output)
+
+
 class TestPluginRemovePathTraversal(PluginCommandTestBase):
     """Regression tests for path-traversal in plugin remove (P1 fix)."""
 
