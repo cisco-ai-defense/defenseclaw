@@ -177,6 +177,19 @@ def _safe_filename(rel_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# GAP-2040: every finding whose rule id and severity the judge model wrote
+# carries this tag, so callers key on who made the finding, not on the rule
+# id string the model chose (a judge may answer "OB-009-001" without "LLM-").
+JUDGE_TAG = "llm-judge"
+
+
+def _judge_tags(tags: Any) -> list[str]:
+    out = [str(tag) for tag in tags] if isinstance(tags, list) else ["llm-detected"]
+    if JUDGE_TAG not in out:
+        out.append(JUDGE_TAG)
+    return out
+
+
 def _make_scan_error_finding(
     finding_counter: list[int],
     title: str,
@@ -264,7 +277,7 @@ def _parse_llm_findings(
                 description=str(item.get("description", "")),
                 location=str(item["location"]) if item.get("location") else None,
                 remediation=str(item["remediation"]) if item.get("remediation") else None,
-                tags=list(item["tags"]) if isinstance(item.get("tags"), list) else ["llm-detected"],
+                tags=_judge_tags(item.get("tags")),
             )
         )
         finding_counter[0] += 1
@@ -524,7 +537,7 @@ def run_meta_llm(
                     confidence=float(mt.get("confidence", 0.7)),
                     title=mt.get("title", ""),
                     description=mt.get("description", ""),
-                    tags=mt.get("tags") if isinstance(mt.get("tags"), list) else ["llm-detected"],
+                    tags=_judge_tags(mt.get("tags")),
                 )
             )
             ctx.finding_counter[0] += 1
@@ -584,7 +597,7 @@ def run_meta_llm(
                     description=desc,
                     evidence=evidence,
                     location=referenced[0].location,
-                    tags=["llm-detected", "correlation", "static-analysis"],
+                    tags=["llm-detected", "correlation", "static-analysis", JUDGE_TAG],
                 )
             )
             ctx.finding_counter[0] += 1

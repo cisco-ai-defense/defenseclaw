@@ -329,6 +329,26 @@ def test_gap2100_loose_git_objects_do_not_use_up_the_walk_limit(tmp_path, monkey
     assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
 
 
+def test_gap2040_a_judge_rule_id_without_the_llm_prefix_is_still_capped(tmp_path, monkeypatch, pe) -> None:
+    # GAP-2040: the cap keyed on the rule id string the model writes, so a
+    # judge answering "OB-009-001" (no "LLM-") at HIGH kept HIGH and an
+    # explicit high=block refused the benign skill-only plugin.
+    judge = _JUDGE.replace('"LLM-OB-009-001"', '"OB-009-001"')
+    meta = _META.replace('"META-LLM-001"', '"MISSED-001"')
+    result = _scan(_plugin(tmp_path, dict(_SKILL)), monkeypatch, judge=judge, meta=meta)
+    found = {(f.rule_id, f.severity) for f in result.findings}
+    assert found >= {("OB-009-001", "MEDIUM"), ("MISSED-001", "MEDIUM")}, found
+    assert result.max_severity() == "MEDIUM"
+    pe.cfg.admission.plugin.actions.update(critical="block", high="block")
+    assert _decide(pe, result).verdict == "warning"
+
+
+def test_gap2040_an_unprefixed_judge_high_on_a_runnable_plugin_stays_high(tmp_path, monkeypatch) -> None:
+    judge = _JUDGE.replace('"LLM-OB-009-001"', '"OB-009-001"')
+    result = _scan(_plugin(tmp_path, {**_SKILL, "scripts/run.sh": "echo hi\n"}), monkeypatch, judge=judge)
+    assert ("OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
+
+
 def test_operator_severity_override_still_wins(tmp_path, monkeypatch) -> None:
     from defenseclaw.scanner.plugin_scanner import scanner as plugin_scanner_module
 

@@ -41,6 +41,7 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     inspect_path_link,
     make_finding,
 )
+from defenseclaw.scanner.plugin_scanner.llm_analyzer import JUDGE_TAG
 from defenseclaw.scanner.plugin_scanner.policy import (
     PluginScanPolicy,
     apply_severity_override,
@@ -433,7 +434,9 @@ def _manifest_starts_code(path: str) -> bool:
 def _cap_judge_finding_without_code(finding: Finding) -> None:
     """Cap an LLM judge or meta-judge HIGH/CRITICAL at MEDIUM (GAP-1389)."""
     rule = finding.rule_id or ""
-    judge = (rule.startswith("LLM-") and rule != "LLM-SCAN-ERROR") or rule.startswith("META-LLM-")
+    judge = rule != "LLM-SCAN-ERROR" and (
+        JUDGE_TAG in finding.tags or rule.startswith("LLM-") or rule.startswith("META-LLM-")
+    )
     if not judge or str(finding.severity).upper() not in ("HIGH", "CRITICAL"):
         return
     finding.severity = "MEDIUM"
