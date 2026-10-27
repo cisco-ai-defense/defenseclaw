@@ -9830,10 +9830,10 @@ def _hermes_python_argv_verdict(args, name) -> bool | None:
     return None if hermes_python or "/hermes_cli/" in lowered or "/hermes-agent/" in lowered else False
 
 
-def _hermes_proc_argv(pid: str) -> tuple[str, ...] | None:
+def _hermes_proc_argv(pid: str, proc_root: str = "/proc") -> tuple[str, ...] | None:
     """Read the complete argv when procps splits a multiline ``-c`` value."""
     try:
-        with open(f"/proc/{pid}/cmdline", "rb") as stream:
+        with open(f"{proc_root}/{pid}/cmdline", "rb") as stream:
             data = stream.read()
     except OSError:
         return None
@@ -9860,9 +9860,12 @@ def _hermes_host_running() -> bool | None:
             check=False,
         )
     except (FileNotFoundError, subprocess.SubprocessError, OSError):
-        return None
+        return _hermes_host_running_from_proc()
     if proc.returncode != 0:
-        return None
+        # ps fails where /proc hides its system files (hidepid=2,subset=pid
+        # has no /proc/stat): this account's own processes are still there
+        # (GAP-0015).
+        return _hermes_host_running_from_proc()
     uid = str(os.getuid())
     own = {str(os.getpid()), str(os.getppid())}
     wrapped = False
@@ -9878,6 +9881,48 @@ def _hermes_host_running() -> bool | None:
             complete = _hermes_proc_argv(fields[0])
             if complete:
                 verdict = _hermes_argv_verdict(complete)
+        if verdict is True:
+            return True
+        if verdict is None:
+            wrapped = True
+    return None if wrapped else False
+
+
+def _hermes_host_running_from_proc(proc_root: str = "/proc") -> bool | None:
+    """:func:`_hermes_host_running` from /proc when ps cannot list processes.
+
+    Reads each process's real uid from ``status`` and its argv from
+    ``cmdline``; only processes of this account count. A /proc that cannot be
+    listed, or that does not show this process itself, leaves it unknown.
+    """
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return None
+    me = str(os.getpid())
+    if me not in entries:
+        return None
+    uid = str(os.getuid())
+    own = {me, str(os.getppid())}
+    wrapped = False
+    for pid in entries:
+        if not pid.isdigit() or pid in own:
+            continue
+        try:
+            with open(f"{proc_root}/{pid}/status", encoding="utf-8", errors="replace") as stream:
+                status = stream.read()
+        except OSError:
+            continue
+        real = next(
+            (line.split()[1] for line in status.splitlines() if line.startswith("Uid:") and len(line.split()) > 1),
+            None,
+        )
+        if real != uid:
+            continue
+        argv = _hermes_proc_argv(pid, proc_root)
+        if not argv:
+            continue
+        verdict = _hermes_argv_verdict(list(argv))
         if verdict is True:
             return True
         if verdict is None:
