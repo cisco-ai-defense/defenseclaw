@@ -588,7 +588,7 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 	}
 	incarnation, incarnationKnown := "", false
 	if ok && identityFactsEnabled.Load() && !ManagedEnterpriseActive() {
-		incarnation, incarnationKnown = managedHookPeerAccountIncarnation(account)
+		incarnation, incarnationKnown = peerAccountIncarnation(account)
 	}
 	c.mu.Lock()
 	entry.account, entry.ok, entry.notFound, entry.expires = account, ok, unixidentity.IsNotFound(err), c.now().Add(retain)
@@ -632,7 +632,7 @@ func (c *managedHookPeerHomeCache) recheckAccount(uid int, entry *managedHookPee
 	ok := err == nil && account.UID == uid
 	incarnation, incarnationKnown := "", false
 	if ok {
-		incarnation, incarnationKnown = managedHookPeerAccountIncarnation(account)
+		incarnation, incarnationKnown = peerAccountIncarnation(account)
 		if managedHookPeerRecordChanged(account) {
 			// The account's own record is newer than the listing (deleted
 			// and created again, or another primary group): the listing
@@ -654,6 +654,17 @@ func (c *managedHookPeerHomeCache) recheckAccount(uid int, entry *managedHookPee
 	}
 	entry.account = account
 	entry.incarnation, entry.incarnationKnown = incarnation, incarnationKnown
+}
+
+// peerAccountIncarnation is the account incarnation of account
+// (managedHookPeerAccountIncarnation), or, when the gateway cannot tell it
+// alone, the one the guardian's current identity record of the uid proves
+// (managedHookPeerGuardianIncarnation, rel-1-0-5 GAP-0022).
+func peerAccountIncarnation(account unixidentity.Account) (string, bool) {
+	if incarnation, known := managedHookPeerAccountIncarnation(account); known {
+		return incarnation, true
+	}
+	return managedHookPeerGuardianIncarnation(account)
 }
 
 // incarnation returns the account incarnation of uid that the last
@@ -1220,7 +1231,27 @@ func (c *managedHookPeerHomeCache) accountToken(uid int) (string, bool) {
 	if record := managedHookPeerAccountRecord(account.Name); record != "" && validAccountToken("record:"+record) {
 		return "record:" + record, true
 	}
+	c.noteSighting(uid)
 	return "", false
+}
+
+// noteSighting records when this gateway first saw uid while the account
+// that holds it could not be named yet (a systemd-userdb account behind
+// SSSD before the guardian's first record of it), as holderToken does for an
+// account it can name: a home created after that sighting is then another
+// account's, which derives agent identities of its own (rel-1-0-5 GAP-0022).
+func (c *managedHookPeerHomeCache) noteSighting(uid int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.loadHomesLocked()
+	if _, sighted := c.firstSeen[uid]; sighted || len(c.firstSeen) >= managedHookPeerHomesMax {
+		return
+	}
+	if c.firstSeen == nil {
+		c.firstSeen = make(map[int]int64)
+	}
+	c.firstSeen[uid] = c.now().UnixNano()
+	c.saveHomesLocked()
 }
 
 // holderToken is the account token of the account named name, of account
@@ -1516,6 +1547,14 @@ func (c *managedHookPeerHomeCache) agentIncarnation(uid int) string {
 			tokens.base = token
 			if c.legacy[uid] && !legacyContinuity(uid, token) {
 				tokens.base = agentIncarnationUnproven
+			} else if strings.Contains(token, "|") {
+				// The first token this gateway can name for the uid names a
+				// home created after it first saw the uid (holderToken):
+				// another account than the one its hooks saw then, whose
+				// agent identities had no token, holds the uid now. Taking
+				// the token as the base gave the new account the earlier
+				// holder's agent identity (rel-1-0-5 GAP-0022).
+				tokens.base = ""
 			}
 			delete(c.legacy, uid)
 		}

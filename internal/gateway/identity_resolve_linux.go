@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -79,14 +80,42 @@ func holderSpoolRecord(key string, account unixidentity.Account, accountSID stri
 		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
 	incarnation, known := managedHookPeerAccountIncarnation(account)
-	if !known && record.AccountIncarnation == "files" && record.AccountSID == "" &&
-		record.Facts.Source == useridentity.SourceNSSFiles {
+	if !known && recordedLocalAccountIncarnation(record) {
 		incarnation, known = managedHookPeerRecordedAccountIncarnation(account)
 	}
 	if !known || incarnation != record.AccountIncarnation {
 		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
 	return record, true, nil
+}
+
+// recordedLocalAccountIncarnation reports whether record, the guardian's
+// identity record of a uid, is of an account of a local account database
+// without a SID: /etc/passwd ("files") or another local NSS service, such as
+// systemd-userdb ("nss:systemd") or nss-altfiles. Only root can show that
+// SSSD, asked before such a service, holds no account of the uid, so the
+// non-root gateway takes the guardian's recorded proof of that miss
+// (AccountIncarnationForRecordedUnsharedUID) for these accounts. Taking it
+// for "files" only left a systemd-userdb account behind sss with no facts and
+// no account incarnation: its hooks were decided without them, and an
+// account deleted and created again under the same name, uid and home path
+// kept the earlier holder's agent identity (rel-1-0-5 GAP-0022).
+func recordedLocalAccountIncarnation(record enterprisehooks.IdentitySpoolRecord) bool {
+	incarnation := record.AccountIncarnation
+	return record.AccountSID == "" && record.Facts.Source == useridentity.SourceNSSFiles &&
+		(incarnation == "files" || strings.HasPrefix(incarnation, "nss:"))
+}
+
+// managedHookPeerGuardianIncarnation is the account incarnation of account
+// that the guardian's current identity record of its uid proves when the
+// gateway cannot tell it alone (holderSpoolRecord): a local account behind
+// SSSD in the passwd line. false without such a record. Tests replace it.
+var managedHookPeerGuardianIncarnation = func(account unixidentity.Account) (string, bool) {
+	record, ok, err := holderSpoolRecord(strconv.Itoa(account.UID), account, "", time.Now().UTC())
+	if err != nil || !ok {
+		return "", false
+	}
+	return record.AccountIncarnation, true
 }
 
 // processCredentialFacts are the facts of the per-user gateway's own
