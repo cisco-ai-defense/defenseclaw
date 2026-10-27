@@ -58,17 +58,29 @@ const unixPrivateWalkCacheKept = "pnpm"
 // walk inspects, so the walk stays complete.
 var errPrivateWalkPruned = errors.New("the walk does not list this tool-owned tree")
 
+// unixHomeRelative is dir as a path below home, and false for home itself
+// and for a path outside it. A folder of home whose name starts with ".."
+// (such as "..cache") is below home.
+func unixHomeRelative(home, dir string) (string, bool) {
+	rel, err := filepath.Rel(home, filepath.Clean(dir))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return rel, true
+}
+
 // unixPrivateWalkPruned reports a folder of home the walk does not list:
 // a pruned tree, a cache other than pnpm's, or a version-control store
-// (.git) at any depth.
-func unixPrivateWalkPruned(home, dir string) bool {
-	rel, err := filepath.Rel(home, filepath.Clean(dir))
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+// (.git) at any depth. fold compares the names without case, as the home's
+// volume does (unixHomeCaseInsensitive).
+func unixPrivateWalkPruned(home, dir string, fold bool) bool {
+	rel, ok := unixHomeRelative(home, dir)
+	if !ok {
 		return false
 	}
 	rel = filepath.ToSlash(rel)
 	same := func(a, b string) bool {
-		if unixHomeCaseInsensitive {
+		if fold {
 			return strings.EqualFold(a, b)
 		}
 		return a == b
@@ -119,11 +131,12 @@ func unixPrivateWalkOpener(home string) func(string) (*os.File, error) {
 	// Read once, before the walk starts its goroutines: an open that is
 	// abandoned at the timeout can still start after the walk returned.
 	openFile, timeout := unixPrivateWalkOpenFile, unixPrivateWalkOpenTimeout
+	fold := unixHomeCaseInsensitive(home)
 	return func(dir string) (*os.File, error) {
 		if unixPrivateWalkPrivacyProtected(home, dir) {
 			return nil, &os.PathError{Op: "open", Path: dir, Err: syscall.EPERM}
 		}
-		if unixPrivateWalkPruned(home, dir) {
+		if unixPrivateWalkPruned(home, dir, fold) {
 			return nil, &os.PathError{Op: "open", Path: dir, Err: errPrivateWalkPruned}
 		}
 		type opened struct {
@@ -164,8 +177,8 @@ func unixPrivateWalkOpener(home string) func(string) (*os.File, error) {
 // unixPrivacyProtectedHomeFolders names, compared as the case-insensitive
 // macOS file system does.
 func unixPrivateWalkPrivacyProtected(home, dir string) bool {
-	rel, err := filepath.Rel(home, filepath.Clean(dir))
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+	rel, ok := unixHomeRelative(home, dir)
+	if !ok {
 		return false
 	}
 	for _, protected := range unixPrivacyProtectedHomeFolders {

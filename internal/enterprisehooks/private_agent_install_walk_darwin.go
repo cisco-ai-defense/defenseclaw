@@ -5,6 +5,8 @@
 
 package enterprisehooks
 
+import "golang.org/x/sys/unix"
+
 // unixPrivacyProtectedHomeFolders are the folders below a macOS home whose
 // open() waits for a privacy (TCC) decision when the process has no Full
 // Disk Access: the user's files folders, app data containers, iCloud and
@@ -22,8 +24,19 @@ var unixPrivacyProtectedHomeFolders = []string{
 	"Library/Application Support/Knowledge", "Library/Metadata/CoreSpotlight",
 }
 
-// unixHomeCaseInsensitive: the macOS file system compares names without case.
-const unixHomeCaseInsensitive = true
+// darwinPathconfCaseSensitive is macOS's _PC_CASE_SENSITIVE pathconf name
+// (<sys/unistd.h>): 1 on a case-sensitive volume, 0 on one that compares
+// names without case.
+const darwinPathconfCaseSensitive = 11
+
+// unixHomeCaseInsensitive reports whether the volume of home compares names
+// without case: the default APFS volume does, a case-sensitive APFS or HFS+
+// volume does not. Unknown (pathconf fails) is case-sensitive, so the walk
+// prunes only the exact names and never a case-distinct tree. Tests replace it.
+var unixHomeCaseInsensitive = func(home string) bool {
+	sensitive, err := unix.Pathconf(home, darwinPathconfCaseSensitive)
+	return err == nil && sensitive == 0
+}
 
 // unixPrivateWalkPlatformPrunedHomeTrees are the macOS toolchain trees the
 // walk does not list (unixPrivateWalkPrunedHomeTrees): Xcode's derived data,
