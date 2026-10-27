@@ -1423,6 +1423,9 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-1461", page: "policies/defaults.mdx", has: ["Writes to the active user's `authorized_keys` are blocked in action mode when a direct command, a file tool or a supported literal interpreter form proves the target; in observe mode the same write raises a CRITICAL would-block alert and runs."], lacks: ["Writes to the active user's `authorized_keys` are blocked when"] },
+  { gap: "GAP-0044", page: "sandboxes/guide.mdx", has: ["A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either"], lacks: ["still goes ahead and the activity feed says what may be lost"] },
+  { gap: "GAP-0044", page: "reference/sandbox-cli.mdx", has: ["A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either"], lacks: ["still goes ahead and the activity feed says what may be lost"] },
   { gap: "GAP-2192", page: "enterprise/identity-entra-id.mdx", has: ['<Callout type="warn" title="Not part of the release certification">', "Active Directory is the certified identity stack. The Entra setups below were last verified live in October 2026"], lacks: ["1.0.4 certification", "certified identity stack in 1.0.4"] },
   { gap: "GAP-2192", page: "enterprise/identity-okta.mdx", has: ['<Callout type="warn" title="Not part of the release certification">', "Active Directory is the certified identity stack. The Okta lab is retired"], lacks: ["1.0.4 certification", "certified identity stack in 1.0.4"] },
   { gap: "GAP-2192", page: "enterprise/identity-sources.mdx", has: ["Active Directory is the certified identity stack; the Okta and Entra parts were last verified live in October 2026."], lacks: ["certified in 1.0.4"] },
@@ -1551,7 +1554,10 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1693", page: "reference/sandbox-cli.mdx", has: ["can reach your account's request limit"] },
   { gap: "GAP-1552", page: "enterprise/sandboxes.mdx", has: ["a run first waits up to 10 seconds for your sandbox policy"] },
   { gap: "GAP-0701", page: "sandboxes/guide.mdx", has: ["offers the next free port and writes it as `openshell.ingress_port` or `openshell.egress_port`"] },
-  { gap: "GAP-0831", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["it cannot cut that guest off below OpenShell's own network broker", "adds none back (approvals included)"] },
+  { gap: "GAP-0831", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["adds none back (approvals included)", "withdrawing those rules does not contain the guest's old OpenShell network broker, which passes a connection it cannot inspect straight to the host (NVIDIA/OpenShell#4494), so treat the guest's network as open until it restarts", "Restart it once DefenseClaw has withdrawn its rules: save the work you need, then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`"], lacks: ["it cannot cut that guest off below OpenShell's own network broker"] },
+  { gap: "GAP-0831", page: "sandboxes/guide.mdx", section: "A guest from OpenShell 0.1.3 or older keeps its network after its rules are withdrawn", has: ["passes a connection it cannot inspect straight to the host", "This is an OpenShell 0.1.3 limit (NVIDIA/OpenShell#4494)", "**Fix:** restart the sandbox after DefenseClaw has withdrawn its rules"] },
+  { gap: "GAP-0454", page: "support-matrix.mdx", section: "Sandboxes", has: ["DefenseClaw's lock covers only DefenseClaw commands, and OpenShell has no admission barrier that raw clients honor", "Do not start raw `openshell` sandboxes until the DefenseClaw command finishes."] },
+  { gap: "GAP-0454", page: "sandboxes/guide.mdx", section: "A raw `openshell` sandbox stops a restart or rollback", has: ["Starting a sandbox with raw `openshell` while DefenseClaw changes, restarts or rolls back the gateway is unsupported", "A sandbox started after the last check cannot be seen, and the restart ends it."] },
   { gap: "GAP-1173, GAP-1188", page: "enterprise/mdm/intune-linux.mdx", has: ["the script first writes what it replaces to a root-only journal"] },
   { gap: "GAP-1584, GAP-1616", page: "enterprise/mdm/index.mdx", has: ["including the rotation journal and the staging folders of wrapper runs that were killed", "`--purge` also removes the wrapper's empty state folder `/var/db/defenseclaw-mdm`", "every ensure exits `mdm_secret_failed`"] },
   { gap: "GAP-0727", page: "enterprise/lifecycle.mdx", has: ["`--purge` leaves that folder and the install's binaries exactly as they are"], lacks: ["to a new `~/.defenseclaw-backup-<UTC time>` folder"] },
@@ -1667,6 +1673,28 @@ describe('edge connector variables and the registry (GAP-1639)', () => {
     assert.ok(registry.includes('"DCLAW_FLEET_API_URL"'));
     const text = page('edge-connector/install.mdx');
     assert.ok(text.includes('are read only by the adapters and are listed only on this page'));
+  });
+});
+
+// GAP-1461: the observe/action split of the authorized_keys sentence is the
+// shipped rule severity (CRITICAL in every pack) under the mode mapping.
+describe('authorized_keys writes block in action mode and alert in observe (GAP-1461)', () => {
+  it('rates persistence.ssh_authorized_keys_command CRITICAL in every pack', () => {
+    for (const pack of ['default', 'permissive', 'strict']) {
+      const yaml = source(`policies/guardrail/${pack}/rules/commands.yaml`);
+      const rule = yaml.split('- id: persistence.ssh_authorized_keys_command\n')[1]?.split(/\n {2}- id: /)[0] ?? '';
+      assert.ok(rule, `${pack}: no persistence.ssh_authorized_keys_command rule`);
+      assert.match(rule, /^ {4}severity: CRITICAL$/m, `${pack}: not CRITICAL (GAP-1461 sentence)`);
+    }
+  });
+});
+
+// GAP-0044: a policy (emergency) stop of a MicroVM whose disk sync failed
+// contains it and leaves it running; the pages say so.
+describe('policy stop of an unsynced MicroVM contains it (GAP-0044)', () => {
+  it('matches lifecycle.go: an emergency stop with a failed flush returns containedStopRefusal', () => {
+    const go = source('internal/openshell/manager/lifecycle.go');
+    assert.match(go, /if why, ok := emergencyStop\(ctx\); ok \{\n\t+return containedStopRefusal\(name, flushErr, m\.containUnsynced\(ctx, b, why\)\)/, 'GAP-0044: emergency stop branch changed; re-check the pages');
   });
 });
 

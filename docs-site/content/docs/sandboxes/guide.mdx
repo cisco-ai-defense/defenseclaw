@@ -523,6 +523,16 @@ A Docker sandbox created on OpenShell 0.1.1 to 0.1.4 keeps its work, but OpenShe
 
 Before stopping a raw OpenShell MicroVM on a gateway older than OpenShell 0.1.5, save its work yourself. On OpenShell 0.1.5 or later, `openshell sandbox stop` requests a guest flush before a planned stop. If the flush fails, changes after the last successful disk sync may still be lost.
 
+##### A guest from OpenShell 0.1.3 or older keeps its network after its rules are withdrawn
+
+**You see:** `defenseclaw sandbox status NAME` reports the sandbox not protected and says DefenseClaw withdraws the network rules it added, but that does not contain the old broker, which passes a connection it cannot inspect straight to the host.
+
+**Cause:** the MicroVM was started on OpenShell 0.1.3 or older and still runs that release's supervisor. Its network broker lets a connection it cannot inspect bypass the sandbox policy, so removing the guest's policy rules does not cut it off. This is an OpenShell 0.1.3 limit (NVIDIA/OpenShell#4494); DefenseClaw has no network cutoff below that broker, and it does not stop the guest for you, so as not to lose work it has not synced.
+
+**Fix:** restart the sandbox after DefenseClaw has withdrawn its rules. Save the work you need, then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`; the next session runs on the current supervisor. If the stop is held because the disk could not sync, see [A MicroVM stop is held because its disk could not sync](#a-microvm-stop-is-held-because-its-disk-could-not-sync). For a guest whose workload completed or failed, follow [Legacy MicroVM guests](/docs/support-matrix#upgrade-and-policy-limits). Until it restarts, treat its network as open.
+
+**Check:** `defenseclaw sandbox status NAME` no longer reports the old supervisor.
+
 ##### A contained VM has no confirmed network withdrawal
 
 If the OpenShell gateway does not answer, or a global OpenShell policy prevents DefenseClaw from withdrawing a VM's network rules, a contained VM can remain reported as unprotected even while new DefenseClaw runs are refused. A user-level DefenseClaw daemon has no host-level network cutoff for that VM, and this OpenShell release has no VM pause or network-off operation. Treat the network as still available until withdrawal is confirmed. Keep the guest and gateway under operator control while saving accessible work; stopping or deleting the VM can lose writes after its last successful disk sync. An administrator must decide whether to retain that work or end the VM despite the loss.
@@ -692,7 +702,7 @@ For another MicroVM error reason, such as `ProcessPollFailed`, OpenShell may sti
 
 ## A MicroVM stop is held because its disk could not sync
 
-On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it. If that sync fails, DefenseClaw does not stop the VM: it keeps running with its work, and the command says why. Save the work you need (`defenseclaw sandbox pull NAME` for a copy run), then run `defenseclaw sandbox stop NAME` again; `defenseclaw sandbox delete NAME` ends it without keeping its work. To stop it anyway, run `defenseclaw sandbox stop NAME --discard-unsynced` (on a terminal, `defenseclaw sandbox stop NAME` asks first): it loses what the VM wrote since its last sync, and the activity feed shows `stop_unflushed`. A stop your organization's policy makes (a hook alarm, a revoked registration) still goes ahead and the activity feed says what may be lost.
+On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it. If that sync fails, DefenseClaw does not stop the VM: it keeps running with its work, and the command says why. Save the work you need (`defenseclaw sandbox pull NAME` for a copy run), then run `defenseclaw sandbox stop NAME` again; `defenseclaw sandbox delete NAME` ends it without keeping its work. To stop it anyway, run `defenseclaw sandbox stop NAME --discard-unsynced` (on a terminal, `defenseclaw sandbox stop NAME` asks first): it loses what the VM wrote since its last sync, and the activity feed shows `stop_unflushed`. A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either: DefenseClaw contains it instead (it closes its egress proxy, withdraws its network rules and providers, reports it not protected and refuses new DefenseClaw runs), and it keeps running until you stop it with `--discard-unsynced` or delete it.
 
 Signing out without linger, `sandbox teardown` and an administrator's stop of the sandbox service stop the VM even when its disk could not sync: DefenseClaw stops it with what reached its disk and the activity feed says what may have been lost.
 

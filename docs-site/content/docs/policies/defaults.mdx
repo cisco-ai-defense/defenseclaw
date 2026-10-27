@@ -111,7 +111,7 @@ All three have the same eight rule files (`c2`, `cognitive`, `commands`, `enterp
 
 `CMD-PIPE-CURL` (`curl ... | bash`) is off in `default` and `permissive` and on in `strict`.
 
-In `default` and `permissive`, a world-writable `chmod` and a Windows Run-key addition produce HIGH alerts and do not block. Writes to the active user's `authorized_keys` are blocked when a direct command, a file tool or a supported literal interpreter form proves the target. Computed interpreter paths are outside that proof. A symlink in the gateway's local filesystem is resolved for write targets; sandbox filesystems are evaluated without local symlink resolution.
+In `default` and `permissive`, a world-writable `chmod` and a Windows Run-key addition produce HIGH alerts and do not block. Writes to the active user's `authorized_keys` are blocked in action mode when a direct command, a file tool or a supported literal interpreter form proves the target; in observe mode the same write raises a CRITICAL would-block alert and runs. Computed interpreter paths are outside that proof. A symlink in the gateway's local filesystem is resolved for write targets; sandbox filesystems are evaluated without local symlink resolution.
 
 **Known limit.** The rule reads the text of the command. A write made by a program the command starts (a nested shell, a generated script, a build tool, a tool option that runs another command) is not visible in that text, so it is not caught when it goes through an already existing link to the protected file. Rely on the OpenShell sandbox and file permissions for containment.
 
