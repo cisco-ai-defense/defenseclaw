@@ -36,16 +36,16 @@ func enterpriseHookDeferredTargetSessionAvailable(
 	return false, fmt.Errorf("deferred enterprise hook targets are supported only on native Windows")
 }
 
-// enterpriseHookRemovedAccountRow excuses a failed standalone row only when
-// reconciliation itself found the target missing and local account evidence
-// makes that absence definitive. NSS also returns not-found for directory
-// users while their provider is unavailable, so it cannot prove deletion.
 // enterpriseHookNoticeAccount names a guardian row's account in a notice:
 // the user name the target carries.
 func enterpriseHookNoticeAccount(row enterpriseHookReconcileRow) string {
 	return firstNonEmptyString(row.User, row.SID)
 }
 
+// enterpriseHookRemovedAccountRow excuses a failed standalone row only when
+// reconciliation itself found the target missing and local account evidence
+// makes that absence definitive. NSS also returns not-found for directory
+// users while their provider is unavailable, so it cannot prove deletion.
 var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool {
 	user := strings.TrimSpace(row.User)
 	if cfg == nil || !cfg.StandaloneEnterprise() || user == "" ||
