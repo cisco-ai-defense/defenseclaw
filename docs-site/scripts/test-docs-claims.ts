@@ -1423,6 +1423,10 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-2192", page: "enterprise/identity-entra-id.mdx", has: ['<Callout type="warn" title="Not part of the release certification">', "Active Directory is the certified identity stack. The Entra setups below were last verified live in October 2026"], lacks: ["1.0.4 certification", "certified identity stack in 1.0.4"] },
+  { gap: "GAP-2192", page: "enterprise/identity-okta.mdx", has: ['<Callout type="warn" title="Not part of the release certification">', "Active Directory is the certified identity stack. The Okta lab is retired"], lacks: ["1.0.4 certification", "certified identity stack in 1.0.4"] },
+  { gap: "GAP-2192", page: "enterprise/identity-sources.mdx", has: ["Active Directory is the certified identity stack; the Okta and Entra parts were last verified live in October 2026."], lacks: ["certified in 1.0.4"] },
+  { gap: "GAP-2158", page: "guardrail/unified-llm-key.mdx", has: ["## The `keys` subcommands"], lacks: ["All four `keys` subcommands"] },
   { gap: "GAP-1821", page: "support-matrix.mdx", section: "Known issues", has: ["**Claude Code settings can keep a variable from 1.0.2 or 1.0.3**. After an upgrade from 1.0.2 or 1.0.3 to 1.0.4", "The upgrade to 1.0.5 removes it."], lacks: ["keep a variable from 1.0.2**. After an upgrade from 1.0.2, the"] },
   { gap: "GAP-0012", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["If that sync fails (a frozen guest, for one), the stop is held and the guest keeps running", "`defenseclaw sandbox stop NAME --discard-unsynced` stops it anyway and loses what it wrote since its last sync; the activity feed then shows `stop_unflushed`"], lacks: ["The stop requests a disk sync, but changes made after the last successful sync may be lost."] },
   { gap: "GAP-0012", page: "sandboxes/guide.mdx", section: "A MicroVM stop is held because its disk could not sync", has: ["To stop it anyway, run `defenseclaw sandbox stop NAME --discard-unsynced`", "the activity feed shows `stop_unflushed`"] },
@@ -1663,6 +1667,18 @@ describe('edge connector variables and the registry (GAP-1639)', () => {
     assert.ok(registry.includes('"DCLAW_FLEET_API_URL"'));
     const text = page('edge-connector/install.mdx');
     assert.ok(text.includes('are read only by the adapters and are listed only on this page'));
+  });
+});
+
+// GAP-2193: each Entra page callout appears once.
+describe('identity-entra-id callouts appear once (GAP-2193)', () => {
+  it('has one "A per-user config belongs to the user" callout', () => {
+    const text = page('enterprise/identity-entra-id.mdx');
+    assert.equal(text.split('<Callout type="warn" title="A per-user config belongs to the user">').length - 1, 1);
+  });
+  it('has each callout title once', () => {
+    const titles = [...page('enterprise/identity-entra-id.mdx').matchAll(/<Callout[^>]*title="([^"]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(titles.filter((t, i) => titles.indexOf(t) !== i), []);
   });
 });
 
