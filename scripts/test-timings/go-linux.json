@@ -1187,6 +1187,7 @@
    "TestReturnedCredentialMaterialLifecycleAcceptsOneExactFileRead": 2.6,
    "TestReturnedCredentialMaterialLifecycleRequiresExactSuccessfulRebind": 3.0,
    "TestReturnedCredentialMaterialLifecycleSupportedConnectorContracts": 7.9,
+   "TestRuleLiteralPrefilterNeverSkipsAMatch": 524.6,
    "TestRunGuardrailMultiAgentSettingsRefusalKeepsOtherConnectors": 6.8,
    "TestRunGuardrailMultiDisablingARefusedConnectorKeepsOtherConnectors": 7.8,
    "TestRunGuardrailRemovingARefusedConnectorStartsTheRemainingOne": 5.8,
