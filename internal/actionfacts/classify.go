@@ -2868,6 +2868,13 @@ func classifySearchPaths(out *parseOutput, command *CommandFact, program string)
 		}
 	case "find":
 		startingPaths := findStartingPaths(command.Argv)
+		if len(startingPaths) == 0 && findSearchesDefaultStart(command.Argv) ||
+			findFirstWordIsGNUPrimary(command.Argv) {
+			// GNU find and bfs search '.' when no starting point is
+			// given (GAP-2267); BSD find refuses to run. A first word
+			// such as -follow is a GNU primary and a BSD -f path.
+			startingPaths = append(startingPaths, ".")
+		}
 		for _, operand := range startingPaths {
 			appendPath(out, command.ID, PathAccessRead, operand)
 		}
@@ -3081,6 +3088,33 @@ func searchPatternOptions(argv []string) (bool, []string) {
 		}
 	}
 	return false, files
+}
+
+// findSearchesDefaultStart reports a find argv that, with no starting
+// point, searches the working directory: anything but --help and
+// --version.
+func findSearchesDefaultStart(argv []string) bool {
+	for _, argument := range argv[1:] {
+		switch argument {
+		case "--help", "-help", "--version", "-version":
+			return false
+		}
+	}
+	return true
+}
+
+// findFirstWordIsGNUPrimary reports a find whose first argument is a GNU
+// primary that BSD getopt reads as an attached -f path (`find -follow
+// -delete`: GNU searches '.', BSD searches "ollow").
+func findFirstWordIsGNUPrimary(argv []string) bool {
+	if len(argv) < 2 {
+		return false
+	}
+	switch argv[1] {
+	case "-follow", "-false", "-fls", "-fprint", "-fprint0", "-fprintf", "-fstype":
+		return true
+	}
+	return false
 }
 
 func findStartingPaths(argv []string) []string {

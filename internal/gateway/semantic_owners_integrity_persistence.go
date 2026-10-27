@@ -18,7 +18,11 @@ package gateway
 
 import (
 	"encoding/base64"
+	"errors"
+	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
@@ -2547,7 +2551,7 @@ func matchesActiveDefenseClawState(
 	}
 	relative = strings.TrimRight(relative, "/")
 	if !ok || relative != ".defenseclaw" && !strings.HasPrefix(relative, ".defenseclaw/") {
-		return false
+		return findAncestorStartChangesState(facts, candidate)
 	}
 	state := strings.TrimPrefix(strings.TrimPrefix(relative, ".defenseclaw"), "/")
 	switch state {
@@ -2669,7 +2673,16 @@ func stateTreeEntryChanged(
 // because each can still reach config.yaml, a hook, a rule pack file or the
 // saved installer.
 func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state string) bool {
-	if state != "" || !strings.EqualFold(command.Program, "find") || len(command.Argv) < 2 {
+	if state != "" {
+		return false
+	}
+	return findDeletesOnlyNames(command, findPatternIsCleanupOnly)
+}
+
+// findDeletesOnlyNames is findDeletesOnlyUnprotectedNames with the name
+// test judged by cleanup.
+func findDeletesOnlyNames(command actionfacts.CommandFact, cleanup func(pattern string, fold bool) bool) bool {
+	if !strings.EqualFold(command.Program, "find") || len(command.Argv) < 2 {
 		return false
 	}
 	named, acted := false, false
@@ -2684,7 +2697,7 @@ func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state stri
 				return false
 			}
 			index++
-			if !findPatternIsCleanupOnly(command.Argv[index], argument == "-iname") {
+			if !cleanup(command.Argv[index], argument == "-iname") {
 				return false
 			}
 			named = named || !acted
@@ -2785,6 +2798,166 @@ func findAttachedPathOption(word string) bool {
 	at := strings.IndexByte(word, 'f')
 	return len(word) > 2 && word[0] == '-' && at > 0 && at < len(word)-1 &&
 		strings.Trim(word[1:at], "EHLPXdsx") == ""
+}
+
+// findAncestorStartChangesState judges a find starting point that contains
+// the active state root (find ~, find /home, find /, or '.' in such a
+// working directory; GAP-2267): it reaches the state tree as a start at
+// the root does, so -delete, an embedded rm, a hand-off to a writer or a
+// pipe into xargs rm changes it, unless the tests before the action keep
+// to names that are never protected (find ~ -name '*.tmp' -delete) or
+// -maxdepth stops above the root's entries (find ~ -maxdepth 1 -type f).
+func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	command, ok := integrityCommandByID(facts, candidate.CommandID)
+	if !ok || !strings.EqualFold(command.Program, "find") ||
+		candidate.Flavor != "" && candidate.Flavor != actionfacts.PathFlavorPOSIX || facts.ActiveHome == "" {
+		return false
+	}
+	acted := command
+	switch candidate.Access {
+	case actionfacts.PathAccessDelete:
+	case actionfacts.PathAccessWrite:
+		if !findHandsEntriesToWriter(command) {
+			return false
+		}
+	case actionfacts.PathAccessRead:
+		if !findPipedToWriter(facts, command) {
+			return false
+		}
+		acted.Argv = append(append([]string(nil), command.Argv...), "-delete")
+	default:
+		return false
+	}
+	start := path.Clean(exactSemanticPathValue(candidate))
+	root := path.Join(path.Clean(facts.ActiveHome), ".defenseclaw")
+	prefix := strings.TrimRight(start, "/") + "/"
+	if !path.IsAbs(start) || !strings.HasPrefix(root, prefix) {
+		return false
+	}
+	// Above the root a find also reaches every other file of the
+	// account, so a name test that matches no protected state name, in
+	// the sample list or in the account's real state tree (`find ~ -name
+	// .DS_Store -exec rm {} +`, `-name '*.py'`), keeps it out of the
+	// state tree.
+	if findDeletesOnlyNames(acted, func(pattern string, fold bool) bool {
+		return findPatternIsCleanupOnly(pattern, fold) ||
+			findPatternMatchesNoStateName(pattern, fold) && !activeStateTreeHasName(root, pattern, fold)
+	}) {
+		return false
+	}
+	// The root is at depth `depth` below the start; its entries one deeper.
+	depth := strings.Count(strings.TrimPrefix(root, prefix), "/") + 1
+	if maxDepth, ok := findMaxDepth(command.Argv); ok &&
+		(maxDepth < depth || maxDepth == depth && findTypeSkipsDirectories(command.Argv)) {
+		return false
+	}
+	return true
+}
+
+// findPatternMatchesNoStateName reports a -name/-iname pattern that
+// matches no DefenseClaw state file or tree name (and not .defenseclaw).
+func findPatternMatchesNoStateName(pattern string, fold bool) bool {
+	if pattern == "" || strings.Contains(pattern, "/") {
+		return false
+	}
+	if fold {
+		pattern = strings.ToLower(pattern)
+	}
+	for _, name := range append([]string{".defenseclaw"}, protectedStateNameSamples...) {
+		if fold {
+			name = strings.ToLower(name)
+		}
+		if matched, err := path.Match(pattern, name); err != nil || matched {
+			return false
+		}
+	}
+	return true
+}
+
+// activeStateTreeLimit bounds the walk of activeStateTreeHasName; a
+// larger tree counts as a match (fail closed).
+const activeStateTreeLimit = 20000
+
+// activeStateTreeHasName reports a file or directory of the protected
+// state (the root's own files and its protected trees; not logs/ or the
+// uv cache) whose name the find pattern matches. A tree that cannot be
+// read counts as a match.
+func activeStateTreeHasName(root, pattern string, fold bool) bool {
+	if fold {
+		pattern = strings.ToLower(pattern)
+	}
+	match := func(name string) bool {
+		if fold {
+			name = strings.ToLower(name)
+		}
+		matched, err := path.Match(pattern, name)
+		return err != nil || matched
+	}
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	seen := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() {
+			if match(name) {
+				return true
+			}
+			continue
+		}
+		switch name {
+		case "cache", "hooks", "installer", "policies", "previous", "quarantine", "receipts", "registries":
+		default:
+			continue
+		}
+		found := false
+		walkErr := filepath.WalkDir(filepath.Join(root, name), func(_ string, item fs.DirEntry, err error) error {
+			seen++
+			if err != nil || seen > activeStateTreeLimit || match(item.Name()) {
+				found = true
+				return fs.SkipAll
+			}
+			return nil
+		})
+		if found || walkErr != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// findMaxDepth returns the -maxdepth (BSD -depth n is not a limit) of a
+// find argv.
+func findMaxDepth(argv []string) (int, bool) {
+	for index := findExpressionStart(argv); index+1 < len(argv); index++ {
+		if strings.EqualFold(argv[index], "-maxdepth") {
+			value, err := strconv.Atoi(argv[index+1])
+			return value, err == nil && value >= 0
+		}
+	}
+	return 0, false
+}
+
+// findTypeSkipsDirectories reports a find whose expression is one AND
+// chain with a -type test that excludes directories (-type f, -type l,
+// GNU -type f,l).
+func findTypeSkipsDirectories(argv []string) bool {
+	skips := false
+	for index := findExpressionStart(argv); index < len(argv); index++ {
+		switch strings.ToLower(argv[index]) {
+		case "-o", "-or", "!", "-not", ",":
+			return false
+		case "-type":
+			if index+1 < len(argv) && !strings.Contains(argv[index+1], "d") {
+				skips = true
+			}
+		}
+	}
+	return skips
 }
 
 // findHandsEntriesToWriter reports a find whose -exec/-execdir/-ok/-okdir
