@@ -222,3 +222,53 @@ func TestRemovedConnectorSingleConnectorBootRemovesLockOnlyLeftovers(t *testing.
 		}
 	}
 }
+
+// The zero-connector boot: a 1.0.4 host whose last connector was dropped kept
+// the OpenHands and OmniGent lock entries, deny stubs and registrations. With
+// no connector configured both boot paths go straight to the idle wait; a
+// 1.0.5 boot still removes what DefenseClaw wrote for them, drops both lock
+// entries and prints the notice once (GAP-2018).
+func TestRemovedConnectorZeroConnectorBootRemovesLockOnlyLeftovers(t *testing.T) {
+	for _, multi := range []bool{false, true} {
+		t.Run("multi="+strconv.FormatBool(multi), func(t *testing.T) {
+			h := stageRemovedBootHost(t)
+			restore, err := connector.BindUserHomeDir(h.home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(restore)
+			lock := `{"version":2,"updated_at":"2026-10-01T00:00:00Z","connectors":{` +
+				`"openhands":{"connector":"openhands","contract_id":"openhands-hooks-v1","defenseclaw_version":"1.0.3","hook_fail_mode":"open","updated_at":"2026-10-01T00:00:00Z"},` +
+				`"omnigent":{"connector":"omnigent","contract_id":"omnigent-policy-v1","defenseclaw_version":"1.0.3","hook_fail_mode":"open","updated_at":"2026-10-01T00:00:00Z"}}}` + "\n"
+			if err := os.WriteFile(filepath.Join(h.dataDir, "hook_contract_lock.json"), []byte(lock), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			removedConnectorNoticeLogged.Store(false)
+			t.Cleanup(func() { removedConnectorNoticeLogged.Store(false) })
+			s := &Sidecar{cfg: &config.Config{DataDir: h.dataDir}}
+			if s.currentConfig().HasConnectorConfigured() {
+				t.Fatal("the fixture configures a connector")
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			stderr := captureStderr(t, func() {
+				run := s.runGuardrail
+				if multi {
+					run = s.runGuardrailMulti
+				}
+				if err := run(ctx); err != nil {
+					t.Errorf("boot = %v, want the idle wait", err)
+				}
+			})
+			h.requireRemoved(t)
+			for _, name := range []string{"openhands", "omnigent"} {
+				if got := connector.LoadHookContractLockEntry(h.dataDir, name); got.Connector != "" {
+					t.Errorf("the %s lock entry is still there", name)
+				}
+			}
+			if got := strings.Count(stderr, connector.RemovedConnectorNotice); got != 1 {
+				t.Errorf("the notice was logged %d times, want 1:\n%s", got, stderr)
+			}
+		})
+	}
+}
