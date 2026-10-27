@@ -599,6 +599,9 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 		}
 
 		hookPath := filepath.Join(hookDir, name)
+		if err := removeHookScriptLink(hookPath); err != nil {
+			return err
+		}
 		if err := atomicWriteFile(hookPath, rendered, 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
@@ -659,6 +662,11 @@ func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, fail
 		return err
 	}
 	for _, script := range scripts {
+		if !managed {
+			if err := removeHookScriptLink(filepath.Join(hookDir, script.name)); err != nil {
+				return err
+			}
+		}
 		if err := writeFile(filepath.Join(hookDir, script.name), script.body, 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", script.name, err)
 		}
@@ -673,6 +681,21 @@ func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, fail
 		writeFile,
 	); err != nil {
 		return err
+	}
+	return nil
+}
+
+// removeHookScriptLink removes a link put in place of a generated hook script,
+// so the render writes a regular file in the hook folder again instead of
+// writing through the link, and doctor --fix converges (GAP-2022). The link's
+// target is left as it is.
+func removeHookScriptLink(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("remove the link in place of hook script %s: %w", path, err)
 	}
 	return nil
 }
