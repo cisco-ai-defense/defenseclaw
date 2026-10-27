@@ -2088,6 +2088,12 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             unread = f"the sandbox list could not be read ({plan.sandbox_list_error})"
             if plan.stop_sandboxes:
                 ux.echo(f"      {ux.dim('·')} {unread}: any running sandbox is stopped and deleted (--stop-sandboxes)")
+            elif _sandboxes_off(plan):
+                ux.echo(
+                    f"      {ux.dim('·')} {unread}: this run stops before any change; check with "
+                    "`defenseclaw sandbox teardown --dry-run` (with sandboxes off, `sandbox list` cannot), then "
+                    "add --skip-sandbox-teardown when it names no sandbox, or add --stop-sandboxes"
+                )
             else:
                 ux.echo(
                     f"      {ux.dim('·')} {unread}: this run stops before any change; check with "
@@ -3371,6 +3377,16 @@ def _with_listed_sandboxes(plan: UninstallPlan, stop_sandboxes: bool) -> Uninsta
     )
 
 
+# The daemon's refusal while sandboxes are off for the account
+# (sandboxapi.DisabledMessage and its other-account variant).
+_SANDBOXES_OFF_TEXT = "OpenShell sandboxes are off"
+
+
+def _sandboxes_off(plan: UninstallPlan) -> bool:
+    """Whether ``sandbox list`` failed because sandboxes are off for this account."""
+    return _SANDBOXES_OFF_TEXT in plan.sandbox_list_error
+
+
 def _running_sandboxes_refusal(plan: UninstallPlan) -> str:
     """Why running sandboxes stop this run before any change ('' when they do not).
 
@@ -3381,6 +3397,20 @@ def _running_sandboxes_refusal(plan: UninstallPlan) -> str:
     """
     if not plan.sandbox_teardown or plan.stop_sandboxes:
         return ""
+    if plan.sandbox_list_error and _sandboxes_off(plan):
+        # Sandboxes off (after a completed `sandbox teardown`, say): the
+        # daemon refuses `sandbox list` the same way, so the check it names
+        # is the teardown's own dry run, which asks OpenShell (GAP-0037).
+        return (
+            f"the sandbox list could not be read ({plan.sandbox_list_error}), so this run cannot tell whether "
+            "OpenShell sandboxes still run for this account; a running sandbox may hold work never pulled back, "
+            "and the sandbox teardown would stop and delete it; nothing was changed. With sandboxes off, "
+            "`defenseclaw sandbox list` cannot check either: run `defenseclaw sandbox teardown --dry-run`, which "
+            "names every sandbox the teardown would delete. When it names none (after a completed `defenseclaw "
+            "sandbox teardown`, say), run this command again with --skip-sandbox-teardown; otherwise "
+            "`defenseclaw sandbox pull NAME --branch` keeps a copy-mode sandbox's work, or add --stop-sandboxes to "
+            "stop and delete the sandboxes with the teardown."
+        )
     if plan.sandbox_list_error:
         # A destructive step does not go ahead on an unknown answer (GAP-0448).
         return (
