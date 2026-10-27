@@ -110,6 +110,7 @@ Resolve-DcPathVariables
 $DataDir = if ($env:DEFENSECLAW_HOME) { $env:DEFENSECLAW_HOME } else { Join-Path $env:USERPROFILE ".defenseclaw" }
 $Venv = Join-Path $DataDir ".venv"
 $BinDir = Join-Path $env:USERPROFILE ".local\bin"
+$script:KeptRollbackCopy = ""
 $Previous = Join-Path $DataDir "previous"
 $Staging = Join-Path $DataDir ".staging"
 $InstallerDir = Join-Path $DataDir "installer"
@@ -438,8 +439,14 @@ function Copy-Kept([string]$Source, [string]$DestinationDir) {
             return
         } catch { if (-not $result.Error) { $why = $_.Exception.GetBaseException().Message } }
     }
-    # Name what may hold it: a gateway or hook a failed Setup left running.
-    $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like "defenseclaw*" } | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" })
+    # Name what may hold it: a gateway, watchdog or hook of this install that
+    # a failed Setup or an outside start left running. Only this account's
+    # own programs: another account's gateway cannot hold this data folder,
+    # and the advice to stop it sent the user after the wrong PIDs (GAP-2245).
+    # Only DefenseClaw's own images in the bin folder: other programs live
+    # there too (Claude Code's claude.exe, uv.exe), and the line told the
+    # user to Stop-Process a working agent as a "DefenseClaw program".
+    $running = @(Get-ProcessesUnder @("$BinDir\defenseclaw", "$DataDir\") | ForEach-Object { "$($_.Name -replace '\.exe$', '') (PID $($_.ProcessId))" })
     $held = if ($running.Count) { "; DefenseClaw programs still running: $($running -join ', ') (stop them with Stop-Process -Id <PID>)" } else { "" }
     throw "Could not copy $Source ($why)$held. Check that this account can read it and that no program has it open (icacls `"$Source`"), then run the installer again"
 }
@@ -467,7 +474,11 @@ function Invoke-Quietly([scriptblock]$Action) {
 
 function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Quiet) {
     # Output goes through the host, so the install log (a transcript) keeps it.
-    $ErrorActionPreference = "Continue"
+    # -Quiet discards it. Windows PowerShell 5.1's transcript still records a
+    # discarded stderr line as a red NativeCommandError under Continue (an
+    # older gateway's "unknown flag" answer to a probe, rel-1-0-5 GAP-0047);
+    # SilentlyContinue keeps it out and leaves LASTEXITCODE as it is.
+    $ErrorActionPreference = if ($Quiet) { "SilentlyContinue" } else { "Continue" }
     # Failure to launch a native image does not set LASTEXITCODE. Never
     # mistake an earlier successful command for this command's result.
     $global:LASTEXITCODE = -1
@@ -482,7 +493,8 @@ function Get-NativeProbe([string]$FilePath, [string[]]$Arguments = @(), [switch]
     # plain-text secret") is no JSON; merged in, it made the health report,
     # the policy digest and the connector roster unreadable, so the upgrade
     # restored the old release with every hook closed (rel-1-0-5 GAP-0018).
-    $ErrorActionPreference = "Continue"
+    # The discarded stderr stays out of the install log too (GAP-0047).
+    $ErrorActionPreference = if ($Json) { "SilentlyContinue" } else { "Continue" }
     try {
         $output = if ($Json) { ((& $FilePath @Arguments 2>$null) | Out-String) } else { ((& $FilePath @Arguments 2>&1) | Out-String) }
         return [pscustomobject]@{ Exit = $LASTEXITCODE; Output = $output }
@@ -630,6 +642,7 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
     if ($versionChange) { Assert-NoActiveConnectorRecovery "Version change to $target" }
     $downgrade = $versionChange -and [version]$target -lt [version]$installed
     $restartCurrent = $false
+    $hooksConverted = $false
     $childCode = $null
     $restartFailed = $false
     $restartCode = 0
@@ -689,6 +702,7 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
             if (-not (Stop-Gateway)) { Die "The gateway did not stop; the release installer was not started" }
             Stop-Watchdog
             Assert-GatewayQuiescent "Version change to $target"
+            if ($downgrade) { $hooksConverted = Convert-HooksForOlderRelease $installed $target }
             Assert-NoActiveConnectorRecovery "Version change to $target"
         }
         $shell = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh.exe" } else { "powershell.exe" }
@@ -702,6 +716,9 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
         $child.WaitForExit()
         $childCode = $child.ExitCode
     } finally {
+        # A downgrade that ends with this release still installed (refused,
+        # failed or restored by the older installer) gets its own entries back.
+        if ($hooksConverted -and (Get-InstalledVersion) -eq $installed) { Restore-HooksAfterAbortedRollback }
         if ($restartCurrent) {
             $restartIssue = ""
             try {
@@ -1313,7 +1330,8 @@ function Test-RollbackData([string]$BackTo) {
     $stores = @(Get-ChildItem -LiteralPath $data -Filter "*.db" -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
     if (-not $stores.Count) { return $false }
     $check = Join-Path ([IO.Path]::GetTempPath()) "defenseclaw-rollback-check-$PID.py"
-    $ErrorActionPreference = "Continue"
+    # Its stderr is discarded; keep it out of the install log (GAP-0047).
+    $ErrorActionPreference = "SilentlyContinue"
     try {
         [IO.File]::WriteAllText($check, $RollbackDbCheckPy)
         $damaged = @(& $python -I $check @stores 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
@@ -1343,6 +1361,13 @@ function Move-DamagedAuditStore([string]$BackTo) {
     return $moved
 }
 
+function Test-GatewayRequiresEveryConnector([string]$Gateway, [string]$Version) {
+    # The flag came with 1.0.4. A restored 1.0.0-1.0.3 is not asked: its
+    # "unknown flag" answer went to the install log (rel-1-0-5 GAP-0047).
+    if ((Test-Version $Version) -and [version]$Version -lt [version]"1.0.4") { return $false }
+    return (Invoke-Native $Gateway @("start", "--require-every-connector", "--help") -Quiet) -eq 0
+}
+
 function Start-Gateway {
     # Its readiness wait is the health check. Exit code 3: running, but a
     # connector refused admission (upgrading again would not change that) or,
@@ -1360,7 +1385,7 @@ function Start-Gateway {
     # when its boot left a configured connector unguarded. An older one (a
     # restored or rolled-back install) refuses the flag, so ask it first.
     $startArgs = @("start")
-    if ((Invoke-Native $gateway @("start", "--require-every-connector", "--help") -Quiet) -eq 0) { $startArgs += "--require-every-connector" }
+    if (Test-GatewayRequiresEveryConnector $gateway $version) { $startArgs += "--require-every-connector" }
     $rc = Invoke-Native $gateway $startArgs
     if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }
     # A first start over a large audit database can outlast start's own
@@ -3464,6 +3489,12 @@ function Restart-Old([switch]$KeepStopped) {
             $Run.RestorePending = $true
         }
     }
+    # A local downgrade that converted this release's hook entries ends with
+    # this release back: its own entries go back before its gateway starts.
+    if (Get-Variable -Name OlderHooksConverted -Scope Script -ValueOnly -ErrorAction SilentlyContinue) {
+        $script:OlderHooksConverted = $false
+        Restore-HooksAfterAbortedRollback
+    }
     # A failure here (a gateway.pid that cannot be read, DefenseClaw Setup's
     # hook state that cannot be moved back) must not end the restore it is
     # part of: it is reported like a gateway that did not start.
@@ -4431,7 +4462,8 @@ function Test-OutageOpenNotice {
     # blocked. Said once, after the upgrade (GAP-1885). Windows PowerShell
     # 5.1 turns a native stderr line (a Python warning) into an error under
     # the installer's Stop preference, which lost the notice (GAP-2056).
-    $ErrorActionPreference = "Continue"
+    # Discarded, it stays out of the install log too (GAP-0047).
+    $ErrorActionPreference = "SilentlyContinue"
     $python = Join-Path $Venv "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { return $false }
     $setHome = -not $env:DEFENSECLAW_HOME
@@ -4459,6 +4491,16 @@ function Remove-KeptNewCopies {
     foreach ($old in @(Get-ChildItem -LiteralPath $DataDir -Directory -Force -Filter ".failed-kept-previous-*-new" -ErrorAction SilentlyContinue)) {
         try { Remove-Tree $old.FullName } catch { }
     }
+}
+
+function Get-UndoHint {
+    # defenseclaw rollback uses previous\. When this install's copy had to be
+    # kept beside another account's previous\ (Publish-PreviousSlot), a plain
+    # "Undo with: defenseclaw rollback" pointed at the other, older copy.
+    if ($script:KeptRollbackCopy) {
+        return "To undo it, an administrator first removes $Previous and you rename $($script:KeptRollbackCopy) to previous; then run: defenseclaw rollback"
+    }
+    return "Undo with: defenseclaw rollback"
 }
 
 function Publish-PreviousSlot([string]$Slot) {
@@ -4497,6 +4539,7 @@ function Publish-PreviousSlot([string]$Slot) {
             $kept = Join-Path $DataDir ".failed-kept-previous-$stamp-new"
             Remove-KeptNewCopies
             Move-Path $Slot $kept
+            $script:KeptRollbackCopy = $kept
             Write-Warn "The older rollback copy $Previous belongs to another account and could not be removed or set aside, so this install's rollback copy was kept in $kept"
             Write-Info "To make it the rollback copy again, an administrator removes $Previous (cmd /c rd /s /q `"$Previous`") and you rename $kept to previous"
             return
@@ -4733,6 +4776,25 @@ function Convert-HooksForRollback([string]$From, [string]$BackTo) {
     }
 }
 
+function Convert-HooksForOlderRelease([string]$From, [string]$To) {
+    # A downgrade (-Version or 'defenseclaw upgrade --version' to an older
+    # release) runs that release's setup, which does not recognise a hook
+    # entry this release writes: 1.0.4 owns the per-user Claude Code
+    # PreToolUse guard only when defenseclaw-hook.exe starts it, and 1.0.5's
+    # one-line install starts defenseclaw-gateway.exe launcher-guard. So the
+    # older setup added its own handler beside it, doctor failed and the
+    # repair it suggested did not finish (GAP-1883). Before the older release
+    # is installed, this install's gateway, still the live one, rewrites its
+    # entries in the shape every earlier release owns, as 'defenseclaw
+    # rollback' does (GAP-1284). Returns whether it converted, so a downgrade
+    # that ends with this release still installed puts its entries back.
+    if (-not (Test-Version $From) -or -not (Test-Version $To) -or [version]$To -ge [version]$From) { return $false }
+    # A gateway that cannot restore converted entries keeps the earlier path.
+    try { if (-not (Test-HookRollbackRestoreAvailable)) { return $false } } catch { return $false }
+    Convert-HooksForRollback $From $To
+    return $true
+}
+
 function Convert-HooksForRestore([string]$Slot) {
     # A failed upgrade's gateway already wrote its hook entries, and the one-
     # line Claude Code handler (`<bin>\defenseclaw-gateway.exe launcher-guard
@@ -4851,6 +4913,39 @@ function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [stri
     return 1
 }
 
+function Get-StaleAgentEvidence([string]$Data) {
+    # The agent programs whose setup evidence in the older install's data no
+    # longer names the file on disk. Its gateway checks the Codex program
+    # it set up (path and SHA-256 in hook_contract_lock.json) at every start
+    # and does not start without it, so after a Codex update the rollback
+    # swapped, failed to start DefenseClaw 1.0.4, rewrote the Claude Code
+    # settings on the way and was undone with the hooks unverified
+    # (GAP-2299). Found here, before anything changes, it is a plain refusal.
+    $lock = Join-Path $Data "hook_contract_lock.json"
+    if (-not (Test-Path -LiteralPath $lock -PathType Leaf)) { return @() }
+    try { $doc = [IO.File]::ReadAllText($lock) | ConvertFrom-Json } catch { return @() }
+    $connectors = Get-Field $doc "connectors"
+    if (-not $connectors) { return @() }
+    $found = @()
+    foreach ($name in @("codex")) {
+        $entry = Get-Field $connectors $name
+        if (-not $entry -or [string](Get-Field $entry "agent_executable_source") -ne "setup-selected") { continue }
+        $exe = [string](Get-Field $entry "agent_executable")
+        $want = ([string](Get-Field $entry "agent_executable_sha256")).ToLowerInvariant()
+        if (-not $exe -or $want -notmatch '^[0-9a-f]{64}$') { continue }
+        $version = ([string](Get-Field $entry "raw_agent_version")) -replace '^codex-cli\s+', ''
+        $label = if ($version) { "Codex $version" } else { "Codex" }
+        if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            $found += "$label, which DefenseClaw set up before the upgrade, is no longer at $exe"
+            continue
+        }
+        $have = ""
+        try { $have = (Get-FileHash -LiteralPath $exe -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() } catch { continue }
+        if ($have -ne $want) { $found += "Codex was updated after DefenseClaw set up $label ($exe changed)" }
+    }
+    return $found
+}
+
 function Invoke-Rollback {
     $backTo = Read-Text (Join-Path $Previous "VERSION")
     if (-not (Test-Version $backTo)) { Write-Step "Rolling back"; Die "No previous install to roll back to ($Previous is missing)" }
@@ -4873,6 +4968,19 @@ function Invoke-Rollback {
     Assert-NoActiveConnectorRecovery "Rollback to $backTo"
     if (-not $rollForward) {
         Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
+    }
+    if (-not $rollForward) {
+        $stale = @(Get-StaleAgentEvidence (Join-Path $Previous "data"))
+        if ($stale.Count -and $backTo -match '^(?:0\.8\.10|1\.0\.[0-3])$') {
+            # Releases before 1.0.4 skip a connector whose setup fails and
+            # start without it, so this rollback completes as it always did;
+            # only Codex runs unguarded until its setup is redone (GAP-2299).
+            Write-Warn ("$($stale -join '; '). DefenseClaw $backTo starts without Codex hooks until you run " +
+                "'defenseclaw setup codex' after the rollback")
+        } elseif ($stale.Count) {
+            Die ("$($stale -join '; '). DefenseClaw $backTo does not start with an agent program it did not set up, so the rollback would stop " +
+                "half-way. Nothing was changed. Put that version back and run 'defenseclaw rollback' again, or stay on DefenseClaw $currentLabel")
+        }
     }
     if (-not (Confirm-Step $question)) {
         Die "Rollback cancelled; nothing was changed"
@@ -5450,6 +5558,10 @@ function Invoke-Install {
         } else { Stop-Watchdog }
         if ($versionChange) {
             Assert-GatewayQuiescent "Version change to $Ver"
+            # A local downgrade this installer runs itself (GAP-1883); a restore of this release puts them back.
+            if ($PrevVersion -match '^\d+\.\d+\.\d+$' -and [version]$Ver -lt [version]$PrevVersion) {
+                $script:OlderHooksConverted = Convert-HooksForOlderRelease $PrevVersion $Ver
+            }
             Assert-NoActiveConnectorRecovery "Version change to $Ver"
         } elseif ($Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement) {
             # A same-version repair over an accepted install: nothing of it may still run.
@@ -5585,7 +5697,7 @@ function Invoke-Install {
         $changed = "Upgraded from $PrevVersion"
         if ((Test-Version $PrevVersion) -and [version]$Ver -lt [version]$PrevVersion) { $changed = "Downgraded from $PrevVersion" }
         if ($PrevVersion -eq $Ver) { $changed = "Replaced the other build of $Ver" }
-        Write-Host "  $changed. Undo with: defenseclaw rollback"
+        Write-Host "  $changed. $(Get-UndoHint)"
         if ((Test-Version $PrevVersion) -and [version]$PrevVersion -lt [version]"1.0.4" -and [version]$PrevVersion -lt [version]$Ver -and (Test-OutageOpenNotice)) {
             Write-Host ('  ' + 'Gateway outages now let calls run with a warning (the default and permissive policies). Run `defenseclaw guardrail fail-mode closed` to keep blocking them.')
         }
