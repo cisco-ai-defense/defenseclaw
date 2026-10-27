@@ -1118,6 +1118,16 @@ jobs:
           tar -xzf "$dir/goreleaser.tar.gz" -C "$dir" goreleaser
           "$dir/goreleaser" --version
           echo "$dir" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      # The managed Linux packages install the scanner runtime (GAP-1527);
+      # nfpm takes these trees, so they are built first.
+      - name: Build the managed Linux scanner runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in linux-amd64 linux-arm64; do
+            packaging/unix/build-scanner-runtime.sh --target "$target" --out-dir "scanner-runtime/$target"
+          done
       - name: Build the Linux packages with the release GoReleaser config
         env:
           # A snapshot needs no tag history; the version is 9.9.9-SNAPSHOT-<commit>.
@@ -1281,6 +1291,7 @@ jobs:
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Build the unsigned standalone pkg
         shell: bash
         env:

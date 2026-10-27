@@ -32,6 +32,14 @@ func gatewayPeerClient(c *config.Config, host string, port int, timeout time.Dur
 		(c == nil || c.StandaloneEnterprise() || managed.IsManagedEnterprise(c.DeploymentMode)) {
 		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managed.StandaloneWindowsGatewaySvc)
 	}
+	// The administrator's scan on a managed Linux or macOS computer loads no
+	// config (GAP-1234): the managed deployment record names the gateway
+	// service, which runs as its own account, not the caller's.
+	if c == nil && runtime.GOOS != "windows" {
+		if _, present := managedHostUnixRecord(nil); present {
+			return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managedServiceName(false))
+		}
+	}
 	if c != nil && (c.StandaloneEnterprise() || managed.IsManagedEnterprise(c.DeploymentMode)) {
 		return managedGatewayClientFactory(timeout, net.JoinHostPort(host, strconv.Itoa(port)), managedServiceName(false))
 	}

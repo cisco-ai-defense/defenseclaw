@@ -778,7 +778,7 @@ func (e *Env) installedModeProblems(record *Deployment, skipConfig bool, skip st
 // which every account (the services, the agents running the hook) executes.
 func managedExecutable(name string) bool {
 	switch name {
-	case binGateway, binHook, binSensorHelper, binACP:
+	case binGateway, binHook, binSensorHelper, binACP, binScanners:
 		return true
 	}
 	return false
