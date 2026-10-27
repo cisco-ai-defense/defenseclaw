@@ -245,10 +245,12 @@ func reconcileEnterpriseHookStandaloneUnixCleanups(
 var errEnterpriseHookCleanupHomeGone = errors.New("the recorded home no longer exists")
 
 // enterpriseHookRecordedHomeGone reports a recorded home that definitively
-// does not exist: its parent directory answers and the home itself is not
-// there. A home that does not answer in time, or whose parent is missing
-// too (an unmounted volume), is not gone. A cleanup is retired on this
-// evidence only when the directory also gives the account no home.
+// does not exist: its parent directory answers, holds other entries, and
+// the home itself is not there. A home that does not answer in time, or
+// whose parent is missing too or empty (an unmounted volume: its mount
+// point stays as an empty folder, GAP-0443), is not gone. A cleanup is
+// retired on this evidence only when the directory also gives the account
+// no home.
 var enterpriseHookRecordedHomeGone = func(home string) bool {
 	home = filepath.Clean(home)
 	if !filepath.IsAbs(home) || home == filepath.Dir(home) {
@@ -259,7 +261,11 @@ var enterpriseHookRecordedHomeGone = func(home string) bool {
 		return false
 	}
 	_, err = enterprisehooks.BoundedLstat(home, enterpriseHookHomeCheckTimeout)
-	return errors.Is(err, os.ErrNotExist)
+	if !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	others, err := enterprisehooks.BoundedDirHasEntries(filepath.Dir(home), enterpriseHookHomeCheckTimeout)
+	return err == nil && others
 }
 
 // enterpriseHookRecordedHomeMoved reports whether a re-homed account's

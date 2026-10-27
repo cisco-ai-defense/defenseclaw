@@ -364,6 +364,11 @@ func TestRemoveAllGroupsManifestTargetsPerAccount(t *testing.T) {
 	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: accounts})
 	uid := func(value int) *int { return &value }
 	missingHome := filepath.Join(ownHome, "gone")
+	// A home is gone only from a parent that still holds other entries: an
+	// empty parent can be an unmounted volume (GAP-0443).
+	if err := os.Mkdir(filepath.Join(ownHome, "other"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
 		{User: "alice", UserHome: "/home/alice", UID: uid(41001), GID: uid(41001), Connector: "codex"},
 		{User: "alice", UserHome: "/home/alice", UID: uid(41001), GID: uid(41001), Connector: "devin", DataDir: "/home/alice/.dc"},
