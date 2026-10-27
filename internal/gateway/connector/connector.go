@@ -724,6 +724,14 @@ type HookProfileRequest struct {
 	Direction        string
 	Model            string
 	Payload          map[string]interface{}
+	// ManagedWatch is set on a managed (service-account) gateway: the watch
+	// paths of a Claude Code answer belong to the verified caller, never to
+	// the gateway service account (GAP-0066). WatchHome is that caller's
+	// home, empty when it could not be resolved (no home paths then), and
+	// WatchCWD the caller project the watch paths name.
+	ManagedWatch bool
+	WatchHome    string
+	WatchCWD     string
 }
 
 // HookVerdictInput is the mode-mapping context fed to a profile's
