@@ -28,6 +28,9 @@ func TestActionWindowsGitBashHereStringIsNotOneGlob(t *testing.T) {
 	if err := os.MkdirAll(proj, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(proj, "k.pub"), []byte("ssh-ed25519 AAAA test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(proj, "README.md"), []byte("plain notes\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +94,43 @@ func TestActionWindowsGitBashHereStringIsNotOneGlob(t *testing.T) {
 				t.Fatalf("ActionCommandDecision(%q) = %q, want %q", tc.command, got, tc.want)
 			}
 		})
+	}
+	// RV8-1: the script of bash -c is read as Git Bash reads it (quote
+	// removal, ~, $HOME, ${HOME}, cd, the MSYS /c/ drive), in the
+	// here-string and in the single-quoted form. Key targets spelled with a
+	// quoted, $HOME-based or /c/ directory stay protected targets.
+	for _, script := range []string{
+		`cp k.pub "$HOME"/.ssh/authorized_k*`,
+		`cp k.pub "$HOME/.ssh"/authorized_k*`,
+		`cp k.pub "${HOME}"/.ssh/authorized_k*`,
+		`cp k.pub ` + filepath.ToSlash(home) + `/".ssh"/authorized_k*`,
+		`cp k.pub ""` + msys + `/.ssh/authorized_k*`,
+		`cp k.pub "` + msys + `"/.ssh/authorized_k*`,
+		`cp k.pub ` + msys + `/.ssh/authorized_k*`,
+		`cp k.pub ` + msys + `/".ssh"/authorized_k*`,
+		`cp k.pub ~/".ssh"/authorized_k*`,
+		`cp k.pub ~/'.ssh'/authorized_k*`,
+		`echo k>` + msys + `/.ssh/authorized_k*`,
+		`echo k > ` + msys + `/.ssh/authorized_k*`,
+		`printf k >> "$HOME"/.ssh/authorized_keys`,
+		`cd ~ && cp proj/k.pub .ssh/authorized_k*`,
+		`cd ~ && cp proj/k.pub ".ssh"/authorized_k*`,
+		`cd ~ && cp proj/k.pub '.ssh'/authorized_k*`,
+		`cd ~ && cp proj/k.pub ".ssh/"authorized_k*`,
+		`cd ~ && cp proj/k.pub ".s"sh/authorized_k*`,
+		`cd ~ && cp proj/k.pub .ssh/authorized_keys`,
+		`cd ` + msys + ` && cp proj/k.pub .ssh/authorized_k*`,
+	} {
+		for form, command := range map[string]string{
+			"here-string":   bash + script + "\n'@",
+			"single-quoted": single + strings.ReplaceAll(script, "'", "''") + "'",
+		} {
+			t.Run(form+" "+script, func(t *testing.T) {
+				if got := ActionCommandDecision(command, proj, home); got != "protected-target" {
+					t.Fatalf("ActionCommandDecision(%q) = %q, want protected-target", command, got)
+				}
+			})
+		}
 	}
 }
 

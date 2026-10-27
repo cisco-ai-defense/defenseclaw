@@ -79,9 +79,14 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	ssh := filepath.Join(home, ".ssh")
 	// base places a relative value: the effective cwd for a parsed word,
 	// the request cwd for the text scan.
+	// Git Bash spells a Windows drive /c/... (GAP-0781 RV8-1).
+	windowsHost := runtime.GOOS == "windows" && actionWindowsHome(home)
 	checkValue := func(value string, tilde bool, base string) bool {
 		if len(value) == 0 || len(value) > MaxWriteTargetPathBytes {
 			return false
+		}
+		if windowsHost {
+			value = actionMSYSDrivePath(value)
 		}
 		if tilde && strings.HasPrefix(value, "~/") {
 			if actionPosixWindowsHome(home) {
@@ -1827,6 +1832,12 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 					}
 				}
 			}
+			if posixShellProgram(program) || program == "ash" {
+				if actionWindowsPOSIXShellMention(rawWords[i+1:], cwd, home, depth, stateOnly) {
+					return true
+				}
+				continue
+			}
 			if program != "pwsh" && program != "powershell" {
 				continue
 			}
@@ -1893,6 +1904,47 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 	return false
 }
 
+// actionWindowsPOSIXShellMention reads the script that a POSIX shell (Git
+// Bash, MSYS sh) runs with -c as that shell reads it, on the Windows file
+// system (ActionCommandDecisionInShell): quote removal, ~, $HOME and
+// ${HOME}, cd tracking and the MSYS /c/ drive spelling. The Windows reading
+// keeps the script's own quotes and operators inside its words, so a key
+// target spelled "$HOME"/.ssh/authorized_k*, k>/c/Users/u/.ssh/... or
+// cd ~ && cp k .ssh/authorized_k* named no file there (GAP-0781 RV8-1).
+// words are the words after the shell program.
+func actionWindowsPOSIXShellMention(words []string, cwd, home string, depth int, stateOnly bool) bool {
+	if depth+1 >= 8 {
+		return false
+	}
+	for j := 0; j+1 < len(words); j++ {
+		option := words[j]
+		if !strings.HasPrefix(option, "-") && !strings.HasPrefix(option, "+") {
+			return false
+		}
+		switch option {
+		case "-o", "+o", "-O", "+O", "--rcfile", "--init-file":
+			j++ // This option consumes the next word (bash -O dotglob -c).
+			continue
+		}
+		if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&
+			!strings.ContainsAny(option, "=/") && strings.Contains(option[1:], "c") {
+			script := actionWindowsHereStringBody(words[j+1])
+			return actionPosixTargetMention(script, cwd, home, depth+1, stateOnly, (*actionGlobs)(nil).forCommand(script)) ||
+				!stateOnly && actionConcreteProtectedWriteOn(script, cwd, home, true)
+		}
+	}
+	return false
+}
+
+// actionWindowsHereStringBody returns the text of an @'...'@ or @"..."@
+// word as the scanner keeps it (the @ marks around the body).
+func actionWindowsHereStringBody(word string) string {
+	if len(word) >= 2 && word[0] == '@' && word[len(word)-1] == '@' && strings.ContainsAny(word, "\r\n") {
+		return word[1 : len(word)-1]
+	}
+	return word
+}
+
 // actionWindowsInvokedTextMention runs the scan on the text that
 // Invoke-Expression (iex) runs, given as its argument or piped into it: the
 // text is parsed again when it runs, so a $HOME that a single-quoted string
@@ -1902,12 +1954,7 @@ func actionWindowsInvokedTextMention(words []string, cwd, home string, depth int
 		program := strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(word, `\`, "/"))), ".exe")
 		return program == "iex" || program == "invoke-expression"
 	}
-	body := func(word string) string {
-		if len(word) >= 2 && word[0] == '@' && word[len(word)-1] == '@' && strings.ContainsAny(word, "\r\n") {
-			return word[1 : len(word)-1]
-		}
-		return word
-	}
+	body := actionWindowsHereStringBody
 	for i, word := range words {
 		if invoke(word) {
 			for j := i + 1; j < len(words); j++ {

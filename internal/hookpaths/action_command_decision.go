@@ -102,8 +102,14 @@ func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool)
 	}
 	patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
 	writes = append(writes, patches...)
+	msys := func(value string) string {
+		if windowsHome && runtime.GOOS == "windows" {
+			return actionMSYSDrivePath(value) // Git Bash /c/... (GAP-0781 RV8-1)
+		}
+		return value
+	}
 	for _, target := range writes {
-		if protectedReachPath(OperandPath(target, cwd), protected, ssh) {
+		if protectedReachPath(OperandPath(msys(target), cwd), protected, ssh) {
 			return true
 		}
 	}
@@ -116,7 +122,7 @@ func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool)
 					continue
 				}
 				if value, known := actionWordValue(redirect.Word, values, cwd, home); known &&
-					protectedReachPath(OperandPath(value, cwd), protected, ssh) {
+					protectedReachPath(OperandPath(msys(value), cwd), protected, ssh) {
 					return true
 				}
 			}
