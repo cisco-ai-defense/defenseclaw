@@ -524,6 +524,43 @@ func refuseWindowsEnterpriseStandaloneDeferredState(action string, opts *windows
 	return nil
 }
 
+// refuseWindowsEnterpriseRepairFromAnotherRelease refuses an explicit
+// Setup /repair whose payload is another release than the installed one.
+// Repair copies the payload's files over the installed ones but records the
+// installed version, so a newer Setup left the newer hook program and Codex
+// requirements under installed_version of the older release, and a later
+// rollback snapshot took them as that release (GAP-2061). Repair stays the
+// installed release's Setup; this Setup's /ensure upgrades. The recovery of
+// a pending transaction (any release may finish it), the installed CLI
+// (no payload) and an unreadable version are left to the installer.
+func refuseWindowsEnterpriseRepairFromAnotherRelease(action string, opts *windowsEnterpriseLifecycleOptions) error {
+	if action != "repair" || !windowsEnterpriseStandalone(opts) || len(missingWindowsEnterpriseSources(opts)) != 0 {
+		return nil
+	}
+	deployment, err := windowsEnterpriseTargetDeployment(opts)
+	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled || windowsEnterpriseStandaloneRecoveryPending(opts) {
+		return nil
+	}
+	installed, setup := strings.TrimSpace(deployment.ProductVersion), strings.TrimSpace(opts.productVersion)
+	if _, _, ok := parseWindowsEnterpriseVersion(installed); !ok {
+		return nil
+	}
+	if _, _, ok := parseWindowsEnterpriseVersion(setup); !ok {
+		return nil
+	}
+	switch compareWindowsEnterpriseVersions(setup, installed) {
+	case 1:
+		return windowsEnterpriseInvalidArguments("this Setup is release %s and the installed release is %s: repair would put %s files "+
+			"under the installed %s. Run the %s Setup with /repair JSON=1, or this Setup with /ensure JSON=1 to upgrade (nothing was changed)",
+			setup, installed, setup, installed, installed)
+	case -1:
+		return windowsEnterpriseInvalidArguments("this Setup is release %s and the installed release is %s: repair would put %s files "+
+			"under the installed %s. Run the %s Setup with /repair JSON=1, or this Setup with /upgrade JSON=1 to downgrade (nothing was changed)",
+			setup, installed, setup, installed, installed)
+	}
+	return nil
+}
+
 // windowsEnterpriseInstallerAction is the -Action value of installer args.
 func windowsEnterpriseInstallerAction(args []string) string {
 	for i := 0; i+1 < len(args); i++ {
@@ -599,6 +636,9 @@ func runWindowsEnterpriseStandaloneAction(
 	// untrusted scanner runtime it cannot remove, before it changes
 	// anything: refused here, they come before this run's first change too.
 	if err := refuseWindowsEnterpriseStandaloneDeferredState(action, opts); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+	}
+	if err := refuseWindowsEnterpriseRepairFromAnotherRelease(action, opts); err != nil {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
 	if err := refuseUntrustedWindowsScannerRuntimeBeforeChange(canonicalWindowsEnterpriseAction(action), opts); err != nil {
