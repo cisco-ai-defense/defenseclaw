@@ -992,6 +992,55 @@ func TestLoadRulePackNamesTheInvalidSemanticRule(t *testing.T) {
 	}
 }
 
+// GAP-0036: the comprehension-depth refusal names only the list macros a
+// rule-pack expression admits. map(), filter() and exists_one() are refused by
+// the surface check, so naming them here told authors they were allowed at a
+// lower depth.
+func TestComprehensionDepthRefusalNamesOnlyAdmittedMacros(t *testing.T) {
+	load := func(expression string) *RulePackError {
+		t.Helper()
+		dir := t.TempDir()
+		body := strings.Replace(validRulesYAML("custom", "R-DEPTH"), "    title:",
+			"    tool_call_only: true\n    expression: '"+expression+"'\n    title:", 1)
+		writeRulePackFile(t, dir, "rules/custom.yaml", body)
+		_, err := LoadRulePack(dir)
+		if err == nil {
+			return nil
+		}
+		return requireRulePackError(t, err, "")
+	}
+	for _, admitted := range []string{
+		"f.commands.exists(c, c.argv_complete)",
+		"f.commands.all(c, c.argv_complete)",
+		"f.commands.exists(c, c.argv.all(a, a != \"x\"))",
+	} {
+		if packErr := load(admitted); packErr != nil {
+			t.Fatalf("%s refused: %v", admitted, packErr)
+		}
+	}
+	for _, refused := range []string{
+		"f.commands.map(c, c.argv_complete).exists(b, b)",
+		"f.commands.filter(c, c.argv_complete).exists(b, b.argv_complete)",
+		"f.commands.exists_one(c, c.argv_complete)",
+	} {
+		if packErr := load(refused); packErr == nil || packErr.Code != "semantic_surface" {
+			t.Fatalf("%s: refusal = %v, want semantic_surface", refused, packErr)
+		}
+	}
+	packErr := load("f.commands.exists(c, c.argv.exists(a, f.commands.exists(d, d.argv_complete)))")
+	if packErr == nil || packErr.Code != "semantic_comprehension_depth" {
+		t.Fatalf("three nested exists(): refusal = %v, want semantic_comprehension_depth", packErr)
+	}
+	if !strings.Contains(packErr.Reason, "exists() and all()") {
+		t.Errorf("reason = %q, want it to name exists() and all()", packErr.Reason)
+	}
+	for _, refusedMacro := range []string{"map", "filter", "exists_one"} {
+		if strings.Contains(packErr.Reason, refusedMacro) {
+			t.Errorf("reason = %q names %s, which the surface check refuses at any depth", packErr.Reason, refusedMacro)
+		}
+	}
+}
+
 func TestLoadRulePackRejectsInvalidManifestPosture(t *testing.T) {
 	dir := t.TempDir()
 	writeRulePackFile(t, dir, "rules/custom.yaml", validRulesYAML("custom", "R-1"))

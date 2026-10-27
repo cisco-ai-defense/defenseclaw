@@ -1685,7 +1685,7 @@ var semanticCompileProblems = map[semantic.CompileCode]string{
 	semantic.CompileResultType:         "it must evaluate to true or false",
 	semantic.CompileSurface:            "it uses a field or function that rule-pack expressions don't allow",
 	semantic.CompileEnumDomain:         "it compares a field with a value that field never has",
-	semantic.CompileComprehensionDepth: "it nests list macros (exists, all, map, filter) too deeply",
+	semantic.CompileComprehensionDepth: "it nests exists() and all() too deeply; flatten the check or split it into separate rules",
 	semantic.CompileRegexForm:          "call matches() on a string with one pattern argument",
 	semantic.CompileRegexDynamic:       "the matches() pattern must be a string literal",
 	semantic.CompileRegexSize:          "the matches() pattern is too long",
