@@ -30,3 +30,32 @@ func TestR105GAP2135FindLeadingOptions(t *testing.T) {
 		}
 	}
 }
+
+// GAP-2122: an exact embedded rm/unlink/rmdir/shred makes the starting
+// points delete operands, and mv {} DEST move sources; any other embedded
+// command is not exact.
+func TestR105GAP2122FindExactEmbeddedCommands(t *testing.T) {
+	for _, tc := range []struct {
+		argv           []string
+		exact, deletes bool
+		moveTo         []string
+	}{
+		{[]string{"find", "/a", "-exec", "rm", "-f", "{}", "+"}, true, true, nil},
+		{[]string{"find", "/a", "-execdir", "/usr/bin/unlink", "{}", ";"}, true, true, nil},
+		{[]string{"find", "/a", "-ok", "rmdir", "{}", ";", "-exec", "true", ";"}, true, true, nil},
+		{[]string{"find", "/a", "-exec", "mv", "{}", "/tmp/", ";"}, true, false, []string{"/tmp/"}},
+		{[]string{"find", "/a", "-name", "x"}, true, false, nil},
+		{[]string{"find", "/a", "-exec", "rm", "-rf", "/etc", "{}", ";"}, false, false, nil},
+		{[]string{"find", "/a", "-exec", "env", "rm", "{}", ";"}, false, false, nil},
+		{[]string{"find", "/a", "-exec", "sh", "-c", "rm {}", ";"}, false, false, nil},
+		{[]string{"find", "/a", "-exec", "grep", "rm", "{}", ";"}, false, false, nil},
+		{[]string{"find", "/a", "-exec", "mv", "-t", "/tmp", "{}", "+"}, false, false, nil},
+		{[]string{"find", "/a", "-exec", "rm", "{}"}, false, false, nil},
+		{[]string{"find", "/a", "-exec", "true", "x", ";"}, false, false, nil},
+	} {
+		got := findExactEmbeddedCommands(tc.argv)
+		if got.exact != tc.exact || got.exact && (got.deletes != tc.deletes || !slices.Equal(got.moveTo, tc.moveTo)) {
+			t.Errorf("%q: embedded %+v, want exact=%t deletes=%t moveTo=%q", tc.argv, got, tc.exact, tc.deletes, tc.moveTo)
+		}
+	}
+}
