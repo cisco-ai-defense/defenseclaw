@@ -776,3 +776,24 @@ func TestManagedEnrollmentIdentityRejectsStaleDeploymentWithSameSID(t *testing.T
 		t.Fatal("stale Codex gateway identity was accepted because the SID set matched")
 	}
 }
+
+// GAP-0929 review: a guardian notice of a row that carries only the SID
+// names the account as "user (SID)", like the other Windows notices, not by
+// the SID alone.
+func TestWindowsGuardianNoticeNamesTheAccountOfASIDOnlyRow(t *testing.T) {
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := enterpriseHookNoticeAccount(enterpriseHookReconcileRow{SID: current.Uid})
+	name := current.Username
+	if i := strings.LastIndex(name, `\`); i >= 0 {
+		name = name[i+1:]
+	}
+	if !strings.HasSuffix(got, " ("+current.Uid+")") || !strings.Contains(strings.ToLower(got), strings.ToLower(name)) {
+		t.Fatalf("notice account = %q, want the name of %s (%s)", got, current.Username, current.Uid)
+	}
+	if got := enterpriseHookNoticeAccount(enterpriseHookReconcileRow{User: "dcw-std1", SID: current.Uid}); got != "dcw-std1 ("+current.Uid+")" {
+		t.Fatalf("named row = %q", got)
+	}
+}

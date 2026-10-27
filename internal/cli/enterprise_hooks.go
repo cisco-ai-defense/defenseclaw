@@ -2739,7 +2739,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					if result.AgentConfig != "" {
 						// A Hermes or Devin config put back or recreated
 						// (GAP-0588).
-						notices = append(notices, enterpriseHookGuardianNotice{User: firstNonEmptyString(row.User, row.SID), Connector: row.Connector, AgentConfig: result.AgentConfig})
+						notices = append(notices, enterpriseHookGuardianNotice{User: enterpriseHookNoticeAccount(row), Connector: row.Connector, AgentConfig: result.AgentConfig})
 					}
 					reconcileEnterpriseForeignHooks(opts)
 				}
