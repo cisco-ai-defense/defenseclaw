@@ -1080,9 +1080,18 @@ jobs:
           - os: ubuntu-24.04
             label: ubuntu-24.04
             part: lifecycle
+            shards: 1
+            shard: 0
           - os: macos-latest
             label: macos-latest
             part: lifecycle
+            shards: 2
+            shard: 0
+          - os: macos-latest
+            label: macos-latest lifecycle 2 of 2
+            part: lifecycle
+            shards: 2
+            shard: 1
           - os: macos-latest
             label: macos-latest lifecycle packages
             part: lifecycle-packages
@@ -1113,12 +1122,28 @@ jobs:
       - name: Go tests of the standalone lifecycle packages
         if: matrix.part == 'lifecycle'
         shell: bash
+        env:
+          GO_TEST_SHARDS: ${{ matrix.shards }}
+          GO_TEST_SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           # Keep the longest suite separate and name each test in the log.
           # A stalled hosted runner then shows the test or compile phase,
           # rather than silently cancelling the whole job.
-          go test -count=1 -timeout 12m -p 2 -v ./internal/enterpriseunix/...
+          if [ "$GO_TEST_SHARDS" -gt 1 ]; then
+            # On macOS internal/enterpriseunix alone took 11 to 12 minutes
+            # (672 s of tests), at its 12-minute -timeout, so it runs in
+            # time-balanced parts (scripts/test-timings/go-darwin.json);
+            # go_test_shards.py covers every test exactly once.
+            test_regex="$(python3 scripts/go_test_shards.py \
+              --package-dir internal/enterpriseunix \
+              --timings scripts/test-timings/go-darwin.json \
+              --shard-count "$GO_TEST_SHARDS" \
+              --shard-index "$GO_TEST_SHARD")"
+            go test -count=1 -timeout 12m -v -run "$test_regex" ./internal/enterpriseunix
+          else
+            go test -count=1 -timeout 12m -p 2 -v ./internal/enterpriseunix/...
+          fi
           # On macOS the other packages run on their own runner (both took
           # ~7 minutes there).
           if [ "$RUNNER_OS" = Linux ]; then
@@ -1199,7 +1224,7 @@ jobs:
       - name: The shipped binaries start without stderr output
         # A dependency's start-up warning (for example sonic's Go-version
         # notice) would reach admin and MDM output and agent hook errors.
-        if: matrix.part == 'lifecycle'
+        if: matrix.part == 'lifecycle' && matrix.shard == 0
         shell: bash
         run: make check-quiet-startup
       - name: systemd-analyze verify the packaged units
