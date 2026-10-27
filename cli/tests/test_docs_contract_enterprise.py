@@ -640,7 +640,10 @@ def test_windows_docs_say_how_to_leave_bundle_mode() -> None:
         "`/uninstall JSON=1`, without `PURGE=1`",
         "removes the trust anchors, the bundle state",
         "`user_registrations_pending`",
+        "A user who is signed out, or whose session is disconnected, keeps an inert registration",
+        "needs no `/repair`",
         "`/ensure CONFIG=<file> JSON=1`",
+        "a signed-out user at their next sign-in",
     ):
         assert phrase in section, phrase
     assert "## Remove" in (DOCS / "enterprise/install/reference/windows.mdx").read_text(encoding="utf-8")
