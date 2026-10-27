@@ -404,10 +404,12 @@ def test_f0623_readme_uses_env_var_not_cli_token() -> None:
 # --------------------------------------------------------------------------- #
 # F-0641 — conditional tomli dependency for Python < 3.11
 # --------------------------------------------------------------------------- #
-def test_f0641_tomli_conditional_dependency() -> None:
+def test_f0641_no_tomli_backport_once_python_3_10_is_dropped() -> None:
+    # The wheel requires Python 3.11 (GAP-1715), whose stdlib has tomllib.
     data = _load_toml(PYPROJECT)
     deps = data["project"]["dependencies"]
-    assert any(d.startswith("tomli") and "python_version" in d and "3.11" in d for d in deps)
+    assert data["project"]["requires-python"].startswith(">=3.11")
+    assert not any(d.startswith("tomli") for d in deps)
 
 
 # --------------------------------------------------------------------------- #

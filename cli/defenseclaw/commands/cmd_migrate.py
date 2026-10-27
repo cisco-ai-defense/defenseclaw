@@ -126,9 +126,12 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
     elif check:
         # Pending is not success: a neutral marker, the step names, and how
         # they get applied (the installer and upgrade run them as well).
+        versions = str(result.from_config_version)
+        if result.from_config_version != result.to_config_version:
+            versions += f" -> {result.to_config_version}"
         ux.echo(
             f"  {ux.bold('•')} {len(result.applied)} migration step(s) pending "
-            f"(config_version {result.from_config_version} -> {result.to_config_version}):"
+            f"(config_version {versions}):"
         )
         for step in result.applied:
             ux.echo(f"    → {display_step_name(step)}")

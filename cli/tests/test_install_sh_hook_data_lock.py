@@ -304,8 +304,9 @@ def _identity(pid: int) -> str:
 # Rounds j and k (no clock): a pid file dated a week before or after its
 # process started stands in for a clock step either way. With its proc-start
 # record the live owner holds however the clock stepped, and another record
-# (a reused pid) is taken over; without one (1.0.2, 1.0.3) the lock holds
-# while its pid names a process, on every system.
+# (a reused pid) is taken over. Without one (1.0.2, 1.0.3) the lock holds
+# while its pid names a process that started before the lock was made
+# (GAP-1465 below takes over one that started after).
 @pytest.mark.parametrize("legacy", [False, True])
 def test_a_live_installer_keeps_its_lock_however_old_and_a_reused_pid_is_taken_over(
     tmp_path: Path, legacy: bool
@@ -321,7 +322,7 @@ def test_a_live_installer_keeps_its_lock_however_old_and_a_reused_pid_is_taken_o
         if not legacy:
             (lock / "started").write_text(f"{int(time.time())}\n", encoding="utf-8")
             (lock / "proc-start").write_text(_identity(other.pid) + "\n", encoding="utf-8")
-        for step in (0, -7 * 86400, 7 * 86400):
+        for step in (0, 7 * 86400) if legacy else (0, -7 * 86400, 7 * 86400):
             then = time.time() + step
             for path in (lock / "pid", lock):
                 os.utime(path, (then, then))
@@ -339,6 +340,32 @@ def test_a_live_installer_keeps_its_lock_however_old_and_a_reused_pid_is_taken_o
     finally:
         other.kill()
         other.wait()
+
+
+# GAP-1465 (lead decision 2026-10-26 13:58): a 1.0.2/1.0.3 lock has no
+# proc-start record. A killed old installer whose pid a later process got
+# blocked every upgrade ("Another DefenseClaw install is running"). A
+# record-less lock whose pid names a process that started after the lock
+# was made is stale and taken over; one whose process is older holds.
+@pytest.mark.skipif(not (sys.platform.startswith("linux") or sys.platform == "darwin"), reason="Linux and macOS")
+def test_a_legacy_lock_whose_pid_was_reused_after_it_was_made_is_taken_over(tmp_path: Path) -> None:
+    home, data = _layout(tmp_path)
+    lock = data / ".install.lock"
+    lock.mkdir()
+    (lock / "started").write_text(f"{int(time.time())}\n", encoding="utf-8")
+    time.sleep(4)
+    later = subprocess.Popen(["sleep", "30"])
+    try:
+        (lock / "pid").write_text(f"{later.pid}\n", encoding="utf-8")
+        # The pid file the old installer wrote with the folder (no birth time).
+        then = time.time() - 4
+        os.utime(lock / "pid", (then, then))
+        proc = _run(tmp_path, home, f'hold_hook_data_dir "{_gateway(tmp_path)}"\n', {"STUB_DATA_DIR": str(data)})
+        assert proc.returncode == 0, proc.stderr
+        assert _held(proc) == [f"{data.resolve()}/.install.lock"]
+    finally:
+        later.kill()
+        later.wait()
 
 
 # Loop round 2 (P2): a lock naming this installer's own pid is not its own
@@ -367,6 +394,10 @@ def test_a_missing_account_folder_is_made_held_and_removed(tmp_path: Path) -> No
     assert not folder.exists()
 
 
+# A quoted "~/..." DEFENSECLAW_CONFIG (the shell did not expand it) named
+# a folder called "~" under the caller's directory: the upgrade found no
+# config, printed no OpenHands/OmniGent notice and rolled back (P3 row,
+# remove-openhands review4).
 def test_relative_home_and_config_are_recorded_as_absolute_paths() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
     start = text.index("for dc_path_var in DEFENSECLAW_HOME DEFENSECLAW_CONFIG; do")
@@ -375,7 +406,9 @@ def test_relative_home_and_config_are_recorded_as_absolute_paths() -> None:
     for home, config, want in (
         ("rel-home", "rel/config.yaml", "{cwd}/rel-home|{cwd}/rel/config.yaml"),
         ("/abs/home", "", "/abs/home|"),
-        ("~/x", "/abs/c.yaml", "~/x|/abs/c.yaml"),
+        ("~/x", "/abs/c.yaml", "{home}/x|/abs/c.yaml"),
+        ("/abs/home", "~/c.yaml", "/abs/home|{home}/c.yaml"),
+        ("~", "", "{home}|"),
     ):
         cwd = Path(tempfile.mkdtemp()).resolve()
         proc = subprocess.run(
@@ -387,12 +420,13 @@ def test_relative_home_and_config_are_recorded_as_absolute_paths() -> None:
             timeout=30,
             env={
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": "/home/u",
                 "DEFENSECLAW_HOME": home,
                 "DEFENSECLAW_CONFIG": config,
             },
         )
         assert proc.returncode == 0, proc.stderr
-        assert proc.stdout.strip() == want.format(cwd=cwd)
+        assert proc.stdout.strip() == want.format(cwd=cwd, home="/home/u")
 
 
 # oss-outage-open round i loop 2: an install acts under, and gives back,

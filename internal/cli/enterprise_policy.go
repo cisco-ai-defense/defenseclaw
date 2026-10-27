@@ -278,11 +278,33 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 		}
 	}
 	connectors = kept
+	// A connector named with --connector that the managed config does not
+	// enable has no machine policy to check: "not configured", as the
+	// unfiltered report, which omits it, says by its absence. It is not a
+	// missing hook (GAP-1688).
+	var notConfigured []enterprisepolicy.State
+	if requested > 0 {
+		configured := map[string]bool{}
+		for _, name := range enterprisepolicy.WithCompanions(ctx.connectors) {
+			configured[name] = true
+		}
+		kept = []string{}
+		for _, name := range connectors {
+			if configured[name] {
+				kept = append(kept, name)
+				continue
+			}
+			notConfigured = append(notConfigured, enterprisepolicy.State{Connector: name, Route: enterprisepolicy.RouteNotConfigured,
+				Details: []string{name + " is not enabled in the managed config, so DefenseClaw publishes no machine policy or hooks for it and there is nothing to check or repair"}})
+		}
+		connectors = kept
+	}
 	var result enterprisepolicy.Result
 	var err error
 	if len(connectors) > 0 || requested == 0 {
 		result, err = enterprisepolicy.VerifyAll(ctx.opts, connectors)
 	}
+	result.States = append(result.States, notConfigured...)
 	if includeWSL {
 		state, wslErr := enterprisePolicyWSLState(ctx)
 		result.States = append(result.States, state)

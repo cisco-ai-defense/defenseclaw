@@ -87,7 +87,8 @@ func TestBundleSessionsPreventCompleteCoverage(t *testing.T) {
 	r := &Result{CoverageComplete: true, SecurityComplete: true, Bundle: &BundleState{State: BundleConfirmed}}
 	r.SetBundleSessions(SessionRestartStatus{State: "known", Count: 1, Entries: []SessionEntry{}})
 	r.Finish("linux", 0)
-	if r.CoverageComplete || r.SecurityComplete || len(r.Warnings) != 1 || r.Warnings[0].Code != CodeSessionsNeedRestart {
+	if r.CoverageComplete || r.SecurityComplete || len(r.Warnings) != 2 || r.Warnings[0].Code != CodeSessionsNeedRestart ||
+		r.Warnings[1].Code != CodeSecurityIncomplete || !strings.Contains(r.Warnings[1].Message, "coverage_complete is false because of: "+CodeSessionsNeedRestart) {
 		t.Fatalf("result with old session = %+v", r)
 	}
 }

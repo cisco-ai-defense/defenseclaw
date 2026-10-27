@@ -21,6 +21,22 @@ import (
 // for an agent config the guardian had to put back or recreate.
 const windowsAgentSettingsNotRestoredCode = "agent_settings_not_restored"
 
+// windowsNativeOTLPConfigUncheckedCode is the warning for an agent
+// configuration that reaches a file the account does not own, which the
+// guardian could not check for an earlier per-user native OTLP exporter
+// (GAP-0929).
+const windowsNativeOTLPConfigUncheckedCode = "native_otlp_config_unchecked"
+
+// windowsEnterpriseNativeOTLPNotices reads the standalone guardian's
+// native_otlp_unchecked notices (a seam for tests).
+var windowsEnterpriseNativeOTLPNotices = func() []string {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return nil
+	}
+	return enterpriseHookGuardianNativeOTLPMessages(layout.DataDir)
+}
+
 // windowsEnterpriseAgentSettingsNotices reads the standalone guardian's
 // agent config notices (a seam for tests).
 var windowsEnterpriseAgentSettingsNotices = func() []string {
@@ -47,5 +63,10 @@ func applyWindowsEnterpriseAgentSettings(result *enterprisestatus.Result) {
 	}
 	for _, message := range windowsEnterpriseAgentSettingsNotices() {
 		result.AddWarning(windowsAgentSettingsNotRestoredCode, message)
+	}
+	// Its hooks are in place too: a warning, security_complete and the exit
+	// code stay as they are (GAP-0929).
+	for _, message := range windowsEnterpriseNativeOTLPNotices() {
+		result.AddWarning(windowsNativeOTLPConfigUncheckedCode, message)
 	}
 }

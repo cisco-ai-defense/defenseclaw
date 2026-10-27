@@ -61,7 +61,7 @@ Python: cli/defenseclaw/connector_paths.py KNOWN_CONNECTORS
 | `docs-site/components/connector-brand.tsx` `FALLBACKS` | initials and color when there is no LobeHub icon (zeptoclaw, omnigent) | nothing |
 | `docs-site/lib/hero-connectors.ts` `TERMINAL_CONNECTORS` | id, label, setup command, modeId | nothing |
 | `docs-site/content/docs/connectors/index.mdx` | frontmatter count and keywords, the Integration families card, a Platform support row (`\| [Label](/docs/connectors/<id>) \| **Supported** \| **<win>** \| ... \|`), a Capability summary row | the platform row is regex-pinned; the rest isn't |
-| `docs-site/content/docs/reference/apis/hook-contracts.mdx` | a row per contract band: `\| <ConnectorLabel id="<id>" /> \| gate \| range \| contract / script gen \| AID surfaces \|` | only the codex and claude rows are pinned; add a pin |
+| `docs-site/content/docs/connectors/compatibility.mdx` | a row per contract band: `\| <ConnectorLabel id="<id>" /> \| gate \| range \| contract / script gen \| AID surfaces \|` | only the codex and claude rows are pinned; add a pin |
 | `docs/CONNECTOR-MATRIX.md` | **nothing.** It only points to the website (`test_connector_matrix_delegates_current_support_to_the_website`) | |
 
 ## 3. Pages that list every connector
@@ -70,10 +70,10 @@ No test checks these. Review each one. They are the pages that name most connect
 
 | Area | Pages |
 |---|---|
-| Connectors | `connectors/index.mdx`, `connectors/compatibility.mdx`, `capability-matrix.mdx`, `command-generator.mdx`, `index.mdx` |
-| Setup and guardrails | `get-started/quickstart.mdx`, `setup/index.mdx`, `setup/guardrail/index.mdx`, `setup/guardrail/disabling.mdx`, `setup/guardrail/aliases.mdx`, `setup/unified-llm-key.mdx`, `setup/semantic-routing.mdx` |
-| Reference | `reference/commands/cli.mdx`, `reference/configuration/index.mdx`, `reference/apis/gateway-api.mdx`, `reference/configuration/env-vars.mdx` (generated) |
-| Features | `ai-discovery.mdx`, `hitl.mdx`, `stories/hitl-approvals.mdx`, `llm-judge-benchmark.mdx`, `policies/cel/tool-call-state.mdx` |
+| Connectors | `connectors/index.mdx`, `connectors/compatibility.mdx`, `connectors/capability-matrix.mdx`, `command-generator.mdx`, `index.mdx` |
+| Setup and guardrails | `get-started/quickstart.mdx`, `reference/cli.mdx`, `guardrail/aliases.mdx`, `guardrail/disabling.mdx`, `guardrail/aliases.mdx`, `guardrail/unified-llm-key.mdx`, `guardrail/semantic-routing.mdx` |
+| Reference | `reference/cli.mdx`, `reference/configuration.mdx`, `reference/gateway-api.mdx`, `reference/env-vars.mdx` (generated) |
+| Features | `ai-discovery.mdx`, `hitl.mdx`, `stories/hitl-approvals.mdx`, `guardrail/llm-judge-benchmark.mdx`, `policies/cel/tool-call-state.mdx` |
 | Windows | `get-started/windows/telemetry-security.mdx`, `get-started/windows/paths-troubleshooting.mdx` |
 | Enterprise | `enterprise/index.mdx`, `concepts.mdx`, `machine-policy.mdx`, `foreign-hook-guard.mdx`, `threat-model.mdx`, `windows.mdx`, `rollout.mdx`, `enrollment.mdx`, `operations.mdx`, `troubleshooting.mdx` |
 | Repository docs | `docs/ENTERPRISE-THREAT-MODEL.md`, `docs/LINUX-ENTERPRISE-THREAT-MODEL.md`, `docs/MACOS-ENTERPRISE-THREAT-MODEL.md`, `docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md`, `docs/WINDOWS-NATIVE-INSTALLER.md`, `docs/WINDOWS-NATIVE-CI.md` |

@@ -71,6 +71,50 @@ func TestRedirectedAppDataFolderOddValues(t *testing.T) {
 	}
 }
 
+// A share is an absolute folder only where network is set (the account's own
+// agent configuration, read as the account); the \\?\ and \\.\ forms name the
+// same folders, and ".." stays on the drive or the share.
+func TestWindowsAbsoluteFolder(t *testing.T) {
+	for _, tc := range []struct {
+		value, network, local string
+	}{
+		{`D:\Redirected\alice\..\bob`, `D:\Redirected\bob`, `D:\Redirected\bob`},
+		{`D:/Redirected/alice/`, `D:\Redirected\alice`, `D:\Redirected\alice`},
+		{`\\files\home\alice\AppData\Roaming`, `\\files\home\alice\AppData\Roaming`, ""},
+		{`//files/home/alice`, `\\files\home\alice`, ""},
+		{`\\files\home`, `\\files\home`, ""},
+		{`\\files\home\..\..\other`, `\\files\home\other`, ""},
+		{`\\files\home\alice\\AppData`, `\\files\home\alice\AppData`, ""},
+		{`\\?\UNC\files\home\alice`, `\\files\home\alice`, ""},
+		{`\\?\unc\files\home\alice`, `\\files\home\alice`, ""},
+		{`\\?\D:\Redirected\alice`, `D:\Redirected\alice`, ""},
+		{`\\.\D:\Redirected\alice`, `D:\Redirected\alice`, ""},
+		{`\\?\Volume{00000000-0000-0000-0000-000000000000}\AppData`, "", ""},
+		{`\\.\pipe\agent`, "", ""},
+		{`\\files`, "", ""},
+		{`\\files\`, "", ""},
+		{`\\\home\alice`, "", ""},
+		{`\\..\home\alice`, "", ""},
+		{`\\files\..\alice`, "", ""},
+		{`\\files\C:\alice`, "", ""},
+		{`\\?\UNC\files`, "", ""},
+		{`D:\..\..\Windows`, "", ""},
+		{`Redirected\alice`, "", ""},
+		{"", "", ""},
+	} {
+		for _, network := range []bool{true, false} {
+			want := tc.local
+			if network {
+				want = tc.network
+			}
+			folder, refused := windowsAbsoluteFolder(tc.value, network)
+			if folder != want || (refused == "") != (want != "") {
+				t.Errorf("windowsAbsoluteFolder(%q, network=%v) = %q, %q; want %q", tc.value, network, folder, refused, want)
+			}
+		}
+	}
+}
+
 // Under a budget that reads only some profiles a cycle, every enrolled
 // profile gets a record within the cycles the budget needs for all of
 // them, and none waits much longer than that for a new one.

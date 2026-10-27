@@ -24,7 +24,7 @@ DOCS = Path(__file__).resolve().parents[1] / "content/docs/reference"
 
 class ReferencePolicyDocsTest(unittest.TestCase):
     def test_fail_modes_distinguish_managed_refusals_from_user_outages(self):
-        text = (DOCS / "configuration/fail-modes.mdx").read_text()
+        text = (DOCS / "fail-modes.mdx").read_text()
         behavior = text.split("## Effective behavior", 1)[1].split("### Stop", 1)[0]
         self.assertIn("Managed standalone `open`", behavior)
         rows = [line for line in behavior.splitlines() if line.startswith("| ")]
@@ -42,19 +42,23 @@ class ReferencePolicyDocsTest(unittest.TestCase):
 
 
     def test_foreign_hook_outage_scope_names_the_shared_remove_setting(self):
-        text = (DOCS / "configuration/fail-modes.mdx").read_text()
+        text = (DOCS / "fail-modes.mdx").read_text()
         guard = next(line for line in text.splitlines()
                      if "foreign-hook guard" in line and "requires a current gateway answer" in line)
         self.assertIn("On a managed standalone host with `foreign_hooks: remove`", guard)
         self.assertIn("GitHub Copilot CLI, Cursor, Devin, OpenCode and Amp", guard)
         self.assertIn("Hermes on Linux and macOS", guard)
+        self.assertIn("Each gateway-backed guarded call requires a current gateway answer", guard)
+        self.assertIn("Windows Amp checks its session record locally", guard)
+        effective = text.split("## Effective behavior", 1)[1].split("These outcomes apply", 1)[0]
+        self.assertIn("A gateway-backed guarded tool call", effective)
 
     def test_managed_open_never_allows_an_accepted_call_without_an_answer(self):
         # oss-outage-open review (round g, loop round 2): managed open applies
         # only to a proven outage (no gateway took the call). A gateway that
         # accepted the call and gave no answer in time blocks (noAnswerFailMode
         # is closed for a managed hook); the docs said open could allow it.
-        text = (DOCS / "configuration/fail-modes.mdx").read_text()
+        text = (DOCS / "fail-modes.mdx").read_text()
         paragraph = next(line for line in text.splitlines()
                          if line.startswith("On a managed standalone host `open` applies only to"))
         self.assertNotIn("or gives no answer in time.", paragraph)
@@ -64,7 +68,7 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         managed = row.split("|")[3]
         self.assertIn("A gateway that took the call and gave no answer in time", managed)
         self.assertIn("blocks", managed)
-        coverage = (DOCS.parent / "appendix/coverage-by-layer.mdx").read_text()
+        coverage = (DOCS.parent / "segmentation.mdx").read_text()
         self.assertNotIn("stopped, restarting or gives\nno answer in time", coverage)
 
     def test_no_doc_lets_managed_open_cover_a_restart_or_an_unanswered_call(self):
@@ -96,7 +100,7 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         self.assertEqual(offenders, [])
 
     def test_amp_per_user_outage_is_persisted_but_managed_and_sandbox_are_not(self):
-        text = (DOCS / "configuration/fail-modes.mdx").read_text()
+        text = (DOCS / "fail-modes.mdx").read_text()
         reporting = text.split("## Reporting and diagnosis", 1)[1]
         self.assertIn("Amp plugin writes a record only for a call an outage let run", reporting)
         self.assertIn("managed and sandbox Amp plugins write no record", reporting)
@@ -104,7 +108,7 @@ class ReferencePolicyDocsTest(unittest.TestCase):
 
 
     def test_zero_consensus_uses_sdk_default_without_disabling_llm(self):
-        text = (DOCS / "configuration/index.mdx").read_text()
+        text = (DOCS / "configuration.mdx").read_text()
         row = next(line for line in text.splitlines()
                    if line.startswith("| `scanners.skill_scanner.llm_consensus_runs` |"))
         self.assertIn("`0` leaves the SDK default", row)
@@ -112,7 +116,7 @@ class ReferencePolicyDocsTest(unittest.TestCase):
 
 
     def test_secure_client_status_and_digest_exceptions_are_explicit(self):
-        text = (DOCS / "commands/cli.mdx").read_text()
+        text = (DOCS / "cli.mdx").read_text()
         status = next(line for line in text.splitlines()
                       if line.startswith("| `defenseclaw status` |"))
         digest = next(line for line in text.splitlines()
@@ -127,7 +131,7 @@ class ReferencePolicyDocsTest(unittest.TestCase):
 
 
     def test_remote_skill_scan_uses_gateway_timeout(self):
-        text = (DOCS / "configuration/index.mdx").read_text()
+        text = (DOCS / "configuration.mdx").read_text()
         row = next(line for line in text.splitlines()
                    if line.startswith("| `scanners.skill_scanner.timeouts.scan_s` |"))
         self.assertIn("`defenseclaw skill scan --remote`", row)
@@ -135,7 +139,7 @@ class ReferencePolicyDocsTest(unittest.TestCase):
 
 
     def test_effective_config_is_file_resolution_not_live_gateway(self):
-        text = (DOCS / "commands/cli.mdx").read_text()
+        text = (DOCS / "cli.mdx").read_text()
         row = next(line for line in text.splitlines()
                    if line.startswith("| `defenseclaw config get KEY"))
         section = text.split("`--effective` resolves", 1)[1].split("### Managed devices", 1)[0]
@@ -146,7 +150,7 @@ class ReferencePolicyDocsTest(unittest.TestCase):
 
 
     def test_edited_generated_hook_can_run_before_repair(self):
-        text = (DOCS / "configuration/source-of-truth.mdx").read_text()
+        text = (DOCS / "source-of-truth.mdx").read_text()
         section = text.split("## What is derived", 1)[1].split("## What is evidence", 1)[0]
         self.assertIn("next hook event", section)
         self.assertIn("before repair", section)
@@ -154,7 +158,7 @@ class ReferencePolicyDocsTest(unittest.TestCase):
 
 
     def test_managed_guardrail_refusal_uses_exit_three(self):
-        text = (DOCS / "commands/cli.mdx").read_text()
+        text = (DOCS / "cli.mdx").read_text()
         section = text.split("### Managed devices and exit code 3", 1)[1].split("## Registries", 1)[0]
         self.assertIn("`guardrail ...` writers", section)
         self.assertIn("exit `3`", section)

@@ -79,7 +79,10 @@ func TestIdentityDirectoryCacheRefreshesIncompleteFacts(t *testing.T) {
 
 // TestMacOSGuardianUPNRecoveryRefreshesCachedLocalFacts pins the managed Mac
 // case: Open Directory groups are available before the guardian record, but
-// its UPN must be picked up after the short incomplete lifetime.
+// its UPN must be picked up after the short incomplete lifetime. Open
+// Directory answers a directory account without a directory until the
+// guardian's record (resolvePeerDirectoryFacts calls only a local node
+// account local); a local node account has no UPN to wait for (GAP-0532).
 func TestMacOSGuardianUPNRecoveryRefreshesCachedLocalFacts(t *testing.T) {
 	previousDir := currentIdentitySpoolDir()
 	setIdentitySpoolDir(t.TempDir())
@@ -91,8 +94,7 @@ func TestMacOSGuardianUPNRecoveryRefreshesCachedLocalFacts(t *testing.T) {
 	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
 		calls++
 		facts := useridentity.DirectoryFacts{
-			Directory: useridentity.DirectoryLocal, Source: useridentity.SourceMacOSOpenDirectory,
-			Groups: []string{"staff"}, ResolvedAt: now,
+			Source: useridentity.SourceMacOSOpenDirectory, Groups: []string{"staff"}, ResolvedAt: now,
 		}
 		if recovered {
 			facts.Directory = useridentity.DirectoryActiveDirectory
@@ -109,6 +111,10 @@ func TestMacOSGuardianUPNRecoveryRefreshesCachedLocalFacts(t *testing.T) {
 	now = now.Add(identityDirectoryIncompleteTTL)
 	if facts, ok := cache.get("501", true); !ok || facts.UPN != "alice@corp.example.com" || calls != 2 {
 		t.Fatalf("recovered facts = %+v, ok = %v, calls = %d; want guardian UPN after short TTL", facts, ok, calls)
+	}
+	if awaitingSpoolUPN(useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, Source: useridentity.SourceMacOSOpenDirectory,
+		Groups: []string{"staff"}, ResolvedAt: now}) {
+		t.Fatal("a local node account's complete facts were marked as waiting for a UPN")
 	}
 }
 

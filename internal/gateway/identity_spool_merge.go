@@ -60,7 +60,12 @@ func awaitingSpool(facts useridentity.DirectoryFacts) bool {
 // An account the guardian never names keeps refreshing at that pace, which
 // costs a directory cache read. Facts its current record was merged into
 // await nothing: a local Mac account, or an SSSD account whose directory
-// gives no UPN, has none (GAP-0522).
+// gives no UPN, has none (GAP-0522). Nor does an account the gateway's own
+// Open Directory answer proves local (macOSOwnDirectory: of the local node,
+// not a mobile copy of a directory account and not linked to Platform SSO):
+// it has no UPN to wait for, as agentIdentityAccountUPN already holds. Waiting for one left every UPN or
+// DOMAIN\name assignment a maybe for such an account, so a local account
+// was refused once any such assignment existed (GAP-0532).
 func awaitingSpoolUPN(facts useridentity.DirectoryFacts) bool {
 	if currentIdentitySpoolDir() == "" || facts.GuardianRecord {
 		return false
@@ -69,7 +74,7 @@ func awaitingSpoolUPN(facts useridentity.DirectoryFacts) bool {
 	case useridentity.SourceSSSD:
 		return facts.UPN == ""
 	case useridentity.SourceMacOSOpenDirectory:
-		return facts.UPN == "" || facts.Directory == ""
+		return facts.Directory == "" || facts.UPNPending || facts.UPN == "" && facts.Directory != useridentity.DirectoryLocal
 	}
 	return false
 }

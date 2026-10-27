@@ -1,7 +1,7 @@
 # CLI
 
 The
-[published CLI reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/commands/cli/)
+[published CLI reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cli/)
 is the operator source of truth. It is reviewed with the current Click and
 Cobra command trees and should be preferred over version-pinned repository
 links.

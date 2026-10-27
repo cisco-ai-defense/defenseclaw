@@ -13,6 +13,7 @@
 package enterprisehooks
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -35,6 +36,24 @@ type IdentitySpoolAccount struct {
 	// exempt, out of the manifest): it is not resolved, and its record
 	// goes at once.
 	Left bool
+	// Peer marks an account listed only because the gateway served it (a
+	// machine-policy host, GAP-0422) while a 1.0.4 gateway may have served
+	// its uid. Its record does not write the first migration map: 1.0.4
+	// wrote no record of it, so the account that holds the uid at the
+	// upgrade to this release may not be the one 1.0.3 saw (GAP-1865). It
+	// may still join an existing map under the rollback rule. A served
+	// account on a host that came from a build before 1.0.4 directly is no
+	// Peer: its holder at the first pass is the one 1.0.3 saw, as for an
+	// enrolled account.
+	Peer bool
+	// PreTokenHolder marks a served account that the gateway's homes file
+	// shows a build before 1.0.4 saw hold its uid, with no 1.0.4 gateway
+	// serving the uid since and a home not younger than that sighting (it
+	// is then no Peer). Its record joins an existing migration map too: a
+	// 1.0.4 guardian wrote that map at its first pass with the accounts it
+	// enrolled only, so a 1.0.3 holder that 1.0.4 never served was left out
+	// and its 1.0.3 agents entry refused it for good (GAP-2085, GAP-1976).
+	PreTokenHolder bool
 }
 
 // checkMacOSRecordUID refuses the Open Directory record dscl returned for an
@@ -121,6 +140,25 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	}
 	keep, left := map[string]bool{}, map[string]bool{}
 	owners := map[int]LegacyAgentOwner{}
+	// Until the migration map is recorded, every listed account must be in
+	// it by name (unnamedLegacyAgentOwners).
+	ownersUnrecorded := !LegacyAgentOwnersRecorded(dir)
+	ownerOfRecord := legacyAgentOwnerOfRecord(dir)
+	var unnamed []int
+	// joiners are the owners of PreTokenHolder accounts, which join an
+	// existing migration map (writeLegacyAgentOwnersOnce, GAP-2085).
+	joiners := map[int]LegacyAgentOwner{}
+	// Records this pass rewrites with a fact only a release with the
+	// migration map writes (the account incarnation, Linux, or the owner
+	// token of the record extension, Linux and macOS), and those of them the
+	// previous pass wrote with neither: a release without the map (1.0.3,
+	// which drops the extension when it rewrites a record) wrote that
+	// previous pass (writeLegacyAgentOwnersOnce, GAP-0709, GAP-1787).
+	mapRecords, preMapRecords := 0, 0
+	// Read before any account is collected: a change of the account
+	// database during the pass leaves the records with the earlier stamp,
+	// which the gateway then no longer takes as current.
+	accountsStamp := LocalAccountsStamp()
 	var passErr error
 	answeredDirectories := map[string]bool{}
 	for _, account := range accounts {
@@ -147,11 +185,21 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			}
 		}
 		keep[name] = true
+		// The name the guardian's record of the uid gave before this pass:
+		// the account that held it before the upgrade, when the listing and
+		// the lookup below give none.
+		holderBefore := ""
+		if ownersUnrecorded && account.User == "" {
+			holderBefore = legacyAgentHolderOfRecord(dir, account.UID)
+		}
 		lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
 		record, err := identitySpoolCollect(lookupCtx, account, time.Now().UTC())
 		cancel()
 		if err == nil {
+			previousRecorded, previousMapless := false, false
 			if previous, readErr := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); readErr == nil {
+				previousRecorded = true
+				previousMapless = previous.AccountIncarnation == "" && previous.LegacyOwnerToken == ""
 				binding := UPNBindingUnknown
 				bind := func(upn string) UPNBinding {
 					// Without a SID on the record it would be checked against,
@@ -182,11 +230,25 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 				}
 			}
 			if record.User != "" {
-				record.LegacyOwnerToken = LegacyAgentOwnerToken(record.AccountIncarnation, identitySpoolAccountHome(account.UID))
+				uid, user := account.UID, record.User
+				record.LegacyOwnerToken = LegacyAgentOwnerTokenFor(record.AccountIncarnation, identitySpoolAccountHome(uid),
+					func() (string, time.Time) { return ownerOfRecord(uid, user) })
+				if record.LegacyOwnerToken != "" {
+					record.AccountsStamp = accountsStamp
+				}
+			}
+			if previousRecorded && (record.AccountIncarnation != "" || record.LegacyOwnerToken != "") {
+				mapRecords++
+				if previousMapless {
+					preMapRecords++
+				}
 			}
 			err = writeIdentitySpoolFile(dir, name, record, setOwnership)
-			if err == nil && record.LegacyOwnerToken != "" {
+			if err == nil && record.LegacyOwnerToken != "" && (!account.Peer || LegacyAgentOwnersRecorded(dir)) {
 				owners[account.UID] = LegacyAgentOwner{User: record.User, Token: record.LegacyOwnerToken}
+			}
+			if err == nil && record.LegacyOwnerToken != "" && account.PreTokenHolder {
+				joiners[account.UID] = LegacyAgentOwner{User: record.User, Token: record.LegacyOwnerToken}
 			}
 			if err == nil && identitySpoolDirectoryRecord(record) {
 				if key := identitySpoolDirectoryKey(record); key != "" {
@@ -219,9 +281,31 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 				logf("[hook-guardian] identity facts for uid %d: %v", account.UID, err)
 			}
 		}
+		// A peer (GAP-1865) is not in the first map, as owner or as pending.
+		if _, proven := owners[account.UID]; !proven && (!account.Peer || !ownersUnrecorded) {
+			if user := cmp.Or(record.User, account.User, holderBefore); user != "" {
+				// No owner proof on this pass (the lookup failed, or the
+				// home is not there now, as an automounted one can be): the
+				// map lists the account as pending, under the name the host
+				// gives it, and a later pass that proves the account under
+				// that name adds its owner (WriteLegacyAgentOwners).
+				owners[account.UID] = LegacyAgentOwner{User: user}
+			} else if ownersUnrecorded {
+				unnamed = append(unnamed, account.UID)
+			}
+		}
 	}
-	if err := writeLegacyAgentOwnersOnce(dir, owners, passErr == nil, setOwnership); err != nil {
-		passErr = errors.Join(passErr, err)
+	complete := passErr == nil
+	if !ownersUnrecorded || unnamedLegacyAgentOwners(ctx, dir, owners, unnamed, logf) {
+		if _, err := WriteLegacyAgentOwners(dir, owners, time.Now(), setOwnership); err != nil {
+			passErr = errors.Join(passErr, fmt.Errorf("record the agent identity migration map: %w", err))
+		}
+	}
+	if !ownersUnrecorded {
+		rolledBack := mapRecords > 0 && preMapRecords == mapRecords
+		if err := addLegacyAgentOwnersToRecordedMap(dir, owners, joiners, complete, rolledBack, setOwnership); err != nil {
+			passErr = errors.Join(passErr, err)
+		}
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -235,9 +319,9 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	unresolved := map[string]bool{}
 	var withdrawErr error
 	for _, entry := range entries {
-		// The migration map is written once and kept for good.
-		if keep[entry.Name()] || entry.Name() == LegacyAgentOwnersFile ||
-			strings.HasPrefix(entry.Name(), "legacy-agent-owners-corrupt-") && strings.HasSuffix(entry.Name(), ".bad") {
+		// The migration map, its shards and a quarantined map are kept for
+		// good.
+		if keep[entry.Name()] || isLegacyAgentOwnersFile(entry.Name()) {
 			continue
 		}
 		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge && !left[entry.Name()] &&
@@ -342,36 +426,72 @@ var identitySpoolAccountHome = func(uid int) string {
 	return account.Home
 }
 
-// legacyAgentOwnersPasses counts, per spool directory, the passes that did
-// not collect every account before the migration map was written.
-var legacyAgentOwnersPasses = struct {
+// legacyAgentOwnersPassLimit is how many passes after a rollback window with
+// a failed account the guardian keeps adding the accounts it collects
+// (legacyAgentOwnersRollbackPass).
+const legacyAgentOwnersPassLimit = 3
+
+// addLegacyAgentOwnersToRecordedMap adds accounts to dir's recorded
+// migration map (AddLegacyAgentOwners). rolledBack says the previous pass
+// was a release's without the map (every record it wrote lacks the account
+// incarnation and owner token this pass found): the accounts that release
+// served are added to the map as the first upgrade recorded its own
+// (GAP-0709, GAP-1787), also at the passes after it until one collects every
+// account (legacyAgentOwnersRollbackPass, GAP-1788). joiners, the 1.0.3
+// holders the homes file proves no 1.0.4 gateway served
+// (IdentitySpoolAccount.PreTokenHolder), join an existing map at any pass:
+// the map a 1.0.4 guardian wrote names only the accounts it enrolled
+// (GAP-2085). Recorded and pending uids keep their entries. The first map
+// is WriteLegacyAgentOwners's (a map an older release removed is written
+// anew, as at the first upgrade).
+func addLegacyAgentOwnersToRecordedMap(dir string, owners, joiners map[int]LegacyAgentOwner, complete, rolledBack bool, setOwnership func(string) error) error {
+	if len(owners) == 0 {
+		return nil
+	}
+	if !legacyAgentOwnersRollbackPass(dir, rolledBack, complete) {
+		if len(joiners) == 0 {
+			return nil
+		}
+		if _, err := AddLegacyAgentOwners(dir, joiners, setOwnership); err != nil {
+			return fmt.Errorf("add the 1.0.3 holders 1.0.4 never served to the agent identity migration map: %w", err)
+		}
+		return nil
+	}
+	if _, err := AddLegacyAgentOwners(dir, owners, setOwnership); err != nil {
+		return fmt.Errorf("add the accounts of the rollback to the agent identity migration map: %w", err)
+	}
+	return nil
+}
+
+// legacyAgentOwnersRollbackPending counts, per spool directory, the passes
+// since the first pass after an upgrade back from a rollback window that did
+// not collect every account (GAP-1788). An account whose lookup failed at
+// that pass kept the record the release without the map wrote, and the next
+// pass no longer finds the rollback (the other records carry the map's
+// facts again), so the accounts later passes collect are still added, up to
+// the first complete pass or legacyAgentOwnersPassLimit passes, as the first
+// map waits for them.
+var legacyAgentOwnersRollbackPending = struct {
 	sync.Mutex
 	byDir map[string]int
 }{byDir: map[string]int{}}
 
-// legacyAgentOwnersPassLimit is how many passes with a failed account the
-// guardian waits before it records the migration map without that account.
-const legacyAgentOwnersPassLimit = 3
-
-// writeLegacyAgentOwnersOnce records the migration map of the upgrade at
-// the guardian's first pass that collected every account (complete), or at
-// the legacyAgentOwnersPassLimit-th pass with what it collected, and never
-// again (LegacyAgentOwnersFile).
-func writeLegacyAgentOwnersOnce(dir string, owners map[int]LegacyAgentOwner, complete bool, setOwnership func(string) error) error {
-	if LegacyAgentOwnersRecorded(dir) || len(owners) == 0 {
-		return nil
+// legacyAgentOwnersRollbackPass reports whether this pass adds the accounts
+// it collected to dir's existing migration map: a pass that finds the
+// rollback window, or one of the passes after it while accounts failed.
+func legacyAgentOwnersRollbackPass(dir string, rolledBack, complete bool) bool {
+	legacyAgentOwnersRollbackPending.Lock()
+	defer legacyAgentOwnersRollbackPending.Unlock()
+	passes, pending := legacyAgentOwnersRollbackPending.byDir[dir]
+	if !rolledBack && !pending {
+		return false
 	}
-	legacyAgentOwnersPasses.Lock()
-	legacyAgentOwnersPasses.byDir[dir]++
-	passes := legacyAgentOwnersPasses.byDir[dir]
-	legacyAgentOwnersPasses.Unlock()
-	if !complete && passes < legacyAgentOwnersPassLimit {
-		return nil
+	if passes++; complete || passes >= legacyAgentOwnersPassLimit {
+		delete(legacyAgentOwnersRollbackPending.byDir, dir)
+	} else {
+		legacyAgentOwnersRollbackPending.byDir[dir] = passes
 	}
-	if _, err := WriteLegacyAgentOwners(dir, owners, time.Now(), setOwnership); err != nil {
-		return fmt.Errorf("record the agent identity migration map: %w", err)
-	}
-	return nil
+	return true
 }
 
 // identitySpoolCollect is collectIdentitySpoolRecord; tests replace it.

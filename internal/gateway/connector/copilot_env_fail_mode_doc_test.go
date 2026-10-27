@@ -59,7 +59,7 @@ func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 		path string
 		want []string
 	}{
-		{filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "configuration", "fail-modes.mdx"), []string{
+		{filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "fail-modes.mdx"), []string{
 			"`DEFENSECLAW_FAIL_MODE` is not read",
 		}},
 		{filepath.Join("..", "..", "envvars", "registry.json"), []string{

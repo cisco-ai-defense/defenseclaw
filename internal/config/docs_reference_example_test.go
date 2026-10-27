@@ -28,7 +28,7 @@ import (
 // pass the shipped schema, so a key the schema no longer accepts fails CI
 // instead of reaching readers who copy the example.
 func TestReferenceConfigurationExampleMatchesSchema(t *testing.T) {
-	page := filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "configuration", "index.mdx")
+	page := filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "configuration.mdx")
 	data, err := os.ReadFile(page)
 	if err != nil {
 		t.Skipf("docs page not available: %v", err)

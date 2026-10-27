@@ -60,7 +60,17 @@ func addEnterpriseSecurityIncompleteReasons(result *enterprisestatus.Result, tra
 	if result == nil || result.SecurityComplete || len(result.Errors) > 0 {
 		return
 	}
+	// hook_process_fail_open is the agent's own residual, with no
+	// administrator remedy, and every Windows standalone result with Claude
+	// Code or Codex carries it since 1.0.4: it explains security_complete but
+	// must not hide the actionable reasons (a stale Claude attestation after
+	// an upgrade, a pending account), which it did (GAP-1900).
+	residual := false
 	for _, warning := range result.Warnings {
+		if warning.Code == enterprisestatus.CodeHookProcessFailOpen {
+			residual = true
+			continue
+		}
 		if !enterpriseInformationalWarningCodes[warning.Code] {
 			return
 		}
@@ -100,6 +110,9 @@ func addEnterpriseSecurityIncompleteReasons(result *enterprisestatus.Result, tra
 		reasons = append(reasons, fmt.Sprintf("%d per-user enrollment(s) failed", failed))
 	}
 	if len(reasons) == 0 {
+		if residual {
+			return
+		}
 		// Each input of the installer's security_complete is named above;
 		// this keeps the warning from reading empty if one is added.
 		reasons = append(reasons, "the installer named no failing check")

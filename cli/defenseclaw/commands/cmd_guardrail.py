@@ -988,6 +988,12 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 runtime_drift_rows.append(f"{_connector_label(name)} ({name}){fail_drift}")
             if cfm == "closed":
                 runtime_limit_rows.append(f"{_connector_label(name)} ({name}) is closed: {runtime_state.limit}")
+        if _is_proxy_connector(name):
+            # A proxy connector has no hooks: its proxy refuses every call
+            # while the gateway is down, whatever hook_fail_mode says. Show
+            # what `guardrail fail-mode` shows (GAP-1646), so neither the
+            # Fail column nor a hooks-allow warning over-states the risk.
+            cfm = "closed"
         # Per-connector on/off: a connector turned off via
         # `guardrail disable --connector X` is reported as disabled so the
         # roster never implies it is enforcing when its hooks have been torn
@@ -1828,7 +1834,9 @@ def _apply_global_fail_mode_transaction(
                         state = resolve_connector_fail_mode(app.cfg, name)
                         if not state.current:
                             raise OSError(
-                                f"connector runtime verification failed for {name}: " + ", ".join(state.drift)
+                                f"connector runtime verification failed for {name}: "
+                                + ", ".join(state.drift)
+                                + ". Run `defenseclaw doctor`, then retry the fail-mode command."
                             )
             except (OSError, RuntimeError, click.ClickException) as exc:
                 gc.hook_fail_mode = old_global
@@ -3909,9 +3917,45 @@ def _scope_key(connector_key: str | None, profile: str | None) -> str:
     return key
 
 
-def _rule_prune_scope(connector_key: str | None, profile: str | None) -> str:
-    """Keep the owning scope when its last rule override is removed."""
-    return _scope_key(None, profile) if profile else _scope_key(connector_key, None)
+def _rule_prune_scope(connector_key: str | None, profile: str | None, cfg=None) -> str:
+    """Keep the owning scope when its last rule override is removed.
+
+    A connector entry that only holds overrides goes with its last one when
+    the single-connector setting already puts that connector on the roster:
+    'guardrail rule severity R HIGH --connector codex' then '... default'
+    left 'connectors: codex: {}' behind (GAP-0967, GAP-1894).
+    """
+    if profile:
+        return _scope_key(None, profile)
+    if connector_key and cfg is not None:
+        listed = list((getattr(getattr(cfg, "guardrail", None), "connectors", None) or {}).keys())
+        if roster_entry_is_redundant(cfg, connector_key, listed):
+            return "guardrail"
+    return _scope_key(connector_key, None)
+
+
+def roster_entry_is_redundant(cfg, connector: str, listed: list) -> bool:
+    """Whether the guardrail.connectors entry ``connector`` adds nothing to the roster.
+
+    True when it is the map's only entry and ``guardrail.connector`` names
+    the same connector; the entry is what puts the connector on the roster
+    whenever the map has other entries or ``guardrail.connector`` names
+    another connector or none. ``claw.mode`` never counts: Go hook
+    enablement reads only ``guardrail.connector`` and ``guardrail.connectors``,
+    so on a claw.mode-only config the entry is what keeps hook calls scanned
+    (GAP-1953).
+    """
+    from defenseclaw import connector_paths
+
+    try:
+        name = connector_paths.normalize(connector)
+        if [connector_paths.normalize(str(key)) for key in listed] != [name]:
+            return False
+        single = str(cfg.guardrail.connector or "").strip()
+        single = connector_paths.normalize(single) if single else ""
+    except Exception:  # noqa: BLE001 - keep the entry when the roster cannot be read
+        return False
+    return bool(single) and single == name and name != "openclaw"
 
 
 def _scope_block(cfg, connector_key: str | None, profile: str | None):
@@ -4398,7 +4442,15 @@ def use_pack_cmd(
         stale, dropped = _stale_rule_changes(app.cfg, fallback.path, connector_key)
         result = _write_guardrail_config(
             app,
-            [config_writer.Change(f"{key}.rule_pack", unset=True), *pin_changes, *stale],
+            [
+                # The entry goes with its last override when guardrail.connector
+                # already puts the connector on the roster (GAP-1954, GAP-1894).
+                config_writer.Change(
+                    f"{key}.rule_pack", unset=True, prune_empty_to=_rule_prune_scope(connector_key, None, app.cfg)
+                ),
+                *pin_changes,
+                *stale,
+            ],
             f"guardrail use-pack --clear --connector {connector_key}",
             _fail,
         )
@@ -4472,12 +4524,11 @@ def use_pack_cmd(
     # for that directory so conflicting aliases cannot silently re-pin it.
     path_pins = []
     if kind != "preset":
-        canonical = os.path.normcase(os.path.realpath(path))
         path_pins = [
             (name, pin)
             for name, pin in sorted((getattr(gc, "custom_packs", None) or {}).items())
             if getattr(pin, "path", "")
-            and os.path.normcase(os.path.realpath(policy_catalog.normalize_pack_path(pin.path))) == canonical
+            and policy_catalog.same_pack_path(path, policy_catalog.normalize_pack_path(pin.path))
         ]
         if path_pins and kind != "registered":
             pack_name = path_pins[0][0]
@@ -4931,7 +4982,7 @@ def _change_protection(
         change = (
             config_writer.Change(path, desired)
             if desired else config_writer.Change(
-                path, unset=True, prune_empty_to=_rule_prune_scope(connector_key, profile_name)
+                path, unset=True, prune_empty_to=_rule_prune_scope(connector_key, profile_name, app.cfg)
             )
         )
         _preflight_config_write(app)
@@ -5058,7 +5109,7 @@ def _stale_rule_changes(cfg, pack_dir: str, connector_key: str | None) -> tuple[
                 changes.append(
                     config_writer.Change(path, kept)
                     if kept else config_writer.Change(
-                        path, unset=True, prune_empty_to=_rule_prune_scope(scope_connector, scope_profile)
+                        path, unset=True, prune_empty_to=_rule_prune_scope(scope_connector, scope_profile, cfg)
                     )
                 )
         overrides = dict(getattr(rules, "severity_overrides", None) or {})
@@ -5069,7 +5120,7 @@ def _stale_rule_changes(cfg, pack_dir: str, connector_key: str | None) -> tuple[
             changes.append(
                 config_writer.Change(path, kept_overrides)
                 if kept_overrides else config_writer.Change(
-                    path, unset=True, prune_empty_to=_rule_prune_scope(scope_connector, scope_profile)
+                    path, unset=True, prune_empty_to=_rule_prune_scope(scope_connector, scope_profile, cfg)
                 )
             )
     return changes, dropped
@@ -5129,7 +5180,7 @@ def _change_rule_lists(
                 if rest
                 else config_writer.Change(
                     f"{key}.rules.{remove_from}", unset=True,
-                    prune_empty_to=_rule_prune_scope(connector_key, profile_name),
+                    prune_empty_to=_rule_prune_scope(connector_key, profile_name, app.cfg),
                 )
             )
         if not changes:
@@ -5199,7 +5250,7 @@ def rule_severity_cmd(
     key = config_writer.format_path((*overrides, rule_id))
     level = severity.upper()
     scope_key = _scope_key(connector_key, profile_name)
-    prune_to = _rule_prune_scope(connector_key, profile_name)
+    prune_to = _rule_prune_scope(connector_key, profile_name, app.cfg)
     change = (
         config_writer.Change(key, unset=True, prune_empty_to=prune_to)
         if level == "DEFAULT" else config_writer.Change(key, level)
@@ -5329,7 +5380,7 @@ def _change_suppression(
         change = (
             config_writer.Change(path, updated)
             if updated else config_writer.Change(
-                path, unset=True, prune_empty_to=_rule_prune_scope(connector_key, profile_name)
+                path, unset=True, prune_empty_to=_rule_prune_scope(connector_key, profile_name, app.cfg)
             )
         )
         _preflight_config_write(app)
@@ -5623,7 +5674,16 @@ def mode_cmd(
     if connector_key is None:
         gc.mode = mode
     elif clear:
-        _connector_block_for_write(gc, connector_key).mode = ""
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        block = _connector_block_for_write(gc, connector_key)
+        block.mode = ""
+        if block == PerConnectorGuardrailConfig() and roster_entry_is_redundant(
+            app.cfg, connector_key, list(gc.connectors)
+        ):
+            # Nothing of its own is left and guardrail.connector already puts
+            # the connector on the roster: no 'connectors: codex: {}' (GAP-1954).
+            del gc.connectors[connector_key]
     else:
         _connector_block_for_write(gc, connector_key).mode = mode
     new_mode = _effective(connector_key)
@@ -5643,7 +5703,10 @@ def mode_cmd(
         _unguarded_hook_connectors(app, affected) if new_mode == "action" and outcome in ("live", "restarted") else []
     )
 
-    plain = {"action": "blocks findings at or above the block-at severity", "observe": "logs findings, blocks nothing"}
+    observe_effect = "logs policy findings without blocking on them"
+    if any(str(gc.effective_hook_fail_mode(c) or "").strip().lower() == "closed" for c in affected):
+        observe_effect += "; a gateway outage can still deny a call when hook fail mode is closed"
+    plain = {"action": "blocks findings at or above the block-at severity", "observe": observe_effect}
     if connector_key is None:
         message = f"The global guardrail mode is now {new_mode}: it {plain[new_mode]}."
         not_covered = [c for c in actives if _override(c) and policy_catalog.mode_label(_override(c)) != new_mode]

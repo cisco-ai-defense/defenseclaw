@@ -14,7 +14,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -704,10 +703,12 @@ func parseWindowsCodexRequirements(raw []byte) (map[string]interface{}, error) {
 // byte for byte the same. It is replaced, as the earlier release's group,
 // only when published proves DefenseClaw wrote it and the file holds no exact
 // group of this install for that event (an upgrade from 1.0.2 or 1.0.3 that
-// nobody edited since). Every other such group is the administrator's: it
-// stays and the exact group is added beside it, as uninstall keeps it
-// (removeWindowsCodexOwnedGroups). A publication of this install that already
-// kept it holds the exact group, so later repairs keep it too.
+// nobody edited since). Every other such group is kept and the exact group is
+// added beside it, so a repair never deletes what may be an administrator's
+// edit. A publication of this install that already kept it holds the exact
+// group, so later repairs keep it too. Uninstall takes it with the rest of
+// this install's groups (removeWindowsCodexOwnedGroups, GAP-0907): it runs
+// the hook binary the uninstall deletes.
 func reconcileWindowsCodexRequirements(
 	raw []byte,
 	opts WindowsCodexMachineRequirementsOptions,
@@ -875,15 +876,13 @@ func removeWindowsCodexRequirementsOwnedChanges(
 		// A standalone removal also takes DefenseClaw's groups of any
 		// release or hook contract (windowsCodexOwnedHookGroup), whatever
 		// the baseline holds: a group that runs this install's hook binary
-		// is DefenseClaw's, and one left behind would run a removed binary.
-		// A baseline that an earlier release recorded with its own groups
-		// (a requirements file recovered to that release's bytes) no longer
-		// strands the uninstall on them (GAP-0907). This install's own
-		// group in a shape this install does not render is an
-		// administrator's edit and stays, unless the recorded baseline holds
-		// that same group (windowsCodexEditedCurrentGroup).
+		// in a shape a DefenseClaw release renders is DefenseClaw's, and one
+		// left behind would run a removed binary and strand the uninstall
+		// on its reference (GAP-0907). That includes this install's command
+		// in the SessionStart shape of 1.0.2 and 1.0.3, whether or not the
+		// recorded baseline holds it.
 		if windowsCodexOwnedGroupsRecognized(opts) {
-			removeWindowsCodexOwnedGroups(hooks, baseHooks, opts)
+			removeWindowsCodexOwnedGroups(hooks, opts)
 		}
 
 		// The isolation booleans and managed directory are shared prerequisites
@@ -960,9 +959,9 @@ func removeWindowsCodexRequirementsOwnedChanges(
 // who edits this install's group gets (the compact source cut from the
 // matcher). Reconcile replaces it only in a file nobody edited since
 // DefenseClaw published it that holds no exact group of this install (the
-// earlier release's own file, reconcileWindowsCodexRequirements); a removal
-// leaves it unless the recorded preimage holds that same group. A kept group's
-// reference to the managed directory keeps the binary removal unsafe.
+// earlier release's own file, reconcileWindowsCodexRequirements). A
+// standalone removal takes it as DefenseClaw's: it runs the binary the
+// removal deletes (GAP-0907).
 func windowsCodexEditedCurrentGroup(raw interface{}, event string, opts WindowsCodexMachineRequirementsOptions) bool {
 	command := windowsCodexManagedHookCommandFor(opts, event)
 	for _, shape := range windowsCodexMachineProfileGroups(opts) {
@@ -988,21 +987,16 @@ func windowsCodexOwnedGroupsRecognized(opts WindowsCodexMachineRequirementsOptio
 }
 
 // removeWindowsCodexOwnedGroups drops every DefenseClaw managed group of any
-// release from each event list of hooks, except this install's own group as
-// an administrator edited it that baseHooks (the recorded preimage) does not
-// hold (windowsCodexEditedCurrentGroup).
-func removeWindowsCodexOwnedGroups(hooks, baseHooks map[string]interface{}, opts WindowsCodexMachineRequirementsOptions) {
+// release (windowsCodexOwnedHookGroup) from each event list of hooks.
+func removeWindowsCodexOwnedGroups(hooks map[string]interface{}, opts WindowsCodexMachineRequirementsOptions) {
 	for key, raw := range hooks {
 		groups, ok := raw.([]interface{})
 		if !ok || key == "windows_managed_dir" || key == "state" {
 			continue
 		}
-		recorded, _ := baseHooks[key].([]interface{})
 		kept := make([]interface{}, 0, len(groups))
 		for _, group := range groups {
-			edited := windowsCodexEditedCurrentGroup(group, key, opts) &&
-				!slices.ContainsFunc(recorded, func(entry interface{}) bool { return reflect.DeepEqual(entry, group) })
-			if edited || !windowsCodexOwnedHookGroup(group, key, opts.HookBinary) {
+			if !windowsCodexOwnedHookGroup(group, key, opts.HookBinary) {
 				kept = append(kept, group)
 			}
 		}
@@ -1033,13 +1027,10 @@ func windowsCodexRemovalCandidate(
 	// A preimage an earlier release recorded with its own groups (or
 	// their managed directory alone) is DefenseClaw's in those parts:
 	// restoring it verbatim would strand the uninstall on them
-	// (GAP-0907), so it is cleaned as a surgical removal is. A group the
-	// record itself holds is DefenseClaw's in any release's shape, also
-	// this install's command in the SessionStart shape of 1.0.2 and 1.0.3
-	// (GAP-1456): a removal takes it, as it does from a live file.
+	// (GAP-0907, GAP-1456), so it is cleaned as a surgical removal is.
 	preimageLeftovers := false
 	if exactPostimage && state.PreimageExisted {
-		if preimageLeftovers, err = windowsCodexRecordedRequirementsHoldOwnedLeftovers(state.Preimage, opts); err != nil {
+		if preimageLeftovers, err = windowsCodexRequirementsHoldOwnedLeftovers(state.Preimage, opts); err != nil {
 			return nil, false, false, "", fmt.Errorf("inspect the recorded Codex requirements preimage: %w", err)
 		}
 	}
@@ -1067,30 +1058,11 @@ func windowsCodexRemovalCandidate(
 	}
 }
 
-// windowsCodexRecordedRequirementsHoldOwnedLeftovers is
-// windowsCodexRequirementsHoldOwnedLeftovers for requirements DefenseClaw
-// recorded as its preimage. A group the record holds is in its own baseline,
-// so this install's command in a shape this install does not render counts
-// as DefenseClaw's, as removeWindowsCodexOwnedGroups removes it, and not as
-// an administrator's later edit (GAP-1456).
-func windowsCodexRecordedRequirementsHoldOwnedLeftovers(raw []byte, opts WindowsCodexMachineRequirementsOptions) (bool, error) {
-	return windowsCodexRequirementsHoldOwnedLeftoversIn(raw, opts, true)
-}
-
 // windowsCodexRequirementsHoldOwnedLeftovers reports whether raw still holds
 // what a standalone removal takes: a DefenseClaw managed group of any
-// release (not this install's group as an administrator edited it,
-// windowsCodexEditedCurrentGroup), or, with no hook left, a managed directory
-// that names this install's own directory.
+// release, or, with no hook left, a managed directory that names this
+// install's own directory.
 func windowsCodexRequirementsHoldOwnedLeftovers(raw []byte, opts WindowsCodexMachineRequirementsOptions) (bool, error) {
-	return windowsCodexRequirementsHoldOwnedLeftoversIn(raw, opts, false)
-}
-
-func windowsCodexRequirementsHoldOwnedLeftoversIn(
-	raw []byte,
-	opts WindowsCodexMachineRequirementsOptions,
-	recorded bool,
-) (bool, error) {
 	if !windowsCodexOwnedGroupsRecognized(opts) {
 		return false, nil
 	}
@@ -1108,8 +1080,7 @@ func windowsCodexRequirementsHoldOwnedLeftoversIn(
 			continue
 		}
 		for _, group := range groups {
-			if windowsCodexOwnedHookGroup(group, key, opts.HookBinary) &&
-				(recorded || !windowsCodexEditedCurrentGroup(group, key, opts)) {
+			if windowsCodexOwnedHookGroup(group, key, opts.HookBinary) {
 				return true, nil
 			}
 		}
@@ -1336,14 +1307,10 @@ func windowsCodexAdoptRequirements(
 		currentDir = opts.ManagedDir
 	}
 	// This install's own command in a shape only an earlier release renders
-	// is the administrator's edit as far as anything here can prove
-	// (windowsCodexEditedCurrentGroup): reconcile keeps it in an adopted
-	// file, so the preimage keeps it too, and a removal that restores the
-	// preimage does not delete it.
-	keepEdited := func(group interface{}, event string) bool {
-		return !opts.SecureClient && windowsCodexEditedCurrentGroup(group, event, opts)
-	}
-	withoutCurrent, strippedCurrent, err := stripWindowsCodexLayoutKeeping(adoption.base, opts.HookBinary, currentDir, keepEdited)
+	// (windowsCodexEditedCurrentGroup) leaves the preimage too: uninstall
+	// removes it with the rest of this install's groups (GAP-0907), so a
+	// restored preimage must not bring it back (GAP-1767).
+	withoutCurrent, strippedCurrent, err := stripWindowsCodexLayout(adoption.base, opts.HookBinary, currentDir)
 	if err != nil {
 		return windowsCodexAdoption{}, fmt.Errorf("strip current Codex managed layout: %w", err)
 	}
@@ -1431,12 +1398,6 @@ func windowsCodexDiscardedPreimageTrusted(
 // that kind. It reports whether anything was removed; the document is
 // re-rendered only then.
 func stripWindowsCodexLayout(raw []byte, hookBinary, managedDir string) ([]byte, bool, error) {
-	return stripWindowsCodexLayoutKeeping(raw, hookBinary, managedDir, nil)
-}
-
-// stripWindowsCodexLayoutKeeping is stripWindowsCodexLayout that leaves
-// every group keep reports (nil keeps none).
-func stripWindowsCodexLayoutKeeping(raw []byte, hookBinary, managedDir string, keep func(group interface{}, event string) bool) ([]byte, bool, error) {
 	if strings.TrimSpace(hookBinary) == "" && strings.TrimSpace(managedDir) == "" {
 		return raw, false, nil
 	}
@@ -1463,7 +1424,7 @@ func stripWindowsCodexLayoutKeeping(raw []byte, hookBinary, managedDir string, k
 			}
 			kept := make([]interface{}, 0, len(groups))
 			for _, candidate := range groups {
-				if windowsCodexOwnedHookGroup(candidate, key, hookBinary) && (keep == nil || !keep(candidate, key)) {
+				if windowsCodexOwnedHookGroup(candidate, key, hookBinary) {
 					stripped = true
 					continue
 				}

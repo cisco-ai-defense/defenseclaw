@@ -45,9 +45,6 @@ func TestStopUsesFreshMicroVMPhaseAfterRawTransition(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newVMEnv(t, nil)
 			e.create(sandboxapi.CreateRequest{Name: "box", Copy: true})
-			e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
-				return openshelltest.ExecResponse{Stdout: []byte("none\nsynced\n")}
-			}))
 			if tc.cached == audit.SandboxPhaseStopped {
 				e.stopBox("box")
 			}

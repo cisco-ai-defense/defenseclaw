@@ -129,7 +129,7 @@ func (l *lifecycle) describeAgentSessionsBeforeGuardianRestore(ctx context.Conte
 			return fmt.Sprintf("runs %s, started before the hook guardian put back the account's changed or removed %s hooks at %s; an agent keeps the hooks it loaded when it started, so a session started while they were missing runs without DefenseClaw until it is restarted: ask that user to restart these sessions", sessions, g.connector, g.at.UTC().Format(time.RFC3339))
 		})
 	}
-	l.result.SecurityComplete = false
+	l.result.MarkSecurityIncomplete(codeAgentSessionsRestart)
 }
 
 // warnGuardianRestoresUnknown names, per account, the agent sessions whose
@@ -153,5 +153,5 @@ func (l *lifecycle) warnGuardianRestoresUnknown(ctx context.Context, record *Dep
 			return fmt.Sprintf("runs %s; restart status unknown: the hook guardian's restore record could not be read (%v), so DefenseClaw cannot tell whether these sessions started before the guardian put back the account's hooks and run without DefenseClaw: ask that user to restart them", sessions, cause)
 		})
 	}
-	l.result.SecurityComplete = false
+	l.result.MarkSecurityIncomplete(codeAgentSessionsRestart)
 }

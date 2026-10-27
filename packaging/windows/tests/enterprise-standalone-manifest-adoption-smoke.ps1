@@ -282,6 +282,22 @@ try {
             }
             Set-TestGuardian $false $republishedSHA256 2 1 -Results @([pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }, $signedOut)
             Assert-TestSyncRefuses 'signed-out account' 'sign in, or remove it with its profile, then run this command again: alice (S-1-5-21-1-2-3-1018). The guardian repairs their DefenseClaw hooks only in their own Windows session)'
+            # GAP-1657: a deleted account the guardian reports through the
+            # session wait (its home no longer exists) is accepted as a
+            # removed account, not named as a signed-out one to remove again.
+            $removedRow = [pscustomobject]@{
+                user = 'gone'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                error = 'enterprise hooks: protected target requires repair but its exact active Windows session is unavailable (verification: enterprise hooks: user home C:\Users\gone no longer exists: the account was deleted or its profile folder removed; run Setup /ensure again (file does not exist))'
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @([pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }, $removedRow)
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation `
+                -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok) {
+                $failures.Add("a deleted account reported through the session wait refused the adoption: $($adoption.reason)")
+            }
             # A deleted account whose profile folder was removed fails every
             # reconcile until the enumerator's next pass drops its rows; the
             # guardian status counts exactly those failures, and the adoption

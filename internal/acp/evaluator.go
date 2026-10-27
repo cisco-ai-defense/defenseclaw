@@ -120,6 +120,36 @@ func (e acpDisabledError) Is(target error) bool {
 	return target == ErrGatewayNotReady || target == ErrACPDisabled
 }
 
+// GatewayRefusedError is an authenticated answer other than a verdict that
+// no more specific error names: the gateway was reached and refused the
+// evaluation (for example HTTP 400 with its reason). It is not an outage and
+// the editor is told what the gateway said, not that it did not answer.
+type GatewayRefusedError struct {
+	Status  int
+	Message string
+}
+
+func (e *GatewayRefusedError) Error() string {
+	if e.Message == "" {
+		return fmt.Sprintf("ACP evaluator returned HTTP %d", e.Status)
+	}
+	return fmt.Sprintf("ACP evaluator returned HTTP %d: %s", e.Status, e.Message)
+}
+
+// marshalEvaluation encodes an evaluation without HTML escaping, so a frame
+// the guard accepted reaches the gateway at its own size: escaped, a frame
+// full of "<", ">" or "&" grew up to six times and the gateway refused it as
+// larger than an ACP frame (GAP-1327).
+func marshalEvaluation(in Evaluation) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(in); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
 type Evaluation struct {
 	Profile   string          `json:"profile"`
 	Mode      Mode            `json:"mode"`
@@ -146,6 +176,10 @@ type Verdict struct {
 	// refuses it after one said "closed" (observeRefuses, owner decision
 	// 2026-10-20).
 	FailMode string `json:"fail_mode,omitempty"`
+	// Enforced marks a block the gateway enforces in every mode (identity
+	// uncertainty): an observe-mode guard refuses the frame too instead of
+	// passing it on as a would-block (GAP-2103).
+	Enforced bool `json:"enforced,omitempty"`
 }
 
 type Evaluator interface {
@@ -236,7 +270,7 @@ func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, e
 	if err != nil {
 		return Verdict{}, err
 	}
-	body, err := json.Marshal(in)
+	body, err := marshalEvaluation(in)
 	if err != nil {
 		return Verdict{}, err
 	}
@@ -327,7 +361,13 @@ func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, e
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return Verdict{}, fmt.Errorf("ACP evaluator returned HTTP %d", resp.StatusCode)
+		// The gateway answered and signed it: it refused this evaluation,
+		// it did not fail to answer (GAP-1327).
+		var refusal struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(payload, &refusal)
+		return Verdict{}, &GatewayRefusedError{Status: resp.StatusCode, Message: boundedBlockReason(refusal.Error)}
 	}
 	var verdict Verdict
 	decoder := json.NewDecoder(bytes.NewReader(payload))

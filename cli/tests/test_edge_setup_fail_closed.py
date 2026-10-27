@@ -73,7 +73,7 @@ def test_edge_install_help_and_missing_source_name_fleet_archive(tmp_path, monke
 def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch) -> None:
     install_guide = (
         Path(__file__).resolve().parents[2]
-        / "docs-site/content/docs/how-to/install-the-edge-connector.mdx"
+        / "docs-site/content/docs/edge-connector/install.mdx"
     ).read_text(encoding="utf-8")
     assert "defenseclaw edge-connector register 1001" not in install_guide
     assert "--endpoint https://fleet.example.com/api/v1/fleet" in install_guide
@@ -85,7 +85,7 @@ def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch
     assert "defenseclaw config set fleet.allow_key_over_http true" in install_guide
     reference = (
         Path(__file__).resolve().parents[2]
-        / "docs-site/content/docs/reference/edge-connector/configuration.mdx"
+        / "docs-site/content/docs/edge-connector/install.mdx"
     ).read_text(encoding="utf-8")
     assert "fleet.trust_proxy_headers" in reference
     assert "fleet.allow_key_over_http" in reference

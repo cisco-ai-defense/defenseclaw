@@ -161,6 +161,14 @@ func copilotUnparsedPatchNamesProtectedTarget(ctx context.Context, req agentHook
 		req.ToolArgs, cwd, hookActiveHome(ctx), resolvedWritesFromContext(ctx))
 }
 
+// The observe answers to an unreadable Copilot call are gateway text only,
+// so the agent reads them as written (trustedUnparsedToolCallReason), not as
+// redacted spans (GAP-1833).
+const (
+	copilotObserveUnparsedReason          = "DefenseClaw could not read this Copilot tool call; it was allowed in observe mode and recorded for review."
+	copilotObserveProtectedUnparsedReason = "rule " + unparsedProtectedPatchRuleID + ": SSH authorized keys mutation; " + copilotObserveUnparsedReason
+)
+
 func (a *APIServer) unparsedStructuredHookResponse(ctx context.Context, profile connector.HookProfile, req agentHookRequest) agentHookResponse {
 	findings := []string{hookToolCallUnparsedRuleID}
 	ruleIDs := []string{hookToolCallUnparsedRuleID}
@@ -174,13 +182,13 @@ func (a *APIServer) unparsedStructuredHookResponse(ctx context.Context, profile 
 		cfg := a.decisionConfig(ctx)
 		if cfg != nil && !cfg.SecureClientIntegration() &&
 			cfg.HookPolicyTierForConnector("copilot") != config.HookPolicyTierStrict {
-			reason := "DefenseClaw could not read this Copilot tool call; it was allowed in observe mode and recorded for review."
+			reason := copilotObserveUnparsedReason
 			resp := agentHookResponseForProfile(profile, req, "allow", "alert", "WARN", reason,
 				findings, "observe", false, profile.Capabilities)
 			if protected {
 				// Observe does not block, but the protected target is the
 				// finding: the critical alert and audit row name its rule.
-				reason = "rule " + unparsedProtectedPatchRuleID + ": SSH authorized keys mutation; " + reason
+				reason = copilotObserveProtectedUnparsedReason
 				resp = agentHookResponseForProfile(profile, req, "allow", "block", "CRITICAL", reason,
 					findings, "observe", true, profile.Capabilities)
 			}

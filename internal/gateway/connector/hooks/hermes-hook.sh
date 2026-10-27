@@ -209,6 +209,17 @@ hermes_bootstrap_failure() {
   exit 0
 }
 trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_closed; then hermes_bootstrap_failure; fi' EXIT
+{{else if and .Managed (not .Sandbox) (not .SecureClientDelivery)}}# A managed hook that fails before its helpers load (a missing or broken
+# _hardening.sh, a set -e error) is a local failure, not a gateway outage:
+# it answers Hermes' block whatever the administrator's outage mode
+# (GAP-0340). defenseclaw_harden_env replaces this trap with the hook's own.
+hermes_bootstrap_failure() {
+  echo "defenseclaw: hermes hook could not start; blocking (fail mode closed)" >&2
+  # Hermes acts on a synchronous JSON block, not on process status.
+  printf '%s\n' '{"action":"block","message":"DefenseClaw hook failed closed"}'
+  exit 0
+}
+trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ]; then hermes_bootstrap_failure; fi' EXIT
 {{end}}# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME

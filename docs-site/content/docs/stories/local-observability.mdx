@@ -1,0 +1,141 @@
+---
+title: Run the local observability stack
+description: defenseclaw setup local-observability up starts the bundled OTel Collector + Prometheus, Loki, Tempo, and Grafana stack and writes its named v8 destination.
+keywords:
+  - DefenseClaw local observability
+  - DefenseClaw OTLP local stack
+  - prometheus loki tempo grafana
+  - DefenseClaw OTel exporter
+---
+
+The local stack gives you 19 DefenseClaw dashboards on `localhost:3000` in one command. It is meant for development and evaluation. Every port is bound to `127.0.0.1`.
+
+This story retells the walkthrough briefly. For the full page on flags, dashboards and tear-down, see [Observability → Local stack](/docs/observability/local-observability).
+
+## Before you start
+
+- Docker with Compose v2, running.
+- Ports 3000, 3100, 3200, 4317, 4318 and 9090 free. There is no flag to move them.
+- On Windows, Docker Desktop with Linux containers on Windows Pro, Enterprise or Education. Windows Server and WSL2-only Docker are not supported; send to an existing collector instead ([Send to an OTLP collector](/docs/observability)).
+
+## Run it
+
+<Steps>
+
+<Step>
+
+### Bring up the stack
+
+```bash
+defenseclaw setup local-observability up
+```
+
+The command starts the five containers, waits for their health checks, and adds a destination named `local-observability` to your observability config. A running gateway picks it up without a restart.
+
+</Step>
+
+<Step>
+
+### Print the addresses
+
+```bash
+defenseclaw setup local-observability url
+```
+
+```text
+Grafana:    http://localhost:3000
+Prometheus: http://localhost:9090
+Tempo API:  http://localhost:3200
+Loki API:   http://localhost:3100
+OTLP gRPC:  127.0.0.1:4317
+OTLP HTTP:  127.0.0.1:4318
+```
+
+</Step>
+
+<Step>
+
+### Open Grafana
+
+Open Grafana and sign in as `admin`. The generated password is in `~/.defenseclaw/observability-stack/.grafana-admin-password`. A stack that was already running with anonymous access keeps it, read-only (Viewer): to edit dashboards, rerun setup with `--password`. The setup summary says which mode applies.
+
+</Step>
+
+<Step>
+
+### Generate one real event
+
+Run one agent turn, for example ask Claude Code or Codex to list the files in a folder. Dashboards fill only from real traffic; a destination test adds nothing.
+
+</Step>
+
+<Step>
+
+### Open the dashboards
+
+Open **Dashboards → DefenseClaw → Overview**. **Hook Connectors** shows the connector's hook calls. **Agent identity → Runtime Agent Directory** lists the agent; click its **Agent ID** to open [Agent360](/docs/observability/agent360).
+
+</Step>
+
+<Step>
+
+### Check the destination
+
+```bash
+defenseclaw observability destination test local-observability
+```
+
+The test checks the connection without adding events to history or dashboard counts.
+
+</Step>
+
+<Step>
+
+### Tear it down
+
+```bash
+defenseclaw setup local-observability down
+```
+
+`down` stops the containers and keeps their data. The destination stays in your config, so the gateway keeps trying to send; add `--disable-config` to turn it off too. To delete the stored metrics, logs and traces, run `defenseclaw setup local-observability reset --yes`.
+
+</Step>
+
+</Steps>
+
+## Architecture
+
+<Flow
+  direction="TB"
+  compact
+  caption="The gateway sends logs, metrics and traces over OTLP to the collector, which writes each signal to its own store. Grafana queries the three stores. Ports are bound to 127.0.0.1."
+>
+  <Node id="gateway" kind="gateway">{`Gateway\ndefenseclaw-gateway`}</Node>
+  <Node id="collector" kind="generic">{`OTel Collector\n:4317 gRPC · :4318 HTTP`}</Node>
+  <Node id="prom" kind="datastore">{`Prometheus\nmetrics · :9090`}</Node>
+  <Node id="loki" kind="datastore">{`Loki\nlogs · :3100`}</Node>
+  <Node id="tempo" kind="datastore">{`Tempo\ntraces · :3200`}</Node>
+  <Node id="graf" kind="generic">{`Grafana\ndashboards · :3000`}</Node>
+  <Edge from="gateway" to="collector" label="sends OTLP" />
+  <Edge from="collector" to="prom" label="writes" />
+  <Edge from="collector" to="loki" label="writes" />
+  <Edge from="collector" to="tempo" label="writes" />
+  <Edge from="prom" to="graf" label="queried by" variant="dashed" />
+  <Edge from="loki" to="graf" label="queried by" variant="dashed" />
+  <Edge from="tempo" to="graf" label="queried by" variant="dashed" />
+</Flow>
+
+## Keep the destination name
+
+Do not rename `local-observability`. The bundled dashboards read metric labels that DefenseClaw only exports to a destination with that name. To feed the stack from a gateway on another computer, add the destination with the preset:
+
+```bash
+defenseclaw setup observability add local-otlp --endpoint <stack-host>:4317 --non-interactive
+```
+
+## Next
+
+- [Dashboards](/docs/observability/grafana-dashboards): what each board shows and how to read empty panels.
+- [Observability reference](/docs/observability): stack images, ports and `up` flags.
+- [Troubleshoot the local stack](/docs/observability): no data, port conflicts and detaching the gateway.
+- [Send to Splunk](/docs/observability/splunk): run Splunk next to this stack.

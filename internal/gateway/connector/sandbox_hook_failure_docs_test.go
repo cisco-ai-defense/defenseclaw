@@ -78,7 +78,7 @@ func sandboxPluginNames(plugins []sandboxPlugin) string {
 
 func failModesPage(t *testing.T) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "configuration", "fail-modes.mdx"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "fail-modes.mdx"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestFailModesDocSaysSandboxPluginsDoNotBlockPrompts(t *testing.T) {
 		t.Fatal("fail-modes.mdx says every next prompt is blocked; not every hook can block a prompt")
 	}
 	stopEvents := strings.Split(strings.Split(page, "### Stop and session-end events")[1], "### ")[0]
-	if want := "[gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)"; !strings.Contains(stopEvents, want) {
+	if want := "[gateway outage table](/docs/connectors/capability-matrix#gateway-outage)"; !strings.Contains(stopEvents, want) {
 		t.Fatalf("fail-modes.mdx must link to the canonical outage table: %q", want)
 	}
 	var blockers []string

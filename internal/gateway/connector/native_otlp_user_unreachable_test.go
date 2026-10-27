@@ -25,7 +25,7 @@ func TestUserNativeOTLPConfigUnreachableNamesADanglingLink(t *testing.T) {
 		t.Helper()
 		var got string
 		if err := WithUserHomeDir(home, func() error {
-			got = UserNativeOTLPConfigUnreachable("codex")
+			got = UserNativeOTLPPathUnreachable(UserNativeOTLPConfigPathFor("codex", home))
 			return nil
 		}); err != nil {
 			t.Fatal(err)
@@ -81,8 +81,5 @@ func TestUserNativeOTLPConfigUnreachableNamesADanglingLink(t *testing.T) {
 	}
 	if got := check(); got != fileLink {
 		t.Fatalf("dangling config.toml link: %q, want %q", got, fileLink)
-	}
-	if got := UserNativeOTLPConfigUnreachable("hermes"); got != "" {
-		t.Fatalf("hermes: %q", got)
 	}
 }

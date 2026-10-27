@@ -674,9 +674,8 @@ def report_renders_fail_mode(report: dict[str, Any]) -> bool:
 def rendered_fail_mode(report: dict[str, Any]) -> str | None:
     """The fail mode the installed hook of a connector_fail_mode_report was rendered with, or None.
 
-    ``effective`` also counts an inherited DEFENSECLAW_FAIL_MODE=closed, which
-    only the process reading the report has: the agent that runs the hook may
-    not. A hook rendered open is open for every agent without it.
+    The agent environment does not change the installed mode. A hook rendered
+    open stays open until the fail-mode command refreshes its installed policy.
     """
 
     for source in report.get("sources") or ():
@@ -1427,19 +1426,27 @@ def _windows_registration_freshness(
     install_root = _packaged_windows_install_root(str(cfg.data_dir))
     if install_root is None:
         install_root = str(Path.home() / ".local" / "bin")
-    check = validate_windows_hook_registration(
-        connector=connector,
-        config_path=config_path,
-        data_dir=str(cfg.data_dir),
-        install_root=install_root,
-        search_path=os.environ.get("PATH", ""),
-        pathext=os.environ.get("PATHEXT", ""),
-        inspect_effective_policy=inspect_effective_policy,
-        codex_per_user=(
-            connector == "codex"
-            and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
-        ),
-    )
+    # Agents can briefly hold their settings or launcher without read sharing.
+    # Revalidate all evidence after each wait. A persistent permission fault
+    # still refuses the transaction; elapsed time never proves registration.
+    for delay in (0, 0.1, 0.2, 0.4, 0.8):
+        if delay:
+            time.sleep(delay)
+        check = validate_windows_hook_registration(
+            connector=connector,
+            config_path=config_path,
+            data_dir=str(cfg.data_dir),
+            install_root=install_root,
+            search_path=os.environ.get("PATH", ""),
+            pathext=os.environ.get("PATHEXT", ""),
+            inspect_effective_policy=inspect_effective_policy,
+            codex_per_user=(
+                connector == "codex"
+                and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
+            ),
+        )
+        if check.healthy or check.state != "access-denied":
+            break
     return None if check.healthy else f"registration-{check.state}"
 
 
@@ -1771,5 +1778,9 @@ def reconcile_connector_registration(cfg: Any, connector: str) -> ConnectorFailM
             time.sleep(0.15)
             state = resolve_connector_fail_mode(cfg, name)
     if not state.current:
-        raise OSError(f"connector runtime verification failed for {state.connector}: " + ", ".join(state.drift))
+        raise OSError(
+            f"connector runtime verification failed for {state.connector}: "
+            + ", ".join(state.drift)
+            + ". Run `defenseclaw doctor`, then retry the fail-mode command."
+        )
     return state

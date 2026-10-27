@@ -1,0 +1,79 @@
+---
+title: First guardrail
+description: After the quickstart. Switch one agent from observe to action mode so the guardrail blocks, check that it worked, and switch back.
+keywords:
+  - first DefenseClaw guardrail
+  - DefenseClaw action mode
+  - block agent tool calls
+  - guardrail mode
+---
+
+Observe mode records policy findings without enforcing them. Hook fail mode and proxy availability still apply. Action mode blocks at the levels in [Guardrail](/docs/guardrail). Run observe for about a week on a new agent before you switch.
+
+## Before you start
+
+- DefenseClaw is installed and an agent is set up ([Quickstart](/docs/get-started/quickstart)).
+- You have read `defenseclaw alerts` for a while and the findings look right.
+
+## Steps
+
+1. Check the current mode.
+
+   ```bash
+   defenseclaw guardrail status
+   ```
+
+   ```text
+     Guardrail status
+     ----------------
+     * enabled:    yes
+         Connector    Key         State    Mode     Fail    Rule pack  Block/alert       HILT  Scan        Judge
+         -----------  ----------  -------  -------  ------  ---------  ----------------  ----  ----------  -----
+         Claude Code  claudecode  enabled  observe  closed  default    CRITICAL/MEDIUM+  off   regex_only  off
+     …
+   ```
+
+2. Switch the agent to action mode. Leave out `--connector` to change the global mode that agents without their own mode follow.
+
+   ```bash
+   defenseclaw guardrail mode action --connector claudecode
+   ```
+
+   ```text
+     OK Claude Code is now in action mode: it blocks findings at or above the block-at severity.
+   ```
+
+   The running gateway applies the change on its next reload. No restart is needed.
+
+3. Run a command a default rule blocks. `CMD-RM-RF` blocks a recursive force delete of `/` or a top-level directory such as `/etc` or `/proc`. Many models refuse to run `rm -rf /proc` themselves, so no tool call is made; if that happens, use the harmless test rule in [Block a destructive command](/docs/stories/observe-claude-code).
+
+## Check it worked
+
+```bash
+defenseclaw alerts --limit 5
+```
+
+```text
+                         Security Alerts (last 2)
++------------------------------------------------------------------------+
+| # | Severity | Time  | Action       | Target      | Details [--show #] |
+|---+----------+-------+--------------+-------------+--------------------|
+| 1 | CRITICAL | 06:59 | scan-finding | ...eToolUse | decision=blocke... |
+…
+```
+
+`decision=blocked` means the agent received a deny.
+
+## Undo
+
+```bash
+defenseclaw guardrail mode observe --connector claudecode
+```
+
+To drop the agent's own mode and follow the global mode again, run `defenseclaw guardrail mode --connector claudecode --clear`.
+
+## Next
+
+- [Ask before risky calls](/docs/hitl)
+- [Allow a blocked call](/docs/guardrail)
+- [`setup guardrail` reference](/docs/guardrail/aliases)

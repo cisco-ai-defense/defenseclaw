@@ -1580,9 +1580,10 @@ func (d *SandboxDaemon) notePolicyStop(r daemonRegistration) {
 const sandboxPolicyStopReason = "policy_stop"
 
 // stopRevoked stops a sandbox whose registration the managed gateway
-// revoked; it never starts again from this registration.
+// revoked; it never starts again from this registration. A MicroVM whose
+// disk cannot be synced first is contained instead (GAP-0902).
 func (d *SandboxDaemon) stopRevoked(ctx context.Context, r daemonRegistration) {
-	if _, err := d.rt.manager.StopForPolicy(ctx, r.Sandbox); err != nil {
+	if _, err := d.rt.manager.Stop(manager.WithEmergencyStop(ctx, "its managed registration was revoked"), r.Sandbox); err != nil {
 		d.logf("stop %s after its registration was revoked: %v", r.Sandbox, err)
 		return
 	}
@@ -1722,26 +1723,6 @@ func (d *SandboxDaemon) containLostListener(ctx context.Context, part string) {
 		case <-time.After(every):
 		}
 	}
-}
-
-// policyFleet is the fleet the listener-loss containment stops through
-// (buildSandboxRuntime, for the OSS sidecar and the managed daemon alike):
-// that stop is DefenseClaw's own security response (another program may
-// receive the sandbox's hooks and credentials), so a MicroVM whose disk
-// sync fails is stopped all the same and the feed says what it may have
-// lost (StopForPolicy), never held as a stop the user asked for is
-// (GAP-1163).
-type policyFleet struct{ policyStopper }
-
-// policyStopper is what policyFleet needs: *manager.Manager.
-type policyStopper interface {
-	List(ctx context.Context) ([]sandboxapi.Sandbox, error)
-	StopForPolicy(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
-}
-
-// Stop is the policy stop.
-func (f policyFleet) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
-	return f.StopForPolicy(ctx, name)
 }
 
 type listenerFailure struct {

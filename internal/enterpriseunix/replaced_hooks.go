@@ -130,9 +130,10 @@ fi
 // replacedHookFolder is an enrolled account's hook folder whose
 // _hardening.sh is the replaced release's (fenced now or by an earlier run).
 type replacedHookFolder struct {
-	user string
-	uid  int
-	path string
+	user     string
+	uid      int
+	path     string
+	fencedAt time.Time
 }
 
 // fenceReplacedHooks fences the replaced release's shell hooks of every
@@ -149,7 +150,6 @@ func (l *lifecycle) fenceReplacedHooks(ctx context.Context) {
 	if len(targets) == 0 {
 		return
 	}
-	fencedAt := env.Now()
 	fence := lifecycleFence(env.Layout.LifecycleMarkerPath)
 	var folders []replacedHookFolder
 	for _, target := range targets {
@@ -160,13 +160,13 @@ func (l *lifecycle) fenceReplacedHooks(ctx context.Context) {
 			continue
 		}
 		if replaced {
-			folders = append(folders, replacedHookFolder{user: target.user, uid: target.uid, path: target.folder()})
+			folders = append(folders, replacedHookFolder{user: target.user, uid: target.uid, path: target.folder(), fencedAt: env.Now()})
 		}
 	}
 	if len(folders) == 0 {
 		return
 	}
-	running := l.waitForReplacedHookCalls(ctx, folders, fencedAt)
+	running := l.waitForReplacedHookCalls(ctx, folders)
 	if len(running) == 0 {
 		return
 	}
@@ -419,11 +419,11 @@ func fenceHardening(home, rel string, uid int, fence string) (replaced bool, err
 // that started before the fence (a second later: ps on macOS counts whole
 // seconds). The gateway still answers them meanwhile. It returns those still
 // running, as "user (pid N)".
-func (l *lifecycle) waitForReplacedHookCalls(ctx context.Context, folders []replacedHookFolder, fencedAt time.Time) []string {
+func (l *lifecycle) waitForReplacedHookCalls(ctx context.Context, folders []replacedHookFolder) []string {
 	env := l.env
 	deadline := time.Now().Add(env.ReplacedHookCallsTimeout)
 	for {
-		running := env.replacedHookCalls(ctx, folders, fencedAt.Add(time.Second))
+		running := env.replacedHookCalls(ctx, folders)
 		if len(running) == 0 || !time.Now().Before(deadline) {
 			return running
 		}
@@ -435,16 +435,13 @@ func (l *lifecycle) waitForReplacedHookCalls(ctx context.Context, folders []repl
 	}
 }
 
-// replacedHookCalls are the processes that started before before and run a
-// hook from one of folders as its account.
-func (e *Env) replacedHookCalls(ctx context.Context, folders []replacedHookFolder, before time.Time) []string {
+// replacedHookCalls are the processes that started before their folder's
+// fence and run a hook from that folder as its account.
+func (e *Env) replacedHookCalls(ctx context.Context, folders []replacedHookFolder) []string {
 	var out []string
 	for _, process := range e.hostProcesses(ctx) {
-		if !process.Started.Before(before) {
-			continue
-		}
 		for _, folder := range folders {
-			if process.UID == folder.uid && runsFromFolder(process.Argv, folder.path) {
+			if process.Started.Before(folder.fencedAt.Add(time.Second)) && process.UID == folder.uid && runsFromFolder(process.Argv, folder.path) {
 				out = append(out, fmt.Sprintf("%s (pid %d)", folder.user, process.PID))
 				break
 			}

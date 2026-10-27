@@ -2463,10 +2463,11 @@ func TestUnknownConnector(t *testing.T) {
 	}
 }
 
-// until 1.1: a hook an older release registered for a removed connector (on
-// Windows, the native launcher) blocks every call, in every fail mode, and
-// says that support was removed in 1.0.4; it never reaches the gateway.
-func TestRemovedConnectorHookBlocksWithTheRemovalReason(t *testing.T) {
+// until 1.1: a hook an older release registered for OpenHands or OmniGent
+// (on Windows, the native launcher) lets the call run in every fail mode and
+// prints the one removal notice: DefenseClaw no longer guards them, and a
+// leftover registration must not block normal work.
+func TestRemovedConnectorHookAllowsWithTheRemovalNotice(t *testing.T) {
 	for _, connector := range []string{"openhands", "OpenHands", "omnigent"} {
 		for _, failMode := range []string{"open", "closed"} {
 			t.Run(connector+"/"+failMode, func(t *testing.T) {
@@ -2476,19 +2477,13 @@ func TestRemovedConnectorHookBlocksWithTheRemovalReason(t *testing.T) {
 					Connector: connector, Event: "PreToolUse", FailMode: failMode, Home: home, HookDir: home, Token: "t",
 					Stdin: strings.NewReader(`{"tool_name":"bash"}`), Stdout: &out, Stderr: &errb,
 				})
-				if code != 2 {
-					t.Fatalf("code = %d, want 2 (block)", code)
+				if code != 0 {
+					t.Fatalf("code = %d, want 0 (DefenseClaw no longer guards %s)", code, connector)
 				}
-				if !strings.Contains(errb.String(), "support was removed in DefenseClaw 1.0.4") {
-					t.Fatalf("stderr = %q, want the removal reason", errb.String())
+				if strings.TrimSpace(errb.String()) != "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it." {
+					t.Fatalf("stderr = %q, want the one removal notice", errb.String())
 				}
-				if strings.EqualFold(connector, "openhands") {
-					var decision map[string]string
-					if err := json.Unmarshal(out.Bytes(), &decision); err != nil || decision["decision"] != "deny" ||
-						!strings.Contains(decision["reason"], "OpenHands support was removed") {
-						t.Fatalf("stdout = %q, want the OpenHands deny decision", out.String())
-					}
-				} else if out.Len() != 0 {
+				if out.Len() != 0 {
 					t.Fatalf("stdout = %q, want none", out.String())
 				}
 			})

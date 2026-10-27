@@ -44,7 +44,7 @@ func TestNoCommandStopsOrRunsInALegacySandbox(t *testing.T) {
 				func() error { return ta.Connect(bg, ConnectOptions{Name: "m1-b"}) },
 			} {
 				err := run()
-				if err == nil || !strings.Contains(err.Error(), "m1-b: legacy sandbox running, not protected by the 1.0.4 egress policy") ||
+				if err == nil || !strings.Contains(err.Error(), "m1-b: "+sandboxapi.LegacyUnprotected) ||
 					!strings.Contains(err.Error(), "does not stop it for you: save the work you need, then run `defenseclaw sandbox stop m1-b`") {
 					t.Fatalf("refusal = %v", err)
 				}
@@ -83,14 +83,40 @@ func TestDoctorIsNotReadyWhileALegacySandboxRuns(t *testing.T) {
 	ta.daemon.add(ready)
 	ta.daemon.add(ended)
 	c := row(ta)
-	// The fake daemon lists its sandboxes in map order.
-	named := c != nil && (strings.Contains(c.Detail, "old-ready, old-ended: legacy sandbox running, not protected by the 1.0.4 egress policy") ||
-		strings.Contains(c.Detail, "old-ended, old-ready: legacy sandbox running, not protected by the 1.0.4 egress policy"))
-	if c == nil || c.Status != openshell.StatusFail || c.Fix == nil || !named ||
+	if c == nil || c.Status != openshell.StatusFail || c.Fix == nil ||
+		!strings.Contains(c.Detail, "old-ended, old-ready: "+sandboxapi.LegacyUnprotected) ||
 		!strings.Contains(c.Detail, "creates and starts no sandbox until they are gone") ||
 		!strings.Contains(c.Fix.Summary, "save the work you need in old-ready, then run `defenseclaw sandbox stop old-ready`, which syncs the VM's disk first") ||
 		!strings.Contains(c.Fix.Summary, "`defenseclaw sandbox delete old-ended` (DefenseClaw sandbox)") || strings.Contains(c.Fix.Summary, "--end-vm` ends") {
 		t.Fatalf("legacy row = %+v", c)
+	}
+}
+
+// GAP-0902 review (loop round 4): the doctor named only legacy sandboxes,
+// from the list, and left out a MicroVM the daemon's status names
+// contained, which also holds back every new run. It now fails a row for
+// each contained one, as the status names it, with the command that ends
+// it; none, no row.
+func TestDoctorIsNotReadyWhileAContainedSandboxRuns(t *testing.T) {
+	row := func(ta *testApp) *openshell.Check {
+		t.Helper()
+		ta.HostDoctor = func(context.Context, *openshell.Doctor) *openshell.DoctorReport { return &openshell.DoctorReport{} }
+		return ta.runDoctor(bg).Get(CheckIDContainedSandbox)
+	}
+	ta := newTestApp(t, "")
+	ta.daemon.add(sampleSandbox("plain"))
+	ta.daemon.status.Unprotected = []sandboxapi.UnprotectedSandbox{{Name: "old", Phase: "ready", Stop: "defenseclaw sandbox stop old"}}
+	if c := row(ta); c != nil {
+		t.Fatalf("a contained row with no contained sandbox: %+v", c)
+	}
+	ta.daemon.status.Unprotected = append(ta.daemon.status.Unprotected,
+		sandboxapi.UnprotectedSandbox{Name: "held", Phase: "starting", Stop: "defenseclaw sandbox stop held", Reason: sandboxapi.UnprotectedContained})
+	c := row(ta)
+	if c == nil || c.Status != openshell.StatusFail || c.Fix == nil ||
+		!strings.Contains(c.Detail, "held: "+sandboxapi.ContainedUnprotected) || strings.Contains(c.Detail, "old") ||
+		!strings.Contains(c.Detail, "creates and starts no sandbox until it is gone") ||
+		c.Fix.Summary != "save the work you need in held, then run `defenseclaw sandbox stop held`" {
+		t.Fatalf("contained row = %+v", c)
 	}
 }
 

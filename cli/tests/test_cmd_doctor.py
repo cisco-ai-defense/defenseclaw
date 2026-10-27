@@ -1448,6 +1448,33 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             self.assertEqual(result.warned, 0, result.checks)
             self.assertIn("reachable", result.checks[0]["detail"])
 
+    def test_antigravity_hooks_disabled_entry_fails(self):
+        # GAP-0538: "enabled": false on the key, the PreToolUse matcher group
+        # or its handler turns the guard off; doctor must not pass it.
+        for where in ("key", "group", "handler"):
+            with self.subTest(where=where), tempfile.TemporaryDirectory() as tmp:
+                home = os.path.join(tmp, "home")
+                hook_path = os.path.join(home, ".gemini", "config", "hooks.json")
+                os.makedirs(os.path.dirname(hook_path), exist_ok=True)
+                script_path = os.path.join(tmp, ".defenseclaw", "hooks", "antigravity-hook.sh")
+                payload = self._antigravity_hooks_payload(script_path)
+                registration = payload["defenseclaw-antigravity-pretooluse"]
+                if where == "key":
+                    registration["enabled"] = False
+                elif where == "group":
+                    registration["PreToolUse"][0]["enabled"] = False
+                else:
+                    registration["PreToolUse"][0]["hooks"][0]["enabled"] = False
+                with open(hook_path, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh)
+                cfg = self._cfg(tmp, "antigravity")
+                with patch.dict(os.environ, isolated_home_env(home), clear=False):
+                    result = _DoctorResult()
+                    _check_antigravity_hooks(cfg, result, platform_name="posix")
+                self.assertEqual(result.passed, 0, result.checks)
+                self.assertEqual(result.failed, 1, result.checks)
+                self.assertIn("disabled", result.checks[0]["detail"])
+
     def test_antigravity_hooks_ignore_undocumented_legacy_path_residue(self):
         # Undocumented residue is ignored; only the documented global hook
         # file is authoritative for this check.

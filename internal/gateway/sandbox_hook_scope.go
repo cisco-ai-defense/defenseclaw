@@ -550,6 +550,15 @@ func sandboxStopTargets(ctx context.Context, view *sandboxauth.FSView, hostCWD s
 // host-only entries (the host user's Claude home) are dropped.
 func claudeCodeWatchPathsForRequest(req claudeCodeHookRequest, root string) []string {
 	if req.sandboxView == nil {
+		if req.managedWatch {
+			// An unresolved caller keeps its project entries; only the
+			// home entries it cannot prove are left out.
+			home := req.watchHome
+			if home == unresolvedCallerHome {
+				home = ""
+			}
+			return connector.ClaudeCodeWatchPathsForHome(root, home)
+		}
 		return connector.ClaudeCodeWatchPaths(root)
 	}
 	out := []string{}

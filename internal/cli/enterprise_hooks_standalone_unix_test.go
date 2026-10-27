@@ -1318,6 +1318,11 @@ func TestStandaloneVerifyRefusesUnattestableHermesHome(t *testing.T) {
 	if row := run.Rows[1]; row.OK || !row.Pending || row.Error != "" {
 		t.Fatalf("recorded unavailable home must remain pending: %+v", row)
 	}
+	// The refusal is the only failure: the guardian records that prove the
+	// registration are not also reported as stale or mismatched (GAP-1703).
+	if run.AuthorizationErr != nil {
+		t.Fatalf("a fully hooked Hermes set was also refused as a record mismatch: %v", run.AuthorizationErr)
+	}
 	// Setup and the guardian prove the registered persistent home without
 	// claiming that a later shell cannot select a different HERMES_HOME.
 	registration, err := runEnterpriseHookRegistrationAttempt(context.Background())

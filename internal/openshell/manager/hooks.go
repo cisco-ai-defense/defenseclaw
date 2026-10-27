@@ -531,7 +531,7 @@ func (m *Manager) stopForAlarm(name, bindingID string, kind audit.SandboxFinding
 	if kind == audit.SandboxFindingHookSilence {
 		what = "silent hooks"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
+	ctx, cancel := context.WithTimeout(WithEmergencyStop(context.Background(), what), defaultOpTimeout)
 	defer cancel()
 	b, unlock, err := m.lockBox(name)
 	if err != nil {
@@ -545,12 +545,10 @@ func (m *Manager) stopForAlarm(name, bindingID string, kind audit.SandboxFinding
 	if !current {
 		return
 	}
-	// The pack's response (hooks.on_tamper, hooks.on_silence: stop) is
-	// the organization's: a failed sync does not hold it back.
-	if err := m.stop(ctx, b, false); err != nil {
+	if err := m.stop(ctx, b); err != nil {
 		m.logf("%s: stop %s: %v", what, name, err)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
-			Reason: string(kind), Message: "⚠ DefenseClaw could not stop the sandbox for " + what + ": stop it yourself"})
+			Reason: string(kind), Message: "⚠ DefenseClaw could not stop the sandbox for " + what + " (" + sandboxapi.AsError(err).Error() + "): stop it yourself"})
 		return
 	}
 	m.logf("%s: stopped %s", what, name)

@@ -153,7 +153,7 @@ Brand casing is explicit (`test_tui_label_maps_have_explicit_brand_cases`).
 
 - **Env var registry.** Every new `DEFENSECLAW_<X>_*` variable (`_CONFIG_HOME`, `_EXECUTABLE`, `_TEST_*`) needs an entry in `internal/envvars/registry.json` with `name`, `category`, `purpose`, `default`, `accepted_values`, `security_impact`, `surface_in_doctor`, `consumers` and `since`.
   - `cli/tests/test_envvars_codebase_coverage.py` scans the repo for `DEFENSECLAW_*` tokens.
-  - Regenerate with `python scripts/gen_envvars_docs.py`, which also writes `docs-site/content/docs/reference/configuration/env-vars.mdx`. CI runs it with `--check`.
+  - Regenerate with `python scripts/gen_envvars_docs.py`, which also writes `docs-site/content/docs/reference/env-vars.mdx`. CI runs it with `--check`.
 - **Bundle data.** `make _bundle-data` copies bundle data into `cli/defenseclaw/_data/` (gitignored). The only per-connector content there is env vars. The hook contracts live in `cli/defenseclaw/inventory/` as package-data.
 
 ### Step 15. macOS app (`macos/DefenseClawMac/`)

@@ -59,15 +59,20 @@ func TestWindowsManagedNativeOTLPTakeBackKeepsThePendingMarkerWhenTheLinkedConfi
 		a.marker = filepath.Join(a.dataDir, "native-otlp-take-back-pending-codex.json")
 		return a
 	}
+	var warnings []string
+	previousWarn := windowsNativeOTLPWarn
+	windowsNativeOTLPWarn = func(message string) { warnings = append(warnings, message) }
+	t.Cleanup(func() { windowsNativeOTLPWarn = previousWarn })
 	takeBack := func(a account) string {
 		t.Helper()
-		return captureWindowsTestStderr(t, func() {
-			if err := connector.WithUserHomeDir(a.home, func() error {
-				return removeWindowsManagedUserNativeOTLPAsTarget("codex", a.dataDir)
-			}); err != nil {
-				t.Fatalf("take-back failed the install: %v", err)
-			}
-		})
+		warnings = nil
+		if err := connector.WithUserHomeDir(a.home, func() error {
+			removeWindowsManagedUserNativeOTLPAsTarget("codex", user.User.Sid, a.home, a.dataDir)
+			return nil
+		}); err != nil {
+			t.Fatalf("take-back failed the install: %v", err)
+		}
+		return strings.Join(warnings, "\n")
 	}
 	unreachable := func(a account) {
 		t.Helper()
@@ -110,8 +115,8 @@ func TestWindowsManagedNativeOTLPTakeBackKeepsThePendingMarkerWhenTheLinkedConfi
 	}
 
 	// The config FILE itself is a symlink to the share (.codex is a real
-	// folder): the first take-back refuses the reparse component and records
-	// the marker; a retry while the share cannot be reached keeps it.
+	// folder): a take-back that cannot read it records the marker; a retry
+	// while the share cannot be reached keeps it.
 	fileLinked := newAccount(true)
 	if err := os.Remove(filepath.Join(fileLinked.home, ".codex")); err != nil {
 		t.Fatal(err)
@@ -122,9 +127,11 @@ func TestWindowsManagedNativeOTLPTakeBackKeepsThePendingMarkerWhenTheLinkedConfi
 	if err := os.Symlink(filepath.Join(fileLinked.share, "config.toml"), filepath.Join(fileLinked.home, ".codex", "config.toml")); err != nil {
 		t.Fatalf("file symlink (needs SeCreateSymbolicLinkPrivilege): %v", err)
 	}
+	restoreFile := denyWindowsTestPathReadForTest(t, filepath.Join(fileLinked.share, "config.toml"), user.User.Sid)
 	report = takeBack(fileLinked)
+	restoreFile()
 	if _, err := os.Lstat(fileLinked.marker); err != nil {
-		t.Fatalf("no pending marker for a config.toml linked to a share: %v (report %q)", err, report)
+		t.Fatalf("no pending marker for a config.toml linked to a share it cannot read: %v (report %q)", err, report)
 	}
 	unreachable(fileLinked)
 	report = takeBack(fileLinked)

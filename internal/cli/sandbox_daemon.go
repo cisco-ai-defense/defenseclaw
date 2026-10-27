@@ -402,17 +402,24 @@ func sandboxDaemonRestarting(ctx context.Context) bool {
 type managedSandboxStopper interface {
 	List(ctx context.Context) ([]sandboxapi.Sandbox, error)
 	Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
-	StopAcceptingUnsynced(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
 }
 
+// stopUnsyncedBudget bounds how long stopManagedSandboxes tries again the
+// stop of a MicroVM whose disk could not be synced, and stopUnsyncedPause
+// is the pause between tries: within the gateway unit's TimeoutStopSec (2
+// minutes), after which systemd ends the gateway, and the VM with it.
+var (
+	stopUnsyncedBudget = 90 * time.Second
+	stopUnsyncedPause  = 5 * time.Second
+)
+
 // stopManagedSandboxes stops every sandbox of the account that may be
-// running. A daemon that is not running has nothing to stop. It is the
-// gateway unit's ExecStop (a sign-out without linger, a lifecycle stop,
-// sandboxes turned off), after which systemd ends the gateway and with it
-// every MicroVM: a stop held because a guest's disk sync failed is made
-// again accepting the loss, so it keeps what reached the disk and the feed
-// says what may be lost (stop_unflushed), where the VM died unsynced with
-// no word (GAP-1550).
+// running. A daemon that is not running has nothing to stop. The daemon
+// does not stop a MicroVM whose disk it could not sync first
+// (sandboxapi.CodeUnsynced, GAP-0902), but what this runs for (a sign-out,
+// a stop of the gateway unit) ends the gateway next, and the VM with it
+// (GAP-0998): its stop, which syncs first, is tried again while there is
+// time, and one still unsynced is named with what it may lose.
 func stopManagedSandboxes(ctx context.Context, c managedSandboxStopper, out io.Writer) error {
 	list, err := c.List(ctx)
 	if err != nil {
@@ -422,21 +429,41 @@ func stopManagedSandboxes(ctx context.Context, c managedSandboxStopper, out io.W
 		return err
 	}
 	var failed []error
+	var unsynced []string
+	stop := func(name string) {
+		if _, err := c.Stop(ctx, name); err != nil {
+			if sandboxapi.IsCode(err, sandboxapi.CodeUnsynced) {
+				unsynced = append(unsynced, name)
+				return
+			}
+			failed = append(failed, fmt.Errorf("stop %s: %w", name, err))
+			return
+		}
+		fmt.Fprintf(out, "stopped sandbox %s\n", name)
+	}
 	for _, sb := range list {
 		switch audit.SandboxPhase(sb.Phase) {
 		case audit.SandboxPhaseProvisioning, audit.SandboxPhaseStarting, audit.SandboxPhaseReady, audit.SandboxPhaseUnknown:
 		default:
 			continue
 		}
-		_, err := c.Stop(ctx, sb.Name)
-		if sandboxapi.IsUnsyncedStopHeld(err) {
-			_, err = c.StopAcceptingUnsynced(ctx, sb.Name)
+		stop(sb.Name)
+	}
+	deadline := time.Now().Add(stopUnsyncedBudget)
+	for len(unsynced) > 0 && time.Now().Before(deadline) && ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+		case <-time.After(stopUnsyncedPause):
 		}
-		if err != nil {
-			failed = append(failed, fmt.Errorf("stop %s: %w", sb.Name, err))
-			continue
+		again := unsynced
+		unsynced = nil
+		for _, name := range again {
+			stop(name)
 		}
-		fmt.Fprintf(out, "stopped sandbox %s\n", sb.Name)
+	}
+	for _, name := range unsynced {
+		failed = append(failed, fmt.Errorf("sandbox %s keeps running: its MicroVM's disk could not be synced, so DefenseClaw did not stop it; "+
+			"what stops its OpenShell gateway now (a sign-out, a stop of the gateway unit) ends the VM, and what its guest wrote since its last sync may be lost", name))
 	}
 	return errors.Join(failed...)
 }

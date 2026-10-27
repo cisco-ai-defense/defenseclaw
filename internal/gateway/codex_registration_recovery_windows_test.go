@@ -320,6 +320,13 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	// fresh protected selection receipt before the gateway applies connector
 	// Setup. Model that authority boundary after the full teardown cleared the
 	// prior connector lock/runtime record.
+	// The teardown revoked the first credential, so the re-add issues a new
+	// one; the late stale teardown below still carries the first (GAP-1728).
+	staleOpts := opts
+	if hookToken, err = connector.EnsureHookAPIToken(dataDir, "codex"); err != nil {
+		t.Fatalf("re-issue scoped Codex hook token: %v", err)
+	}
+	opts.APIToken, opts.HookAPIToken = hookToken, hookToken
 	publishCodexSetupSelectionFixture(t, dataDir, opts)
 	if err := setupSidecar.setupOneConnector(
 		context.Background(), conn, opts, gatewayToken, guardrail.NewRulePackCache(),
@@ -340,7 +347,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	// connector-flat runtime record models the captured partial teardown state:
 	// status still resolves windows-sidecar=open from the shared JSON, but the
 	// real managed hook matrix is registration-missing.
-	if err := conn.Teardown(context.Background(), opts); err != nil {
+	if err := conn.Teardown(context.Background(), staleOpts); err != nil {
 		t.Fatalf("late stale Codex teardown: %v", err)
 	}
 	if err := os.WriteFile(

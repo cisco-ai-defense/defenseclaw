@@ -23,11 +23,19 @@ func findPortHolder(host string, port int) (PortHolder, error) {
 // findProcPortHolder reads the kernel's TCP tables for a LISTEN socket on
 // port that serves host, then finds the process that owns that socket among
 // the processes whose descriptors this account may read.
+//
+// The tables are read from <proc>/self/net: /proc/net is only a link to it,
+// and a /proc mounted with subset=pid has no /proc/net at all, so every
+// listener read as "none" and start reported a gateway identity mismatch
+// while its own gateway served (GAP-1909, as the Python CLI since GAP-1184).
 func findProcPortHolder(procRoot, host string, port int) (PortHolder, error) {
 	holder := PortHolder{UID: -1}
 	inodes := map[string]struct{}{}
 	for _, table := range []string{"tcp", "tcp6"} {
-		file, err := os.Open(filepath.Join(procRoot, "net", table))
+		file, err := os.Open(filepath.Join(procRoot, "self", "net", table))
+		if err != nil {
+			file, err = os.Open(filepath.Join(procRoot, "net", table))
+		}
 		if err != nil {
 			continue
 		}

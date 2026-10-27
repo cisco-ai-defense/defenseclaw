@@ -223,8 +223,25 @@ func readEnterpriseHookGuardianNotices(dataDir string) []enterpriseHookGuardianN
 // enterpriseunix. Names are bounded and plain: the per-user side may have
 // chosen them.
 func enterpriseHookGuardianNoticeMessages(dataDir string) []string {
+	return enterpriseHookGuardianNoticesOf(dataDir, func(code string) bool { return code != connector.AgentConfigNativeOTLPUnchecked })
+}
+
+// enterpriseHookGuardianNativeOTLPMessages words the record's
+// native_otlp_unchecked notices (GAP-0929) for the Windows status and
+// verify (warning native_otlp_config_unchecked), as
+// enterpriseHookGuardianNoticeMessages does the others.
+func enterpriseHookGuardianNativeOTLPMessages(dataDir string) []string {
+	return enterpriseHookGuardianNoticesOf(dataDir, func(code string) bool { return code == connector.AgentConfigNativeOTLPUnchecked })
+}
+
+// enterpriseHookGuardianNoticesOf words the record's notices whose code
+// keep accepts, sorted.
+func enterpriseHookGuardianNoticesOf(dataDir string, keep func(string) bool) []string {
 	var out []string
 	for _, notice := range readEnterpriseHookGuardianNotices(dataDir) {
+		if !keep(notice.AgentConfig) {
+			continue
+		}
 		if message, ok := connector.AgentConfigNotice(notice.Connector, enterpriseHookNoticeName(notice.User), notice.AgentConfig); ok {
 			out = append(out, message)
 		}

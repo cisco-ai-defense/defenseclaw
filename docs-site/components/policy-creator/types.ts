@@ -428,6 +428,8 @@ export interface Scenario {
   input: Record<string, unknown>;
   description: string;
   expectedVerdict: string;
+  /** Expectations that differ from expectedVerdict (the Balanced outcome) under another preset. */
+  expectedByPreset?: Partial<Record<'default' | 'strict' | 'permissive', string>>;
 }
 
 export interface ScenariosFile {

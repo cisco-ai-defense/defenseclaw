@@ -170,8 +170,10 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 			if err := decodeSandboxBody(r, &req, true); err != nil {
 				return nil, err
 			}
-			if req.AcceptUnsynced {
-				ctx = sandboxapi.WithUnsyncedStopAccepted(ctx)
+			if req.DiscardUnsynced {
+				// The user accepted the loss of what the MicroVM has not
+				// synced: only then does a stop go ahead after a failed sync.
+				ctx = sandboxapi.WithDiscardUnsynced(ctx)
 			}
 			return c.Stop(ctx, name)
 		case "start":

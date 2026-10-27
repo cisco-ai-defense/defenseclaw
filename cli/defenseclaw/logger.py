@@ -24,6 +24,7 @@ handling, local persistence, route-specific redaction, and destination fanout.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import secrets
@@ -114,9 +115,10 @@ class _GatewayConfigRecorder:
         gateway: Any,
         token: str,
     ) -> None:
+        address = _running_gateway_address(str(getattr(self._cfg, "data_dir", "") or ""))
         client = OrchestratorClient(
-            host=_gateway_api_host(self._cfg),
-            port=int(getattr(gateway, "api_port", 18970)),
+            host=address[0] if address else _gateway_api_host(self._cfg),
+            port=address[1] if address else int(getattr(gateway, "api_port", 18970)),
             timeout=10,
             token=token,
         )
@@ -241,8 +243,29 @@ def keep_running_gateway_token(logger: Any, data_dir: str, running: str, saved: 
 
 def _running_gateway_token(data_dir: str) -> str:
     """Read only a private handoff bound to the gateway's current PID."""
+    record = _running_gateway_record(data_dir, "gateway_running_token.json")
+    token = record.get("token") if record else None
+    return token if isinstance(token, str) and 0 < len(token) <= 2048 else ""
+
+
+def _running_gateway_address(data_dir: str) -> tuple[str, int] | None:
+    """Use the live process's loopback listener until restart applies saved settings."""
+    record = _running_gateway_record(data_dir, "gateway-api.json")
+    if not record:
+        return None
+    host, port = record.get("host"), record.get("port")
+    try:
+        if isinstance(host, str) and ipaddress.ip_address(host).is_loopback and type(port) is int and 0 < port < 65536:
+            return host, port
+    except ValueError:
+        pass
+    return None
+
+
+def _running_gateway_record(data_dir: str, name: str) -> dict | None:
+    """A runtime descriptor is evidence of a live PID, never saved configuration."""
     if not data_dir:
-        return ""
+        return None
     from defenseclaw.file_permissions import (
         darwin_acl_confidentiality_error,
         read_regular_file_no_follow,
@@ -252,21 +275,20 @@ def _running_gateway_token(data_dir: str) -> str:
 
     pid = read_pid_file(os.path.join(data_dir, "gateway.pid"))
     if pid is None or not pid_alive(pid):
-        return ""
-    path = os.path.join(data_dir, "gateway_running_token.json")
+        return None
+    path = os.path.join(data_dir, name)
     try:
         info = os.stat(path, follow_symlinks=False)
         if not stat.S_ISREG(info.st_mode) or (os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077):
-            return ""
+            return None
         if darwin_acl_confidentiality_error(path) or windows_acl_custody_confidentiality_error(path):
-            return ""
+            return None
         record = json.loads(read_regular_file_no_follow(path, max_bytes=4096))
     except (OSError, ValueError, TypeError):
-        return ""
+        return None
     if not isinstance(record, dict) or record.get("pid") != pid:
-        return ""
-    token = record.get("token")
-    return token if isinstance(token, str) and 0 < len(token) <= 2048 else ""
+        return None
+    return record
 
 
 class _NoRuntimeRecorder:

@@ -115,3 +115,30 @@ func TestGenerationBundleVersionDirectoryFaults(t *testing.T) {
 		})
 	}
 }
+
+// GAP-1853: a YAML comment that names a bundle version directory is not
+// configuration. It neither fails the build on a directory that does not
+// exist nor counts as a second directory next to the one a value names.
+func TestGenerationBundleVersionDirectoryIgnoresComments(t *testing.T) {
+	const bundleID = "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z3F"
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	bundles := filepath.Join(root, enterprisebundle.BundlesDirName)
+	used := filepath.Join(bundles, enterprisebundle.VersionDirNameForReceipt(6, bundleID, bundleID))
+	if err := os.MkdirAll(used, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	comment := "# note " + filepath.Join(bundles, enterprisebundle.VersionDirName(6, bundleID)) + "\n"
+	for name, raw := range map[string]string{
+		"comment only":            "config_version: 9\n" + comment,
+		"comment next to a value": "config_version: 9\nplugin_dir: " + filepath.Join(used, "plugins") + "\n" + comment,
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeBundleRecord(t, configPath, []byte(raw), bundleID, 6)
+			cfg := &config.Config{ConfigFilePath: configPath, DataDir: filepath.Join(root, "runtime")}
+			if _, err := ComputeEffectivePolicyFor(context.Background(), cfg, EffectivePolicyOptions{Raw: []byte(raw)}); err != nil {
+				t.Fatalf("a comment naming a version directory failed the build: %v", err)
+			}
+		})
+	}
+}

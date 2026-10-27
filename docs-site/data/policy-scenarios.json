@@ -32,6 +32,9 @@
       "domain": "admission",
       "description": "An MCP server scan found a MEDIUM finding. Balanced warns and keeps it enabled; Strict rejects.",
       "expectedVerdict": "warning",
+      "expectedByPreset": {
+        "strict": "rejected"
+      },
       "input": {
         "target_type": "mcp",
         "target_name": "context-server",

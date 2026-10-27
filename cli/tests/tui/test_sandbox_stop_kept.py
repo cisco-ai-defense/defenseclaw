@@ -45,7 +45,7 @@ def _terminal(monkeypatch: pytest.MonkeyPatch, app: DefenseClawTUI, returncode: 
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             yield
 
-    def run(argv, cwd=None, check=False):
+    def run(argv, cwd=None, check=False, stderr=None):
         ran.append(argv)
         return SimpleNamespace(returncode=returncode)
 

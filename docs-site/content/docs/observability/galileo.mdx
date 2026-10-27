@@ -1,0 +1,178 @@
+---
+title: Galileo
+description: Send DefenseClaw GenAI traces to Galileo Cloud or self-hosted Galileo while keeping local observability enabled.
+keywords:
+  - Galileo
+  - OpenTelemetry
+  - OTLP
+  - multi OTLP
+  - defenseclaw setup galileo
+---
+
+Galileo receives traces only, over OTLP HTTP. Metrics and logs keep going to your other destinations. Per user, Galileo shows which agent ran, its model and tool calls, and the rule that blocked a turn.
+
+The Galileo preset sends the generated `galileo-rich-v2` trace profile over OTLP HTTP/protobuf. It has six span families: agent invocation, workflow, model chat, tool execution, retrieval and guardrail judge. AI discovery, scanner, audit and other operational records are not in the profile, so Galileo never receives them. For discovery results, use the Grafana **AI Agent Usage & Detection** board, Splunk, or an OTLP destination with logs.
+
+## Before you start
+
+- A Galileo API key, and the project and Log stream names.
+- Scanner, AI discovery and audit records are not traces, so Galileo does not receive them.
+
+## Cloud setup
+
+1. Set the key and add the destination. `--persist-api-key` copies the key into the owner-only `~/.defenseclaw/.env`. The key is never written to `config.yaml`.
+
+   ```bash
+   export GALILEO_API_KEY='...'
+
+   defenseclaw setup galileo \
+     --non-interactive \
+     --project defenseclaw \
+     --logstream production \
+     --persist-api-key
+   ```
+
+   Add `--dry-run` first to preview:
+
+   ```text
+     Galileo configuration preview
+     -----------------------------
+     Action:      ADD
+     Deployment:  cloud
+     Destination: galileo
+     Endpoint:    https://api.galileo.ai/otel/traces
+     Project:     defenseclaw
+     Log stream:  production
+     Signals:     traces
+     Delivery:    real-time after each completed model/tool operation (<=1s batch delay)
+     Config:      config.yaml (changed)
+   ```
+
+2. Send a test trace.
+
+   ```bash
+   defenseclaw setup galileo test
+   ```
+
+   {/* needs-live-capture: `setup galileo test` output against a live Galileo project */}
+
+   The test writes one content-free two-span trace to the project and prints its trace ID after Galileo accepts it.
+
+The cloud endpoint is `https://api.galileo.ai/otel/traces`.
+
+## Self-hosted setup
+
+For a self-hosted deployment, pass `--deployment self-hosted --console-url https://console.galileo.example.com`. DefenseClaw derives the API host from the console URL. If your host names differ, pass the full address with `--trace-endpoint`.
+
+The API host is the console host with a leading `console.` changed to `api.` (or `console-` to `api-`), plus `/otel/traces`. TLS verification is always on.
+
+## Standalone enterprise deployments
+
+The managed service has no administrator shell environment. Store the key with `defenseclaw-gateway enterprise secret set --name galileo-api-key --from-stdin` and reference it as `Galileo-API-Key: {credential: galileo-api-key}` in the administrator config. `setup galileo` is not shipped in enterprise packages.
+
+## Keep local observability and Galileo together
+
+Run `defenseclaw setup local-observability up` and the Galileo setup. They are separate destinations, each with its own queue. A Galileo outage does not stop Grafana, and the reverse.
+
+Leave `send` and `routes` unset on the `galileo` destination. DefenseClaw then sends only the six span types Galileo can index. Setting `send` or `routes` replaces that set, and Galileo rejects any span it cannot index as `unsupported_shape`. To redact only Galileo, set a profile on its route; see [Redact before export](/docs/observability/redaction#redact-before-export).
+
+## Manage and verify
+
+### Check it worked
+
+```bash
+defenseclaw setup galileo status
+```
+
+`status` shows the endpoint, the signals and how many spans were delivered, rejected or failed. In Galileo, open the project's Log stream and look for the test trace. Filter out DefenseClaw's own checks with `defenseclaw.telemetry.canary: "true"`.
+
+The Galileo key is `GALILEO_API_KEY` in `~/.defenseclaw/.env`; the OTLP header holds `${GALILEO_API_KEY}`. If the key is missing the gateway keeps running but cannot restart, and every `setup` command refuses until you run `defenseclaw keys set GALILEO_API_KEY` or delete the destination.
+
+If the API key is missing, `defenseclaw setup galileo status` and `defenseclaw status` exit 1 and name the missing key. `defenseclaw status` then prints `Sidecar: not checked` until you fix the config; `defenseclaw-gateway status` still shows the running gateway.
+
+`setup galileo test` and each `doctor` run (up to four enabled Galileo routes) write an `invoke_agent diagnostic` trace with one `chat defenseclaw-diagnostic` span. Its metadata has `defenseclaw.telemetry.canary: "true"`.
+
+### Undo
+
+```bash
+defenseclaw setup galileo disable
+defenseclaw setup galileo remove --yes
+```
+
+`disable` keeps the configuration; `remove` deletes the destination and keeps the shared API key. `enable` turns it back on.
+
+## What you see in Galileo
+
+### Agent graph: understand delegation and dependencies
+
+![Galileo Agent graph for a Codex session: the root agent delegates to Researcher and explore subagents, with chat, MCP, apply_patch, and Read nodes, and edge analytics for the selected codex to Researcher edge](/images/galileo/agent-graph.png)
+
+### Session messages: reconstruct the lifecycle
+
+![Galileo session Messages view: invoke_agent codex lifecycle rows on the left and the session_start input and output records on the right](/images/galileo/session-lifecycle.png)
+
+Hook connectors export a short `invoke_agent` anchor with each completed `chat` or `execute_tool` span as its own trace. `gen_ai.conversation.id` and the stable agent, lifecycle and execution attributes group them into one Galileo session.
+
+### Tool calls that end after their turn was sent
+
+Galileo drops spans that arrive after it closed the trace. A tool span that ends after its turn was sent is exported as the root of its own trace with the original ID in `defenseclaw.trace.id`.
+
+### Guardrail decisions: find blocked, confirmed, and alerted tool calls
+
+Galileo metadata keys on agent, model and tool spans:
+
+| Key | Value |
+| --- | --- |
+| `user.id`, `defenseclaw.user.name` | Account uid or SID, and name |
+| `defenseclaw.user.principal` | Directory principal. Sent only with `ai_discovery.include_user_principal`. |
+| `defenseclaw.user.domain`, `defenseclaw.user.directory` | Domain and directory type |
+| `defenseclaw.user.identity.source`, `defenseclaw.user.principal.assurance` | Resolving OS facility, and `verified` or `claimed` |
+| `defenseclaw.agent.identity.id` | Stable agent identity (`agt-`) |
+| `defenseclaw.guardrail.profile.name`, `.digest`, `.match`, `.matched_group` | Guardrail profile that decided (model, tool and guardrail spans) |
+| `defenseclaw.guardrail.action`, `.rule_id`, `.severity` | Decision on a guarded tool call. A block ends the tool span with status `ERROR`; the `invoke_agent` parent carries the same three attributes. |
+| `defenseclaw.outcome` | `blocked` on the turn's `invoke_agent` and `chat` spans when a prompt was blocked |
+
+Galileo does not read the OTLP span status, so a blocked call's status code there is `0`; filter on the metadata keys. The session kind, client address and Kerberos principal are never sent to Galileo. `strict` removes the principal.
+
+See [Telemetry identity](/docs/observability/end-user-identity) for these user fields.
+
+## DefenseClaw and GenAI semantic conventions
+
+The `defenseclaw.*` attributes stay the authoritative policy and forensic record.
+On AI inference spans DefenseClaw adds a standard GenAI projection next to them:
+
+| DefenseClaw data | GenAI attribute |
+| --- | --- |
+| Provider and request model | `gen_ai.provider.name`, `gen_ai.request.model` |
+| Response model and token counts | `gen_ai.response.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens` |
+| Session ID | `gen_ai.conversation.id` |
+| Prompt and response | `gen_ai.input.messages`, `gen_ai.output.messages` |
+| Agent identity | `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.agent.type` |
+| Tool name, call ID, arguments and result | `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result` |
+
+Prompt, response, tool-argument and tool-result values follow the redaction
+profile of the Galileo destination ([Redaction](/docs/observability/redaction)).
+The input of a Claude Code `tool_batch` span lists the calls of the batch by tool
+name and call ID. Those are identifiers, as on the span of each call, so the
+`content` profile keeps them in clear.
+
+The generated `galileo-rich-v2` profile, not a hand-written `span_filter`, decides
+which spans are eligible and which attributes, events and links they carry. A span
+that the profile cannot project is rejected as `unsupported_shape`, and destination
+health shows the error.
+
+On Bedrock, a Claude Code chat span names the model ID (`anthropic.claude-haiku-4-5-20251001-v1:0`), not the cross-region profile from `ANTHROPIC_MODEL`.
+
+### Read the routing and delivery funnel
+
+The `defenseclaw.telemetry.destination.spans` metric counts each span's path to a destination, with `destination`, `outcome` and `reason`:
+
+```text
+observed → eligible → attempted → delivered | rejected | failed
+```
+
+`delivered` is worked out per batch from the OTLP response. `rejected` is a partial success that refused spans. `failed` is an authentication, transport, TLS or timeout error. `setup galileo status`, `/health` and the TUI show the same counters without credentials.
+
+## Upgrade from v7
+
+The Galileo preset keeps your project and Log stream when you run `defenseclaw upgrade --yes`. See [Upgrade DefenseClaw](/docs/get-started/upgrade).

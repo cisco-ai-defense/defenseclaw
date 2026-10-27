@@ -417,6 +417,50 @@ class TestPluginInstall(PluginCommandTestBase):
         self.assertEqual(self.invoke(["remove", "mkt"]).exit_code, 1)
         self.assertTrue(os.path.isdir(os.path.join(cache, "mkt")))
 
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_gap0017_a_copied_plugin_with_skills_is_one_plugin_and_remove_finds_it(self, mock_scan):
+        # GAP-0017: <cache>/<name>/skills/helper was read as a
+        # <marketplace>/<plugin>/<version> plugin (skills@<name>), so plugin
+        # list showed it and remove skipped the copy as a marketplace folder.
+        def scan_at(*args, **_kwargs):
+            result = self._clean_result()
+            result.target = str(args[-1])
+            return result
+
+        mock_scan.side_effect = scan_at
+        cache = os.path.join(self.tmp_dir, "claude-plugins", "cache")
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [cache]  # type: ignore[method-assign]
+        src = self._create_plugin_dir("r105sub")
+        os.makedirs(os.path.join(src, "skills", "helper"))
+        with open(os.path.join(src, "skills", "helper", "SKILL.md"), "w") as fh:
+            fh.write("---\nname: helper\ndescription: Format notes.\n---\nFormat notes.\n")
+        os.makedirs(os.path.join(cache, "mkt", "other", "1.0.0"))
+
+        self.assertEqual(self._invoke_install(["install", src, "--connector", "claudecode"]).exit_code, 0)
+        from defenseclaw.inventory.plugin_directories import discover_plugin_directories
+
+        found = [entry.id for entry in discover_plugin_directories(cache, connector="claudecode")]
+        self.assertNotIn("skills@r105sub", found)
+        self.assertIn("other@mkt", found)
+        listed = self.invoke(["list", "--connector", "claudecode", "--json"])
+        self.assertNotIn("skills@r105sub", listed.output)
+        # The filed expected: plugin list shows the copy with its install
+        # verdict, disabled because Claude Code does not load it.
+        rows = {row["id"]: row for row in json.loads(listed.output)}
+        self.assertIn("r105sub", rows, listed.output)
+        self.assertFalse(rows["r105sub"]["enabled"])
+        self.assertEqual(rows["r105sub"]["origin"], "copy, not loaded by Claude Code")
+        self.assertIn("scan", rows["r105sub"])
+        table = self.invoke(["list", "--connector", "claudecode"])
+        self.assertIn("r105sub", table.output)
+        self.assertNotIn("has no installed plugins", table.output)
+        removed = self.invoke(["remove", "r105sub", "--connector", "claudecode"])
+        self.assertEqual(removed.exit_code, 0, removed.output)
+        self.assertFalse(os.path.exists(os.path.join(cache, "r105sub")))
+        self.assertTrue(os.path.isdir(os.path.join(cache, "mkt", "other", "1.0.0")))
+
     def test_remove_deletes_legacy_flat_codex_cache_copy(self):
         # Older installs could leave an invisible flat cache copy. Both bare
         # and scoped removal must still find it after new installs refuse it.
@@ -1350,6 +1394,31 @@ class TestPluginRemove(PluginCommandTestBase):
 
         self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("not configured", result.output)
+
+
+class TestPluginUnblockMarketplaceKey(PluginCommandTestBase):
+    """GAP-1911: plugin list shows <name>; the watcher keys <name>@<marketplace>."""
+
+    def _auto_block(self, key: str) -> None:
+        pe = PolicyEngine(self.app.store, self.app.cfg)
+        reason = "auto-block: watch detected HIGH findings (scanner=plugin-scanner)"
+        pe.block_for_connector("plugin", key, "claudecode", reason)
+        pe.disable_for_connector("plugin", key, "claudecode", reason)
+
+    def test_bare_unblock_clears_the_marketplace_key_of_that_plugin_only(self):
+        self._auto_block("r105fx@r105mkt")
+        self._auto_block("r105fxx@r105mkt")
+        result = self.invoke(["unblock", "r105fx"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Unblocked 'r105fx@r105mkt'", result.output)
+        self.assertNotIn("no enforcement state", result.output)
+        self.assertIsNone(self.app.store.get_action("plugin", "r105fx@r105mkt", "claudecode"))
+        self.assertIsNotNone(self.app.store.get_action("plugin", "r105fxx@r105mkt", "claudecode"))
+
+    def test_bare_unblock_without_any_state_still_says_so(self):
+        result = self.invoke(["unblock", "r105none"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("has no enforcement state to clear", result.output)
 
 
 class TestPluginRemovePathTraversal(PluginCommandTestBase):

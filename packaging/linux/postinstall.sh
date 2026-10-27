@@ -20,15 +20,6 @@ set -u
 case "${1:-}" in
     abort-remove) exit 0 ;;
     abort-upgrade | abort-install | abort-deconfigure)
-        # The previous files are back: the sandbox daemons the preinstall
-        # held go on (GAP-0868).
-        if [ -f /run/defenseclaw-sandbox-daemons.held ]; then
-            while read -r s_pid s_start; do
-                kill -CONT "$s_pid" 2>/dev/null || true
-            done </run/defenseclaw-sandbox-daemons.held
-            rm -f /run/defenseclaw-sandbox-daemons.held
-            systemctl stop defenseclaw-sandbox-daemons-recovery.timer >/dev/null 2>&1 || true
-        fi
         # Restart the apply trigger the preinstall held for this upgrade.
         if [ -e /run/defenseclaw-enterprise-apply-path.held ]; then
             if systemctl start defenseclaw-enterprise-apply.path >/dev/null 2>&1; then
@@ -71,23 +62,6 @@ fi
 # empty script that exits 0, so every agent's hook allowed everything
 # (GAP-0467).
 sync >/dev/null 2>&1 || true
-# The preinstall held each sandbox daemon of a DefenseClaw before 1.0.4
-# (SIGSTOP), whose own exit would stop its account's OpenShell gateway also
-# under a completed or failed MicroVM that still runs (GAP-0868). End each
-# one that is still the same process with SIGKILL, which runs nothing on its
-# way out: systemd starts the installed daemon, which counts those MicroVMs,
-# and the ensure below finds it.
-sandbox_held=/run/defenseclaw-sandbox-daemons.held
-if [ -f "$sandbox_held" ]; then
-    while read -r s_pid s_start; do
-        s_now=$(sed 's/^.*) //' "/proc/$s_pid/stat" 2>/dev/null | cut -d' ' -f20)
-        if [ -n "$s_now" ] && [ "$s_now" = "$s_start" ]; then
-            kill -KILL "$s_pid" 2>/dev/null || true
-        fi
-    done <"$sandbox_held"
-    rm -f "$sandbox_held"
-    systemctl stop defenseclaw-sandbox-daemons-recovery.timer >/dev/null 2>&1 || true
-fi
 systemd-sysusers /usr/lib/sysusers.d/defenseclaw.conf >/dev/null 2>&1 || true
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/defenseclaw.conf >/dev/null 2>&1 || true
 systemctl daemon-reload >/dev/null 2>&1 || true

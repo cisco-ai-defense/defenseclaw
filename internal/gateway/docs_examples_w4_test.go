@@ -15,7 +15,7 @@ import (
 )
 
 func TestDocsDefaultPackValidationCaptureMatchesLoader(t *testing.T) {
-	page, err := os.ReadFile("../../docs-site/content/docs/how-to/policies/validate-a-rule-pack.mdx")
+	page, err := os.ReadFile("../../docs-site/content/docs/policies/rulepack-validation.mdx")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestDocsDefaultPackValidationCaptureMatchesLoader(t *testing.T) {
 }
 
 func TestDocsApprovalExampleUsesAnEnforceableRule(t *testing.T) {
-	page, err := os.ReadFile("../../docs-site/content/docs/how-to/guardrail/ask-before-risky-calls.mdx")
+	page, err := os.ReadFile("../../docs-site/content/docs/hitl.mdx")
 	if err != nil {
 		t.Fatal(err)
 	}

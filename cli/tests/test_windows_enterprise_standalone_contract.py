@@ -260,10 +260,10 @@ def test_standalone_setup_uninstall_docs_say_it_removes_the_machine_state() -> N
     # The Secure Client page keeps its own wording (state kept unless
     # PURGE=1) and says how the standalone profile differs.
     standalone = {
-        "windows": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "install" / "windows.mdx",
-        "cli": ROOT / "docs-site" / "content" / "docs" / "reference" / "commands" / "cli.mdx",
+        "windows": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "windows.mdx",
+        "cli": ROOT / "docs-site" / "content" / "docs" / "reference" / "cli.mdx",
         "setup-design": ROOT / "docs" / "WINDOWS-ENTERPRISE-SETUP.md",
-        "intune": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "mdm" / "intune" / "windows.mdx",
+        "intune": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "mdm" / "intune-windows.mdx",
     }
     for name, page in standalone.items():
         text = " ".join(_text(page).split())
@@ -275,7 +275,7 @@ def test_standalone_setup_uninstall_docs_say_it_removes_the_machine_state() -> N
     docs = ROOT / "docs-site" / "content" / "docs"
     secure_client_page = next(
         page
-        for page in (docs / "enterprise" / "install" / "secure-client.mdx", docs / "setup" / "enterprise-deployment.mdx")
+        for page in (docs / "enterprise" / "secure-client.mdx", docs / "setup" / "enterprise-deployment.mdx")
         if page.exists()
     )
     secure_client = " ".join(_text(secure_client_page).split())
@@ -320,6 +320,17 @@ def test_lifecycles_retire_a_stale_committed_journal_through_the_fallback() -> N
     module = _text(MODULE)
     for name in ("Invoke-DefenseClawInstallLikeLifecycle", "Invoke-DefenseClawUninstallLifecycle"):
         assert "Invoke-DefenseClawCommittedManagedHooksLifecycleRetire" in _function_body(module, name)
+
+
+def test_lifecycles_classify_runtime_bundles_before_the_transaction() -> None:
+    # GAP-0822 (refix round 1): with no committed journal, an upgrade or
+    # repair classifies the per-user runtime bundles with the replacement
+    # gateway before New-DefenseClawTransaction; only a classification refusal
+    # stops it (behaviour in
+    # enterprise-standalone-pretransaction-bundle-classification-smoke.ps1).
+    body = _function_body(_text(MODULE), "Invoke-DefenseClawInstallLikeLifecycle")
+    check = body.index("Assert-DefenseClawStagedRuntimeBundleClassification")
+    assert check < body.index("New-DefenseClawTransaction")
 
 
 def test_standalone_purge_keeps_the_launching_cli_powershell_temp() -> None:
@@ -434,11 +445,16 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-claude-policy-binding-smoke.ps1",
     "enterprise-standalone-config-acl-repair-smoke.ps1",
     "enterprise-standalone-enumerator-environment-smoke.ps1",
+    "enterprise-standalone-forced-uninstall-residue-smoke.ps1",
     "enterprise-standalone-guardian-first-reconcile-wait-smoke.ps1",
+    "enterprise-standalone-guardian-readiness-older-gateway-smoke.ps1",
+    "enterprise-standalone-guardian-state-identity-smoke.ps1",
     "enterprise-standalone-install-tree-smoke.ps1",
     "enterprise-standalone-machine-leftovers-purge-smoke.ps1",
     "enterprise-standalone-manifest-adoption-smoke.ps1",
+    "enterprise-standalone-mdm-rotation-journal-smoke.ps1",
     "enterprise-standalone-native-otlp-rollback-smoke.ps1",
+    "enterprise-standalone-pretransaction-bundle-classification-smoke.ps1",
     "enterprise-standalone-recorded-trust-smoke.ps1",
     "enterprise-standalone-recovery-activation-deferral-smoke.ps1",
     "enterprise-standalone-recovery-gateway-smoke.ps1",
@@ -451,6 +467,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-stale-lifecycle-journal-smoke.ps1",
     "enterprise-standalone-state-files-in-use-smoke.ps1",
     "enterprise-standalone-uninstall-hook-commit-smoke.ps1",
+    "enterprise-standalone-uninstall-lifecycle-lock-smoke.ps1",
     "enterprise-standalone-uninstall-cleanup-trust-smoke.ps1",
     "enterprise-standalone-user-cleanup-report-smoke.ps1",
 )

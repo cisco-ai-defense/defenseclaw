@@ -705,6 +705,41 @@ def test_windows_registration_freshness_surfaces_codex_effective_policy_block(
     assert observed["connector"] == "codex"
 
 
+@pytest.mark.parametrize(
+    ("states", "expected", "attempts"),
+    [
+        (["access-denied", "current"], None, 2),
+        (["access-denied"] * 5, "registration-access-denied", 5),
+        (["policy-blocked"], "registration-policy-blocked", 1),
+    ],
+)
+def test_windows_registration_freshness_retries_access_denied_without_accepting_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, states: list[str], expected: str | None, attempts: int
+) -> None:
+    checks = iter(states)
+    validate = MagicMock(
+        side_effect=lambda **_kwargs: SimpleNamespace(healthy=(state := next(checks)) == "current", state=state)
+    )
+    waits: list[float] = []
+    monkeypatch.setattr("defenseclaw.doctor_hooks.validate_windows_hook_registration", validate)
+    monkeypatch.setattr("time.sleep", waits.append)
+
+    assert _WINDOWS_REGISTRATION_FRESHNESS(SimpleNamespace(data_dir=str(tmp_path)), "claudecode") == expected
+    assert validate.call_count == attempts
+    assert len(waits) == attempts - 1 and sum(waits) <= 2
+    if expected:
+        monkeypatch.setattr("defenseclaw.fail_mode.shutil.which", lambda _name: str(tmp_path / "gateway.exe"))
+        monkeypatch.setattr(
+            "defenseclaw.fail_mode.subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0)
+        )
+        monkeypatch.setattr(
+            "defenseclaw.fail_mode.resolve_connector_fail_mode",
+            lambda *_args: SimpleNamespace(current=False, connector="claudecode", drift=(expected,)),
+        )
+        with pytest.raises(OSError, match="defenseclaw doctor"):
+            fail_mode_runtime.reconcile_connector_registration(SimpleNamespace(data_dir=str(tmp_path)), "claudecode")
+
+
 def test_windows_codex_presence_uses_native_registration_validator(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1213,7 +1248,7 @@ def test_fail_mode_help_and_docs_describe_registration_refresh() -> None:
     assert result.exit_code == 0, result.output
     help_text = " ".join(result.output.split())
     docs = " ".join(
-        (Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/configuration/fail-modes.mdx")
+        (Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/fail-modes.mdx")
         .read_text(encoding="utf-8").split()
     )
     persisted = docs.split("## Persisted fail mode", 1)[1].split("## ", 1)[0]

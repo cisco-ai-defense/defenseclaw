@@ -101,7 +101,7 @@ func TestStandaloneRowAdmissionAppliesTheWindowsPlatformMinimum(t *testing.T) {
 		if err := requireWindowsEnterpriseManagedAgentVersion("codex", version); err == nil {
 			t.Fatalf("fixture codex %s must be below the install minimum", version)
 		}
-		setStandaloneProfileForTest(t, false)
+		useWindowsSecureClientForTest(t)
 		if err := requireWindowsEnterpriseManagedAgentVersion("codex", version); err != nil {
 			t.Fatalf("fixture codex %s: Secure Client install gate = %v, want none", version, err)
 		}

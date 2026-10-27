@@ -4607,7 +4607,53 @@ def _skill_allow_pin(app: AppContext, skill_name: str, connector: str) -> str:
     for copy_connector, destination in _skill_quarantined_copies(app, skill_name):
         if copy_connector == connector:
             return destination
-    return ""
+    return _skill_scanned_copy(app, skill_name, connector)
+
+
+def _skill_scanned_copy(app: AppContext, skill_name: str, connector: str) -> str:
+    """The folder a skill known only from ``skill scan --path`` was scanned
+    at, when exactly one such folder is on record (GAP-1579): an allow is
+    pinned to that copy, so another folder with the same name is still
+    scanned. Several scanned folders stay ambiguous (name-only rule)."""
+    store = getattr(app, "store", None)
+    if store is None:
+        return ""
+    try:
+        latest = store.latest_scans_by_scanner("skill-scanner")
+    except Exception:  # noqa: BLE001 - no scan history means no pin
+        return ""
+    targets = {
+        os.path.realpath(str(ls.get("target") or ""))
+        for ls in latest
+        if ls.get("target") and os.path.basename(str(ls["target"]).rstrip("/\\")) == skill_name
+    }
+    # A pin must name a copy that stays: the folder still exists and is not
+    # the temporary copy "skill scan <url>" fetched and then removed
+    # (GAP-1974). Otherwise the name-only rule and its note apply.
+    targets = {target for target in targets if _skill_scan_copy_lasts(target)}
+    if connector and len(targets) > 1:
+        scoped = {
+            target for target in targets
+            if _scan_entry_matches_connector(app, {"target": target}, connector)
+        }
+        targets = scoped or targets
+    return next(iter(targets)) if len(targets) == 1 else ""
+
+
+def _skill_scan_copy_lasts(target: str) -> bool:
+    """A scanned folder an allow can pin: it exists and is not under the
+    URL fetch's temporary ``defenseclaw-skill-*`` folder."""
+    import tempfile
+
+    if not os.path.isdir(target):
+        return False
+    tmp_root = os.path.realpath(tempfile.gettempdir())
+    try:
+        rel = os.path.relpath(target, tmp_root)
+    except ValueError:  # another drive on Windows
+        return True
+    first = rel.split(os.sep, 1)[0]
+    return first == ".." or not first.startswith("defenseclaw-skill-")
 
 
 def _echo_skill_allow_scope(skill_name: str, connector: str, pin: str) -> None:

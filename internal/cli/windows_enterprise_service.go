@@ -369,6 +369,15 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	// exit 1639 and the refused anchor install recorded (GAP-0608). Only
 	// ensure shows them in its help.
 	if windowsEnterpriseMutationAction(action) {
+		if action == "ensure" {
+			cmd.SetFlagErrorFunc(windowsAnchorsArgumentRefusal)
+			cmd.Args = func(c *cobra.Command, args []string) error {
+				if err := strayArgumentError(c, args); err != nil {
+					return windowsAnchorsArgumentRefusal(c, err)
+				}
+				return nil
+			}
+		}
 		flags.StringVar(&opts.bundlePath, "bundle", "",
 			"standalone: apply this signed policy bundle (.dcbundle file); the bundle carries the config, so not with --config")
 		flags.BoolVar(&opts.refuseCapabilityLoss, "refuse-capability-loss", false, "refuse a bundle that disables a currently enforced capability")

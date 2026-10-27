@@ -481,6 +481,7 @@ interface Scenario {
   input: Record<string, unknown>;
   description: string;
   expectedVerdict: string;
+  expectedByPreset?: Partial<Record<'default' | 'strict' | 'permissive', string>>;
 }
 
 function buildScenarios(): Scenario[] {
@@ -516,6 +517,7 @@ function buildScenarios(): Scenario[] {
       domain: 'admission',
       description: 'An MCP server scan found a MEDIUM finding. Balanced warns and keeps it enabled; Strict rejects.',
       expectedVerdict: 'warning',
+      expectedByPreset: { strict: 'rejected' },
       input: {
         target_type: 'mcp',
         target_name: 'context-server',

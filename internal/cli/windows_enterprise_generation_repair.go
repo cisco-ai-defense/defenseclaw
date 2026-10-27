@@ -23,11 +23,26 @@ import (
 // repairWindowsEnterpriseConfigGeneration; tests replace it.
 var windowsEnterpriseConfigGenerationRepair = repairWindowsEnterpriseConfigGeneration
 
+// windowsEnterpriseNewBundleDelivery reports a signed bundle this run applies
+// for the first time. Its staged config is not the administrator's approved
+// copy of the installed one: when its bytes equal the installed base, the
+// recovery below read the record (not yet bound to the bundle) as damaged and
+// rewrote it under a new generation, so the installed CLI's policy proof no
+// longer matched the running gateway and the first bundle failed
+// bundle_hot_apply_unavailable, then not_confirmed (GAP-1577, a regression of
+// GAP-0359). The bundle apply records its own generation.
+func windowsEnterpriseNewBundleDelivery(opts *windowsEnterpriseLifecycleOptions) bool {
+	return opts != nil && opts.bundle != nil && opts.bundle.prepared != nil && !opts.bundle.prepared.AlreadyApplied
+}
+
 // Recover a damaged counter only when the administrator supplied the exact
 // installed config. The live gateway provides a counter that must not be
 // lost when the service stops. Both lifecycle and config locks protect the
 // repair; a changed file or unproven counter is refused before any write.
 func repairWindowsEnterpriseConfigGeneration(ctx context.Context, opts *windowsEnterpriseLifecycleOptions, status *windowsEnterpriseInstallerReport) (bool, error) {
+	if windowsEnterpriseNewBundleDelivery(opts) {
+		return false, nil
+	}
 	if !status.Installed || status.TransactionPending || opts.configPath == "" ||
 		!windowsEnterpriseIsElevated() || compareWindowsEnterpriseVersions(opts.productVersion, status.InstalledVersion) < 0 {
 		return false, nil

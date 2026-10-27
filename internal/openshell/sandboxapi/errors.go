@@ -35,6 +35,11 @@ const (
 	CodeNotFound    = "not_found"
 	// CodeConflict: the sandbox exists already or is in the wrong phase.
 	CodeConflict = "conflict"
+	// CodeUnsynced: a MicroVM's disk could not be synced before its stop,
+	// so the stop was not made: it keeps running, and a stop now would lose
+	// what it wrote since its last sync. Only a stop the user accepted that
+	// loss for goes ahead (StopRequest.DiscardUnsynced, GAP-0902).
+	CodeUnsynced = "unsynced"
 	// CodeNeedsCopy: the project cannot be mounted live (a linked worktree,
 	// a git directory outside the folder, a compute driver that mounts no
 	// host folders, and the like; Detail says why); it can run in copy mode.
@@ -165,7 +170,7 @@ func StatusForCode(code string) int {
 		return http.StatusBadRequest
 	case CodeNotFound:
 		return http.StatusNotFound
-	case CodeConflict, CodeNeedsCopy, CodeImageUnavailable:
+	case CodeConflict, CodeNeedsCopy, CodeImageUnavailable, CodeUnsynced:
 		return http.StatusConflict
 	case CodeAdminViolation, CodePolicyViolation:
 		return http.StatusForbidden
@@ -196,18 +201,6 @@ func AsError(err error) *Error {
 }
 
 // IsCode reports whether err is an *Error with code.
-// UnsyncedStopHeldText is in the message of a MicroVM stop the daemon held
-// because the guest's disk sync failed (GAP-1163).
-const UnsyncedStopHeldText = "could not sync its MicroVM's disk before the stop"
-
-// IsUnsyncedStopHeld reports a stop the daemon held because the MicroVM's
-// disk sync failed: the sandbox keeps running, and a stop that accepts the
-// loss (StopRequest.AcceptUnsynced) is made.
-func IsUnsyncedStopHeld(err error) bool {
-	var e *Error
-	return errors.As(err, &e) && e.Code == CodeConflict && strings.Contains(e.Message, UnsyncedStopHeldText)
-}
-
 func IsCode(err error, code string) bool {
 	var e *Error
 	return errors.As(err, &e) && e.Code == code

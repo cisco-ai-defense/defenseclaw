@@ -7,6 +7,7 @@ keywords:
   - Jamf extension attribute
   - macOS pkg deployment
   - Jamf smart group
+  - DefenseClaw MDM wrapper
 ---
 
 <Callout title="Template">Checked by simulating the MDM execution context; not run in a live Jamf Pro tenant. Pilot it on a small group first.</Callout>
@@ -21,7 +22,7 @@ detection and how config and keys are delivered.
 - Macs with Apple silicon on macOS 13 or later, and no Cisco Secure Client DefenseClaw
   deployment.
 - A cloud distribution point, if you upload the package through the web interface.
-- Your administrator config ([choose the agents](/docs/enterprise/configure/configuration#choose-the-agents-to-protect)).
+- Your administrator config ([choose the agents](/docs/enterprise/configuration)).
   The default config protects no agent.
 - `cosign` on the workstation where you verify the release.
 
@@ -42,6 +43,8 @@ You also need three scripts from `packaging/mdm/macos` (also in the
 `defenseclaw-enterprise-<version>-darwin-arm64.tar.gz` archive):
 `defenseclaw-enterprise.sh` (policy script that runs `ensure`), `detect.sh`
 (extension attribute) and `uninstall.sh` (removal).
+
+## How Jamf Pro runs scripts and packages
 
 ### Add one line to each kit script
 
@@ -128,7 +131,7 @@ child and reports `mdm_cancelled`.
 ### DefenseClaw uninstall
 
 Upload `uninstall.sh` with the same `set --` line. Set `DC_PURGE=1` for a purge
-([what it removes](/docs/enterprise/mdm/reference#uninstall)).
+([what it removes](/docs/enterprise/mdm#uninstall)).
 
 ## Install
 
@@ -169,7 +172,7 @@ read -rs KEY && printf '%s' "$KEY" | sudo /opt/cisco/defenseclaw/bin/defenseclaw
 
 Then set `enterprise.inspection.ai_defense.enabled: true` and
 `credential: ai-defense-api-key` in the config
-([AI Defense key](/docs/enterprise/configure/ai-defense-key)).
+([AI Defense key](/docs/enterprise/ai-defense-key)).
 
 ## Detect and report
 
@@ -197,14 +200,14 @@ submits inventory ([Detection](/docs/enterprise/mdm#detection)).
 | Task | What to do |
 | --- | --- |
 | Upgrade | Upload the new package and set `DC_MIN_VERSION` in the extension attribute to the new version. Create a new install policy with the new package, or flush the old policy's logs: a **Once per computer** policy does not run again on a computer with a log entry |
-| Roll back | Run a script that creates the root-owned marker (`touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`), then deploy the earlier package ([Roll back](/docs/enterprise/operate/lifecycle#roll-back)) |
+| Roll back | Run a script that creates the root-owned marker (`touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`), then deploy the earlier package ([Roll back](/docs/enterprise/lifecycle)) |
 | Change the config | Edit the YAML in `DefenseClaw stage config`. The ensure policy applies it at its next run, validated first. In bundle mode, deliver a new signed bundle instead; a plain config is refused with `bundle_required` |
 
 ## Deliver a custom macOS rule pack
 
 Before the first pkg install, add a root **stage-pack** script that copies the pack
 into `/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` with `root:wheel`
-ownership. Use the [stage-pack script and pin example](/docs/enterprise/mdm/reference#stage-a-custom-macos-rule-pack),
+ownership. Use the [stage-pack script and pin example](/docs/enterprise/mdm#stage-a-custom-macos-rule-pack),
 run it before the config and pkg steps, and set `guardrail.custom_packs.<name>` to
 that absolute path and its `sha256:<digest>` pin. Stage the pack again before
 reinstalling after a purge.
@@ -230,8 +233,10 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --js
 | `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure runs (root, `0600`). Uninstall removes this log with the machine state, so use the policy log for the uninstall result |
 | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The package's own `ensure` result |
 
+## Exit codes in Jamf Pro
+
 Exit codes follow the Linux and macOS column of [Exit codes](/docs/enterprise/mdm#exit-codes):
 `0` success, `1` failed and rolled back (read `errors[].code` in the policy log;
-[wrapper error codes](/docs/troubleshooting/enterprise#mdm-wrapper-error-codes)), `2`
+[wrapper error codes](/docs/enterprise/troubleshooting)), `2`
 invalid settings such as a missing `set --` line, `75` another run holds a lock (the
 next scheduled run retries).

@@ -62,6 +62,9 @@ type observabilityV8Startup struct {
 func SetVersion(v string) {
 	appVersion = v
 	rootCmd.Version = v
+	// The build is known from the start: every command, including those
+	// that load no config, stamps and checks records with it (GAP-1454).
+	version.SetBinaryVersion(v)
 }
 
 func SetBuildInfo(commit, date string) {

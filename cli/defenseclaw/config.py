@@ -35,6 +35,7 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 import urllib.parse
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -79,6 +80,7 @@ from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     dotenv_key_is_process_control,
     dotenv_key_is_valid,
+    namespace_hides_owner,
     read_regular_file_no_follow,
     tracked_host_owner_uid,
 )
@@ -769,6 +771,12 @@ def _managed_config_trust_problem(path: str) -> str | None:
         owner_uid = tracked_host_owner_uid(current, info) if hasattr(info, "st_uid") else None
         if owner_uid is None:
             return f"{current}: cannot inspect path owner"
+        if owner_uid == -1 and namespace_hides_owner(info):
+            # Unknown, not another account: a sandbox hides it (GAP-1395).
+            return (
+                f"{current}: its owner cannot be checked inside this sandbox (a user namespace hides it); "
+                "run the command outside the sandbox"
+            )
         if owner_uid != 0:
             return f"{current}: owner uid {owner_uid} is not trusted; expected root/admin uid 0"
 
@@ -2260,7 +2268,7 @@ class JudgeConfig:
 class WebhookConfig:
     # Mirrors ``internal/config.WebhookConfig`` (notifier webhook, not an
     # audit sink). See the published webhook guide:
-    # https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/set-up-webhook-alerts/
+    # https://cisco-ai-defense.github.io/defenseclaw/docs/observability/webhooks/
     #
     # ``name`` is the CLI-visible identifier used by
     # ``defenseclaw setup webhook {enable,disable,remove,show,test}``.
@@ -4590,7 +4598,7 @@ class Config:
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
-        _drop_retired_connector_settings(existing)
+        _drop_retired_connector_settings(existing, path)
         merged = _merge_v8_modeled_changes(
             existing,
             dataclass_data,
@@ -7331,7 +7339,13 @@ def _is_retired_connector_name(name: Any) -> bool:
     return isinstance(name, str) and name.strip().lower() in _RETIRED_CONNECTOR_NAMES
 
 
-def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
+# Set once _drop_retired_connector_settings has warned in this process.
+_retired_settings_warned = threading.Event()
+
+
+def _drop_retired_connector_settings(
+    raw: dict[str, Any], source: str | os.PathLike[str] | None = None, *, emit_warning: bool = True
+) -> None:
     """Until 1.1, accept old rosters and discard removed connector settings.
 
     Only connector fields are touched (mirrors ``dropRetiredConnectorSettings``
@@ -7443,10 +7457,16 @@ def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
     if isinstance(claw, dict) and _is_retired_connector_name(claw.get("mode")):
         claw["mode"] = ""
         changed = True
-    if changed:
-        logging.warning(
-            "until 1.1: removed OpenHands/OmniGent connector settings from loaded config; "
-            "run defenseclaw migrate"
+    if changed and emit_warning and not _retired_settings_warned.is_set():
+        # Once per process, through this module's logger: the root logger's
+        # implicit basicConfig printed a raw "WARNING:root:" line into the
+        # installer's output, and that line repeated the installers' one
+        # removal notice (GAP-2043). It names the file, which is what to fix.
+        _retired_settings_warned.set()
+        _log.warning(
+            "%s still names OpenHands/OmniGent, which DefenseClaw no longer supports; "
+            "they are ignored. Delete them from that file.",
+            os.fspath(source) if source else "config.yaml",
         )
 
 
@@ -7492,7 +7512,7 @@ def load(
     # is normalized or checked for duplicates. The Go loader applies the same
     # rule; `defenseclaw migrate` persists it (see migrations.py).
     legacy_connector.migrate_raw_config(raw, cfg_file)
-    _drop_retired_connector_settings(raw)
+    _drop_retired_connector_settings(raw, cfg_file)
     if without_guardrail_profiles:
         raw = _without_guardrail_profiles(raw)
 
