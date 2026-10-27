@@ -41,6 +41,7 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     inspect_path_link,
     make_finding,
 )
+from defenseclaw.scanner.plugin_scanner.llm_analyzer import JUDGE_TAG
 from defenseclaw.scanner.plugin_scanner.policy import (
     PluginScanPolicy,
     apply_severity_override,
@@ -221,6 +222,15 @@ def scan_plugin(
 
         all_findings.extend(findings)
 
+    # GAP-1389 (LEAD DECISION 09:05): a judge that read no code cannot rate a
+    # plugin with no executable files HIGH. Its findings rest on the manifest
+    # alone ("manifest-only, no source"), so they are capped at MEDIUM on
+    # every tier; static findings keep their severity and an operator's
+    # severity override (applied next) still wins.
+    if not _plugin_has_executable_files(target, ctx):
+        for f in all_findings:
+            _cap_judge_finding_without_code(f)
+
     # --- Apply policy: severity overrides + suppression ---
     for f in all_findings:
         apply_severity_override(f, policy.severity_overrides)
@@ -286,6 +296,154 @@ _MANIFEST_CANDIDATES: tuple[tuple[str, str], ...] = (
     ("plugin.yaml", "plugin.yaml"),
     ("plugin.yml", "plugin.yml"),
 )
+
+
+# Files that run code: source, script and binary suffixes the analyzers
+# read or flag, plus the other common interpreters.
+_EXECUTABLE_SUFFIXES = frozenset({
+    ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".cjs", ".mjs", ".py", ".pyc", ".pyz", ".rb", ".pl", ".php",
+    ".lua", ".go", ".rs", ".java", ".jar", ".class", ".ps1", ".psm1", ".vbs", ".bash", ".zsh", ".fish",
+    ".exe", ".so", ".dylib", ".wasm", ".dll", ".node", ".sh", ".bat", ".cmd",
+    ".com", ".scr", ".msi", ".cpl", ".hta", ".wsf", ".vbe", ".jse", ".psd1", ".pyw",
+    # Other interpreters and compiled sources an agent can run or build, and
+    # archives, which can carry any of the above (GAP-2039).
+    ".applescript", ".scpt", ".swift", ".r", ".jl", ".tcl", ".groovy", ".kts", ".ex", ".exs",
+    ".c", ".cc", ".cpp", ".cs",
+    ".zip", ".tar", ".tgz", ".gz", ".whl", ".deb", ".rpm", ".pkg", ".dmg", ".7z",
+})
+# Build files a single command runs (make, just) whatever their suffix (GAP-2039).
+_EXECUTABLE_NAMES = frozenset({"makefile", "gnumakefile", "justfile"})
+# First bytes of a file the OS can run whatever its name: a #! script, an
+# ELF, Mach-O (thin and fat, both byte orders) or Windows PE (MZ) binary.
+_EXECUTABLE_MAGIC = (
+    b"#!", b"\x7fELF", b"MZ",
+    b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",
+    b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf", b"\xbe\xba\xfe\xca", b"\xbf\xba\xfe\xca",
+)
+# Files that make an agent run a command (hooks, MCP and LSP servers).
+_EXECUTABLE_CONFIG_NAMES = frozenset({"hooks.json", ".mcp.json", "mcp.json", ".lsp.json"})
+# Manifests and the keys in them that start code.
+_MANIFEST_NAMES = frozenset({"plugin.json", "package.json", "openclaw.plugin.json", "plugin.yaml", "plugin.yml"})
+_EXECUTABLE_MANIFEST_KEYS = frozenset({
+    "hooks", "mcpServers", "lspServers", "main", "bin", "scripts", "exports", "module", "browser",
+    "entry", "entrypoint", "entrypoints", "command", "extensions", "runtime",
+})
+_EXECUTABLE_WALK_LIMIT = 5000
+
+
+def _plugin_has_executable_files(target: str, ctx: ScanContext) -> bool:
+    """Whether the plugin holds anything that runs: collected source, a
+    script, binary or interpreter suffix, a regular file with an executable
+    bit or whose first bytes are ``#!``, ELF, Mach-O or ``MZ`` (on every OS),
+    a hooks/MCP/LSP config, or a manifest key that starts code. A symlink, a
+    non-regular file, an unreadable file or folder, an unparsable manifest or
+    a tree past the walk limit counts as executable, so only a plain,
+    readable tree of documents is "no executable files" (GAP-1389, GAP-2009).
+    A ``.git`` folder is walked like any other; only git's hook samples are
+    skipped (GAP-2036)."""
+    if ctx.source_files or not os.path.isdir(target) or os.path.islink(target):
+        return True
+    walk_errors: list[OSError] = []
+    seen = 0
+    for root, dirs, files in os.walk(target, followlinks=False, onerror=walk_errors.append):
+        if walk_errors:
+            return True
+        for name in dirs:
+            if os.path.islink(os.path.join(root, name)):
+                return True
+        git_parts = _git_dir_parts(os.path.relpath(root, target))
+        git_objects = git_parts is not None and "objects" in git_parts
+        for name in files:
+            # git's object store is data git writes read-only; it is still
+            # read below, but it does not use up the walk limit (GAP-2100).
+            if not git_objects:
+                seen += 1
+            if seen > _EXECUTABLE_WALK_LIMIT:
+                return True
+            path = os.path.join(root, name)
+            if _is_git_hook_sample(root, git_parts, name):
+                continue
+            suffix = os.path.splitext(name)[1].casefold()
+            folded = name.casefold()
+            if suffix in _EXECUTABLE_SUFFIXES or folded in _EXECUTABLE_CONFIG_NAMES or folded in _EXECUTABLE_NAMES:
+                return True
+            try:
+                st = os.lstat(path)
+            except OSError:
+                return True
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                return True
+            if st.st_mode & 0o111 or _starts_with_executable_magic(path):
+                return True
+            if name.casefold() in _MANIFEST_NAMES and _manifest_starts_code(path):
+                return True
+    return bool(walk_errors)
+
+
+def _git_dir_parts(rel_root: str) -> list[str] | None:
+    """The path parts of a folder below the first ``.git`` folder of the
+    plugin (``[]`` for ``.git`` itself), or None outside any ``.git``."""
+    parts = [] if rel_root in ("", os.curdir) else rel_root.split(os.sep)
+    if ".git" not in parts:
+        return None
+    return parts[parts.index(".git") + 1:]
+
+
+def _is_git_hook_sample(root: str, git_parts: list[str] | None, name: str) -> bool:
+    """git's own ``*.sample`` hook templates in the ``hooks`` folder of a git
+    dir: ``.git/hooks`` and a submodule's git dir anywhere under
+    ``.git/modules`` (GAP-2100). git names a submodule's git dir after its
+    path, so ``vendor/lib`` is ``.git/modules/vendor/lib``; a git dir holds
+    ``HEAD``. git never runs the samples and the agent does not load them.
+    Every other file under a ``.git`` folder is read with the same rule as the
+    rest of the plugin, because a local, zip or tarball plugin controls
+    ``.git`` too (GAP-2036)."""
+    if git_parts is None or not name.endswith(".sample") or os.path.basename(root) != "hooks":
+        return False
+    git_dir = git_parts[:-1]
+    if not git_dir:
+        return True  # .git/hooks
+    return (
+        len(git_dir) >= 2
+        and git_dir[0] == "modules"
+        and os.path.isfile(os.path.join(os.path.dirname(root), "HEAD"))
+    )
+
+
+def _starts_with_executable_magic(path: str) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(4)
+    except OSError:
+        return True
+    return head.startswith(_EXECUTABLE_MAGIC)
+
+
+def _manifest_starts_code(path: str) -> bool:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read(1024 * 1024)
+        data = yaml.safe_load(text) if path.casefold().endswith((".yaml", ".yml")) else json.loads(text)
+    except (OSError, ValueError, yaml.YAMLError):
+        return True
+    if not isinstance(data, dict):
+        return True
+    return any(key in data for key in _EXECUTABLE_MANIFEST_KEYS)
+
+
+def _cap_judge_finding_without_code(finding: Finding) -> None:
+    """Cap an LLM judge or meta-judge HIGH/CRITICAL at MEDIUM (GAP-1389)."""
+    rule = finding.rule_id or ""
+    judge = rule != "LLM-SCAN-ERROR" and (
+        JUDGE_TAG in finding.tags or rule.startswith("LLM-") or rule.startswith("META-LLM-")
+    )
+    if not judge or str(finding.severity).upper() not in ("HIGH", "CRITICAL"):
+        return
+    finding.severity = "MEDIUM"
+    note = "Capped at MEDIUM: the plugin has no executable files and the judge read no code."
+    finding.description = f"{finding.description} {note}".strip()
+    if "judge-no-executable-files" not in finding.tags:
+        finding.tags.append("judge-no-executable-files")
 
 
 def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:

@@ -702,7 +702,7 @@ rules:
     expression: >-
       f.tool in ['sql_query', 'db.execute'] ||
       f.commands.exists(c, c.argv_complete &&
-      c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd'])
+      c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'])
     # Exact ActionFacts owner only. This detects a closed unbounded DELETE,
     # TRUNCATE, DROP TABLE, DROP SCHEMA, or DROP DATABASE operation from a
     # reviewed CLI or authenticated structured connector. It remains alert-only

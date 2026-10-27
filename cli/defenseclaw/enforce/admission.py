@@ -669,6 +669,15 @@ def evaluate_admission(
     return _done(AdmissionDecision("warning", detail, action=action, source=source))
 
 
+def _meta_judge_missed_threat(rule: str) -> bool:
+    """A meta-judge missed threat (META-LLM-<N>), Go ``metaJudgeMissedThreat``.
+
+    GAP-2107: the number is the model's own count, so every missed threat
+    counts, not only META-LLM-001. The ids the scanner writes do not.
+    """
+    return rule.startswith("META-LLM-") and rule not in ("META-LLM-CORR", "META-LLM-FP-ADVISORY", "META-LLM-UNKNOWN")
+
+
 def _judge_only_plugin_high(cfg: Any, policy: CompiledAdmission, target_type: str, connector: str,
                             scan_result: Any, severity: str) -> bool:
     """The GAP-1389 pre-step: Go ``policy.WarnJudgeOnlyPluginHigh``, same rules."""
@@ -688,7 +697,7 @@ def _judge_only_plugin_high(cfg: Any, policy: CompiledAdmission, target_type: st
     for f in findings:
         rank, rule = _severity_rank(str(getattr(f, "severity", ""))), str(getattr(f, "rule_id", "") or "")
         judge = (rule.startswith("LLM-") and rule != "LLM-SCAN-ERROR") or rule.startswith("META-LLM-")
-        if rank == 4 and (rule.startswith("LLM-OB-") or rule == "META-LLM-001"):
+        if rank == 4 and (rule.startswith("LLM-OB-") or _meta_judge_missed_threat(rule)):
             judge_high = True
         elif rank == 0 or rank >= 4 or (rank == 3 and not judge and rule != "SCAN-LLM-NO-SOURCE"):
             return False
