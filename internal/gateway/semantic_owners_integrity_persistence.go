@@ -2726,6 +2726,14 @@ func findExpressionStart(argv []string) int {
 				// -f path: the path is a starting point.
 				index++
 			}
+		case findAttachedPathOption(argument):
+			// -f/path or -xf/path: getopt takes the rest of the word as
+			// the -f path, a starting point.
+			index++
+		case argument == "--":
+			// The end of the options: macOS find needs it between a lone
+			// -f path and the expression (`find -f/path -- -delete`).
+			index++
 		default:
 			for index < len(argv) && !strings.HasPrefix(argv[index], "-") &&
 				argv[index] != "(" && argv[index] != ")" && argv[index] != "!" && argv[index] != "," {
@@ -2745,6 +2753,14 @@ func findOptionLetters(word string) bool {
 		return false
 	}
 	return strings.Trim(strings.TrimSuffix(word[1:], "f"), "EHLPXdsx") == ""
+}
+
+// findAttachedPathOption reports BSD find option letters ending in an f
+// with its path attached (`-f/path`, `-xf/path`, GAP-2135).
+func findAttachedPathOption(word string) bool {
+	at := strings.IndexByte(word, 'f')
+	return len(word) > 2 && word[0] == '-' && at > 0 && at < len(word)-1 &&
+		strings.Trim(word[1:at], "EHLPXdsx") == ""
 }
 
 // findPrimaryArity is the number of arguments each GNU/BSD find primary

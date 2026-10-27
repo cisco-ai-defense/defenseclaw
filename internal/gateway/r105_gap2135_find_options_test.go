@@ -17,7 +17,7 @@ func TestR105GAP2135FindLeadingOptionsOfActiveState(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell forms")
 	}
-	_, cwd := r105StateFixture(t)
+	home, cwd := r105StateFixture(t)
 	rows := []r105StateRow{
 		// GAP-2135
 		{"gnu D tree root delete", "find -D tree ~/.defenseclaw -delete", true, ""},
@@ -33,12 +33,21 @@ func TestR105GAP2135FindLeadingOptionsOfActiveState(t *testing.T) {
 		{"bsd f root delete", "find -f ~/.defenseclaw -delete", true, ""},
 		{"bsd x f hooks delete", "find -x -f ~/.defenseclaw/hooks -delete", true, ""},
 		{"HOME O2 root delete", "find -O2 $HOME/.defenseclaw -delete", true, ""},
+		// pod check7: getopt takes an attached -f path.
+		{"bsd attached f HOME root delete", "find -f$HOME/.defenseclaw -delete", true, ""},
+		{"bsd attached xf HOME hooks delete", "find -xf$HOME/.defenseclaw/hooks -delete", true, ""},
+		{"bsd attached sf HOME name config", "find -sf$HOME/.defenseclaw -name config.yaml -delete", true, ""},
+		{"bsd attached f absolute root delete", "find -f" + home + "/.defenseclaw -delete", true, ""},
+		{"bsd attached f HOME end of options delete", "find -f$HOME/.defenseclaw/hooks -- -delete", true, ""},
+		{"usr bin find attached f HOME end of options", "/usr/bin/find -f$HOME/.defenseclaw -- -type f -delete", true, ""},
 		// Benign: cleanup with an option, named cleanup through -exec,
 		// read-only -exec, other trees.
 		{"bsd x log cleanup", "find -x ~/.defenseclaw -name '*.log' -delete", false, ""},
 		{"gnu D tree log cleanup", "find -D tree ~/.defenseclaw -name '*.log' -delete", false, ""},
 		{"gnu O3 log cleanup mtime", "find -O3 ~/.defenseclaw -name '*.log' -mtime +7 -delete", false, ""},
 		{"bsd f log cleanup", "find -f ~/.defenseclaw -name '*.log' -delete", false, ""},
+		{"bsd attached f HOME log cleanup", "find -f$HOME/.defenseclaw -name '*.log' -delete", false, ""},
+		{"bsd attached f HOME end of options log cleanup", "/usr/bin/find -f$HOME/.defenseclaw -- -name '*.log' -delete", false, ""},
 		{"gnu D tree project tmp", "find -D tree . -name '*.tmp' -delete", false, ""},
 	}
 	for _, mode := range []string{"observe", "action"} {

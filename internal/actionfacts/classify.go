@@ -3100,7 +3100,8 @@ func findStartingPaths(argv []string) []string {
 // findLeadingOption reads the option word argv[i] before find's starting
 // points (GAP-2135): GNU -H, -L, -P, -D debugopts and -Olevel, and the BSD
 // option letters E, H, L, P, X, d, s and x, which getopt lets one word
-// combine, ending in an optional f whose path argument is a starting point.
+// combine, ending in an optional f whose path argument (the rest of the
+// word, or the next word) is a starting point.
 // skip is the number of argument words it takes; ok is false for a word
 // that is not one of them.
 func findLeadingOption(argv []string, i int) (skip int, start string, ok bool) {
@@ -3121,7 +3122,12 @@ func findLeadingOption(argv []string, i int) (skip int, start string, ok bool) {
 	for index, letter := range letters {
 		switch {
 		case strings.ContainsRune("EHLPXdsx", letter):
-		case letter == 'f' && index == len(letters)-1:
+		case letter == 'f':
+			// getopt takes the rest of the word as the -f path
+			// (`-f/path`, `-xf/path`), else the next word.
+			if rest := letters[index+1:]; rest != "" {
+				return 0, rest, true
+			}
 			if i+1 >= len(argv) {
 				return 0, "", false
 			}

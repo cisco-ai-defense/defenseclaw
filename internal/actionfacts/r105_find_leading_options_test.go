@@ -21,6 +21,11 @@ func TestR105GAP2135FindLeadingOptions(t *testing.T) {
 		{[]string{"find", "-xs", "/a"}, []string{"/a"}},
 		{[]string{"find", "-f", "/a", "-f", "/b", "-print"}, []string{"/a", "/b"}},
 		{[]string{"find", "-xf", "/a"}, []string{"/a"}},
+		// getopt takes an attached -f path (pod check7).
+		{[]string{"find", "-f/a", "-delete"}, []string{"/a"}},
+		{[]string{"find", "-xf/a", "-name", "x"}, []string{"/a"}},
+		{[]string{"find", "-sf/a", "/b"}, []string{"/a", "/b"}},
+		{[]string{"/usr/bin/find", "-f/a", "--", "-delete"}, []string{"/a"}},
 		{[]string{"find", "-q", "/a"}, nil},
 		{[]string{"find", "/a", "-x", "/b"}, []string{"/a"}},
 		{[]string{"find", "--", "-a"}, nil},
@@ -58,4 +63,33 @@ func TestR105GAP2122FindExactEmbeddedCommands(t *testing.T) {
 			t.Errorf("%q: embedded %+v, want exact=%t deletes=%t moveTo=%q", tc.argv, got, tc.exact, tc.deletes, tc.moveTo)
 		}
 	}
+}
+
+// GAP-2135 (pod check7): an attached -f$HOME/... path gets the trusted home
+// like a separate word, so find -delete names the state root.
+func TestR105GAP2135FindAttachedHomePath(t *testing.T) {
+	for _, command := range []string{
+		"find -f$HOME/.defenseclaw -delete",
+		"find -xf${HOME}/.defenseclaw -delete",
+		"find -f/home/u/.defenseclaw -delete",
+	} {
+		facts := Analyze(Input{Tool: "Bash", Command: command, CWD: "/home/u/p", ActiveHome: "/home/u"})
+		if !hasPathFact(facts, PathAccessDelete, "/home/u/.defenseclaw") {
+			t.Errorf("%q: no delete fact for the state root: %+v (%+v)", command, facts.Paths, facts.Parse)
+		}
+	}
+	// A tilde attached to an option is not expanded by the shell.
+	facts := Analyze(Input{Tool: "Bash", Command: "find -f~/.defenseclaw -delete", CWD: "/home/u/p", ActiveHome: "/home/u"})
+	if hasPathFact(facts, PathAccessDelete, "/home/u/.defenseclaw") {
+		t.Errorf("-f~/: the tilde is literal, got %+v", facts.Paths)
+	}
+}
+
+func hasPathFact(facts Facts, access PathAccess, resolved string) bool {
+	for _, path := range facts.Paths {
+		if path.Access == access && path.Resolved == resolved {
+			return true
+		}
+	}
+	return false
 }

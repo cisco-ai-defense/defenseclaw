@@ -119,6 +119,18 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 	last := 0
 	rewrite := trustedPOSIXHomeRewrite{tildeOperands: map[string]string{}}
 	for _, word := range words {
+		if prefix, ok := findOptionHomeWord(word); ok {
+			// `-f$HOME/...`: the -f path of BSD find, attached (GAP-2135).
+			suffix, _ := homeAnchoredLiteralWord(&syntax.Word{Parts: word.Parts[1:]})
+			start, end := int(word.Pos().Offset()), int(word.End().Offset())
+			if start < last || end > len(source) {
+				return trustedPOSIXHomeRewrite{}, false
+			}
+			out.WriteString(source[last:start])
+			out.WriteString(prefix + activeHome + suffix)
+			last = end
+			continue
+		}
 		literal, ok := firstLiteral(word)
 		if !ok || (literal.Value != "~" && !strings.HasPrefix(literal.Value, "~/")) {
 			if suffix, anchored := homeAnchoredLiteralWord(word); anchored &&
@@ -271,6 +283,9 @@ func staticHomeRewriteWord(word *syntax.Word) bool {
 	if plainHomeRewriteWord(word) {
 		return true
 	}
+	if _, ok := findOptionHomeWord(word); ok {
+		return true
+	}
 	for _, part := range word.Parts {
 		switch part.(type) {
 		case *syntax.Lit, *syntax.SglQuoted, *syntax.DblQuoted:
@@ -280,6 +295,27 @@ func staticHomeRewriteWord(word *syntax.Word) bool {
 	}
 	return true
 }
+
+// findOptionHomeWord reports a find option word whose -f path is attached
+// and starts with a plain $HOME or ${HOME} (`-f$HOME/.x`, `-xf${HOME}/.x`)
+// and returns its option letters; the shell expands that HOME as in a
+// separate word (GAP-2135).
+func findOptionHomeWord(word *syntax.Word) (string, bool) {
+	literal, ok := firstLiteral(word)
+	if !ok || len(word.Parts) < 2 || !findAttachedPathOption.MatchString(literal.Value) {
+		return "", false
+	}
+	rest := &syntax.Word{Parts: word.Parts[1:]}
+	if _, anchored := homeAnchoredLiteralWord(rest); !anchored || !plainHomeRewriteWord(rest) {
+		return "", false
+	}
+	if _, home := word.Parts[1].(*syntax.ParamExp); !home {
+		return "", false
+	}
+	return literal.Value, true
+}
+
+var findAttachedPathOption = regexp.MustCompile(`^-[EHLPXdsx]*f$`)
 
 func plainHomeRewriteWord(word *syntax.Word) bool {
 	if _, ok := homeAnchoredLiteralWord(word); !ok {
