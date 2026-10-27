@@ -238,6 +238,24 @@ func TestR105GAP2075FindDeleteOfProtectedStateNames(t *testing.T) {
 		{"find root iname codex bracket log", "find ~/.defenseclaw -iname 'CODEX*[.LOG]*' -delete", true, ""},
 		{"find HOME suppress bracket tmp", "find $HOME/.defenseclaw -name 'suppress*[.tmp]*' -delete", true, ""},
 		{"find root unterminated bracket", "find ~/.defenseclaw -name 'codex*[.log' -delete", true, ""},
+		// find runs its expression left to right: an action before the
+		// name test removes every entry (pod check 3).
+		{"find root delete before name log", "find ~/.defenseclaw -delete -name '*.log'", true, ""},
+		{"find root type delete before name tmp", "find ~/.defenseclaw -type f -delete -name '*.tmp'", true, ""},
+		{"find HOME delete before iname LOG", "find $HOME/.defenseclaw -delete -iname '*.LOG'", true, ""},
+		{"find root depth delete before name jsonl", "find ~/.defenseclaw -depth -delete -name '*.jsonl'", true, ""},
+		{"find root mtime delete before name log", "find ~/.defenseclaw -mtime +7 -delete -name '*.log'", true, ""},
+		// A primary that takes arguments swallows the words after it: GNU
+		// -fprintf takes FILE=-name FORMAT=*.log, so the -delete removes
+		// every entry (pod check 4). An unknown primary is not cleanup.
+		{"find root fprintf swallows name", "find ~/.defenseclaw -fprintf -name '*.log' -delete", true, ""},
+		{"find HOME type fprintf swallows iname", "find $HOME/.defenseclaw -type f -fprintf -iname '*.LOG' -delete", true, ""},
+		{"find root fprint swallows name", "find ~/.defenseclaw -fprint -name '*.log' -delete", true, ""},
+		{"find root unknown primary", "find ~/.defenseclaw -frobnicate -name '*.log' -delete", true, ""},
+		// -cnewer and BSD -depth n take one argument: a name word after
+		// them is their argument, not a test.
+		{"find root cnewer swallows name", "find ~/.defenseclaw -cnewer -name '*.log' -delete", true, ""},
+		{"find root bsd depth n then delete", "find ~/.defenseclaw -depth 1 -delete -name '*.log'", true, ""},
 		// Log cleanup from the root stays allowed with no state finding.
 		{"find root log cleanup", "find ~/.defenseclaw -name '*.log' -mtime +7 -delete", false, ""},
 		{"find root tmp cleanup", "find ~/.defenseclaw -type f -name '*.tmp' -delete", false, ""},
@@ -247,6 +265,18 @@ func TestR105GAP2075FindDeleteOfProtectedStateNames(t *testing.T) {
 		{"find root escaped log", `find ~/.defenseclaw -name '*\.log' -delete`, false, ""},
 		{"find root rotated digit logs", "find ~/.defenseclaw -name 'gateway.log.[0-9]*' -delete", false, ""},
 		{"find logs tree", "find ~/.defenseclaw/logs -mtime +7 -delete", false, ""},
+		{"find root log cleanup delete twice", "find ~/.defenseclaw -name '*.log' -delete -delete", false, ""},
+		{"find root log cleanup then mtime", "find ~/.defenseclaw -name '*.log' -delete -mtime +7", false, ""},
+		{"find root log cleanup fprintf record", `find ~/.defenseclaw -name '*.log' -fprintf /tmp/removed.txt '%p\n' -delete`, false, ""},
+		{"find root log cleanup print", "find ~/.defenseclaw -name '*.log' -print -delete", false, ""},
+		{"find root maxdepth log cleanup", "find ~/.defenseclaw -maxdepth 2 -name '*.log' -mmin +60 -delete", false, ""},
+		// Reference-file and BSD numeric primaries are known, not unknown
+		// words: the cleanup stays allowed (pod check5 over-block).
+		{"find root log cleanup cnewer", "find ~/.defenseclaw -name '*.log' -cnewer /tmp/ref -delete", false, ""},
+		{"find root log cleanup anewer", "find ~/.defenseclaw -name '*.log' -anewer /tmp/ref -delete", false, ""},
+		{"find root log cleanup bsd depth n", "find ~/.defenseclaw -name '*.log' -depth 1 -delete", false, ""},
+		{"find root log cleanup bsd Bnewer", "find ~/.defenseclaw -name '*.log' -Bnewer /tmp/ref -delete", false, ""},
+		{"find root log cleanup depth option", "find ~/.defenseclaw -depth -name '*.log' -delete", false, ""},
 	}
 	for _, mode := range []string{"observe", "action"} {
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)
