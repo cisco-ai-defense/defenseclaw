@@ -1971,7 +1971,8 @@ func actionWindowsSearchPatternWord(words []string) int {
 	if len(words) == 0 {
 		return -1
 	}
-	switch strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(words[0], `\`, "/"))), ".exe") {
+	tool := strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(words[0], `\`, "/"))), ".exe")
+	switch tool {
 	case "grep", "egrep", "fgrep", "rg", "ag", "ack", "findstr":
 	default:
 		return -1
@@ -1990,6 +1991,8 @@ func actionWindowsSearchPatternWord(words []string) int {
 			return -1
 		case strings.HasPrefix(word, "--regexp="):
 			return k
+		case actionSearchOptionTakesValue(tool, word):
+			k++ // the option's value (-A 2, -m 5, -g '*.md') is not the pattern (RV5-3)
 		case strings.HasPrefix(word, "-") || strings.HasPrefix(word, "/"):
 			continue
 		default:
@@ -1997,6 +2000,48 @@ func actionWindowsSearchPatternWord(words []string) int {
 		}
 	}
 	return -1
+}
+
+// actionSearchOptionTakesValue reports an option of a search tool whose
+// value is the next word (RV5-3); an attached value (-A2, --glob=x) is one
+// word. The short options differ per tool: grep -r and -E take no value,
+// rg -r and -E do.
+func actionSearchOptionTakesValue(tool, word string) bool {
+	switch word {
+	case "-A", "-B", "-C", "-m", "-f",
+		"--after-context", "--before-context", "--context", "--max-count", "--file":
+		return true
+	}
+	switch tool {
+	case "grep", "egrep", "fgrep":
+		switch word {
+		case "-D", "-d", "--devices", "--directories", "--include", "--exclude", "--exclude-from",
+			"--exclude-dir", "--label", "--binary-files", "--group-separator":
+			return true
+		}
+	case "rg":
+		switch word {
+		case "-E", "-M", "-T", "-d", "-g", "-j", "-r", "-t",
+			"--glob", "--iglob", "--type", "--type-not", "--type-add", "--type-clear", "--max-columns",
+			"--max-depth", "--max-filesize", "--threads", "--encoding", "--replace", "--sort", "--sortr",
+			"--pre", "--pre-glob", "--ignore-file", "--engine", "--context-separator",
+			"--field-match-separator", "--path-separator", "--colors", "--dfa-size-limit",
+			"--regex-size-limit":
+			return true
+		}
+	case "ag":
+		switch word {
+		case "-G", "-g", "-p", "--ignore", "--ignore-dir", "--depth", "--path-to-ignore",
+			"--file-search-regex":
+			return true
+		}
+	case "ack":
+		switch word {
+		case "--type", "--ignore-dir", "--ignore-file", "--output":
+			return true
+		}
+	}
+	return false
 }
 
 // actionWindowsNativeProgram reports a program PowerShell runs as a native
