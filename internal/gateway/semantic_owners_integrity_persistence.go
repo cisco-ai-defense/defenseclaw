@@ -2689,17 +2689,22 @@ var protectedStateNameSamples = []string{
 var cleanupNameMarkers = []string{".log", ".tmp", ".bak", ".old", ".gz", ".jsonl"}
 
 // findPatternIsCleanupOnly reports a -name/-iname pattern that selects only
-// cleanup files: it carries a cleanup marker as literal text and matches
-// none of the sample protected names. Every other pattern (a hook name,
+// cleanup files: it carries a cleanup marker as literal text (outside any
+// bracket expression or wildcard, findPatternLiteralText) and matches none
+// of the sample protected names. Every other pattern (a hook name,
 // codex*, *.yaml, *) can reach protected state and is not exempt (GAP-2075).
 func findPatternIsCleanupOnly(pattern string, fold bool) bool {
-	lower := strings.ToLower(pattern)
 	if fold {
-		pattern = lower
+		pattern = strings.ToLower(pattern)
 	}
+	literal, ok := findPatternLiteralText(pattern)
+	if !ok {
+		return false
+	}
+	literal = strings.ToLower(literal)
 	marked := false
 	for _, marker := range cleanupNameMarkers {
-		if strings.Contains(lower, marker) {
+		if strings.Contains(literal, marker) {
 			marked = true
 			break
 		}
@@ -2717,6 +2722,48 @@ func findPatternIsCleanupOnly(pattern string, fold bool) bool {
 		}
 	}
 	return true
+}
+
+// findPatternLiteralText returns the text a name must hold for a find glob
+// pattern to match it: escaped characters are kept, while '*', '?' and a
+// whole bracket expression become a separator, so a cleanup marker spelled
+// inside a bracket (`codex*[.log]*` matches codex-hook.sh) is not literal
+// (GAP-2075). An unterminated bracket reports false.
+func findPatternLiteralText(pattern string) (string, bool) {
+	var literal strings.Builder
+	for index := 0; index < len(pattern); index++ {
+		switch character := pattern[index]; character {
+		case '\\':
+			if index+1 < len(pattern) {
+				index++
+				literal.WriteByte(pattern[index])
+			}
+		case '*', '?':
+			literal.WriteByte(0)
+		case '[':
+			end := index + 1
+			if end < len(pattern) && (pattern[end] == '!' || pattern[end] == '^') {
+				end++
+			}
+			if end < len(pattern) && pattern[end] == ']' {
+				end++
+			}
+			for end < len(pattern) && pattern[end] != ']' {
+				if pattern[end] == '\\' {
+					end++
+				}
+				end++
+			}
+			if end >= len(pattern) {
+				return "", false
+			}
+			index = end
+			literal.WriteByte(0)
+		default:
+			literal.WriteByte(character)
+		}
+	}
+	return literal.String(), true
 }
 
 // chmodAddsGroupOrOtherWrite reports a chmod whose mode gives group or

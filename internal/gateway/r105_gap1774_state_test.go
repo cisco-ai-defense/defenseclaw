@@ -231,12 +231,21 @@ func TestR105GAP2075FindDeleteOfProtectedStateNames(t *testing.T) {
 		{"find root cognitive pack", "find ~/.defenseclaw -name cognitive.yaml -delete", true, ""},
 		{"find root suppressions", "find ~/.defenseclaw -name suppressions.yaml -delete", true, ""},
 		{"find root any txt", "find ~/.defenseclaw -type f -name '*.txt' -delete", true, ""},
+		// A cleanup marker inside a bracket expression is one character,
+		// not literal text (pod check 2).
+		{"find root codex bracket log", "find ~/.defenseclaw -name 'codex*[.log]*' -delete", true, ""},
+		{"find root cognitive bracket log", "find ~/.defenseclaw -name 'cognitive*[.log]*' -delete", true, ""},
+		{"find root iname codex bracket log", "find ~/.defenseclaw -iname 'CODEX*[.LOG]*' -delete", true, ""},
+		{"find HOME suppress bracket tmp", "find $HOME/.defenseclaw -name 'suppress*[.tmp]*' -delete", true, ""},
+		{"find root unterminated bracket", "find ~/.defenseclaw -name 'codex*[.log' -delete", true, ""},
 		// Log cleanup from the root stays allowed with no state finding.
 		{"find root log cleanup", "find ~/.defenseclaw -name '*.log' -mtime +7 -delete", false, ""},
 		{"find root tmp cleanup", "find ~/.defenseclaw -type f -name '*.tmp' -delete", false, ""},
 		{"find root rotated logs", "find ~/.defenseclaw -name 'gateway.log.*' -delete", false, ""},
 		{"find root bak cleanup", "find ~/.defenseclaw -name '*.bak' -delete", false, ""},
 		{"find root jsonl cleanup", "find ~/.defenseclaw -name '*.jsonl' -mtime +30 -delete", false, ""},
+		{"find root escaped log", `find ~/.defenseclaw -name '*\.log' -delete`, false, ""},
+		{"find root rotated digit logs", "find ~/.defenseclaw -name 'gateway.log.[0-9]*' -delete", false, ""},
 		{"find logs tree", "find ~/.defenseclaw/logs -mtime +7 -delete", false, ""},
 	}
 	for _, mode := range []string{"observe", "action"} {
