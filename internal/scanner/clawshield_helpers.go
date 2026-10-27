@@ -79,6 +79,12 @@ func csCollectFiles(root string, strict bool, include func(string) bool) ([]stri
 			if name == ".git" || name == "node_modules" || name == "__pycache__" || name == ".venv" || name == "venv" {
 				return filepath.SkipDir
 			}
+			if perr := probeDirOpen(path); perr != nil {
+				if strict {
+					return incompleteScan(path, perr)
+				}
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		info, lerr := os.Lstat(path)
