@@ -1862,7 +1862,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		warnings = append(warnings, fmt.Sprintf("agent %q is not verified against a host identity record by profile-explain; confirm it with agent identities before relying on this answer", agent))
 	}
 	if source == profileSubjectLookup {
-		if view, warning := explainCacheView(set, subject, decision, connectorName, agent, time.Now()); view != nil {
+		if view, warning := explainCacheViewOf(set, subject, decision, connectorName, explained, legacy, time.Now()); view != nil {
 			out["cache"] = view
 			if warning != "" {
 				warnings = append(warnings, warning)

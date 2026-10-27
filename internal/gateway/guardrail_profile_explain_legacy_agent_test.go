@@ -67,6 +67,12 @@ func TestProfileExplainOfA103AgentIdentityDecidesAsTheHook(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 			t.Fatalf("bound=%v: %v: %s", bound, err, rec.Body.String())
 		}
+		live, _ := api.guardrailProfileSet().explainLiveDecision(&subject, "codex", current, func() (profileAgentClaim, bool) {
+			return legacyAgentClaim(legacy, in.UserID, in.MachineHash, in.Account, false), true
+		})
+		if live.Name != hook.Name || live.Match != hook.Match || live.Refused != hook.Refused {
+			t.Errorf("bound=%v: explain's live view %q/%q refused %q; the hook decides %q/%q refused %q", bound, live.Name, live.Match, live.Refused, hook.Name, hook.Match, hook.Refused)
+		}
 		if got.Profile != hook.Name || got.Match != hook.Match || got.Refused != (hook.Refused != "") || got.RefusedReason != hook.Refused {
 			t.Errorf("bound=%v: explain of the 1.0.3 identity %+v; the hook decides %q/%q refused %q", bound, got, hook.Name, hook.Match, hook.Refused)
 		}
