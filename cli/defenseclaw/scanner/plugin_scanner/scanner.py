@@ -390,16 +390,23 @@ def _git_dir_parts(rel_root: str) -> list[str] | None:
 
 def _is_git_hook_sample(root: str, git_parts: list[str] | None, name: str) -> bool:
     """git's own ``*.sample`` hook templates in the ``hooks`` folder of a git
-    dir: ``.git/hooks`` and a submodule's ``.git/modules/<name>/hooks``
-    (GAP-2100). git never runs them and the agent does not load them. Every
-    other file under a ``.git`` folder is read with the same rule as the rest
-    of the plugin, because a local, zip or tarball plugin controls ``.git``
-    too (GAP-2036)."""
+    dir: ``.git/hooks`` and a submodule's git dir anywhere under
+    ``.git/modules`` (GAP-2100). git names a submodule's git dir after its
+    path, so ``vendor/lib`` is ``.git/modules/vendor/lib``; a git dir holds
+    ``HEAD``. git never runs the samples and the agent does not load them.
+    Every other file under a ``.git`` folder is read with the same rule as the
+    rest of the plugin, because a local, zip or tarball plugin controls
+    ``.git`` too (GAP-2036)."""
     if git_parts is None or not name.endswith(".sample") or os.path.basename(root) != "hooks":
         return False
     git_dir = git_parts[:-1]
-    # .git itself, or .git/modules/<name>[/modules/<name>...] for submodules.
-    return len(git_dir) % 2 == 0 and all(part == "modules" for part in git_dir[::2])
+    if not git_dir:
+        return True  # .git/hooks
+    return (
+        len(git_dir) >= 2
+        and git_dir[0] == "modules"
+        and os.path.isfile(os.path.join(os.path.dirname(root), "HEAD"))
+    )
 
 
 def _starts_with_executable_magic(path: str) -> bool:
