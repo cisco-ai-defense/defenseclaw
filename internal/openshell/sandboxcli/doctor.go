@@ -239,7 +239,7 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		}
 	}
 	if a.Cfg != nil || managed {
-		rep.Checks = append(rep.Checks, a.tlsTrustCheck(ctx, managed), a.hostGitCheck(ctx, managed))
+		rep.Checks = append(rep.Checks, a.tlsTrustCheck(ctx, managed), a.hostGitCheck(ctx, managed, a.everyRunCopies(managed, string(rep.Driver))))
 	}
 	if managed && a.GOOS == "darwin" {
 		if rep.Driver == openshell.DriverVM || (st.managed != nil && rep.Driver != openshell.DriverDocker) {
@@ -385,12 +385,15 @@ func (a *App) containedSandboxCheck(ctx context.Context) *openshell.Check {
 		Fix: &openshell.Fix{Summary: strings.Join(ways, "; ")}}
 }
 
-// hostGitCheck fails when this computer has no git DefenseClaw can drive
-// (App.HostGit): a sandbox run copies its project into the sandbox, and
-// keeps the project's pre-session snapshot, with the host's git, so a run
-// fails before its first turn without it (GAP-1068). The fix says how to
-// install it, or on a managed computer whom to ask.
-func (a *App) hostGitCheck(ctx context.Context, managed bool) openshell.Check {
+// hostGitCheck checks the host git DefenseClaw drives (App.HostGit, git
+// 2.29 or newer). A copy-mode run copies its project into the sandbox with
+// it, so without it no copy-mode run starts (GAP-1068); a mount-mode run
+// needs it only for the pre-session snapshot of a git repository, and a
+// mount-mode run of any other folder works without it (GAP-2117). So the
+// row fails when every run here works on a copy (copyOnly) and warns
+// otherwise. The fix says how to install it, or on a managed computer whom
+// to ask.
+func (a *App) hostGitCheck(ctx context.Context, managed, copyOnly bool) openshell.Check {
 	v, err := a.HostGit(ctx)
 	if err == nil {
 		return openshell.Check{ID: CheckIDHostGit, Title: "Host Git", Status: openshell.StatusPass, Detail: "git " + v}
@@ -400,10 +403,31 @@ func (a *App) hostGitCheck(ctx context.Context, managed bool) openshell.Check {
 	if managed {
 		fix = "ask your administrator to install git 2.29 or newer on this computer"
 	}
-	return openshell.Check{ID: CheckIDHostGit, Title: "Host Git", Status: openshell.StatusFail,
-		Detail: "a sandbox run copies the project into the sandbox and keeps its pre-session snapshot with this computer's git, so no run starts without it: " +
-			sandboxapi.DisplayText(strings.TrimPrefix(err.Error(), "workspace: ")),
+	why := sandboxapi.DisplayText(strings.TrimPrefix(err.Error(), "workspace: "))
+	if copyOnly {
+		return openshell.Check{ID: CheckIDHostGit, Title: "Host Git", Status: openshell.StatusFail,
+			Detail: "every sandbox run here works on a copy of the project, which it makes and snapshots with this computer's git, so no run starts without it: " + why,
+			Fix:    &openshell.Fix{Summary: fix}}
+	}
+	return openshell.Check{ID: CheckIDHostGit, Title: "Host Git", Status: openshell.StatusWarn,
+		Detail: "a copy-mode run (--copy) and the pre-session snapshot of a git repository need this computer's git, so those runs do not start without it; " +
+			"a mount-mode run of a folder that is not a git repository works: " + why,
 		Fix: &openshell.Fix{Summary: fix}}
+}
+
+// everyRunCopies reports whether every sandbox run of this account works
+// on a copy of its project: on a managed computer (the floor makes the
+// workspace a copy), with openshell.workdir.mode copy, or on a compute
+// driver that mounts no host folders.
+func (a *App) everyRunCopies(managed bool, driver string) bool {
+	if managed {
+		return true
+	}
+	if a.Cfg != nil && a.Cfg.OpenShell.Workdir.Mode == config.OpenShellWorkdirCopy {
+		return true
+	}
+	d, known := openshell.LookupDriver(driver)
+	return known && !d.HostMounts
 }
 
 // unknownSandboxCheck fails while a sandbox may run unprotected and its

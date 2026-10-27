@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -67,32 +68,47 @@ func TestStatusAndDoctorNameAnUnseenSandbox(t *testing.T) {
 }
 
 // GAP-1068: the doctor said sandboxes were ready on a computer without git,
-// and the next run failed before its first turn: a run copies the project
-// into the sandbox, and keeps its pre-session snapshot, with the host's
-// git. The doctor now checks it, and says how to install it (on a managed
-// computer, whom to ask).
+// and the next run failed before its first turn: a copy-mode run copies the
+// project into the sandbox, and snapshots it, with the host's git. The
+// doctor now checks it, and says how to install it (on a managed computer,
+// whom to ask). GAP-2117: a mount-mode run of a folder that is not a git
+// repository works without git, so the row fails only where every run
+// works on a copy (a managed computer, openshell.workdir.mode copy, a
+// driver that mounts no host folders) and warns otherwise.
 func TestDoctorChecksTheHostGitEveryRunNeeds(t *testing.T) {
-	check := func(git func(context.Context) (string, error)) *openshell.Check {
+	check := func(git func(context.Context) (string, error), mode string) *openshell.Check {
 		t.Helper()
 		ta := newTestApp(t, "")
 		ta.HostDoctor = func(context.Context, *openshell.Doctor) *openshell.DoctorReport { return &openshell.DoctorReport{} }
 		ta.HostGit = git
+		ta.Cfg.OpenShell.Workdir.Mode = mode
 		return ta.runDoctor(bg).Get(CheckIDHostGit)
 	}
-	if c := check(func(context.Context) (string, error) { return "2.47.3", nil }); c == nil || c.Status != openshell.StatusPass || c.Detail != "git 2.47.3" {
+	if c := check(func(context.Context) (string, error) { return "2.47.3", nil }, ""); c == nil || c.Status != openshell.StatusPass || c.Detail != "git 2.47.3" {
 		t.Fatalf("host git row with git = %+v", c)
 	}
 	missing := func(context.Context) (string, error) {
 		return "", errors.New(`workspace: git is required on this machine: exec: "git": executable file not found in $PATH`)
 	}
-	c := check(missing)
+	c := check(missing, config.OpenShellWorkdirCopy)
 	if c == nil || c.Status != openshell.StatusFail || c.Fix == nil || !strings.Contains(c.Detail, "git is required on this machine") ||
 		!strings.Contains(c.Detail, "no run starts without it") || !strings.Contains(c.Fix.Summary, "sudo dnf install git") {
-		t.Fatalf("host git row without git = %+v", c)
+		t.Fatalf("host git row without git, workdir.mode copy = %+v", c)
+	}
+	c = check(missing, "")
+	if c == nil || c.Status != openshell.StatusWarn || c.Fix == nil || !strings.Contains(c.Detail, "git is required on this machine") ||
+		!strings.Contains(c.Detail, "a copy-mode run (--copy)") ||
+		!strings.Contains(c.Detail, "a mount-mode run of a folder that is not a git repository works") ||
+		strings.Contains(c.Detail, "no run starts without it") || !strings.Contains(c.Fix.Summary, "sudo dnf install git") {
+		t.Fatalf("host git row without git, mount mode = %+v", c)
 	}
 	ta := newTestApp(t, "")
 	ta.HostGit = missing
-	if c := ta.hostGitCheck(bg, true); c.Fix == nil || c.Fix.Summary != "ask your administrator to install git 2.29 or newer on this computer" {
+	if c := ta.hostGitCheck(bg, true, ta.everyRunCopies(true, string(openshell.DriverDocker))); c.Status != openshell.StatusFail ||
+		c.Fix == nil || c.Fix.Summary != "ask your administrator to install git 2.29 or newer on this computer" {
 		t.Fatalf("managed host git row without git = %+v", c)
+	}
+	if !ta.everyRunCopies(false, string(openshell.DriverVM)) || ta.everyRunCopies(false, string(openshell.DriverDocker)) || ta.everyRunCopies(false, "") {
+		t.Fatal("everyRunCopies: the vm driver mounts no host folders; docker and an unknown driver can mount")
 	}
 }
