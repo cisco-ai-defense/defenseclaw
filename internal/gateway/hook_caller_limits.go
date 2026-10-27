@@ -339,6 +339,15 @@ func yieldHookRunSlot(ctx context.Context) (resume func()) {
 	// The hook bounds its wait for a local decision; this one waits on a
 	// remote scanner, so it reports progress first (hook_progress.go).
 	reportHookProgress(ctx)
+	return waitWithoutHookRunSlot(ctx)
+}
+
+// waitWithoutHookRunSlot frees the caller's run slot while the request waits
+// on something that uses no gateway CPU (a remote scanner, a session start
+// that has not arrived yet, GAP-1822). Unlike pauseHookRunSlot, resume takes
+// a slot back before the request goes on, and gives up when the request has
+// ended.
+func waitWithoutHookRunSlot(ctx context.Context) (resume func()) {
 	slot := giveUpHookRunSlot(ctx)
 	if slot == nil {
 		return func() {}
