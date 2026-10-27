@@ -74,6 +74,23 @@ func TestR105StateRedirectSpellingsAreWrites(t *testing.T) {
 		{"quoted $HOME then double-quoted name rm", `rm -f "$HOME"/.defenseclaw/"config.yaml"`, true},
 		{"quoted $HOME then double-quoted project name", `printf x > "$HOME"/proj/"notes.txt"`, false},
 		{"quoted $HOME then double-quoted name read", `cat "$HOME"/.defenseclaw/"config.yaml"`, false},
+		{"aggregate redirect after 2>&1", "ls 2>&1 >& ~/.defenseclaw/config.yaml", true},
+		{"aggregate redirect before 2>&1", "ls >& ~/.defenseclaw/config.yaml 2>&1", true},
+		// GAP-2225: a home redirect target of a program with no operand grammar.
+		{"make redirect", "make > ~/.defenseclaw/config.yaml", true},
+		{"make append", "make >> ~/.defenseclaw/config.yaml", true},
+		{"make target redirect", "make test > ~/.defenseclaw/config.yaml", true},
+		{"make -C redirect", "make -C /tmp > ~/.defenseclaw/config.yaml", true},
+		{"make hook redirect", "make > ~/.defenseclaw/hooks/claude-code-hook.sh", true},
+		{"make $HOME redirect", "make > $HOME/.defenseclaw/config.yaml", true},
+		{"npm redirect", "npm test > ~/.defenseclaw/config.yaml", true},
+		{"go redirect", "go version > ~/.defenseclaw/config.yaml", true},
+		{"python script redirect", "python3 build.py > ~/.defenseclaw/config.yaml", true},
+		{"make build log", "make > build.log", false},
+		{"make home project redirect", "make test > ~/proj/out.txt", false},
+		{"npm $HOME project log", "npm test > $HOME/proj/test.log", false},
+		{"go home file", "go version > ~/go-version.txt", false},
+		{"make reads config", "make CONFIG=~/.defenseclaw/config.yaml > build.log", false},
 	}
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connectorName)

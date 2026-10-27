@@ -76,6 +76,13 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 					// the same HOME as ~, as for the arguments (GAP-1773).
 					words = append(words, redirect.Word)
 				}
+			case syntax.DplOut, syntax.DplIn:
+				// A descriptor copy or close (2>&1, >&-) names no file and
+				// no home word (GAP-2225).
+				if copied := projectPOSIXWord(redirect.Word); copied.Expands ||
+					copied.Value != "-" && strings.Trim(copied.Value, "0123456789") != "" {
+					return false
+				}
 			default:
 				return false
 			}

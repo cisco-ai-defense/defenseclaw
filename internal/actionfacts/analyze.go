@@ -18,6 +18,7 @@ package actionfacts
 
 import (
 	"path"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -227,7 +228,8 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			// exact; the rewrite is kept only when nothing else is dynamic.
 			home, _ := normalizeActiveHome(input.ActiveHome)
 			if rewrite, ok := rewriteTrustedPOSIXHomeTilde(command, home); ok {
-				if resolved := parse(rewrite.source); resolved.status == StatusComplete {
+				if resolved := parse(rewrite.source); resolved.status == StatusComplete ||
+					issuesNarrowed(resolved, parsed) {
 					parsed = resolved
 					// A Windows drive home (GAP-0912) keeps its rewritten
 					// spelling: the POSIX parse cannot resolve a drive path,
@@ -2213,4 +2215,21 @@ func safeToolName(value string) string {
 		return ""
 	}
 	return value
+}
+
+// issuesNarrowed reports a partial parse of the trusted-home rewrite whose
+// issues are a strict subset of the partial parse of the command as sent:
+// the rewrite only made the home words exact, and what else stays unknown
+// (a program with no operand grammar, as in `make > ~/f`) stays partial the
+// same way, so its static redirect targets keep their path facts (GAP-2225).
+func issuesNarrowed(resolved, original parseOutput) bool {
+	if resolved.status != StatusPartial || len(resolved.issues) >= len(original.issues) {
+		return false
+	}
+	for _, issue := range resolved.issues {
+		if !slices.Contains(original.issues, issue) {
+			return false
+		}
+	}
+	return true
 }
