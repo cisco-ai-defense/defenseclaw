@@ -1514,7 +1514,100 @@ func refreshHookFailModesLocked(hookDir string, mode func(connector string) stri
 			}
 		}
 	}
+	named, err := nameInstallInLegacyHardening(hookDir)
+	if err != nil {
+		return out, err
+	}
+	if named {
+		out.Scripts = append(out.Scripts, legacyHardeningScript)
+	}
 	return out, nil
+}
+
+// legacyHardeningScript is the shared shell helper file every released
+// per-user hook sources from its own folder.
+const legacyHardeningScript = "_hardening.sh"
+
+// legacyInstallWindowMarker opens the block nameInstallInLegacyHardening
+// appends; it makes the append happen once.
+const legacyInstallWindowMarker = "# defenseclaw-legacy-install-window-text-v1"
+
+// legacyInstallWindowText is the sentence this release's _hardening.sh
+// (defenseclaw_unreachable_next_step) gives while an install holds the lock.
+const legacyInstallWindowText = "DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done; try again in a moment, or run the installer again if it has stopped (`defenseclaw-gateway status` shows its state)"
+
+// nameInstallInLegacyHardening makes a released _hardening.sh that predates
+// the install-lock text (1.0.2 and older) name the install while the lock is
+// held (GAP-1899). Those hooks say "this account's gateway is not running;
+// run `defenseclaw-gateway start`" for every refused connection, also while
+// the installer has stopped the gateway on purpose. The appended block wraps
+// that release's own defenseclaw_unreachable_next_step: with the lock held
+// in the hook's data folder it prints this release's install sentence,
+// otherwise it answers as before. Only the text changes: the block, the
+// fail modes and the outage table stay the same. The gateway of this release
+// writes its own _hardening.sh when it starts, which drops the block. A
+// 1.0.3 or later file already names the install and is left as it is.
+// Remove with the 1.0.2 upgrade path.
+func nameInstallInLegacyHardening(hookDir string) (bool, error) {
+	path := filepath.Join(hookDir, legacyHardeningScript)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect hook %s: %w", legacyHardeningScript, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > hookScriptMaxBytes {
+		return false, nil
+	}
+	body, err := readConnectorStateFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read hook %s: %w", legacyHardeningScript, err)
+	}
+	text := string(body)
+	if strings.Contains(text, "being installed or upgraded") ||
+		!strings.Contains(text, "defenseclaw_unreachable_next_step()") {
+		return false, nil
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	text += legacyInstallWindowBlock(filepath.Dir(hookDir))
+	if err := atomicWriteFile(path, []byte(text), info.Mode().Perm()); err != nil {
+		return false, fmt.Errorf("update hook %s: %w", legacyHardeningScript, err)
+	}
+	return true, nil
+}
+
+// legacyInstallWindowBlock is the shell appended to a released
+// _hardening.sh. dataDir is the hook folder's data directory; the hook's own
+// DEFENSECLAW_HOME is read too, as that release reads it.
+func legacyInstallWindowBlock(dataDir string) string {
+	return legacyInstallWindowMarker + ` (GAP-1899): written by the upgrade's fail-mode refresh;
+# the new gateway replaces this file when it starts.
+if declare -F defenseclaw_unreachable_next_step >/dev/null 2>&1 && ! declare -F _dc_legacy_unreachable_next_step >/dev/null 2>&1; then
+  _dc_legacy_src="$(declare -f defenseclaw_unreachable_next_step)"
+  eval "_dc_legacy_unreachable_next_step ${_dc_legacy_src#defenseclaw_unreachable_next_step}"
+  unset _dc_legacy_src
+  defenseclaw_unreachable_next_step() {
+    local _dc_lock_data
+    if [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ]; then
+      case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+        1|true|TRUE|yes|YES) ;;
+        *)
+          for _dc_lock_data in ` + shellSingleQuote(dataDir) + ` "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"; do
+            if [ -e "${_dc_lock_data}/.install.lock" ] || [ -L "${_dc_lock_data}/.install.lock" ]; then
+              printf '%s' ` + shellSingleQuote(legacyInstallWindowText) + `
+              return 0
+            fi
+          done
+          ;;
+      esac
+    fi
+    _dc_legacy_unreachable_next_step "$@"
+  }
+fi
+`
 }
 
 // connectorHookAdapters are the Windows PowerShell adapters a per-user Cursor
