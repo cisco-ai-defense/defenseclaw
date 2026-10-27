@@ -1752,3 +1752,46 @@ describe('saved installer protection matches the rule packs (GAP-1922)', () => {
     }
   });
 });
+
+// GAP-2289: the setup guardrail connector list matches the CLI's choices per
+// OS: the proxy connectors are refused on native Windows (platform_support.py).
+describe('setup guardrail --connector choices match the CLI (GAP-2289)', () => {
+  it('lists the hook connectors everywhere and openclaw/zeptoclaw only on Linux and macOS', () => {
+    const setup = source('cli/defenseclaw/commands/cmd_setup.py');
+    const fallback = setup.split('_CONNECTOR_NAMES_FALLBACK = [')[1]?.split(']')[0] ?? '';
+    const names = [...fallback.matchAll(/"([a-z]+)"/g)].map((m) => m[1]).sort();
+    assert.match(setup, /type=_PlatformConnectorChoice\(_CONNECTOR_NAMES, case_sensitive=False\)/);
+    const support = source('cli/defenseclaw/platform_support.py');
+    const windows = support.split('WINDOWS_CONNECTOR_SUPPORT')[1] ?? '';
+    const refused = [...windows.matchAll(/"([a-z]+)": ConnectorPlatformSupport\(\s*UNSUPPORTED,/g)].map((m) => m[1]).sort();
+    assert.deepEqual(refused, ['openclaw', 'zeptoclaw']);
+    const hooks = names.filter((n) => !refused.includes(n));
+    const text = page('guardrail/index.mdx');
+    const row = text.split('**Which agent framework are you using?**')[1]?.split('| **Enable guardrail?**')[0] ?? '';
+    const listed = row.split('; on Linux and macOS also')[0];
+    assert.deepEqual([...listed.matchAll(/`([a-z]+)`/g)].map((m) => m[1]).filter((n) => n !== 'connector' && n !== 'agent').sort(), hooks.sort());
+    assert.ok(row.includes('on Linux and macOS also `openclaw` and `zeptoclaw`. Native Windows refuses those two'), 'connector row lost the per-OS split');
+    assert.ok(text.includes('amp or kiro; on Linux and macOS also openclaw or zeptoclaw (native Windows refuses those two: they need the guardrail proxy)'), 'flag table lost the per-OS split');
+    assert.ok(!text.includes('`kiro`, `openclaw`, `zeptoclaw`.'), 'old unqualified list is back');
+  });
+});
+
+// GAP-2291: an in-page link on a connector page points at a heading of that page.
+describe('connector pages have no dead in-page anchors (GAP-2291)', () => {
+  it('resolves every [text](#anchor) link to a heading on the same page', () => {
+    const dir = join(site, 'content/docs/connectors');
+    const dead: string[] = [];
+    for (const file of docsPages(dir)) {
+      const raw = readFileSync(file, 'utf8');
+      const ids = new Set<string>();
+      for (const m of raw.matchAll(/^#{1,6} (.+?)\s*$/gm)) {
+        const custom = m[1].match(/\[#([a-z0-9-]+)\]$/);
+        ids.add(custom ? custom[1] : anchor(m[1].replace(/`/g, '')));
+      }
+      for (const m of raw.matchAll(/\]\(#([a-z0-9-]+)\)/g)) {
+        if (!ids.has(m[1])) dead.push(`${file.split('/content/docs/')[1]}#${m[1]}`);
+      }
+    }
+    assert.deepEqual(dead, []);
+  });
+});

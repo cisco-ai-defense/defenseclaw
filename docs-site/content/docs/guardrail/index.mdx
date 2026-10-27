@@ -130,7 +130,7 @@ Each row is one wizard prompt, with the default that Enter selects and the flag 
 
 | Prompt (default) | Flag, or how to script it |
 | --- | --- |
-| **Which agent framework are you using?** *(first setup only; suggests an agent it finds)* | `--connector` / `--agent`: `claudecode`, `codex`, `cursor`, `devin`, `copilot`, `hermes`, `antigravity`, `opencode`, `amp`, `kiro`, `openclaw`, `zeptoclaw`. |
+| **Which agent framework are you using?** *(first setup only; suggests an agent it finds)* | `--connector` / `--agent`: `claudecode`, `codex`, `cursor`, `devin`, `copilot`, `hermes`, `antigravity`, `opencode`, `amp`, `kiro`; on Linux and macOS also `openclaw` and `zeptoclaw`. Native Windows refuses those two (they need the guardrail proxy, which Windows does not run) and names the reason. |
 | **Enable guardrail?** *(Y)* | Implied by running setup. `--disable` turns the guardrail off. |
 | **Select mode** *(observe on first setup, then the current mode)* | `--mode observe\|action`. `observe` records; `action` enforces. |
 | **Select hook fail mode** *(current setting; asked on first setup or when the mode changes)* | No flag on `setup guardrail`. Use `defenseclaw setup <connector> --fail-mode open\|closed`, `defenseclaw init --fail-mode`, or `defenseclaw guardrail fail-mode open\|closed` afterwards. |
@@ -326,7 +326,7 @@ The table follows `defenseclaw setup guardrail --help`.
   type={{
     "--connector / --agent": {
       type: "connector name",
-      description: "Agent connector to configure: claudecode, codex, cursor, devin, copilot, hermes, antigravity, opencode, amp, kiro, openclaw or zeptoclaw. It decides how traffic is intercepted, how tool calls are inspected and which subprocess policy applies.",
+      description: "Agent connector to configure: claudecode, codex, cursor, devin, copilot, hermes, antigravity, opencode, amp or kiro; on Linux and macOS also openclaw or zeptoclaw (native Windows refuses those two: they need the guardrail proxy). It decides how traffic is intercepted, how tool calls are inspected and which subprocess policy applies.",
     },
     "--mode": {
       type: "observe|action",
