@@ -23972,6 +23972,32 @@ function Test-DefenseClawGatewayReady {
     return ([int]$probe.exit_code -eq 0)
 }
 
+function Get-DefenseClawGuardianDiagnosticAccountLabel {
+    # A Windows guardian row carries only the account's SID: name it as the
+    # other Windows notices do, "DOMAIN\user (SID)", and keep the bare SID
+    # when it does not resolve (GAP-2290). One lookup per SID per diagnostic.
+    param(
+        [Parameter(Mandatory)][string]$Sid,
+        [Parameter(Mandatory)][hashtable]$Cache
+    )
+    if ($Cache.ContainsKey($Sid)) {
+        return [string]$Cache[$Sid]
+    }
+    $label = $Sid
+    try {
+        $account = [Security.Principal.SecurityIdentifier]::new($Sid).Translate(
+            [Security.Principal.NTAccount]).Value
+        if (-not [string]::IsNullOrWhiteSpace($account)) {
+            $label = "$account ($Sid)"
+        }
+    }
+    catch {
+        $label = $Sid
+    }
+    $Cache[$Sid] = $label
+    return $label
+}
+
 function Get-DefenseClawGuardianVerificationFailureDiagnostic {
     param([Parameter(Mandatory)]$Probe)
 
@@ -24007,6 +24033,7 @@ function Get-DefenseClawGuardianVerificationFailureDiagnostic {
 
     $issues = [Collections.Generic.List[string]]::new()
     $pendingCount = 0
+    $accountLabels = @{}
     $resultsProperty = $report.PSObject.Properties['results']
     if ($null -ne $resultsProperty) {
         foreach ($row in @($resultsProperty.Value)) {
@@ -24045,7 +24072,13 @@ function Get-DefenseClawGuardianVerificationFailureDiagnostic {
                     -not [string]::IsNullOrWhiteSpace(
                         [string]$identityProperty.Value
                     )) {
-                    $label += "@$([string]$identityProperty.Value)"
+                    $identity = [string]$identityProperty.Value
+                    if ($identityName -eq 'sid') {
+                        $identity = Get-DefenseClawGuardianDiagnosticAccountLabel `
+                            -Sid $identity `
+                            -Cache $accountLabels
+                    }
+                    $label += "@$identity"
                     break
                 }
             }

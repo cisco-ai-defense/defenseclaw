@@ -2257,6 +2257,14 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     # GAP-1940: pending rows of signed-out accounts are counted, not failures.
     assert "PSObject.Properties['pending']" in guardian_failure
     assert "are pending " in guardian_failure
+    # GAP-2290: a row's SID is named as its account, "DOMAIN\user (SID)".
+    assert "Get-DefenseClawGuardianDiagnosticAccountLabel" in guardian_failure
+    account_label = module[
+        module.index("function Get-DefenseClawGuardianDiagnosticAccountLabel") :
+        module.index("function Get-DefenseClawGuardianVerificationFailureDiagnostic")
+    ]
+    assert "Translate(" in account_label
+    assert '"$account ($Sid)"' in account_label
     assert "ready = $ready" in guardian_probe
     assert "return [bool]$readiness.ready" in guardian_boolean
     assert "Get-DefenseClawGuardianReadinessProbe `" in deployment_assertion

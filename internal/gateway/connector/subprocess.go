@@ -1829,6 +1829,16 @@ func closeBakedHookFailMode(path string, opens *strings.Replacer) (bool, error) 
 
 const copilotUpgradeEarlyMarker = "_DC_COPILOT_UPGRADE_EARLY=1"
 
+// hookBodyIsDisabledTombstone reports a hook script whose line-2 marker is
+// the v0 one teardown writes (writeDisabledHookTombstone and the failed-setup
+// placeholder): it calls no gateway and has no failure paths to close, so a
+// refresh leaves it as it is (GAP-2282: an upgrade with a torn-down Copilot
+// hook stopped with "unrecognized released hook layout").
+func hookBodyIsDisabledTombstone(body string) bool {
+	lines := strings.SplitN(body, "\n", 3)
+	return len(lines) >= 2 && strings.HasPrefix(lines[1], "# defenseclaw-managed-hook v0 ")
+}
+
 // closeReleasedCopilotEarlyFailures closes the paths of a 0.8.10 or 1.0.0 to
 // 1.0.3 per-user copilot-hook.sh that run before its failure functions: a
 // missing helper, token or payload exited 0, so Copilot ran the tool even
@@ -1839,7 +1849,7 @@ const copilotUpgradeEarlyMarker = "_DC_COPILOT_UPGRADE_EARLY=1"
 // (copilot_hook_failure) or an already closed one is left as it is.
 func closeReleasedCopilotEarlyFailures(body string) (string, error) {
 	if strings.Contains(body, copilotUpgradeEarlyMarker) || strings.Contains(body, "copilot_hook_failure()") ||
-		!strings.Contains(body, "# defenseclaw-managed-hook v") {
+		!strings.Contains(body, "# defenseclaw-managed-hook v") || hookBodyIsDisabledTombstone(body) {
 		return body, nil
 	}
 	const start = "set -euo pipefail\n"
@@ -1856,6 +1866,12 @@ func closeReleasedCopilotEarlyFailures(body string) (string, error) {
 	prefix = strings.Replace(prefix,
 		"defenseclaw_handle_missing_token copilot copilot-hook \"copilot tool\"",
 		"(defenseclaw_handle_missing_token copilot copilot-hook \"copilot tool\") || true\n  _dc_copilot_upgrade_early_failure", 1)
+	// Any exit while the marker is armed is an early failure, whatever its
+	// status: macOS /bin/bash 3.2 runs the EXIT trap with $? 0 when a
+	// sourced helper is missing (GAP-2141), so the trap cannot test the
+	// status. The denial disarms the marker first, so its own exit 0 does
+	// not print a second object.
+	//
 	// The released scripts read --event only after these exits, so the
 	// preamble reads it from the script's own arguments. A hook bound to no
 	// event (0.8.10) prints one object with both denies, as copilot_deny does.
@@ -1863,6 +1879,7 @@ func closeReleasedCopilotEarlyFailures(body string) (string, error) {
 _DC_COPILOT_UPGRADE_EVENT=""
 if [ "$#" -eq 2 ] && [ "$1" = "--event" ]; then _DC_COPILOT_UPGRADE_EVENT="$2"; fi
 _dc_copilot_upgrade_early_failure() {
+  _DC_COPILOT_UPGRADE_EARLY=0
   case "$_DC_COPILOT_UPGRADE_EVENT" in
     preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;
     permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
@@ -1871,12 +1888,12 @@ _dc_copilot_upgrade_early_failure() {
   esac
   exit 0
 }
-trap '_dc_upgrade_rc=$?; if [ "${_DC_COPILOT_UPGRADE_EARLY:-0}" = 1 ] && [ "$_dc_upgrade_rc" -ne 0 ]; then _dc_copilot_upgrade_early_failure; fi' EXIT
+trap 'if [ "${_DC_COPILOT_UPGRADE_EARLY:-0}" = 1 ]; then _dc_copilot_upgrade_early_failure; fi' EXIT
 `
 	prefix = strings.Replace(prefix, start, start+preamble, 1)
 	// Hardening installs its own cleanup trap: keep it and re-arm the
 	// native denial until the first gateway request has been prepared.
-	cleanup := "trap '_dc_upgrade_rc=$?; _defenseclaw_hook_cleanup; if [ \"${_DC_COPILOT_UPGRADE_EARLY:-0}\" = 1 ] && [ \"$_dc_upgrade_rc\" -ne 0 ]; then _dc_copilot_upgrade_early_failure; fi' EXIT"
+	cleanup := "trap '_defenseclaw_hook_cleanup; if [ \"${_DC_COPILOT_UPGRADE_EARLY:-0}\" = 1 ]; then _dc_copilot_upgrade_early_failure; fi' EXIT"
 	if strings.Contains(prefix, "if ! defenseclaw_harden_env; then") {
 		anchor := "fi\n\n# Copilot documents timeout failures"
 		if !strings.Contains(prefix, anchor) {

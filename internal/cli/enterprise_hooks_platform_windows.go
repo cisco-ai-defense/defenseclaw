@@ -88,6 +88,19 @@ var enterpriseHookSignedOutAccount = func(row enterpriseHookReconcileRow) string
 	return enterpriseHookWindowsAccountLabel(row)
 }
 
+// enterpriseHookNoticeAccount names a guardian row's account in a notice
+// as the other Windows notices do, "user (SID)": a SID-only row would name
+// the account by SID alone (GAP-0929 review).
+func enterpriseHookNoticeAccount(row enterpriseHookReconcileRow) string {
+	return enterpriseHookWindowsAccountLabel(row)
+}
+
+// enterpriseHookTargetIssueAccount names a failing or drifted target's
+// account as "user (SID)" (GAP-2290).
+func enterpriseHookTargetIssueAccount(row enterpriseHookReconcileRow) string {
+	return enterpriseHookWindowsAccountLabel(row)
+}
+
 // enterpriseHookWindowsAccountLabel is "user (SID)", looking the account up
 // when the row carries only its SID.
 func enterpriseHookWindowsAccountLabel(row enterpriseHookReconcileRow) string {
