@@ -13449,6 +13449,10 @@ def _remove_connector(
             )
             return False
 
+    # The gateway applies a connector-set change on its config reload, but a
+    # new primary (guardrail.connector, claw.mode) waits for a restart.
+    previous_primary = (str(getattr(gc, "connector", "") or ""), str(getattr(cfg.claw, "mode", "") or ""))
+
     # Drop from the multi-connector map (case-insensitive key match).
     if getattr(gc, "connectors", None):
         for key in [k for k in gc.connectors if k.lower() == match.lower()]:
@@ -13514,7 +13518,9 @@ def _remove_connector(
                 _rollback_failed_connector_application(app, setup_snapshot, exc)
     else:
         # Suppress the group's auto-restart result callback so --no-restart
-        # is honored; warn that teardown is deferred until the next boot.
+        # is honored. A running gateway tears a removed non-primary connector
+        # down on its config reload, within seconds; a new primary waits for a
+        # restart, and a stopped gateway does it at its next start (GAP-2125).
         ctx = click.get_current_context(silent=True)
         if ctx is not None:
             ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
@@ -13523,6 +13529,12 @@ def _remove_connector(
             click.echo(
                 "  --no-restart: config updated; restart defenseclaw-gateway so it drops "
                 "the removed connector's DefenseClaw state."
+            )
+        elif previous_primary == (str(gc.connector or ""), str(cfg.claw.mode or "")):
+            click.echo(
+                "  --no-restart: config updated. A running defenseclaw-gateway removes the "
+                "connector's hooks when it reloads the config (within seconds); a stopped "
+                "one removes them when it next starts."
             )
         else:
             click.echo(
