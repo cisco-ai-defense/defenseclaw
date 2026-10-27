@@ -2668,6 +2668,7 @@ func trustedFallbackLanes(
 	findings []RuleFinding,
 	facts actionfacts.Facts,
 ) ([]RuleFinding, trustedActionTelemetry) {
+	legacyFindings := append([]RuleFinding(nil), findings...)
 	findings = appendTrustedFIFOListenerBindShellFinding(
 		findings,
 		generation,
@@ -2717,7 +2718,41 @@ func trustedFallbackLanes(
 		facts,
 		request.EnforcementCapable,
 	)
+	// The exact body of a pwsh -Command call runs as written whatever left
+	// the whole action partial (a profile, a runtime-expanded redirect
+	// target), so a fallback that body proves, and that commands around it
+	// cannot undo, stands for the call: `pwsh -Command "iwr ... | iex"`
+	// blocks as the -NoProfile form does (GAP-0033).
+	for _, body := range actionfacts.PowerShellCommandBodyActions(request.Input, facts) {
+		bodyFindings := filterExactFallbackFindings(
+			powerShellBodyMonotoneFindings(legacyFindings),
+			request.Input,
+			body,
+			request.EnforcementCapable,
+		)
+		findings = withSequenceProvenFindings(findings, bodyFindings)
+	}
 	return findings, laneTelemetry
+}
+
+// powerShellBodyMonotoneFallbacks are the exact fallback rules whose proof
+// reads only a PowerShell body's own commands and the data flow between them.
+var powerShellBodyMonotoneFallbacks = map[string]struct{}{
+	"CMD-WIN-IWR-IEX": {},
+}
+
+// powerShellBodyMonotoneFindings keeps the findings whose rule is in
+// powerShellBodyMonotoneFallbacks. Only those are judged on a body, so
+// another rule's legacy finding (strict CMD-PIPE-CURL) cannot stand in for
+// them there.
+func powerShellBodyMonotoneFindings(findings []RuleFinding) []RuleFinding {
+	kept := make([]RuleFinding, 0, len(findings))
+	for _, finding := range findings {
+		if _, ok := powerShellBodyMonotoneFallbacks[finding.RuleID]; ok {
+			kept = append(kept, finding)
+		}
+	}
+	return kept
 }
 
 // neutralizeTrustedSecretStoreValue keeps credential detectors focused on

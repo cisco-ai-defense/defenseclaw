@@ -543,12 +543,14 @@ defenseclaw config get guardrail.block_at --effective
 ```
 
 ```text
-HIGH
 (source: config:guardrail.block_at)
+HIGH
 ```
 
-When nothing sets the threshold, the same command prints the pack's level and
-names the pack, for example `(source: pack-default:default)`.
+The source line comes first and goes to standard error, so `$(...)` or a pipe
+gets only the value. When nothing sets the threshold, the same command prints
+the pack's level and names the pack, for example
+`(source: pack-default:default)`.
 
 ### Admission
 

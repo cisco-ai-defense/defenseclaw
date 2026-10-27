@@ -235,6 +235,16 @@ With `openshell.enabled: false` the subsystem is absent.
 `/health` and `/status` carry a `policy` object that identifies the policy the
 gateway is enforcing. It is omitted on a Secure Client device.
 
+On a managed standalone computer `/health` gives the object only to an
+administrator: root or the gateway's own account on the hook socket (Linux and
+macOS), or a request with the gateway token. A plain
+`curl http://127.0.0.1:18970/health`, even under `sudo`, has no `policy` key,
+and neither has the hook socket's answer to an ordinary account. Read it from
+the hook socket as root
+(`sudo curl -s --unix-socket /run/defenseclaw-hook/hook.sock http://localhost/health`
+on Linux), from `/status` (which needs the gateway token), or as the `policy:`
+line of `enterprise linux|macos|windows status`.
+
 ```json title="GET /health (policy object)"
 {
   "effective_digest": "sha256:ad4166a5811d1b19edf47054d9b81c0ae317e19f05a0ec5cfa16621755f13813",

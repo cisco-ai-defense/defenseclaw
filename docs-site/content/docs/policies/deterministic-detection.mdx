@@ -87,8 +87,13 @@ sources, not `internal/gateway/rules_catalog_generated.go`.
 `CMD-PIPE-CURL` is off in the default and permissive profiles, so a command such
 as `curl ... | bash` is not recorded as a finding there. Many legitimate
 installers use that pattern. The strict profile enables the rule at `CRITICAL`.
-`wget ... | sh` (`CMD-PIPE-WGET`) and PowerShell `iwr ... | iex`
-(`CMD-WIN-IWR-IEX`) are still reported in every profile.
+`wget ... | sh` (`CMD-PIPE-WGET`) is still reported in every profile, and so is
+PowerShell `iwr ... | iex` or `irm ... | iex` (`CMD-WIN-IWR-IEX`) when PowerShell
+runs it: a PowerShell command on Windows, or `pwsh -Command "..."` or
+`powershell -Command "..."` on any OS, with or without `-NoProfile` (a profile
+runs before the command, so it cannot stop it). Typed into bash or sh on Linux
+or macOS, `iwr` and `iex` are not
+commands, so there is no finding for them.
 
 To get the finding for `curl` pipelines, switch to the strict pack with
 `defenseclaw guardrail use-pack strict`, or add your own rule in a pack of your
