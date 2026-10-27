@@ -2637,10 +2637,10 @@ func stateTreeEntryChanged(
 // `find ~/.defenseclaw -name '*.log' -mtime +7 -delete`), not the tree it
 // starts from (GAP-2075). It holds only for a find from the state root
 // (state ""), whose tests are all joined by AND, with at least one -name or
-// -iname and every such pattern matching no protected name. A start at a
-// protected tree, a time, size or path test alone, and an OR or a negation
-// never exempt, because each can still reach config.yaml, a hook or the
-// saved installer.
+// -iname and every such pattern a cleanup pattern (findPatternIsCleanupOnly).
+// A start at a protected tree, a time, size or path test alone, and an OR
+// or a negation never exempt, because each can still reach config.yaml, a
+// hook, a rule pack file or the saved installer.
 func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state string) bool {
 	if state != "" || !strings.EqualFold(command.Program, "find") || len(command.Argv) < 2 {
 		return false
@@ -2656,7 +2656,7 @@ func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state stri
 				return false
 			}
 			index++
-			if findPatternReachesProtectedState(command.Argv[index], argument == "-iname") {
+			if !findPatternIsCleanupOnly(command.Argv[index], argument == "-iname") {
 				return false
 			}
 			named = true
@@ -2665,9 +2665,10 @@ func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state stri
 	return named
 }
 
-// protectedStateNameSamples are the names a file of the active state can
-// have: the root's own files, the tree names and the files the trees hold
-// (hooks, the saved installer and its digest, policies, receipts).
+// protectedStateNameSamples are names a file of the active state can have:
+// the root's own files, the tree names and files the trees hold (hooks, the
+// saved installer and its digest, policies, receipts). A cleanup pattern
+// that matches one of them is not exempt.
 var protectedStateNameSamples = []string{
 	".env", "config.yaml", "confidence_policy.yaml", "guardrail_runtime.json",
 	"device.key", "picked_connector", "custom-providers.json", "audit.db",
@@ -2680,9 +2681,31 @@ var protectedStateNameSamples = []string{
 	"defenseclaw-hook-post", "default.yaml", "rules.yml", "policy.rego", "data.json",
 }
 
-func findPatternReachesProtectedState(pattern string, fold bool) bool {
+// cleanupNameMarkers are the file kinds a state-root cleanup removes: logs,
+// temporary files, backups, rotated or compressed copies and event logs.
+// No hook, rule pack, config, receipt or installer file has one, while a
+// hand list of protected names can never be complete (every connector adds
+// its own hook names and every pack its own rule files).
+var cleanupNameMarkers = []string{".log", ".tmp", ".bak", ".old", ".gz", ".jsonl"}
+
+// findPatternIsCleanupOnly reports a -name/-iname pattern that selects only
+// cleanup files: it carries a cleanup marker as literal text and matches
+// none of the sample protected names. Every other pattern (a hook name,
+// codex*, *.yaml, *) can reach protected state and is not exempt (GAP-2075).
+func findPatternIsCleanupOnly(pattern string, fold bool) bool {
+	lower := strings.ToLower(pattern)
 	if fold {
-		pattern = strings.ToLower(pattern)
+		pattern = lower
+	}
+	marked := false
+	for _, marker := range cleanupNameMarkers {
+		if strings.Contains(lower, marker) {
+			marked = true
+			break
+		}
+	}
+	if !marked {
+		return false
 	}
 	for _, name := range protectedStateNameSamples {
 		if fold {
@@ -2690,10 +2713,10 @@ func findPatternReachesProtectedState(pattern string, fold bool) bool {
 		}
 		matched, err := path.Match(pattern, name)
 		if err != nil || matched {
-			return true
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // chmodAddsGroupOrOtherWrite reports a chmod whose mode gives group or

@@ -222,9 +222,21 @@ func TestR105GAP2075FindDeleteOfProtectedStateNames(t *testing.T) {
 		{"find root iname yaml", "find ~/.defenseclaw -iname '*.YAML' -delete", true, ""},
 		{"find root log or config", "find ~/.defenseclaw -name '*.log' -o -name config.yaml -delete", true, ""},
 		{"find root not log", "find ~/.defenseclaw -not -name '*.log' -delete", true, ""},
+		// Protected names no hand list holds: connector hooks and rule
+		// pack files (pod check 1).
+		{"find root codex hook", "find ~/.defenseclaw -name codex-hook.sh -delete", true, ""},
+		{"find root codex star", "find ~/.defenseclaw -name 'codex*' -delete", true, ""},
+		{"find root copilot hook", "find ~/.defenseclaw -name 'copilot-hook.*' -delete", true, ""},
+		{"find root iname codex hook", "find ~/.defenseclaw -iname 'CODEX-HOOK.SH' -delete", true, ""},
+		{"find root cognitive pack", "find ~/.defenseclaw -name cognitive.yaml -delete", true, ""},
+		{"find root suppressions", "find ~/.defenseclaw -name suppressions.yaml -delete", true, ""},
+		{"find root any txt", "find ~/.defenseclaw -type f -name '*.txt' -delete", true, ""},
 		// Log cleanup from the root stays allowed with no state finding.
 		{"find root log cleanup", "find ~/.defenseclaw -name '*.log' -mtime +7 -delete", false, ""},
 		{"find root tmp cleanup", "find ~/.defenseclaw -type f -name '*.tmp' -delete", false, ""},
+		{"find root rotated logs", "find ~/.defenseclaw -name 'gateway.log.*' -delete", false, ""},
+		{"find root bak cleanup", "find ~/.defenseclaw -name '*.bak' -delete", false, ""},
+		{"find root jsonl cleanup", "find ~/.defenseclaw -name '*.jsonl' -mtime +30 -delete", false, ""},
 		{"find logs tree", "find ~/.defenseclaw/logs -mtime +7 -delete", false, ""},
 	}
 	for _, mode := range []string{"observe", "action"} {
