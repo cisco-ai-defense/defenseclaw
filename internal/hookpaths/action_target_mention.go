@@ -375,13 +375,43 @@ func actionEvaluatesRuntimeNames(file *syntax.File, uncalled map[*syntax.FuncDec
 			// A static word that holds a command substitution is code
 			// for whatever evaluates it: zsh print -P with promptsubst,
 			// ${(e)...}, zstyle -e, a later eval (RV5-1).
-			if value, fixed := StaticWord(node, ""); fixed && (strings.Contains(value, "$(") || strings.Contains(value, "`")) {
+			if value, fixed := StaticWord(node, ""); fixed && (strings.Contains(value, "$(") || strings.Contains(value, "`") ||
+				actionZshQualifierText.MatchString(value)) {
+				found = true
+			}
+			// zsh $~name, ${~name} and ${(~)name} glob a value at run
+			// time, and a qualifier in it can run any function (RV6-1).
+			if actionZshGlobSubstWord(node) {
 				found = true
 			}
 		case *syntax.DeclClause:
 			found = node.Variant != nil && node.Variant.Value == "nameref"
 		case *syntax.CallExpr:
 			found = actionCallEvaluatesNames(node.Args)
+		}
+		return !found
+	})
+	return found
+}
+
+// actionZshQualifierText matches a string that holds a zsh glob qualifier
+// that runs code for every file: a pattern followed by (e:code:),
+// (e'code'), (+name) or a longer qualifier list such as (.e:code:)
+// (RV6-1). Prose such as "see (e.g. x)" has a space before the paren.
+var actionZshQualifierText = regexp.MustCompile(`[^\s(]\([^()\s]*(?:e[^A-Za-z0-9_\s()]|\+[A-Za-z_])`)
+
+// actionZshGlobSubstWord reports a word with a zsh glob-subst expansion:
+// $~name, ${~name} or a ${(...~...)name} flag list. The bash parser reads
+// $~ as literal text, so the raw literal is checked as well (RV6-1).
+func actionZshGlobSubstWord(word *syntax.Word) bool {
+	found := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		if lit, ok := node.(*syntax.Lit); ok && (strings.Contains(lit.Value, "$~") || strings.Contains(lit.Value, "${~") ||
+			strings.Contains(lit.Value, "${(")) {
+			found = true
 		}
 		return !found
 	})

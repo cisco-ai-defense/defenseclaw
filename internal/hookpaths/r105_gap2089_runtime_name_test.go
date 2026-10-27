@@ -41,6 +41,13 @@ func TestActionRuntimeEvaluatedNameKeepsFunctionBodyChecked(t *testing.T) {
 		`print -rP -- 'x'`,
 		`zstyle -e ':x:*' y 'reply=(f""oo)'`,
 		`PROMPT='$(f""oo)'`,
+		// A zsh glob-subst expansion runs the qualifier held in a
+		// string (RV6-1).
+		`p='*(e:f""oo:)'; print -l $~p`,
+		`p='*(e:f""oo:)'; ls $~p`,
+		`p='*(+f""oo)'; ls $~p`,
+		`p='*(e:f""oo:)'; ls ${~p}`,
+		`p='*(.e:f""oo:)'; print -l ${(~)p}`,
 	} {
 		command := body + call
 		if got := ActionCommandDecision(command, cwd, home); got == "" {
@@ -54,6 +61,8 @@ func TestActionRuntimeEvaluatedNameKeepsFunctionBodyChecked(t *testing.T) {
 		`for f in a b; do echo "$f"; done`,
 		`print -l -- a b`,
 		`print -r -- done`,
+		`p='notes (draft).md'; echo "$p"`,
+		`ls *.go; echo "see (e.g. README)"`,
 	} {
 		if got := ActionCommandDecision(body+call, cwd, home); got != "" {
 			t.Errorf("ActionCommandDecision(%q) = %q, want allow", body+call, got)
