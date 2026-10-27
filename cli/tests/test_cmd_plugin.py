@@ -417,6 +417,35 @@ class TestPluginInstall(PluginCommandTestBase):
         self.assertEqual(self.invoke(["remove", "mkt"]).exit_code, 1)
         self.assertTrue(os.path.isdir(os.path.join(cache, "mkt")))
 
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_gap0017_a_copied_plugin_with_skills_is_one_plugin_and_remove_finds_it(self, mock_scan):
+        # GAP-0017: <cache>/<name>/skills/helper was read as a
+        # <marketplace>/<plugin>/<version> plugin (skills@<name>), so plugin
+        # list showed it and remove skipped the copy as a marketplace folder.
+        mock_scan.return_value = self._clean_result()
+        cache = os.path.join(self.tmp_dir, "claude-plugins", "cache")
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [cache]  # type: ignore[method-assign]
+        src = self._create_plugin_dir("r105sub")
+        os.makedirs(os.path.join(src, "skills", "helper"))
+        with open(os.path.join(src, "skills", "helper", "SKILL.md"), "w") as fh:
+            fh.write("---\nname: helper\ndescription: Format notes.\n---\nFormat notes.\n")
+        os.makedirs(os.path.join(cache, "mkt", "other", "1.0.0"))
+
+        self.assertEqual(self._invoke_install(["install", src, "--connector", "claudecode"]).exit_code, 0)
+        from defenseclaw.inventory.plugin_directories import discover_plugin_directories
+
+        found = [entry.id for entry in discover_plugin_directories(cache, connector="claudecode")]
+        self.assertNotIn("skills@r105sub", found)
+        self.assertIn("other@mkt", found)
+        listed = self.invoke(["list", "--connector", "claudecode", "--json"])
+        self.assertNotIn("skills@r105sub", listed.output)
+        removed = self.invoke(["remove", "r105sub", "--connector", "claudecode"])
+        self.assertEqual(removed.exit_code, 0, removed.output)
+        self.assertFalse(os.path.exists(os.path.join(cache, "r105sub")))
+        self.assertTrue(os.path.isdir(os.path.join(cache, "mkt", "other", "1.0.0")))
+
     def test_remove_deletes_legacy_flat_codex_cache_copy(self):
         # Older installs could leave an invisible flat cache copy. Both bare
         # and scoped removal must still find it after new installs refuse it.

@@ -890,7 +890,7 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 		// <marketplace>/<plugin>/<version>; plugin.json is optional. Admit
 		// exactly that directory and never let a nested dependency manifest
 		// manufacture a second plugin identity.
-		if depth == 3 {
+		if depth == 3 || depth == 1 && isCachePluginCopy(path) {
 			out = append(out, path)
 			return filepath.SkipDir
 		}

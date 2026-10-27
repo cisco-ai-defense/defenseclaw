@@ -39,6 +39,7 @@ from defenseclaw.file_permissions import (
     reject_reparse_path,
 )
 from defenseclaw.inventory.plugin_identity import (
+    MANIFEST_FILES,
     AmbiguousPluginIdentityError,
     PluginIdentityError,
     canonical_plugin_id,
@@ -1161,6 +1162,15 @@ def _claude_enabled(
     return default_enabled if isinstance(default_enabled, bool) else True
 
 
+def _is_cache_plugin_copy(path: str) -> bool:
+    """A folder directly in a plugin cache that holds a plugin manifest."""
+    for rel in MANIFEST_FILES:
+        candidate = os.path.join(path, *rel.split("/"))
+        if os.path.isfile(candidate) and not is_symlink(candidate):
+            return True
+    return False
+
+
 def _discover_claude_cache(
     cache_root: str,
     *,
@@ -1197,6 +1207,13 @@ def _discover_claude_cache(
             continue
 
         parts = Path(relative).parts
+        if len(parts) == 1 and _is_cache_plugin_copy(current):
+            # A whole plugin copied into the cache (``plugin install`` writes
+            # cache/<name>): its skills/<skill> and .git/<...> folders are
+            # part of it, not <marketplace>/<plugin>/<version> folders
+            # (GAP-0017). Claude Code does not load it, so it is not listed.
+            dirs[:] = []
+            continue
         # The documented cache layout is
         # <marketplace>/<plugin>/<version>. A manifest at the plugin root is
         # optional, so directory shape -- not manifest presence -- establishes

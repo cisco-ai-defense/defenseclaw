@@ -1080,10 +1080,18 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					if w.inClaudePluginStaging(event.Name, 0) {
 						continue
 					}
+					copyRoot, copied := w.cachePluginCopyRoot(event.Name)
 					if info, statErr := os.Stat(event.Name); statErr == nil &&
 						info.IsDir() && depth < 3 {
 						addClaudeCacheWatches(fsw, event.Name, watchedDirs)
-						w.queueExistingClaudePlugins(ctx, event.Name, depth)
+						if !copied {
+							w.queueExistingClaudePlugins(ctx, event.Name, depth)
+						}
+					}
+					if copied {
+						w.recordWatcherEvent(ctx, "create", string(InstallPlugin), "")
+						w.queuePending(copyRoot)
+						continue
 					}
 					if depth != 3 {
 						continue
@@ -1262,6 +1270,13 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 	for _, path := range ready {
 		if _, err := os.Stat(w.addressableAssetPath(path)); err != nil && !w.admitsLinkedAsset(path) {
 			w.endAdmission(path)
+			continue
+		}
+		// A folder queued before the plugin copy around it had its
+		// manifest is part of that plugin (GAP-0017).
+		if root, copied := w.cachePluginCopyRoot(path); copied && !sameWatcherPath(root, path) {
+			w.endAdmission(path)
+			w.queuePending(root)
 			continue
 		}
 		events := w.pendingInstallEvents(path) // Run goroutine state
@@ -1634,6 +1649,9 @@ func (w *InstallWatcher) claudePluginIdentity(path string) (string, bool) {
 		switch {
 		case strings.EqualFold(filepath.Base(rootAbs), "cache") && len(parts) == 3:
 			return parts[1] + "@" + parts[0], true
+		case strings.EqualFold(filepath.Base(rootAbs), "cache") && len(parts) == 1 &&
+			isCachePluginCopy(pathAbs):
+			return parts[0], true
 		case strings.EqualFold(filepath.Base(rootAbs), "skills") &&
 			len(parts) == 1 && isClaudeSkillsPlugin(pathAbs):
 			return claudeSkillsPluginIdentity(pathAbs), true
@@ -3183,7 +3201,11 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 			continue
 		}
 		child := filepath.Join(dir, entry.Name())
-		if depth+1 < 3 {
+		if root, copied := w.cachePluginCopyRoot(child); copied {
+			if !sameWatcherPath(root, child) {
+				continue
+			}
+		} else if depth+1 < 3 {
 			w.queueExistingClaudePlugins(ctx, child, depth+1)
 			continue
 		}
@@ -3228,7 +3250,7 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 			continue
 		}
 		first := strings.FieldsFunc(relative, func(r rune) bool { return r == '/' || r == '\\' })[0]
-		if !strings.HasPrefix(strings.ToLower(first), "temp_local_") || len(first) <= len("temp_local_") {
+		if !isPluginStagingFolder(first) {
 			return false
 		}
 		if grace <= 0 {
@@ -3238,6 +3260,61 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 		return statErr == nil && time.Since(info.ModTime()) < grace
 	}
 	return false
+}
+
+// isPluginStagingFolder names a staging folder in a plugin cache: Claude
+// Code's temp_local_<id>, and the .dclaw-stage-<name>-<random> folder that
+// "defenseclaw plugin install" copies a plugin into, scans and decides
+// itself before it moves the copy to cache/<name> (GAP-0017).
+func isPluginStagingFolder(name string) bool {
+	lower := strings.ToLower(name)
+	for _, prefix := range []string{"temp_local_", ".dclaw-stage-"} {
+		if strings.HasPrefix(lower, prefix) && len(lower) > len(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCachePluginCopy reports a folder directly in a plugin cache that holds a
+// plugin manifest: a whole plugin copied there ("defenseclaw plugin install"
+// writes cache/<name>), not a <marketplace> folder of <plugin>/<version>
+// folders.
+func isCachePluginCopy(path string) bool {
+	return !strings.HasPrefix(filepath.Base(path), ".") && hasPluginManifest(path)
+}
+
+// cachePluginCopyRoot returns the plugin copy (isCachePluginCopy) that path
+// is or lies in, for a cache-layout plugin root. Its sub-folders (skills,
+// skills/<skill>, .git, ...) are part of that one plugin: the watcher read
+// them as <marketplace>/<plugin>/<version> folders and blocked each for a
+// missing manifest (GAP-0017). The whole copy is scanned as one plugin.
+func (w *InstallWatcher) cachePluginCopyRoot(path string) (string, bool) {
+	if w.secureClientActive() || !w.cacheLayoutPlugins(path) {
+		return "", false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	for _, root := range w.pluginDirs {
+		rootAbs, absErr := filepath.Abs(root)
+		if absErr != nil || !strings.EqualFold(filepath.Base(rootAbs), "cache") {
+			continue
+		}
+		relative, relErr := filepath.Rel(rootAbs, pathAbs)
+		if relErr != nil || relative == "." || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		first := strings.FieldsFunc(relative, func(r rune) bool { return r == '/' || r == '\\' })[0]
+		candidate := filepath.Join(rootAbs, first)
+		if isCachePluginCopy(candidate) {
+			return candidate, true
+		}
+		return "", false
+	}
+	return "", false
 }
 
 // cacheLayoutPlugins reports whether the plugin root that holds path is read
