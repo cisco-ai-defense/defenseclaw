@@ -2709,18 +2709,23 @@ func findDeletesOnlyUnprotectedNames(command actionfacts.CommandFact, state stri
 }
 
 // findExpressionStart returns the index of the first expression word of a
-// find argv: after the -H/-L/-P/-D/-O options and the starting points.
+// find argv: after the options (GNU -H/-L/-P/-D/-O, BSD option letters
+// E/H/L/P/X/d/s/x and -f path, GAP-2135) and the starting points.
 func findExpressionStart(argv []string) int {
 	index := 1
 	for index < len(argv) {
 		argument := argv[index]
 		switch {
-		case argument == "-H" || argument == "-L" || argument == "-P":
-			index++
 		case argument == "-D":
 			index += 2
 		case strings.HasPrefix(argument, "-O") && len(argument) > 2:
 			index++
+		case findOptionLetters(argument):
+			index++
+			if strings.HasSuffix(argument, "f") {
+				// -f path: the path is a starting point.
+				index++
+			}
 		default:
 			for index < len(argv) && !strings.HasPrefix(argv[index], "-") &&
 				argv[index] != "(" && argv[index] != ")" && argv[index] != "!" && argv[index] != "," {
@@ -2730,6 +2735,16 @@ func findExpressionStart(argv []string) int {
 		}
 	}
 	return index
+}
+
+// findOptionLetters reports a word of GNU or BSD find option letters before
+// the starting points (-H, -L, -P, -E, -X, -d, -s, -x, combined as BSD getopt
+// allows, ending in an optional f that takes a path).
+func findOptionLetters(word string) bool {
+	if len(word) < 2 || word[0] != '-' {
+		return false
+	}
+	return strings.Trim(strings.TrimSuffix(word[1:], "f"), "EHLPXdsx") == ""
 }
 
 // findPrimaryArity is the number of arguments each GNU/BSD find primary
