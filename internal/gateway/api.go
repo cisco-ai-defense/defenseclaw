@@ -2038,7 +2038,7 @@ func sameRuntimeDataDir(left, right string) bool {
 //	  "mode":       "guardrail" | "observability", // legacy data-path field
 //	  "policy_mode": "observe" | "action",
 //	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks",
-//	  "telemetry":  ["hooks", "otel", "notify"],   // active channels
+//	  "telemetry":  ["hooks"],   // channels the install registers
 //	  "proxy_intercept": true | false,
 //	}
 //
