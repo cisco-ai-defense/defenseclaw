@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -66,6 +68,11 @@ const bundleRefusalMarkerName = "bundle-refusal.reported"
 // changeRecordPinsDirName holds the record pin of each change event not
 // reported yet (audit.ConfigChangePin), in the gateway's data directory.
 const changeRecordPinsDirName = "change-record-pins"
+
+// changeAcknowledgedDirName holds, per change event not reported yet, one
+// file per remote destination that acknowledged it, in the gateway's data
+// directory (bundleReceiptReporter.acknowledgedDir).
+const changeAcknowledgedDirName = "change-acknowledged.d"
 
 // bundleReceiptSink is the audit surface the reporter uses (*audit.Logger).
 type bundleReceiptSink interface {
@@ -142,6 +149,7 @@ func (r *bundleReceiptReporter) run(ctx context.Context) {
 	r.reported = r.readMarker()
 	r.reportedRefusal = r.readRefusalMarker()
 	r.pins.Prune(r.reportedOnDisk)
+	r.pruneAcknowledged()
 	ticker := time.NewTicker(bundleReceiptPollInterval)
 	defer ticker.Stop()
 	for {
@@ -374,14 +382,19 @@ func (r *bundleReceiptReporter) reportChanges() {
 // have it and have nothing of it in flight. While its deliveries are in
 // flight the change is not offered again; once one failed (refused,
 // dropped, abandoned at shutdown or by a reload) the next poll offers it
-// again. After a restart the delivery state is gone and an unreported
-// change goes to every destination again, under the same record id.
+// again. Each acknowledgement is recorded on disk as it arrives
+// (acknowledgedDir), so a gateway restarted before a poll marked the change
+// reported (a credential change restarts the gateway within seconds) does
+// not send it again to a destination that has it (GAP-0526); a destination
+// without one gets it again under the same record id.
 func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
 	state := r.changes[ev.EventID]
 	firstOffer := false
 	if state == nil {
 		firstOffer = r.spoolScanned && !r.spoolAtStart[ev.EventID]
-		state = &changeDelivery{delivery: observability.NewRemoteDelivery()}
+		id := ev.EventID
+		state = &changeDelivery{delivery: observability.NewRecordedRemoteDelivery(
+			r.acknowledgedDestinations(id), func(destination string) { r.recordAcknowledged(id, destination) })}
 		if r.changes == nil {
 			r.changes = make(map[string]*changeDelivery)
 		}
@@ -430,6 +443,81 @@ func (r *bundleReceiptReporter) markedChange(id string) {
 	delete(r.changes, id)
 	delete(r.spoolAtStart, id)
 	_ = r.pins.Remove(id)
+	if enterprisestatus.ValidChangeEventID(id) {
+		_ = os.RemoveAll(filepath.Join(r.acknowledgedDir(), id))
+	}
+}
+
+// acknowledgedDir is <data_dir>/change-acknowledged.d: per change event not
+// reported yet, one file per remote destination that acknowledged it.
+func (r *bundleReceiptReporter) acknowledgedDir() string {
+	return filepath.Join(filepath.Dir(r.markerPath), changeAcknowledgedDirName)
+}
+
+// acknowledgedDestinations returns the destinations recorded as having
+// change event id.
+func (r *bundleReceiptReporter) acknowledgedDestinations(id string) []string {
+	if !enterprisestatus.ValidChangeEventID(id) {
+		return nil
+	}
+	dir := filepath.Join(r.acknowledgedDir(), id)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var destinations []string
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.Size() > 1<<10 {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if name := string(raw); err == nil && name != "" && acknowledgedFileName(name) == entry.Name() {
+			destinations = append(destinations, name)
+		}
+	}
+	return destinations
+}
+
+// recordAcknowledged records, durably, that destination has change event id.
+// It runs on the destination's queue, before the acknowledgement counts.
+func (r *bundleReceiptReporter) recordAcknowledged(id, destination string) {
+	if !enterprisestatus.ValidChangeEventID(id) || destination == "" || len(destination) > 1<<10 {
+		return
+	}
+	dir := filepath.Join(r.acknowledgedDir(), id)
+	if err := configwrite.MkdirDurable(r.acknowledgedDir()); err != nil {
+		return
+	}
+	if err := configwrite.MkdirDurable(dir); err != nil {
+		return
+	}
+	_ = configwrite.WriteFileDurable(filepath.Join(dir, acknowledgedFileName(destination)), []byte(destination), 0o600)
+}
+
+// pruneAcknowledged removes the acknowledgements of the change events whose
+// reported marker is on disk: a gateway that stopped between writing the
+// marker and removing them left them.
+func (r *bundleReceiptReporter) pruneAcknowledged() {
+	entries, err := os.ReadDir(r.acknowledgedDir())
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if id := entry.Name(); enterprisestatus.ValidChangeEventID(id) && r.reportedOnDisk(id) {
+			_ = os.RemoveAll(filepath.Join(r.acknowledgedDir(), id))
+		}
+	}
+}
+
+// acknowledgedFileName names a destination's file: destination names are
+// configuration text, not file names.
+func acknowledgedFileName(destination string) string {
+	sum := sha256.Sum256([]byte(destination))
+	return hex.EncodeToString(sum[:16])
 }
 
 // changeSpoolIDs is the id of every change event and reservation in the
