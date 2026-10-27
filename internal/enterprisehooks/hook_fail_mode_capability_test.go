@@ -95,3 +95,47 @@ func TestSecureClientManagedHookFailModeFollowsTheConfig(t *testing.T) {
 		t.Errorf("unknown connector = %q", got)
 	}
 }
+
+// Status reports the mode a managed standalone hook operates in: the managed
+// Amp plugin, and OpenCode or Copilot on the per-user route, block every
+// gateway outage whatever hook_fail_mode says, so an administrator's open
+// reads closed for them; on vendor machine policy the administrator's mode
+// applies (GAP-0465).
+func TestManagedStatusHookFailModeIsTheOutageModeOnThePerUserRoute(t *testing.T) {
+	cfg := managedConfigForProfile(t, managed.ProfileStandalone)
+	cfg.Guardrail.HookFailMode = "open"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"amp": {}, "opencode": {}, "copilot": {}, "codex": {}, "claudecode": {}, "cursor": {},
+	}
+	for _, tc := range []struct {
+		name, goos string
+		machine    bool
+		want       string
+	}{
+		{"amp", "linux", false, "closed"},
+		{"amp", "darwin", false, "closed"},
+		{"amp", "windows", false, "closed"},
+		{"opencode", "linux", false, "closed"},
+		{"opencode", "linux", true, "open"},
+		{"opencode", "windows", false, "closed"},
+		{"copilot", "darwin", false, "closed"},
+		{"copilot", "linux", true, "open"},
+		{"copilot", "windows", false, "open"},
+		{"codex", "linux", false, "open"},
+		{"claudecode", "darwin", true, "open"},
+		{"cursor", "windows", false, "open"},
+	} {
+		if got := ManagedHookFailMode(cfg, tc.name); got != "open" {
+			t.Fatalf("%s: ManagedHookFailMode = %q; the test needs the administrator's open", tc.name, got)
+		}
+		if got := ManagedStatusHookFailMode(cfg, tc.name, tc.goos, tc.machine); got != tc.want {
+			t.Errorf("%s on %s (machine policy %v): status reports %q, the hook operates %q", tc.name, tc.goos, tc.machine, got, tc.want)
+		}
+	}
+	cfg.Guardrail.HookFailMode = "closed"
+	for _, name := range []string{"amp", "opencode", "codex"} {
+		if got := ManagedStatusHookFailMode(cfg, name, "linux", false); got != "closed" {
+			t.Errorf("%s: closed reports %q", name, got)
+		}
+	}
+}

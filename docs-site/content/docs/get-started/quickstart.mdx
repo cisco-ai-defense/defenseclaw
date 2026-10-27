@@ -55,7 +55,7 @@ Quit and reopen Claude Code so it loads the hooks, ask it to list the files in t
 defenseclaw guardrail mode action --connector claudecode
 ```
 
-This switches only Claude Code to **action** mode, which enforces the rules. The running gateway applies it without a restart. The mode does not change what an outage does: in the default policy a tool call runs with a warning while the gateway is not running, and `defenseclaw guardrail use-pack strict` blocks it ([fail modes](/docs/reference/fail-modes)).
+This switches only Claude Code to **action** mode, which enforces the rules. The running gateway applies it without a restart. The mode does not change what an outage does: in the default policy a tool call runs with a warning while the gateway is not running, and `defenseclaw guardrail use-pack strict` blocks it. A mode you saved with `defenseclaw guardrail fail-mode` wins over the policy: with a saved `open` the call still runs under strict, and `defenseclaw guardrail fail-mode closed` (add `--connector <name>` when the mode was saved for one agent) blocks it ([fail modes](/docs/reference/fail-modes)).
 
 </Step>
 

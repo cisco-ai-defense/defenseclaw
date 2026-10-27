@@ -103,7 +103,7 @@ Proxy connector: not gated by a hook contract version. The guardrail proxy inspe
 
 ## Subprocess policy
 
-The policy is `shims` on every platform. Setup installs seven PATH shims, for `curl`, `wget`, `ssh`, `nc`, `ncat` (a link to the `nc` shim), `pip` and `npm`, that send each invocation to the gateway's tool-inspection endpoint before running the real binary. They inspect those six commands only and give no syscall, filesystem or network isolation. ZeptoClaw does not run in an OpenShell sandbox. Support is pending in the [capability matrix](/docs/connectors/capability-matrix).
+The policy is `shims` on every platform. Setup installs seven PATH shims, for `curl`, `wget`, `ssh`, `nc`, `ncat` (a link to the `nc` shim), `pip` and `npm`, that send each invocation to the gateway's tool-inspection endpoint before running the real binary. They inspect those six commands only and give no syscall, filesystem or network isolation. While the gateway is not running, the shims follow the policy: the default and permissive policies print `DefenseClaw warning: gateway peer is unverified or unavailable; running <tool> without inspection`, write a `hook-failures.jsonl` record and run the real tool; the strict policy refuses it (`DefenseClaw: gateway peer is unverified or unavailable — refusing to exec <tool>`, exit 1). ZeptoClaw does not run in an OpenShell sandbox. Support is pending in the [capability matrix](/docs/connectors/capability-matrix).
 
 ## Limits
 

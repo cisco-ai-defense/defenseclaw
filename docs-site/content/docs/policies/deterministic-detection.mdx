@@ -353,7 +353,7 @@ a production-protection pack asserts that the selected connector context is
 actually protected. See [Opt-in protection packs](/docs/reference/cli),
 [Authoring custom rule packs](/docs/policies/cel), and [Rules and custom packs](/docs/policies/rules) for the `guardrail.rules` scopes.
 
-DefenseClaw also protects its saved installer (`~/.defenseclaw/installer/` and `~/.defenseclaw/previous/installer/`): an agent that writes, truncates or deletes it is blocked in every mode, like `config.yaml`. Reading or running the saved installer stays allowed.
+DefenseClaw also protects its saved installer (`~/.defenseclaw/installer/` and `~/.defenseclaw/previous/installer/`): with the default and strict rule packs, an agent that writes, truncates or deletes it is blocked in every mode, like `config.yaml`. The permissive pack rates this rule HIGH and blocks only CRITICAL, so with it such a write to the saved installer or `config.yaml` is reported, not blocked, in both modes. Reading or running the saved installer stays allowed.
 
 With the balanced (default) rule pack, action mode blocks CRITICAL findings; instruction-file writes are HIGH, so they are reported, not blocked, unless `guardrail.block_at` is `HIGH` or the strict pack is used.
 

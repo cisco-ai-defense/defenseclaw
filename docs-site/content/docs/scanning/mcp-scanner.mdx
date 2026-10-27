@@ -428,12 +428,9 @@ Scanner processes run under the gateway's process-tree supervisor. How it ends t
 
 ## Availability and recovery
 
-`cisco-ai-mcp-scanner` is declared only when the runtime interpreter is Python
-3.11 or newer. DefenseClaw itself also supports Python 3.10, so a Python 3.10
-runtime—including a POSIX release install on a host where 3.10 is the selected
-interpreter—legitimately omits MCP scanning, and `defenseclaw doctor` reports
-`skill and MCP scanning need Python 3.11+`. Use Python 3.11 or newer when this
-feature is required.
+`cisco-ai-mcp-scanner` is declared for Python 3.11 and newer. DefenseClaw
+itself needs Python 3.11 to 3.13 (the package refuses Python 3.10), so every
+supported runtime includes MCP scanning.
 
 On Python 3.11 or newer, an absent SDK means the environment is incomplete. Do
 not patch a managed virtual environment with `pip`; use the

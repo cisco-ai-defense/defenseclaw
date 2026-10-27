@@ -109,7 +109,13 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 		in.MachinePolicy = record.MachinePolicyConnectors
 		in.MachinePolicyCoverage = machinePolicyCoverage(record.MachinePolicyConnectors, r.MachinePolicy)
 	}
-	failMode := func(name string) string { return enterprisehooks.ManagedHookFailMode(cfg, name) }
+	machine := map[string]bool{}
+	for _, name := range in.MachinePolicy {
+		machine[strings.ToLower(strings.TrimSpace(name))] = true
+	}
+	failMode := func(name string) string {
+		return enterprisehooks.ManagedStatusHookFailMode(cfg, name, env.GOOS, machine[name])
+	}
 	block, hidden := enterprisestatus.BuildConnectors(in, failMode)
 	if state, ok := block["hermes"]; ok && state.Enabled &&
 		(state.Detected == nil || *state.Detected || state.Targets != nil && state.Targets.Total > 0) {

@@ -200,7 +200,7 @@ Fixes for the gateway, the keys it needs and the destinations it exports to.
 
 **Fix.** The message names the command, for example `chmod go-w <file>`. Run it as the file's owner.
 
-**Check.** `defenseclaw doctor` shows `Config validation` as `[PASS]` (on Windows the row is `Config file`).
+**Check.** `defenseclaw doctor` shows `Config file` (`canonical schema valid`) as `[PASS]` on every OS. `Config validation` appears only as a failure or warning.
 
 ### `Config validation` fails after an edit
 

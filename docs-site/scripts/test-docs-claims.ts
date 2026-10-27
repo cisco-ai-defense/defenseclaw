@@ -1178,6 +1178,22 @@ describe('Windows AD UPN outage wording', () => {
   });
 });
 
+describe('per-user install window refusal (GAP-2173)', () => {
+  it('every per-user hook refusal during an install says what the upgrade page says', () => {
+    const upgrade = page('get-started/upgrade.mdx');
+    assert.ok(upgrade.includes('DefenseClaw is being installed or upgraded for this account and to try again in a moment'));
+    for (const [file, pattern] of [
+      ['internal/gateway/connector/hooks/_hardening.sh', /DefenseClaw is being installed or upgraded for this account[^']*try again in a moment/],
+      ['internal/gateway/connector/hooks/copilot-hook.sh', /DefenseClaw is being installed or upgraded for this account; try again in a moment/],
+      ['internal/gateway/connector/hooks/copilot-hook.ps1', /DefenseClaw is being installed or upgraded for this account; try again in a moment/],
+      ['internal/gateway/connector/hooks/codex-hook.sh', /DefenseClaw is being installed or upgraded for this account/],
+      ['internal/gateway/connector/subprocess.go', /DefenseClaw is being installed or upgraded for this account[^"]*try again in a moment/],
+    ] as const) {
+      assert.match(source(file), pattern, `${file} no longer gives the install-window refusal the upgrade page describes`);
+    }
+  });
+});
+
 describe('managed launcher refusal on every page (GAP-1387, GAP-1569)', () => {
   it('quotes launcherRefusal wherever a page quotes the refusal', () => {
     const refusal = /launcherRefusal = "([^"]+)"/.exec(source('internal/cli/launcher.go'))?.[1];
@@ -1407,6 +1423,20 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-1821", page: "support-matrix.mdx", section: "Known issues", has: ["**Claude Code settings can keep a variable from 1.0.2 or 1.0.3**. After an upgrade from 1.0.2 or 1.0.3 to 1.0.4", "The upgrade to 1.0.5 removes it."], lacks: ["keep a variable from 1.0.2**. After an upgrade from 1.0.2, the"] },
+  { gap: "GAP-0012", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["If that sync fails (a frozen guest, for one), the stop is held and the guest keeps running", "`defenseclaw sandbox stop NAME --discard-unsynced` stops it anyway and loses what it wrote since its last sync; the activity feed then shows `stop_unflushed`"], lacks: ["The stop requests a disk sync, but changes made after the last successful sync may be lost."] },
+  { gap: "GAP-0012", page: "sandboxes/guide.mdx", section: "A MicroVM stop is held because its disk could not sync", has: ["To stop it anyway, run `defenseclaw sandbox stop NAME --discard-unsynced`", "the activity feed shows `stop_unflushed`"] },
+  { gap: "GAP-0516", page: "reference/env-vars.mdx", section: "Managed hosts and the environment", has: ["`DEFENSECLAW_FAIL_MODE` is not one of them: a managed hook uses only the fail mode the administrator installed", "(`DEFENSECLAW_FAIL_MODE` is one of them)"], lacks: ["`DEFENSECLAW_FAIL_MODE` is passed through for older installed hooks", "opt-outs except `DEFENSECLAW_FAIL_MODE` and"] },
+  { gap: "GAP-0516", page: "enterprise/threat-model.mdx", has: ["`DEFENSECLAW_FAIL_MODE` is ignored in both directions: the installed fail mode applies"], lacks: ["`DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY` and `DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS` count only when stricter"] },
+  { gap: "GAP-0669", page: "stories/cursor-secret-exfil.mdx", has: ["cursor gateway outage=open (failClosed=true)", "`failClosed=true` in `hooks.json` only covers a hook process that cannot answer."], lacks: ["cursor hook failures=closed"] },
+  { gap: "GAP-2132", page: "guardrail/index.mdx", has: ["`defenseclaw doctor` shows `Config file` (`canonical schema valid`) and `Rule pack` as `[PASS]`"], lacks: ["shows `Config validation` and `Rule pack` as `[PASS]`"] },
+  { gap: "GAP-2132", page: "reference/keys.mdx", has: ["`defenseclaw doctor` shows `Config file` (`canonical schema valid`) as `[PASS]` on every OS"], lacks: ["shows `Config validation` as `[PASS]`", "on Windows the row is `Config file`"] },
+  { gap: "GAP-2145", page: "get-started/first-run.mdx", has: ["`init` does not ask for an outage mode and saves none", "Omitted, nothing is saved: the default and permissive policies let a call run with a warning, strict blocks it."], lacks: ["closed on a new install", "On a new install the fail mode prompt offers `closed`"] },
+  { gap: "GAP-2238", page: "get-started/first-guardrail.mdx", has: ["Claude Code claudecode enabled observe open default"], lacks: ["observe closed default"] },
+  { gap: "GAP-2238", page: "stories/switch-connectors.mdx", has: ["Claude Code claudecode enabled observe open default", "Codex codex enabled observe open default"], lacks: ["observe closed default"] },
+  { gap: "GAP-2210", page: "get-started/upgrade.mdx", has: ["1.0.5 upgrades any 1.0 release and is tested from 1.0.4, 1.0.3 and 1.0.2.", "This is a legacy path that is no longer tested."], lacks: ["1.0.4 supports upgrades from", "the supported bridge"] },
+  { gap: "GAP-2173", page: "get-started/upgrade.mdx", section: "Upgrade", has: ["While the installer has your gateway stopped for the swap, DefenseClaw refuses every agent tool call.", "with a saved `open` too: an install or upgrade is not a gateway outage", "DefenseClaw is being installed or upgraded for this account and to try again in a moment", "The installer waits up to 3 minutes for a slow gateway start, and the refusals end when it exits, also if it fails."] },
+  { gap: "GAP-2173", page: "reference/fail-modes.mdx", section: "Per-user installs", has: ["while the installer has the gateway stopped: every call blocks in every tier, a saved `open` included"], lacks: ["Per-user default and permissive calls that receive a usable gateway allow may proceed"] },
   { gap: "GAP-1795", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["fails with Conflict and leaves it starting", "keep the VM while you need what it holds"], lacks: ["can use `defenseclaw sandbox start NAME --end-vm`, then stop it"] },
   { gap: "GAP-1795", page: "sandboxes/guide.mdx", has: ["fails with Conflict and leaves it starting"], lacks: ["`start NAME --end-vm` starts it", "or on 0.1.5 start it with `--end-vm`", "can refuse the recovery above", "ends the lingering VM without a flush", "(which ends its VM without a flush)"] },
   { gap: "GAP-1795", page: "sandboxes/guide.mdx", section: "A sandbox is in OpenShell's error state", has: ["fails with Conflict and leaves it starting"], lacks: ["run `defenseclaw sandbox stop NAME` once it is ready"] },
@@ -1451,13 +1481,19 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1610", page: "stories/prompt-injection-codex.mdx", has: ["Host setup does not wire Codex's native OpenTelemetry; only an isolated OpenShell sandbox uses it."], lacks: ["Setup also wires Codex's native OpenTelemetry."] },
   { gap: "GAP-1618", page: "enterprise/macos.mdx", has: ["`enterprise macos status --json` and `enterprise macos verify` report `tetragon_not_applicable`"] },
   { gap: "GAP-1618", page: "enterprise/configuration.mdx", has: ["on macOS `status --json` and `verify` report `tetragon_not_applicable`"] },
-  { gap: "GAP-1591", page: "policies/cel/engine.mdx", has: ["`exists`, `all`, `map` and `filter` comprehensions; nesting is limited to two levels"] },
+  { gap: "GAP-1591", page: "policies/cel/engine.mdx", has: ["`exists` and `all` comprehensions; nesting is limited to two levels", "so `validate-pack` refuses `map`, `filter` and `exists_one` (`semantic_surface`)"], lacks: ["`exists`, `all`, `map` and `filter` comprehensions"] },
+  { gap: "GAP-2250", page: "support-matrix.mdx", section: "Hook floods on Windows", has: ["every hook decision adds about 40 KiB to the account's audit database (`audit.db`)", "can also pass its 256 MiB alarm and hook answers can take seconds", "A call the gateway took but did not answer in time is blocked in every policy tier, never let through", "This is a Windows disk-write limit."] },
+  { gap: "GAP-2250", page: "get-started/windows/paths-troubleshooting.mdx", has: ["audit.db grows fast or hook answers are slow during a tool-call flood", "/docs/support-matrix#hook-floods-on-windows"] },
+  { gap: "GAP-2216", page: "get-started/install.mdx", has: ["| Python | 3.11-3.13 |", "`uv` and Python 3.11-3.13 from python.org"], lacks: ["3.10-3.13"] },
+  { gap: "GAP-2216", page: "scanning/skill-scanner.mdx", has: ["DefenseClaw needs Python 3.11 to 3.13 (the package refuses Python 3.10)"], lacks: ["DefenseClaw itself still runs on Python 3.10"] },
+  { gap: "GAP-2216", page: "scanning/mcp-scanner.mdx", has: ["itself needs Python 3.11 to 3.13 (the package refuses Python 3.10)"], lacks: ["DefenseClaw itself also supports Python 3.10"] },
+  { gap: "GAP-2216", page: "scanning/registries.mdx", has: ["DefenseClaw needs Python 3.11 to 3.13, so every"], lacks: ["any Python 3.10 runtime"] },
   { gap: "GAP-1587", page: "guardrail/index.mdx", has: ["fails the **Config validation** and **Rule pack** rows and skips **Policy**"], lacks: ["fails the Policy row until you pin the new digest"] },
   { gap: "GAP-1656", page: "policies/rules.mdx", has: ["`live state was not checked while config.yaml is invalid`"], lacks: ["fails the **Policy** row: `generation 2"] },
   { gap: "GAP-1652", page: "guardrail/index.mdx", has: ["pin the `files digest` value it prints (the guardrail.custom_packs pin, not the `digest` line)", "set both its `path` and `digest`"] },
   { gap: "GAP-1649", page: "reference/keys.mdx", has: ["`DefenseClaw blocked this because its gateway is stopped`", "`defenseclaw: gateway unreachable, blocking <agent> tool (fail mode closed)`"] },
   { gap: "GAP-1667", page: "reference/keys.mdx", has: ["Under the default and permissive policies a per-user call runs with one warning instead"], lacks: ["the hook is fail-closed. This holds in observe mode too."] },
-  { gap: "GAP-1666", page: "reference/keys.mdx", has: ["(on Windows the row is `Config file`)", "`Gateway token env`, `Gateway token drift` and `Gateway PID identity`"] },
+  { gap: "GAP-1666", page: "reference/keys.mdx", has: ["`Config file` (`canonical schema valid`) as `[PASS]` on every OS", "`Gateway token env`, `Gateway token drift` and `Gateway PID identity`"] },
   { gap: "GAP-1691", page: "reference/fail-modes.mdx", has: ["accept only `open` or `closed`, in lower case"], lacks: ["Any value other than `open` (in any case) is `closed`."] },
   { gap: "GAP-1698", page: "enterprise/operations.mdx", has: ["`/var/lib/defenseclaw-enterprise/last-package-result.json` (the package"], lacks: ["and `last-package-result.log` beside it"] },
   { gap: "GAP-1517", page: "guardrail/benchmarks.mdx", has: ["title=\"Eleven YARA signatures\""], lacks: ["Ten YARA signatures"] },
@@ -1483,7 +1519,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1689", page: "enterprise/ai-defense-key.mdx", has: ["`! secret set: done with N warnings`", "The warnings are the host's normal status, not a failed store."] },
   { gap: "GAP-1568", page: "enterprise/ai-defense-key.mdx", has: ["`! secret remove: done with N warnings`", "`! secret remove: nothing to do (up_to_date), N warnings`"] },
   { gap: "GAP-1573", page: "get-started/install.mdx", section: "Check it worked", has: ["`✓ All components in sync.`", "piped to another command, as above, they use text"] },
-  { gap: "GAP-1581", page: "get-started/upgrade.mdx", section: "Rollback", has: ["Rollback needs a previous install that was initialized.", "undoes itself and exits 1"] },
+  { gap: "GAP-1581", page: "get-started/upgrade.mdx", section: "Rollback", has: ["A previous install that never ran `defenseclaw init` has no configuration, and what rollback does then depends on the gateway:", "If the gateway is running, rollback must start the previous gateway, which refuses with `no config.yaml exists yet`. Rollback then undoes itself and exits 1", "There is nothing to fix there:", "If the gateway is stopped, rollback completes and exits 0, and the previous install runs with no `config.yaml`", "run `defenseclaw rollback` again to roll forward to your current install and its configuration"], lacks: ["Rollback needs a previous install that was initialized. If that install never ran `defenseclaw init`, rollback says `no config.yaml exists yet`, undoes itself and exits 1; the current install stays."] },
   { gap: "GAP-1567", page: "policies/recipes.mdx", has: ["In action mode DefenseClaw blocks an agent that copies into `~/.defenseclaw` (`tamper.detector_state_write`"] },
   { gap: "GAP-1613", page: "enterprise/sandboxes.mdx", has: ["`sandboxes are unavailable: OpenShell 0.1.3 runs no DefenseClaw sandbox:"], lacks: ["OpenShell 0.1.3 is installed, but that release is unsupported"] },
   { gap: "GAP-1619", page: "guardrail/user-and-group-policies.mdx", has: ["`defenseclaw-gateway config validate FILE`", "`enterprise macos ensure --config FILE`", "`enterprise macos profile-explain`"] },
@@ -1535,6 +1571,20 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1503", page: "policies/deterministic-detection.mdx", has: ["instruction-file writes are HIGH, so they are reported, not blocked"] },
   { gap: "GAP-1254", page: "connectors/copilot.mdx", has: ["removes the `enabledPlugins` entry `defenseclaw@defenseclaw`"] },
   { gap: "GAP-1795", page: "reference/sandbox-cli.mdx", has: ["OpenShell 0.1.5 refuses `--end-vm` for a MicroVM whose workload completed or failed while its VM still runs"] },
+  { gap: "GAP-0013", page: "get-started/quickstart.mdx", has: ["A mode you saved with `defenseclaw guardrail fail-mode` wins over the policy: with a saved `open` the call still runs under strict, and `defenseclaw guardrail fail-mode closed`"] },
+  { gap: "GAP-0013", page: "connectors/claudecode.mdx", has: ["On a per-user install with no saved mode, a gateway that is not running follows the policy tier"], lacks: ["On a per-user install a gateway that is not running follows the policy tier"] },
+  { gap: "GAP-0013", page: "connectors/codex.mdx", has: ["On a per-user install with no saved mode, a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning, and the strict policy blocks it"] },
+  { gap: "GAP-0040", page: "connectors/codex.mdx", has: ["A saved mode decides instead: with `guardrail fail-mode open` saved, the call runs with one warning under every policy, strict included."], lacks: ["yes, except on a per-user install with no saved mode"] },
+  { gap: "GAP-0013", page: "policies/defaults.mdx", has: ["A per-user install with no saved mode follows its rule pack when the gateway is down"] },
+  { gap: "GAP-0464", page: "enterprise/troubleshooting.mdx", has: ["The foreign-hook guard is the exception: with `foreign_hooks: remove` (the default) the connectors it checks need the gateway's session record, so `open` does not apply to them", "It is never an allow, also with the administrator's `hook_fail_mode: open`: `open` covers only a gateway service the hook proves stopped."], lacks: ["It is never an allow unless the administrator set `hook_fail_mode: open`."] },
+  { gap: "GAP-0827", page: "enterprise/machine-policy.mdx", section: "Managed OpenCode plugin", has: ["a stopped gateway service depends on `foreign_hooks`: with `remove` (the default) the foreign-plugin guard needs the gateway's session record, so `open` does not apply; with `report` or `allow` it does.", "/docs/connectors/capability-matrix#gateway-outage"], lacks: ["It fails closed: a tool call is blocked when the hook binary cannot run, answers with an error, or the gateway is unreachable."] },
+  { gap: "GAP-1997", page: "support-matrix.mdx", section: "Known issues", has: ["refuse to run the real tool in every policy, so `npm` and `pip` builds stop", "In 1.0.5 the default and permissive policies run the tool with a warning and only strict refuses", "/docs/connectors/zeptoclaw#subprocess-policy"], lacks: ["running <tool> without inspection", "they still run the tool until you run the connector's `defenseclaw setup` again"] },
+  { gap: "GAP-1997", page: "connectors/zeptoclaw.mdx", section: "Subprocess policy", has: ["While the gateway is not running, the shims follow the policy", "running <tool> without inspection", "refusing to exec <tool>`, exit 1"] },
+  { gap: "GAP-1997", page: "connectors/openclaw.mdx", section: "Subprocess policy", has: ["While the gateway is not running, the shims follow the policy", "running <tool> without inspection", "refusing to exec <tool>`, exit 1"] },
+  { gap: "GAP-0506", page: "segmentation.mdx", section: "Fail-open and fail-closed, per layer", has: ["| A hook cannot reach the gateway | The [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) gives the result per connector and install.", "covers a gateway outage only, and not for a connector whose foreign-hook guard checks the session with the gateway ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage))"] },
+  { gap: "GAP-0465", page: "connectors/capability-matrix.mdx", has: ["report as `effective_hook_fail_mode` the mode a managed connector's hook works in", "(on Windows the Amp and OpenCode plugins) read `closed`"], lacks: ["also for a hook that blocks the outage anyway"] },
+  { gap: "GAP-0465", page: "support-matrix.mdx", has: ["With 1.0.5 and later those two read `closed` with an open mode, because they block an outage anyway"] },
+  { gap: "GAP-0048", page: "support-matrix.mdx", has: ["On 1.0.4 that includes the Amp and OpenCode plugins on the per-user route. With 1.0.5 and later those two read `closed`"], lacks: ["The Amp and OpenCode plugins on the per-user route read `closed` with an open mode too"] },
   // r105-rows-end
 ];
 
@@ -1545,6 +1595,37 @@ function pageSection(name: string, heading?: string): string {
   assert.ok(body !== undefined, `${name} has no "## ${heading}" section`);
   return body.split(' ## ')[0];
 }
+
+// GAP-0506 class: a Markdown table row about a gateway outage states no outcome of its own;
+// it points at the gateway outage table (or the fail modes reference) and never keys the
+// outage result by the guardrail mode. The table page and the fail modes reference are the sources.
+describe('outage rows in Markdown tables point at the outage table (GAP-0506)', () => {
+  const outageCell = /^(?:an? )?(?:hook|agent hook|hooks) (?:cannot|can't|could not) reach the gateway|^(?:the )?gateway (?:outage|is down|is unreachable|is not running|is stopped|stops|cannot answer)\b|^gateway (?:down|unreachable|not running|stopped)\b/i;
+  const outcome = /\b(?:block|blocks|blocked|run|runs|allow|allows|allowed|deny|denies|denied|refuse|refuses|fails? (?:open|closed))\b/i;
+  const pointer = /\/docs\/connectors\/capability-matrix#gateway-outage|\/docs\/reference\/fail-modes/;
+  const byGuardrailMode = /\b(?:in|under) (?:observe|action) mode\b[^|.;:]{0,40}\b(?:fails? (?:open|closed)|runs?|blocks?|allows?|denies)\b|\b(?:observe|action)(?: mode)?\s*(?::|=|->)\s*(?:fails? )?(?:open|closed)\b/i;
+  it('every outage row links the table and does not key the result by guardrail mode', () => {
+    const sources = new Set(['connectors/capability-matrix.mdx', 'reference/fail-modes.mdx']);
+    const bad: string[] = [];
+    let rows = 0;
+    for (const file of mdxPages(docs)) {
+      const rel = relative(docs, file).replace(/\\/g, '/');
+      if (sources.has(rel)) continue;
+      for (const line of readFileSync(file, 'utf8').split('\n')) {
+        if (!line.startsWith('|')) continue;
+        const cells = line.split('|').slice(1, -1).map((cell) => cell.trim());
+        if (cells.length < 2 || !outageCell.test(cells[0].replace(/[*`]/g, ''))) continue;
+        const body = cells.slice(1).join(' | ');
+        if (!outcome.test(body)) continue;
+        rows++;
+        if (!pointer.test(body)) bad.push(`${rel}: no outage table link: ${line.slice(0, 160)}`);
+        if (byGuardrailMode.test(body)) bad.push(`${rel}: outage result keyed by guardrail mode: ${line.slice(0, 160)}`);
+      }
+    }
+    assert.ok(rows >= 1, `expected at least the segmentation outage row, found ${rows}`);
+    assert.deepEqual(bad, []);
+  });
+});
 
 describe('first-run report sample matches cmd_init (GAP-1605)', () => {
   it('shows the outage line init prints and the default fail mode', () => {
@@ -1593,4 +1674,37 @@ describe('1.0.5 docs rows', () => {
       for (const phrase of row.lacks ?? []) assert.ok(!text.includes(phrase), `${row.page} still says: ${phrase}`);
     });
   }
+});
+
+// GAP-1922: the saved-installer protection the detection page promises is the
+// rule every shipped pack carries, and the every-mode claim is the observe test.
+describe('saved installer protection matches the rule packs (GAP-1922)', () => {
+  it('names installer/ and previous/installer/ in tamper.detector_state_write of every pack, for writes and deletes', () => {
+    const text = page('policies/deterministic-detection.mdx');
+    assert.ok(text.includes('DefenseClaw also protects its saved installer (`~/.defenseclaw/installer/` and `~/.defenseclaw/previous/installer/`): with the default and strict rule packs, an agent that writes, truncates or deletes it is blocked in every mode, like `config.yaml`. The permissive pack rates this rule HIGH and blocks only CRITICAL, so with it such a write to the saved installer or `config.yaml` is reported, not blocked, in both modes. Reading or running the saved installer stays allowed.'));
+    assert.ok(!text.includes('`~/.defenseclaw/previous/installer/`): an agent that writes, truncates or deletes it is blocked in every mode'), 'GAP-0046: unqualified every-mode claim is back');
+    assert.ok(page('policies/recipes.mdx').includes('DefenseClaw protects its own files; with the permissive pack it only reports it).'), 'GAP-0046: recipes step 2 lost the pack qualifier');
+    // GAP-0046: the page's per-pack split is the shipped severity against the
+    // posture thresholds (default and strict block it, permissive reports it).
+    const thresholds = source('internal/gateway/decision.go');
+    assert.match(thresholds, /case "strict":\n\t\treturn severityMedium, severityLow\n\tcase "permissive":\n\t\treturn severityCritical, severityHigh\n\tdefault:\n\t\treturn severityCritical, severityMedium/, 'GAP-0046: posture thresholds changed; re-check the per-pack sentence');
+    const packSeverity: Record<string, string> = { default: 'CRITICAL', strict: 'HIGH', permissive: 'HIGH' };
+    for (const pack of ['default', 'permissive', 'strict']) {
+      const yaml = source(`policies/guardrail/${pack}/rules/cognitive.yaml`);
+      const rule = yaml.split('- id: tamper.detector_state_write\n')[1]?.split(/\n {2}- id: /)[0] ?? '';
+      assert.ok(rule, `${pack}: no tamper.detector_state_write rule`);
+      const pattern = rule.match(/^ {4}pattern: '(.*)'$/m)?.[1] ?? '';
+      assert.ok(pattern.includes('|installer|'), `${pack}: pattern does not name installer/`);
+      assert.ok(pattern.includes('previous[/\\\\]installer'), `${pack}: pattern does not name previous/installer/`);
+      assert.match(rule, new RegExp(`^ {4}severity: ${packSeverity[pack]}$`, "m"), `${pack}: not ${packSeverity[pack]} (GAP-0046 per-pack sentence)`);
+      for (const access of ['PATH_ACCESS_WRITE', 'PATH_ACCESS_APPEND', 'PATH_ACCESS_DELETE']) {
+        assert.ok(rule.includes(access), `${pack}: ${access} missing`);
+      }
+    }
+    const goTest = source('internal/gateway/action_saved_installer_state_test.go');
+    assert.ok(goTest.includes('instructionProtectionTestAPI(t, agent, "observe", "HIGH")'), 'the every-mode proof no longer runs in observe');
+    for (const row of ['{"append installer", ', '{"delete previous installer", ', '{"read installer", ', '{"run saved installer help", ']) {
+      assert.ok(goTest.includes(row), `Go test lost row ${row}`);
+    }
+  });
 });

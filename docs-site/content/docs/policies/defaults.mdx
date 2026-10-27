@@ -161,7 +161,7 @@ To change a named preset instead, add `--policy-name default`. The first edit of
 | Knob | Default | Notes |
 | --- | --- | --- |
 | `observability.local` SQLite history | always present | Local durability for collected logs |
-| `guardrail.hook_fail_mode` | `closed` on managed installs | A per-user install follows its rule pack when the gateway is down: open with a warning in `default` and `permissive`, closed in `strict` ([fail modes](/docs/reference/fail-modes)) |
+| `guardrail.hook_fail_mode` | `closed` on managed installs | A per-user install with no saved mode follows its rule pack when the gateway is down: open with a warning in `default` and `permissive`, closed in `strict` ([fail modes](/docs/reference/fail-modes)) |
 | `guardrail.judge.enabled` | `false` | Turn on with `--judge-model` or the setup prompt |
 | `guardrail.hilt.enabled` | `false` | `min_severity` is `HIGH`; the config key is spelled `hilt` |
 | `guardrail.judge.timeout` | `30s` | Judge latency budget |
