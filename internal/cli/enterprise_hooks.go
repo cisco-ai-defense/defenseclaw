@@ -1912,8 +1912,13 @@ func runEnterpriseHooksReadiness(cmd *cobra.Command, _ []string) error {
 func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool) error {
 	var run enterpriseHookVerifyRun
 	var err error
+	var notes *enterpriseHookNoteSet
+	defer enterpriseHookVerifyRunScope()()
 	if registrationOnly {
+		notes = &enterpriseHookNoteSet{}
+		enterpriseHookReadinessNotes.Store(notes)
 		run, err = runEnterpriseHookRegistrationOnce(cmd.Context())
+		enterpriseHookReadinessNotes.Store(nil)
 	} else {
 		run, err = runEnterpriseHookVerifyOnce(cmd.Context())
 	}
@@ -1941,17 +1946,17 @@ func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool
 		if run.AuthorizationErr != nil {
 			payload["authorization_error"] = run.AuthorizationErr.Error()
 		}
+		if warnings := enterpriseHookVerifyWarnings(run, notes); len(warnings) != 0 {
+			payload["warnings"] = warnings
+		}
 		if len(run.Excused) != 0 {
-			warnings := make([]string, 0, len(run.Excused))
 			// The excused targets by SID and connector, so a caller that waits
 			// for the guardian (a signed bundle's hook proof) treats them as
 			// verify does instead of waiting for a sign-in (review loop 2).
 			excused := make([]map[string]string, 0, len(run.Excused))
 			for _, row := range run.Excused {
-				warnings = append(warnings, enterpriseHookTargetLabel(row)+": "+row.Error+enterpriseHookVerifyExcusedNote(run, row))
 				excused = append(excused, map[string]string{"sid": row.SID, "connector": row.Connector})
 			}
-			payload["warnings"] = warnings
 			payload["excused"] = excused
 		}
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(payload); err != nil {
@@ -1979,6 +1984,9 @@ func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %s\n", Style("✗", "fg=red", "bold"), enterpriseHookTargetLabel(row), row.Error)
 		}
+	}
+	for _, note := range notes.list() {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", Style("•", "fg=yellow", "bold"), note)
 	}
 	if run.AuthorizationErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  %s protected authorization: %s\n", Style("✗", "fg=red", "bold"), run.AuthorizationErr)
@@ -3035,6 +3043,8 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	if enterpriseHookWatchDebounce <= 0 {
 		return fmt.Errorf("enterprise hooks watch: --debounce must be positive")
 	}
+	enterpriseHookGuardianWatching.Store(true)
+	defer enterpriseHookGuardianWatching.Store(false)
 	standaloneConfigFingerprint := enterpriseHookStandaloneConfigFingerprint()
 	startEnterpriseHookQuarantineRemovals(cmd.Context(), cmd.ErrOrStderr())
 	fsw, err := fsnotify.NewWatcher()

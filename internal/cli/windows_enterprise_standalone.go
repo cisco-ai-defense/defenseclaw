@@ -1461,6 +1461,9 @@ func applyWindowsEnterpriseInstallerReport(
 		enrollment, err := readWindowsEnterpriseStandaloneEnrollment()
 		if err == nil {
 			result.Enrollment = enrollment
+			if result.Action == "status" || result.Action == "verify" || result.Action == "ensure" {
+				appendWindowsClaudeUserSettingsWarnings(result, enrollment.Accounts)
+			}
 		}
 		aiDefense, err := readWindowsEnterpriseStandaloneAIDefense()
 		if err == nil && aiDefense {
