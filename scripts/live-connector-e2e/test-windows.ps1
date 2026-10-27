@@ -2938,27 +2938,32 @@ threading.Event().wait()
         Assert-True ($nativeWorkflowText -match [regex]::Escape($testName)) "native Windows Go DACL step reaches $testName"
     }
     Assert-True ($nativeWorkflowText -match '''test'', ''-vet=off'', ''-v'', ''-count=1'', ''-run'', \$daclTestPattern, ''\./internal/safefile'', ''\./internal/managed'', ''\./internal/gateway/connector''') 'Go DACL regressions execute in every owning package without cache reuse'
+    $gatewayMatrixIndexes = @([regex]::Matches($nativeWorkflowText,
+        '- \{ shard: gw(\d+), kind: gateway, index: \1 \}') | ForEach-Object { [int]$_.Groups[1].Value } | Sort-Object)
     Assert-True ($nativeWorkflowText -match
-        '''test'', ''-vet=off'', ''-list'', ''\^\(Test\|Fuzz\|Example\)'', ''\./internal/gateway''' -and
-        $nativeWorkflowText -match '''-run'', \$gatewayShardPattern, ''\./internal/gateway''' -and
-        $nativeWorkflowText -match
-        '''test'', ''-vet=off'', ''-list'', ''\^\(Test\|Fuzz\|Example\)'', ''\./internal/gateway/connector''' -and
-        $nativeWorkflowText -match '''-run'', \$connectorShardPattern, ''\./internal/gateway/connector''' -and
+        '@\{ Dir = ''internal/gateway''; Skip = \$windowsInapplicable; Extra = @\(''-parallel=1''\) \}' -and
+        $nativeWorkflowText -match '@\{ Dir = ''internal/gateway/connector''; Skip = \$connectorSkip; Extra = @\(\) \}' -and
+        $nativeWorkflowText -match '''--package-dir'', \$part\.Dir,' -and
+        $nativeWorkflowText -match '''--shard-count'', \[string\]\$nativeTestShardCount,' -and
+        [regex]::Matches($nativeWorkflowText, '''--shard-index'', \[string\]\$matrixShard').Count -eq 2 -and
+        $nativeWorkflowText -match 'foreach \(\$part in @\(' -and
+        $nativeWorkflowText -match 'throw "go_test_shards\.py selected no \$\(\$part\.Dir\) tests for shard \$matrixShard"' -and
+        $nativeWorkflowText -match '\$suiteKind -eq ''gateway'' -and \(\$matrixShard -lt 0 -or \$matrixShard -ge \$nativeTestShardCount\)' -and
+        ($gatewayMatrixIndexes -join ',') -eq ((0..15) -join ',') -and
+        $nativeWorkflowText -match '''-skip'', \$part\.Skip, ''-run'', \$shardPattern, \(''\./'' \+ \$part\.Dir\)' -and
         $nativeWorkflowText -match '\$nativeTestShardCount = 16' -and
-        [regex]::Matches($nativeWorkflowText, 'foreach \(\$shard in 0\.\.\(\$nativeTestShardCount - 1\)\)').Count -eq 2 -and
-        [regex]::Matches($nativeWorkflowText, '\(\$index % \$nativeTestShardCount\) -eq \$shard').Count -eq 2 -and
         [regex]::Matches($nativeWorkflowText, '''-parallel=1''').Count -eq 1 -and
         $nativeWorkflowText -match '\$connectorIsolatedTests = @\(' -and
-        $nativeWorkflowText -match '\$_ -notin \$connectorIsolatedTests' -and
+        $nativeWorkflowText -match '\$connectorSkip = ''\^\('' \+ \(\(\$windowsInapplicableTests \+ \$connectorIsolatedTests\) -join ''\|''\) \+ ''\)\$''' -and
         $nativeWorkflowText -match '''TestCodexLifecycle_CrossProcessSetupTeardownTransaction''' -and
         $nativeWorkflowText -match '''TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout''' -and
         $nativeWorkflowText -match 'foreach \(\$isolatedTest in \$connectorIsolatedTests\)' -and
         $nativeWorkflowText -match '''-run'', \(''\^'' \+ \[regex\]::Escape\(\$isolatedTest\) \+ ''\$''\), ''\./internal/gateway/connector''' -and
         $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway'',' -and
         $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway/connector'',' -and
-        $nativeWorkflowText -match '''--timings'', ''scripts/test-timings/go-windows\.json''' -and
+        [regex]::Matches($nativeWorkflowText, '''--timings'', ''scripts/test-timings/go-windows\.json''').Count -eq 2 -and
         $nativeWorkflowText -match '\$remainingArguments = @\(') `
-        'full native Go suite bounds gateway and connector selectors across sequential processes, isolates native lifecycle regressions, serializes gateway tests with process-global capture state, and separately selects every remaining package'
+        'full native Go suite runs one timing-balanced gateway and connector shard per runner across all sixteen matrix shards, isolates native lifecycle regressions, serializes gateway tests with process-global capture state, and separately selects every remaining package'
     Assert-True ($nativeWorkflowText -match '(?s)''-p=1''.*?''-skip''.*?\$windowsInapplicable') 'native Go suite serializes packages and excludes only declared Windows-inapplicable tests'
     Assert-True ([regex]::Matches($nativeWorkflowText, '''test'', ''-vet=off''').Count -eq
         [regex]::Matches($nativeWorkflowText, '''test''').Count -and
@@ -3225,7 +3230,7 @@ threading.Event().wait()
             $contractFunction.IndexOf("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D", [StringComparison]::Ordinal)) `
         'connector contract binds Profile, LocalAppData, and RoamingAppData to the current process token before hostile environment isolation'
     Assert-True ($connectorContractJob -match '(?s)Required connector contract\r?\n.*?Invoke-WindowsNativeProcess.*?-Mode'', ''contract'', ''-Connector'', \$env:CONNECTOR.*?-DiagnosticsRoot'', \$contractDiagnostics' -and
-        $connectorContractJob -match "timeout-minutes: \$\{\{ matrix\.connector == 'devin' && 50 \|\| 35 \}\}" -and
+        $connectorContractJob -match '(?m)^    timeout-minutes: 20\r?$' -and
         $nativeWorkflowText -notmatch '\./scripts/windows-native-ci\.ps1 -Operation contract') `
         'hosted connector contracts run as disposable real standard users and preserve the matrix connector'
     $connectorContractStep = [regex]::Match(
