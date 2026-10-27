@@ -53,6 +53,8 @@ If the `defenseclaw` command does not start, run the install command again. It r
 A running OpenShell sandbox keeps running, but its hooks fail closed while the gateway is stopped (usually under a minute). Upgrade between sessions, or let the agent retry afterwards.
 </Callout>
 
+An upgrade from 1.0.3 or earlier refuses, and changes nothing, while that release's gateway runs a sandbox. Those sessions keep the network broker of the OpenShell release they started with, which DefenseClaw cannot contain. The installer names each one with the command that ends it: `defenseclaw sandbox stop NAME`, or `defenseclaw sandbox delete NAME` for a completed or failed MicroVM, which deletes its work. Save the work you need, end them, then run the upgrade again. When the gateway is not running the installer cannot ask it, so end your sandboxes before you upgrade.
+
 For a legacy MicroVM guest, save accessible work before upgrading. If it is ready afterward, keep the guest: run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`. See [Known limits in 1.0.4](/docs/troubleshooting/known-limits#upgrade-and-policy-limits) for completed or failed guests and data-loss risks.
 
 ## Rollback
