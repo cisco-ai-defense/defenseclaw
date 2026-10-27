@@ -98,6 +98,8 @@ from defenseclaw.config import (
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACTS,
     KIRO_CLI_HOOK_FLOOR,
+    OPENCLAW_APPROVAL_SURFACES,
+    OPENCLAW_BEDROCK_PLUGIN_PACKAGE,
     OPENCLAW_PLUGIN_APPROVALS_SINCE,
     PROXY_CONNECTORS,
     STATUS_KNOWN,
@@ -110,6 +112,7 @@ from defenseclaw.connector_contracts import (
     known_broken_entry,
     normalize_agent_version,
     normalize_connector,
+    openclaw_bedrock_plugin_missing,
     openclaw_lacks_plugin_approvals,
     openclaw_needs_interception_advisory,
     resolve_connector_contract,
@@ -5941,6 +5944,7 @@ def _check_connector_version_supported_for_setup(
     _discovery: Any = None,
     _refusal_scope: dict[str, Any] | None = None,
     human_approval: bool = False,
+    openclaw_config_file: str | None = None,
 ) -> bool:
     """Verify the selected connector's installed version before setup.
 
@@ -6110,6 +6114,8 @@ def _check_connector_version_supported_for_setup(
                     "A live guardrail proxy port is not proof that agent LLM traffic is intercepted — "
                     "run `defenseclaw doctor` and confirm the OpenClaw interception check."
                 )
+            if connector == "openclaw":
+                _warn_openclaw_setup_advisories(raw_version, human_approval, openclaw_config_file)
         return True
 
     if compatibility.status == STATUS_UNVERSIONED:
@@ -6529,6 +6535,8 @@ def _check_guardrail_setup_connector_versions(
             "_allow_prompt": allow_prompt,
             "human_approval": _guardrail_hilt_enabled_for(gc, connector),
         }
+        if connector == "openclaw":
+            version_check_kwargs["openclaw_config_file"] = getattr(getattr(app.cfg, "claw", None), "config_file", None)
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
         if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
@@ -6567,10 +6575,37 @@ def _check_guardrail_setup_connector_versions(
     return True
 
 
+def _warn_openclaw_setup_advisories(
+    raw_version: str | None, human_approval: bool, openclaw_config_file: str | None
+) -> None:
+    """Name where OpenClaw shows approvals (GAP-1958) and a missing Bedrock
+    provider plugin (GAP-1959). Both only warn; setup goes on."""
+    label = f"OpenClaw {normalize_agent_version(raw_version or '') or ''}".strip()
+    if human_approval:
+        ux.warn(f"{OPENCLAW_APPROVAL_SURFACES}.")
+    if not openclaw_config_file:
+        return
+    try:
+        with open(os.path.expanduser(openclaw_config_file), encoding="utf-8") as fh:
+            openclaw_config = _json.load(fh)
+    except (OSError, ValueError):
+        return
+    if openclaw_bedrock_plugin_missing(raw_version, openclaw_config):
+        ux.warn(
+            f"{label} loads Amazon Bedrock from the external plugin {OPENCLAW_BEDROCK_PLUGIN_PACKAGE}, "
+            "and openclaw.json names a Bedrock model without it, so OpenClaw model calls fail with "
+            '"No API provider registered for api: bedrock-converse-stream".'
+        )
+        ux.subhead(
+            f"Run: openclaw plugins install {OPENCLAW_BEDROCK_PLUGIN_PACKAGE} "
+            "(it adds amazon-bedrock to plugins.allow), then openclaw gateway restart."
+        )
+
+
 def _hilt_support_note(connector: str) -> str:
     """Return the operator-facing HILT support note for a connector."""
     if connector == "openclaw":
-        return "OpenClaw supports DefenseClaw approval prompts for tool actions."
+        return f"OpenClaw supports DefenseClaw approval prompts for tool actions. {OPENCLAW_APPROVAL_SURFACES}."
     if connector == "claudecode":
         return "Claude Code supports native PreToolUse ask prompts."
     if connector == "codex":

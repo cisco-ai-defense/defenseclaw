@@ -2210,7 +2210,13 @@ def _check_hilt_support(
         return
 
     if connector == "openclaw":
-        _emit("pass", "Human approval", f"OpenClaw prompts supported at {min_sev}+", r=r)
+        _emit(
+            "pass",
+            "Human approval",
+            f"OpenClaw prompts supported at {min_sev}+ (Control UI and chat channels that "
+            "forward /approve; openclaw tui and local chat do not show them)",
+            r=r,
+        )
     elif connector == "claudecode":
         _emit("pass", "Human approval", f"Claude Code PreToolUse ask supported at {min_sev}+", r=r)
     elif connector == "copilot":

@@ -53,6 +53,15 @@ Human approval needs OpenClaw 2026.3.28 or later. The OpenClaw that `install.sh`
 
 For a second-pass LLM judge, export a key and add `--detection-strategy regex_judge --judge-model <model> --judge-api-key-env DEFENSECLAW_LLM_KEY`. Latency and cost depend on the model.
 
+#### Bedrock on OpenClaw 2026.5.12 and later
+
+From 2026.5.12 OpenClaw no longer bundles the Amazon Bedrock provider. A Bedrock model in `openclaw.json` then needs the external plugin, or every model call fails with `No API provider registered for api: bedrock-converse-stream`. `defenseclaw setup openclaw` warns when the plugin is missing, disabled or not in `plugins.allow`.
+
+```bash
+openclaw plugins install @openclaw/amazon-bedrock-provider   # adds amazon-bedrock to plugins.allow
+openclaw gateway restart
+```
+
 #### Bedrock through a VPC endpoint
 
 When `bedrock-runtime.<region>.amazonaws.com` resolves to an AWS PrivateLink (VPC interface) endpoint, the proxy refuses the private address and every turn fails. The agent shows `DefenseClaw refused a private LLM endpoint; if you trust it, run: defenseclaw guardrail allow-private-upstream <host>`, and `defenseclaw doctor` warns with a **Private upstream** row. Allow the endpoint. The command restarts a running gateway.
@@ -173,7 +182,9 @@ The gateway answers allow, alert, confirm or block. In action mode a block stops
 
 ## Native ask
 
-For a `confirm` verdict in action mode the plugin returns OpenClaw's `requireApproval` object with `timeoutBehavior: "deny"`. OpenClaw applies the decision. The plugin's `onResolution` callback only logs it. It sends no separate "resolve approval" request to the gateway. OpenClaw is the only connector with plugin-mediated approval in its chat origin. Other native-ask connectors use their own host UI. See [Human approval](/docs/features/guardrail) for the per-connector matrix.
+For a `confirm` verdict in action mode the plugin returns OpenClaw's `requireApproval` object with `timeoutBehavior: "deny"`. OpenClaw applies the decision. The plugin's `onResolution` callback only logs it. It sends no separate "resolve approval" request to the gateway.
+
+OpenClaw shows the request in its Control UI (`openclaw dashboard`) and on chat channels that forward `/approve`. `openclaw tui` and local `openclaw chat` do not show it, so a call that needs approval there is denied when the request times out (`gateway.approval_timeout_s`, 30 s by default). The plugin then logs `<tool> was denied: nobody answered its approval request` with where to answer, and setup with `--human-approval` and the doctor **Human approval** row say the same. OpenClaw is the only connector with plugin-mediated approval in its chat origin. Other native-ask connectors use their own host UI. See [Human approval](/docs/features/guardrail) for the per-connector matrix.
 
 ## Fail mode
 

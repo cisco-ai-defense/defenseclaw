@@ -43,7 +43,7 @@ The sequence of a model call and a tool call, with approvals, is on the [referen
 <HookEventsList connector="openclaw" />
 
 - The proxy can block a checked request, a checked response and a tool call.
-- OpenClaw is the connector with plugin-mediated approval. In action mode a confirm verdict on `before_tool_call` becomes OpenClaw's own approval request, which denies on timeout. You answer inside OpenClaw.
+- OpenClaw is the connector with plugin-mediated approval. In action mode a confirm verdict on `before_tool_call` becomes OpenClaw's own approval request, which denies on timeout. Answer it in the OpenClaw Control UI (`openclaw dashboard`) or with `/approve` on a chat channel that forwards approvals. `openclaw tui` and local `openclaw chat` do not show the request, so the call there is denied when it times out, and the OpenClaw gateway log says where to answer.
 - Only recognized model traffic is redirected. Other requests pass through unchecked.
 
 ## Files it changes
@@ -61,6 +61,7 @@ DefenseClaw backs up `openclaw.json` first. Teardown restores it, or removes onl
 - Raw sockets, custom transports and libraries that bypass the patched entry points are not inspected.
 - The shims inspect those six commands only. They give no syscall, filesystem or network isolation.
 - If a Bedrock endpoint resolves to a private VPC address, the proxy refuses it. Allow it with `defenseclaw guardrail allow-private-upstream <host>`.
+- OpenClaw 2026.5.12 and later load Amazon Bedrock from the external plugin `@openclaw/amazon-bedrock-provider`. Without it every model call fails with `No API provider registered for api: bedrock-converse-stream`, and setup warns. Run `openclaw plugins install @openclaw/amazon-bedrock-provider`, then `openclaw gateway restart`.
 - If you move OpenClaw's gateway port, run `defenseclaw setup openclaw` again.
 - OpenClaw does not run in an OpenShell sandbox.
 
