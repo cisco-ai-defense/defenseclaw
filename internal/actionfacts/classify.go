@@ -381,6 +381,8 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		}
 	case "uniq":
 		classifyUniqOutputOperand(out, command)
+	case "xxd":
+		classifyXxdOperands(out, command)
 	case "getcap":
 		classifyGetcap(out, command)
 	case "where", "where.exe":

@@ -41,7 +41,7 @@ var findEmbeddedReaders = map[string]struct{}{
 	"more": {}, "od": {}, "printf": {}, "readlink": {}, "realpath": {},
 	"rg": {}, "sha1sum": {}, "sha224sum": {}, "sha256sum": {}, "sha384sum": {},
 	"sha512sum": {}, "shasum": {}, "stat": {}, "strings": {}, "tail": {},
-	"test": {}, "[": {}, "true": {}, "false": {}, "wc": {}, "xxd": {},
+	"test": {}, "[": {}, "true": {}, "false": {}, "wc": {},
 	"jq": {}, "cut": {}, "column": {}, "nl": {}, "tac": {}, "rev": {},
 	"chmod": {}, "chown": {}, "chgrp": {}, "touch": {},
 }
@@ -111,6 +111,9 @@ func handedEntriesOf(words []string, inEntryDir bool) HandedEntries {
 	switch program {
 	case "uniq":
 		only = len(handedOperands(args, "fsw")) <= 1
+	case "xxd":
+		// xxd INFILE OUTFILE rewrites OUTFILE (GAP-2302).
+		only = !xxdWritesOutput(args)
 	case "sort":
 		only = sortOnlyPrints(args)
 	case "sed":

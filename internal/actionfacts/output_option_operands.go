@@ -269,3 +269,64 @@ func UnknownOutputOptionTargets(argv []string) []string {
 	}
 	return targets
 }
+
+// xxd reads INFILE and writes OUTFILE: `xxd INFILE OUTFILE` (and `xxd -r
+// INFILE OUTFILE`) truncates and rewrites the second operand, so `xxd
+// /dev/null FILE` empties FILE (GAP-2302). A single operand is only read.
+func classifyXxdOperands(out *parseOutput, command *CommandFact) {
+	positionals, ok := xxdPositionals(command.Argv[1:])
+	if !ok {
+		out.markPartial(IssueUnknownOperandGrammar)
+	}
+	if len(positionals) > 0 && positionals[0] != "-" {
+		addOperation(command, OperationRead)
+		appendCommandPath(out, command, PathAccessRead, positionals[0])
+	}
+	if len(positionals) > 1 && positionals[1] != "-" {
+		addOperation(command, OperationWrite)
+		appendCommandPath(out, command, PathAccessWrite, positionals[1])
+	}
+	if len(positionals) > 2 {
+		out.markPartial(IssueUnknownOperandGrammar)
+	}
+}
+
+// xxdValueOptions are the xxd options that take a value, by the short
+// letter and the long spellings xxd accepts (-c/-cols, -g/-groupsize,
+// -l/-len, -o/-offset, -s/-seek, -n/-name, -R).
+var xxdValueOptions = map[string]struct{}{
+	"-c": {}, "-cols": {}, "-g": {}, "-groupsize": {}, "-l": {}, "-len": {},
+	"-o": {}, "-offset": {}, "-s": {}, "-seek": {}, "-n": {}, "-name": {}, "-R": {},
+}
+
+// xxdPositionals returns the INFILE and OUTFILE operands of xxd's
+// arguments (options and their values removed). ok is false when an
+// option is missing its value.
+func xxdPositionals(args []string) (positionals []string, ok bool) {
+	ok = true
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if len(positionals) == 0 && strings.HasPrefix(arg, "-") && arg != "-" {
+			if _, takes := xxdValueOptions[arg]; takes {
+				// The value may itself start with '-' (`-s -16`).
+				if i+1 >= len(args) {
+					return positionals, false
+				}
+				i++
+			}
+			// Any other dash word is a flag or an option with its value
+			// attached (-c8, -s+16).
+			continue
+		}
+		positionals = append(positionals, arg)
+	}
+	return positionals, ok
+}
+
+// xxdWritesOutput reports xxd arguments with an OUTFILE operand (or a
+// grammar that cannot be read), so a find or xargs that hands entries to
+// such an xxd may change what it names (GAP-2302).
+func xxdWritesOutput(args []string) bool {
+	positionals, ok := xxdPositionals(args)
+	return !ok || len(positionals) > 1
+}
