@@ -522,8 +522,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 32471,
-      "sha256": "5352ef77e7aaae220b86d6cc5446f511808f51c3fb2e501f4f7f7eca03f77dbb"
+      "size": 33066,
+      "sha256": "07765bb23b43f0ba53c4a1dfc766187515afe640e791de4900ae8df47f4db825"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -574,8 +574,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 32471,
-      "sha256": "5352ef77e7aaae220b86d6cc5446f511808f51c3fb2e501f4f7f7eca03f77dbb"
+      "size": 33066,
+      "sha256": "07765bb23b43f0ba53c4a1dfc766187515afe640e791de4900ae8df47f4db825"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -626,8 +626,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 32537,
-      "sha256": "ebaf1a76fa3864c5bd560895fda72b41be55cb7abc4dc16b5f36031fbe0be410"
+      "size": 33132,
+      "sha256": "a7354e05a59c71235a2a150dc01e828c77ccf9e751d767e44ae90831290421e0"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -678,8 +678,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 32537,
-      "sha256": "ebaf1a76fa3864c5bd560895fda72b41be55cb7abc4dc16b5f36031fbe0be410"
+      "size": 33132,
+      "sha256": "a7354e05a59c71235a2a150dc01e828c77ccf9e751d767e44ae90831290421e0"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1489,8 +1489,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 32349,
-      "sha256": "150fd419944ae30cc256e7ff400b6212af9dfdb442a25bdf49af48eeedf968b1"
+      "size": 32944,
+      "sha256": "7bdedd6b46692013cfbdc2fb8bf77e3c7db92008c5d77c6b2b7ebe91275b8479"
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
@@ -1576,8 +1576,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 32349,
-      "sha256": "02bb29c728979eb2e34d50868c71ede94b2c5d0481b2fa246b23133c718926e6"
+      "size": 32944,
+      "sha256": "5313a7d3de5eb451e19777539460a00c757cc54af25b647564b9da68f0a9bb7c"
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",

@@ -510,8 +510,14 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 # Follow FAIL_MODE; strict availability is an additional force-closed override.
 fail_unreachable() {
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+  # The same cause and next step as the Claude Code block and the open-mode
+  # warning: a stopped gateway names the start step (GAP-2253).
   _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because it could not reach its gateway ($1). Run defenseclaw-gateway status to check it."
-  if _dc_answer="$(defenseclaw_gateway_error_answer "$1")"; then
+  if [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.stopped" ]; then
+    _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection (defenseclaw-gateway status shows its state)."
+  elif [ "$1" = "gateway unreachable" ] && _dc_next="$(defenseclaw_unreachable_next_step)" && [ -n "$_dc_next" ]; then
+    _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this: ${_dc_next//\`/}."
+  elif _dc_answer="$(defenseclaw_gateway_error_answer "$1")"; then
     _DC_CODEX_BLOCK_REASON="DefenseClaw blocked this because its gateway answered with an error (${_dc_answer}). Run defenseclaw doctor to see what to fix."
   fi
 {{end}}  # A blocked Stop only keeps Codex running the turn (#1140).
