@@ -949,6 +949,12 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 runtime_drift_rows.append(f"{_connector_label(name)} ({name}){fail_drift}")
             if cfm == "closed":
                 runtime_limit_rows.append(f"{_connector_label(name)} ({name}) is closed: {runtime_state.limit}")
+        if _is_proxy_connector(name):
+            # A proxy connector has no hooks: its proxy refuses every call
+            # while the gateway is down, whatever hook_fail_mode says. Show
+            # what `guardrail fail-mode` shows (GAP-1646), so neither the
+            # Fail column nor a hooks-allow warning over-states the risk.
+            cfm = "closed"
         # Per-connector on/off: a connector turned off via
         # `guardrail disable --connector X` is reported as disabled so the
         # roster never implies it is enforcing when its hooks have been torn
@@ -4397,7 +4403,15 @@ def use_pack_cmd(
         stale, dropped = _stale_rule_changes(app.cfg, fallback.path, connector_key)
         result = _write_guardrail_config(
             app,
-            [config_writer.Change(f"{key}.rule_pack", unset=True), *pin_changes, *stale],
+            [
+                # The entry goes with its last override when guardrail.connector
+                # already puts the connector on the roster (GAP-1954, GAP-1894).
+                config_writer.Change(
+                    f"{key}.rule_pack", unset=True, prune_empty_to=_rule_prune_scope(connector_key, None, app.cfg)
+                ),
+                *pin_changes,
+                *stale,
+            ],
             f"guardrail use-pack --clear --connector {connector_key}",
             _fail,
         )
@@ -5588,7 +5602,16 @@ def mode_cmd(
     if connector_key is None:
         gc.mode = mode
     elif clear:
-        _connector_block_for_write(gc, connector_key).mode = ""
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        block = _connector_block_for_write(gc, connector_key)
+        block.mode = ""
+        if block == PerConnectorGuardrailConfig() and roster_entry_is_redundant(
+            app.cfg, connector_key, list(gc.connectors)
+        ):
+            # Nothing of its own is left and guardrail.connector already puts
+            # the connector on the roster: no 'connectors: codex: {}' (GAP-1954).
+            del gc.connectors[connector_key]
     else:
         _connector_block_for_write(gc, connector_key).mode = mode
     new_mode = _effective(connector_key)

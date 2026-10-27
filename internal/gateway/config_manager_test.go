@@ -244,6 +244,7 @@ func TestConfigManagerReloadRejectsInvalidAndKeepsSnapshot(t *testing.T) {
 }
 
 func TestConfigManagerV8ReloadCompilesAndPassesExactStableSnapshot(t *testing.T) {
+	before := version.Current().Generation
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
 	initialRaw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
@@ -289,6 +290,27 @@ func TestConfigManagerV8ReloadCompilesAndPassesExactStableSnapshot(t *testing.T)
 	}
 	if got, want := version.Current().ContentHash, configContentHashForTest(nextRaw); got != want {
 		t.Fatalf("successful reload content hash = %q, want %q", got, want)
+	}
+	// provenance show reads the running gateway's generation: a successful
+	// apply advances it by one, an unchanged or rejected reload does not
+	// (GAP-0391).
+	if got := version.Current().Generation; got != before+1 {
+		t.Fatalf("applied provenance generation = %d, want %d", got, before+1)
+	}
+	if err := mgr.Reload(context.Background(), "unchanged"); err != nil {
+		t.Fatal(err)
+	}
+	if got := version.Current().Generation; got != before+1 {
+		t.Fatalf("unchanged reload advanced provenance to %d", got)
+	}
+	if err := os.WriteFile(path, []byte("config_version: invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(context.Background(), "invalid"); err == nil {
+		t.Fatal("invalid reload succeeded")
+	}
+	if got := version.Current().Generation; got != before+1 {
+		t.Fatalf("rejected reload advanced provenance to %d", got)
 	}
 }
 

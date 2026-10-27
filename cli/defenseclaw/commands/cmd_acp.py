@@ -27,6 +27,7 @@ from defenseclaw.acp_catalog import ACP_AGENT_ENTRY_POINTS, ACP_CLIENT_IDS, ACP_
 from defenseclaw.config import ACPBinding, ACPProfile
 from defenseclaw.connector_paths import _normalize_jsonc
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.enforce.asset_lists import is_secure_client
 from defenseclaw.file_permissions import (
     atomic_write_private_bytes,
     atomic_write_text_secure,
@@ -46,15 +47,58 @@ _CLIENTS = set(ACP_CLIENT_IDS)
 _AGENTS = {agent_id: (command, list(args)) for agent_id, (command, args) in ACP_AGENT_ENTRY_POINTS.items()}
 
 
+# The home of the account whose managed runtime an administrator checks
+# (_runtime_owner_view), or None for this account's own home.
+_RUNTIME_OWNER_HOME: Path | None = None
+
+
 def _client_path(client: str) -> Path:
+    owner_home = _RUNTIME_OWNER_HOME
     if client == "jetbrains":
-        return Path.home() / ".jetbrains" / "acp.json"
+        return (owner_home or Path.home()) / ".jetbrains" / "acp.json"
     if os.name == "nt":
         appdata = os.environ.get("APPDATA")
         if not appdata:
             raise click.ClickException("APPDATA is required to configure Zed on Windows")
         return Path(appdata) / "Zed" / "settings.json"
+    if owner_home is not None:
+        return owner_home / ".config" / "zed" / "settings.json"
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "zed" / "settings.json"
+
+
+def _runtime_owner_uid(data_dir: str) -> int | None:
+    """The account that owns <data_dir>/acp, when root checks another account's runtime (POSIX), else None."""
+    if os.name == "nt" or os.geteuid() != 0:
+        return None
+    try:
+        owner = (Path(data_dir).expanduser() / "acp").lstat().st_uid
+    except OSError:
+        return None
+    return owner if owner != 0 else None
+
+
+@contextlib.contextmanager
+def _runtime_owner_view(data_dir: str):
+    """Read a managed enrollment as the account it belongs to (GAP-2111).
+
+    The administrator checks a user's managed enrollment with
+    --runtime-data-dir. The editor settings file is that user's, under the
+    home of the account that owns the runtime directory, not root's.
+    """
+    global _RUNTIME_OWNER_HOME
+    owner = _runtime_owner_uid(data_dir)
+    previous = _RUNTIME_OWNER_HOME
+    if owner is not None:
+        import pwd
+
+        try:
+            _RUNTIME_OWNER_HOME = Path(pwd.getpwuid(owner).pw_dir)
+        except KeyError:
+            pass
+    try:
+        yield
+    finally:
+        _RUNTIME_OWNER_HOME = previous
 
 
 def _resolve_executable(value: str, label: str) -> str:
@@ -241,13 +285,29 @@ def _write_contract_lock(
     agent_executable: str,
     client_path: Path,
     managed: bool,
+    pin_entry: bool = False,
 ) -> Path:
+    """Write the pair's contract lock.
+
+    pin_entry: pin the pair's guarded entries (acp.EntryDigestPrefix): the
+    entries that start the guard with this lock, under the reserved name, an
+    adopted name or a numbered one, instead of the whole editor file, so a
+    theme or agent-panel edit elsewhere in the file keeps the guard starting
+    (GAP-0504).
+    """
     path = _contract_lock_path(data_dir, client, agent)
+    client_pin = _sha256_file(str(client_path))
+    if pin_entry:
+        entry_digest = _guard_entry_sha256(
+            _read_json_object(client_path).get("agent_servers"), client, agent, path.resolve()
+        )
+        if entry_digest:
+            client_pin = _ENTRY_DIGEST_PREFIX + entry_digest
     document: dict[str, Any] = {
         "version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "protocol": {"schema_version": _SCHEMA_VERSION, "schema_sha256": _SCHEMA_SHA256},
-        "client": {"id": client, "config_path": str(client_path), "config_sha256": _sha256_file(str(client_path))},
+        "client": {"id": client, "config_path": str(client_path), "config_sha256": client_pin},
         "agent": {
             "id": agent,
             "path": agent_executable,
@@ -329,6 +389,11 @@ def _refresh_client_contract_digests(data_dir: str, client: str, client_path: Pa
             or lock_agent.get("id") != pair_agent
         ):
             raise click.ClickException(f"managed ACP contract lock identity does not match: {path}")
+        pinned = lock_client.get("config_sha256")
+        if isinstance(pinned, str) and pinned.startswith(_ENTRY_DIGEST_PREFIX) and _lock_binds_editor(document, client):
+            # It pins only its own entry, which this change did not write:
+            # re-pinning it here would seal another binding's edit (GAP-0513).
+            continue
         lock_client["config_path"] = str(client_path.resolve())
         lock_client["config_sha256"] = digest
         atomic_write_private_bytes(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())
@@ -403,19 +468,47 @@ _GO_JSON_ESCAPES = (
 )
 
 
-def _guard_entry_sha256(servers: Any, client: str, agent: str) -> str:
-    """The digest the guard computes for the pair's entry (acp.ClientEntrySHA256), or "".
+def _entry_starts_lock(entry: Any, lock_path: str | Path) -> bool:
+    """Whether an editor entry starts the guard with the contract lock at lock_path (acp entryStartsLock)."""
+    value = _guard_options(entry).get("--contract-lock") if isinstance(entry, dict) else None
+    if not value:
+        return False
+    return os.path.normcase(os.path.abspath(value)) == os.path.normcase(os.path.abspath(str(lock_path)))
 
-    Go's json.Marshal: sorted keys, no spaces, and <, >, &, U+2028 and U+2029
-    escaped. The keys the editor owns for client are left out, as there.
+
+def _guard_entry_sha256(servers: Any, client: str, agent: str, lock_path: str | Path | None = None) -> str:
+    """The digest the guard computes for the pair's entries (acp.ClientEntrySHA256), or "".
+
+    The entries are those that start the guard with the lock at lock_path
+    (an adopted or numbered entry too, GAP-0504); with none, the entry under
+    the reserved name. One entry is pinned alone, several as one object by
+    name. Go's json.Marshal: sorted keys, no spaces, and <, >, &, U+2028 and
+    U+2029 escaped. The keys the editor owns for client are left out, as there.
     """
-    entry = servers.get(_managed_name(agent)) if isinstance(servers, dict) else None
-    if entry is None:
+    if not isinstance(servers, dict):
         return ""
-    if isinstance(entry, dict):
-        editor_owned = _EDITOR_OWNED_ENTRY_KEYS.get(client, frozenset())
-        entry = {key: value for key, value in entry.items() if key not in editor_owned}
-    canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    editor_owned = _EDITOR_OWNED_ENTRY_KEYS.get(client, frozenset())
+
+    def pinned(entry: Any) -> Any:
+        if not isinstance(entry, dict):
+            return entry
+        return {key: value for key, value in entry.items() if key not in editor_owned}
+
+    guarded = {
+        name: pinned(entry)
+        for name, entry in servers.items()
+        if lock_path is not None and _entry_starts_lock(entry, lock_path)
+    }
+    if len(guarded) == 1:
+        value: Any = next(iter(guarded.values()))
+    elif guarded:
+        value = guarded
+    else:
+        value = servers.get(_managed_name(agent))
+        if value is None:
+            return ""
+        value = pinned(value)
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     for raw, escaped in _GO_JSON_ESCAPES:
         canonical = canonical.replace(raw, escaped)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -449,13 +542,21 @@ def _record_is_private(path: Path, info: os.stat_result) -> bool:
     """Whether the record is this account's own file, private to it.
 
     On POSIX it must be a regular file this account owns with no group or
-    other permission bit. On Windows the check is the guard's private-file
+    other permission bit. Root checking another account's managed runtime
+    (--runtime-data-dir) accepts that account's own record in its own acp
+    directory, where its enterprise setup writes it (GAP-2111). On Windows the check is the guard's private-file
     rule: no reparse point on the path, owned by this account, and a DACL
     that grants only this account, OWNER RIGHTS and SYSTEM.
     """
     if os.name == "nt":
         return windows_guard_private_file_error(path) is None
-    return stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and not stat.S_IMODE(info.st_mode) & 0o077
+    owner = os.geteuid()
+    if owner == 0:
+        try:
+            owner = path.parent.lstat().st_uid
+        except OSError:
+            return False
+    return stat.S_ISREG(info.st_mode) and info.st_uid == owner and not stat.S_IMODE(info.st_mode) & 0o077
 
 
 def _owned_entry_records(data_dir: str | None) -> EntryRecords:
@@ -841,6 +942,65 @@ def _managed_guard_custody_is_trusted(path_value: str) -> bool:
         return False
 
 
+# The contract lock as the guard decodes it (acp.RuntimeContractLock, with
+# DisallowUnknownFields): each section's keys and the type each value must have.
+_LOCK_SCHEMA: dict[str, Any] = {
+    "version": int, "generated_at": str, "profile": str, "mode": str,
+    "protocol": {"schema_version": str, "schema_sha256": str},
+    "client": {"id": str, "config_path": str, "config_sha256": str},
+    "agent": {"id": str, "path": str, "sha256": str, "version": str},
+    "guard": {"path": str, "sha256": str, "managed_custody": bool},
+}
+
+
+def _lock_shape_problem(value: Any, schema: dict[str, Any], where: str) -> str:
+    """The first key or type the guard's decoder refuses, or ""."""
+    if not isinstance(value, dict):
+        return f"{where or 'the lock'} is not an object"
+    for key, item in value.items():
+        expected = schema.get(key)
+        name = f"{where}.{key}" if where else key
+        if expected is None:
+            return f"unknown key {name!r}"
+        if isinstance(expected, dict):
+            problem = _lock_shape_problem(item, expected, name)
+            if problem:
+                return problem
+        elif item is not None and (type(item) is not expected):
+            return f"{name!r} is not a {expected.__name__}"
+    return ""
+
+
+def _lock_file_problems(lock: dict[str, Any], info: os.stat_result) -> list[str]:
+    """What the guard refuses in the lock file itself before it checks any pin (GAP-2071).
+
+    The guard starts only a private lock (no group or other access on POSIX)
+    of at most 64 KiB that decodes into its lock type with no unknown key and
+    no value of another type, and it compares the running guard's resolved
+    path with the pinned one, so a pinned guard path that is a link never
+    starts. A user who copied ~/.defenseclaw with cp -r under umask 022 got
+    "Verified" while the editor could not start the agent.
+    """
+    problems: list[str] = []
+    if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+        problems.append("contract lock permissions are too broad (the guard starts only a private lock)")
+    if info.st_size > 64 << 10:
+        problems.append("contract lock is larger than the guard reads")
+    shape = _lock_shape_problem(lock, _LOCK_SCHEMA, "")
+    if shape:
+        problems.append(f"contract lock is malformed for the guard: {shape}")
+    guard = lock.get("guard")
+    guard_path = guard.get("path") if isinstance(guard, dict) else None
+    if (
+        os.name != "nt"
+        and isinstance(guard_path, str)
+        and guard.get("managed_custody") is not True
+        and os.path.realpath(guard_path) != os.path.abspath(guard_path)
+    ):
+        problems.append("guard executable path is a link; the guard starts only from the path setup pinned")
+    return problems
+
+
 def _verify_binding(
     data_dir: str,
     client: str,
@@ -896,6 +1056,7 @@ def _verify_binding(
         problems.append("contract lock is missing or unsafe")
         return problems
     try:
+        lock_info = lock_path.stat()
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         problems.append("contract lock is unreadable")
@@ -903,6 +1064,7 @@ def _verify_binding(
     if not isinstance(lock, dict):
         problems.append("contract lock is not an object")
         return problems
+    problems.extend(_lock_file_problems(lock, lock_info))
     lock_client = lock.get("client")
     lock_agent = lock.get("agent")
     lock_guard = lock.get("guard")
@@ -927,8 +1089,10 @@ def _verify_binding(
         if not same_editor:
             problems.append("client configuration path does not match")
         elif settings_usable and isinstance(client_digest, str) and client_digest.startswith(_ENTRY_DIGEST_PREFIX):
-            # The lock pins the guarded entry, checked as the guard checks it (GAP-0912).
-            if client_digest[len(_ENTRY_DIGEST_PREFIX):].lower() != _guard_entry_sha256(servers, client, agent):
+            # The lock pins the guarded entries, checked as the guard checks them (GAP-0912, GAP-0504).
+            if client_digest[len(_ENTRY_DIGEST_PREFIX):].lower() != _guard_entry_sha256(
+                servers, client, agent, lock_path.resolve()
+            ):
                 problems.append(f"the {_managed_name(agent)} entry changed after setup (the contract lock pins it)")
         elif settings_usable and (not isinstance(client_digest, str) or client_digest != _client_digest(client_path)):
             problems.append("client configuration digest has drifted")
@@ -1218,6 +1382,7 @@ def setup_cmd(
             agent_executable=agent_executable,
             client_path=path,
             managed=managed,
+            pin_entry=not is_secure_client(app.cfg),
         )
         _refresh_client_contract_digests(data_dir, client, path)
         # Record what was written, so this runtime can later prove these
@@ -1499,6 +1664,11 @@ def status_cmd(app: AppContext, runtime_data_dir: Path | None, json_output: bool
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
     data_dir = str((runtime_data_dir or Path(app.cfg.data_dir)).expanduser().resolve())
+    with _runtime_owner_view(data_dir) if runtime_data_dir else contextlib.nullcontext():
+        _status(app, data_dir, json_output)
+
+
+def _status(app: AppContext, data_dir: str, json_output: bool) -> None:
     bindings = {}
     for client, agent in sorted(_binding_pairs(app.cfg, data_dir)):
         problems = _verify_binding(data_dir, client, agent, app.cfg.acp, _expected_gateway(app.cfg))
@@ -1589,6 +1759,11 @@ def verify_cmd(app: AppContext, client: str | None, agent: str | None, runtime_d
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
     data_dir = str((runtime_data_dir or Path(app.cfg.data_dir)).expanduser().resolve())
+    with _runtime_owner_view(data_dir) if runtime_data_dir else contextlib.nullcontext():
+        _verify(app, client, agent, data_dir)
+
+
+def _verify(app: AppContext, client: str | None, agent: str | None, data_dir: str) -> None:
     if client and agent:
         pairs = [(client, agent)]
     else:
@@ -1637,10 +1812,38 @@ def setup_repair_command(cfg: Any, client: str, agent: str, data_dir: str) -> st
         executable = item.get("path") if isinstance(item, dict) else None
         if isinstance(executable, str) and Path(executable).is_absolute() and Path(executable).is_file():
             command.extend([flag, executable])
+    if cfg.deployment_mode == "managed_enterprise" and not is_secure_client(cfg):
+        return _enterprise_setup_command(cfg, client, agent, profile, mode != "observe", data_dir, lock)
     if cfg.deployment_mode == "managed_enterprise":
         command.extend(["--managed", "--runtime-data-dir", data_dir])
     if os.name == "nt":
         return "defenseclaw " + " ".join("'" + value.replace("'", "''") + "'" for value in command[1:])
+    return shlex.join(command)
+
+
+def _enterprise_setup_command(
+    cfg: Any, client: str, agent: str, profile: str, activate: bool, data_dir: str, lock: dict[str, Any] | None
+) -> str:
+    """The user's setup step on a managed standalone host: the gateway's own `enterprise acp setup`.
+
+    That host has no per-user `defenseclaw acp setup` (the per-user CLI
+    refuses to run there), so verify named a command the user cannot run.
+    This is the command the enrollment reports and the guard prints. The
+    installed guard sits next to the gateway.
+    """
+    item = lock.get("guard") if lock else None
+    guard = item.get("path") if isinstance(item, dict) else None
+    if isinstance(guard, str) and Path(guard).is_absolute():
+        gateway = str(Path(guard).with_name("defenseclaw-gateway" + Path(guard).suffix))
+    else:
+        guard, gateway = "defenseclaw-acp", "defenseclaw-gateway"
+    command = [gateway, "enterprise", "acp", "setup", "--client", client, "--agent", agent, "--profile", profile]
+    if activate:
+        command.append("--activate")
+    port = getattr(getattr(cfg, "gateway", None), "api_port", None) or 18970
+    command.extend(["--data-dir", data_dir, "--api-port", str(port), "--guard-binary", guard])
+    if os.name == "nt":
+        return "& " + " ".join("'" + value.replace("'", "''") + "'" for value in command)
     return shlex.join(command)
 
 

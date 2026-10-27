@@ -840,7 +840,10 @@ def test_clear_connector_override(env):
     assert payload["path"] == str(root / "default")
     # The custom pin only codex selected goes with its pack (GAP-0127).
     assert writes == [[
-        config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True),
+        # claudecode is on the roster too, so the codex entry stays (GAP-1954).
+        config_writer.Change(
+            "guardrail.connectors.codex.rule_pack", unset=True, prune_empty_to="guardrail.connectors.codex"
+        ),
         config_writer.Change("guardrail.custom_packs.team", unset=True),
     ]]
 
@@ -857,7 +860,7 @@ def test_clear_connector_pack_drops_stale_rule_overrides(env, monkeypatch):
     result = _run(app, ["use-pack", "--clear", "--connector", "codex", "--json"])
     assert result.exit_code == 0, result.output
     assert writes[-1] == [
-        config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True),
+        config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True, prune_empty_to="guardrail"),
         # guardrail.connector already puts codex on the roster, so an entry
         # left empty goes too (GAP-1894).
         config_writer.Change("guardrail.connectors.codex.rules.disable", unset=True, prune_empty_to="guardrail"),

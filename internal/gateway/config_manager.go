@@ -1589,6 +1589,11 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 	m.rejected = false
 	m.rejectedAssets.Store(nil)
 	gen := m.gen.Add(1)
+	// provenance show reports this generation (GAP-0391). Secure Client
+	// keeps its own provenance path.
+	if !next.SecureClientIntegration() {
+		version.BumpGeneration()
+	}
 	m.current.Store(cloneConfig(next))
 	exportCandidateKey()
 	recordHandEdit(ctx, next, m.path, source.raw)

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/procboot"
 )
 
 // codeAgentSessionsRestart names agent sessions that started before the
@@ -186,17 +187,24 @@ func (e *Env) agentSessionsStartedBefore(ctx context.Context, since time.Time, s
 	return out
 }
 
-// linuxAgentSessions reads the agent processes from /proc: the start time is
-// field 22 of /proc/<pid>/stat, in clock ticks (USER_HZ, 100) after btime.
-func (e *Env) linuxAgentSessions() []agentSession {
-	sessions, _ := e.linuxAgentSessionsWithError()
-	return sessions
-}
+// bootFromClock is procboot.FromClock; tests replace it.
+var bootFromClock = procboot.FromClock
 
-func (e *Env) linuxAgentSessionsWithError() ([]agentSession, error) {
+// linuxBootSeconds is the boot instant (Unix seconds) that the start times in
+// /proc/<pid>/stat count from: the btime line of /proc/stat. A /proc mounted
+// with subset=pid has no /proc/stat but still serves the process table, so
+// there the instant comes from the clocks, the way the kernel computes btime
+// (GAP-2101). Any other unreadable /proc/stat stays an error, and the scan is
+// reported as unknown.
+func (e *Env) linuxBootSeconds() (int64, error) {
 	stat, err := readBounded(e.P("/proc/stat"), 1<<20)
 	if err != nil {
-		return nil, err
+		if procboot.SubsetPID(e.P("/proc")) {
+			if boot, ok := bootFromClock(); ok {
+				return boot, nil
+			}
+		}
+		return 0, err
 	}
 	var boot int64
 	for _, line := range strings.Split(string(stat), "\n") {
@@ -205,7 +213,22 @@ func (e *Env) linuxAgentSessionsWithError() ([]agentSession, error) {
 		}
 	}
 	if boot == 0 {
-		return nil, fmt.Errorf("missing Linux boot time")
+		return 0, fmt.Errorf("missing Linux boot time")
+	}
+	return boot, nil
+}
+
+// linuxAgentSessions reads the agent processes from /proc: the start time is
+// field 22 of /proc/<pid>/stat, in clock ticks (USER_HZ, 100) after btime.
+func (e *Env) linuxAgentSessions() []agentSession {
+	sessions, _ := e.linuxAgentSessionsWithError()
+	return sessions
+}
+
+func (e *Env) linuxAgentSessionsWithError() ([]agentSession, error) {
+	boot, err := e.linuxBootSeconds()
+	if err != nil {
+		return nil, err
 	}
 	entries, err := os.ReadDir(e.P("/proc"))
 	if err != nil {
@@ -529,17 +552,8 @@ func (e *Env) hostProcesses(ctx context.Context) []hostProcess {
 // linuxProcesses reads the processes from /proc: the start time is field
 // 22 of /proc/<pid>/stat, in clock ticks (USER_HZ, 100) after btime.
 func (e *Env) linuxProcesses() []hostProcess {
-	stat, err := readBounded(e.P("/proc/stat"), 1<<20)
+	boot, err := e.linuxBootSeconds()
 	if err != nil {
-		return nil
-	}
-	var boot int64
-	for _, line := range strings.Split(string(stat), "\n") {
-		if value, ok := strings.CutPrefix(line, "btime "); ok {
-			boot, _ = strconv.ParseInt(strings.TrimSpace(value), 10, 64)
-		}
-	}
-	if boot == 0 {
 		return nil
 	}
 	entries, _ := os.ReadDir(e.P("/proc"))

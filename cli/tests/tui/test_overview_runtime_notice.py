@@ -115,3 +115,28 @@ async def test_initial_audit_loading_notice_is_whole_on_the_80x24_overview(tmp_p
         loading = next(notice.message for notice in notices if "Loading the audit history" in notice.message)
         screen = fixtures.screen_text(app)
     assert any(loading in line for line in screen.splitlines()), screen
+
+def test_idle_connector_notice_goes_after_the_runtime_notice() -> None:
+    # GAP-2104: at 80x24 only the first notice lines are above the fold; the
+    # transient "0 hook events" note came first and hid Runtime and its N key.
+    from datetime import timedelta
+
+    from defenseclaw.tui.panels.overview import ConnectorHealth, HealthSnapshot, OverviewPanelModel, SubsystemHealth
+
+    model = OverviewPanelModel(
+        OverviewConfig(claw_mode="codex", guardrail_connector="codex", guardrail_enabled=True), version="test"
+    )
+    model.set_health(
+        HealthSnapshot(
+            uptime_ms=int(timedelta(minutes=3).total_seconds() * 1000),
+            gateway=SubsystemHealth(state="running"),
+            connector=ConnectorHealth(name="codex", state="running", requests=0),
+            api=SubsystemHealth(state="running", details={"addr": "127.0.0.1:17777"}),
+        )
+    )
+    model.runtime = _standard_account_runtime().overview()
+    messages = [notice.message for notice in model.build_notices()]
+    runtime = next(i for i, m in enumerate(messages) if m.startswith("Runtime "))
+    idle = next(i for i, m in enumerate(messages) if "0 hook events" in m)
+    assert runtime < idle, messages
+    assert idle == len(messages) - 1, messages

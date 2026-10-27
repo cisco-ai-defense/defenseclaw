@@ -325,6 +325,14 @@ def test_verify_detects_client_configuration_drift(tmp_path, monkeypatch):
         )
         assert result.exit_code == 0, result.output
         settings = _zed_settings(tmp_path)
+        # A lock from 1.0.4 or earlier pins the whole editor file (setup now
+        # pins the guarded entry, GAP-0504): any edit of that file is drift.
+        lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+        lock = json.loads(lock_path.read_text())
+        lock["client"]["config_sha256"] = hashlib.sha256(settings.read_bytes()).hexdigest()
+        cmd_acp_module.atomic_write_private_bytes(lock_path, json.dumps(lock).encode())
+        result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert result.exit_code == 0, result.output
         document = json.loads(settings.read_text())
         document["theme"] = "drifted"
         settings.write_text(json.dumps(document))
