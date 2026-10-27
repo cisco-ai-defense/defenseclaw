@@ -237,7 +237,8 @@ func TestUninstallCompletesWhenTheServiceAccountCannotBeDeleted(t *testing.T) {
 	done := h.run(Options{Action: ActionUninstall, Purge: true})
 	requireOK(t, done)
 	if len(done.Warnings) != 1 || done.Warnings[0].Code != codeAccount ||
-		!strings.Contains(done.Warnings[0].Message, "sudo dscl . -delete /Users/"+h.env.Layout.ServiceUser) {
+		!strings.Contains(done.Warnings[0].Message, "sudo dscl . -delete /Users/"+h.env.Layout.ServiceUser) ||
+		!strings.Contains(done.Warnings[0].Message, "from a Terminal or an MDM script that has Full Disk Access") {
 		t.Fatalf("warnings = %+v, want the service-account warning with the delete command", done.Warnings)
 	}
 	if exists(h.env.deploymentPath()) {

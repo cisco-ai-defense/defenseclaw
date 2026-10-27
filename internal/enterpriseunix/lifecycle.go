@@ -4016,7 +4016,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 // account by hand after an uninstall could not.
 func serviceAccountDeleteCommand(goos, name string) string {
 	if goos == "darwin" {
-		return "`sudo dscl . -delete /Users/" + name + "` and `sudo dscl . -delete /Groups/" + name + "`"
+		return "`sudo dscl . -delete /Users/" + name + "` and `sudo dscl . -delete /Groups/" + name + "`, from a Terminal or an MDM script that has Full Disk Access (System Settings > Privacy & Security > Full Disk Access, or a PPPC profile); an ssh session without it is refused the same way"
 	}
 	return "`sudo userdel " + name + "`"
 }

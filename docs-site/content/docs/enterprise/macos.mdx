@@ -368,9 +368,11 @@ per-user binaries in `~/.local/bin` and DefenseClaw's wheels in `~/.cache/uv`. I
 keep data. Pass `--purge` in the same run as the uninstall: uninstall deletes the
 list of enrolled accounts, so a later `--purge` is a no-op (`not_installed`). To
 clean up afterward, delete `~/.defenseclaw` by hand, or install again and run
-`uninstall --purge`. If macOS denies deleting the `_defenseclaw` account (it can,
-from a remote shell), the uninstall still completes with a `service_account`
-warning carrying the two `dscl` commands to delete it.
+`uninstall --purge`. macOS lets only a process with Full Disk Access delete the
+`_defenseclaw` account. Run from an ssh session or an MDM agent without it, the
+delete is refused (`eDSPermissionError`) and the uninstall still completes with a
+`service_account` warning carrying the two `dscl` commands; run them from a
+Terminal or MDM script that has Full Disk Access (or grant it with a PPPC profile).
 
 A pkg has no uninstaller, so the lifecycle removes the binaries itself. The
 root-owned `lifecycle/lifecycle.lock` remains so waiting runs share one lock. For a

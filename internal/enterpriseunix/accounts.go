@@ -415,8 +415,19 @@ var dsclOpenDirectoryError = regexp.MustCompile(`\beDS[A-Za-z]+\b`)
 // Directory error name, instead of dscl's raw output (exit 40, "DS Error:
 // -14120 (eDSPermissionError)"), which the uninstall warning repeated next
 // to the command that deletes the account by hand (GAP-0769).
+//
+// eDSPermissionError on a user record means the process that ran dscl has
+// no Full Disk Access: macOS 13 and later let only such a process delete a
+// local user account, root or not, and an ssh session or a LaunchDaemon
+// without a PPPC grant has none (GAP-1542, cap-emac1: the same sudo dscl
+// delete is refused there and succeeds on a Mac whose sshd has Full Disk
+// Access). The message says so, because the by-hand command fails the
+// same way in the same shell.
 func dsclDeleteError(record string, err error) error {
 	if name := dsclOpenDirectoryError.FindString(err.Error()); name != "" {
+		if name == "eDSPermissionError" {
+			return fmt.Errorf("macOS refused to delete the directory record %s (%s: macOS lets only a process with Full Disk Access delete a user account, and this one has none)", record, name)
+		}
 		return fmt.Errorf("macOS refused to delete the directory record %s (%s)", record, name)
 	}
 	return fmt.Errorf("remove %s: %w", record, err)
