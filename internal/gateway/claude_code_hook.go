@@ -600,7 +600,9 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 		}
 	}
 	watchRoot := strings.TrimSpace(req.NewCWD)
-	if watchRoot == "" {
+	// A managed caller's new_cwd the service cannot resolve still names
+	// the new project; it does not fall back to the old one (GAP-0066).
+	if watchRoot == "" && (!req.managedWatch || req.reportedNewCWD == "") {
 		watchRoot = req.CWD
 	}
 	if watchRoot == "" {
