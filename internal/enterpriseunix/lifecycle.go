@@ -3070,6 +3070,7 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 	if l.bundle != nil {
 		opt.LocalActor = configwrite.CurrentOSActor()
 	}
+	var restoredPending *enterprisebundle.Receipt
 	if before := l.generationBefore; before != nil {
 		if raw, err := os.ReadFile(configPath); err == nil {
 			opt = configwrite.RestoreOptions(before.state, configwrite.SHA256Hex(raw), opt)
@@ -3077,19 +3078,37 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 	} else if env.bundleMode() {
 		// A killed process took generationBefore with it. Recover the actor
 		// and bundle identity from the confirmed receipt, after checking that
-		// the restored bytes really are that bundle's rendered config.
-		raw, ref, err := env.currentBundleConfig(env.bundleStore())
+		// the restored bytes really are that bundle's rendered config. A
+		// higher delivery killed over a bundle an earlier run committed and
+		// the gateway has not confirmed is rolled back to that bundle's
+		// bytes: they are recorded as that bundle, and its receipt moves to
+		// the new generation, so the gateway can still confirm it
+		// (GAP-1803, GAP-2097).
+		store := env.bundleStore()
+		raw, ref, err := env.currentBundleConfig(store)
 		if err != nil {
 			return fmt.Errorf("read the confirmed bundle for rollback: %w", err)
 		}
 		if ref != nil {
 			restored, err := os.ReadFile(configPath)
-			if err != nil || !bytes.Equal(restored, raw) {
-				return fmt.Errorf("restored config does not match confirmed bundle %s version %d: %v", ref.BundleID, ref.Version, err)
+			if err == nil && !bytes.Equal(restored, raw) {
+				restoredPending = env.committedPendingBundle(store, ref, restored)
 			}
-			opt, err = currentBundleGenerationOptions(env.bundleStore(), ref)
-			if err != nil {
-				return fmt.Errorf("read confirmed bundle attribution: %w", err)
+			switch {
+			case restoredPending != nil:
+				pendingOpt, ok := enterprisebundle.GenerationOptions(restoredPending)
+				if !ok {
+					return fmt.Errorf("pending bundle %s version %d has no principal", displayID(restoredPending), restoredPending.Version)
+				}
+				pendingOpt.GenerationFloor = restoredPending.ConfigGeneration
+				opt = pendingOpt
+			case err != nil || !bytes.Equal(restored, raw):
+				return fmt.Errorf("restored config does not match confirmed bundle %s version %d: %v", ref.BundleID, ref.Version, err)
+			default:
+				opt, err = currentBundleGenerationOptions(store, ref)
+				if err != nil {
+					return fmt.Errorf("read confirmed bundle attribution: %w", err)
+				}
 			}
 		}
 	}
@@ -3125,7 +3144,24 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 	if before := l.generationBefore; before != nil {
 		l.rebindRestoredPendingBundle(before.state)
 	}
+	if restoredPending != nil {
+		l.rebindRecoveredPendingBundle(restoredPending)
+	}
 	return nil
+}
+
+// rebindRecoveredPendingBundle moves the receipt of the committed,
+// unconfirmed bundle a recovery put back (committedPendingBundle) to the
+// generation recordRestoredGeneration recorded for its bytes and signed
+// attribution, so the gateway's report of that generation confirms it.
+func (l *lifecycle) rebindRecoveredPendingBundle(rc *enterprisebundle.Receipt) {
+	state, err := configwrite.ReadGenerationState(l.env.P(l.env.Layout.ConfigPath))
+	if err != nil || state.Generation <= rc.ConfigGeneration || state.ConfigSHA256 != rc.ConfigSHA256 ||
+		state.BundleID != rc.BundleID || state.BundleVersion != rc.Version ||
+		state.SignerKeyID != rc.SignerKeyID || state.Actor != rc.Principal {
+		return
+	}
+	l.rebindPendingReceipt(rc, state.Generation)
 }
 
 // rebindRestoredPendingBundle keeps provable the unconfirmed bundle whose
@@ -3157,11 +3193,17 @@ func (l *lifecycle) rebindRestoredPendingBundle(before configwrite.GenerationSta
 			rc.SignerKeyID != state.SignerKeyID || rc.Principal != state.Actor {
 			continue
 		}
-		if err := store.RebindGeneration(rc, state.Generation); err != nil {
-			l.result.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), fmt.Sprintf(
-				"policy bundle %s version %d is installed again, but its receipt could not record the restored config generation; deliver it again to confirm it: %v%s",
-				displayID(rc), rc.Version, err, stateWriteAction(err)))
-		}
+		l.rebindPendingReceipt(rc, state.Generation)
+	}
+}
+
+// rebindPendingReceipt moves an applied receipt to the config generation
+// that records its bytes again.
+func (l *lifecycle) rebindPendingReceipt(rc *enterprisebundle.Receipt, generation uint64) {
+	if err := l.env.bundleStore().RebindGeneration(rc, generation); err != nil {
+		l.result.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), fmt.Sprintf(
+			"policy bundle %s version %d is installed again, but its receipt could not record the restored config generation; deliver it again to confirm it: %v%s",
+			displayID(rc), rc.Version, err, stateWriteAction(err)))
 	}
 }
 
