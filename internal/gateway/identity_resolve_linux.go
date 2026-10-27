@@ -72,6 +72,13 @@ var managedHookPeerRecordedAccountIncarnation = func(account unixidentity.Accoun
 // A record of another SID is an error (readIdentitySpoolFactsForAccount): the
 // account's own facts are then unproven.
 func holderSpoolRecord(key string, account unixidentity.Account, accountSID string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool, error) {
+	return holderSpoolRecordFor(key, account, accountSID, now, managedHookPeerAccountIncarnation)
+}
+
+// holderSpoolRecordFor is holderSpoolRecord with the gateway's own account
+// incarnation lookup ownIncarnation.
+func holderSpoolRecordFor(key string, account unixidentity.Account, accountSID string, now time.Time,
+	ownIncarnation func(unixidentity.Account) (string, bool)) (enterprisehooks.IdentitySpoolRecord, bool, error) {
 	record, ok, err := readIdentitySpoolFactsForAccount(key, account.Name, accountSID, now)
 	if err != nil {
 		return enterprisehooks.IdentitySpoolRecord{}, false, err
@@ -79,7 +86,7 @@ func holderSpoolRecord(key string, account unixidentity.Account, accountSID stri
 	if !ok || record.AccountIncarnation == "" {
 		return enterprisehooks.IdentitySpoolRecord{}, false, nil
 	}
-	incarnation, known := managedHookPeerAccountIncarnation(account)
+	incarnation, known := ownIncarnation(account)
 	if !known && recordedLocalAccountIncarnation(record) {
 		incarnation, known = managedHookPeerRecordedAccountIncarnation(account)
 	}
@@ -109,9 +116,15 @@ func recordedLocalAccountIncarnation(record enterprisehooks.IdentitySpoolRecord)
 // managedHookPeerGuardianIncarnation is the account incarnation of account
 // that the guardian's current identity record of its uid proves when the
 // gateway cannot tell it alone (holderSpoolRecord): a local account behind
-// SSSD in the passwd line. false without such a record. Tests replace it.
+// SSSD in the passwd line. false without such a record. It is asked only
+// after the gateway's own lookup (managedHookPeerAccountIncarnation) did not
+// name the incarnation (peerAccountIncarnation), so it does not ask that
+// lookup again: each recheck of such an account, every second on the hook
+// path, made three NSS incarnation lookups instead of two (RVI1-1). Tests
+// replace it.
 var managedHookPeerGuardianIncarnation = func(account unixidentity.Account) (string, bool) {
-	record, ok, err := holderSpoolRecord(strconv.Itoa(account.UID), account, "", time.Now().UTC())
+	record, ok, err := holderSpoolRecordFor(strconv.Itoa(account.UID), account, "", time.Now().UTC(),
+		func(unixidentity.Account) (string, bool) { return "", false })
 	if err != nil || !ok {
 		return "", false
 	}

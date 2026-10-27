@@ -980,7 +980,9 @@ func (c *managedHookPeerHomeCache) cachedHolderFor(name string) (int, string, er
 }
 
 // holderNow asks the account database at once which account holds uid, and
-// its account incarnation (managedHookPeerAccountIncarnation). A completed
+// its account incarnation (peerAccountIncarnation, as recheckAccount: for
+// a local account behind SSSD only the guardian's record names it, and
+// without it the entry lost the incarnation until the next recheck). A completed
 // answer is recorded as recheckAccount records one, so the hook path
 // compares its holder with it (noteHolder). ok is false when the database
 // does not name the uid now.
@@ -999,7 +1001,7 @@ func (c *managedHookPeerHomeCache) holderNow(uid int) (account unixidentity.Acco
 	if err != nil || found.UID != uid {
 		return unixidentity.Account{}, "", false, false
 	}
-	incarnation, incarnationKnown = managedHookPeerAccountIncarnation(found)
+	incarnation, incarnationKnown = peerAccountIncarnation(found)
 	if entry != nil {
 		select {
 		case <-entry.ready:
