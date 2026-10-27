@@ -268,6 +268,9 @@ type Store struct {
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
+	// lockWait stops the waits on a write lock another process holds
+	// (GAP-1021).
+	lockWait writeLockWait
 
 	// progress receives the one-line notes Init writes while it applies
 	// migrations. nil means os.Stderr, which is gateway.log in the daemon.
@@ -323,7 +326,10 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 	s.sqliteBusyMu.RLock()
 	observer := s.sqliteBusyObserver
 	s.sqliteBusyMu.RUnlock()
-	return observer
+	if observer == nil {
+		return nil
+	}
+	return storeBusyObserver{store: s, inner: observer}
 }
 
 // auditPragmas is the pragma set applied to every connection in the
@@ -338,9 +344,10 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 // Settings explained:
 //   - journal_mode=WAL          enables write-ahead logging so readers
 //     and writers do not block each other.
-//   - busy_timeout=5000         SQLite waits up to 5 seconds before
+//   - busy_timeout=750          SQLite waits up to 0.75 seconds before
 //     returning SQLITE_BUSY, absorbing the
-//     vast majority of write contention.
+//     vast majority of write contention
+//     (auditBusyTimeoutMillis, writeLockWait).
 //   - wal_autocheckpoint=0      disables SQLite's connection-local commit
 //     hook. DefenseClaw copies the log on a dedicated checkpoint connection
 //     (the WAL guard, health and retention maintenance); running a checkpoint from
@@ -525,7 +532,12 @@ func isSQLiteBusy(err error) bool {
 
 // IsSQLiteBusy reports transient SQLite contention to callers that must
 // retry an entire transaction after a stale read snapshot.
-func IsSQLiteBusy(err error) bool { return isSQLiteBusy(err) }
+//
+// A busy error met while another process holds the write lock is not
+// transient (writeLockWait): retrying would only hold the caller's answer.
+func IsSQLiteBusy(err error) bool {
+	return isSQLiteBusy(err) && !errors.Is(err, errAuditWriteLockHeld)
+}
 
 // SQLite BUSY retry policy. Even with busy_timeout=5000 some bursts
 // outpace SQLite's internal waiter — we layer an application-level
@@ -556,14 +568,23 @@ func retryBusyObserved(
 	fn func() error,
 ) error {
 	delay := time.Duration(sqliteRetryBaseMs) * time.Millisecond
+	store := busyObserverStore(observer)
 	var err error
 	for attempt := 0; attempt < sqliteRetryAttempts; attempt++ {
+		started := time.Now()
 		err = fn()
+		store.noteWriteAttempt(started, err, false)
 		if !isSQLiteBusy(err) {
 			return err
 		}
 		if observer != nil {
 			_ = observer.RecordSQLiteBusyMetric(ctx, op)
+		}
+		// Another process holds the write lock: stop waiting on it and fail
+		// now (writeLockWait). fn has given the connection back.
+		if store.writeLockHeld() {
+			store.applyWriteLockWait(writeLockApplyWait)
+			return store.markHeldLockError(err)
 		}
 		if attempt == sqliteRetryAttempts-1 {
 			break
@@ -582,7 +603,9 @@ func (s *Store) execDB(ctx context.Context, op string, query string, args ...any
 	var res sql.Result
 	err := retryBusyObserved(ctx, op, s.sqliteBusyObservabilityV8(), func() error {
 		var execErr error
+		started := time.Now()
 		res, execErr = s.db.ExecContext(ctx, query, args...)
+		s.noteWriteAttempt(started, execErr, true)
 		return execErr
 	})
 	return res, err
@@ -620,11 +643,14 @@ func txExecContextObserved(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	started := time.Now()
 	res, err := tx.ExecContext(ctx, query, args...)
+	store := busyObserverStore(observer)
+	store.noteWriteAttempt(started, err, true)
 	if isSQLiteBusy(err) && observer != nil {
 		reportSQLiteBusyDetached(ctx, observer, op)
 	}
-	return res, err
+	return res, store.markHeldLockError(err)
 }
 
 // sqliteBusyDetachedReports bounds the BUSY reports of open transactions
@@ -2277,7 +2303,7 @@ func (s *Store) verifyMandatoryPragmas(ctx context.Context) error {
 		if err := s.scanRow(ctx, "audit_pragma_"+pragma.name, row, &got); err != nil {
 			return fmt.Errorf("audit: verify SQLite %s pragma: %w", pragma.name, err)
 		}
-		if got != pragma.want {
+		if got != pragma.want && (pragma.name != "busy_timeout" || got != 0 || !s.writeLockHeld()) {
 			return fmt.Errorf("audit: SQLite %s pragma is %d, want %d", pragma.name, got, pragma.want)
 		}
 	}
