@@ -1670,6 +1670,22 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     )
 
 
+def _restore_global_hook_fail_mode(gc: object, value: str, saved: bool) -> None:
+    """Put the global hook_fail_mode back as it was before a failed change.
+
+    An unset global reads as "closed" in memory (GuardrailConfig keeps that
+    public default) but is not a saved choice. Assigning that value back would
+    mark it saved, so a rollback wrote ``hook_fail_mode: closed`` that the
+    user never chose (GAP-2019). An unset value goes back unset.
+    """
+
+    if saved:
+        gc.hook_fail_mode = value
+        return
+    gc.hook_fail_mode = ""
+    object.__setattr__(gc, "hook_fail_mode", value)
+
+
 def _apply_global_fail_mode_transaction(
     app: AppContext,
     *,
@@ -1696,6 +1712,7 @@ def _apply_global_fail_mode_transaction(
             raise click.Abort() from exc
 
         old_global = gc.hook_fail_mode
+        old_global_saved = bool(getattr(gc, "_hook_fail_mode_saved", True))
         old_entries: dict[str, tuple[object, str]] = {}
         gc.hook_fail_mode = mode
         if fail_mode_targets:
@@ -1735,7 +1752,7 @@ def _apply_global_fail_mode_transaction(
         except OSError as exc:
             # A failed writer commit leaves config.yaml as it was, and no
             # registration file has been touched yet.
-            gc.hook_fail_mode = old_global
+            _restore_global_hook_fail_mode(gc, old_global, old_global_saved)
             for name, (old_entry, old_mode) in old_entries.items():
                 old_entry.hook_fail_mode = old_mode
             ux.err(
@@ -1792,7 +1809,7 @@ def _apply_global_fail_mode_transaction(
                                 f"connector runtime verification failed for {name}: " + ", ".join(state.drift)
                             )
             except (OSError, RuntimeError, click.ClickException) as exc:
-                gc.hook_fail_mode = old_global
+                _restore_global_hook_fail_mode(gc, old_global, old_global_saved)
                 for name, (old_entry, old_mode) in old_entries.items():
                     old_entry.hook_fail_mode = old_mode
                 try:

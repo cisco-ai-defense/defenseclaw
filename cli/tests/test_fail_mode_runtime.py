@@ -973,6 +973,52 @@ def test_scoped_reconcile_failure_rolls_back_config_and_registration(
     assert config_yaml.read_bytes() == concurrent
 
 
+def test_global_rollback_keeps_an_unset_global_fail_mode_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-2019: a default-tier install has no saved global hook_fail_mode
+    # (it reads "closed" in memory). A failed `guardrail fail-mode closed
+    # --yes` must not roll back to a saved "closed" the user never chose.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": ""})
+    cfg.guardrail = dcconfig.GuardrailConfig()
+    cfg.guardrail.enabled = True
+    cfg.guardrail.connectors = {
+        name: dcconfig.PerConnectorGuardrailConfig(hook_fail_mode="") for name in ("claudecode", "codex")
+    }
+    assert not cfg.guardrail._hook_fail_mode_saved
+    _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
+    saves: list[tuple[str, bool, dict[str, str]]] = []
+    cfg.save = MagicMock(
+        side_effect=lambda **_kw: saves.append(
+            (
+                cfg.guardrail.hook_fail_mode,
+                cfg.guardrail._hook_fail_mode_saved,
+                {name: entry.hook_fail_mode for name, entry in cfg.guardrail.connectors.items()},
+            )
+        )
+    )
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    refused = OSError("copilot: cannot repair event preToolUse: an independent or unrecognized handler is present")
+    with (
+        patch("defenseclaw.fail_mode.Path.home", return_value=home),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration", side_effect=refused),
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True),
+        patch("defenseclaw.commands.cmd_setup._restart_services", side_effect=refused),
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    assert result.exit_code != 0, result.output
+    assert "restored" in result.output
+    assert len(saves) == 2, saves
+    assert saves[0][0] == "closed" and saves[0][1]
+    # The rollback save writes the global back unset, not as a saved closed.
+    assert saves[1][1] is False, saves
+    assert saves[1][2] == {"claudecode": "", "codex": ""}
+    assert cfg.guardrail.hook_fail_mode == "closed"
+    assert not cfg.guardrail._hook_fail_mode_saved
+
+
 def test_truthful_noop_requires_current_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
