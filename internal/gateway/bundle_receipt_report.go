@@ -69,12 +69,14 @@ const changeRecordPinsDirName = "change-record-pins"
 
 // bundleReceiptSink is the audit surface the reporter uses (*audit.Logger).
 type bundleReceiptSink interface {
-	LogPolicyBundleReceipt(principal string, bundle audit.PolicyBundle, receipt audit.PolicyBundleReceipt) error
+	LogPolicyBundleReceipt(principal string, bundle audit.PolicyBundle, receipt audit.PolicyBundleReceipt,
+		delivery *observability.RemoteDelivery, pins *audit.ConfigChangePins) error
 	RecordPolicyBundleVersion(ctx context.Context, bundleVersion uint64) error
 	LogConfigChange(change audit.ConfigChange, delivery *observability.RemoteDelivery, pins *audit.ConfigChangePins) error
 }
 
-// changeDelivery is the reporter's state of one change event it offered.
+// changeDelivery is the reporter's state of one change event or terminal
+// receipt it offered.
 type changeDelivery struct {
 	delivery *observability.RemoteDelivery
 	offered  time.Time
@@ -101,14 +103,17 @@ type bundleReceiptReporter struct {
 	// marker again: the change commands remove a change event from the
 	// spool only once its marker is on disk.
 	unmarked map[string]bool
-	// changes holds the change events offered and not reported yet.
+	// changes holds the change events and receipts offered and not
+	// reported yet.
 	changes map[string]*changeDelivery
-	// pins keeps the record of each change the same on every offer.
+	// pins keeps the record of each change and receipt the same on every
+	// offer.
 	pins *audit.ConfigChangePins
 	// spoolAtStart holds the ids of the change events and reservations in
-	// the change spool when this reporter first read it (spoolScanned).
-	// Only a change that entered the spool later, on its first offer, is one
-	// no earlier gateway process can have offered (audit.ConfigChange.FirstOffer).
+	// the change spool, and of the receipts in the receipt spool, when this
+	// reporter first read them (spoolScanned). Only one that entered a spool
+	// later, on its first offer, is one no earlier gateway process can have
+	// offered (audit.ConfigChange.FirstOffer).
 	spoolAtStart map[string]bool
 	spoolScanned bool
 }
@@ -183,7 +188,7 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 		// The public receipt remains confirmed when a pre-staging delivery
 		// is refused. Its separate refusal still needs an audit event.
 	} else {
-		if err := r.report(receipt); err != nil {
+		if !r.report(receipt, false) {
 			if r.attempts++; r.attempts >= bundleReceiptRetries {
 				seen()
 			}
@@ -191,7 +196,7 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 		}
 		r.reported = key
 		_ = configwrite.WriteFileDurable(r.markerPath, []byte(key+"\n"), 0o600)
-		r.markSeen(receipt.ReceiptID)
+		r.changeReported(receipt.ReceiptID)
 	}
 	if refusal := receipt.LastRefusal; refusal != nil && refusal.ReceiptID == receipt.ReceiptID {
 		r.reportedRefusal = refusal.ReceiptID + "|" + refusal.Time
@@ -202,18 +207,18 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 	if refusal := receipt.LastRefusal; refusal != nil && refusal.ReceiptID != receipt.ReceiptID {
 		refusalKey := refusal.ReceiptID + "|" + refusal.Time
 		if refusalKey != r.reportedRefusal && !r.hasSeen(refusal.ReceiptID) {
-			if err := r.report(enterprisestatus.PublicReceipt{ReceiptID: refusal.ReceiptID, DeliveryID: refusal.DeliveryID,
+			if ok := r.report(enterprisestatus.PublicReceipt{ReceiptID: refusal.ReceiptID, DeliveryID: refusal.DeliveryID,
 				BundleID: refusal.BundleID, Version: refusal.Version, State: enterprisestatus.BundleFailed,
 				ErrorCode: refusal.ErrorCode, FinishedAt: refusal.Time,
 				WarningCodes: refusal.WarningCodes, DisabledByBundle: refusal.DisabledByBundle,
-				CurrentBundleID: receipt.CurrentBundleID, CurrentVersion: receipt.CurrentVersion}); err != nil {
+				CurrentBundleID: receipt.CurrentBundleID, CurrentVersion: receipt.CurrentVersion}, false); !ok {
 				if r.attempts++; r.attempts >= bundleReceiptRetries {
 					seen()
 				}
 				return
 			}
 			r.reportedRefusal = refusalKey
-			r.markSeen(refusal.ReceiptID)
+			r.changeReported(refusal.ReceiptID)
 			if r.refusalMarkerPath != "" {
 				_ = configwrite.WriteFileDurable(r.refusalMarkerPath, []byte(refusalKey+"\n"), 0o600)
 			}
@@ -287,7 +292,8 @@ func (r *bundleReceiptReporter) markSeen(id string) bool {
 }
 
 // retryMarkers writes the marker of each id reported without one. A change
-// keeps its delivery state and its record pin until its marker is on disk.
+// or receipt keeps its delivery state and its record pin until its marker
+// is on disk.
 func (r *bundleReceiptReporter) retryMarkers() {
 	for id := range r.unmarked {
 		if r.markSeen(id) {
@@ -296,7 +302,14 @@ func (r *bundleReceiptReporter) retryMarkers() {
 	}
 }
 
+// reportSpool offers each terminal receipt in the receipt spool not
+// reported yet, oldest first, as reportChanges offers a change: its record
+// keeps one id and one pin across offers, and it is marked reported only
+// once every sink confirmed it. A receipt the audit store could not write
+// is offered again at the next poll, but goes only to the remote
+// destinations that do not have it.
 func (r *bundleReceiptReporter) reportSpool() {
+	r.scanSpools()
 	info, err := os.Lstat(r.spoolDir())
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return
@@ -324,11 +337,11 @@ func (r *bundleReceiptReporter) reportSpool() {
 	})
 	for _, receipt := range receipts {
 		if receipt.Key() == r.reported || receipt.ReceiptID+"|"+receipt.FinishedAt == r.reportedRefusal {
-			r.markSeen(receipt.ReceiptID)
+			r.changeReported(receipt.ReceiptID)
 			continue
 		}
-		if r.report(receipt) == nil {
-			r.markSeen(receipt.ReceiptID)
+		if r.report(receipt, true) {
+			r.changeReported(receipt.ReceiptID)
 		}
 	}
 }
@@ -348,9 +361,7 @@ func (r *bundleReceiptReporter) reportSpool() {
 // commands remove it, only once every sink confirmed it.
 func (r *bundleReceiptReporter) reportChanges() {
 	dir := r.changeDir()
-	if !r.spoolScanned {
-		r.spoolAtStart, r.spoolScanned = changeSpoolIDs(dir)
-	}
+	r.scanSpools()
 	for _, ev := range enterprisestatus.ReportableChangeEvents(dir, r.hasSeen) {
 		r.reportChange(ev)
 	}
@@ -377,42 +388,65 @@ func (r *bundleReceiptReporter) reportChanges() {
 // again. After a restart the delivery state is gone and an unreported
 // change goes to every destination again, under the same record id.
 func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
-	state := r.changes[ev.EventID]
-	firstOffer := false
-	if state == nil {
-		firstOffer = r.spoolScanned && !r.spoolAtStart[ev.EventID]
-		state = &changeDelivery{delivery: observability.NewRemoteDelivery()}
-		if r.changes == nil {
-			r.changes = make(map[string]*changeDelivery)
-		}
-		r.changes[ev.EventID] = state
-	} else if !state.retry {
-		settled, delivered := state.delivery.Settled()
-		if settled && delivered {
-			r.changeReported(ev.EventID)
-			return
-		}
-		if !settled && time.Since(state.offered) < bundleChangeDeliveryWait {
-			return
-		}
-	}
-	state.offered = time.Now()
-	err := r.sink.LogConfigChange(audit.ConfigChange{
-		EventID: ev.EventID, Kind: ev.Kind, Action: ev.Action, Outcome: ev.Outcome, ReasonCode: ev.ReasonCode,
-		Actor: ev.Actor, ChangedAt: ev.Time, SHA256: ev.SHA256, PreviousSHA256: ev.PreviousSHA256,
-		KeyIDsAdded: ev.KeyIDsAdded, KeyIDsRemoved: ev.KeyIDsRemoved, SecretName: ev.SecretName,
-		FirstOffer: firstOffer,
-	}, state.delivery, r.pins)
-	state.retry = err != nil
-	if err != nil {
-		return
-	}
-	if settled, delivered := state.delivery.Settled(); settled && delivered {
+	if r.offer(ev.EventID, true, func(delivery *observability.RemoteDelivery, firstOffer bool) error {
+		return r.sink.LogConfigChange(audit.ConfigChange{
+			EventID: ev.EventID, Kind: ev.Kind, Action: ev.Action, Outcome: ev.Outcome, ReasonCode: ev.ReasonCode,
+			Actor: ev.Actor, ChangedAt: ev.Time, SHA256: ev.SHA256, PreviousSHA256: ev.PreviousSHA256,
+			KeyIDsAdded: ev.KeyIDsAdded, KeyIDsRemoved: ev.KeyIDsRemoved, SecretName: ev.SecretName,
+			FirstOffer: firstOffer,
+		}, delivery, r.pins)
+	}) {
 		r.changeReported(ev.EventID)
 	}
 }
 
-// changeReported marks a change every sink confirmed. Its delivery state
+// offer makes one offer of the spooled change or receipt id with log, and
+// reports whether every sink confirmed it. Its delivery state lives as
+// long as the reporter: while its remote deliveries are in flight it is
+// not offered again, and after a refused offer, a failed delivery or
+// bundleChangeDeliveryWait it is. spooled says id is read from a spool
+// scanned at start, so its first offer is one no earlier gateway process
+// made when it was not there then (log's firstOffer).
+func (r *bundleReceiptReporter) offer(
+	id string, spooled bool, log func(delivery *observability.RemoteDelivery, firstOffer bool) error,
+) bool {
+	state := r.changes[id]
+	firstOffer := false
+	if state == nil {
+		firstOffer = spooled && r.spoolScanned && !r.spoolAtStart[id]
+		state = &changeDelivery{delivery: observability.NewRemoteDelivery()}
+		if r.changes == nil {
+			r.changes = make(map[string]*changeDelivery)
+		}
+		r.changes[id] = state
+	} else if !state.retry {
+		settled, delivered := state.delivery.Settled()
+		if settled && delivered {
+			return true
+		}
+		if !settled && time.Since(state.offered) < bundleChangeDeliveryWait {
+			return false
+		}
+	}
+	state.offered = time.Now()
+	err := log(state.delivery, firstOffer)
+	state.retry = err != nil
+	if err != nil {
+		return false
+	}
+	settled, delivered := state.delivery.Settled()
+	return settled && delivered
+}
+
+// scanSpools reads, once, the ids in the change and receipt spools
+// (spoolAtStart).
+func (r *bundleReceiptReporter) scanSpools() {
+	if !r.spoolScanned {
+		r.spoolAtStart, r.spoolScanned = changeSpoolIDs(r.changeDir(), r.spoolDir())
+	}
+}
+
+// changeReported marks a change or receipt every sink confirmed. Its delivery state
 // and record pin go once the marker is on disk: until then a restart offers
 // it again, and its pin keeps that offer the same record.
 func (r *bundleReceiptReporter) changeReported(id string) {
@@ -421,10 +455,10 @@ func (r *bundleReceiptReporter) changeReported(id string) {
 	}
 }
 
-// markedChange drops the delivery state and the record pin of a change
-// whose marker is on disk.
+// markedChange drops the delivery state and the record pin of a change or
+// receipt whose marker is on disk.
 func (r *bundleReceiptReporter) markedChange(id string) {
-	if _, ok := r.changes[id]; !ok && !enterprisestatus.ValidChangeEventID(id) {
+	if _, ok := r.changes[id]; !ok && !reportableID(id) {
 		return
 	}
 	delete(r.changes, id)
@@ -433,11 +467,11 @@ func (r *bundleReceiptReporter) markedChange(id string) {
 }
 
 // changeSpoolIDs is the id of every change event and reservation in the
-// change spool dir, and whether the spool could be read. A spool that does
-// not exist holds none.
-func changeSpoolIDs(dir string) (map[string]bool, bool) {
+// change spool dir and of every receipt in receiptDir, and whether the
+// spools could be read. A spool that does not exist holds none.
+func changeSpoolIDs(dir, receiptDir string) (map[string]bool, bool) {
 	ids := map[string]bool{}
-	for _, folder := range []string{dir, filepath.Join(dir, enterprisestatus.ChangeReservedDirName)} {
+	for _, folder := range []string{dir, filepath.Join(dir, enterprisestatus.ChangeReservedDirName), receiptDir} {
 		entries, err := os.ReadDir(folder)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -463,20 +497,25 @@ func (r *bundleReceiptReporter) reportedOnDisk(id string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-func (r *bundleReceiptReporter) report(p enterprisestatus.PublicReceipt) error {
+// report offers the terminal receipt p (offer; spooled when it is read
+// from the receipt spool) and reports whether every sink confirmed it.
+func (r *bundleReceiptReporter) report(p enterprisestatus.PublicReceipt, spooled bool) bool {
 	bundle := audit.PolicyBundle{ID: p.BundleID, Version: p.Version, SignerKeyID: p.SignerKeyID, ChangeSummary: p.ChangeSummary}
-	err := r.sink.LogPolicyBundleReceipt(p.Principal, bundle, audit.PolicyBundleReceipt{
-		ReceiptID: p.ReceiptID, DeliveryID: p.DeliveryID, Actor: p.Actor, State: p.State, ErrorCode: p.ErrorCode,
-		EffectivePolicyDigest: p.EffectivePolicyDigest, EnforcingDigest: p.EnforcingDigest,
-		ConfigGeneration: p.ConfigGeneration, RolledBack: p.RolledBack, Restart: p.Restart,
-		RestartRequired:  p.RestartRequired,
-		EnforcingVersion: p.CurrentVersion,
-		WarningCodes:     p.WarningCodes, DisabledByBundle: p.DisabledByBundle,
+	return r.offer(p.ReceiptID, spooled, func(delivery *observability.RemoteDelivery, firstOffer bool) error {
+		err := r.sink.LogPolicyBundleReceipt(p.Principal, bundle, audit.PolicyBundleReceipt{
+			ReceiptID: p.ReceiptID, DeliveryID: p.DeliveryID, Actor: p.Actor, State: p.State, ErrorCode: p.ErrorCode,
+			EffectivePolicyDigest: p.EffectivePolicyDigest, EnforcingDigest: p.EnforcingDigest,
+			ConfigGeneration: p.ConfigGeneration, RolledBack: p.RolledBack, Restart: p.Restart,
+			RestartRequired:  p.RestartRequired,
+			EnforcingVersion: p.CurrentVersion,
+			WarningCodes:     p.WarningCodes, DisabledByBundle: p.DisabledByBundle,
+			FinishedAt: p.FinishedAt, FirstOffer: firstOffer,
+		}, delivery, r.pins)
+		if err == nil && p.CurrentVersion != 0 {
+			r.gaugeVersion = p.CurrentVersion
+		}
+		return err
 	})
-	if err == nil && p.CurrentVersion != 0 {
-		r.gaugeVersion = p.CurrentVersion
-	}
-	return err
 }
 
 func (r *bundleReceiptReporter) readMarker() string {
