@@ -128,6 +128,9 @@ func TestACPEvaluateDecidesUncertainProfilesOnInspectPath(t *testing.T) {
 		{"observe ACP, uncertain group, observe profiles", "observe", "observe", true, false},
 		{"action ACP, uncertain group, observe profiles", "action", "observe", true, false},
 		{"action ACP, uncertain action profile", "action", "action", false, true},
+		// GAP-2103: identity uncertainty refuses in every mode, so the
+		// verdict of an observe ACP profile tells its guard to enforce it.
+		{"observe ACP, uncertain action profile", "observe", "action", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			subject := identityTestSubject(p, p.providers[0], stateProven, false)
@@ -173,10 +176,10 @@ func TestACPEvaluateDecidesUncertainProfilesOnInspectPath(t *testing.T) {
 				t.Fatalf("ACP status=%d body=%s", rec.Code, rec.Body.String())
 			}
 			if tc.wantBlock {
-				if verdict.Action != "block" || !strings.Contains(verdict.Reason, "account holder is unconfirmed") {
-					t.Fatalf("ACP verdict=%+v; want account fact refusal", verdict)
+				if verdict.Action != "block" || !verdict.Enforced || !strings.Contains(verdict.Reason, "account holder is unconfirmed") {
+					t.Fatalf("ACP verdict=%+v; want an enforced account fact refusal", verdict)
 				}
-			} else if verdict.Action != "allow" || strings.Contains(verdict.Reason, "refused this request") {
+			} else if verdict.Action != "allow" || verdict.Enforced || strings.Contains(verdict.Reason, "refused this request") {
 				t.Fatalf("ACP verdict=%+v; want observe-only frame allowed", verdict)
 			}
 		})

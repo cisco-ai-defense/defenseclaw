@@ -1015,7 +1015,11 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			}
 		}
 		if verdict.Action == "block" || verdict.Action == "confirm" {
-			if opts.Mode == ModeAction {
+			// A refusal the gateway enforces in every mode (Enforced, such
+			// as an unconfirmed account holder) is refused in observe mode
+			// too: forwarding it let the agent answer a frame the gateway
+			// refused and audited as blocked (GAP-2103).
+			if opts.Mode == ModeAction || verdict.Action == "block" && verdict.Enforced {
 				if err := writeBlock(state, direction, msg, verdict.Reason, dst, rejectDst); err != nil {
 					return err
 				}
