@@ -264,6 +264,13 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 			}
 			window.Stop()
 			resume()
+			// A request that ended while it waited to take its run slot
+			// back is not judged: a start check (or a Codex registration
+			// repair) run with a done context would record a sticky
+			// start block for a live session.
+			if ctx.Err() != nil {
+				return sessionStartPendingReason, true
+			}
 			if timedOut {
 				g.judgeMissingStart(ctx, key, startCheck)
 			}

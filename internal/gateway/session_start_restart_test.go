@@ -112,3 +112,41 @@ func TestSessionStartArrivalWaitGivesUpTheRunSlot(t *testing.T) {
 		t.Fatalf("the run slot was not taken back: held=%t tokens=%d", held, len(run))
 	}
 }
+
+// A request whose context ends while the arrival wait takes its run slot
+// back (another call holds the slot) is refused as pending and its start
+// is not judged with the done context (pod check6 note on GAP-1822).
+func TestSessionStartArrivalWaitEndedWhileTakingTheSlotBackIsNotJudged(t *testing.T) {
+	run := make(chan struct{}, 1)
+	run <- struct{}{}
+	slot := &hookRunSlot{run: run, held: true}
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), hookRunSlotContextKey{}, slot))
+	defer cancel()
+	var gate sessionStartGate
+	taken := make(chan struct{})
+	go func() {
+		// Another call takes the freed slot and keeps it past the window.
+		run <- struct{}{}
+		close(taken)
+		time.Sleep(400 * time.Millisecond)
+		cancel()
+	}()
+	judged := false
+	reason, refuse := gate.await(ctx, "codex\x00\x00unseen-ended", 10*time.Second, 100*time.Millisecond, func(context.Context) (bool, string) {
+		judged = true
+		return true, "judged with a done context"
+	})
+	<-taken
+	if !refuse || reason != sessionStartPendingReason {
+		t.Fatalf("ended request: refuse=%t reason=%q, want the pending refusal", refuse, reason)
+	}
+	if judged {
+		t.Fatal("the start was judged with a done context")
+	}
+	gate.mu.Lock()
+	_, blocked := gate.entries["codex\x00\x00unseen-ended"]
+	gate.mu.Unlock()
+	if blocked {
+		t.Fatal("an ended request left a start verdict for the session")
+	}
+}
