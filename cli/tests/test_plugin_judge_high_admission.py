@@ -542,3 +542,38 @@ def test_gap2116_stored_scan_rule_ids_are_read_and_never_printed() -> None:
     bad = _plugin_scan_payload_from_latest(
         {"target": "/p/x", "finding_count": 1, "max_severity": "HIGH", "raw_json": "not json", "timestamp": None})
     assert "_findings" not in bad
+
+
+# --- GAP-2123: plugin info says what plugin list says, without private keys ---
+
+
+def test_gap2123_info_verdict_is_the_list_word_and_private_keys_stay_out(monkeypatch, tmp_path, capsys) -> None:
+    import json as _json
+
+    from defenseclaw.commands import cmd_plugin
+
+    cfg = default_config()
+    cfg.quarantine_dir = str(tmp_path / "quarantine")
+    entry = {"target": "/p/r105fx", "max_severity": "HIGH", "total_findings": 4, "clean": False,
+             "_findings": list(_G51_ROWS)}
+    monkeypatch.setattr(cmd_plugin, "_plugin_match_dir_scopes", lambda *_a, **_k: [])
+    monkeypatch.setattr(cmd_plugin, "_hermes_listed_plugin", lambda *_a, **_k: None)
+    monkeypatch.setattr(cmd_plugin, "_get_openclaw_plugin_info", lambda *_a, **_k: None)
+    monkeypatch.setattr(cmd_plugin, "_latest_plugin_scan_for_connector", lambda *_a, **_k: dict(entry))
+    monkeypatch.setattr(cmd_plugin, "_build_plugin_actions_map", lambda *_a, **_k: {})
+    app = SimpleNamespace(cfg=cfg, store=None)
+
+    info_map = cmd_plugin._plugin_info_card(app, "r105fx", connector="claudecode")
+    assert info_map is not None
+    assert "_findings" not in info_map["scan"], info_map
+    assert '"_findings"' not in _json.dumps(info_map, default=str)
+    assert info_map["scan"]["verdict"] == _list_verdict(cfg, _G51_ROWS) == "warning"
+    cmd_plugin._print_plugin_info_card(info_map, "r105fx")
+    assert "Verdict:  warning" in capsys.readouterr().out
+
+    # A severity the policy refuses still reads rejected, in both places.
+    cfg.admission.plugin.actions.update(high="block")
+    info_map = cmd_plugin._plugin_info_card(app, "r105fx", connector="claudecode")
+    assert info_map["scan"]["verdict"] == _list_verdict(cfg, _G51_ROWS) == "rejected"
+    cmd_plugin._print_plugin_info_card(info_map, "r105fx")
+    assert "Verdict:  rejected" in capsys.readouterr().out

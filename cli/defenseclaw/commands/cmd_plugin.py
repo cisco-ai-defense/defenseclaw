@@ -5117,7 +5117,14 @@ def _plugin_info_card(
     if connector:
         info_map["connector"] = connector
     if scan_entry is not None:
-        info_map["scan"] = scan_entry
+        # GAP-2123: the private stored rule ids never reach the output, and
+        # the Verdict is the word plugin list shows for this scan (the
+        # GAP-1389 judge-only pre-step included); an action has its own line.
+        info_map["scan"] = _public_scan_entry(scan_entry)
+        if not scan_entry.get("clean"):
+            label, _style = _plugin_list_verdict_for(app, connector)(None, scan_entry)
+            if label != "-":
+                info_map["scan"]["verdict"] = label
     if action_name in actions_map:
         ae = actions_map[action_name]
         if not ae.actions.is_empty():
@@ -5176,7 +5183,7 @@ def _print_plugin_info_card(
             click.echo("  Findings: 0 findings")
         else:
             sev = scan_data.get("max_severity", "INFO")
-            verdict, _style = _compute_verdict(None, scan_data)
+            verdict = scan_data.get("verdict") or _compute_verdict(None, scan_data)[0]
             if verdict == "-":
                 verdict = str(sev).lower()
             click.secho(f"  Verdict:  {verdict}", fg=_SCAN_SEVERITY_COLORS.get(sev))
