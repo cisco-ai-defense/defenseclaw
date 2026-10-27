@@ -845,7 +845,7 @@ func TestStandaloneSetupTimeoutNamesTheRecovery(t *testing.T) {
 }
 
 func TestStandaloneSetupTimeoutReportsTheRecoveredDeployment(t *testing.T) {
-	opts := enterpriseSetupOptions{Action: "ensure", JSON: true, LifecycleTimeout: time.Minute}
+	opts := enterpriseSetupOptions{Action: "ensure", JSON: true, Config: `C:\stage\config.yaml`, LifecycleTimeout: time.Minute}
 	recovered := enterprisestatus.New("recover", "standalone", "windows", "1.0.3")
 	recovered.Installed = true
 	recovered.InstalledVersion = "1.0.3"
@@ -869,7 +869,8 @@ func TestStandaloneSetupTimeoutReportsTheRecoveredDeployment(t *testing.T) {
 			State string `json:"state"`
 		} `json:"services"`
 		Errors []struct {
-			Code string `json:"code"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
 		} `json:"errors"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.Action != "ensure" ||
@@ -879,5 +880,10 @@ func TestStandaloneSetupTimeoutReportsTheRecoveredDeployment(t *testing.T) {
 		result.Services[0].State != "running" || len(result.Errors) != 1 ||
 		result.Errors[0].Code != "lifecycle_timeout" || stderr.Len() != 0 {
 		t.Fatalf("timeout lost recovered deployment proof: %s (%v)", stdout.String(), err)
+	}
+	// GAP-1709: the recovered result names the same action with a longer
+	// limit, not a bare "retry".
+	if want := `as LocalSystem with a longer limit: /ensure CONFIG=C:\stage\config.yaml JSON=1 TIMEOUTSECONDS=7200`; !strings.Contains(result.Errors[0].Message, want) {
+		t.Fatalf("recovered timeout does not name the longer retry %q: %s", want, result.Errors[0].Message)
 	}
 }

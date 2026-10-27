@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -57,6 +58,15 @@ func TestWindowsRecoveryToAnEarlierReleaseDoesNotFailOnItsScannerRuntime(t *test
 		applyWindowsStandaloneScannerRuntime(result, opts)
 		if got := windowsEnterpriseResultHasError(result, "scanner_runtime_unavailable"); got != tc.wantError {
 			t.Errorf("%s over %s: error=%t, want %t (warnings %+v)", tc.action, tc.installed, got, tc.wantError, result.Warnings)
+		}
+		if !tc.wantError {
+			// The plain ensure clears it, so the warning names it, not /repair.
+			for _, warning := range result.Warnings {
+				if warning.Code == "scanner_runtime_unavailable" &&
+					(!strings.Contains(warning.Message, "/ensure CONFIG=") || strings.Contains(warning.Message, "/repair")) {
+					t.Errorf("%s over %s: warning does not name the clearing /ensure: %s", tc.action, tc.installed, warning.Message)
+				}
+			}
 		}
 	}
 }

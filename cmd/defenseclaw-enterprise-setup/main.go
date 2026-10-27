@@ -930,20 +930,31 @@ func standaloneEnterpriseSetupTimeout(opts enterpriseSetupOptions, cause error) 
 }
 
 func standaloneEnterpriseSetupTimeoutWithRecovery(opts enterpriseSetupOptions, cause error, report *enterprisestatus.Result) error {
-	if report != nil {
-		return enterpriseSetupLifecycleTimeout{error: fmt.Errorf(
-			"enterprise %s did not finish within TIMEOUTSECONDS=%d and Setup stopped it (%w). "+
-				"Setup replayed its pending transaction and no lifecycle record remains; this result is the recovered deployment's status, "+
-				"and the requested action did not finish. Run %s /status JSON=1, then retry the requested action",
-			opts.Action, int(opts.LifecycleTimeout/time.Second), cause, standaloneSetupArtifactName,
-		), recovery: report}
-	}
 	config := opts.Config
 	if strings.TrimSpace(config) == "" {
 		config = "<config.yaml>"
 	}
 	limit := int(opts.LifecycleTimeout / time.Second)
 	maximum := int(maximumLifecycleTimeout / time.Second)
+	if report != nil {
+		// The deployment is back as it was; what is left is the requested
+		// action, which needs a longer limit than the one it hit (GAP-1709).
+		retry := "/" + opts.Action
+		if opts.Action != "uninstall" {
+			retry += " CONFIG=" + config
+		}
+		retry += fmt.Sprintf(" JSON=1 TIMEOUTSECONDS=%d", maximum)
+		longer := "with a longer limit"
+		if limit >= maximum {
+			longer = fmt.Sprintf("again (%d seconds is the longest limit)", maximum)
+		}
+		return enterpriseSetupLifecycleTimeout{error: fmt.Errorf(
+			"enterprise %s did not finish within TIMEOUTSECONDS=%d and Setup stopped it (%w). "+
+				"Setup replayed its pending transaction and no lifecycle record remains; this result is the recovered deployment's status, "+
+				"and the requested action did not finish. Run %s as LocalSystem %s: %s",
+			opts.Action, limit, cause, standaloneSetupArtifactName, longer, retry,
+		), recovery: report}
+	}
 	recovery := fmt.Sprintf("/ensure CONFIG=%s JSON=1 TIMEOUTSECONDS=%d to recover (without TIMEOUTSECONDS the limit is the default %d seconds)",
 		config, maximum, int(defaultLifecycleTimeout/time.Second))
 	if limit >= maximum {

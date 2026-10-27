@@ -350,6 +350,13 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 				// installs and admits this release's runtime (GAP-1709).
 				restoredOlder := result.Action == "recover" && opts != nil &&
 					compareWindowsEnterpriseVersions(opts.productVersion, result.InstalledVersion) > 0
+				if restoredOlder {
+					// The plain ensure clears it, not /repair (GAP-1709).
+					message = "the skill, MCP and plugin scanner runtime in place is the one DefenseClaw " + result.InstalledVersion +
+						" uses, which this recovery put back; this release's admission rule does not prove that release's record. " +
+						"The next DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<config.yaml> JSON=1 as LocalSystem " +
+						"installs and admits this release's runtime"
+				}
 				if (result.Action == "verify" || result.Action == "recover") && !restoredOlder {
 					result.AddError("scanner_runtime_unavailable", message)
 				} else {
