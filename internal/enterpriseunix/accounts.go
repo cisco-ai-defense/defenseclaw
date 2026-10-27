@@ -411,6 +411,10 @@ func (a *dsclAccounts) Remove(ctx context.Context, name string) error {
 // ("DS Error: -14120 (eDSPermissionError)").
 var dsclOpenDirectoryError = regexp.MustCompile(`\beDS[A-Za-z]+\b`)
 
+// errNoFullDiskAccess is why macOS refuses to delete a user record with
+// eDSPermissionError (see dsclDeleteError).
+var errNoFullDiskAccess = errors.New("macOS lets only a process with Full Disk Access delete a user account, and this one has none")
+
 // dsclDeleteError says that macOS refused to delete record, with the Open
 // Directory error name, instead of dscl's raw output (exit 40, "DS Error:
 // -14120 (eDSPermissionError)"), which the uninstall warning repeated next
@@ -422,11 +426,12 @@ var dsclOpenDirectoryError = regexp.MustCompile(`\beDS[A-Za-z]+\b`)
 // without a PPPC grant has none (GAP-1542, cap-emac1: the same sudo dscl
 // delete is refused there and succeeds on a Mac whose sshd has Full Disk
 // Access). The message says so, because the by-hand command fails the
-// same way in the same shell.
+// same way in the same shell. Only this error wraps errNoFullDiskAccess, so
+// the uninstall names Full Disk Access only when it is the cause.
 func dsclDeleteError(record string, err error) error {
 	if name := dsclOpenDirectoryError.FindString(err.Error()); name != "" {
 		if name == "eDSPermissionError" {
-			return fmt.Errorf("macOS refused to delete the directory record %s (%s: macOS lets only a process with Full Disk Access delete a user account, and this one has none)", record, name)
+			return fmt.Errorf("macOS refused to delete the directory record %s (%s: %w)", record, name, errNoFullDiskAccess)
 		}
 		return fmt.Errorf("macOS refused to delete the directory record %s (%s)", record, name)
 	}
