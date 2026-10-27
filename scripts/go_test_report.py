@@ -9,7 +9,8 @@ CI pipes `go test -json` through this script:
   go test -json ... ./pkg | python3 scripts/go_test_report.py --timings t.json
 
 The log looks like a `go test` run without -v: package lines ("ok", "FAIL",
-coverage, a timeout panic and its goroutine dump) as they arrive, and the
+coverage, a timeout panic and its goroutine dump) and compiler errors (the
+build-output events) as they arrive, and the
 output of a test only when it fails. A test still running when the stream
 ends (a hang the package -timeout killed) has its output printed too, under
 a "still running" line, so a hung shard names its test.
@@ -53,6 +54,16 @@ def main() -> int:
                 out.write(line)
                 continue
             action = event.get("Action")
+            if action == "build-output":
+                # Go 1.24 and later report a package's compiler output as
+                # JSON (ImportPath, no Package): print it, or a shard that
+                # does not compile fails without its error.
+                out.write(event.get("Output", ""))
+                out.flush()
+                continue
+            if action == "build-fail":
+                package_failed = True
+                continue
             package = event.get("Package", "")
             test = event.get("Test")
             if test is None:

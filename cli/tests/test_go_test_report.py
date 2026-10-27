@@ -76,3 +76,26 @@ def test_a_test_still_running_at_the_end_is_named(tmp_path: Path) -> None:
     assert "=== still running when go test ended: TestHangs (p)" in out
     assert "waiting for the daemon" in out
     assert "::error title=shard 1 failed::TestHangs was still running" in out
+
+
+def test_build_errors_in_json_are_printed(tmp_path: Path) -> None:
+    # Go 1.24+ reports compiler output as build-output events with an
+    # ImportPath and no Package; a shard that does not compile must show why.
+    importpath = "github.com/example/pkg [github.com/example/pkg.test]"
+    out, timings = _run(
+        [
+            {"ImportPath": importpath, "Action": "build-output", "Output": "# github.com/example/pkg\n"},
+            {"ImportPath": importpath, "Action": "build-output", "Output": "./x_test.go:7:2: undefined: missingHelper\n"},
+            {"ImportPath": importpath, "Action": "build-fail"},
+            _out(None, "FAIL\tp [build failed]\n"),
+            {"Action": "fail", "Package": "p", "Elapsed": 0, "FailedBuild": importpath},
+        ],
+        tmp_path,
+        "--annotate",
+        "shard 1 failed",
+    )
+
+    assert "./x_test.go:7:2: undefined: missingHelper" in out
+    assert "FAIL\tp [build failed]" in out
+    assert "::error title=shard 1 failed::No named failing test was reported" in out
+    assert timings == [{"Action": "fail", "Package": "p", "Elapsed": 0}]
