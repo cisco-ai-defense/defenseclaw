@@ -4876,6 +4876,39 @@ function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [stri
     return 1
 }
 
+function Get-StaleAgentEvidence([string]$Data) {
+    # The agent programs whose setup evidence in the older install's data no
+    # longer names the file on disk. Its gateway checks the Codex program
+    # it set up (path and SHA-256 in hook_contract_lock.json) at every start
+    # and does not start without it, so after a Codex update the rollback
+    # swapped, failed to start DefenseClaw 1.0.4, rewrote the Claude Code
+    # settings on the way and was undone with the hooks unverified
+    # (GAP-2299). Found here, before anything changes, it is a plain refusal.
+    $lock = Join-Path $Data "hook_contract_lock.json"
+    if (-not (Test-Path -LiteralPath $lock -PathType Leaf)) { return @() }
+    try { $doc = [IO.File]::ReadAllText($lock) | ConvertFrom-Json } catch { return @() }
+    $connectors = Get-Field $doc "connectors"
+    if (-not $connectors) { return @() }
+    $found = @()
+    foreach ($name in @("codex")) {
+        $entry = Get-Field $connectors $name
+        if (-not $entry -or [string](Get-Field $entry "agent_executable_source") -ne "setup-selected") { continue }
+        $exe = [string](Get-Field $entry "agent_executable")
+        $want = ([string](Get-Field $entry "agent_executable_sha256")).ToLowerInvariant()
+        if (-not $exe -or $want -notmatch '^[0-9a-f]{64}$') { continue }
+        $version = ([string](Get-Field $entry "raw_agent_version")) -replace '^codex-cli\s+', ''
+        $label = if ($version) { "Codex $version" } else { "Codex" }
+        if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            $found += "$label, which DefenseClaw set up before the upgrade, is no longer at $exe"
+            continue
+        }
+        $have = ""
+        try { $have = (Get-FileHash -LiteralPath $exe -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() } catch { continue }
+        if ($have -ne $want) { $found += "Codex was updated after DefenseClaw set up $label ($exe changed)" }
+    }
+    return $found
+}
+
 function Invoke-Rollback {
     $backTo = Read-Text (Join-Path $Previous "VERSION")
     if (-not (Test-Version $backTo)) { Write-Step "Rolling back"; Die "No previous install to roll back to ($Previous is missing)" }
@@ -4898,6 +4931,13 @@ function Invoke-Rollback {
     Assert-NoActiveConnectorRecovery "Rollback to $backTo"
     if (-not $rollForward) {
         Assert-NoActiveConnectorRecovery "Rollback to $backTo" (Join-Path $Previous "data")
+    }
+    if (-not $rollForward) {
+        $stale = @(Get-StaleAgentEvidence (Join-Path $Previous "data"))
+        if ($stale.Count) {
+            Die ("$($stale -join '; '). DefenseClaw $backTo does not start with an agent program it did not set up, so the rollback would stop " +
+                "half-way. Nothing was changed. Put that version back and run 'defenseclaw rollback' again, or stay on DefenseClaw $currentLabel")
+        }
     }
     if (-not (Confirm-Step $question)) {
         Die "Rollback cancelled; nothing was changed"

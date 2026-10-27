@@ -5634,6 +5634,67 @@ try {{ Publish-PreviousSlot (Join-Path $DataDir 'previous.new') }} catch {{ "THR
     assert names and all(name.startswith(".failed-kept-previous-") for name in names), names
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("case", ["updated", "same", "missing", "no-lock", "not-setup-selected"])
+def test_a_rollback_refuses_before_any_change_when_codex_changed_since_the_older_setup(tmp_path: Path, case: str) -> None:
+    # GAP-2299: after a Codex update (0.160.0 -> 0.164.0) and setup codex on
+    # 1.0.5, 'defenseclaw rollback' swapped to 1.0.4, whose gateway does not
+    # start with a Codex program other than the one its setup recorded
+    # (previous\data\hook_contract_lock.json path + SHA-256); the start
+    # rewrote the Claude Code settings first, and the undo left them in the
+    # 1.0.4 form with "protection could not be verified" for claudecode.
+    data = tmp_path / "previous" / "data"
+    data.mkdir(parents=True)
+    exe = tmp_path / "codex.exe"
+    exe.write_bytes(b"codex 0.160.0")
+    recorded = hashlib.sha256(b"codex 0.160.0").hexdigest()
+    if case == "updated":
+        exe.write_bytes(b"codex 0.164.0")
+    if case == "missing":
+        exe.unlink()
+    source = "setup-selected" if case != "not-setup-selected" else ""
+    if case != "no-lock":
+        (data / "hook_contract_lock.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "connectors": {
+                        "claudecode": {"raw_agent_version": "2.1.311 (Claude Code)"},
+                        "codex": {
+                            "raw_agent_version": "codex-cli 0.160.0",
+                            "agent_executable": str(exe),
+                            "agent_executable_source": source,
+                            "agent_executable_sha256": recorded,
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+    script = f"""
+$ErrorActionPreference = 'Stop'
+{_ps1_function("Get-Field")}
+{_ps1_function("Get-StaleAgentEvidence")}
+@(Get-StaleAgentEvidence '{data}') | ForEach-Object {{ "STALE $_" }}
+'OK'
+"""
+    result = _run_powershell(script)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0 and "OK" in out, out
+    stale = re.findall(r"STALE (.*)", out)
+    if case == "updated":
+        assert stale == [f"Codex was updated after DefenseClaw set up Codex 0.160.0 ({exe} changed)"], out
+    elif case == "missing":
+        assert stale == [f"Codex 0.160.0, which DefenseClaw set up before the upgrade, is no longer at {exe}"], out
+    else:
+        assert stale == [], out
+    rollback = _ps1_function("Invoke-Rollback")
+    check = rollback.index("Get-StaleAgentEvidence (Join-Path $Previous \"data\")")
+    assert check < rollback.index("Confirm-Step $question") < rollback.index("Stop-Gateway")
+    assert check < rollback.index("Convert-HooksForRollback") and check < rollback.index("Switch-WithPrevious")
+    assert "Nothing was changed" in rollback[check : check + 600]
+
+
 def test_the_fail_mode_hold_outlasts_the_installers_own_steps() -> None:
     # GAP-0311: the hold took the 2 minute default from its start, before the
     # rollback copy, the hook swap and the drain of old calls; on a busy host
@@ -6687,7 +6748,8 @@ def test_a_rollback_is_done_only_once_its_gateway_runs_and_is_proven(tmp_path: P
         "function Start-Gateway { $script:starts++; if ($script:case -like 'start-fails*') { return 1 }; return 0 }\n"
         "function Wait-LifecycleProof { if ($script:case -eq 'not-proven') { return @('the gateway is not running') }; return @() }\n"
         "function Undo-Rollback { param($Reason) $script:undone++; Write-Host \"undo: $Reason\"; return 1 }\n"
-        + _ps1_function("Get-Field") + _ps1_function("Read-Text") + _ps1_function("Test-Version") + _ps1_function("Invoke-Rollback")
+        + _ps1_function("Get-Field") + _ps1_function("Get-StaleAgentEvidence") + _ps1_function("Read-Text")
+        + _ps1_function("Test-Version") + _ps1_function("Invoke-Rollback")
         + "\n$rc = Invoke-Rollback\nWrite-Host \"rc: $rc undone: $script:undone removed: $script:removed\"\n",
         encoding="utf-8",
     )
