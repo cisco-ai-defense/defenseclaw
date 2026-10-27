@@ -2871,15 +2871,30 @@ func classifySearchPaths(out *parseOutput, command *CommandFact, program string)
 		for _, operand := range startingPaths {
 			appendPath(out, command.ID, PathAccessRead, operand)
 		}
-		if hasAnyArgument(command.Argv, "-delete") {
-			addOperation(command, OperationDelete)
+		// An embedded rm, unlink, rmdir or shred given only the found
+		// entry removes it, as -delete does, and mv {} DEST moves it away
+		// (GAP-2122). Only such exact embedded commands (and true/false)
+		// are read; any other keeps the find partial.
+		embedded := findExactEmbeddedCommands(command.Argv)
+		if hasAnyArgument(command.Argv, "-delete") || embedded.deletes || len(embedded.moveTo) != 0 {
+			if len(embedded.moveTo) != 0 {
+				addOperation(command, OperationMove)
+			}
+			if hasAnyArgument(command.Argv, "-delete") || embedded.deletes {
+				addOperation(command, OperationDelete)
+			}
 			for _, operand := range startingPaths {
 				appendPath(out, command.ID, PathAccessDelete, operand)
+			}
+			for _, destination := range embedded.moveTo {
+				appendPath(out, command.ID, PathAccessWrite, destination)
 			}
 		}
 		if findHasEmbeddedCommand(command.Argv) {
 			addOperation(command, OperationExecute)
-			out.markPartial(IssueUnsupportedConstruct)
+			if !embedded.exact {
+				out.markPartial(IssueUnsupportedConstruct)
+			}
 		}
 		classifyFindOutputOperands(out, command)
 	case "fd":
@@ -3052,7 +3067,7 @@ func searchPatternOptions(argv []string) (bool, []string) {
 
 func findStartingPaths(argv []string) []string {
 	var paths []string
-	options := true
+	options, operands := true, false
 	for i := 1; i < len(argv); i++ {
 		arg := argv[i]
 		if options && arg == "--" {
@@ -3062,18 +3077,130 @@ func findStartingPaths(argv []string) []string {
 		if findExpressionStart(arg) {
 			break
 		}
-		if options {
-			switch arg {
-			case "-H", "-L", "-P":
-				continue
-			}
-			if strings.HasPrefix(arg, "-") {
+		if options && strings.HasPrefix(arg, "-") {
+			if operands {
 				break
 			}
+			skip, start, ok := findLeadingOption(argv, i)
+			if !ok {
+				break
+			}
+			if start != "" {
+				paths = append(paths, start)
+			}
+			i += skip
+			continue
 		}
+		operands = true
 		paths = append(paths, arg)
 	}
 	return paths
+}
+
+// findLeadingOption reads the option word argv[i] before find's starting
+// points (GAP-2135): GNU -H, -L, -P, -D debugopts and -Olevel, and the BSD
+// option letters E, H, L, P, X, d, s and x, which getopt lets one word
+// combine, ending in an optional f whose path argument (the rest of the
+// word, or the next word) is a starting point.
+// skip is the number of argument words it takes; ok is false for a word
+// that is not one of them.
+func findLeadingOption(argv []string, i int) (skip int, start string, ok bool) {
+	arg := argv[i]
+	switch {
+	case arg == "-D":
+		if i+1 >= len(argv) {
+			return 0, "", false
+		}
+		return 1, "", true
+	case strings.HasPrefix(arg, "-O") && len(arg) > 2:
+		return 0, "", true
+	}
+	letters := arg[1:]
+	if letters == "" {
+		return 0, "", false
+	}
+	for index, letter := range letters {
+		switch {
+		case strings.ContainsRune("EHLPXdsx", letter):
+		case letter == 'f':
+			// getopt takes the rest of the word as the -f path
+			// (`-f/path`, `-xf/path`), else the next word.
+			if rest := letters[index+1:]; rest != "" {
+				return 0, rest, true
+			}
+			if i+1 >= len(argv) {
+				return 0, "", false
+			}
+			return 1, argv[i+1], true
+		default:
+			return 0, "", false
+		}
+	}
+	return 0, "", true
+}
+
+// findEmbeddedCommandFacts is what the -exec, -execdir, -ok and -okdir
+// commands of a find do when every one is exact (GAP-2122): rm, unlink,
+// rmdir or shred with only options and the found entry {}, mv with only
+// options, {} and one literal destination, or a bare true or false.
+type findEmbeddedCommandFacts struct {
+	exact   bool
+	deletes bool
+	moveTo  []string
+}
+
+func findExactEmbeddedCommands(argv []string) findEmbeddedCommandFacts {
+	result := findEmbeddedCommandFacts{exact: true}
+	for i := 1; i < len(argv); i++ {
+		switch argv[i] {
+		case "-exec", "-execdir", "-ok", "-okdir":
+		default:
+			continue
+		}
+		end := i + 1
+		for end < len(argv) && argv[end] != ";" && argv[end] != "+" {
+			end++
+		}
+		if end >= len(argv) || end == i+1 {
+			return findEmbeddedCommandFacts{}
+		}
+		program := argv[i+1]
+		program = strings.ToLower(program[strings.LastIndex(program, "/")+1:])
+		var found, others []string
+		for _, word := range argv[i+2 : end] {
+			switch {
+			case word == "{}":
+				found = append(found, word)
+			case strings.HasPrefix(word, "-"):
+				if program == "mv" && (strings.HasPrefix(word, "-t") || strings.HasPrefix(word, "--target")) {
+					return findEmbeddedCommandFacts{}
+				}
+			default:
+				others = append(others, word)
+			}
+		}
+		switch program {
+		case "true", "false":
+			if end != i+2 {
+				return findEmbeddedCommandFacts{}
+			}
+		case "rm", "unlink", "rmdir", "shred":
+			if len(found) != 1 || len(others) != 0 {
+				return findEmbeddedCommandFacts{}
+			}
+			result.deletes = true
+		case "mv":
+			if len(found) != 1 || len(others) != 1 || argv[end-1] != others[0] ||
+				strings.ContainsAny(others[0], "{}$`*?[") {
+				return findEmbeddedCommandFacts{}
+			}
+			result.moveTo = append(result.moveTo, others[0])
+		default:
+			return findEmbeddedCommandFacts{}
+		}
+		i = end
+	}
+	return result
 }
 
 func findExpressionStart(value string) bool {
