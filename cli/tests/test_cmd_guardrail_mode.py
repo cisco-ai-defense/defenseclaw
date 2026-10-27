@@ -54,7 +54,11 @@ def version_checks(monkeypatch):
     verdicts: dict[str, bool] = {}
 
     def check(connector, *, mode, **_k):
-        assert mode == "action"
+        if mode != "action":
+            # An observe switch asks only for a refusal that holds in every
+            # mode (GAP-1946); an installed, supported agent passes it.
+            assert mode == "observe"
+            return True
         calls.append(connector)
         return verdicts.get(connector, True)
 
@@ -262,10 +266,71 @@ def test_kiro_below_its_floor_is_refused_in_observe_too_so_the_switch_can_be_und
     assert "observe and action mode" in payload["message"]
     assert seen == [("kiro", "observe")]
     app.cfg.save.assert_not_called()
-    # Other connectors still switch to observe without a probe.
+    # A connector setup admits in observe mode switches after the same check.
     seen.clear()
     result, payload = _run(app, "observe", "--connector", "codex", "--json")
-    assert result.exit_code == 0 and seen == []
+    assert result.exit_code == 0 and seen == [("codex", "observe")]
+
+
+@pytest.mark.parametrize(
+    ("connector", "reason"),
+    [
+        ("opencode", "OpenCode 1.19.4 has no DefenseClaw hook contract."),
+        ("codex", "Codex 0.120.0 cannot run the app-server command this connector requires"),
+    ],
+)
+def test_every_connector_setup_refuses_in_every_mode_is_refused_in_observe_too(
+    app, monkeypatch, restarts, connector, reason
+) -> None:
+    # GAP-1946: the GAP-1638 floor covered only kiro, so `guardrail mode
+    # observe --connector opencode` with an OpenCode outside its plugin
+    # contract (or an old Codex) was accepted and the switch back to action
+    # was refused: the CLI could not undo its own change.
+    app.cfg.guardrail.connectors = {"codex": None, "opencode": None}
+    app.cfg.guardrail.connector = "codex"
+    monkeypatch.setattr(app.cfg, "active_connectors", lambda: ["codex", "opencode"])
+    monkeypatch.setattr(app.cfg.guardrail, "effective_mode", lambda c="": "action")
+    seen: list[tuple[str, str]] = []
+
+    def check(c, *, mode, _refusal_scope=None, **_k):
+        seen.append((c, mode))
+        if c == connector and _refusal_scope is not None:
+            _refusal_scope["observe_admitted"] = False
+            _refusal_scope["reason"] = reason
+            return False
+        return True
+
+    monkeypatch.setattr(cmd_setup, "_check_connector_version_supported_for_setup", check)
+    result, _ = _run(app, "observe", "--connector", connector)
+    assert result.exit_code == 1, result.output
+    assert "Nothing was changed" in result.output and "observe and action mode" in result.output
+    assert reason in result.output
+    assert seen == [(connector, "observe")]
+    app.cfg.save.assert_not_called()
+
+
+def test_observe_switch_is_not_stopped_by_an_action_only_refusal(app, monkeypatch, restarts) -> None:
+    # Only a refusal that holds in every mode stops the switch: a version
+    # setup refuses in action mode alone (or an agent not installed here)
+    # still switches to observe, and a connector already in observe is not
+    # probed at all.
+    app.cfg.guardrail.connectors = {"codex": None, "opencode": None}
+    app.cfg.guardrail.connector = "codex"
+    monkeypatch.setattr(app.cfg, "active_connectors", lambda: ["codex", "opencode"])
+    app.cfg.guardrail.mode = "action"
+    modes = {"codex": "action", "opencode": "observe"}
+    monkeypatch.setattr(app.cfg.guardrail, "effective_mode", lambda c="": modes.get(c, "action"))
+    seen: list[tuple[str, str]] = []
+
+    def check(c, *, mode, _refusal_scope=None, **_k):
+        seen.append((c, mode))
+        return False
+
+    monkeypatch.setattr(cmd_setup, "_check_connector_version_supported_for_setup", check)
+    result, payload = _run(app, "observe", "--json")
+    assert result.exit_code == 0, result.output
+    assert payload["ok"] is True
+    assert seen == [("codex", "observe")]
 
 
 def test_copilot_mode_switch_keeps_its_fail_mode(app) -> None:
