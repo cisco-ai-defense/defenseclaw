@@ -518,6 +518,38 @@ def test_fail_mode_note_names_deployment_and_tier_override(
     )
 
 
+@pytest.mark.parametrize("loaded", [False, True])
+def test_fail_mode_note_names_no_saved_value_when_none_is_saved(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    loaded: bool,
+) -> None:
+    # GAP-2248: with no hook fail mode saved (a fresh or upgraded per-user
+    # install on the default tier), doctor said "guardrail.hook_fail_mode=closed
+    # does not control hook failures here" although config.yaml saves none.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"cursor": ""})
+    if loaded:
+        # What load() builds from a config.yaml without the key: the field
+        # holds the closed default and the saved flag is off.
+        cfg.guardrail = dcconfig.GuardrailConfig(enabled=True, connectors=cfg.guardrail.connectors)
+        assert cfg.guardrail.hook_fail_mode == "closed"
+    else:
+        cfg.guardrail.hook_fail_mode = ""
+    cfg.guardrail.effective_hook_fail_mode = lambda _name: "open"
+    cfg.guardrail.hook_policy_tier = lambda _name: "default"
+    cfg.managed_outside_secure_client = lambda: False
+    cfg.guardrail.secure_client_hook_fail_modes = lambda: False
+    monkeypatch.setattr(fail_mode_runtime, "_platform_runtime_source", lambda _cfg, _name: ("hook-script", "open"))
+
+    state = resolve_connector_fail_mode(cfg, "cursor")
+
+    assert state.effective == "open"
+    assert "=closed" not in state.to_report()["note"]
+    assert state.note == (
+        "the default per-user policy tier keeps gateway outages fail-open; guardrail.hook_fail_mode is not set"
+    )
+
+
 def test_opencode_fail_mode_uses_baked_plugin_and_ignores_process_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2645,3 +2677,24 @@ def test_codex_registration_under_a_custom_home_is_current(monkeypatch, tmp_path
         encoding="utf-8",
     )
     assert not fail_mode_runtime._codex_registration_current("", str(data_dir))
+
+
+def test_codex_registration_matches_every_spelling_of_the_hook_path(monkeypatch, tmp_path) -> None:
+    """GAP-2275: the registration names the install's hook whatever the
+    separator, a TOML basic string's doubled backslashes, or (on Windows) the
+    case; a hook under another directory is still not DefenseClaw's."""
+    data_dir = tmp_path / "dchome"
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    monkeypatch.setattr(fail_mode_runtime, "connector_config_files", lambda *_a, **_k: [str(config)])
+    hook = os.path.join(str(data_dir), "hooks", "codex-hook.sh")
+    spellings = [
+        "'" + hook.replace("\\", "/") + " --event PreToolUse'",
+        '"' + hook.replace("\\", "\\\\") + ' --event PreToolUse"',
+    ]
+    if os.name == "nt":
+        spellings.append("'" + hook.replace("/", "\\").upper() + " --event PreToolUse'")
+    for command in spellings:
+        config.write_text(f"[hooks]\n[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ncommand = {command}\n", encoding="utf-8")
+        assert fail_mode_runtime._codex_registration_current("", str(data_dir)), command
+        assert not fail_mode_runtime._codex_registration_current("", str(tmp_path / "other")), command

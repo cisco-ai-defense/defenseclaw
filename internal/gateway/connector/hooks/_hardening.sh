@@ -2261,7 +2261,9 @@ defenseclaw_procfs_listener_status() {
   for table in "${net}/tcp" "${net}/tcp6"; do
     [ -r "$table" ] || continue
     defenseclaw_read_listen_rows "$table" || continue
-    for row in "${_DC_SOCKET_ROWS[@]}"; do
+    # Bash 3.2 (macOS) treats "${a[@]}" of an empty array as unbound under
+    # set -u, and a table with no LISTEN row leaves none (GAP-2273).
+    for row in ${_DC_SOCKET_ROWS[@]+"${_DC_SOCKET_ROWS[@]}"}; do
       # The state column is the only " 0A " (LISTEN) a row can hold; skip
       # the TIME_WAIT and connected rows before splitting. procfs rows have
       # no glob characters, so the unquoted split cannot expand a pattern.
@@ -3348,9 +3350,26 @@ defenseclaw_gateway_post() {
 # _dc_json_escape_shell VALUE sets _DC_JSON_ESCAPED to VALUE as the inside
 # of a JSON string, with the shell's own substitutions (backslash, quote,
 # newline, carriage return, tab); a value with any other control character
-# goes through defenseclaw_json_escape.
+# goes through defenseclaw_json_escape. Bash 3.2 (macOS) runs ${v//x/y} in
+# time quadratic in the value (110 KB took minutes), so there a value over
+# 1 KiB goes through one sed and one awk, linear and the same encoding
+# (GAP-2274); headers stay in the shell (GAP-1755).
 _dc_json_escape_shell() {
   local LC_ALL=C v="${1:-}"
+  if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] && [ "${#v}" -gt 1024 ]; then
+    v="$(printf '%sx' "$v" |
+      LC_ALL=C sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e $'s/\r/\\\\r/g' -e $'s/\t/\\\\t/g' |
+      LC_ALL=C awk 'BEGIN { ORS = "" } NR > 1 { print "\\n" } { print }')" || v=""
+    case "$v" in
+      *x) v="${v%x}" ;;
+      *) v="$(defenseclaw_json_escape "${1:-}")" ;;
+    esac
+    case "$v" in
+      *[[:cntrl:]]*) v="$(defenseclaw_json_escape "${1:-}")" ;;
+    esac
+    _DC_JSON_ESCAPED="$v"
+    return 0
+  fi
   v="${v//\\/\\\\}"
   v="${v//\"/\\\"}"
   v="${v//$'\n'/\\n}"

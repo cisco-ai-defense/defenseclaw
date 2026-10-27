@@ -1487,18 +1487,31 @@ func actionWindowsTargetMention(command, cwd, home string, depth int, stateOnly 
 			return true
 		}
 	}
+	// A word checked once in a directory is not checked again: in one call
+	// the check depends only on the word and the directory, and on Windows
+	// it looks up the file a word names, so a long command that repeats its
+	// words paid one round of file system calls per repeat (GAP-2256).
+	checked := make(map[[2]string]struct{})
+	mentions := func(word, dir string) bool {
+		key := [2]string{word, dir}
+		if _, seen := checked[key]; seen {
+			return false
+		}
+		checked[key] = struct{}{}
+		return actionWindowsWordMentionsTarget(word, dir, home, stateOnly)
+	}
 	effectiveCWD := cwd
 	var directoryStack []string
 	for _, statement := range actionWindowsResolvedStatements(words, cwd, home) {
 		for _, word := range statement {
-			if actionWindowsWordMentionsTarget(word, effectiveCWD, home, stateOnly) {
+			if mentions(word, effectiveCWD) {
 				return true
 			}
 		}
 		actionWindowsAdvanceDirectory(statement, home, &effectiveCWD, &directoryStack)
 	}
 	for _, word := range words {
-		if actionWindowsWordMentionsTarget(word, cwd, home, stateOnly) {
+		if mentions(word, cwd) {
 			return true
 		}
 	}
