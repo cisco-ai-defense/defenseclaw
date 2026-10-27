@@ -22,6 +22,9 @@ import (
 // notice; the Windows status and verify read it apart from the agent
 // settings notices, under its own warning code.
 func TestTheGuardianRecordsANativeOTLPConfigItCouldNotCheck(t *testing.T) {
+	// The Windows protected-file writer hands the record to the gateway
+	// service account, which a test host does not have.
+	enableEnterpriseHookGuardianRestores(t, true)
 	dataDir := t.TempDir()
 	writeEnterpriseHookGuardianNotices(io.Discard, dataDir, []enterpriseHookGuardianNotice{
 		{User: "dcw-std1", Connector: "codex", AgentConfig: connector.AgentConfigNativeOTLPUnchecked},
