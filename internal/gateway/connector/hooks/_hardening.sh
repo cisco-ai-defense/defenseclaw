@@ -441,7 +441,7 @@ defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
   local config="${hook_dir}/.hookcfg"
-  local candidate suffix recorded mode source selected="" summary="" raw="" managed_open=0 records=0
+  local candidate suffix recorded mode source selected="" summary="" raw="" managed_open=0 records=0 flat_names=""
   if defenseclaw_managed_runtime_sidecar "$config"; then
     managed_open=1
   fi
@@ -473,6 +473,7 @@ defenseclaw_shared_runtime_fail_mode() {
       return 0
     fi
     records=$((records + 1))
+    flat_names="${flat_names:+$flat_names }$suffix"
     if [ "$suffix" = "$connector" ]; then
       selected=open
     fi
@@ -538,7 +539,7 @@ defenseclaw_shared_runtime_fail_mode() {
         summary="invalid"
       # --stream sees every key as written: a path met again after its value
       # ended is a key given twice, or a second document.
-      elif ! summary="$(jq -n -r --stream --arg connector "$connector" --arg managed "$managed_open" '
+      elif ! summary="$(jq -n -r --stream --arg connector "$connector" --arg managed "$managed_open" --arg flat "$flat_names" '
         def word($source): if . == null or . == "" then "none" elif . == "open" and ($source == "config" or $managed == "1") then "open" else "closed" end;
         def text: . == null or type == "string";
         def fold: explode | map(if . == 383 then 115 elif . == 8490 then 107 else . end) | implode | ascii_downcase;
@@ -563,7 +564,7 @@ defenseclaw_shared_runtime_fail_mode() {
               (if has("fail_modes") then .fail_modes else {} end) as $modes
               | (if has("fail_mode_sources") then .fail_mode_sources else {} end) as $sources
               | .legacy_fail_mode_source as $legacy_source
-              | "\($modes | length) \(if [$modes | to_entries[] | .value == "open" and ($sources[.key] == "config" or $managed == "1")] | all then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word($sources[$connector])) end) \(.legacy_fail_mode | word($legacy_source))"
+              | "\($modes | length) \(if [$modes | to_entries[] | .value == "open" and ($sources[.key] == "config" or $managed == "1")] | all then "open" else "closed" end) \(if $connector == "" then "none" else ($modes[$connector] | word($sources[$connector])) end) \(.legacy_fail_mode | word($legacy_source)) \(if [$flat | splits(" ") | select(length > 0) | $modes[.] == "open"] | all then "bound" else "unbound" end)"
             else "invalid" end end end' "$config" 2>/dev/null)"; then
         summary="invalid"
       fi
@@ -607,7 +608,7 @@ need(isinstance(s,dict) and all(t(v) for v in s.values()))
 g=sys.argv[3]=="1"
 w=lambda v,src:"none" if v in (None,"") else ("open" if v=="open" and (src=="config" or g) else "closed")
 c=sys.argv[2]
-print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.items()) else "closed",w(m.get(c),s.get(c)) if c else "none",w(d.get("legacy_fail_mode"),d.get("legacy_fail_mode_source")))' "$config" "$connector" "$managed_open" 2>/dev/null)" || summary="invalid"
+print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.items()) else "closed",w(m.get(c),s.get(c)) if c else "none",w(d.get("legacy_fail_mode"),d.get("legacy_fail_mode_source")),"bound" if all(m.get(n)=="open" for n in sys.argv[4].split()) else "unbound")' "$config" "$connector" "$managed_open" "$flat_names" 2>/dev/null)" || summary="invalid"
     elif [ "${DEFENSECLAW_MANAGED_HOOK:-0}" != "1" ] || [ "${_DC_SECURE_CLIENT_HOOK:-0}" != "1" ]; then
       printf closed
       return 0
@@ -617,7 +618,7 @@ print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.
       summary="invalid"
     fi
   fi
-  local json_count=0 json_all=open json_selected=none json_legacy=none
+  local json_count=0 json_all=open json_selected=none json_legacy=none json_bound=bound
   if [ -n "$summary" ]; then
     # shellcheck disable=SC2086 # four fixed words, split on purpose
     set -- $summary
@@ -625,16 +626,26 @@ print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.
     json_all="${2:-}"
     json_selected="${3:-}"
     json_legacy="${4:-}"
+    json_bound="${5:-}"
     case "$json_count" in
       ""|*[!0-9]*) printf closed; return 0 ;;
     esac
-    # Exactly the four words the parsers print, nothing more.
-    if [ "$#" -ne 4 ]; then
+    # Exactly the five words the parsers print, nothing more.
+    if [ "$#" -ne 5 ]; then
       printf closed
       return 0
     fi
   fi
   if [ "$json_all" != "open" ]; then
+    printf closed
+    return 0
+  fi
+  # The managed writer records a connector in the protected JSON and its flat
+  # file together, so a flat open the JSON does not record open is a leftover
+  # (an earlier per-user install, a torn-down connector) that no current
+  # policy chose: it never opens a managed hook (GAP-0449). Secure Client
+  # delivery keeps its flat-record reading.
+  if [ -n "$summary" ] && [ "$json_bound" != "bound" ] && [ "${_DC_SECURE_CLIENT_HOOK:-0}" != "1" ]; then
     printf closed
     return 0
   fi
@@ -663,6 +674,13 @@ print(len(m),"open" if all(v=="open" and (s.get(k)=="config" or g) for k,v in m.
       fi
     fi
     if [ "$json_legacy" = "closed" ]; then
+      printf closed
+      return 0
+    fi
+    # A flat legacy open the parsed JSON does not record open is a leftover
+    # too (GAP-0449).
+    if [ -n "$summary" ] && [ "$json_legacy" != "open" ] && [ "${_DC_SECURE_CLIENT_HOOK:-0}" != "1" ] \
+      && { [ -e "$legacy" ] || [ -L "$legacy" ]; }; then
       printf closed
       return 0
     fi
