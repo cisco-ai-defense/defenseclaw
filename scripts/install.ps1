@@ -456,7 +456,11 @@ function Invoke-Quietly([scriptblock]$Action) {
 
 function Invoke-Native([string]$FilePath, [string[]]$Arguments = @(), [switch]$Quiet) {
     # Output goes through the host, so the install log (a transcript) keeps it.
-    $ErrorActionPreference = "Continue"
+    # -Quiet discards it. Windows PowerShell 5.1's transcript still records a
+    # discarded stderr line as a red NativeCommandError under Continue (an
+    # older gateway's "unknown flag" answer to a probe, rel-1-0-5 GAP-0047);
+    # SilentlyContinue keeps it out and leaves LASTEXITCODE as it is.
+    $ErrorActionPreference = if ($Quiet) { "SilentlyContinue" } else { "Continue" }
     # Failure to launch a native image does not set LASTEXITCODE. Never
     # mistake an earlier successful command for this command's result.
     $global:LASTEXITCODE = -1
@@ -471,7 +475,8 @@ function Get-NativeProbe([string]$FilePath, [string[]]$Arguments = @(), [switch]
     # plain-text secret") is no JSON; merged in, it made the health report,
     # the policy digest and the connector roster unreadable, so the upgrade
     # restored the old release with every hook closed (rel-1-0-5 GAP-0018).
-    $ErrorActionPreference = "Continue"
+    # The discarded stderr stays out of the install log too (GAP-0047).
+    $ErrorActionPreference = if ($Json) { "SilentlyContinue" } else { "Continue" }
     try {
         $output = if ($Json) { ((& $FilePath @Arguments 2>$null) | Out-String) } else { ((& $FilePath @Arguments 2>&1) | Out-String) }
         return [pscustomobject]@{ Exit = $LASTEXITCODE; Output = $output }
@@ -1307,7 +1312,8 @@ function Test-RollbackData([string]$BackTo) {
     $stores = @(Get-ChildItem -LiteralPath $data -Filter "*.db" -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
     if (-not $stores.Count) { return $false }
     $check = Join-Path ([IO.Path]::GetTempPath()) "defenseclaw-rollback-check-$PID.py"
-    $ErrorActionPreference = "Continue"
+    # Its stderr is discarded; keep it out of the install log (GAP-0047).
+    $ErrorActionPreference = "SilentlyContinue"
     try {
         [IO.File]::WriteAllText($check, $RollbackDbCheckPy)
         $damaged = @(& $python -I $check @stores 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
@@ -1337,6 +1343,13 @@ function Move-DamagedAuditStore([string]$BackTo) {
     return $moved
 }
 
+function Test-GatewayRequiresEveryConnector([string]$Gateway, [string]$Version) {
+    # The flag came with 1.0.4. A restored 1.0.0-1.0.3 is not asked: its
+    # "unknown flag" answer went to the install log (rel-1-0-5 GAP-0047).
+    if ((Test-Version $Version) -and [version]$Version -lt [version]"1.0.4") { return $false }
+    return (Invoke-Native $Gateway @("start", "--require-every-connector", "--help") -Quiet) -eq 0
+}
+
 function Start-Gateway {
     # Its readiness wait is the health check. Exit code 3: running, but a
     # connector refused admission (upgrading again would not change that) or,
@@ -1354,7 +1367,7 @@ function Start-Gateway {
     # when its boot left a configured connector unguarded. An older one (a
     # restored or rolled-back install) refuses the flag, so ask it first.
     $startArgs = @("start")
-    if ((Invoke-Native $gateway @("start", "--require-every-connector", "--help") -Quiet) -eq 0) { $startArgs += "--require-every-connector" }
+    if (Test-GatewayRequiresEveryConnector $gateway $version) { $startArgs += "--require-every-connector" }
     $rc = Invoke-Native $gateway $startArgs
     if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }
     # A first start over a large audit database can outlast start's own
@@ -4426,7 +4439,8 @@ function Test-OutageOpenNotice {
     # blocked. Said once, after the upgrade (GAP-1885). Windows PowerShell
     # 5.1 turns a native stderr line (a Python warning) into an error under
     # the installer's Stop preference, which lost the notice (GAP-2056).
-    $ErrorActionPreference = "Continue"
+    # Discarded, it stays out of the install log too (GAP-0047).
+    $ErrorActionPreference = "SilentlyContinue"
     $python = Join-Path $Venv "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { return $false }
     $setHome = -not $env:DEFENSECLAW_HOME

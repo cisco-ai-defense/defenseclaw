@@ -7128,8 +7128,11 @@ def test_the_windows_installer_asks_for_every_connector_to_be_guarded() -> None:
     # asked for it (an older one refuses the flag), also after a slow first
     # start, and its 3 keeps the install with "a connector needs attention".
     body = _ps1_function("Start-Gateway")
-    probe = 'if ((Invoke-Native $gateway @("start", "--require-every-connector", "--help") -Quiet) -eq 0) { $startArgs += "--require-every-connector" }'
+    probe = 'if (Test-GatewayRequiresEveryConnector $gateway $version) { $startArgs += "--require-every-connector" }'
     assert body.index('$startArgs = @("start")') < body.index(probe) < body.index("$rc = Invoke-Native $gateway $startArgs")
+    assert 'return (Invoke-Native $Gateway @("start", "--require-every-connector", "--help") -Quiet) -eq 0' in _ps1_function(
+        "Test-GatewayRequiresEveryConnector"
+    )
     slow = body[body.index('Write-Ok "The gateway finished starting"') :]
     assert slow.index("if ($startArgs.Count -gt 1 -and (Invoke-Native $gateway $startArgs) -ne 0) { return 3 }") < slow.index(
         "return 0"
@@ -7176,6 +7179,7 @@ def test_start_gateway_passes_the_every_connector_flag_only_to_a_gateway_that_ha
         'function Get-UtcClock { "now" }\nfunction Get-InstalledVersion { "1.0.4" }\n'
         "function Test-Version($v) { $true }\nfunction Reset-AuditJournalMode { }\nfunction Get-GatewayProcess { $null }\n"
         + _ps1_function("Invoke-Native")
+        + _ps1_function("Test-GatewayRequiresEveryConnector")
         + _ps1_function("Start-Gateway")
         + '$rc = Start-Gateway\nWrite-Host "rc=$rc"\n'
     )
@@ -8121,6 +8125,81 @@ if (-not $r) {{ throw 'no report' }}
         body = _ps1_function(name)
         parsed = [line for line in body.splitlines() if "$probe = Get-NativeProbe" in line and "--help" not in line]
         assert parsed and all(line.rstrip().endswith("-Json") for line in parsed), (name, parsed)
+
+
+# rel-1-0-5 GAP-0047: Windows PowerShell 5.1's transcript (the install log)
+# records a native command's stderr as a red NativeCommandError even when the
+# installer discards it, under the Continue preference: a rollback to 1.0.3
+# logged the restored gateway's "unknown flag: --require-every-connector"
+# answer to the start-flag probe. A quiet call and a JSON probe leave nothing
+# of the discarded stream in the log and keep the exit code.
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_a_quiet_native_probe_leaves_no_error_record_in_the_install_log(tmp_path: Path) -> None:
+    line = "Error: unknown flag: --require-every-connector"
+    if os.name == "nt":
+        gateway = tmp_path / "defenseclaw-gateway.cmd"
+        gateway.write_text(f"@echo off\r\necho {line} 1>&2\r\necho {{}}\r\nexit /b 1\r\n", encoding="ascii")
+    else:
+        gateway = tmp_path / "defenseclaw-gateway"
+        gateway.write_text(f"#!/bin/sh\necho '{line}' >&2\necho '{{}}'\nexit 1\n", encoding="ascii")
+        gateway.chmod(0o755)
+    log = tmp_path / "install.log"
+    script = f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+{_ps1_function('Invoke-Native')}
+{_ps1_function('Get-NativeProbe')}
+Start-Transcript -LiteralPath '{log}' | Out-Null
+$rc = Invoke-Native '{gateway}' @('start', '--require-every-connector', '--help') -Quiet
+$probe = Get-NativeProbe '{gateway}' @('status', '--json') -Json
+Stop-Transcript | Out-Null
+"rc:$rc"
+"probe:$($probe.Exit):$($probe.Output.Trim())"
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout.split()
+    assert "rc:1" in out, result.stdout + result.stderr
+    assert "probe:1:{}" in out, result.stdout + result.stderr
+    text = log.read_text(encoding="utf-8", errors="replace")
+    assert "NativeCommandError" not in text, text
+    # PowerShell 7's transcript copies a redirected native stderr line as
+    # plain text whatever the preference; 5.1 (powershell.exe) keeps it out.
+    if "PSEdition: Core" not in text:
+        assert "unknown flag" not in text, text
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("version", "asked", "flag"),
+    [("1.0.3", False, False), ("1.0.2", False, False), ("1.0.4", True, True), ("1.0.5", True, True), ("", True, True)],
+    ids=["restored-1.0.3", "restored-1.0.2", "1.0.4", "1.0.5", "unknown-version"],
+)
+def test_a_restored_release_without_the_every_connector_flag_is_not_asked_for_it(
+    tmp_path: Path, version: str, asked: bool, flag: bool
+) -> None:
+    calls = tmp_path / "calls.txt"
+    if os.name == "nt":
+        gateway = tmp_path / "defenseclaw-gateway.cmd"
+        gateway.write_text(f"@echo off\r\necho %* >> \"{calls}\"\r\nexit /b 0\r\n", encoding="ascii")
+    else:
+        gateway = tmp_path / "defenseclaw-gateway"
+        gateway.write_text(f"#!/bin/sh\necho \"$*\" >> '{calls}'\nexit 0\n", encoding="ascii")
+        gateway.chmod(0o755)
+    script = f"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+{_ps1_function('Test-Version')}
+{_ps1_function('Invoke-Native')}
+{_ps1_function('Test-GatewayRequiresEveryConnector')}
+"flag:$(Test-GatewayRequiresEveryConnector '{gateway}' '{version}')"
+"""
+    result = _run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"flag:{flag}" in result.stdout.split(), result.stdout + result.stderr
+    assert calls.exists() == asked, calls.read_text() if calls.exists() else ""
 
 
 # A failed upgrade to 1.0.5 that restored 1.0.2-1.0.4 kept the Claude Code
