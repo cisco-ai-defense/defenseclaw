@@ -69,6 +69,11 @@ func TestR105StateRedirectSpellingsAreWrites(t *testing.T) {
 		{"mention $HOME path", `printf '%s\n' "$HOME/.defenseclaw/config.yaml" > notes.txt`, false},
 		{"$HOMEX look-alike", "printf x >> $HOMEX/.defenseclaw/config.yaml", false},
 		{"$HOME project write", "printf x >> $HOME/proj/notes.txt", false},
+		// GAP-1773 RV11-1: a double-quoted literal part after the "$HOME" part.
+		{"quoted $HOME then double-quoted name", `printf x > "$HOME"/.defenseclaw/"config.yaml"`, true},
+		{"quoted $HOME then double-quoted name rm", `rm -f "$HOME"/.defenseclaw/"config.yaml"`, true},
+		{"quoted $HOME then double-quoted project name", `printf x > "$HOME"/proj/"notes.txt"`, false},
+		{"quoted $HOME then double-quoted name read", `cat "$HOME"/.defenseclaw/"config.yaml"`, false},
 	}
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connectorName)

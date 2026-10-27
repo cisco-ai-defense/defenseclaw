@@ -320,8 +320,15 @@ func quotedPlainHomeRewriteWord(word *syntax.Word) bool {
 		return false
 	}
 	for _, part := range word.Parts[1:] {
-		switch part.(type) {
+		switch typed := part.(type) {
 		case *syntax.Lit, *syntax.SglQuoted:
+		case *syntax.DblQuoted:
+			// "$HOME"/.defenseclaw/"config.yaml": literal text only.
+			for _, quoted := range typed.Parts {
+				if _, literal := quoted.(*syntax.Lit); !literal {
+					return false
+				}
+			}
 		default:
 			return false
 		}
