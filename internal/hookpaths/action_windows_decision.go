@@ -47,7 +47,16 @@ func actionWindowsPath(value, cwd, home string) (string, bool) {
 		return "", false // drive-relative paths depend on mutable drive state
 	}
 	if !actionWindowsHome(value) {
-		value = strings.TrimRight(strings.ReplaceAll(cwd, `\`, "/"), "/") + "/" + value
+		base := strings.TrimRight(strings.ReplaceAll(cwd, `\`, "/"), "/")
+		if base == "" && strings.HasPrefix(value, "/") {
+			// A rooted path with no known working directory names the root
+			// of an unknown drive. Joining it to the empty directory made
+			// "/tmp/x" the network name //tmp/x, so the state check asked
+			// the network for a host named by the command (seconds per word
+			// on Windows, GAP-2256).
+			return "", false
+		}
+		value = base + "/" + value
 	}
 	// Remove lexical traversal before asking the filesystem to expand a short
 	// name. GetLongPathName cannot expand a nonexistent intermediate component.
