@@ -64,9 +64,6 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 		}
 	}
 	var words []*syntax.Word
-	// Redirect targets may also be one quoted "$HOME/..." word; arguments
-	// keep the plain spellings only.
-	quotedTargets := map[*syntax.Word]bool{}
 	collectRedirects := func(stmt *syntax.Stmt) bool {
 		for _, redirect := range stmt.Redirs {
 			switch redirect.Op {
@@ -78,7 +75,6 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 					// bash expands $HOME/${HOME} in a redirect target from
 					// the same HOME as ~, as for the arguments (GAP-1773).
 					words = append(words, redirect.Word)
-					quotedTargets[redirect.Word] = true
 				}
 			default:
 				return false
@@ -138,7 +134,7 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 		literal, ok := firstLiteral(word)
 		if !ok || (literal.Value != "~" && !strings.HasPrefix(literal.Value, "~/")) {
 			if suffix, anchored := homeAnchoredLiteralWord(word); anchored &&
-				(plainHomeRewriteWord(word) || quotedTargets[word] && quotedPlainHomeRewriteWord(word)) {
+				(plainHomeRewriteWord(word) || quotedPlainHomeRewriteWord(word)) {
 				start, end := int(word.Pos().Offset()), int(word.End().Offset())
 				if start < last || end > len(source) {
 					return trustedPOSIXHomeRewrite{}, false
@@ -311,15 +307,24 @@ func plainHomeRewriteWord(word *syntax.Word) bool {
 	return true
 }
 
-// quotedPlainHomeRewriteWord reports one double-quoted "$HOME/..." word
-// whose path needs no quoting, so the unquoted ActiveHome spelling of the
-// rewrite names exactly the same path (GAP-1773).
+// quotedPlainHomeRewriteWord reports a home word that starts with a
+// double-quoted "$HOME" or "${HOME}" ("$HOME/...", "$HOME"/..., and
+// "$HOME"'/...' with literal or single-quoted parts after it) whose path
+// needs no quoting, so the unquoted ActiveHome spelling of the rewrite
+// names exactly the same path: the shell removes the quotes (GAP-1773).
 func quotedPlainHomeRewriteWord(word *syntax.Word) bool {
-	if word == nil || len(word.Parts) != 1 {
+	if word == nil || len(word.Parts) == 0 {
 		return false
 	}
 	if _, quoted := word.Parts[0].(*syntax.DblQuoted); !quoted {
 		return false
+	}
+	for _, part := range word.Parts[1:] {
+		switch part.(type) {
+		case *syntax.Lit, *syntax.SglQuoted:
+		default:
+			return false
+		}
 	}
 	suffix, anchored := homeAnchoredLiteralWord(word)
 	return anchored && trustedPOSIXHomeLiteral.MatchString(suffix)
