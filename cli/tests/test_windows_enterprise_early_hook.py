@@ -118,7 +118,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Publish-DefenseClawEarlyHook', 'Assert-DefenseClawEarlyHookPublished', 'Restore-DefenseClawEarlyHook', 'Get-DefenseClawEarlyHookField', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds', 'Assert-DefenseClawInstalledHookCallsEnded', 'Wait-DefenseClawServiceProcessExit', 'Test-DefenseClawProcessIdentityRunning')) {
+foreach ($name in @('Publish-DefenseClawEarlyHook', 'Assert-DefenseClawEarlyHookPublished', 'Restore-DefenseClawEarlyHook', 'Get-DefenseClawEarlyHookField', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds', 'Assert-DefenseClawInstalledHookCallsEnded', 'Assert-DefenseClawHookNotHeld', 'Wait-DefenseClawServiceProcessExit', 'Test-DefenseClawProcessIdentityRunning')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -154,6 +154,21 @@ if ($Case -like 'drain*') {
         $script:looks++
         $script:events.Add('look:' + [string]$script:looks)
         if ($Case -eq 'drain-timeout' -or $Case -eq 'drain-deferred' -or $script:looks -le 2) { 4242 }
+    }
+}
+if ($Case -like 'held*') {
+    # GAP-2001: an antivirus-style reader (no delete sharing) has the
+    # installed hook open: it closes after two looks (held-closes), or never
+    # (held-stays).
+    $script:holderLooks = 0
+    function Get-DefenseClawStateFileHolders {
+        param([hashtable]$Layout, [string[]]$Paths, $Excluded)
+        $script:holderLooks++
+        $script:events.Add('holders:' + [string]$script:holderLooks)
+        if ($Case -eq 'held-stays' -or $script:holderLooks -le 2) {
+            return @{ '4343/1' = [pscustomobject]@{ Id = 4343; Name = 'scanner.exe'; UserName = 'NT AUTHORITY\SYSTEM'; Parent = ''; File = '' } }
+        }
+        return @{}
     }
 }
 if ($Case -like 'restorer*') {
@@ -300,6 +315,19 @@ try {
             finally {
                 $result.hook = Get-Content -LiteralPath $hook -Raw
             }
+        }
+        'held-stays' {
+            try {
+                Assert-DefenseClawHookNotHeld -Layout $layout -TimeoutSeconds 1
+                $script:events.Add('returned')
+            }
+            finally {
+                $result.hook = Get-Content -LiteralPath $hook -Raw
+            }
+        }
+        'held-closes' {
+            Assert-DefenseClawHookNotHeld -Layout $layout -TimeoutSeconds 30
+            $script:events.Add('returned')
         }
         'drain-ended' {
             Assert-DefenseClawInstalledHookCallsEnded -HookPath $hook -TimeoutSeconds 30
@@ -629,6 +657,34 @@ def test_the_transaction_waits_for_the_installed_hooks_calls_before_it_stops_any
     assert check < body.index("New-DefenseClawDirectory -Path $directory")
     assert check < body.index("Set-DefenseClawServiceStartMode")
     assert check < body.index("Publish-DefenseClawEarlyHook")
+
+
+def test_a_program_holding_the_hook_open_defers_the_run_before_anything_changes(tmp_path: Path) -> None:
+    """GAP-2001: a 1.0.2 -> candidate upgrade with a reader holding
+    bin\\defenseclaw-hook.exe open (FileShare.Read) failed the swap, the
+    rollback could not publish its closed guard over the held file either,
+    and the transaction stayed pending with the guardian and enumerator
+    stopped. The holder is found before the transaction: the run defers
+    (retryable 1618), names it, and the hook is unchanged."""
+    result = _run(tmp_path, "held-stays")
+    assert result["threw"].startswith("hook_in_use: scanner.exe (process id 4343, NT AUTHORITY\\SYSTEM) has "), result
+    assert "this run stopped and replaced nothing" in result["threw"], result
+    assert "returned" not in result["events"], result
+    assert result["hook"] == "hook-1.0.2", result
+
+
+def test_the_run_goes_on_once_the_program_closed_the_hook(tmp_path: Path) -> None:
+    result = _run(tmp_path, "held-closes")
+    assert result["threw"] == "", result
+    assert result["events"] == ["holders:1", "holders:2", "holders:3", "returned"], result
+
+
+def test_the_transaction_checks_for_a_hook_holder_before_it_stops_anything() -> None:
+    body = _function_body(_text(), "New-DefenseClawTransaction")
+    check = body.index("Assert-DefenseClawHookNotHeld -Layout $Layout")
+    assert body.index("Assert-DefenseClawInstalledHookCallsEnded -HookPath $Layout.HookPath") < check
+    assert check < body.index("New-DefenseClawDirectory -Path $directory")
+    assert check < body.index("Set-DefenseClawServiceStartMode")
 
 
 def test_only_hook_processes_started_before_the_swap_are_waited_for(tmp_path: Path) -> None:

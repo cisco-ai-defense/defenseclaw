@@ -12569,6 +12569,11 @@ function New-DefenseClawTransaction {
         # running gateway answers the installed hook's calls and a deferral
         # leaves the deployment exactly as it was.
         Assert-DefenseClawInstalledHookCallsEnded -HookPath $Layout.HookPath
+        # GAP-2001: a program that holds the hook open without delete sharing
+        # fails the swap, and the rollback could not put its closed guard
+        # there either, so the transaction stayed pending with the guardian
+        # and enumerator stopped. It is found before anything changes.
+        Assert-DefenseClawHookNotHeld -Layout $Layout
     }
     $id = [Guid]::NewGuid().ToString('N')
     $directory = Assert-DefenseClawDescendant `
@@ -19077,6 +19082,44 @@ function Assert-DefenseClawInstalledHookCallsEnded {
         return
     }
     throw ("hook_calls_running: {0} DefenseClaw hook process(es) of the installed release (process ids {1}) were still running after a {2} s wait; the gateway must keep answering them, so this run stopped and replaced nothing. Next step: let those agent calls finish or close those agent sessions, then run the same Setup command again (an MDM retries exit 1618 on its own)" -f $running.Count, ($running -join ', '), $TimeoutSeconds)
+}
+
+function Assert-DefenseClawHookNotHeld {
+    <#
+        GAP-2001: waits, up to TimeoutSeconds, until no program outside the
+        install folder (an antivirus scan, an editor, a backup agent) has the
+        installed hook open, as Restart Manager reports it; the hook's own
+        processes and the services run from the install folder and are not
+        counted. A holder still there at the end defers the run with the
+        retryable hook_in_use (exit 1618) before the transaction stopped or
+        replaced anything. A failed query counts as no holder: the swap's own
+        retry and refusal then apply as before.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [int]$TimeoutSeconds = 30
+    )
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.HookPath -PathType Leaf)) {
+        return
+    }
+    $excluded = [Collections.Generic.HashSet[int]]::new()
+    [void]$excluded.Add([int]$PID)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ($true) {
+        $holders = @((Get-DefenseClawStateFileHolders -Layout $Layout -Paths @([string]$Layout.HookPath) -Excluded $excluded).Values)
+        if ($holders.Count -eq 0) {
+            return
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            break
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Seconds 1
+    }
+    $named = @($holders | Microsoft.PowerShell.Core\ForEach-Object {
+            if ([string]::IsNullOrWhiteSpace([string]$_.UserName)) { '{0} (process id {1})' -f $_.Name, $_.Id }
+            else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
+        })
+    throw ("hook_in_use: {0} has {1} open, so Setup could not replace it; this run stopped and replaced nothing. Next step: close that program (for example an antivirus scan or an editor), then run the same Setup command again (an MDM retries exit 1618 on its own)" -f ($named -join ', '), $Layout.HookPath)
 }
 
 function Restore-DefenseClawEarlyHook {
