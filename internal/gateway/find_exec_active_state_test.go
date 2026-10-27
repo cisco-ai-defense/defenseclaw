@@ -94,6 +94,24 @@ func TestR105GAP2122FindExecDeleteOfActiveState(t *testing.T) {
 		{"xargs jq root", "find ~/.defenseclaw -name '*.json' | xargs jq .", false, ""},
 		{"tee xargs sha256sum", "find ~/.defenseclaw/hooks -type f | tee /tmp/l | xargs sha256sum", false, ""},
 		{"sudo xargs ls hooks", "find ~/.defenseclaw/hooks -type f | sudo xargs ls -l", false, ""},
+		// pod check9: find's own -delete next to a reader or copy-out
+		// -exec still removes every entry that reaches it.
+		{"exec cat delete hooks", `find ~/.defenseclaw/hooks -type f -exec cat {} \; -delete`, true, ""},
+		{"exec grep q delete hooks", `find ~/.defenseclaw/hooks -type f -exec grep -q . {} \; -delete`, true, ""},
+		{"exec jq delete hooks", `find ~/.defenseclaw/hooks -type f -exec jq . {} \; -delete`, true, ""},
+		{"exec cp out delete hooks", `find ~/.defenseclaw/hooks -type f -exec cp {} /tmp/x/ \; -delete`, true, ""},
+		{"exec cp t out delete hooks", `find ~/.defenseclaw/hooks -type f -exec cp -t /tmp/x {} \; -delete`, true, ""},
+		{"exec ls delete hooks", `find ~/.defenseclaw/hooks -type f -exec ls {} \; -delete`, true, ""},
+		{"exec sha256sum delete hooks", "find ~/.defenseclaw/hooks -type f -exec sha256sum {} + -delete", true, ""},
+		{"exec rsync out delete hooks", `find ~/.defenseclaw/hooks -type f -exec rsync -a {} /tmp/x/ \; -delete`, true, ""},
+		{"execdir cat delete hooks", `find ~/.defenseclaw/hooks -type f -execdir cat {} \; -delete`, true, ""},
+		{"exec sort delete hooks", "find ~/.defenseclaw/hooks -type f -exec sort {} + -delete", true, ""},
+		{"exec tar out delete hooks", "find ~/.defenseclaw/hooks -type f -exec tar -cf /tmp/h.tar {} + -delete", true, ""},
+		{"exec sed n delete yaml", `find ~/.defenseclaw -name '*.yaml' -exec sed -n 1p {} \; -delete`, true, ""},
+		{"exec cat delete home previous", `find ~ -path '*/previous/*' -type f -exec cat {} \; -delete`, true, ""},
+		{"exec cat log cleanup delete", `find ~/.defenseclaw -name '*.log' -exec cat {} \; -delete`, false, ""},
+		{"exec cat delete project", `find . -name '*.tmp' -exec cat {} \; -delete`, false, ""},
+		{"exec delete word not action", `find ~/.defenseclaw/hooks -type f -exec grep -l -delete {} +`, false, ""},
 	}
 	for _, mode := range []string{"observe", "action"} {
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)

@@ -2936,7 +2936,8 @@ func provenPartialFindHandOff(
 ) bool {
 	handsOff := candidate.Access == actionfacts.PathAccessWrite &&
 		(findHandsEntriesToWriter(projected) || findCopiesOutTo(projected, candidate)) ||
-		candidate.Access == actionfacts.PathAccessRead && findPipedToWriter(facts, projected)
+		candidate.Access == actionfacts.PathAccessRead && findPipedToWriter(facts, projected) ||
+		candidate.Access == actionfacts.PathAccessDelete && findDeletesBesideItsExec(projected)
 	if !handsOff {
 		return false
 	}
@@ -3011,6 +3012,33 @@ func handOffOutputInState(facts actionfacts.Facts, output string) bool {
 			if value == ".defenseclaw" || strings.HasPrefix(value, ".defenseclaw/") {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// findDeletesBesideItsExec reports a find with its own -delete action and
+// an -exec/-execdir/-ok/-okdir command (pod check9, GAP-2122). The command
+// keeps the find partial (a reader, a copy-out, sh -c, ...), but the
+// -delete is find's own and removes every entry that reaches it:
+// `find ~/.defenseclaw/hooks -type f -exec cat {} \; -delete` empties
+// hooks/ whatever cat does. Its delete facts are exact, so the state owner
+// judges them with the same order-aware cleanup exemption
+// (`-name '*.log' -exec cat {} \; -delete` stays log cleanup).
+func findDeletesBesideItsExec(command actionfacts.CommandFact) bool {
+	if !strings.EqualFold(command.Program, "find") || !findHasExecAction(command.Argv) {
+		return false
+	}
+	for index := findExpressionStart(command.Argv); index < len(command.Argv); index++ {
+		switch strings.ToLower(command.Argv[index]) {
+		case "-delete":
+			return true
+		case "-exec", "-execdir", "-ok", "-okdir":
+			// The words of the command are not find primaries.
+			for index+1 < len(command.Argv) && command.Argv[index+1] != ";" && command.Argv[index+1] != "+" {
+				index++
+			}
+			index++
 		}
 	}
 	return false
@@ -3098,7 +3126,7 @@ func xargsHandedEntries(argv []string) actionfacts.HandedEntries {
 // not count, so the proof below decides (GAP-2122).
 func factsHaveFindHandOff(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
-		if findHandsEntriesToWriter(command) || findPipedToWriter(facts, command) ||
+		if findHandsEntriesToWriter(command) || findPipedToWriter(facts, command) || findDeletesBesideItsExec(command) ||
 			strings.EqualFold(command.Program, "find") && len(actionfacts.FindHandedEntries(command.Argv).Outputs) != 0 {
 			return true
 		}
