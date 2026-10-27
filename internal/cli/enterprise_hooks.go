@@ -1302,7 +1302,7 @@ func enterpriseHookGuardianFailureIssue(row enterpriseHookReconcileRow) string {
 	account := enterpriseHookSignedOutAccount(row)
 	if enterpriseHookAwaitingSignInRow(row) {
 		if account == "" {
-			account = enterpriseHookTargetLabel(row)
+			account = enterpriseHookTargetIssueLabel(row)
 		}
 		return fmt.Sprintf("%s for %s is pending until that account signs in: %s",
 			strings.TrimSpace(row.Connector), account, enterpriseHookAwaitingSignInCause(row.Error))
@@ -1320,7 +1320,7 @@ func enterpriseHookGuardianFailureIssue(row enterpriseHookReconcileRow) string {
 	if detail == "" {
 		detail = "no target error was recorded"
 	}
-	return fmt.Sprintf("last guardian reconcile failed for %s: %s", enterpriseHookTargetLabel(row), detail)
+	return fmt.Sprintf("last guardian reconcile failed for %s: %s", enterpriseHookTargetIssueLabel(row), detail)
 }
 
 func loadEnterpriseHookGuardianState(dataDir string) (enterpriseHookGuardianState, bool, error) {
@@ -1529,7 +1529,7 @@ func compareEnterpriseHookGuardianRecordsExcusing(
 				}
 			}
 			if !covered {
-				issues = append(issues, fmt.Sprintf("protected authorization does not cover %s", enterpriseHookTargetLabel(row)))
+				issues = append(issues, fmt.Sprintf("protected authorization does not cover %s", enterpriseHookTargetIssueLabel(row)))
 			}
 		}
 	}
@@ -1578,11 +1578,11 @@ func compareEnterpriseHookProtectedTargetSets(
 	for _, row := range expected {
 		key := enterpriseHookProtectedTargetKey(row)
 		if key == "" {
-			issues = append(issues, fmt.Sprintf("current enabled target is incomplete: %s", enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("current enabled target is incomplete: %s", enterpriseHookTargetIssueLabel(row)))
 			continue
 		}
 		if _, duplicate := expectedByKey[key]; duplicate {
-			issues = append(issues, fmt.Sprintf("current enabled target is duplicated: %s", enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("current enabled target is duplicated: %s", enterpriseHookTargetIssueLabel(row)))
 			continue
 		}
 		expectedByKey[key] = row
@@ -1590,23 +1590,23 @@ func compareEnterpriseHookProtectedTargetSets(
 	for _, row := range actual {
 		key := enterpriseHookProtectedTargetKey(row)
 		if key == "" {
-			issues = append(issues, fmt.Sprintf("protected %s contains an incomplete target: %s", record, enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("protected %s contains an incomplete target: %s", record, enterpriseHookTargetIssueLabel(row)))
 			continue
 		}
 		if _, duplicate := actualByKey[key]; duplicate {
-			issues = append(issues, fmt.Sprintf("protected %s contains a duplicate target: %s", record, enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("protected %s contains a duplicate target: %s", record, enterpriseHookTargetIssueLabel(row)))
 			continue
 		}
 		actualByKey[key] = row
 	}
 	for key, row := range expectedByKey {
 		if _, covered := actualByKey[key]; !covered {
-			issues = append(issues, fmt.Sprintf("protected %s does not cover %s", record, enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("protected %s does not cover %s", record, enterpriseHookTargetIssueLabel(row)))
 		}
 	}
 	for key, row := range actualByKey {
 		if _, enabled := expectedByKey[key]; !enabled {
-			issues = append(issues, fmt.Sprintf("protected %s contains extra or stale target %s", record, enterpriseHookTargetLabel(row)))
+			issues = append(issues, fmt.Sprintf("protected %s contains extra or stale target %s", record, enterpriseHookTargetIssueLabel(row)))
 		}
 	}
 	sort.Strings(issues)
@@ -1628,6 +1628,18 @@ func sameEnterpriseHookPath(a, b string) bool {
 		return strings.EqualFold(filepath.Clean(absA), filepath.Clean(absB))
 	}
 	return filepath.Clean(absA) == filepath.Clean(absB)
+}
+
+// enterpriseHookTargetIssueLabel names a target in a failure or drift
+// message. On Windows a guardian row carries only the account's SID, so the
+// message names the account as "user (SID)", as the guardian notices do
+// (GAP-2290); elsewhere it is enterpriseHookTargetLabel. Only rendered: keys
+// and matching use the SID.
+func enterpriseHookTargetIssueLabel(row enterpriseHookReconcileRow) string {
+	if strings.TrimSpace(row.SID) == "" {
+		return enterpriseHookTargetLabel(row)
+	}
+	return strings.TrimSpace(row.Connector) + "@" + enterpriseHookTargetIssueAccount(row)
 }
 
 func enterpriseHookTargetLabel(row enterpriseHookReconcileRow) string {

@@ -36,6 +36,12 @@ func enterpriseHookDeferredTargetSessionAvailable(
 	return false, fmt.Errorf("deferred enterprise hook targets are supported only on native Windows")
 }
 
+// enterpriseHookTargetIssueAccount is the SID, as enterpriseHookTargetLabel
+// names it: Unix rows are unchanged.
+func enterpriseHookTargetIssueAccount(row enterpriseHookReconcileRow) string {
+	return strings.TrimSpace(row.SID)
+}
+
 // enterpriseHookNoticeAccount names a guardian row's account in a notice:
 // the user name the target carries.
 func enterpriseHookNoticeAccount(row enterpriseHookReconcileRow) string {

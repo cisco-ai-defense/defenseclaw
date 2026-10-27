@@ -95,6 +95,12 @@ func enterpriseHookNoticeAccount(row enterpriseHookReconcileRow) string {
 	return enterpriseHookWindowsAccountLabel(row)
 }
 
+// enterpriseHookTargetIssueAccount names a failing or drifted target's
+// account as "user (SID)" (GAP-2290).
+func enterpriseHookTargetIssueAccount(row enterpriseHookReconcileRow) string {
+	return enterpriseHookWindowsAccountLabel(row)
+}
+
 // enterpriseHookWindowsAccountLabel is "user (SID)", looking the account up
 // when the row carries only its SID.
 func enterpriseHookWindowsAccountLabel(row enterpriseHookReconcileRow) string {
