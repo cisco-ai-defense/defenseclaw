@@ -703,6 +703,9 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 					}
 				}()
 			}
+			// The setup relax record goes once the folders are hardened or
+			// restored (this defer runs after the restore below, GAP-1985).
+			defer clearWindowsSetupRelaxMarkerAsService(target.conn.Name(), target.sid)
 			relaxed, err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint)
 			// Hardening below only runs when the setup succeeds. A failed setup
 			// must not leave the relaxed directories owner-private.
@@ -1779,6 +1782,8 @@ func teardownWindowsGenericManagedTarget(
 	name := target.conn.Name()
 	_, perUser := windowsStandalonePerUserConnector(name)
 	if perUser {
+		// Runs after the restore below (GAP-1985).
+		defer clearWindowsSetupRelaxMarkerAsService(name, target.sid)
 		relaxed, err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint)
 		defer func() {
 			restore := windowsRelaxedPathsToRestoreAfterTeardown(target.dataDir, relaxed, teardownErr == nil)

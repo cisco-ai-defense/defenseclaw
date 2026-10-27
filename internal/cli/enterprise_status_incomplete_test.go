@@ -66,6 +66,32 @@ func TestEnterpriseSecurityIncompleteNamesItsReasons(t *testing.T) {
 	}
 }
 
+// GAP-1900: hook_process_fail_open, the agents' own residual present on every
+// Windows result with Claude Code or Codex, does not hide the actionable
+// reasons (here the stale Claude attestation after an upgrade); alone, with
+// nothing actionable, it adds no empty reason.
+func TestEnterpriseSecurityIncompleteNamesActionableReasonsBesideTheHookProcessResidual(t *testing.T) {
+	result := &enterprisestatus.Result{
+		Readiness: enterprisestatus.Readiness{Guardian: true},
+		MachinePolicy: map[string]enterprisestatus.MachinePolicyState{
+			"claudecode": {Ownership: "merge", Lock: "enforce"},
+		},
+	}
+	result.AddWarning(enterprisestatus.CodeHookProcessFailOpen, "claudecode: may continue")
+	result.AddWarning(enterprisestatus.CodeHookProcessFailOpen, "codex: may continue")
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 3 || result.Warnings[2].Code != "security_incomplete" ||
+		!strings.Contains(result.Warnings[2].Message, "ATTESTCLAUDEEFFECTIVEPOLICY=1") {
+		t.Fatalf("the residual hid the attestation reason: %+v", result.Warnings)
+	}
+	result.MachinePolicy["claudecode"] = enterprisestatus.MachinePolicyState{Ownership: "merge", Lock: "enforce", EffectiveLock: "enforce"}
+	result.Warnings = result.Warnings[:2]
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 2 {
+		t.Fatalf("the residual alone got an empty reason: %+v", result.Warnings)
+	}
+}
+
 // GAP-2494: a repair that restored the Cursor adapter still names why
 // security is not complete; a warning that explains it still suppresses it.
 func TestEnterpriseSecurityIncompleteIgnoresInformationalWarnings(t *testing.T) {

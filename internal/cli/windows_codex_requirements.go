@@ -314,9 +314,10 @@ func resolveWindowsStagedRetireInstallRoot(executable string) (string, error) {
 	if !enterprisehooks.WindowsStandaloneProcess() {
 		return "", errors.New("staged managed-hook retirement requires the standalone profile")
 	}
-	if err := enterpriseHooksNativeMutationIdentityPreflight(); err != nil {
-		return "", fmt.Errorf("staged managed-hook retirement: %w", err)
-	}
+	// The LocalSystem check of a staged retire that retires a committed
+	// journal runs in that retire. With no journal the staged retire only
+	// classifies, which an elevated administrator's Setup /ensure or /repair
+	// runs too (GAP-0822).
 	runtimeDir, err := exactWindowsCodexLayoutEnv("DEFENSECLAW_HOME")
 	if err != nil {
 		return "", err

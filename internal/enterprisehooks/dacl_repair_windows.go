@@ -397,6 +397,9 @@ func windowsSDDLACEFlags(flags uint8) string {
 // windowsRecoverSetupRelaxedHookDirectory is replaceable in tests.
 var windowsRecoverSetupRelaxedHookDirectory = recoverWindowsSetupRelaxedHookDirectory
 
+// windowsRecoverSetupRelaxedDataDirectory is a seam for tests.
+var windowsRecoverSetupRelaxedDataDirectory = recoverWindowsSetupRelaxedDataDirectory
+
 // recoverWindowsSetupRelaxedHookDirectory restores the canonical managed DACL
 // on <dataDir>\hooks when a guardian stopped between relaxing that directory
 // for a connector setup and hardening it again (for example when a lifecycle
@@ -418,6 +421,35 @@ func recoverWindowsSetupRelaxedHookDirectory(dataDir string, target *windows.SID
 	if !filepath.IsAbs(dataDir) || filepath.Clean(dataDir) != dataDir {
 		return false, fmt.Errorf("enterprise hooks: hooks directory recovery needs an absolute clean data directory: %s", dataDir)
 	}
+	return runWindowsSetupRelaxRecovery(dataDir, target, recoverWindowsSetupRelaxedHookDirectoryPrivileged)
+}
+
+// recoverWindowsSetupRelaxedDataDirectory is recoverWindowsSetupRelaxedHookDirectory
+// for <dataDir> itself, which a guardian relaxes for a Hermes setup (Hermes
+// keeps its lifecycle lock there): a guardian stopped before it hardened it
+// again left LocalSystem and OWNER RIGHTS full control (OI|CI) on the user's
+// .defenseclaw folder, and every later retire and publication for that
+// account refused the folder, so Setup /repair failed 1603 (GAP-1334). Only
+// a plain target-owned directory whose DACL is exactly that setup shape
+// changes; its hooks child is left to recoverWindowsSetupRelaxedHookDirectory.
+func recoverWindowsSetupRelaxedDataDirectory(dataDir string, target *windows.SID) (bool, error) {
+	if target == nil {
+		return false, errors.New("enterprise hooks: target SID is unavailable for data directory recovery")
+	}
+	if !filepath.IsAbs(dataDir) || filepath.Clean(dataDir) != dataDir {
+		return false, fmt.Errorf("enterprise hooks: data directory recovery needs an absolute clean data directory: %s", dataDir)
+	}
+	return runWindowsSetupRelaxRecovery(dataDir, target, recoverWindowsSetupRelaxedDataDirectoryPrivileged)
+}
+
+// runWindowsSetupRelaxRecovery runs recover on a dedicated locked thread with
+// its own impersonation token, so the backup and restore privileges it
+// enables never reach another goroutine.
+func runWindowsSetupRelaxRecovery(
+	dataDir string,
+	target *windows.SID,
+	recover func(string, *windows.SID) (bool, error),
+) (bool, error) {
 	type outcome struct {
 		changed bool
 		err     error
@@ -430,7 +462,7 @@ func recoverWindowsSetupRelaxedHookDirectory(dataDir string, target *windows.SID
 			result <- outcome{err: fmt.Errorf("enterprise hooks: create dedicated hooks recovery token: %w", err)}
 			return
 		}
-		changed, err := recoverWindowsSetupRelaxedHookDirectoryPrivileged(dataDir, target)
+		changed, err := recover(dataDir, target)
 		if revertErr := windows.RevertToSelf(); revertErr != nil {
 			// Do not return a still-privileged thread to the runtime pool.
 			result <- outcome{changed: changed, err: errors.Join(
@@ -444,6 +476,57 @@ func recoverWindowsSetupRelaxedHookDirectory(dataDir string, target *windows.SID
 	}()
 	out := <-result
 	return out.changed, out.err
+}
+
+func recoverWindowsSetupRelaxedDataDirectoryPrivileged(dataDir string, target *windows.SID) (bool, error) {
+	if err := enableWindowsSetupRelaxRecoveryPrivileges(); err != nil {
+		return false, err
+	}
+	root, err := openWindowsGuardianACLRoot(dataDir, true)
+	if err != nil {
+		return false, err
+	}
+	defer windows.CloseHandle(root)
+	if err := validateWindowsGuardianACLHandle(root, target, true, true, false); err != nil {
+		return false, fmt.Errorf("enterprise hooks: reject managed runtime data directory %s: %w", dataDir, err)
+	}
+	sd, err := windows.GetSecurityInfo(root, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, fmt.Errorf("enterprise hooks: read DACL of %s: %w", dataDir, err)
+	}
+	relaxed, err := windowsSetupRelaxedDirectoryDACL(sd)
+	if err != nil || !relaxed {
+		return false, err
+	}
+	acl, err := windowsUserPathProtectionACL(target, true)
+	if err != nil {
+		return false, err
+	}
+	if err := setWindowsObjectDACLNoPropagation(root, acl, true); err != nil {
+		return false, fmt.Errorf("enterprise hooks: restore canonical DACL on %s: %w", dataDir, err)
+	}
+	return true, nil
+}
+
+// enableWindowsSetupRelaxRecoveryPrivileges enables backup and restore on
+// the calling thread's impersonation token (runWindowsSetupRelaxRecovery).
+func enableWindowsSetupRelaxRecoveryPrivileges() error {
+	var token windows.Token
+	if err := windows.OpenThreadToken(
+		windows.CurrentThread(),
+		windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY,
+		false,
+		&token,
+	); err != nil {
+		return fmt.Errorf("enterprise hooks: open hooks recovery token: %w", err)
+	}
+	defer token.Close()
+	for _, privilege := range []string{"SeBackupPrivilege", "SeRestorePrivilege"} {
+		if err := enableWindowsThreadPrivilege(token, privilege); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func recoverWindowsSetupRelaxedHookDirectoryPrivileged(dataDir string, target *windows.SID) (bool, error) {

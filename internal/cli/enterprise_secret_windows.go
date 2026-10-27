@@ -190,7 +190,15 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		})
 	}
 	if change.noop {
+		if action == "remove" {
+			fmt.Fprintf(cmd.OutOrStdout(), "credential %s was not stored; nothing to remove\n", opts.name)
+			return nil
+		}
 		fmt.Fprintf(cmd.OutOrStdout(), "credential %s already holds this value; gateway restart not needed\n", opts.name)
+		return nil
+	}
+	if action == "remove" && !change.changed {
+		fmt.Fprintf(cmd.OutOrStdout(), "credential %s was not stored; nothing to remove; gateway restarted: %v\n", opts.name, change.restarted)
 		return nil
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "credential %s %s; gateway restarted: %v\n", opts.name, windowsSecretChanged(action), change.restarted)
@@ -431,8 +439,14 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		}
 	}
 	store.close()
-	// The gateway reads credentials when it starts; apply the change now.
-	restarted, err := windowsSecretRestartGateway(recovery.arm)
+	// The gateway reads credentials when it starts; apply the change now. An
+	// identical value or an absent credential needs no restart once the
+	// running gateway started after that credential last changed: it loaded
+	// exactly what is stored (GAP-0712, GAP-1690).
+	restarted := false
+	if !unchanged || !windowsSecretGatewayStartedAfter(windowsSecretLastChange(layout, opts.name, action)) {
+		restarted, err = windowsSecretRestartGateway(recovery.arm)
+	}
 	if err != nil {
 		// A refused SCM stop did not stop this service. A concurrent
 		// administrator stop is not this command's restart to recover.
@@ -450,6 +464,44 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	}
 	change.restarted, change.noop, change.changed = restarted, unchanged && !restarted, !unchanged
 	return change, nil
+}
+
+// windowsSecretLastChange is when credential name last changed in the
+// store: its file's last write for a stored value, the store folder's for an
+// absent one (a removal writes the folder). The zero time when unknown.
+func windowsSecretLastChange(layout managed.StandaloneLayout, name, action string) time.Time {
+	path := layout.SecretsDir
+	if action == "set" {
+		path = filepath.Join(layout.SecretsDir, name)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
+// windowsSecretGatewayStartedAfter reports whether the running gateway
+// process was created after changedAt; false when that cannot be shown. A
+// seam for tests.
+var windowsSecretGatewayStartedAfter = func(changedAt time.Time) bool {
+	if changedAt.IsZero() {
+		return false
+	}
+	pid := windowsStandaloneGatewayPID()
+	if pid == 0 {
+		return false
+	}
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = windows.CloseHandle(process) }()
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(process, &created, &exited, &kernel, &user); err != nil {
+		return false
+	}
+	return time.Unix(0, created.Nanoseconds()).After(changedAt)
 }
 
 func windowsSecretAbsentRead(err error) bool {
@@ -552,16 +604,44 @@ func readWindowsSecretInstalledConfig(layout managed.StandaloneLayout, allowAbse
 		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
 			fmt.Errorf("cannot trust the installed config %s (%v); nothing was removed", layout.ConfigPath, err))
 	}
-	raw, err := os.ReadFile(layout.ConfigPath)
+	raw, err := readWindowsSecretConfigAsCaller(layout.ConfigPath)
 	if err != nil {
 		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
 			fmt.Errorf("cannot read the installed config %s (%v); nothing was removed: restore read access to the config and run it again", layout.ConfigPath, err))
+	}
+	// The gateway reads the config as its service account when it starts
+	// again after the change: a config that account cannot read would leave
+	// it stopped with the credential gone (GAP-0750).
+	if err := managed.ValidateServiceCanReadTree(layout.ConfigPath, "installed config", layout.ServiceUser); err != nil && !managed.IsServiceAccountUnresolved(err) {
+		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+			fmt.Errorf("the gateway could not start on the installed config after this change (%v); nothing was removed", err))
 	}
 	if _, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, raw); err != nil {
 		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
 			fmt.Errorf("cannot load the installed config %s (%v); nothing was removed", layout.ConfigPath, err))
 	}
 	return raw, nil
+}
+
+// readWindowsSecretConfigAsCaller reads the installed config with the
+// caller's own access check. os.ReadFile opens with backup semantics, so an
+// elevated caller whose token had SeBackupPrivilege enabled read a config
+// whose DACL denies Administrators, removed the credential, and the gateway
+// then failed to start (GAP-0750, TST-30694).
+func readWindowsSecretConfigAsCaller(path string) ([]byte, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	file := os.NewFile(uintptr(handle), path)
+	defer file.Close()
+	return io.ReadAll(io.LimitReader(file, windowsEnterpriseHotConfigMaxBytes+1))
 }
 
 func removeWindowsSecret(store *windowsSecretStore, name string) error {
