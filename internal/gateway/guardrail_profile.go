@@ -1806,8 +1806,14 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		agent = ""
 	}
 	scans := set.requestScanScopes(r.Context(), connectorName)
+	explained, legacy := agent, profileAgentLegacy(nil)
+	if source != "" && subject != nil {
+		// A 1.0.3 agent identity is explained as the agent's current one,
+		// with its binding, as the hook decides it (GAP-0019).
+		explained, legacy = set.explainAgent(agent, subject.UserID, connectorName)
+	}
 	decision, refusedOn, sandboxRefused := set.explainOnRequestPaths(connectorName, func(path profilePath) profileDecision {
-		return set.matchAgent(subject, source, connectorName, scans, path, agent, nil)
+		return set.matchAgent(subject, source, connectorName, scans, path, explained, legacy)
 	})
 	out["profile"] = decision.Name
 	out["digest"] = decision.Digest
