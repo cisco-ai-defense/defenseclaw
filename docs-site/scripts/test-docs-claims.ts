@@ -1423,6 +1423,8 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-0516", page: "reference/env-vars.mdx", section: "Managed hosts and the environment", has: ["`DEFENSECLAW_FAIL_MODE` is not one of them: a managed hook uses only the fail mode the administrator installed", "(`DEFENSECLAW_FAIL_MODE` is one of them)"], lacks: ["`DEFENSECLAW_FAIL_MODE` is passed through for older installed hooks", "opt-outs except `DEFENSECLAW_FAIL_MODE` and"] },
+  { gap: "GAP-0516", page: "enterprise/threat-model.mdx", has: ["`DEFENSECLAW_FAIL_MODE` is ignored in both directions: the installed fail mode applies"], lacks: ["`DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY` and `DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS` count only when stricter"] },
   { gap: "GAP-0669", page: "stories/cursor-secret-exfil.mdx", has: ["cursor gateway outage=open (failClosed=true)", "`failClosed=true` in `hooks.json` only covers a hook process that cannot answer."], lacks: ["cursor hook failures=closed"] },
   { gap: "GAP-2132", page: "guardrail/index.mdx", has: ["`defenseclaw doctor` shows `Config file` (`canonical schema valid`) and `Rule pack` as `[PASS]`"], lacks: ["shows `Config validation` and `Rule pack` as `[PASS]`"] },
   { gap: "GAP-2132", page: "reference/keys.mdx", has: ["`defenseclaw doctor` shows `Config file` (`canonical schema valid`) as `[PASS]` on every OS"], lacks: ["shows `Config validation` as `[PASS]`", "on Windows the row is `Config file`"] },
