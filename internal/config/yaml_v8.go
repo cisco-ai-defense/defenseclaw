@@ -279,6 +279,7 @@ func parseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
 	if !v9SecureClientDocument(root) {
 		dropRetiredScannerKeys(root)
 	}
+	foldOpenShellEnumCase(root)
 	plainValue, err := projectV8YAML(source, root, "$")
 	if err != nil {
 		return nil, err

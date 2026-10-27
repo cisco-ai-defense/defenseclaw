@@ -31,8 +31,14 @@ CHECKER = SCRIPTS / "check_enterprise_lifecycle_result.py"
 RESULT_CHECKER_TEST = SCRIPTS / "test_check_enterprise_lifecycle_result.py"
 UNIX_LANE = SCRIPTS / "test-enterprise-unix-install.sh"
 POSTINSTALL_RESULT_TEST = ROOT / "packaging/linux/tests/test_postinstall_result.sh"
-# CI selects Python modules that name the changed file's basename.
+SANDBOX_HOLD_TEST = ROOT / "packaging/linux/tests/test_upgrade_holds_legacy_sandbox_daemons.sh"
+# CI selects Python modules that name the changed file's basename: the hold
+# lives in preinstall.sh and the macOS package's build script (GAP-1809).
 POSTINSTALL = ROOT / "packaging/linux/postinstall.sh"
+PREINSTALL = ROOT / "packaging/linux/preinstall.sh"
+MACOS_PKG_BUILD = ROOT / "scripts/build-macos-enterprise-pkg.sh"
+MACOS_TEST_RUNNER = ROOT / "packaging/macos/tests/run_tests.sh"
+MACOS_SANDBOX_HOLD_TEST = ROOT / "packaging/macos/tests/test_enterprise_pkg_sandbox_hold.sh"
 
 
 def test_hook_process_warning_keeps_install_lanes_honest(tmp_path: Path) -> None:
@@ -186,6 +192,32 @@ def test_postinstall_failure_contract_runs_in_ci() -> None:
         cwd=ROOT, capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the hold reads /proc")
+def test_upgrade_holds_legacy_sandbox_daemons_runs_in_ci() -> None:
+    """GAP-0868 and GAP-1553: the package's hold of a pre-1.0.4 sandbox
+    daemon runs in CI, not only in gate scripts (GAP-1596)."""
+    result = subprocess.run(
+        ["sh", str(SANDBOX_HOLD_TEST)],
+        cwd=ROOT, capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the stand-in ps reads /proc")
+def test_macos_pkg_sandbox_hold_runs_in_ci() -> None:
+    """GAP-1554 and RB1-1: the macOS package's hold of a pre-1.0.4 sandbox
+    daemon (in build-macos-enterprise-pkg.sh) runs in CI too; its test is
+    written to run on Linux (GAP-1809)."""
+    assert PREINSTALL.is_file() and MACOS_PKG_BUILD.is_file()
+    result = subprocess.run(
+        ["bash", str(MACOS_TEST_RUNNER), str(MACOS_SANDBOX_HOLD_TEST)],
+        cwd=ROOT, capture_output=True, text=True, timeout=180, check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "skip" not in output, output
 
 
 def test_checker_accepts_a_matching_result(tmp_path: Path) -> None:

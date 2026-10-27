@@ -1503,7 +1503,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0755", page: "enterprise/enrollment.mdx", has: ["Excluding an enrolled account also removes its guardian identity record at the next guardian pass"] },
   { gap: "GAP-1163", page: "reference/sandbox-cli.mdx", has: ["If that sync fails, DefenseClaw does not stop the VM"] },
   { gap: "GAP-1550", page: "sandboxes/guide.mdx", section: "A MicroVM stop is held because its disk could not sync", has: ["Signing out without linger, `sandbox teardown` and an administrator"] },
-  { gap: "GAP-1595", page: "tui.mdx", has: ["the TUI asks whether to stop it anyway"] },
+  { gap: "GAP-1595", page: "tui.mdx", has: ["asks in this terminal whether to stop it anyway"], lacks: ["defenseclaw sandbox stop NAME --yes`)"] },
   { gap: "GAP-0868", page: "enterprise/sandboxes.mdx", has: ["the package pauses each account's old sandbox daemon before it replaces any file"] },
   { gap: "GAP-0546", page: "enterprise/sandboxes.mdx", has: ["`ensure` fails with `config_invalid` and keeps the previous config and the running gateway"] },
   { gap: "GAP-0691", page: "enterprise/sandboxes.mdx", has: ["can be written in any letter case: `VM` is `vm`"] },

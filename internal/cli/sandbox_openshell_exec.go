@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
@@ -515,19 +516,7 @@ func sandboxOpenShellUpstreamTelemetry(ctx context.Context) bool {
 // sandboxOpenShellDaemonSettings asks the managed gateway's hook socket for
 // the account's settings; ok is false when it does not answer.
 func sandboxOpenShellDaemonSettings(ctx context.Context) (sandboxrelay.DaemonSettings, bool) {
-	layout, descriptor, err := sandboxDaemonHost(runtime.GOOS)
-	if err != nil {
-		return sandboxrelay.DaemonSettings{}, false
-	}
-	socket := descriptor.HookSocket
-	if socket == "" {
-		socket = layout.HookSocketPath
-	}
-	var trusted []int
-	if descriptor.ServiceUID > 0 {
-		trusted = append(trusted, descriptor.ServiceUID)
-	}
-	relay, err := sandboxrelay.NewClient(sandboxrelay.ClientOptions{SocketPath: socket, TrustedOwners: trusted, Timeout: 10 * time.Second})
+	relay, err := sandboxManagedRelay()
 	if err != nil {
 		return sandboxrelay.DaemonSettings{}, false
 	}
@@ -537,6 +526,42 @@ func sandboxOpenShellDaemonSettings(ctx context.Context) (sandboxrelay.DaemonSet
 		return sandboxrelay.DaemonSettings{}, false
 	}
 	return settings, true
+}
+
+// sandboxManagedRelay is a client of the managed gateway's hook socket, as
+// the account's sandbox daemon dials it; an error on a computer DefenseClaw
+// does not manage.
+func sandboxManagedRelay() (*sandboxrelay.UnixClient, error) {
+	layout, descriptor, err := sandboxDaemonHost(runtime.GOOS)
+	if err != nil {
+		return nil, err
+	}
+	socket := descriptor.HookSocket
+	if socket == "" {
+		socket = layout.HookSocketPath
+	}
+	var trusted []int
+	if descriptor.ServiceUID > 0 {
+		trusted = append(trusted, descriptor.ServiceUID)
+	}
+	return sandboxrelay.NewClient(sandboxrelay.ClientOptions{SocketPath: socket, TrustedOwners: trusted, Timeout: 10 * time.Second})
+}
+
+// sandboxManagedAccountPolicy is the managed gateway's policy view of the
+// caller's new run of harness (sandboxcli.App.ManagedAccountPolicy), asked
+// without the account's sandbox daemon.
+func sandboxManagedAccountPolicy(ctx context.Context, harness string) (*sandboxapi.ManagedExplain, error) {
+	relay, err := sandboxManagedRelay()
+	if err != nil {
+		return nil, err
+	}
+	defer relay.Close()
+	conn := config.NormalizeConnectorName(harness)
+	view, err := relay.Explain(ctx, sandboxrelay.ExplainRequest{Connector: conn, Harness: conn})
+	if err != nil {
+		return nil, err
+	}
+	return &view, nil
 }
 
 // ownFileOnly checks that path is a regular file the caller owns that no

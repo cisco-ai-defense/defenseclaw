@@ -78,6 +78,9 @@ func (a *App) defaultDoctor() *openshell.Doctor {
 			a.warnErr("could not record the gateway change for teardown: " + err.Error())
 		}
 	}}
+	// A fix's restart gives a MicroVM gateway's service the stop sync
+	// first, or syncs its running MicroVMs (GAP-1927, GAP-1928).
+	d.StopSync, d.StopSyncOut = a.stopSyncSpec(), a.IO.Err
 	if onManagedHost() {
 		// The account's gateway runs on the administrator's rendered
 		// configuration, not on files of the account's own (GAP-0254).
@@ -279,7 +282,10 @@ func managedRenderedDoctorDriver(paths *openshell.RenderedPaths) (openshell.Comp
 type statusProbe struct {
 	// A configured port is not proof the daemon holds it.
 	ingressListening, egressListening bool
-	unavailable                       bool
+	// listenersProven: the daemon's status names only the ports it holds
+	// (sandboxapi.Status.ListenersProven).
+	listenersProven bool
+	unavailable     bool
 	// available is set when the daemon serves sandboxes; ingress is its
 	// hook ingress address.
 	available bool
@@ -466,7 +472,7 @@ func (a *App) unknownSandboxCheck(ctx context.Context) *openshell.Check {
 // (sandboxapi.Sandbox.OldSupervisor): the stop of a ready one, which on a
 // MicroVM syncs its disk first because that release's stop does not, and
 // the delete of a MicroVM whose workload ended, which OpenShell does not
-// stop (or its start with --end-vm on OpenShell SupportedMin or later).
+// stop (openshell.EndedVMWayOn: OpenShell 0.1.5 does not start it either).
 func legacyStopWay(sb *sandboxapi.Sandbox) string {
 	if sb.Phase == "ready" {
 		way := "save the work you need in " + sb.Name + ", then run `" + CommandName + " stop " + sb.Name + "`"
@@ -476,8 +482,7 @@ func legacyStopWay(sb *sandboxapi.Sandbox) string {
 		}
 		return way
 	}
-	return "`" + CommandName + " delete " + sb.Name + "` deletes " + sb.Name + " and its work, or on OpenShell " + openshell.SupportedMin + " or later `" +
-		CommandName + " start " + sb.Name + " --end-vm` ends its VM, losing what it has not written to its disk"
+	return openshell.EndedVMWayOn(sb.Name)
 }
 
 // hooksCheck reports the sandboxes whose current session's hooks do not
@@ -681,6 +686,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			p.managed = st.Managed
 			p.ingressListening = st.IngressAddr != ""
 			p.egressListening = st.EgressAddr != ""
+			p.listenersProven = st.ListenersProven
 		}
 		managed = managed || (serr == nil && st.Managed != nil)
 		switch {
@@ -716,7 +722,14 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 			}
 			c.Status, c.Detail = openshell.StatusPass, "running; "+a.managedFirstRunText(st.Managed)
 		case !st.Available:
-			p.ingressListening, p.egressListening, p.unavailable = false, false, true
+			// A daemon that names only the ports it holds (ListenersProven)
+			// still serves the one it names: its egress listener while
+			// another account holds its ingress port is no other process
+			// (GAP-1875). An older daemon's addresses prove nothing here.
+			if !p.listenersProven {
+				p.ingressListening, p.egressListening = false, false
+			}
+			p.unavailable = true
 			c.Status, c.Detail = openshell.StatusFail, "running, but sandboxes are unavailable: "+sandboxapi.DisplayText(firstNonEmpty(st.Reason, "not connected to OpenShell"))
 			switch {
 			case st.Managed != nil && st.GatewayElsewhere != "":

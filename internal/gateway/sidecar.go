@@ -2667,8 +2667,14 @@ func aiDiscoveryNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		return false
 	}
 	// application_protection acts on discovery reports, so the rebuilt
-	// service's first report applies an edit at once.
+	// service's first report applies an edit at once. The scan record
+	// folders a full scan reads are fixed when the service is built: the
+	// sandboxes' one exists only while openshell.enabled is on, which a
+	// hot-reloaded `sandbox setup` turns on, so what a sandbox scan found
+	// never reached the inventory until the gateway restarted (GAP-1962).
 	return !reflect.DeepEqual(oldCfg.AIDiscovery, newCfg.AIDiscovery) ||
+		inventory.SandboxScanDirForConfig(oldCfg) != inventory.SandboxScanDirForConfig(newCfg) ||
+		inventory.UserScanDirForConfig(oldCfg) != inventory.UserScanDirForConfig(newCfg) ||
 		!reflect.DeepEqual(oldCfg.ApplicationProtection, newCfg.ApplicationProtection) ||
 		managed.IsManagedEnterprise(oldCfg.DeploymentMode) != managed.IsManagedEnterprise(newCfg.DeploymentMode) ||
 		!slices.Equal(discoveryExcludeUsers(oldCfg), discoveryExcludeUsers(newCfg))

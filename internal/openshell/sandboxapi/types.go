@@ -55,6 +55,9 @@ const (
 // object) is judged for the agent the daemon's managed configuration runs.
 type ReadyRequest struct {
 	Harness string `json:"harness,omitempty"`
+	// Pack is the run's --pack, which the ready's policy view judges the
+	// agent under, as the create does (GAP-1551); empty is the default pack.
+	Pack string `json:"pack,omitempty"`
 }
 
 // PolicyDecisionRequest records one managed user's lasting host decision
@@ -110,9 +113,15 @@ type Status struct {
 	// OpenShell does not stop and whose VM may still run, until OpenShell
 	// reports it stopped or deleted (openshell.HoldsGateway). Unset by a
 	// daemon before DefenseClaw 1.0.4 (Busy).
-	Live             *int      `json:"live,omitempty"`
-	PendingApprovals int       `json:"pending_approvals"`
-	LastReconcile    time.Time `json:"last_reconcile,omitzero"`
+	Live             *int `json:"live,omitempty"`
+	PendingApprovals int  `json:"pending_approvals"`
+	// ListenersProven says IngressAddr and EgressAddr name only the sandbox
+	// ports this daemon holds now (the gateway's statusListenerAddresses),
+	// so the doctor takes a named port for the daemon's own also while
+	// sandboxes are unavailable. Unset by a daemon before DefenseClaw 1.0.5,
+	// whose addresses could be the configured ones (GAP-1875).
+	ListenersProven bool      `json:"listeners_proven,omitempty"`
+	LastReconcile   time.Time `json:"last_reconcile,omitzero"`
 	// StartedAt is when the daemon's sandbox subsystem started. Nothing
 	// keeps the sandboxes' counters (HookCoverage, EgressStats) across a
 	// restart: they count from then, so a session that began earlier knows
@@ -219,6 +228,12 @@ type ManagedStatus struct {
 	// DeniedHarnesses names configured harnesses whose profile forbids a
 	// sandbox. Empty with Allowed false means the policy could not be read.
 	DeniedHarnesses []string `json:"denied_harnesses,omitempty"`
+	// PolicyUnread is why the managed gateway gave no policy answer when
+	// Allowed is false and DeniedHarnesses is empty ("" from an older
+	// daemon), and PolicyLimited says the caller's request limit refused
+	// it: that passes on its own and is not a policy verdict (GAP-2203).
+	PolicyUnread  string `json:"policy_unread,omitempty"`
+	PolicyLimited bool   `json:"policy_limited,omitempty"`
 	// HostRunGate, when present, is the caller's gateway decision carried
 	// from a managed explain into a launch banner.
 	HostRunGate string `json:"host_run_gate,omitempty"`

@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -172,5 +173,39 @@ func TestStatusNamesEveryUnprotectedLegacyGuest(t *testing.T) {
 	must(t, err)
 	if len(st.Unprotected) != 1 || st.Unprotected[0].Stop != "defenseclaw sandbox delete ended" || st.Unprotected[0].Phase != "completed" {
 		t.Fatalf("ended MicroVM unprotected = %+v", st.Unprotected)
+	}
+}
+
+// GAP-1163: after a raw OpenShell start (the daemon's cached phase still
+// says stopped) the user's stop syncs the MicroVM's disk first like any
+// other, and one whose sync fails is not made: the VM keeps running with its
+// work, OpenShell is not asked to stop it, and nothing is reported lost.
+func TestAStopAfterARawStartIsNotMadeWhenTheSyncFails(t *testing.T) {
+	e := newVMEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "box", Copy: true})
+	answer := "none\nsynced\n"
+	e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		return openshelltest.ExecResponse{Stdout: []byte(answer)}
+	}))
+	e.stopBox("box")
+	must(t, e.fake.SetPhase(openshell.DefaultWorkspace, "box", openshell.PhaseReady))
+	answer = "exited\n"
+	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+	_, err := e.m.Stop(t.Context(), "box")
+	apiErr := wantCode(t, err, sandboxapi.CodeUnsynced)
+	if !strings.Contains(apiErr.Message, "sandbox box was not stopped") || !strings.Contains(apiErr.Message, "it keeps running") {
+		t.Fatalf("user stop after a raw start and a failed sync = %+v", apiErr)
+	}
+	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
+		t.Fatalf("the refused stop called OpenShell's stop %d times", got-stops)
+	}
+	if got := e.events("box", "", "stop_unflushed"); len(got) != 0 {
+		t.Fatalf("a stop that was not made was reported as one that lost writes: %+v", got)
+	}
+	// With the sync working again, the next stop goes ahead synced.
+	answer = "exited\nsynced\n"
+	e.stopBox("box")
+	if got := e.get("box"); got.Phase != "stopped" {
+		t.Fatalf("after the synced stop: %s", got.Phase)
 	}
 }

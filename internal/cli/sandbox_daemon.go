@@ -36,9 +36,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 	"github.com/defenseclaw/defenseclaw/internal/systemd"
@@ -97,6 +99,37 @@ var sandboxDaemonStopCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
 		defer cancel()
 		return stopManagedSandboxes(ctx, sandboxapi.NewUnixClient(path), cmd.OutOrStdout())
+	},
+}
+
+// sandboxDaemonSyncGateway is sync-sandboxes' --gateway.
+var sandboxDaemonSyncGateway string
+
+// sandboxDaemonSyncCmd is the ExecStop DefenseClaw gives the OpenShell
+// gateway service of a per-user gateway on the MicroVM driver (a systemd
+// drop-in setup writes, openshell.StopSync): a stop or restart of the
+// gateway ends every MicroVM on it, so it first syncs the disk of each one
+// OpenShell lists ready, whoever started it and whoever stops the gateway
+// (GAP-0380). It runs as the account, under the user manager.
+var sandboxDaemonSyncCmd = &cobra.Command{
+	Use:          "sync-sandboxes",
+	Short:        "Sync each running MicroVM's disk before the OpenShell gateway stops (the gateway service's ExecStop)",
+	Hidden:       true,
+	Args:         cobra.NoArgs,
+	SilenceUsage: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		ctx, cancel := context.WithTimeout(cmd.Context(), openshell.StopSyncTimeout)
+		defer cancel()
+		err := openshell.SyncGatewaySandboxes(ctx, openshell.DiscoverOptions{Gateway: sandboxDaemonSyncGateway}, cmd.OutOrStdout())
+		// The gateway's stop ends each one it could not sync: the next
+		// sandbox daemon's feed says what may be lost (stop_unflushed),
+		// not only this unit's journal (GAP-2081).
+		if names := openshell.UnsyncedSandboxes(err); len(names) > 0 {
+			if rerr := manager.RecordUnsyncedStops(config.DefaultDataPath(), names, time.Now()); rerr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "could not record the unsynced stop for the sandbox feed: %v\n", rerr)
+			}
+		}
+		return err
 	},
 }
 
@@ -183,6 +216,8 @@ func drainAccountGateway(ctx context.Context, in io.Reader, out io.Writer, d san
 
 func init() {
 	sandboxDaemonCmd.AddCommand(sandboxDaemonStopCmd)
+	sandboxDaemonSyncCmd.Flags().StringVar(&sandboxDaemonSyncGateway, "gateway", "", "the OpenShell gateway registration (default: the openshell CLI's active one)")
+	sandboxDaemonCmd.AddCommand(sandboxDaemonSyncCmd)
 	sandboxDaemonCmd.AddCommand(sandboxDaemonDrainCmd)
 	rootCmd.AddCommand(sandboxDaemonCmd)
 }

@@ -53,6 +53,9 @@ var newSandboxApp = func(cmd *cobra.Command) *sandboxcli.App {
 			return settings.Operational.TrustedCAs, settings.Operational.TrustedCAError, ok
 		},
 		ManagedAccountHome: sandboxAccountHome,
+		ManagedAccountPolicy: func(ctx context.Context, harness string) (*sandboxapi.ManagedExplain, error) {
+			return launcherAccountPolicy(ctx, harness)
+		},
 		IO: sandboxcli.IO{
 			In: cmd.InOrStdin(), Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
 			TTY:    term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())),

@@ -362,6 +362,9 @@ func (m *Manager) mergeHostPortRule(ctx context.Context, a *approval) (*openshel
 	if err := triage.CheckProposal(eff, p, false); err != nil {
 		return nil, err
 	}
+	if err := m.networkWithdrawn(a.sandbox); err != nil {
+		return nil, err
+	}
 	gw, err := m.gateway(ctx)
 	if err != nil {
 		return nil, err

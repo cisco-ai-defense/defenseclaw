@@ -692,9 +692,9 @@ For another MicroVM error reason, such as `ProcessPollFailed`, OpenShell may sti
 
 ## A MicroVM stop is held because its disk could not sync
 
-On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it. If that sync fails, DefenseClaw does not stop the VM: it keeps running with its work, and the command says why. Save the work you need (`defenseclaw sandbox pull NAME` for a copy run), then run `defenseclaw sandbox stop NAME` again; `defenseclaw sandbox delete NAME` ends it without keeping its work. A stop your organization's policy makes (a hook alarm, a revoked registration) still goes ahead and the activity feed says what may be lost.
+On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it. If that sync fails, DefenseClaw does not stop the VM: it keeps running with its work, and the command says what a stop would lose and, on a terminal, asks whether to stop it anyway; `defenseclaw sandbox stop NAME --discard-unsynced` stops it anyway without asking. Or save the work you need (`defenseclaw sandbox pull NAME` for a copy run) and run `defenseclaw sandbox stop NAME` again; `defenseclaw sandbox delete NAME` ends it without keeping its work. A stop DefenseClaw makes on its own for a security alarm (a hook alarm, foreign network rules, a lost listener, a revoked registration) contains such a VM instead of stopping it: it closes its egress proxy, withdraws the network rules it added, and `sandbox status` names it until you stop it.
 
-Signing out without linger, `sandbox teardown` and an administrator's stop of the sandbox service stop the VM even when its disk could not sync: DefenseClaw stops it with what reached its disk and the activity feed says what may have been lost.
+Signing out without linger, `sandbox teardown` and an administrator's stop of the sandbox service end the OpenShell gateway, and with it the VM, even when its disk could not sync: DefenseClaw tries its synced stop again first, and names each VM whose disk still could not sync and what it may have lost (on your own computer, in the activity feed).
 
 #### A network rule from the last session was not removed
 

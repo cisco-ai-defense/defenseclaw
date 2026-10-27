@@ -278,14 +278,21 @@ func (o *accountOpenShell) Drift(s sandboxrelay.DaemonSettings) ([]openshell.Set
 	compare := e.Install != config.EnterpriseOpenShellInstallSetup && e.GatewayConfigPath != ""
 	var want openshell.RenderedGateway
 	var renderedDrift []openshell.SettingDrift
-	if compare {
+	if e.GatewayConfigPath != "" {
+		// Both install modes run the administrator's rendered file (the
+		// managed unit's exec shim), so a hand edit of it is drift in setup
+		// mode too: reported, as status reports it, never a pause
+		// (blockingOpenShellDrift). Setup mode, whose gateway may also run
+		// the account's own install, does not fail on a render it cannot
+		// read (GAP-0730).
 		envPath := filepath.Join(filepath.Dir(e.GatewayConfigPath), openshell.GatewayEnvFile)
 		var digest string
 		var err error
-		if want, digest, err = o.readRendered(e.GatewayConfigPath, envPath); err != nil {
+		want, digest, err = o.readRendered(e.GatewayConfigPath, envPath)
+		switch {
+		case err != nil && compare:
 			return nil, err
-		}
-		if e.GatewayConfigDigest != "" && digest != e.GatewayConfigDigest {
+		case err == nil && e.GatewayConfigDigest != "" && digest != e.GatewayConfigDigest:
 			renderedDrift = []openshell.SettingDrift{{Field: renderedGatewayDriftField, Want: "installed render", Have: "changed"}}
 		}
 	}
@@ -899,15 +906,31 @@ func registrationPortOf(reg *openshell.Registration) int {
 // accepts connections but has no listener this process can see (macOS lsof
 // lists only this account's processes) is another account's (-1).
 func loopbackPortHolder(port int) (int, bool) {
-	holder, err := daemon.FindPortHolder("127.0.0.1", port)
+	return portHolderSeen(port, daemon.FindPortHolder, func(addr string) (net.Conn, error) {
+		return net.DialTimeout("tcp", addr, time.Second)
+	})
+}
+
+// portHolderSeen is loopbackPortHolder with its lookup and dial. The
+// listener is looked up again after a dial that connected: the account's
+// own gateway that starts listening between the first lookup and the dial
+// (the daemon polls the port while the gateway it just started binds it)
+// is then seen as the account's, not as another account's (r103 GAP-0038:
+// a fresh run after kept sandboxes was refused as "another account is
+// using them" the moment its own gateway came up).
+func portHolderSeen(port int, find func(string, int) (daemon.PortHolder, error), dial func(string) (net.Conn, error)) (int, bool) {
+	holder, err := find("127.0.0.1", port)
 	if err == nil && holder.UID >= 0 {
 		return holder.UID, true
 	}
-	conn, derr := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	conn, derr := dial(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if derr != nil {
 		return 0, false
 	}
 	_ = conn.Close()
+	if holder, err := find("127.0.0.1", port); err == nil && holder.UID >= 0 {
+		return holder.UID, true
+	}
 	return -1, true
 }
 
