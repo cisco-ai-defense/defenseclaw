@@ -16,6 +16,7 @@ import (
 // got no path fact, so the state owner never saw it. GAP-2076: neither did
 // the redirect of the ":" builtin or of a command-less redirect (`> f`).
 // All of them are writes of the redirect target, as `true > f` already was.
+// GAP-2225: so is the redirect of a wrapped program.
 func TestR105StateRedirectSpellingsAreWrites(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX command matrix")
@@ -102,6 +103,14 @@ func TestR105StateRedirectSpellingsAreWrites(t *testing.T) {
 		{"npm $HOME project log", "npm test > $HOME/proj/test.log", false},
 		{"go home file", "go version > ~/go-version.txt", false},
 		{"make reads config", "make CONFIG=~/.defenseclaw/config.yaml > build.log", false},
+		// GAP-2225 RV12-1: the same redirect behind an env, sudo or command wrapper.
+		{"env make redirect", "env make > ~/.defenseclaw/config.yaml", true},
+		{"env assignment make redirect", "env A=1 make > ~/.defenseclaw/config.yaml", true},
+		{"sudo make redirect", "sudo make > ~/.defenseclaw/config.yaml", true},
+		{"command make redirect", "command make > ~/.defenseclaw/config.yaml", true},
+		{"env make $HOME hook", "env make > $HOME/.defenseclaw/hooks/claude-code-hook.sh", true},
+		{"env make build log", "env make > ~/build.log", false},
+		{"sudo make home log", "sudo make > ~/proj/build.log", false},
 	}
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connectorName)
