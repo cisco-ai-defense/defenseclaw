@@ -143,6 +143,28 @@ func (c *OpenClawConnector) AllowedHosts() []string {
 	}
 }
 
+// OpenClawPluginApprovalsSince is the first OpenClaw release with plugin
+// approvals (the before_tool_call requireApproval result and the
+// approvals.plugin config block). Human approval needs it (GAP-1956).
+const OpenClawPluginApprovalsSince = "2026.3.28"
+
+// OpenClawLacksPluginApprovals reports an observed OpenClaw version older
+// than OpenClawPluginApprovalsSince. An unknown version is not refused.
+func OpenClawLacksPluginApprovals(rawVersion string) bool {
+	version := NormalizeAgentVersion("openclaw", rawVersion)
+	return version != "" && CompareAgentVersions(version, OpenClawPluginApprovalsSince) < 0
+}
+
+// OpenClawPluginApprovalsRefusal names the version, the reason and the two
+// ways forward.
+func OpenClawPluginApprovalsRefusal(rawVersion string) string {
+	return fmt.Sprintf("openclaw: human approval needs OpenClaw %s or later, and this host has %s, "+
+		"which has no plugin approvals and rejects approvals.plugin in openclaw.json; "+
+		"upgrade OpenClaw (npm install -g openclaw@%s or later) or turn human approval off "+
+		"(defenseclaw setup openclaw --no-human-approval)",
+		OpenClawPluginApprovalsSince, NormalizeAgentVersion("openclaw", rawVersion), OpenClawPluginApprovalsSince)
+}
+
 func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// Proxy connectors require the local guardrail proxy, which DefenseClaw
 	// does not host on Windows (hook-only there). Fail clearly instead of
@@ -155,6 +177,14 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// TS plugin built (typical for non-OpenClaw operators) by embedding
 	// a placeholder. If the operator now actually wants OpenClaw, refuse
 	// to plant a corrupt extension and tell them how to fix it.
+	// OpenClaw before 2026.3.28 has no plugin approval hook and rejects an
+	// approvals.plugin block in openclaw.json ("Unrecognized key: plugin"),
+	// so its gateway no longer starts. Refuse before anything is written
+	// (GAP-1956).
+	if opts.HILTEnabled && OpenClawLacksPluginApprovals(opts.AgentVersion) {
+		return fmt.Errorf("%s", OpenClawPluginApprovalsRefusal(opts.AgentVersion))
+	}
+
 	if !openClawExtensionAvailable() {
 		return fmt.Errorf("openclaw extension is not bundled in this gateway build — run 'make extensions' (or 'make plugin') and rebuild the gateway, or pick a different connector with 'defenseclaw setup connector'")
 	}

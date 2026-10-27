@@ -49,6 +49,8 @@ defenseclaw policy activate strict
 defenseclaw setup openclaw --mode action --rule-pack strict --restart
 ```
 
+Human approval needs OpenClaw 2026.3.28 or later. The OpenClaw that `install.sh` installs (2026.3.24) has no plugin approvals, so setup refuses `--human-approval` there and changes nothing. Upgrade OpenClaw first (`npm install -g openclaw@2026.3.28` or later), or set up without human approval.
+
 For a second-pass LLM judge, export a key and add `--detection-strategy regex_judge --judge-model <model> --judge-api-key-env DEFENSECLAW_LLM_KEY`. Latency and cost depend on the model.
 
 #### Bedrock through a VPC endpoint

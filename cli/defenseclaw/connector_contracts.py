@@ -943,6 +943,21 @@ def openclaw_needs_interception_advisory(raw_version: str | None) -> bool:
     return compare_agent_versions(normalized, OPENCLAW_TRANSPORT_ADVISORY_SINCE) >= 0
 
 
+# First OpenClaw release with plugin approvals (the requireApproval result of
+# before_tool_call and the approvals.plugin config block). Older releases
+# reject approvals.plugin, so their gateway no longer starts (GAP-1956).
+OPENCLAW_PLUGIN_APPROVALS_SINCE = "2026.3.28"
+
+
+def openclaw_lacks_plugin_approvals(raw_version: str | None) -> bool:
+    """Return True for a known OpenClaw version older than plugin approvals."""
+
+    normalized = normalize_agent_version(raw_version or "")
+    if not normalized:
+        return False
+    return compare_agent_versions(normalized, OPENCLAW_PLUGIN_APPROVALS_SINCE) < 0
+
+
 def _version_tuple(value: str) -> tuple[int, int, int]:
     normalized = normalize_agent_version(value)
     if not normalized:

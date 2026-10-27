@@ -98,6 +98,7 @@ from defenseclaw.config import (
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACTS,
     KIRO_CLI_HOOK_FLOOR,
+    OPENCLAW_PLUGIN_APPROVALS_SINCE,
     PROXY_CONNECTORS,
     STATUS_KNOWN,
     STATUS_NOT_GATED,
@@ -109,6 +110,7 @@ from defenseclaw.connector_contracts import (
     known_broken_entry,
     normalize_agent_version,
     normalize_connector,
+    openclaw_lacks_plugin_approvals,
     openclaw_needs_interception_advisory,
     resolve_connector_contract,
     stable_agent_version,
@@ -5938,6 +5940,7 @@ def _check_connector_version_supported_for_setup(
     _trusted_prompt_cache: dict[str, bool] | None = None,
     _discovery: Any = None,
     _refusal_scope: dict[str, Any] | None = None,
+    human_approval: bool = False,
 ) -> bool:
     """Verify the selected connector's installed version before setup.
 
@@ -6085,6 +6088,20 @@ def _check_connector_version_supported_for_setup(
         return True
 
     if compatibility.status == STATUS_NOT_GATED:
+        if connector == "openclaw" and human_approval and openclaw_lacks_plugin_approvals(raw_version):
+            # OpenClaw before 2026.3.28 rejects approvals.plugin, so its
+            # gateway would no longer start (GAP-1956).
+            if emit:
+                ux.err(
+                    f"{label} {normalize_agent_version(raw_version)}: human approval needs OpenClaw "
+                    f"{OPENCLAW_PLUGIN_APPROVALS_SINCE} or later; this version has no plugin approvals and "
+                    "rejects approvals.plugin in openclaw.json. No changes made."
+                )
+                ux.subhead(
+                    f"Upgrade OpenClaw (npm install -g openclaw@{OPENCLAW_PLUGIN_APPROVALS_SINCE} or later), "
+                    "or run setup with --no-human-approval."
+                )
+            return False
         if emit:
             ux.ok(f"{label}: version {version_display}; connector has no hook contract gate.")
             if connector == "openclaw" and openclaw_needs_interception_advisory(raw_version):
@@ -6473,6 +6490,15 @@ def _guardrail_setup_check_targets(app: AppContext, gc, explicit_connector: str 
     return targets
 
 
+def _guardrail_hilt_enabled_for(gc, connector: str) -> bool:
+    """Effective human approval for *connector* in this setup run."""
+    try:
+        hilt = gc.effective_hilt(connector) if hasattr(gc, "effective_hilt") else getattr(gc, "hilt", None)
+    except Exception:  # noqa: BLE001 - SimpleNamespace test stubs.
+        hilt = getattr(gc, "hilt", None)
+    return bool(getattr(hilt, "enabled", False))
+
+
 def _check_guardrail_setup_connector_versions(
     app: AppContext,
     gc,
@@ -6501,6 +6527,7 @@ def _check_guardrail_setup_connector_versions(
             "mode": mode or "observe",
             "data_dir": getattr(app.cfg, "data_dir", None),
             "_allow_prompt": allow_prompt,
+            "human_approval": _guardrail_hilt_enabled_for(gc, connector),
         }
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache

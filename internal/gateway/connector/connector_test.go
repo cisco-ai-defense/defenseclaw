@@ -1311,6 +1311,50 @@ func TestOpenClaw_Setup_HILTEnablesPluginApprovalForwarding(t *testing.T) {
 	}
 }
 
+// GAP-1956: OpenClaw 2026.3.24 (the install.sh pin) rejects approvals.plugin,
+// so human approval on it is refused before openclaw.json is touched. The
+// refusal precedes the extension-bundle check, so it needs no bundle.
+func TestOpenClaw_Setup_HILTRefusedOnOpenClawWithoutPluginApprovals(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenClaw requires the guardrail proxy and is intentionally unsupported by the native Windows hook-only build")
+	}
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	if err := os.MkdirAll(ocHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	before := []byte(`{"gateway":{"mode":"local"}}`)
+	if err := os.WriteFile(configPath, before, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970",
+		HILTEnabled: true, AgentVersion: "OpenClaw 2026.3.24 (cff6dc9)"}
+	err := c.Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "2026.3.28") || !strings.Contains(err.Error(), "2026.3.24") {
+		t.Fatalf("Setup err = %v, want the human approval refusal naming both versions", err)
+	}
+	after, _ := os.ReadFile(configPath)
+	if string(after) != string(before) {
+		t.Fatalf("openclaw.json changed by a refused setup: %s", after)
+	}
+	if _, err := os.Stat(filepath.Join(ocHome, "extensions", "defenseclaw")); !os.IsNotExist(err) {
+		t.Fatalf("extension written by a refused setup: %v", err)
+	}
+	for _, v := range []string{"OpenClaw 2026.3.28 (abc1234)", "2026.6.8", ""} {
+		if OpenClawLacksPluginApprovals(v) {
+			t.Fatalf("OpenClawLacksPluginApprovals(%q) = true", v)
+		}
+	}
+	if !OpenClawLacksPluginApprovals("2026.3.24") {
+		t.Fatal("OpenClawLacksPluginApprovals(2026.3.24) = false")
+	}
+}
+
 func TestOpenClaw_Setup_HILTDefaultsPluginApprovalMode(t *testing.T) {
 	requireOpenClawExtensionBundle(t)
 
