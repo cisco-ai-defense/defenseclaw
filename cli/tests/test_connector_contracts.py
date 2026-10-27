@@ -572,12 +572,17 @@ class TestConnectorContractManifest(unittest.TestCase):
             "2026.9.24",
             "Hermes Agent vgit.5bba024 (2026.9.24)",
             "Hermes Agent vgit.5bba024",
+            "Hermes Agent vunknown (2026.9.24)",
         ):
             compat = resolve_connector_contract("hermes", raw)
             self.assertEqual(compat.status, STATUS_KNOWN, raw)
             self.assertEqual(compat.contract.contract_id, "hermes-hooks-v2", raw)
             self.assertEqual(compat.warning, "", raw)
             self.assertEqual(known_broken_entry("hermes", raw), (None, ""), raw)
+        # GAP-2052: a git install release date resolves like the bare date,
+        # and only in the Hermes form (mirrors Go hermesGitReleaseRE).
+        for raw in ("Hermes Agent vunknown (2026.6.1)", "Other Agent vunknown (2026.9.24)"):
+            self.assertNotEqual(resolve_connector_contract("hermes", raw).status, STATUS_KNOWN, raw)
         # Below the first reviewed release keeps its own "upgrade" answer.
         self.assertNotIn("known broken", resolve_connector_contract("hermes", "0.18.2").reason)
 

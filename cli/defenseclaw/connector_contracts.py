@@ -38,6 +38,9 @@ _VERSION_RE = re.compile(r"(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+
 # gitBuildReleaseDateRE.
 _GIT_BUILD_RE = re.compile(r"(?i)(?:^|[^a-z0-9])v?git[.+-]?[0-9a-f]{7,40}(?:[^a-z0-9]|$)")
 _GIT_BUILD_RELEASE_DATE_RE = re.compile(r"\(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})(?:\.[0-9]+)?\)")
+# A Hermes git install prints only the release date it is on, in this exact
+# vendor form; mirrors Go hermesGitReleaseRE (GAP-0232, GAP-2052).
+_HERMES_GIT_RELEASE_RE = re.compile(r"^Hermes Agent vunknown \(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})\)$")
 _CONTRACT_PLATFORMS = frozenset({"darwin", "linux", "windows"})
 _PLATFORM_OVERRIDE_FIELDS = frozenset(
     {
@@ -820,7 +823,7 @@ def _contract_matches_agent_version(
     normalized_version: str,
 ) -> bool:
     if contract.exact_agent_versions and _exact_agent_version_match(
-        raw_version, contract.exact_agent_versions
+        raw_version, contract.exact_agent_versions, connector=contract.connector
     ):
         return True
     # Empty min/max would otherwise accept any normalized version.
@@ -869,7 +872,7 @@ def _known_broken_match(
     for entry in KNOWN_BROKEN_VERSIONS.get(name, ()):
         if entry["warn_only"] != warn_only:
             continue
-        if (entry["exact"] and _exact_agent_version_match(raw, (entry["exact"],))) or (
+        if (entry["exact"] and _exact_agent_version_match(raw, (entry["exact"],), connector=name)) or (
             not entry["exact"]
             and _version_in_range(normalized, entry["min_inclusive"], entry["max_exclusive"])
         ):
@@ -877,7 +880,12 @@ def _known_broken_match(
     return None, ""
 
 
-def _exact_agent_version_match(raw: str, expected: tuple[str, ...]) -> bool:
+def _exact_agent_version_match(raw: str, expected: tuple[str, ...], *, connector: str = "") -> bool:
+    # A Hermes git install matches only a pinned release date, never an
+    # arbitrary version substring (mirrors Go exactAgentVersionMatch).
+    hermes_git = _HERMES_GIT_RELEASE_RE.match(raw.strip()) if connector == "hermes" else None
+    if hermes_git is not None:
+        raw = hermes_git.group(1)
     fields = raw.strip().split()
     if not fields or len(fields) > 2:
         return False
