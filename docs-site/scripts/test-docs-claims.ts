@@ -1423,6 +1423,7 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  { gap: "GAP-0669", page: "stories/cursor-secret-exfil.mdx", has: ["cursor gateway outage=open (failClosed=true)", "`failClosed=true` in `hooks.json` only covers a hook process that cannot answer."], lacks: ["cursor hook failures=closed"] },
   { gap: "GAP-2132", page: "guardrail/index.mdx", has: ["`defenseclaw doctor` shows `Config file` (`canonical schema valid`) and `Rule pack` as `[PASS]`"], lacks: ["shows `Config validation` and `Rule pack` as `[PASS]`"] },
   { gap: "GAP-2132", page: "reference/keys.mdx", has: ["`defenseclaw doctor` shows `Config file` (`canonical schema valid`) as `[PASS]` on every OS"], lacks: ["shows `Config validation` as `[PASS]`", "on Windows the row is `Config file`"] },
   { gap: "GAP-2145", page: "get-started/first-run.mdx", has: ["`init` does not ask for an outage mode and saves none", "Omitted, nothing is saved: the default and permissive policies let a call run with a warning, strict blocks it."], lacks: ["closed on a new install", "On a new install the fail mode prompt offers `closed`"] },
@@ -1521,6 +1522,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1659", page: "guardrail/user-and-group-policies.mdx", section: "A complete example", has: ["hilt: {enabled: true, min_severity: LOW}"], lacks: ["hilt: {enabled: true, min_severity: HIGH}"] },
   { gap: "GAP-0595", page: "ai-discovery.mdx", has: ["asks `Proceed? [Y/n]`; press Enter to continue. In a script or scheduled task, use `defenseclaw agent", "It asks `Proceed? [Y/n]`; `--yes` skips the question."] },
   { gap: "GAP-0633", page: "reference/env-vars.mdx", has: ["where the profile is standalone, the Linux default; on Windows and macOS", "the writers keep writing"] },
+  { gap: "GAP-0669", page: "stories/cursor-secret-exfil.mdx", has: ["defenseclaw setup cursor --yes --mode action --rule-pack default --no-human-approval --restart", "`--yes` re-applies hooks when Cursor is already configured and skips the optional LLM judge prompt", "✓ cursor mode=action"] },
   { gap: "GAP-0520", page: "guardrail/index.mdx", has: ["**Select action connector(s) for LLM judge.**"] },
   { gap: "GAP-0388", page: "observability/local-observability.mdx", has: ["18 DefenseClaw dashboards (19 with the Fleet assets)"] },
   { gap: "GAP-0388", page: "observability/grafana-dashboards.mdx", has: ["DefenseClaw provisions 18 Grafana dashboards", "it is not in the installed package and is added with the separate Fleet assets"] },
