@@ -467,3 +467,84 @@ func TestAGuestItsOwnGatewayProvedGoneStaysGoneOnEveryGateway(t *testing.T) {
 		}
 	})
 }
+
+// GAP-1176 (NP5 np5-kvm): a legacy guest its user stopped on its own
+// gateway was named again, and every new run refused, once that gateway
+// stopped answering while DefenseClaw was connected to another one: after a
+// daemon restart the stop word was gone (no lookup of that place since),
+// and without one a failed read of the place replaced the read that had
+// proved it stopped. The last word of the guest's own place is kept with
+// its record: a stopped one releases the guest while the place cannot be
+// read, whatever happens to the daemon. A guest last said running stays
+// held. None is stopped.
+func TestAGuestStoppedOnItsOwnGatewayStaysReleasedWhileThatGatewayIsDown(t *testing.T) {
+	t.Run("stopped there by DefenseClaw, then a daemon restart", func(t *testing.T) {
+		e, _ := legacyGuest(t, "oldstopped", false, nil)
+		own := e.gw
+		_, err := e.m.Stop(t.Context(), "oldstopped")
+		must(t, err)
+		var down atomic.Bool
+		down.Store(true)
+		e.m = e.newManager()
+		homeGatewayAt(e, own, &down)
+		away, _ := awayGateway(e)
+		e.gw = away
+		stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+		if entry, refusal, warnings := guestAccount(t, e, "oldstopped"); entry != nil || refusal != "" || hasPrefix(warnings, unknownUnprotected) {
+			t.Fatalf("stopped on its own gateway, that gateway down, after a restart: entry %+v, refusal %q, warnings %q", entry, refusal, warnings)
+		}
+		// Its gateway back, it says the same.
+		down.Store(false)
+		forgetReads(e)
+		if entry, refusal, _ := guestAccount(t, e, "oldstopped"); entry != nil || refusal != "" {
+			t.Fatalf("its gateway back: entry %+v, refusal %q", entry, refusal)
+		}
+		if n := e.fake.Calls(openshelltest.MethodStopSandbox) - stops; n != 0 {
+			t.Fatalf("%d stops", n)
+		}
+	})
+
+	t.Run("stopped there by its user, read from another gateway, then that gateway down", func(t *testing.T) {
+		e, _ := legacyGuest(t, "oldread", true, nil)
+		own := e.gw
+		var down atomic.Bool
+		homeGatewayAt(e, own, &down)
+		away, _ := awayGateway(e)
+		switchGateway(t, e, away)
+		if entry, refusal, _ := guestAccount(t, e, "oldread"); entry == nil || refusal == "" {
+			t.Fatalf("running on its own gateway, read from another: entry %+v, refusal %q", entry, refusal)
+		}
+		_, err := e.client.StopSandbox(t.Context(), "oldread")
+		must(t, err)
+		forgetReads(e)
+		if entry, refusal, _ := guestAccount(t, e, "oldread"); entry != nil || refusal != "" {
+			t.Fatalf("stopped on its own gateway, read from another: entry %+v, refusal %q", entry, refusal)
+		}
+		down.Store(true)
+		forgetReads(e)
+		if entry, refusal, _ := guestAccount(t, e, "oldread"); entry != nil || refusal != "" {
+			t.Fatalf("its gateway down since: entry %+v, refusal %q", entry, refusal)
+		}
+		// And after a daemon restart, with that gateway still down.
+		e.m = e.newManager()
+		homeGatewayAt(e, own, &down)
+		e.gw = away
+		if entry, refusal, _ := guestAccount(t, e, "oldread"); entry != nil || refusal != "" {
+			t.Fatalf("its gateway down, after a restart: entry %+v, refusal %q", entry, refusal)
+		}
+		// Started there again: a new word, read once the gateway answers.
+		_, err = e.client.StartSandbox(t.Context(), "oldread")
+		must(t, err)
+		down.Store(false)
+		forgetReads(e)
+		if entry, refusal, _ := guestAccount(t, e, "oldread"); entry == nil || entry.Phase != string(audit.SandboxPhaseReady) || refusal == "" {
+			t.Fatalf("started again on its own gateway: entry %+v, refusal %q", entry, refusal)
+		}
+		// Last said running, it stays held while its gateway is down.
+		down.Store(true)
+		forgetReads(e)
+		if entry, refusal, _ := guestAccount(t, e, "oldread"); entry == nil || refusal == "" {
+			t.Fatalf("last said running, its gateway down: entry %+v, refusal %q", entry, refusal)
+		}
+	})
+}
