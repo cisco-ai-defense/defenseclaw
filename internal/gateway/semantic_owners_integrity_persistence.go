@@ -18,11 +18,7 @@ package gateway
 
 import (
 	"encoding/base64"
-	"errors"
-	"io/fs"
-	"os"
 	"path"
-	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
@@ -2840,7 +2836,7 @@ func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfact
 	// .DS_Store -exec rm {} +`, `-name '*.py'`), keeps it out of the
 	// state tree.
 	if findDeletesOnlyNames(acted, func(pattern string, fold bool) bool {
-		return findPatternIsCleanupOnly(pattern, fold) ||
+		return findPatternIsCleanupOnly(pattern, fold) || findPatternIsRegenerableBytecode(pattern, fold) ||
 			findPatternMatchesNoStateName(pattern, fold) && !activeStateTreeHasName(root, pattern, fold)
 	}) {
 		return false
@@ -2872,62 +2868,6 @@ func findPatternMatchesNoStateName(pattern string, fold bool) bool {
 		}
 	}
 	return true
-}
-
-// activeStateTreeLimit bounds the walk of activeStateTreeHasName; a
-// larger tree counts as a match (fail closed).
-const activeStateTreeLimit = 20000
-
-// activeStateTreeHasName reports a file or directory of the protected
-// state (the root's own files and its protected trees; not logs/ or the
-// uv cache) whose name the find pattern matches. A tree that cannot be
-// read counts as a match.
-func activeStateTreeHasName(root, pattern string, fold bool) bool {
-	if fold {
-		pattern = strings.ToLower(pattern)
-	}
-	match := func(name string) bool {
-		if fold {
-			name = strings.ToLower(name)
-		}
-		matched, err := path.Match(pattern, name)
-		return err != nil || matched
-	}
-	entries, err := os.ReadDir(root)
-	if errors.Is(err, fs.ErrNotExist) {
-		return false
-	}
-	if err != nil {
-		return true
-	}
-	seen := 0
-	for _, entry := range entries {
-		name := entry.Name()
-		if !entry.IsDir() {
-			if match(name) {
-				return true
-			}
-			continue
-		}
-		switch name {
-		case "cache", "hooks", "installer", "policies", "previous", "quarantine", "receipts", "registries":
-		default:
-			continue
-		}
-		found := false
-		walkErr := filepath.WalkDir(filepath.Join(root, name), func(_ string, item fs.DirEntry, err error) error {
-			seen++
-			if err != nil || seen > activeStateTreeLimit || match(item.Name()) {
-				found = true
-				return fs.SkipAll
-			}
-			return nil
-		})
-		if found || walkErr != nil {
-			return true
-		}
-	}
-	return false
 }
 
 // findMaxDepth returns the -maxdepth (BSD -depth n is not a limit) of a

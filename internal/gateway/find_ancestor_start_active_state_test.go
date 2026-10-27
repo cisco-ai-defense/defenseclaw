@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -59,6 +60,55 @@ func TestFindAncestorOrDefaultStartOfActiveState(t *testing.T) {
 		{"no start project files", "find -type f -name '*.o' -exec rm -f {} +", false, ""},
 		{"dot project delete", "find . -type d -empty -delete", false, ""},
 		{"no start list", "find -type f", false, ""},
+	}
+	for _, mode := range []string{"observe", "action"} {
+		r105RunStateRowsChecked(t, mode, cwd, rows, true)
+	}
+}
+
+// GAP-2267 pod check9: an upgraded account keeps a whole Python venv under
+// previous/ (about 25000 entries, thousands of *.pyc). A find from ~ whose
+// name test matches no protected name, and a bytecode cleanup, stay
+// allowed there; a name the saved venv does hold still blocks.
+func TestFindAncestorStartOfUpgradedAccountState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell forms")
+	}
+	home, cwd := r105StateFixture(t)
+	venv := filepath.Join(home, ".defenseclaw", "previous", "venv", "lib", "python3.12", "site-packages")
+	for i := 0; i < 21000; i++ {
+		dir := filepath.Join(venv, fmt.Sprintf("pkg%03d", i/100))
+		name := fmt.Sprintf("m%05d.py", i)
+		if i%3 == 0 {
+			dir = filepath.Join(dir, "__pycache__")
+			name = fmt.Sprintf("m%05d.cpython-312.pyc", i)
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := []r105StateRow{
+		{"home node_modules prune rm", "find ~ -name node_modules -type d -prune -exec rm -rf {} +", false, ""},
+		{"home orig delete", "find ~ -name '*.orig' -delete", false, ""},
+		{"home class delete", "find ~ -name '*.class' -delete", false, ""},
+		{"home pyc delete", "find ~ -name '*.pyc' -delete", false, ""},
+		{"cd home dot o delete", "cd ~ && find . -name '*.o' -delete", false, ""},
+		{"home target prune rm", "find ~ -type d -name target -prune -exec rm -rf {} +", false, ""},
+		{"home core delete", "find ~ -name 'core.[0-9]*' -delete", false, ""},
+		{"home rej xargs rm", "find ~ -name '*.rej' | xargs rm -f", false, ""},
+		{"cd home dot pyc delete", "cd ~ && find . -name '*.pyc' -delete", false, ""},
+		{"cd home pycache rm", "cd ~ && find . -name __pycache__ -type d -exec rm -rf {} +", false, ""},
+		{"home pycache prune rm", "find ~ -name '__pycache__' -prune -exec rm -rf {} +", false, ""},
+		{"home tmp delete", "find ~ -name '*.tmp' -delete", false, ""},
+		// Still blocked: names the state holds, and no name test at all.
+		{"home py delete", "find ~ -name '*.py' -delete", true, ""},
+		{"home config delete", "find ~ -name config.yaml -delete", true, ""},
+		{"home install sh delete", "find ~ -name 'install.sh' -exec rm -f {} +", true, ""},
+		{"home type f delete", "find ~ -type f -delete", true, ""},
+		{"home path previous delete", "find ~ -path '*/previous/*' -type f -delete", true, ""},
 	}
 	for _, mode := range []string{"observe", "action"} {
 		r105RunStateRowsChecked(t, mode, cwd, rows, true)
