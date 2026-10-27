@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
 // GAP-2024 (RV5-1): after 1.0.3 -> 1.0.4 -> 1.0.5, an account recreated
@@ -45,14 +46,23 @@ func TestGuardianBoundsALegacyEntrysSightingByTheUIDsLastHook(t *testing.T) {
 		{"1.0.4 file, legacy holder 1.0.4 never served", `{"format":{"format":1},` + head + `,"legacy_holder":true}}`},
 		{"1.0.3 file", `{` + head + `}}`},
 	} {
+		age := time.Since(time.Unix(0, birth))
 		for _, tc := range []struct {
 			name     string
 			lastHook int64
+			pruned   bool
+			window   time.Duration
 			pre      bool
 		}{
-			{"last hook before the home was created", birth - int64(time.Hour), false},
-			{"last hook after the home was created", time.Now().Add(-time.Minute).UnixNano(), true},
-			{"no ledger", 0, true},
+			{"last hook before the home was created", birth - int64(time.Hour), false, 0, false},
+			{"last hook after the home was created", time.Now().Add(-time.Minute).UnixNano(), false, 0, true},
+			{"no ledger", 0, false, 0, true},
+			// GAP-2069: the ledger is read but has no row of the uid, so the
+			// holder ran no hook in the row window. A home younger than the
+			// window belongs to an account created after that holder; for
+			// both the first map and the existing map's join (PreTokenHolder).
+			{"pruned ledger, home younger than the row window", 0, true, age + time.Hour, false},
+			{"pruned ledger, home older than the row window", 0, true, age - time.Hour, true},
 		} {
 			t.Run(file.name+": "+tc.name, func(t *testing.T) {
 				dir := t.TempDir()
@@ -60,11 +70,17 @@ func TestGuardianBoundsALegacyEntrysSightingByTheUIDsLastHook(t *testing.T) {
 				if err := os.WriteFile(path, []byte(file.body), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				previous := enterpriseHookAgentLastHooks
-				t.Cleanup(func() { enterpriseHookAgentLastHooks = previous })
+				previous, previousWindow := enterpriseHookAgentLastHooks, inventory.AgentLedgerRowWindow
+				t.Cleanup(func() { enterpriseHookAgentLastHooks, inventory.AgentLedgerRowWindow = previous, previousWindow })
+				if tc.window > 0 {
+					inventory.AgentLedgerRowWindow = tc.window
+				}
 				enterpriseHookAgentLastHooks = func(dataDir string) map[int]int64 {
 					if dataDir != dir {
 						t.Errorf("ledger read from %q; want the homes file's data dir %q", dataDir, dir)
+					}
+					if tc.pruned {
+						return map[int]int64{uid + 1: time.Now().UnixNano()}
 					}
 					if tc.lastHook == 0 {
 						return nil

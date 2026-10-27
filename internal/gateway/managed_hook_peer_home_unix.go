@@ -375,11 +375,17 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 	// uid, which can come after an account was deleted and created again
 	// (another account's first hook): the uid's last hook the agent ledger
 	// recorded before this gateway took over bounds it too, since an
-	// account created after that hook did not make it (GAP-1947).
+	// account created after that hook did not make it (GAP-1947). A uid
+	// with no row there ran no hook in the ledger's row window, so the
+	// window's start bounds it (GAP-2069).
 	if len(fromFile) > 0 {
 		if hooks := managedHookPeerLastHooks(); hooks != nil {
+			now := time.Now()
+			if c.now != nil {
+				now = c.now()
+			}
 			for _, uid := range fromFile {
-				if at, ok := hooks[uid]; ok && at > 0 && at < c.firstSeen[uid] {
+				if at := inventory.AgentLedgerSightingBound(hooks, uid, now); at > 0 && at < c.firstSeen[uid] {
 					c.firstSeen[uid] = at
 				}
 			}

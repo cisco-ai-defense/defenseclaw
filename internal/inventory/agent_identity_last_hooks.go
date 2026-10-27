@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // AgentLastHooksByUID is, per uid, the newest last_seen of records (Unix
@@ -38,6 +40,28 @@ func AgentLastHooksByUID(records []AgentIdentityRecord) map[int]int64 {
 		}
 	}
 	return hooks
+}
+
+// AgentLedgerRowWindow is how long the agent ledger keeps the rows of a uid
+// that runs no hook: the default local retention window
+// (config.ObservabilityV8DefaultRetentionDays, PruneAgentIdentities). Tests
+// replace it.
+var AgentLedgerRowWindow = time.Duration(config.ObservabilityV8DefaultRetentionDays) * 24 * time.Hour
+
+// AgentLedgerSightingBound is the latest time, by the agent ledger's hooks
+// (AgentLastHooksByUID; nil while the ledger cannot be read), at which a
+// build before this one can have last seen uid's holder: its last hook, or,
+// when a readable ledger has no row of the uid, the start of the ledger's
+// row window, because the holder's rows were pruned for running no hook in
+// it (GAP-2069). 0 when the ledger cannot be read.
+func AgentLedgerSightingBound(hooks map[int]int64, uid int, now time.Time) int64 {
+	if hooks == nil {
+		return 0
+	}
+	if at := hooks[uid]; at > 0 {
+		return at
+	}
+	return now.Add(-AgentLedgerRowWindow).UnixNano()
 }
 
 // ReadAgentLastHooks is AgentLastHooksByUID of every row, live and retired,

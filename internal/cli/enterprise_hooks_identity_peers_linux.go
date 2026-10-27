@@ -152,14 +152,15 @@ var enterpriseHookResolveGatewayPeers = func(path string, last map[int]enterpris
 	// sighting too, as the gateway bounds it (loadHomesLocked, GAP-1947): an
 	// account created after that hook did not make it, so it is no 1.0.3
 	// holder and the first map does not bind it (GAP-2024). Read once, and
-	// only when an entry needs it.
+	// only when an entry needs it. A uid with no row there ran no hook in
+	// the ledger's row window, whose start then bounds it (GAP-2069).
 	var lastHooks map[int]int64
 	lastHooksRead := false
 	lastHook := func(uid int) int64 {
 		if !lastHooksRead {
 			lastHooks, lastHooksRead = enterpriseHookAgentLastHooks(filepath.Dir(path)), true
 		}
-		return lastHooks[uid]
+		return inventory.AgentLedgerSightingBound(lastHooks, uid, time.Now())
 	}
 	// preToken reports whether the account that holds uid now, whose home
 	// is home, is the one a build before 1.0.4 saw hold it, with no 1.0.4
