@@ -4348,7 +4348,13 @@ function Convert-HooksForRollback([string]$From, [string]$BackTo) {
     # connector recovery below prevents the version swap.
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
     if (-not (Test-Path -LiteralPath $gateway)) { return }
-    if ((Invoke-Native $gateway @("connector", "prepare-rollback", "--data-dir", $DataDir)) -ne 0) {
+    # until 1.1: back to a release before 1.0.5, the OpenHands and OmniGent
+    # files this release's teardown changed outside the data folder come
+    # back with it (GAP-2136).
+    $prepare = @("connector", "prepare-rollback", "--data-dir", $DataDir)
+    $help = Get-NativeOutput $gateway @("connector", "prepare-rollback", "--help")
+    if ($BackTo -and $help -match '--to-version') { $prepare += @("--to-version", $BackTo) }
+    if ((Invoke-Native $gateway $prepare) -ne 0) {
         Write-Warn ("Could not rewrite the agent hook entries of DefenseClaw $From in the form $BackTo reads (see above). " +
             "After the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as " +
             "the cmd.exe entries that run defenseclaw-hook.exe in %USERPROFILE%\.claude\settings.json; remove them by hand")

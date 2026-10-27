@@ -73,6 +73,7 @@ var (
 	connectorFlagConfigHome           string
 	connectorFlagHookExe              string
 	connectorRollbackRestore          bool
+	connectorRollbackToVersion        string
 	connectorVerifySetupParent        string
 	connectorVerifySetupStartIdentity string
 	connectorVerifyCleanupRecord      string
@@ -230,6 +231,8 @@ func init() {
 	_ = connectorCheckAgentSettingsCmd.Flags().MarkHidden("workspace-dir")
 	connectorPrepareRollbackCmd.Flags().BoolVar(&connectorRollbackRestore, "restore", false,
 		"Restore authenticated current-release hooks after an aborted rollback")
+	connectorPrepareRollbackCmd.Flags().StringVar(&connectorRollbackToVersion, "to-version", "",
+		"The release the rollback goes to: before 1.0.5, the OpenHands and OmniGent files this release removed come back")
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagName, "connector", "",
 		"Connector name (default: the active connector; 'defenseclaw guardrail status' lists them)")
 	connectorCmd.PersistentFlags().BoolVar(&connectorFlagJSON, "json", false,
@@ -1271,12 +1274,31 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 			converted[name] = count
 		}
 	}
+	// until 1.1 (GAP-2136): the agent files the OpenHands/OmniGent teardown
+	// changed are outside the data folder the rollback swaps.
+	var putBack []connector.RemovedRollbackResult
+	var putBackErr error
+	if !connectorRollbackRestore {
+		putBack, putBackErr = connector.RestoreRemovedConnectorFilesForRollback(dataDir, connectorRollbackToVersion)
+	}
 	if connectorFlagJSON {
 		payload := map[string]any{
 			"action":    "prepare-rollback",
 			"ok":        len(failed) == 0,
 			"converted": converted,
 			"failed":    failed,
+		}
+		if len(putBack) > 0 || putBackErr != nil {
+			restoredFiles := []string{}
+			for _, result := range putBack {
+				if result.Restored {
+					restoredFiles = append(restoredFiles, result.Path)
+				}
+			}
+			payload["removed_connector_files_restored"] = restoredFiles
+			if putBackErr != nil {
+				payload["removed_connector_files_error"] = putBackErr.Error()
+			}
 		}
 		if connectorRollbackRestore {
 			payload["restored"] = converted
@@ -1298,6 +1320,20 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 			if reason, ok := failed[name]; ok {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  %s: %s\n", name, reason)
 			}
+		}
+	}
+	if !connectorFlagJSON {
+		for _, result := range putBack {
+			if result.Restored {
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: put back %s as the earlier release set it up\n",
+					Style(glyph("✓", "OK"), "fg=green", "bold"), result.Connector, result.Path)
+			} else if result.Reason != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s: kept %s as it is (%s); run the earlier release's setup for it if you need it\n",
+					result.Connector, result.Path, result.Reason)
+			}
+		}
+		if putBackErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  %v\n", putBackErr)
 		}
 	}
 	if len(failed) > 0 {

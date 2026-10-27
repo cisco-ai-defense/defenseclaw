@@ -89,6 +89,10 @@ type removedOnlyConnector struct {
 	// <data>/hooks; marker starts one of its first lines.
 	script, marker string
 	configStep     string
+	// rollbackDir is the data folder whose removedRollbackFile keeps what
+	// the teardown changed outside it, for a rollback (GAP-2136); empty in
+	// managed mode, which has no rollback command.
+	rollbackDir string
 }
 
 // removedOpenHandsLauncherFlag is how a Windows hooks.json command names the
@@ -175,6 +179,9 @@ func (c removedOnlyConnector) Teardown(_ context.Context, opts SetupOpts) error 
 	// they are read before either goes.
 	configs := c.configPaths(opts)
 	names := c.namesFor(opts)
+	if !opts.ManagedEnterprise {
+		c.rollbackDir = opts.DataDir
+	}
 	for _, path := range configs {
 		_ = c.removeEntries(path, names, opts.DataDir)
 	}
@@ -192,7 +199,7 @@ func (c removedOnlyConnector) Teardown(_ context.Context, opts SetupOpts) error 
 		return nil
 	}
 	if c.name == removedOmnigentID {
-		_ = removeOmnigentImportPath(opts.DataDir)
+		_ = removeOmnigentImportPath(opts.DataDir, c.rollbackDir)
 		pycache, _ := filepath.Glob(filepath.Join(hooks, "__pycache__", removedOmnigentModuleName+".*.pyc"))
 		for _, path := range pycache {
 			_ = removeRegularFile(path)
@@ -430,6 +437,9 @@ func (c removedOnlyConnector) removeEntries(path string, names func(string) bool
 		return err
 	}
 	if removedEmptyConfig(updated) && c.setupMadeConfig(dataDir, path) {
+		if info, err := os.Lstat(path); err == nil {
+			recordRemovedRollback(c.rollbackDir, c.name, path, data, info.Mode(), nil)
+		}
 		return removeRegularFile(path)
 	}
 	// The agent reads its config through links; the file it reads is the
@@ -442,6 +452,7 @@ func (c removedOnlyConnector) removeEntries(path string, names func(string) bool
 	if err != nil {
 		return err
 	}
+	recordRemovedRollback(c.rollbackDir, c.name, target, data, info.Mode(), updated)
 	if err := atomicWriteFile(target, updated, info.Mode().Perm()); err != nil {
 		return err
 	}
@@ -908,8 +919,8 @@ func removedPthHasLine(pth, hooks string) bool {
 // removeOmnigentImportPath removes DefenseClaw's line (its hooks folder) from
 // the import-path file an older OmniGent setup wrote, and the file when
 // nothing else is in it. A file that is not a regular file or cannot be read
-// is left (and listed).
-func removeOmnigentImportPath(dataDir string) error {
+// is left (and listed). rollbackDir keeps what it changed for a rollback.
+func removeOmnigentImportPath(dataDir, rollbackDir string) error {
 	pth := managedFileBackupTargetPath(dataDir, removedOmnigentID, "pth", "")
 	if pth == "" {
 		return nil
@@ -940,12 +951,15 @@ func removeOmnigentImportPath(dataDir string) error {
 	case !own:
 		return nil
 	case !other:
+		recordRemovedRollback(rollbackDir, removedOmnigentID, pth, data, info.Mode(), nil)
 		if err := os.Remove(pth); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove the import-path file %s: %w", pth, err)
 		}
 		return nil
 	}
-	if err := atomicWriteFile(pth, []byte(strings.Join(kept, "\n")), info.Mode().Perm()); err != nil {
+	updated := []byte(strings.Join(kept, "\n"))
+	recordRemovedRollback(rollbackDir, removedOmnigentID, pth, data, info.Mode(), updated)
+	if err := atomicWriteFile(pth, updated, info.Mode().Perm()); err != nil {
 		return fmt.Errorf("remove DefenseClaw's line from the import-path file %s: %w", pth, err)
 	}
 	return removedKeepOwner(pth, info)
