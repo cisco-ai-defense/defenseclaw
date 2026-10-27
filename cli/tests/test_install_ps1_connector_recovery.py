@@ -216,6 +216,8 @@ try {{ Assert-NoActiveConnectorRecovery 'Downgrade' {_literal(root)}; throw 'gua
 _SWAP_PHASE_STUBS = (
     """
 function Die([string]$Message) { throw $Message }
+# A downgrade's hook conversion has its own tests in test_install_ps1.py.
+function Convert-HooksForOlderRelease { return $false }
 function Start-HookFailModeHold { return $true }
 function Complete-HookFailModeHold { return $true }
 function Stop-HookFailModeHold {}
@@ -245,6 +247,7 @@ def _handoff_stubs(version: str, exit_code: int, marker: str | None = "1") -> st
     return f"""
 {_function('Test-Version')}
 {_function('Invoke-ReleaseInstaller')}
+{_function('Convert-HooksForOlderRelease')}
 $ReleaseBase = 'https://release.invalid'
 $OfficialReleaseBase = $ReleaseBase
 $BinDir = Join-Path $DataDir 'bin'

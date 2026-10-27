@@ -3291,6 +3291,7 @@ $script:children = 0
 {_ps1_function("Test-Version")}
 {_ps1_function("Get-LifecycleNextStep")}
 {_ps1_function("Invoke-ReleaseInstaller")}
+{_ps1_function("Convert-HooksForOlderRelease")}
 function Write-Warn([string]$Message) {{ Write-Host $Message }}
 function Write-Info([string]$Message) {{ Write-Host $Message }}
 function Die([string]$Message) {{ throw $Message }}
@@ -3328,6 +3329,99 @@ Write-Output "CHILDREN=$script:children"
     else:
         assert "HANDED" in out and "CHILDREN=1" in out, out
     assert (tmp_path / ".lifecycle-txn.json").exists() == record
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    ("target", "child_installs", "restore_reader", "expected"),
+    [
+        ("1.0.4", True, True, "convert,child"),
+        ("1.0.4", False, True, "convert,child,restore"),
+        ("1.0.6", True, True, "child"),
+        ("1.0.4", True, False, "child"),
+    ],
+    ids=["downgrade-installed", "downgrade-restored", "upgrade", "no-restore-reader"],
+)
+def test_a_downgrade_converts_this_releases_hook_entries_before_the_older_installer_runs(
+    tmp_path: Path, target: str, child_installs: bool, restore_reader: bool, expected: str
+) -> None:
+    # GAP-1883: `defenseclaw upgrade --version 1.0.4` (or -Version 1.0.4) over
+    # 1.0.5 ran 1.0.4's setup, which does not own 1.0.5's one-line Claude Code
+    # PreToolUse handler (defenseclaw-gateway.exe launcher-guard): it added its
+    # own beside it and doctor failed. The live (newer) gateway converts the
+    # entries before the older installer runs, as rollback does; a downgrade
+    # that ends with this release still installed gets its own entries back.
+    installer = f'$DcVersion = "{target}"\n$DcVersionChangeGuard = 1\n$DcLifecycleRecord = 1'
+    reader = "return $true" if restore_reader else "throw 'The current gateway cannot safely restore converted rollback hooks'"
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{tmp_path}'
+$BinDir = Join-Path $DataDir 'bin'
+$LifecycleManifest = Join-Path $DataDir '.lifecycle-txn.json'
+$ReleaseBase = 'https://release.invalid'
+$OfficialReleaseBase = $ReleaseBase
+$Ver = '1.0.5'
+$Local = ''
+$script:installed = '1.0.5'
+$script:events = @()
+{_ps1_function("Test-Version")}
+{_ps1_function("Get-LifecycleNextStep")}
+{_ps1_function("Invoke-ReleaseInstaller")}
+{_ps1_function("Convert-HooksForOlderRelease")}
+function Test-HookRollbackRestoreAvailable {{ {reader} }}
+function Convert-HooksForRollback([string]$From, [string]$BackTo) {{ $script:events += 'convert' }}
+function Restore-HooksAfterAbortedRollback {{ $script:events += 'restore' }}
+function Write-Warn([string]$Message) {{ Write-Host $Message }}
+function Write-Info([string]$Message) {{ Write-Host $Message }}
+function Die([string]$Message) {{ throw $Message }}
+function Invoke-Quietly([scriptblock]$Block) {{ & $Block }}
+function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
+function Get-InstalledVersion {{ return $script:installed }}
+function Assert-NoLoadedPluginAgents {{ }}
+function Assert-NoActiveConnectorRecovery {{ }}
+function Save-Url([string]$Url, [string]$To) {{ [IO.File]::WriteAllText($To.Replace([char]92, [IO.Path]::DirectorySeparatorChar), '{installer.replace("'", "''")}'); return $true }}
+function Get-ListedSha256 {{ return 'verified' }}
+function Get-Sha256 {{ return 'verified' }}
+function Get-Cosign {{ return '' }}
+function Wait-VenvFree {{ }}
+function Get-GatewayProcess {{ return $null }}
+function Stop-Gateway {{ return $true }}
+function Stop-Watchdog {{ }}
+function Assert-GatewayQuiescent {{ }}
+function Start-Gateway {{ return 0 }}
+function ConvertTo-ProcessArgument([string]$Value) {{ return $Value }}
+function Start-Process {{
+    $script:events += 'child'
+    if (${str(child_installs).lower()}) {{ $script:installed = '{target}' }}
+    $child = [PSCustomObject]@{{ Handle = [IntPtr]::Zero; ExitCode = {0 if child_installs else 1} }}
+    $child | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {{}}
+    return $child
+}}
+$code = Invoke-ReleaseInstaller '{target}' @('-Yes')
+Write-Output "EVENTS=$($script:events -join ',') CODE=$code"
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert f"EVENTS={expected} CODE={0 if child_installs else 1}" in out, out
+
+
+def test_a_local_downgrade_converts_the_hooks_after_the_gateway_stops_and_restores_them_with_this_release() -> None:
+    # GAP-1883, the -Local -Version route `defenseclaw upgrade --version`
+    # takes with a local folder: this installer installs the older release
+    # itself. It converts once the live gateway is quiet, before the recovery
+    # check, and a restore of this release puts its entries back before its
+    # gateway starts again.
+    install = _ps1_function("Invoke-Install")
+    quiet = install.index('Assert-GatewayQuiescent "Version change to $Ver"')
+    convert = install.index("$script:OlderHooksConverted = Convert-HooksForOlderRelease $PrevVersion $Ver")
+    assert quiet < convert < install.index('Assert-NoActiveConnectorRecovery "Version change to $Ver"', quiet)
+    assert convert < install.index("try { $saved = Save-Snapshot }") < install.index("try { $installed = Install-New }")
+    restart = _ps1_function("Restart-Old")
+    assert restart.index("Restore-HooksAfterAbortedRollback") < restart.index("Start-Gateway")
+    helper = _ps1_function("Convert-HooksForOlderRelease")
+    assert "[version]$To -ge [version]$From) { return $false }" in helper
+    assert helper.index("Test-HookRollbackRestoreAvailable") < helper.index("Convert-HooksForRollback $From $To")
 
 
 def test_this_installer_declares_that_it_reads_the_lifecycle_record() -> None:

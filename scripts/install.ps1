@@ -615,6 +615,7 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
     if ($versionChange) { Assert-NoActiveConnectorRecovery "Version change to $target" }
     $downgrade = $versionChange -and [version]$target -lt [version]$installed
     $restartCurrent = $false
+    $hooksConverted = $false
     $childCode = $null
     $restartFailed = $false
     $restartCode = 0
@@ -674,6 +675,7 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
             if (-not (Stop-Gateway)) { Die "The gateway did not stop; the release installer was not started" }
             Stop-Watchdog
             Assert-GatewayQuiescent "Version change to $target"
+            if ($downgrade) { $hooksConverted = Convert-HooksForOlderRelease $installed $target }
             Assert-NoActiveConnectorRecovery "Version change to $target"
         }
         $shell = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh.exe" } else { "powershell.exe" }
@@ -687,6 +689,9 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
         $child.WaitForExit()
         $childCode = $child.ExitCode
     } finally {
+        # A downgrade that ends with this release still installed (refused,
+        # failed or restored by the older installer) gets its own entries back.
+        if ($hooksConverted -and (Get-InstalledVersion) -eq $installed) { Restore-HooksAfterAbortedRollback }
         if ($restartCurrent) {
             $restartIssue = ""
             try {
@@ -3448,6 +3453,12 @@ function Restart-Old([switch]$KeepStopped) {
             $Run.RestorePending = $true
         }
     }
+    # A local downgrade that converted this release's hook entries ends with
+    # this release back: its own entries go back before its gateway starts.
+    if (Get-Variable -Name OlderHooksConverted -Scope Script -ValueOnly -ErrorAction SilentlyContinue) {
+        $script:OlderHooksConverted = $false
+        Restore-HooksAfterAbortedRollback
+    }
     # A failure here (a gateway.pid that cannot be read, DefenseClaw Setup's
     # hook state that cannot be moved back) must not end the restore it is
     # part of: it is reported like a gateway that did not start.
@@ -4713,6 +4724,25 @@ function Convert-HooksForRollback([string]$From, [string]$BackTo) {
     }
 }
 
+function Convert-HooksForOlderRelease([string]$From, [string]$To) {
+    # A downgrade (-Version or 'defenseclaw upgrade --version' to an older
+    # release) runs that release's setup, which does not recognise a hook
+    # entry this release writes: 1.0.4 owns the per-user Claude Code
+    # PreToolUse guard only when defenseclaw-hook.exe starts it, and 1.0.5's
+    # one-line install starts defenseclaw-gateway.exe launcher-guard. So the
+    # older setup added its own handler beside it, doctor failed and the
+    # repair it suggested did not finish (GAP-1883). Before the older release
+    # is installed, this install's gateway, still the live one, rewrites its
+    # entries in the shape every earlier release owns, as 'defenseclaw
+    # rollback' does (GAP-1284). Returns whether it converted, so a downgrade
+    # that ends with this release still installed puts its entries back.
+    if (-not (Test-Version $From) -or -not (Test-Version $To) -or [version]$To -ge [version]$From) { return $false }
+    # A gateway that cannot restore converted entries keeps the earlier path.
+    try { if (-not (Test-HookRollbackRestoreAvailable)) { return $false } } catch { return $false }
+    Convert-HooksForRollback $From $To
+    return $true
+}
+
 function Convert-HooksForRestore([string]$Slot) {
     # A failed upgrade's gateway already wrote its hook entries, and the one-
     # line Claude Code handler (`<bin>\defenseclaw-gateway.exe launcher-guard
@@ -5430,6 +5460,10 @@ function Invoke-Install {
         } else { Stop-Watchdog }
         if ($versionChange) {
             Assert-GatewayQuiescent "Version change to $Ver"
+            # A local downgrade this installer runs itself (GAP-1883); a restore of this release puts them back.
+            if ($PrevVersion -match '^\d+\.\d+\.\d+$' -and [version]$Ver -lt [version]$PrevVersion) {
+                $script:OlderHooksConverted = Convert-HooksForOlderRelease $PrevVersion $Ver
+            }
             Assert-NoActiveConnectorRecovery "Version change to $Ver"
         } elseif ($Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement) {
             # A same-version repair over an accepted install: nothing of it may still run.
