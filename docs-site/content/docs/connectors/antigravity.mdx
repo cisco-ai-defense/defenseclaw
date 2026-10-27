@@ -73,7 +73,7 @@ Setup backs up `hooks.json` and keeps unrelated hooks. It writes only the global
 
 - In action mode `PreToolUse` can deny a tool call or ask you first, using Antigravity's own `decision` field. The ask always prompts, even when you chose "Always Allow" before.
 - `PreInvocation` and `PostInvocation` can only add context. `PostToolUse` only observes. `Stop` is always allowed.
-- Observe mode records policy findings without blocking on those findings. When the gateway is not running, the default and permissive policies let the call run with one warning and strict denies `PreToolUse`; every other hook failure denies it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)).
+- Observe mode records policy findings without blocking on those findings. With no saved mode, when the gateway is not running, the default and permissive policies let the call run with one warning and strict denies `PreToolUse`; every other hook failure denies it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)).
 
 ### Verdict mapping
 

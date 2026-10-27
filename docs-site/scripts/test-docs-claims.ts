@@ -1563,6 +1563,12 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1503", page: "policies/deterministic-detection.mdx", has: ["instruction-file writes are HIGH, so they are reported, not blocked"] },
   { gap: "GAP-1254", page: "connectors/copilot.mdx", has: ["removes the `enabledPlugins` entry `defenseclaw@defenseclaw`"] },
   { gap: "GAP-1795", page: "reference/sandbox-cli.mdx", has: ["OpenShell 0.1.5 refuses `--end-vm` for a MicroVM whose workload completed or failed while its VM still runs"] },
+  { gap: "GAP-0013", page: "get-started/quickstart.mdx", has: ["A mode you saved with `defenseclaw guardrail fail-mode` wins over the policy: with a saved `open` the call still runs under strict, and `defenseclaw guardrail fail-mode closed`"] },
+  { gap: "GAP-0013", page: "connectors/claudecode.mdx", has: ["On a per-user install with no saved mode, a gateway that is not running follows the policy tier"], lacks: ["On a per-user install a gateway that is not running follows the policy tier"] },
+  { gap: "GAP-0013", page: "connectors/codex.mdx", has: ["except on a per-user install with no saved mode in the default and permissive policies"] },
+  { gap: "GAP-0013", page: "policies/defaults.mdx", has: ["A per-user install with no saved mode follows its rule pack when the gateway is down"] },
+  { gap: "GAP-1997", page: "support-matrix.mdx", has: ["running <tool> without inspection", "the strict policy refuses it (`refusing to exec <tool>`, exit 1)", "after `defenseclaw guardrail use-pack strict` they still run the tool until you run the connector's `defenseclaw setup` again"], lacks: ["refuse to run the real tool while the gateway is down or the peer check fails", "No workaround when `~/.local` is a symlink."] },
+  { gap: "GAP-0506", page: "segmentation.mdx", section: "Fail-open and fail-closed, per layer", has: ["| A hook cannot reach the gateway | The [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) gives the result per connector and install.", "covers a gateway outage only, and not for a connector whose foreign-hook guard checks the session with the gateway ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage))"] },
   // r105-rows-end
 ];
 
@@ -1573,6 +1579,37 @@ function pageSection(name: string, heading?: string): string {
   assert.ok(body !== undefined, `${name} has no "## ${heading}" section`);
   return body.split(' ## ')[0];
 }
+
+// GAP-0506 class: a Markdown table row about a gateway outage states no outcome of its own;
+// it points at the gateway outage table (or the fail modes reference) and never keys the
+// outage result by the guardrail mode. The table page and the fail modes reference are the sources.
+describe('outage rows in Markdown tables point at the outage table (GAP-0506)', () => {
+  const outageCell = /^(?:an? )?(?:hook|agent hook|hooks) (?:cannot|can't|could not) reach the gateway|^(?:the )?gateway (?:outage|is down|is unreachable|is not running|is stopped|stops|cannot answer)\b|^gateway (?:down|unreachable|not running|stopped)\b/i;
+  const outcome = /\b(?:block|blocks|blocked|run|runs|allow|allows|allowed|deny|denies|denied|refuse|refuses|fails? (?:open|closed))\b/i;
+  const pointer = /\/docs\/connectors\/capability-matrix#gateway-outage|\/docs\/reference\/fail-modes/;
+  const byGuardrailMode = /\b(?:in|under) (?:observe|action) mode\b[^|.;:]{0,40}\b(?:fails? (?:open|closed)|runs?|blocks?|allows?|denies)\b|\b(?:observe|action)(?: mode)?\s*(?::|=|->)\s*(?:fails? )?(?:open|closed)\b/i;
+  it('every outage row links the table and does not key the result by guardrail mode', () => {
+    const sources = new Set(['connectors/capability-matrix.mdx', 'reference/fail-modes.mdx']);
+    const bad: string[] = [];
+    let rows = 0;
+    for (const file of mdxPages(docs)) {
+      const rel = relative(docs, file).replace(/\\/g, '/');
+      if (sources.has(rel)) continue;
+      for (const line of readFileSync(file, 'utf8').split('\n')) {
+        if (!line.startsWith('|')) continue;
+        const cells = line.split('|').slice(1, -1).map((cell) => cell.trim());
+        if (cells.length < 2 || !outageCell.test(cells[0].replace(/[*`]/g, ''))) continue;
+        const body = cells.slice(1).join(' | ');
+        if (!outcome.test(body)) continue;
+        rows++;
+        if (!pointer.test(body)) bad.push(`${rel}: no outage table link: ${line.slice(0, 160)}`);
+        if (byGuardrailMode.test(body)) bad.push(`${rel}: outage result keyed by guardrail mode: ${line.slice(0, 160)}`);
+      }
+    }
+    assert.ok(rows >= 1, `expected at least the segmentation outage row, found ${rows}`);
+    assert.deepEqual(bad, []);
+  });
+});
 
 describe('first-run report sample matches cmd_init (GAP-1605)', () => {
   it('shows the outage line init prints and the default fail mode', () => {
