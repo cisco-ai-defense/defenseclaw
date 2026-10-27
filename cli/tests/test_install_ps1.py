@@ -1370,9 +1370,17 @@ $DataDir = '{source.parent}'
 function Invoke-Robocopy([string[]]$Arguments) {{
     [pscustomobject]@{{ Code = 8; Error = 'ERROR 32 (0x00000020) Copying File locked.txt The process cannot access the file.' }}
 }}
-function Get-ProcessesUnder([string[]]$Prefixes) {{
-    Write-Output ([pscustomobject]@{{ ProcessId = 4242; Name = 'defenseclaw-gateway.exe'; ExecutablePath = "$BinDir\\defenseclaw-gateway.exe"; Prefixes = ($Prefixes -join '|') }})
+function Get-CimInstance {{
+    @(
+        [pscustomobject]@{{ ProcessId = 4242; Name = 'defenseclaw-gateway.exe'; ExecutablePath = "$BinDir\\defenseclaw-gateway.exe" }},
+        [pscustomobject]@{{ ProcessId = 4243; Name = 'defenseclaw-hook.exe.old-20261027T120000000'; ExecutablePath = "$BinDir\\defenseclaw-hook.exe.old-20261027T120000000" }},
+        [pscustomobject]@{{ ProcessId = 4244; Name = 'python.exe'; ExecutablePath = "$DataDir\\.venv\\Scripts\\python.exe" }},
+        [pscustomobject]@{{ ProcessId = 5151; Name = 'claude.exe'; ExecutablePath = "$BinDir\\claude.exe" }},
+        [pscustomobject]@{{ ProcessId = 5152; Name = 'uv.exe'; ExecutablePath = "$BinDir\\uv.exe" }},
+        [pscustomobject]@{{ ProcessId = 8344; Name = 'defenseclaw-gateway.exe'; ExecutablePath = "C:\\Users\\other\\.local\\bin\\defenseclaw-gateway.exe" }}
+    )
 }}
+{_ps1_function("Get-ProcessesUnder")}
 {_ps1_function("Copy-Kept")}
 try {{ Copy-Kept '{source}' '{tmp_path / "slot"}' }} catch {{ Write-Output $_.Exception.Message }}
 """
@@ -1385,11 +1393,16 @@ try {{ Copy-Kept '{source}' '{tmp_path / "slot"}' }} catch {{ Write-Output $_.Ex
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     out = " ".join(completed.stdout.split())
-    assert "DefenseClaw programs still running: defenseclaw-gateway (PID 4242)" in out, out
+    # A working agent run from the same bin folder (Claude Code's native
+    # claude.exe, uv.exe) is not a DefenseClaw program to stop.
+    assert (
+        "DefenseClaw programs still running: defenseclaw-gateway (PID 4242), "
+        "defenseclaw-hook.exe.old-20261027T120000000 (PID 4243), python (PID 4244)"
+    ) in out, out
+    assert "claude" not in out and "PID 5151" not in out and "PID 5152" not in out and "PID 8344" not in out, out
     assert "then run the installer again" in out, out
     copy_kept = _ps1_function("Copy-Kept")
     assert "Get-Process -ErrorAction" not in copy_kept
-    assert 'Get-ProcessesUnder @("$BinDir\\", "$DataDir\\")' in copy_kept
 
 
 def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:

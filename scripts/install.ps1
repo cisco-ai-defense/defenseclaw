@@ -424,7 +424,10 @@ function Copy-Kept([string]$Source, [string]$DestinationDir) {
     # a failed Setup or an outside start left running. Only this account's
     # own programs: another account's gateway cannot hold this data folder,
     # and the advice to stop it sent the user after the wrong PIDs (GAP-2245).
-    $running = @(Get-ProcessesUnder @("$BinDir\", "$DataDir\") | ForEach-Object { "$($_.Name -replace '\.exe$', '') (PID $($_.ProcessId))" })
+    # Only DefenseClaw's own images in the bin folder: other programs live
+    # there too (Claude Code's claude.exe, uv.exe), and the line told the
+    # user to Stop-Process a working agent as a "DefenseClaw program".
+    $running = @(Get-ProcessesUnder @("$BinDir\defenseclaw", "$DataDir\") | ForEach-Object { "$($_.Name -replace '\.exe$', '') (PID $($_.ProcessId))" })
     $held = if ($running.Count) { "; DefenseClaw programs still running: $($running -join ', ') (stop them with Stop-Process -Id <PID>)" } else { "" }
     throw "Could not copy $Source ($why)$held. Check that this account can read it and that no program has it open (icacls `"$Source`"), then run the installer again"
 }
