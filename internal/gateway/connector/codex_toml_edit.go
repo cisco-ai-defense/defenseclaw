@@ -62,11 +62,14 @@ func editCodexOwnedTOMLWith(raw []byte, desired map[string]interface{}, narrowOt
 	}
 	narrow := len(removedOtel) > 0
 	keepOtelBytes = keepOtelBytes || narrow
+	// Lines DefenseClaw renders take the file's line ending; every line it
+	// keeps keeps its own, so an operator table saved with other endings
+	// than the rest of the file comes back byte for byte (GAP-1993).
 	newline := "\n"
 	if bytes.Contains(raw, []byte("\r\n")) {
 		newline = "\r\n"
-		raw = bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
 	}
+	rendered := func(b []byte) string { return strings.ReplaceAll(string(b), "\n", newline) }
 	root := map[string]interface{}{}
 	if value, ok := desired["notify"]; ok {
 		root["notify"] = value
@@ -97,9 +100,9 @@ func editCodexOwnedTOMLWith(raw []byte, desired map[string]interface{}, narrowOt
 			return
 		}
 		if out.Len() != 0 && !strings.HasSuffix(out.String(), "\n") {
-			out.WriteByte('\n')
+			out.WriteString(newline)
 		}
-		out.Write(rootBytes)
+		out.WriteString(rendered(rootBytes))
 		rootWritten = true
 	}
 	var syntax tomlEditSyntax
@@ -194,12 +197,11 @@ func editCodexOwnedTOMLWith(raw []byte, desired map[string]interface{}, narrowOt
 	writeRoot()
 	if len(sectionBytes) != 0 {
 		if out.Len() != 0 && !strings.HasSuffix(out.String(), "\n") {
-			out.WriteByte('\n')
+			out.WriteString(newline)
 		}
-		out.Write(sectionBytes)
+		out.WriteString(rendered(sectionBytes))
 	}
-	result := strings.ReplaceAll(out.String(), "\n", newline)
-	return append(bom, []byte(result)...), nil
+	return append(bom, []byte(out.String())...), nil
 }
 
 // RemoveCodexManagedHookFeature removes a user preference for the hooks
@@ -228,7 +230,6 @@ func RemoveCodexManagedHookFeature(raw []byte) ([]byte, error) {
 	newline := "\n"
 	if bytes.Contains(raw, []byte("\r\n")) {
 		newline = "\r\n"
-		raw = bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
 	}
 	var syntax tomlEditSyntax
 	section := []string(nil)
@@ -268,12 +269,12 @@ func RemoveCodexManagedHookFeature(raw []byte) ([]byte, error) {
 				return nil, fmt.Errorf("render remaining Codex features: %w", err)
 			}
 			if out.Len() != 0 && !strings.HasSuffix(out.String(), "\n") {
-				out.WriteByte('\n')
+				out.WriteString(newline)
 			}
-			out.Write(encoded)
+			out.WriteString(strings.ReplaceAll(string(encoded), "\n", newline))
 		}
 	}
-	result := []byte(strings.ReplaceAll(out.String(), "\n", newline))
+	result := []byte(out.String())
 	var checked map[string]interface{}
 	if err := toml.Unmarshal(result, &checked); err != nil {
 		return nil, fmt.Errorf("codex user config after removing features.hooks: %w", err)
