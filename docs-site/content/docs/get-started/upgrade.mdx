@@ -12,7 +12,7 @@ keywords:
   - renamed and removed connectors
 ---
 
-`defenseclaw upgrade` installs the latest release and keeps your configuration, audit data, device key and agent setup. 1.0.4 supports upgrades from 1.0.3, 1.0.2 and 0.8.10. For 0.8.x, see [Upgrading from 0.x to 1.0](/docs/get-started/upgrade#upgrading-from-0x-to-10).
+`defenseclaw upgrade` installs the latest release and keeps your configuration, audit data, device key and agent setup. 1.0.5 upgrades any 1.0 release and is tested from 1.0.4, 1.0.3 and 1.0.2. An upgrade from 0.8.8, 0.8.9 or 0.8.10 still runs, but it is a legacy path that is no longer tested; see [Upgrading from 0.x to 1.0](/docs/get-started/upgrade#upgrading-from-0x-to-10).
 
 ## Upgrade
 
@@ -94,7 +94,7 @@ The mirror must serve the paths GitHub serves: `releases/latest` (a redirect to 
 
 ## Upgrading from 0.x to 1.0
 
-1.x replaces the 0.x upgrade system. Every path below keeps your configuration and data. The 0.8.10 release is the supported bridge: a 0.8.8, 0.8.9 or 0.8.10 install finds the 1.x release through its own `defenseclaw upgrade`.
+1.x replaces the 0.x upgrade system. Every path below keeps your configuration and data. The 0.8.10 release is the bridge: a 0.8.8, 0.8.9 or 0.8.10 install finds the 1.x release through its own `defenseclaw upgrade`. This is a legacy path that is no longer tested. On Windows, the 0.8.10 Claude Code hook can let tool calls run without a check while the upgrade runs, and the upgrade does not check that every hook an agent registered was replaced: end every agent session before you upgrade from 0.8.x and start new ones afterwards.
 
 ### Which command to run
 
