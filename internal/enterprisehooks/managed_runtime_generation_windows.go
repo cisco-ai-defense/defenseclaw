@@ -1256,9 +1256,10 @@ func collectWindowsManagedRuntimeGenerations(
 			if generationID == selectedGenerationID {
 				continue
 			}
-			if windowsManagedRuntimeBundleYoung(validated.DataDir, validated.Connector, generationID) {
+			if !opts.Retired && windowsManagedRuntimeBundleYoung(validated.DataDir, validated.Connector, generationID) {
 				// Prepared outside the selector lock and possibly about to
-				// be selected: a later GC collects it (GAP-1768).
+				// be selected: a later GC collects it (GAP-1768). An
+				// uninstall finalize has no later GC (GAP-1986).
 				continue
 			}
 			collect = append(collect, collectable{entry: entry, data: data})

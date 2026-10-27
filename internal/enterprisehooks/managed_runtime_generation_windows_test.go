@@ -314,6 +314,29 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if _, err := os.Lstat(third.BundlePath()); err != nil {
 		t.Fatalf("selected generation was removed by GC: %v", err)
 	}
+	// GAP-1986: the uninstall finalize has no later GC, so it collects a
+	// just-prepared unselected bundle too; the selected one stays.
+	retiredDesired := thirdDesired
+	retiredDesired.GatewayAddr = "127.0.0.1:18974"
+	retiredDesired.ScopedToken = "retired-scoped-test-token"
+	young, err := PrepareWindowsManagedRuntimeGeneration(retiredDesired)
+	if err != nil {
+		t.Fatalf("prepare young unselected generation: %v", err)
+	}
+	windowsManagedRuntimeGenerationGCMinAge = time.Hour
+	retiredOpts := gcOpts
+	retiredOpts.Retired = true
+	removed, err = GarbageCollectWindowsManagedRuntimeGenerations(retiredOpts)
+	windowsManagedRuntimeGenerationGCMinAge = minAge
+	if err != nil || removed != 1 {
+		t.Fatalf("uninstall finalize GC of a young bundle: removed=%d err=%v, want 1", removed, err)
+	}
+	if _, err := os.Lstat(young.BundlePath()); !os.IsNotExist(err) {
+		t.Fatalf("uninstall finalize GC left a young unselected bundle: %v", err)
+	}
+	if _, err := os.Lstat(third.BundlePath()); err != nil {
+		t.Fatalf("uninstall finalize GC removed the selected generation: %v", err)
+	}
 
 	// DataDir is intentionally left empty here: this is the
 	// deleted-profile removal shape, where the caller no longer has
