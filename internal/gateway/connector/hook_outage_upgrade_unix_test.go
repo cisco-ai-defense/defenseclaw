@@ -279,6 +279,49 @@ func TestRefreshClosesReleasedCopilotEarlyFailures(t *testing.T) {
 	}
 }
 
+// TestRefreshedReleasedCopilotHookDeniesAnEarlyExitOfStatusZero: an early
+// exit of status 0 is a failure too. macOS /bin/bash 3.2 runs the EXIT trap
+// with $? 0 when the sourced helper is missing, so a trap that tested the
+// status let the tool run there (GAP-2141); a helper that exits 0 while it
+// is sourced gives the same status on every bash.
+func TestRefreshedReleasedCopilotHookDeniesAnEarlyExitOfStatusZero(t *testing.T) {
+	requireShellHookToolsForTest(t)
+	for _, release := range []string{"0.8.10", "1.0.0", "1.0.3"} {
+		for _, mode := range []string{"closed", "open"} {
+			t.Run(release+"/"+mode, func(t *testing.T) {
+				home := t.TempDir()
+				dataDir := filepath.Join(home, ".defenseclaw")
+				hookDir := filepath.Join(dataDir, "hooks")
+				if err := os.MkdirAll(hookDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"_hardening.sh", "copilot-hook.sh"} {
+					body, err := os.ReadFile(filepath.Join("testdata", "released-hooks", release, name))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(hookDir, name), body, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := RefreshHookFailModes(hookDir, func(string) string { return mode }); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(hookDir, "_hardening.sh"), []byte("exit 0\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				hook := filepath.Join(hookDir, "copilot-hook.sh")
+				for _, event := range []string{"preToolUse", "permissionRequest"} {
+					out, code := runReleasedCopilotEarlyFailure(t, hook, home, dataDir, event)
+					if code != 0 || !copilotEarlyDenial(out, event) {
+						t.Fatalf("helper exit 0 %s: exit %d stdout=%q", event, code, out)
+					}
+				}
+			})
+		}
+	}
+}
+
 // copilotEarlyDenial reports one JSON object on stdout that denies event
 // with Copilot's native field for it: two objects are not an answer Copilot
 // reads.
