@@ -969,9 +969,15 @@ func provenPartialStateRedirect(
 	if !integrityCommandOwnsStaticRedirect(projected, candidate) {
 		return false
 	}
+	// The shell opens a static redirect target before it runs the program,
+	// so the write does not depend on what the program is: a program named
+	// by a relative path (./build.sh, scripts/gen.sh) has an uncertain
+	// effect, yet its redirect writes the target as `make > f` does
+	// (GAP-2268).
 	original, ok := integrityCommandByID(facts, projected.ID)
 	return ok && (original.Effect == actionfacts.EffectExecute ||
-		original.Effect == actionfacts.EffectPreview) &&
+		original.Effect == actionfacts.EffectPreview ||
+		original.Effect == actionfacts.EffectUncertain) &&
 		!original.ControlFlowUncertain &&
 		integrityCommandOwnsStaticRedirect(original, candidate)
 }

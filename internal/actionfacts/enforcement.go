@@ -90,8 +90,12 @@ func (f Facts) EnforcementProjection() Facts {
 		if command.Effect == EffectExecute {
 			executing[command.ID] = struct{}{}
 			retainedHierarchy[command.ID] = struct{}{}
-		} else if command.Effect == EffectPreview &&
+		} else if (command.Effect == EffectPreview || command.Effect == EffectUncertain) &&
 			hasStaticRedirect(command.Redirects) {
+			// The shell opens a static redirect target before it runs the
+			// program, whatever the program is: a program named by a
+			// relative path (./build.sh > f) has an uncertain effect, yet
+			// its redirect writes f (GAP-2268).
 			redirecting[command.ID] = struct{}{}
 			retainedHierarchy[command.ID] = struct{}{}
 		}
@@ -117,6 +121,7 @@ func (f Facts) EnforcementProjection() Facts {
 			f.CWD,
 			f.ActiveHome,
 		)
+		keepRedirectResolution(paths, f.Paths, command.ID)
 		mergeProjectionParseResult(
 			&projected.Parse,
 			parse,
@@ -164,6 +169,22 @@ func (f Facts) EnforcementProjection() Facts {
 	}
 
 	return projected
+}
+
+// keepRedirectResolution gives a projected redirect path the resolution
+// that the parse already found for the same spelling of the same command: a
+// trusted-home rewrite respells its target back to "$HOME/...", which the
+// projection alone cannot resolve (GAP-2268).
+func keepRedirectResolution(paths []PathFact, parsed []PathFact, commandID int64) {
+	for index := range paths {
+		for _, fact := range parsed {
+			if fact.CommandID == commandID && fact.Value == paths[index].Value &&
+				fact.Access == paths[index].Access && fact.Resolved != "" {
+				paths[index].Resolved = fact.Resolved
+				break
+			}
+		}
+	}
 }
 
 func projectRedirectExecution(

@@ -16,7 +16,8 @@ import (
 // got no path fact, so the state owner never saw it. GAP-2076: neither did
 // the redirect of the ":" builtin or of a command-less redirect (`> f`).
 // All of them are writes of the redirect target, as `true > f` already was.
-// GAP-2225: so is the redirect of a wrapped program.
+// GAP-2225 and GAP-2268: so is the redirect of a wrapped program or of a
+// program named by a relative path.
 func TestR105StateRedirectSpellingsAreWrites(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX command matrix")
@@ -111,6 +112,18 @@ func TestR105StateRedirectSpellingsAreWrites(t *testing.T) {
 		{"env make $HOME hook", "env make > $HOME/.defenseclaw/hooks/claude-code-hook.sh", true},
 		{"env make build log", "env make > ~/build.log", false},
 		{"sudo make home log", "sudo make > ~/proj/build.log", false},
+		// GAP-2268: a program named by a relative path.
+		{"relative script redirect", "./build.sh > ~/.defenseclaw/config.yaml", true},
+		{"relative script absolute redirect", "./build.sh > " + home + "/.defenseclaw/config.yaml", true},
+		{"relative script $HOME redirect", "./build.sh > $HOME/.defenseclaw/config.yaml", true},
+		{"relative script hook redirect", "./build.sh > ~/.defenseclaw/hooks/claude-code-hook.sh", true},
+		{"relative script absolute hook redirect", "./build.sh > " + home + "/.defenseclaw/hooks/claude-code-hook.sh", true},
+		{"relative subdir script append", "scripts/gen.sh >> ~/.defenseclaw/config.yaml", true},
+		{"relative script aggregate redirect", "./build.sh >& ~/.defenseclaw/config.yaml", true},
+		{"relative script home log", "./build.sh > ~/build.log", false},
+		{"relative script build log", "./build.sh > build.log", false},
+		{"relative subdir script output", "scripts/gen.sh > out.txt", false},
+		{"relative script reads config", "./build.sh ~/.defenseclaw/config.yaml > build.log", false},
 	}
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connectorName)
