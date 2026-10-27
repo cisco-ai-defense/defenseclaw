@@ -1268,9 +1268,9 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 				complete = false
 				break
 			}
-			directory, err := os.Open(dir)
+			directory, err := actionGlobOpenDir(dir)
 			if err != nil {
-				if errors.Is(err, fs.ErrNotExist) && !hidden || errors.Is(err, syscall.ENOTDIR) {
+				if errors.Is(err, fs.ErrNotExist) && !hidden || errors.Is(err, syscall.ENOTDIR) || actionGlobInvalidName(err) {
 					continue
 				}
 				// A process that runs as the user cannot list what the
@@ -1307,6 +1307,50 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 		paths = next
 	}
 	return paths, complete, unseen
+}
+
+// actionGlobOpenDir opens a directory the walk lists. Windows refuses a
+// name that holds a character its file names cannot hold (", <, >, |, :
+// past the volume, a control character) with ERROR_INVALID_NAME. Git Bash
+// (MSYS/Cygwin) stores such a character as U+F000 plus its code, so the
+// shell's own expansion reads that spelling: it is tried before the walk
+// concludes that the name names no directory (GAP-0781 RV7-1).
+func actionGlobOpenDir(dir string) (*os.File, error) {
+	directory, err := os.Open(dir)
+	if err == nil || !actionGlobInvalidName(err) {
+		return directory, err
+	}
+	if mapped := actionMSYSMappedPath(dir); mapped != dir {
+		if alias, mappedErr := os.Open(mapped); mappedErr == nil || !errors.Is(mappedErr, fs.ErrNotExist) && !actionGlobInvalidName(mappedErr) {
+			return alias, mappedErr
+		}
+	}
+	return nil, err
+}
+
+// actionGlobInvalidName reports a Windows refusal of the name itself
+// (ERROR_INVALID_NAME): no file or directory can have it, so the user's
+// shell expands nothing there either. Such a word is program text that a
+// mention scan split at a slash (glob.glob("data/*.csv"), "src"/*.py),
+// not a directory that this process failed to see.
+func actionGlobInvalidName(err error) bool {
+	const errorInvalidName = syscall.Errno(123)
+	return runtime.GOOS == "windows" && errors.Is(err, errorInvalidName)
+}
+
+// actionMSYSMappedPath spells the components after the volume the way
+// Cygwin and MSYS store the characters Windows names cannot hold.
+func actionMSYSMappedPath(dir string) string {
+	volume := filepath.VolumeName(dir)
+	var b strings.Builder
+	b.WriteString(volume)
+	for _, r := range dir[len(volume):] {
+		if r < 0x20 || strings.ContainsRune(`"*:<>?|`, r) {
+			r += 0xF000
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // actionGlobNotDirectory reports that a listing failed because dir, or the
