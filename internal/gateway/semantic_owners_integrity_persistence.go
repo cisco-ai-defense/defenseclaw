@@ -2828,18 +2828,13 @@ var findEntryOnlyChangers = map[string]struct{}{
 }
 
 // findShellPrograms run a script; findInlineInterpreters run code given on
-// their command line; findCommandWrappers run another command.
+// their command line.
 var (
 	findShellPrograms = map[string]struct{}{
 		"sh": {}, "bash": {}, "dash": {}, "zsh": {}, "ksh": {}, "mksh": {}, "ash": {}, "fish": {}, "csh": {}, "tcsh": {},
 	}
 	findInlineInterpreters = map[string]struct{}{
 		"perl": {}, "ruby": {}, "node": {}, "php": {}, "python": {}, "python3": {}, "pwsh": {}, "osascript": {},
-	}
-	findCommandWrappers = map[string]struct{}{
-		"sudo": {}, "doas": {}, "su": {}, "runuser": {}, "env": {}, "nice": {}, "nohup": {}, "timeout": {},
-		"command": {}, "exec": {}, "xargs": {}, "find": {}, "busybox": {}, "stdbuf": {}, "ionice": {},
-		"chroot": {}, "setsid": {}, "time": {}, "watch": {}, "parallel": {},
 	}
 )
 
