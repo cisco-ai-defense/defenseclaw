@@ -300,7 +300,13 @@ and readiness check, and exits `1` when anything fails. A healthy `status`, trim
   "enrollment": { "targets": 16, "pending": 0, "failed": 0, "exempt": 0 },
   "coverage_complete": true,
   "security_complete": false,
-  "warnings": [{ "code": "hook_process_fail_open", "message": "Codex can run a tool after its PreToolUse hook is killed or times out" }],
+  "warnings": [
+    { "code": "hook_process_fail_open", "message": "claudecode: a killed PreToolUse hook or PreToolUse timeout is non-blocking; ..." },
+    { "code": "hook_process_fail_open", "message": "codex: a killed PreToolUse hook or PreToolUse timeout is non-blocking; ..." },
+    { "code": "unprivileged_user_namespaces", "message": "standard users can create user namespaces (user.max_user_namespaces=...): ..." },
+    { "code": "unprivileged_ptrace", "message": "standard users can trace their own processes (kernel.yama.ptrace_scope=0): ..." },
+    { "code": "security_incomplete", "message": "security_complete is false because of: hook_process_fail_open, unprivileged_user_namespaces, unprivileged_ptrace; ..." }
+  ],
   "errors": []
 }
 ```
@@ -312,6 +318,9 @@ and readiness check, and exits `1` when anything fails. A healthy `status`, trim
   reconcile at once: `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux reconcile --json`.
 - On most distributions `status` and `verify` warn `unprivileged_user_namespaces`
   or `unprivileged_ptrace` and report incomplete security. See [User namespaces](#user-namespaces).
+- `hook_process_fail_open` appears once per enabled connector, with the connector
+  name first, and `security_incomplete` lists the warnings that keep
+  `security_complete` false.
 
 ### Gateway sandbox
 

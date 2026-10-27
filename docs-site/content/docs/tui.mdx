@@ -204,8 +204,8 @@ block NAME`, `defenseclaw mcp allow NAME` or `defenseclaw tool block NAME
 - `disable`, `enable`, `quarantine` and `restore` are runtime actions kept in
   the audit database, not in `config.yaml`.
 - On a managed standalone device the three policy verbs fail with the message
-  `This device is managed: add it to asset_policy in the admin config (MDM or
-  management plane)`, which the TUI shows in the status line and in Activity.
+  `This device is managed: the asset_policy block and allow lists are set in
+  the admin config (MDM or management plane)`, which the TUI shows in the status line and in Activity.
   Nothing changes. See [Admission reference](/docs/policies/admission).
 
 ## Five actions you will use most
