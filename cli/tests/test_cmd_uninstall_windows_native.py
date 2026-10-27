@@ -49,6 +49,88 @@ class DeferredInterpreterRemovalCommandTests(unittest.TestCase):
             command,
         )
 
+    def test_after_exit_retries_the_renamed_folder_while_a_deleted_file_is_held(self) -> None:
+        # GAP-2233: one rd /s of .uv.dc-removed-<id> left seven empty folders
+        # under its uv cache (a deleted file still held open keeps its parents),
+        # and the result said "could not remove ...; remove it by hand".
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper
+
+        uv = r"C:\Users\u\.defenseclaw\.uv"
+        with (
+            patch.object(windows_uninstall_helper.subprocess, "Popen") as popen,
+            patch.object(windows_uninstall_helper.os, "path", ntpath),
+        ):
+            windows_uninstall_helper._remove_after_exit([uv], [])  # noqa: SLF001
+
+        command = popen.call_args.args[0]
+        tombstone = ntpath.join(
+            ntpath.dirname(uv), re.search(r'"(\.uv\.dc-removed-[0-9a-f]{8})"', command).group(1)
+        )
+        tries = windows_uninstall_helper._TREE_RD_TRIES  # noqa: SLF001
+        self.assertGreater(tries, 1)
+        self.assertIn(
+            f'(for /l %i in (1,1,{tries}) do if exist "{tombstone}" (rd /s /q "{tombstone}" 2>nul & '
+            f'if exist "{tombstone}" ping -n 3 127.0.0.1 >nul))',
+            command,
+        )
+        # The rename is retried as long as the folder is held, too.
+        self.assertIn(
+            f'(for /l %i in (1,1,{tries}) do if not exist "{tombstone}" if exist "{uv}" '
+            f'(ren "{uv}" "{ntpath.basename(tombstone)}" 2>nul || ping -n 3 127.0.0.1 >nul))',
+            command,
+        )
+        # The folder itself (the rename failed) is still removed only once.
+        self.assertIn(f'else (rd /s /q "{uv}"))', command)
+        self.assertNotIn(f'if exist "{uv}" (rd /s /q "{uv}"', command)
+
+    @unittest.skipUnless(sys.platform == "win32", "runs cmd.exe")
+    def test_after_exit_command_waits_out_a_held_folder_on_windows(self) -> None:
+        # GAP-2233 on Windows: a folder deep in the uv cache held open without
+        # delete sharing (as a scanner or a process's current folder holds it)
+        # blocks the rename and rd until it is closed.
+        import ctypes
+        import threading
+        from ctypes import wintypes
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            uv = data_dir / ".uv"
+            deep = uv / "cache" / "archive-v0" / "x" / "litellm" / "llms" / "openai" / "responses"
+            deep.mkdir(parents=True)
+            (deep / "transformation.py").write_bytes(b"x")
+            status = Path(tmp) / "result.json"
+            # FILE_LIST_DIRECTORY, FILE_SHARE_READ|WRITE (no delete), OPEN_EXISTING, BACKUP_SEMANTICS
+            handle = kernel32.CreateFileW(str(deep), 0x1, 0x3, None, 3, 0x02000000, None)
+            self.assertNotEqual(handle, wintypes.HANDLE(-1).value)
+            closer = threading.Timer(12.0, kernel32.CloseHandle, args=(handle,))
+            closer.start()
+            try:
+                with patch.object(windows_uninstall_helper.subprocess, "Popen") as popen:
+                    windows_uninstall_helper._remove_after_exit(  # noqa: SLF001
+                        [str(uv)], [str(data_dir)], status_path=str(status), gone=[str(data_dir)]
+                    )
+                subprocess.run(popen.call_args.args[0], timeout=180, check=False)
+            finally:
+                closer.join()
+            self.assertFalse(data_dir.exists(), list(Path(tmp).rglob("*")))
+            self.assertEqual(json.loads(status.read_text(encoding="utf-8")), {"status": "succeeded"})
+
     def test_after_exit_writes_the_result_after_the_removal(self) -> None:
         # GAP-1960: the result file said succeeded before cmd.exe removed .uv
         # and the data folder, so it could not report that step.
