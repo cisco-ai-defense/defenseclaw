@@ -80,7 +80,7 @@ func TestWindowsStatusV2Blocks(t *testing.T) {
 		}
 	}
 	for name, state := range result.Connectors {
-		if want := enterprisehooks.ManagedHookFailMode(cfg, name); state.EffectiveHookFailMode != want {
+		if want := enterprisehooks.ManagedStatusHookFailMode(cfg, name, "windows", state.ManagedHook != nil && *state.ManagedHook); state.EffectiveHookFailMode != want {
 			t.Fatalf("%s: effective_hook_fail_mode %q, the Windows renderer writes %q", name, state.EffectiveHookFailMode, want)
 		}
 	}

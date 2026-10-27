@@ -180,7 +180,9 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 		inputs.MachinePolicy = append(inputs.MachinePolicy, name)
 	}
 	sort.Strings(inputs.MachinePolicy)
-	failMode := func(name string) string { return enterprisehooks.ManagedHookFailMode(cfg, name) }
+	failMode := func(name string) string {
+		return enterprisehooks.ManagedStatusHookFailMode(cfg, name, "windows", machine[name])
+	}
 	block, hidden := enterprisestatus.BuildConnectors(inputs, failMode)
 	if state, ok := block["hermes"]; ok && state.Enabled &&
 		(state.Detected == nil || *state.Detected || state.Targets != nil && state.Targets.Total > 0) {

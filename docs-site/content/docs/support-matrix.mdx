@@ -222,7 +222,7 @@ These are bugs in 1.0.4. They are fixed in 1.0.5. Each entry says who is affecte
   1. The approved config is installed: `/ensure` with it exits 0.
   2. `defenseclaw enterprise windows verify --profile standalone --json` exits 0 with `ok: true`, `installed: true`, `transaction_pending: false` and no errors.
   3. The gateway enforces the installed policy: `policy.effective_digest` equals `policy.gateway_reported_digest`, and `policy.applied` is true.
-  4. Every connector's `effective_hook_fail_mode` is what the approved config sets (`closed` unless you set an explicit open mode).
+  4. Every connector's `effective_hook_fail_mode` is what the approved config sets (`closed` unless you set an explicit open mode). The Amp and OpenCode plugins on the per-user route read `closed` with an open mode too; the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) says why.
   5. The marker is a plain file (not a reparse point) whose only content is `hot-config-undo-unproven-v1`.
 
   If any check fails, keep the marker (users stay blocked, which is safe), fix what the check names and check again.
