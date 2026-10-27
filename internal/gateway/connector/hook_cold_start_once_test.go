@@ -46,6 +46,9 @@ func newColdStartTestEnv(t *testing.T, startTime time.Duration) *coldStartTestEn
 	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// A cold start runs only the helper recorded beside the hook, for the
+	// data directory above the hook folder.
+	recordGatewayHelperForTest(t, filepath.Join(env.data, "hooks"), binary)
 	return env
 }
 
@@ -53,7 +56,7 @@ func newColdStartTestEnv(t *testing.T, startTime time.Duration) *coldStartTestEn
 // sourced.
 func (env *coldStartTestEnv) coldStart(prelude string) {
 	command := exec.Command(env.shell, "-c", `source "$0"; `+prelude+` defenseclaw_gateway_cold_start`, env.helper)
-	command.Env = append(os.Environ(), "DEFENSECLAW_AGENT_HOME="+env.home, "HOME="+env.home, "DEFENSECLAW_HOME="+env.data)
+	command.Env = append(os.Environ(), "DEFENSECLAW_AGENT_HOME="+env.home, "HOME="+env.home, "DEFENSECLAW_HOME="+env.data, "HOOK_DIR="+filepath.Join(env.data, "hooks"))
 	if out, err := command.CombinedOutput(); err != nil {
 		env.t.Errorf("cold start: %v\n%s", err, out)
 	}

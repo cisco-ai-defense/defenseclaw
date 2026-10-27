@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.defenseclaw.dev/config/v8/defenseclaw-config.schema.json",
+  "$id": "https://schemas.defenseclaw.dev/config/v9/defenseclaw-config.schema.json",
   "title": "DefenseClaw configuration v9",
   "description": "Canonical source schema for DefenseClaw config_version 9, the current version written by this build; config_version 8 sources remain accepted as migration input. Every defined configuration object is closed; extensible maps declare the schema of their values explicitly.",
   "type": "object",

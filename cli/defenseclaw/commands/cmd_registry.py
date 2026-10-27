@@ -857,8 +857,9 @@ def test_cmd(
     skill_count = sum(1 for e in filtered if e.is_skill())
     mcp_count = sum(1 for e in filtered if e.is_mcp())
 
+    skip_notes = list(getattr(manifest, "notes", []) or []) if not filtered else []
     payload: dict[str, Any] = {
-        "ok": True,
+        "ok": not skip_notes,
         "source_id": source.id,
         "publisher": manifest.publisher,
         "schema_version": manifest.schema_version,
@@ -882,6 +883,9 @@ def test_cmd(
             })
         payload["entries"]["rows"] = rows
         payload["entries"]["truncated"] = len(filtered) > len(rows)
+
+    if skip_notes:
+        payload["skip_reasons"] = skip_notes
 
     if emit_json:
         _emit_json(payload)
@@ -908,6 +912,10 @@ def test_cmd(
         if len(filtered) > limit:
             ux.subhead(f"  … {len(filtered) - limit} more (raise --limit to see)")
     click.echo()
+    if skip_notes:
+        # GAP-1640: zero entries is not a successful fetch; say why.
+        ux.warn("Dry-run found no usable entries: " + "; ".join(skip_notes))
+        return
     ux.ok(
         f"Dry-run successful — run `defenseclaw registry sync {source.id}` "
         "to persist + scan + promote.",

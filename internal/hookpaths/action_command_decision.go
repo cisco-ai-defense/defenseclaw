@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -31,11 +32,18 @@ func ActionCommandDecision(command, cwd, home string) string {
 // facts is the managed hook client's evidence map; its GlobFactPrefix
 // answers stand in only for a pattern the gateway cannot expand itself.
 func ActionCommandDecisionWithGlobFacts(command, cwd, home string, facts map[string]string) string {
+	return ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, "", facts)
+}
+
+// ActionCommandDecisionWithDialectAndGlobFacts uses only an explicit dialect
+// hint. A native Windows home also belongs to Git Bash and must not decide
+// which shell expands the command.
+func ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) string {
 	var globs *actionGlobs
 	if facts != nil {
 		globs = &actionGlobs{facts: facts}
 	}
-	if actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs) {
+	if actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs, dialect) {
 		return "protected-target"
 	}
 	if actionPureMake(command, home) {
@@ -136,7 +144,7 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 		return false
 	}
 	if actionWindowsHome(home) {
-		words, ok := actionWindowsWords(command)
+		words, _, ok := actionWindowsWords(command)
 		if !ok {
 			return false
 		}

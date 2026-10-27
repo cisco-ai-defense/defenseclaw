@@ -1,0 +1,127 @@
+---
+title: Agent360 dashboard
+description: Drill from any observed agent into lifecycle, executions, model and tool activity, tokens, cost, security decisions, hook enforcement/recovery paths, traces, and agent topology.
+keywords:
+  - DefenseClaw Agent360
+  - agent lifecycle dashboard
+  - Grafana agent observability
+  - Tempo agent traces
+  - agent topology
+---
+
+Agent360 shows one agent, or an agent and all its descendants, from one stable identity. New root agents and subagents appear as hook events arrive; DefenseClaw creates no dashboard file per agent. Open it from **Agent identity → Runtime Agent Directory** by clicking an **Agent ID**.
+
+Complete coverage needs the `local-observability` destination to keep logs, traces, metrics and the agent, model, tool, security and health buckets. `defenseclaw observability plan` reports partial coverage if you narrow it.
+
+## Open an agent
+
+Agent360 has these variables:
+
+| Variable | Use |
+| --- | --- |
+| **Connector** | Separates Codex, Claude Code and other connectors. |
+| **Agent or root ID regex** | The durable agent identity. Text box; default `.+`. |
+| **Scope** | **This agent**, or **Agent tree** to include every descendant. |
+| **Lifecycle (drilldown)**, **Execution (drilldown)** | Restrict execution-detail panels to one lifecycle or execution. Tree panels ignore them. |
+| **Trace ID** | Pivot the lower section to one Tempo trace. |
+
+## Read the overview
+
+![Agent360 for a Claude Code agent: the Agent Directory, the KPI strip with turns, model and tool calls, tokens and cost marked Not reported, and the execution phase timeline](/images/grafana/agent360-overview.jpg)
+
+Top panels, from identity to health:
+
+| Panel | Meaning |
+| --- | --- |
+| **Agent Directory** | Agents seen for the connector and range, with their root and parent IDs, name, type and observation count. |
+| **Turns**, **Model calls**, **Tool calls** | Distinct logical completed operations. Exact hook and native mirrors count once. |
+| **Descendants in selected root tree** | Transitive child agents under the root. |
+| **Input/output tokens**, **Reported cost** | Connector- or provider-reported usage only. |
+| **Terminal event success rate** | Successful terminal events over all terminal outcomes. Not the latest agent's state. |
+| **Enforced hook blocks** | Final hook decisions returned as `block`. |
+| **Observe-mode would-blocks** | Blocks returned as advisory because enforcement was off or unavailable. |
+
+## Follow the complete lifecycle
+
+**Ordered lifecycle and work sequence — root to terminal** is the chronology: starts, prompts, subagent starts and stops, model and tool calls, approvals, egress, guardrail decisions and outcomes in timestamp order. Sequence numbers are monotonic within an execution, not across a tree. A missing trace ID does not break the sequence.
+
+The lifecycle DAG, the structural view, is described in [Inspect the lifecycle DAG](#inspect-the-lifecycle-dag).
+
+## Explain logical grouping and relationship evidence
+
+The **Correlation identity and relationship evidence** row compares **Logical events** (distinct `defenseclaw.logical_event.id`) with **Raw observations** (every Loki record). Mirrors are never deleted. Relationship methods are `reported`, `trace_exact`, `derived` or `inferred`; `unresolved`, `conflicted`, `superseded` and `rejected` stay visible. A shared trace ID or span parent never creates an agent edge on its own. Metric labels never carry semantic, logical, request, turn, tool or relationship IDs.
+
+Four read-only gateway endpoints return the same relationship state. Each takes exactly one anchor query parameter (`agent_id`, `session_id`, `turn_id`, `lifecycle_id`, `execution_id`, `trace_id`, `record_id`, `semantic_event_id`, `logical_event_id`, `model_request_id`, `model_response_id` or `tool_invocation_id`), plus `limit` (1 to 500), `after_time` and `after_id`:
+
+| Endpoint | Returns |
+| --- | --- |
+| `GET /api/v1/correlation/graph` | The relationship graph around the anchor. |
+| `GET /api/v1/correlation/explain` | How records link to the anchor. |
+| `GET /api/v1/correlation/timeline` | Correlated events in time order. |
+| `GET /api/v1/correlation/conflicts` | Relationship conflicts involving the anchor. |
+
+```bash
+curl -s -H "Authorization: Bearer $DEFENSECLAW_GATEWAY_TOKEN" \
+  "http://127.0.0.1:18970/api/v1/correlation/timeline?agent_id=AGENT_ID&limit=50"
+```
+
+See the [gateway API reference](/docs/reference/gateway-api#auth) for the token and port.
+
+## Follow an enforced or alternative path
+
+**Hook enforcement and recovery paths** shows the decision the agent was given and what the agent did next. On a standalone managed host:
+
+- A native hook confirms the answer to a tool call with a delivery receipt on the same local request, after it gives the answer to the agent. The decision is recorded only then. The managed OpenCode plugin runs the native hook, so its `tool.execute.before` calls are confirmed this way too.
+- If the hook's answer budget runs out first, or the caller hangs up before the decision is recorded, a closed hook blocked the call. The decision is recorded as `block` with the reason `enterprise_managed_gateway_no_answer`, even when the gateway had evaluated an allow.
+- The action is `unconfirmed` when the gateway cannot prove the result: a tool call from a hook binary older than 1.0.4 while a package upgrade is in progress, a tool call whose hook stopped waiting for the receipt handshake before the gateway started it (the hook still takes the answer), or an administrator-selected open outage.
+- The Amp in-agent plugin and events without an answer budget (prompts, lifecycle events) send no receipt. They record the gateway's decision.
+
+Each `hook_decision` record has:
+
+| Field | Meaning |
+| --- | --- |
+| **Action** | The decision the connector was given: the confirmed answer, the fail-closed `block`, or `unconfirmed` when a managed gateway cannot prove it. Per-user and Secure Client hooks report the gateway response. |
+| **Raw action** | The guardrail result before connector and mode mapping. |
+| **Enforced** | `true` only when the connector was told to stop. |
+| **Would block** | `true` when a raw block became advisory. |
+| **Evaluation / rule IDs** | Join keys to the verdict and findings. |
+
+An enforced block does not guarantee a retry. When no later row appears, no further hook event was seen; DefenseClaw does not infer a retry.
+
+## Inspect the lifecycle DAG
+
+**Lifecycle DAG — prompt → agents → work → outcomes** shows who spawned whom and which agent owned each piece of work. It is built from Loki events and durable relationship evidence, never from trace parentage alone. A session start points to the root agent. A parent points to each child recorded by `parent_of` or `delegated_by`. Each agent points to one node per provider and model, one per tool family (Bash, MCP, Skills, Collaboration, File edits, Web/browser, Visual, Task control; an unknown tool keeps its name), and to its messages, approvals and outcomes. Repeated calls raise a node's total instead of adding nodes. Click a node or edge for its grouping key, count and links to the exact records. Lineage goes to depth 64; the graph shows only reported or inferred levels.
+
+![Agent360 lifecycle DAG for a Codex agent tree: the prompt start, the root agent at depth 0, three depth-1 subagents, grouped tool-family and model nodes, and a terminal outcome](/images/grafana/agent360-topology.jpg)
+
+## Drill into logs and traces
+
+The same fields correlate all three backends:
+
+| Field | Purpose |
+| --- | --- |
+| `gen_ai.agent.id` | One logical root or delegated agent. |
+| `defenseclaw.agent.root.id`, `defenseclaw.agent.parent.id` | The descendant tree and direct parent. |
+| `defenseclaw.agent.lifecycle.id` | Identity across gateway restarts and resumed sessions. |
+| `defenseclaw.agent.execution.id` | One execution attempt. |
+| `trace_id` | Pivot from a log that reports W3C trace identity into the Tempo waterfall. Aggregate metrics never invent one. |
+
+## Interpret missing values correctly
+
+Claude Code can report completed model calls without token or price fields; Agent360 then shows **Not reported** instead of an estimate. Data from before a schema or dashboard change is not backfilled.
+
+What 0, No data and Not reported mean is in [Read empty values correctly](/docs/observability/grafana-dashboards#read-empty-values-correctly).
+
+## Common investigation paths
+
+| Question | Start with | Then |
+| --- | --- | --- |
+| Why is an agent still running? | The execution phase timeline and ordered lifecycle sequence | Lifecycle logs and the newest trace. |
+| Which tool made it slow? | Top tools and tool p95 | The trace waterfall and ordered sequence. |
+| Did a subagent cause the failure? | Agent tree and lifecycle DAG | The child's work, errors and decisions, then its trace. |
+| Why did tokens or cost spike? | Tokens and cost over time | The provider and model breakdown. |
+| Was it blocked, advisory or approved, and what next? | Hook enforcement and recovery paths | Decision → recovery path, then the trace. |
+
+<Callout type="warn" title="Dashboards display the record as received">
+Dashboards add no redaction, masking or field hiding. They show every field that reaches Loki, Tempo or Prometheus, including content when the producer supplied it. Set a [redaction profile](/docs/observability/redaction) on the `local-observability` destination to reduce what they receive.
+</Callout>

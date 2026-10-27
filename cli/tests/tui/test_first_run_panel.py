@@ -149,15 +149,15 @@ def test_connector_preview_badge_uses_stable_kind_not_label(monkeypatch) -> None
     assert supported.display_value == "hermes"
 
 
-def test_first_run_action_profile_defaults_fail_mode_closed() -> None:
-    # GAP-0353: the first-run default matches quickstart and the
-    # non-interactive init (closed); open is an explicit choice.
+def test_first_run_action_profile_saves_a_fail_mode_only_when_picked() -> None:
+    # Owner decision 2026-10-23: like quickstart and the non-interactive
+    # init, the default saves no fail mode; the policy tier decides.
     panel = FirstRunPanelModel()
     panel.cursor = 1
     panel.handle_key("right")
     args = panel.args()
     assert args[args.index("--profile") + 1] == "action"
-    assert args[args.index("--fail-mode") + 1] == "closed"
+    assert "--fail-mode" not in args
 
     panel.cursor = 4
     panel.handle_key("right")

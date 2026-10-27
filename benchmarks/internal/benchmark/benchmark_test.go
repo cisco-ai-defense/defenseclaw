@@ -381,12 +381,12 @@ func TestDatabaseOptInPolicyPackFixtureExactEnforcementMetrics(t *testing.T) {
 			group.Dimension != "overall" || group.Group != "all" {
 			continue
 		}
-		// Two independently labeled SnowSQL positives remain outside the current
-		// exact grammar. This test pins
-		// the honest pack score while separately requiring the rollback-boundary
-		// case above to block.
-		want := Confusion{TruePositive: 12, TrueNegative: 10, FalseNegative: 2}
-		if group.Enforcement.Confusion != want || math.Abs(group.Enforcement.F1-12.0/13.0) > 1e-12 ||
+		// The two independently labeled SnowSQL positives are in the exact
+		// grammar since snowsql joined the reviewed SQL clients (GAP-1771).
+		// This test pins the honest pack score while separately requiring the
+		// rollback-boundary case above to block.
+		want := Confusion{TruePositive: 14, TrueNegative: 10}
+		if group.Enforcement.Confusion != want || math.Abs(group.Enforcement.F1-1) > 1e-12 ||
 			group.Enforcement.FPR != 0 || group.BenignBlockRate.Numerator != 0 {
 			t.Fatalf("database opt-in enforcement=%+v benign_block_rate=%+v", group.Enforcement, group.BenignBlockRate)
 		}

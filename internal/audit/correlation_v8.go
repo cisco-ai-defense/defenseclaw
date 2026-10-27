@@ -1346,8 +1346,8 @@ func (tx *CorrelationTx) PutObservation(ctx context.Context, observation Correla
 // this before handing a signal to a provider/exporter, preserving
 // commit-before-export without storing the trace or metric payload in
 // audit.db. A metric batch passes the observations of all its records, so it
-// costs one commit, not one per metric (B-26). Either every observation
-// commits or none does.
+// costs one commit, not one per metric (B-26), and concurrent batches share
+// one (GAP-1790). Either every observation of a call commits or none does.
 func (repo *CorrelationRepository) RecordObservations(
 	ctx context.Context,
 	observations ...CorrelationObservation,
@@ -1361,31 +1361,50 @@ func (repo *CorrelationRepository) RecordObservations(
 	if len(observations) == 0 {
 		return nil
 	}
-	release, err := repo.store.acquireReady()
-	if err != nil {
-		return err
-	}
-	defer release()
+	// Concurrent observation batches share one transaction (writeGroup).
 	// BeginTx is outside putCorrelationObservationTx's busy retry. On Windows
 	// antivirus can lock a freshly created audit.db long enough that the first
 	// begin fails even though the insert path would have waited.
-	return retryBusyObserved(ctx, "correlation_observation_write", repo.store.sqliteBusyObservabilityV8(), func() error {
-		tx, beginErr := repo.store.db.BeginTx(ctx, nil)
-		if beginErr != nil {
-			return fmt.Errorf("audit: begin correlation observation write: %w", beginErr)
-		}
-		defer tx.Rollback() //nolint:errcheck
+	write := &groupedWrite{ctx: ctx, run: func(ctx context.Context, tx *sql.Tx) error {
 		for _, observation := range observations {
-			if putErr := putCorrelationObservationTx(ctx, tx, repo.store, observation); putErr != nil {
-				return putErr
+			if err := putCorrelationObservationTx(ctx, tx, repo.store, observation); err != nil {
+				return err
 			}
 		}
-		if commitErr := tx.Commit(); commitErr != nil {
-			return fmt.Errorf("audit: commit correlation observation: %w", commitErr)
-		}
 		return nil
+	}}
+	store := repo.store
+	return store.observationGroup.do(write, func(batch []*groupedWrite) {
+		release, err := store.acquireReady()
+		if err != nil {
+			for _, item := range batch {
+				item.err = err
+			}
+			return
+		}
+		defer release()
+		_ = store.runGroupedTx(batch, groupedTxHooks{
+			op: "correlation_observation_write",
+			begin: func(err error) error {
+				return fmt.Errorf("audit: begin correlation observation write: %w", err)
+			},
+			commit: func(_ context.Context, tx *sql.Tx, _ []*groupedWrite) error {
+				if err := tx.Commit(); err != nil {
+					return fmt.Errorf("audit: commit correlation observation: %w", err)
+				}
+				return nil
+			},
+		})
 	})
 }
+
+// correlationObservationInsertSQL inserts one correlation observation
+// (txExecPrepared).
+const correlationObservationInsertSQL = `INSERT INTO correlation_observations (
+			record_id, semantic_event_id, signal, bucket, event_name, observed_time_unix_nano,
+			trace_id, span_id, session_id, turn_id, agent_id, lifecycle_id, execution_id,
+			model_request_id, model_response_id, tool_invocation_id, projection_hash, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func putCorrelationObservationTx(
 	ctx context.Context,
@@ -1405,12 +1424,7 @@ func putCorrelationObservationTx(
 	if err := validateObservation(observation); err != nil {
 		return err
 	}
-	_, err := txExecContextObserved(ctx, tx, "correlation_observation_insert",
-		store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_observations (
-			record_id, semantic_event_id, signal, bucket, event_name, observed_time_unix_nano,
-			trace_id, span_id, session_id, turn_id, agent_id, lifecycle_id, execution_id,
-			model_request_id, model_response_id, tool_invocation_id, projection_hash, status
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err := store.txExecPrepared(ctx, tx, "correlation_observation_insert", correlationObservationInsertSQL,
 		observation.RecordID, string(observation.SemanticEventID), string(observation.Signal),
 		observation.Bucket, observation.EventName, unixNano(observation.ObservedAt),
 		nullStr(observation.TraceID), nullStr(observation.SpanID), nullStr(observation.SessionID),

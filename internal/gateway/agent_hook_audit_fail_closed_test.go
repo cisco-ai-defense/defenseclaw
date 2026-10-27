@@ -142,11 +142,9 @@ func lastHookDecisionAction(t *testing.T, path string) string {
 	return raw
 }
 
-// Review of G-flood-wal (P1): an accepted hook whose audit row could not be
-// written answered with its computed allow, so a call ran with no durable
-// record. Outside Secure Client the fail mode is closed: the call is denied,
-// and the exported hook_decision says so.
-func TestHookAuditWriteFailureDeniesTheCall(t *testing.T) {
+// A failed audit write keeps the computed allow in the balanced tier, with a
+// visible degraded-audit warning. Strict and managed remain closed.
+func TestHookAuditWriteFailureFollowsPolicyTier(t *testing.T) {
 	t.Run("store refuses the row (disk full)", func(t *testing.T) {
 		fixture := newAuditFailureHookFixture(t, "")
 		if got := fixture.preToolUse(t, "toolu-before")["action"]; got != "allow" {
@@ -163,32 +161,50 @@ func TestHookAuditWriteFailureDeniesTheCall(t *testing.T) {
 		}
 		out := fixture.preToolUse(t, "toolu-full")
 		reason, _ := out["reason"].(string)
-		if out["action"] != "block" || !strings.Contains(reason, "could not write the call's audit record") {
-			t.Fatalf("full store: action %v reason %q, want a fail-closed block", out["action"], reason)
+		if out["action"] != "allow" || out["raw_action"] != "alert" || !strings.Contains(reason, "audit is degraded") {
+			t.Fatalf("full store: action %v reason %q, want an allowed degraded-audit alert", out["action"], reason)
 		}
-		if got := lastHookDecisionAction(t, fixture.path); got != "block" {
-			t.Fatalf("hook_decision action %q, want block", got)
+		shown, _ := out["claude_code_output"].(map[string]any)
+		if message, _ := shown["systemMessage"].(string); !strings.Contains(message, "audit is degraded") {
+			t.Fatalf("Claude Code did not show the degraded-audit alert: %v", shown)
 		}
-		// Review round 2 (P1): the agent gets Claude Code's own PreToolUse
-		// denial, not a generic decision:block it may not honor.
-		assertClaudeCodePreToolUseDenial(t, out["claude_code_output"])
-		// Review round 2 (P2): status counts the block the agent got.
-		if blocks := fixture.api.health.statsFor("claudecode").toolBlocks.Load(); blocks != 1 {
-			t.Fatalf("status tool blocks = %d after a fail-closed audit write, want 1", blocks)
+		if got := lastHookDecisionAction(t, fixture.path); got != "allow" {
+			t.Fatalf("hook_decision action %q, want allow", got)
+		}
+		if blocks := fixture.api.health.statsFor("claudecode").toolBlocks.Load(); blocks != 0 {
+			t.Fatalf("status tool blocks = %d after an allowed audit failure, want 0", blocks)
 		}
 	})
 	t.Run("store stays busy", func(t *testing.T) {
 		fixture := newAuditFailureHookFixture(t, "")
 		fixture.emitter.fail = true
-		if out := fixture.preToolUse(t, "toolu-busy"); out["action"] != "block" {
-			t.Fatalf("busy store: action %v, want block", out["action"])
+		if out := fixture.preToolUse(t, "toolu-busy"); out["action"] != "allow" || out["raw_action"] != "alert" {
+			t.Fatalf("busy store: verdict %v, want an allowed alert", out)
 		}
 	})
-	t.Run("saved per-user open still blocks an unaudited call", func(t *testing.T) {
+	t.Run("saved per-user open still follows balanced audit behavior", func(t *testing.T) {
 		fixture := newAuditFailureHookFixture(t, "open")
 		fixture.emitter.fail = true
-		if out := fixture.preToolUse(t, "toolu-open"); out["action"] != "block" {
-			t.Fatalf("saved per-user open: action %v, want block", out["action"])
+		if out := fixture.preToolUse(t, "toolu-open"); out["action"] != "allow" {
+			t.Fatalf("saved per-user open: action %v, want allow", out["action"])
+		}
+	})
+	t.Run("strict tier closes", func(t *testing.T) {
+		fixture := newAuditFailureHookFixture(t, "")
+		fixture.api.scannerCfg.Guardrail.RulePack = "strict"
+		fixture.emitter.fail = true
+		out := fixture.preToolUse(t, "toolu-strict")
+		if out["action"] != "block" {
+			t.Fatalf("strict tier: verdict %v, want block", out)
+		}
+		assertClaudeCodePreToolUseDenial(t, out["claude_code_output"])
+	})
+	t.Run("permissive tier allows", func(t *testing.T) {
+		fixture := newAuditFailureHookFixture(t, "")
+		fixture.api.scannerCfg.Guardrail.RulePack = "permissive"
+		fixture.emitter.fail = true
+		if out := fixture.preToolUse(t, "toolu-permissive"); out["action"] != "allow" || out["raw_action"] != "alert" {
+			t.Fatalf("permissive tier: verdict %v, want an allowed alert", out)
 		}
 	})
 	t.Run("managed outage-open still blocks an unaudited call", func(t *testing.T) {
@@ -223,11 +239,11 @@ func TestHookAuditFailureResponseKeepsWhatItCannotTighten(t *testing.T) {
 		req.ConnectorName = "claudecode"
 		return api.finalizeAgentHook(t.Context(), "claudecode", req, resp, nil, []byte(`{}`), time.Millisecond, false, nil)
 	}
-	denied := finalize(agentHookRequest{HookEventName: "PreToolUse", SessionID: "s-1", ToolName: "Bash",
+	degraded := finalize(agentHookRequest{HookEventName: "PreToolUse", SessionID: "s-1", ToolName: "Bash",
 		Payload: map[string]interface{}{"tool_name": "Bash"}}, allow)
-	if !denied.AuditFailedClosed || denied.Response.Action != "block" || !denied.Enforced || denied.AuditPersisted ||
-		denied.Response.EvaluationID != "eval-1" {
-		t.Fatalf("PreToolUse allow with a failed audit write: %+v", denied)
+	if degraded.AuditFailedClosed || degraded.Response.Action != "allow" || degraded.Response.RawAction != "alert" || degraded.Enforced || degraded.AuditPersisted ||
+		degraded.Response.EvaluationID != "eval-1" {
+		t.Fatalf("PreToolUse allow with a failed audit write: %+v", degraded)
 	}
 	block := agentHookResponse{Action: "block", RawAction: "block", Mode: "action", Reason: "policy"}
 	if kept := finalize(agentHookRequest{HookEventName: "PreToolUse", SessionID: "s-1", ToolName: "Bash"}, block); kept.AuditFailedClosed || kept.Response.Reason != "policy" {
@@ -267,46 +283,59 @@ func (transport handlerTransport) RoundTrip(req *http.Request) (*http.Response, 
 	return recorder.Result(), nil
 }
 
-// Review of G-flood-wal round 2 (P1): the fail-closed verdict of a failed
-// audit write was rendered without the request body, so Claude Code got a
-// generic {"decision":"block"} for a PreToolUse. The Unix hook script prints
-// whatever the gateway rendered and exits 0, and Claude Code may run the call.
-// End to end through the native hook runner, the agent now reads the
-// gateway's own PreToolUse denial.
-func TestHookAuditWriteFailureReachesClaudeCodeAsANativeDenial(t *testing.T) {
-	fixture := newAuditFailureHookFixture(t, "")
-	fixture.emitter.fail = true
-	home := t.TempDir()
-	hookDir := filepath.Join(home, "hooks")
-	if err := os.MkdirAll(hookDir, 0o700); err != nil {
-		t.Fatal(err)
+// The native Claude Code hook must relay the gateway's tier-specific audit
+// failure answer: balanced allows with a visible warning, while strict sends
+// Claude Code's own PreToolUse denial rather than a generic block object.
+func TestHookAuditWriteFailureReachesClaudeCodeAsANativeTierDecision(t *testing.T) {
+	for _, tc := range []struct {
+		name, tier string
+		deny       bool
+	}{
+		{name: "balanced", tier: "balanced"},
+		{name: "strict", tier: "strict", deny: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newAuditFailureHookFixture(t, "")
+			fixture.api.scannerCfg.Guardrail.RulePack = tc.tier
+			fixture.emitter.fail = true
+			home := t.TempDir()
+			hookDir := filepath.Join(home, "hooks")
+			if err := os.MkdirAll(hookDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(hookDir, ".token"), []byte("DEFENSECLAW_GATEWAY_TOKEN=\"tkn\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			code := hookexec.Run(t.Context(), hookexec.Options{
+				Connector:  "claudecode",
+				Event:      "PreToolUse",
+				APIAddr:    "127.0.0.1:8787",
+				FailMode:   "closed",
+				Home:       home,
+				HookDir:    hookDir,
+				Stdin:      bytes.NewReader(preToolUseBody(t, "toolu-native")),
+				Stdout:     &stdout,
+				Stderr:     &stderr,
+				HTTPClient: &http.Client{Transport: handlerTransport{handler: fixture.api.handleAgentHook("claudecode")}},
+			})
+			var output map[string]any
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &output); err != nil {
+				t.Fatalf("hook exit %d stdout %q stderr %q: %v", code, stdout.String(), stderr.String(), err)
+			}
+			if code != 0 {
+				t.Fatalf("hook exit %d, want 0 with a structured answer (stderr %q)", code, stderr.String())
+			}
+			if tc.deny {
+				assertClaudeCodePreToolUseDenial(t, output)
+				return
+			}
+			message, _ := output["systemMessage"].(string)
+			if !strings.Contains(message, "audit is degraded") || output["hookSpecificOutput"] != nil || output["decision"] != nil {
+				t.Fatalf("balanced Claude Code output %v; want a visible degraded-audit allow", output)
+			}
+		})
 	}
-	if err := os.WriteFile(filepath.Join(hookDir, ".token"), []byte("DEFENSECLAW_GATEWAY_TOKEN=\"tkn\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var stdout, stderr bytes.Buffer
-	code := hookexec.Run(t.Context(), hookexec.Options{
-		Connector:  "claudecode",
-		Event:      "PreToolUse",
-		APIAddr:    "127.0.0.1:8787",
-		FailMode:   "closed",
-		Home:       home,
-		HookDir:    hookDir,
-		Stdin:      bytes.NewReader(preToolUseBody(t, "toolu-native")),
-		Stdout:     &stdout,
-		Stderr:     &stderr,
-		HTTPClient: &http.Client{Transport: handlerTransport{handler: fixture.api.handleAgentHook("claudecode")}},
-	})
-	var output map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &output); err != nil {
-		t.Fatalf("hook exit %d stdout %q stderr %q: %v", code, stdout.String(), stderr.String(), err)
-	}
-	if code != 0 {
-		t.Fatalf("hook exit %d, want 0 with a structured denial (stderr %q)", code, stderr.String())
-	}
-	// The reason is the gateway's, so the runner relayed the gateway's own
-	// native output rather than replacing an output it could not use.
-	assertClaudeCodePreToolUseDenial(t, output)
 }
 
 // Review of G-flood-wal round 2 (P2): the sandbox recorded a hook's verdict

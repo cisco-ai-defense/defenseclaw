@@ -34,7 +34,7 @@ import (
 // and what the migration does with them.
 func migrateV9Page(t *testing.T) string {
 	t.Helper()
-	page := filepath.Join("..", "..", "docs-site", "content", "docs", "appendix", "migrate-v9.mdx")
+	page := filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "migrate-v9.mdx")
 	data, err := os.ReadFile(page)
 	if err != nil {
 		t.Skipf("docs page not available: %v", err)

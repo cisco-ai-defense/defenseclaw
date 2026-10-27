@@ -34,10 +34,22 @@ func writeUnusedSharedHookRuntime(t *testing.T) (dataDir string, scripts []strin
 
 func TestRemoveUnusedSharedHookRuntimeRemovesAnUnusedRuntime(t *testing.T) {
 	dataDir, scripts := writeUnusedSharedHookRuntime(t)
+	hookDir := filepath.Join(dataDir, "hooks")
+	record := filepath.Join(hookDir, ".gateway-helper")
+	markers := filepath.Join(hookDir, ".outage-warnings")
+	if err := os.WriteFile(record, []byte("helper\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(markers, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(markers, "old-session"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := RemoveUnusedSharedHookRuntime(dataDir); err != nil {
 		t.Fatalf("RemoveUnusedSharedHookRuntime: %v", err)
 	}
-	for _, path := range append(scripts, filepath.Join(dataDir, hookContractLockFile)) {
+	for _, path := range append(scripts, record, markers, filepath.Join(dataDir, hookContractLockFile)) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("%s survived an unused runtime's removal: %v", path, err)
 		}

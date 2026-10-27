@@ -444,19 +444,21 @@ func TestStopOnVMFlushesFirst(t *testing.T) {
 		t.Fatalf("a flushed stop was reported: %+v", got)
 	}
 
-	// The sandbox answers, but the flush did not finish: the stop is held
-	// and OpenShell is not asked to stop it.
+	// The sandbox answers, but the flush did not finish: the stop is not
+	// made (GAP-0902) until the user accepts the loss, which the feed then
+	// reports.
 	e.startBox("flushbox", sandboxapi.StartRequest{})
 	answer = "exited\n"
 	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
-	if _, err := e.m.Stop(t.Context(), "flushbox"); !sandboxapi.IsCode(err, sandboxapi.CodeConflict) || !strings.Contains(err.Error(), "keeps running") {
-		t.Fatalf("stop after a failed flush = %v", err)
-	}
-	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops || e.get("flushbox").Phase != "ready" {
+	_, err := e.m.Stop(t.Context(), "flushbox")
+	wantCode(t, err, sandboxapi.CodeUnsynced)
+	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops || e.get("flushbox").Phase != "ready" ||
+		len(e.events("flushbox", "", "stop_unflushed")) != 0 {
 		t.Fatalf("a stop whose flush failed went ahead: %d stop calls, phase %s", got-stops, e.get("flushbox").Phase)
 	}
-	if got := e.events("flushbox", "", "stop_unflushed"); len(got) != 0 {
-		t.Fatalf("a held stop was reported as one that lost writes: %+v", got)
+	e.stopBoxAcceptingLoss("flushbox")
+	if got := e.events("flushbox", "", "stop_unflushed"); len(got) != 1 || !strings.Contains(got[0].Message, "may come back empty") {
+		t.Fatalf("feed = %+v", got)
 	}
 	answer = "exited\nsynced\n"
 	e.stopBox("flushbox")
@@ -471,7 +473,7 @@ func TestStopOnVMFlushesFirst(t *testing.T) {
 		return openshelltest.ExecResponse{Err: errors.New("exec relay closed")}
 	}))
 	before := len(e.fake.ExecCalls())
-	e.stopBox("flushbox")
+	e.stopBoxAcceptingLoss("flushbox")
 	calls = e.fake.ExecCalls()[before:]
 	if len(calls) != 3 || !slices.Contains(calls[1].Command, "defenseclaw-run-probe") || !slices.Equal(calls[2].Command, []string{"/bin/sync"}) {
 		t.Fatalf("exec calls = %+v", calls)

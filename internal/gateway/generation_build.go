@@ -78,7 +78,7 @@ type generationInputs struct {
 }
 
 // managedPolicyTreeTrust refuses a managed standalone policy_dir that a
-// standard user could change (managed.ValidateTrustedServiceRuntimeTree).
+// standard user could change (config.ValidateManagedPolicyDir).
 var managedPolicyTreeTrust = func(cfg *config.Config, dir string) error {
 	if !cfg.StandaloneEnterprise() || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
@@ -86,8 +86,15 @@ var managedPolicyTreeTrust = func(cfg *config.Config, dir string) error {
 	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	return managed.ValidateTrustedServiceRuntimeTree(dir, "policy_dir", os.Getenv(managed.WindowsServiceAccountEnv))
+	// The same check as the config validation: the rule pack folders no
+	// setting names are not loaded, so they are not trust inputs (GAP-1694).
+	return validateManagedPolicyDir(cfg, dir, os.Getenv(managed.WindowsServiceAccountEnv))
 }
+
+// validateManagedPolicyDir is the shared check managedPolicyTreeTrust runs;
+// a test replaces it (the real one needs root-owned folders) to prove the
+// gateway's build uses it (GAP-1890).
+var validateManagedPolicyDir = config.ValidateManagedPolicyDir
 
 func buildGeneration(ctx context.Context, in generationInputs) (*Generation, error) {
 	cfg := in.cfg
@@ -204,7 +211,9 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		if raw == nil {
 			raw, _ = os.ReadFile(cfg.ConfigFilePath)
 		}
-		switch names := enterprisebundle.VersionDirsNamed(raw, bundlesDir); len(names) {
+		// Only a configuration value names a version directory: a YAML
+		// comment or key that mentions one is not configuration (GAP-1853).
+		switch names := enterprisebundle.VersionDirsInValues(raw, bundlesDir); len(names) {
 		case 0:
 			// A settings-only bundle (config.yaml names no bundle file) is
 			// still digested in the bundle scope: the signer and the staged

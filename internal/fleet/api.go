@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -536,7 +537,7 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 	// Validate the credential delivery channel before RegisterDevice can change
 	// in-memory metadata or durable state on either registration path.
 	if !credentialDeliveryAllowed(r, a.settings) {
-		http.Error(w, `{"error":"key_delivery_requires_tls"}`, http.StatusForbidden)
+		writeJSONError(w, `{"error":"key_delivery_requires_tls"}`, http.StatusForbidden)
 		return
 	}
 	if a.keyStore == nil {
@@ -1105,7 +1106,7 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.Devices) > 1000 {
-		http.Error(w, `{"error":"batch size exceeds maximum of 1000"}`, http.StatusBadRequest)
+		writeJSONError(w, `{"error":"batch size exceeds maximum of 1000"}`, http.StatusBadRequest)
 		return
 	}
 	a.deviceMutationMu.Lock()
@@ -1244,7 +1245,7 @@ func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.TLS == nil {
 		if !credentialDeliveryAllowed(r, a.settings) {
-			http.Error(w, `{"error":"token_delivery_requires_tls"}`, http.StatusForbidden)
+			writeJSONError(w, `{"error":"token_delivery_requires_tls"}`, http.StatusForbidden)
 			return
 		}
 	}
@@ -1308,7 +1309,7 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 	_ = callerTID
 	if r.TLS == nil {
 		if !credentialDeliveryAllowed(r, a.settings) {
-			http.Error(w, `{"error":"key_delivery_requires_tls"}`, http.StatusForbidden)
+			writeJSONError(w, `{"error":"key_delivery_requires_tls"}`, http.StatusForbidden)
 			return
 		}
 	}
@@ -1410,15 +1411,15 @@ func csrfMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			xrw := r.Header.Get("X-Requested-With")
 			xdc := r.Header.Get("X-DefenseClaw-Client")
 			if xrw == "" && xdc == "" {
-				http.Error(w, `{"error":"missing CSRF header"}`, http.StatusForbidden)
+				writeJSONError(w, `{"error":"missing CSRF header"}`, http.StatusForbidden)
 				return
 			}
 			if xdc != "" && !csrfValueValid(xdc) {
-				http.Error(w, `{"error":"invalid X-DefenseClaw-Client header value"}`, http.StatusForbidden)
+				writeJSONError(w, `{"error":"invalid X-DefenseClaw-Client header value"}`, http.StatusForbidden)
 				return
 			}
 			if xrw != "" && !csrfValueValid(xrw) {
-				http.Error(w, `{"error":"invalid X-Requested-With header value"}`, http.StatusForbidden)
+				writeJSONError(w, `{"error":"invalid X-Requested-With header value"}`, http.StatusForbidden)
 				return
 			}
 		}
@@ -1476,6 +1477,16 @@ func isTrustedProxy(r *http.Request, settings FleetSettings) bool {
 func credentialDeliveryAllowed(r *http.Request, settings FleetSettings) bool {
 	return r.TLS != nil || settings.AllowKeyOverHTTP ||
 		(isTrustedProxy(r, settings) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"))
+}
+
+// writeJSONError writes a fixed JSON error body as application/json.
+// http.Error sent these bodies as text/plain while the API reference says
+// every JSON error is application/json (GAP-0569, GAP-1376).
+func writeJSONError(w http.ResponseWriter, body string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, body+"\n")
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -55,3 +55,20 @@ func TestPermissionEditArgsRequiresOneCompleteDeclaredDiff(t *testing.T) {
 		t.Fatalf("extra target became trusted: %s", got)
 	}
 }
+
+func TestPermissionEditArgsNativeCreatedFileDiff(t *testing.T) {
+	for _, path := range []string{"/home/alice/project/README.md", `C:\Users\alice\project\README.md`} {
+		gitPath := strings.TrimPrefix(strings.ReplaceAll(path, `\`, "/"), "/")
+		diff := "\ndiff --git a/" + gitPath + " b/" + gitPath +
+			"\ncreate file mode 100644\nindex 0000000..0000000\n--- a/dev/null\n+++ b/" + gitPath +
+			"\n@@ -1,0 +1,2 @@\n+first\n+second\n"
+		got := PermissionEditArgs("edit", map[string]any{"file_path": path, "diff": diff})
+		if len(got) == 0 || !strings.Contains(string(got), `"new_str":"first\nsecond"`) {
+			t.Fatalf("native create diff %q projected=%s", path, got)
+		}
+		if bad := PermissionEditArgs("edit", map[string]any{"file_path": path,
+			"diff": strings.Replace(diff, "+++ b/"+gitPath, "+++ b/other.txt", 1)}); len(bad) != 0 {
+			t.Fatalf("mismatched created file projected=%s", bad)
+		}
+	}
+}

@@ -35,6 +35,10 @@ func privateInstallContractReason(name, version string) string {
 // windowsPrivateInstallMachineRoots are machine npm prefixes every account
 // can run a copy from: Node's own folder, where npm puts global packages
 // when the prefix is the Node installation. Tests replace it.
+// privateInstallWalkDefaultMaxEntries is the profile walk entry bound on
+// Windows, unchanged by the Unix bound (private_agent_install_walk_unix.go).
+const privateInstallWalkDefaultMaxEntries = 1 << 19
+
 var windowsPrivateInstallMachineRoots = func() []string {
 	programFiles := strings.TrimSpace(os.Getenv("ProgramFiles"))
 	if programFiles == "" || !filepath.IsAbs(programFiles) {

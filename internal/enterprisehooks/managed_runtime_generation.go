@@ -159,6 +159,11 @@ type WindowsManagedRuntimeGenerationGCOptions struct {
 	TargetSID      string
 	DataDir        string
 	HookExecutable string
+	// Retired is set by the uninstall finalize, which runs after the
+	// guardian is gone and the selectors no longer name the target: no
+	// publication can be in flight, so the bundles a recent ensure, repair
+	// or config change prepared are collected too (GAP-1986).
+	Retired bool
 }
 
 // WindowsManagedRuntimeGenerationPublication is an opaque prepared immutable

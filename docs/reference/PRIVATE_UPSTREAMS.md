@@ -4,7 +4,7 @@
 setup guidance. Configuration and environment-variable usage are maintained in the
 [configuration reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/)
 and
-[environment-variable catalog](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/env-vars/).
+[environment-variable catalog](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/env-vars/).
 
 ## Contract
 

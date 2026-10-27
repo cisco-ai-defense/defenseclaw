@@ -1,0 +1,121 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package hookexec
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"testing"
+	"time"
+)
+
+// oss-outage-open rounds i to k (one liveness rule, no clock): a lock is no
+// lock only when its owner is gone: its pid names no process, or the
+// reader's own, or another process than its proc-start record names. A
+// live owner keeps it for as long as it runs; so does a lock without a
+// valid pid, and a 1.0.2/1.0.3 lock without a record whose pid names a
+// process. The lock's age, its pid file's time and a deadline an earlier
+// build recorded are never read: every row runs with each of them a week in
+// the past and a week in the future (a wall-clock step either way).
+func TestInstallLockHeldIgnoresOnlyALockWhoseOwnerIsGone(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exited := exec.Command(self, "-test.run=^$")
+	if err := exited.Run(); err != nil {
+		t.Fatal(err)
+	}
+	dead := strconv.Itoa(exited.ProcessState.Pid())
+	live := strconv.Itoa(os.Getppid())
+	type owner struct {
+		pid, deadline, record string
+	}
+	for _, tc := range []struct {
+		name string
+		lock owner
+		held bool
+	}{
+		{"installer exited", owner{pid: dead + "\n"}, false},
+		{"installer exited, Windows line end", owner{pid: dead + "\r\n"}, false},
+		{"installer running", owner{pid: live + "\n"}, true},
+		{"installer running, a deadline an earlier build recorded", owner{pid: live, deadline: "1"}, true},
+		// Without a proc-start record no clock may tell a reused pid from a
+		// live owner: a 1.0.2/1.0.3 PID-only lock holds while its pid names
+		// a process (GAP-1465 is the reused pid of a lock with a record).
+		{"1.0.2/1.0.3 PID-only lock, its pid names a process", owner{pid: live}, true},
+		{"1.0.2/1.0.3 PID-only lock, installer exited", owner{pid: dead}, false},
+		// Loop round 2 P2: no reader writes a lock, so a lock naming the
+		// reader's own pid is a reused pid.
+		{"lock names this reader's own pid", owner{pid: strconv.Itoa(os.Getpid())}, false},
+		// Round k: a lock without a valid pid holds; no wait expires it.
+		{"no pid", owner{}, true},
+		{"empty pid", owner{pid: " "}, true},
+		{"pid not a number", owner{pid: "abc"}, true},
+		{"pid out of range", owner{pid: "99999999999"}, true},
+		{"interrupted install kept previous.new", owner{pid: dead, record: "previous.new"}, true},
+		{"interrupted install kept .repair", owner{pid: dead, record: ".repair"}, true},
+		{"interrupted install kept .rollback-hold", owner{pid: dead, record: ".rollback-hold"}, true},
+		{"interrupted Windows install kept its record", owner{pid: dead, record: ".lifecycle-txn.json"}, true},
+		{"interrupted install, an earlier build's deadline", owner{pid: dead, record: "previous.new", deadline: "1"}, true},
+	} {
+		for _, step := range []time.Duration{0, -7 * 24 * time.Hour, 7 * 24 * time.Hour} {
+			t.Run(tc.name+"/times "+step.String(), func(t *testing.T) {
+				home := t.TempDir()
+				lock := filepath.Join(home, ".install.lock")
+				if err := os.Mkdir(lock, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				for name, value := range map[string]string{"pid": tc.lock.pid, "deadline": tc.lock.deadline} {
+					if value == "" {
+						continue
+					}
+					if err := os.WriteFile(filepath.Join(lock, name), []byte(value), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if tc.lock.record != "" {
+					if err := os.Mkdir(filepath.Join(home, tc.lock.record), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if step != 0 {
+					then := time.Now().Add(step)
+					for _, path := range []string{filepath.Join(lock, "pid"), lock} {
+						if err := os.Chtimes(path, then, then); err != nil && !os.IsNotExist(err) {
+							t.Fatal(err)
+						}
+					}
+				}
+				if got := InstallLockHeld(home); got != tc.held {
+					t.Fatalf("InstallLockHeld = %v, want %v", got, tc.held)
+				}
+				opts := Options{Home: home, FailMode: "open"}
+				if got := closeDuringInstall(&opts, "open"); (got == "closed") != tc.held {
+					t.Fatalf("closeDuringInstall = %q with the lock held %v", got, tc.held)
+				}
+			})
+		}
+	}
+	t.Run("lock that is a file", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, ".install.lock"), []byte(dead), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !InstallLockHeld(home) {
+			t.Fatal("a lock that is not a folder must hold")
+		}
+	})
+	t.Run("pid that is a folder", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(home, ".install.lock", "pid"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if !InstallLockHeld(home) {
+			t.Fatal("a pid record that cannot be read must hold")
+		}
+	})
+}

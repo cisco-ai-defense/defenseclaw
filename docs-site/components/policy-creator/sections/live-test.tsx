@@ -27,6 +27,7 @@ import type { Policy, Scenario } from '../types';
 import { projectPolicyToData } from '../lib/data-projection';
 import { evalDomain, isOpaAvailable, OpaUnavailableError } from '../lib/opa-eval';
 import { highlightJsonToHtml } from '../lib/json-highlight';
+import { expectedVerdictFor, presetDiverges } from '../lib/scenario-expectation';
 import { listScenariosForDomain, ScenarioJsonPreview, ScenarioPicker } from '../ui/scenario-picker';
 import { SegmentedControl } from '../ui/segmented-control';
 import { VerdictBadge } from '../ui/verdict-badge';
@@ -251,8 +252,10 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
     setCorpusResults(
       scenarios.map((s) => ({
         id: s.id,
-        title: s.title,
-        expected: s.expectedVerdict,
+        title: presetDiverges(s, policy.basedOn)
+          ? `${s.title} (the ${policy.basedOn} preset expects ${expectedVerdictFor(s, policy.basedOn)})`
+          : s.title,
+        expected: expectedVerdictFor(s, policy.basedOn),
         got: '…',
         reason: null,
         matches: false,
@@ -272,7 +275,7 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
                     ...row,
                     got: res.verdict,
                     reason: res.reason ?? null,
-                    matches: s.expectedVerdict != null && res.verdict === s.expectedVerdict,
+                    matches: s.expectedVerdict != null && res.verdict === expectedVerdictFor(s, policy.basedOn),
                     errored: false,
                   }
                 : row,
@@ -301,7 +304,7 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
       cancelled = true;
       setCorpusRunning(false);
     };
-  }, [source, domain, data, available]);
+  }, [source, domain, data, available, policy.basedOn]);
 
   function seedFromScenario() {
     if (!scenario) return;
@@ -315,7 +318,7 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
     setCustomByDomain((prev) => ({ ...prev, [domain]: '' }));
   }
 
-  const expected = scenario?.expectedVerdict;
+  const expected = scenario ? expectedVerdictFor(scenario, policy.basedOn) : undefined;
   const matchesExpected =
     source === 'scenario' && expected != null && verdict === expected;
   const observeHint = domain === 'guardrail' && data.guardrail.mode === 'observe'

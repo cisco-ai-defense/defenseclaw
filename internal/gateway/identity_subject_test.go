@@ -146,6 +146,7 @@ func TestSecureClientIgnoresIdentityFacts(t *testing.T) {
 // facts again within the cache lifetime emit nothing, but changed facts (a
 // group added in the directory) emit at once, not up to 15 minutes later.
 func TestVerifiedSubjectEmitsIdentityObserved(t *testing.T) {
+	isolateIdentityObservedThrottle(t)
 	setIdentityFactsEnabled(true)
 	t.Cleanup(func() { setIdentityFactsEnabled(false) })
 	capture := &endpointInventoryCapture{}
@@ -185,6 +186,7 @@ func TestVerifiedSubjectEmitsIdentityObserved(t *testing.T) {
 
 // A failed local write must leave unchanged facts due for the next hook.
 func TestIdentityObservedRetriesAfterEmissionFailure(t *testing.T) {
+	isolateIdentityObservedThrottle(t)
 	subject := VerifiedSubject{
 		UserID: "identity-retry-user", IDKind: useridentity.KindPOSIXUID, UserName: "alice",
 		Directory: useridentity.DirectoryFacts{

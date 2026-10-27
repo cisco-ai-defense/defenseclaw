@@ -1,0 +1,86 @@
+---
+title: Verify a policy locally
+description: Test a policy-creator install script in an isolated DefenseClaw home, validate its Rego, and dry-run an admission decision before promotion.
+keywords:
+  - DefenseClaw policy
+  - policy verification
+  - install script
+  - defenseclaw policy activate
+  - defenseclaw-gateway policy evaluate
+  - OPA test
+---
+
+<Callout title="Shell examples">
+The shell examples require Bash. On native Windows, use Git Bash or WSL; PowerShell uses different continuation and environment-variable syntax.
+</Callout>
+
+The [Policy creator](/docs/policies/creator) downloads an install script that writes the policy files and runs `defenseclaw policy activate`. Test the script in a throwaway home before you run it on a shared install. Read the script first; it inlines every pack file.
+
+## 1. Inspect and isolate
+
+Isolate the home and list the script's write targets.
+
+```bash
+INSTALL_SCRIPT="$HOME/Downloads/install-my-policy.sh"
+REAL_HOME="$HOME"
+REAL_DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-$HOME/.defenseclaw}"
+VERIFY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-policy-verify.XXXXXX")"
+export HOME="$VERIFY_HOME" DEFENSECLAW_HOME="$VERIFY_HOME/.defenseclaw"
+grep -nE '^(cat >|defenseclaw )' "$INSTALL_SCRIPT"
+```
+
+## 2. Initialize the throwaway installation
+
+Create a minimal install.
+
+```bash
+defenseclaw init --non-interactive --yes --connector codex \
+  --skip-install --no-start-gateway --no-verify
+```
+
+## 3. Run and inspect the generated script
+
+Run the script and read the policy back. Use the name the creator showed in place of `my-policy`.
+
+```bash
+bash -n "$INSTALL_SCRIPT" && bash "$INSTALL_SCRIPT"
+defenseclaw policy show my-policy
+```
+
+## 4. Validate and test the active Rego
+
+Compile and test the Rego, and read the effective values. `opa` is used when it is on `PATH`, otherwise the engine inside `defenseclaw-gateway`.
+
+```bash
+defenseclaw policy validate --rego-dir "$DEFENSECLAW_HOME/policies/rego"
+defenseclaw policy test --rego-dir "$DEFENSECLAW_HOME/policies/rego" --verbose
+defenseclaw config get guardrail.block_at --effective
+```
+
+## 5. Dry-run an admission decision
+
+```bash
+defenseclaw-gateway policy evaluate --target-type skill \
+  --target-name test-skill --severity HIGH --findings 3
+```
+
+The JSON decision should match the HIGH action you set in the creator.
+
+## 6. Validate and switch to the rule pack
+
+Validate and switch to the rule pack. The throwaway gateway is not running, so `use-pack` warns that the audit event was not recorded. That is expected.
+
+```bash
+defenseclaw guardrail validate-pack "$DEFENSECLAW_HOME/policies/guardrail/my-policy"
+defenseclaw guardrail use-pack my-policy
+```
+
+## 7. Promote or clean up
+
+Clean up the throwaway home:
+
+```bash
+rm -rf -- "${VERIFY_HOME:?}"
+```
+
+To promote, run the reviewed script and `use-pack` again with `HOME="$REAL_HOME" DEFENSECLAW_HOME="$REAL_DEFENSECLAW_HOME"`.

@@ -939,13 +939,15 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 	}
 	// GAP-0575: so is an Open Directory answer without the guardian's UPN or
 	// without its directory (an Active Directory account before the
-	// guardian's record, which Open Directory may list as a local node
-	// account), but not one the record named.
+	// guardian's record), but not one the record named. GAP-0532: an account
+	// the answer proves is of the local node (not a mobile copy) has no UPN
+	// to wait for.
 	if !awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory}) ||
-		!awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryLocal}) ||
+		!awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryActiveDirectory}) ||
+		awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryLocal}) ||
 		awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryActiveDirectory,
 			UPN: "alice@corp.example.com"}) {
-		t.Fatal("Open Directory facts without a UPN or a directory must await the guardian record, facts the record named must not")
+		t.Fatal("Open Directory facts without a UPN or a directory must await the guardian record; a local node account and facts the record named must not")
 	}
 	setIdentitySpoolDir("")
 	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()) != "" {
@@ -1759,42 +1761,82 @@ func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 	}
 }
 
-// A qualified-name SSSD host can have the same short account name in two
-// trusted domains. Neither account may receive a relaxed profile by that
-// short name; the administrator must use a qualified name or uid.
+// GAP-0725: on a host whose SSSD AD accounts come from more than one trusted
+// domain, a bare users entry selects the account of that name in each of
+// them. In the default and permissive policy tiers it still matches (no
+// over-tightening: 1.0.3 configs keep their meaning), and explain, status and
+// verify warn and name every account it selects with the exact replacement.
+// The strict policy tier refuses the ambiguous entry when it could change
+// the decision.
 func TestSSSDQualifiedNamesDoNotGrantBareNamesakeProfile(t *testing.T) {
 	useridentity.SetTrustedADChildDomains([]string{"dclab2.test"})
 	t.Cleanup(func() { useridentity.SetTrustedADChildDomains(nil) })
 	previous := identityFactsEnabled.Load()
 	setIdentityFactsEnabled(true)
 	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
-	cfg := &config.Config{}
-	cfg.Guardrail.Mode = "action"
-	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
-		"strict": {Mode: "action", BlockAt: "low"}, "relaxed": {Mode: "observe"},
-	}
-	cfg.Guardrail.DefaultProfile = "strict"
-	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{
-		Profile: "relaxed", Match: config.ProfileMatch{Users: []string{"dcad-r103-eng1"}},
-	}}
-	set, err := newGuardrailProfileSet(cfg, nil, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct{ uid, domain, source string }{
+	namesakes := []struct{ uid, domain, source string }{
 		{"94404135", "dclab.test", useridentity.SourceSSSD},
 		{"844201107", "dclab2.test", useridentity.SourceSSSDInfoPipe},
-	} {
-		subject := profileSubjectFromVerified(VerifiedSubject{
-			UserID: tc.uid, UserName: "dcad-r103-eng1@" + tc.domain,
-			Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
-				Source: tc.source, Domain: tc.domain, ResolvedAt: time.Now()},
-		}, true)
-		if got := set.match(&subject, profileSubjectVerified, "claudecode", ""); got.Name != "strict" || got.Refused == "" ||
-			got.Match != profileMatchDefaultLookupFailed {
-			t.Errorf("%s: bare namesake decision %+v; want strict refusal", tc.domain, got)
-		} else if warning := ambiguousShortNameUserNote(set, got, &subject); !strings.Contains(warning, "uid "+tc.uid) {
-			t.Errorf("%s: ambiguous decision did not name an exact replacement: %q", tc.domain, warning)
+	}
+	previousRecords := profileShortNameRecords
+	profileShortNameRecords = func() []enterprisehooks.IdentitySpoolRecord {
+		var records []enterprisehooks.IdentitySpoolRecord
+		for _, tc := range namesakes {
+			records = append(records, enterprisehooks.IdentitySpoolRecord{Key: tc.uid, User: "dcad-r103-eng1@" + tc.domain,
+				Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Source: tc.source,
+					Domain: tc.domain, UPN: "dcad-r103-eng1@" + tc.domain}})
+		}
+		return records
+	}
+	t.Cleanup(func() { profileShortNameRecords = previousRecords })
+	for _, tier := range []string{"", "strict"} {
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = "action"
+		if tier == "strict" {
+			// A pack folder named strict is the strict policy tier.
+			cfg.Guardrail.RulePackDir = meetRulePackDir(t, t.TempDir(), "strict")
+		}
+		cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+			"strict": {Mode: "action", BlockAt: "low"}, "relaxed": {Mode: "observe"},
+		}
+		cfg.Guardrail.DefaultProfile = "strict"
+		cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{
+			Profile: "relaxed", Match: config.ProfileMatch{Users: []string{"dcad-r103-eng1"}},
+		}}
+		set, err := newGuardrailProfileSet(cfg, nil, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range namesakes {
+			subject := profileSubjectFromVerified(VerifiedSubject{
+				UserID: tc.uid, UserName: "dcad-r103-eng1@" + tc.domain,
+				Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+					Source: tc.source, Domain: tc.domain, ResolvedAt: time.Now()},
+			}, true)
+			got := set.match(&subject, profileSubjectVerified, "claudecode", "")
+			warning := ambiguousShortNameUserNote(set, got, &subject)
+			if tier == "strict" {
+				if got.Name != "strict" || got.Refused == "" || got.Match != profileMatchDefaultLookupFailed {
+					t.Errorf("strict tier, %s: bare namesake decision %+v; want the strict refusal", tc.domain, got)
+				}
+				if !strings.Contains(warning, "strict policy tier refuses") {
+					t.Errorf("strict tier, %s: warning %q does not say the tier refuses the entry", tc.domain, warning)
+				}
+			} else if got.Name != "relaxed" || got.Refused != "" || got.Match != profileMatchUser {
+				t.Errorf("default tier, %s: bare namesake decision %+v; want relaxed by user, as before", tc.domain, got)
+			}
+			for _, other := range namesakes {
+				if !strings.Contains(warning, "dcad-r103-eng1@"+other.domain) || !strings.Contains(warning, "uid "+other.uid) {
+					t.Errorf("tier %q, %s: warning %q does not name %s (uid %s)", tier, tc.domain, warning, other.domain, other.uid)
+				}
+			}
+			if note := shortNameUserNote(set, got, &subject); note != "" {
+				t.Errorf("tier %q, %s: a second short-name note %q", tier, tc.domain, note)
+			}
+		}
+		health := strings.Join(shortNameAssignmentWarnings(set.assignments, profileShortNameRecords()), "\n")
+		if strings.Count(health, "assignment 1") != 1 || !strings.Contains(health, "dcad-r103-eng1@dclab.test (uid 94404135) and dcad-r103-eng1@dclab2.test (uid 844201107)") {
+			t.Errorf("tier %q: status and verify warning %q does not name both accounts in one line", tier, health)
 		}
 	}
 }
@@ -1842,9 +1884,9 @@ func TestSingleDomainSSSDBareUserAssignmentSurvivesUpgrade(t *testing.T) {
 	}
 }
 
-// PM-13: a bare users entry never selects a local namesake. On an SSSD host
-// with qualified names it is ambiguous across trusted domains and refuses;
-// on Windows and macOS it selects the directory account. The local account
+// PM-13: a bare users entry never selects a local namesake; it selects the
+// directory account (on an SSSD host with qualified names in the default
+// tier too: only the strict tier refuses it as ambiguous, GAP-0725). The local account
 // is selected by its uid or SID, or as .\name (GAP-0305, GAP-0313, GAP-0418,
 // GAP-0725).
 func TestBareUsersEntrySkipsLocalNamesake(t *testing.T) {
@@ -1903,12 +1945,7 @@ func TestBareUsersEntrySkipsLocalNamesake(t *testing.T) {
 			domain := profileSubjectFromVerified(tc.domain, true)
 			local := profileSubjectFromVerified(tc.local, true)
 			got := set.match(&domain, profileSubjectVerified, "claudecode", "")
-			if tc.name == "linux" {
-				if got.Refused == "" || got.Match != profileMatchDefaultLookupFailed ||
-					!slices.Contains(got.Unproven, "account:ambiguous_short_name") {
-					t.Fatalf("qualified directory account: %+v, want ambiguous short-name refusal", got)
-				}
-			} else if got.Name != "contractors" || got.Match != profileMatchUser {
+			if got.Name != "contractors" || got.Match != profileMatchUser {
 				t.Fatalf("directory account: %+v, want contractors by user", got)
 			}
 			if got := set.match(&local, profileSubjectVerified, "claudecode", ""); got.Name != "floor" || got.Match != profileMatchDefault {

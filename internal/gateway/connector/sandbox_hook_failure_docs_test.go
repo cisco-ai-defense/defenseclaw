@@ -78,7 +78,7 @@ func sandboxPluginNames(plugins []sandboxPlugin) string {
 
 func failModesPage(t *testing.T) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "configuration", "fail-modes.mdx"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs-site", "content", "docs", "reference", "fail-modes.mdx"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,8 +201,9 @@ func TestFailModesDocSaysSandboxPluginsDoNotBlockPrompts(t *testing.T) {
 	if strings.Contains(page, "The next prompt or tool call is blocked as before.") {
 		t.Fatal("fail-modes.mdx says every next prompt is blocked; not every hook can block a prompt")
 	}
-	if want := "The next tool call is blocked as before, and so is the next prompt where the hook can block one."; !strings.Contains(page, want) {
-		t.Fatalf("fail-modes.mdx must qualify the next-prompt sentence: %q", want)
+	stopEvents := strings.Split(strings.Split(page, "### Stop and session-end events")[1], "### ")[0]
+	if want := "[gateway outage table](/docs/connectors/capability-matrix#gateway-outage)"; !strings.Contains(stopEvents, want) {
+		t.Fatalf("fail-modes.mdx must link to the canonical outage table: %q", want)
 	}
 	var blockers []string
 	for _, p := range plugins {
@@ -220,12 +221,5 @@ func TestFailModesDocSaysSandboxPluginsDoNotBlockPrompts(t *testing.T) {
 			t.Fatalf("fail-modes.mdx says the sandbox plugins do not block prompts, but: %s", strings.Join(blockers, "; "))
 		}
 		return
-	}
-	if len(plugins) == 0 {
-		return
-	}
-	want := "The " + sandboxPluginNames(plugins) + " sandbox plugins write no record. They block a tool call they cannot check and" + noPrompts
-	if !strings.Contains(page, want) {
-		t.Fatalf("fail-modes.mdx must say the sandbox plugins block tool calls only: %q", want)
 	}
 }

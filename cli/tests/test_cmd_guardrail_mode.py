@@ -112,7 +112,7 @@ def test_global_switch_sets_only_guardrail_mode(app) -> None:
 
 def test_cursor_mode_switch_keeps_its_fail_mode(app, restarts, rerenders) -> None:
     # The guardrail mode no longer pins Cursor's fail mode: like every other
-    # connector its outage mode follows the policy tier (oss-outage-open), so
+    # connector it keeps the explicitly saved mode, so
     # a mode switch re-renders no hook and restarts nothing.
     app.cfg.claw.mode = "cursor"
     app.cfg.guardrail.connector = "cursor"
@@ -120,7 +120,7 @@ def test_cursor_mode_switch_keeps_its_fail_mode(app, restarts, rerenders) -> Non
     assert payload["gateway"] == "live" and restarts == [] and rerenders == []
     _run(app, "observe")
     assert restarts == [] and rerenders == []
-    assert app.cfg.guardrail.effective_hook_fail_mode("cursor") == "open"
+    assert app.cfg.guardrail.effective_hook_fail_mode("cursor") == "closed"
 
 
 def test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode(app, restarts, rerenders) -> None:
@@ -130,8 +130,34 @@ def test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode(app, restart
     assert payload["gateway"] == "live" and rerenders == [] and restarts == []
     _, payload = _run(app, "observe", "--json")
     assert rerenders == [] and restarts == []
-    # The default tier's outage mode (oss-outage-open).
-    assert app.cfg.guardrail.effective_hook_fail_mode("codex") == "open"
+    # The fixture has an explicit saved closed choice.
+    assert app.cfg.guardrail.effective_hook_fail_mode("codex") == "closed"
+
+
+@pytest.mark.parametrize("scope", ["global", "connector", "clear"])
+@pytest.mark.parametrize("fail_mode", ["closed", "open"])
+def test_observe_message_scopes_policy_findings_and_closed_outages(app, monkeypatch, scope, fail_mode) -> None:
+    gc = app.cfg.guardrail
+    monkeypatch.setattr(type(gc), "effective_hook_fail_mode", lambda _self, _connector: fail_mode)
+    if scope == "global":
+        gc.mode = "action"
+        args = ("observe", "--json")
+    elif scope == "connector":
+        gc.mode = "action"
+        args = ("observe", "--connector", "codex", "--json")
+    else:
+        gc.connectors = {"codex": PerConnectorGuardrailConfig(mode="action")}
+        args = ("--clear", "--connector", "codex", "--json")
+
+    result, payload = _run(app, *args)
+    assert result.exit_code == 0, result.output
+    message = payload["message"]
+    assert "policy findings" in message
+    assert "blocks nothing" not in message
+    if fail_mode == "closed":
+        assert "gateway outage" in message and "deny" in message
+    else:
+        assert "gateway outage" not in message
 
 
 def test_connector_override_created_on_a_single_install(app, restarts, rerenders) -> None:
@@ -152,7 +178,9 @@ def test_connector_override_created_on_a_single_install(app, restarts, rerenders
     assert payload["changed"] is False  # already there
     _, payload = _run(app, "--clear", "--connector", "codex", "--no-restart", "--json")
     assert (payload["mode"], payload["mode_source"], payload["gateway"]) == ("observe", "global", "live")
-    assert gc.connectors["codex"].mode == ""
+    # guardrail.connector already lists codex, so its emptied entry goes (GAP-1954).
+    assert "codex" not in gc.connectors
+    assert app.cfg.active_connectors() == ["codex"]
 
 
 def test_connector_scope_leaves_peers_alone_and_global_names_overrides(app) -> None:

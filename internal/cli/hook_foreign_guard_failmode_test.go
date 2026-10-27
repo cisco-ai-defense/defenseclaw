@@ -197,6 +197,11 @@ func TestForeignHookCheckDeniesAGuardedConnectorDuringAGatewayOutage(t *testing.
 		if !result.Deny || !strings.Contains(result.Reason, hookexec.ManagedGatewayNotRunningReason) {
 			t.Fatalf("%s: a stopped gateway must deny with the not-running reason: %+v", connector, result)
 		}
+		// Loop round 2 review of 06bb83dd (GAP-1180): the plugins retry their
+		// load-time check only on this structured flag, never on reason text.
+		if !result.Retryable {
+			t.Fatalf("%s: a stopped gateway with a clean scan must be a retryable denial: %+v", connector, result)
+		}
 		if connector == "hermes" {
 			if result.HookOutput == nil || result.HookOutput.Action != "block" || !strings.HasSuffix(result.HookOutput.Message, "("+hookexec.ManagedGatewayNotRunningReason+")") {
 				t.Fatalf("hermes: the outage denial must carry the Hermes block object: %+v", result.HookOutput)

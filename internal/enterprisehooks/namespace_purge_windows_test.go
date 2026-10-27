@@ -581,6 +581,43 @@ func TestPurgeWindowsNamespaceRootRejectsJunctionChild(t *testing.T) {
 	}
 }
 
+// GAP-1902: an installed file a LocalSystem writer restored (owner and group
+// SYSTEM, the protected install DACL) is DefenseClaw's own; the forced
+// uninstall's exact-root purge accepts it. Any other owner, or another DACL,
+// stays foreign.
+func TestWindowsNamespacePurgeAcceptsSystemOwnedInstallFile(t *testing.T) {
+	descriptors, err := windowsNamespacePurgeCanonicalDescriptors(windowsNamespacePurgeTestGatewaySID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		sddl string
+		want bool
+	}{
+		{"O:SYG:SYD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)", true},
+		{"O:SYG:SYD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)(A;;0x1200a9;;;" + windowsNamespacePurgeTestGatewaySID + ")", true},
+		{"O:BAG:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)", true},
+		{"O:BUG:BUD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)", false},
+		{"O:SYG:SYD:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;BU)", false},
+	} {
+		actual, err := windows.SecurityDescriptorFromString(tc.sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		matched := false
+		for _, candidate := range descriptors.files {
+			equal, err := windowsNamespacePurgeDescriptorsEqual(actual, candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			matched = matched || equal
+		}
+		if matched != tc.want {
+			t.Errorf("%s accepted=%t, want %t", tc.sddl, matched, tc.want)
+		}
+	}
+}
+
 func TestPurgeWindowsNamespaceRootRejectsForeignDescriptor(t *testing.T) {
 	request, root := newWindowsNamespacePurgeEmptyTestRoot(t)
 	foreign := filepath.Join(root, "foreign.txt")

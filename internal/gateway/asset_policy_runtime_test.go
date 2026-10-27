@@ -874,6 +874,39 @@ func TestUnprovenMCPDefinitionIgnoresUnrelatedPinnedDeny(t *testing.T) {
 	}
 }
 
+func TestUnprovenMCPDefinitionRespectsRuntimeDetectionSwitch(t *testing.T) {
+	for _, kind := range []string{"registry", "allow", "deny"} {
+		t.Run(kind, func(t *testing.T) {
+			cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+			cfg.AssetPolicy.Enabled = true
+			cfg.AssetPolicy.Mode = config.AssetPolicyModeAction
+			cfg.AssetPolicy.MCP.RuntimeDetection.Enabled = false
+			cfg.AssetPolicy.MCP.RegistryRequired = true
+			rule := config.AssetPolicyRule{Name: "docs", URL: "https://mcp.example.invalid"}
+			switch kind {
+			case "registry":
+				cfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{rule}
+			case "allow":
+				cfg.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{rule}
+			case "deny":
+				cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{rule}
+			}
+			api := &APIServer{scannerCfg: cfg}
+			ctx := context.WithValue(context.Background(), claimedAssetFactsContextKey{}, assetfacts.Facts{MCPUnproven: "docs"})
+			decision, matched := api.evaluateRuntimeMCPAssetPolicy(ctx, "claudecode", "PreToolUse", mcpRuntimeProbe{
+				Matched: true, Surface: "hook", ServerName: "docs",
+			})
+			if kind == "deny" {
+				if !matched || decision.Action != "block" {
+					t.Fatalf("explicit endpoint deny must still block: %+v matched=%v", decision, matched)
+				}
+			} else if matched {
+				t.Fatalf("runtime detection is off but %s blocked: %+v", kind, decision)
+			}
+		})
+	}
+}
+
 // GAP-0939: Codex shows a hyphenated MCP server to its hooks as
 // mcp__acme_notes__<tool>. The registry and the lists still match the server
 // under the name its Codex config gives it, so an approved acme-notes runs and

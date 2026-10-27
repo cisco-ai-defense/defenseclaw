@@ -36,6 +36,7 @@ jobs:
   changes:
     name: Detect macOS app changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     env:
       # The app embeds no runtime, so only app sources and its packaging
       # scripts affect this build.
@@ -119,6 +120,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.macos == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -130,6 +132,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.macos == 'true' }}
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -160,6 +163,7 @@ jobs:
     needs: [changes, license-headers, build-and-test]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Require every macOS app check
         env:

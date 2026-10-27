@@ -865,6 +865,32 @@ func newAuditEventRuntimeV8GeneratedMetric(event Event) (RuntimeV8GeneratedMetri
 	}, nil
 }
 
+// activityMetricActorKinds is the closed vocabulary of the activity
+// counters' actor label. An actor is audit evidence: the record keeps it
+// whole, while the label keeps only its kind, the part before ":" ("cli"
+// for "cli:alice"), so an account name, SID, UPN or a caller-chosen API
+// token never becomes a metric dimension (GAP-0377).
+var activityMetricActorKinds = map[string]bool{
+	"api": true, "cli": true, "control-plane": true, "defenseclaw": true, "defenseclaw-gateway": true,
+	"defenseclaw-hook": true, "defenseclaw-hook-guard": true, "gateway": true, "guardian": true,
+	"hand-edit": true, "lifecycle": true, "local_account": true, "migration": true, "operator": true,
+	"os": true, "sandbox": true, "system": true, "tui": true, "unattributed": true, "watchdog": true,
+	"watcher": true,
+}
+
+// activityMetricActor is the actor label of the activity counters: the
+// actor's kind from activityMetricActorKinds, "other" for anything else.
+func activityMetricActor(actor string) string {
+	kind, _, _ := strings.Cut(strings.TrimSpace(actor), ":")
+	if kind == "" {
+		return ""
+	}
+	if activityMetricActorKinds[kind] {
+		return kind
+	}
+	return "other"
+}
+
 func newActivityRuntimeV8GeneratedMetrics(
 	event Event,
 	action string,
@@ -881,8 +907,8 @@ func newActivityRuntimeV8GeneratedMetrics(
 		actor      observability.Optional[string]
 	}{
 		action:     optionalAuditMetricDimension(action),
-		targetType: optionalAuditMetricDimension(targetType),
-		actor:      optionalAuditMetricDimension(actor),
+		targetType: observability.Present(activityMetricTargetType(targetType)),
+		actor:      optionalAuditMetricDimension(activityMetricActor(actor)),
 	}
 	build := func(
 		family observability.EventName,
@@ -940,6 +966,19 @@ func newActivityRuntimeV8GeneratedMetrics(
 		build(observability.EventName(observability.TelemetryInstrumentDefenseClawActivityTotal), 1),
 		build(observability.EventName(observability.TelemetryInstrumentDefenseClawActivityDiffEntries), int64(diffEntries)),
 	}, nil
+}
+
+// Activity input retains its raw target and actor in audit evidence. Metric
+// labels use only product categories, including for account-shaped values
+// that happen to be valid stable tokens.
+func activityMetricTargetType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "config", "policy", "policy_bundle", "skill", "mcp", "plugin", "tool",
+		"prompt", "tool_call", "tool_response", "file", "code":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "unknown"
+	}
 }
 
 func (l *Logger) recordAuditEventMetricV8(

@@ -1,7 +1,7 @@
 # Environment variables
 
 The generated, canonical catalog is published on the
-[DefenseClaw environment-variable reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/env-vars/).
+[DefenseClaw environment-variable reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/env-vars/).
 
 The code-level source of truth is
 [`../internal/envvars/registry.json`](../internal/envvars/registry.json).

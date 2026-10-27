@@ -23,6 +23,7 @@ jobs:
   changes:
     name: Detect telemetry registry changes
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       telemetry: ${{ steps.detect.outputs.telemetry }}
     steps:
@@ -85,7 +86,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.telemetry == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -99,6 +100,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          # Only main writes the uv cache; other refs restore it.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: uv sync
       - run: make _bundle-data
       - name: Run exhaustive telemetry registry suite
@@ -117,6 +122,7 @@ jobs:
     needs: [changes, exhaustive]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Require every exhaustive suite
         env:

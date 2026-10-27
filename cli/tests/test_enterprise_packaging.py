@@ -844,7 +844,7 @@ def test_launchd_enterprise_installer_matches_cisco_plist_layout():
     assert "system/com.defenseclaw." not in text
 
     deployment_docs = (
-        ROOT / "docs-site" / "content" / "docs" / "enterprise" / "install" / "reference" / "secure-client.mdx"
+        ROOT / "docs-site" / "content" / "docs" / "enterprise" / "secure-client.mdx"
     ).read_text(encoding="utf-8")
     documented_contract = {
         "There is no dedicated `defenseclaw` service user on macOS.",
@@ -2660,3 +2660,190 @@ def test_linux_preremove_leaves_the_user_units_alone_on_an_upgrade(tmp_path: Pat
     result = host.run(_linux_scriptlet(host, "preremove.sh"), *arguments)
     assert result.returncode == 0, result.stderr
     assert not [c for c in host.calls() if c.startswith(("runuser", "systemctl --global"))]
+
+
+# GAP-0903: a sandbox daemon of DefenseClaw 1.0.3 or older noticed that the
+# package replaced its program and, once none of its user's sandboxes was
+# provisioning, starting or ready, stopped the user's OpenShell gateway, under
+# a MicroVM whose workload ended, which lost what that VM had not written.
+# DefenseClaw stops no sandbox itself: the stamped preinstall (Linux) and pkg
+# preinstall (macOS) now refuse before anything changes while such a daemon
+# has a sandbox that may hold compute, naming each with its user's command,
+# and refuse too when the daemon cannot say; an older daemon with nothing
+# running is ended first (SIGKILL; on Linux its units are stopped so systemd
+# does not start it again), and a daemon of 1.0.4 or later is left alone.
+GUARD_LIST = json.dumps({"sandboxes": [
+    {"name": "web", "phase": "ready", "driver": "docker", "launch": {"phase": "stopped", "name": "nested"}},
+    {"name": "vm1", "phase": "completed", "driver": "vm", "phase_reason": "Completed: exit 0"},
+    {"name": "gone", "phase": "error", "driver": "vm", "phase_reason": "ProcessExited: the VM exited"},
+    {"name": "dk", "phase": "completed"},
+    {"name": "st", "phase": "stopped", "driver": "vm"},
+]}, indent=2)
+GUARD_IDLE_LIST = json.dumps({"sandboxes": [{"name": "st", "phase": "stopped", "driver": "vm"}]}, indent=2)
+
+
+def _stamp(tmp_path: Path, text: str, version: str) -> str:
+    """The script as the release stamps it (scripts/stamp-package-script.sh)."""
+    src, out = tmp_path / "unstamped.sh", tmp_path / "stamped.sh"
+    src.write_text(text, encoding="utf-8")
+    subprocess.run(["sh", str(ROOT / "scripts" / "stamp-package-script.sh"), version, str(src), str(out)], check=True, timeout=30)
+    stamped = out.read_text(encoding="utf-8")
+    assert "# @LEGACY_SANDBOX_GUARD@" not in stamped and "dc_legacy_sandbox_guard()" in stamped
+    return stamped
+
+
+def _guard_host(tmp_path: Path, daemons: list[str], status: str, listing: str, status_rc: int = 0) -> tuple[_Host, Path]:
+    host = _Host(tmp_path)
+    (tmp_path / "ps.out").write_text("".join(line + "\n" for line in daemons), encoding="utf-8")
+    (tmp_path / "status.json").write_text(status, encoding="utf-8")
+    (tmp_path / "list.json").write_text(listing, encoding="utf-8")
+    _write_stub(host.bin, "ps", f"cat '{tmp_path / 'ps.out'}'")
+    _write_stub(host.bin, "getent", 'echo "alice:x:1001:1001::/home/alice:/bin/sh"')
+    _write_stub(host.bin, "id", 'echo alice')
+    _write_stub(host.bin, "dscacheutil", 'printf "name: alice\\ndir: /Users/alice\\n"')
+    _write_stub(host.bin, "stat", "echo 0")
+    # runuser and sudo run what follows their options, as the account.
+    _write_stub(host.bin, "runuser", f"""echo "runuser $*" >>'{host.log}'
+while [ "$1" != "--" ]; do shift; done
+shift
+exec "$@" """)
+    _write_stub(host.bin, "sudo", f"""echo "sudo $*" >>'{host.log}'
+while [ "$1" != "-H" ]; do shift; done
+shift
+exec "$@" """)
+    launcher = tmp_path / "launcher"
+    _write_stub(tmp_path, "launcher", f"""echo "launcher $*" >>'{host.log}'
+case "$1 $2" in
+    "sandbox status") cat '{tmp_path / "status.json"}'; exit {status_rc} ;;
+    "sandbox list") cat '{tmp_path / "list.json"}' ;;
+esac""")
+    return host, launcher
+
+
+def _linux_guarded_preinstall(host: _Host, tmp_path: Path, launcher: Path) -> str:
+    text = _rooted((LINUX / "preinstall.sh").read_text(encoding="utf-8"), {
+        "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+        "/run/systemd/system": str(host.run_systemd),
+        "/run/defenseclaw-enterprise-apply-path.held": str(tmp_path / "held"),
+        "/opt/defenseclaw/bin/defenseclaw-gateway /usr/bin/defenseclaw": f"/opt/defenseclaw/bin/defenseclaw-gateway {launcher}",
+    })
+    return _stamp(tmp_path, text, "1.0.4")
+
+
+DAEMON = "/opt/defenseclaw/bin/defenseclaw-gateway sandbox-daemon"
+
+
+def test_linux_preinstall_refuses_while_an_earlier_daemon_runs_a_sandbox(tmp_path: Path) -> None:
+    host, launcher = _guard_host(tmp_path, [f" 1001  4242 {DAEMON}"], '{"sandboxes":5,"running":1}', GUARD_LIST)
+    result = host.run(_linux_guarded_preinstall(host, tmp_path, launcher), "2")
+    assert result.returncode == 1, result.stderr
+    assert "this install was refused, and nothing was changed" in result.stderr
+    assert "alice: web (ready): save the work you need, then `defenseclaw sandbox stop web`" in result.stderr
+    assert "alice: vm1 (completed MicroVM, which OpenShell does not stop): `defenseclaw sandbox delete vm1`" in result.stderr
+    for free in ("gone", "dk", "st", "nested"):
+        assert f"alice: {free} " not in result.stderr, free
+    calls = host.calls()
+    assert not [c for c in calls if c.startswith(("systemctl", "systemd-run"))], calls  # nothing touched
+    assert any(c.endswith("launcher sandbox list --output json") for c in calls)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["cannot answer", "unreadable list", "account unknown"],
+)
+def test_linux_preinstall_refuses_when_an_earlier_daemon_cannot_say(tmp_path: Path, case: str) -> None:
+    host, launcher = _guard_host(tmp_path, [f" 1001  4242 {DAEMON}"], '{"sandboxes":0,"running":0}',
+                                 "not json" if case == "unreadable list" else GUARD_IDLE_LIST, status_rc=1 if case == "cannot answer" else 0)
+    if case == "account unknown":
+        _write_stub(host.bin, "getent", "exit 2")
+    result = host.run(_linux_guarded_preinstall(host, tmp_path, launcher), "2")
+    assert result.returncode == 1, result.stderr
+    assert "nothing was changed" in result.stderr
+    want = {"cannot answer": "alice: the sandbox daemon did not answer",
+            "unreadable list": "alice: the sandbox daemon of an earlier DefenseClaw did not list its sandboxes",
+            "account unknown": "uid 1001: its account could not be read"}[case]
+    assert want in result.stderr
+    assert not [c for c in host.calls() if c.startswith(("systemctl", "systemd-run"))]
+
+
+def test_linux_preinstall_ends_an_idle_earlier_daemon_and_leaves_a_current_one(tmp_path: Path) -> None:
+    idle = subprocess.Popen(["sleep", "300"])
+    try:
+        host, launcher = _guard_host(tmp_path, [
+            f" 1001 {idle.pid} {DAEMON}",
+            # Not this deployment's daemon: its other commands and another install.
+            f" 1001  77 {DAEMON} stop-sandboxes",
+            " 1001  78 /home/alice/.local/bin/defenseclaw-gateway sandbox-daemon",
+            " 1001  79 /opt/defenseclaw/bin/launch-agents/not-a-digest/defenseclaw-gateway sandbox-daemon",
+            " 1001  80 /opt/defenseclaw/bin/launch-agents/0f0f/defenseclaw-gateway sandbox-daemon stop-sandboxes",
+        ], '{"sandboxes":1,"running":0}', GUARD_IDLE_LIST)
+        result = host.run(_linux_guarded_preinstall(host, tmp_path, launcher), "2")
+        assert result.returncode == 0, result.stderr
+        assert idle.wait(timeout=10) == -9
+        calls = host.calls()
+        assert "systemctl --user stop defenseclaw-sandbox.socket defenseclaw-sandbox.service" in calls, calls
+        assert calls.count("launcher sandbox status --output json") == 1, calls  # the real daemon only
+    finally:
+        if idle.poll() is None:
+            idle.kill()
+
+    # A daemon of 1.0.4 or later (its status says "live") waits for its own
+    # sandboxes: it is neither listed nor ended.
+    current = tmp_path / "current"
+    current.mkdir()
+    host, launcher = _guard_host(current, [f" 1001  4242 {DAEMON}"], '{"sandboxes":5,"running":1,"live":3}', GUARD_LIST)
+    result = host.run(_linux_guarded_preinstall(host, current, launcher), "2")
+    assert result.returncode == 0, result.stderr
+    calls = host.calls()
+    assert not [c for c in calls if "sandbox list" in c or "--user stop" in c], calls
+
+
+def test_both_package_preinstalls_are_stamped_with_the_guard() -> None:
+    # The release stamps the guard in place of each preinstall's marker line;
+    # an unstamped copy (a local build) only skips it.
+    assert "\n# @LEGACY_SANDBOX_GUARD@\n" in (LINUX / "preinstall.sh").read_text(encoding="utf-8")
+    builder = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
+    heredoc = re.search(r"cat >\"\$SCRIPTS/preinstall\" <<'EOF'\n(.*?)\nEOF\n", builder, re.DOTALL)
+    assert heredoc and "\n# @LEGACY_SANDBOX_GUARD@\n" in heredoc.group(1)
+    assert '"$REPO_ROOT/scripts/stamp-package-script.sh" "$VERSION" "$SCRIPTS/preinstall" "$SCRIPTS/preinstall"' in builder
+    assert "sh scripts/stamp-package-script.sh \"{{ .Version }}\" packaging/linux/preinstall.sh build/packaging/linux/preinstall.sh" in (
+        ROOT / ".goreleaser.yaml").read_text(encoding="utf-8")
+
+
+# GAP-0979: the LaunchAgent of DefenseClaw 1.0.3 runs the package's
+# content-addressed copy of the gateway (bin/launch-agents/<sha256>/), which
+# the guard did not match: it saw no daemon and let the upgrade go on.
+@pytest.mark.parametrize("program", [
+    "/opt/cisco/defenseclaw/bin/defenseclaw-gateway",
+    "/opt/cisco/defenseclaw/bin/launch-agents/" + "0f" * 32 + "/defenseclaw-gateway",
+])
+def test_macos_pkg_preinstall_refuses_while_an_earlier_daemon_runs_a_sandbox(tmp_path: Path, program: str) -> None:
+    daemon = "/opt/cisco/defenseclaw/bin/defenseclaw-gateway sandbox-daemon"
+    host, launcher = _guard_host(tmp_path, [f"  501  4242 {program} sandbox-daemon"], '{"sandboxes":2,"running":1}', GUARD_LIST)
+    host.state.mkdir()
+    (host.state / "deployment.json").write_text('{"product_version": "1.0.3"}', encoding="utf-8")
+    script = _macos_pkg_preinstall(host, "1.0.4").replace(f"{daemon[:-len(' sandbox-daemon')]} /usr/local/bin/defenseclaw", f"{daemon[:-len(' sandbox-daemon')]} {launcher}")
+    assert str(launcher) in script
+    result = host.run(_stamp(tmp_path, script, "1.0.4"))
+    assert result.returncode == 1, result.stderr
+    assert "alice: web (ready): save the work you need, then `defenseclaw sandbox stop web`" in result.stderr
+    assert any(c.startswith("sudo -n -u #501 -H /usr/bin/env HOME=/Users/alice") for c in host.calls()), host.calls()
+    document = json.loads((host.state / "last-package-result.json").read_text(encoding="utf-8"))
+    assert document["ok"] is False and document["exit_code"] == 1 and document["installed_version"] == "1.0.3"
+    assert document["errors"][0]["code"] == "sandboxes_running"
+    assert "`defenseclaw sandbox delete vm1`" in document["errors"][0]["message"]
+    _validate_lifecycle_result(document)
+
+    # With nothing running the daemon is ended (no unit to stop on macOS).
+    idle = subprocess.Popen(["sleep", "300"])
+    try:
+        (tmp_path / "ps.out").write_text(f"  501 {idle.pid} {program} sandbox-daemon\n", encoding="utf-8")
+        (tmp_path / "list.json").write_text(GUARD_IDLE_LIST, encoding="utf-8")
+        (host.state / "last-package-result.json").unlink()
+        result = host.run(_stamp(tmp_path, script, "1.0.4"))
+        assert result.returncode == 0, result.stderr
+        assert idle.wait(timeout=10) == -9
+        assert not (host.state / "last-package-result.json").exists()
+    finally:
+        if idle.poll() is None:
+            idle.kill()

@@ -33,23 +33,23 @@ def test_docs_never_prescribe_sandbox_run_mount_or_yolo_flags() -> None:
 
 
 def test_no_sandbox_variable_is_not_an_unconditional_bypass() -> None:
-    guide = " ".join(_read("how-to/sandboxes/more-ways-to-run.mdx").split())
+    guide = " ".join(_read("sandboxes/guide.mdx").split())
     bullet = guide.split("DEFENSECLAW_NO_SANDBOX=1 claude` runs the harness", 1)[1][:400]
     assert "where your organization allows it" in bullet  # GAP-0047
     assert "required_for" in bullet
-    env = " ".join(_read("reference/configuration/env-vars.mdx").split())
+    env = " ".join(_read("reference/env-vars.mdx").split())
     assert "still refused" in env.split("`DEFENSECLAW_NO_SANDBOX`", 1)[1][:900]
 
 
 def test_admin_docs_use_the_packaged_gateway_path() -> None:
-    concepts = _read("enterprise/plan/concepts.mdx")  # GAP-0203
+    concepts = _read("enterprise/concepts.mdx")  # GAP-0203
     assert "/opt/defenseclaw/bin/defenseclaw-gateway" in concepts
     assert "command not found" in concepts
 
 
 def test_managed_sandbox_page_states_the_verified_residuals_and_limits() -> None:
     # The residuals and flag limits moved to the sandbox reference page.
-    page = _read("enterprise/runtime/sandbox-reference.mdx")
+    page = _read("enterprise/sandboxes.mdx")
     assert "hidepid" in page  # GAP-0302
     assert "openshell.admin.when_unavailable" in page  # GAP-0408
     assert "user_approvals: null" not in page  # GAP-0394
@@ -58,18 +58,18 @@ def test_managed_sandbox_page_states_the_verified_residuals_and_limits() -> None
 
 
 def test_windows_rule_pack_folder_is_not_left_readable_by_users() -> None:
-    windows = _read("enterprise/install/windows.mdx")
+    windows = _read("enterprise/windows.mdx")
     assert "leave the inherited `Users`" not in " ".join(windows.split())  # GAP-0386
     assert "sc.exe showsid DefenseClawGateway" in windows
 
 
 def test_lifecycle_explains_a_hand_edit_is_applied_not_drift() -> None:
-    lifecycle = _read("enterprise/operate/reference.mdx")
+    lifecycle = _read("enterprise/lifecycle.mdx")
     assert "A hand edit of the config is applied, not reported as drift" in lifecycle  # GAP-0398
 
 
 def test_coverage_and_cli_keep_managed_sandbox_platform_support() -> None:
-    coverage = _read("appendix/coverage-by-layer.mdx")
+    coverage = _read("segmentation.mdx")
     rows = [line.split("|") for line in coverage.splitlines() if line.startswith("| **")]
     linux = next(row[3] for row in rows if "Linux, managed" in row[1])
     mac = next(row[3] for row in rows if "macOS, managed" in row[1])
@@ -79,7 +79,7 @@ def test_coverage_and_cli_keep_managed_sandbox_platform_support() -> None:
     assert all(term in mac for term in ("MicroVM", "Apple silicon", "copy")), mac
     assert next(row[3] for row in rows if "Windows" in row[1]).strip().startswith("No")
 
-    reference = " ".join(_read("reference/sandboxes/cli.mdx").split())
+    reference = " ".join(_read("reference/sandbox-cli.mdx").split())
     install = reference.split("### `sandbox kernel-feed install`", 1)[1].split("```", 1)[0]
     assert "where sandboxes are not supported" not in install
     assert "per-user" in install and "managed" in install

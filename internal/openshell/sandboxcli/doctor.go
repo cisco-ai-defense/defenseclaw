@@ -48,9 +48,19 @@ const (
 	// OpenShell release older than openshell.SupportedMin
 	// (sandboxapi.Sandbox.OldSupervisor).
 	CheckIDLegacySandbox = "legacy-sandbox"
+	// CheckIDContainedSandbox fails while a MicroVM runs contained
+	// (sandboxapi.UnprotectedContained).
+	CheckIDContainedSandbox = "contained-sandbox"
+	// CheckIDUnknownSandbox fails while a sandbox that may be a live legacy
+	// or contained one has a gateway that has not said whether it runs
+	// (sandboxapi.UnprotectedUnknown).
+	CheckIDUnknownSandbox = "unknown-sandbox"
 	// CheckIDManagedRuntime is a managed computer's OpenShell as the
 	// account's daemon reports it.
 	CheckIDManagedRuntime = "managed-runtime"
+	// CheckIDHostGit fails when this computer has no git DefenseClaw can
+	// drive (workspace.HostGit), which every sandbox run needs (GAP-1068).
+	CheckIDHostGit = "host-git"
 )
 
 // DoctorOptions are the `sandbox doctor` flags.
@@ -184,6 +194,12 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 			if c := a.legacySandboxCheck(ctx); c != nil {
 				rep.Checks = append(rep.Checks, *c)
 			}
+			if c := a.containedSandboxCheck(ctx); c != nil {
+				rep.Checks = append(rep.Checks, *c)
+			}
+			if c := a.unknownSandboxCheck(ctx); c != nil {
+				rep.Checks = append(rep.Checks, *c)
+			}
 		}
 		runDriver, _ := openshell.LookupDriver(string(rep.Driver))
 		images := a.imagesCheck(ctx, image.MicroVMTarget(runDriver))
@@ -226,7 +242,7 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		}
 	}
 	if a.Cfg != nil || managed {
-		rep.Checks = append(rep.Checks, a.tlsTrustCheck(ctx, managed))
+		rep.Checks = append(rep.Checks, a.tlsTrustCheck(ctx, managed), a.hostGitCheck(ctx, managed))
 	}
 	if managed && a.GOOS == "darwin" {
 		if rep.Driver == openshell.DriverVM || (st.managed != nil && rep.Driver != openshell.DriverDocker) {
@@ -313,6 +329,8 @@ func (a *App) legacySandboxCheck(ctx context.Context) *openshell.Check {
 	if err != nil {
 		return nil
 	}
+	// In name order, whatever order the daemon lists them in.
+	slices.SortFunc(list, func(a, b sandboxapi.Sandbox) int { return strings.Compare(a.Name, b.Name) })
 	var names, ways []string
 	for i := range list {
 		if sb := &list[i]; sb.OldSupervisor {
@@ -328,10 +346,101 @@ func (a *App) legacySandboxCheck(ctx context.Context) *openshell.Check {
 		gone = "they are gone"
 	}
 	return &openshell.Check{ID: CheckIDLegacySandbox, Title: "Legacy sandboxes", Status: openshell.StatusFail,
-		Detail: strings.Join(names, ", ") + ": legacy sandbox running, not protected by the 1.0.4 egress policy (" + itsTheir(names) +
+		Detail: strings.Join(names, ", ") + ": " + sandboxapi.LegacyUnprotected + " (" + itsTheir(names) +
 			" session runs the supervisor of an OpenShell release older than " + openshell.SupportedMin + ", whose network broker can let connections " +
 			"bypass sandbox policy, NVIDIA/OpenShell#4494, and DefenseClaw cannot contain it); DefenseClaw stops " + itThem(names) +
 			" for nobody, and creates and starts no sandbox until " + gone,
+		Fix: &openshell.Fix{Summary: strings.Join(ways, "; ")}}
+}
+
+// containedSandboxCheck fails while a MicroVM runs contained, as the
+// daemon's status names it (sandboxapi.UnprotectedContained, the one
+// account of it the status and the run refusal give too): DefenseClaw had
+// to stop it but could not sync its disk first, so it keeps it running
+// with the network it added withdrawn, and creates and starts no sandbox
+// until it is gone. DefenseClaw stops none itself, so the fix names the
+// command that ends each. nil when none runs, or when the status cannot be
+// read (the daemon row says so).
+func (a *App) containedSandboxCheck(ctx context.Context) *openshell.Check {
+	api, err := a.api()
+	if err != nil {
+		return nil
+	}
+	st, err := api.Status(ctx)
+	if err != nil {
+		return nil
+	}
+	var names, ways []string
+	for _, u := range st.Unprotected {
+		if u.Reason == sandboxapi.UnprotectedContained {
+			names = append(names, u.Name)
+			ways = append(ways, "save the work you need in "+u.Name+", then run `"+u.Stop+"`")
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	gone := "it is gone"
+	if len(names) > 1 {
+		gone = "they are gone"
+	}
+	return &openshell.Check{ID: CheckIDContainedSandbox, Title: "Contained sandboxes", Status: openshell.StatusFail,
+		Detail: strings.Join(names, ", ") + ": " + sandboxapi.ContainedUnprotected + " (DefenseClaw had to stop " + itThem(names) +
+			", but could not sync the MicroVM's disk first, so it keeps " + itThem(names) + " running with the network rules and providers it added withdrawn); " +
+			"DefenseClaw stops " + itThem(names) + " for nobody, and creates and starts no sandbox until " + gone,
+		Fix: &openshell.Fix{Summary: strings.Join(ways, "; ")}}
+}
+
+// hostGitCheck fails when this computer has no git DefenseClaw can drive
+// (App.HostGit): a sandbox run copies its project into the sandbox, and
+// keeps the project's pre-session snapshot, with the host's git, so a run
+// fails before its first turn without it (GAP-1068). The fix says how to
+// install it, or on a managed computer whom to ask.
+func (a *App) hostGitCheck(ctx context.Context, managed bool) openshell.Check {
+	v, err := a.HostGit(ctx)
+	if err == nil {
+		return openshell.Check{ID: CheckIDHostGit, Title: "Host Git", Status: openshell.StatusPass, Detail: "git " + v}
+	}
+	fix := "install git 2.29 or newer on this computer (RHEL and Fedora: `sudo dnf install git`; Debian and Ubuntu: `sudo apt-get install git`; " +
+		"macOS: `xcode-select --install`), then run `" + CommandName + " doctor` again"
+	if managed {
+		fix = "ask your administrator to install git 2.29 or newer on this computer"
+	}
+	return openshell.Check{ID: CheckIDHostGit, Title: "Host Git", Status: openshell.StatusFail,
+		Detail: "a sandbox run copies the project into the sandbox and keeps its pre-session snapshot with this computer's git, so no run starts without it: " +
+			sandboxapi.DisplayText(strings.TrimPrefix(err.Error(), "workspace: ")),
+		Fix: &openshell.Fix{Summary: fix}}
+}
+
+// unknownSandboxCheck fails while a sandbox may run unprotected and its
+// gateway has not said whether it runs, as the daemon's status names it
+// (sandboxapi.UnprotectedUnknown, the one account of it the status and
+// the run refusal give too): DefenseClaw creates and starts no sandbox
+// until it does. The fix is the daemon's detail for each. nil when there is
+// none, or when the status cannot be read (the daemon row says so).
+func (a *App) unknownSandboxCheck(ctx context.Context) *openshell.Check {
+	api, err := a.api()
+	if err != nil {
+		return nil
+	}
+	st, err := api.Status(ctx)
+	if err != nil {
+		return nil
+	}
+	var names, ways []string
+	for _, u := range st.Unprotected {
+		if u.Reason == sandboxapi.UnprotectedUnknown {
+			names = append(names, u.Name)
+			ways = append(ways, u.Name+": "+u.Detail)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return &openshell.Check{ID: CheckIDUnknownSandbox, Title: "Unseen sandboxes", Status: openshell.StatusFail,
+		Detail: strings.Join(names, ", ") + ": " + sandboxapi.UnknownUnprotected + " (" + itsTheir(names) + " session may run a legacy supervisor, " +
+			"or a MicroVM DefenseClaw contained, and " + itsTheir(names) + " gateway has not said whether it runs); DefenseClaw stops " + itThem(names) +
+			" for nobody, and creates and starts no sandbox until it does",
 		Fix: &openshell.Fix{Summary: strings.Join(ways, "; ")}}
 }
 
@@ -344,8 +453,8 @@ func legacyStopWay(sb *sandboxapi.Sandbox) string {
 	if sb.Phase == "ready" {
 		way := "save the work you need in " + sb.Name + ", then run `" + CommandName + " stop " + sb.Name + "`"
 		if d, ok := openshell.LookupDriver(sb.Driver); !ok || !d.StopFlushes {
-			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost); " +
-				"when the sync fails the stop is held, and `" + CommandName + " stop " + sb.Name + " --yes` then stops it with what reached its disk"
+			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost) " +
+				"and, when that sync fails, asks before it stops the VM"
 		}
 		return way
 	}

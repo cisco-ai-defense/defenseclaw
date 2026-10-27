@@ -118,7 +118,16 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 		// HERMES_HOME. Do not publish their counts as coverage for this state.
 		state.Targets = nil
 		block["hermes"] = state
-		r.CoverageComplete, r.SecurityComplete = false, false
+		// The limit is reported, not certified: security_complete stays
+		// false for it and verify exits 0. coverage_complete says the
+		// enabled hooks are installed, and they are, so a documented
+		// platform limit keeps its warning but does not make it false, as on
+		// Windows (GAP-1861, GAP-1593). A Hermes target the guardian
+		// failed is reported like a failed target of any other connector
+		// and on Windows: guardian_target_failed and security_complete
+		// false (describeHookContracts), coverage_complete unchanged
+		// (GAP-1975).
+		r.MarkSecurityIncomplete(enterprisestatus.CodeStatusDetailUnavailable)
 		if err := enterprisehooks.ManagedHermesSessionHomeAttestation(env.GOOS, "hermes", true, false); err != nil {
 			message := "connectors.hermes: NOT COVERED: " + err.Error()
 			r.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, message)
@@ -243,6 +252,10 @@ func (l *lifecycle) verifyManagedHermesRegistration(ctx context.Context) error {
 	}
 	sort.Strings(notCovered)
 	for _, user := range notCovered {
+		// The enabled hooks are installed, so coverage_complete stays true,
+		// as for a failed target of any other connector and on Windows; the
+		// target is not protected, so security_complete is false (GAP-1975).
+		l.result.MarkSecurityIncomplete(enterprisestatus.CodeStatusDetailUnavailable)
 		l.result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, "connectors.hermes: NOT COVERED for user "+user+
 			": the guardian's last reconcile could not protect its Hermes hook; the guardian target warning names the cause")
 	}

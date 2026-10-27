@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 import stat
 import sys
@@ -70,20 +71,20 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 # bridge_host), and the copy the Secure Client profile renders
 # (internal/gateway/connector/hooks/*-secure-client.*), which its release pins.
 _BRIDGE_STANDALONE_TEMPLATE_DIGESTS = {
-    "amp": "c2d705527b5c6b1482a645435998f048fdb48b47303f37ae21f3fb90749a6671",
-    "opencode": "4624e672100f3564814e6c92ae20e0217ec5561d766c038601f64a1dc31912eb",
+    "amp": "e18b57604916c1d1c6c40b6255e4af9d0422e3e1b8943179727099eeb86b0d47",
+    "opencode": "0f02212caf86f4c5293ee796dab0c0befdacc2d74cc3ce28d1ab162b5cb6f81b",
 }
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "4b0292f2a6e16c44931649c836aa7263136c9d58a916c23c3a10256e711282c9",  # amp-plugin.ts
+            "7b6f3f534ac2b2a1aea7b26cead29788ea85c19ed9de0d8b8fa2b04928290c47",  # amp-plugin.ts
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["amp"],
             "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "9216239388d216ef5cc11ac9737408fc60d984907efb31b214ebbbcbb2e7204b",  # opencode-plugin.js
+            "fa4f5910a9aa89e3c5b0fe28db9bd37da96c3c68675a19a1615ee2350cf58c1e",  # opencode-plugin.js
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["opencode"],
             "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
         }
@@ -163,6 +164,18 @@ _BRIDGE_DYNAMIC_LINES = {
             b'const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"\n',
             "proof",
         ),
+        (
+            b'const DC_WINDOWS_POWERSHELL: string = "',
+            b'"\n',
+            b'const DC_WINDOWS_POWERSHELL: string = "{{.WindowsPowerShellJS}}"\n',
+            "powershell",
+        ),
+        (
+            b'const DC_GATEWAY_BINARY: string = "',
+            b'"\n',
+            b'const DC_GATEWAY_BINARY: string = "{{.GatewayBinaryJS}}"\n',
+            "gateway",
+        ),
     ),
     "opencode": (
         (
@@ -225,21 +238,18 @@ _BRIDGE_DYNAMIC_LINES = {
             b'const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";\n',
             "proof",
         ),
-    ),
-}
-# A per-user bridge's gateway-outage mode line (Go pluginOutageFailMode):
-# present once in a per-user render, absent from managed and Secure Client
-# ones; its value is open or closed.
-_BRIDGE_OUTAGE_MODE_LINES = {
-    "amp": (
-        b'const DC_OUTAGE_FAIL_MODE: string = "',
-        b'"\n',
-        b'const DC_OUTAGE_FAIL_MODE: string = "{{.OutageFailMode}}"\n',
-    ),
-    "opencode": (
-        b'const DC_OUTAGE_FAIL_MODE = "',
-        b'";\n',
-        b'const DC_OUTAGE_FAIL_MODE = "{{.OutageFailMode}}";\n',
+        (
+            b'const DC_WINDOWS_POWERSHELL = "',
+            b'";\n',
+            b'const DC_WINDOWS_POWERSHELL = "{{.WindowsPowerShellJS}}";\n',
+            "powershell",
+        ),
+        (
+            b'const DC_GATEWAY_BINARY = "',
+            b'";\n',
+            b'const DC_GATEWAY_BINARY = "{{.GatewayBinaryJS}}";\n',
+            "gateway",
+        ),
     ),
 }
 _LOWER_HEX = frozenset("0123456789abcdef")
@@ -481,6 +491,47 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
     return info.st_uid == 0 and not info.st_mode & 0o022
 
 
+def _valid_bridge_powershell(value: bytes) -> bool:
+    """Setup renders the system Windows PowerShell it resolved with
+    GetSystemDirectoryW; a bridge naming any other executable is not ours."""
+
+    from defenseclaw.doctor_hooks import _windows_system_powershell_path
+
+    expected = _windows_system_powershell_path()
+    try:
+        rendered = json.loads('"' + value.decode("utf-8", errors="strict") + '"')
+    except (UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        bool(expected)
+        and isinstance(rendered, str)
+        and ntpath.normcase(rendered) == ntpath.normcase(expected)
+    )
+
+
+def _valid_bridge_gateway_binary(value: bytes) -> bool:
+    """Accept the gateway binary a per-user bridge runs (Go
+    perUserPluginGatewayBinary): unset (the ~/.local/bin gateway) or the
+    absolute path of a defenseclaw-gateway binary in a bin folder, as native
+    Windows Setup renders it. The account owns that install, as it owns
+    ~/.local/bin, so no ownership check applies.
+    """
+
+    if value == b"":
+        return True
+    try:
+        path = json.loads('"' + value.decode("utf-8", errors="strict") + '"')
+    except (UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(path, str) or not os.path.isabs(path) or any(ord(char) < 0x20 for char in path):
+        return False
+    name = "defenseclaw-gateway.exe" if os.name == "nt" else "defenseclaw-gateway"
+    return (
+        os.path.normcase(os.path.basename(path)) == os.path.normcase(name)
+        and os.path.normcase(os.path.basename(os.path.dirname(path))) == "bin"
+    )
+
+
 def _valid_bridge_dynamic_value(
     kind: str,
     value: bytes,
@@ -497,8 +548,12 @@ def _valid_bridge_dynamic_value(
         return value in {b"", b"1"}
     if kind == "mode":
         return value in {b"open", b"closed"}
+    if kind == "powershell":
+        return _valid_bridge_powershell(value)
     if kind in {"socket", "guard", "marker", "native", "lifecycle"}:
         return _valid_bridge_managed_path(kind, value)
+    if kind == "gateway":
+        return _valid_bridge_gateway_binary(value)
     if kind != "token":
         return False
     try:
@@ -533,7 +588,7 @@ def _matches_immutable_bridge_template(
             for index, line in enumerate(lines)
             if line.startswith(prefix) and line.endswith(suffix)
         ]
-        if not matches and kind in {"native", "proof", "mode", "lifecycle"}:
+        if not matches and kind in {"native", "proof", "mode", "lifecycle", "powershell", "gateway"}:
             # Current and Secure Client templates have distinct fields, each
             # still covered by its exact pinned digest.
             continue
@@ -561,14 +616,7 @@ def _matches_immutable_bridge_template(
         required_lifecycle = b""
     if dynamic_values.get("lifecycle", b"") != required_lifecycle:
         return False
-    prefix, suffix, canonical = _BRIDGE_OUTAGE_MODE_LINES[connector]
-    outage = [index for index, line in enumerate(lines) if line.startswith(prefix) and line.endswith(suffix)]
-    if len(outage) > 1:
-        return False
-    if outage:
-        if lines[outage[0]][len(prefix) : -len(suffix)] not in {b"open", b"closed"}:
-            return False
-        lines[outage[0]] = canonical
+
     def standalone_socket_matches(digest: str) -> bool:
         if digest != _BRIDGE_STANDALONE_TEMPLATE_DIGESTS[connector]:
             return True

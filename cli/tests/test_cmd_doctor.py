@@ -1448,6 +1448,33 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             self.assertEqual(result.warned, 0, result.checks)
             self.assertIn("reachable", result.checks[0]["detail"])
 
+    def test_antigravity_hooks_disabled_entry_fails(self):
+        # GAP-0538: "enabled": false on the key, the PreToolUse matcher group
+        # or its handler turns the guard off; doctor must not pass it.
+        for where in ("key", "group", "handler"):
+            with self.subTest(where=where), tempfile.TemporaryDirectory() as tmp:
+                home = os.path.join(tmp, "home")
+                hook_path = os.path.join(home, ".gemini", "config", "hooks.json")
+                os.makedirs(os.path.dirname(hook_path), exist_ok=True)
+                script_path = os.path.join(tmp, ".defenseclaw", "hooks", "antigravity-hook.sh")
+                payload = self._antigravity_hooks_payload(script_path)
+                registration = payload["defenseclaw-antigravity-pretooluse"]
+                if where == "key":
+                    registration["enabled"] = False
+                elif where == "group":
+                    registration["PreToolUse"][0]["enabled"] = False
+                else:
+                    registration["PreToolUse"][0]["hooks"][0]["enabled"] = False
+                with open(hook_path, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh)
+                cfg = self._cfg(tmp, "antigravity")
+                with patch.dict(os.environ, isolated_home_env(home), clear=False):
+                    result = _DoctorResult()
+                    _check_antigravity_hooks(cfg, result, platform_name="posix")
+                self.assertEqual(result.passed, 0, result.checks)
+                self.assertEqual(result.failed, 1, result.checks)
+                self.assertIn("disabled", result.checks[0]["detail"])
+
     def test_antigravity_hooks_ignore_undocumented_legacy_path_residue(self):
         # Undocumented residue is ignored; only the documented global hook
         # file is authoritative for this check.
@@ -3117,14 +3144,14 @@ class DoctorFixDryRunTests(unittest.TestCase):
         # post-repair health counts. The policy-changing repair is visible but
         # explicitly requires selection on the real run.
         self.assertEqual(result.checks, [])
-        self.assertEqual(len(result.repairs), 23)
+        self.assertEqual(len(result.repairs), 24)
         self.assertEqual(
             {record["state"] for record in result.repairs},
             {"applicable", "noop", "requires_confirmation"},
         )
         self.assertEqual(result.repair_summary.planned, 8)
         self.assertEqual(result.repair_summary.requires_confirmation, 1)
-        self.assertEqual(result.repair_summary.noop, 14)
+        self.assertEqual(result.repair_summary.noop, 15)
         # Doctor must NEVER offer connector teardown from --fix (D7).
         self.assertNotIn(
             "connector residue",
@@ -3211,10 +3238,10 @@ class DoctorFixDryRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result.checks, [])
-        self.assertEqual(len(result.repairs), 23)
+        self.assertEqual(len(result.repairs), 24)
         self.assertEqual(result.repair_summary.applied, 8)
         self.assertEqual(result.repair_summary.manual, 1)
-        self.assertEqual(result.repair_summary.noop, 14)
+        self.assertEqual(result.repair_summary.noop, 15)
         self.assertEqual(fix_plugin_reg.call_count, 1)
         self.assertTrue(fix_plugin_reg.call_args.kwargs["plan_only"])
         self.assertNotIn(

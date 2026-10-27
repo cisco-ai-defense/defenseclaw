@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func TestHookColdStartRefusesAfterStopDuringInstallAndAfterAFailure(t *testing.T
 		t.Fatalf("after start cleared the stop = %v", err)
 	}
 
-	lock := filepath.Join(dataDir, installLockName)
+	lock := filepath.Join(dataDir, ".install.lock")
 	if err := os.Mkdir(lock, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +58,57 @@ func TestHookColdStartRefusesAfterStopDuringInstallAndAfterAFailure(t *testing.T
 	}
 	if err := hookColdStartRefusal(dataDir, time.Now().Add(hookColdStartBackoff+time.Second)); err != nil {
 		t.Fatalf("after the backoff window = %v", err)
+	}
+}
+
+func TestHookColdStartIgnoresAbandonedInstallLock(t *testing.T) {
+	for _, tc := range []struct {
+		name, pid string
+		age       time.Duration
+	}{
+		{"dead installer", "99999999", 0},
+		// No clock (fix/r104-oss-outage-open identity rule): a pid no
+		// installer can have, the reader's own, is a reused pid.
+		{"pid reused by the reader", strconv.Itoa(os.Getpid()), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			lock := filepath.Join(dataDir, ".install.lock")
+			if err := os.Mkdir(lock, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if tc.pid != "" {
+				if err := os.WriteFile(filepath.Join(lock, "pid"), []byte(tc.pid+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.age != 0 {
+				then := time.Now().Add(-tc.age)
+				if err := os.Chtimes(lock, then, then); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := hookColdStartRefusal(dataDir, time.Now()); err != nil {
+				t.Fatalf("abandoned lock prevented cold start: %v", err)
+			}
+		})
+	}
+}
+
+// An old lock that names no installer pid yet is held: the identity rule
+// reads no clock, so the hooks do not start the gateway under it.
+func TestHookColdStartHoldsAnOldLockWithoutAnInstallerPid(t *testing.T) {
+	dataDir := t.TempDir()
+	lock := filepath.Join(dataDir, ".install.lock")
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	then := time.Now().Add(-11 * time.Minute)
+	if err := os.Chtimes(lock, then, then); err != nil {
+		t.Fatal(err)
+	}
+	if err := hookColdStartRefusal(dataDir, time.Now()); err == nil || !strings.Contains(err.Error(), "install") {
+		t.Fatalf("old lock without an installer pid = %v, want the install refusal", err)
 	}
 }
 

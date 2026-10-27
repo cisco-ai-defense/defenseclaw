@@ -440,6 +440,12 @@ func withCompanions(connectors []string) []string {
 	return normalizeConnectors(out)
 }
 
+// WithCompanions returns connectors with the companion targets that come
+// with them (sorted, without duplicates).
+func WithCompanions(connectors []string) []string {
+	return withCompanions(connectors)
+}
+
 func companionNames() []string {
 	return normalizeConnectors(func() []string {
 		names := []string{}

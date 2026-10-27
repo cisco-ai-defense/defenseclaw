@@ -20,9 +20,9 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -30,13 +30,157 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
-// GAP-1163: a MicroVM's stop loses what its guest did not sync. A stop the
-// user asks for, after a raw OpenShell start too, is held when the sync
-// fails: the VM keeps running with its work and the refusal says how to
-// save it. The organization's own stops (a hook alarm's on_tamper or
-// on_silence response, a revoked registration) go ahead and say what they
-// may have lost.
-func TestAFailedSyncHoldsTheUsersStopButNotTheOrganizations(t *testing.T) {
+// stopBoxAcceptingLoss is the user's stop that accepted the loss of what a
+// MicroVM has not synced (the CLI's yes, or --discard-unsynced).
+func (e *harnessEnv) stopBoxAcceptingLoss(name string) {
+	e.t.Helper()
+	if _, err := e.m.Stop(sandboxapi.WithDiscardUnsynced(context.Background()), name); err != nil {
+		e.t.Fatalf("Stop %s accepting the loss: %v", name, err)
+	}
+}
+
+// GAP-0902: a MicroVM's stop went ahead after its disk sync failed, and the
+// loss was published only after the stop. DefenseClaw now never stops a
+// MicroVM whose sync failed on its own: the user's stop that did not accept
+// the loss, a hook alarm's stop and the stop for foreign network rules all
+// leave it running, make no StopSandbox call and publish no unflushed stop,
+// whether the guest answered without confirming the sync or did not answer
+// at all, and on a current session or a legacy one. The user's stop is
+// refused with CodeUnsynced and the command that stops it anyway; the
+// automatic ones publish a HIGH finding that says why. Only a stop whose
+// user accepted the loss goes ahead, and then the feed says what it may have
+// lost, once.
+func TestNoStopAfterAFailedSyncUnlessTheUserAcceptsTheLoss(t *testing.T) {
+	unconfirmed := guestAnswers("exited\n", false)
+	silent := func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
+		return openshelltest.ExecResponse{Err: errors.New("exec relay closed")}
+	}
+	type stopper struct {
+		name    string
+		stop    func(e *harnessEnv, b *box) error
+		finding string
+	}
+	stoppers := []stopper{
+		{name: "the user's stop", stop: func(e *harnessEnv, _ *box) error {
+			_, err := e.m.Stop(context.Background(), "vmbox")
+			return err
+		}},
+		{name: "a hook alarm", finding: string(audit.SandboxFindingHookTamper), stop: func(e *harnessEnv, b *box) error {
+			e.m.stopForAlarm("vmbox", b.rec.BindingID, audit.SandboxFindingHookTamper)
+			return nil
+		}},
+		{name: "foreign network rules", finding: policyReasonForeignRule, stop: func(e *harnessEnv, b *box) error {
+			e.m.scheduleForeignStop("vmbox", b.rec.BindingID)
+			e.m.tamperStops.Wait()
+			return nil
+		}},
+	}
+	for _, guest := range []struct {
+		name string
+		exec openshelltest.ExecHandler
+	}{{"sync not confirmed", unconfirmed}, {"guest does not answer", silent}} {
+		for _, legacy := range []bool{false, true} {
+			for _, s := range stoppers {
+				t.Run(guest.name+"/legacy="+map[bool]string{false: "no", true: "yes"}[legacy]+"/"+s.name, func(t *testing.T) {
+					e := newVMEnv(t, nil)
+					e.create(sandboxapi.CreateRequest{Name: "vmbox", Copy: true})
+					b := e.boxOf("vmbox")
+					if legacy {
+						e.m.mu.Lock()
+						b.rec.SessionRelease = "0.1.3"
+						e.m.mu.Unlock()
+						must(t, e.m.saveRecord(b))
+					}
+					e.fake.HandleExec(e.workloadChecks(nil, guest.exec))
+					stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+					err := s.stop(e, b)
+					if s.finding == "" {
+						apiErr := wantCode(t, err, sandboxapi.CodeUnsynced)
+						if !strings.Contains(apiErr.Message, "sandbox vmbox was not stopped: its MicroVM's disk could not be synced first") ||
+							!strings.Contains(apiErr.Message, "it keeps running") ||
+							!strings.Contains(apiErr.Detail, "`defenseclaw sandbox stop vmbox --discard-unsynced`") {
+							t.Fatalf("the refused stop = %+v", apiErr)
+						}
+					} else {
+						found := e.events("vmbox", sandboxapi.ActivityFinding, s.finding)
+						if len(found) == 0 || !strings.Contains(found[len(found)-1].Message, "could not stop the sandbox") ||
+							!strings.Contains(found[len(found)-1].Message, "could not be synced first") {
+							t.Fatalf("the automatic stop did not say why it kept the sandbox: %+v", found)
+						}
+					}
+					if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
+						t.Fatalf("stopped a MicroVM whose sync failed: %d stop calls", got-stops)
+					}
+					if got := e.get("vmbox"); got.Phase != "ready" {
+						t.Fatalf("the MicroVM did not keep running: %s", got.Phase)
+					}
+					if got := e.events("vmbox", sandboxapi.ActivityLifecycle, "stop_unflushed"); len(got) != 0 {
+						t.Fatalf("a stop that was not made was reported as one that lost writes: %+v", got)
+					}
+
+					// The user accepts the loss: the stop goes ahead and says
+					// what it may have lost.
+					e.stopBoxAcceptingLoss("vmbox")
+					if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops+1 {
+						t.Fatalf("the accepted stop made %d stop calls", got-stops)
+					}
+					if got := e.get("vmbox"); got.Phase != "stopped" {
+						t.Fatalf("the accepted stop left %s", got.Phase)
+					}
+					if got := e.events("vmbox", sandboxapi.ActivityLifecycle, "stop_unflushed"); len(got) != 1 {
+						t.Fatalf("the accepted unflushed stop was not reported once: %+v", got)
+					}
+				})
+			}
+		}
+	}
+
+	// Docker's stop flushes nothing: a guest that does not answer still stops.
+	d := liveEnv(t, "dockerstop", nil)
+	d.fake.HandleExec(d.workloadChecks(nil, silent))
+	d.stopBox("dockerstop")
+	if got := d.get("dockerstop"); got.Phase != "stopped" {
+		t.Fatalf("docker stop = %s", got.Phase)
+	}
+}
+
+// GAP-0901: the daemon's status names every live legacy guest, with the
+// command its user runs to end it (the managed lifecycle's status and verify
+// read it), and nothing for a current session, a stopped legacy sandbox or
+// a docker one whose workload ended.
+func TestStatusNamesEveryUnprotectedLegacyGuest(t *testing.T) {
+	e, b := legacyGuest(t, "kept", false, nil)
+	e.m.lifecycle(t.Context(), b, audit.SandboxPhaseReady, audit.SandboxTriggerWatch, true, nil, nil)
+	e.m.tamperStops.Wait()
+	st, err := e.m.Status(t.Context())
+	must(t, err)
+	if len(st.Unprotected) != 1 || st.Unprotected[0] != (sandboxapi.UnprotectedSandbox{Name: "kept", Phase: "ready", Stop: "defenseclaw sandbox stop kept"}) {
+		t.Fatalf("unprotected = %+v", st.Unprotected)
+	}
+	e.stopBox("kept")
+	e.create(sandboxapi.CreateRequest{Name: "fresh", Copy: true, Project: e.otherProject("other")})
+	st, err = e.m.Status(t.Context())
+	must(t, err)
+	if len(st.Unprotected) != 0 {
+		t.Fatalf("a stopped legacy sandbox or a current session is named unprotected: %+v", st.Unprotected)
+	}
+
+	// An ended legacy MicroVM is named with its delete.
+	v, vb := legacyGuest(t, "ended", true, nil)
+	v.m.lifecycle(t.Context(), vb, audit.SandboxPhaseCompleted, audit.SandboxTriggerWatch, false, nil, nil)
+	v.m.tamperStops.Wait()
+	st, err = v.m.Status(t.Context())
+	must(t, err)
+	if len(st.Unprotected) != 1 || st.Unprotected[0].Stop != "defenseclaw sandbox delete ended" || st.Unprotected[0].Phase != "completed" {
+		t.Fatalf("ended MicroVM unprotected = %+v", st.Unprotected)
+	}
+}
+
+// GAP-1163: after a raw OpenShell start (the daemon's cached phase still
+// says stopped) the user's stop syncs the MicroVM's disk first like any
+// other, and one whose sync fails is not made: the VM keeps running with its
+// work, OpenShell is not asked to stop it, and nothing is reported lost.
+func TestAStopAfterARawStartIsNotMadeWhenTheSyncFails(t *testing.T) {
 	e := newVMEnv(t, nil)
 	e.create(sandboxapi.CreateRequest{Name: "box", Copy: true})
 	answer := "none\nsynced\n"
@@ -44,120 +188,24 @@ func TestAFailedSyncHoldsTheUsersStopButNotTheOrganizations(t *testing.T) {
 		return openshelltest.ExecResponse{Stdout: []byte(answer)}
 	}))
 	e.stopBox("box")
-	// A raw OpenShell start: the cached phase still says stopped. The
-	// harness exits; sync(1) does not finish.
 	must(t, e.fake.SetPhase(openshell.DefaultWorkspace, "box", openshell.PhaseReady))
 	answer = "exited\n"
 	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
 	_, err := e.m.Stop(t.Context(), "box")
-	if !sandboxapi.IsCode(err, sandboxapi.CodeConflict) || !strings.Contains(err.Error(), "box keeps running") ||
-		!strings.Contains(err.Error(), "defenseclaw sandbox pull box") {
-		t.Fatalf("user stop after a failed sync = %v", err)
+	apiErr := wantCode(t, err, sandboxapi.CodeUnsynced)
+	if !strings.Contains(apiErr.Message, "sandbox box was not stopped") || !strings.Contains(apiErr.Message, "it keeps running") {
+		t.Fatalf("user stop after a raw start and a failed sync = %+v", apiErr)
 	}
 	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
-		t.Fatalf("the held stop called OpenShell's stop %d times", got-stops)
+		t.Fatalf("the refused stop called OpenShell's stop %d times", got-stops)
 	}
 	if got := e.events("box", "", "stop_unflushed"); len(got) != 0 {
-		t.Fatalf("a held stop was reported as one that lost writes: %+v", got)
+		t.Fatalf("a stop that was not made was reported as one that lost writes: %+v", got)
 	}
-
-	// The organization's stop for an alarm goes ahead and says what it may
-	// have lost.
-	b := e.boxOf("box")
-	e.m.mu.Lock()
-	b.phase = audit.SandboxPhaseReady
-	binding := b.rec.BindingID
-	e.m.mu.Unlock()
-	e.m.stopForAlarm("box", binding, audit.SandboxFindingHookTamper)
-	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops+1 {
-		t.Fatalf("the alarm stop made %d stop calls, want 1", got-stops)
-	}
-	if got := e.events("box", "", "stop_unflushed"); len(got) != 1 || !strings.Contains(got[0].Message, "may come back empty") {
-		t.Fatalf("the alarm stop's loss was not said once: %+v", got)
-	}
-}
-
-// A guest whose exec or sync keeps failing is not left to a delete that
-// loses all of its work: the user's stop is held, and held again when
-// repeated, also with --yes on a first stop; once a stop was held, the
-// stop that accepts the loss (`sandbox stop --yes`) stops it with what
-// reached its disk and the feed says what may be lost.
-func TestARepeatedStopThatAcceptsTheLossStopsAVMWhoseSyncKeepsFailing(t *testing.T) {
-	e := newVMEnv(t, nil)
-	e.create(sandboxapi.CreateRequest{Name: "box", Copy: true})
-	e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
-		return openshelltest.ExecResponse{Stdout: []byte("exited\n")}
-	}))
-	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
-	accept := sandboxapi.WithUnsyncedStopAccepted(t.Context())
-	for i, ctx := range []context.Context{accept, t.Context()} {
-		_, err := e.m.Stop(ctx, "box")
-		if !sandboxapi.IsCode(err, sandboxapi.CodeConflict) || !strings.Contains(err.Error(), "box keeps running") ||
-			!strings.Contains(err.Error(), "`defenseclaw sandbox stop box --yes` stops it anyway") {
-			t.Fatalf("stop %d after a failed sync = %v", i+1, err)
-		}
-	}
-	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
-		t.Fatalf("a held stop called OpenShell's stop %d times", got-stops)
-	}
-	if _, err := e.m.Stop(accept, "box"); err != nil {
-		t.Fatalf("the stop that accepts the loss: %v", err)
-	}
-	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops+1 {
-		t.Fatalf("the accepted stop made %d stop calls, want 1", got-stops)
-	}
-	if got := e.events("box", "", "stop_unflushed"); len(got) != 1 {
-		t.Fatalf("the accepted stop's loss was not said once: %+v", got)
-	}
+	// With the sync working again, the next stop goes ahead synced.
+	answer = "exited\nsynced\n"
+	e.stopBox("box")
 	if got := e.get("box"); got.Phase != "stopped" {
-		t.Fatalf("after the accepted stop: %s", got.Phase)
-	}
-}
-
-// GAP-1594: a held stop accepts the loss only for a while. Long after it the
-// sync may work again, and a routine `stop --yes` whose sync then fails is
-// held first again, never made at once.
-func TestAnOldHoldDoesNotLetAStopYesSkipTheNextHold(t *testing.T) {
-	e := newVMEnv(t, nil)
-	_, advance := e.fakeClock(time.Now())
-	e.create(sandboxapi.CreateRequest{Name: "box", Copy: true})
-	e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
-		return openshelltest.ExecResponse{Stdout: []byte("exited\n")}
-	}))
-	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
-	if _, err := e.m.Stop(t.Context(), "box"); !sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
-		t.Fatalf("first stop after a failed sync = %v, want held", err)
-	}
-	advance(unsyncedStopAcceptWindow + time.Minute)
-	accept := sandboxapi.WithUnsyncedStopAccepted(t.Context())
-	if _, err := e.m.Stop(accept, "box"); !sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
-		t.Fatalf("stop --yes long after the hold = %v, want held again", err)
-	}
-	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
-		t.Fatalf("a stop --yes long after the hold called OpenShell's stop %d times", got-stops)
-	}
-	// Right after that new hold, --yes goes ahead.
-	if _, err := e.m.Stop(accept, "box"); err != nil {
-		t.Fatalf("stop --yes right after the new hold: %v", err)
-	}
-}
-
-// The listener-loss containment's stop (StopForPolicy) of a VM whose sync
-// fails is made at once: one OpenShell stop, and the loss is said.
-func TestThePolicyStopOfAVMWhoseSyncFailsIsMadeAtOnce(t *testing.T) {
-	e := newVMEnv(t, nil)
-	e.create(sandboxapi.CreateRequest{Name: "box", Copy: true})
-	e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
-		return openshelltest.ExecResponse{Stdout: []byte("exited\n")}
-	}))
-	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
-	if _, err := e.m.StopForPolicy(t.Context(), "box"); err != nil {
-		t.Fatalf("policy stop: %v", err)
-	}
-	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops+1 {
-		t.Fatalf("the policy stop made %d stop calls, want 1", got-stops)
-	}
-	if got := e.events("box", "", "stop_unflushed"); len(got) != 1 {
-		t.Fatalf("the policy stop's loss was not said once: %+v", got)
+		t.Fatalf("after the synced stop: %s", got.Phase)
 	}
 }

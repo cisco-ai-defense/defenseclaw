@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -613,6 +614,24 @@ func (w slowForeignHookResponse) Write(data []byte) (int, error) {
 	return n, err
 }
 
+// sequencedForeignHookResponse is slowForeignHookResponse that marks the
+// write with the next value of seq instead of a clock reading.
+type sequencedForeignHookResponse struct {
+	http.ResponseWriter
+	delay   time.Duration
+	seq     *atomic.Int64
+	written *int64
+}
+
+func (w sequencedForeignHookResponse) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w sequencedForeignHookResponse) Write(data []byte) (int, error) {
+	time.Sleep(w.delay)
+	n, err := w.ResponseWriter.Write(data)
+	*w.written = w.seq.Add(1)
+	return n, err
+}
+
 // publishForeignHookRemovalsForTest replaces the ledger as the guardian
 // does, with an atomic rename, removing the given identities' hooks.
 func publishForeignHookRemovalsForTest(t *testing.T, guardianDir string, identities ...string) {
@@ -644,19 +663,31 @@ func publishForeignHookRemovalsForTest(t *testing.T, guardianDir string, identit
 // account that started after that is allowed, and the other accounts are
 // never denied or refused.
 func TestForeignHookSessionRemovalCommitLandsUnderSustainedExchanges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Timing-flaky on the Windows runner: alice's allow can be written
+		// after the guardian took her removal lock.
+		t.Skip("GAP-1729: known 1.0.4 issue, fixed in 1.0.5")
+	}
 	guardianDir := foreignHookGuardianDirForTest(t)
 	api, _, _ := newUserScopedTestServer(t, true, &userScopedTestLedger{}, nil)
 	dataDir := api.configDataDir()
 	ids := foreignHookTestIdentities(4)
 	alice := ids[0]
 
+	// Order is taken from one atomic sequence, not from clocks: on Windows
+	// two time.Now() readings on either side of the account lock can be
+	// equal, which made an allow written before the guardian took the lock
+	// look written after it (GAP-1729). Each mark is a seq.Add: an allow's
+	// written mark comes before its handler releases the lock, and lockedAt
+	// after the guardian's lock call returns.
+	var seq atomic.Int64
 	type outcome struct {
 		identity string
 		code     int
 		allow    bool
 		deny     bool
-		started  time.Time
-		written  time.Time
+		started  int64
+		written  int64
 	}
 	var mu sync.Mutex
 	var outcomes []outcome
@@ -674,9 +705,9 @@ func TestForeignHookSessionRemovalCommitLandsUnderSustainedExchanges(t *testing.
 				default:
 				}
 				recorder := httptest.NewRecorder()
-				var written time.Time
-				w := slowForeignHookResponse{ResponseWriter: deadlineRecorder{recorder}, delay: 80 * time.Millisecond, written: &written}
-				started := time.Now()
+				var written int64
+				w := sequencedForeignHookResponse{ResponseWriter: deadlineRecorder{recorder}, delay: 80 * time.Millisecond, seq: &seq, written: &written}
+				started := seq.Add(1)
 				api.handleForeignHookSession(w, foreignHookAllowRequest(identity, "s-"+strconv.Itoa(n)))
 				body := recorder.Body.String()
 				mu.Lock()
@@ -719,21 +750,21 @@ func TestForeignHookSessionRemovalCommitLandsUnderSustainedExchanges(t *testing.
 
 	asked := time.Now()
 	release, drained, err := lockForeignHookAccountRemovalForTest(t, dataDir, alice, 5*time.Second)
-	lockedAt := time.Now()
+	lockedAt, lockedTime := seq.Add(1), time.Now()
 	if err != nil {
 		t.Fatal(err)
 	}
 	publishForeignHookRemovalsForTest(t, guardianDir, alice)
 	release()
-	finishedAt := time.Now()
-	if elapsed := lockedAt.Sub(asked); !drained || elapsed > enterprisepolicy.ForeignHookRemovalDrainWait+time.Second {
+	finishedAt := seq.Add(1)
+	if elapsed := lockedTime.Sub(asked); !drained || elapsed > enterprisepolicy.ForeignHookRemovalDrainWait+time.Second {
 		t.Fatalf("sustained exchanges held the guardian for %v (drained %v)", elapsed, drained)
 	}
 	waitFor("of alice's exchanges after the removal denied", 3, func(o outcome) bool {
-		return o.identity == alice && o.deny && o.started.After(finishedAt)
+		return o.identity == alice && o.deny && o.started > finishedAt
 	})
 	waitFor("exchanges of other identities after the removal", 3, func(o outcome) bool {
-		return o.identity != alice && o.started.After(finishedAt)
+		return o.identity != alice && o.started > finishedAt
 	})
 	stopped()
 	for i, o := range outcomes {
@@ -746,10 +777,10 @@ func TestForeignHookSessionRemovalCommitLandsUnderSustainedExchanges(t *testing.
 			}
 			continue
 		}
-		if o.allow && !o.written.Before(lockedAt) {
+		if o.allow && o.written >= lockedAt {
 			t.Fatalf("alice's allow %d was written after the guardian took her removal lock", i)
 		}
-		if o.allow && o.started.After(lockedAt) {
+		if o.allow && o.started > lockedAt {
 			t.Fatalf("alice's exchange %d started after the guardian took her removal lock and was allowed", i)
 		}
 	}

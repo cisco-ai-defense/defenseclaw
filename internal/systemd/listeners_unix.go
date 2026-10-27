@@ -59,10 +59,11 @@ func loadInherited() {
 }
 
 // Listener returns a view of the socket-activated listener named name
-// (FileDescriptorName= in the socket unit). ok is false when the process was
-// not activated or systemd passed no descriptor with that name. The view may
-// be closed and requested again: the inherited socket stays open for the
-// process lifetime.
+// (FileDescriptorName= in the systemd socket unit, the Sockets key in the
+// launchd plist). ok is false when the process was not activated or the
+// service manager passed no socket with that name. The view may be closed
+// and requested again: the inherited socket stays open for the process
+// lifetime.
 func Listener(name string) (net.Listener, bool, error) {
 	loadInherited()
 	if inherited.err != nil {
@@ -70,7 +71,10 @@ func Listener(name string) (net.Listener, bool, error) {
 	}
 	shared, ok := inherited.listeners[name]
 	if !ok {
-		return nil, false, nil
+		var err error
+		if shared, ok, err = launchdListener(name); err != nil || !ok {
+			return nil, false, err
+		}
 	}
 	return shared.view(), true, nil
 }

@@ -93,12 +93,12 @@ func TestFleetPostWithoutContentTypeIsDocumented415(t *testing.T) {
 			t.Fatalf("POST %s: status=%d body=%q", path, rr.Code, rr.Body.String())
 		}
 	}
-	raw, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "edge-connector", "api.mdx"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "edge-connector", "api-reference.mdx"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, table, _ := strings.Cut(string(raw), "## Common status codes")
 	if !strings.Contains(table, "| `415` |") || !strings.Contains(string(raw), "`415` with `"+want+"`") {
-		t.Fatal("api.mdx does not document the 415 the gateway returns")
+		t.Fatal("api-reference.mdx does not document the 415 the gateway returns")
 	}
 }

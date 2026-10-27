@@ -170,6 +170,8 @@ done
 # downgrade before the older binaries replace the installed ones unless the
 # administrator created the root-owned rollback marker
 # /opt/cisco/defenseclaw/lifecycle/allow-downgrade (postinstall consumes it).
+# It refuses while a sandbox daemon of DefenseClaw 1.0.3 or older has a
+# sandbox running too (the legacy sandbox guard, GAP-0903).
 cat >"$SCRIPTS/preinstall" <<'EOF'
 #!/bin/sh
 if [ -e /opt/cisco/secureclient/defenseclaw ] ||
@@ -279,7 +281,8 @@ installed=
 if root_owned "$record"; then
     installed=$(sed -n 's/.*"product_version": *"\([^"]*\)".*/\1/p' "$record" | head -n 1)
 fi
-# refuse CODE MESSAGE: nothing was changed. The Installer shows only a
+# refuse CODE MESSAGE [SAID]: nothing was changed; stderr shows SAID (MESSAGE
+# when there is none). The Installer shows only a
 # generic error, so leave the reason in the package result an MDM detection
 # or an administrator reads. The result reports the running deployment as
 # its own status sees it (GAP-1428: a fixed document said every service was
@@ -287,8 +290,9 @@ fi
 # cannot answer, or is not a root-owned file only root can change (trusted;
 # it is not run).
 refuse() {
-    code=$1 message=$2
-    echo "$message" >&2
+    code=$1 said=${3:-$2}
+    message=$(printf '%s' "$2" | tr -d '"\\|&')
+    echo "$said" >&2
     umask 077
     result="$state/last-package-result.json"
     error="{\"code\":\"$code\",\"message\":\"$message\"}"
@@ -390,6 +394,11 @@ if [ -n "$installed" ] && ! [ -f "$marker" ] && ! awk -v a="$package_version" -v
     }'; then
     refuse downgrade_refused "DefenseClaw $installed is installed; refusing to downgrade to $package_version, so nothing was changed. For a deliberate rollback, create $marker as root first."
 fi
+# @LEGACY_SANDBOX_GUARD@
+if command -v dc_legacy_sandbox_guard >/dev/null 2>&1 &&
+    ! dc_legacy_sandbox_guard darwin /opt/cisco/defenseclaw/bin/defenseclaw-gateway /usr/local/bin/defenseclaw; then
+    refuse sandboxes_running "DefenseClaw ${installed:-an earlier release} is installed, and this install was refused: $dc_guard_reason" "$dc_guard_message"
+fi
 # A sandbox daemon of DefenseClaw before 1.0.4 exits by itself once the
 # package gave its program a new file, as soon as it counts no running
 # sandbox, and its exit stops the account's OpenShell gateway: also under a
@@ -427,7 +436,7 @@ if [ -n "$installed" ] && awk -v v="$installed" 'BEGIN {
 fi
 exit 0
 EOF
-sed -i.bak "s/@DC_PKG_VERSION@/${VERSION}/" "$SCRIPTS/preinstall" && rm -f "$SCRIPTS/preinstall.bak"
+"$REPO_ROOT/scripts/stamp-package-script.sh" "$VERSION" "$SCRIPTS/preinstall" "$SCRIPTS/preinstall"
 
 # postinstall applies the deployment. A failure has already been rolled back
 # by the lifecycle; it fails the install so the MDM reports it. It waits for

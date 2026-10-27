@@ -4582,6 +4582,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 	}
 	s.migrateRetiredConnectorState(ctx, registry)
+	s.removeRemovedConnectorLeftovers(ctx, registry)
 	s.reportUnrebasedRulePacks(ctx)
 	conn, err := resolveActiveConnector(registry, configuredConnectorName(s.currentConfig()), "guardrail")
 	if err != nil {
@@ -4999,6 +5000,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 }
 
 func (s *Sidecar) waitForConnectorSetup(ctx context.Context) error {
+	// A host with no connector configured is a boot path too: a 1.0.4 host
+	// whose last connector was dropped can still hold the OpenHands/OmniGent
+	// lock entries and stubs (GAP-2018). Their teardown needs no registry.
+	s.removeRemovedConnectorLeftovers(ctx, nil)
 	if err := s.reconcileUnconfiguredConnectors(ctx, nil); err != nil {
 		if s.health != nil {
 			s.health.SetGuardrail(StateError, err.Error(), nil)
@@ -5113,6 +5118,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		}
 	}
 	s.migrateRetiredConnectorState(ctx, registry)
+	s.removeRemovedConnectorLeftovers(ctx, registry)
 	s.reportUnrebasedRulePacks(ctx)
 
 	// configured is every connector in guardrail.connectors. names is the
@@ -7440,10 +7446,9 @@ func connectorDroppable(registry *connector.Registry, name string) bool {
 // (connector.RetiredConnector). A cleanup it cannot finish or verify is
 // returned with the lock entry kept, the way a registered connector's failed
 // teardown is: the caller keeps the name (active roster or lock) so a later
-// boot retries it. A removed connector (OpenHands, OmniGent; until 1.1) keeps
-// its lock entry even then: its teardown changes only its hook script and
-// tokens, and clearing its entry is a no-op. Any other name only loses
-// DefenseClaw's lock state (dropUnregisteredConnectorState).
+// boot retries it. OpenHands and OmniGent (until 1.1) never fail: their
+// teardown removes what DefenseClaw wrote and lists the rest. Any other name
+// only loses DefenseClaw's lock state (dropUnregisteredConnectorState).
 //
 // opts is retiredConnectorOpts: the data directory and the configured
 // connector workspace, where a workspace-pinned older setup registered its
@@ -7466,32 +7471,35 @@ func retireOrDropUnregisteredConnector(ctx context.Context, registry *connector.
 		return fmt.Errorf("retired connector %s left state: %w; %s", retired.Name(), err, removedConnectorDocHint)
 	}
 	if err := clearLock(dataDir, retired.Name()); err != nil {
-		return fmt.Errorf("clear hook contract lock for retired connector %s: %w", retired.Name(), err)
+		if !connector.IsRemovedConnector(retired.Name()) {
+			return fmt.Errorf("clear hook contract lock for retired connector %s: %w", retired.Name(), err)
+		}
+		// until 1.1: an OpenHands/OmniGent lock entry guards nothing; a
+		// leftover one never keeps the name for a retry.
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: clear hook contract lock for %s: %v\n", retired.Name(), err)
 	}
 	RemoveConnectorRulePackOverrides(retired.Name())
 	return nil
 }
 
-// logRemovedConnectorLeftovers logs one line for each thing a removed
-// connector's teardown leaves for the user to remove by hand (an agent config
-// that still names its hook or policy module, its stub, a kept token), with
-// the step, so the upgrade log names every such file. until 1.1.
+// removedConnectorNoticeLogged makes the removal notice one line per gateway
+// process, not one per removed connector or boot path. until 1.1.
+var removedConnectorNoticeLogged atomic.Bool
+
+// logRemovedConnectorLeftovers logs the one removal notice for OpenHands or
+// OmniGent (once per process), then one line for each thing its teardown could
+// not remove, with the step, so the upgrade log names every such file. until 1.1.
 func logRemovedConnectorLeftovers(name string, opts connector.SetupOpts) {
-	leftovers, _ := connector.RemovedConnectorLeftovers(name, opts)
+	leftovers, removed := connector.RemovedConnectorLeftovers(name, opts)
+	if !removed {
+		return
+	}
+	if removedConnectorNoticeLogged.CompareAndSwap(false, true) {
+		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", connector.RemovedConnectorNotice)
+	}
 	for _, left := range leftovers {
 		fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s left %s: %s; to remove it: %s\n", name, left.Path, left.What, left.Step)
 	}
-}
-
-// removedConnectorAlreadyTornDown reports whether name is a removed connector
-// (until 1.1) whose teardown has nothing left to do; opts is
-// retiredConnectorOpts.
-func removedConnectorAlreadyTornDown(opts connector.SetupOpts, name string) bool {
-	if !connector.IsRemovedConnector(name) {
-		return false
-	}
-	retired, ok := connector.RetiredConnector(name)
-	return ok && retired.VerifyClean(opts) == nil
 }
 
 // retiredConnectorOpts are the options a retired connector's teardown and
@@ -7501,6 +7509,35 @@ func removedConnectorAlreadyTornDown(opts connector.SetupOpts, name string) bool
 // else: they write or read no other connector's state.
 func retiredConnectorOpts(dataDir, workspaceDir string) connector.SetupOpts {
 	return connector.SetupOpts{DataDir: dataDir, WorkspaceDir: workspaceDir}
+}
+
+// removeRemovedConnectorLeftovers runs the OpenHands/OmniGent teardown on
+// every boot path, single- and multi-connector alike and with no connector
+// configured, when a lock entry or a leftover of theirs is there: a 1.0.4
+// host that dropped them from the roster kept both, and the single-connector
+// and zero-connector boots have no orphan reconcile (GAP-1843, GAP-1926,
+// GAP-2018). registry may be nil: a removed connector's teardown never uses it. It runs before any connector transaction captures
+// state and never fails a boot. A managed install leaves it to the hook
+// guardian, which runs it as each account. until 1.1.
+func (s *Sidecar) removeRemovedConnectorLeftovers(ctx context.Context, registry *connector.Registry) {
+	cfg := s.currentConfig()
+	if cfg == nil || strings.TrimSpace(cfg.DataDir) == "" || managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return
+	}
+	opts := s.retiredConnectorOpts()
+	for _, name := range []string{"openhands", "omnigent"} {
+		locked := connector.LoadHookContractLockEntry(opts.DataDir, name).Connector != ""
+		if left, _ := connector.RemovedConnectorLeftovers(name, opts); !locked && len(left) == 0 {
+			continue
+		}
+		if err := retireOrDropUnregisteredConnector(ctx, registry, opts, name, "lock-only", nil); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %v\n", err)
+			continue
+		}
+		if locked {
+			s.auditDroppedConnectorState(name, "lock-only")
+		}
+	}
 }
 
 // retiredConnectorOpts is retiredConnectorOpts for the current config.
@@ -7606,12 +7643,10 @@ func reconcileOrphanedConnectorRegistrations(
 			if !connectorDroppable(registry, name) {
 				return fmt.Errorf("protected lock-only connector %q is not registered and a plugin may still provide it (check plugin discovery); %s", name, removedConnectorDocHint)
 			}
+			// until 1.1: an OpenHands/OmniGent lock entry runs its teardown
+			// too; it removes what DefenseClaw wrote and the entry, so the
+			// next boot finds no orphan (GAP-1843).
 			retiredOpts := retiredConnectorOpts(dataDir, ops.workspaceDir)
-			if removedConnectorAlreadyTornDown(retiredOpts, name) {
-				// until 1.1: a removed connector's lock entry stays after
-				// its teardown, so only a teardown still due runs.
-				continue
-			}
 			if err := retireOrDropUnregisteredConnector(ctx, registry, retiredOpts, name, "lock-only", ops.clearLock); err != nil {
 				return err
 			}

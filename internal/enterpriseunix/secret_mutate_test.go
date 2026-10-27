@@ -15,8 +15,10 @@ package enterpriseunix
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
@@ -113,5 +115,56 @@ func TestSecretChangePausesTheApplyWatcher(t *testing.T) {
 	}
 	if !h.services.isActive(unitApplyPath) {
 		t.Fatal("the apply watcher was not started again")
+	}
+}
+
+// GAP-1734: a credential change whose ensure then refuses the config before
+// it changes anything (an untrusted pack in use) is put back: the credential
+// store holds what it held, as the result's "the refused config changed
+// nothing" says.
+func TestRefusedSecretChangeIsPutBack(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	const pack = "/etc/defenseclaw/policies/guardrail/custom"
+	if err := os.MkdirAll(h.env.P(pack), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := writeChangedConfig(t, h, "rule_pack: default",
+		"rule_pack: acme\n  custom_packs:\n    acme: {path: "+pack+", digest: \"sha256:"+strings.Repeat("a", 64)+"\"}")
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: cfg}))
+	h.env.Trust = func(path string, kind TrustKind) error {
+		if kind == TrustRulePack && path == h.env.P(pack) {
+			return errors.New(path + ": group/other writable permissions 0775 are not trusted")
+		}
+		return nil
+	}
+	secret := filepath.Join(h.env.P(h.env.Layout.SecretsDir), "galileo-api-key")
+	undone := false
+	r := h.run(Options{Action: ActionEnsure, Reason: "secret",
+		Mutate: func(ctx context.Context) error {
+			return h.env.WriteSecret(ctx, "galileo-api-key", []byte("s3cr3t"))
+		},
+		MutateUndo: func(context.Context) error {
+			undone = true
+			return h.env.RemoveRotatedSecret("galileo-api-key")
+		}})
+	requireError(t, r, codeConfig)
+	if !r.ConfigRefused || !undone {
+		t.Fatalf("refused=%v undone=%v errors=%+v", r.ConfigRefused, undone, r.Errors)
+	}
+	if exists(secret) {
+		t.Fatal("the refused credential change left the new credential on disk")
+	}
+	// A change the run applies is kept.
+	h.env.Trust = func(string, TrustKind) error { return nil }
+	undone = false
+	r = h.run(Options{Action: ActionEnsure, Reason: "secret",
+		Mutate: func(ctx context.Context) error {
+			return h.env.WriteSecret(ctx, "galileo-api-key", []byte("s3cr3t"))
+		},
+		MutateUndo: func(context.Context) error { undone = true; return nil }})
+	requireOK(t, r)
+	if undone || !exists(secret) {
+		t.Fatalf("an applied credential change was put back: undone=%v", undone)
 	}
 }

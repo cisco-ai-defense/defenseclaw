@@ -350,10 +350,18 @@ func unresolvedProfileExplainAccount(answer json.RawMessage) string {
 }
 
 // refuseUnknownIdentityViewAccount refuses a --user that names no account,
-// with the reason profile-explain gives and the spellings the view takes.
+// with the reason profile-explain gives and the spellings the view takes. It
+// sends the account as root resolves it, as profile-explain does (GAP-0500):
+// the gateway service cannot look up a bare directory name on an
+// SSSD-joined host itself, and refused an existing account whose listing
+// was empty (GAP-2035).
 func refuseUnknownIdentityViewAccount(user string) error {
+	query := url.Values{"user": {user}}
+	if facts := enterpriseExplainCallerFacts(user); facts != "" {
+		query.Set("caller_facts", facts)
+	}
 	var answer json.RawMessage
-	if _, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?user="+url.QueryEscape(user), &answer); err != nil {
+	if _, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?"+query.Encode(), &answer); err != nil {
 		return enterpriseIdentityViewError(err)
 	}
 	lookupErr := unresolvedProfileExplainAccount(answer)

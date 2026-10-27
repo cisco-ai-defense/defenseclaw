@@ -67,6 +67,9 @@ func mcpScanTargetNotScanned(target, why string) error {
 		"(an allowed server is not scanned) or sets admission.mcp.scan_on_install: false", target, why)
 }
 
+// mcpScanLookupIP resolves an MCP scan URL's host; a seam for tests.
+var mcpScanLookupIP = net.LookupIP
+
 // validateMCPScanTargetURL refuses MCP scan URLs that point at
 // loopback / private / link-local / cloud metadata destinations, or
 // that embed inline credentials. The check is opt-out via
@@ -111,12 +114,13 @@ func validateMCPScanTargetURL(target string) error {
 		}
 		return nil
 	}
-	addrs, err := net.LookupIP(host)
+	addrs, err := mcpScanLookupIP(host)
 	if err != nil {
-		// DNS failure is treated as fatal here: an unresolvable host
-		// would be revalidated at dial time and we cannot rely on the
-		// downstream scanner to do that.
-		return fmt.Errorf("MCP scan target %q does not resolve: %w", host, err)
+		// No address, so nothing is dialed and the server was not scanned.
+		// That is a scan that did not finish, not a refusal of the server's
+		// definition: unverified_server decides, as mcp set does (GAP-1277).
+		// An address that resolves later is checked by the next scan.
+		return fmt.Errorf("MCP scan target %q does not resolve: %w: %w", host, errMCPScanTargetUnresolved, err)
 	}
 	for _, ip := range addrs {
 		if ip.IsLoopback() ||
@@ -446,6 +450,10 @@ func (s *MCPScanner) workDirNote() string {
 	return "the server was not started in its folder " + s.workDirRefused + "; it ran in the scanner folder instead: "
 }
 
+// errMCPScanTargetUnresolved marks an MCP URL whose host had no address: the
+// scan did not finish, it was not refused (GAP-1277).
+var errMCPScanTargetUnresolved = errors.New("no DNS answer")
+
 // ErrMCPScanRefused marks an MCP scan refused for the server's own
 // definition: a URL on a local, private or metadata address, a path the
 // scanner does not read, a server that must start as its user, or a local
@@ -562,7 +570,10 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 				ScanError:  err.Error(),
 				ExitCode:   -1,
 			}
-			scanErr = refusedMCPScan(err)
+			scanErr = err
+			if !errors.Is(err, errMCPScanTargetUnresolved) {
+				scanErr = refusedMCPScan(err)
+			}
 			return result, scanErr
 		}
 	}

@@ -76,13 +76,17 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 	}
 	for _, conn := range []Connector{NewClaudeCodeConnector(), NewCodexConnector(), NewCopilotConnector(), NewCursorConnector(),
 		NewDevinConnector(), NewKiroConnector(), NewAntigravityConnector(), NewHermesConnector()} {
-		for _, tier := range []struct{ name, mode string }{{"default or permissive", "open"}, {"strict", "closed"}} {
+		for _, tier := range []struct{ name, mode, config string }{
+			{"default or permissive", "open", outageDefaultTierConfig},
+			{"strict", "closed", outageStrictTierConfig},
+		} {
 			for _, sc := range scenarios {
 				t.Run(conn.Name()+"/"+tier.name+"/"+sc.name, func(t *testing.T) {
 					t.Parallel()
 					invoke := hookArgvConnectorCase(t, conn.Name())
 					home := t.TempDir()
 					installNativeGatewayForHookTest(t, home)
+					writeOutageTierConfig(t, home, tier.config)
 					var addr string
 					if sc.handler != nil {
 						server := httptest.NewServer(sc.handler)
@@ -103,7 +107,7 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 					}
 					cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, invoke.script)}, invoke.args...)...)
 					cmd.Stdin = strings.NewReader(invoke.stdin)
-					cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home)
+					cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 					cmd.Env = append(cmd.Env, sc.env...)
 					output, err := cmd.CombinedOutput()
 					blocked := hookCallBlocked(err, string(output))
@@ -129,7 +133,7 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 						t.Fatalf("outage row = %+v, want a fail_open transport row with fail mode open", last)
 					}
 					text := string(output)
-					for _, want := range []string{"defenseclaw-gateway start", "defenseclaw doctor", "fail mode open for an outage"} {
+					for _, want := range []string{"defenseclaw-gateway start", "defenseclaw doctor", outageOpenWarningForTest(conn.Name())} {
 						if !strings.Contains(text, want) {
 							t.Fatalf("the warning does not name %q:\n%s", want, text)
 						}
@@ -143,10 +147,9 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 	}
 }
 
-// An outage record the hook cannot trust (a record without the config
-// source, one that names another connector or is malformed, or none) keeps
-// the open tier's outage closed.
-func TestPerUserShellHookOutageNeedsItsOwnRecord(t *testing.T) {
+// A setup-time record cannot override the current policy tier, including a
+// record left by an earlier strict render or a missing legacy record.
+func TestPerUserShellHookOutageIgnoresStaleRecord(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		record string // "" removes the record
@@ -162,6 +165,8 @@ func TestPerUserShellHookOutageNeedsItsOwnRecord(t *testing.T) {
 			invoke := hookArgvConnectorCase(t, "codex")
 			home := t.TempDir()
 			installNativeGatewayForHookTest(t, home)
+			// The current config gives the open outage mode.
+			writeOutageTierConfig(t, home, outageDefaultTierConfig)
 			hookDir := filepath.Join(home, "hooks")
 			opts := SetupOpts{DataDir: home, APIAddr: freeLoopbackAddrForOutageTest(t), APIToken: "scoped-test-token", HookFailMode: "open"}
 			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewCodexConnector()); err != nil {
@@ -178,13 +183,85 @@ func TestPerUserShellHookOutageNeedsItsOwnRecord(t *testing.T) {
 			cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, invoke.script)}, invoke.args...)...)
 			cmd.Stdin = strings.NewReader(invoke.stdin)
 			// An inherited transport status cannot stand in for the call's own.
-			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "_DC_TRANSPORT_STATUS=7")
+			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0", "_DC_TRANSPORT_STATUS=7")
 			output, err := cmd.CombinedOutput()
-			if !hookCallBlocked(err, string(output)) {
-				t.Fatalf("an outage with record %q ran the call:\n%s", tc.record, output)
+			if hookCallBlocked(err, string(output)) {
+				t.Fatalf("an outage with record %q blocked the call:\n%s", tc.record, output)
 			}
 		})
 	}
+}
+
+// The runtime record is what the gateway or the last refresh wrote. A
+// rule-pack change made since (strict selected while the gateway is stopped,
+// for every connector or for this one) and a config this release cannot read
+// close the outage, whatever the record says; the default and permissive
+// packs and another connector's strict pack leave it open.
+func TestPerUserShellHookOutageFollowsTheConfigNow(t *testing.T) {
+	for _, conn := range []Connector{NewClaudeCodeConnector(), NewCodexConnector(), NewCopilotConnector(), NewCursorConnector(),
+		NewDevinConnector(), NewKiroConnector(), NewAntigravityConnector(), NewHermesConnector()} {
+		other := "claudecode"
+		if conn.Name() == other {
+			other = "codex"
+		}
+		for _, tc := range []struct {
+			name, config string
+			opens        bool
+		}{
+			{"default pack after a strict render", outageDefaultTierConfig, true},
+			{"permissive pack", outageDefaultTierConfig + "  rule_pack: permissive\n", true},
+			{"strict pack", outageStrictTierConfig, false},
+			{"strict pack for this connector", outageDefaultTierConfig + "  connectors:\n    " + conn.Name() + ":\n      rule_pack: strict\n", false},
+			{"strict pack for another connector", outageDefaultTierConfig + "  connectors:\n    " + other + ":\n      rule_pack: strict\n", true},
+			{"no config", "", false},
+			{"config this release cannot read", "config_version: 9\nguardrail: [\n", false},
+		} {
+			t.Run(conn.Name()+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				invoke := hookArgvConnectorCase(t, conn.Name())
+				home := t.TempDir()
+				installNativeGatewayForHookTest(t, home)
+				hookDir := filepath.Join(home, "hooks")
+				// A strict render can remain installed when the gateway is stopped.
+				opts := SetupOpts{DataDir: home, APIAddr: freeLoopbackAddrForOutageTest(t), APIToken: "scoped-test-token", HookFailMode: "closed"}
+				if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+					t.Fatal(err)
+				}
+				writeOutageTierConfig(t, home, tc.config)
+				cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, invoke.script)}, invoke.args...)...)
+				cmd.Stdin = strings.NewReader(invoke.stdin)
+				cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+				output, err := cmd.CombinedOutput()
+				if blocked := hookCallBlocked(err, string(output)); blocked == tc.opens {
+					t.Fatalf("blocked=%v, want %v (exit %v):\n%s", blocked, !tc.opens, err, output)
+				}
+				records := hookFailureRecords(t, home)
+				if len(records) == 0 {
+					t.Fatalf("no hook-failures.jsonl row for the outage:\n%s", output)
+				}
+				want := "fail_closed"
+				if tc.opens {
+					want = "fail_open"
+				}
+				if last := records[len(records)-1]; last["outcome"] != want {
+					t.Fatalf("outage row = %+v, want %s", last, want)
+				}
+				if tc.opens && !strings.Contains(string(output), outageOpenWarningForTest(conn.Name())) {
+					t.Fatalf("open outage omitted its warning:\n%s", output)
+				}
+			})
+		}
+	}
+}
+
+// outageOpenWarningForTest is the one outage warning a connector's shell
+// hook shows: Claude Code and Codex show it as their user-visible
+// systemMessage, the others on stderr.
+func outageOpenWarningForTest(connector string) string {
+	if connector == "claudecode" || connector == "codex" {
+		return "DefenseClaw is not checking this session"
+	}
+	return "fail mode open for an outage"
 }
 
 // freeLoopbackAddrForOutageTest is a loopback address no process listens on.

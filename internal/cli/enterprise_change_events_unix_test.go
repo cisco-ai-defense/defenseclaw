@@ -20,11 +20,15 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
@@ -64,6 +68,101 @@ func spoolEvents(t *testing.T, root string, layout managed.StandaloneLayout) ([]
 		out = append(out, ev)
 	}
 	return out, raw.String()
+}
+
+// Cobra rejects syntax before RunE. Those refusals must still reach the
+// installed host's change spool without reading a value or recording raw input.
+func TestUnixChangeSyntaxRefusalsAreAudited(t *testing.T) {
+	root, layout := stubSecretChangeEnv(t)
+	savedManaged, savedSecure := bundleManagedDevice, bundleSecureClient
+	installed, secure, euid := true, false, 0
+	bundleManagedDevice = func() bool { return installed }
+	bundleSecureClient = func() bool { return secure }
+	previousEnv := newUnixLifecycleEnv
+	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
+		env, err := previousEnv(goos)
+		if env != nil {
+			env.Geteuid = func() int { return euid }
+		}
+		return env, err
+	}
+	t.Cleanup(func() {
+		bundleManagedDevice, bundleSecureClient = savedManaged, savedSecure
+		newUnixLifecycleEnv = previousEnv
+	})
+	for _, tc := range []struct {
+		action string
+		args   []string
+	}{
+		{"set", []string{"--name", "BAD_NAME", "--unknown"}},
+		{"set", []string{"--name"}},
+		{"set", []string{"--from-stdin"}},
+		{"remove", []string{"--name", "qa-token", "extra"}},
+		{"remove", []string{"--lock-wait=invalid"}},
+		{"anchors", []string{"--file", "unread-input.json", "--unknown"}},
+		{"anchors", []string{"--file"}},
+		{"anchors", []string{"--lock-wait=invalid"}},
+		{"anchors", []string{"extra"}},
+		{"anchors", nil},
+	} {
+		t.Run(tc.action+"/"+strings.Join(tc.args, " "), func(t *testing.T) {
+			before, _ := spoolEvents(t, root, layout)
+			cmd := newEnterpriseSecretCommand(tc.action, "")
+			kind, action := enterprisestatus.ChangeKindSecret, tc.action
+			if tc.action == "anchors" {
+				cmd = newEnterpriseBundleAnchorsCommand()
+				cmd.SetArgs(append([]string{"install"}, tc.args...))
+				kind, action = enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall
+			} else {
+				cmd.SetArgs(tc.args)
+			}
+			input := strings.NewReader("credential-value-marker\n")
+			cmd.SetIn(input)
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			if err := cmd.Execute(); commandExitCode(err) != enterprisestatus.UnixExitInvalidArgs {
+				t.Fatalf("syntax error = %v", err)
+			}
+			if input.Len() != len("credential-value-marker\n") {
+				t.Fatal("a syntax refusal read the credential")
+			}
+			events, raw := spoolEvents(t, root, layout)
+			if len(events) != len(before)+1 {
+				t.Fatalf("got %d change events, want %d", len(events), len(before)+1)
+			}
+			ev := events[len(events)-1]
+			if ev.Kind != kind || ev.Action != action || ev.Outcome != enterprisestatus.ChangeRefused ||
+				ev.ReasonCode != "invalid_arguments" || ev.Actor == "" || ev.Validate() != nil {
+				t.Fatalf("syntax refusal = %+v", ev)
+			}
+			for _, private := range []string{"BAD_NAME", "credential-value-marker", "unread-input.json"} {
+				if strings.Contains(raw, private) {
+					t.Fatalf("the change spool contains %q", private)
+				}
+			}
+		})
+	}
+	before, _ := spoolEvents(t, root, layout)
+	for _, mode := range []string{"per-user", "standard-account", "secure-client", "status"} {
+		installed, secure, euid = mode != "per-user", mode == "secure-client", 0
+		if mode == "standard-account" {
+			euid = 1000
+		}
+		action := "set"
+		if mode == "status" {
+			action = "status"
+		}
+		cmd := newEnterpriseSecretCommand(action, "")
+		cmd.SetArgs([]string{"--unknown"})
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		if err := cmd.Execute(); commandExitCode(err) != enterprisestatus.UnixExitInvalidArgs {
+			t.Fatalf("%s syntax error = %v", mode, err)
+		}
+	}
+	if after, _ := spoolEvents(t, root, layout); len(after) != len(before) {
+		t.Fatal("a per-user, unprivileged, Secure Client or read-only syntax error wrote a managed event")
+	}
 }
 
 // Every Linux and macOS secret set or remove that changed a credential,
@@ -247,5 +346,133 @@ func TestUnixSecretSetRefusedWhileAnotherChangeHoldsTheLastPlace(t *testing.T) {
 	}
 	if got := len(enterprisestatus.ListChangeEventIDs(dir)); got != 4096 {
 		t.Fatalf("spool holds %d events, want 4096", got)
+	}
+}
+
+type secretLockWaitServices struct{ enterpriseunix.ServiceManager }
+
+func (secretLockWaitServices) Check(context.Context) error { return nil }
+func (secretLockWaitServices) Version(context.Context) int { return 0 }
+
+// The reservation must already exist while set waits for the lifecycle
+// lock. A killed writer is reported exactly once without storing a value.
+func TestUnixSecretSetInterruptedDuringLockWait(t *testing.T) {
+	const childRoot = "DC_TEST_SECRET_LOCK_ROOT"
+	if root := os.Getenv(childRoot); root != "" {
+		layout, err := managed.StandaloneLayoutFor(enterpriseunix.CurrentGOOS())
+		if err != nil {
+			t.Fatal(err)
+		}
+		nowCalls := 0
+		newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
+			return &enterpriseunix.Env{GOOS: goos, Root: root, Layout: layout,
+				Services: secretLockWaitServices{},
+				Geteuid:  func() int { return 0 }, Lchown: func(string, int, int) error { return nil },
+				Now: func() time.Time {
+					nowCalls++
+					// acquireLock reads its deadline first; flockUntil reads
+					// the clock again only after flock reports the lock busy.
+					if nowCalls == 2 {
+						if err := os.WriteFile(filepath.Join(root, "lock-wait-entered"), nil, 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return time.Now()
+				}}, nil
+		}
+		cmd := newEnterpriseSecretCommand("set", "")
+		cmd.SetContext(context.Background())
+		var diagnostics bytes.Buffer
+		cmd.SetOut(&diagnostics)
+		cmd.SetErr(&diagnostics)
+		cmd.SetIn(strings.NewReader("provided by secret store\n"))
+		opts := enterpriseSecretOptions{name: "interrupted-token", fromStdin: true, lockWait: time.Minute}
+		if err := runEnterpriseSecret(cmd, "set", &opts); err != nil {
+			t.Fatalf("%v: %s", err, &diagnostics)
+		}
+		t.Fatal("secret set finished while another process held the lifecycle lock")
+	}
+	root, layout := stubSecretChangeEnv(t)
+	stateDir := filepath.Join(root, layout.LifecycleDir)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(stateDir, "lifecycle.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(binary, "-test.run=^TestUnixSecretSetInterruptedDuringLockWait$")
+	child.Env = append(os.Environ(), childRoot+"="+root)
+	var output bytes.Buffer
+	child.Stdout, child.Stderr = &output, &output
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- child.Wait() }()
+	t.Cleanup(func() { _ = child.Process.Kill() })
+	reservations := filepath.Join(root, enterprisestatus.ChangeEventsDir(layout.ConfigDir), enterprisestatus.ChangeReservedDirName)
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		entries, _ := os.ReadDir(reservations)
+		_, waiting := os.Stat(filepath.Join(root, "lock-wait-entered"))
+		if len(entries) == 1 && waiting == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("set ended before its reservation: %v: %s", err, &output)
+		case <-deadline.C:
+			t.Fatal("set did not reserve its audit event before waiting on the lifecycle lock")
+		case <-tick.C:
+		}
+	}
+	secret := filepath.Join(root, layout.SecretsDir, "interrupted-token")
+	if _, err := os.Lstat(secret); !os.IsNotExist(err) {
+		t.Fatalf("waiting set stored a credential: %v", err)
+	}
+	if err := child.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err == nil {
+		t.Fatal("killed set succeeded")
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	env, err := newUnixLifecycleEnv(enterpriseunix.CurrentGOOS())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Repeated later writers settle the killed command only once.
+	for i := 0; i < 2; i++ {
+		held, err := env.ReserveChange(enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionSet, "later-token")
+		if err != nil {
+			t.Fatal(err)
+		}
+		held.Release()
+	}
+	events, _ := spoolEvents(t, root, layout)
+	if len(events) != 1 || events[0].SecretName != "interrupted-token" ||
+		events[0].Outcome != enterprisestatus.ChangeFailed || events[0].ReasonCode != enterprisestatus.ChangeInterrupted {
+		t.Fatalf("interrupted set events = %+v", events)
+	}
+	if entries, err := os.ReadDir(reservations); err != nil || len(entries) != 0 {
+		t.Fatalf("reservations remain: %v (%v)", entries, err)
+	}
+	if _, err := os.Lstat(secret); !os.IsNotExist(err) {
+		t.Fatalf("killed set stored a credential: %v", err)
 	}
 }

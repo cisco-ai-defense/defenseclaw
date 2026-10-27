@@ -87,6 +87,47 @@ SANDBOX_BUTTON_BAR_MIN_WIDTH = 100
 # stopping it would lose work (sandboxcli.ExitStopKept, #1144).
 SANDBOX_STOP_KEPT_EXIT = 5
 
+# The words of a stop the daemon refused because the MicroVM's disk could
+# not be synced first (sandboxapi.CodeUnsynced, GAP-0902). On this terminal
+# `sandbox stop` asks itself whether to stop it anyway; without an answer it
+# keeps the sandbox running and exits SANDBOX_STOP_KEPT_EXIT.
+UNSYNCED_STOP_TEXT = "disk could not be synced first"
+
+
+def _run_teeing_stderr(argv: list[str], cwd: str, sink: list[str]) -> int:
+    """Run *argv* on this terminal and keep a copy of what it wrote to stderr.
+
+    stdin and stdout stay the terminal (the command's questions need them);
+    stderr is copied to the terminal as it arrives, so the user still reads
+    it live, and appended to *sink* when the command ends.
+    """
+    read_fd, write_fd = os.pipe()
+    chunks: list[bytes] = []
+
+    def pump() -> None:
+        with os.fdopen(read_fd, "rb", buffering=0) as source:
+            while data := source.read(4096):
+                chunks.append(data)
+                try:
+                    target = getattr(sys.stderr, "buffer", None)
+                    if target is not None:
+                        target.write(data)
+                        target.flush()
+                    else:
+                        sys.stderr.write(data.decode("utf-8", "replace"))
+                        sys.stderr.flush()
+                except (OSError, ValueError):
+                    pass
+
+    thread = threading.Thread(target=pump, name="sandbox-stderr", daemon=True)
+    thread.start()
+    try:
+        return subprocess.run(argv, cwd=cwd, check=False, stderr=write_fd).returncode
+    finally:
+        os.close(write_fd)
+        thread.join(timeout=5)
+        sink.append(b"".join(chunks).decode("utf-8", "replace"))
+
 
 def sandbox_stop_kept_text(name: str) -> str:
     """Why ``sandbox stop`` kept ``name`` running: its MicroVM disk is full and holds unpulled work."""
@@ -95,6 +136,15 @@ def sandbox_stop_kept_text(name: str) -> str:
         f"so its work that was not pulled would be lost. Free some space in it (defenseclaw sandbox exec {name} "
         f"-- df -h /), pull its work (P), then stop it; delete it (d) to give that work up."
     )
+
+def sandbox_stop_unsynced_text(name: str) -> str:
+    """Why ``sandbox stop`` kept ``name`` running: its MicroVM disk could not be synced first."""
+    return (
+        f"{name} keeps running: its MicroVM's disk could not be synced first, so a stop now would lose what it "
+        f"wrote since its last sync. Save the work you need (pull it with P), then stop it again; "
+        f"defenseclaw sandbox stop {name} --discard-unsynced stops it anyway, losing that."
+    )
+
 
 # Buttons of the panel's control bar, mapped to the key they press.
 SANDBOX_BUTTON_KEYS: dict[str, str] = {
@@ -1134,13 +1184,23 @@ class SandboxPanelMixin:
         if not confirmed:
             self._set_status("Stop cancelled.")  # type: ignore[attr-defined]
             return
-        code = self._run_sandbox_terminal(SandboxLaunch(("sandbox", "stop", name), os.getcwd(), f"sandbox stop {name}"))
+        said: list[str] = []
+        code = self._run_sandbox_terminal(
+            SandboxLaunch(("sandbox", "stop", name), os.getcwd(), f"sandbox stop {name}"), stderr_sink=said
+        )
         if code == SANDBOX_STOP_KEPT_EXIT:
-            # #1144: the command line kept a copy-mode MicroVM with a full
-            # disk running, because stopping it would lose its unpulled work.
-            message = sandbox_stop_kept_text(name)
+            if UNSYNCED_STOP_TEXT in " ".join("".join(said).split()):
+                # GAP-1595: the MicroVM's disk could not be synced first, and
+                # the command line's own question (asked in this terminal)
+                # was not answered with a yes: it keeps running.
+                message = sandbox_stop_unsynced_text(name)
+            else:
+                # #1144: the command line kept a copy-mode MicroVM with a full
+                # disk running, because stopping it would lose its unpulled work.
+                message = sandbox_stop_kept_text(name)
             self._set_status(message)  # type: ignore[attr-defined]
             self.notify_toast("warn", message)  # type: ignore[attr-defined]
+            return
 
     async def _sandbox_delete(self, name: str) -> bool:
         """Delete ``name`` through the command line, which asks; whether it is gone.
@@ -1305,11 +1365,14 @@ class SandboxPanelMixin:
         launch = SandboxLaunch(("sandbox", "connect", name), os.getcwd(), f"sandbox connect {name}")
         self._run_sandbox_terminal(launch)
 
-    def _run_sandbox_terminal(self, launch: SandboxLaunch, *, notify_unsupported: bool = True) -> int | None:
+    def _run_sandbox_terminal(
+        self, launch: SandboxLaunch, *, notify_unsupported: bool = True, stderr_sink: list[str] | None = None
+    ) -> int | None:
         """Hand the terminal to ``defenseclaw-gateway`` and return its exit status.
 
         ``None`` when the terminal cannot be handed over (no gateway binary,
-        or an environment Textual cannot suspend).
+        or an environment Textual cannot suspend). With *stderr_sink*, what
+        the command wrote to stderr is also kept there.
         """
         from textual.app import SuspendNotSupported
 
@@ -1329,7 +1392,12 @@ class SandboxPanelMixin:
                     try:
                         print(f"\n→ {command}   (the TUI comes back when it ends)\n", flush=True)
                         try:
-                            returncode = subprocess.run([binary, *launch.argv], cwd=launch.cwd, check=False).returncode
+                            if stderr_sink is None:
+                                returncode = subprocess.run(
+                                    [binary, *launch.argv], cwd=launch.cwd, check=False
+                                ).returncode
+                            else:
+                                returncode = _run_teeing_stderr([binary, *launch.argv], launch.cwd, stderr_sink)
                         except OSError as exc:
                             print(f"could not start {binary}: {exc}", flush=True)
                             returncode = 127

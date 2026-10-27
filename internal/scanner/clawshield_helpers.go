@@ -37,18 +37,20 @@ var csTextExtensions = map[string]bool{
 }
 
 // csCollectTextFiles returns all text-extension files under root.
-func csCollectTextFiles(root string) ([]string, error) {
-	return csCollectFiles(root, func(path string) bool {
+func csCollectTextFiles(root string, strict bool) ([]string, error) {
+	return csCollectFiles(root, strict, func(path string) bool {
 		return csTextExtensions[filepath.Ext(path)]
 	})
 }
 
 // csCollectAllFiles returns all non-directory files under root (for binary-aware scanning).
-func csCollectAllFiles(root string) ([]string, error) {
-	return csCollectFiles(root, func(string) bool { return true })
+func csCollectAllFiles(root string, strict bool) ([]string, error) {
+	return csCollectFiles(root, strict, func(string) bool { return true })
 }
 
-func csCollectFiles(root string, include func(string) bool) ([]string, error) {
+// csCollectFiles skips an unreadable directory or entry unless strict, when
+// it fails with ErrIncompleteScan.
+func csCollectFiles(root string, strict bool, include func(string) bool) ([]string, error) {
 	info, err := os.Lstat(root)
 	if err != nil {
 		return nil, err
@@ -67,6 +69,9 @@ func csCollectFiles(root string, include func(string) bool) ([]string, error) {
 	var files []string
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if strict {
+				return incompleteScan(path, walkErr)
+			}
 			return nil
 		}
 		if d.IsDir() {
@@ -78,6 +83,9 @@ func csCollectFiles(root string, include func(string) bool) ([]string, error) {
 		}
 		info, lerr := os.Lstat(path)
 		if lerr != nil {
+			if strict {
+				return incompleteScan(path, lerr)
+			}
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {

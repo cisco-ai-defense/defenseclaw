@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
@@ -21,6 +23,14 @@ import (
 // 2026-10-24, GAP-1372: the plugin's deny of it was a benign false block).
 // Outside the window a per-user plugin is closed whatever mode it was asked
 // for (sa-port-peer): failures block and a valid allow runs.
+//
+// The carry reads the outage mode at call time (fix/r104-oss-outage-open):
+// the plugin asks the helper its .gateway-helper record names
+// (hook-outage-mode --install-window), and the window is open only for the
+// default and permissive tiers; the strict tier and any doubt close it
+// (OWNER DECISION 2026-10-24 20:33). installWindowTierForTest gives the
+// plugin the default tier's answer. The lock is stale only when its
+// installer is proven gone; no clock is read.
 func pluginInstallWindowCases(t *testing.T, asset, extension, harness string) {
 	t.Helper()
 	nodeForTest(t)
@@ -34,6 +44,7 @@ func pluginInstallWindowCases(t *testing.T, asset, extension, harness string) {
 			if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			openWindow := installWindowTierForTest(t, filepath.Dir(token))
 			data := templateData{APIAddr: "127.0.0.1:1", TokenFileJS: javaScriptStringContent(token), FailMode: "open"}
 			plugin := writeRenderedPlugin(t, asset, "defenseclaw."+strings.TrimPrefix(extension, "."), data)
 			// Load once before the upgrade starts. An agent keeps this module in
@@ -59,23 +70,43 @@ func pluginInstallWindowCases(t *testing.T, asset, extension, harness string) {
 			if err := os.Mkdir(lock, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			blocked := session.request("during install", "call")
-			if failure == "valid-allow" {
-				if blocked != "allow" {
-					t.Fatalf("valid allow with install lock = %q; want the gateway's allow", blocked)
+			during := func(phase string) {
+				t.Helper()
+				blocked := session.request(phase, "call")
+				if failure == "valid-allow" && openWindow {
+					if blocked != "allow" {
+						t.Fatalf("valid allow %s = %q; want the gateway's allow", phase, blocked)
+					}
+				} else if !strings.HasPrefix(blocked, "block:") ||
+					!strings.Contains(blocked, "being installed or upgraded") ||
+					!strings.Contains(blocked, "run the installer again") ||
+					strings.Contains(blocked, "defenseclaw-gateway start") {
+					t.Fatalf("%s %s = %q; want a block naming the install", failure, phase, blocked)
 				}
-			} else if !strings.HasPrefix(blocked, "block:") ||
-				!strings.Contains(blocked, "being installed or upgraded") ||
-				!strings.Contains(blocked, "run the installer again") ||
-				strings.Contains(blocked, "defenseclaw-gateway start") {
-				t.Fatalf("%s with install lock = %q; want a block naming the install", failure, blocked)
 			}
+			during("during install")
 			afterLog, afterErr := os.ReadFile(filepath.Join(dataDir, "logs", "hook-failures.jsonl"))
 			if afterErr != nil && !os.IsNotExist(afterErr) {
 				t.Fatal(afterErr)
 			}
 			if string(afterLog) != string(beforeLog) {
 				t.Fatalf("%s logged a blocked install call as fail-open", failure)
+			}
+			then := time.Now().Add(-11 * time.Minute)
+			if err := os.Chtimes(lock, then, then); err != nil {
+				t.Fatal(err)
+			}
+			// No clock: an old lock that names no installer pid yet still holds.
+			during("old install lock without an installer pid")
+			if err := os.Chtimes(lock, time.Now(), time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(lock, "pid"), []byte("99999999\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			outside("dead install owner")
+			if err := os.Remove(filepath.Join(lock, "pid")); err != nil {
+				t.Fatal(err)
 			}
 			if err := os.Remove(lock); err != nil {
 				t.Fatal(err)
@@ -151,6 +182,7 @@ func TestAmpPluginInstallWindowBlocksFailOpen(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
 				t.Fatal(err)
 			}
+			openWindow := installWindowTierForTest(t, filepath.Dir(token))
 			plugin := writeRenderedPlugin(t, "amp-plugin.ts", "defenseclaw.mts", templateData{
 				APIAddr: "127.0.0.1:1", TokenFileJS: javaScriptStringContent(token), FailMode: "open",
 			})
@@ -187,8 +219,8 @@ func TestAmpPluginInstallWindowBlocksFailOpen(t *testing.T) {
 				t.Fatal(err)
 			}
 			// GAP-1372: a valid allow the gateway gave keeps its answer in the
-			// window; every failure blocks both boundaries.
-			check("during install", failure != "valid-allow")
+			// default tier's window; every failure blocks both boundaries.
+			check("during install", failure != "valid-allow" || !openWindow)
 			if err := os.Remove(lock); err != nil {
 				t.Fatal(err)
 			}
@@ -196,4 +228,29 @@ func TestAmpPluginInstallWindowBlocksFailOpen(t *testing.T) {
 			session.close()
 		})
 	}
+}
+
+// installWindowTierForTest writes the per-user helper and its .gateway-helper
+// record beside a rendered plugin's token: it answers hook-outage-mode
+// --install-window with the default tier's "open" and every other outage
+// mode with "closed". It reports false on native Windows, where the record
+// must name the real gateway executable: there the window is closed by doubt.
+// DEFENSECLAW_HOME names an empty folder, so no lock of this account counts.
+func installWindowTierForTest(t *testing.T, hookDir string) bool {
+	t.Helper()
+	t.Setenv("DEFENSECLAW_HOME", testenv.PrivateTempDir(t))
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	bin := filepath.Join(testenv.PrivateTempDir(t), ".local", "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := "#!/bin/sh\nif [ \"$1\" = hook-outage-mode ]; then\n" +
+		"  case \" $* \" in *\" --install-window \"*) printf 'open\\n' ;; *) printf 'closed\\n' ;; esac\n  exit 0\nfi\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(bin, "defenseclaw-gateway"), []byte(helper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	recordGatewayHelperForTest(t, hookDir, filepath.Join(bin, "defenseclaw-gateway"))
+	return true
 }

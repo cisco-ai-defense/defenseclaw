@@ -1003,6 +1003,29 @@ func TestCodexUserPromptSubmitBlockSchema(t *testing.T) {
 
 func TestOversizedPayload(t *testing.T) {
 	big := strings.Repeat("a", 64)
+	t.Run("balanced per-user bounded oversized call warns and audits", func(t *testing.T) {
+		for _, connector := range []string{"claudecode", "codex", "cursor", "copilot", "amp"} {
+			t.Run(connector, func(t *testing.T) {
+				rt := ok(`{"action":"allow"}`)
+				var home string
+				r := run(t, connector, rt, func(o *Options) {
+					home = o.Home
+					o.OutageFailModeNow = func() string { return "open" }
+					o.MaxBody = 8
+					o.Stdin = strings.NewReader(big)
+				})
+				if r.code != 0 || strings.Contains(r.stdout, `"decision":"block"`) ||
+					strings.Contains(r.stdout, `"permissionDecision":"deny"`) ||
+					!strings.Contains(r.stderr, "warning") || rt.requests != 1 {
+					t.Fatalf("code=%d stdout=%q stderr=%q requests=%d", r.code, r.stdout, r.stderr, rt.requests)
+				}
+				rows, err := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
+				if err != nil || !strings.Contains(string(rows), `"outcome":"fail_open"`) {
+					t.Fatalf("balanced audit = %q, %v", rows, err)
+				}
+			})
+		}
+	})
 	t.Run("per-user open still blocks, never calls gateway", func(t *testing.T) {
 		rt := ok(`{"action":"allow"}`)
 		r := run(t, "claudecode", rt, func(o *Options) {
@@ -1043,6 +1066,72 @@ func TestOversizedPayload(t *testing.T) {
 			}
 			if r.stdout != want.stdout {
 				t.Errorf("stdout = %q, want %q", r.stdout, want.stdout)
+			}
+		})
+	}
+}
+
+func TestOversizedBalancedPreActionAsksGatewayAboutProtectedTarget(t *testing.T) {
+	cases := []struct {
+		name, connector, event, tool, path string
+	}{
+		{"cursor credential store read", "cursor", "beforeReadFile", "Read", "/home/alice/.config/chromium/Default/Cookies"},
+		{"cursor audit database read", "cursor", "beforeReadFile", "Read", "/home/alice/.defenseclaw/audit.db"},
+		{"claude authorized keys write", "claudecode", "PreToolUse", "Write", "/home/alice/.ssh/authorized_keys"},
+		{"codex protected hook write", "codex", "PreToolUse", "Write", "/home/alice/.defenseclaw/hooks/claude-code-hook.sh"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := fmt.Sprintf(`{"hook_event_name":%q,"tool_name":%q,"tool_input":{"file_path":%q,"content":%q}}`,
+				tc.event, tc.tool, tc.path, strings.Repeat("x", 2048))
+			rt := ok(`{"action":"block","reason":"protected target"}`)
+			r := run(t, tc.connector, rt, func(o *Options) {
+				o.Event = tc.event
+				o.OutageFailModeNow = func() string { return "open" }
+				o.MaxBody = 256
+				o.Stdin = strings.NewReader(payload)
+			})
+			if rt.requests != 1 {
+				t.Fatalf("gateway requests = %d, want 1", rt.requests)
+			}
+			if !bytes.Contains(rt.gotBody, []byte(tc.path)) ||
+				!bytes.Contains(rt.gotBody, []byte(`"content_truncated":true`)) {
+				t.Fatalf("bounded gateway review lost target or truncation marker: %s", rt.gotBody)
+			}
+			if !strings.Contains(r.stdout, "deny") && !strings.Contains(r.stdout, "block") && r.code != blockExit {
+				t.Fatalf("protected call was allowed: code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
+			}
+		})
+	}
+}
+
+// Every native connector's oversized call reaches the gateway with its
+// command, wherever the connector puts it, so a protected command blocks.
+func TestOversizedBalancedNativeCallSendsItsCommandToTheGateway(t *testing.T) {
+	const secret = "cat ~/.ssh/id_rsa"
+	pad := strings.Repeat("p", 4096)
+	for _, tc := range []struct {
+		name, connector, event, payload, want string
+	}{
+		{"codex exec_command cmd", "codex", "PreToolUse", `{"hook_event_name":"PreToolUse","tool_name":"exec_command","tool_input":{"justification":"` + pad + `","cmd":"` + secret + `"},"padding":"` + pad + pad + `"}`, `"cmd":"` + secret + `"`},
+		{"codex shell argv", "codex", "PreToolUse", `{"hook_event_name":"PreToolUse","tool_name":"shell","tool_input":{"command":["bash","-lc","` + secret + `"]},"padding":"` + pad + pad + `"}`, `"-lc","` + secret + `"`},
+		{"claude bash command", "claudecode", "PreToolUse", `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"description":"` + pad + `","command":"` + secret + `"},"padding":"` + pad + pad + `"}`, `"command":"` + secret + `"`},
+		{"cursor top-level command", "cursor", "beforeShellExecution", `{"hook_event_name":"beforeShellExecution","command":"` + secret + `","cwd":"/w","padding":"` + pad + pad + `"}`, `"command":"` + secret + `"`},
+		{"copilot toolArgs", "copilot", "preToolUse", `{"toolName":"bash","toolArgs":"{\"command\":\"` + secret + `\",\"description\":\"` + pad + pad + `\"}"}`, `\"command\":\"` + secret + `\"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := ok(`{"action":"block","reason":"protected target"}`)
+			r := run(t, tc.connector, rt, func(o *Options) {
+				o.Event = tc.event
+				o.OutageFailModeNow = func() string { return "open" }
+				o.MaxBody = 6144
+				o.Stdin = strings.NewReader(tc.payload)
+			})
+			if rt.requests != 1 || !bytes.Contains(rt.gotBody, []byte(tc.want)) {
+				t.Fatalf("gateway requests=%d review lost the command %s: %.500s", rt.requests, tc.want, rt.gotBody)
+			}
+			if r.code == 0 && !strings.Contains(r.stdout, "deny") && !strings.Contains(r.stdout, "block") {
+				t.Fatalf("protected call was allowed: stdout=%q stderr=%q", r.stdout, r.stderr)
 			}
 		})
 	}
@@ -1189,6 +1278,8 @@ func TestPerUserColdStartOutlivesTheCall(t *testing.T) {
 	release := make(chan struct{})
 	r := run(t, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
 		opts.Event = "MessageDisplay"
+		// The default tier opens a per-user outage (its config, at call time).
+		opts.OutageFailModeNow = func() string { return "open" }
 		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 200*time.Millisecond)
 		opts.GatewayRecovery = func(ctx context.Context, _ error) error {
 			startCtx <- ctx
@@ -2372,10 +2463,11 @@ func TestUnknownConnector(t *testing.T) {
 	}
 }
 
-// until 1.1: a hook an older release registered for a removed connector (on
-// Windows, the native launcher) blocks every call, in every fail mode, and
-// says that support was removed in 1.0.4; it never reaches the gateway.
-func TestRemovedConnectorHookBlocksWithTheRemovalReason(t *testing.T) {
+// until 1.1: a hook an older release registered for OpenHands or OmniGent
+// (on Windows, the native launcher) lets the call run in every fail mode and
+// prints the one removal notice: DefenseClaw no longer guards them, and a
+// leftover registration must not block normal work.
+func TestRemovedConnectorHookAllowsWithTheRemovalNotice(t *testing.T) {
 	for _, connector := range []string{"openhands", "OpenHands", "omnigent"} {
 		for _, failMode := range []string{"open", "closed"} {
 			t.Run(connector+"/"+failMode, func(t *testing.T) {
@@ -2385,19 +2477,13 @@ func TestRemovedConnectorHookBlocksWithTheRemovalReason(t *testing.T) {
 					Connector: connector, Event: "PreToolUse", FailMode: failMode, Home: home, HookDir: home, Token: "t",
 					Stdin: strings.NewReader(`{"tool_name":"bash"}`), Stdout: &out, Stderr: &errb,
 				})
-				if code != 2 {
-					t.Fatalf("code = %d, want 2 (block)", code)
+				if code != 0 {
+					t.Fatalf("code = %d, want 0 (DefenseClaw no longer guards %s)", code, connector)
 				}
-				if !strings.Contains(errb.String(), "support was removed in DefenseClaw 1.0.4") {
-					t.Fatalf("stderr = %q, want the removal reason", errb.String())
+				if strings.TrimSpace(errb.String()) != "OpenHands/OmniGent support was removed in 1.0.5; DefenseClaw no longer guards it." {
+					t.Fatalf("stderr = %q, want the one removal notice", errb.String())
 				}
-				if strings.EqualFold(connector, "openhands") {
-					var decision map[string]string
-					if err := json.Unmarshal(out.Bytes(), &decision); err != nil || decision["decision"] != "deny" ||
-						!strings.Contains(decision["reason"], "OpenHands support was removed") {
-						t.Fatalf("stdout = %q, want the OpenHands deny decision", out.String())
-					}
-				} else if out.Len() != 0 {
+				if out.Len() != 0 {
 					t.Fatalf("stdout = %q, want none", out.String())
 				}
 			})

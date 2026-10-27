@@ -229,7 +229,10 @@ def test_hermes_upgrade_from_1_0_2_layout_passes_once_the_gateway_reseals(tmp_pa
     row = check(reseal=False)
     assert row["status"] == "fail", row
     assert "execution probe failed" in row["detail"]
-    assert fail_mode._unix_registration_freshness(cfg, "hermes") == "registration-command-stale"
+    # The registration is this install's sealed hook, so fail-mode does not
+    # call it stale: the probe is Doctor's, and fail-mode reads the 1.0.2
+    # hook's rendered mode as its own source (hook-script).
+    assert fail_mode._unix_registration_freshness(cfg, "hermes") is None
 
     # The new gateway's Setup renders the hook and reseals the lock.
     write_lock(2, "#!/bin/sh\n# defenseclaw-managed-hook v6\n" + _PROOF)
@@ -792,6 +795,110 @@ def test_hermes_doctor_adds_forkless_arg_only_for_darwin(tmp_path, monkeypatch):
     monkeypatch.setattr(cmd_doctor, "sys", _ProxyModule(sys, platform="darwin"))
     assert not cmd_doctor._hermes_registered_execution_problem(cfg, config)
     assert seen == [[str(hook), "--defenseclaw-execution-probe", "--forkless"]]
+
+
+# How the contained probe ends where the host cannot run it: unshare refused
+# (no unprivileged user namespaces), a spawn failure or timeout (None), the
+# supervisor refusing to run it uncontained (125), or an error from the
+# probe runner itself.
+_PROBE_UNAVAILABLE = {
+    "cannot-run": (None, b""),
+    "not-contained": (125, b""),
+    "runner-error": OSError("unshare: No space left on device"),
+}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@pytest.mark.parametrize("outcome", sorted(_PROBE_UNAVAILABLE))
+def test_hermes_fail_mode_freshness_does_not_need_the_execution_probe(tmp_path, monkeypatch, outcome):
+    """A host that cannot run Doctor's probe keeps a current Hermes registration current.
+
+    Fail-mode reconcile rejected every Hermes update on a Linux host without
+    unprivileged user namespaces, because the freshness check ran the probe.
+    """
+    _registered_unix_hermes(tmp_path, monkeypatch)
+    calls = []
+
+    def unavailable(argv):
+        calls.append(argv)
+        result = _PROBE_UNAVAILABLE[outcome]
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr(cmd_doctor, "_run_hermes_execution_probe", unavailable)
+    cfg = SimpleNamespace(data_dir=str(tmp_path / "dc"))
+    assert fail_mode._unix_registration_freshness(cfg, "hermes") is None
+    assert fail_mode._native_deny_registration_freshness(cfg, "hermes") is None
+    assert calls == []
+    if outcome != "runner-error":
+        # Doctor still runs the probe and reports that it did not prove the hook.
+        assert cmd_doctor._hermes_registered_execution_problem(cfg, str(tmp_path / "hermes" / "config.yaml"))
+        assert len(calls) == 1
+
+
+@pytest.mark.skipif(not _LINUX, reason="Linux probe supervisor")
+def test_hermes_fail_mode_keeps_a_current_registration_where_unshare_is_refused(tmp_path, monkeypatch):
+    """The real probe supervisor on a host that refuses its namespaces (here: an unshare flag it rejects)."""
+    script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    ran = tmp_path / "ran"
+    script.write_text(f"#!/bin/sh\n: > '{ran}'\n" + _PROOF, encoding="utf-8")
+    supervisor = cmd_doctor._HERMES_PROBE_SUPERVISOR
+    assert "CLONE_NEWUSER, CLONE_NEWPID = 0x10000000, 0x20000000" in supervisor
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_HERMES_PROBE_SUPERVISOR",
+        supervisor.replace(
+            "CLONE_NEWUSER, CLONE_NEWPID = 0x10000000, 0x20000000",
+            "CLONE_NEWUSER, CLONE_NEWPID = 0x10000000, 0x1",
+        ),
+    )
+    monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_PIPE_WAIT", 0.5)
+    row = check()  # seals the edited hook, then Doctor probes it
+    assert row["status"] == "fail" and "could not run" in row["detail"], row
+    cfg = SimpleNamespace(data_dir=str(tmp_path / "dc"))
+    assert fail_mode._unix_registration_freshness(cfg, "hermes") is None
+    assert not ran.exists(), "the hook ran outside a namespace of its own"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@pytest.mark.parametrize(
+    "case",
+    ["unsealed-edit", "other-script", "missing-approval", "timeout", "duplicate", "not-executable", "extra-event"],
+)
+def test_hermes_fail_mode_still_rejects_a_stale_registration_without_the_probe(tmp_path, monkeypatch, case):
+    """With the probe out of fail-mode, the registration checks alone still find a stale one."""
+    script, _check = _registered_unix_hermes(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        cmd_doctor, "_run_hermes_execution_probe", lambda _argv: (0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE)
+    )
+    config = tmp_path / "hermes" / "config.yaml"
+    allowlist = config.with_name("shell-hooks-allowlist.json")
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    first = next(iter(_HERMES_REQUIRED_HOOKS))
+    if case == "unsealed-edit":
+        script.write_text('#!/bin/sh\nFAIL_MODE="open"\n' + _PROOF, encoding="utf-8")
+    elif case == "other-script":
+        other = script.with_name(script.name + ".old")
+        other.write_bytes(script.read_bytes())
+        other.chmod(0o700)
+        for entries in document["hooks"].values():
+            entries[0]["command"] = "'" + str(other) + "'"
+    elif case == "missing-approval":
+        approvals = json.loads(allowlist.read_text(encoding="utf-8"))
+        approvals["approvals"] = approvals["approvals"][1:]
+        allowlist.write_text(json.dumps(approvals), encoding="utf-8")
+    elif case == "timeout":
+        document["hooks"][first][0]["timeout"] = 5
+    elif case == "duplicate":
+        document["hooks"][first].append(dict(document["hooks"][first][0]))
+    elif case == "not-executable":
+        script.chmod(0o600)
+    elif case == "extra-event":
+        document["hooks"]["defenseclaw_test_extra_event"] = [dict(document["hooks"][first][0])]
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+    cfg = SimpleNamespace(data_dir=str(tmp_path / "dc"))
+    assert fail_mode._unix_registration_freshness(cfg, "hermes") == "registration-command-stale"
 
 
 @_needs_perl

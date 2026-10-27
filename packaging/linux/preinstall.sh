@@ -13,7 +13,8 @@
 # package, and let an apply run that already started finish first.
 #
 # It fails the package transaction only for an administrator config this
-# package cannot read, or for a downgrade the administrator did not ask for
+# package cannot read, for a downgrade the administrator did not ask for, or
+# while a sandbox daemon of DefenseClaw 1.0.3 or older has a sandbox running
 # (below); nothing else stops it.
 
 set -u
@@ -255,6 +256,22 @@ case "$package_version" in
         fi
         ;;
 esac
+
+# A sandbox daemon of DefenseClaw 1.0.3 or older stops its user's OpenShell
+# gateway once this package replaces its program, under a MicroVM whose
+# workload ended, which loses what that VM has not written (GAP-0903).
+# DefenseClaw stops no sandbox itself: refuse before any file is replaced
+# while such a daemon has a sandbox running, naming each one with the
+# command its user runs to end it, and end an idle one first. The release
+# build puts the guard in place of the next line
+# (scripts/stamp-package-script.sh).
+# @LEGACY_SANDBOX_GUARD@
+if command -v dc_legacy_sandbox_guard >/dev/null 2>&1; then
+    if ! dc_legacy_sandbox_guard linux /opt/defenseclaw/bin/defenseclaw-gateway /usr/bin/defenseclaw; then
+        echo "$dc_guard_message" >&2
+        exit 1
+    fi
+fi
 
 apply_path=defenseclaw-enterprise-apply.path
 # The postinstall starts the trigger again when this marker is present.

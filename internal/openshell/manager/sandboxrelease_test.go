@@ -193,8 +193,14 @@ func TestDefenseClawStopsNoLegacyGuest(t *testing.T) {
 				e.fake.SetGlobalPolicy(nil)
 				e.fake.Intercept(nil)
 			}
-			e.fake.HandleExec(e.workloadChecks(nil, guestAnswers("exited\nsynced\n", false)))
-			e.stopBox("kept")
+			_, err = e.m.Stop(t.Context(), "kept")
+			if tc.name == "MicroVM, sync fails" {
+				// It keeps running until its user accepts the loss (GAP-0902).
+				wantCode(t, err, sandboxapi.CodeUnsynced)
+				e.stopBoxAcceptingLoss("kept")
+			} else {
+				must(t, err)
+			}
 			if got := e.get("kept"); got.Phase != "stopped" || got.OldSupervisor {
 				t.Fatalf("the user's stop: %+v", got)
 			}
@@ -447,18 +453,25 @@ func TestALegacyMicroVMIsNamedOnceAndOnlyItsUsersStopEndsIt(t *testing.T) {
 		t.Fatalf("the legacy MicroVM was not named exactly once over four looks: %+v", got)
 	}
 
-	// The user's stop while the sync fails is held: OpenShell is not
-	// asked, and nothing was lost.
+	// The user's stop that did not accept the loss is not made (GAP-0902).
 	_, err := e.m.Stop(t.Context(), "kept")
-	if !sandboxapi.IsCode(err, sandboxapi.CodeConflict) || !strings.Contains(err.Error(), "keeps running") ||
-		!strings.Contains(err.Error(), "defenseclaw sandbox pull kept") {
-		t.Fatalf("the user's stop with a broken sync = %v", err)
+	wantCode(t, err, sandboxapi.CodeUnsynced)
+	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
+		t.Fatalf("a stop whose sync failed reached OpenShell: %d stop calls", got-stops)
+	}
+
+	// The user accepts the loss: OpenShell refuses the first stop, which
+	// lost nothing, and takes the second, which says what it may have lost.
+	e.fake.FailNext(openshelltest.MethodStopSandbox, &types.StatusError{Code: types.ErrorInternal, Message: "stop refused"})
+	if _, err := e.m.Stop(sandboxapi.WithDiscardUnsynced(t.Context()), "kept"); err == nil {
+		t.Fatal("the refused stop succeeded")
 	}
 	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
 		t.Fatalf("a held stop called OpenShell's stop: %d calls", got-stops)
 	}
-	if got := e.events("kept", sandboxapi.ActivityLifecycle, "stop_unflushed"); len(got) != 0 {
-		t.Fatalf("a held stop was reported as one that lost writes: %+v", got)
+	e.stopBoxAcceptingLoss("kept")
+	if got := e.events("kept", sandboxapi.ActivityLifecycle, "stop_unflushed"); len(got) != 1 {
+		t.Fatalf("the user's unflushed stop was not reported once: %+v", got)
 	}
 }
 

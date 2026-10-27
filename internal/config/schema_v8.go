@@ -27,7 +27,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const observabilityV8ConfigSchemaID = "https://schemas.defenseclaw.dev/config/v8/defenseclaw-config.schema.json"
+// The schema file keeps its v8 directory; its $id names the version it
+// describes, config_version 9 (GAP-1651).
+const observabilityV8ConfigSchemaID = "https://schemas.defenseclaw.dev/config/v9/defenseclaw-config.schema.json"
 
 var (
 	observabilityV8SchemaOnce sync.Once

@@ -534,6 +534,19 @@ func copilotProfileDecode(payload map[string]interface{}) HookProfileRequest {
 		CWD:           hookFirstString(payload, "cwd"),
 		ToolName:      hookFirstString(payload, "toolName"),
 	}
+	if calls, present := payload["toolCalls"]; present {
+		// The first call names the request; the gateway judges every call
+		// of a parallel envelope (copilotargs.NativeCalls).
+		native, ok := copilotargs.NativeCalls(calls)
+		if !ok || req.ToolName != "" || payload["toolArgs"] != nil || payload["toolInput"] != nil {
+			req.ToolCallUnparsed = true
+			return req
+		}
+		req.ToolName = native[0].Name
+		req.ToolArgsAuthoritative = true
+		req.ToolArgs = native[0].Args
+		return req
+	}
 	args, present := payload["toolArgs"]
 	if !present {
 		if hookFirstString(payload, "hookName") == "permissionRequest" {
@@ -1428,16 +1441,6 @@ func managedPluginInstallMarker(opts SetupOpts) string {
 	return filepath.Clean(marker)
 }
 
-// pluginOutageFailMode is the outage mode a per-user in-agent plugin bakes
-// (OutageHookFailMode): open in the default and permissive tiers, closed in
-// strict. Managed and Secure Client plugins bake "" and keep FailMode.
-func pluginOutageFailMode(opts SetupOpts) string {
-	if !perUserOutageRender(opts) {
-		return ""
-	}
-	return normalizeHookFailMode(opts.HookFailMode)
-}
-
 // renderPluginArtifact is shared by Setup and standalone verification so
 // verification compares the agent's executable plugin with the bytes Setup
 // would install for the current options.
@@ -1458,25 +1461,45 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 	failMode := setupHookFailMode(opts)
 	hookSocket, serviceUID := managedPluginHookSocket(opts)
 	rendered, err := renderTemplate(string(tmpl), templateData{
-		APIAddr:            opts.APIAddr,
-		TokenFileJS:        javaScriptStringContent(tokenPath),
-		NativePostBinaryJS: javaScriptStringContent(secureClientPluginNativePostBinary(opts)),
-		HookSocketJS:       javaScriptStringContent(hookSocket),
-		ServiceUID:         serviceUID,
-		ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts)),
-		InstallMarkerJS:    javaScriptStringContent(managedPluginInstallMarker(opts)),
-		LifecycleMarkerJS:  javaScriptStringContent(managedPluginLifecycleMarker(opts)),
-		ListenerProofJS:    managedPluginListenerProofJS(opts),
-		FailMode:           failMode,
-		OutageFailMode:     pluginOutageFailMode(opts),
-		Managed:            opts.ManagedEnterprise,
-		SecureClient:       shellHookSecureClientProfile(opts),
-		ConnectorName:      c.name,
+		APIAddr:             opts.APIAddr,
+		TokenFileJS:         javaScriptStringContent(tokenPath),
+		NativePostBinaryJS:  javaScriptStringContent(secureClientPluginNativePostBinary(opts)),
+		GatewayBinaryJS:     javaScriptStringContent(perUserPluginGatewayBinary(opts)),
+		HookSocketJS:        javaScriptStringContent(hookSocket),
+		ServiceUID:          serviceUID,
+		ForeignHookGuardJS:  javaScriptStringContent(managedPluginForeignHookGuard(opts)),
+		InstallMarkerJS:     javaScriptStringContent(managedPluginInstallMarker(opts)),
+		LifecycleMarkerJS:   javaScriptStringContent(managedPluginLifecycleMarker(opts)),
+		ListenerProofJS:     managedPluginListenerProofJS(opts),
+		WindowsPowerShellJS: javaScriptStringContent(windowsSystemPowerShellExe()),
+		FailMode:            failMode,
+		Managed:             opts.ManagedEnterprise,
+		SecureClient:        shellHookSecureClientProfile(opts),
+		ConnectorName:       c.name,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%s render plugin template: %w", c.name, err)
 	}
 	return []byte(rendered), nil
+}
+
+// perUserPluginGatewayBinary is the gateway binary a per-user in-agent plugin
+// (OpenCode, Amp) runs for hook-post and session facts: the gateway of the
+// install that renders it. Native Windows Setup installs it in
+// InstallRoot\bin and has no ~/.local/bin gateway, so the plugin gets that
+// path when this gateway is Setup's (the same proof that registers Setup's
+// hook launcher for the other connectors, GAP-1847). "" keeps the
+// ~/.local/bin gateway install.sh and install.ps1 put there; managed and
+// Secure Client plugins never use it.
+func perUserPluginGatewayBinary(opts SetupOpts) string {
+	if runtime.GOOS != "windows" || opts.ManagedEnterprise || pluginSecureClientProfile(opts) {
+		return ""
+	}
+	launcher := canonicalNativeWindowsHookBinary()
+	if launcher == "" || !sameWindowsInstallPath(defenseclawHookBinary(), launcher) {
+		return ""
+	}
+	return canonicalNativeWindowsInstalledGatewayBinary()
 }
 
 func secureClientPluginNativePostBinary(opts SetupOpts) string {
@@ -1537,6 +1560,11 @@ func ManagedPluginArtifactDrift(conn Connector, opts SetupOpts) (string, error) 
 // sidecar. The managed-file backup lets Teardown restore a prior file only
 // when it is unchanged since Setup.
 func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
+	if !opts.ManagedEnterprise {
+		if err := writePerUserGatewayHelperRecord(filepath.Join(opts.DataDir, "hooks")); err != nil {
+			return fmt.Errorf("%s install helper record: %w", c.name, err)
+		}
+	}
 	renderedBody, err := c.renderPluginArtifact(opts)
 	if err != nil {
 		return err
@@ -2024,7 +2052,7 @@ func (c *hookOnlyConnector) removeHermesHomeEntries(opts SetupOpts, configPath s
 		}
 	}
 	if approvals {
-		if err := removeHermesOwnedApprovals(filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName), command, nil); err != nil {
+		if err := removeHermesOwnedApprovals(filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName), command, nil, managedStandaloneRender(opts)); err != nil {
 			return fmt.Errorf("remove shell hook approvals: %w", err)
 		}
 	}
@@ -4171,6 +4199,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	if err := validateHermesWindowsConfigPath(configPath); err != nil {
 		return err
 	}
+	retireManagedConsent := managedStandaloneRender(opts)
 	logicalName := hermesAllowlistLogicalName
 	path := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
 	backup, backupErr := loadManagedFileBackupForTransform(opts.DataDir, "hermes", logicalName, path)
@@ -4180,7 +4209,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	// Approvals that carry DefenseClaw's ownership marker are DefenseClaw's
 	// even in the copy Setup captured (a file put back from an earlier
 	// enrollment holds them), so that copy is restored only without them.
-	if backup == nil || !hermesAllowlistHoldsOwnedApprovals(backup.PristineBytes) {
+	if !retireManagedConsent && (backup == nil || !hermesAllowlistHoldsOwnedApprovals(backup.PristineBytes)) {
 		restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, "hermes", logicalName, path)
 		if err != nil {
 			return err
@@ -4201,7 +4230,7 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 			return err
 		}
 	}
-	if err := removeHermesOwnedApprovals(path, command, backup); err != nil {
+	if err := removeHermesOwnedApprovals(path, command, backup, retireManagedConsent); err != nil {
 		return err
 	}
 	discardManagedFileBackup(opts.DataDir, "hermes", logicalName)
@@ -4211,7 +4240,9 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 // removeHermesOwnedApprovals removes DefenseClaw's approvals of command
 // from the Hermes allowlist at path. The approvals the copy Setup captured
 // (backup) held go back as Hermes wrote them.
-func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup) error {
+// retireManagedConsent (a standalone managed uninstall) also removes the
+// consent for the exact hook a supported upgrade retained (GAP-0366).
+func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup, retireManagedConsent bool) error {
 	document, err := readHermesAllowlist(path)
 	if err != nil {
 		return err
@@ -4249,6 +4280,13 @@ func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup)
 		owned, _ := entry[hermesAllowlistOwnerField].(bool)
 		_, requiredEvent := events[event]
 		pair := event + "\x00" + entryCommand
+		if retireManagedConsent && requiredEvent && entryCommand == command &&
+			(owned || hermesConsentForCommand(entry, command)) {
+			// A standalone uninstall removes the product, including consent for
+			// its exact hook retained by a supported upgrade. Restoring that
+			// consent would leave a registration pointing into removed state.
+			continue
+		}
 		if owned && requiredEvent && !pristinePairs[pair] {
 			if entryCommand != command {
 				return fmt.Errorf("Hermes allowlist entry %s has a tampered DefenseClaw command; refusing non-exact cleanup", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
@@ -6208,6 +6246,9 @@ func managedHookCommandEntry(raw interface{}, hookScript string) bool {
 			}
 		}
 		if isCopilotShellHookScript(hookScript) && isCopilotEventBoundShellCommand(command, hookScript) {
+			return true
+		}
+		if isCopilotShellHookScript(hookScript) && copilotManagedShellCommand(command, hookScript) {
 			return true
 		}
 	}

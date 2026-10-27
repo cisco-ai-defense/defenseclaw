@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 from unittest.mock import MagicMock
 
@@ -200,6 +201,29 @@ def test_registered_custom_pack_key_is_selected_by_name(env):
     # GAP-0159: an unknown name lists the registered custom_packs names it could have been.
     unknown = _run(app, ["use-pack", "nosuch"])
     assert unknown.exit_code == 1 and "guardrail.custom_packs name (team)" in unknown.output
+
+
+def test_directory_identity_cannot_bypass_any_registered_pin(env, monkeypatch):
+    app, _root, custom, writes = env
+    alias_path = str(custom.with_name("Team"))
+    app.cfg.guardrail.custom_packs = {
+        "fresh": CustomRulePack(path=str(custom), digest="sha256:" + "a" * 64),
+        "stale": CustomRulePack(path=alias_path, digest="sha256:" + "b" * 64),
+    }
+    original_samefile = os.path.samefile
+
+    def samefile(left, right):
+        if {str(left), str(right)} <= {str(custom), alias_path}:
+            return True  # The filesystem resolves Team and team to one directory.
+        return original_samefile(left, right)
+
+    monkeypatch.setattr(os.path, "samefile", samefile)
+    for target in (str(custom), "fresh"):
+        result = _run(app, ["use-pack", target, "--json"])
+        assert result.exit_code == 1, result.output
+        # The stale alias is refused and named with its remedy (GAP-0476).
+        assert "'stale'" in result.output and "guardrail.custom_packs.stale.digest" in result.output
+        assert writes == []
 
 
 @pytest.mark.parametrize("by_name", [False, True], ids=["path", "name"])
@@ -816,7 +840,10 @@ def test_clear_connector_override(env):
     assert payload["path"] == str(root / "default")
     # The custom pin only codex selected goes with its pack (GAP-0127).
     assert writes == [[
-        config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True),
+        # claudecode is on the roster too, so the codex entry stays (GAP-1954).
+        config_writer.Change(
+            "guardrail.connectors.codex.rule_pack", unset=True, prune_empty_to="guardrail.connectors.codex"
+        ),
         config_writer.Change("guardrail.custom_packs.team", unset=True),
     ]]
 
@@ -833,8 +860,10 @@ def test_clear_connector_pack_drops_stale_rule_overrides(env, monkeypatch):
     result = _run(app, ["use-pack", "--clear", "--connector", "codex", "--json"])
     assert result.exit_code == 0, result.output
     assert writes[-1] == [
-        config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True),
-        config_writer.Change("guardrail.connectors.codex.rules.disable", unset=True, prune_empty_to="guardrail.connectors.codex"),
+        config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True, prune_empty_to="guardrail"),
+        # guardrail.connector already puts codex on the roster, so an entry
+        # left empty goes too (GAP-1894).
+        config_writer.Change("guardrail.connectors.codex.rules.disable", unset=True, prune_empty_to="guardrail"),
     ]
     assert json.loads(result.output)["dropped_rule_references"] == [
         "guardrail.connectors.codex.rules.disable: SEC-ENV-DUMP-REQUEST"
@@ -979,3 +1008,59 @@ def test_validate_pack_unknown_bare_name_json_is_the_versioned_failure(env, monk
     assert (document["kind"], document["valid"]) == ("validation_error", False)
     assert document["error"]["code"] == "pack_not_found"
     assert "definitely-missing-pack" in document["error"]["reason"]
+
+
+def _refresh_calls(monkeypatch, binary="/opt/dc/bin/defenseclaw-gateway"):
+    """Record the gateway refresh-fail-modes runs; every other subprocess runs."""
+    import subprocess
+
+    from defenseclaw import gateway
+
+    calls: list[list[str]] = []
+    real_run = subprocess.run
+
+    def _run_recording(argv, *args, **kwargs):
+        if "refresh-fail-modes" in list(argv):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0)
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(gateway, "resolve_gateway_binary", lambda: binary)
+    monkeypatch.setattr(subprocess, "run", _run_recording)
+    return calls
+
+
+def test_use_pack_refreshes_the_installed_hooks_outage_records(env, monkeypatch):
+    # oss-outage-open review (loop round 2): a per-user hook's outage record
+    # follows its rule pack, and a stopped gateway does not rewrite it. Every
+    # use-pack write (global, one connector, --clear) refreshes the records
+    # through the gateway binary, so strict closes them at once.
+    app, _root, custom, writes = env
+    (pathlib.Path(app.cfg.data_dir) / "hooks").mkdir(parents=True)
+    calls = _refresh_calls(monkeypatch)
+    assert _run(app, ["use-pack", "strict"]).exit_code == 0
+    assert _run(app, ["use-pack", "strict", "--connector", "codex"]).exit_code == 0
+    _multi(app, {"codex": str(custom)})
+    assert _run(app, ["use-pack", "--clear", "--connector", "codex"]).exit_code == 0
+    want = ["/opt/dc/bin/defenseclaw-gateway", "connector", "refresh-fail-modes", "--data-dir", app.cfg.data_dir]
+    assert calls == [want, want, want]
+    assert len(writes) == 3
+
+
+def test_use_pack_skips_the_refresh_without_hooks_or_a_gateway_binary(env, monkeypatch):
+    app, _root, _custom, _writes = env
+    calls = _refresh_calls(monkeypatch)
+    assert _run(app, ["use-pack", "strict"]).exit_code == 0
+    assert calls == []
+    (pathlib.Path(app.cfg.data_dir) / "hooks").mkdir(parents=True)
+    calls = _refresh_calls(monkeypatch, binary=None)
+    assert _run(app, ["use-pack", "strict"]).exit_code == 0
+    assert calls == []
+
+
+def test_use_pack_does_not_refresh_after_a_refused_write(env, monkeypatch):
+    app, _root, _custom, writes = env
+    (pathlib.Path(app.cfg.data_dir) / "hooks").mkdir(parents=True)
+    calls = _refresh_calls(monkeypatch)
+    assert _run(app, ["use-pack", "no-such-pack"]).exit_code == 1
+    assert calls == [] and writes == []

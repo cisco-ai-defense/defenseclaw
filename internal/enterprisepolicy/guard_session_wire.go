@@ -3,6 +3,8 @@
 
 package enterprisepolicy
 
+import "time"
+
 // ForeignHookSessionPathPrefix is the standalone gateway's scoped session
 // route. The connector name following the prefix selects its hook authority.
 const ForeignHookSessionPathPrefix = "/api/v1/foreign-hook-session/"
@@ -21,4 +23,10 @@ type SessionExchange struct {
 	// decision never depends on them.
 	Event string `json:"event,omitempty"`
 	Tool  string `json:"tool,omitempty"`
+	// RetryUntil is the last moment the hook can still use an answer after
+	// leaving time for its own request. Until then the gateway applies a
+	// clean scan again when the session store could not apply it
+	// (SessionRecordUnavailableReason). Zero (a hook before 1.0.5) asks for
+	// no retry.
+	RetryUntil time.Time `json:"retry_until,omitzero"`
 }

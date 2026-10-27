@@ -284,6 +284,7 @@ func (a *APIServer) safeApplySandboxVerdictReason(
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("sandbox verdict reason panic: %v", r))
 		}
 	}()
+	hookStageForTest(ctx, "sandbox_reason")
 	return a.applySandboxVerdictReason(ctx, profile, connectorName, req, rawBody, payload, resp)
 }
 
@@ -396,8 +397,11 @@ func (a *APIServer) failSandboxHookClosed(
 	resp.Findings = nil
 	defer func() {
 		if r := recover(); r != nil {
+			// The callback-free render keeps the native denial: a bare
+			// block reaches some agents as an allow.
 			out = resp
 			out.Reason = sandboxInternalErrorReason
+			out.HookOutput = nativeFallbackOutput(profile, connectorName, req, "block", sandboxInternalErrorReason)
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("sandbox fail-closed render panic: %v", r))
 		}
 	}()

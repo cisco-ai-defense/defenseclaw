@@ -89,7 +89,8 @@ func TestWindowsManagedNativeOTLPCleanupKeepsProtectedDataDir(t *testing.T) {
 	for _, name := range []string{"codex", "claudecode"} {
 		err := connector.WithUserHomeDir(home, func() error {
 			return runWindowsEnterpriseImpersonatedCallback(impersonation, sid, func() error {
-				return removeWindowsManagedUserNativeOTLPAsTarget(name, dataDir)
+				removeWindowsManagedUserNativeOTLPAsTarget(name, sid, home, dataDir)
+				return nil
 			})
 		})
 		if err != nil {
@@ -184,7 +185,8 @@ func TestWindowsManagedRowRefusesAndRemovesStalePerUserNativeOTLP(t *testing.T) 
 			t.Fatalf("%s: verify error carries a value: %v", name, err)
 		}
 		if err := connector.WithUserHomeDir(home, func() error {
-			return removeWindowsManagedUserNativeOTLPAsTarget(name, dataDir)
+			removeWindowsManagedUserNativeOTLPAsTarget(name, sid, home, dataDir)
+			return nil
 		}); err != nil {
 			t.Fatalf("%s: remove: %v", name, err)
 		}
@@ -269,7 +271,8 @@ func TestWindowsManagedNativeOTLPVerifyIgnoresOtherUserToken(t *testing.T) {
 	}
 	setWindowsTestPathExactOwner(t, tokenPath, viewer.User.Sid)
 	if err := connector.WithUserHomeDir(home, func() error {
-		return removeWindowsManagedUserNativeOTLPAsTarget("claudecode", dataDir)
+		removeWindowsManagedUserNativeOTLPAsTarget("claudecode", target, home, dataDir)
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -334,4 +337,210 @@ func TestWindowsClaudeManagedVerifyAndRepairStalePerUserNativeOTLP(t *testing.T)
 	if _, err := Verify(context.Background(), opts); err != nil {
 		t.Fatalf("Verify after repair: %v", err)
 	}
+}
+
+// A configuration the check cannot reach (AppData or CLAUDE_CONFIG_DIR on a
+// share that is down, a folder that cannot be resolved) never fails the row:
+// a failed row drops the account's protection and closes its hooks. Install
+// and Verify succeed with a warning, and repair revokes the credential of the
+// earlier per-user install, so an exporter left there sends no DefenseClaw
+// credential to the holder of its port.
+func TestWindowsManagedRowNeverFailsOnAnUnreachableAgentFolder(t *testing.T) {
+	for name, value := range map[string]string{
+		"unreachable share": `\\dc-unreachable.invalid\share\claude`,
+		"unresolvable":      `%DC_NOT_SET%\claude`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+			opts := windowsManagedInstallOptions(fixture)
+			if _, err := Install(context.Background(), opts); err != nil {
+				t.Fatal(err)
+			}
+			previousEnvironment, previousWarn := windowsUserEnvironment, windowsNativeOTLPWarn
+			windowsUserEnvironment = func(sid, variable string) string {
+				if variable == "CLAUDE_CONFIG_DIR" {
+					return value
+				}
+				return previousEnvironment(sid, variable)
+			}
+			var warnings []string
+			windowsNativeOTLPWarn = func(message string) { warnings = append(warnings, message) }
+			t.Cleanup(func() { windowsUserEnvironment, windowsNativeOTLPWarn = previousEnvironment, previousWarn })
+			token, err := connector.OTLPPathTokenFilePath(filepath.Join(fixture.home, ".defenseclaw"), connector.OTLPScopeClaude)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(token, []byte(strings.Repeat("d1", 32)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := Install(context.Background(), opts); err != nil {
+				t.Fatalf("repair failed the row on an agent folder it cannot reach: %v", err)
+			}
+			if _, err := os.Stat(token); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("repair kept the earlier per-user credential: %v", err)
+			}
+			warnings = nil
+			if _, err := Verify(context.Background(), opts); err != nil {
+				t.Fatalf("Verify failed the row on an agent folder it cannot reach: %v", err)
+			}
+			if len(warnings) == 0 || !strings.Contains(strings.Join(warnings, "\n"), "CLAUDE_CONFIG_DIR") {
+				t.Fatalf("Verify did not warn about the folder it could not check: %q", warnings)
+			}
+			for _, warning := range warnings {
+				if strings.Contains(warning, "dc-unreachable") || strings.Contains(warning, fixture.home) {
+					t.Fatalf("warning carries a path: %s", warning)
+				}
+			}
+		})
+	}
+}
+
+// GAP-1170 (ported from train T1 onto the carry-base check): an earlier
+// per-user exporter in a config behind a link the check cannot read as the
+// account must not let Verify pass while that install's scoped credential is
+// still in the data directory, and Verify passes once it is revoked.
+func TestWindowsManagedNativeOTLPVerifyFailsOnLinkedConfigWithCredential(t *testing.T) {
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	for _, tc := range gap1170Cases() {
+		t.Run(tc.name, func(t *testing.T) {
+			home, dataDir, _, tokenPath := gap1170Fixture(t, tc)
+			previousWarn := windowsNativeOTLPWarn
+			windowsNativeOTLPWarn = func(string) {}
+			t.Cleanup(func() { windowsNativeOTLPWarn = previousWarn })
+			err := windowsManagedUserNativeOTLPAbsent(tc.name, home, dataDir, nil)
+			if err == nil {
+				t.Fatal("verify passed a linked config while the earlier install's credential is kept")
+			}
+			if strings.Contains(err.Error(), "e7e7") || strings.Contains(err.Error(), "19010") {
+				t.Fatalf("verify error carries a value: %v", err)
+			}
+			if err := os.Remove(tokenPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := windowsManagedUserNativeOTLPAbsent(tc.name, home, dataDir, nil); err != nil {
+				t.Fatalf("verify of a linked config without the credential: %v", err)
+			}
+		})
+	}
+}
+
+// GAP-1170 (refix 1, ported): a signed-out user's take-back cannot read a
+// .codex or .claude linked to a share. It still revokes the scoped
+// credential, never fails the install, and Verify then passes.
+func TestWindowsManagedNativeOTLPTakeBackRevokesCredentialWhenLinkedConfigUnreadable(t *testing.T) {
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range gap1170Cases() {
+		t.Run(tc.name, func(t *testing.T) {
+			home, dataDir, config, tokenPath := gap1170Fixture(t, tc)
+			denyWindowsTestPathReadForTest(t, config, user.User.Sid)
+			if _, err := os.ReadFile(filepath.Join(home, tc.dir, tc.file)); err == nil {
+				t.Fatal("fixture: the linked config is still readable")
+			}
+			var warnings []string
+			previousWarn := windowsNativeOTLPWarn
+			windowsNativeOTLPWarn = func(message string) { warnings = append(warnings, message) }
+			t.Cleanup(func() { windowsNativeOTLPWarn = previousWarn })
+			if err := connector.WithUserHomeDir(home, func() error {
+				removeWindowsManagedUserNativeOTLPAsTarget(tc.name, user.User.Sid, home, dataDir)
+				return nil
+			}); err != nil {
+				t.Fatalf("take-back failed the install: %v", err)
+			}
+			if _, err := os.Lstat(tokenPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("take-back kept the scoped credential beside an unreadable linked config: %v", err)
+			}
+			for _, warning := range warnings {
+				if strings.Contains(warning, "e7e7") || strings.Contains(warning, "19010") {
+					t.Fatalf("take-back warning carries a value: %q", warning)
+				}
+			}
+			if err := windowsManagedUserNativeOTLPAbsent(tc.name, home, dataDir, user.User.Sid); err != nil {
+				t.Fatalf("verify fails the install on a linked config after the credential was revoked: %v", err)
+			}
+		})
+	}
+}
+
+type gap1170Case struct {
+	name, dir, file, body string
+	scope                 connector.OTLPPathTokenScope
+}
+
+func gap1170Cases() []gap1170Case {
+	return []gap1170Case{
+		{"codex", ".codex", "config.toml", "[otel.exporter.otlp-http]\r\nendpoint = 'http://127.0.0.1:19010/v1/logs'\r\n" +
+			"[otel.exporter.otlp-http.headers]\r\nauthorization = 'Bearer " + strings.Repeat("e7", 32) + "'\r\n", connector.OTLPScopeCodex},
+		{"claudecode", ".claude", "settings.json", `{"env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1","OTEL_EXPORTER_OTLP_ENDPOINT":"http://127.0.0.1:19010",` +
+			`"OTEL_EXPORTER_OTLP_HEADERS":"authorization=Bearer ` + strings.Repeat("e7", 32) + `"}}`, connector.OTLPScopeClaude},
+	}
+}
+
+// gap1170Fixture writes the agent config into a folder outside the profile,
+// links the profile's agent folder to it with a junction and writes the
+// earlier per-user install's scoped credential.
+func gap1170Fixture(t *testing.T, tc gap1170Case) (home, dataDir, config, tokenPath string) {
+	t.Helper()
+	home = t.TempDir()
+	dataDir = filepath.Join(home, ".defenseclaw")
+	share := filepath.Join(t.TempDir(), "share")
+	if err := os.MkdirAll(share, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config = filepath.Join(share, tc.file)
+	if err := os.WriteFile(config, []byte(tc.body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	makeTestJunction(t, filepath.Join(home, tc.dir), share)
+	tokenPath, err := connector.OTLPPathTokenFilePath(dataDir, tc.scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("e7", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return home, dataDir, config, tokenPath
+}
+
+// denyWindowsTestPathReadForTest denies sid read access to path, as an S4U
+// token meets a share it has no credentials for, and puts the DACL back on
+// cleanup so the temporary directory can be removed.
+func denyWindowsTestPathReadForTest(t *testing.T, path string, sid *windows.SID) {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.FILE_GENERIC_READ,
+		AccessMode:        windows.DENY_ACCESS,
+		Inheritance:       windows.NO_INHERITANCE,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}}, dacl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, denied, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+	})
 }

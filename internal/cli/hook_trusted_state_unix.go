@@ -7,8 +7,10 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -144,18 +146,31 @@ func linuxTracerPidReason(open func(string) (io.ReadCloser, error)) string {
 
 // reportStandaloneHookRefusal tells the gateway, over the hook socket, that
 // this hook refused its agent, so the refusal is in the audit log and the
-// gateway log as a refused unenrolled account is (GAP-0923). From a private
-// user namespace the listener's owner cannot be checked (it reads as the
-// overflow uid), so the report carries only the connector and the reason;
-// it is best effort and bounded.
-var reportStandaloneHookRefusal = func(socket string, serviceUID int, connectorName, reason string) {
-	if strings.TrimSpace(socket) == "" {
+// gateway log as a refused unenrolled account is (GAP-0923). It is best
+// effort and bounded.
+//
+// It dials the layout's fixed socket path without the listener proof of the
+// verified transport (managedStandaloneHTTPClient): from a private user
+// namespace the root-owned socket directory and the listener both read as
+// the overflow uid, and the refused runtime has no service uid, so the proof
+// can never pass and the report never left the hook (GAP-1335). The report
+// carries no credential, no event content and no decision (an empty body,
+// the connector and the refusal reason), and its answer is discarded. Only
+// root can hold that path in the host's mount namespace; in a private mount
+// namespace only the refused user can, and then receives its own report.
+var reportStandaloneHookRefusal = func(socket, connectorName, reason string) {
+	socket = strings.TrimSpace(socket)
+	if socket == "" || !filepath.IsAbs(socket) {
 		return
 	}
-	client, err := hookexec.NewManagedStandaloneHookSocketHTTPClient(2*time.Second, socket, serviceUID)
-	if err != nil {
-		return
-	}
+	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{
+		DisableKeepAlives: true,
+		Proxy:             nil,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "unix", socket)
+		},
+	}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	request, err := http.NewRequest(http.MethodPost, "http://defenseclaw-hook/api/v1/inspect/tool", strings.NewReader("{}"))
 	if err != nil {
 		return
@@ -324,11 +339,7 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 		if prepared && failed && !secureClientHost {
 			opts.ManagedStandalone = true
 			if hookexec.IsManagedProcessContextReason(opts.ManagedRuntimeFailure) {
-				serviceUID := -1
-				if descriptor != nil {
-					serviceUID = descriptor.ServiceUID
-				}
-				reportStandaloneHookRefusal(layout.HookSocketPath, serviceUID, connectorName, opts.ManagedRuntimeFailure)
+				reportStandaloneHookRefusal(layout.HookSocketPath, connectorName, opts.ManagedRuntimeFailure)
 			}
 		}
 		return

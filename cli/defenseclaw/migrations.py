@@ -30,6 +30,8 @@ code. Three kinds of steps exist:
   Desktop connector ID to ``devin`` and drops connectors this release does not
   ship. It has no ``config_version``: it runs whenever ``config.yaml`` still
   names such a connector.
+* Release-specific steps use the installer's ``--from-version`` when a prior
+  release wrote a value without recording whether an operator chose it.
 
 Every step is idempotent and writes through temp-file-and-rename.
 """
@@ -53,7 +55,7 @@ from typing import TYPE_CHECKING
 import click
 import yaml
 
-from defenseclaw import legacy_connector, ux
+from defenseclaw import legacy_connector, removed_connectors, ux
 from defenseclaw.file_lock import locked_file_update
 from defenseclaw.file_permissions import (
     copy_windows_dacl,
@@ -3020,6 +3022,62 @@ def _migrate_connector_roster(ctx: MigrationContext) -> None:
     """
     _migrate_retired_desktop_connector(ctx)
     _migrate_unshipped_connectors(ctx)
+    _persist_removed_connector_settings(ctx)
+
+
+def _removed_connector_settings_pending(raw: object) -> bool:
+    """Include retired-only telemetry even when the roster is already current."""
+    if not isinstance(raw, dict):
+        return False
+    from defenseclaw.config import _drop_retired_connector_settings
+
+    cleaned = copy.deepcopy(raw)
+    _drop_retired_connector_settings(cleaned, emit_warning=False)
+    return cleaned != raw
+
+
+def _persist_removed_connector_settings(ctx: MigrationContext) -> None:
+    """Persist the loader's restrictive retired cleanup with an exact backup."""
+    from defenseclaw.config_writer import hold_lock
+
+    path = ctx.active_config_path()
+    with hold_lock(path, timeout_s=None):
+        if not os.path.isfile(path):
+            return
+        if os.path.islink(path):
+            raise MigrationError(f"refusing removed connector cleanup through a symlink at {path}")
+        with open(path, "rb") as source:
+            original = source.read()
+        raw = yaml.safe_load(original)
+        if not _removed_connector_settings_pending(raw):
+            return
+        from defenseclaw.config import _drop_retired_connector_settings
+
+        cleaned = copy.deepcopy(raw)
+        _drop_retired_connector_settings(cleaned, emit_warning=False)
+        updated = yaml.safe_dump(cleaned, default_flow_style=False, sort_keys=False)
+        # A full YAML rewrite loses comments and formatting. Keep the exact
+        # source, including those operator edits, before replacing the file.
+        backup = f"{path}.retired-connector-{secrets.token_hex(8)}.bak"
+        try:
+            fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                set_file_mode(fd, backup, 0o600, set_owner=True)
+                with os.fdopen(fd, "wb") as saved:
+                    fd = -1
+                    saved.write(original)
+                    saved.flush()
+                    os.fsync(saved.fileno())
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+        except OSError as exc:
+            raise MigrationError(f"could not save config before removed connector cleanup: {exc}") from exc
+        if not _atomic_write_config(path, updated):
+            raise MigrationError(f"could not persist removed connector cleanup in {path}; original at {backup}")
+    ctx.changes.append(
+        f"removed retired connector settings and retired-only telemetry destinations from config.yaml; original at {backup}"
+    )
 
 
 def _connector_roster_pending(config_path: str, data_dir: str) -> bool:
@@ -3033,6 +3091,8 @@ def _connector_roster_pending(config_path: str, data_dir: str) -> bool:
     except yaml.YAMLError:
         return False
     if legacy_connector.migrated_copy(raw, config_path)[1]:
+        return True
+    if _removed_connector_settings_pending(raw):
         return True
     try:
         return bool(_unshipped_connector_names(raw, data_dir))
@@ -3316,7 +3376,26 @@ def _drop_unshipped_connectors(ctx: MigrationContext) -> None:
         return
     ctx.changes.append(
         f"removed connector {listed} (not shipped by this release) from config.yaml; primary connector is "
-        f"{new_primary!r}. DefenseClaw did not change those agents' config files; {_REMOVED_CONNECTORS_DOC}"
+        f"{new_primary!r}. {_unshipped_agent_config_note(names)}; {_REMOVED_CONNECTORS_DOC}"
+    )
+
+
+def _unshipped_agent_config_note(names: list[str]) -> str:
+    """What happens to the agents' own config files of the connectors dropped from config.yaml.
+
+    until 1.1: the teardown of OpenHands and OmniGent (removed in 1.0.5)
+    removes the entries DefenseClaw wrote in their configs and keeps the
+    rest; any other unshipped name keeps its agent config as it is.
+    """
+    removed = [n for n in names if removed_connectors.is_removed(n)]
+    others = [n for n in names if not removed_connectors.is_removed(n)]
+    if not others:
+        return "DefenseClaw removes only the entries it wrote in those agents' config files"
+    if not removed:
+        return "DefenseClaw did not change those agents' config files"
+    return (
+        f"DefenseClaw removes only the entries it wrote for {', '.join(repr(n) for n in removed)} and did not "
+        f"change the config files of {', '.join(repr(n) for n in others)}"
     )
 
 
@@ -3805,6 +3884,7 @@ def migrate(
             raise MigrationError(f"{name} failed: {exc}") from exc
     for change in ctx.changes:
         ux.ok(change, indent="    ")
+    _report_legacy_cursor_open(config_path, from_version or "")
     try:
         reached = source_config_version(path=config_path)
     except ConfigVersionError as exc:
@@ -4198,6 +4278,57 @@ def _pending_migration_steps(
     if _connector_roster_pending(config_path, data_dir):
         steps.append(("update renamed and removed connectors", _migrate_connector_roster))
     return steps
+
+
+def _legacy_cursor_open_paths(config_path: str) -> list[str]:
+    """Find a saved ``open`` Cursor outage mode that 1.0.x setup may have written.
+
+    DefenseClaw 1.0.0-1.0.3 setup saved ``open`` for an observe-mode Cursor,
+    and ``guardrail fail-mode open`` or ``config set`` saved the same bytes;
+    those releases did not record which one did. The value is kept (a saved
+    mode wins, and 1.0.x Cursor in observe failed open in every tier) and the
+    upgrade names it, so the operator can let the policy tier decide.
+    """
+    source = _read_config_text(config_path)
+    if source is None or _guardrail_runtime_migration_is_managed(source):
+        return []
+    try:
+        root = yaml.safe_load(source) or {}
+    except yaml.YAMLError:
+        return []
+    guardrail = root.get("guardrail") if isinstance(root, dict) else None
+    if not isinstance(guardrail, dict):
+        return []
+    mode = str(guardrail.get("mode") or "observe").strip().lower()
+    paths: list[str] = []
+    connectors = guardrail.get("connectors")
+    cursor_entry = False
+    if isinstance(connectors, dict):
+        for name, entry in connectors.items():
+            if str(name).strip().lower() != "cursor" or not isinstance(entry, dict):
+                continue
+            cursor_entry = True
+            own_mode = str(entry.get("mode") or mode).strip().lower()
+            if own_mode != "action" and str(entry.get("hook_fail_mode") or "").strip().lower() == "open":
+                paths.append(f"guardrail.connectors.{name}.hook_fail_mode")
+    # Old setup wrote the global value only for a Cursor without its own entry.
+    if str(guardrail.get("connector") or "").strip().lower() == "cursor" and mode != "action" and not cursor_entry:
+        if str(guardrail.get("hook_fail_mode") or "").strip().lower() == "open":
+            paths.append("guardrail.hook_fail_mode")
+    return paths
+
+
+def _report_legacy_cursor_open(config_path: str, from_version: str) -> None:
+    """Name a kept 1.0.x Cursor ``open`` whose author is unknown (no write)."""
+    if not from_version or _version_before(from_version, (1, 0, 0)) or not _version_before(from_version, (1, 0, 4)):
+        return
+    for path in _legacy_cursor_open_paths(config_path):
+        ux.warn(
+            f"Cursor keeps its saved gateway-outage mode open ({path}). DefenseClaw {from_version} setup "
+            "also saved this value on its own in observe mode, so it may not be your choice. A saved mode "
+            "wins over the policy tier: strict does not close it. To let the policy tier decide, run: "
+            f"defenseclaw config unset {path}"
+        )
 
 
 def _config_version_step(

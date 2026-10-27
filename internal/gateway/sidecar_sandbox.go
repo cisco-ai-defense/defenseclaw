@@ -78,8 +78,7 @@ type sandboxRuntime struct {
 	listening map[string]bool
 
 	// fleet, publish and tel are what containing a lost listener uses
-	// (the manager's policy stop, policyFleet; its activity feed; and the
-	// sandbox telemetry recorder);
+	// (the manager, its activity feed and the sandbox telemetry recorder);
 	// listenBudget bounds the egress bind retries (30s when zero) and
 	// recheck paces the containment (sandboxListenerRecheck when zero).
 	fleet        sandboxFleet
@@ -356,6 +355,8 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 		DiscoveryRemoved:   discoveryRemoved,
 		ManagedAccount:     opts.Managed,
 		OtherGateways:      otherGateways,
+		// A sandbox whose record names another gateway is read there.
+		GatewayAt: manager.RegistrationGateway(openshell.DiscoverOptions{}, openshell.ClientOptions{}),
 	})
 	if err != nil {
 		return nil, err
@@ -422,7 +423,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 	api.SetSandboxController(&sandboxStatusController{SandboxController: mgr, runtime: rt})
 	rt.manager, rt.proxy = mgr, proxy
 	feed := mgr.Feed()
-	rt.fleet = policyFleet{mgr}
+	rt.fleet = mgr
 	if deps.telemetry != nil {
 		rt.tel = deps.telemetry
 	}
@@ -628,7 +629,9 @@ func stopSandboxesWithoutListener(ctx context.Context, fleet sandboxFleet, publi
 		default:
 			continue
 		}
-		if _, err := fleet.Stop(ctx, sb.Name); err != nil {
+		// A MicroVM whose disk cannot be synced first is contained, not
+		// stopped (GAP-0902): the error says so.
+		if _, err := fleet.Stop(manager.WithEmergencyStop(ctx, "the sandbox "+part+" listener is not running"), sb.Name); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
@@ -636,7 +639,8 @@ func stopSandboxesWithoutListener(ctx context.Context, fleet sandboxFleet, publi
 				unstoppable[sb.Name] = true
 				fmt.Fprintf(os.Stderr, "[sandbox] %s: stop %s: %v\n", gatewaylog.ErrCodeOpenShellListenerFailed, sb.Name, err)
 				publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: sb.Name, Severity: "CRITICAL",
-					Reason: sandboxListenerLostReason, Message: why + ", and DefenseClaw could not stop it: stop it yourself"})
+					Reason: sandboxListenerLostReason, Message: why + ", and DefenseClaw could not stop it (" + sandboxapi.AsError(err).Error() +
+						"): stop it yourself"})
 			}
 			continue
 		}

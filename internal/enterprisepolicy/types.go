@@ -48,6 +48,10 @@ const (
 	RouteACP = "acp"
 	// RouteUnsupported marks connectors the managed profile refuses.
 	RouteUnsupported = "unsupported"
+	// RouteNotConfigured marks a connector named on the command line that
+	// is not enabled in the managed config: DefenseClaw publishes nothing
+	// for it, so there is nothing to check or repair.
+	RouteNotConfigured = "not_configured"
 )
 
 // Connector names with a machine policy implementation.

@@ -44,16 +44,6 @@ type fakeSandboxStopper struct {
 	listErr error
 	stopped []string
 	fail    string
-	// held is a sandbox whose plain stop the daemon holds (a failed sync);
-	// accepted are the stops made accepting the loss.
-	held     string
-	accepted []string
-}
-
-func (f *fakeSandboxStopper) StopAcceptingUnsynced(_ context.Context, name string) (*sandboxapi.Sandbox, error) {
-	f.accepted = append(f.accepted, name)
-	f.stopped = append(f.stopped, name)
-	return &sandboxapi.Sandbox{Name: name}, nil
 }
 
 func (f *fakeSandboxStopper) List(context.Context) ([]sandboxapi.Sandbox, error) {
@@ -63,10 +53,6 @@ func (f *fakeSandboxStopper) List(context.Context) ([]sandboxapi.Sandbox, error)
 func (f *fakeSandboxStopper) Stop(_ context.Context, name string) (*sandboxapi.Sandbox, error) {
 	if name == f.fail {
 		return nil, errors.New("gateway gone")
-	}
-	if name == f.held {
-		return nil, &sandboxapi.Error{Code: sandboxapi.CodeConflict,
-			Message: "sandbox " + name + " keeps running: DefenseClaw " + sandboxapi.UnsyncedStopHeldText + " (sync: exit 1)"}
 	}
 	f.stopped = append(f.stopped, name)
 	return &sandboxapi.Sandbox{Name: name}, nil
@@ -90,22 +76,64 @@ func TestStopManagedSandboxes(t *testing.T) {
 	if err := stopManagedSandboxes(context.Background(), f, &out); err == nil || !slices.Equal(f.stopped, []string{"b"}) {
 		t.Fatalf("a failed stop: %v, stopped %v", err, f.stopped)
 	}
-	// GAP-1550: the unit's stop ends the VM anyway, so a held stop is made
-	// accepting the loss (it keeps what reached the disk and says the rest).
-	// It is made after the other stops, so its second sync wait cannot run
-	// the unit's stop timeout out before a healthy sandbox listed after it
-	// stops synced (GAP-1805).
-	f = &fakeSandboxStopper{list: []sandboxapi.Sandbox{{Name: "a", Phase: "ready"}, {Name: "b", Phase: "ready"}}, held: "a"}
-	if err := stopManagedSandboxes(context.Background(), f, &out); err != nil || !slices.Equal(f.accepted, []string{"a"}) ||
-		!slices.Equal(f.stopped, []string{"b", "a"}) {
-		t.Fatalf("a held stop at ExecStop: %v, accepted %v, stopped %v (want b's synced stop first)", err, f.accepted, f.stopped)
-	}
-	if !strings.Contains(out.String(), "stopped sandbox a (unsynced)\n") || !strings.Contains(out.String(), "stopped sandbox b\n") {
-		t.Fatalf("out %q, want the accepted stop marked unsynced (GAP-1806)", out.String())
-	}
 	f = &fakeSandboxStopper{listErr: &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: "not reachable"}}
 	if err := stopManagedSandboxes(context.Background(), f, &out); err != nil {
 		t.Fatalf("daemon not running: %v", err)
+	}
+}
+
+// unsyncedStopper answers each stop of a name in unsynced with
+// sandboxapi.CodeUnsynced (its MicroVM's disk could not be synced) as many
+// times as it says, then stops it.
+type unsyncedStopper struct {
+	fakeSandboxStopper
+	unsynced map[string]int
+	tries    map[string]int
+}
+
+func (f *unsyncedStopper) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
+	f.tries[name]++
+	if sandboxapi.DiscardUnsynced(ctx) {
+		return nil, errors.New("stop-sandboxes accepted the loss of what a MicroVM has not synced")
+	}
+	if f.unsynced[name] != 0 {
+		f.unsynced[name]--
+		return nil, &sandboxapi.Error{Code: sandboxapi.CodeUnsynced, Message: "sandbox " + name + " was not stopped: its MicroVM's disk could not be synced first"}
+	}
+	return f.fakeSandboxStopper.Stop(ctx, name)
+}
+
+// GAP-0998: at a sign-out the gateway unit's ExecStop asked the daemon to
+// stop the account's sandboxes, the daemon refused the stop of a MicroVM
+// whose disk it could not sync (it never stops one then), and systemd went
+// on to stop the gateway, which ended the VM with no word of what was
+// lost. stop-sandboxes now tries such a stop again (it syncs first) while
+// the gateway unit's stop timeout leaves time, never accepting the loss
+// itself, and names a MicroVM still unsynced with what it may lose.
+func TestStopSandboxesTriesAnUnsyncedMicroVMAgainAndNamesWhatItMayLose(t *testing.T) {
+	pause, budget := stopUnsyncedPause, stopUnsyncedBudget
+	t.Cleanup(func() { stopUnsyncedPause, stopUnsyncedBudget = pause, budget })
+	stopUnsyncedPause, stopUnsyncedBudget = time.Millisecond, time.Second
+	list := []sandboxapi.Sandbox{{Name: "vm", Phase: "ready", Driver: "vm"}, {Name: "dk", Phase: "ready"}}
+
+	f := &unsyncedStopper{fakeSandboxStopper: fakeSandboxStopper{list: list}, unsynced: map[string]int{"vm": 2}, tries: map[string]int{}}
+	var out bytes.Buffer
+	if err := stopManagedSandboxes(context.Background(), f, &out); err != nil {
+		t.Fatalf("a MicroVM whose sync worked on a later try: %v", err)
+	}
+	if f.tries["vm"] != 3 || !slices.Equal(f.stopped, []string{"dk", "vm"}) || !strings.Contains(out.String(), "stopped sandbox vm") {
+		t.Fatalf("tries %v, stopped %v, out %q", f.tries, f.stopped, out.String())
+	}
+
+	f = &unsyncedStopper{fakeSandboxStopper: fakeSandboxStopper{list: list}, unsynced: map[string]int{"vm": 1 << 30}, tries: map[string]int{}}
+	out.Reset()
+	err := stopManagedSandboxes(context.Background(), f, &out)
+	if err == nil || !strings.Contains(err.Error(), "sandbox vm keeps running: its MicroVM's disk could not be synced, so DefenseClaw did not stop it") ||
+		!strings.Contains(err.Error(), "what its guest wrote since its last sync may be lost") {
+		t.Fatalf("a MicroVM that never syncs: %v", err)
+	}
+	if f.tries["vm"] < 2 || slices.Contains(f.stopped, "vm") || !slices.Equal(f.stopped, []string{"dk"}) {
+		t.Fatalf("tries %v, stopped %v", f.tries, f.stopped)
 	}
 }
 

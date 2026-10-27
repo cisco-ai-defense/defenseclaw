@@ -17,7 +17,6 @@
 package sandboxapi
 
 import (
-	"context"
 	"encoding/json"
 	"slices"
 	"strconv"
@@ -143,6 +142,59 @@ type Status struct {
 	// Managed is set by a managed host's per-user sandbox daemon: the
 	// caller's own policy, never another account's.
 	Managed *ManagedStatus `json:"managed,omitempty"`
+	// Unprotected names every live legacy guest (Sandbox.OldSupervisor)
+	// and every contained one (UnprotectedContained), which run unprotected
+	// until their user ends them, with the command that does, and every
+	// one that may be either whose gateway has not said whether it runs
+	// (UnprotectedUnknown): the managed lifecycle's status and verify read
+	// it. Unset by a daemon before DefenseClaw 1.0.4, whose running
+	// sandboxes all are.
+	Unprotected []UnprotectedSandbox `json:"unprotected,omitempty"`
+}
+
+// LegacyUnprotected opens every account of a live legacy guest
+// (Sandbox.OldSupervisor): its session runs the supervisor of an OpenShell
+// release older than the oldest supported one, whose network broker
+// DefenseClaw cannot contain.
+const LegacyUnprotected = "running unprotected: legacy sandbox"
+
+// ContainedUnprotected opens every account of a contained guest: a MicroVM
+// DefenseClaw had to stop on its own (a hook alarm, repeated foreign
+// network rules, a lost listener, a revoked registration, a start that
+// failed) but keeps running, its network withdrawn, because its disk could
+// not be synced first and a stop would lose what its guest had not written
+// (GAP-0902).
+const ContainedUnprotected = "running unprotected: contained sandbox"
+
+// UnprotectedContained is the UnprotectedSandbox.Reason of a contained
+// guest (ContainedUnprotected).
+const UnprotectedContained = "contained"
+
+// UnknownUnprotected opens every account of a guest that may be a live
+// legacy or a contained one, whose gateway has not said whether it runs:
+// one the gateway has not reported since the sandbox daemon started, or one
+// on another gateway that DefenseClaw could not read. DefenseClaw creates
+// and starts no sandbox until its gateway says.
+const UnknownUnprotected = "may be running unprotected: sandbox DefenseClaw cannot see"
+
+// UnprotectedUnknown is the UnprotectedSandbox.Reason of a guest whose
+// state DefenseClaw cannot see (UnknownUnprotected).
+const UnprotectedUnknown = "unknown"
+
+// UnprotectedSandbox is one entry of Status.Unprotected.
+type UnprotectedSandbox struct {
+	Name  string `json:"name"`
+	Phase string `json:"phase"`
+	// Stop is the command its user runs to end it.
+	Stop string `json:"stop"`
+	// Reason is why it is unprotected: "" for a live legacy guest
+	// (LegacyUnprotected), UnprotectedContained for a contained one,
+	// UnprotectedUnknown for one whose gateway has not said (with no Stop).
+	Reason string `json:"reason,omitempty"`
+	// Detail is what its user does about it when Stop alone does not say:
+	// for an unknown guest, why DefenseClaw cannot see it and what to do;
+	// for one on another gateway, that DefenseClaw connects there first.
+	Detail string `json:"detail,omitempty"`
 }
 
 // Busy is how many sandboxes may hold compute (Live, and never fewer than
@@ -840,28 +892,13 @@ type DeleteResponse struct {
 
 // StopRequest is POST /sandboxes/{name}/stop.
 type StopRequest struct {
-	// AcceptUnsynced is `sandbox stop --yes`: a MicroVM whose stop was
-	// held because its disk sync failed (GAP-1163) is stopped on this
-	// stop even when the sync fails again; it keeps what reached its
-	// disk, and the feed says what may be lost (stop_unflushed). A stop
-	// that was not held first is held as any other.
-	AcceptUnsynced bool `json:"accept_unsynced,omitempty"`
-}
-
-// stopRequestKey carries StopRequest.AcceptUnsynced to the manager
-// through the controllers between (WithUnsyncedStopAccepted).
-type stopRequestKey struct{}
-
-// WithUnsyncedStopAccepted marks ctx's stop as one that accepts the loss
-// of what a failed MicroVM disk sync did not save (StopRequest).
-func WithUnsyncedStopAccepted(ctx context.Context) context.Context {
-	return context.WithValue(ctx, stopRequestKey{}, true)
-}
-
-// UnsyncedStopAccepted reports a stop marked by WithUnsyncedStopAccepted.
-func UnsyncedStopAccepted(ctx context.Context) bool {
-	accepted, _ := ctx.Value(stopRequestKey{}).(bool)
-	return accepted
+	// DiscardUnsynced stops a MicroVM whose disk could not be synced
+	// first, losing what it wrote since its last sync: the user said yes
+	// to that. Without it the daemon refuses such a stop with CodeUnsynced
+	// and the sandbox keeps running. Nothing in DefenseClaw sets it on its
+	// own. A daemon before 1.0.4, which holds no stop back, refuses the
+	// field (Client.StopWith sends the stop again without it).
+	DiscardUnsynced bool `json:"discard_unsynced,omitempty"`
 }
 
 // StartRequest is POST /sandboxes/{name}/start.
@@ -1577,6 +1614,12 @@ const ReasonUnflushedStop = "unflushed_stop"
 // sandbox gets when its session started on an OpenShell release older than
 // openshell.SupportedMin, whose supervisor it keeps until it stops.
 const ReasonOldSupervisor = "old_supervisor"
+
+// ReasonContained is the Reason of the (HIGH) finding event of a MicroVM
+// DefenseClaw had to stop for a security alarm, or after a start that
+// failed, but keeps running contained because its disk could not be synced
+// first (ContainedUnprotected).
+const ReasonContained = "contained"
 
 // ReasonUpstreamFailed is the Reason of the (INFO) finding event the feed
 // gets the first time the egress proxy could not complete an allowed

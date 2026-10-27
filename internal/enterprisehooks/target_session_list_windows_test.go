@@ -6,7 +6,11 @@
 
 package enterprisehooks
 
-import "testing"
+import (
+	"testing"
+
+	"golang.org/x/sys/windows"
+)
 
 // An administrator (or any account) can read the session list without
 // LocalSystem: an account nobody is signed in as has no session, and a SID
@@ -18,5 +22,18 @@ func TestWindowsTargetHasNoSessionReadsTheSessionList(t *testing.T) {
 	}
 	if signedOut, err := WindowsTargetHasNoSession("not-a-sid"); err == nil || signedOut {
 		t.Fatalf("malformed SID: signedOut=%v err=%v, want an error", signedOut, err)
+	}
+}
+
+// GAP-1533, GAP-1564: only an active session is signed in for the wait, as
+// for the guardian; a disconnected one waits for its account.
+func TestWindowsSessionStateSignedInOnlyWhenActive(t *testing.T) {
+	if !windowsSessionStateSignedIn(windows.WTSActive) {
+		t.Fatal("an active session is not signed in")
+	}
+	for _, state := range []uint32{windows.WTSDisconnected, windows.WTSConnected, windows.WTSListen} {
+		if windowsSessionStateSignedIn(state) {
+			t.Fatalf("session state %d counted as signed in", state)
+		}
 	}
 }

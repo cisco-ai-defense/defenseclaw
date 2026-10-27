@@ -90,6 +90,21 @@ type SandboxStatus struct {
 	// which that stop ends with no flush; a stop of it ends it first
 	// (StopKill).
 	Legacy bool
+	// Unprotected are the account's live legacy guests, as a daemon of
+	// DefenseClaw 1.0.4 or later reports them (sandboxapi.Status.Unprotected):
+	// each runs unprotected until its user ends it.
+	Unprotected []UnprotectedSandbox
+}
+
+// UnprotectedSandbox is one live legacy or contained guest of an account,
+// or one that may be either whose gateway has not said: its name, the
+// command its user runs to end it, why it is unprotected and what else its
+// user does (sandboxapi.UnprotectedSandbox.Reason, Detail).
+type UnprotectedSandbox struct {
+	Name   string `json:"name"`
+	Stop   string `json:"stop"`
+	Reason string `json:"reason,omitempty"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // daemonStop is scope for a stop of the sandbox daemon that st describes:
@@ -480,6 +495,7 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 		Managed   *struct {
 			PendingRestart bool `json:"pending_restart"`
 		} `json:"managed"`
+		Unprotected []UnprotectedSandbox `json:"unprotected"`
 	}
 	if err := json.Unmarshal(res.Stdout, &reply); err != nil {
 		return st, fmt.Errorf("read the sandbox status of %s: %w", a.Name, err)
@@ -497,6 +513,7 @@ func (o *commandUserOps) Status(ctx context.Context, a SandboxAccount) (SandboxS
 	}
 	st.StartedAt = reply.StartedAt
 	st.PendingRestart = reply.Managed != nil && reply.Managed.PendingRestart
+	st.Unprotected = reply.Unprotected
 	if st.busy() == 0 {
 		// A daemon restarted on new inputs may no longer see a guest left by
 		// the old gateway. Its zero count is not a disposition of that guest.
@@ -1781,22 +1798,8 @@ func (l *lifecycle) keepAccountSandboxes(ctx context.Context, a SandboxAccount) 
 	// the sandboxes are stopped as if one did.
 	if st, err := ops.Status(ctx, a); err != nil || st.busy() > 0 {
 		stopped, err := ops.StopSandboxes(ctx, a)
-		var synced, unsynced []string
-		for _, name := range stopped {
-			if name, ok := strings.CutSuffix(name, sandboxapi.UnsyncedStopSuffix); ok {
-				unsynced = append(unsynced, name)
-			} else {
-				synced = append(synced, name)
-			}
-		}
-		if len(synced) > 0 {
-			r.Changes = append(r.Changes, fmt.Sprintf("stopped the running sandboxes of user %s (%s); they are kept, with their work", a.Name, strings.Join(synced, ", ")))
-		}
-		if len(unsynced) > 0 {
-			// Their guests' disks could not sync, so the stop accepted that
-			// loss (GAP-1806).
-			r.Changes = append(r.Changes, fmt.Sprintf("stopped the running sandboxes of user %s whose MicroVM disk could not sync (%s); they are kept, "+
-				"but may miss the files written in them since their disks were last synced", a.Name, strings.Join(unsynced, ", ")))
+		if len(stopped) > 0 {
+			r.Changes = append(r.Changes, fmt.Sprintf("stopped the running sandboxes of user %s (%s); they are kept, with their work", a.Name, strings.Join(stopped, ", ")))
 		}
 		if err != nil {
 			r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not stop every running sandbox of %s through its sandbox daemon: %v; its units stop next, and a MicroVM sandbox "+
