@@ -3089,26 +3089,26 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read the confirmed bundle for rollback: %w", err)
 		}
-		if ref != nil {
-			restored, err := os.ReadFile(configPath)
-			if err == nil && !bytes.Equal(restored, raw) {
-				restoredPending = env.committedPendingBundle(store, ref, restored)
+		restored, readErr := os.ReadFile(configPath)
+		if readErr == nil && (ref == nil || !bytes.Equal(restored, raw)) {
+			restoredPending = env.committedPendingBundle(store, ref, restored)
+		}
+		switch {
+		case restoredPending != nil:
+			pendingOpt, ok := enterprisebundle.GenerationOptions(restoredPending)
+			if !ok {
+				return fmt.Errorf("pending bundle %s version %d has no principal", displayID(restoredPending), restoredPending.Version)
 			}
-			switch {
-			case restoredPending != nil:
-				pendingOpt, ok := enterprisebundle.GenerationOptions(restoredPending)
-				if !ok {
-					return fmt.Errorf("pending bundle %s version %d has no principal", displayID(restoredPending), restoredPending.Version)
-				}
-				pendingOpt.GenerationFloor = restoredPending.ConfigGeneration
-				opt = pendingOpt
-			case err != nil || !bytes.Equal(restored, raw):
-				return fmt.Errorf("restored config does not match confirmed bundle %s version %d: %v", ref.BundleID, ref.Version, err)
-			default:
-				opt, err = currentBundleGenerationOptions(store, ref)
-				if err != nil {
-					return fmt.Errorf("read confirmed bundle attribution: %w", err)
-				}
+			pendingOpt.GenerationFloor = restoredPending.ConfigGeneration
+			opt = pendingOpt
+		case ref == nil:
+			// No bundle was confirmed yet: the lifecycle records the bytes.
+		case readErr != nil || !bytes.Equal(restored, raw):
+			return fmt.Errorf("restored config does not match confirmed bundle %s version %d: %v", ref.BundleID, ref.Version, readErr)
+		default:
+			opt, err = currentBundleGenerationOptions(store, ref)
+			if err != nil {
+				return fmt.Errorf("read confirmed bundle attribution: %w", err)
 			}
 		}
 	}

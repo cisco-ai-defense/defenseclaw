@@ -10,6 +10,7 @@ package enterpriseunix
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
@@ -136,12 +137,22 @@ func TestAKilledHigherDeliveryOverAPendingBundleKeepsItProvable(t *testing.T) {
 // to the new generation: that plain ensure ends without rollback_failed and
 // confirms the pending bundle from the live gateway, and a newer bundle then
 // applies.
+//
+// The same holds when no bundle was confirmed yet (the pending bundle is the
+// first): the recovery records its bytes as that bundle, not as the
+// lifecycle, so it does not stay pending for good.
 func TestAKilledHigherDeliveryOverAnUnconfirmedPendingBundleRecovers(t *testing.T) {
-	for _, goos := range []string{"linux", "darwin"} {
-		t.Run(goos, func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		confirmed bool
+	}{{"linux", true}, {"darwin", true}, {"linux first bundle", false}, {"darwin first bundle", false}} {
+		goos := strings.Fields(tc.name)[0]
+		t.Run(tc.name, func(t *testing.T) {
 			b := newBundleHost(t, goos)
 			v1, v2, restart := bundleConfigs(b.testHost)
-			requireOK(t, b.apply(b.dir(1, v1)))
+			if tc.confirmed {
+				requireOK(t, b.apply(b.dir(1, v1)))
+			}
 			b.env.bundleFault = func(phase string) error {
 				if phase == enterprisebundle.StateApplied {
 					b.healthy = false
