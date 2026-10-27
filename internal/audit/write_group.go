@@ -158,7 +158,7 @@ func (s *Store) runGroupedTx(batch []*groupedWrite, hooks groupedTxHooks) error 
 		defer stop()
 	}
 	single := len(batch) == 1
-	err := retryBusyObserved(batchCtx, hooks.op, s.sqliteBusyObservabilityV8(), func() error {
+	err := retryBusyObserved(batchCtx, hooks.op, s.groupedTxBusyObservabilityV8(), func() error {
 		tx, beginErr := s.db.BeginTx(batchCtx, nil)
 		if beginErr != nil {
 			return hooks.begin(beginErr)
@@ -276,7 +276,9 @@ func (writer *EventHistoryWriter) appendGrouped(
 func (writer *EventHistoryWriter) runAppendBatch(batch []*groupedWrite) {
 	release, err := writer.store.acquireReady()
 	if err != nil {
-		writer.reportHealthFailure(EventHistoryHealthWriteFailed, err, EventHistorySQLiteUnavailable)
+		// Staged, not reported: this caller leads the group, and every caller
+		// flushes the health state after its write returns (appendGrouped).
+		writer.stageHealthFailure(EventHistoryHealthWriteFailed, err, EventHistorySQLiteUnavailable)
 		for _, item := range batch {
 			if item.ctx.Err() == nil {
 				item.err = err
