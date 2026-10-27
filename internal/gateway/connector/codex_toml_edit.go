@@ -112,8 +112,9 @@ func editCodexOwnedTOMLWith(raw []byte, desired map[string]interface{}, narrowOt
 	// quoted one, which Codex refuses to load (p0 GAP-1300).
 	sectionPath := []string(nil)
 	skipValue := false
-	// Comments and blank lines at the end of a dropped [otel] subtable
-	// belong to the table after it; hold them until that table is kept.
+	// Comments and blank lines at the end of a dropped [otel] subtable, or of
+	// the [hooks] / [otel] tables DefenseClaw renders again, belong to the
+	// table after it; hold them until that table is kept (GAP-0032).
 	pending := ""
 	for _, line := range lines {
 		inMultiline, inArray := syntax.multiline != 0, syntax.arrayDepth != 0
@@ -132,10 +133,8 @@ func editCodexOwnedTOMLWith(raw []byte, desired map[string]interface{}, narrowOt
 				section = sectionPath[0]
 			}
 		}
-		if section == "hooks" || section == "otel" && !keepOtelBytes {
-			continue
-		}
-		dropped := narrow && section == "otel" && (len(sectionPath) > 1 && removedOtel[sectionPath[1]] || len(sectionPath) == 1 && !hasDesiredOtel)
+		rerendered := section == "hooks" || section == "otel" && !keepOtelBytes
+		dropped := rerendered || narrow && section == "otel" && (len(sectionPath) > 1 && removedOtel[sectionPath[1]] || len(sectionPath) == 1 && !hasDesiredOtel)
 		if dropped {
 			if !inMultiline && !inArray && trimmed == "" {
 				pending += line
