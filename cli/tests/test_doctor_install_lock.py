@@ -52,9 +52,15 @@ def test_doctor_preserves_live_and_managed_install_locks(tmp_path, monkeypatch):
     assert _planned(cfg) == "skip"
     assert cmd_doctor._fix_stale_install_lock(cfg, assume_yes=True)[0] == "skip"
     assert lock.exists()
-    then = time.time() - 660
-    os.utime(lock, (then, then))
-    # No clock: an old lock whose installer still runs stays held.
+    # No clock: an old lock whose installer still runs stays held (with its
+    # proc-start record; a record-less lock older than its pid's process is
+    # a reused pid, GAP-2057).
+    identity = cmd_doctor._process_identity(os.getppid())
+    if identity:
+        (lock / "proc-start").write_text(identity + "\n")
+        then = time.time() - 660
+        for path in (lock / "pid", lock / "proc-start", lock):
+            os.utime(path, (then, then))
     assert _planned(cfg) == "skip"
     assert cmd_doctor._fix_stale_install_lock(cfg, assume_yes=True)[0] == "skip"
     assert lock.exists()

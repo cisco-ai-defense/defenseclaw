@@ -84,25 +84,6 @@ func TestRunReadiesManagedOpenShellAtFirstRun(t *testing.T) {
 	}
 }
 
-// A first run that the run's own policy forbids (here a pack whose
-// harness.allowed leaves the agent out) is refused before the daemon
-// readies anything: no OpenShell is installed or started for a run that
-// cannot go ahead (GAP-0812).
-func TestAForbiddenFirstManagedRunReadiesNothing(t *testing.T) {
-	ta := newTestApp(t, "")
-	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
-	ta.daemon.status.Managed = managedStatusFixture()
-	ta.daemon.explain.Violations = []sandboxapi.Violation{{Key: "harness", Fatal: true, Admin: true,
-		Constraint: "harness.allowed", Message: "codex is not an allowed harness of pack team-pack"}}
-	err := ta.Run(bg, RunOptions{Harness: "codex", Pack: "team-pack"})
-	if err == nil || !strings.Contains(err.Error(), "codex is not an allowed harness of pack team-pack") {
-		t.Fatalf("forbidden first run: %v", err)
-	}
-	if r := ta.daemon.callsTo("POST", sandboxapi.PathReady); len(r) != 0 {
-		t.Fatalf("a forbidden first run readied OpenShell: %d ready calls", len(r))
-	}
-}
-
 // A run's ready names the run's own agent, so the daemon asks only that
 // agent's policy view (S2 review, loop round 2).
 func TestRunReadiesTheRequestedManagedHarness(t *testing.T) {
@@ -117,43 +98,13 @@ func TestRunReadiesTheRequestedManagedHarness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ta.preflight(bg, api, sandboxapi.ReadyRequest{Harness: "codex"}, nil); err != nil {
+	if _, err := ta.preflight(bg, api, "codex"); err != nil {
 		t.Fatal(err)
 	}
 	ready := ta.daemon.callsTo("POST", sandboxapi.PathReady)
 	if len(ready) != 1 || string(ready[0].Body) != `{"harness":"codex"}` {
 		t.Fatalf("codex ready request = %+v", ready)
 	}
-}
-
-// GAP-1551: a run's ready names its --pack, which the daemon judges the
-// agent under.
-func TestRunReadiesWithTheRunsPack(t *testing.T) {
-	ta := newTestApp(t, "")
-	gw := ta.daemon.status.Gateway
-	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
-	ta.daemon.status.Managed = managedStatusFixture()
-	ta.daemon.onReady = func(st *sandboxapi.Status) { st.Available, st.Gateway = true, gw }
-	_ = ta.Run(bg, RunOptions{Harness: "codex", Pack: "codex-pack"})
-	ready := ta.daemon.callsTo("POST", sandboxapi.PathReady)
-	if len(ready) != 1 || string(ready[0].Body) != `{"harness":"codex","pack":"codex-pack"}` {
-		t.Fatalf("ready request = %+v", ready)
-	}
-}
-
-// GAP-1552: when the run's policy view is provisional (the directory did not
-// answer, off VPN), the ready waits for it before it starts anything; the
-// run says so instead of pausing without a word.
-func TestAProvisionalRunSaysItWaitsForTheDirectory(t *testing.T) {
-	ta := newTestApp(t, "")
-	gw := ta.daemon.status.Gateway
-	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
-	ta.daemon.status.Managed = managedStatusFixture()
-	ta.daemon.explain.Managed = managedExplainFixture()
-	ta.daemon.explain.Managed.Provisional = true
-	ta.daemon.onReady = func(st *sandboxapi.Status) { st.Available, st.Gateway = true, gw }
-	_ = ta.Run(bg, RunOptions{Harness: "codex"})
-	has(t, ta.output(), "your organization's directory did not answer, so DefenseClaw waits up to 10s for your sandbox policy")
 }
 
 // While another account's sandboxes hold the one gateway port, a run is

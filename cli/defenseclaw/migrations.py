@@ -55,7 +55,7 @@ from typing import TYPE_CHECKING
 import click
 import yaml
 
-from defenseclaw import legacy_connector, ux
+from defenseclaw import legacy_connector, removed_connectors, ux
 from defenseclaw.file_lock import locked_file_update
 from defenseclaw.file_permissions import (
     copy_windows_dacl,
@@ -3022,6 +3022,62 @@ def _migrate_connector_roster(ctx: MigrationContext) -> None:
     """
     _migrate_retired_desktop_connector(ctx)
     _migrate_unshipped_connectors(ctx)
+    _persist_removed_connector_settings(ctx)
+
+
+def _removed_connector_settings_pending(raw: object) -> bool:
+    """Include retired-only telemetry even when the roster is already current."""
+    if not isinstance(raw, dict):
+        return False
+    from defenseclaw.config import _drop_retired_connector_settings
+
+    cleaned = copy.deepcopy(raw)
+    _drop_retired_connector_settings(cleaned, emit_warning=False)
+    return cleaned != raw
+
+
+def _persist_removed_connector_settings(ctx: MigrationContext) -> None:
+    """Persist the loader's restrictive retired cleanup with an exact backup."""
+    from defenseclaw.config_writer import hold_lock
+
+    path = ctx.active_config_path()
+    with hold_lock(path, timeout_s=None):
+        if not os.path.isfile(path):
+            return
+        if os.path.islink(path):
+            raise MigrationError(f"refusing removed connector cleanup through a symlink at {path}")
+        with open(path, "rb") as source:
+            original = source.read()
+        raw = yaml.safe_load(original)
+        if not _removed_connector_settings_pending(raw):
+            return
+        from defenseclaw.config import _drop_retired_connector_settings
+
+        cleaned = copy.deepcopy(raw)
+        _drop_retired_connector_settings(cleaned, emit_warning=False)
+        updated = yaml.safe_dump(cleaned, default_flow_style=False, sort_keys=False)
+        # A full YAML rewrite loses comments and formatting. Keep the exact
+        # source, including those operator edits, before replacing the file.
+        backup = f"{path}.retired-connector-{secrets.token_hex(8)}.bak"
+        try:
+            fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                set_file_mode(fd, backup, 0o600, set_owner=True)
+                with os.fdopen(fd, "wb") as saved:
+                    fd = -1
+                    saved.write(original)
+                    saved.flush()
+                    os.fsync(saved.fileno())
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+        except OSError as exc:
+            raise MigrationError(f"could not save config before removed connector cleanup: {exc}") from exc
+        if not _atomic_write_config(path, updated):
+            raise MigrationError(f"could not persist removed connector cleanup in {path}; original at {backup}")
+    ctx.changes.append(
+        f"removed retired connector settings and retired-only telemetry destinations from config.yaml; original at {backup}"
+    )
 
 
 def _connector_roster_pending(config_path: str, data_dir: str) -> bool:
@@ -3035,6 +3091,8 @@ def _connector_roster_pending(config_path: str, data_dir: str) -> bool:
     except yaml.YAMLError:
         return False
     if legacy_connector.migrated_copy(raw, config_path)[1]:
+        return True
+    if _removed_connector_settings_pending(raw):
         return True
     try:
         return bool(_unshipped_connector_names(raw, data_dir))
@@ -3318,7 +3376,26 @@ def _drop_unshipped_connectors(ctx: MigrationContext) -> None:
         return
     ctx.changes.append(
         f"removed connector {listed} (not shipped by this release) from config.yaml; primary connector is "
-        f"{new_primary!r}. DefenseClaw did not change those agents' config files; {_REMOVED_CONNECTORS_DOC}"
+        f"{new_primary!r}. {_unshipped_agent_config_note(names)}; {_REMOVED_CONNECTORS_DOC}"
+    )
+
+
+def _unshipped_agent_config_note(names: list[str]) -> str:
+    """What happens to the agents' own config files of the connectors dropped from config.yaml.
+
+    until 1.1: the teardown of OpenHands and OmniGent (removed in 1.0.5)
+    removes the entries DefenseClaw wrote in their configs and keeps the
+    rest; any other unshipped name keeps its agent config as it is.
+    """
+    removed = [n for n in names if removed_connectors.is_removed(n)]
+    others = [n for n in names if not removed_connectors.is_removed(n)]
+    if not others:
+        return "DefenseClaw removes only the entries it wrote in those agents' config files"
+    if not removed:
+        return "DefenseClaw did not change those agents' config files"
+    return (
+        f"DefenseClaw removes only the entries it wrote for {', '.join(repr(n) for n in removed)} and did not "
+        f"change the config files of {', '.join(repr(n) for n in others)}"
     )
 
 

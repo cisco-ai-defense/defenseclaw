@@ -349,8 +349,15 @@ func TestExclusionWithdrawsAnOmittedRecordWhateverTheSpoolSize(t *testing.T) {
 	if _, after, _ := enterpriseHookIdentitySpoolAccounts(context.Background(), io.Discard, dir, enterpriseHookReconcileRun{}); slices.Equal(after, before) {
 		t.Fatal("removing an exclude_users entry left the keys as they were")
 	}
+	// xia is exempt: her record is listed for refresh whatever its place in
+	// the spool (GAP-0964). This resolver has no account for her uid, so her
+	// lookup fails, the pass reports it, and her record stays.
+	if !slices.ContainsFunc(accounts, func(a enterprisehooks.IdentitySpoolAccount) bool { return a.UID == xiaUID && !a.Left }) {
+		t.Fatalf("accounts %d listed; the record of xia, exempt and beyond the first 4096, is not refreshed", len(accounts))
+	}
 	settings([]string{"zed@corp.example"}, []string{"xia@corp.example"})
-	if err := enterprisehooks.WriteIdentitySpool(context.Background(), dir, accounts, nil, nil, withdraw); err != nil {
+	if err := enterprisehooks.WriteIdentitySpool(context.Background(), dir, accounts, nil, nil, withdraw); err != nil &&
+		err.Error() != "uid 999997: unixidentity: not found" {
 		t.Fatal(err)
 	}
 	if withdrawTestRecordExists(t, dir, zedUID) {

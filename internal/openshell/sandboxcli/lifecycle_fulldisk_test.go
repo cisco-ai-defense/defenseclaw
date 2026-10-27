@@ -182,9 +182,9 @@ func TestStatusSaysAMicroVMsDiskIsFilling(t *testing.T) {
 // own disk is filling, rather than only at the end once a write failed; it
 // stops looking after that.
 func TestSessionWarnsOnceThatItsMicroVMDiskIsFilling(t *testing.T) {
-	prev, prevSmall := overlayDiskEvery, smallOverlayDiskEvery
-	overlayDiskEvery, smallOverlayDiskEvery = time.Millisecond, time.Millisecond
-	t.Cleanup(func() { overlayDiskEvery, smallOverlayDiskEvery = prev, prevSmall })
+	prev := overlayDiskEvery
+	overlayDiskEvery = time.Millisecond
+	t.Cleanup(func() { overlayDiskEvery = prev })
 	sb := vmCopySandbox("vmbox")
 	ta := newTestApp(t, "", sb)
 	ta.IO.TTY = false
@@ -217,47 +217,6 @@ func TestSessionWarnsOnceThatItsMicroVMDiskIsFilling(t *testing.T) {
 	}
 	if len(s.notices) != 1 || !strings.Contains(s.notices[0].summary, "`defenseclaw sandbox pull vmbox`") {
 		t.Fatalf("summary notices = %+v", s.notices)
-	}
-}
-
-// GAP-1140: a small MicroVM disk an agent fills fast is warned about before
-// it is full: at the rate it filled since the last look it would be full
-// before the look after next, so the session warns at about 70%, not at 90%
-// after the write already failed. A disk that does not fill is not.
-func TestSessionWarnsAboutAFastFillingSmallDisk(t *testing.T) {
-	prev, prevSmall := overlayDiskEvery, smallOverlayDiskEvery
-	overlayDiskEvery, smallOverlayDiskEvery = time.Hour, 20*time.Millisecond
-	t.Cleanup(func() { overlayDiskEvery, smallOverlayDiskEvery = prev, prevSmall })
-	df70 := dfHeader + "/dev/vda           2097152 1468006    629146      70% /\n"
-	for _, tc := range []struct {
-		name    string
-		answers []string
-		warn    bool
-	}{
-		{"filling fast", []string{dfHalf, df70}, true},
-		{"steady", []string{dfHalf, dfHalf, dfHalf}, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			sb := vmCopySandbox("vmbox")
-			ta := newTestApp(t, "", sb)
-			ta.IO.TTY = false
-			looks := 0
-			ta.stream.answer = func(argv []string) (int, string) {
-				if cmd := sandboxCommand(argv); len(cmd) > 0 && cmd[0] == "df" {
-					looks++
-					return 0, tc.answers[min(looks, len(tc.answers))-1]
-				}
-				return 0, ""
-			}
-			s := &session{app: ta.App, cli: ta.cli("gw"), sb: &sb}
-			ctx, cancel := context.WithTimeout(bg, time.Duration(len(tc.answers))*smallOverlayDiskEvery+500*time.Millisecond)
-			defer cancel()
-			s.watchOverlayDisk(ctx)
-			warned := strings.Contains(ta.err.String(), "own disk is 69% full")
-			if warned != tc.warn || tc.warn && looks != 2 {
-				t.Fatalf("warned %v after %d looks:\n%s", warned, looks, ta.err.String())
-			}
-		})
 	}
 }
 

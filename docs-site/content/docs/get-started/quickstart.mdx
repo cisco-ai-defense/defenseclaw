@@ -1,17 +1,19 @@
 ---
 title: Quickstart
-description: Block your first risky tool call in five minutes. Install DefenseClaw, set up one agent and watch a test command get blocked.
+description: Block your first risky tool call in 5 minutes. Install DefenseClaw, run init, turn on blocking for one agent and watch a test command get blocked.
 keywords:
   - defenseclaw quickstart
   - defenseclaw init
+  - DefenseClaw first run
   - DefenseClaw first block
+  - DefenseClaw demo
 ---
 
-Install DefenseClaw, guard one agent and watch a test command get blocked, in about five minutes. This uses Claude Code. For another agent, replace `claudecode` with its connector name (`codex`, `copilot`, `cursor`, `devin`, `antigravity`, `kiro`, `opencode`, `amp` or `hermes`). The [support matrix](/docs/get-started/support-matrix) shows which agents can block on your OS.
+Install DefenseClaw, guard one agent and watch a test command get blocked, in about five minutes. This uses Claude Code. For another agent, replace `claudecode` with its connector name (`codex`, `copilot`, `cursor`, `devin`, `antigravity`, `kiro`, `opencode`, `amp` or `hermes`). The [support matrix](/docs/support-matrix) shows which agents can block on your OS.
 
 The block comes from a one-rule test pack that matches only `echo defenseclaw-demo-marker`. Agents refuse the destructive commands the default rules target, so a harmless marker is the reliable way to see a block.
 
-## Block a tool call
+## Block a tool call in six steps
 
 <Steps>
 
@@ -21,7 +23,7 @@ The block comes from a one-rule test pack that matches only `echo defenseclaw-de
 
 <include>../../snippets/install-commands.mdx</include>
 
-The installer asks which agent to guard: type `claudecode`. Requirements and options are on [Install](/docs/get-started/install).
+The installer asks which agent to guard: type `claudecode`. Requirements and options are on [Install](/docs/get-started/download).
 
 </Step>
 
@@ -33,11 +35,13 @@ The installer asks which agent to guard: type `claudecode`. Requirements and opt
 defenseclaw init --connector claudecode
 ```
 
-Press Enter through the prompts. Claude Code starts in **observe** mode: DefenseClaw records policy findings without enforcing them. In the default policy its hook lets a call run with one warning while the gateway is not running; every other hook failure blocks. At **Select connector(s) for action enforcement**, leave the box unchecked. `init` starts the gateway and prints a first-run report. This sample comes from `defenseclaw quickstart --skip-gateway`, which prints the same report, so its Sidecar row says not started where yours says started:
+On an install that already guards other agents, `init --connector claudecode` keeps only Claude Code. To add an agent there, use `defenseclaw setup <agent>` instead.
+
+Press Enter through the prompts. Claude Code starts in **observe** mode: DefenseClaw records policy findings without enforcing them. In the default policy its hook lets a call run with one warning while the gateway is not running; a running hook blocks every other failure it detects. At **Select connector(s) for action enforcement**, leave the box unchecked. `init` starts the gateway and prints a first-run report. This sample comes from `defenseclaw quickstart --skip-gateway`, which prints the same report, so its Sidecar row says not started where yours says started:
 
 <include>../../snippets/first-run-report.mdx</include>
 
-`✓` is done and `-` is optional or skipped. You need no LLM key for this guide. If the report says `partial`, it names what needs attention; `defenseclaw doctor` explains the rest. Options are in the [init reference](/docs/reference/commands/first-run).
+`✓` is done and `-` is optional or skipped. You need no LLM key for this guide. If the report says `partial`, it names what needs attention; `defenseclaw doctor` explains the rest. Options are in the [init reference](/docs/get-started/first-run).
 
 Quit and reopen Claude Code so it loads the hooks, ask it to list the files in the directory, then run `defenseclaw status`. The agent, its mode and the new events appear within a second or two.
 
@@ -51,7 +55,7 @@ Quit and reopen Claude Code so it loads the hooks, ask it to list the files in t
 defenseclaw guardrail mode action --connector claudecode
 ```
 
-This switches only Claude Code to **action** mode, which enforces the rules. The running gateway applies it without a restart. The mode does not change what an outage does: in the default policy a tool call runs with a warning while the gateway is not running, and `defenseclaw guardrail use-pack strict` blocks it ([fail modes](/docs/reference/configuration/fail-modes)).
+This switches only Claude Code to **action** mode, which enforces the rules. The running gateway applies it without a restart. The mode does not change what an outage does: in the default policy a tool call runs with a warning while the gateway is not running, and `defenseclaw guardrail use-pack strict` blocks it ([fail modes](/docs/reference/fail-modes)).
 
 </Step>
 
@@ -173,17 +177,123 @@ Delete the `first-guardrail` folder under `~/.defenseclaw/policies/guardrail/`. 
 
 </Steps>
 
-## If it did not block
+## Set up with an AI agent
+
+<Callout title="Hand this section to your agent">
+Paste this into your agent:
+
+```text
+Read https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/quickstart/llms.md and follow the section "Set up with an AI agent". Ask me before any change it marks as needing my yes.
+```
+</Callout>
+
+You are an AI agent. Install DefenseClaw for the current user and set up the coding agents on this computer in observe mode. Run each step, compare with the expected output, and follow the "if it differs" branch.
+
+### Hard rules
+
+1. Observe first. Never switch an agent to action mode, change a fail mode, disable a connector or edit `config.yaml` by hand without the user's yes to that exact change.
+2. Never print a key, token or the contents of `.env`.
+3. Stop on a managed computer: if a command prints `This computer is managed` or `This device is managed` (exit `2` or `3`), or `defenseclaw status --json` shows `"deployment_mode": "managed_enterprise"`, tell the user to contact their administrator.
+
+### Steps
+
+1. Check the OS and CPU.
+
+   ```bash
+   uname -sm
+   ```
+
+   Expected: `Darwin arm64`, `Linux x86_64` or `Linux aarch64`. On Windows, use PowerShell and expect an x64 system.
+   If it differs: `Darwin x86_64` is an Intel Mac. Stop and tell the user it is unsupported. Windows on ARM64 and x86 are also unsupported.
+
+2. Check whether DefenseClaw is already installed and whether the computer is managed.
+
+   ```bash
+   defenseclaw status --json
+   ```
+
+   Expected on a clean computer: `command not found`. Go to step 3.
+   If it prints `This computer is managed`: stop (rule 3).
+   If it prints JSON: read `deployment_mode`. `managed_enterprise` means stop (rule 3). Otherwise DefenseClaw is already installed; skip to step 4.
+
+3. Install. This is the official one-line installer; tell the user what you run.
+
+   ```bash
+   curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector none
+   ```
+
+   On Windows PowerShell:
+
+   ```powershell
+   & ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector none
+   ```
+
+   `--connector none` installs without picking an agent; step 4 sets up every agent it finds.
+   Expected: the installer ends with `Next: defenseclaw init`. Open a new shell if it says `~/.local/bin` is not on `PATH`, then run `defenseclaw --version` (expect `defenseclaw, version X.Y.Z`).
+   If it fails, exit `1` means not installed (an upgrade puts the previous install back) and `2` an unknown option. Report the last lines of the output; do not retry in a loop.
+
+4. Set up the agents in observe mode.
+
+   ```bash
+   defenseclaw init --non-interactive --yes --observe-all
+   ```
+
+   Expected: a first-run report like this one (a terminal shows `✓` where a script sees `OK`):
+
+   ```text
+     OK Configured connectors: claudecode, codex
+
+     DefenseClaw First-Run
+     status=ready connectors=2 profile=observe
+     …
+     OK Guardrail  2 connectors: claudecode=observe, codex=observe
+     OK Sidecar  …
+   ```
+
+   If `status=partial` or `needs_attention`: the report names the cause (for example an agent that is not installed). Continue to step 5 and include it in your report. For one agent only, use `defenseclaw quickstart --connector <name>`.
+
+5. Check health.
+
+   ```bash
+   defenseclaw doctor --json
+   ```
+
+   Expected: `"outcome": "healthy"` (or `"warning"`) and `"exit_code": 0`. `"outcome": "failed"` comes with `"exit_code": 1`.
+   If it differs: list each check with `"status": "fail"` and its `"remediation"`. Do not apply `--fix` without the user's yes; you may show `defenseclaw doctor --fix --dry-run`.
+
+6. Check the gateway and the agents.
+
+   ```bash
+   defenseclaw status --json
+   ```
+
+   Expected: `sidecar.running` is `true`, and each entry in `connectors` has `"mode": "observe"`.
+   If the sidecar is not running, ask the user before running `defenseclaw-gateway start`.
+
+7. Tell the user to restart each agent so it loads the hooks.
+
+### Report
+
+Reply with:
+
+- Installed: version, OS and CPU.
+- Agents set up and their mode.
+- `doctor` outcome and each failing check with its remediation.
+- What you did not do, and what needs the user's yes (for example action mode: `defenseclaw guardrail mode action --connector <name>`).
+
+## Troubleshooting
+
+If it did not block:
 
 - The agent was open before `init`: quit and reopen it.
-- `defenseclaw doctor` shows a failing hook or gateway row: see [Troubleshooting](/docs/troubleshooting).
+- `defenseclaw doctor` shows a failing hook or gateway row: see [Troubleshooting](/docs/get-started/upgrade#troubleshooting).
 - Still in observe mode: run `defenseclaw guardrail status`.
 
 ## Next
 
 <Cards>
-  <Card title="Ask before risky calls" href="/docs/how-to/guardrail/ask-before-risky-calls" description="Pause risky calls for your approval (HITL)." />
-  <Card title="Allow a blocked call" href="/docs/how-to/guardrail/allow-a-blocked-call" description="The safe ways to allow something a rule blocks." />
+  <Card title="Ask before risky calls" href="/docs/hitl" description="Pause risky calls for your approval (HITL)." />
+  <Card title="Allow a blocked call" href="/docs/guardrail" description="The safe ways to allow something a rule blocks." />
   <Card title="Add more agents" href="/docs/connectors" description="Set up another agent with defenseclaw setup <connector>." />
-  <Card title="Send events to your tools" href="/docs/features/observability" description="Grafana, Splunk, Galileo and any OTLP collector." />
+  <Card title="Send events to your tools" href="/docs/observability" description="Grafana, Splunk, Galileo and any OTLP collector." />
 </Cards>

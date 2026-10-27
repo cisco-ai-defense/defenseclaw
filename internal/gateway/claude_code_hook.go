@@ -36,6 +36,8 @@ import (
 )
 
 type claudeCodeHookRequest struct {
+	watchHome            string
+	managedWatch         bool
 	HookEventName        string                 `json:"hook_event_name"`
 	SessionID            string                 `json:"session_id,omitempty"`
 	TurnID               string                 `json:"turn_id,omitempty"`
@@ -108,7 +110,7 @@ type claudeCodeHookResponse struct {
 	RuleIDs []string `json:"rule_ids,omitempty"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive back through the unified dispatch so
-	// finalizeAgentHook can honor it on the hook_decision event +
+	// finalizeAgentHookAnswer can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
 	RedactionEnabled     *bool  `json:"-"`
 	SourceReason         string `json:"-"`
@@ -133,6 +135,7 @@ type claudeCodeHookResponse struct {
 // value so downstream tooling and the audit envelope receive them.
 
 func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHookRequest) claudeCodeHookResponse {
+	req = req.withWatchHome(ctx)
 	// Keep authenticated lifecycle state current even while inspection is
 	// disabled so a live same-session re-enable cannot lose active-file authority.
 	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
@@ -328,6 +331,14 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	return resp
 }
 
+func (req claudeCodeHookRequest) withWatchHome(ctx context.Context) claudeCodeHookRequest {
+	if serviceAccountGatewayFromContext(ctx) {
+		req.watchHome = trustedActiveHome(ctx)
+		req.managedWatch = true
+	}
+	return req
+}
+
 // dispatchClaudeCodeHookNotification fires a user-session OS toast
 // for any non-allow verdict the hook produced. Routing is:
 //
@@ -433,7 +444,7 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	if cfg.Guardrail.HasConnector("claudecode") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "claudecode")
+	return cfg.Guardrail.NamesConnector("claudecode")
 }
 
 func (a *APIServer) claudeCodeMode(ctx context.Context) string {

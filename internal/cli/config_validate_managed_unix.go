@@ -70,23 +70,6 @@ func configValidateCredentialsDir(path string) string {
 
 var configValidateStandaloneLayout = managed.StandaloneLayoutFor
 
-// configValidateRequiredSandboxPacks loads, on a standalone managed Linux or
-// macOS host, every custom sandbox pack the candidate requires
-// (openshell.admin.required_pack and each profile floor's), with ensure's own
-// check: validate called a file valid whose required pack does not load, and
-// ensure then refused it (GAP-0546). Elsewhere the packs are another
-// computer's, and nothing is checked.
-func configValidateRequiredSandboxPacks(cfg *config.Config) error {
-	if cfg == nil || !configValidateManagedHost() || !managed.IsManagedEnterprise(cfg.DeploymentMode) || !cfg.StandaloneEnterprise() {
-		return nil
-	}
-	env, err := newUnixLifecycleEnv(runtime.GOOS)
-	if err != nil || env == nil {
-		return nil
-	}
-	return env.CheckRequiredSandboxPacks(cfg)
-}
-
 // configV8AbsolutePath is path as the loader reads it: the default config
 // when it is empty.
 func configV8AbsolutePath(path string) string {

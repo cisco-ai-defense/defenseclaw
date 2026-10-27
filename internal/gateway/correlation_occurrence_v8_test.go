@@ -76,12 +76,19 @@ func TestHookCorrelationRetriesConcurrentSQLiteWriter(t *testing.T) {
 	// The hook reads the last committed connector state while another
 	// process owns the writer. Its occurrence transaction must start over
 	// after that writer commits, rather than dropping the correlation claim.
-	done := make(chan error, 1)
-	go func() {
-		time.Sleep(120 * time.Millisecond)
-		_, commitErr := conn.ExecContext(context.Background(), "COMMIT")
-		done <- commitErr
-	}()
+	// The writer commits when the hook first reports it busy, not after a
+	// fixed delay: on a loaded Windows runner a 120 ms sleep outlasted the
+	// hook's whole bounded retry.
+	busyWaits := 0
+	var commitErr error
+	previousBusyWait := hookCorrelationBusyWait
+	t.Cleanup(func() { hookCorrelationBusyWait = previousBusyWait })
+	hookCorrelationBusyWait = func(int) {
+		busyWaits++
+		if busyWaits == 1 {
+			_, commitErr = conn.ExecContext(context.Background(), "COMMIT")
+		}
+	}
 	const raw = `{"hook_event_name":"PreToolUse","session_id":"writer-test","tool_name":"Bash","tool_use_id":"writer-tool"}`
 	payload := map[string]interface{}{
 		"hook_event_name": "PreToolUse", "session_id": "writer-test",
@@ -89,8 +96,8 @@ func TestHookCorrelationRetriesConcurrentSQLiteWriter(t *testing.T) {
 	}
 	req := normalizeAgentHookRequestWithProfile("claudecode", payload, profile)
 	_, correlated, correlationErr := server.correlateHookOccurrence(t.Context(), profile, req, []byte(raw))
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	if busyWaits == 0 || commitErr != nil {
+		t.Fatalf("the hook never met the competing writer (busy waits %d) or its commit failed: %v", busyWaits, commitErr)
 	}
 	if correlationErr != nil || correlated.SemanticEventID == "" {
 		t.Fatalf("correlation under a competing SQLite writer: id=%q err=%v", correlated.SemanticEventID, correlationErr)

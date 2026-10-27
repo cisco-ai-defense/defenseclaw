@@ -794,7 +794,7 @@ func (m *Manager) scheduleForeignStop(name, bindingID string) {
 	m.tamperStops.Add(1)
 	go func() {
 		defer m.tamperStops.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
+		ctx, cancel := context.WithTimeout(WithEmergencyStop(context.Background(), "repeated network rules added outside DefenseClaw"), defaultOpTimeout)
 		defer cancel()
 		b, unlock, err := m.lockBox(name)
 		if err != nil {
@@ -808,10 +808,10 @@ func (m *Manager) scheduleForeignStop(name, bindingID string) {
 		if !current {
 			return
 		}
-		if err := m.stop(ctx, b, false); err != nil {
+		if err := m.stop(ctx, b); err != nil {
 			m.logf("foreign rules: stop %s: %v", name, err)
 			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
-				Reason: policyReasonForeignRule, Message: "⚠ DefenseClaw could not stop the sandbox for repeated foreign network rules: stop it yourself"})
+				Reason: policyReasonForeignRule, Message: "⚠ DefenseClaw could not stop the sandbox for repeated foreign network rules (" + sandboxapi.AsError(err).Error() + "): stop it yourself"})
 		}
 	}()
 }

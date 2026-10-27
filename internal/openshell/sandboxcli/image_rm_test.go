@@ -216,12 +216,7 @@ func TestImageRemoveWithoutTheDaemon(t *testing.T) {
 	wantErr(t, err,
 		"the DefenseClaw daemon did not list its sandboxes, so which of them boot the 2 MicroVM disks OpenShell prepared from these images "+
 			"(8.0 KiB in ~/.local/state/openshell/vm-driver/images) is not known, and nothing was removed",
-		"the DefenseClaw daemon did not answer or could not be verified", "(nothing accepted the connection on its port)")
-	// The cause in plain words, not the client's loopback address and dial
-	// text (GAP-1549).
-	if strings.Contains(err.Error(), "127.0.0.1") || strings.Contains(err.Error(), "dial tcp") {
-		t.Fatalf("err = %v", err)
-	}
+		"the DefenseClaw daemon did not answer or could not be verified", "127.0.0.1:1", "connection refused")
 	if len(f.images.removed) != 0 {
 		t.Fatalf("removed %v", f.images.removed)
 	}

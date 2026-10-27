@@ -144,7 +144,6 @@ from defenseclaw.platform_support import (
     LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
     local_shell_stacks_supported,
 )
-from defenseclaw.removed_connectors import KEPT_HOOK_TOKEN_NAMES
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
 from defenseclaw.sandbox_images import verified_harness_contract
 from defenseclaw.scanner import settings as scanner_settings
@@ -691,6 +690,8 @@ def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> Non
     from defenseclaw.commands.cmd_config import validate_config
 
     result = validate_config()
+    if not_checked := getattr(result, "not_checked", ""):
+        ux.echo(f"Config check: not run: {not_checked}", err=True)
     if not result.ok and _webhook_url_cleanup(ctx, result):
         # The message says "fix the url, or remove the webhook": list, disable and remove
         # have to run for that to be possible (GAP-0219).
@@ -767,7 +768,7 @@ from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (  # noqa: E40
 # notifiers). Distinct from `setup observability add webhook` (generic
 # HTTP JSONL audit-log forwarder) — see the published webhook guide for the
 # disambiguation:
-# https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/set-up-webhook-alerts/
+# https://cisco-ai-defense.github.io/defenseclaw/docs/observability/webhooks/
 from defenseclaw.commands.cmd_setup_webhook import webhook  # noqa: E402
 
 setup.add_command(webhook)
@@ -4562,9 +4563,7 @@ def _rotate_token_transaction(
                 "Connector hook credential scope changed before rotation; no credentials were modified."
             )
         persisted_scopes = set(_rotate_token_persisted_hook_scopes(data_dir))
-        # Removed hooks that fail open without their credential still need the
-        # kept sidecar to reach the gateway's blocking retired route.
-        unconfigured_scopes = sorted(persisted_scopes - configured_scopes - KEPT_HOOK_TOKEN_NAMES)
+        unconfigured_scopes = sorted(persisted_scopes - configured_scopes)
         tracked_scopes = sorted(configured_scopes | persisted_scopes)
         for connector in tracked_scopes:
             hook_locks.enter_context(locked_file_update(_rotate_token_hook_path(data_dir, connector)))
@@ -11106,6 +11105,8 @@ def _apply_hook_connector_setup(
                 )
         else:
             ux.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
+            if connector == "copilot":
+                _warn_leftover_copilot_managed_plugin_key()
     elif _batch_summary is None:
         _echo_saved_without_restart()
 
@@ -13005,6 +13006,60 @@ def _connector_not_shipped(cfg, name: str) -> bool:
     return normalized not in declared and name.strip().lower() not in declared
 
 
+_COPILOT_MANAGED_PLUGIN_KEY = "defenseclaw@defenseclaw"
+
+
+def _copilot_machine_managed_settings_path() -> str:
+    """Copilot's machine managed-settings file ("" on macOS), as the gateway's
+    copilotMachineManagedSettingsPath."""
+    if os.name == "nt":
+        program_files = (os.environ.get("ProgramFiles") or "").strip()
+        if not program_files or not os.path.isabs(program_files):
+            program_files = r"C:\Program Files"
+        return os.path.join(program_files, "GitHubCopilot", "managed-settings.json")
+    if sys.platform.startswith("linux"):
+        return "/etc/github-copilot/managed-settings.json"
+    return ""
+
+
+def _warn_leftover_copilot_managed_plugin_key(path: str | None = None) -> bool:
+    """Name the leftover Copilot machine key a per-user setup could not remove.
+
+    A managed install before 1.0.4 left enabledPlugins
+    ``defenseclaw@defenseclaw`` = true in Copilot's machine managed-settings
+    file, so the Copilot CLI warns at every start that the marketplace
+    "defenseclaw" is not found (GAP-1254). The gateway's per-user Copilot
+    setup and teardown remove it when the account can write the file; a
+    standard user cannot, and the gateway's note goes to its own log during
+    the restart, so setup said nothing (GAP-1814). This prints the one line
+    with the file and the entry after the restart. Nothing on a managed host,
+    whose lifecycle owns the key. Returns whether it printed.
+    """
+    from defenseclaw.upgrade_shim import managed_deployment
+
+    if managed_deployment():
+        return False
+    path = _copilot_machine_managed_settings_path() if path is None else path
+    if not path or os.path.islink(path) or not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(1 << 20)
+        document = _json.loads(raw.decode("utf-8-sig"))
+    except (OSError, ValueError):
+        return False
+    plugins = document.get("enabledPlugins") if isinstance(document, dict) else None
+    if not isinstance(plugins, dict) or plugins.get(_COPILOT_MANAGED_PLUGIN_KEY) is not True:
+        return False
+    elevated = ", or run this setup from an elevated prompt" if os.name == "nt" else ""
+    ux.warn(
+        f"{path} still enables the plugin {_COPILOT_MANAGED_PLUGIN_KEY}, left by an earlier managed DefenseClaw "
+        'install, so Copilot CLI warns at every start that the marketplace "defenseclaw" is not found. '
+        f"Ask an administrator to delete that entry{elevated}."
+    )
+    return True
+
+
 # The connectors whose gateway Setup refuses the agent's own settings before it
 # changes anything (connector.CheckAgentSettings).
 _GATEWAY_RESTART_STEP_RE = re.compile(r",? then run: defenseclaw-gateway restart\.?$")
@@ -13363,7 +13418,15 @@ def _remove_connector(
         return False
 
     ux.echo(f"  ✓ Removed connector {match!r}")
-    if unshipped:
+    if unshipped and removed_connectors.is_removed(match):
+        # until 1.1: the gateway teardown removes what DefenseClaw wrote for
+        # OpenHands/OmniGent in their configs (GAP-1892 class).
+        ux.echo(
+            f"  {removed_connectors.NOTICE} The gateway removes the entries DefenseClaw wrote in "
+            "that agent's config and keeps the rest.",
+            err=True,
+        )
+    elif unshipped:
         ux.echo(
             f"  ⚠ {match!r} is not a connector this DefenseClaw build ships, so DefenseClaw "
             "did not change that agent's config files. Remove any DefenseClaw hook entries "
@@ -13396,6 +13459,8 @@ def _remove_connector(
                 if setup_snapshot is None:
                     raise click.ClickException("connector removal restart failed without rollback authority") from None
                 _rollback_failed_connector_application(app, setup_snapshot, exc)
+        if normalize_connector(match) == "copilot":
+            _warn_leftover_copilot_managed_plugin_key()
     else:
         # Suppress the group's auto-restart result callback so --no-restart
         # is honored; warn that teardown is deferred until the next boot.
@@ -17879,7 +17944,11 @@ def _native_windows_local_splunk() -> bool:
 @click.option(
     "--accept-splunk-license", is_flag=True, help="Acknowledge the Splunk General Terms for local Splunk enablement"
 )
-@click.option("--skip-test", is_flag=True, help="Skip the live HEC probe after remote Splunk Enterprise setup")
+@click.option(
+    "--skip-test",
+    is_flag=True,
+    help="Save remote Splunk Enterprise setup without the live HEC probe that otherwise runs first",
+)
 @click.option(
     "--show-credentials",
     is_flag=True,
@@ -17941,7 +18010,8 @@ def setup_splunk(
       --enterprise
                Remote Splunk Enterprise HEC endpoint + token.
                No Docker, local bridge, or Splunk-side automation.
-               Sends one best-effort HEC probe unless --skip-test is set.
+               Probes the HEC endpoint before saving; a failed probe
+               saves nothing (exit 1). --skip-test saves without it.
 
     Both can run simultaneously. Without flags, runs an interactive wizard.
     """
@@ -18472,16 +18542,16 @@ def _interactive_enterprise(app: AppContext, *, skip_test: bool = False) -> None
     source = click.prompt("  Source", default="defenseclaw")
     sourcetype = click.prompt("  Sourcetype", default="_json")
 
-    sink_name = _apply_enterprise_config(
+    _apply_enterprise_config(
         app,
         endpoint=endpoint,
         token=token,
         index=index,
         source=source,
         sourcetype=sourcetype,
+        skip_test=skip_test,
     )
     click.echo("  Splunk Enterprise configured (HEC)")
-    _maybe_probe_enterprise_hec(app, sink_name, skip_test=skip_test)
 
 
 # ---------------------------------------------------------------------------
@@ -18602,16 +18672,16 @@ def _setup_enterprise(
         click.echo("  error: HEC token is required for Splunk Enterprise", err=True)
         raise SystemExit(1)
 
-    sink_name = _apply_enterprise_config(
+    _apply_enterprise_config(
         app,
         endpoint=endpoint,
         token=token,
         index=index or "defenseclaw",
         source=source or "defenseclaw",
         sourcetype=sourcetype or "_json",
+        skip_test=skip_test,
     )
     click.echo("  Splunk Enterprise configured (HEC)")
-    _maybe_probe_enterprise_hec(app, sink_name, skip_test=skip_test)
 
 
 def _print_splunk_license_notice() -> None:
@@ -18665,6 +18735,7 @@ def _apply_v8_observability_preset(
     local_stack: dict[str, str] | None = None,
     legacy_local_destination: tuple[dict[str, Any], str] | None = None,
     allow_private_networks: bool = False,
+    probe_timeout: float | None = None,
 ) -> str:
     """Write one setup alias through the canonical v8 destination writer.
 
@@ -18696,6 +18767,7 @@ def _apply_v8_observability_preset(
         allow_private_networks=allow_private_networks,
         local_stack=local_stack,
         legacy_local_destination=legacy_local_destination,
+        probe_timeout=probe_timeout,
     )
     return resolved_name
 
@@ -19129,12 +19201,19 @@ def _apply_enterprise_config(
     index: str,
     source: str,
     sourcetype: str,
+    skip_test: bool = False,
 ) -> str:
     """Configure a remote Splunk Enterprise HEC sink.
 
     This is intentionally config-only: no Docker preflight, local bridge
     bootstrap, Splunk license prompt, or Splunk-side token/index creation.
+    Without *skip_test*, one live HEC probe of the validated candidate runs
+    before anything is saved; a failed probe stops setup with config.yaml
+    and .env unchanged (GAP-1600).
     """
+    from defenseclaw.commands.cmd_setup_observability import DestinationProbeFailed
+
+    click.echo("  Live HEC probe skipped." if skip_test else "  Live HEC probe:")
     try:
         name = _apply_v8_observability_preset(
             app,
@@ -19146,7 +19225,16 @@ def _apply_enterprise_config(
                 "sourcetype": sourcetype,
             },
             secret_value=token or None,
+            probe_timeout=None if skip_test else 10.0,
         )
+    except DestinationProbeFailed as exc:
+        click.echo(f"  error: {exc.message}", err=True)
+        click.echo(
+            "  Nothing was saved. Fix the HEC endpoint or token, or run again with --skip-test "
+            "to save it without the probe.",
+            err=True,
+        )
+        raise SystemExit(1) from exc
     except ValueError as exc:
         message = str(exc)
         if "set allow_private_networks" in message:
@@ -19159,25 +19247,6 @@ def _apply_enterprise_config(
         raise SystemExit(2) from exc
     _reload_cfg_from_data_dir(app)
     return name
-
-
-def _maybe_probe_enterprise_hec(
-    app: AppContext,
-    sink_name: str,
-    *,
-    skip_test: bool,
-) -> None:
-    if skip_test:
-        click.echo("  Live HEC probe skipped.")
-        return
-
-    from defenseclaw.commands.cmd_setup_observability import _test_v8_destination
-
-    click.echo("  Live HEC probe:")
-    try:
-        _test_v8_destination(app.cfg.data_dir, sink_name, 10.0, write_probe=False)
-    except click.ClickException as exc:
-        click.echo(f"    warning: {exc}")
 
 
 def _reload_cfg_from_data_dir(app: AppContext) -> None:
@@ -19491,14 +19560,20 @@ def _bootstrap_bridge(
         click.echo("  Local Splunk is ready")
         web_url = contract.get("splunk_web_url", "http://127.0.0.1:8000")
         click.echo(f"    Web UI: {web_url}")
-        if str(contract.get("license_group", "")).lower() == "free":
+        free = str(contract.get("license_group", "")).lower() == "free"
+        if free:
             click.echo("    License: Free")
         click.echo()
-        click.echo("  Splunk Web login:")
-        click.echo("    Username:  admin")
+        if free:
+            # Splunk Free has no Web login: the UI opens as admin (GAP-1398).
+            click.echo("  Splunk Web: no login in Free mode (it opens as admin)")
+        else:
+            # Any other license asks for the admin login (GAP-1750).
+            click.echo(
+                "  Splunk Web: log in as admin; show the password with: defenseclaw setup splunk --show-credentials"
+            )
         env_file = os.path.join(data_dir, "splunk-bridge", "env", ".env")
-        click.echo(f"    Password:  (stored in {env_file})")
-        ux.echo("    Note: Free mode may still show a login page — use these credentials")
+        click.echo(f"    Runtime secret: stored in {env_file}")
         return contract
     except subprocess.TimeoutExpired:
         click.echo("  Bridge startup timed out after 3 hours (including image download)")
@@ -20147,13 +20222,10 @@ def _print_splunk_next_steps(did_o11y: bool, did_logs: bool, did_enterprise: boo
     click.echo("    1. Start (or restart) the DefenseClaw sidecar:")
     click.echo("       defenseclaw-gateway restart")
     if did_logs:
+        # Local Splunk runs in Free mode on every OS: no Web login (GAP-1398).
         click.echo("    2. Open local Splunk Web at http://127.0.0.1:8000")
-        if _native_windows_local_splunk():
-            click.echo("       Web authentication is disabled in Splunk Free mode.")
-            click.echo("       To view the HEC/runtime secrets explicitly: defenseclaw setup splunk --show-credentials")
-        else:
-            click.echo("       Log in with admin / the password from setup output above.")
-            click.echo("       To view credentials later: defenseclaw setup splunk --show-credentials")
+        click.echo("       Web authentication is disabled in Splunk Free mode.")
+        click.echo("       To view the HEC/runtime secrets explicitly: defenseclaw setup splunk --show-credentials")
         click.echo("    3. Validate data in local Splunk")
     if did_enterprise:
         step = "3" if did_logs else "2"
@@ -20225,6 +20297,7 @@ def _show_splunk_credentials(data_dir: str) -> None:
         click.echo("  Splunk Web Credentials")
         ux.echo("  ──────────────────────")
         click.echo("    URL:       http://127.0.0.1:8000")
+        click.echo("    Web auth:  disabled in Splunk Free mode; these apply only if Splunk asks for a login")
         click.echo("    Username:  admin")
         click.echo(f"    Password:  {password}")
     click.echo()

@@ -16,22 +16,22 @@ DOCS = REPO / "docs-site/content/docs"
     ("page", "facts", "obsolete"),
     [
         (
-            "enterprise/runtime/tetragon-reference.mdx",
+            "enterprise/tetragon.mdx",
             ("With Plane C off, `ensure` writes an `off` drop-in",),
             ("produce the same policy digest and no drop-in",),
         ),
         (
-            "reference/sandboxes/cli.mdx",
+            "reference/sandbox-cli.mdx",
             ("per-user feed installer", "standalone managed Linux and macOS"),
             ("a managed host, where sandboxes are not supported",),
         ),
         (
-            "enterprise/plan/concepts.mdx",
+            "enterprise/concepts.mdx",
             ("manifest` on Linux, macOS and Windows",),
             ("manifest` on Linux and macOS",),
         ),
         (
-            "reference/commands/cli.mdx",
+            "reference/cli.mdx",
             (
                 "`init` and `quickstart` are not shipped",
                 "`doctor` prints administrator guidance and exits `1`",
@@ -43,12 +43,12 @@ DOCS = REPO / "docs-site/content/docs"
             ("All three take `--json`", "defenseclaw tool list/status"),
         ),
         (
-            "reference/configuration/env-vars.mdx",
+            "reference/env-vars.mdx",
             ("On managed Linux and macOS", "enterprise macos status"),
             (),
         ),
         (
-            "reference/commands/tui.mdx",
+            "tui.mdx",
             ("Managed packages ship no TUI", "enterprise macos status"),
             ("The editor still opens",),
         ),
@@ -62,7 +62,7 @@ def test_managed_package_command_scope(page, facts, obsolete):
         assert claim not in text, (page, claim)
 
 
-@pytest.mark.parametrize("page", ["enterprise/mdm/index.mdx", "enterprise/mdm/intune/macos.mdx"])
+@pytest.mark.parametrize("page", ["enterprise/mdm/index.mdx", "enterprise/mdm/intune-macos.mdx"])
 def test_mdm_live_delivery_names_the_test_build(page):
     text = (DOCS / page).read_text()
     assert "`9.9.9`" in text
@@ -73,10 +73,10 @@ def test_mdm_live_delivery_names_the_test_build(page):
 def test_mdm_invalid_candidate_code_is_consistent():
     for page in (
         "enterprise/mdm/index.mdx",
-        "enterprise/mdm/reference.mdx",
+        "enterprise/mdm/index.mdx",
         "enterprise/mdm/workspace-one.mdx",
         "enterprise/mdm/configmgr.mdx",
-        "enterprise/mdm/intune/tenant-reference.mdx",
+        "enterprise/mdm/intune-tenant.mdx",
     ):
         text = (DOCS / page).read_text()
         if page.endswith("workspace-one.mdx"):
@@ -109,7 +109,7 @@ def _windows_config_verbs() -> set[str]:
 
 
 def _windows_package_section() -> str:
-    text = (DOCS / "reference/commands/cli.mdx").read_text(encoding="utf-8")
+    text = (DOCS / "reference/cli.mdx").read_text(encoding="utf-8")
     start = text.index("Windows has no sandbox-only command.")
     return text[start:text.index("\n## ", start)]
 

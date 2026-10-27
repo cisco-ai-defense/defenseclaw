@@ -68,12 +68,12 @@ DEAD = _exited_pid()
         (None, 11 * 60, None, "held"),
         ("abc", 0, None, "held"),
         ("99999999999", 0, None, "held"),
-        (str(os.getppid()), 7 * 3600, None, "held"),
         (f"{DEAD}\n", 0, "previous.new", "recovery"),
         (f"{DEAD}\n", 0, ".repair", "recovery"),
         (f"{DEAD}\n", 0, ".rollback-hold", "recovery"),
         (f"{DEAD}\n", 0, ".lifecycle-txn.json", "recovery"),
     ],
+    ids=lambda value: _stable_id(value),
 )
 def test_install_lock_state_follows_the_plugin_rule(account, pid, age, record, want):
     _lock(account.data, pid, age)
@@ -85,27 +85,32 @@ def test_install_lock_state_follows_the_plugin_rule(account, pid, age, record, w
 PAST = str(int(time.time()) - 60)
 
 
-# oss-outage-open rounds j and k (one liveness rule, no clock): a live
-# installer keeps its lock for as long as it runs, so neither its age nor a
-# deadline an earlier build recorded expires it; a PID-only lock of 1.0.2 or
-# 1.0.3 holds while its pid names a process, whenever the pid was written (a
-# clock may not tell a reused pid; a proc-start record does); an interrupted
-# install keeps its lock.
+def _stable_id(value):
+    """Test ids that do not carry the clock or a pid (pytest-xdist workers collect the same ids)."""
+    if value == PAST:
+        return "past"
+    if value in (f"{DEAD}\n", f"{DEAD}\r\n"):
+        return "dead-crlf" if value.endswith("\r\n") else "dead"
+    if value in (str(os.getppid()), str(os.getpid())):
+        return "parent" if value == str(os.getppid()) else "self"
+    return None
+
+
+# oss-outage-open rounds j and k (one liveness rule): a live installer
+# keeps its lock for as long as it runs, so no deadline an earlier build
+# recorded expires it; an interrupted install keeps its lock. How old a
+# record-less lock may be is test_a_record_less_lock_older_than_its_pids_process_is_stale.
 @pytest.mark.parametrize(
     ("pid", "age", "deadline", "pid_age", "record", "want"),
     [
-        (str(os.getppid()), 7 * 3600, PAST, 0, None, "held"),
-        # Without a proc-start record no clock tells a reused pid from a
-        # live owner: it holds.
-        (str(os.getppid()), 7 * 3600, None, 7 * 3600, None, "held"),
-        (str(os.getppid()), 3600, None, 3600, None, "held"),
-        (str(os.getppid()), 30 * 86400, None, 30 * 86400, None, "held"),
+        (str(os.getppid()), 0, PAST, 0, None, "held"),
         # Loop round 2 P2: a lock naming doctor's own pid is a reused pid.
         (str(os.getpid()), 0, None, 0, None, "stale"),
         (f"{DEAD}\n", 3600, None, 3600, None, "stale"),
         (f"{DEAD}\n", 0, PAST, 0, "previous.new", "recovery"),
         (str(os.getppid()), 0, "soon", 0, None, "held"),
     ],
+    ids=_stable_id,
 )
 def test_install_lock_state_holds_while_its_owner_runs(account, pid, age, deadline, pid_age, record, want):
     _lock(account.data, pid, age, deadline, pid_age)
@@ -115,6 +120,69 @@ def test_install_lock_state_holds_while_its_owner_runs(account, pid, age, deadli
 
 
 _IDENTITY_SYSTEM = sys.platform.startswith("linux") or sys.platform == "darwin" or os.name == "nt"
+
+
+@pytest.fixture
+def owner():
+    """A running process, started before the test makes its lock."""
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    yield proc
+    proc.kill()
+    proc.wait()
+
+
+# GAP-2057 (lead decision 2026-10-26 13:58, GAP-1465): doctor applies the
+# installers' and hooks' rule to a lock without a proc-start record (1.0.2,
+# 1.0.3 and released 1.0.4 write none). Its pid names a live installer only
+# when that process started before its pid file was written (2 s slack);
+# one that started later got a killed installer's pid, so the lock is stale
+# and doctor --fix may remove it. Neither the lock's age nor a past deadline
+# expires a live owner, and a lock with its record holds however old.
+@pytest.mark.skipif(not _IDENTITY_SYSTEM, reason="no process start reader here")
+@pytest.mark.parametrize(
+    ("age", "deadline", "record", "want"),
+    [
+        (0, None, False, "held"),
+        (0, PAST, False, "held"),
+        (3600, None, False, "stale"),
+        (7 * 3600, PAST, False, "stale"),
+        (30 * 86400, None, False, "stale"),
+        (30 * 86400, None, True, "held"),
+    ],
+    ids=_stable_id,
+)
+def test_a_record_less_lock_older_than_its_pids_process_is_stale(account, owner, age, deadline, record, want):
+    assert cmd_doctor._process_started(owner.pid) is not None
+    lock = _lock(account.data, f"{owner.pid}\n", deadline=deadline)
+    if record:
+        identity = cmd_doctor._process_identity(owner.pid)
+        assert identity
+        (lock / "proc-start").write_text(identity + "\n", encoding="ascii")
+    if age:
+        then = time.time() - age
+        for path in (lock / "pid", lock):
+            os.utime(path, (then, then))
+    assert cmd_doctor._install_lock_state(str(account.data))[0] == want
+
+
+@pytest.mark.skipif(not _IDENTITY_SYSTEM, reason="no process start reader here")
+def test_fix_removes_a_record_less_lock_whose_pid_was_reused(account, owner):
+    lock = _lock(account.data, f"{owner.pid}\n", age=3600, pid_age=3600)
+    r = cmd_doctor._DoctorResult(mode="check")
+    cmd_doctor._check_install_lock(account.cfg, r)
+    assert [row.get("reason_code") for row in r.checks if row.get("check_id") == "doctor.install.lock"] == [
+        "install-lock-stale"
+    ]
+    tag, detail = cmd_doctor._fix_stale_install_lock(account.cfg, assume_yes=True)
+    assert tag == "pass", detail
+    assert not lock.exists() and owner.poll() is None
+
+
+@pytest.mark.skipif(not _IDENTITY_SYSTEM, reason="no process start reader here")
+def test_the_start_of_a_process_is_read():
+    started = cmd_doctor._process_started(os.getpid())
+    assert started is not None and time.time() - 86400 * 365 < started <= time.time() + 1
+    assert cmd_doctor._process_started(DEAD) is None
 
 
 def _other(identity: str) -> str:
@@ -392,7 +460,7 @@ def test_managed_install_is_left_alone(account):
 def test_the_repair_is_registered_and_documented():
     ids = [spec.repair_id for spec in cmd_doctor._doctor_repair_specs()]
     assert "doctor.install.stale-lock.clear" in ids
-    for page in ("troubleshooting/doctor.mdx", "reference/commands/cli.mdx"):
+    for page in ("reference/cli.mdx",):
         assert "doctor.install.stale-lock.clear" in (REPO / "docs-site/content/docs" / page).read_text()
     # Doctor names an interrupted install's recovery step; the plugins do not
     # hold a lock for its records once the installer is gone (GAP-1024).

@@ -1018,41 +1018,6 @@ func TestHookSilenceResponse(t *testing.T) {
 	}
 }
 
-// GAP-1328: a MicroVM session whose hooks connect and never authenticate
-// (OpenShell reports none of its model traffic) is flagged unreachable at
-// once, and once it stays so for the pack's silence_after with no hook
-// authenticated it gets hooks.on_silence: a user-tier harness under stop is
-// stopped, as a silent harness at work is.
-func TestUnreachableHooksForSilenceAfterAreSilent(t *testing.T) {
-	r := &reachEnv{harnessEnv: newEnv(t, nil), name: "reachbox"}
-	_, r.advance = r.fakeClock(time.Now())
-	r.create(sandboxapi.CreateRequest{Name: r.name, Pack: "balanced"})
-	r.binding = r.harnessEnv.binding(r.name)
-	b := r.boxOf(r.name)
-	r.m.mu.Lock()
-	b.rec.TamperTier = "user"
-	r.m.mu.Unlock()
-	silence := func() int {
-		r.m.checkHookSilence(t.Context())
-		return len(r.tel.findingsOf(audit.SandboxFindingHookSilence)) - len(r.findings())
-	}
-	r.line(ingressLine("ALLOWED"))
-	r.advance(hookAttemptGrace + time.Second)
-	r.check()
-	if h := r.hooks(); !h.Unreachable {
-		t.Fatalf("hooks = %+v, want unreachable", h)
-	}
-	r.advance(9 * time.Minute)
-	if n := silence(); n != 0 || stopped(t, r.harnessEnv, r.name) {
-		t.Fatalf("before silence_after: %d hook_silence finding(s), stopped %v", n, stopped(t, r.harnessEnv, r.name))
-	}
-	r.advance(time.Minute)
-	if n := silence(); n != 1 || !stopped(t, r.harnessEnv, r.name) {
-		t.Fatalf("unreachable for silence_after: %d hook_silence finding(s), stopped %v; want one and stopped (on_silence: stop)",
-			n, stopped(t, r.harnessEnv, r.name))
-	}
-}
-
 // While a sandbox's policy is not resolved, silent hooks get the fail-closed
 // response, and its view says so: a user-tier harness under a pack that
 // alerts after 2m is stopped after the default 10m.

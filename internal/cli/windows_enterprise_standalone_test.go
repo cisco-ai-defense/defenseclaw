@@ -3066,12 +3066,62 @@ func TestWindowsEnterprisePolicyReportsWhetherTheGatewayAppliedIt(t *testing.T) 
 	if result := run("ensure", true); result.Policy == nil || result.Policy.Applied || !containsString(warningCodes(result), "policy_not_applied") {
 		t.Fatalf("stale gateway policy = %+v warnings=%+v", result.Policy, result.Warnings)
 	}
-	if result := run("status", true); result.Policy == nil || len(result.Warnings) != 0 {
-		t.Fatalf("status reports the policy without a warning: %+v %+v", result.Policy, result.Warnings)
+	if result := run("status", true); result.Policy == nil || !containsString(warningCodes(result), "policy_not_applied") {
+		t.Fatalf("status does not warn about the stale gateway policy: %+v %+v", result.Policy, result.Warnings)
 	}
 	if result := run("ensure", false); result.Policy != nil {
 		t.Fatalf("policy reported while the gateway is not ready: %+v", result.Policy)
 	}
+}
+
+// A healthy installer report does not certify a policy the gateway has not
+// applied: a gateway digest other than the installed one, or an equal digest
+// with a reload error, clears security_complete for every action, warns on
+// status and fails verify with the cause (rel-1-0-4 GAP-1329).
+func TestWindowsEnterpriseVerifyFailsAPolicyTheGatewayHasNotApplied(t *testing.T) {
+	previous := windowsEnterprisePolicyDigest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = previous })
+	for name, c := range map[string]struct {
+		out  string
+		code string
+	}{
+		"another digest": {out: `{"effective_digest":"sha256:aa","config_generation":6,"config_generation_recorded":true,"gateway_reported_digest":"sha256:bb"}`, code: "policy_not_applied"},
+		"reload error":   {out: `{"effective_digest":"sha256:aa","config_generation":6,"config_generation_recorded":true,"gateway_reported_digest":"sha256:aa","gateway_last_reload_error":"rule pack p: digest mismatch"}`, code: "policy_reload_rejected"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return []byte(c.out), nil }
+			for _, action := range []string{"status", "verify", "ensure"} {
+				result := newWindowsEnterpriseStandaloneResult(action, &windowsEnterpriseLifecycleOptions{})
+				result.Installed, result.Readiness.Gateway, result.SecurityComplete = true, true, true
+				applyWindowsEnterprisePolicy(t.Context(), result)
+				if result.SecurityComplete {
+					t.Fatalf("%s certified security_complete over an unapplied policy: %+v", action, result.Policy)
+				}
+				switch action {
+				case "verify":
+					if !containsMessageCode(result.Errors, c.code) {
+						t.Fatalf("verify did not fail on %s: errors=%+v warnings=%+v", c.code, result.Errors, result.Warnings)
+					}
+					if result.Finish("windows", enterprisestatus.WindowsExitFailure) == 0 || result.OK {
+						t.Fatalf("verify succeeded over an unapplied policy: %+v", result)
+					}
+				default:
+					if len(result.Errors) != 0 || !containsMessageCode(result.Warnings, c.code) {
+						t.Fatalf("%s: errors=%+v warnings=%+v, want a %s warning", action, result.Errors, result.Warnings, c.code)
+					}
+				}
+			}
+		})
+	}
+}
+
+func containsMessageCode(messages []enterprisestatus.Message, code string) bool {
+	for _, message := range messages {
+		if message.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 // Status, verify and the change actions name a policy digest they could not
@@ -3089,6 +3139,9 @@ func TestWindowsEnterprisePolicyNamesADigestItCouldNotRead(t *testing.T) {
 	}{
 		"custody refused": {err: errors.New(`refuse to run the installed CLI: C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe is writable by BUILTIN\Users`),
 			code: "policy_unverified", contains: "refuse to run the installed CLI"},
+		// GAP-0594: the custody refusal names the icacls fix.
+		"custody refused writer": {err: errors.New(`refuse to run the installed CLI: C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe: untrusted Windows principal S-1-5-32-545 has write-like access mask 0x1301bf`),
+			code: "policy_unverified", contains: `Fix: icacls "C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe" /remove:g *S-1-5-32-545`},
 		"run failed":    {err: errors.New("exit status 1"), code: "policy_unverified", contains: "exit status 1"},
 		"no digest":     {out: `{}`, code: "policy_unverified", contains: "no effective policy digest"},
 		"not buildable": {out: `{"error":"rule pack \"p\": digest does not match","gateway_reported_digest":"sha256:aa"}`, code: "policy_not_buildable"},

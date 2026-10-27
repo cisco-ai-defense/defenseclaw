@@ -150,18 +150,9 @@ func (e *Env) bundleManagedSettingsTimes() (map[string]time.Time, error) {
 }
 
 func (e *Env) bundleLinuxProcesses(ctx context.Context, aliases map[string]string) ([]enterprisestatus.SessionProcess, error) {
-	stat, err := readBounded(e.P("/proc/stat"), 1<<20)
+	boot, err := e.linuxBootSeconds()
 	if err != nil {
 		return nil, err
-	}
-	var boot int64
-	for _, line := range strings.Split(string(stat), "\n") {
-		if text, ok := strings.CutPrefix(line, "btime "); ok {
-			boot, _ = strconv.ParseInt(strings.TrimSpace(text), 10, 64)
-		}
-	}
-	if boot == 0 {
-		return nil, errors.New("missing Linux boot time")
 	}
 	entries, err := os.ReadDir(e.P("/proc"))
 	if err != nil {

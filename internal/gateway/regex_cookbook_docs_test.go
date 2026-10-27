@@ -20,7 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const regexCookbookPage = "../../docs-site/content/docs/reference/policy/regex-cookbook.mdx"
+const regexCookbookPage = "../../docs-site/content/docs/policies/regex-cookbook.mdx"
 
 var (
 	cookbookExcerpt  = regexp.MustCompile("(?s)```yaml title=\"policies/guardrail/strict/rules/([a-z-]+\\.yaml) \\(excerpt\\)\"\n(.*?)```")

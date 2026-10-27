@@ -13,12 +13,12 @@ import (
 // Loop round 2 review (Windows consolidation): an administrator who cuts the
 // compact source from this install's SessionStart matcher gets the group a
 // release before the compact matcher rendered around the same command.
-// Uninstall keeps it as the administrator's (round 5), but reconcile took it
-// as that release's group, so every repair deleted it. Reconcile now replaces
-// it only in a file nobody edited since DefenseClaw published it that holds
-// no exact group of this install: an upgrade from 1.0.2 or 1.0.3. Every
-// other copy stays next to the exact group, through repeated repairs, and
-// the uninstall that follows still keeps it.
+// Reconcile took it as that release's group, so every repair deleted it.
+// Reconcile now replaces it only in a file nobody edited since DefenseClaw
+// published it that holds no exact group of this install: an upgrade from
+// 1.0.2 or 1.0.3. Every other copy stays next to the exact group, through
+// repeated repairs. The uninstall that follows takes it with DefenseClaw's
+// other groups: it runs the binary the uninstall deletes (GAP-0907).
 func TestReconcileWindowsCodexKeepsAnAdministratorNarrowedSessionStart(t *testing.T) {
 	for _, contract := range KnownHookContracts("codex") {
 		if !codexContractCertifiesCompactSessionStart(contract.ContractID) {
@@ -104,8 +104,8 @@ func TestReconcileWindowsCodexKeepsAnAdministratorNarrowedSessionStart(t *testin
 				if err != nil {
 					t.Fatalf("%s: %v", tc.name, err)
 				}
-				if n, c := counts(t, cleaned); n != 1 || c != 0 {
-					t.Fatalf("%s: the uninstall after the repair left %d narrowed and %d compact groups, want 1 and 0:\n%s", tc.name, n, c, cleaned)
+				if n, c := counts(t, cleaned); n != 0 || c != 0 {
+					t.Fatalf("%s: the uninstall after the repair left %d narrowed and %d compact groups, want 0 and 0:\n%s", tc.name, n, c, cleaned)
 				}
 			}
 
@@ -120,7 +120,7 @@ func TestReconcileWindowsCodexKeepsAnAdministratorNarrowedSessionStart(t *testin
 				t.Fatalf("the upgrade left %d earlier and %d compact groups, want 0 and 1:\n%s", n, c, upgraded)
 			}
 			// That file edited since: nothing proves DefenseClaw wrote the
-			// group, so it stays (the safe side; uninstall keeps it too).
+			// group, so a repair keeps it.
 			edited := edit(t, true, narrowed)
 			kept, _, err := reconcileWindowsCodexRequirements(edited, current, false)
 			if err != nil {
@@ -133,11 +133,11 @@ func TestReconcileWindowsCodexKeepsAnAdministratorNarrowedSessionStart(t *testin
 	}
 }
 
-// Continuation 2 review: a repair that adopts the file (no trusted ownership
-// record) keeps the administrator's narrowed SessionStart group in place,
-// but the preimage it recorded had it stripped as DefenseClaw's, so a later
-// removal that restores the preimage deleted it. The preimage now keeps it.
-func TestWindowsCodexAdoptionKeepsAnAdministratorNarrowedSessionStartInThePreimage(t *testing.T) {
+// A repair that adopts the file (no trusted ownership record) keeps the
+// narrowed SessionStart group in place. The preimage it records holds no
+// DefenseClaw group, that one included: a removal takes it from any file
+// (GAP-0907), so a restored preimage must not bring it back.
+func TestWindowsCodexAdoptionKeepsTheNarrowedSessionStartLiveButNotInThePreimage(t *testing.T) {
 	for _, contract := range KnownHookContracts("codex") {
 		if !codexContractCertifiesCompactSessionStart(contract.ContractID) {
 			continue
@@ -180,8 +180,8 @@ func TestWindowsCodexAdoptionKeepsAnAdministratorNarrowedSessionStartInThePreima
 				if err != nil {
 					t.Fatalf("%s: %v", tc.name, err)
 				}
-				if n := windowsCodexTestCountGroup(t, adoption.preimage, "SessionStart", wantNarrowed); n != 1 {
-					t.Fatalf("%s: the adopted preimage holds %d narrowed groups, want 1:\n%s", tc.name, n, adoption.preimage)
+				if n := windowsCodexTestCountGroup(t, adoption.preimage, "SessionStart", wantNarrowed); n != 0 {
+					t.Fatalf("%s: the adopted preimage holds %d narrowed groups, want 0:\n%s", tc.name, n, adoption.preimage)
 				}
 				if c := windowsCodexTestCountGroup(t, adoption.preimage, "SessionStart", wantCompact); c != 0 {
 					t.Fatalf("%s: the adopted preimage holds DefenseClaw's compact group:\n%s", tc.name, adoption.preimage)

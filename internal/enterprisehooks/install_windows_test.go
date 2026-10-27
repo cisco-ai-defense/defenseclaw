@@ -1469,7 +1469,7 @@ func TestWindowsGenericCodexInstallVerifyAndUninstallLifecycle(t *testing.T) {
 
 func TestInstallWindowsGenericUsesUnionInsteadOfUserVersionCache(t *testing.T) {
 	// Secure Client (#1163).
-	setStandaloneProfileForTest(t, false)
+	useWindowsSecureClientForTest(t)
 	fixture := newWindowsGenericCodexFixture(t)
 	dataDir := filepath.Join(fixture.home, ".defenseclaw")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
@@ -3111,7 +3111,7 @@ func removeExactWindowsManagedRuntimeGenerationSnapshot(
 // TestWindowsEnterpriseManagedAgentVersionIsNotAnInstallPrerequisite is the
 // Secure Client contract (#1163): no agent-version gate.
 func TestWindowsEnterpriseManagedAgentVersionIsNotAnInstallPrerequisite(t *testing.T) {
-	setStandaloneProfileForTest(t, false)
+	useWindowsSecureClientForTest(t)
 	for _, tc := range []struct {
 		name      string
 		connector string
@@ -3199,7 +3199,7 @@ func TestWindowsEnterpriseHookFailModeFollowsTheAdministrator(t *testing.T) {
 	if got := windowsManagedGenerationFailMode(nil); got != "closed" {
 		t.Fatalf("standalone generation without a mode = %q, want closed", got)
 	}
-	setStandaloneProfileForTest(t, false)
+	useWindowsSecureClientForTest(t)
 	for configured, want := range map[string]string{"": "open", "open": "open", "Open": "open", "closed": "closed", "bogus": "closed"} {
 		if got := canonicalHookFailMode(configured); got != want {
 			t.Fatalf("secure client configured %q = %q, want %q", configured, got, want)

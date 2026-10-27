@@ -1728,9 +1728,22 @@ var bakedAdapterFailModeOpens = strings.NewReplacer(
 	"$exitCode = 0\r\n", "$exitCode = 2\r\n",
 	"$exitCode = 0\n", "$exitCode = 2\n",
 	copilotAdapterOpenFailure, copilotAdapterClosedFailure,
+	copilotAdapterReleasedRead+"\r\n"+copilotAdapterReleasedWrite, copilotAdapterReleasedRead+copilotAdapterCrashCheck+"\r\n"+copilotAdapterReleasedWrite,
+	copilotAdapterReleasedRead+"\n"+copilotAdapterReleasedWrite, copilotAdapterReleasedRead+copilotAdapterCrashCheck+"\n"+copilotAdapterReleasedWrite,
 )
 
 const (
+	// copilotAdapterReleasedRead and copilotAdapterReleasedWrite are the two
+	// lines of a 1.0.0 to 1.0.3 copilot-hook.ps1 between which the launcher's
+	// answer is passed on. A launcher that crashed (non-zero exit, no answer)
+	// threw nothing there, so Copilot got no answer and ran the tool; the
+	// catch rewrite alone never ran (GAP-0343). The refresh adds the current
+	// template's check on the read line, so the closed catch answers it. The
+	// match spans the line end, so a refreshed adapter is not changed again.
+	copilotAdapterReleasedRead  = `    $stderr = $stderrTask.GetAwaiter().GetResult()`
+	copilotAdapterReleasedWrite = `    if ($stdout.Length -gt 0) {`
+	copilotAdapterCrashCheck    = `; if ($stdout.Length -eq 0 -and $process.ExitCode -ne 0) { if ($stderr.Length -gt 0) { [Console]::Error.Write($stderr) }; ` +
+		`throw "DefenseClaw hook launcher exited $($process.ExitCode) without an answer" }`
 	// cursorAdapterClosedResponse is Cursor's denial in cursor-hook.ps1.
 	cursorAdapterClosedResponse = `{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}`
 	// copilotAdapterOpenFailure is the catch block of copilot-hook.ps1 for
@@ -1763,6 +1776,12 @@ func closeBakedHookFailMode(path string, opens *strings.Replacer) (bool, error) 
 		return false, fmt.Errorf("read hook %s: %w", filepath.Base(path), err)
 	}
 	closed := opens.Replace(string(body))
+	if filepath.Base(path) == "copilot-hook.sh" {
+		closed, err = closeReleasedCopilotEarlyFailures(closed)
+		if err != nil {
+			return false, fmt.Errorf("close released Copilot hook %s: %w; run setup copilot to repair it", path, err)
+		}
+	}
 	if closed == string(body) {
 		return false, nil
 	}
@@ -1770,6 +1789,76 @@ func closeBakedHookFailMode(path string, opens *strings.Replacer) (bool, error) 
 		return false, fmt.Errorf("close hook %s: %w", filepath.Base(path), err)
 	}
 	return true, nil
+}
+
+const copilotUpgradeEarlyMarker = "_DC_COPILOT_UPGRADE_EARLY=1"
+
+// closeReleasedCopilotEarlyFailures closes the paths of a 0.8.10 or 1.0.0 to
+// 1.0.3 per-user copilot-hook.sh that run before its failure functions: a
+// missing helper, token or payload exited 0, so Copilot ran the tool even
+// after the refresh closed fail_unreachable and fail_response (GAP-0345).
+// Each such exit prints Copilot's native denial on a tool boundary instead,
+// whatever the mode, as the installer's own window does (GAP-0649). The
+// installer runs this before it stops the old gateway; a current render
+// (copilot_hook_failure) or an already closed one is left as it is.
+func closeReleasedCopilotEarlyFailures(body string) (string, error) {
+	if strings.Contains(body, copilotUpgradeEarlyMarker) || strings.Contains(body, "copilot_hook_failure()") ||
+		!strings.Contains(body, "# defenseclaw-managed-hook v") {
+		return body, nil
+	}
+	const start = "set -euo pipefail\n"
+	cut := strings.Index(body, "API_ADDR=")
+	if !strings.Contains(body, start) || cut < 0 {
+		return "", fmt.Errorf("unrecognized released hook layout")
+	}
+	prefix, suffix := body[:cut], body[cut:]
+	// The released scripts allowed helper and token failures with exit 0.
+	// Every such early exit, the no-home and malformed-event branches too,
+	// becomes a native denial on tool boundaries.
+	prefix = strings.ReplaceAll(prefix, "exit 0", "_dc_copilot_upgrade_early_failure")
+	prefix = strings.ReplaceAll(prefix, "allowing copilot tool", "blocking copilot tool")
+	prefix = strings.Replace(prefix,
+		"defenseclaw_handle_missing_token copilot copilot-hook \"copilot tool\"",
+		"(defenseclaw_handle_missing_token copilot copilot-hook \"copilot tool\") || true\n  _dc_copilot_upgrade_early_failure", 1)
+	// The released scripts read --event only after these exits, so the
+	// preamble reads it from the script's own arguments. A hook bound to no
+	// event (0.8.10) prints one object with both denies, as copilot_deny does.
+	preamble := copilotUpgradeEarlyMarker + `
+_DC_COPILOT_UPGRADE_EVENT=""
+if [ "$#" -eq 2 ] && [ "$1" = "--event" ]; then _DC_COPILOT_UPGRADE_EVENT="$2"; fi
+_dc_copilot_upgrade_early_failure() {
+  case "$_DC_COPILOT_UPGRADE_EVENT" in
+    preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}' ;;
+    permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+    sessionStart|sessionEnd|userPromptSubmitted|userPromptTransformed|postToolUse|agentStop|subagentStart|subagentStop|postToolUseFailure|errorOccurred|preCompact|notification) ;;
+    *) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed","behavior":"deny","message":"DefenseClaw hook failed closed"}' ;;
+  esac
+  exit 0
+}
+trap '_dc_upgrade_rc=$?; if [ "${_DC_COPILOT_UPGRADE_EARLY:-0}" = 1 ] && [ "$_dc_upgrade_rc" -ne 0 ]; then _dc_copilot_upgrade_early_failure; fi' EXIT
+`
+	prefix = strings.Replace(prefix, start, start+preamble, 1)
+	// Hardening installs its own cleanup trap: keep it and re-arm the
+	// native denial until the first gateway request has been prepared.
+	cleanup := "trap '_dc_upgrade_rc=$?; _defenseclaw_hook_cleanup; if [ \"${_DC_COPILOT_UPGRADE_EARLY:-0}\" = 1 ] && [ \"$_dc_upgrade_rc\" -ne 0 ]; then _dc_copilot_upgrade_early_failure; fi' EXIT"
+	if strings.Contains(prefix, "if ! defenseclaw_harden_env; then") {
+		anchor := "fi\n\n# Copilot documents timeout failures"
+		if !strings.Contains(prefix, anchor) {
+			return "", fmt.Errorf("unrecognized hardening exit")
+		}
+		prefix = strings.Replace(prefix, anchor, "fi\n"+cleanup+"\n\n# Copilot documents timeout failures", 1)
+	} else if strings.Contains(prefix, "defenseclaw_harden_env\n") {
+		prefix = strings.Replace(prefix, "defenseclaw_harden_env\n",
+			"defenseclaw_harden_env || _dc_copilot_upgrade_early_failure\n"+cleanup+"\n", 1)
+	} else {
+		return "", fmt.Errorf("missing hardening call")
+	}
+	const responseStart = "fail_unreachable() {"
+	at := strings.Index(suffix, responseStart)
+	if at < 0 {
+		return "", fmt.Errorf("missing released failure response")
+	}
+	return prefix + suffix[:at] + "_DC_COPILOT_UPGRADE_EARLY=0\n" + suffix[at:], nil
 }
 
 // OutageHookFailMode records the tier's mode for legacy per-user hook refresh
@@ -2458,6 +2547,17 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("ensure hook dir: %w", err)
 	}
+	target := filepath.Join(hookDir, scriptName)
+	// A teardown runs as the account. A hook folder that account cannot
+	// search (a root-owned ~/.defenseclaw/hooks made by sudo with HOME kept)
+	// holds no script its agents can run, so there is nothing to disable:
+	// that is not a failure (GAP-1978, same class as GAP-1904). The
+	// fail-closed rollback placeholder still reports the error.
+	if runtime.GOOS != "windows" && !opts.FailedSetupFailClosed {
+		if _, err := os.Lstat(target); errors.Is(err, os.ErrPermission) {
+			return nil
+		}
+	}
 	// A managed Windows hook folder holds only files with the managed runtime
 	// DACL; the generic private descriptor made a later rollback refuse to
 	// remove the tombstone, which left the deployment pending.
@@ -2474,8 +2574,7 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 	if opts.FailedSetupFailClosed && failedSetupPlaceholderBlocks[scriptName] {
 		body = failedSetupHookPlaceholder(vendorLabel)
 	}
-	return hookRuntimeFileWriter(opts.ManagedEnterprise)(
-		filepath.Join(hookDir, scriptName), []byte(body), 0o700)
+	return hookRuntimeFileWriter(opts.ManagedEnterprise)(target, []byte(body), 0o700)
 }
 
 // failedSetupPlaceholderBlocks lists the hook scripts whose agents treat

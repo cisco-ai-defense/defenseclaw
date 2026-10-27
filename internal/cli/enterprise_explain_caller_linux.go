@@ -69,21 +69,33 @@ var enterpriseExplainCallerFacts = func(user string) string {
 // under ProtectHome, and the guardian rewrites its identity records at its
 // next pass, so the first view after a local account was deleted and created
 // again under the same name and uid listed the agent identities of the
-// account before it (T8r, GAP-0422). "" when the caller is not root, user is
-// an id, NSS does not resolve it, or its account incarnation is a SID, which
-// tells accounts apart already. Tests replace it.
+// account before it (T8r, GAP-0422), by its name or its uid (GAP-1876). ""
+// when the caller is not root, user is a SID, NSS does not resolve it, or its
+// account incarnation is a SID, which tells accounts apart already. Tests
+// replace it.
 var enterpriseIdentityViewHolderProof = func(user string) string {
 	user = strings.TrimSpace(user)
-	if user == "" || os.Geteuid() != 0 || useridentity.KindForID(user) != "" {
+	kind := useridentity.KindForID(user)
+	if user == "" || kind != "" && kind != useridentity.KindPOSIXUID {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	resolver, err := unixidentity.NewNSSResolver(ctx)
-	if err != nil {
+	resolver, ok := enterpriseIdentityViewRootResolver(ctx)
+	if !ok {
 		return ""
 	}
-	account, err := resolver.LookupUser(user)
+	var account unixidentity.Account
+	var err error
+	if kind == useridentity.KindPOSIXUID {
+		uid, convErr := strconv.Atoi(user)
+		if convErr != nil {
+			return ""
+		}
+		account, err = resolver.LookupUID(uid)
+	} else {
+		account, err = resolver.LookupUser(user)
+	}
 	if err != nil || account.UID <= 0 || account.Name == "" {
 		return ""
 	}
@@ -96,4 +108,25 @@ var enterpriseIdentityViewHolderProof = func(user string) string {
 		return ""
 	}
 	return strconv.Itoa(account.UID) + ":" + token
+}
+
+// enterpriseIdentityViewResolver is the account lookup of the view's holder
+// proof (enterpriseIdentityViewHolderProof).
+type enterpriseIdentityViewResolver interface {
+	LookupUser(name string) (unixidentity.Account, error)
+	LookupUID(uid int) (unixidentity.Account, error)
+	AccountIncarnation(uid int, name string) (string, bool)
+}
+
+// enterpriseIdentityViewRootResolver is the NSS resolver of a root caller,
+// false for any other caller or without a trusted getent. Tests replace it.
+var enterpriseIdentityViewRootResolver = func(ctx context.Context) (enterpriseIdentityViewResolver, bool) {
+	if os.Geteuid() != 0 {
+		return nil, false
+	}
+	resolver, err := unixidentity.NewNSSResolver(ctx)
+	if err != nil {
+		return nil, false
+	}
+	return resolver, true
 }

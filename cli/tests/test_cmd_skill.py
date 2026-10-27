@@ -261,6 +261,69 @@ class TestSkillAllow(SkillCommandTestBase):
         self.assertFalse(self.app.store.has_action("skill", "docx", "runtime", "disable"))
 
 
+class TestSkillAllowScannedCopy(SkillCommandTestBase):
+    def test_allow_of_a_skill_known_from_scan_path_pins_the_scanned_copy(self):
+        # GAP-1579: a skill scanned with "skill scan --path" and not installed
+        # got a name-only allow, so skill info kept "Policy: rejected" and any
+        # same-named skill skipped the scan. The allow now pins the scanned
+        # folder and skill info reads allowed.
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        scanned = os.path.realpath(os.path.join(self.tmp_dir, "code", "risky-skill"))
+        os.makedirs(scanned)
+        self.app.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", scanned,
+            datetime.now(timezone.utc), 100, 5, "CRITICAL", "{}",
+        )
+
+        result = self.invoke(["allow", "risky-skill", "--reason", "reviewed"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("matches the name only", result.output)
+        self.assertIn(f"covers the copy at {scanned} only", result.output)
+        rules = [r.source_path_contains for r in self.app.cfg.asset_policy.skill.allowed]
+        self.assertEqual(rules, [[scanned]])
+        info = self.invoke(["info", "risky-skill"])
+        self.assertIn("Policy: allowed", " ".join(info.output.split()), info.output)
+
+    def test_allow_after_a_url_scan_keeps_the_name_only_rule(self):
+        # GAP-1974: "skill scan <url>" scans a temporary copy and removes it.
+        # An allow must not pin that deleted folder; it keeps the name-only
+        # rule and its note. A fetch folder that still exists is not pinned
+        # either.
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        fetch = tempfile.mkdtemp(prefix="defenseclaw-skill-")
+        self.addCleanup(shutil.rmtree, fetch, True)
+        live = os.path.realpath(os.path.join(fetch, "skill", "fetched-skill"))
+        os.makedirs(live)
+        gone = os.path.realpath(os.path.join(self.tmp_dir, "removed", "gone-skill"))
+        for name, target in (("fetched-skill", live), ("gone-skill", gone)):
+            self.app.store.insert_scan_result(
+                str(uuid.uuid4()), "skill-scanner", target,
+                datetime.now(timezone.utc), 100, 5, "CRITICAL", "{}",
+            )
+            result = self.invoke(["allow", name, "--reason", "reviewed"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("matches the name only", result.output)
+            self.assertNotIn("covers the copy at", result.output)
+        rules = [r.source_path_contains for r in self.app.cfg.asset_policy.skill.allowed]
+        self.assertNotIn([live], rules)
+        self.assertNotIn([gone], rules)
+
+    def test_two_scanned_folders_keep_the_name_only_note(self):
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        for parent in ("a", "b"):
+            self.app.store.insert_scan_result(
+                str(uuid.uuid4()), "skill-scanner", os.path.join(self.tmp_dir, parent, "twin"),
+                datetime.now(timezone.utc), 100, 1, "HIGH", "{}",
+            )
+        result = self.invoke(["allow", "twin", "--reason", "reviewed"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("matches the name only", result.output)
+
+
 class TestSkillUnblock(SkillCommandTestBase):
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_unblock_reenables_runtime_disable_before_clearing_state(self, mock_cls):
@@ -4190,6 +4253,23 @@ class TestSkillInstallQuarantineNeverWarns(SkillCommandTestBase):
     def test_action_refuses_when_the_quarantine_move_fails(self):
         with patch("defenseclaw.commands.cmd_skill._quarantine_skill_with_provenance", return_value=None):
             result, scanned = self._install("qfail-skill", ["--action"], self.FILE_ONLY)
+        self._assert_refused(result, scanned, "reason=enforcement-failed failed=quarantine")
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), "POSIX mode bits as non-root")
+    def test_action_refuses_with_one_line_when_the_quarantine_folder_is_unwritable(self):
+        # GAP-1740: with ~/.defenseclaw/quarantine not writable, --action
+        # printed a raw PermissionError traceback from SkillEnforcer(). It
+        # is the failed-quarantine refusal: one clear line, rolled back.
+        quarantine = self.app.cfg.quarantine_dir
+        os.makedirs(quarantine, exist_ok=True)
+        os.chmod(quarantine, 0o500)
+        try:
+            result, scanned = self._install("qperm-skill", ["--action"], self.FILE_ONLY)
+        finally:
+            os.chmod(quarantine, 0o700)
+        self.assertNotIn("Traceback", result.output)
+        self.assertIsNone(result.exception if not isinstance(result.exception, SystemExit) else None, result.output)
+        self.assertIn("quarantine of 'qperm-skill' failed", result.output)
         self._assert_refused(result, scanned, "reason=enforcement-failed failed=quarantine")
 
     def test_action_refuses_when_the_gateway_disable_fails(self):

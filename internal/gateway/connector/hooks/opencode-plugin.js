@@ -640,7 +640,10 @@ function defenseclawCheckWindowsHelperACL(paths) {
   // PowerShell (DC_WINDOWS_POWERSHELL) checks every path before a
   // bearer-bearing helper launch: its owner is this account, SYSTEM,
   // Administrators (an elevated install) or TrustedInstaller, and no other
-  // principal may write it. An inherit-only entry does not apply to the
+  // principal may write it. An OWNER RIGHTS (S-1-3-4) entry, which the
+  // DefenseClaw CLI and installer write on the data folder, grants only
+  // that trusted owner, so it is not another writer (GAP-2042).
+  // An inherit-only entry does not apply to the
   // path itself; its children carry it.
   // execFileSync opens the helper by this path, so every folder above a
   // checked path, up to its volume root, must not let another principal
@@ -670,6 +673,7 @@ function defenseclawCheckWindowsHelperACL(paths) {
     "$ErrorActionPreference='Stop'",
     "$current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
     "$trusted=@($current,'S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')",
+    "$writers=$trusted+@('S-1-3-4')",
     "$inheritOnly=[int][System.Security.AccessControl.PropagationFlags]::InheritOnly",
     "$sid=[System.Security.Principal.SecurityIdentifier]",
     "$count=0",
@@ -681,7 +685,7 @@ function defenseclawCheckWindowsHelperACL(paths) {
     "  if([System.IO.Directory]::Exists($p)) { $acl=[System.IO.Directory]::GetAccessControl($p) } elseif([System.IO.File]::Exists($p)) { $acl=[System.IO.File]::GetAccessControl($p) } else { throw 'missing' }",
     "  if($trusted -notcontains $acl.GetOwner($sid).Value) { throw 'owner' }",
     "  foreach($ace in $acl.GetAccessRules($true,$true,$sid)) {",
-    "    if($ace.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and (([int]$ace.PropagationFlags -band $inheritOnly) -eq 0) -and $trusted -notcontains $ace.IdentityReference.Value -and (([int64]$ace.FileSystemRights -band $writeMask) -ne 0)) { throw 'writable' }",
+    "    if($ace.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and (([int]$ace.PropagationFlags -band $inheritOnly) -eq 0) -and $writers -notcontains $ace.IdentityReference.Value -and (([int64]$ace.FileSystemRights -band $writeMask) -ne 0)) { throw 'writable' }",
     "  }",
     "  $count++",
     "}",

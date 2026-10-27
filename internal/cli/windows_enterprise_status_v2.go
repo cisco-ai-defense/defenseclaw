@@ -188,12 +188,15 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 		// A persistent-home target cannot prove a session-only HERMES_HOME.
 		state.Targets = nil
 		block["hermes"] = state
-		result.CoverageComplete, result.SecurityComplete = false, false
 		// The limit is the same for every Hermes account and is reported,
-		// not certified: lifecycle verify keeps coverage and security
-		// incomplete and exits 0 (as on Linux and macOS), Setup's live
-		// readiness proves each registered hook, and public hooks verify
-		// still refuses to attest the home (GAP-0766, GAP-1433).
+		// not certified: lifecycle verify keeps security incomplete and
+		// exits 0 (as on Linux and macOS), Setup's live readiness proves
+		// each registered hook, and public hooks verify still refuses to
+		// attest the home (GAP-0766, GAP-1433). coverage_complete says the
+		// enabled hooks are installed, and they are: a documented platform
+		// limit keeps its warning but does not make it false, so a clean
+		// 1.0.2 upgrade no longer reads incomplete (GAP-1593).
+		result.SecurityComplete = false
 		message := "connectors.hermes: NOT COVERED: the guardian's persistent-home registration cannot prove a session-only HERMES_HOME is hooked; Windows managed Hermes coverage cannot be verified"
 		result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, message)
 		if result.Installed && result.Readiness.Gateway {

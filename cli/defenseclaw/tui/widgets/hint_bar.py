@@ -57,6 +57,8 @@ class HintEngine:
         return tip
 
     def hint_for(self, state: HintState, status: StatusModel | None = None) -> str:
+        if state.palette_open:
+            return "Type a command or alias · ↑/↓ choose · Tab complete · Enter run · Esc close"
         panel = state.active_panel.strip().lower().replace("_", "-").replace(" ", "-")
         if panel == "overview":
             return self._overview_hint(state, status)

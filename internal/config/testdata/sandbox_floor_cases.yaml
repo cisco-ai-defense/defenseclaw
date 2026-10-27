@@ -13,26 +13,6 @@ cases:
     source: |
       config_version: 9
 
-  # GAP-0691 (#1226): the words take any letter case.
-  - name: mixed-case-enum-values
-    valid: true
-    source: |
-      config_version: 9
-      openshell:
-        admin:
-          foreign_sandboxes: Alert
-          when_unavailable: ALERT
-          on_silence: Stop
-          driver_fallback: Docker
-      guardrail:
-        profiles:
-          contractors:
-            mode: action
-            sandbox:
-              foreign_sandboxes: Stop
-              when_unavailable: Refuse
-              user_approvals: Session
-
   - name: full-valid-floors
     valid: true
     source: |

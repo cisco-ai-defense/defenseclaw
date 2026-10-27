@@ -58,6 +58,11 @@ func TestWarnJudgeOnlyPluginHigh(t *testing.T) {
 		{name: "judge failure beside a judge HIGH", findings: with(FindingInput{Severity: "MEDIUM", RuleID: "LLM-SCAN-ERROR"}), want: "rejected"},
 		{name: "another LLM rule id", findings: []FindingInput{{Severity: "HIGH", RuleID: "LLM-UNKNOWN"}}, want: "rejected"},
 		{name: "a second META rule id", findings: []FindingInput{{Severity: "HIGH", RuleID: "META-LLM-CORR"}}, want: "rejected"},
+		{name: "meta advisory id at HIGH", findings: []FindingInput{{Severity: "HIGH", RuleID: "META-LLM-FP-ADVISORY"}}, want: "rejected"},
+		{name: "meta answer without a rule id", findings: []FindingInput{{Severity: "HIGH", RuleID: "META-LLM-UNKNOWN"}}, want: "rejected"},
+		// GAP-2107: the number of a meta missed threat is the model's count.
+		{name: "another meta missed threat at HIGH", findings: []FindingInput{{Severity: "HIGH", RuleID: "META-LLM-002"}}, want: "warning"},
+		{name: "meta missed threat the scanner prefixed", findings: with(FindingInput{Severity: "HIGH", RuleID: "META-LLM-MISSED-001"}), want: "warning"},
 		{name: "unknown severity", findings: with(FindingInput{Severity: "SEVERE", RuleID: "LLM-OB-009-002"}), want: "rejected"},
 		{name: "incomplete findings list", findings: gap1389, total: 4, want: "rejected"},
 		{name: "count-only input", total: 2, want: "rejected"},

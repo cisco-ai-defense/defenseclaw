@@ -243,48 +243,30 @@ func TestInstructionBenignSymlinkedCodexSessionCreatedFile(t *testing.T) {
 	}
 }
 
-// startupClientCWD takes the hook client's directory only when it names the
-// gateway's directory by identity.
-func TestStartupClientCWDNeedsTheSameDirectory(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX symlinks")
-	}
-	root := t.TempDir()
-	real, other := filepath.Join(root, "real"), filepath.Join(root, "other")
-	for _, dir := range []string{real, other} {
-		if err := os.Mkdir(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	link := filepath.Join(root, "link")
-	if err := os.Symlink(real, link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	id := hookpaths.DirectoryIdentity
-	perUser, managed := t.Context(), withManagedHookPeer(t.Context(), managedHookPeer{UID: 1001, Home: root})
+// startupClientCWD takes the hook client's absolute directory whenever it
+// spells another directory than the gateway's (GAP-1508: no identity match
+// is needed, the snapshot is keyed by the spelling the client read), and
+// the gateway's otherwise.
+func TestStartupClientCWDTakesTheClientSpelling(t *testing.T) {
+	real := filepath.Join(t.TempDir(), "real")
+	link := filepath.Join(filepath.Dir(real), "link")
 	cases := []struct {
-		name       string
-		ctx        context.Context
-		client     string
-		identities map[string]string
-		want       string
+		name, client, want string
 	}{
-		{"per-user link", perUser, link, nil, link},
-		{"per-user unclean link", perUser, link + "/", nil, link},
-		{"per-user other directory", perUser, other, nil, real},
-		{"per-user relative", perUser, "link", nil, real},
-		{"per-user no evidence", perUser, "", nil, real},
-		{"managed link by client identities", managed, link, map[string]string{link: id(real), real: id(real)}, link},
-		{"managed link without identities", managed, link, nil, real},
-		{"managed other directory", managed, other, map[string]string{other: id(other), real: id(real)}, real},
-		{"managed forged identity", managed, other, map[string]string{other: id(real)}, real},
+		{"link", link, link},
+		{"unclean link", link + string(filepath.Separator), link},
+		{"other directory", filepath.Join(filepath.Dir(real), "other"), filepath.Join(filepath.Dir(real), "other")},
+		{"same directory", real, real},
+		{"relative", "link", real},
+		{"none", "", real},
+		{"NUL", link + "\x00x", real},
 	}
 	for _, c := range cases {
 		facts := map[string]string{}
 		if c.client != "" {
 			facts[hookpaths.CWDKey] = c.client
 		}
-		if got := startupClientCWD(c.ctx, real, facts, c.identities); got != c.want {
+		if got := startupClientCWD(real, facts); got != c.want {
 			t.Errorf("%s: startupClientCWD = %q, want %q", c.name, got, c.want)
 		}
 	}

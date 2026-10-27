@@ -128,6 +128,9 @@ func TestACPEvaluateDecidesUncertainProfilesOnInspectPath(t *testing.T) {
 		{"observe ACP, uncertain group, observe profiles", "observe", "observe", true, false},
 		{"action ACP, uncertain group, observe profiles", "action", "observe", true, false},
 		{"action ACP, uncertain action profile", "action", "action", false, true},
+		// GAP-2103: identity uncertainty refuses in every mode, so the
+		// verdict of an observe ACP profile tells its guard to enforce it.
+		{"observe ACP, uncertain action profile", "observe", "action", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			subject := identityTestSubject(p, p.providers[0], stateProven, false)
@@ -173,10 +176,10 @@ func TestACPEvaluateDecidesUncertainProfilesOnInspectPath(t *testing.T) {
 				t.Fatalf("ACP status=%d body=%s", rec.Code, rec.Body.String())
 			}
 			if tc.wantBlock {
-				if verdict.Action != "block" || !strings.Contains(verdict.Reason, "account holder is unconfirmed") {
-					t.Fatalf("ACP verdict=%+v; want account fact refusal", verdict)
+				if verdict.Action != "block" || !verdict.Enforced || !strings.Contains(verdict.Reason, "account holder is unconfirmed") {
+					t.Fatalf("ACP verdict=%+v; want an enforced account fact refusal", verdict)
 				}
-			} else if verdict.Action != "allow" || strings.Contains(verdict.Reason, "refused this request") {
+			} else if verdict.Action != "allow" || verdict.Enforced || strings.Contains(verdict.Reason, "refused this request") {
 				t.Fatalf("ACP verdict=%+v; want observe-only frame allowed", verdict)
 			}
 		})
@@ -686,11 +689,14 @@ func TestACPEvaluationContextNamesTheSessionInstance(t *testing.T) {
 	if agent := resolveHookAgentIdentity(t.Context(), agentHookRequest{ConnectorName: "kiro"}).ID; agent != "" {
 		pending, _, _ := sharedAgentIdentities.snapshot()
 		before := pending[agent].SessionsSeen
-		instance(`{"sessionId":"acp-session-ledger"}`)
-		instance(`{"sessionId":"acp-session-ledger"}`)
+		// The ledger is process-wide: a session ID of its own per run, so a
+		// second -count iteration sees a new session too (GAP-1133).
+		session := fmt.Sprintf("acp-session-ledger-%d", time.Now().UnixNano())
+		instance(`{"sessionId":"` + session + `"}`)
+		instance(`{"sessionId":"` + session + `"}`)
 		pending, _, _ = sharedAgentIdentities.snapshot()
-		if got := pending[agent]; got.AgentID != agent || got.SessionsSeen != before+1 || got.LastSessionID != "acp-session-ledger" {
-			t.Fatalf("agent identity ledger row = %+v, want %s with one more session (acp-session-ledger)", got, agent)
+		if got := pending[agent]; got.AgentID != agent || got.SessionsSeen != before+1 || got.LastSessionID != session {
+			t.Fatalf("agent identity ledger row = %+v, want %s with one more session (%s)", got, agent, session)
 		}
 	}
 	restore := ManagedEnterpriseActive()
@@ -1223,4 +1229,76 @@ func TestACPEvaluateBlockRecordsConnectorFinding(t *testing.T) {
 func auditStringValue(value any) string {
 	text, _ := value.(string)
 	return text
+}
+
+// productionACPChainHandler serves the ACP routes behind the middleware the
+// gateway runs in production: tokenAuth opens the signed request, then the
+// CSRF check and the generic API body cap run before the handler.
+func productionACPChainHandler(api *APIServer) http.Handler {
+	routes := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/acp/challenge":
+			api.handleACPChallenge(w, r)
+		case "/api/v1/acp/evaluate":
+			api.handleACPEvaluate(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	return api.tokenAuth(api.apiCSRFProtect(apiBodyLimitMiddleware(routes, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)))
+}
+
+// Every frame the guard accepts is evaluated: the generic 1 MiB API body cap
+// refused a near-limit frame after tokenAuth opened it, and HTML escaping
+// grew a markup-heavy frame past the ACP frame limit. Both reached the
+// editor as "the gateway did not answer" (GAP-1327).
+func TestACPSignedEvaluationOfAnyAcceptedFrameIsEvaluated(t *testing.T) {
+	token := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	dataDir := writePrivateACPToken(t, token)
+	api := &APIServer{scannerCfg: acpGatewayTestConfig(dataDir, "")}
+	server := httptest.NewServer(productionACPChainHandler(api))
+	defer server.Close()
+	evaluator, err := acp.NewHTTPEvaluator(server.URL, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, pad := range map[string]string{
+		"near the frame limit":     strings.Repeat("a", acp.MaxFrameBytes-100),
+		"markup that JSON escapes": strings.Repeat("<", 300<<10),
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := deniedACPTestEvaluation()
+			in.Payload = json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"pad":"` + pad + `"}}`)
+			if len(in.Payload) > acp.MaxFrameBytes {
+				t.Fatalf("fixture frame is %d bytes, over the ACP frame limit", len(in.Payload))
+			}
+			verdict, err := evaluator.Evaluate(t.Context(), in)
+			if err != nil {
+				t.Fatalf("evaluation of an accepted frame failed: %v", err)
+			}
+			if verdict.Action != "block" {
+				t.Fatalf("verdict = %+v, want the profile's block", verdict)
+			}
+		})
+	}
+}
+
+// A gateway that answers with a signed refusal names it; the guard must not
+// read that answer as no answer (GAP-1327).
+func TestACPSignedEvaluatorReportsTheGatewayRefusal(t *testing.T) {
+	token := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	dataDir := writePrivateACPToken(t, token)
+	api := &APIServer{scannerCfg: acpGatewayTestConfig(dataDir, "")}
+	server := httptest.NewServer(productionACPChainHandler(api))
+	defer server.Close()
+	evaluator, err := acp.NewHTTPEvaluator(server.URL, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := deniedACPTestEvaluation()
+	in.AgentID = "no-such-agent"
+	_, err = evaluator.Evaluate(t.Context(), in)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 400") || !strings.Contains(err.Error(), "unknown or unbound ACP agent") {
+		t.Fatalf("error = %v, want the gateway's HTTP 400 reason", err)
+	}
 }

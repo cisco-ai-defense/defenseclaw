@@ -1,6 +1,6 @@
 {
   "$schema_version": "1",
-  "$description": "DefenseClaw environment-variable registry. Single source of truth for DEFENSECLAW_* environment variables and Fleet/Edge DCLAW_* runtime variables consumed by the codebase. Both internal/envvars (Go) and cli/defenseclaw/envvars (Python) load this file. The CI gate at cli/tests/test_envvars_codebase_coverage.py fails the build if any callsite references a DEFENSECLAW_* var not declared here. The canonical website catalog at docs-site/content/docs/reference/configuration/env-vars.mdx is rendered from this file; docs/ENV-VARS.md is a stable pointer to that catalog. Each entry's managed field says what a managed (standalone enterprise) host does with it: allow (read as set), ignore (treated as unset, from the environment and from .env) or tighten_only (honoured only when it makes the setting stricter).",
+  "$description": "DefenseClaw environment-variable registry. Single source of truth for DEFENSECLAW_* environment variables and Fleet/Edge DCLAW_* runtime variables consumed by the codebase. Both internal/envvars (Go) and cli/defenseclaw/envvars (Python) load this file. The CI gate at cli/tests/test_envvars_codebase_coverage.py fails the build if any callsite references a DEFENSECLAW_* var not declared here. The canonical website catalog at docs-site/content/docs/reference/env-vars.mdx is rendered from this file; docs/ENV-VARS.md is a stable pointer to that catalog. Each entry's managed field says what a managed (standalone enterprise) host does with it: allow (read as set), ignore (treated as unset, from the environment and from .env) or tighten_only (honoured only when it makes the setting stricter).",
   "$categories": {
     "security_opt_out": "Toggles that weaken security defaults. Surfaced by 'defenseclaw doctor' whenever active.",
     "debug": "Verbose-logging toggles. Safe but noisy.",
@@ -307,39 +307,6 @@
         }
       ],
       "since": "1.0.3"
-    },
-    {
-      "name": "DEFENSECLAW_REMOVED_CONNECTOR_UNINSTALL",
-      "category": "upgrade_internal",
-      "purpose": "Set to 1 only by an uninstall (the Python uninstall's connector teardown child and the native Setup uninstall transaction's connector children) so that connector teardown also removes what an older setup wrote for a removed connector (OpenHands, OmniGent) and a removed DefenseClaw does not keep blocking the agent. Setup strips ambient copies from every other child.",
-      "default": "unset",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "low",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "internal/gateway/connector/removed_uninstall.go",
-          "description": "Defines the variable for the removed-connector uninstall teardown"
-        },
-        {
-          "location": "internal/cli/connector_cmd.go",
-          "description": "Connector teardown also removes removed-connector state when it is 1"
-        },
-        {
-          "location": "cmd/defenseclaw-setup/transaction.go",
-          "description": "Filters ambient copies and sets it only for an uninstall transaction's connector children"
-        },
-        {
-          "location": "cli/defenseclaw/commands/cmd_uninstall.py",
-          "description": "Sets it for the uninstall's connector teardown child"
-        }
-      ],
-      "since": "1.0.4",
-      "security_note": "Internal uninstall flag, removed with the OpenHands/OmniGent compatibility teardown (until 1.1). It only widens what an uninstall removes for retired connectors."
     },
     {
       "name": "DEFENSECLAW_TEST_WINDOWS_LIFECYCLE_PRIORITY",
@@ -1546,8 +1513,8 @@
         "unset"
       ],
       "security_impact": "medium",
-      "surface_in_doctor": true,
-      "managed": "tighten_only",
+      "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/fail_mode.py",

@@ -1806,7 +1806,9 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		agent = ""
 	}
 	scans := set.requestScanScopes(r.Context(), connectorName)
-	decision := set.matchAgent(subject, source, connectorName, scans, profilePathAny, agent, nil)
+	decision, refusedOn, sandboxRefused := set.explainOnRequestPaths(connectorName, func(path profilePath) profileDecision {
+		return set.matchAgent(subject, source, connectorName, scans, path, agent, nil)
+	})
 	out["profile"] = decision.Name
 	out["digest"] = decision.Digest
 	out["match"] = decision.Match
@@ -1827,6 +1829,14 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if decision.Refused != "" {
 		out["refused"] = true
 		out["refused_reason"] = decision.Refused
+		if len(refusedOn) > 0 {
+			out["refused_paths"] = refusedOn
+		}
+	}
+	if sandboxRefused != "" {
+		out["refused_paths"] = []string{"sandbox"}
+		out["sandbox_refused_reason"] = sandboxRefused
+		warnings = append(warnings, sandboxRefusedWarning(connectorName, sandboxRefused))
 	}
 	if len(decision.Candidates) > 0 {
 		// An administrator view: the profiles that may apply, and the

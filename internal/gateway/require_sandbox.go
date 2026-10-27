@@ -61,7 +61,7 @@ import (
 // host run of a connector some floor requires as policy_unloadable.
 
 // Outcomes of the gate, recorded on the hook's audit row as
-// require_sandbox=<outcome> by finalizeAgentHook.
+// require_sandbox=<outcome> by finalizeAgentHookAnswer.
 const (
 	// requireSandboxRefused: a sandbox can run; the host run is refused.
 	requireSandboxRefused = "refused"
@@ -479,7 +479,12 @@ func (a *APIServer) requireSandboxGateFailed(
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			// outcome, resp and gated keep what was set before the panic:
-			// a bare block once the refusal is decided.
+			// once the refusal is decided, a block with the callback-free
+			// native denial.
+			if gated {
+				resp.Reason = outcome.Message
+				resp.HookOutput = nativeFallbackOutput(profile, connectorName, req, "block", outcome.Message)
+			}
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("require-sandbox refusal render panic: %v", recovered))
 		}
 	}()

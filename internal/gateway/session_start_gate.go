@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -336,9 +337,29 @@ func (a *APIServer) codexStartRegistrationRefusal(ctx context.Context, connector
 	}
 	if err := a.ensureHookRegistration(ctx, connectorName); err != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration recovery failed: %v\n", err)
+		if step := registrationRepairStep(err); step != "" {
+			return codexStartRegistrationUnavailable + ": " + step
+		}
 		return codexStartRegistrationUnavailable
 	}
 	return ""
+}
+
+// registrationRepairStep is the text of the error in err's chain that names
+// the command the user runs to repair the registration ("...; run:
+// defenseclaw setup codex --yes", connector.ErrCodexExecutableChanged after
+// a Codex self-update, GAP-1884), so the refusal and the 503 body name the
+// step instead of only "run doctor". The innermost such error is taken: it
+// is the cause, without the wrapping detail (paths, digests). Any other
+// error gives "".
+func registrationRepairStep(err error) string {
+	step := ""
+	for ; err != nil; err = errors.Unwrap(err) {
+		if text := err.Error(); strings.Contains(text, "run: defenseclaw ") {
+			step = text
+		}
+	}
+	return step
 }
 
 // sessionStartCheck judges, for a call, the start of its session that did

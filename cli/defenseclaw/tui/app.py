@@ -637,7 +637,7 @@ class _OverviewRenderSnapshot:
     hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
     last_good_hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
     # The terminal size the body was laid out for (_overview_layout_key).
-    layout: tuple[int]
+    layout: tuple[int, int]
 
 
 @dataclass(frozen=True)
@@ -1107,7 +1107,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     }
 
     #command-palette {
-        height: 14;
+        height: 14fr;
+        max-height: 14;
         margin: 0 1 1 1;
         border: round TOKEN_BORDER_ACTIVE;
         background: TOKEN_SURFACE_PANEL;
@@ -3759,6 +3760,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # entry. Idle = strip is hidden, exactly what we want here.
         self._strip_clear()
         self._set_status("Command palette. Type or pick.")
+        self._refresh_hint()
 
     def action_open_panel_jumper(self) -> None:
         """Open the Ctrl+P fuzzy panel jumper modal.
@@ -3983,11 +3985,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         palette.clear(columns=True)
         self._command_palette_values = []
         self.set_focus(None)
-        # Closing the palette by running a row left its open hint
-        # in the status bar (GAP-1213). Callers that report something else
-        # set their own status after this.
-        if self.status_text == "Command palette. Type or pick.":
-            self._set_status(self._status_text())
+        self._refresh_hint()
 
     def _handle_command_palette_key(self, event: events.Key) -> bool:
         palette = self.query_one("#command-palette", DataTable)
@@ -5334,6 +5332,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "off": TOKENS.text_muted,
             "waiting": TOKENS.accent_blue,
             "degraded": TOKENS.accent_amber,
+            "partial": TOKENS.accent_cyan,
             "healthy": TOKENS.accent_green,
         }[state]
         badge_color = {
@@ -5906,7 +5905,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         enabled = bool(model.snapshot.enabled)
         self._set_button_visible("#runtime-enable", model.needs_enable())
         self._set_button_visible("#runtime-scan", enabled)
-        self._set_button_visible("#runtime-permissions", model.health_state() == "degraded")
+        self._set_button_visible("#runtime-permissions", model.health_state() in ("degraded", "partial"))
         refresh.disabled = False
         detail.disabled = model.selected() is None
 
@@ -9775,7 +9774,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         return Group(
             banner,
             tagline,
-            Text(""),
+            # At 24 rows, two notices need the line otherwise used by
+            # this spacer (Doctor recovery plus Runtime details).
+            *([] if self.size.height <= 24 and len(notice_block) > 1 else [Text("")]),
             *notice_block,
             Text(""),
             columns,
@@ -9796,14 +9797,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
         return ("overview", self.help_open, *self._overview_layout_key(), stable_text)
 
-    def _overview_layout_key(self) -> tuple[int]:
+    def _overview_layout_key(self) -> tuple[int, int]:
         """The part of the terminal size the Overview layout depends on."""
 
         # The CONFIGURATION card is laid out for the width at render time, so
         # a new width is new content: after a resize it kept the old width's
         # wrapping until the next data change (GAP-2509).
         width = int(getattr(self.size, "width", 0) or 0)
-        return (width,)
+        # Multiple notices use compact spacing at 24 rows. A height-only
+        # resize must invalidate a render prepared for the other layout.
+        height = int(getattr(self.size, "height", 0) or 0)
+        return (width, int(height <= 24))
 
     def _runtime_sample_time(self) -> str:
         """When the last runtime sample was taken ("14:02:11", "Oct 02 14:02"), or "".
@@ -10725,11 +10729,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             width=width - 2 - _status_text_cells(text) - 5 if width > 0 else None,
         )
         rendered = f"{text}  [#444444]│[/]  {strip}" if strip else text
-        if not _is_command_result(text) and any(
+        if any(
             service.label not in strip
             for service in (status_model.gateway, status_model.watchdog, status_model.guardrail)
         ):
-            rendered = render_status_with_hint(status_model, text, max(0, width - 2))
+            # The 80-column footer keeps Gateway, Watchdog and Guardrail and
+            # lets the digest, then "gen N", give way. A command result
+            # ("Command cancelled.", "Done: ...") goes through it too while
+            # it stays whole; it kept gen and digest and dropped Watchdog
+            # and Guardrail (GAP-0524).
+            narrow = render_status_with_hint(status_model, text, max(0, width - 2))
+            if not _is_command_result(text) or _keeps_whole_text(narrow, text):
+                rendered = narrow
         if self._config_error:
             rendered = f"[bold {TOKENS.accent_red}]{rich_escape(self._config_error)}[/]"
         elif _is_command_result(text) and _status_text_fills_line(text, self.size.width):
@@ -10943,6 +10954,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             not_configured=self.config is None,
             connector_filter=friendly_connector_name(connector_filter) if connector_filter else "",
             hidden_critical_alerts=hidden_critical,
+            palette_open=self.query_one("#command-input", Input).has_class("open"),
         )
         hint.refresh_hint(hint_state, self._hint_status_model())
         self.hint_text = str(getattr(hint, "content", ""))
@@ -12525,10 +12537,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def _setup_table(self) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
         if self.first_run_model.active:
-            return (
-                ("Field", "Value", "Hint"),
-                tuple((field.label, field.display_value, field.hint) for field in self.first_run_model.fields),
-            )
+            columns = ("Field", "Value", "Hint")
+            rows = tuple((field.label, field.display_value, field.hint) for field in self.first_run_model.fields)
+            return columns, self._wrap_last_table_column(columns, rows)
         if self.setup_model.goal_active:
             columns = ("Goal", "What it does")
             labels = [goal.label for goal in self.setup_model.goals]
@@ -12780,7 +12791,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
         if model.goal_active:
             label = setup_catalog.wizard_label(model.active_wizard)
-            summary = wizard_state_summary(model.active_wizard, model.config)
+            summary = wizard_state_summary(model.active_wizard, model.config, model.observability_status)
             head = f"[bold #22D3EE]Setup[/] · [bold]{rich_escape(label)}[/] · What do you want to do?"
             return head + (f"\n{self._setup_line(summary, style=TOKENS.text_secondary)}" if summary else "")
         if model.form_active:
@@ -17069,6 +17080,20 @@ _COMMAND_RESULT_FOLLOW_S = 15.0
 
 def _is_command_result(text: object) -> bool:
     return bool(_COMMAND_RESULT_RE.match(str(text or "")))
+
+
+def _keeps_whole_text(rendered: str, text: str) -> bool:
+    """Whether the footer ``rendered`` starts with all of ``text``."""
+    from rich.text import Text
+
+    try:
+        plain = Text.from_markup(text).plain
+    except Exception:  # noqa: BLE001 - malformed operator text stays literal
+        plain = text
+    try:
+        return Text.from_markup(rendered).plain.startswith(plain)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _service_reported(state: str) -> bool:

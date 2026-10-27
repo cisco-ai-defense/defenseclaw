@@ -101,7 +101,7 @@ func (a *App) wrapperPreflight(spec *harness.Spec) (API, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if _, err := a.checkSandboxes(ctx, api, false, sandboxapi.ReadyRequest{}, nil); err != nil {
+	if _, err := a.checkSandboxes(ctx, api, false, ""); err != nil {
 		return nil, why(err)
 	}
 	return api, nil

@@ -33,7 +33,7 @@ def test_managed_acp_pages_name_every_enterprise_acp_subcommand():
     # GAP-0548: the pages listed enroll, verify and revoke, not list and setup.
     subcommands = _enterprise_acp_subcommands()
     assert {"enroll", "verify", "revoke", "list", "setup"} <= subcommands
-    for rel in ("features/acp-guard.mdx", "reference/apis/acp-guard.mdx"):
+    for rel in ("acp-guard.mdx", "acp-guard.mdx"):
         section = _page(rel).split("## Managed computers", 1)[1].split("## ", 1)[0]
         for name in sorted(subcommands):
             assert f"`{name}`" in section or f"enterprise acp {name}" in section, (rel, name)
@@ -47,7 +47,7 @@ def test_sandbox_exit_status_names_usage_errors():
     assert '"sandbox"' not in exit_code.split("usageFlagErrorExempt = ", 1)[1].split("\n", 1)[0]
     ui = (REPO / "internal/openshell/sandboxcli/ui.go").read_text(encoding="utf-8")
     assert "--output must be text or json" in ui
-    text = _page("reference/sandboxes/cli.mdx")
+    text = _page("reference/sandbox-cli.mdx")
     bullet = text.split("**Exit status.**", 1)[1].split("## ", 1)[0]
     assert "an unknown command or flag" in bullet and "exits `2`" in bullet
     assert "`-o yaml`, is an error and exits `1`" in bullet
@@ -71,7 +71,7 @@ def test_sandbox_doctor_help_states_the_json_exit_status():
 def test_turn_off_page_says_what_a_scoped_enable_does_after_a_global_disable():
     # GAP-0550: `guardrail enable --connector codex` after `setup guardrail
     # --disable` changed nothing; the page said it brought the agent back.
-    text = _page("how-to/guardrail/turn-off-the-guardrail.mdx")
+    text = _page("guardrail/disabling.mdx")
     assert "Add `--connector codex` to bring back one agent" not in text
     assert "After `setup guardrail --disable`, `defenseclaw guardrail enable --connector codex` changes nothing" in text
     assert "exits `1`" in text
@@ -95,7 +95,7 @@ def test_no_contract_pages_describe_the_gateway_start_gates_as_the_code_does():
     assert single, "runGuardrail no longer refuses an unknown version in every mode; update the page"
     assert "(actionMode || strictUnknownVersion) &&" in sidecar
     assert "is not covered by a known hook contract; continuing in observe mode" in sidecar
-    text = _page("reference/apis/hook-contracts.mdx")
+    text = _page("connectors/compatibility.mdx")
     assert "The gateway installs no hooks for such a version" not in text
     assert (
         "With one connector, a version with no contract is refused in observe and action mode for every hook "
@@ -104,7 +104,7 @@ def test_no_contract_pages_describe_the_gateway_start_gates_as_the_code_does():
     assert "In observe mode a version with no contract gets a warning in the gateway log" in text
     setup = (REPO / "cli/defenseclaw/commands/cmd_setup.py").read_text(encoding="utf-8")
     assert "the gateway installs no" not in setup
-    first_run = _page("reference/commands/first-run.mdx")
+    first_run = _page("get-started/first-run.mdx")
     assert "has no hook contract is downgraded to observe" not in first_run
     assert "For Claude Code and Codex the gateway then does not start" not in first_run
     assert (
@@ -121,7 +121,7 @@ def test_hook_contract_pages_say_which_start_gate_the_guardian_skips_and_when_a_
     multi = multi[: multi.index("\n}\n")]
     assert "guardianManagedLifecycle" not in multi
     assert "if wasActive && !registration.opts.ManagedEnterprise {" in sidecar
-    text = _page("reference/apis/hook-contracts.mdx")
+    text = _page("connectors/compatibility.mdx")
     assert "Unless the enterprise hook guardian owns the hooks" not in text
     assert "The guardian does not skip this check." in text
     assert "One it already guarded, as after an upgrade of DefenseClaw or of the agent, stops the start" in text
@@ -130,16 +130,16 @@ def test_hook_contract_pages_say_which_start_gate_the_guardian_skips_and_when_a_
 
 def test_pages_do_not_say_a_version_with_no_contract_is_saved_in_observe():
     # GAP-0554 class: setup, init and quickstart refuse it in both modes.
-    hermes = _page("reference/connectors/hermes.mdx")
+    hermes = _page("connectors/hermes.mdx")
     assert "saves Hermes in observe mode with upgrade guidance" not in hermes
     assert "refuses Hermes in observe and action mode" in hermes
-    trouble = _page("troubleshooting/hooks-and-blocking.mdx")
+    trouble = _page("guardrail/index.mdx")
     assert (
         "Its installed version has no hook contract (below the tested floor or known broken). Action mode needs one."
         not in trouble
     )
     assert "is not switched to observe" in trouble
-    first_run = _page("reference/commands/first-run.mdx")
+    first_run = _page("get-started/first-run.mdx")
     assert "`defenseclaw quickstart --connector <name>` for quickstart" in first_run
     registry = json.loads((REPO / "internal/envvars/registry.json").read_text(encoding="utf-8"))
     drift = next(v for v in registry["entries"] if v["name"] == "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT")
@@ -166,7 +166,7 @@ def test_rule_recipes_page_names_the_suppressions_the_catalog_holds():
         for layer in layers.values():
             if data.get(layer):
                 shipped.add((f"policies/guardrail/{pack.name}/suppressions.yaml", layer))
-    text = _page("reference/policy/rule-recipes.mdx")
+    text = _page("policies/recipes.mdx")
     if in_catalog != shipped:
         assert "plus the suppressions the packs ship" not in text
     for source, _layer in sorted(in_catalog):
@@ -181,11 +181,11 @@ def test_hook_contracts_page_does_not_promise_observe_mode_without_a_contract():
     # refused the version and stayed down. Setup now refuses in both modes.
     setup = (REPO / "cli/defenseclaw/commands/cmd_setup.py").read_text(encoding="utf-8")
     assert "Continuing in observe mode under the connector's established warning policy" not in setup
-    text = _page("reference/apis/hook-contracts.mdx")
+    text = _page("connectors/compatibility.mdx")
     assert "allowed in observe mode" not in text
     assert "Setup keeps observe mode and refuses action mode" not in text
     assert "refused in observe and action mode before any change" in text
-    devin = _page("reference/connectors/devin.mdx")
+    devin = _page("connectors/devin.mdx")
     assert "setup keeps it in observe mode" not in devin
 
 
@@ -195,7 +195,7 @@ def test_hook_refusal_codes_section_says_where_the_codes_are():
     hookexec = (REPO / "internal/gateway/connector/hookexec/hookexec.go").read_text(encoding="utf-8")
     explanation = hookexec.split("const unixUnenrolledAccountExplanation = ", 1)[1].split("\n\n", 1)[0]
     assert "enterprise_managed_uid_unregistered" not in explanation
-    text = _page("troubleshooting/enterprise/index.mdx")
+    text = _page("enterprise/troubleshooting.mdx")
     section = text.split("## Hook refusal codes", 1)[1]
     assert "An agent reports these codes in its hook output" not in section
     assert "an unenrolled account's does not" in section

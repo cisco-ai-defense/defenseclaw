@@ -1,0 +1,136 @@
+---
+title: Quick setup aliases
+description: Connector-oriented setup aliases for supported DefenseClaw integrations.
+keywords:
+  - defenseclaw setup codex
+  - defenseclaw setup claude-code
+  - defenseclaw setup cursor
+  - defenseclaw setup copilot
+  - defenseclaw setup antigravity
+  - defenseclaw setup hermes
+  - defenseclaw setup opencode
+  - defenseclaw setup amp
+  - defenseclaw setup devin
+  - defenseclaw setup kiro
+  - defenseclaw setup openclaw
+  - defenseclaw setup zeptoclaw
+---
+
+Each connector has a setup alias that runs `setup guardrail --connector <id>` with a smaller, connector-oriented flag set. The hook aliases start in observe mode and never proxy model traffic. OpenClaw and ZeptoClaw run the guardrail proxy regardless of mode.
+
+## Direct-to-upstream aliases (hook or policy enforcement)
+
+| Agent | Id | Alias | Class |
+| --- | --- | --- | --- |
+| Claude Code | `claudecode` | `defenseclaw setup claude-code` | Hook |
+| Codex | `codex` | `defenseclaw setup codex` | Hook |
+| Cursor | `cursor` | `defenseclaw setup cursor` | Hook |
+| Devin | `devin` | `defenseclaw setup devin` | Hook |
+| GitHub Copilot CLI | `copilot` | `defenseclaw setup copilot` | Hook |
+| Antigravity | `antigravity` | `defenseclaw setup antigravity` | Hook |
+| Hermes | `hermes` | `defenseclaw setup hermes` | Hook |
+| OpenCode | `opencode` | `defenseclaw setup opencode` | Hook (JS bridge) |
+| Amp | `amp` | `defenseclaw setup amp` | Policy plugin |
+| Kiro | `kiro` | `defenseclaw setup kiro` | Hook |
+
+### What a direct-to-upstream alias does
+
+An alias selects the connector, wires its hook or plugin, writes `config.yaml`, the connector roster and the `picked_connector` hint, and restarts the gateway unless `--no-restart`.
+
+### Common flags
+
+Every hook alias takes these flags; run `defenseclaw setup <connector> --help` for the exact list. The policy flags write a per-connector override on a multi-connector install, and the global value when the connector is the only one.
+
+<TypeTable
+  type={{
+    "-y / --yes": {
+      type: "flag",
+      description: "Skip the confirmation prompt. Aliases: --non-interactive, --accept-defaults.",
+    },
+    "--restart / --no-restart": {
+      type: "flag",
+      description: "Restart defenseclaw-gateway after applying changes, so the connector's hooks and telemetry are wired.",
+      default: "--restart",
+    },
+    "--mode": {
+      type: "observe|action",
+      description: "Record only, or return the connector's native block or approval verdict on supported events. A re-run keeps the current mode.",
+      default: "observe on first setup",
+    },
+    "--replace": {
+      type: "flag",
+      description: "Replace the configured connectors with this one. Without it, setup adds the connector next to the others.",
+    },
+    "--rule-pack": {
+      type: "default|strict|permissive",
+      description: "Rule-pack profile for this connector. Omit it to inherit the global pack. A custom pack folder is registered with defenseclaw guardrail use-pack DIR --connector NAME, which pins it by digest.",
+    },
+    "--enable-judge / --no-enable-judge": {
+      type: "flag",
+      description: "Judge this connector's hook events (action mode only). Configure the judge model with setup guardrail or setup llm.",
+    },
+    "--judge-hook-connectors": {
+      type: "all|none|list",
+      description: "Hook-lane judge gate to write (guardrail.judge.hook_connectors). With --enable-judge alone, it defaults to this connector.",
+    },
+    "--human-approval / --no-human-approval": {
+      type: "flag",
+      description: "Turn human approval (HITL) on or off for this connector (action mode).",
+    },
+    "--hilt-min-severity": {
+      type: "high|medium|low|critical",
+      description: "Lowest severity that asks for human approval for this connector.",
+    },
+    "--block-message": {
+      type: "string",
+      description: "Block message for this connector. Empty inherits the global or default message.",
+    },
+    "--fail-mode": {
+      type: "open|closed",
+      description: "Hook fail mode for this connector during a gateway outage: open allows, warns and logs; closed blocks. Error, malformed or missing gateway answers block either way.",
+    },
+    "--workspace / --workspace-dir": {
+      type: "path",
+      description: "Use workspace-scoped config for this setup instead of the global user config.",
+    },
+    "--with-local-stack / --no-local-stack": {
+      type: "flag",
+      description: "Also bring up the bundled Prometheus, Loki, Tempo and Grafana stack with defenseclaw setup local-observability up once config is saved.",
+      default: "--no-local-stack",
+    },
+  }}
+/>
+
+<Callout type="warning" title="Port 3000 is the current local-stack preflight">
+`--with-local-stack` treats any TCP listener on `127.0.0.1:3000` as an
+already-running stack and skips `local-observability up`, including its
+destination wiring. If the bundled stack or expected destination is absent,
+run `defenseclaw setup local-observability up` explicitly and follow the
+printed `defenseclaw-gateway restart` step.
+</Callout>
+
+Examples:
+
+```bash
+defenseclaw setup claude-code
+defenseclaw setup codex --with-local-stack
+defenseclaw setup cursor --no-restart
+defenseclaw setup openclaw --mode action --human-approval --rule-pack default --restart
+```
+
+## Full guardrail aliases (proxy connectors)
+
+| Agent | Id | Alias | Class |
+| --- | --- | --- | --- |
+| OpenClaw | `openclaw` | `defenseclaw setup openclaw` | Proxy |
+| ZeptoClaw | `zeptoclaw` | `defenseclaw setup zeptoclaw` | Proxy |
+
+## Add or reconfigure connectors
+
+On a host with another connector already configured, an alias asks whether to **Add** the new connector or **Replace** the old one. Add is the default, also under `--yes`. Pass `--replace` to switch. Only the aliases add a connector to the roster: `setup guardrail --connector <name>` tunes a connector already on it and refuses one that is not, with `No changes made` and the alias that adds it. `defenseclaw setup remove <connector>` retires one.
+
+For the questions setup asks and the Replace flow, see [Changing connectors](/docs/guardrail/switching-connectors).
+
+## Why aliases at all?
+
+`--connector` is the scope selector after setup too: `defenseclaw skill list --connector codex`, `defenseclaw mcp scan --connector cursor` and `defenseclaw guardrail status --connector hermes` use the same scope.

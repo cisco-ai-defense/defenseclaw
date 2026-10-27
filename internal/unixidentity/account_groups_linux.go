@@ -33,7 +33,7 @@ func platformAccountGroupIDs(ctx context.Context, _ commandRunner, account *user
 	if held, ok := local[account.Username]; ok && held == uid {
 		owned := Account{Name: account.Username, UID: uid, GID: primary}
 		if resolver, resolverErr := NewNSSResolver(ctx); resolverErr == nil {
-			ids, _, _, err = resolver.localAccountGroupsWithDirectory(owned)
+			ids, _, _, err = resolver.localAccountGroupsWithDirectory(owned, false)
 		} else {
 			ids, _, err = localAccountGroups(owned)
 		}

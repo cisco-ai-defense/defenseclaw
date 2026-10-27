@@ -402,8 +402,8 @@ func dispatchTrustedActionWith(
 					if !checkedWholeWrite {
 						checkedWholeWrite = true
 						wholeWriteSafe = wholeCommandKnown &&
-							hookpaths.ActionCommandDecisionWithGlobFacts(wholeCommand,
-								request.Input.CWD, request.Input.ActiveHome, clientGlobFacts(request)) == ""
+							hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(wholeCommand,
+								request.Input.CWD, request.Input.ActiveHome, request.Input.DialectHint, clientGlobFacts(request)) == ""
 					}
 					if wholeWriteSafe {
 						// A child with a missing action-local value cannot prove a

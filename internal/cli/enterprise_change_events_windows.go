@@ -146,6 +146,39 @@ func recordWindowsChange(layout managed.StandaloneLayout, reservation *enterpris
 	return spool.Write(ev)
 }
 
+// recordWindowsChangeRefusal audits an early refusal only on a proven
+// installed standalone deployment, from an elevated caller. It never reads
+// the requested credential or trust-anchor input.
+func recordWindowsChangeRefusal(cmd *cobra.Command, ev enterprisestatus.ChangeEvent) {
+	if !windowsSecretIsElevated() || bundleSecureClient() {
+		return
+	}
+	installed, err := windowsSecretDeploymentInstalled()
+	if err == nil && installed {
+		var layout managed.StandaloneLayout
+		layout, err = windowsSecretLayout()
+		if err == nil {
+			err = recordWindowsChange(layout, nil, ev)
+		}
+	}
+	warnChangeUnrecorded(cmd.ErrOrStderr(), err)
+}
+
+// Cobra stops parsing at the first error. A later --trust-anchors, or one
+// missing its value, still requests an anchor change; never inspect its path.
+// A --trust-anchors that is another flag's value (--config --trust-anchors)
+// or follows "--" requests nothing.
+func windowsAnchorsArgumentRefusal(cmd *cobra.Command, err error) error {
+	requested := cmd.Flags().Changed("trust-anchors") ||
+		argsSetLongFlag(cmd.Flags(), secretRawArgs(), "trust-anchors")
+	if requested {
+		if ev, ok := anchorsFailureEvent("invalid_arguments", false, nil); ok {
+			recordWindowsChangeRefusal(cmd, ev)
+		}
+	}
+	return lifecycleFlagError(cmd, err)
+}
+
 // recordWindowsAnchorsChange records an anchor file a run installed.
 func recordWindowsAnchorsChange(layout managed.StandaloneLayout, reservation *enterprisestatus.ChangeReservation, change *anchorOnlyChange) error {
 	if change == nil {

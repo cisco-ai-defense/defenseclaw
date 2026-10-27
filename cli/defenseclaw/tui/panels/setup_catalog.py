@@ -627,6 +627,7 @@ SECTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "Guardrail",
             "Scanners",
             "Asset Policy",
+            "Admission Defaults",
             "Skill Admission",
             "MCP Admission",
             "Plugin Admission",

@@ -87,7 +87,7 @@ export function ConnectorSupport({ id }: { id: string }) {
           <dd>{enterpriseSummary(id)}</dd>
         </div>
       </dl>
-      <Link href="/docs/get-started/support-matrix" className={styles.stripLink}>
+      <Link href="/docs/support-matrix/" className={styles.stripLink}>
         Support matrix <span aria-hidden>→</span>
       </Link>
     </div>

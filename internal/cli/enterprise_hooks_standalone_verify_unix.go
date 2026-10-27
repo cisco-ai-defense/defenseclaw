@@ -213,6 +213,12 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 		}
 		run.Rows[index] = row
 	}
+	// The guardian's records prove registration. Public Verify then refuses
+	// to attest a managed Hermes home (GAP-0766), so its records are
+	// compared with the registration result: a fully hooked Hermes set fails
+	// only with the session-only refusal, not also as "extra or stale"
+	// targets and mismatched dispositions (GAP-1703).
+	registered := append([]enterpriseHookReconcileRow(nil), run.Rows...)
 	for index, row := range run.Rows {
 		if row.Connector != "hermes" || !row.OK {
 			continue
@@ -238,6 +244,15 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 	}
 	if run.AuthorizationErr == nil && exists && activationExists {
 		proof := run
+		proof.Rows, proof.Pending, proof.Failures = registered, 0, 0
+		for _, row := range registered {
+			switch {
+			case row.Pending:
+				proof.Pending++
+			case !row.OK:
+				proof.Failures++
+			}
+		}
 		if partialRegistration {
 			proof = enterpriseHookPartialRegistrationProof(run)
 		}

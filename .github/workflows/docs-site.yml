@@ -67,6 +67,7 @@ jobs:
   build:
     name: Build static export
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: docs-site
@@ -146,6 +147,13 @@ jobs:
       - name: Validate documentation links
         run: npm run validate-links
 
+      - name: Validate documentation media and pages
+        # Every video, image, demo and terminal replay a page showed stays on
+        # its page (or is retired with a reason in data/media-ledger.json),
+        # every media file is used, and every published page or its
+        # redirect still exists.
+        run: npm run validate-media
+
       - name: Build static export
         env:
           # Project-pages subpath. Override in repo Settings → Pages
@@ -194,6 +202,7 @@ jobs:
     name: Deploy to GitHub Pages
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     # Job-scoped privileged permissions: only the deploy job ever uses
     # them, and it never runs PR code (guarded by the `if` above).

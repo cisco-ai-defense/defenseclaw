@@ -422,6 +422,28 @@ func TestHTTPUserinfoPasswordUsesExistingURIOffsets(t *testing.T) {
 	}
 }
 
+func TestURIUserinfoBeforeSentencePunctuation(t *testing.T) {
+	t.Parallel()
+	for _, suffix := range []string{")", ").", "])!", "},", ":", ";", "**", "|", "_", `\n`, "”", "。"} {
+		input := "sent (https://unit:reserved-user-pass:@example.test" + suffix
+		assertDetectorExact(t, "secrets.url_query", input, "reserved-user-pass:")
+		assertDetectorExact(t, "credentials.connection_string",
+			"sent (postgres://unit:reserved-db-pass:@example.test"+suffix, "reserved-db-pass:")
+	}
+	assertDetectorExact(t, "secrets.url_query",
+		"sent (https://unit:reserved-user-pass:@[::1]:8088).", "reserved-user-pass:")
+	assertDetectorExact(t, "secrets.url_query",
+		"sent (https://unit:reserved-user-pass:@[::1]).", "reserved-user-pass:")
+	for _, suffix := range []string{"**", "”"} {
+		assertDetectorExact(t, "secrets.url_query",
+			"sent https://unit:reserved-user-pass@example.test"+suffix, "reserved-user-pass")
+		assertDetectorExact(t, "credentials.connection_string",
+			"sent postgres://unit:reserved-db-pass@example.test"+suffix, "reserved-db-pass")
+	}
+	assertDetectorAbsent(t, "secrets.url_query", "sent (https://unit@example.test).")
+	assertDetectorAbsent(t, "secrets.url_query", "sent (ftp://unit:reserved-user-pass@example.test).")
+}
+
 func TestCloudIdentifierEveryContextAndExclusion(t *testing.T) {
 	t.Parallel()
 	values := []struct{ input, match string }{

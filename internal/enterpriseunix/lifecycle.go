@@ -93,6 +93,11 @@ type Options struct {
 	// that the change wakes cannot interleave with it. A Mutate error fails
 	// the run before anything is applied.
 	Mutate func(ctx context.Context) error
+	// MutateUndo puts back what Mutate changed when the run then refuses
+	// the config before it changes anything (Result.ConfigRefused): a
+	// refused secret set left the new credential on disk while the result
+	// said the refused config changed nothing (GAP-1734).
+	MutateUndo func(ctx context.Context) error
 	// Bundle is a signed policy bundle (.dcbundle file or directory, an
 	// absolute path) that an ensure stages, verifies, applies, confirms and
 	// makes current (bundleapply.go).
@@ -202,6 +207,9 @@ type lifecycle struct {
 	// uninstall; keptKnown is false when the accounts record was unreadable.
 	keptPerUser []perUserKept
 	keptKnown   bool
+	// enrolledHomes are the (rooted, clean) homes of the enrolled accounts
+	// the record named before the uninstall removed it.
+	enrolledHomes map[string]bool
 	// packageManaged is set when the deb/rpm owns the binaries, so the
 	// uninstall leaves them to the package manager.
 	packageManaged bool
@@ -273,6 +281,11 @@ type lifecycle struct {
 	// generation moved (GAP-0381). After it the counter only moves forward.
 	generationBefore  *generationRecord
 	generationExposed bool
+	// interruptedConfigSHA is the hex SHA-256 of the config.yaml an
+	// interrupted transaction left, which this run's recovery rolled back:
+	// the config of a bundle whose run was killed before it committed. Settle
+	// reports that bundle interrupted, never superseded (GAP-1574).
+	interruptedConfigSHA string
 	// machinePolicyPublished is set once a transaction of this run wrote
 	// vendor machine policy for its config, which a rollback then undoes.
 	machinePolicyPublished bool
@@ -632,6 +645,18 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			}
 			r.AddError(code, err.Error())
 			return 0
+		}
+		if undo := l.opts.MutateUndo; undo != nil {
+			defer func() {
+				if !r.ConfigRefused {
+					return
+				}
+				resume := l.pauseApplyTrigger(ctx)
+				defer resume()
+				if err := undo(ctx); err != nil {
+					r.AddError(codeChange, "the config was refused, and the change made before the check could not be put back: "+err.Error())
+				}
+			}()
 		}
 		if record == nil && l.opts.PayloadDir == "" && !l.opts.FromPackage {
 			// Staged before the first install (a credential the config
@@ -3045,6 +3070,7 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 	if l.bundle != nil {
 		opt.LocalActor = configwrite.CurrentOSActor()
 	}
+	var restoredPending *enterprisebundle.Receipt
 	if before := l.generationBefore; before != nil {
 		if raw, err := os.ReadFile(configPath); err == nil {
 			opt = configwrite.RestoreOptions(before.state, configwrite.SHA256Hex(raw), opt)
@@ -3052,17 +3078,35 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 	} else if env.bundleMode() {
 		// A killed process took generationBefore with it. Recover the actor
 		// and bundle identity from the confirmed receipt, after checking that
-		// the restored bytes really are that bundle's rendered config.
-		raw, ref, err := env.currentBundleConfig(env.bundleStore())
+		// the restored bytes really are that bundle's rendered config. A
+		// higher delivery killed over a bundle an earlier run committed and
+		// the gateway has not confirmed is rolled back to that bundle's
+		// bytes: they are recorded as that bundle, and its receipt moves to
+		// the new generation, so the gateway can still confirm it
+		// (GAP-1803, GAP-2097).
+		store := env.bundleStore()
+		raw, ref, err := env.currentBundleConfig(store)
 		if err != nil {
 			return fmt.Errorf("read the confirmed bundle for rollback: %w", err)
 		}
-		if ref != nil {
-			restored, err := os.ReadFile(configPath)
-			if err != nil || !bytes.Equal(restored, raw) {
-				return fmt.Errorf("restored config does not match confirmed bundle %s version %d: %v", ref.BundleID, ref.Version, err)
+		restored, readErr := os.ReadFile(configPath)
+		if readErr == nil && (ref == nil || !bytes.Equal(restored, raw)) {
+			restoredPending = env.committedPendingBundle(store, ref, restored)
+		}
+		switch {
+		case restoredPending != nil:
+			pendingOpt, ok := enterprisebundle.GenerationOptions(restoredPending)
+			if !ok {
+				return fmt.Errorf("pending bundle %s version %d has no principal", displayID(restoredPending), restoredPending.Version)
 			}
-			opt, err = currentBundleGenerationOptions(env.bundleStore(), ref)
+			pendingOpt.GenerationFloor = restoredPending.ConfigGeneration
+			opt = pendingOpt
+		case ref == nil:
+			// No bundle was confirmed yet: the lifecycle records the bytes.
+		case readErr != nil || !bytes.Equal(restored, raw):
+			return fmt.Errorf("restored config does not match confirmed bundle %s version %d: %v", ref.BundleID, ref.Version, readErr)
+		default:
+			opt, err = currentBundleGenerationOptions(store, ref)
 			if err != nil {
 				return fmt.Errorf("read confirmed bundle attribution: %w", err)
 			}
@@ -3094,7 +3138,73 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return env.fixMetadata(statePath, mode.Perm(), fileOwner{UID: uid, GID: gid})
+	if err := env.fixMetadata(statePath, mode.Perm(), fileOwner{UID: uid, GID: gid}); err != nil {
+		return err
+	}
+	if before := l.generationBefore; before != nil {
+		l.rebindRestoredPendingBundle(before.state)
+	}
+	if restoredPending != nil {
+		l.rebindRecoveredPendingBundle(restoredPending)
+	}
+	return nil
+}
+
+// rebindRecoveredPendingBundle moves the receipt of the committed,
+// unconfirmed bundle a recovery put back (committedPendingBundle) to the
+// generation recordRestoredGeneration recorded for its bytes and signed
+// attribution, so the gateway's report of that generation confirms it.
+func (l *lifecycle) rebindRecoveredPendingBundle(rc *enterprisebundle.Receipt) {
+	state, err := configwrite.ReadGenerationState(l.env.P(l.env.Layout.ConfigPath))
+	if err != nil || state.Generation <= rc.ConfigGeneration || state.ConfigSHA256 != rc.ConfigSHA256 ||
+		state.BundleID != rc.BundleID || state.BundleVersion != rc.Version ||
+		state.SignerKeyID != rc.SignerKeyID || state.Actor != rc.Principal {
+		return
+	}
+	l.rebindPendingReceipt(rc, state.Generation)
+}
+
+// rebindRestoredPendingBundle keeps provable the unconfirmed bundle whose
+// committed config a rollback put back. The counter only moves forward, so
+// the rollback records those bytes, with that bundle's signed attribution,
+// under a new generation; the receipt still named the old one, and every
+// later ensure kept the bundle pending until it was delivered again
+// (GAP-1186). Only the receipt whose committed generation is the one the
+// run found, for the same bytes and attribution, moves to the new number.
+func (l *lifecycle) rebindRestoredPendingBundle(before configwrite.GenerationState) {
+	env := l.env
+	if before.BundleID == "" || before.Generation == 0 || !env.bundleMode() {
+		return
+	}
+	state, err := configwrite.ReadGenerationState(env.P(env.Layout.ConfigPath))
+	if err != nil || state.Generation <= before.Generation || state.ConfigSHA256 != before.ConfigSHA256 ||
+		state.BundleID != before.BundleID || state.BundleVersion != before.BundleVersion ||
+		state.SignerKeyID != before.SignerKeyID || state.Actor != before.Actor {
+		return
+	}
+	store := env.bundleStore()
+	receipts, err := store.Unsettled()
+	if err != nil {
+		return
+	}
+	for _, rc := range receipts {
+		if rc.State != enterprisebundle.StateApplied || rc.ConfigGeneration != before.Generation ||
+			rc.ConfigSHA256 != state.ConfigSHA256 || rc.BundleID != state.BundleID || rc.Version != state.BundleVersion ||
+			rc.SignerKeyID != state.SignerKeyID || rc.Principal != state.Actor {
+			continue
+		}
+		l.rebindPendingReceipt(rc, state.Generation)
+	}
+}
+
+// rebindPendingReceipt moves an applied receipt to the config generation
+// that records its bytes again.
+func (l *lifecycle) rebindPendingReceipt(rc *enterprisebundle.Receipt, generation uint64) {
+	if err := l.env.bundleStore().RebindGeneration(rc, generation); err != nil {
+		l.result.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), fmt.Sprintf(
+			"policy bundle %s version %d is installed again, but its receipt could not record the restored config generation; deliver it again to confirm it: %v%s",
+			displayID(rc), rc.Version, err, stateWriteAction(err)))
+	}
 }
 
 // recoverInterrupted rolls back a transaction a previous run left pending,
@@ -3147,7 +3257,11 @@ func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 	// that still fails (the disk is still full) then leaves the running
 	// services alone instead of stopping and restarting the gateway on every
 	// apply trigger, MDM ensure or package postinstall until it succeeds.
+	left, _ := sha256File(env.P(env.Layout.ConfigPath))
 	restored, err := l.rollback(ctx, snap, pending, true, nil, nil)
+	if restored {
+		l.interruptedConfigSHA = left
+	}
 	switch {
 	case !restored:
 		r.AddError(codeRollbackFailed, fmt.Sprintf("could not roll back the interrupted %s started at %s: %v", pending.Action, pending.StartedAt, err))
@@ -3384,6 +3498,13 @@ func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 // KeepState keeps the other machine state for a reinstall to resume with.
 func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
+	// An uninstall resolves no service account (only install, ensure and
+	// repair do), so a refused uninstall that started the services again
+	// waited for a gateway served by uid 0 and timed out after 90 s, while
+	// the restored gateway runs as the deployment's account (GAP-0184).
+	if record != nil {
+		l.serviceUID = record.ServiceUID
+	}
 	units := env.Services.Units()
 	if record == nil && !l.opts.Purge {
 		failure := env.lastPackageInstallFailure()
@@ -3413,7 +3534,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// Read before the machine state, and the accounts record with it, go.
 	// A Unix purge also needs this snapshot to report enrolled OSS data that
 	// the per-user worker leaves untouched (GAP-0727).
-	l.keptPerUser, l.keptKnown = env.perUserLeftovers()
+	l.keptPerUser, l.enrolledHomes, l.keptKnown = env.perUserLeftovers()
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	// stopUnits stops a group of units and returns the ones still running.
@@ -3497,38 +3618,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// removal below deletes the records that name some of them.
 	sandboxAccounts := l.sandboxAccounts(ctx)
 	var errs []error
-	// Per-user registrations go first, while the binaries they name still
-	// exist: each user's worker removes only DefenseClaw's own entries (and,
-	// on purge, that user's DefenseClaw state).
-	//
-	// Without a deployment record (after a default or --keep-state
-	// uninstall) a purge still finds the enrolled accounts when the
-	// enrollment record and the config it needs are there; otherwise it
-	// names the accounts whose per-user files stay (GAP-2632).
-	perUserLeft := false
-	// Without a record, the package database says whether the deb/rpm owns
-	// the binaries: a purge deleted those of an installed rpm (GAP-2632).
-	l.packageManaged = env.GOOS == "linux" && (record != nil && record.Channel == ChannelPackage ||
-		record == nil && gatewayPresent && env.packageOwned(ctx, filepath.Join(env.Layout.BinDir, binGateway)))
-	if removePerUser {
-		var cacheAccounts []sessionFactsAccount
-		if l.opts.Purge {
-			cacheAccounts = env.sessionFactsAccounts()
-		}
-		perUserLeft = l.removePerUserRegistrations(ctx)
-		l.purgeSessionFactsCaches(cacheAccounts)
-	} else if record == nil && l.opts.Purge {
-		l.warnUnpurgedPerUser(ctx)
-	}
-	if l.opts.Purge {
-		l.reportRetainedEnrolledUserData()
-	}
-	// The sandbox subsystem goes before the binaries it runs: a non-purge
-	// uninstall stops and keeps each account's sandboxes, then its daemon
-	// and OpenShell gateway. A purge tears down the sandboxes as the account
-	// and removes what the subsystem left in its home.
-	l.teardownOpenShell(ctx, sandboxAccounts)
-	// DefenseClaw's vendor machine policy entries go next, while the hook
+	// DefenseClaw's vendor machine policy entries go first, while the hook
 	// binary they name still exists; administrator entries stay byte for
 	// byte (enterprisepolicy restores the recorded preimage or edits only
 	// DefenseClaw's own entries).
@@ -3545,7 +3635,46 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			}
 		}
 	}
-	stillRunning = append(stillRunning, stopGroup(false)...)
+	// A machine-policy failure leaves every user's hooks and state intact:
+	// removing or purging them first would leave the retained deployment
+	// unguarded until its guardian repaired the registrations (GAP-0393).
+	// Per-user registrations go next, while the binaries they name still
+	// exist: each user's worker removes only DefenseClaw's own entries (and,
+	// on purge, that user's DefenseClaw state).
+	//
+	// Without a deployment record (after a default or --keep-state
+	// uninstall) a purge still finds the enrolled accounts when the
+	// enrollment record and the config it needs are there; otherwise it
+	// names the accounts whose per-user files stay (GAP-2632).
+	perUserLeft := false
+	// Without a record, the package database says whether the deb/rpm owns
+	// the binaries: a purge deleted those of an installed rpm (GAP-2632).
+	l.packageManaged = env.GOOS == "linux" && (record != nil && record.Channel == ChannelPackage ||
+		record == nil && gatewayPresent && env.packageOwned(ctx, filepath.Join(env.Layout.BinDir, binGateway)))
+	if removePerUser && !policyLeft {
+		var cacheAccounts []sessionFactsAccount
+		if l.opts.Purge {
+			cacheAccounts = env.sessionFactsAccounts()
+		}
+		perUserLeft = l.removePerUserRegistrations(ctx)
+		l.purgeSessionFactsCaches(cacheAccounts)
+	} else if record == nil && l.opts.Purge && !policyLeft {
+		l.warnUnpurgedPerUser(ctx)
+	}
+	if l.opts.Purge {
+		l.reportRetainedEnrolledUserData()
+		if removePerUser && !policyLeft {
+			l.reportUnenrolledUserData(ctx)
+		}
+	}
+	// The sandbox subsystem goes before the binaries it runs: a non-purge
+	// uninstall stops and keeps each account's sandboxes, then its daemon
+	// and OpenShell gateway. A purge tears down the sandboxes as the account
+	// and removes what the subsystem left in its home.
+	if !policyLeft {
+		l.teardownOpenShell(ctx, sandboxAccounts)
+		stillRunning = append(stillRunning, stopGroup(false)...)
+	}
 	if len(stillRunning) > 0 {
 		errs = append(errs, fmt.Errorf("could not stop %s; stop them with %s and rerun `%s`",
 			strings.Join(stillRunning, ", "), env.stopCommands(stillRunning), l.uninstallCommand()))
@@ -3553,7 +3682,9 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// The sensor helper is stopped. The Tetragon policies it loaded outlive
 	// it and would keep enforcing with frozen anchors: remove them with the
 	// binary that loaded them, before any binary or state goes.
-	l.kernelRemoved = l.retireKernelPolicies(ctx)
+	if !policyLeft {
+		l.kernelRemoved = l.retireKernelPolicies(ctx)
+	}
 	if perUserLeft || policyLeft {
 		if len(l.kernelRemoved) > 0 {
 			r.Changes = append(r.Changes, kernelPolicyChange(l.kernelRemoved))
@@ -3599,16 +3730,17 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		return 0
 	}
 	// A device that takes signed bundles keeps a copy of the gateway for the
-	// package scripts' release floor check: once the binaries are gone (a
-	// --keep-state uninstall, or one that fails after removing them) the
-	// installed gateway cannot answer, and a package below the confirmed
-	// bundle's floor would write its files before its postinstall ensure
-	// refused it. The machine state removal below takes the copy with the
-	// rest of the lifecycle state.
+	// release floor check of the 1.0.4 and later package scripts: once the
+	// binaries are gone (a --keep-state uninstall, or one that fails after
+	// removing them) the installed gateway cannot answer, and a 1.0.4 or
+	// later package below the confirmed bundle's floor would write its files
+	// before its postinstall ensure refused it. A package older than 1.0.4
+	// has no floor check, with or without the copy. The machine state removal
+	// below takes the copy with the rest of the lifecycle state.
 	if !l.opts.Purge {
 		kept, err := env.keepFloorChecker(record)
 		if err != nil {
-			r.AddWarning(codeFloorCheckerNotKept, "could not keep the gateway that checks the release floor of the confirmed policy bundle ("+err.Error()+"); a package below that floor is refused only by its postinstall, after its files are in place")
+			r.AddWarning(codeFloorCheckerNotKept, "could not keep the gateway that checks the release floor of the confirmed policy bundle ("+err.Error()+"); "+floorCheckerNotKeptLimit)
 		}
 		l.floorCheckerKept = kept
 	}
@@ -3753,6 +3885,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// an ensure that restores the deployment.
 	removeState := l.opts.Purge || (!l.opts.KeepState && len(errs) == 0)
 	if removeState {
+		// The MDM wrapper's rotation journal goes with the credentials it
+		// can put back: --keep-state and a failed uninstall keep both, so
+		// a reinstall or ensure can still settle the rotation (GAP-1801).
+		l.removeKitRotationJournal()
 		for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, env.Layout.LogDir} {
 			var err error
 			if dir == env.Layout.ConfigDir && !l.opts.Purge && env.GOOS == "linux" {
@@ -3955,7 +4091,7 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	case l.opts.KeepState:
 		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
 		if l.floorCheckerKept {
-			lines = append(lines, "kept a root-only copy of the gateway in "+filepath.Join(layout.LifecycleDir, floorCheckerDir)+": the package scripts run its release floor check of the confirmed policy bundle before a reinstall replaces any file")
+			lines = append(lines, "kept a root-only copy of the gateway in "+filepath.Join(layout.LifecycleDir, floorCheckerDir)+": the scripts of a 1.0.4 or later package run its release floor check of the confirmed policy bundle before a reinstall replaces any file; "+olderPackageFloorLimit)
 		}
 		if l.openshellRecordKept {
 			lines = append(lines, "kept the record of the sandbox setup the kept sandboxes were made under in "+layout.LifecycleDir)
@@ -4124,15 +4260,24 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	}
 	out, err := env.runGatewayCLILong(ctx, removeAllTimeout, args...)
 	var report struct {
+		OK           bool                        `json:"ok"`
 		Pending      []string                    `json:"pending"`
 		Failed       []string                    `json:"failed"`
 		StateFailed  []string                    `json:"state_failed"`
 		Purged       []string                    `json:"purged"`
 		Removed      int                         `json:"removed"`
 		PurgedDetail map[string]purgedUserDetail `json:"purged_detail"`
+		// ClaudeHookUnblocked: the accounts whose Claude Code blocker the
+		// uninstall removed (GAP-1828).
+		ClaudeHookUnblocked []string `json:"claude_hook_unblocked"`
 	}
-	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil && err == nil {
-		return false
+	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil {
+		r.AddError(codePerUserHooks, "the per-user hook removal returned an invalid report; keep the deployment and rerun `"+l.uninstallCommand()+"`")
+		return true
+	}
+	if !report.OK && len(report.Failed) == 0 && err == nil {
+		r.AddError(codePerUserHooks, "the per-user hook removal did not confirm success; keep the deployment and rerun `"+l.uninstallCommand()+"`")
+		return true
 	}
 	l.perUserRemoved = report.Removed
 	rerun := "`" + l.uninstallCommand() + "`"
@@ -4178,13 +4323,19 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	for _, user := range report.Purged {
 		r.Changes = append(r.Changes, purgedUserChange(user, report.PurgedDetail[user]))
 	}
+	// The enrollment had replaced the account's own Claude Code hook script
+	// with a blocker; the uninstall removed it, and the account's own hook
+	// does not guard Claude Code until its owner sets it up again.
+	for _, user := range report.ClaudeHookUnblocked {
+		r.Changes = append(r.Changes, fmt.Sprintf("removed the Claude Code blocker the enrollment had written over the own DefenseClaw hook script of user %s (~/.defenseclaw/hooks/claude-code-hook.sh); that account's own Claude Code hook now reports a missing script and does not guard Claude Code until `defenseclaw setup claude-code` runs as that user", user))
+	}
 	return left
 }
 
 // purgedUserDetail is what the purge found and removed for one account.
 type purgedUserDetail struct {
 	Data     bool `json:"data"`
-	Backup   bool `json:"backup"`
+	Kept     bool `json:"kept"`
 	Binaries bool `json:"binaries"`
 	Gateway  bool `json:"gateway"`
 	UVCache  bool `json:"uv_cache"`
@@ -4197,6 +4348,11 @@ type purgedUserDetail struct {
 func purgedUserChange(user string, detail purgedUserDetail) string {
 	const data = "all DefenseClaw per-user data of user %s (~/.defenseclaw, including its hook scripts and the foreign-hooks-backup folder)"
 	var text string
+	if detail.Kept {
+		// A machine uninstall never deletes or moves an account's own
+		// data (GAP-0727, owner 2026-10-23).
+		return fmt.Sprintf("kept the DefenseClaw per-user data of user %s (~/.defenseclaw) as it is: it holds the account's own DefenseClaw install from before the managed deployment (config, secrets, audit history, policies), which a machine uninstall never deletes or moves; its owner can remove it", user)
+	}
 	switch {
 	case detail.Data && detail.Binaries:
 		text = fmt.Sprintf("removed "+data+" and its per-user binaries and launcher links in ~/.local/bin", user)
@@ -4216,9 +4372,6 @@ func purgedUserChange(user string, detail purgedUserDetail) string {
 	}
 	if detail.Gateway {
 		text += ", after stopping its per-user gateway"
-	}
-	if detail.Backup {
-		text += "; the data of its own DefenseClaw install from before the managed deployment (config, secrets, audit history, policies) was moved to ~/.defenseclaw-backup-<UTC time> in its home first, with a DEFENSECLAW-BACKUP.txt that says how to restore it"
 	}
 	return text
 }

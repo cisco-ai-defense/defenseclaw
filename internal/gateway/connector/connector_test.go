@@ -12372,3 +12372,51 @@ func skipManagedWindowsCodexHostSetup(t *testing.T) {
 		t.Skip("managed Windows Codex hooks are machine policy that the requirements installer writes; host Setup refuses them")
 	}
 }
+
+func TestClaudeCodeWatchPathsForUnverifiedHomeKeepProjectEntries(t *testing.T) {
+	project := t.TempDir()
+	command := filepath.Join(project, ".claude", "commands", "review.md")
+	if err := os.MkdirAll(filepath.Dir(command), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(command, []byte("# review\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The gateway's own working directory must never be watched in place of
+	// an unknown user directory.
+	gatewayCWD := t.TempDir()
+	for _, dir := range []string{"commands", "agents", filepath.Join("skills", "s")} {
+		if err := os.MkdirAll(filepath.Join(gatewayCWD, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, file := range []string{filepath.Join("commands", "x.md"), filepath.Join("agents", "a.md"), filepath.Join("skills", "s", "SKILL.md")} {
+		if err := os.WriteFile(filepath.Join(gatewayCWD, file), []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(gatewayCWD)
+	for _, home := range []string{"", "relative/home", string(filepath.Separator), string(filepath.Separator) + string(filepath.Separator)} {
+		t.Run(home, func(t *testing.T) {
+			paths := ClaudeCodeWatchPathsForHome(project, home)
+			for _, want := range []string{
+				filepath.Join(project, ".mcp.json"),
+				filepath.Join(project, ".claude", "settings.local.json"),
+				filepath.Join(project, ".claude", "settings.json"),
+				command,
+			} {
+				if !slices.Contains(paths, want) {
+					t.Fatalf("project watch path %s missing: %v", want, paths)
+				}
+			}
+			for _, path := range paths {
+				if !strings.HasPrefix(path, project+string(filepath.Separator)) {
+					t.Fatalf("watch path %s is outside the project: %v", path, paths)
+				}
+			}
+		})
+	}
+	if paths := ClaudeCodeWatchPathsForHome("", ""); paths == nil || len(paths) != 0 {
+		t.Fatalf("no project and no home = %#v, want an empty list", paths)
+	}
+}

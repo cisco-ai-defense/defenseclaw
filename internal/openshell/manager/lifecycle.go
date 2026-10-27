@@ -17,6 +17,7 @@
 package manager
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -120,6 +121,9 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	} else if st.Reason == "" {
 		st.Reason = err.Error()
 	}
+	// Every guest is counted at the place its record names (proveGuests).
+	m.proveGuests(ctx)
+	here := m.lastGw.Load()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	live := 0
@@ -134,7 +138,24 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 		if !b.missing && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason) {
 			live++
 		}
+		if kind, phase := unprotectedKind(b, here); kind != "" {
+			u := sandboxapi.UnprotectedSandbox{Name: b.rec.Name, Phase: string(cmp.Or(phase, audit.SandboxPhaseUnknown))}
+			switch kind {
+			case sandboxapi.UnprotectedUnknown:
+				u.Reason, u.Detail = kind, unknownWhy(b, here)
+			case sandboxapi.UnprotectedContained:
+				u.Reason = kind
+				fallthrough
+			default:
+				u.Stop = legacyStopCommand(b.rec.Name, phase)
+				if !atConnectedPlace(b, here) {
+					u.Detail = unprotectedWayOn(b, here, kind, phase)
+				}
+			}
+			st.Unprotected = append(st.Unprotected, u)
+		}
 	}
+	slices.SortFunc(st.Unprotected, func(a, b sandboxapi.UnprotectedSandbox) int { return strings.Compare(a.Name, b.Name) })
 	st.Live = &live
 	for _, a := range m.approvals {
 		if a.status == sandboxapi.ApprovalPending {
@@ -156,7 +177,7 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 			m.mu.Lock()
 			for _, sb := range sbs {
 				if b := m.boxes[sb.Name]; b != nil && !b.creating && !b.retained && m.sameSandboxLocked(b, sb) {
-					b.sb, b.missing = sb, false
+					foundOnLocked(b, gw, sb)
 				}
 			}
 			m.mu.Unlock()
@@ -219,14 +240,16 @@ func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, er
 	if gw, err := m.gateway(ctx); err == nil && !retained {
 		sb, err := gw.Client.GetSandbox(ctx, name)
 		m.mu.Lock()
+		report := func(context.Context) {}
 		switch {
 		case err == nil && !b.creating && m.sameSandboxLocked(b, sb):
-			b.sb, b.missing = sb, false
+			foundOnLocked(b, gw, sb)
 		case (err == nil || openshell.IsNotFound(err)) && !b.creating:
-			// Gone, or another sandbox took the name.
-			b.missing = true
+			// Gone from gw, or another sandbox took the name there.
+			report = m.missingFromLocked(gw, b)
 		}
 		m.mu.Unlock()
+		report(ctx)
 		live = err == nil || openshell.IsNotFound(err)
 		if !live {
 			m.dropGateway(gw, err)
@@ -252,11 +275,7 @@ func unconfirmedPhase(v *sandboxapi.Sandbox) {
 }
 
 // Stop stops a sandbox and keeps it (and its mounts and binding) for a
-// later start. A stop held because the MicroVM's disk sync failed is made
-// by the user's next stop that accepts the loss
-// (sandboxapi.UnsyncedStopAccepted, `sandbox stop --yes`): a guest whose
-// exec or sync keeps failing is stopped with what reached its disk, not
-// left to a delete that loses all of it.
+// later start.
 func (m *Manager) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
 	b, unlock, err := m.lockBox(name)
 	if err != nil {
@@ -266,36 +285,7 @@ func (m *Manager) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, e
 	if err := m.refuseRetained(b); err != nil {
 		return nil, err
 	}
-	m.mu.Lock()
-	held := !b.stopHeldAt.IsZero() && m.now().Sub(b.stopHeldAt) <= unsyncedStopAcceptWindow
-	hold := !held || !sandboxapi.UnsyncedStopAccepted(ctx)
-	m.mu.Unlock()
-	if err := m.stop(ctx, b, hold); err != nil {
-		return nil, err
-	}
-	v := m.viewOf(b)
-	return &v, nil
-}
-
-// unsyncedStopAcceptWindow is how long after a held stop the user's stop
-// that accepts the loss (`sandbox stop --yes`) is made. A hold from long ago,
-// after which the sync may have worked again, does not let a routine
-// `stop --yes` skip the hold (GAP-1594).
-const unsyncedStopAcceptWindow = 15 * time.Minute
-
-// StopForPolicy is Stop for the organization's own decision (a revoked
-// managed registration): a failed MicroVM sync does not hold it back
-// (Manager.stop).
-func (m *Manager) StopForPolicy(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
-	b, unlock, err := m.lockBox(name)
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
-	if err := m.refuseRetained(b); err != nil {
-		return nil, err
-	}
-	if err := m.stop(ctx, b, false); err != nil {
+	if err := m.stop(ctx, b); err != nil {
 		return nil, err
 	}
 	v := m.viewOf(b)
@@ -391,18 +381,20 @@ func (m *Manager) refuseRetained(b *box) error {
 
 // stop stops the sandbox of b once its harness has exited and, on a driver
 // whose stop does not flush (the MicroVM driver), after sync(1) in the
-// guest. A flush that fails holds the stop back when hold is set (a stop
-// the user asked for, or one that ends a session): the sandbox keeps
-// running with what it wrote, and the refusal says why and how to save the
-// work first (unsyncedStopHeld, GAP-1163). Without hold (the
-// organization's own response to a hook alarm or a foreign rule, a revoked
-// registration, an undo that discards the changes anyway) the stop goes
-// ahead, and once OpenShell takes it the feed says what it may have lost
-// (flushFailed), never for a stop that was refused or not made. One whose
-// main process completed or failed OpenShell returns as it is: it keeps its
-// phase, and with it the OpenShell gateway (HoldsCompute), until OpenShell
-// reports another.
-func (m *Manager) stop(ctx context.Context, b *box, hold bool) error {
+// guest. A flush that fails holds the stop back (unsyncedStopRefusal: the VM
+// keeps running and loses nothing), unless the caller accepted that loss
+// (sandboxapi.DiscardUnsynced), which only the user's own stop does, after
+// it asked them (GAP-0902): DefenseClaw never stops a MicroVM after a failed
+// sync on its own, for a hook alarm, a policy, a lost listener or the
+// stop-sandboxes of a sign-out alike. A stop it makes for a security alarm
+// (WithEmergencyStop) contains the VM instead (containUnsynced), and says
+// whether it could. Once OpenShell takes an accepted one,
+// the feed says what it may have lost (flushFailed), never for a stop that
+// was refused or not made. One whose main process
+// completed or failed OpenShell returns as it is: it keeps its phase, and
+// with it the OpenShell gateway (HoldsCompute), until OpenShell reports
+// another.
+func (m *Manager) stop(ctx context.Context, b *box) error {
 	gw, err := m.gateway(ctx)
 	if err != nil {
 		return err
@@ -424,12 +416,12 @@ func (m *Manager) stop(ctx context.Context, b *box, hold bool) error {
 	// the stop ends is marked interrupted, and once the stop is published
 	// its log is kept for `sandbox logs` of the stopped sandbox (runlog.go).
 	run, flushErr := m.endHarness(ctx, gw, b)
-	if flushErr != nil && hold {
-		m.logf("sandbox %s: the stop is held, the sandbox keeps running: %v", name, flushErr)
-		m.mu.Lock()
-		b.stopHeldAt = m.now()
-		m.mu.Unlock()
-		return unsyncedStopHeld(name, flushErr)
+	if flushErr != nil && !sandboxapi.DiscardUnsynced(ctx) {
+		m.logf("sandbox %s: not stopped: its disk could not be synced first: %v", name, flushErr)
+		if why, ok := emergencyStop(ctx); ok {
+			return containedStopRefusal(name, flushErr, m.containUnsynced(ctx, b, why))
+		}
+		return unsyncedStopRefusal(name, flushErr)
 	}
 	if !ended {
 		m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
@@ -448,11 +440,6 @@ func (m *Manager) stop(ctx context.Context, b *box, hold bool) error {
 				_, err = gw.Client.StopSandbox(ctx, name)
 			}
 		}
-	}
-	if err == nil {
-		m.mu.Lock()
-		b.stopHeldAt = time.Time{}
-		m.mu.Unlock()
 	}
 	if err != nil {
 		m.dropGateway(gw, err)
@@ -516,17 +503,60 @@ func (m *Manager) stop(ctx context.Context, b *box, hold bool) error {
 	return nil
 }
 
-// unsyncedStopHeld is the refusal of a stop held because the sync of the
-// MicroVM name's disk failed (err): a MicroVM's stop loses what was not
-// synced, so DefenseClaw keeps it running with its work (GAP-1163).
-func unsyncedStopHeld(name string, err error) error {
-	return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
-		Message: "sandbox " + name + " keeps running: DefenseClaw " + sandboxapi.UnsyncedStopHeldText + " (" + err.Error() +
-			"), and the stop of a MicroVM loses what was not synced",
-		Detail: "save the work you need first (`defenseclaw sandbox pull " + name + "` brings a copy's changes back), then run `defenseclaw sandbox stop " +
-			name + "` again, which syncs again first; if the sync keeps failing, `defenseclaw sandbox stop " + name +
-			" --yes` stops it anyway with what reached its disk (what was not synced may be lost); `defenseclaw sandbox delete " + name +
-			"` ends it without keeping any of its work"}
+// unsyncedStopRefusal refuses the stop of the MicroVM name whose disk could
+// not be synced first (err): its stop does not flush, so what the guest
+// wrote since its last sync would be lost. It keeps running instead, and
+// the user decides (sandboxapi.CodeUnsynced): the CLI asks, and says what is
+// lost, before it stops it with sandboxapi.StopRequest.DiscardUnsynced.
+func unsyncedStopRefusal(name string, err error) error {
+	return &sandboxapi.Error{Code: sandboxapi.CodeUnsynced,
+		Message: "sandbox " + name + " was not stopped: its MicroVM's disk could not be synced first (" + truncate(sandboxapi.DisplayText(err.Error()), 200) +
+			"), so a stop now would lose what it wrote since its last sync; it keeps running",
+		Detail: "save the work you need and stop it again, or stop it anyway, losing that: `defenseclaw sandbox stop " + name +
+			" --discard-unsynced` (on a terminal, `defenseclaw sandbox stop " + name + "` asks first)"}
+}
+
+// containedStopRefusal is the error of a stop DefenseClaw made for a
+// security alarm (WithEmergencyStop), or of a start's stop of a sandbox it
+// must not leave running (stopUnverified), that left the MicroVM name
+// running because its disk could not be synced first (flushErr), contained
+// instead (containUnsynced); containErr is what of the containment could
+// not be done or confirmed.
+func containedStopRefusal(name string, flushErr, containErr error) error {
+	state := "DefenseClaw contained it instead: " + containedContainment
+	if containErr != nil {
+		state = "and DefenseClaw could not confirm it contained (" + truncate(sandboxapi.DisplayText(containErr.Error()), 300) + ")"
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeUnsynced,
+		Message: "sandbox " + name + " was not stopped: its MicroVM's disk could not be synced first (" + truncate(sandboxapi.DisplayText(flushErr.Error()), 200) +
+			"), so it keeps running, " + containedUnprotected + "; " + state,
+		Detail: "save the work you need, then stop it: `defenseclaw sandbox stop " + name + "` (on a terminal it asks before it stops the VM without the sync)"}
+}
+
+// emergencyStopKey is the context key of WithEmergencyStop.
+type emergencyStopKey struct{}
+
+// WithEmergencyStop is ctx for a stop DefenseClaw makes on its own for a
+// security alarm, why in words (a hook alarm, repeated foreign network
+// rules, a lost listener, a revoked registration): one that must not leave
+// the sandbox as it is. Where that stop would lose what a MicroVM has not
+// synced, DefenseClaw never makes it (GAP-0902): it contains the VM
+// instead (containUnsynced) and the stop fails with what it did.
+func WithEmergencyStop(ctx context.Context, why string) context.Context {
+	return context.WithValue(ctx, emergencyStopKey{}, why)
+}
+
+// EmergencyStopReason is the why of a WithEmergencyStop ctx, "" for any
+// other.
+func EmergencyStopReason(ctx context.Context) string {
+	why, _ := ctx.Value(emergencyStopKey{}).(string)
+	return why
+}
+
+// emergencyStop reports a WithEmergencyStop ctx and its why.
+func emergencyStop(ctx context.Context) (string, bool) {
+	why := EmergencyStopReason(ctx)
+	return why, why != ""
 }
 
 // lockStart takes the gateway's lifecycle lock for a create or a start
@@ -534,6 +564,8 @@ func unsyncedStopHeld(name string, err error) error {
 // DefenseClaw restarts or upgrades the gateway (doctor --fix, setup, the
 // OpenShell upgrade), whose check of the sandboxes would not see one
 // started after it, the call is refused.
+//
+// Only lockRun takes it.
 func (m *Manager) lockStart() (func(), error) {
 	if m.opts.StartLock == nil {
 		return func() {}, nil
@@ -547,6 +579,32 @@ func (m *Manager) lockStart() (func(), error) {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "take the OpenShell gateway's lifecycle lock: %v", err)
 	}
 	return unlock, nil
+}
+
+// lockRun takes the start lock (lockStart) for the gateway call that runs
+// a new sandbox or session (CreateSandbox, StartSandbox), checks once more
+// that no guest DefenseClaw cannot show protected runs
+// (unprotectedRunRefusal; except as for legacyRunRefusal), and holds
+// runGate shared until the returned func. A guest recorded contained
+// (containUnsynced) after the create's or start's first check is so
+// refused here, and one contained while the call runs is recorded only
+// once it returned: that sandbox then ran before it, as one already
+// running does. The caller unlocks right after the call.
+func (m *Manager) lockRun(except string) (func(), error) {
+	unlockStart, err := m.lockStart()
+	if err != nil {
+		return nil, err
+	}
+	m.runGate.RLock()
+	if err := m.unprotectedRunRefusal(except); err != nil {
+		m.runGate.RUnlock()
+		unlockStart()
+		return nil, err
+	}
+	return func() {
+		m.runGate.RUnlock()
+		unlockStart()
+	}, nil
 }
 
 // stoppedAsIs is the phase of a sandbox OpenShell's stop returned as it
@@ -605,13 +663,26 @@ func (m *Manager) restorePhase(ctx context.Context, gw *Gateway, b *box, trigger
 	name := b.rec.Name
 	m.mu.Unlock()
 	sb, err := gw.Client.GetSandbox(ctx, name)
-	if err != nil || !m.sameSandbox(b, sb) {
+	if err == nil && !m.sameSandbox(b, sb) {
 		return
 	}
-	m.mu.Lock()
-	b.sb = sb
-	m.mu.Unlock()
-	if phase := auditPhase(sb.Status.Phase); phase != pending && phase != audit.SandboxPhaseUnknown {
+	phase := audit.SandboxPhaseUnknown
+	if err == nil {
+		m.mu.Lock()
+		b.sb = sb
+		m.mu.Unlock()
+		phase = auditPhase(sb.Status.Phase)
+	}
+	if phase == audit.SandboxPhaseUnknown && pending == audit.SandboxPhaseDeleting {
+		// OpenShell refused the delete and does not say what it left: the
+		// VM may run as before. Its phase is unknown, which holds its
+		// compute, not DefenseClaw's own deleting, which does not: a stop
+		// would skip its sync, and the status would count it idle for the
+		// gateway's stop (GAP-1084).
+		m.lifecycle(ctx, b, audit.SandboxPhaseUnknown, trigger, false, nil, nil)
+		return
+	}
+	if phase != pending && phase != audit.SandboxPhaseUnknown {
 		// A failing condition explains an error phase (statusEvent), which
 		// the status then names (GAP-0297).
 		var cond *audit.SandboxCondition
@@ -641,12 +712,14 @@ func (m *Manager) checkSandbox(ctx context.Context, gw *Gateway, b *box) error {
 		return upstream("look up sandbox "+name, err)
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if !m.sameSandboxLocked(b, sb) {
-		b.missing = true
+		report := m.missingFromLocked(gw, b)
+		m.mu.Unlock()
+		report(ctx)
 		return errReplaced(name)
 	}
-	b.sb, b.missing = sb, false
+	foundOnLocked(b, gw, sb)
+	m.mu.Unlock()
 	return nil
 }
 
@@ -666,10 +739,6 @@ func (m *Manager) Start(ctx context.Context, name string, req sandboxapi.StartRe
 	if err := m.start(ctx, b, req); err != nil {
 		return nil, err
 	}
-	// A new run: its first failed sync holds the stop again (GAP-1594).
-	m.mu.Lock()
-	b.stopHeldAt = time.Time{}
-	m.mu.Unlock()
 	v := m.viewOf(b)
 	return &v, nil
 }
@@ -888,7 +957,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	}
 	// No new session while a legacy guest runs unprotected; this one's
 	// start ends it when it is an ended legacy MicroVM (--end-vm).
-	if err := m.legacyRunRefusal(rec.Name); err != nil {
+	if err := m.legacyRunRefusal(ctx, rec.Name); err != nil {
 		return err
 	}
 	// Containment may have detached providers or removed rules before an
@@ -898,8 +967,9 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	// even when the closed-network checkpoint was not reached. The closed
 	// and providers fields alone are what earlier 1.0.4 builds of this
 	// change recorded, until 1.0.4 ships.
+	// A contained VM (record.Contained) gets the same.
 	restoreLegacyNetwork := rec.OldSupervisorNetworkRestore || rec.OldSupervisorNetworkClosed || len(rec.OldSupervisorProviders) > 0 ||
-		oldSupervisorLingering(auditPhase(sb.Status.Phase), rec)
+		rec.Contained != "" || oldSupervisorLingering(auditPhase(sb.Status.Phase), rec)
 	// A sandbox an OpenShell before 0.1.5 created keeps a Docker bootstrap
 	// that 0.1.5 cannot read (GAP-0300): it moves to 0.1.5's format first.
 	if err := m.migrateBootstrap(gw, rec.Name, sb); err != nil {
@@ -1039,14 +1109,15 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 			return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
 		}
 	}
-	// Not while DefenseClaw restarts or upgrades the gateway (lockStart).
-	unlockStart, err := m.lockStart()
+	// Not while DefenseClaw restarts or upgrades the gateway, nor beside a
+	// guest contained since the run check above (lockRun).
+	unlockRun, err := m.lockRun(rec.Name)
 	if err != nil {
 		return err
 	}
 	m.lifecycle(ctx, b, audit.SandboxPhaseStarting, audit.SandboxTriggerStart, false, nil, nil)
 	_, err = gw.Client.StartSandbox(ctx, rec.Name)
-	unlockStart()
+	unlockRun()
 	if err != nil {
 		m.dropGateway(gw, err)
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
@@ -1073,10 +1144,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		// legacy supervisor can still run background work. Session approvals
 		// removed above are not brought into the new session.
 		if err := m.restoreOldSupervisorNetwork(ctx, gw, b, sb, eff); err != nil {
-			stopErr := m.stopUnverified(ctx, gw, b)
 			detail := "DefenseClaw stopped the new session before it could run without its network policy"
-			if stopErr != nil {
-				detail += "; stopping it also failed: " + stopErr.Error()
+			if stopErr := m.stopUnverified(ctx, gw, b); stopErr != nil {
+				// Not stopped (a failed sync contains it instead, GAP-0902):
+				// the start failed, and the VM still runs.
+				detail = "DefenseClaw did not stop the new session, so it is still running: " + stopErr.Error()
 			}
 			return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
 				Message: "sandbox " + rec.Name + " did not restore its network on the new OpenShell supervisor: " + err.Error(),
@@ -1695,8 +1767,9 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 			case err == nil:
 				// Another sandbox took the name: this one's agent is gone.
 				m.mu.Lock()
-				b.missing = true
+				report := m.missingFromLocked(gw, b)
 				m.mu.Unlock()
+				report(ctx)
 			case !openshell.IsNotFound(err):
 				if !req.Preview {
 					return nil, upstream("look up sandbox "+name, err)
@@ -1711,9 +1784,7 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 		if !req.Stop {
 			return nil, sandboxapi.Errorf(sandboxapi.CodeConflict, "stop sandbox %s before undoing its changes", name)
 		}
-		// The undo discards what the sandbox wrote: a failed sync loses
-		// nothing it keeps.
-		if err := m.stop(ctx, b, false); err != nil {
+		if err := m.stop(ctx, b); err != nil {
 			return nil, err
 		}
 		resp.Stopped = true

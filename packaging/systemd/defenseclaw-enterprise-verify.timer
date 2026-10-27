@@ -3,7 +3,7 @@
 
 [Unit]
 Description=Daily DefenseClaw managed deployment verification
-Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/install/linux/
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
 
 [Timer]
 OnCalendar=daily

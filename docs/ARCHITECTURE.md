@@ -20,7 +20,7 @@ connector runtime / operator CLI
 The diagram is deliberately topology-neutral: proxy connectors, hook
 connectors, and the OpenClaw extension do not share one universal request path.
 The published
-[connector compatibility matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/hook-contracts/)
+[connector compatibility matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/)
 defines the supported path for each connector.
 
 | Component | Source ownership |
@@ -53,7 +53,7 @@ not independent authorities; see [`../schemas/README.md`](../schemas/README.md).
 Routes are registered in
 [`../internal/gateway/api.go`](../internal/gateway/api.go) and focused endpoint
 files. Consumer documentation is published on the
-[gateway API page](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/gateway-api/).
+[gateway API page](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/gateway-api/).
 Do not maintain a second endpoint table in repository Markdown.
 
 ### Connectors
@@ -61,7 +61,7 @@ Do not maintain a second endpoint table in repository Markdown.
 Hook delivery fails closed by default. Only under the Secure Client
 integration does an unset `hook_fail_mode` default to open, independently of
 action-mode policy enforcement (see the published
-[fail modes](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/fail-modes/) page). An explicit closed is always kept; OSS, standalone
+[fail modes](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/fail-modes/) page). An explicit closed is always kept; OSS, standalone
 and other managed installs keep the fail-closed rules, including managed Codex
 and Claude Code and standalone Devin. Managed authorization, runtime integrity
 and strict availability remain distinct controls.

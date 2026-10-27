@@ -2759,6 +2759,10 @@ defenseclaw_missing_token_next_step() {
   esac
   local setup_name="${1:-}"
   [ "$setup_name" = "claudecode" ] && setup_name="claude-code"
+  if [ "$setup_name" = "inspect" ]; then
+    printf '%s' '; this shared inspect hook is retired; run `defenseclaw doctor` to identify the active connector and repair its hook'
+    return 0
+  fi
   [ -n "$setup_name" ] || return 0
   printf '%s' "; run \`defenseclaw setup ${setup_name}\` to restore the hook token"
 }

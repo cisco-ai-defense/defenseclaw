@@ -37,7 +37,7 @@ import (
 // or for a command group its subcommands. Everything else on the page is
 // prose.
 const (
-	sandboxDocsPage       = "sandboxes/cli.mdx"
+	sandboxDocsPage       = "sandbox-cli.mdx"
 	sandboxDocsBeginMark  = "{/* AUTOGEN-BEGIN: sandbox-flags "
 	sandboxDocsMarkSuffix = " */}"
 	sandboxDocsEndMark    = "{/* AUTOGEN-END: sandbox-flags */}"
@@ -247,7 +247,7 @@ func TestSandboxDocsExitStatuses(t *testing.T) {
 		return strings.Join(strings.Fields(part), " ")
 	}
 	reference := read(filepath.Join("reference", sandboxDocsPage), "- **Exit status.**", "\n- ")
-	guide := read(filepath.Join("troubleshooting", "sandboxes", "index.mdx"), "Exit statuses:", "\n\n")
+	guide := read(filepath.Join("sandboxes", "guide.mdx"), "Exit statuses:", "\n\n")
 	for _, c := range []struct {
 		code      int
 		reference string
@@ -263,7 +263,7 @@ func TestSandboxDocsExitStatuses(t *testing.T) {
 			t.Errorf("%s: the exit-status list lacks %q:\n%s", sandboxDocsPage, c.reference, reference)
 		}
 		if !strings.Contains(guide, c.guide) {
-			t.Errorf("troubleshooting/sandboxes/index.mdx: the exit statuses lack %q:\n%s", c.guide, guide)
+			t.Errorf("sandboxes/guide.mdx: the exit statuses lack %q:\n%s", c.guide, guide)
 		}
 	}
 }

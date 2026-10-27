@@ -79,7 +79,7 @@ def test_ordinary_ci_always_checks_real_registry_without_exhaustive_mutation_sui
         "python-lint",
     }
     rendered_aggregate = _render(aggregate)
-    assert 'test "${#coverage_parts[@]}" -eq 6' in rendered_aggregate
+    assert 'test "${#coverage_parts[@]}" -eq 8' in rendered_aggregate
     assert "PYTHON_TELEMETRY" not in rendered_aggregate
     assert "python-coverage-part-telemetry" not in CI_PATH.read_text(encoding="utf-8")
 
@@ -117,7 +117,7 @@ def test_exhaustive_registry_workflow_always_reports_and_runs_selectively() -> N
     assert exhaustive["if"] == "${{ needs.changes.outputs.telemetry == 'true' }}"
     cases = exhaustive["strategy"]["matrix"]["include"]
     assert {case["test_file"] for case in cases} == EXHAUSTIVE_TESTS
-    assert exhaustive["timeout-minutes"] == "50"
+    assert exhaustive["timeout-minutes"] == "20"
     assert "--numprocesses=4" in _render(exhaustive)
     assert "--dist=worksteal" in _render(exhaustive)
     assert "--cov" not in text

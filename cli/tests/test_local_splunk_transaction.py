@@ -993,7 +993,7 @@ def test_enterprise_setup_takes_the_token_only_from_its_inputs(tmp_path: Path, m
     assert (tmp_path / "config.yaml").read_bytes() == config_before
 
     status, validate = _v8_writer_patches()
-    with status, validate, patch.object(cmd_setup, "_maybe_probe_enterprise_hec"):
+    with status, validate:
         cmd_setup._setup_enterprise(
             app, hec_endpoint=_REMOTE_HEC, hec_token="remote credential", non_interactive=True, skip_test=True,
         )

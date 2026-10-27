@@ -535,6 +535,11 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 			want[event] = copilotHookRegistration(runtime.GOOS, event, hookCommand)
 		}
 		return hookEventEntriesMatch(hooks, want, func(event string, entry interface{}) bool {
+			if event == "preToolUse" && !pluginSecureClientProfile(opts) && opts.HookFailMode != "open" {
+				// Any extra pre-tool command can override the closed verdict.
+				// Preserve an unowned command, but never certify it as closed.
+				return true
+			}
 			if _, registered := want[event]; registered {
 				// defenseclaw.json is DefenseClaw's file; Setup leaves only
 				// its render on a bound event (patchCopilotHooksForOS).

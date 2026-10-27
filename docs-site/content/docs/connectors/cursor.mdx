@@ -1,22 +1,28 @@
 ---
 title: Cursor
-description: Guard Cursor with DefenseClaw user hooks that observe events or deny actions before they run.
+description: Cursor connector installs user hooks that observe events or deny actions before they run. Action mode denies with Cursor's own response and does not enable native ask.
 keywords:
-  - Cursor connector
+  - DefenseClaw Cursor connector
   - Cursor hooks
   - beforeShellExecution
+  - Cursor hooks.json
 ---
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-DefenseClaw adds entries to Cursor's user `hooks.json`. This is a hook connector: Cursor talks to its own upstream and no proxy is involved.
+DefenseClaw adds entries to Cursor's user-scoped [hooks.json](https://cursor.com/docs/hooks). This is a hook connector: Cursor talks to its own upstream and no proxy is involved. There is no proxy path, and DefenseClaw claims no enterprise-wide authority or native human approval.
 
-On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
+On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/fail-modes).
 ## Platform support
 
 <ConnectorSupport id="cursor" />
 
-## Set up
+| Platform | Status | Connector path |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | User-scoped command hooks invoke the portable DefenseClaw hook. |
+| Native Windows x64 | **Supported** | User-scoped command hooks invoke the managed `cursor-hook.ps1` pipeline adapter and the protected `defenseclaw-hook.exe`. |
+
+## Setup
 
 On a new install, run `defenseclaw init --connector cursor` first. Until DefenseClaw is initialized, `defenseclaw setup cursor` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
 
@@ -25,15 +31,11 @@ defenseclaw setup cursor  # first setup defaults to observe
 defenseclaw setup cursor --mode action --no-human-approval
 ```
 
-A re-run without `--mode` keeps the current mode. On Windows, run the same
-commands in PowerShell. Action mode turns on event-native deny and leaves
-native approval off. Interactive setup asks for the mode, whether to add to or
-replace an existing connector roster, and whether to add an LLM judge. For
-scripts, pass `--yes --mode observe` (or `--mode action`).
+A re-run without `--mode` keeps the current mode. On Windows, run the same commands in PowerShell. Action mode turns on event-native deny and leaves native approval off. Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
 
 Action setup requires an installed Cursor version covered by a hook contract. If that check fails, setup exits with an error before changing the connector roster or hooks. Install a supported version and rerun `defenseclaw setup cursor --yes --mode action --no-human-approval`. To stage observation explicitly, run `defenseclaw setup cursor --yes --mode observe`.
 
-## Check it
+### Check it
 
 ```bash
 defenseclaw status
@@ -41,34 +43,135 @@ defenseclaw status
 
 The agent appears under **Agents** with its mode. `defenseclaw doctor` reports no failed check for it.
 
+### What setup cursor actually does
 
-## What it can block or ask
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--yes / -y` | off | Skip the confirmation prompt. |
+| `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes. |
+| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`. Run its printed gateway-restart step before expecting exports. |
 
-<HookEventsList connector="cursor" />
+The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`, approval, block-message, add/replace and workspace options ([quick-alias reference](/docs/guardrail/aliases)). For scanner and judge settings use [full guardrail setup](/docs/guardrail).
 
-- In action mode these events deny with Cursor's own response: `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead` and `beforeSubmitPrompt`.
-- DefenseClaw does not turn on Cursor's native ask. A confirm verdict stays an alert.
-- Observe mode records policy findings without blocking on those findings. On a per-user install, while its hook runs, a gateway outage lets the call run with a warning in the default and permissive policies and blocks it in strict ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)).
-- `sessionStart`, `sessionEnd`, `stop` and `subagentStop` never gate.
+Fresh setup ignores `DEFENSECLAW_CURSOR_CONFIG_HOME` and binds the official `.cursor` location. Only an authenticated persisted custody record may restore or migrate a historical path.
 
-## Files it changes
+### Inventory
+
+| Asset | Sources |
+| --- | --- |
+| MCP | Project and user `.cursor/mcp.json`. Same-name candidates and dynamic extension servers stay unverified. |
+| Skills | Recursive `SKILL.md` under project and user `.cursor/skills`, `.agents/skills`, `.claude/skills` and `.codex/skills`, including nested project roots. |
+| Rules | `.cursor/rules/**/*.mdc`, plus root and nested `AGENTS.md`. |
+| Agents | Project and user `.cursor/agents`, `.claude/agents` and `.codex/agents`. Project wins over user, and `.cursor` over the compatibility roots. |
+| Plugins | Existing local plugins under `~/.cursor/plugins/local`, inventory only. |
+
+Scanning is bounded and does not follow symlinks, junctions or reparse points. Multi-root selection, cloud agents, marketplace, team and private sources, dynamic sources, user UI rules and runtime-only assets stay unverified.
+
+## Files DefenseClaw will modify
 
 | What | macOS and Linux | Windows |
 | --- | --- | --- |
 | Hooks | `~/.cursor/hooks.json` | `%USERPROFILE%\.cursor\hooks.json` |
 | Hook program | `~/.defenseclaw/hooks/cursor-hook.sh` | `~/.defenseclaw/hooks/cursor-hook.ps1` and `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
-Teardown restores the earlier file, or removes only DefenseClaw's entries, then its adapter files.
+Teardown restores the earlier file, or removes only DefenseClaw's entries, then its adapter files. Cursor spawns command-hook processes and reloads `hooks.json` automatically. If a change is not loaded, restart Cursor.
+
+## Hook capabilities
+
+<HookEventsList connector="cursor" />
+
+| Contract | Agent versions | Hook script | Events | Can block | Can ask |
+| --- | --- | --- | --- | --- | --- |
+| `cursor-hooks-v1` | `>=2.4.0, <4.0.0`; exact pins `2026.07.23-e383d2b` | `v8` | 21 | 7 | 0 |
+
+| Contract | Events registered | Block events | Ask events |
+| --- | --- | --- | --- |
+| `cursor-hooks-v1` | `sessionStart`, `sessionEnd`, `preToolUse`, `postToolUse`, `postToolUseFailure`, `subagentStart`, `subagentStop`, `beforeShellExecution`, `afterShellExecution`, `beforeMCPExecution`, `afterMCPExecution`, `beforeReadFile`, `afterFileEdit`, `beforeTabFileRead`, `afterTabFileEdit`, `beforeSubmitPrompt`, `preCompact`, `stop`, `afterAgentResponse`, `afterAgentThought`, `workspaceOpen` | `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt` | none |
+
+| Fact | Value |
+| --- | --- |
+| Hook script | `cursor-hook.sh` |
+| Hook config paths | `~/.cursor/hooks.json` |
+| Response field | `hook_output` |
+| Native OTLP | no |
+| W3C traceparent | yes |
+| Fail closed | yes |
+
+The contract covers Cursor Desktop application versions `>=2.4.0, <4.0.0`, and for the Agent CLI only the reviewed exact build `2026.07.23-e383d2b`. The hook payload's `cursor_version` is the Desktop application version. A later Agent build runs as an untested newer version ([version policy](/docs/connectors/compatibility#version-policy)).
+
+### What it can block or ask
+
+- In action mode these events deny with Cursor's own response: `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead` and `beforeSubmitPrompt`.
+- DefenseClaw does not turn on Cursor's native ask. A confirm verdict stays an alert.
+- Observe mode records policy findings without blocking on those findings. On a per-user install, while its hook runs, a gateway outage lets the call run with a warning in the default and permissive policies and blocks it in strict ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)).
+- `sessionStart`, `sessionEnd`, `stop` and `subagentStop` never gate.
+
+### Verdict mapping
+
+Cursor runs every matching hook and merges conflicts in **Enterprise > Team > Project > User** priority. DefenseClaw owns only the user hook. It cannot prove that an Enterprise, Team or Project source is absent, and Cursor offers no safe API to detect a real higher-priority conflict, so DefenseClaw reports the limitation and does not infer one.
+
+| Mode | Registration | Behavior |
+| --- | --- | --- |
+| Action | `failClosed: true` | Returns the documented native deny on supported pre-action events. `beforeSubmitPrompt` blocks with `continue: false`. The permission-gated events use `permission: "deny"`. Confirm verdicts stay attributed alerts. Native ask is not enabled. |
+| Observe | `failClosed: true` | Allows on policy findings and records `would_block` audit state; on a per-user install, a gateway outage follows an explicit saved mode or, when unset, the policy tier: default and permissive run the call with a warning, strict blocks it. If the hook process never answers, Cursor blocks the call. |
+
+Blocking events are `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead` and `beforeSubmitPrompt`. `sessionStart` and `sessionEnd` are not gates. `stop` and `subagentStop` accept only a follow-up message. Result inspection reads `tool_output`, `error_message`, shell `output`, MCP `result_json`, file `edits`, agent `text` and subagent `summary`. `beforeMCPExecution` keeps its exact `tool_input` and URL or command, and derives a stable digest identity without inventing a vendor name.
+
+An explicit `--fail-mode` is saved as Cursor's outage choice; outside Secure Client, observe and action registrations both stay `failClosed: true`. The running hook's outage mode is described below. Setup reports readiness only after the current 21-event `type: command`, 30-second, mode-matched registration, the managed runtime adapter, the contract lock and the complete active-connector roster agree. Adding or repairing another connector waits for that full roster.
+
+### Native ask
+
+DefenseClaw does not enable Cursor native approval. Confirm verdicts stay attributed alerts and cannot resume the original hook call.
+
+### Fail mode
+
+Can fail closed: yes. A per-user Cursor hook uses an explicit saved outage mode; when unset, its policy tier decides in observe and action mode: the default and permissive policies let the call run with a warning, strict blocks it ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). Outside Secure Client, action and observe both register `failClosed: true`, so a stopped, killed or timed-out hook cannot silently let a tool run. Managed Cursor's running hook follows the administrator's resolved fail mode. Settings and edge cases are in [Fail modes](/docs/reference/fail-modes).
+
+### Agent CLI behavior
+
+| Build | Behavior | Check |
+| --- | --- | --- |
+| Agent CLI 2026.10.01-14929f9 | Did not emit `beforeSubmitPrompt` in a managed standalone run although `hooks.json` registered it. Prompts reached the model with the gateway stopped. Tool hooks still ran and blocked. | Look for `beforeSubmitPrompt` rows with `hook_decision` in the audit log. DefenseClaw status and enterprise verify warn about this. |
+| Same build, gateway down, action mode | A refused prompt is dropped without a message: the input clears and the start screen returns. The hook answers `continue: false` with a reason, but the CLI does not display `user_message` for that event. Tool calls show their reason. | Run `defenseclaw-gateway status` (or `defenseclaw-gateway start` on a per-user install). Refusals are the `"connector":"cursor"` lines with `"fail_mode":"closed"` in `~/.defenseclaw/logs/hook-failures.jsonl`. |
+| 2026.10.01-e373342 and -14929f9, managed Windows | After you answer `[a] Trust this workspace` on the first start in a folder, the CLI can stay on "Trusting workspace..." and ignore typing and Ctrl+C. The folder is already trusted. | Close the tab and start `cursor-agent` again, or start new folders with `cursor-agent --trust`. |
+
+## Enterprise (standalone profile)
+
+Cursor gets machine policy instead of `~/.cursor/hooks.json`. DefenseClaw merges one entry per event into Cursor's Enterprise hooks file and keeps every other key, event and entry.
+
+| OS | Enterprise hooks file |
+| --- | --- |
+| Linux | `/etc/cursor/hooks.json` |
+| macOS | `/Library/Application Support/Cursor/hooks.json` |
+| Windows | `%ProgramData%\Cursor\hooks.json`, with the `defenseclaw-hook.ps1` adapter beside it |
+
+Each entry runs the administrator's hook binary with `hook --connector cursor --enterprise-managed` and sets `failClosed: true`, so a hook process that never answers blocks the call. The administrator's resolved fail mode decides what the running hook does on a gateway outage: managed `open` covers eligible gateway outages only; a foreign-hook guard can still block the call. Cursor still runs Team, Project and User hooks and a deny from any wins, so they cannot allow what DefenseClaw denies, but a foreign `preToolUse` hook can still rewrite tool input. Cursor applies the Enterprise file only on plans that support enterprise hooks, so confirm in a real session that DefenseClaw records its events. The macOS route is a preview and is not verified live.
+
+## In an OpenShell sandbox
+
+<Callout type="warn" title="Cursor Agent cannot run in a sandbox yet">
+DefenseClaw builds the image, but it is **unverified**, so `defenseclaw sandbox run cursor` refuses it. Cursor Agent CLI needs a Cursor account (`CURSOR_API_KEY` or `cursor-agent login`) before any agent turn. Without one it stops at "Authentication required" and fires no hook, and it has no bring-your-own model endpoint. The image check uses a mock model, so it cannot pass.
+</Callout>
+
+`sandbox run cursor` builds the whole image (several GB) and only then refuses it. The image stays: `defenseclaw sandbox image list` shows HOOKS VERIFIED `no`, and `defenseclaw sandbox image prune` keeps it as the newest Cursor Agent image. Remove it with `docker image rm <tag>`; the next prune forgets its record.
+
+| Item | Detail |
+| --- | --- |
+| Tier | Managed. Hooks are in root-owned `/etc/cursor/hooks.json` with `failClosed` on every event. The enterprise answer wins over team, user and project hooks. On Cursor's authless local build of the same release, enterprise hooks fired and blocked a shell call, and user and project `hooks.json` files answering allow changed nothing. |
+| Launch flags | `--sandbox disabled` and `--trust`, since Cursor's own sandbox cannot run inside OpenShell. Skip-permissions adds `--force`. `--safe` drops it. The launcher turns Node's compile cache off and drops `NODE_OPTIONS` and `NODE_PATH`. |
+| Sign-in | The daemon's `defenseclaw-cursor` profile binds a Cursor API key to Cursor's service, and the sandbox sees a placeholder. A browser login inside the sandbox (`/usr/local/lib/defenseclaw/bin/cursor-launch login`) keeps a session in the sandbox home, where the agent can read it. Neither was tested live. |
+| Image | Cursor Agent 2026.07.23-e383d2b, the reviewed build, from its release archive with a SHA-256 DefenseClaw measured. Cursor publishes no digests. |
 
 ## Limits
 
-- Cursor runs Enterprise, Team, Project and User hooks and merges them by that priority. DefenseClaw owns only the user hook and cannot detect a higher-priority conflict.
+- Cursor runs Enterprise, Team, Project and User hooks and merges them by that priority. DefenseClaw owns only the user hook and cannot prove a higher-priority source is absent or detect a conflict.
+- Cursor applies the Enterprise hooks file only on plans that support enterprise hooks. The macOS route is a preview and is not verified live.
 - Cursor Agent CLI builds that do not emit `beforeSubmitPrompt` let prompts reach the model, even when the gateway is down. Tool hooks still block. Check `hook_decision` audit rows before you claim prompt coverage.
 - When the gateway is down in action mode, Cursor Agent CLI drops a refused prompt without showing why. Run `defenseclaw-gateway status`.
 - On managed Windows, the first start in a new folder can stall at "Trusting workspace...". Close the tab and start again, or start with `cursor-agent --trust`.
 - Cursor Agent cannot run in an OpenShell sandbox yet.
 
-## Turn it off
+## Disable
 
 For a per-user, single-connector install:
 
@@ -76,14 +179,6 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-With the default gateway restart, disabling removes DefenseClaw's hooks from
-Cursor's config and its hook adapter files. It preserves your other Cursor
-settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To
-remove the connector, run `defenseclaw setup remove cursor --yes` (add
-`--force` if it is the last one).
+With the default gateway restart, disabling removes DefenseClaw's hooks from Cursor's config and its hook adapter files. It preserves your other Cursor settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To remove the connector, run `defenseclaw setup remove cursor --yes` (add `--force` if it is the last one).
 
 On a multi-connector install, add `--connector cursor` to `guardrail disable` and `guardrail enable` to change only this agent.
-
-## Details
-
-Hook contracts, response shapes, inventory, the enterprise hooks file and the sandbox image are in the [Cursor reference](/docs/reference/connectors/cursor).

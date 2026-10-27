@@ -1,0 +1,80 @@
+---
+title: Install and maintain
+description: Install, configure, upgrade, roll back, and uninstall DefenseClaw for the signed-in Windows x64 user with install.ps1.
+keywords:
+  - DefenseClaw Windows install
+  - DefenseClaw install.ps1
+  - DefenseClaw Windows upgrade
+  - DefenseClaw Windows uninstall
+---
+
+## System requirements
+
+| Requirement | Detail |
+| --- | --- |
+| Windows | Windows 10 or newer, including Windows Server 2019 and later. |
+| Architecture | x64 (`amd64`) only. ARM64 is not certified, even with x64 emulation, and the installer stops. x86 is unsupported. |
+| Shell | Windows PowerShell 5.1 (built in) or PowerShell 7. |
+| Scope | Current user only. Running elevated works but is not needed. |
+| Agent | A [supported agent](/docs/support-matrix) installed natively for the same Windows user. |
+| Network | The installer downloads from GitHub. At runtime DefenseClaw listens on authenticated loopback, normally `127.0.0.1:18970`. |
+
+Core DefenseClaw does not need Docker. The optional local observability and Local Splunk bundles need Windows x64 Pro, Enterprise or Education with Hyper-V and machine-installed Docker Desktop (Linux containers, Hyper-V backend, Compose v2). Windows Home, per-user Docker Desktop, WSL2 engines and Windows containers are not supported for these bundles.
+
+## Install
+
+In PowerShell, as the user who runs your agents:
+
+```powershell
+irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
+```
+
+To guard one agent and run first-time setup in the same step, download the script first and pass parameters:
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector codex -Quickstart
+```
+
+The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`. Open a new terminal, then check:
+
+```powershell
+defenseclaw --version
+defenseclaw-gateway --version
+```
+
+Parameters and exit codes are in the [installer reference](/docs/reference/setup-commands).
+
+## Configure after installation
+
+```powershell
+defenseclaw init
+```
+
+`init` asks which agents to guard. To add one later:
+
+```powershell
+defenseclaw setup codex --mode observe
+```
+
+`defenseclaw setup --add-detected --yes` adds newly installed agents without touching the others. Windows connectors: `claudecode`, `codex`, `amp`, `cursor`, `devin`, `hermes`, `opencode`, `copilot`, `antigravity` and `kiro`. Restart OpenCode after setup; fully exit and relaunch Amp. Home-folder overrides are in [Paths](/docs/get-started/windows/paths-troubleshooting#supported-path-overrides).
+
+## Upgrade
+
+```powershell
+defenseclaw upgrade
+defenseclaw rollback
+```
+
+The installer continues in a new PowerShell window. Close the TUI and other DefenseClaw commands first. On Windows, `defenseclaw upgrade` and `defenseclaw rollback` hand over to the installer in a new window and return at once: exit code 0 means the installer started, not that it finished, because the installer must replace the Python environment the CLI runs from. The result is shown in that window and saved in `%USERPROFILE%\.defenseclaw\logs\install-<time>.log`. A script that needs the result runs the installer itself in its own terminal, for example `powershell -NoProfile -ExecutionPolicy Bypass -File <install.ps1> -Rollback -Yes`, which waits and sets the exit code. In an SSH session there is no desktop for that window, so both commands change nothing, exit 1 and print the `powershell -File ... install.ps1` command to run in your terminal. See [Upgrade](/docs/get-started/upgrade) and, for a 0.8.x Setup install, [Upgrade from 0.8.x](/docs/get-started/upgrade#windows-moving-from-the-setup-package).
+
+## Repair
+
+To repair an install, run the install command again.
+
+## Uninstall and preserved state
+
+```powershell
+defenseclaw uninstall --all --binaries --yes
+```
+
+Without `--all` and `--binaries`, uninstall keeps your data and programs. Close agent sessions first. See [Uninstall](/docs/get-started/install#uninstall).

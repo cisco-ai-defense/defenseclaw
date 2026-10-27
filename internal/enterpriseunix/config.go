@@ -614,13 +614,25 @@ func (e *Env) checkManagedPolicyDir(cfg *config.Config) error {
 	if err := e.Trust(full, TrustRuntimeDir); err != nil {
 		return fmt.Errorf("config: managed standalone policy_dir is not administrator-controlled: %w", err)
 	}
+	packs := filepath.Join(full, "guardrail")
+	var referenced []string
+	for _, pack := range cfg.ReferencedRulePackDirs() {
+		if pack = strings.TrimSpace(pack); pack != "" {
+			referenced = append(referenced, e.P(filepath.Clean(pack)))
+		}
+	}
 	entries := 0
-	return filepath.WalkDir(full, func(path string, _ fs.DirEntry, walkErr error) error {
+	return filepath.WalkDir(full, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return fmt.Errorf("config: inspect policy_dir %s: %w", path, walkErr)
 		}
 		if path == full {
 			return nil
+		}
+		if d != nil && d.IsDir() && filepath.Dir(path) == packs && !config.PathHoldsAny(path, referenced) {
+			// A rule pack folder no setting names loads nothing; a
+			// writable one refused every admin command (GAP-1694).
+			return filepath.SkipDir
 		}
 		entries++
 		if entries > rulePackTreeMaxEntries {
@@ -660,12 +672,6 @@ func (e *Env) checkCandidateAssets(v *validatedConfig) error {
 		return fmt.Errorf("config does not build: %w", err)
 	}
 	return nil
-}
-
-// CheckRequiredSandboxPacks is checkRequiredSandboxPacks for `config
-// validate`, which must refuse what ensure refuses (GAP-0546).
-func (e *Env) CheckRequiredSandboxPacks(cfg *config.Config) error {
-	return e.checkRequiredSandboxPacks(cfg)
 }
 
 // checkRequiredSandboxPacks loads every administrator-required sandbox pack

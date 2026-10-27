@@ -262,6 +262,9 @@ type Store struct {
 	// plannerStatsRows is the history size at the last ANALYZE
 	// (RefreshPlannerStatistics).
 	plannerStatsRows atomic.Int64
+	// observationGroup groups concurrent correlation observation writes
+	// into one transaction (CorrelationRepository.RecordObservations).
+	observationGroup writeGroup
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8

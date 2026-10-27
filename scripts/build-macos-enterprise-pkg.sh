@@ -170,6 +170,8 @@ done
 # downgrade before the older binaries replace the installed ones unless the
 # administrator created the root-owned rollback marker
 # /opt/cisco/defenseclaw/lifecycle/allow-downgrade (postinstall consumes it).
+# It refuses while a sandbox daemon of DefenseClaw 1.0.3 or older has a
+# sandbox running too (the legacy sandbox guard, GAP-0903).
 cat >"$SCRIPTS/preinstall" <<'EOF'
 #!/bin/sh
 if [ -e /opt/cisco/secureclient/defenseclaw ] ||
@@ -279,7 +281,8 @@ installed=
 if root_owned "$record"; then
     installed=$(sed -n 's/.*"product_version": *"\([^"]*\)".*/\1/p' "$record" | head -n 1)
 fi
-# refuse CODE MESSAGE: nothing was changed. The Installer shows only a
+# refuse CODE MESSAGE [SAID]: nothing was changed; stderr shows SAID (MESSAGE
+# when there is none). The Installer shows only a
 # generic error, so leave the reason in the package result an MDM detection
 # or an administrator reads. The result reports the running deployment as
 # its own status sees it (GAP-1428: a fixed document said every service was
@@ -287,8 +290,9 @@ fi
 # cannot answer, or is not a root-owned file only root can change (trusted;
 # it is not run).
 refuse() {
-    code=$1 message=$2
-    echo "$message" >&2
+    code=$1 said=${3:-$2}
+    message=$(printf '%s' "$2" | tr -d '"\\|&')
+    echo "$said" >&2
     umask 077
     result="$state/last-package-result.json"
     error="{\"code\":\"$code\",\"message\":\"$message\"}"
@@ -390,44 +394,14 @@ if [ -n "$installed" ] && ! [ -f "$marker" ] && ! awk -v a="$package_version" -v
     }'; then
     refuse downgrade_refused "DefenseClaw $installed is installed; refusing to downgrade to $package_version, so nothing was changed. For a deliberate rollback, create $marker as root first."
 fi
-# A sandbox daemon of DefenseClaw before 1.0.4 exits by itself once the
-# package gave its program a new file, as soon as it counts no running
-# sandbox, and its exit stops the account's OpenShell gateway: also under a
-# MicroVM that completed or whose main process failed while its VM still
-# runs, which it does not count, so that VM ends with no flush (GAP-0868,
-# GAP-0903, GAP-0979 on macOS). Its program is the LaunchAgent's copy under
-# bin/launch-agents/<digest>/, which the postinstall renames over before its
-# ensure. Hold each one (SIGSTOP), last, before any file is replaced; the
-# postinstall ends the held ones with SIGKILL, which runs nothing on their
-# way out, and the launcher starts the installed daemon. If the install
-# never reaches the postinstall, they go on after 10 minutes.
-sandbox_held="$state/sandbox-daemons.held"
-if [ -n "$installed" ] && awk -v v="$installed" 'BEGIN {
-        sub(/^v/, "", v); sub(/[-+].*/, "", v); split(v, x, ".")
-        exit !(x[1] + 0 < 1 || (x[1] + 0 == 1 && x[2] + 0 == 0 && x[3] + 0 < 4))
-    }'; then
-    s_list=$(ps -axo pid=,lstart=,command= 2>/dev/null | awk '{
-        command = ""
-        for (i = 7; i <= NF; i++) command = command (i > 7 ? " " : "") $i
-        if (command ~ /^\/opt\/cisco\/defenseclaw\/bin\/(launch-agents\/[0-9a-f]+\/)?defenseclaw-gateway sandbox-daemon$/)
-            print $1 "|" $2 " " $3 " " $4 " " $5 " " $6
-    }')
-    if [ -n "$s_list" ] && (umask 077 && printf '%s\n' "$s_list" >"$sandbox_held") 2>/dev/null; then
-        printf '%s\n' "$s_list" | while IFS='|' read -r s_pid s_start; do
-            kill -STOP "$s_pid" 2>/dev/null || true
-        done
-        (
-            sleep 600 || exit 0
-            if [ -f "$sandbox_held" ]; then
-                while IFS='|' read -r s_pid s_start; do kill -CONT "$s_pid" 2>/dev/null; done <"$sandbox_held"
-                rm -f "$sandbox_held"
-            fi
-        ) </dev/null >/dev/null 2>&1 &
-    fi
+# @LEGACY_SANDBOX_GUARD@
+if command -v dc_legacy_sandbox_guard >/dev/null 2>&1 &&
+    ! dc_legacy_sandbox_guard darwin /opt/cisco/defenseclaw/bin/defenseclaw-gateway /usr/local/bin/defenseclaw; then
+    refuse sandboxes_running "DefenseClaw ${installed:-an earlier release} is installed, and this install was refused: $dc_guard_reason" "$dc_guard_message"
 fi
 exit 0
 EOF
-sed -i.bak "s/@DC_PKG_VERSION@/${VERSION}/" "$SCRIPTS/preinstall" && rm -f "$SCRIPTS/preinstall.bak"
+"$REPO_ROOT/scripts/stamp-package-script.sh" "$VERSION" "$SCRIPTS/preinstall" "$SCRIPTS/preinstall"
 
 # postinstall applies the deployment. A failure has already been rolled back
 # by the lifecycle; it fails the install so the MDM reports it. It waits for
@@ -476,26 +450,6 @@ refresh_programs() {
         fi
     done
 }
-# The preinstall held each sandbox daemon of a DefenseClaw before 1.0.4
-# (SIGSTOP), whose own exit would stop its account's OpenShell gateway also
-# under a completed or failed MicroVM that still runs (GAP-0868). End each
-# one that is still the same process with SIGKILL, which runs nothing on its
-# way out, before its program gets a new file, and resume (SIGCONT) any other
-# so nothing stays stopped once the list is gone. Both sides compare lstart
-# with its runs of spaces folded, as the preinstall's awk wrote it: lstart
-# pads a day from 1 to 9 ("Fri Nov  6").
-sandbox_held="$state/sandbox-daemons.held"
-if [ -f "$sandbox_held" ]; then
-    while IFS='|' read -r s_pid s_start; do
-        s_now=$(ps -o lstart= -p "$s_pid" 2>/dev/null | awk '{$1 = $1; print}')
-        if [ -n "$s_now" ] && [ "$s_now" = "$s_start" ]; then
-            kill -KILL "$s_pid" 2>/dev/null || true
-        else
-            kill -CONT "$s_pid" 2>/dev/null || true
-        fi
-    done <"$sandbox_held"
-    rm -f "$sandbox_held"
-fi
 if ! refresh_programs "$prefix"; then
     exit 1
 fi

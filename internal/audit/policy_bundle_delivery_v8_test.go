@@ -23,7 +23,7 @@ func TestLogPolicyBundleReceiptCarriesTheDeliveryID(t *testing.T) {
 	logger.SetRuntimeV8Emitter(runtime)
 	for _, id := range []string{"acme-agent:d-000913", "", "agent 7"} {
 		if err := logger.LogPolicyBundleReceipt("operator:root", PolicyBundle{ID: testPolicyBundleID, Version: 5},
-			PolicyBundleReceipt{ReceiptID: testPolicyBundleID, DeliveryID: id, State: PolicyBundleConfirmed, EnforcingVersion: 5}); err != nil {
+			PolicyBundleReceipt{ReceiptID: testPolicyBundleID, DeliveryID: id, State: PolicyBundleConfirmed, EnforcingVersion: 5}, nil, nil); err != nil {
 			t.Fatalf("LogPolicyBundleReceipt(%q): %v", id, err)
 		}
 	}
@@ -56,7 +56,7 @@ func TestLogPolicyBundleReceiptOmitsPrincipalRefOutsideTheSafeTokenSet(t *testin
 	principals := []string{"control-plane:acme/alice", "control-plane:acme/alice@example.com", `operator:CORP\admin`}
 	for _, principal := range principals {
 		if err := logger.LogPolicyBundleReceipt(principal, PolicyBundle{ID: testPolicyBundleID, Version: 5},
-			PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: PolicyBundleConfirmed, EnforcingVersion: 5}); err != nil {
+			PolicyBundleReceipt{ReceiptID: testPolicyBundleID, State: PolicyBundleConfirmed, EnforcingVersion: 5}, nil, nil); err != nil {
 			t.Fatalf("LogPolicyBundleReceipt(%q): %v", principal, err)
 		}
 	}
