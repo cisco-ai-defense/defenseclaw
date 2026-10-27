@@ -11106,6 +11106,8 @@ def _apply_hook_connector_setup(
                 )
         else:
             ux.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
+            if connector == "copilot":
+                _warn_leftover_copilot_managed_plugin_key()
     elif _batch_summary is None:
         _echo_saved_without_restart()
 
@@ -13005,6 +13007,60 @@ def _connector_not_shipped(cfg, name: str) -> bool:
     return normalized not in declared and name.strip().lower() not in declared
 
 
+_COPILOT_MANAGED_PLUGIN_KEY = "defenseclaw@defenseclaw"
+
+
+def _copilot_machine_managed_settings_path() -> str:
+    """Copilot's machine managed-settings file ("" on macOS), as the gateway's
+    copilotMachineManagedSettingsPath."""
+    if os.name == "nt":
+        program_files = (os.environ.get("ProgramFiles") or "").strip()
+        if not program_files or not os.path.isabs(program_files):
+            program_files = r"C:\Program Files"
+        return os.path.join(program_files, "GitHubCopilot", "managed-settings.json")
+    if sys.platform.startswith("linux"):
+        return "/etc/github-copilot/managed-settings.json"
+    return ""
+
+
+def _warn_leftover_copilot_managed_plugin_key(path: str | None = None) -> bool:
+    """Name the leftover Copilot machine key a per-user setup could not remove.
+
+    A managed install before 1.0.4 left enabledPlugins
+    ``defenseclaw@defenseclaw`` = true in Copilot's machine managed-settings
+    file, so the Copilot CLI warns at every start that the marketplace
+    "defenseclaw" is not found (GAP-1254). The gateway's per-user Copilot
+    setup and teardown remove it when the account can write the file; a
+    standard user cannot, and the gateway's note goes to its own log during
+    the restart, so setup said nothing (GAP-1814). This prints the one line
+    with the file and the entry after the restart. Nothing on a managed host,
+    whose lifecycle owns the key. Returns whether it printed.
+    """
+    from defenseclaw.upgrade_shim import managed_deployment
+
+    if managed_deployment():
+        return False
+    path = _copilot_machine_managed_settings_path() if path is None else path
+    if not path or os.path.islink(path) or not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(1 << 20)
+        document = _json.loads(raw.decode("utf-8-sig"))
+    except (OSError, ValueError):
+        return False
+    plugins = document.get("enabledPlugins") if isinstance(document, dict) else None
+    if not isinstance(plugins, dict) or plugins.get(_COPILOT_MANAGED_PLUGIN_KEY) is not True:
+        return False
+    elevated = ", or run this setup from an elevated prompt" if os.name == "nt" else ""
+    ux.warn(
+        f"{path} still enables the plugin {_COPILOT_MANAGED_PLUGIN_KEY}, left by an earlier managed DefenseClaw "
+        'install, so Copilot CLI warns at every start that the marketplace "defenseclaw" is not found. '
+        f"Ask an administrator to delete that entry{elevated}."
+    )
+    return True
+
+
 # The connectors whose gateway Setup refuses the agent's own settings before it
 # changes anything (connector.CheckAgentSettings).
 _AGENT_SETTINGS_CHECKED_CONNECTORS = frozenset({"claudecode", "codex", "copilot"})
@@ -13397,6 +13453,8 @@ def _remove_connector(
                 if setup_snapshot is None:
                     raise click.ClickException("connector removal restart failed without rollback authority") from None
                 _rollback_failed_connector_application(app, setup_snapshot, exc)
+        if normalize_connector(match) == "copilot":
+            _warn_leftover_copilot_managed_plugin_key()
     else:
         # Suppress the group's auto-restart result callback so --no-restart
         # is honored; warn that teardown is deferred until the next boot.
