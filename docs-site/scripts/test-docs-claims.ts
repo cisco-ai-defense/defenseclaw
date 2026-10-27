@@ -1583,7 +1583,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1997", page: "connectors/openclaw.mdx", section: "Subprocess policy", has: ["While the gateway is not running, the shims follow the policy", "running <tool> without inspection", "refusing to exec <tool>`, exit 1"] },
   { gap: "GAP-0506", page: "segmentation.mdx", section: "Fail-open and fail-closed, per layer", has: ["| A hook cannot reach the gateway | The [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) gives the result per connector and install.", "covers a gateway outage only, and not for a connector whose foreign-hook guard checks the session with the gateway ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage))"] },
   { gap: "GAP-0465", page: "connectors/capability-matrix.mdx", has: ["report as `effective_hook_fail_mode` the mode a managed connector's hook works in", "(on Windows the Amp and OpenCode plugins) read `closed`"], lacks: ["also for a hook that blocks the outage anyway"] },
-  { gap: "GAP-0465", page: "support-matrix.mdx", has: ["The Amp and OpenCode plugins on the per-user route read `closed` with an open mode too"] },
+  { gap: "GAP-0465", page: "support-matrix.mdx", has: ["With 1.0.5 and later those two read `closed` with an open mode, because they block an outage anyway"] },
+  { gap: "GAP-0048", page: "support-matrix.mdx", has: ["On 1.0.4 that includes the Amp and OpenCode plugins on the per-user route. With 1.0.5 and later those two read `closed`"], lacks: ["The Amp and OpenCode plugins on the per-user route read `closed` with an open mode too"] },
   // r105-rows-end
 ];
 
