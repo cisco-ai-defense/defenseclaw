@@ -2811,6 +2811,12 @@ func findMoveActsOnEntryOnly(args []string, inEntryDir bool) bool {
 		return false
 	}
 	destination := operands[1]
+	// The move facts judge the destination of a {} source only, so for
+	// ./{} the destination itself must stay off the state root
+	// (`-execdir mv ./{} ~/.defenseclaw/config.yaml`, GAP-2305).
+	if operands[0] == "./{}" && strings.Contains(strings.ToLower(destination), ".defenseclaw") {
+		return false
+	}
 	return strings.HasPrefix(destination, "/") && !strings.ContainsAny(destination, "{}$`*?[~\\") &&
 		!strings.Contains("/"+destination+"/", "/../")
 }
@@ -2883,45 +2889,109 @@ func findShellScriptActsOnEntryOnly(words []string) bool {
 	return operands > 0
 }
 
-// findCommandStaysOffState reports an -exec/-execdir/-ok/-okdir command
+// findCommandStaysOffStateOf judges an -exec/-execdir/-ok/-okdir command
 // that is handed only entries outside the state (its name test matches no
-// state name) and cannot reach the state on its own: an entry-only
-// command, or a program that is not a shell, a wrapper, inline code or a
-// remover, with no {} inside a longer word and, where -execdir runs it in
-// the entry's directory, no operand but the entry (`find ~ -name '*.py'
-// -exec python3 -m py_compile {} +` stays allowed; `-execdir rm -rf
-// .defenseclaw` does not; GAP-2305).
-func findCommandStaysOffState(words []string, inEntryDir bool) bool {
-	if findCommandActsOnEntryOnly(words, inEntryDir) {
-		return true
-	}
-	if len(words) == 0 {
-		return false
-	}
-	program := findProgramName(words[0])
-	if _, shell := findShellPrograms[program]; shell {
-		return false
-	}
-	if _, wrapper := findCommandWrappers[program]; wrapper {
-		return false
-	}
-	pythonModule := strings.HasPrefix(program, "python") && len(words) > 2 && words[1] == "-m"
-	if _, inline := findInlineInterpreters[program]; inline && !pythonModule {
-		return false
-	}
-	switch program {
-	case "rm", "unlink", "rmdir", "shred", "mv", "ln", "truncate", "dd", "tee", "install", "rsync", "cp":
-		return false
-	}
-	for _, word := range words[1:] {
-		if word == "{}" || inEntryDir && word == "./{}" {
-			continue
+// state name, or it runs from an unprotected state subtree such as logs/):
+// it stays off the state when it acts on the entry only or when none of
+// its words can reach the state on its own (findWordReachesState). So
+// normal work with plain words and {}.ext stays allowed (`-execdir git
+// pull`, `-execdir make clean`, `ffmpeg -i {} {}.mp3`, `bash -c 'wc -l
+// "$1"' _ {}`, pod check11), and `-execdir rm -rf .defenseclaw`, `rm {}
+// ~/.defenseclaw/config.yaml`, `rm -rf {}/..`, `-execdir rm -rf ../hooks`
+// and a script with $(dirname ...) or ${1%/*} do not (GAP-2305). Inline
+// code and commands read from stdin (xargs, parallel) are not read here,
+// so they never stay off.
+func findCommandStaysOffStateOf(home, root string) func(words []string, inEntryDir bool) bool {
+	return func(words []string, inEntryDir bool) bool {
+		if findCommandActsOnEntryOnly(words, inEntryDir) {
+			return true
 		}
-		if strings.Contains(word, "{}") || inEntryDir && !findPlainOption(word) {
+		if len(words) == 0 {
 			return false
 		}
+		for index, word := range words {
+			program := findProgramName(word)
+			pythonModule := strings.HasPrefix(program, "python") && index+1 < len(words) && words[index+1] == "-m"
+			if _, inline := findInlineInterpreters[program]; inline && !pythonModule {
+				return false
+			}
+			if program == "xargs" || program == "parallel" {
+				return false
+			}
+			if findWordReachesState(word, home, root, inEntryDir) {
+				return false
+			}
+		}
+		return true
 	}
-	return true
+}
+
+// findWordReachesState reports a command word, or a word of a shell
+// script given as one, that can name DefenseClaw state on its own: the
+// state root name, {} followed by '/', a '..' component, '.', a command or
+// parameter substitution, dirname, a dot-name glob, another user's home or
+// an unknown variable, a path that is the state root, inside it or above
+// it, and (where the command runs in the find's working directory, which
+// may be the root) a relative path that starts with a state name.
+func findWordReachesState(word, home, root string, inEntryDir bool) bool {
+	if strings.Contains(strings.ToLower(word), ".defenseclaw") || strings.Contains(word, "{}/") ||
+		strings.Contains(word, "$(") || strings.Contains(word, "${") || strings.Contains(word, "`") {
+		return true
+	}
+	lowerRoot := strings.ToLower(path.Clean(root))
+	tokens := strings.FieldsFunc(word, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || strings.ContainsRune("\"';&|<>()=,", r)
+	})
+	for _, token := range tokens {
+		if findProgramName(token) == "dirname" || token == "." || token == "./" ||
+			strings.HasPrefix(token, ".") && strings.ContainsAny(token, "*?[") {
+			return true
+		}
+		for _, part := range strings.Split(token, "/") {
+			if part == ".." {
+				return true
+			}
+		}
+		resolved := token
+		switch {
+		case token == "~" || strings.HasPrefix(token, "~/"):
+			if home == "" {
+				return true
+			}
+			resolved = home + token[1:]
+		case token == "$HOME" || strings.HasPrefix(token, "$HOME/"):
+			if home == "" {
+				return true
+			}
+			resolved = home + strings.TrimPrefix(token, "$HOME")
+		case strings.HasPrefix(token, "~"):
+			return true
+		case strings.HasPrefix(token, "$"):
+			// "$1", "$@" and "$1.utf8" are the entry a script is handed.
+			if len(token) < 2 || !strings.ContainsRune("0123456789@*#", rune(token[1])) {
+				return true
+			}
+			continue
+		}
+		if strings.HasPrefix(resolved, "/") {
+			clean := strings.ToLower(path.Clean(resolved))
+			if clean == "/" || clean == lowerRoot || strings.HasPrefix(clean, lowerRoot+"/") ||
+				strings.HasPrefix(lowerRoot, clean+"/") {
+				return true
+			}
+			continue
+		}
+		if inEntryDir {
+			continue
+		}
+		first := strings.ToLower(strings.SplitN(strings.TrimPrefix(token, "./"), "/", 2)[0])
+		for _, name := range protectedStateNameSamples {
+			if first == strings.ToLower(name) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // findReachesPastItsEntries reports a written find starting point whose
@@ -2937,6 +3007,7 @@ func findReachesPastItsEntries(facts actionfacts.Facts, candidate actionfacts.Pa
 	if !ok || !strings.EqualFold(command.Program, "find") {
 		return false
 	}
+	staysOff := findCommandStaysOffStateOf(facts.ActiveHome, path.Join(path.Clean(facts.ActiveHome), ".defenseclaw"))
 	argv := command.Argv
 	for index := 1; index < len(argv); index++ {
 		action := argv[index]
@@ -2949,7 +3020,7 @@ func findReachesPastItsEntries(facts actionfacts.Facts, candidate actionfacts.Pa
 		for end < len(argv) && argv[end] != ";" && argv[end] != "+" {
 			end++
 		}
-		if !findCommandStaysOffState(argv[index+1:end], action == "-execdir" || action == "-okdir") {
+		if !staysOff(argv[index+1:end], action == "-execdir" || action == "-okdir") {
 			return true
 		}
 		index = end
@@ -3060,7 +3131,7 @@ func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfact
 	}
 	if findDeletesOnlyNames(acted, func(pattern string, fold bool) bool {
 		return findPatternIsCleanupOnly(pattern, fold) || findPatternIsRegenerableBytecode(pattern, fold) || noStateName(pattern, fold)
-	}, findCommandActsOnEntryOnly) || findDeletesOnlyNames(acted, noStateName, findCommandStaysOffState) {
+	}, findCommandActsOnEntryOnly) || findDeletesOnlyNames(acted, noStateName, findCommandStaysOffStateOf(facts.ActiveHome, root)) {
 		return false
 	}
 	// The root is at depth `depth` below the start; its entries one deeper.
