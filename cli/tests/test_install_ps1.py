@@ -7577,10 +7577,13 @@ def test_the_outage_notice_runs_under_the_installers_readonly_home(tmp_path: Pat
         ("  connectors:\n    claudecode: {}\n    codex: {}\n", True),
         ("  hook_fail_mode: closed\n  connectors:\n    claudecode: {}\n", False),
         ("  hook_fail_mode: open\n  connectors:\n    claudecode: {}\n", False),
-        ("  connectors:\n    claudecode:\n      hook_fail_mode: closed\n    codex: {}\n", False),
+        ("  connectors:\n    claudecode:\n      hook_fail_mode: closed\n", False),
+        ("  connectors:\n    claudecode:\n      hook_fail_mode: closed\n    codex: {}\n", True),
+        ("  connectors:\n    claudecode: {}\n    codex:\n      hook_fail_mode: closed\n    copilot:\n      hook_fail_mode: closed\n", True),
+        ("  connectors:\n    claudecode:\n      hook_fail_mode: open\n    codex:\n      hook_fail_mode: closed\n", False),
         ("  rule_pack: strict\n  connectors:\n    claudecode: {}\n", False),
     ],
-    ids=["unset", "saved-closed", "saved-open", "connector-closed", "strict"],
+    ids=["unset", "saved-closed", "saved-open", "connector-closed", "other-connector-unset", "t2-codex-copilot-closed", "every-connector-saved", "strict"],
 )
 def test_an_upgrade_from_1_0_3_says_once_that_outages_now_run(tmp_path: Path, guardrail: str, notice: bool) -> None:
     # GAP-1885 (lead 13:58, failmode's exact sentence): a 1.0.2 or 1.0.3
@@ -7588,7 +7591,9 @@ def test_an_upgrade_from_1_0_3_says_once_that_outages_now_run(tmp_path: Path, gu
     # outage; after the upgrade the default and permissive tiers let them
     # run with a warning (owner decision 2026-10-23). Both installers say so
     # once, after "Upgraded from"; a saved mode (which now wins), the strict
-    # tier, a managed install or an upgrade from 1.0.4 say nothing.
+    # tier, a managed install or an upgrade from 1.0.4 say nothing. A mode
+    # saved for Codex and Copilot only still leaves an unsaved Claude Code
+    # open, so the notice is said (T2 TST-34170).
     sh_py, ps_py = _outage_notice_python()
     assert sh_py == ps_py
     home = tmp_path / ".defenseclaw"

@@ -4379,9 +4379,10 @@ function Complete-StoppedConnectorReconcile {
 }
 
 $OutageOpenNoticePython = @'
-# GAP-1885: "notice" when this config saves no hook fail mode (global or for
-# an active connector) and a per-user connector now lets a gateway outage
-# run (the default and permissive tiers); 1.0.2 and 1.0.3 closed it.
+# GAP-1885: "notice" when an active per-user connector whose hook fail mode
+# this config does not save (for it, or globally) now lets a gateway outage
+# run (the default and permissive tiers); 1.0.2 and 1.0.3 closed it. A mode
+# saved for one connector says nothing about another one.
 try:
     from defenseclaw import config as dc_config
     cfg = dc_config.load()
@@ -4392,9 +4393,10 @@ try:
         for name in names:
             override = guard._connector_override(name)
             if override is not None and str(override.hook_fail_mode or "").strip():
-                saved = True
-        if not saved and any(guard.effective_hook_fail_mode(name) == "open" for name in names):
-            print("notice")
+                continue
+            if not saved and guard.effective_hook_fail_mode(name) == "open":
+                print("notice")
+                break
 except Exception:
     pass
 '@
