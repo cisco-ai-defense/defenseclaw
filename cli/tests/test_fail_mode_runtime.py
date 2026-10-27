@@ -2542,3 +2542,25 @@ def test_a_claude_settings_carrier_is_still_an_input_of_a_render_that_reads_it(
         assert "claude-env-open" in state.drift, state.drift
     else:
         assert "agent-env-unverified" in state.drift, state.drift
+
+
+def test_codex_registration_under_a_custom_home_is_current(monkeypatch, tmp_path) -> None:
+    """GAP-1882: hooks rendered under a custom DEFENSECLAW_HOME (~/dchome)
+    name no "defenseclaw" in their command path and are still DefenseClaw's
+    registration; another program's hooks are not."""
+    data_dir = tmp_path / "dchome"
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    monkeypatch.setattr(fail_mode_runtime, "connector_config_files", lambda *_a, **_k: [str(config)])
+    config.write_text(
+        "[hooks]\n[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\n"
+        f"command = '{data_dir}/hooks/codex-hook.sh --event PreToolUse --hook-contract codex-hooks-v4'\n",
+        encoding="utf-8",
+    )
+    assert fail_mode_runtime._codex_registration_current("", str(data_dir))
+    assert not fail_mode_runtime._codex_registration_current("", str(tmp_path / "other"))
+    config.write_text(
+        "[hooks]\n[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ncommand = '/usr/local/bin/other-hook.sh'\n",
+        encoding="utf-8",
+    )
+    assert not fail_mode_runtime._codex_registration_current("", str(data_dir))

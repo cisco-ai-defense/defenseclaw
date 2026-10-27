@@ -420,7 +420,11 @@ def resolve_connector_fail_mode(
     # Windows Codex registration is a structured event matrix whose native
     # validator below checks the exact command, launcher, contract, policy,
     # trust, and file identities, so the text probe is not used there.
-    elif name == "codex" and not _is_windows() and not _codex_registration_current(workspace):
+    elif (
+        name == "codex"
+        and not _is_windows()
+        and not _codex_registration_current(workspace, str(getattr(cfg, "data_dir", "") or ""))
+    ):
         drift.append("registration-missing")
 
     drift.extend(registration_integrity_drift(cfg, name))
@@ -1234,15 +1238,25 @@ def codex_windows_hook_config_path(cfg: Any) -> str:
     return str(Path(codex_home()) / ("managed_config.toml" if managed else "config.toml"))
 
 
-def _codex_registration_current(workspace: str = "") -> bool:
+def _codex_registration_current(workspace: str = "", data_dir: str = "") -> bool:
+    """Whether Codex's config.toml registers DefenseClaw's hooks.
+
+    The hook commands run the scripts in this install's data directory, so a
+    custom DEFENSECLAW_HOME (``~/dchome/hooks/codex-hook.sh``) names no
+    "defenseclaw" in the path and still is DefenseClaw's registration
+    (GAP-1882).
+    """
     paths = connector_config_files("codex", workspace_dir=workspace)
     if not paths:
         return False
     config_path = Path(paths[0])
     data = _read_small_file(config_path)
-    if data is None:
+    if data is None or "[hooks]" not in data:
         return False
-    return "[hooks]" in data and "defenseclaw" in data.lower()
+    if "defenseclaw" in data.lower():
+        return True
+    hook_dir = os.path.join(os.path.expanduser(data_dir), "hooks") if data_dir.strip() else ""
+    return bool(hook_dir) and os.path.join(hook_dir, "codex-hook.sh") in data
 
 
 def _registration_lock_state(
