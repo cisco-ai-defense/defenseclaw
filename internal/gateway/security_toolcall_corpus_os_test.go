@@ -18,10 +18,12 @@ package gateway
 
 import "testing"
 
-// GAP-2142: NTFS folds case, so on Windows the case-different spelling of the
-// state directory is the state directory and the row scores as a state write.
-// Linux and macOS keep the benign reading.
-func TestToolCallCorpusCaseLookalikeIsStateOnWindowsOnly(t *testing.T) {
+// GAP-2142, GAP-2416: NTFS and APFS fold case, so on Windows and macOS the
+// case-different spelling of the state directory is the state directory and
+// the row scores as a state write (the gateway uses the exact spelling only on
+// Linux).
+// Linux keeps the benign reading.
+func TestToolCallCorpusCaseLookalikeIsStateOffLinux(t *testing.T) {
 	cases := readJSONL[toolCallCorpusCase](t, "toolcall", "corpus.jsonl")
 	var row *toolCallCorpusCase
 	for i := range cases {
@@ -38,7 +40,7 @@ func TestToolCallCorpusCaseLookalikeIsStateOnWindowsOnly(t *testing.T) {
 		route  string
 	}{
 		{"linux", false, "none"},
-		{"darwin", false, "none"},
+		{"darwin", true, "semantic"},
 		{"windows", true, "semantic"},
 	} {
 		got := applyToolCallCorpusOSOverride(*row, tc.goos)
