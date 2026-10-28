@@ -7800,11 +7800,13 @@ def setup_guardrail(
         rows = [
             ("guardrail.connector", f"{connector_label} ({gc.connector})"),
             ("scope", scope_val),
-            ("guardrail.mode", gc.mode),
+            # The values this connector runs with: a guardrail.connectors entry
+            # wins over the top-level keys, as guardrail status shows (GAP-2239).
+            ("guardrail.mode", gc.effective_mode(gc.connector)),
             ("guardrail.port", str(gc.port)),
             *_legacy_guardrail_llm_rows(gc),
             ("guardrail.detection_strategy", _effective_detection_strategy(gc, gc.connector)),
-            ("guardrail.rule_pack", gc.effective_rule_pack() or "default"),
+            ("guardrail.rule_pack", gc.effective_rule_pack(gc.connector) or "default"),
         ]
         if gc.api_base:
             rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
@@ -7812,8 +7814,9 @@ def setup_guardrail(
             truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
             rows.append(("guardrail.block_message", truncated))
         rows.append(("guardrail.hook_fail_mode", _guardrail_summary_hook_fail_mode(app.cfg, gc.connector)))
-        rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
-        rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
+        hilt = gc.effective_hilt(gc.connector)
+        rows.append(("guardrail.hilt.enabled", str(bool(hilt.enabled)).lower()))
+        rows.append(("guardrail.hilt.min_severity", hilt.min_severity or "HIGH"))
     if gc.judge.enabled:
         rows.append(("guardrail.judge.enabled", "true"))
         # GAP-2056: show the judge LLM in use (guardrail.judge.llm layered on

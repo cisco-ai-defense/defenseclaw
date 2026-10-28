@@ -1647,6 +1647,9 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2391", page: "reference/cli.mdx", has: ["they are audit rows with action `config.change.applied` and others."], lacks: ["they are audit rows with action `config-update` and others."] },
   { gap: "GAP-2262", page: "guardrail/unified-llm-key.mdx", section: "Undo", has: ["defenseclaw setup guardrail --non-interactive --detection-strategy regex_only", "Without `--non-interactive` the command starts the full setup wizard"], lacks: ["and run `defenseclaw setup guardrail --detection-strategy regex_only` to turn the judge off."] },
   { gap: "GAP-2392", page: "tui.mdx", section: "Panels", has: ["The quick-action row at the end of Overview lists both as `[G] Gateway` and `[z] AI Discovery`", "The hint line above the status line is not a key list on Overview"], lacks: ["The key row shows both actions at 80 columns."] },
+  { gap: "GAP-2239", page: "policies/defaults.mdx", section: "What `setup guardrail` actually writes", has: ["If `config.yaml` already has an entry for the connector under `guardrail.connectors` (`defenseclaw setup claude-code` or an `init` that picked several agents writes one), the command saves `mode` and `rule_pack` in that entry instead of at the top level. The setup summary and `defenseclaw guardrail status` show the values the connector runs with; `defenseclaw config show --section guardrail` shows where they are saved."] },
+  { gap: "GAP-2224", page: "stories/cursor-secret-exfil.mdx", has: ["✓ cursor gateway outage=open (failClosed=true)", "This is the output in a terminal. Piped to another command or saved to a file, the same lines start with `OK` and `i` instead of the check mark and the info sign."] },
+  { gap: "GAP-2342", page: "get-started/first-run.mdx", has: ["You do not need `init` before `quickstart`.", "If `init` chose no agent and started the gateway, `quickstart --connector <name>` restarts the gateway so it loads the agent and writes its hooks."] },
 ];
 
 function pageSection(name: string, heading?: string): string {
@@ -2003,6 +2006,19 @@ describe('keys set audit row matches the pages (GAP-2391)', () => {
     const exp = source('internal/cli/audit_export.go');
     assert.ok(!exp.includes('(action config-update and others)'), 'audit export help or the --include-activity note names the stored action, not the exported one');
     assert.equal((exp.match(/\(action config\.change\.applied and others\)/g) ?? []).length, 2, 'audit export help and the --include-activity note must name config.change.applied');
+  });
+});
+
+// GAP-2239, GAP-2224, GAP-2342: the code behind the three page sentences.
+describe('setup summary, ASCII markers and the no-connector gateway match the pages (GAP-2239, GAP-2224, GAP-2342)', () => {
+  it('summary uses the connector values, piped output uses OK and i, quickstart restarts a no-connector gateway', () => {
+    const py = source('cli/defenseclaw/commands/cmd_setup.py');
+    assert.ok(py.includes('("guardrail.mode", gc.effective_mode(gc.connector)),') && py.includes('("guardrail.rule_pack", gc.effective_rule_pack(gc.connector) or "default"),'), 'single-connector setup summary no longer prints the connector values: re-check policies/defaults.mdx');
+    const ux = source('cli/defenseclaw/ux.py');
+    assert.ok(ux.includes('"✓": "OK",') && ux.includes('"ℹ": "i",'), 'ASCII markers changed: re-check stories/cursor-secret-exfil.mdx and get-started/install.mdx');
+    const boot = source('cli/defenseclaw/bootstrap.py');
+    assert.ok(boot.includes('if roster is None and cfg.active_connectors() and _running_gateway_has_no_connector(cfg):') && boot.includes('guardrail.get("last_error") == "no connector configured"'), 'first run no longer restarts a gateway that booted with no connector: re-check get-started/first-run.mdx');
+    assert.ok(source('internal/gateway/sidecar.go').includes('s.health.SetGuardrail(StateDisabled, "no connector configured", details)'), 'the gateway no longer reports a no-connector boot on /health: re-check bootstrap._running_gateway_has_no_connector');
   });
 });
 

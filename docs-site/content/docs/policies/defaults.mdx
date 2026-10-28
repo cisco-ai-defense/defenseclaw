@@ -142,6 +142,8 @@ observability: {}
 
 A built-in pack is a name, not a path. `block_at` and `alert_at` stay unset, so the pack's levels apply. `observability: {}` means no optional destination; the local SQLite history still records every log, unredacted. A destination with no redaction policy receives everything under profile `none`.
 
+If `config.yaml` already has an entry for the connector under `guardrail.connectors` (`defenseclaw setup claude-code` or an `init` that picked several agents writes one), the command saves `mode` and `rule_pack` in that entry instead of at the top level. The setup summary and `defenseclaw guardrail status` show the values the connector runs with; `defenseclaw config show --section guardrail` shows where they are saved.
+
 ## Tuning by risk tolerance
 
 ### Block risky plugins at install
