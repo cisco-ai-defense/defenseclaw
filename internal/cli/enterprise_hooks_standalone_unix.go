@@ -640,6 +640,20 @@ type enterpriseHookStandaloneSlot struct {
 	credentialID string
 }
 
+// enterpriseHookStandaloneProductCredentialDigests are the digests of the
+// product credentials an exporter in an account's own agent configuration
+// may carry: the gateway token (replaceable in tests). The foreign cleanup
+// hands them to its as-the-user worker (GAP-2376).
+var enterpriseHookStandaloneProductCredentialDigests = func() []connector.NativeOTLPCredentialDigest {
+	if cfg == nil {
+		return nil
+	}
+	if digest, ok := connector.NativeOTLPCredentialDigestOf(cfg.Gateway.ResolvedToken()); ok {
+		return []connector.NativeOTLPCredentialDigest{digest}
+	}
+	return nil
+}
+
 // runEnterpriseHookReconcileOnceStandaloneUnix is the standalone Unix
 // reconcile. The Secure Client reconcile is untouched.
 func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpriseHookReconcileRun, error) {

@@ -181,6 +181,7 @@ func otlpUnhex(c byte) (byte, bool) {
 // product's.
 func otlpKnownProductTokens(opts SetupOpts, scope OTLPPathTokenScope) []string {
 	known := []string{strings.TrimSpace(opts.OTLPPathToken), strings.TrimSpace(opts.APIToken), strings.TrimSpace(opts.GatewayToken)}
+	known = append(known, opts.knownCredentials...)
 	if opts.DataDir != "" {
 		if token, err := LoadOTLPPathToken(opts.DataDir, scope); err == nil {
 			known = append(known, token)
