@@ -25,6 +25,8 @@ type trustedPOSIXHomeRewrite struct {
 	// tildeOperands maps each rewritten operand to its original home-path
 	// spelling (including HOME parameter forms).
 	tildeOperands map[string]string
+	// homeGlobs is set when a $HOME or ${HOME} pattern was rewritten.
+	homeGlobs bool
 }
 
 // rewriteTrustedPOSIXHomeTilde replaces home-anchored operands of simple
@@ -159,6 +161,19 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 			out.WriteString(activeHome + suffix)
 			last = end
 			rewrite.tildeOperands[activeHome+suffix] = source[start:end]
+			continue
+		}
+		if suffix, ok := homeGlobRewriteWord(word); ok {
+			// `rm -rf $HOME/.defenseclaw/*`: the shell expands HOME and
+			// then the pattern, as for ~/ (GAP-2047).
+			start, end := int(word.Pos().Offset()), int(word.End().Offset())
+			if start < last || end > len(source) {
+				return trustedPOSIXHomeRewrite{}, false
+			}
+			out.WriteString(source[last:start])
+			out.WriteString(activeHome + suffix)
+			last = end
+			rewrite.homeGlobs = true
 			continue
 		}
 		literal, ok := firstLiteral(word)
@@ -319,6 +334,9 @@ func staticHomeRewriteWord(word *syntax.Word) bool {
 	if _, ok := findOptionHomeWord(word); ok {
 		return true
 	}
+	if _, ok := homeGlobRewriteWord(word); ok {
+		return true
+	}
 	for _, part := range word.Parts {
 		switch part.(type) {
 		case *syntax.Lit, *syntax.SglQuoted, *syntax.DblQuoted:
@@ -393,18 +411,54 @@ func bareHomeWord(word *syntax.Word) (string, bool) {
 	return suffix, true
 }
 
+// plainHomeRewriteWord reports a home-anchored word the rewrite writes back
+// unquoted as ActiveHome plus its path. A quoted part ("$HOME/.x/y",
+// "$HOME"/.x) reads the same unquoted only when the path holds no blank,
+// pattern or other shell character, so only such a path is taken
+// (GAP-2047).
 func plainHomeRewriteWord(word *syntax.Word) bool {
-	if _, ok := homeAnchoredLiteralWord(word); !ok {
+	suffix, ok := homeAnchoredLiteralWord(word)
+	if !ok {
 		return false
 	}
+	quoted := false
 	for _, part := range word.Parts {
 		switch part.(type) {
 		case *syntax.Lit, *syntax.ParamExp:
+		case *syntax.DblQuoted, *syntax.SglQuoted:
+			quoted = true
 		default:
 			return false
 		}
 	}
-	return true
+	return !quoted || trustedPOSIXHomeLiteral.MatchString(suffix)
+}
+
+// homeGlobRewriteWord reports an unquoted $HOME or ${HOME} followed by
+// plain literal text that holds a pathname pattern (`$HOME/.defenseclaw/*`)
+// and returns that text. The shell expands HOME first and then the
+// pattern, so ActiveHome plus the same text names the same files.
+func homeGlobRewriteWord(word *syntax.Word) (string, bool) {
+	if word == nil || len(word.Parts) < 2 {
+		return "", false
+	}
+	if parameter, ok := word.Parts[0].(*syntax.ParamExp); !ok || !plainHomeParameter(parameter) {
+		return "", false
+	}
+	var suffix strings.Builder
+	for _, part := range word.Parts[1:] {
+		literal, ok := part.(*syntax.Lit)
+		if !ok {
+			return "", false
+		}
+		suffix.WriteString(literal.Value)
+	}
+	text := suffix.String()
+	if !strings.HasPrefix(text, "/") || !strings.ContainsAny(text, "*?[") ||
+		strings.ContainsAny(text, "\\~\x00$`") {
+		return "", false
+	}
+	return text, true
 }
 
 func firstLiteral(word *syntax.Word) (*syntax.Lit, bool) {

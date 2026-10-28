@@ -102,6 +102,13 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 			if expanded(source) && stateLandingReached(destination, path.Base(source), home, cwd) {
 				return true
 			}
+			// `cp -r /tmp/x/. ~/.defenseclaw/`: the entries of x land in
+			// the destination by their own names.
+			if sourceNamesItsEntries(source) {
+				if tree, root := stateDirectoryOf(destination, home, cwd); tree || root {
+					return true
+				}
+			}
 		}
 		if expanded(destination) {
 			for _, source := range sources {
@@ -125,21 +132,71 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 			}
 		}
 		tree, root := stateDirectoryOf(destination, home, cwd)
-		return tree || root && deletes
+		if tree || root && deletes {
+			return true
+		}
+		if !root {
+			return false
+		}
+		// Into the root itself, each source lands by its name, and the
+		// entries of a `dir/` or `dir/.` source by theirs, which can be
+		// config.yaml or hooks/ (`rsync -a /tmp/x/ ~/.defenseclaw/`).
+		for _, source := range operands[:len(operands)-1] {
+			if strings.HasSuffix(source, "/") || sourceNamesItsEntries(source) ||
+				stateLandingReached(destination, path.Base(source), home, cwd) {
+				return true
+			}
+		}
 	case "git":
 		index := slices.Index(operands, "clean")
 		if index < 0 || !slices.ContainsFunc(options, gitCleanForces) ||
 			slices.ContainsFunc(options, gitCleanDryRun) {
 			return false
 		}
-		for _, operand := range operands[index+1:] {
-			if tree, root := stateDirectoryOf(operand, home, cwd); tree || root ||
-				statePatternReaches(operand, home, cwd) {
+		// `git -C DIR clean` cleans from DIR, and its paths are under DIR.
+		base, ok := gitCleanDirectory(words, home, cwd)
+		if !ok {
+			return false
+		}
+		paths := operands[index+1:]
+		if len(paths) == 0 {
+			tree, root := stateDirectoryOf(base, home, cwd)
+			return tree || root
+		}
+		for _, operand := range paths {
+			if tree, root := stateDirectoryOf(operand, home, base); tree || root ||
+				statePatternReaches(operand, home, base) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// sourceNamesItsEntries reports a copy source spelled `dir/.`: its entries
+// are copied, not the directory.
+func sourceNamesItsEntries(source string) bool {
+	source = strings.TrimRight(source, "/")
+	return source == "." || strings.HasSuffix(source, "/.")
+}
+
+// gitCleanDirectory returns the directory a git clean starts from: the
+// working directory, or the -C directories before the subcommand, each
+// relative to the one before. ok is false for a -C value it cannot place.
+func gitCleanDirectory(words []string, home, cwd string) (string, bool) {
+	base := cwd
+	for index := 0; index < len(words) && words[index] != "clean"; index++ {
+		if words[index] != "-C" || index+1 >= len(words) {
+			continue
+		}
+		index++
+		next, ok := stateHomePath(words[index], home, base)
+		if !ok {
+			return "", false
+		}
+		base = path.Clean(next)
+	}
+	return base, true
 }
 
 func gitCleanForces(option string) bool {

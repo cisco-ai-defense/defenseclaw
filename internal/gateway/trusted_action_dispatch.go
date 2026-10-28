@@ -801,7 +801,7 @@ func withActiveStateTargetMention(
 	if !globbedStateMutation(facts) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
-			!factsHaveFindHandOff(facts) {
+			!factsHaveFindHandOff(facts) && !stateOperandThroughLink(facts, request) {
 			return findings
 		}
 		if !provenStateMutationPath(facts, request) {
@@ -899,6 +899,56 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		}
 		candidate.Resolved = physical
 		if matchesActiveDefenseClawState(projected, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// stateOperandThroughLink reports a changing operand spelled outside the
+// state whose place is in it: a project symlink to the state root as a
+// parent (`rm -rf dclink/installer`), or as the operand itself when a
+// trailing separator makes the kernel follow it (`rm -rf dclink/`). Such a
+// call names no state path, so the mention check alone let it through
+// (GAP-2047); provenStateMutationPath then judges it on the physical
+// target, as it does every other operand.
+func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionRequest) bool {
+	home := facts.ActiveHome
+	if !filepath.IsAbs(home) {
+		return false
+	}
+	resolve := func(value string) (string, bool) {
+		if physical, found := request.ResolvedWriteTargets[value]; found {
+			return physical, true
+		}
+		if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
+			return "", false
+		}
+		return hookpaths.ResolveWriteTarget(value)
+	}
+	root, ok := resolve(filepath.Join(home, ".defenseclaw"))
+	if !ok {
+		root = filepath.Join(home, ".defenseclaw")
+	}
+	inState := func(value string) bool {
+		return value == root || strings.HasPrefix(value, root+string(filepath.Separator))
+	}
+	for _, candidate := range facts.Paths {
+		switch candidate.Access {
+		case actionfacts.PathAccessDelete, actionfacts.PathAccessWrite,
+			actionfacts.PathAccessAppend, actionfacts.PathAccessMetadata:
+		default:
+			continue
+		}
+		value := candidate.Resolved
+		if !filepath.IsAbs(value) || inState(value) {
+			continue
+		}
+		target := filepath.Dir(value)
+		if strings.HasSuffix(candidate.Value, "/") || strings.HasSuffix(candidate.Value, "/.") {
+			target = value
+		}
+		if physical, ok := resolve(target); ok && inState(physical) {
 			return true
 		}
 	}

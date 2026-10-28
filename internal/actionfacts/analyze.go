@@ -228,7 +228,8 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			home, _ := normalizeActiveHome(input.ActiveHome)
 			if rewrite, ok := rewriteTrustedPOSIXHomeTilde(command, home); ok {
 				if resolved := parse(rewrite.source); resolved.status == StatusComplete ||
-					findRewriteKeepsOnlyEmbeddedPartial(resolved) {
+					findRewriteKeepsOnlyEmbeddedPartial(resolved) ||
+					rewrite.homeGlobs && rewriteKeepsOnlyStaticGlobs(resolved) {
 					parsed = resolved
 					// A Windows drive home (GAP-0912) keeps its rewritten
 					// spelling: the POSIX parse cannot resolve a drive path,
@@ -2214,6 +2215,37 @@ func safeToolName(value string) string {
 		return ""
 	}
 	return value
+}
+
+// rewriteKeepsOnlyStaticGlobs reports a home rewrite whose parse is left
+// partial only by static pathname patterns: `rm -rf $HOME/.defenseclaw/*`
+// then has the facts of `rm -rf <home>/.defenseclaw/*`, whose pattern the
+// owners read from StaticGlob, while the HOME spelling had no static
+// spelling at all (GAP-2047).
+func rewriteKeepsOnlyStaticGlobs(resolved parseOutput) bool {
+	if resolved.status != StatusPartial || len(resolved.commands) == 0 {
+		return false
+	}
+	// A pattern operand is a dynamic word, and the command reading it
+	// an unsupported construct, exactly as for the absolute spelling.
+	for _, issue := range resolved.issues {
+		if issue != IssueDynamicWord && issue != IssueUnsupportedConstruct {
+			return false
+		}
+	}
+	globs := 0
+	for _, command := range resolved.commands {
+		for _, argument := range command.Arguments {
+			if !argument.Expands {
+				continue
+			}
+			if argument.StaticGlob == "" {
+				return false
+			}
+			globs++
+		}
+	}
+	return globs != 0
 }
 
 // findRewriteKeepsOnlyEmbeddedPartial reports a home rewrite whose parse is
