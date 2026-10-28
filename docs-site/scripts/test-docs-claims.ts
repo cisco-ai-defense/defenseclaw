@@ -1415,6 +1415,11 @@ describe('Known limits by lead decision (rel-1-0-4 P1 reconcile)', () => {
 // heading of the page; the row reads only that section and its subsections.
 type DocRow = { gap: string; page: string; section?: string; has?: string[]; lacks?: string[] };
 const r105Rows: DocRow[] = [
+  // GH #1100 Windows Remove items (docs pod, 2026-10-28, live on rc.8): the installed CLI uninstall keeps lifecycle.lock, a disconnected session keeps its registrations.
+  { gap: "GH #1100 p0:GAP-0764", page: "enterprise/windows.mdx", section: "Remove", has: ["A plain installed CLI uninstall leaves the lock file and its folder", "`C:\\ProgramData\\Cisco\\DefenseClaw-Lifecycle` from an elevated prompt once no", "not remove a lock an earlier uninstall left."] },
+  { gap: "GH #1100 p0:GAP-0675", page: "enterprise/windows.mdx", section: "Remove", has: ["active (connected) session, running as each user.", "session is disconnected (`query user` shows `Disc`), keep theirs and are named in"] },
+  { gap: "GH #1100 p0:GAP-0675", page: "enterprise/lifecycle.mdx", section: "Uninstall notes", has: ["out, or whose session is disconnected, keep theirs."], lacks: ["from every signed-in user's agent config"] },
+  { gap: "GH #1100 p0:GAP-0675", page: "enterprise/threat-model.mdx", section: "Residual risks", has: ["of signed-out users and users whose session is disconnected"] },
   // GH #1101 reference items (docs pod, 2026-10-28): config limits, block_message refusal, pack manifest re-pin.
   { gap: "GH #1101 p0:GAP-0677", page: "enterprise/configuration.mdx", section: "Where the config lives", has: ["The file may be at most 4 MiB and 65,536 parsed YAML nodes.", "`configuration source exceeds the 4 MiB limit`", "`parsed YAML exceeds the 65,536-node limit`", "move rules into a [custom rule pack](#custom-rule-packs)"], lacks: ["The file is limited to 4 MiB and 65,536 YAML nodes."] },
   { gap: "GH #1101 p0:GAP-0677", page: "enterprise/windows.mdx", section: "2. Write the config", has: ["The file may be at most 4 MiB and 65,536 YAML nodes", "([limits](/docs/enterprise/configuration#where-the-config-lives))"] },
@@ -2498,5 +2503,13 @@ describe('no table row is detached from its table (GAP-2190)', () => {
       });
     }
     assert.deepEqual(bad, []);
+  });
+});
+
+// GH #1100 (p0 GAP-0675): the pages say a disconnected session keeps its registrations because the uninstall warning says so.
+describe('Windows uninstall session wording matches the pages (GH #1100)', () => {
+  it('the no-active-session reason still names a disconnected session', () => {
+    const messages = source('internal/cli/windows_enterprise_messages.go');
+    assert.ok(messages.includes('"had no active (connected) session (signed out, or signed in with a disconnected session)"'), 'windowsEnterpriseNoActiveSession changed: re-check enterprise/windows.mdx Remove, lifecycle.mdx Uninstall notes and threat-model.mdx');
   });
 });

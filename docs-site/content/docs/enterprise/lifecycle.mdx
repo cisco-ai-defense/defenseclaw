@@ -757,8 +757,9 @@ the binaries, so stage the payload again and run its `ensure --payload <dir> --c
 - **Windows per-user registrations.** Acting as a user needs that user's session token, which only
   LocalSystem can obtain. An MDM uninstall runs as LocalSystem and removes DefenseClaw's hooks and
   plugins (Amp, Antigravity, Devin, Hermes, Kiro, OpenCode, and a DefenseClaw Copilot user hook
-  file) from every signed-in user's agent config. An uninstall from an elevated administrator prompt
-  or from Add/Remove Programs removes none, and users who are signed out keep theirs. The result
+  file) from the agent config of every user with an active (connected) session. An uninstall from an
+  elevated administrator prompt or from Add/Remove Programs removes none, and users who are signed
+  out, or whose session is disconnected, keep theirs. The result
   lists them in the `user_registrations_pending` and `user_registrations_failed` warnings. What
   stays is inert; see [Windows: Remove](/docs/enterprise/windows#remove).
 - **Per-user state (Windows).** `PURGE=1` or `--purge`, run as LocalSystem, also removes all of each

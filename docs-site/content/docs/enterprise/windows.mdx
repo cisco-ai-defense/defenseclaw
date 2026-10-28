@@ -872,8 +872,12 @@ those too. The marker key, the Add/Remove Programs entry and a `DisableSelfUpdat
 value the lifecycle wrote are removed, and the lifecycle log stays. A standalone
 Setup uninstall removes the administrator-only
 `C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock` and its directory even
-without `PURGE=1`. The Secure Client profile keeps the lock unless `PURGE=1`. On a
-computer without DefenseClaw, uninstall succeeds and changes nothing.
+without `PURGE=1`. A plain installed CLI uninstall leaves the lock file and its folder
+in place (without `--purge`). They are harmless and the next install reuses them; to remove them, delete
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle` from an elevated prompt once no
+DefenseClaw run is active. The Secure Client profile keeps the lock unless `PURGE=1`.
+On a computer without DefenseClaw, uninstall succeeds and changes nothing, so it does
+not remove a lock an earlier uninstall left.
 
 - A standalone uninstall first runs a read-only check of the hook teardown (guardian, enrollment
   and runtime selectors). If the check refuses, DefenseClaw stays fully installed and the
@@ -890,10 +894,11 @@ computer without DefenseClaw, uninstall succeeds and changes nothing.
 - **Per-user registrations.** Uninstall revokes every enrollment, then removes
   DefenseClaw's own registrations and plugins (Amp, Antigravity, Devin, Hermes,
   Kiro, OpenCode, a Copilot user hook file) from the agent config of users with an
-  active session, running as each user. Acting as a user needs LocalSystem, so an
+  active (connected) session, running as each user. Acting as a user needs LocalSystem, so an
   uninstall from an elevated prompt or Add/Remove Programs removes none and
-  reports `user_registrations_pending`. Signed-out users keep theirs; failures
-  report `user_registrations_failed`. An older Claude Code per-user hook in
+  reports `user_registrations_pending`. Signed-out users, and signed-in users whose
+  session is disconnected (`query user` shows `Disc`), keep theirs and are named in
+  `user_registrations_pending`; failures report `user_registrations_failed`. An older Claude Code per-user hook in
   `%USERPROFILE%\.claude\settings.json` is removed exactly, and a changed one is
   kept with `claude_settings_hook_left`.
 - **`PURGE=1`** also removes each enrolled account's `%USERPROFILE%\.defenseclaw`
@@ -901,7 +906,7 @@ computer without DefenseClaw, uninstall succeeds and changes nothing.
   hooks back), its `.defenseclaw.rollback-<random>` copies, the DefenseClaw
   launchers and binaries in `%USERPROFILE%\.local\bin`, the Claude Code drop-ins,
   `machine-policy.json`, the runtime selectors and the lifecycle lock. An account
-  without an active session keeps its `.defenseclaw` for the registrations that
+  without an active (connected) session keeps its `.defenseclaw` for the registrations that
   stay (`user_registrations_pending` and `per_user_state_remaining` warnings; the
   purge exits `0`). A signed-out account's registry hive is not loaded, so it also keeps its user
   Path entry for `%USERPROFILE%\.local\bin`; that is a warning too, and the entry runs nothing.
