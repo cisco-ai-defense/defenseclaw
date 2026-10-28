@@ -7062,7 +7062,8 @@ _HERMES_PROBE_NOT_CONTAINED = 125
 # The supervisor's exit code when the kernel or a seccomp filter refused the
 # probe's user/PID namespace, so the registered command never ran (GAP-1945:
 # a container seccomp profile, not only the two sysctls). A probe that ran
-# never ends with it: the supervisor returns it only before the namespace.
+# never ends with it: the supervisor returns it only before the namespace,
+# and reports a hook's own exit 123 as 1.
 _HERMES_PROBE_NAMESPACE_REFUSED = 123
 _HERMES_PROOF_NAMESPACE_REFUSED = "this host refuses the user namespace the probe needs (a seccomp profile or sandbox)"
 _HERMES_PROBE_SUPERVISOR = r"""
@@ -7248,7 +7249,9 @@ def main():
         return 125
     if state["ended"]:
         return 124
-    return code
+    # The hook ran: its own 123 is a plain failure, never a refused
+    # namespace (GAP-1945).
+    return 1 if code == 123 else code
 
 
 sys.exit(main())

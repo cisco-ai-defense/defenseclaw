@@ -1084,6 +1084,35 @@ def test_hermes_probe_supervisor_names_a_refused_namespace_and_never_runs_the_ho
 
 
 @pytest.mark.skipif(not _LINUX, reason="Linux probe supervisor")
+def test_hermes_probe_supervisor_reports_a_hook_that_ran_and_exited_123_as_a_plain_failure(tmp_path, monkeypatch):
+    """GAP-1945: 123 is the supervisor's refused-namespace code. A hook that ran
+    and exited 123 is its own failure, not a host without namespaces."""
+    monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_PIPE_WAIT", 0.5)
+    ran = tmp_path / "ran"
+    returncode, _stdout = cmd_doctor._run_hermes_execution_probe(
+        [str(_probe_stub(tmp_path, f": > '{ran}'\nexit 123\n"))],
+    )
+    if not ran.exists():
+        pytest.skip(f"the contained probe did not run on this host (exit {returncode})")
+    assert returncode == 1, returncode
+
+
+@pytest.mark.skipif(not _LINUX, reason="Linux probe supervisor")
+def test_hermes_doctor_fails_a_sealed_hook_that_ran_and_exited_123(tmp_path, monkeypatch):
+    """GAP-1945: a sealed hook whose probe ran and ended 123 failed the proof;
+    Doctor fails it and never names a refused namespace."""
+    script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    ran = tmp_path / "ran"
+    script.write_text(f"#!/bin/sh\n: > '{ran}'\nexit 123\n", encoding="utf-8")
+    monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_PIPE_WAIT", 0.5)
+    row = check()  # seals the edited hook, then Doctor probes it
+    if not ran.exists():
+        pytest.skip("the contained probe did not run on this host")
+    assert row["status"] == "fail", row
+    assert "refuses the user namespace" not in row["detail"], row
+
+
+@pytest.mark.skipif(not _LINUX, reason="Linux probe supervisor")
 def test_hermes_doctor_warns_proof_unavailable_where_a_seccomp_profile_refuses_the_namespace(tmp_path, monkeypatch):
     """GAP-1945: the sysctls allow user namespaces, but a container seccomp profile
     refuses them. Doctor failed 'execution probe could not run' for a sealed,

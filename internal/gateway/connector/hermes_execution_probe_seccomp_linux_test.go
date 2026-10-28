@@ -71,3 +71,48 @@ func TestHermesRegistrationStaysCurrentWhenTheHostRefusesTheProbeNamespace(t *te
 		t.Fatalf("edited script on a host that refuses the probe namespace present=%v err=%v, want absent", present, err)
 	}
 }
+
+// GAP-1945: a sealed hook whose probe RAN and exited 123 (the launcher's code
+// for a refused namespace) failed the proof; it is not current.
+func TestHermesSealedRegistrationWhoseProbeRanAndExited123IsNotCurrent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root needs no user namespace for the probe")
+	}
+	root := testenv.PrivateTempDir(t)
+	configPath := filepath.Join(root, "hermes", "config.yaml")
+	previous, previousCheck := HermesConfigPathOverride, hermesExecutionContainmentUnavailable
+	HermesConfigPathOverride = configPath
+	hermesExecutionContainmentUnavailable = func() string { return "" }
+	t.Cleanup(func() { HermesConfigPathOverride, hermesExecutionContainmentUnavailable = previous, previousCheck })
+
+	opts := SetupOpts{DataDir: filepath.Join(root, "dc")}
+	script := filepath.Join(opts.DataDir, "hooks", "hermes-hook.sh")
+	if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ran := filepath.Join(root, "ran")
+	body := []byte("#!/bin/sh\n: > '" + ran + "'\nexit 123\n")
+	if err := os.WriteFile(script, body, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchHermesHooks(configPath, script, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchHermesAllowlist(filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName),
+		hermesConfiguredHookCommand(script, ""), script); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveHookContractLockEntry(opts.DataDir, HookContractLockEntry{
+		Connector:         "hermes",
+		HookScriptDigests: map[string]string{"hermes-hook.sh": "sha256:" + sha256Hex(body)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	present, err := NewHermesConnector().ownedHookContractPresent(opts)
+	if _, statErr := os.Stat(ran); statErr != nil {
+		t.Skipf("the contained probe did not run on this host: %v", statErr)
+	}
+	if err != nil || present {
+		t.Fatalf("sealed registration whose probe ran and exited 123 present=%v err=%v, want absent", present, err)
+	}
+}
