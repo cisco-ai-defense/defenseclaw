@@ -135,7 +135,7 @@ dev = [
     "freezegun==1.5.5",
     "jsonschema>=4.23.0",
     "ruff==0.15.7",
-    # CVE-2026-114603 (GHSA-xcq7-p3pf-p88h) fixed in 1.45.1.
+    # CVE-2026-114603 (unbounded tracestate parsing) is fixed in 1.45.1.
     "opentelemetry-api>=1.45.1",
     "opentelemetry-sdk>=1.45.1",
 ]
@@ -232,12 +232,6 @@ override-dependencies = [
     # CVE-2026-84377 fixed in 1.91.5; GHSA-g5ff-637f-6q2m fixed in 1.95.0;
     # CVE-2026-114612 fixed in 1.103.1 on the 1.103 line.
     "litellm>=1.103.10,<1.104.0",
-    # CVE-2026-112907/112913/112940 fixed in 4.2.1 (huggingface-hub, through
-    # tokenizers). filelock 4.2.x needs Python 3.11; installers bundle 3.12+.
-    # An override replaces every filelock requirement, so Python 3.10 keeps
-    # huggingface-hub's own floor (no fixed filelock supports 3.10).
-    "filelock>=4.2.1; python_version >= '3.11'",
-    "filelock>=3.10.0; python_version < '3.11'",
     # litellm pins exact transitive versions that conflict with what
     # the scanners (and our own pins) expect. We
     # override to a single compatible version per package — the newer
