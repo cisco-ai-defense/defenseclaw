@@ -872,10 +872,11 @@ func TestWindowsManagedRuntimeGenerationGCRecoversSetupRelaxedHooks(t *testing.T
 		t.Fatalf("publish protected selector without target SID: %v", err)
 	}
 
-	// The classification before a transaction changes nothing: it leaves
-	// the relaxed folder to this retire, reported as untrusted.
-	if err := ClassifyWindowsManagedRuntimeGenerations(fixture.options); !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) {
-		t.Fatalf("classify with a relaxed hooks directory: err=%v, want untrusted", err)
+	// The classification before a transaction changes nothing: it reads the
+	// relaxed folder as it is (nothing refused here) and leaves its repair
+	// to this retire (GAP-1818).
+	if err := ClassifyWindowsManagedRuntimeGenerations(fixture.options); err != nil {
+		t.Fatalf("classify with a relaxed hooks directory: %v", err)
 	}
 	if err := validateWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err == nil {
 		t.Fatal("classify repaired the relaxed hooks directory")
@@ -980,6 +981,103 @@ func TestWindowsManagedRuntimeGenerationGCRecoversASetupRelaxedDataDirectory(t *
 	}
 	if err := validate(); err == nil {
 		t.Fatal("a foreign data directory DACL was rewritten to the canonical one")
+	}
+}
+
+// GAP-1818: the classification Setup runs before an upgrade skipped a root a
+// stopped or running guardian left in its setup shape, so a bundle the new
+// release refuses there was found only by the retire after the commit (1603,
+// journal left, the GAP-0822 symptom). It now reads that exact shape as it is,
+// refuses the same bundle and repairs nothing; any other shape stays
+// untrusted and is left to that retire.
+func TestWindowsManagedRuntimeClassifyRefusesABundleInASetupRelaxedRoot(t *testing.T) {
+	setDACL := func(t *testing.T, path, sddl string) {
+		t.Helper()
+		sd, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, dacl, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		relax   func(dataDir, hookDir string) string
+		refused bool
+	}{
+		{name: "hooks in the setup shape", relax: func(_, hookDir string) string { return hookDir }, refused: true},
+		{name: "data dir in the setup shape", relax: func(dataDir, _ string) string { return dataDir }, refused: true},
+		{name: "hooks in another shape", relax: func(_, hookDir string) string { return hookDir }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withWindowsStandaloneProcess(t)
+			fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+			if err := publishWindowsManagedRuntimeSelector(windowsManagedRuntimeSelector{
+				SchemaVersion: windowsManagedRuntimeGenerationSchema,
+				Connector:     fixture.options.Connector,
+				Targets:       []windowsManagedRuntimeSelectorTarget{},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			hookDir := filepath.Join(fixture.options.DataDir, "hooks")
+			if _, err := ensureWindowsTargetOwnedDirectoryTree(filepath.Dir(fixture.options.DataDir), hookDir, fixture.target); err != nil {
+				t.Fatal(err)
+			}
+			generationID := strings.Repeat("c", 32)
+			data, err := marshalWindowsManagedRuntimeBundle(windowsManagedRuntimeBundle{
+				SchemaVersion: windowsManagedRuntimeGenerationSchema + 1,
+				GenerationID:  generationID, Connector: fixture.options.Connector,
+				TargetSID: fixture.options.TargetSID, DataDir: fixture.options.DataDir,
+				HookExecutable: fixture.options.HookExecutable,
+				GatewayAddr:    "127.0.0.1:18970", GatewayServiceName: "DefenseClawGateway",
+				FailMode: "open", ScopedToken: "test token", HookContractID: "codex-hooks-v1",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, err := windowsManagedRuntimeBundlePath(fixture.options.DataDir, fixture.options.Connector, generationID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := connector.PublishManagedTargetRuntimeFileNoReplace(path, data); err != nil {
+				t.Fatal(err)
+			}
+			if err := ClassifyWindowsManagedRuntimeGenerations(fixture.options); !errors.Is(err, ErrWindowsManagedRuntimeBundleRefused) {
+				t.Fatalf("classify over canonical roots: err=%v, want the bundle refused", err)
+			}
+			relaxed := tc.relax(fixture.options.DataDir, hookDir)
+			sddl := windowsSetupRelaxedDirectorySDDL
+			if !tc.refused {
+				sddl += "(A;OICI;FR;;;WD)"
+			}
+			setDACL(t, relaxed, sddl)
+			if err := validateWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err == nil {
+				t.Fatal("relaxed root validated as canonical")
+			}
+			err = ClassifyWindowsManagedRuntimeGenerations(fixture.options)
+			if tc.refused {
+				if !errors.Is(err, ErrWindowsManagedRuntimeBundleRefused) ||
+					!strings.Contains(err.Error(), "unsupported schema version") {
+					t.Fatalf("classify over a setup-relaxed root: err=%v, want the bundle refused", err)
+				}
+				if !windowsManagedRuntimeDirSetupRelaxed(relaxed, fixture.target) {
+					t.Fatal("classify repaired the setup-relaxed root")
+				}
+			} else if !errors.Is(err, ErrWindowsManagedRuntimeGenerationDirectoryUntrusted) ||
+				errors.Is(err, ErrWindowsManagedRuntimeBundleRefused) {
+				t.Fatalf("classify over another shape: err=%v, want untrusted", err)
+			}
+			if _, err := os.Lstat(path); err != nil {
+				t.Fatalf("classify removed the refused bundle: %v", err)
+			}
+		})
 	}
 }
 
