@@ -107,6 +107,8 @@ value in `Authorization`, `X-DefenseClaw-Token`, `X-DC-Auth`, or an OTLP path
 token) gets 401 on every authenticated route of this API, before any other
 check. Those credentials are valid only on the [hook ingress](#hook-ingress).
 
+Refusals from the authentication, rate-limit and CSRF checks carry a JSON `{"error": ...}` body and `Content-Type: application/json`.
+
 ### CSRF protection
 
 Every non-`GET`/`HEAD` request also requires `X-DefenseClaw-Client` (any
@@ -149,6 +151,8 @@ X-DefenseClaw-Client: cli
 - `user_scoped_credentials.key_ids`: non-secret SHA-256 fingerprints of the per-machine keys the current per-user credentials derive from (the current key, plus a staged or retiring one during rotation). They let the lifecycle check a rotation; they are not the key IDs the listener proof takes, which are the SHA-256 of one user's hook credential.
 
 Profile warnings name configured groups and `DOMAIN\user` selectors, so `/health` gives only counts, `profile_assignment_warning_count` and on the standalone profile `profile_warning_count`, each present only when not zero; `/status` lists the warnings. On Linux and macOS managed installs the hook socket also answers `GET /health` with the same document without peer authorization (root alone also gets `profile_assignment_warnings`, `profile_warnings` and the uids of accounts whose directory lookups fail, which `enterprise linux|macos status` and `verify` read); every other path there keeps peer authorization. This is accepted so every health consumer works without a credential (residual R33 in the enterprise threat model).
+
+While a write to the local event history is failing, the health details carry `event_history_failure`. `event_history_last_failure_at` is the time of the last failed write; once writes recover, it is dated from the recovery of that failure episode, not from its start.
 
 When `openshell.enabled` is `true`, `/health` includes a `sandbox` subsystem:
 
