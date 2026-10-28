@@ -7,6 +7,7 @@ package connector
 
 import (
 	"bytes"
+	"encoding/json"
 	"net"
 	"net/http"
 	"os"
@@ -198,6 +199,11 @@ func runPerUserHookForStop(t *testing.T, c Connector, script string, args []stri
 	}
 	env = append(env, "HOME="+home, "DEFENSECLAW_HOME="+dataDir, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 	env = append(env, extraEnv...)
+	if strings.Contains(strings.Join(extraEnv, " "), "DC_TEST_GATEWAY_STOPPED=1") {
+		if err := os.WriteFile(filepath.Join(dataDir, "gateway.stopped"), []byte("stopped\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if strings.Contains(strings.Join(extraEnv, " "), "DC_TEST_NO_TOKEN=1") {
 		tokens, _ := filepath.Glob(filepath.Join(hooksDir, "*.token"))
 		dotTokens, _ := filepath.Glob(filepath.Join(hooksDir, ".*token"))
@@ -352,6 +358,65 @@ func TestSandboxHooksLetAFailedStopEventThrough(t *testing.T) {
 			if run.exitCode != 0 || strings.TrimSpace(run.stdout) != tc.stdout || !strings.Contains(run.stderr, stopEventNotBlockedLead) {
 				t.Errorf("%s/%s: want the neutral allow %q, got exit %d stdout=%q stderr=%q", tc.script, name, tc.stdout, run.exitCode, run.stdout, run.stderr)
 			}
+		}
+	}
+}
+
+// GAP-0006: Claude Code cannot block a session start, and for an exit 2 it
+// prints the hook's whole command line, whose visible part is the
+// missing-script guard sentence, as a "hook error". A fail-closed per-user
+// Claude Code hook whose gateway is down answers the session start with one
+// plain systemMessage that says this session's prompts and tool calls are
+// blocked and how to resume, and a subagent start with a silent exit 0, as
+// the native hook does (emitPerUserClaudeGatewayDown). The prompt and tool
+// call stay blocked and every failure is still logged fail mode closed.
+func TestPerUserClaudeShellHookSessionStartOutageIsOnePlainSentence(t *testing.T) {
+	const lead = "DefenseClaw is blocking prompts and tool calls in this session"
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{"stopped", []string{"DC_TEST_GATEWAY_STOPPED=1"},
+			lead + " because its gateway is stopped. Run defenseclaw-gateway start to resume protection (defenseclaw-gateway status shows its state)."},
+		{"down", nil, ""},
+	} {
+		env := append([]string{"DEFENSECLAW_FAIL_MODE=closed"}, tc.env...)
+		start := runPerUserHookForStop(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil,
+			`{"hook_event_name":"SessionStart","session_id":"s1","source":"startup"}`, "exit:7", env...)
+		if start.code != 0 {
+			t.Fatalf("%s: SessionStart exit %d stdout=%q stderr=%q, want exit 0 with a systemMessage", tc.name, start.code, start.stdout, start.stderr)
+		}
+		var answer map[string]string
+		if err := json.Unmarshal([]byte(strings.TrimSpace(start.stdout)), &answer); err != nil || len(answer) != 1 {
+			t.Fatalf("%s: SessionStart stdout=%q, want exactly one systemMessage", tc.name, start.stdout)
+		}
+		message := answer["systemMessage"]
+		if !strings.HasPrefix(message, lead) || strings.ContainsAny(message, "`{}|") ||
+			strings.Contains(message, ".defenseclaw/") || strings.Contains(message, "hook script is missing") {
+			t.Fatalf("%s: systemMessage %q, want one plain sentence starting %q", tc.name, message, lead)
+		}
+		if tc.want != "" && message != tc.want {
+			t.Fatalf("%s: systemMessage %q\nwant %q", tc.name, message, tc.want)
+		}
+		if !strings.Contains(start.log, `"fail_mode":"closed"`) {
+			t.Fatalf("%s: SessionStart failure not logged fail mode closed: %s", tc.name, start.log)
+		}
+
+		sub := runPerUserHookForStop(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil,
+			`{"hook_event_name":"SubagentStart","session_id":"s1","agent_id":"a1"}`, "exit:7", env...)
+		if sub.code != 0 || strings.TrimSpace(sub.stdout) != "" || !strings.Contains(sub.log, `"fail_mode":"closed"`) {
+			t.Fatalf("%s: SubagentStart exit %d stdout=%q log=%q, want a silent exit 0 logged fail mode closed", tc.name, sub.code, sub.stdout, sub.log)
+		}
+
+		prompt := runPerUserHookForStop(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil,
+			`{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"hi"}`, "exit:7", env...)
+		if prompt.code != 0 || !strings.Contains(prompt.stdout, `"decision":"block"`) {
+			t.Fatalf("%s: UserPromptSubmit exit %d stdout=%q, want the fail-closed block", tc.name, prompt.code, prompt.stdout)
+		}
+		tool := runPerUserHookForStop(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, claudePreToolUse, "exit:7", env...)
+		if tool.code != 0 || !strings.Contains(tool.stdout, `"permissionDecision":"deny"`) {
+			t.Fatalf("%s: PreToolUse exit %d stdout=%q, want the fail-closed deny", tc.name, tool.code, tool.stdout)
 		}
 	}
 }

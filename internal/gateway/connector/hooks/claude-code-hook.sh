@@ -461,12 +461,19 @@ claude_fail_closed_decision() {
         '{hookSpecificOutput:{hookEventName:"PermissionRequest",decision:{behavior:"deny",message:$r}}}')" || return 1 ;;
     UserPromptSubmit|UserPromptExpansion)
       out="$(_dc_jq -cn --arg r "$reason" '{decision:"block",reason:$r}')" || return 1 ;;
+    SessionStart)
+      # Claude Code cannot block a session start: an exit 2 there only shows
+      # the hook's whole command line, guard clause included, as a hook error
+      # (GAP-0006). Say instead, as the native hook does on Windows, that
+      # this session's prompts and tool calls are blocked and why.
+      out="$(_dc_jq -cn --arg m "DefenseClaw is blocking prompts and tool calls in this session${reason#DefenseClaw blocked this}" \
+        '{systemMessage:$m}')" || return 1 ;;
     *) return 1 ;;
   esac
   # Without jq or python3 the fallback reader cannot build this object and
   # prints "null": that is no decision, so the caller's exit 2 blocks instead.
   case "$out" in
-    "{"*deny*|"{"*block*) printf '%s\n' "$out" ;;
+    "{"*deny*|"{"*block*|"{"*systemMessage*) printf '%s\n' "$out" ;;
     *) return 1 ;;
   esac
 }
@@ -493,6 +500,12 @@ claude_fail_closed_decision() {
       printf '%s\n' "$blocked"
       exit 0
     }
+    # A subagent start cannot be blocked either and has nothing to show: an
+    # exit 2 would only print the hook command line (GAP-0006; the native
+    # hook exits 0 there too, GAP-0203). The failure is in hook-failures.jsonl.
+    case "$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" in
+      SubagentStart) exit 0 ;;
+    esac
 {{end}}    exit 2
   fi
 {{if not .Sandbox}}  # Claude Code does not show stderr of a hook that exits 0: say on screen
