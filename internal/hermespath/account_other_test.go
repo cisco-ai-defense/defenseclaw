@@ -220,3 +220,29 @@ func TestMacOSProcessHelper(t *testing.T) {
 	}
 	time.Sleep(time.Minute)
 }
+
+// GAP-2374: a directory account's home holds an "@" (/home/user@domain).
+// A value naming that home through $HOME, ~ or a literal path resolves; it
+// is not a reference a service cannot evaluate. Real references still
+// cannot be resolved.
+func TestExpandAccountHomeResolvesADirectoryAccountsHome(t *testing.T) {
+	home := "/home/dcad-eng1@dclab.test"
+	for value, want := range map[string]string{
+		"$HOME/.hermes":                home + "/.hermes",
+		"${HOME}/.hermes":              home + "/.hermes",
+		"@{HOME}/.hermes":              home + "/.hermes",
+		"~/.hermes":                    home + "/.hermes",
+		`"` + home + `/.hermes-other"`: home + "/.hermes-other",
+		home + "/.hermes-other":        home + "/.hermes-other",
+		"/srv/hermes":                  "/srv/hermes",
+		"$XDG_DATA_HOME/hermes":        "",
+		"@{XDG_DATA_HOME}/hermes":      "",
+		"`hermes-home`":                "",
+		"~other/.hermes":               "",
+		"relative/.hermes":             "",
+	} {
+		if got := expandAccountHome(value, home); got != want {
+			t.Errorf("expandAccountHome(%q) = %q, want %q", value, got, want)
+		}
+	}
+}

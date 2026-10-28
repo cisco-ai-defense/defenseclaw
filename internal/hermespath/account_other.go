@@ -216,19 +216,27 @@ func environmentFileEvidence(path, userHome string, pam bool) ([]homeEvidence, e
 
 // expandAccountHome resolves an environment file value: quotes are
 // removed and the account's home stands for $HOME, ${HOME}, @{HOME} and a
-// leading ~. Any other reference cannot be resolved ("").
+// leading ~. Any other reference cannot be resolved (""). The reference
+// check reads the value as written, not the expanded home: a directory
+// account's home such as /home/user@domain holds an "@", so every value of
+// such an account, $HOME/.hermes included, was reported as one a service
+// cannot resolve (GAP-2374). A literal "@" in a path is not a reference;
+// pam_env's @{NAME} is.
 func expandAccountHome(value, userHome string) string {
 	value = strings.TrimSpace(value)
 	if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
 		value = value[1 : len(value)-1]
 	}
-	for _, reference := range []string{"${HOME}", "@{HOME}", "$HOME"} {
-		value = strings.ReplaceAll(value, reference, userHome)
-	}
-	if value == "~" || strings.HasPrefix(value, "~/") {
+	written := value
+	if written == "~" || strings.HasPrefix(written, "~/") {
+		written = written[1:]
 		value = userHome + value[1:]
 	}
-	if strings.ContainsAny(value, "$@`~") {
+	for _, reference := range []string{"${HOME}", "@{HOME}", "$HOME"} {
+		written = strings.ReplaceAll(written, reference, "")
+		value = strings.ReplaceAll(value, reference, userHome)
+	}
+	if strings.ContainsAny(written, "$`~") || strings.Contains(written, "@{") {
 		return ""
 	}
 	return absoluteHome(value)

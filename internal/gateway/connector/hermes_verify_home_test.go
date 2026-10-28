@@ -468,3 +468,66 @@ func stubHermesAdmissionInstalledVersion(t *testing.T) {
 	hermesInstalledVersionReader = func(string) (string, error) { return hermesAdmissionTestRawVersion, nil }
 	t.Cleanup(func() { hermesInstalledVersionReader = previous })
 }
+
+// GAP-2374: the managed Linux and macOS guardian verifies each account in a
+// worker that runs as that account, so the account home is the process's
+// own home. A persistent HERMES_HOME redirect of the account (its
+// environment.d, or a redirect the DefenseClaw hooks recorded) still fails
+// managed verification there. A per-user check of its own home is
+// unchanged: the HERMES_HOME of its environment decides which home it
+// checks.
+func TestManagedHermesVerifyAsTheAccountFailsOnAPersistentRedirect(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows resolves the account's persistent environment for every check")
+	}
+	previousOverride, previousResolver := HermesConfigPathOverride, hermesConfigPathResolver
+	HermesConfigPathOverride = ""
+	t.Cleanup(func() { HermesConfigPathOverride, hermesConfigPathResolver = previousOverride, previousResolver })
+	root := testenv.PrivateTempDir(t)
+	t.Cleanup(hermespath.OverrideAccountEnvironmentForTest(filepath.Join(root, "system")))
+	home := filepath.Join(root, "home", "eng1")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("HERMES_HOME", "")
+	hermesConfigPathResolver = func() string { return filepath.Join(home, ".hermes", "config.yaml") }
+	other := filepath.Join(home, ".hermes-other")
+	evidence := []struct{ name, file, body string }{
+		{"environment.d", filepath.Join(home, ".config", "environment.d", "x.conf"), "HERMES_HOME=" + other + "\n"},
+		{"recorded redirect", filepath.Join(home, ".defenseclaw", "foreign-hook-env.json"),
+			`{"v":1,"connectors":{"hermes":[{"vars":{"HERMES_HOME":"` + other + `"}}]}}`},
+	}
+	dataDir := filepath.Join(home, ".defenseclaw")
+	managed := SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
+	perUser := SetupOpts{DataDir: dataDir}
+	if err := WithUserHomeDir(home, func() error {
+		if !isProcessUserHome(home) {
+			t.Fatalf("fixture: %s must be the process home", home)
+		}
+		if _, err := hermesVerifiedConfigPath(managed); err != nil {
+			t.Fatalf("managed verify with no redirect = %v; want verified", err)
+		}
+		for _, tc := range evidence {
+			if err := os.MkdirAll(filepath.Dir(tc.file), 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(tc.file, []byte(tc.body), 0o600); err != nil {
+				return err
+			}
+			_, err := hermesVerifiedConfigPath(managed)
+			if err == nil || !strings.Contains(err.Error(), "not verified") || !strings.Contains(err.Error(), "HERMES_HOME unproven") || !strings.Contains(err.Error(), other) {
+				t.Errorf("%s: managed verify as the account = %v; want not verified naming %s", tc.name, err, other)
+			}
+			if _, err := hermesVerifiedConfigPath(perUser); err != nil {
+				t.Errorf("%s: per-user verify of its own home = %v; want unchanged (verified)", tc.name, err)
+			}
+			if err := os.Remove(tc.file); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
