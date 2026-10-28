@@ -1308,7 +1308,7 @@ const knownLimitEntries = [
     from: ['connectors/codex.mdx', 'connectors/codex.mdx'],
   },
   { gaps: 'GAP-1110', section: 'Local Splunk', phrases: ['works only with an x86_64 Docker engine', 'published for x86_64 (amd64) only', 'This is a Splunk image limit.', '/docs/observability/splunk#before-you-start'], from: [] },
-  { gaps: 'GAP-1565', section: 'Upgrade and policy limits', phrases: ['**Restored hook records on managed macOS:**', '`hook_contract_lock.json`', 'the guardian and gateway rewrite them at the next check', 'compare the hook commands, not the file bytes'], from: [] },
+  { gaps: 'GAP-1565', section: 'Upgrade and policy limits', phrases: ['**Restored hook records on managed macOS:**', '`hook_contract_lock.json`', 'the guardian rewrites, within seconds, the records that no longer match the live registration', 'compare the hook commands, not the file bytes'], from: [] },
   { gaps: 'GAP-0999', section: 'Sandboxes', phrases: ['**Raw OpenShell during a gateway restart:**', 'OpenShell has no admission barrier that raw clients honor', 'one started after the last check is ended by the restart', 'This is an OpenShell limit.', '/docs/sandboxes/guide#a-raw-openshell-sandbox-stops-a-restart-or-rollback'], from: [] },
   { gaps: 'GAP-1177', section: 'Sandboxes', phrases: ['**No network cutoff for a contained MicroVM:**', 'the VM stays reported as unprotected and new DefenseClaw runs are refused', 'OpenShell has no VM pause or network-off operation', 'This is an OpenShell and platform limit.', '/docs/sandboxes/guide#a-contained-vm-has-no-confirmed-network-withdrawal'], from: [] },
   // Known issues moved to 1.0.5 by the owner decision of 2026-10-25 10:40 (KNOWN-ISSUES-1.0.4.md).
@@ -1666,6 +1666,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2051", page: "get-started/windows/telemetry-security.mdx", has: ["OpenCode's managed plugin also grant access only to the user (or `OWNER RIGHTS`) and SYSTEM", "`judge_bodies.db`", "also grant Administrators"], lacks: ["readable by the user, Administrators, and SYSTEM, and so is OpenCode's managed"] },
   { gap: "GAP-1766", page: "enterprise/troubleshooting.mdx", has: ["On Linux and macOS `status` and `verify` show the same condition as `policy.applied: false` and do not warn. On Windows `status` warns `policy_not_applied` with the Setup `/repair` next step, `security_complete` is `false`, and `verify` fails (exit `1603`)."], lacks: ["computes to. The message gives both and says the gateway applies the config on its next reload. `status` and `verify` show the same condition"] },
   { gap: "GAP-1766", page: "enterprise/troubleshooting.mdx", has: ["`policy.last_reload_error` and `policy.applied: false` say the same. `verify` fails with this code (exit `1603`)."] },
+  { gap: "GAP-2099", page: "support-matrix.mdx", has: ["the guardian rewrites, within seconds, the records that no longer match the live registration", "Records that still match stay byte for byte as restored."], lacks: ["the guardian and gateway rewrite them at the next check", "the running guardian rewrites them within minutes"] },
 ];
 
 function pageSection(name: string, heading?: string): string {
