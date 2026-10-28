@@ -74,6 +74,12 @@ $moduleText = [IO.File]::ReadAllText($modulePath)
 if ($moduleText -notlike '*$script:DefenseClawMdmRotationJournalKept = (*kept the MDM kit credential rotation journal*') {
     $failures.Add('a plain uninstall does not record the journal it keeps')
 }
+# A standalone uninstall sets $Purge itself (it removes StateRoot), so only the
+# requested purge (the per-user flag) may remove the journal (GAP-1913 live
+# red: a plain Setup /uninstall tried to remove it).
+if ($moduleText -notlike '*$purgeRequested = if (Test-DefenseClawStandaloneProfile) {*[bool]$script:DefenseClawUninstallPurgeUserState*if ($purgeRequested) {*Remove-DefenseClawMdmRotationJournal -Purge*') {
+    $failures.Add('a plain standalone uninstall would remove the journal: the journal purge does not follow the requested purge')
+}
 
 if ($failures.Count -gt 0) {
     foreach ($failure in $failures) {

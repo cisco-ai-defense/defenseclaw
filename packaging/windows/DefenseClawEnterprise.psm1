@@ -39493,8 +39493,16 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             # plain uninstall keeps it and says so. The note also goes into
             # the result (mdm_rotation_journal_kept, read by
             # install-enterprise.ps1), so the Setup and CLI JSON name a kept
-            # or left journal, not only the warning stream.
-            if ($Purge) {
+            # or left journal, not only the warning stream. A standalone
+            # uninstall always runs with $Purge (it removes StateRoot), so
+            # the purge the administrator asked for is the per-user flag.
+            $purgeRequested = if (Test-DefenseClawStandaloneProfile) {
+                [bool]$script:DefenseClawUninstallPurgeUserState
+            }
+            else {
+                [bool]$Purge
+            }
+            if ($purgeRequested) {
                 Remove-DefenseClawMdmRotationJournal -Purge
             }
             elseif ([IO.Directory]::Exists([IO.Path]::Combine($script:ProgramData, 'Cisco\DefenseClaw-MDM\rotation'))) {
