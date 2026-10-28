@@ -1570,6 +1570,102 @@ func TestStandaloneReconcileManagedCodexFeatureChangeQueuesRepair(t *testing.T) 
 	}
 }
 
+// Machine policy pins Codex hooks for every user, so a managed macOS
+// enumerator enrolls an account only for its per-user connector (Hermes) and
+// lists no Codex row. The account's own `codex features disable hooks` must
+// still be undone, or Codex refuses every project trust write (GAP-0791).
+func TestStandaloneReconcileRemovesTheCodexFeatureKeyForAnAccountWithoutACodexRow(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	f.writeManifest(t, enterprisehooks.ManifestTarget{User: "alice", Connector: "amp"})
+	configDir := filepath.Join(alice, ".codex")
+	configPath := filepath.Join(configDir, "config.toml")
+	previousSet, previousCovered := enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered
+	t.Cleanup(func() {
+		enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered = previousSet, previousCovered
+	})
+	enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} { return map[string]struct{}{"codex": {}} }
+	covered := true
+	enterpriseHookStandaloneMachinePolicyCovered = func(name string) (bool, error) { return name == "codex" && covered, nil }
+	codexRepairs := func() int {
+		n := 0
+		for _, request := range f.requests {
+			for _, target := range request.Targets {
+				if target.Mode == "repair_managed_codex_feature" {
+					if target.Options.ConnectorName != "codex" || target.Options.UserHome != alice || target.Options.OwnerUID != uid {
+						t.Fatalf("codex feature repair names the wrong account: %+v", target)
+					}
+					n++
+				}
+			}
+		}
+		return n
+	}
+
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	if len(run.Rows) != 1 || run.Rows[0].Connector != "amp" || !run.Rows[0].OK {
+		t.Fatalf("the repair must add no row and keep the per-user row: %+v", run.Rows)
+	}
+	if got := codexRepairs(); got != 1 {
+		t.Fatalf("codex feature repairs queued = %d, want 1 for the enrolled account", got)
+	}
+	if !slices.Contains(run.WatchDirs, configDir) || !slices.Contains(run.WatchSharedFiles, configPath) {
+		t.Fatalf("a later codex features disable hooks will not start a pass: dirs=%v shared=%v", run.WatchDirs, run.WatchSharedFiles)
+	}
+
+	// Machine policy that does not pin Codex hooks: the key is the user's.
+	f.requests = nil
+	covered = false
+	if _, err := runEnterpriseHookReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := codexRepairs(); got != 0 {
+		t.Fatalf("codex feature repair queued without covered Codex machine policy: %d", got)
+	}
+}
+
+// An account the manifest also enrolls for Codex gets the repair once.
+func TestStandaloneReconcileQueuesTheCodexFeatureRepairOncePerAccount(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	f.writeManifest(t,
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "codex"},
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "amp"},
+	)
+	previousSet, previousCovered := enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered
+	t.Cleanup(func() {
+		enterpriseHookStandaloneMachinePolicySet, enterpriseHookStandaloneMachinePolicyCovered = previousSet, previousCovered
+	})
+	enterpriseHookStandaloneMachinePolicySet = func() map[string]struct{} { return map[string]struct{}{"codex": {}} }
+	enterpriseHookStandaloneMachinePolicyCovered = func(name string) (bool, error) { return name == "codex", nil }
+	run, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireLedgerOrStateTrust(t, run.StateErr)
+	n := 0
+	for _, request := range f.requests {
+		for _, target := range request.Targets {
+			if target.Mode == "repair_managed_codex_feature" {
+				n++
+			}
+		}
+	}
+	if n != 1 || len(run.Rows) != 2 {
+		t.Fatalf("codex feature repairs = %d (want 1), rows = %+v", n, run.Rows)
+	}
+}
+
 // A home that could be inspected when its target was protected and now
 // refuses the guardian (for example a filesystem the user mounted over it)
 // is a failure; staying pending stopped every repair for that user.
