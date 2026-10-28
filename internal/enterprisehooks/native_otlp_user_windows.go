@@ -93,8 +93,8 @@ var windowsNativeOTLPWarn = func(message string) {
 // check, and an exporter on a share, is a warning (windowsNativeOTLPWarn).
 // The error names fields and sources, never values or paths. Verify is
 // read-only and never impersonates.
-func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, sid *windows.SID) error {
-	_, err := windowsManagedUserNativeOTLPCheck(connectorName, home, dataDir, sid)
+func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, sid *windows.SID, served ...string) error {
+	_, err := windowsManagedUserNativeOTLPCheck(connectorName, home, dataDir, sid, served...)
 	return err
 }
 
@@ -102,13 +102,17 @@ func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, sid
 // that also returns what the row reports: connector.AgentConfigNativeOTLPUnchecked
 // when a configuration reaches a file the account does not own (GAP-0929),
 // which the status and verify name with its remedy, else "".
-func windowsManagedUserNativeOTLPCheck(connectorName, home, dataDir string, sid *windows.SID) (string, error) {
+//
+// served are the addresses the managed gateway serves (API, guardrail
+// proxy): an exporter with the managed orphan shape on any other loopback
+// port is the product's (GAP-0836, connector.UserNativeOTLPMarkedOrphanIn).
+func windowsManagedUserNativeOTLPCheck(connectorName, home, dataDir string, sid *windows.SID, served ...string) (string, error) {
 	if _, ok := windowsNativeOTLPRoots[connectorName]; !ok {
 		return "", nil
 	}
-	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
+	opts := windowsManagedNativeOTLPOpts(dataDir, served)
 	var residue, onShare []string
-	founds, notOwned, _ := windowsManagedUserNativeOTLPResidue(connectorName, sid, home, dataDir, readWindowsAccountConfig, false)
+	founds, notOwned, _ := windowsManagedUserNativeOTLPResidue(connectorName, sid, home, dataDir, readWindowsAccountConfig, false, served...)
 	report := ""
 	if notOwned {
 		report = connector.AgentConfigNativeOTLPUnchecked
@@ -145,10 +149,20 @@ func windowsManagedUserNativeOTLPCheck(connectorName, home, dataDir string, sid 
 }
 
 // windowsNativeOTLPFound is a configuration that keeps the exporter: its
-// label, the final path read and the exporter entries.
+// label, the final path read and the exporter entries; marked reports one
+// only the managed orphan shape proves, with data the bytes read.
 type windowsNativeOTLPFound struct {
 	label, final string
 	names        []string
+	marked       bool
+	data         []byte
+}
+
+// windowsManagedNativeOTLPOpts are the SetupOpts every managed native OTLP
+// check and take-back judges with: the managed orphan shape on (GAP-0836,
+// LEAD DECISION 05:36 option (a)) with the addresses the gateway serves.
+func windowsManagedNativeOTLPOpts(dataDir string, served []string) connector.SetupOpts {
+	return connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true, ManagedMarkedOrphanExporters: true, ManagedServedAddrs: served}
 }
 
 // windowsManagedUserNativeOTLPResidue resolves the account's configurations
@@ -166,13 +180,14 @@ func windowsManagedUserNativeOTLPResidue(
 	home, dataDir string,
 	read func(string, *windows.SID, string) ([]byte, string, error),
 	takeBack bool,
+	served ...string,
 ) (found []windowsNativeOTLPFound, notOwned bool, unchecked []string) {
 	configs, problems := windowsManagedUserNativeOTLPConfigs(connectorName, sid, home, dataDir)
 	for _, problem := range problems {
 		windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: inspect %s native OTLP settings: %v", connectorName, problem))
 		unchecked = append(unchecked, "a configuration folder could not be resolved")
 	}
-	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
+	opts := windowsManagedNativeOTLPOpts(dataDir, served)
 	backup, err := readWindowsAccountFile(filepath.Join(dataDir, connector.UserNativeOTLPBackupName(connectorName)), sid, home)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		// Without the backup an operator entry cannot be told from
@@ -204,11 +219,48 @@ func windowsManagedUserNativeOTLPResidue(
 			unchecked = append(unchecked, config.label+" could not be parsed")
 			continue
 		}
+		if !takeBack {
+			// Option (b): an exporter with DefenseClaw markers that nothing
+			// proves is the product's stays, and Verify names it.
+			if kept := connector.UserNativeOTLPMarkedKeptIn(connectorName, data, backup, opts); len(kept) > 0 {
+				windowsNativeOTLPWarn(fmt.Sprintf(
+					"enterprise hooks: %s: %s keeps %s with DefenseClaw x-defenseclaw-* headers that this install cannot prove are its own, "+
+						"so it is kept; if the account did not add it, remove those entries as that user (the agent sends its telemetry there)",
+					connectorName, config.label, strings.Join(kept, ", ")))
+			}
+		}
 		if len(names) > 0 {
-			found = append(found, windowsNativeOTLPFound{label: config.label, final: final, names: names})
+			found = append(found, windowsNativeOTLPFound{label: config.label, final: final, names: names,
+				marked: connector.UserNativeOTLPMarkedOrphanIn(connectorName, data, opts), data: data})
 		}
 	}
 	return found, notOwned, unchecked
+}
+
+// keepWindowsNativeOTLPCopy writes data (the configuration as read) beside
+// final with connector.NativeOTLPMarkedOrphanBackupSuffix, never over an
+// existing file, and returns its path. It runs as the account.
+func keepWindowsNativeOTLPCopy(final string, data []byte) (string, error) {
+	path := final + connector.NativeOTLPMarkedOrphanBackupSuffix
+	for attempt := 0; ; attempt++ {
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, os.ErrExist) && attempt < 8 {
+			path = fmt.Sprintf("%s.%d%s", final, attempt+1, connector.NativeOTLPMarkedOrphanBackupSuffix)
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		_, err = file.Write(data)
+		if closeErr := file.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			_ = os.Remove(path)
+			return "", err
+		}
+		return path, nil
+	}
 }
 
 // windowsNativeOTLPUncheckable is the warning for a configuration the check
@@ -637,12 +689,12 @@ func windowsHandleFinalPath(handle windows.Handle) (string, error) {
 // with an earlier per-user install to take back, keeps the take-back-pending
 // marker; it is cleared only once every configuration was checked and none
 // keeps an exporter (GAP-1839, GAP-1840, GAP-2095).
-func removeWindowsManagedUserNativeOTLPAsTarget(connectorName string, sid *windows.SID, home, dataDir string) {
+func removeWindowsManagedUserNativeOTLPAsTarget(connectorName string, sid *windows.SID, home, dataDir string, served ...string) {
 	if _, ok := windowsNativeOTLPRoots[connectorName]; !ok {
 		return
 	}
-	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
-	founds, _, unchecked := windowsManagedUserNativeOTLPResidue(connectorName, sid, home, dataDir, openWindowsAccountFile, true)
+	opts := windowsManagedNativeOTLPOpts(dataDir, served)
+	founds, _, unchecked := windowsManagedUserNativeOTLPResidue(connectorName, sid, home, dataDir, openWindowsAccountFile, true, served...)
 	var kept []string
 	for _, found := range founds {
 		if windowsShareFinalPath(found.final) {
@@ -652,10 +704,32 @@ func removeWindowsManagedUserNativeOTLPAsTarget(connectorName string, sid *windo
 			kept = append(kept, found.label+" is on a network share")
 			continue
 		}
+		copyPath := ""
+		if found.marked {
+			// Only its markers and port prove this exporter, so the file is
+			// kept as it was before it is edited (GAP-0836).
+			path, err := keepWindowsNativeOTLPCopy(found.final, found.data)
+			if err != nil {
+				windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: %s: keep a copy of %s before removing its native OTLP exporter: %v",
+					connectorName, found.label, err))
+				kept = append(kept, found.label+" could not be copied before the edit")
+				continue
+			}
+			copyPath = path
+		}
 		if _, err := connector.RemoveUserNativeOTLPAt(connectorName, found.final, opts); err != nil {
 			windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: remove %s native OTLP exporter from an earlier per-user install (%s): %v",
 				connectorName, found.label, err))
 			kept = append(kept, found.label+" could not be edited")
+			continue
+		}
+		if copyPath != "" {
+			windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: %s: removed the native OTLP exporter of an earlier per-user install from %s "+
+				"(DefenseClaw markers, a loopback port the managed gateway does not serve: %s); a copy of the file is beside it",
+				connectorName, found.label, strings.Join(found.names, ", ")))
+			if err := connector.RecordNativeOTLPMarkedOrphanRemoved(dataDir, connectorName, copyPath); err != nil {
+				windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: %s: the removal could not be recorded for status and verify: %v", connectorName, err))
+			}
 		}
 	}
 	credential, _ := connector.UserNativeOTLPCredentialResidue(connectorName, opts)

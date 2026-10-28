@@ -58,6 +58,9 @@ func enterpriseHookAgentConfigNotice(result enterprisehooks.InstallResult) strin
 	if connector.NativeOTLPTakeBackPending(result.DataDir, result.Connector) {
 		return connector.AgentConfigNativeOTLPTakeBackPending
 	}
+	if connector.NativeOTLPMarkedOrphanRemoved(result.DataDir, result.Connector) {
+		return connector.AgentConfigNativeOTLPMarkedRemoved
+	}
 	return ""
 }
 
