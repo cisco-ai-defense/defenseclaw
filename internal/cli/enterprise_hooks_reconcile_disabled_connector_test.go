@@ -65,7 +65,12 @@ func TestEnterpriseHookReconcileNeverRepairsARowOfADisabledConnector(t *testing.
 	previousVerifier, previousInstaller := enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller
 	previousSession, previousCleanup := enterpriseHookReconcileSessionAvailable, enterpriseForeignHookCleanup
 	previousEnabled := enterpriseHookReconcileConnectorEnabled
+	// The guardian state folder is a temp folder: on Windows its ownership
+	// would need the gateway service account, which this test does not run as.
+	previousOwnership := enterpriseHookAuthorizationOwnershipSetter
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
 	t.Cleanup(func() {
+		enterpriseHookAuthorizationOwnershipSetter = previousOwnership
 		enterpriseHookManifest, enterpriseHookAPIAddr, enterpriseHookProxyAddr = previousManifest, previousAPI, previousProxy
 		enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller = previousVerifier, previousInstaller
 		enterpriseHookReconcileSessionAvailable, enterpriseForeignHookCleanup = previousSession, previousCleanup

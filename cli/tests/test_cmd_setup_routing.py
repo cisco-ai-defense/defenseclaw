@@ -21,8 +21,11 @@ def routing_app():
     app, tmp_dir, db_path = make_app_context()
     saved: list[bool] = []
     app.cfg.save = lambda: saved.append(True)  # type: ignore[method-assign]
+    # The rows below are the supported-host behaviour; the native Windows
+    # refusal (GAP-2260) has its own rows that patch this to True.
     try:
-        yield app, saved
+        with patch("defenseclaw.commands.cmd_setup._routing_unsupported_on_host", return_value=False):
+            yield app, saved
     finally:
         cleanup_app(app, db_path, tmp_dir)
 
