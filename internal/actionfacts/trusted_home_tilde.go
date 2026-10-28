@@ -210,11 +210,13 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 // reads HOME, USER or LOGNAME does not change them; a home spelling is not
 // resolved when it follows a statement that names them as written text: an
 // assignment of the name, a for/select loop over it, ${HOME:=..},
-// arithmetic naming it, a declaration naming it, or code or a variable
-// setter (eval, source, $CMD, read, printf -v, ...) whose words name it.
-// Code that may change them out of sight (source ./env.sh, eval "$X",
-// $CMD) does not stop the target from being judged as the active home
-// (GAP-2328). It returns false when there is no such target, when the command
+// arithmetic naming it, a declaration naming it, a variable setter whose
+// operand is the name (read HOME, printf -v USER, unset LOGNAME), or eval
+// or trap text that parses to one of those. Code that may change them out
+// of sight (source ./env.sh, eval "$X", $CMD), a positional word of such
+// code (source ./env.sh HOME, $CMD HOME) and text that only reads them
+// (eval 'echo $HOME') do not stop the target from being judged as the
+// active home (GAP-2328). It returns false when there is no such target, when the command
 // does not parse, or when it declares a function. On a Windows home only
 // the drive paths below the home are returned (C:/Users/<u>/...): active
 // state lives below the home.
@@ -290,15 +292,13 @@ func ShellRedirectTargets(command, activeHome string) ([]string, bool) {
 				if len(cmd.Args) == 0 {
 					return true
 				}
-				// Code run from text, a file or an expanded program word, or
-				// a builtin that sets variables, may change HOME only out of
-				// sight; a later home spelling is still judged as the active
-				// home (if HOME did change, the shell writes below another
-				// home, which is no benign project write either). Only text
-				// that names HOME, USER or LOGNAME keeps the skip (GAP-2328).
-				program := projectPOSIXWord(cmd.Args[0])
-				if (program.Expands || redirectHomeChangingBuiltin(program.Value, cmd.Args[1:])) &&
-					literalHomeNameMention(cmd) {
+				// Code run from text, a file or an expanded program word may
+				// change HOME only out of sight; a later home spelling is
+				// still judged as the active home (if HOME did change, the
+				// shell writes below another home, which is no benign
+				// project write either). Only words that write HOME, USER or
+				// LOGNAME keep the skip (GAP-2328).
+				if homeVariableWriteCall(cmd, 0) {
 					changed(end)
 				}
 			}
@@ -446,9 +446,9 @@ func homeNameMention(text string) bool {
 
 var homeNameToken = regexp.MustCompile(`(^|[^A-Za-z0-9_])(HOME|USER|LOGNAME)([^A-Za-z0-9_]|$)`)
 
-// literalHomeNameMention reports text in node that names HOME, USER or
-// LOGNAME as a whole word (HOME=/x, export HOME, eval 'USER=x',
-// declare -n r=LOGNAME). A read of the variable ($HOME, ${USER}) does not
+// literalHomeNameMention reports text in a declaration that names HOME,
+// USER or LOGNAME as a whole word (export HOME, declare -n r=LOGNAME,
+// declare "HOME$x"). A read of the variable ($HOME, ${USER}) does not
 // write it and does not count; the operand words of an expansion
 // (${X:-HOME=/x}) do. USERNAME or HOME_DIR are other names.
 func literalHomeNameMention(node syntax.Node) bool {
@@ -482,22 +482,163 @@ func homeAssignmentWord(value string) bool {
 		strings.HasPrefix(value, "LOGNAME=")
 }
 
-// redirectHomeChangingBuiltin reports a builtin that can set a variable by a
-// computed name, or run code from text or a file, so HOME may differ by the
-// time a later redirect expands.
-func redirectHomeChangingBuiltin(program string, args []*syntax.Word) bool {
-	switch program {
-	case "eval", "source", ".", "read", "mapfile", "readarray", "getopts", "unset", "set",
-		"export", "readonly", "declare", "typeset", "local", "enable", "builtin", "alias", "trap":
-		return true
+// homeVariableWriteCall reports a simple command whose written words set
+// HOME, USER or LOGNAME: a variable-setting builtin whose operand is the
+// name (read HOME, read -a USER, mapfile LOGNAME, getopts o HOME,
+// printf -v USER, unset HOME, export/readonly/declare/typeset/local NAME,
+// NAME=, NAME+= or a reference to NAME), builtin or command before one of
+// those, or eval or trap text that parses to one of them. A positional word
+// of other code (source ./env.sh HOME, $CMD HOME, : HOME), an option value
+// (read -p HOME) and text that only reads the variable (eval 'echo $HOME')
+// set nothing (GAP-2328). A computed name (read "$n") is not the name.
+func homeVariableWriteCall(cmd *syntax.CallExpr, depth int) bool {
+	if cmd == nil || len(cmd.Args) == 0 || depth > 4 {
+		return false
+	}
+	program := projectPOSIXWord(cmd.Args[0])
+	if program.Expands {
+		return false
+	}
+	args := cmd.Args[1:]
+	switch program.Value {
+	case "builtin", "command":
+		return homeVariableWriteCall(&syntax.CallExpr{Args: args}, depth+1)
+	case "eval":
+		text, ok := staticWordsText(args)
+		return ok && homeVariableWriteText(text, depth+1)
+	case "trap":
+		if len(args) == 0 {
+			return false
+		}
+		text, ok := staticWordsText(args[:1])
+		return ok && homeVariableWriteText(text, depth+1)
 	case "printf":
-		for _, arg := range args {
-			if value := projectPOSIXWord(arg); value.Expands || strings.HasPrefix(value.Value, "-v") {
+		for i := 0; i < len(args); i++ {
+			value := projectPOSIXWord(args[i])
+			if value.Expands || !strings.HasPrefix(value.Value, "-") || value.Value == "--" {
+				return false
+			}
+			if value.Value == "-v" {
+				return i+1 < len(args) && homeOperandWord(args[i+1])
+			}
+			if name, ok := strings.CutPrefix(value.Value, "-v"); ok {
+				return homeVariableName(name)
+			}
+		}
+	case "read":
+		return homeOperandAfterOptions(args, "dinNptu")
+	case "mapfile", "readarray":
+		return homeOperandAfterOptions(args, "dnOsuCc")
+	case "getopts", "unset", "export", "readonly", "declare", "typeset", "local":
+		return homeOperandAfterOptions(args, "")
+	}
+	return false
+}
+
+// homeOperandAfterOptions reports an operand word, or a name given to -a,
+// that names HOME, USER or LOGNAME; the value of an option letter in
+// valued (read -p PROMPT) is not a name.
+func homeOperandAfterOptions(args []*syntax.Word, valued string) bool {
+	for i := 0; i < len(args); i++ {
+		value := projectPOSIXWord(args[i])
+		if value.Expands {
+			continue
+		}
+		option, isOption := strings.CutPrefix(value.Value, "-")
+		if !isOption || option == "" {
+			if homeOperandWord(args[i]) {
 				return true
+			}
+			continue
+		}
+		for j, letter := range option {
+			if letter == 'a' || strings.ContainsRune(valued, letter) {
+				name := option[j+1:]
+				if name == "" && i+1 < len(args) {
+					i++
+					name = projectPOSIXWord(args[i]).Value
+					if projectPOSIXWord(args[i]).Expands {
+						name = ""
+					}
+				}
+				if letter == 'a' && homeVariableName(name) {
+					return true
+				}
+				break
 			}
 		}
 	}
 	return false
+}
+
+// homeOperandWord reports a static word that names HOME, USER or LOGNAME
+// as a variable (HOME, HOME=x, HOME+=x, HOME[0]=x) or as the target of a
+// reference (r=HOME, as declare -n gives it).
+func homeOperandWord(word *syntax.Word) bool {
+	value := projectPOSIXWord(word)
+	if value.Expands {
+		return false
+	}
+	name, rest, assigned := strings.Cut(value.Value, "=")
+	name = strings.TrimSuffix(name, "+")
+	if open := strings.IndexByte(name, '['); open >= 0 {
+		name = name[:open]
+	}
+	return homeVariableName(name) || (assigned && homeVariableName(rest))
+}
+
+func staticWordsText(words []*syntax.Word) (string, bool) {
+	parts := make([]string, 0, len(words))
+	for _, word := range words {
+		value := projectPOSIXWord(word)
+		if value.Expands {
+			return "", false
+		}
+		parts = append(parts, value.Value)
+	}
+	return strings.Join(parts, " "), true
+}
+
+// homeVariableWriteText reports eval or trap text that writes HOME, USER or
+// LOGNAME (HOME=/x, export USER=x, read LOGNAME, for HOME in ..., an
+// arithmetic or ${HOME:=x} naming it). Text that does not parse runs
+// nothing the shell could finish, so it sets nothing.
+func homeVariableWriteText(text string, depth int) bool {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
+	if err != nil {
+		return false
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		switch typed := node.(type) {
+		case *syntax.Assign:
+			found = typed.Name != nil && homeVariableName(typed.Name.Value)
+		case *syntax.ForClause:
+			if iter, ok := typed.Loop.(*syntax.WordIter); ok && homeVariableName(iter.Name.Value) {
+				found = true
+			}
+		case *syntax.DeclClause:
+			found = literalHomeNameMention(typed)
+		case *syntax.ParamExp:
+			found = typed.Param != nil && homeVariableName(typed.Param.Value) && typed.Exp != nil &&
+				(typed.Exp.Op == syntax.AssignUnset || typed.Exp.Op == syntax.AssignUnsetOrNull)
+		case *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.LetClause:
+			start, end := int(typed.Pos().Offset()), int(typed.End().Offset())
+			found = start < 0 || end > len(text) || start > end || homeNameMention(text[start:end])
+		case *syntax.CallExpr:
+			for _, word := range typed.Args {
+				if homeAssignmentWord(projectPOSIXWord(word).Value) {
+					found = true
+				}
+			}
+			found = found || homeVariableWriteCall(typed, depth)
+		}
+		return !found
+	})
+	return found
 }
 
 // Only the GAP-0651 shapes count as inert list members: a bare ":" with no

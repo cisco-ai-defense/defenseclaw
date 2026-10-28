@@ -225,6 +225,17 @@ func TestR105CodeBeforeAHomeRedirectTargetStillJudgesIt(t *testing.T) {
 		"export $VARS; ",
 		"export USERNAME=dev; ",
 		"trap 'echo done' EXIT; ",
+		// RV16-1: the name as a positional word, an option value or read
+		// text writes nothing.
+		"source ./env.sh HOME; ",
+		"$CMD HOME; ",
+		"$CMD USER LOGNAME; ",
+		"eval ': HOME'; ",
+		"eval 'echo $HOME'; ",
+		`eval "echo $HOME"; `,
+		"read -p HOME v < in.txt; ",
+		"trap ': HOME' EXIT; ",
+		"builtin source ./env.sh HOME; ",
 	}
 	programs := []string{"make", "./build.sh", `python3 -c "print('mode: observe')"`, "npm test",
 		"echo $X", "node x.js"}
