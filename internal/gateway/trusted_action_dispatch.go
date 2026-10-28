@@ -809,13 +809,13 @@ func withActiveStateTargetMention(
 	// A pattern, brace list, rsync or git clean that expands onto the
 	// state names no path fact, so it is proved from the shell words
 	// (GAP-2047).
-	if !globbedStateMutation(facts) {
+	if !globbedStateMutation(facts) && !globbedStateMutationThroughLink(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known {
 			return findings
 		}
 		if !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) &&
-			!factsHaveFindHandOff(facts) {
+			!factsHaveFindHandOff(facts) && !stateOperandThroughLink(facts, request) {
 			// Behind ProtectHome the gateway cannot open the user's home, so the
 			// mention scan cannot place a home target. A redirect target the
 			// shell opens is still proven against the hook client's resolved
@@ -978,6 +978,7 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		return false
 	}
 	wholeActionProven := projected.Authoritative() && projected.EnforcementEligible()
+	lineStaysOff := findStripLineStaysOffOf(request, path.Join(path.Clean(projected.ActiveHome), ".defenseclaw"))
 	for _, candidate := range projected.Paths {
 		command, ok := integrityCommandByID(projected, candidate.CommandID)
 		if !ok {
@@ -995,7 +996,7 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 		}
 		if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
 			candidate.Resolved = entry
-			if matchesActiveDefenseClawState(projected, candidate) {
+			if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff) {
 				return true
 			}
 			continue
@@ -1023,7 +1024,151 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 			physical = active
 		}
 		candidate.Resolved = physical
-		if matchesActiveDefenseClawState(projected, candidate) {
+		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff) {
+			return true
+		}
+	}
+	return false
+}
+
+// stateLinkResolver resolves a path through links: the hook's resolved
+// write targets first, then the local filesystem when the hook allows it.
+func stateLinkResolver(request trustedActionRequest) func(string) (string, bool) {
+	return func(value string) (string, bool) {
+		if physical, found := request.ResolvedWriteTargets[value]; found {
+			return physical, true
+		}
+		if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
+			return "", false
+		}
+		return hookpaths.ResolveWriteTarget(value)
+	}
+}
+
+// stateRootOf returns the physical state root and a test for a path in it.
+func stateRootOf(home string, resolve func(string) (string, bool)) (string, func(string) bool) {
+	root, ok := resolve(filepath.Join(home, ".defenseclaw"))
+	if !ok {
+		root = filepath.Join(home, ".defenseclaw")
+	}
+	return root, func(value string) bool {
+		return value == root || strings.HasPrefix(value, root+string(filepath.Separator))
+	}
+}
+
+// globbedStateMutationThroughLink is globbedStateMutation for operands
+// spelled through a link to the state (`rm -rf dclink/*`, `rm -rf
+// ./dclink/hooks/*`, `cp -a /tmp/x/. dclink/` with dclink ->
+// ~/.defenseclaw; pod check17 GAP-2047): the static directory part of each
+// word (up to the first pattern component; the parent of a plain word, the
+// word itself when it ends in / or /.) is resolved, and a word whose
+// directory is physically in the state is judged by its ~/.defenseclaw
+// spelling.
+func globbedStateMutationThroughLink(facts actionfacts.Facts, request trustedActionRequest) bool {
+	home := strings.TrimRight(facts.ActiveHome, "/")
+	if !strings.HasPrefix(home, "/") {
+		return false
+	}
+	resolve := stateLinkResolver(request)
+	root, inState := stateRootOf(home, resolve)
+	for _, command := range facts.Commands {
+		if command.Effect == actionfacts.EffectPreview || command.Dialect != actionfacts.DialectPOSIX {
+			continue
+		}
+		words, ok := stateOperandWords(command)
+		if !ok {
+			continue
+		}
+		rewritten, changed := slices.Clone(words), false
+		for index, word := range words {
+			if spelled, ok := stateWordThroughLink(word, home, facts.CWD, root, resolve, inState); ok {
+				rewritten[index], changed = spelled, true
+			}
+		}
+		if changed && globbedStateCommandMutates(command, rewritten, home, facts.CWD) {
+			return true
+		}
+	}
+	return false
+}
+
+// stateWordThroughLink returns word spelled under ~/.defenseclaw when its
+// static directory part is physically in the state but not spelled there.
+func stateWordThroughLink(
+	word, home, cwd, root string,
+	resolve func(string) (string, bool),
+	inState func(string) bool,
+) (string, bool) {
+	if word == "" || strings.HasPrefix(word, "-") {
+		return "", false
+	}
+	full, ok := stateHomePath(word, home, cwd)
+	if !ok {
+		return "", false
+	}
+	components := strings.Split(full, "/")
+	split := len(components) - 1
+	if strings.HasSuffix(full, "/") || strings.HasSuffix(full, "/.") {
+		split = len(components)
+	}
+	for index, component := range components {
+		if stateWordExpands(component) {
+			split = min(split, index)
+			break
+		}
+	}
+	directory := path.Clean("/" + strings.Join(components[:split], "/"))
+	if directory == "/" || directory == home {
+		return "", false
+	}
+	spelledRoot := home + "/.defenseclaw"
+	if directory == spelledRoot || strings.HasPrefix(directory, spelledRoot+"/") {
+		return "", false
+	}
+	physical, ok := resolve(directory)
+	if !ok || !inState(physical) {
+		return "", false
+	}
+	rest := strings.Join(components[split:], "/")
+	spelled := spelledRoot + strings.TrimPrefix(physical, root)
+	if rest != "" {
+		spelled += "/" + rest
+	} else if strings.HasSuffix(word, "/") {
+		spelled += "/"
+	}
+	return spelled, true
+}
+
+// stateOperandThroughLink reports a changing operand spelled outside the
+// state whose place is in it: a project symlink to the state root as a
+// parent (`rm -rf dclink/installer`), or as the operand itself when a
+// trailing separator makes the kernel follow it (`rm -rf dclink/`). Such a
+// call names no state path, so the mention check alone let it through
+// (GAP-2047); provenStateMutationPath then judges it on the physical
+// target, as it does every other operand.
+func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionRequest) bool {
+	home := facts.ActiveHome
+	if !filepath.IsAbs(home) {
+		return false
+	}
+	resolve := stateLinkResolver(request)
+	_, inState := stateRootOf(home, resolve)
+	for _, candidate := range facts.Paths {
+		switch candidate.Access {
+		case actionfacts.PathAccessDelete, actionfacts.PathAccessWrite,
+			actionfacts.PathAccessAppend, actionfacts.PathAccessMetadata:
+		default:
+			continue
+		}
+		value := candidate.Resolved
+		if !filepath.IsAbs(value) || inState(value) {
+			continue
+		}
+		target := filepath.Dir(value)
+		if strings.HasSuffix(candidate.Value, "/") || strings.HasSuffix(candidate.Value, "/.") {
+			target = value
+		}
+		if physical, ok := resolve(target); ok && inState(physical) {
 			return true
 		}
 	}

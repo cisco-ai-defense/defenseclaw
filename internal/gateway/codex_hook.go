@@ -2538,7 +2538,7 @@ func codexReaderTargetWithType(
 func codexCatInputs(argv []string) (codexStaticReaderInputs, bool) {
 	var inputs codexStaticReaderInputs
 	options := true
-	for _, arg := range argv[1:] {
+	for _, arg := range argvOperands(argv) {
 		if options && arg == "--" {
 			options = false
 			continue

@@ -4,10 +4,13 @@
 package gateway
 
 import (
+	"os"
+	"path"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
@@ -112,7 +115,7 @@ var findPOSIXGrammarShells = map[string]struct{}{
 // spell the state for the shell, not for a raw-text check). The words
 // after the script are plain argv words. A shell with no -c script reads
 // a file or stdin, which is not read here, so it does not stay off.
-func findShellInvocationStaysOff(words []string, home, root string, inEntryDir bool) bool {
+func findShellInvocationStaysOff(words []string, home, root string, inEntryDir, stripDirs bool) bool {
 	if _, posix := findPOSIXGrammarShells[findProgramName(words[0])]; !posix {
 		return false
 	}
@@ -139,7 +142,7 @@ func findShellInvocationStaysOff(words []string, home, root string, inEntryDir b
 			return false
 		}
 	}
-	return findShellScriptStaysOff(words[index+1], home, root, inEntryDir)
+	return findShellScriptStaysOff(words[index+1], home, root, inEntryDir, stripDirs)
 }
 
 // findShellScriptStaysOff parses a -c script with the hook shell grammar
@@ -154,7 +157,7 @@ func findShellInvocationStaysOff(words []string, home, root string, inEntryDir b
 // a case/arithmetic/test clause and the programs in
 // findScriptRefusedPrograms, findShellPrograms and findInlineInterpreters
 // do not stay off (fail closed).
-func findShellScriptStaysOff(script, home, root string, inEntryDir bool) bool {
+func findShellScriptStaysOff(script, home, root string, inEntryDir, stripDirs bool) bool {
 	if len(script) > findShellScriptLimit {
 		return false
 	}
@@ -203,7 +206,7 @@ func findShellScriptStaysOff(script, home, root string, inEntryDir bool) bool {
 			}
 			return false
 		case *syntax.CallExpr:
-			staysOff = findScriptCallStaysOff(node, bound, judge, &inEntryDir)
+			staysOff = findScriptCallStaysOff(node, bound, judge, &inEntryDir, stripDirs)
 			return false
 		default:
 			// A function, case, arithmetic, test or declaration clause is
@@ -222,6 +225,7 @@ func findScriptCallStaysOff(
 	bound map[string]bool,
 	judge func(*syntax.Word) bool,
 	inEntryDir *bool,
+	stripDirs bool,
 ) bool {
 	if len(call.Assigns) > 0 {
 		// Only `name="$N"` with no command binds name to the entry (pod
@@ -255,7 +259,11 @@ func findScriptCallStaysOff(
 		return false
 	}
 	args := make([]string, 0, len(call.Args))
-	for _, word := range call.Args {
+	for index, word := range call.Args {
+		if stripDirs && findEntryDirectoryOperand(name, call.Args, index, bound) {
+			args = append(args, "$1")
+			continue
+		}
 		if !judge(word) {
 			return false
 		}
@@ -314,6 +322,16 @@ func findPositionalName(name string) bool {
 // with an entry expansion written as "$1", and whether an unquoted glob
 // is in it. ok is false for a word that is not read here.
 func findRenderScriptWord(word *syntax.Word, bound map[string]bool) (text string, glob bool, ok bool) {
+	text, glob, ok = findRenderScriptWordMarked(word, bound)
+	if !ok || !findSuffixStripsStayInName(text) {
+		return "", false, false
+	}
+	return strings.ReplaceAll(text, findStripMark, ""), glob, true
+}
+
+// findRenderScriptWordMarked is findRenderScriptWord with each %/%% suffix
+// strip still followed by findStripMark and the strips not checked.
+func findRenderScriptWordMarked(word *syntax.Word, bound map[string]bool) (text string, glob bool, ok bool) {
 	if word == nil {
 		return "", false, false
 	}
@@ -358,11 +376,85 @@ func findRenderScriptWord(word *syntax.Word, bound map[string]bool) (text string
 			out.WriteString(value)
 		}
 	}
-	text = out.String()
-	if !findSuffixStripsStayInName(text) {
-		return "", false, false
+	return out.String(), glob, true
+}
+
+// findEntryDirectoryOperand reports a script word that is only a literal
+// suffix strip of the entry ("${1%.zip}"), which names a sibling of the
+// entry or, when the strip is the whole name (a file named .zip), the
+// entry's directory, given where that directory only receives new files:
+// the -d folder of an unzip that never overwrites (no -o, -f or -u; with
+// no terminal unzip answers its replace prompt with none) or a mkdir
+// operand. `find ~ -name "*.zip" -exec sh -c 'unzip -d "${1%.zip}" "$1"' _
+// {} \;` is ordinary work (GAP-2404); a strip at the end of a word that
+// is removed or moved (`rm -rf "${1%h.txt}"`) is still not read (pod
+// check14 row 29). The caller reads it only when findStripDirectoriesStayOff
+// proves no entry can strip to the state root: unzip takes its replace
+// answer from stdin (`yes |`) and its options from UNZIP/UNZIPOPT, so an
+// archive named ~/.defenseclaw.zip would otherwise unzip over the state
+// (GAP-2404 pod check19).
+func findEntryDirectoryOperand(name string, words []*syntax.Word, index int, bound map[string]bool) bool {
+	text, glob, ok := findRenderScriptWordMarked(words[index], bound)
+	if !ok || glob || text != "$1"+findStripMark {
+		return false
 	}
-	return strings.ReplaceAll(text, findStripMark, ""), glob, true
+	switch name {
+	case "mkdir":
+		return true
+	case "unzip":
+		if index < 2 {
+			return false
+		}
+		for _, word := range words[1:] {
+			option, _, ok := findRenderScriptWordMarked(word, bound)
+			if !ok {
+				return false
+			}
+			if strings.HasPrefix(option, "-") {
+				switch option {
+				case "-d", "-q", "-qq", "-n":
+				default:
+					return false
+				}
+			}
+		}
+		previous, _, ok := findRenderScriptWordMarked(words[index-1], bound)
+		return ok && previous == "-d"
+	}
+	return false
+}
+
+// findShellOnlyParses reports a POSIX-grammar shell at words[index] that
+// reads its script without running it: a -n (noexec) option, and no -c
+// script source other than its operands' text, no -i, no -o option name and
+// no +option that could turn noexec off; nothing before it sets the
+// environment (`env`, NAME=value). `find ~ -name "*.sh" -exec timeout 5
+// bash -n {} \;` only syntax-checks the scripts it finds (GAP-2404).
+func findShellOnlyParses(words []string, index int) bool {
+	if _, posix := findPOSIXGrammarShells[findProgramName(words[index])]; !posix {
+		return false
+	}
+	for _, word := range words[:index] {
+		if strings.Contains(word, "=") || findProgramName(word) == "env" {
+			return false
+		}
+	}
+	noexec := false
+	options := true
+	for _, word := range words[index+1:] {
+		if strings.HasPrefix(word, "+") || strings.HasPrefix(word, "--") {
+			return false
+		}
+		if options && findPlainOption(word) {
+			if strings.ContainsAny(word, "ioc") {
+				return false
+			}
+			noexec = noexec || strings.ContainsRune(word, 'n')
+			continue
+		}
+		options = false
+	}
+	return noexec
 }
 
 // findRenderEntryExpansion renders a parameter or command substitution
@@ -652,4 +744,138 @@ func sedSkipLine(script string, index int) int {
 		}
 	}
 	return len(script)
+}
+
+// findStripSafeNeighbours may stand beside the find in the same command
+// line when a "${1%.zip}" folder is read (findStripDirectoriesStayOff):
+// they move around, print or make plain folders, and never create a file
+// the find could hand on.
+var findStripSafeNeighbours = map[string]struct{}{
+	"cd": {}, "pushd": {}, "popd": {}, "pwd": {}, "true": {}, ":": {}, "yes": {}, "echo": {},
+	"printf": {}, "ls": {}, "mkdir": {}, "sleep": {}, "date": {}, "whoami": {},
+}
+
+// findStripDirectoriesStayOff reports that no entry of the find can strip
+// to the state root, so a script word "${1%.zip}" may be read as the
+// entry's sibling folder (findEntryDirectoryOperand). unzip takes its
+// replace answer from stdin (`yes |`, `< answers`) and its options from
+// UNZIP/UNZIPOPT, so an archive named ~/.defenseclaw.zip would unzip over
+// the state root (GAP-2404 pod check19). It holds when nothing in the
+// state root's parent directory but the root itself has a name that starts
+// with the root's name, in any letter case (a directory that cannot be
+// read counts as one), when every redirect and written path of the facts
+// names a known path whose name does not, and when every command beside
+// the find is one of findStripSafeNeighbours with a complete argv.
+// lineStaysOff, when set, judges the other simple commands of the whole
+// command line the same way (the hook judges each one on its own:
+// `zip -r ~/.defenseclaw.zip . && yes | find ~ ...`).
+func findStripDirectoriesStayOff(
+	facts actionfacts.Facts,
+	find actionfacts.CommandFact,
+	root string,
+	lineStaysOff func() bool,
+) bool {
+	rootName := findStripRootName(root)
+	if rootName == "" || !findStripFactsStayOff(facts, find.ID, rootName) {
+		return false
+	}
+	entries, err := os.ReadDir(path.Dir(path.Clean(root)))
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		name := strings.ToLower(entry.Name())
+		if name != rootName && strings.HasPrefix(name, rootName) {
+			return false
+		}
+	}
+	return lineStaysOff == nil || lineStaysOff()
+}
+
+func findStripRootName(root string) string {
+	name := strings.ToLower(path.Base(path.Clean(root)))
+	if name == "." || name == "/" {
+		return ""
+	}
+	return name
+}
+
+// findStripFactsStayOff reports facts whose commands (but the one with id
+// except) are findStripSafeNeighbours with a complete argv and whose
+// redirects and written paths name known paths whose name does not start
+// with rootName.
+func findStripFactsStayOff(facts actionfacts.Facts, except int64, rootName string) bool {
+	startsWithRoot := func(target string) bool {
+		target = strings.TrimRight(strings.ReplaceAll(target, "\\", "/"), "/")
+		return target == "" || strings.HasPrefix(strings.ToLower(path.Base(target)), rootName)
+	}
+	for _, command := range facts.Commands {
+		for _, redirect := range command.Redirects {
+			if redirect.Access != actionfacts.PathAccessRead && (redirect.Expands || startsWithRoot(redirect.Target)) {
+				return false
+			}
+		}
+		if command.ID == except {
+			continue
+		}
+		if command.Effect != actionfacts.EffectExecute || !command.ArgvComplete {
+			return false
+		}
+		if _, safe := findStripSafeNeighbours[strings.ToLower(command.Program)]; !safe {
+			return false
+		}
+	}
+	for _, candidate := range facts.Paths {
+		switch candidate.Access {
+		case actionfacts.PathAccessRead, actionfacts.PathAccessList, actionfacts.PathAccessMetadata:
+			continue
+		}
+		if candidate.CommandID != except && startsWithRoot(exactSemanticPathValue(candidate)) {
+			return false
+		}
+	}
+	return true
+}
+
+// findStripLineStaysOffOf judges the other simple commands of the whole
+// command line a hook child was cut from (request.parentPatch): each must
+// stay off as findStripFactsStayOff reads it. It is computed once.
+func findStripLineStaysOffOf(request trustedActionRequest, root string) func() bool {
+	if !request.simpleCommandPass || request.parentPatch == nil {
+		return nil
+	}
+	var (
+		done   bool
+		result bool
+	)
+	return func() bool {
+		if done {
+			return result
+		}
+		done = true
+		rootName := findStripRootName(root)
+		if rootName == "" {
+			return false
+		}
+		parent := *request.parentPatch
+		skipped := false
+		for _, simple := range actionfacts.SimpleCommands(parent, actionfacts.Analyze(parent)) {
+			if simple.EvaluationFailure != "" {
+				return false
+			}
+			if !skipped && simple.Text == request.Input.Command {
+				// The child under judgment; a second copy is judged as any
+				// other command (a find is not a safe neighbour).
+				skipped = true
+				continue
+			}
+			input := parent
+			input.Command, input.CWD, input.Args, input.Argv = simple.Text, simple.CWD, nil, nil
+			if !findStripFactsStayOff(actionfacts.Analyze(input), -1, rootName) {
+				return false
+			}
+		}
+		result = skipped
+		return result
+	}
 }

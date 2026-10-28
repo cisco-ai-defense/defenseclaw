@@ -102,6 +102,13 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 			if expanded(source) && stateLandingReached(destination, path.Base(source), home, cwd) {
 				return true
 			}
+			// `cp -r /tmp/x/. ~/.defenseclaw/`: the entries of x land in
+			// the destination by their own names.
+			if sourceNamesItsEntries(source) {
+				if tree, root := stateDirectoryOf(destination, home, cwd); tree || root {
+					return true
+				}
+			}
 		}
 		if expanded(destination) {
 			for _, source := range sources {
@@ -111,35 +118,174 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 			}
 		}
 	case "rsync":
-		if len(operands) < 2 {
+		// An option value spelled as its own word (`--exclude cache/`) is
+		// not a source.
+		rsyncOperands, rsyncOptions := rsyncStateOperands(words)
+		if len(rsyncOperands) < 2 {
 			return false
 		}
-		destination := operands[len(operands)-1]
+		destination := rsyncOperands[len(rsyncOperands)-1]
 		if strings.Contains(destination, ":") {
 			return false
 		}
-		deletes := false
-		for _, option := range options {
-			if strings.HasPrefix(option, "--del") || strings.HasPrefix(option, "--remove-source-files") {
-				deletes = true
+		deletes := slices.ContainsFunc(rsyncOptions, rsyncDeletes)
+		tree, root := stateDirectoryOf(destination, home, cwd)
+		if tree || root && deletes {
+			return true
+		}
+		if !root {
+			return false
+		}
+		// Into the root itself, each source lands by its name, and the
+		// entries of a `dir/` or `dir/.` source by theirs, which can be
+		// config.yaml or hooks/ (`rsync -a /tmp/x/ ~/.defenseclaw/`).
+		for _, source := range rsyncOperands[:len(rsyncOperands)-1] {
+			if strings.HasSuffix(source, "/") || sourceNamesItsEntries(source) ||
+				stateLandingReached(destination, path.Base(source), home, cwd) {
+				return true
 			}
 		}
-		tree, root := stateDirectoryOf(destination, home, cwd)
-		return tree || root && deletes
 	case "git":
 		index := slices.Index(operands, "clean")
 		if index < 0 || !slices.ContainsFunc(options, gitCleanForces) ||
 			slices.ContainsFunc(options, gitCleanDryRun) {
 			return false
 		}
-		for _, operand := range operands[index+1:] {
-			if tree, root := stateDirectoryOf(operand, home, cwd); tree || root ||
-				statePatternReaches(operand, home, cwd) {
+		// `git -C DIR clean` cleans from DIR, and its paths are under DIR.
+		base, ok := gitCleanDirectory(words, home, cwd)
+		if !ok {
+			return false
+		}
+		paths := operands[index+1:]
+		if len(paths) == 0 {
+			tree, root := stateDirectoryOf(base, home, cwd)
+			return tree || root
+		}
+		for _, operand := range paths {
+			if tree, root := stateDirectoryOf(operand, home, base); tree || root ||
+				statePatternReaches(operand, home, base) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// rsyncValueOptions are the rsync long options whose value can be the
+// next word.
+var rsyncValueOptions = map[string]bool{
+	"--exclude": true, "--include": true, "--filter": true, "--exclude-from": true,
+	"--include-from": true, "--files-from": true, "--link-dest": true, "--compare-dest": true,
+	"--copy-dest": true, "--backup-dir": true, "--partial-dir": true, "--temp-dir": true,
+	"--suffix": true, "--rsh": true, "--rsync-path": true, "--chmod": true, "--chown": true,
+	"--usermap": true, "--groupmap": true, "--max-size": true, "--min-size": true,
+	"--max-delete": true, "--max-alloc": true, "--timeout": true, "--contimeout": true,
+	"--bwlimit": true, "--log-file": true, "--log-file-format": true, "--out-format": true,
+	"--password-file": true, "--port": true, "--sockopts": true, "--modify-window": true,
+	"--block-size": true, "--checksum-choice": true, "--compress-choice": true,
+	"--compress-level": true, "--skip-compress": true, "--iconv": true, "--info": true,
+	"--debug": true, "--stop-after": true, "--stop-at": true, "--remote-option": true,
+	"--checksum-seed": true, "--address": true, "--write-batch": true,
+	"--only-write-batch": true, "--read-batch": true, "--early-input": true,
+}
+
+// rsyncStateOperands splits rsync words like splitStateOperands and skips
+// the separately spelled value of an option that takes one (`--exclude
+// cache/`, `-e ssh`, `-f "- x/"`, `-T /tmp`, `-B 1024`, `-M --x`).
+func rsyncStateOperands(words []string) (operands, options []string) {
+	optionsDone := false
+	for index := 0; index < len(words); index++ {
+		word := words[index]
+		switch {
+		case optionsDone:
+			operands = append(operands, word)
+		case word == "--":
+			optionsDone = true
+		case strings.HasPrefix(word, "--"):
+			options = append(options, word)
+			if !strings.Contains(word, "=") && rsyncValueOptions[word] {
+				index++
+			}
+		case strings.HasPrefix(word, "-") && word != "-":
+			options = append(options, word)
+			if rsyncShortValueIsNextWord(word) {
+				index++
+			}
+		default:
+			operands = append(operands, word)
+		}
+	}
+	return operands, options
+}
+
+// rsyncShortValueIsNextWord reads a short option cluster left to right:
+// at its first letter that takes a value (e f T B M @) the rest of the word
+// is that value (`-T/tmp/te`, `-aT/tmp/te`, `-essh-te`), and only when the
+// letter ends the word is the value the next word (`-e ssh`, `-aT /tmp`).
+// Reading only the last character made an attached value that happens to
+// end in one of those letters swallow the real source (pod check18).
+func rsyncShortValueIsNextWord(word string) bool {
+	for index := 1; index < len(word); index++ {
+		if strings.IndexByte("efTBM@", word[index]) >= 0 {
+			return index == len(word)-1
+		}
+	}
+	return false
+}
+
+// rsyncDeletes reports an rsync option that removes files: --del, --delete,
+// --delete-* and --remove-source-files (not --delay-updates).
+func rsyncDeletes(option string) bool {
+	option, _, _ = strings.Cut(option, "=")
+	return option == "--del" || option == "--delete" || strings.HasPrefix(option, "--delete-") ||
+		option == "--remove-source-files"
+}
+
+// sourceNamesItsEntries reports a copy source spelled `dir/.`: its entries
+// are copied, not the directory.
+func sourceNamesItsEntries(source string) bool {
+	source = strings.TrimRight(source, "/")
+	return source == "." || strings.HasSuffix(source, "/.")
+}
+
+// gitCleanDirectory returns the directory a git clean starts from: the
+// working directory, or the -C directories before the subcommand, each
+// relative to the one before. A --work-tree DIR (or =DIR) names the tree a
+// clean removes from; git keeps that value as written and resolves a
+// relative one against the directory it ends in after every -C, wherever
+// the option stands (`git --work-tree=. -C ~/.defenseclaw clean`, pod
+// check18). ok is false for a value it cannot place.
+func gitCleanDirectory(words []string, home, cwd string) (string, bool) {
+	base := cwd
+	workTree, hasWorkTree := "", false
+	for index := 0; index < len(words) && words[index] != "clean"; index++ {
+		word := words[index]
+		if value, ok := strings.CutPrefix(word, "--work-tree="); ok {
+			workTree, hasWorkTree = value, true
+			continue
+		}
+		if word != "-C" && word != "--work-tree" || index+1 >= len(words) {
+			continue
+		}
+		index++
+		if word == "--work-tree" {
+			workTree, hasWorkTree = words[index], true
+			continue
+		}
+		next, ok := stateHomePath(words[index], home, base)
+		if !ok {
+			return "", false
+		}
+		base = path.Clean(next)
+	}
+	if hasWorkTree {
+		next, ok := stateHomePath(workTree, home, base)
+		if !ok {
+			return "", false
+		}
+		return path.Clean(next), true
+	}
+	return base, true
 }
 
 func gitCleanForces(option string) bool {
